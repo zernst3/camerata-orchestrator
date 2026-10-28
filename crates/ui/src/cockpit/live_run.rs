@@ -1,6 +1,5 @@
 use super::*;
 
-
 /// One selectable option on a structured clarification (mirrors the server's
 /// `ClarifyOption`): a label + a benefit/drawback description.
 #[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize, Debug, Default)]
@@ -31,6 +30,14 @@ pub(super) struct ClarificationView {
     pub allow_free_text: bool,
     #[serde(default)]
     pub answer: Option<String>,
+    /// The id of the governed run PARKED on this clarification, if any (a free-standing
+    /// story-authoring question — not raised by a run — has none). Populated server-side from
+    /// the resume-context store (`clarify_resume::ClarifyResumeStore::get`) at LIST time; it is
+    /// NOT persisted on the clarification itself. Lets `ClarifyQuestion` re-attach the Bombe
+    /// polling loop on answer even when answered from the app-wide NEEDS YOU queue, where no
+    /// page was already polling this run (see the module-level Bombe-coverage note above).
+    #[serde(default)]
+    pub run_id: Option<String>,
 }
 
 /// Fetch the OPEN clarifications for a story (`GET /api/stories/:id/clarifications`,
@@ -46,7 +53,9 @@ pub(super) async fn fetch_clarifications_for_story(story_id: &str) -> Vec<Clarif
         Ok(r) => r,
         Err(_) => return Vec::new(),
     };
-    resp.json::<Vec<ClarificationView>>().await.unwrap_or_default()
+    resp.json::<Vec<ClarificationView>>()
+        .await
+        .unwrap_or_default()
 }
 
 /// Fetch only the OPEN clarifications for a story (used as a story-authoring pause point).
@@ -65,13 +74,16 @@ pub(super) async fn fetch_all_open_clarifications() -> Vec<ClarificationView> {
         Ok(r) => r,
         Err(_) => return Vec::new(),
     };
-    resp.json::<Vec<ClarificationView>>().await.unwrap_or_default()
+    resp.json::<Vec<ClarificationView>>()
+        .await
+        .unwrap_or_default()
 }
 
 /// Fetch all OPEN UoW (Governed Development) review escalations across every story — paused runs
 /// awaiting an Approve / Amend / Reject. Filters the shared escalation feed to UoW subjects.
 pub(super) async fn fetch_open_uow_escalations() -> Vec<crate::routines::EscalationView> {
-    let resp = match reqwest::get(format!("{}/api/escalations?open=true", crate::bff_base())).await {
+    let resp = match reqwest::get(format!("{}/api/escalations?open=true", crate::bff_base())).await
+    {
         Ok(r) => r,
         Err(_) => return Vec::new(),
     };
@@ -92,7 +104,11 @@ pub(super) async fn answer_uow_escalation(
     action: &str,
 ) -> Option<crate::routines::EscalationView> {
     reqwest::Client::new()
-        .post(format!("{}/api/escalations/{}/answer", crate::bff_base(), id))
+        .post(format!(
+            "{}/api/escalations/{}/answer",
+            crate::bff_base(),
+            id
+        ))
         .json(&serde_json::json!({ "answer": answer, "action": action }))
         .send()
         .await
@@ -123,6 +139,16 @@ pub(super) async fn chat_uow_escalation(
 
 /// Resolve a UoW review (free fn so each action button can call it without moving a shared
 /// closure). Fills a sensible default decision for a bare Approve/Reject; Amend requires text.
+///
+/// Approve/Amend RESUME the paused governed run from its checkpoint under a NEW run id — the
+/// server marks the OLD (paused) run `done` as part of the resume (see `answer_escalation` in
+/// `crates/server/src/lib.rs`), so a client that only guarded the answer POST itself would drop
+/// the Bombe loading indicator EXACTLY when the resumed run's real AI work begins. The server
+/// echoes the new id back as `resume_run_id`; when present we re-attach `poll_run_to_done` on it
+/// so the guard stays held through the resumed run to its OWN completion. `active_run` /
+/// `uow_refresh` are the caller's (usually throwaway, since `UowReviewPanel` is story-agnostic —
+/// see its doc comment) signals for that poll loop.
+#[allow(clippy::too_many_arguments)]
 fn submit_uow_review(
     esc_id: String,
     decision_text: String,
@@ -130,6 +156,8 @@ fn submit_uow_review(
     mut submitting: Signal<bool>,
     on_resolved: EventHandler<()>,
     toasts: Option<Signal<Vec<crate::toast::Toast>>>,
+    active_run: Signal<Option<RunView>>,
+    uow_refresh: Signal<u32>,
 ) {
     if submitting() {
         return;
@@ -149,16 +177,27 @@ fn submit_uow_review(
         } else {
             decision_text
         };
-        let ok = answer_uow_escalation(&esc_id, &answer, action).await.is_some();
+        let resolved = answer_uow_escalation(&esc_id, &answer, action).await;
         submitting.set(false);
-        if ok {
-            on_resolved.call(());
-        } else if let Some(t) = toasts {
-            crate::toast::push_toast(
-                t,
-                crate::toast::ToastKind::Error,
-                "Could not submit your review decision. Your text was kept.".to_string(),
-            );
+        match resolved {
+            Some(esc) => {
+                on_resolved.call(());
+                // Approve/Amend re-spawned a fresh run: keep the Bombe animating through it by
+                // re-attaching the same battle-tested poll loop every other governed-run start
+                // uses. Reject never sets `resume_run_id` (it stops the run, nothing resumes).
+                if let Some(rid) = esc.resume_run_id.clone() {
+                    super::uow::poll_run_to_done(rid, active_run, uow_refresh, toasts).await;
+                }
+            }
+            None => {
+                if let Some(t) = toasts {
+                    crate::toast::push_toast(
+                        t,
+                        crate::toast::ToastKind::Error,
+                        "Could not submit your review decision. Your text was kept.".to_string(),
+                    );
+                }
+            }
         }
     });
 }
@@ -183,7 +222,13 @@ pub(super) fn UowReviewPanel(
     let mut chat_input = use_signal(String::new);
     let mut chatting = use_signal(|| false);
     // The app-wide chat-assistant model (the lead engineer the review chats with).
-    let chat_model = use_resource(|| super::fetch_app_chat_model());
+    let chat_model = use_resource(super::fetch_app_chat_model);
+    // Local, throwaway targets for the resumed-run poll loop (see `submit_uow_review`). This
+    // panel is story-agnostic (rendered from the app-wide NEEDS YOU queue, not a specific UoW
+    // page), so it doesn't feed a persistent UoW view — it exists solely so the Bombe loading
+    // guard stays held through the resumed run, same as every other governed-run start.
+    let review_active_run = use_signal(|| Option::<RunView>::None);
+    let review_uow_refresh = use_signal(|| 0u32);
 
     let e = esc_view();
     let id_approve = e.id.clone();
@@ -194,7 +239,7 @@ pub(super) fn UowReviewPanel(
         .read()
         .clone()
         .flatten()
-        .unwrap_or_else(|| "claude-sonnet-4-6".to_string());
+        .unwrap_or_else(|| "claude-sonnet-5".to_string());
 
     rsx! {
         div { class: "uow-review-card",
@@ -268,19 +313,19 @@ pub(super) fn UowReviewPanel(
                 button {
                     class: "btn-run uow-review-approve",
                     disabled: submitting(),
-                    onclick: move |_| submit_uow_review(id_approve.clone(), decision(), "approve", submitting, on_resolved, toasts),
+                    onclick: move |_| submit_uow_review(id_approve.clone(), decision(), "approve", submitting, on_resolved, toasts, review_active_run, review_uow_refresh),
                     "Approve & resume"
                 }
                 button {
                     class: "btn-run uow-review-amend",
                     disabled: submitting() || decision().trim().is_empty(),
-                    onclick: move |_| submit_uow_review(id_amend.clone(), decision(), "amend", submitting, on_resolved, toasts),
+                    onclick: move |_| submit_uow_review(id_amend.clone(), decision(), "amend", submitting, on_resolved, toasts, review_active_run, review_uow_refresh),
                     "Amend & resume"
                 }
                 button {
                     class: "btn-stop uow-review-reject",
                     disabled: submitting(),
-                    onclick: move |_| submit_uow_review(id_reject.clone(), decision(), "reject", submitting, on_resolved, toasts),
+                    onclick: move |_| submit_uow_review(id_reject.clone(), decision(), "reject", submitting, on_resolved, toasts, review_active_run, review_uow_refresh),
                     "Reject & revert"
                 }
             }
@@ -332,10 +377,16 @@ pub(super) fn ClarifyQuestion(clar: ClarificationView, on_answered: EventHandler
     let mut selected = use_signal(Vec::<String>::new);
     let mut other = use_signal(String::new);
     let mut submitting = use_signal(|| false);
+    // Local, throwaway targets for the resumed-run poll loop when this question paused a
+    // governed run (see the reattach note on the submit handler below). Unused (never set) for
+    // a free-standing story-authoring question, where `clar.run_id` is always `None`.
+    let clarify_active_run = use_signal(|| Option::<RunView>::None);
+    let clarify_uow_refresh = use_signal(|| 0u32);
 
     let multi = clar.multi_select;
     let allow_free_text = clar.allow_free_text;
     let cid = clar.id.clone();
+    let run_id = clar.run_id.clone();
 
     // A submit is valid once there's at least one selection or non-empty free-text.
     let can_submit = !selected().is_empty() || !other().trim().is_empty();
@@ -410,11 +461,13 @@ pub(super) fn ClarifyQuestion(clar: ClarificationView, on_answered: EventHandler
                     disabled: submitting() || !can_submit,
                     onclick: {
                         let cid = cid.clone();
+                        let run_id = run_id.clone();
                         move |_| {
                             // Lock IMMEDIATELY on click (synchronous, before the await) so a
                             // double-click can't fire a second submit and the inputs lock at once.
                             if submitting() { return; }
                             let cid = cid.clone();
+                            let run_id = run_id.clone();
                             let sel = selected();
                             let ft = {
                                 let t = other().trim().to_string();
@@ -428,6 +481,21 @@ pub(super) fn ClarifyQuestion(clar: ClarificationView, on_answered: EventHandler
                                 submitting.set(false);
                                 if ok {
                                     on_answered.call(());
+                                    // The server resumes the SAME run id (Executing again) as
+                                    // part of answering — NOT a fresh id like the escalation
+                                    // resume above. When we know it (the queue's list endpoint
+                                    // populates `run_id` from the resume-context store), keep
+                                    // the Bombe animating through the resumed investigation pass
+                                    // by polling it here, even if no page already had it open.
+                                    if let Some(rid) = run_id {
+                                        super::uow::poll_run_to_done(
+                                            rid,
+                                            clarify_active_run,
+                                            clarify_uow_refresh,
+                                            None,
+                                        )
+                                        .await;
+                                    }
                                 } else if let Some(t) = toasts {
                                     crate::toast::push_toast(
                                         t,
@@ -509,7 +577,11 @@ pub(super) fn NeedsYouQueue() -> Element {
 pub(super) fn LiveRunPanel(run: RunView, uow_refresh: Signal<u32>) -> Element {
     let (status_label, status_cls) = run_status_badge(&run.status);
     let live = run.mode == "live";
-    let mode_label = if live { "live fleet" } else { "scripted · token-free" };
+    let mode_label = if live {
+        "live fleet"
+    } else {
+        "scripted · token-free"
+    };
     let sub = if live {
         "A real governed fleet (claude -p) under the gate. Stage and bounce events are reported as they happen."
     } else {
@@ -937,15 +1009,16 @@ mod render_tests {
     fn model_select_harness() -> Element {
         // AuditModelsResp / AuditModelOption don't derive Default, but both derive
         // Deserialize — build the fixture from JSON (the same wire shape the BFF sends).
-        let models: super::super::scan::AuditModelsResp = serde_json::from_value(serde_json::json!({
-            "models": [
-                { "label": "Claude Sonnet 4.6", "id": "claude-sonnet-4-6", "provider": "claude" },
-                { "label": "DeepSeek R1", "id": "deepseek-r1", "provider": "openrouter" }
-            ],
-            "default": "claude-sonnet-4-6",
-            "openrouter_fetched": true
-        }))
-        .expect("valid AuditModelsResp fixture");
+        let models: super::super::scan::AuditModelsResp =
+            serde_json::from_value(serde_json::json!({
+                "models": [
+                    { "label": "Claude Sonnet 5", "id": "claude-sonnet-5", "provider": "claude" },
+                    { "label": "DeepSeek R1", "id": "deepseek-r1", "provider": "openrouter" }
+                ],
+                "default": "claude-sonnet-5",
+                "openrouter_fetched": true
+            }))
+            .expect("valid AuditModelsResp fixture");
         rsx! {
             ModelSelectHarnessInner { models }
         }
@@ -954,7 +1027,7 @@ mod render_tests {
     // Inner wrapper that owns the bound Signal<String> ModelSelect needs.
     #[component]
     fn ModelSelectHarnessInner(models: super::super::scan::AuditModelsResp) -> Element {
-        let selected = use_signal(|| "claude-sonnet-4-6".to_string());
+        let selected = use_signal(|| "claude-sonnet-5".to_string());
         rsx! {
             super::ModelSelect { models: Some(models), selected }
         }
@@ -965,11 +1038,26 @@ mod render_tests {
         let mut vdom = VirtualDom::new(model_select_harness);
         vdom.rebuild_in_place();
         let html = dioxus_ssr::render(&vdom);
-        assert!(html.contains("run-model-select"), "the <select> renders; html=\n{html}");
-        assert!(html.contains("Claude (subscription)"), "claude optgroup; html=\n{html}");
-        assert!(html.contains("OpenRouter"), "openrouter optgroup; html=\n{html}");
-        assert!(html.contains("Claude Sonnet 4.6"), "claude option label; html=\n{html}");
-        assert!(html.contains("DeepSeek R1"), "openrouter option label; html=\n{html}");
+        assert!(
+            html.contains("run-model-select"),
+            "the <select> renders; html=\n{html}"
+        );
+        assert!(
+            html.contains("Claude (subscription)"),
+            "claude optgroup; html=\n{html}"
+        );
+        assert!(
+            html.contains("OpenRouter"),
+            "openrouter optgroup; html=\n{html}"
+        );
+        assert!(
+            html.contains("Claude Sonnet 5"),
+            "claude option label; html=\n{html}"
+        );
+        assert!(
+            html.contains("DeepSeek R1"),
+            "openrouter option label; html=\n{html}"
+        );
     }
 
     #[test]
@@ -1022,8 +1110,14 @@ mod render_tests {
         let mut vdom = VirtualDom::new(uow_panel_harness);
         vdom.rebuild_in_place();
         let html = dioxus_ssr::render(&vdom);
-        assert!(html.contains("NEEDS YOUR REVIEW"), "the review badge; html=\n{html}");
-        assert!(html.contains("TEST-TAMPER-1"), "the rule/reason; html=\n{html}");
+        assert!(
+            html.contains("NEEDS YOUR REVIEW"),
+            "the review badge; html=\n{html}"
+        );
+        assert!(
+            html.contains("TEST-TAMPER-1"),
+            "the rule/reason; html=\n{html}"
+        );
         assert!(
             html.contains("The agent edited a test assertion."),
             "the stopped-for line; html=\n{html}"
@@ -1032,11 +1126,20 @@ mod render_tests {
             html.contains("Restore the original assertion."),
             "a suggestion renders; html=\n{html}"
         );
-        assert!(html.contains("A test assertion was weakened."), "the chat thread; html=\n{html}");
+        assert!(
+            html.contains("A test assertion was weakened."),
+            "the chat thread; html=\n{html}"
+        );
         // SSR HTML-escapes '&' to '&#38;', so assert on the stable class names + the unescaped
         // leading word rather than the literal "Approve & resume".
-        assert!(html.contains("uow-review-approve") && html.contains("Approve"), "approve action; html=\n{html}");
-        assert!(html.contains("uow-review-reject") && html.contains("Reject"), "reject action; html=\n{html}");
+        assert!(
+            html.contains("uow-review-approve") && html.contains("Approve"),
+            "approve action; html=\n{html}"
+        );
+        assert!(
+            html.contains("uow-review-reject") && html.contains("Reject"),
+            "reject action; html=\n{html}"
+        );
     }
 
     // ── Tier-1 render: RunProvenancePanel (needs the toast context) ─────────────
@@ -1057,7 +1160,10 @@ mod render_tests {
         let mut vdom = VirtualDom::new(provenance_harness);
         vdom.rebuild_in_place();
         let html = dioxus_ssr::render(&vdom);
-        assert!(html.contains("PROVENANCE"), "the provenance heading; html=\n{html}");
+        assert!(
+            html.contains("PROVENANCE"),
+            "the provenance heading; html=\n{html}"
+        );
         assert!(
             html.contains("Sign off this run") || html.contains("Computing provenance"),
             "the sign-off affordance / pending branch renders; html=\n{html}"
@@ -1092,23 +1198,17 @@ mod render_tests {
 #[cfg(test)]
 mod tests {
     // `CAMERATA_BFF_URL` is a process-global env override (see crate::bff_base()). `cargo test` runs
-    // tests on parallel threads, so two tests that set it could clobber each other. This mutex
-    // serializes the env-mutating Tier-2 tests against each other; we recover from poisoning so one
-    // failing test doesn't cascade-fail the rest. (We can't add serial_test without touching Cargo.toml.)
-    static BFF_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    fn bff_env_guard() -> std::sync::MutexGuard<'static, ()> {
-        BFF_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
-    }
+    // tests on parallel threads, so every Tier-2 test below that sets it carries
+    // `#[serial_test::serial(process_env)]`, which serializes them crate-wide (and, unlike a std mutex
+    // guard, is safe to hold across the test's `.await`s).
 
     // ── Tier-2: fetch_clarifications_for_story — GET the story's clarifications ──
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn fetch_clarifications_for_story_gets_and_parses() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
-        let _env = bff_env_guard();
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/api/stories/story-9/clarifications"))
@@ -1120,9 +1220,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let clars = super::fetch_clarifications_for_story("story-9").await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         assert_eq!(clars.len(), 2, "both clarifications parse");
         assert_eq!(clars[0].id, "c1");
@@ -1133,12 +1232,11 @@ mod tests {
 
     // ── Tier-2: fetch_open_clarifications_for_story — same GET, filters answered ──
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn fetch_open_clarifications_for_story_filters_answered() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
-        let _env = bff_env_guard();
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/api/stories/story-9/clarifications"))
@@ -1149,22 +1247,24 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let open = super::fetch_open_clarifications_for_story("story-9").await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
-        assert_eq!(open.len(), 1, "only the unanswered clarification survives the filter");
+        assert_eq!(
+            open.len(),
+            1,
+            "only the unanswered clarification survives the filter"
+        );
         assert_eq!(open[0].id, "c1");
     }
 
     // ── Tier-2: fetch_all_open_clarifications — GET the cross-story queue ────────
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn fetch_all_open_clarifications_gets_and_parses() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
-        let _env = bff_env_guard();
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/api/clarifications"))
@@ -1176,23 +1276,60 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let clars = super::fetch_all_open_clarifications().await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         assert_eq!(clars.len(), 2);
         assert_eq!(clars[0].question, "Q1");
         assert_eq!(clars[1].id, "c2");
     }
 
+    // ── Tier-2: `run_id` wire field — the fix for the "answered from a different page" gap ──
+    //
+    // The server stamps `run_id` onto each OPEN clarification from the resume-context store
+    // (`with_resume_run_ids` in `crates/server/src/lib.rs`) — present only when the question
+    // paused a governed investigation run, absent for a free-standing story-authoring question.
+    // `ClarifyQuestion` reads it to re-attach `poll_run_to_done` after answering, so the Bombe
+    // keeps animating through the resumed pass even when answered from the app-wide NEEDS YOU
+    // queue rather than the story's own (possibly long-since-unmounted) live-run view.
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn fetch_all_open_clarifications_parses_run_id_when_present_and_absent() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/clarifications"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                { "id": "c1", "question": "Paused a run", "run_id": "run-7" },
+                { "id": "c2", "question": "Free-standing authoring question" }
+            ])))
+            .mount(&server)
+            .await;
+
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
+        let clars = super::fetch_all_open_clarifications().await;
+
+        assert_eq!(clars.len(), 2);
+        assert_eq!(
+            clars[0].run_id.as_deref(),
+            Some("run-7"),
+            "a clarification that paused a run carries its run_id"
+        );
+        assert!(
+            clars[1].run_id.is_none(),
+            "a free-standing (non-run) clarification has no run_id"
+        );
+    }
+
     // ── Tier-2: fetch_open_uow_escalations — GET ?open=true, keep subject_kind=="uow" ──
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn fetch_open_uow_escalations_filters_to_uow_subjects() {
         use wiremock::matchers::{method, path, query_param};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
-        let _env = bff_env_guard();
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/api/escalations"))
@@ -1215,23 +1352,25 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let uow = super::fetch_open_uow_escalations().await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
-        assert_eq!(uow.len(), 1, "only the uow-subject escalation survives the filter");
+        assert_eq!(
+            uow.len(),
+            1,
+            "only the uow-subject escalation survives the filter"
+        );
         assert_eq!(uow[0].id, "e1");
         assert_eq!(uow[0].subject_kind, "uow");
     }
 
     // ── Tier-2: answer_uow_escalation — POST {answer, action}, parse the result ──
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn answer_uow_escalation_posts_answer_and_action() {
         use wiremock::matchers::{body_json, method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
-        let _env = bff_env_guard();
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/api/escalations/esc-7/answer"))
@@ -1249,30 +1388,71 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let out = super::answer_uow_escalation("esc-7", "Approved: proceed.", "approve").await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         let out = out.expect("the resolved escalation parses");
         assert_eq!(out.id, "esc-7");
         assert_eq!(out.status, "resolved");
+        assert!(
+            out.resume_run_id.is_none(),
+            "no resume_run_id in the response -> field defaults to None"
+        );
         // `.expect(1)` asserts (on server drop) the exact {answer, action} body was posted.
+    }
+
+    // ── Tier-2: `resume_run_id` wire field — the fix for the resumed-run Bombe-blind spot ──
+    //
+    // `answer_escalation` (server) echoes the FRESH run id back on a successful Approve/Amend
+    // resume (see `crates/server/src/lib.rs`, asserted server-side by
+    // `uow_escalation_approve_resumes_and_consumes_checkpoint`). `submit_uow_review`
+    // (this module) reads `EscalationView::resume_run_id` to re-attach `poll_run_to_done` on
+    // it, so the Bombe keeps animating through the resumed run instead of dropping the guard
+    // the instant the OLD (now `done`) run's poll loop sees it finish. This test proves the
+    // wire field survives deserialization end to end.
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn answer_uow_escalation_parses_the_resumed_run_id_on_approve() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/escalations/esc-8/answer"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "esc-8", "routine_id": "r1", "routine_name": "dev",
+                "subject_kind": "uow", "reason": "TEST-TAMPER-1",
+                "stopped_for": "edited a test", "status": "resolved",
+                "created": "2026-06-30T00:00:00Z",
+                "resume_run_id": "run-42"
+            })))
+            .mount(&server)
+            .await;
+
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
+        let out = super::answer_uow_escalation("esc-8", "Approved: proceed.", "approve").await;
+
+        let out = out.expect("the resolved escalation parses");
+        assert_eq!(
+            out.resume_run_id.as_deref(),
+            Some("run-42"),
+            "the resumed run id survives deserialization so the caller can re-attach polling"
+        );
     }
 
     // ── Tier-2: chat_uow_escalation — POST {message, model}, parse the result ───
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn chat_uow_escalation_posts_message_and_model() {
         use wiremock::matchers::{body_json, method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
-        let _env = bff_env_guard();
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/api/escalations/esc-3/chat"))
             .and(body_json(serde_json::json!({
                 "message": "Why did this stop?",
-                "model": "claude-sonnet-4-6"
+                "model": "claude-sonnet-5"
             })))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "id": "esc-3", "routine_id": "r1", "routine_name": "dev",
@@ -1288,10 +1468,9 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let out =
-            super::chat_uow_escalation("esc-3", "Why did this stop?", "claude-sonnet-4-6").await;
-        std::env::remove_var("CAMERATA_BFF_URL");
+            super::chat_uow_escalation("esc-3", "Why did this stop?", "claude-sonnet-5").await;
 
         let out = out.expect("the escalation with the appended turns parses");
         assert_eq!(out.conversation.len(), 2);
@@ -1301,12 +1480,11 @@ mod tests {
 
     // ── Tier-2: answer_clarification — POST {selected, free_text, answered_by} ──
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn answer_clarification_posts_selected_and_free_text() {
         use wiremock::matchers::{body_json, method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
-        let _env = bff_env_guard();
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/api/clarifications/clar-2/answer"))
@@ -1315,19 +1493,20 @@ mod tests {
                 "free_text": "lean toward managed",
                 "answered_by": "you"
             })))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": true })))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": true })),
+            )
             .expect(1)
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let ok = super::answer_clarification(
             "clar-2",
             vec!["Postgres".to_string()],
             Some("lean toward managed".to_string()),
         )
         .await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         assert!(ok, "a 2xx answer is reported as success");
         // `.expect(1)` asserts the exact {selected, free_text, answered_by} body was posted.
@@ -1335,12 +1514,11 @@ mod tests {
 
     // ── Tier-2: answer_clarification — a null free_text serializes to JSON null ─
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn answer_clarification_omits_free_text_as_null() {
         use wiremock::matchers::{body_json, method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
-        let _env = bff_env_guard();
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/api/clarifications/clar-5/answer"))
@@ -1349,26 +1527,29 @@ mod tests {
                 "free_text": null,
                 "answered_by": "you"
             })))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": true })))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": true })),
+            )
             .expect(1)
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let ok = super::answer_clarification("clar-5", vec!["Yes".to_string()], None).await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
-        assert!(ok, "a single-select answer with no free text posts free_text: null");
+        assert!(
+            ok,
+            "a single-select answer with no free text posts free_text: null"
+        );
     }
 
     // ── Tier-2: answer_clarification — a non-2xx response is reported as false ──
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn answer_clarification_reports_failure_on_non_2xx() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
-        let _env = bff_env_guard();
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/api/clarifications/clar-9/answer"))
@@ -1376,9 +1557,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let ok = super::answer_clarification("clar-9", vec!["X".to_string()], None).await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         assert!(!ok, "a 500 from the answer endpoint is reported as failure");
     }

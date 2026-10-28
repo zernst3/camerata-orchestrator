@@ -88,8 +88,7 @@ pub fn resolve_server_bin() -> PathBuf {
     let env_override = std::env::var("CAMERATA_SERVER_BIN").ok();
     let exe = std::env::current_exe().ok();
     let manifest: Option<&Path> = Some(Path::new(env!("CARGO_MANIFEST_DIR")));
-    let candidates =
-        server_bin_candidates(env_override.as_deref(), exe.as_deref(), manifest);
+    let candidates = server_bin_candidates(env_override.as_deref(), exe.as_deref(), manifest);
     if let Some(over) = env_override.as_deref() {
         if !over.trim().is_empty() {
             return PathBuf::from(over);
@@ -122,9 +121,7 @@ async fn probe_health(client: &reqwest::Client, base_url: &str) -> bool {
     let url = format!("{}/api/health", base_url.trim_end_matches('/'));
     match client.get(&url).send().await {
         Ok(resp) if resp.status().is_success() => match resp.json::<serde_json::Value>().await {
-            Ok(body) => {
-                body.get("service").and_then(|s| s.as_str()) == Some("camerata-server")
-            }
+            Ok(body) => body.get("service").and_then(|s| s.as_str()) == Some("camerata-server"),
             Err(_) => false,
         },
         _ => false,
@@ -221,7 +218,9 @@ impl ServerGuard {
 
 impl Drop for ServerGuard {
     fn drop(&mut self) {
-        let Some(mut child) = self.child.take() else { return };
+        let Some(mut child) = self.child.take() else {
+            return;
+        };
 
         #[cfg(unix)]
         {
@@ -259,6 +258,7 @@ impl Drop for ServerGuard {
 ///   - server exits first (the guard's own Drop killed it) → watchdog just exits;
 ///   - cockpit exits first (normal quit, `process::exit`, even SIGKILL) → watchdog
 ///     SIGTERMs the server (its shutdown hook reaps in-flight `claude` children).
+///
 /// Best-effort by design: if the watchdog can't spawn, the next cockpit launch still
 /// reuses/reclaims whatever is on the port.
 #[cfg(unix)]
@@ -299,7 +299,11 @@ fn spawn_watchdog(_server_pid: u32) {}
 /// so this is a no-op and the caller simply retries / gives up loudly.
 #[cfg(unix)]
 pub fn reclaim_port(port: &str) {
-    let out = match Command::new("lsof").arg("-ti").arg(format!(":{port}")).output() {
+    let out = match Command::new("lsof")
+        .arg("-ti")
+        .arg(format!(":{port}"))
+        .output()
+    {
         Ok(out) => out,
         Err(e) => {
             eprintln!("[camerata-ui] could not run lsof to reclaim :{port}: {e}");
@@ -493,7 +497,10 @@ mod tests {
         let c = server_bin_candidates(None, None, Some(Path::new("/ws/crates/ui")));
         assert_eq!(
             c,
-            vec![Path::new("/ws").join("target").join("debug").join(SERVER_BIN_NAME)]
+            vec![Path::new("/ws")
+                .join("target")
+                .join("debug")
+                .join(SERVER_BIN_NAME)]
         );
     }
 
@@ -504,18 +511,23 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial(server_bin_env)]
+    #[serial_test::serial(process_env)]
     fn resolve_honors_env_override_even_if_missing() {
-        std::env::set_var("CAMERATA_SERVER_BIN", "/nonexistent/override/camerata-server");
+        let _env = camerata_test_env::EnvGuard::set(
+            "CAMERATA_SERVER_BIN",
+            "/nonexistent/override/camerata-server",
+        );
         let resolved = resolve_server_bin();
-        std::env::remove_var("CAMERATA_SERVER_BIN");
-        assert_eq!(resolved, PathBuf::from("/nonexistent/override/camerata-server"));
+        assert_eq!(
+            resolved,
+            PathBuf::from("/nonexistent/override/camerata-server")
+        );
     }
 
     #[test]
-    #[serial_test::serial(server_bin_env)]
+    #[serial_test::serial(process_env)]
     fn resolve_without_override_prefers_an_existing_candidate() {
-        std::env::remove_var("CAMERATA_SERVER_BIN");
+        let _env = camerata_test_env::EnvGuard::remove("CAMERATA_SERVER_BIN");
         let resolved = resolve_server_bin();
         // Regardless of which candidate wins, it must be a concrete path ending in the
         // platform binary name — and if any candidate exists on this machine, the
@@ -531,7 +543,10 @@ mod tests {
             Some(Path::new(env!("CARGO_MANIFEST_DIR"))),
         );
         if candidates.iter().any(|c| c.exists()) {
-            assert!(resolved.exists(), "an existing candidate was available but not chosen");
+            assert!(
+                resolved.exists(),
+                "an existing candidate was available but not chosen"
+            );
         }
     }
 
@@ -542,19 +557,27 @@ mod tests {
         let server = wiremock::MockServer::start().await;
         wiremock::Mock::given(wiremock::matchers::method("GET"))
             .and(wiremock::matchers::path("/api/health"))
-            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(
-                serde_json::json!({ "status": "ok", "service": "camerata-server" }),
-            ))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(
+                    serde_json::json!({ "status": "ok", "service": "camerata-server" }),
+                ),
+            )
             .mount(&server)
             .await;
-        assert_eq!(decide_reuse_or_spawn(&server.uri()).await, LaunchDecision::ReuseExisting);
+        assert_eq!(
+            decide_reuse_or_spawn(&server.uri()).await,
+            LaunchDecision::ReuseExisting
+        );
     }
 
     #[tokio::test]
     async fn decide_spawns_when_health_absent() {
         // Mock server with NO /api/health mount — the probe gets a 404.
         let server = wiremock::MockServer::start().await;
-        assert_eq!(decide_reuse_or_spawn(&server.uri()).await, LaunchDecision::SpawnNew);
+        assert_eq!(
+            decide_reuse_or_spawn(&server.uri()).await,
+            LaunchDecision::SpawnNew
+        );
     }
 
     #[tokio::test]
@@ -569,7 +592,10 @@ mod tests {
             )
             .mount(&server)
             .await;
-        assert_eq!(decide_reuse_or_spawn(&server.uri()).await, LaunchDecision::SpawnNew);
+        assert_eq!(
+            decide_reuse_or_spawn(&server.uri()).await,
+            LaunchDecision::SpawnNew
+        );
     }
 
     #[tokio::test]
@@ -592,9 +618,11 @@ mod tests {
         let server = wiremock::MockServer::start().await;
         wiremock::Mock::given(wiremock::matchers::method("GET"))
             .and(wiremock::matchers::path("/api/health"))
-            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(
-                serde_json::json!({ "status": "ok", "service": "camerata-server" }),
-            ))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(
+                    serde_json::json!({ "status": "ok", "service": "camerata-server" }),
+                ),
+            )
             .mount(&server)
             .await;
         let addr = server.uri().trim_start_matches("http://").to_string();
@@ -653,8 +681,13 @@ mod tests {
             health_timeout: Duration::from_secs(15),
         };
 
-        let guard = ensure_server_running(&cfg).await.expect("server should come up");
-        assert!(guard.owns_child(), "nothing was on the scratch port; must have spawned");
+        let guard = ensure_server_running(&cfg)
+            .await
+            .expect("server should come up");
+        assert!(
+            guard.owns_child(),
+            "nothing was on the scratch port; must have spawned"
+        );
         let pid = guard.pid().expect("spawned guard has a pid");
 
         // The server answers a real endpoint, not just /api/health.
@@ -680,7 +713,10 @@ mod tests {
                 .output()
                 .map(|o| o.status.success())
                 .unwrap_or(false);
-            assert!(!alive, "spawned server pid {pid} still alive after guard drop");
+            assert!(
+                !alive,
+                "spawned server pid {pid} still alive after guard drop"
+            );
         }
         // And the port must answer nothing.
         assert_eq!(

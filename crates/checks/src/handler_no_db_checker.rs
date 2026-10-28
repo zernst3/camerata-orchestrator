@@ -66,7 +66,9 @@
 //! file/parse the extractor can't handle, yields zero functions/calls — fewer findings, never
 //! a crash and never a fabricated one.
 
-use crate::arch_checker::{ArchChecker, ArchViolation, RepoView, SEVERITY_HIGH, SEVERITY_MEDIUM};
+use crate::arch_checker::{
+    ArchChecker, ArchViolation, RepoView, ViolationGrade, SEVERITY_HIGH, SEVERITY_MEDIUM,
+};
 use crate::architecture_config::{architecture_config_from_files, ArchitectureConfig};
 use crate::extract::{self, FunctionSpan, MethodCall};
 
@@ -94,7 +96,8 @@ const HANDLERS_LAYER_NAME: &str = "handlers";
 
 /// Fallback function-NAME markers (weakest tier) — ported verbatim from the deleted interim
 /// lexical checker's `DEFAULT_HANDLER_MARKERS`.
-const DEFAULT_HANDLER_NAME_MARKERS: &[&str] = &["handler", "handle_", "controller", "_route", "endpoint"];
+const DEFAULT_HANDLER_NAME_MARKERS: &[&str] =
+    &["handler", "handle_", "controller", "_route", "endpoint"];
 
 /// Fallback DB-handle-name markers, used only when `.camerata/architecture.toml` has no `[db]`
 /// section (or an empty `handles` list) — ported verbatim from the deleted interim lexical
@@ -105,7 +108,9 @@ const DEFAULT_DB_HANDLE_MARKERS: &[&str] = &["db", "pool", "conn", "tx", "execut
 /// `#[actix_web::get(...)]`, Python `@app.route(...)` / `@app.get(...)`). The synthetic
 /// Express marker (`<express-route:...>`, from `extract::ecma::express_route_marker`) is
 /// recognized by its own prefix, not this list.
-const ROUTE_VERB_TOKENS: &[&str] = &["get", "post", "put", "delete", "patch", "route", "options", "head"];
+const ROUTE_VERB_TOKENS: &[&str] = &[
+    "get", "post", "put", "delete", "patch", "route", "options", "head",
+];
 
 pub struct HandlerNoDbChecker;
 
@@ -204,7 +209,10 @@ fn db_handle_markers(cfg: Option<&ArchitectureConfig>) -> Vec<String> {
             return db.handles.iter().map(|h| h.to_ascii_lowercase()).collect();
         }
     }
-    DEFAULT_DB_HANDLE_MARKERS.iter().map(|s| s.to_string()).collect()
+    DEFAULT_DB_HANDLE_MARKERS
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
 }
 
 // ─── per-function handler classification ────────────────────────────────────────────────────
@@ -255,7 +263,9 @@ fn is_route_marker(attr: &str) -> bool {
     if lower.starts_with("<express-route:") {
         return true;
     }
-    ROUTE_VERB_TOKENS.iter().any(|verb| contains_ident_call(&lower, verb))
+    ROUTE_VERB_TOKENS
+        .iter()
+        .any(|verb| contains_ident_call(&lower, verb))
 }
 
 /// Whether `haystack` contains `ident` as a WHOLE identifier immediately followed by `(` — a
@@ -266,7 +276,8 @@ fn contains_ident_call(haystack: &str, ident: &str) -> bool {
     let mut start = 0usize;
     while let Some(rel) = haystack[start..].find(ident) {
         let idx = start + rel;
-        let before_ok = idx == 0 || !(bytes[idx - 1].is_ascii_alphanumeric() || bytes[idx - 1] == b'_');
+        let before_ok =
+            idx == 0 || !(bytes[idx - 1].is_ascii_alphanumeric() || bytes[idx - 1] == b'_');
         let after = idx + ident.len();
         let after_ok = after < bytes.len() && bytes[after] == b'(';
         if before_ok && after_ok {
@@ -282,7 +293,9 @@ fn contains_ident_call(haystack: &str, ident: &str) -> bool {
 /// word-boundary, for behavioral parity with the fixture this rule has always fired on).
 fn name_matches(name: &str, markers: &[&str]) -> bool {
     let lower = name.to_ascii_lowercase();
-    markers.iter().any(|m| lower.contains(&m.to_ascii_lowercase()))
+    markers
+        .iter()
+        .any(|m| lower.contains(&m.to_ascii_lowercase()))
 }
 
 /// Whether `receiver`'s LAST `.`/`::`-delimited segment EXACTLY matches one of `markers`
@@ -292,16 +305,27 @@ fn name_matches(name: &str, markers: &[&str]) -> bool {
 /// `import_boundary_checker::matching_db_marker` already established for the import facet.
 fn matching_db_marker(receiver: &str, markers: &[String]) -> Option<String> {
     let normalized = receiver.replace("::", ".");
-    let last = normalized.rsplit('.').next().unwrap_or(&normalized).to_ascii_lowercase();
+    let last = normalized
+        .rsplit('.')
+        .next()
+        .unwrap_or(&normalized)
+        .to_ascii_lowercase();
     markers.iter().find(|m| m.as_str() == last).cloned()
 }
 
 // ─── violation construction ──────────────────────────────────────────────────────────────────
 
-fn build_violation(path: &str, call: &MethodCall, func: &FunctionSpan, verdict: Verdict, marker: &str) -> ArchViolation {
+fn build_violation(
+    path: &str,
+    call: &MethodCall,
+    func: &FunctionSpan,
+    verdict: Verdict,
+    marker: &str,
+) -> ArchViolation {
     let object = Some(func.name.clone());
     match verdict {
         Verdict::Deterministic => ArchViolation {
+            grade: ViolationGrade::Defect,
             rule_id: RULE_HANDLER_NO_DB.to_string(),
             file: path.to_string(),
             line: call.line,
@@ -316,6 +340,7 @@ fn build_violation(path: &str, call: &MethodCall, func: &FunctionSpan, verdict: 
             ),
         },
         Verdict::NeedsReviewAttr(attr) => ArchViolation {
+            grade: ViolationGrade::Defect,
             rule_id: RULE_HANDLER_NO_DB.to_string(),
             file: path.to_string(),
             line: call.line,
@@ -332,6 +357,7 @@ fn build_violation(path: &str, call: &MethodCall, func: &FunctionSpan, verdict: 
             ),
         },
         Verdict::NeedsReviewName => ArchViolation {
+            grade: ViolationGrade::Defect,
             rule_id: RULE_HANDLER_NO_DB.to_string(),
             file: path.to_string(),
             line: call.line,
@@ -356,11 +382,17 @@ mod tests {
     use super::*;
 
     fn view<'a>(files: &'a [(String, String)]) -> RepoView<'a> {
-        RepoView { spec: "test/repo", files }
+        RepoView {
+            spec: "test/repo",
+            files,
+        }
     }
 
     fn files(pairs: Vec<(&str, &str)>) -> Vec<(String, String)> {
-        pairs.into_iter().map(|(p, c)| (p.to_string(), c.to_string())).collect()
+        pairs
+            .into_iter()
+            .map(|(p, c)| (p.to_string(), c.to_string()))
+            .collect()
     }
 
     const LAYERED_CONFIG: &str = r#"
@@ -382,7 +414,10 @@ allowed_in = ["repositories"]
 "#;
 
     fn with_config(mut extra: Vec<(&str, &str)>) -> Vec<(String, String)> {
-        extra.push((crate::architecture_config::ARCHITECTURE_CONFIG_PATH, LAYERED_CONFIG));
+        extra.push((
+            crate::architecture_config::ARCHITECTURE_CONFIG_PATH,
+            LAYERED_CONFIG,
+        ));
         files(extra)
     }
 
@@ -401,7 +436,11 @@ allowed_in = ["repositories"]
         assert_eq!(vs[0].line, 2);
         assert_eq!(vs[0].object.as_deref(), Some("list_orgs"));
         assert_eq!(vs[0].severity, SEVERITY_HIGH);
-        assert!(!vs[0].message.contains("[needs review"), "{}", vs[0].message);
+        assert!(
+            !vs[0].message.contains("[needs review"),
+            "{}",
+            vs[0].message
+        );
     }
 
     #[test]
@@ -489,7 +528,11 @@ allowed_in = ["repositories"]
         assert_eq!(vs[0].object.as_deref(), Some("list_orgs_handler"));
         assert_eq!(vs[0].severity, SEVERITY_MEDIUM);
         assert!(vs[0].message.contains("[needs review"), "{}", vs[0].message);
-        assert!(vs[0].message.contains("name-heuristic"), "{}", vs[0].message);
+        assert!(
+            vs[0].message.contains("name-heuristic"),
+            "{}",
+            vs[0].message
+        );
     }
 
     #[test]
@@ -559,7 +602,10 @@ allowed_in = ["repositories"]
     #[test]
     fn config_unsatisfied_when_handlers_layer_present_but_no_db_handles() {
         let cfg = "version = 1\n[layers]\nhandlers = [\"src/routes/**\"]\n";
-        let f = files(vec![(crate::architecture_config::ARCHITECTURE_CONFIG_PATH, cfg)]);
+        let f = files(vec![(
+            crate::architecture_config::ARCHITECTURE_CONFIG_PATH,
+            cfg,
+        )]);
         assert!(HandlerNoDbChecker.config_unsatisfied_for(&view(&f)));
     }
 
@@ -584,8 +630,10 @@ allowed_in = ["repositories"]
 
     #[test]
     fn checker_is_registered() {
-        let ids: std::collections::HashSet<&str> =
-            crate::arch_checker::all_checkers().iter().flat_map(|c| c.rule_ids().iter().copied()).collect();
+        let ids: std::collections::HashSet<&str> = crate::arch_checker::all_checkers()
+            .iter()
+            .flat_map(|c| c.rule_ids().iter().copied())
+            .collect();
         assert!(ids.contains(RULE_HANDLER_NO_DB), "{ids:?}");
     }
 
@@ -595,13 +643,19 @@ allowed_in = ["repositories"]
             .iter()
             .filter(|c| c.rule_ids().contains(&RULE_HANDLER_NO_DB))
             .count();
-        assert_eq!(owners, 1, "exactly one checker must own ARCH-HANDLER-NO-DB-1 after the supersession");
+        assert_eq!(
+            owners, 1,
+            "exactly one checker must own ARCH-HANDLER-NO-DB-1 after the supersession"
+        );
     }
 
     #[test]
     fn non_source_extension_is_not_scoped_in() {
         let f = files(vec![("README.md", "db.query()")]);
-        assert!(!crate::arch_checker::checker_applies(&HandlerNoDbChecker, &f));
+        assert!(!crate::arch_checker::checker_applies(
+            &HandlerNoDbChecker,
+            &f
+        ));
     }
 
     // ── adversarial: malformed / truncated / non-UTF8-ish input never panics ──
@@ -638,7 +692,10 @@ handles = ["db"]
 allowed_in = []
 "#;
         let f = files(vec![
-            (crate::architecture_config::ARCHITECTURE_CONFIG_PATH, conflicting_cfg),
+            (
+                crate::architecture_config::ARCHITECTURE_CONFIG_PATH,
+                conflicting_cfg,
+            ),
             (
                 "src/shared/x_handler.rs",
                 "fn x_handler(db: &Db) -> Result<()> {\n    db.query(\"select 1\").await\n}\n",
@@ -649,5 +706,15 @@ allowed_in = []
         let vs = HandlerNoDbChecker.check(&view(&f));
         assert_eq!(vs.len(), 1, "{vs:#?}");
         assert_eq!(vs[0].severity, SEVERITY_MEDIUM);
+    }
+
+    #[test]
+    fn a_route_attribute_is_recognized_by_its_whole_verb_only() {
+        // The verb at the very start of the attribute text, and after a non-identifier char.
+        assert!(is_route_marker("get(\"/orders\")"));
+        assert!(is_route_marker("#[actix_web::get(\"/orders\")]"));
+        // A verb that is only the tail of a longer identifier is not a route attribute.
+        assert!(!is_route_marker("#[target(x)]"));
+        assert!(!is_route_marker("#[my_get(x)]"));
     }
 }

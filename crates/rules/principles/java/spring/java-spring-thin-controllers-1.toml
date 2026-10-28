@@ -1,9 +1,18 @@
 id = "JAVA-SPRING-THIN-CONTROLLERS-1"
+version = 1
 title = "@RestController methods contain no business logic; they translate HTTP to service calls and return DTOs"
-tag = "stack"
 domain = "java:spring"
 layer = "framework"
 enforcement = "structured"
+kind = "default_with_exceptions"
+inspectable = true
+# Deviation-ceiling escape hatch, INHERITED from ARCH-STRICT-LAYERING-1: severity must describe
+# the PROBLEM, not which rule happened to fire. Without this, a repo on this stack caps the
+# identical architectural defect at medium while an unmirrored stack reaches high under the
+# general rule. This rule mirrors ARCH-STRICT-LAYERING-1 because it re-litigates the handler half
+# of the same hierarchy: a @RestController method translates HTTP to a service call and holds no
+# business logic.
+deviation_ceiling = "high"
 default = true
 verification = "grounded"
 
@@ -20,10 +29,14 @@ title = "Spring Framework Reference — @RestController / @Service stereotype re
 id = "thin-controllers-delegate-to-service"
 label = "@RestController methods delegate entirely to @Service; no domain logic inline"
 directive = "@RestController methods perform exactly: (1) read validated request input (from @RequestBody, @PathVariable, @RequestParam), (2) call one @Service method, (3) map the service result to a ResponseEntity with the appropriate status code and a DTO body. Conditional logic beyond HTTP-concern branching (is the result empty? return 404 vs 200), data transformation (entity-to-DTO mapping is in the service or a mapper), and multi-step orchestration do not appear in controller methods. @Transactional is not placed on controller methods. A controller method body longer than ~10 lines is a signal that business logic has leaked into the controller."
+remediation = """
+Move the business logic and direct repository calls out of the controller method and into a service method, so the controller only reads validated input, calls the service, and maps the result to a ResponseEntity. Verify by confirming the controller method body is a few lines long with no conditional business logic or direct repository access.
+"""
 why = "Thin controllers keep the domain logic in the service layer where it is independently testable, transactionally managed, and reusable from non-HTTP entry points."
 
 [[option]]
 id = "fat-controllers-inline-logic"
+violates = true
 label = "Business logic inline in @RestController methods"
 directive = "Controller methods contain the full business rule implementation: validate inputs, apply domain rules, call repositories directly, and construct the response. Services are not introduced unless the same logic is needed in multiple controllers."
 why = "Inline controller logic is reachable only via an HTTP request, so it cannot be unit-tested without spinning up the web layer, cannot be reused from a scheduled job or message listener, and entangles domain rule changes with HTTP-layer code. @Transactional on a controller method also produces ambiguous AOP proxy semantics compared to the unambiguous service-layer placement."

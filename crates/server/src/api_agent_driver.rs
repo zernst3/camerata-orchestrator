@@ -184,7 +184,7 @@ pub struct ApiAgentDriver {
     /// normalizer branch. It does NOT change the gate.
     shape: ApiShape,
     /// The Anthropic API key, used ONLY when `shape == ApiShape::Anthropic`. Resolved from
-    /// `ANTHROPIC_API_KEY` (mirroring `llm.rs::complete_api`) and threaded in at build time.
+    /// `credentials::anthropic_api_key` (store first, env fallback) at build time.
     /// `None` on the OpenRouter path (the OpenRouter key is read off the completer instead).
     anthropic_api_key: Option<String>,
     /// LIFECYCLE-7 liveness heartbeat. Fired once per agentic loop iteration so a healthy,
@@ -462,7 +462,10 @@ async fn run_loop(
                 }));
                 break;
             }
-            ParsedResponse::ToolCalls { raw_assistant_msg, calls } => {
+            ParsedResponse::ToolCalls {
+                raw_assistant_msg,
+                calls,
+            } => {
                 if calls.is_empty() {
                     // Model returned an assistant message with no tool calls and no text.
                     // Stop loop; return empty result.
@@ -478,12 +481,7 @@ async fn run_loop(
                 let mut results: Vec<(String, String)> = Vec::new();
 
                 for invocation in calls {
-                    let (result_text, denial) = execute_tool(
-                        driver,
-                        role,
-                        &invocation,
-                    )
-                    .await;
+                    let (result_text, denial) = execute_tool(driver, role, &invocation).await;
 
                     if let Some(d) = denial {
                         denials.push(d);
@@ -508,7 +506,11 @@ async fn run_loop(
         // Use the stable driver session_id so the outcome is traceable across multi-turn runs.
         session_id: driver.session_id.clone(),
         result: final_result,
-        cost_usd: if total_cost_usd > 0.0 { Some(total_cost_usd) } else { None },
+        cost_usd: if total_cost_usd > 0.0 {
+            Some(total_cost_usd)
+        } else {
+            None
+        },
         denials,
     })
 }
@@ -583,7 +585,7 @@ async fn call_provider(
 
     // ── Anthropic Messages API shape ───────────────────────────────────────
     // Selected explicitly via `with_shape(ApiShape::Anthropic)` AND with a key attached.
-    // The Anthropic key is carried on the driver (resolved from ANTHROPIC_API_KEY), not
+    // The Anthropic key is carried on the driver (resolved by `credentials::anthropic_api_key`), not
     // read off the completer. If the shape is Anthropic but no key is attached, fall
     // through to the schema-less LlmPort path so test stubs still work.
     if driver.shape == ApiShape::Anthropic {
@@ -648,7 +650,10 @@ fn get_openrouter_key_from_completer(completer: &dyn LlmPort) -> anyhow::Result<
 /// `crate::llm::OpenRouterCompleter::policy_for_agent` / `registry_for_agent`.
 fn get_policy_and_registry_from_completer(
     completer: &dyn LlmPort,
-) -> anyhow::Result<(crate::provider_policy::ProviderPolicy, crate::model_registry::ModelRegistry)> {
+) -> anyhow::Result<(
+    crate::provider_policy::ProviderPolicy,
+    crate::model_registry::ModelRegistry,
+)> {
     let any = completer.as_any();
     let or = any
         .downcast_ref::<crate::llm::OpenRouterCompleter>()
@@ -683,7 +688,9 @@ async fn call_openrouter_with_tools(
     // Resolve the provider-safety constraint BEFORE building the request body — see
     // `crate::provider_policy::provider_constraint_for_request` for the fail-closed
     // contract (never an unconstrained request while safe_mode is on).
-    let safe_providers = registry.ensure_safe_providers_loaded(Some(api_key), model).await;
+    let safe_providers = registry
+        .ensure_safe_providers_loaded(Some(api_key), model)
+        .await;
     let provider_constraint =
         crate::provider_policy::provider_constraint_for_request(policy, &safe_providers, model)
             .map_err(|reason| {
@@ -784,6 +791,7 @@ async fn call_openrouter_with_tools(
         cache_read_input_tokens: 0,
         cache_creation_input_tokens: 0,
         or_cache_discount,
+        truncated: false,
     })
 }
 
@@ -877,11 +885,7 @@ fn build_anthropic_request_body(
                 let shaped = apply_grounding_cache_breakpoint(m);
                 // A shaped (array-content) first message means a grounding breakpoint was placed,
                 // so the beta header must be sent even if there is no system prompt.
-                if shaped
-                    .get("content")
-                    .map(Value::is_array)
-                    .unwrap_or(false)
-                {
+                if shaped.get("content").map(Value::is_array).unwrap_or(false) {
                     use_caching = true;
                 }
                 shaped
@@ -974,7 +978,9 @@ async fn call_anthropic_with_tools(
     let input_tokens = v["usage"]["input_tokens"].as_u64();
     let output_tokens = v["usage"]["output_tokens"].as_u64();
     let cache_read = v["usage"]["cache_read_input_tokens"].as_u64().unwrap_or(0);
-    let cache_creation = v["usage"]["cache_creation_input_tokens"].as_u64().unwrap_or(0);
+    let cache_creation = v["usage"]["cache_creation_input_tokens"]
+        .as_u64()
+        .unwrap_or(0);
     let model_returned = v["model"].as_str().unwrap_or(model).to_string();
 
     Ok(LlmResponse {
@@ -987,6 +993,7 @@ async fn call_anthropic_with_tools(
         cache_read_input_tokens: cache_read,
         cache_creation_input_tokens: cache_creation,
         or_cache_discount: None,
+        truncated: false,
     })
 }
 
@@ -1071,7 +1078,7 @@ fn parse_response(resp: &LlmResponse) -> ParsedResponse {
             let tool_use_blocks: Vec<ToolInvocation> = blocks
                 .iter()
                 .filter(|b| b["type"] == "tool_use")
-                .filter_map(|b| normalize_anthropic_tool_use(b))
+                .filter_map(normalize_anthropic_tool_use)
                 .collect();
 
             if !tool_use_blocks.is_empty() {
@@ -1109,7 +1116,8 @@ fn normalize_openai_tool_call(tc: &Value) -> Option<ToolInvocation> {
     let id = tc["id"].as_str()?.to_string();
     let name = tc["function"]["name"].as_str()?.to_string();
     let args_str = tc["function"]["arguments"].as_str().unwrap_or("{}");
-    let input = serde_json::from_str::<Value>(args_str).unwrap_or(Value::Object(Default::default()));
+    let input =
+        serde_json::from_str::<Value>(args_str).unwrap_or(Value::Object(Default::default()));
     Some(ToolInvocation { id, name, input })
 }
 
@@ -1205,8 +1213,7 @@ struct GateDenial {
 /// provider turn (LIFECYCLE-tasteful — see module docs). No-op when no governance log is
 /// wired.
 async fn record_agent_step(driver: &ApiAgentDriver, tool_name: &str) {
-    let (Some(log), Some(run_id)) = (driver.governance_log.as_ref(), driver.run_id.as_ref())
-    else {
+    let (Some(log), Some(run_id)) = (driver.governance_log.as_ref(), driver.run_id.as_ref()) else {
         return;
     };
     let event = camerata_persistence::GovernanceEvent::info(run_id.clone(), "agent_step", "agent")
@@ -1219,8 +1226,7 @@ async fn record_agent_step(driver: &ApiAgentDriver, tool_name: &str) {
 /// Record a `gate_allow` info event for a `gated_write` that passed Layer-1 + the worktree
 /// jail and was actually written. No-op when no governance log is wired.
 async fn record_gate_allow(driver: &ApiAgentDriver, input: &Value) {
-    let (Some(log), Some(run_id)) = (driver.governance_log.as_ref(), driver.run_id.as_ref())
-    else {
+    let (Some(log), Some(run_id)) = (driver.governance_log.as_ref(), driver.run_id.as_ref()) else {
         return;
     };
     let path = input["path"].as_str().unwrap_or("<unknown>");
@@ -1245,12 +1251,12 @@ async fn record_gate_deny(driver: &ApiAgentDriver, denial: &GateDenial) {
         reason = %denial.reason,
         "gate denied write"
     );
-    let (Some(log), Some(run_id)) = (driver.governance_log.as_ref(), driver.run_id.as_ref())
-    else {
+    let (Some(log), Some(run_id)) = (driver.governance_log.as_ref(), driver.run_id.as_ref()) else {
         return;
     };
-    let mut event = camerata_persistence::GovernanceEvent::warn(run_id.clone(), "gate_deny", "agent")
-        .with_reason(denial.reason.clone());
+    let mut event =
+        camerata_persistence::GovernanceEvent::warn(run_id.clone(), "gate_deny", "agent")
+            .with_reason(denial.reason.clone());
     if let Some(rule) = &denial.rule_id {
         event = event.with_rule_id(rule.clone());
     }
@@ -1323,17 +1329,17 @@ async fn execute_fan_out(
     } else {
         inv.input["tasks"].clone()
     };
-    let entries: Vec<camerata_gateway::fan_out::FanOutEntry> =
-        match serde_json::from_value(raw) {
-            Ok(e) => e,
-            Err(e) => {
-                let msg = format!(
-                    "DENIED: fan_out `entries` must be an array of {{repo, domain, subtask}}: {e}"
-                );
-                return (msg.clone(), Some(msg));
-            }
-        };
-    match camerata_gateway::fan_out::run_fan_out(config, driver.rule_subset.clone(), entries).await {
+    let entries: Vec<camerata_gateway::fan_out::FanOutEntry> = match serde_json::from_value(raw) {
+        Ok(e) => e,
+        Err(e) => {
+            let msg = format!(
+                "DENIED: fan_out `entries` must be an array of {{repo, domain, subtask}}: {e}"
+            );
+            return (msg.clone(), Some(msg));
+        }
+    };
+    match camerata_gateway::fan_out::run_fan_out(config, driver.rule_subset.clone(), entries).await
+    {
         Ok(results) => {
             let by_repo = camerata_gateway::fan_out::assemble_by_repo(&results);
             let mut summary = format!("fan_out complete: {} worker(s).\n", results.len());
@@ -1438,6 +1444,21 @@ fn execute_gated_write(
     // write EFFECT are the same path: no `wt.join(trim)` path-doubling (GATE-F3) and no
     // check-here/write-there divergence (GATE-F4).
     let write_path = if let Some(wt) = &driver.worktree {
+        // The jail root must still exist: a write creates missing parents, so into a worktree
+        // whose checkout was deleted mid-run it would quietly recreate the deleted folder.
+        if !wt.is_dir() {
+            let msg = format!(
+                "DENIED: the worktree {} no longer exists (its checkout may have been deleted); nothing was written.",
+                wt.display()
+            );
+            let denial = GateDenial {
+                message: msg.clone(),
+                rule_id: None,
+                reason: "the worktree no longer exists".to_string(),
+                path: Some(path),
+            };
+            return (msg, Some(denial));
+        }
         match assert_in_worktree(wt, &path) {
             Ok(resolved) => resolved,
             Err(e) => {
@@ -1557,7 +1578,10 @@ fn assert_in_worktree(worktree: &Path, path: &str) -> anyhow::Result<PathBuf> {
 ///
 /// Expected input: `{file_path: "..."}` (Claude Code convention).
 fn execute_read(inv: &ToolInvocation, worktree: Option<&Path>) -> String {
-    let raw_path = match inv.input["file_path"].as_str().or_else(|| inv.input["path"].as_str()) {
+    let raw_path = match inv.input["file_path"]
+        .as_str()
+        .or_else(|| inv.input["path"].as_str())
+    {
         Some(p) => p,
         None => return "ERROR: Read requires `file_path` in input".to_string(),
     };
@@ -1572,14 +1596,17 @@ fn execute_read(inv: &ToolInvocation, worktree: Option<&Path>) -> String {
 ///
 /// Expected input: `{pattern: "..."}` or `{glob: "..."}`.
 fn execute_glob(inv: &ToolInvocation, worktree: Option<&Path>) -> String {
-    let pattern = match inv.input["pattern"].as_str()
+    let pattern = match inv.input["pattern"]
+        .as_str()
         .or_else(|| inv.input["glob"].as_str())
     {
         Some(p) => p,
         None => return "ERROR: Glob requires `pattern` in input".to_string(),
     };
 
-    let base = worktree.map(|p| p.to_path_buf()).unwrap_or_else(|| PathBuf::from("."));
+    let base = worktree
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."));
     let full_pattern = if pattern.starts_with('/') {
         pattern.to_string()
     } else {
@@ -1606,14 +1633,16 @@ fn execute_glob(inv: &ToolInvocation, worktree: Option<&Path>) -> String {
 ///
 /// Expected input: `{pattern: "...", path: "..."}` or `{regex: "...", directory: "..."}`.
 fn execute_grep(inv: &ToolInvocation, worktree: Option<&Path>) -> String {
-    let search_pattern = match inv.input["pattern"].as_str()
+    let search_pattern = match inv.input["pattern"]
+        .as_str()
         .or_else(|| inv.input["regex"].as_str())
     {
         Some(p) => p,
         None => return "ERROR: Grep requires `pattern` in input".to_string(),
     };
 
-    let search_dir = inv.input["path"].as_str()
+    let search_dir = inv.input["path"]
+        .as_str()
         .or_else(|| inv.input["directory"].as_str())
         .unwrap_or(".");
     let resolved_dir = resolve_path(search_dir, worktree);
@@ -1645,7 +1674,11 @@ fn grep_dir(dir: &Path, re: &regex::Regex, out: &mut Vec<String>, depth: usize) 
     for entry in entries.flatten() {
         let path = entry.path();
         // Skip hidden directories (e.g. .git)
-        if path.file_name().map(|n| n.to_str().unwrap_or("").starts_with('.')).unwrap_or(false) {
+        if path
+            .file_name()
+            .map(|n| n.to_str().unwrap_or("").starts_with('.'))
+            .unwrap_or(false)
+        {
             continue;
         }
         if path.is_dir() {
@@ -1671,7 +1704,8 @@ fn grep_dir(dir: &Path, re: &regex::Regex, out: &mut Vec<String>, depth: usize) 
 ///
 /// Expected input: `{path: "..."}` or `{directory: "..."}`.
 fn execute_ls(inv: &ToolInvocation, worktree: Option<&Path>) -> String {
-    let dir_path = inv.input["path"].as_str()
+    let dir_path = inv.input["path"]
+        .as_str()
         .or_else(|| inv.input["directory"].as_str())
         .unwrap_or(".");
     let resolved = resolve_path(dir_path, worktree);
@@ -1989,53 +2023,48 @@ impl LlmPort for AnthropicNoopCompleter {
     }
 }
 
-/// Decide whether the `claude` provider should run via the Anthropic Messages API
-/// (`ApiAgentDriver` in [`ApiShape::Anthropic`]) instead of the `ClaudeCliDriver`.
+/// Resolve the compliance-safety [`crate::llm::BackendResolution`] for the `claude` provider
+/// (`docs/design/2026-09-22_per-project-backend.md`), given the caller-supplied project (or
+/// chat) [`crate::llm::ProjectBackend`] setting. No env read at all — the setting is the
+/// caller's entire input, already resolved from `project.backend` by the gov-dev agent driver
+/// factories below.
 ///
-/// Returns `Some(key)` when BOTH the effective backend is `api` AND an Anthropic key is
-/// available (non-empty) — the same two signals `llm.rs` uses to select the Anthropic API
-/// backend. Returns `None` otherwise (the default `cli` path, or `api` with no key).
-///
-/// ROUTES-9: the Anthropic key is read from the CREDENTIAL STORE first (with an env fallback
-/// for back-compat), NOT solely from `ANTHROPIC_API_KEY` env. The `set_credential` handler no
-/// longer mirrors a freshly-saved key into process env (that was a request-thread `set_var`
-/// racing worker-thread `getenv` — POSIX UB). Reading the store here means a freshly-saved
-/// key still takes effect without a restart, with no process-env mutation. The backend signal
-/// is still read from `CAMERATA_LLM_BACKEND` env, which is hydrated ONCE at single-threaded
-/// startup from the persisted setting (see `run`), so it is never written after threads spawn.
-fn anthropic_api_backend_key(creds: &dyn crate::credentials::CredentialStore) -> Option<String> {
-    let backend = std::env::var("CAMERATA_LLM_BACKEND").ok();
-    if backend.as_deref() != Some("api") {
-        return None;
+/// ONE credential read: the key is resolved once and that same value both decides the
+/// resolution and is returned for the `Api` arm (`Ok(Some(key))`), so no path reads the
+/// keychain twice. `Ok(None)` is the `Cli` resolution; `Err` is `Blocked`.
+fn resolve_claude_backend(
+    creds: &dyn crate::credentials::CredentialStore,
+    backend: crate::llm::ProjectBackend,
+) -> anyhow::Result<Option<String>> {
+    let key = crate::credentials::anthropic_api_key(creds);
+    match crate::llm::resolve_backend(backend, key.is_some()) {
+        crate::llm::BackendResolution::Blocked { message } => anyhow::bail!(message),
+        crate::llm::BackendResolution::Api => Ok(key),
+        crate::llm::BackendResolution::Cli => Ok(None),
     }
-    // Store-first, env-fallback: mirrors `credentials::resolve` so a keychain-saved key wins
-    // and existing dotenv/CI setups keep working. A store read error must not silently degrade
-    // to env with no trace, so warn and fall back (matches the resolve() posture).
-    match creds.get(crate::credentials::ANTHROPIC_API_KEY) {
-        Ok(Some(k)) if !k.trim().is_empty() => return Some(k),
-        Ok(_) => {}
-        Err(e) => eprintln!(
-            "[camerata-server] credential-store read of ANTHROPIC_API_KEY failed ({e}); \
-             falling back to env"
-        ),
-    }
-    std::env::var("ANTHROPIC_API_KEY")
-        .ok()
-        .filter(|k| !k.trim().is_empty())
 }
 
-/// Build a `claude`-provider driver: an Anthropic-shape [`ApiAgentDriver`] when
-/// `CAMERATA_LLM_BACKEND=api` + `ANTHROPIC_API_KEY` are set, else the [`ClaudeCliDriver`].
+/// Build a `claude`-provider driver: an Anthropic-shape [`ApiAgentDriver`] when the resolved
+/// backend is `Api` (and a key is present), else the [`ClaudeCliDriver`].
 ///
 /// Shared by [`build_agent_driver`], [`ServerChildDriverFactory`], and
 /// [`ServerOrchestratorDriverFactory`] so a Claude tier honors the same per-model provider
-/// coupling everywhere: under backend=api it uses the Anthropic API agent; under cli it
-/// uses the CLI. Either way the result is gated identically (same `evaluate_call`, same
-/// worktree jail, same orchestrator gating).
+/// coupling everywhere: under `Api` it uses the Anthropic API agent; under `Cli` it uses the
+/// CLI. Either way the result is gated identically (same `evaluate_call`, same worktree jail,
+/// same orchestrator gating).
+///
+/// The compliance-safety gate (`docs/design/2026-09-22_per-project-backend.md`): `backend` is
+/// the calling PROJECT's (or, for a project-less caller, the chat) backend setting. Resolved
+/// via [`resolve_claude_backend`] BEFORE any driver is built:
+/// - `Blocked` -> refuse to build ANYTHING; returns `Err` (the caller must not start the run).
+/// - `Api` / `Cli` -> proceeds normally.
+// too_many_arguments: a flat construction helper shared by three driver factories; every
+// parameter is an independent knob, and a params struct would only mirror these fields.
+#[allow(clippy::too_many_arguments)]
 fn build_claude_driver(
     model_id: &str,
     // ROUTES-9: credential store, consulted store-first (env fallback) for the Anthropic key
-    // instead of a per-request env `set_var`. See `anthropic_api_backend_key`.
+    // instead of a per-request env `set_var`.
     creds: &dyn crate::credentials::CredentialStore,
     mcp_config_path: &str,
     rule_subset: Vec<RuleId>,
@@ -2052,8 +2081,11 @@ fn build_claude_driver(
     // the module-level Phase H2 note). `None` for callers with no governance log wired (tests) or
     // for a caller that intentionally skips this instrumentation (delegated/fanned-out children).
     governance: Option<(Arc<camerata_persistence::GovernanceLog>, String)>,
-) -> Arc<dyn AgentDriver> {
-    if let Some(key) = anthropic_api_backend_key(creds) {
+    // The calling project's (or chat's) resolved backend setting. See the fn doc.
+    backend: crate::llm::ProjectBackend,
+) -> anyhow::Result<Arc<dyn AgentDriver>> {
+    let key = resolve_claude_backend(creds, backend)?;
+    if let Some(key) = key {
         // Anthropic Messages API agent. Same gate surface as every other ApiAgentDriver:
         // gated_write-only, worktree-jailed, delegate/fan_out only when orchestrator=true.
         let mut driver = ApiAgentDriver::new(Arc::new(AnthropicNoopCompleter), model_id)
@@ -2070,7 +2102,7 @@ fn build_claude_driver(
         if let Some((log, run_id)) = governance {
             driver = driver.with_governance(log, run_id);
         }
-        Arc::new(driver)
+        Ok(Arc::new(driver))
     } else {
         let mut cli_driver = camerata_agent::ClaudeCliDriver::new(mcp_config_path)
             .as_orchestrator(orchestrator)
@@ -2084,7 +2116,7 @@ fn build_claude_driver(
         if let Some(cb) = on_activity {
             cli_driver = cli_driver.with_on_activity(cb);
         }
-        Arc::new(cli_driver)
+        Ok(Arc::new(cli_driver))
     }
 }
 
@@ -2093,8 +2125,8 @@ fn build_claude_driver(
 /// Select the right `Arc<dyn AgentDriver>` for `model_id` based on its provider.
 ///
 /// - **`"claude"` provider (or unknown):** returns a `ClaudeCliDriver` (the Claude
-///   subscription path — uses the local `claude` CLI, no per-token cost), OR — when
-///   `CAMERATA_LLM_BACKEND=api` and `ANTHROPIC_API_KEY` is set — an `ApiAgentDriver` in
+///   subscription path — uses the local `claude` CLI, no per-token cost), OR — when the
+///   resolved `backend` is `Api` and `ANTHROPIC_API_KEY` is set — an `ApiAgentDriver` in
 ///   [`ApiShape::Anthropic`] that drives the same in-process gateway over the Anthropic
 ///   Messages API.
 /// - **`"openrouter"` provider:** returns an `ApiAgentDriver` backed by the
@@ -2147,6 +2179,12 @@ pub fn build_agent_driver(
     // path (OpenRouter, or Anthropic-API-backend); the CLI path ignores it (see
     // `build_claude_driver`).
     governance: Option<(Arc<camerata_persistence::GovernanceLog>, String)>,
+    // The compliance-safety gate (`docs/design/2026-09-22_per-project-backend.md`): the
+    // calling project's (or, for a project-less caller, the chat's) resolved backend setting.
+    // Only meaningful on the `claude` provider path (`build_claude_driver` enforces it);
+    // ignored for `openrouter`, which has its own independent key-presence-or-error gate
+    // above and no CLI transport to guard against.
+    backend: crate::llm::ProjectBackend,
 ) -> anyhow::Result<Arc<dyn AgentDriver>> {
     let provider = registry
         .all_entries()
@@ -2157,16 +2195,13 @@ pub fn build_agent_driver(
 
     match provider.as_str() {
         "openrouter" => {
-            let key = creds
-                .get(crate::credentials::OPENROUTER_API_KEY)
-                .map_err(|e| anyhow::anyhow!("credential store error: {e}"))?
-                .filter(|k| !k.trim().is_empty())
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "model `{model_id}` is an OpenRouter model but OPENROUTER_API_KEY is not \
-                         set — add it via Settings → Credentials before using this model"
-                    )
-                })?;
+            let key = crate::credentials::openrouter_api_key(creds).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "model `{model_id}` is an OpenRouter model but no OpenRouter API key is \
+                     configured; add it in the app (Settings, Credentials) or set \
+                     OPENROUTER_API_KEY before using this model"
+                )
+            })?;
 
             let mut or_completer = crate::llm::OpenRouterCompleter::for_agent(
                 key,
@@ -2193,8 +2228,10 @@ pub fn build_agent_driver(
             Ok(Arc::new(driver))
         }
         // "claude" or any unrecognised provider: CLI by default, or the Anthropic Messages
-        // API agent when CAMERATA_LLM_BACKEND=api + ANTHROPIC_API_KEY are set.
-        _ => Ok(build_claude_driver(
+        // API agent when the resolved backend is `Api` and an Anthropic API key is configured.
+        // `build_claude_driver` returns a `Result` (`Blocked` refuses to build anything), so
+        // this arm doesn't wrap it in an extra `Ok(...)`.
+        _ => build_claude_driver(
             model_id,
             creds,
             mcp_config_path,
@@ -2204,7 +2241,8 @@ pub fn build_agent_driver(
             escalation,
             on_activity,
             governance,
-        )),
+            backend,
+        ),
     }
 }
 
@@ -2257,6 +2295,11 @@ pub struct ServerChildDriverFactory {
     /// child's gateway mcp-config env (never the shared parent process env). `None` = no
     /// live gate-events capture for children.
     gate_events_file: Option<PathBuf>,
+    /// The compliance-safety gate: the PARENT run's project backend setting, inherited by
+    /// every delegated/fanned-out child (a child never gets its own, independent backend
+    /// choice — same principle as `policy` above for the OpenRouter safety policy). See
+    /// `docs/design/2026-09-22_per-project-backend.md`.
+    backend: crate::llm::ProjectBackend,
 }
 
 impl ServerChildDriverFactory {
@@ -2271,6 +2314,7 @@ impl ServerChildDriverFactory {
         rule_subset: Vec<RuleId>,
         run_session_id: Option<String>,
         gate_events_file: Option<PathBuf>,
+        backend: crate::llm::ProjectBackend,
     ) -> Self {
         Self {
             registry,
@@ -2281,6 +2325,7 @@ impl ServerChildDriverFactory {
             rule_subset,
             run_session_id,
             gate_events_file,
+            backend,
         }
     }
 }
@@ -2356,6 +2401,8 @@ impl camerata_gateway::delegate::ChildDriverFactory for ServerChildDriverFactory
             // (visible to the parent's own agent_step trail). Documented skip; the top-level
             // implementer driver (built directly in `dev_implement_run.rs`) IS wired.
             None,
+            // Children inherit the parent run's project backend setting.
+            self.backend,
         )
         .map_err(|e| std::io::Error::other(format!("build child driver for `{model}`: {e}")))?;
 
@@ -2409,6 +2456,11 @@ pub struct ServerOrchestratorDriverFactory {
     /// LIFECYCLE-10: the run's OWN gate-events sink, threaded per-spawn into the lead's and
     /// its delegate children's gateway mcp-config env (never the shared parent process env).
     gate_events_file: Option<PathBuf>,
+    /// The compliance-safety gate: this run's project backend setting, applied to the lead's
+    /// own claude-provider routing AND inherited by every embedded
+    /// [`ServerChildDriverFactory`] this builds for delegated/fanned-out children. See
+    /// `docs/design/2026-09-22_per-project-backend.md`.
+    backend: crate::llm::ProjectBackend,
 }
 
 impl ServerOrchestratorDriverFactory {
@@ -2422,6 +2474,7 @@ impl ServerOrchestratorDriverFactory {
         gateway_bin: PathBuf,
         run_session_id: Option<String>,
         gate_events_file: Option<PathBuf>,
+        backend: crate::llm::ProjectBackend,
     ) -> Self {
         Self {
             registry,
@@ -2431,6 +2484,7 @@ impl ServerOrchestratorDriverFactory {
             gateway_bin,
             run_session_id,
             gate_events_file,
+            backend,
         }
     }
 
@@ -2486,18 +2540,16 @@ impl camerata_fleet::orchestrator::OrchestratorDriverFactory for ServerOrchestra
                 // children inherit (the orchestrator session's role subset).
                 let rule_subset = ctx.session.role_rule_subset.clone();
 
-                let key = self
-                    .creds
-                    .get(crate::credentials::OPENROUTER_API_KEY)
-                    .map_err(|e| anyhow::anyhow!("credential store error: {e}"))?
-                    .filter(|k| !k.trim().is_empty())
-                    .ok_or_else(|| {
+                let key = crate::credentials::openrouter_api_key(self.creds.as_ref()).ok_or_else(
+                    || {
                         anyhow::anyhow!(
-                            "lead model `{}` is an OpenRouter model but OPENROUTER_API_KEY is \
-                             not set — add it via Settings → Credentials before using this model",
+                            "lead model `{}` is an OpenRouter model but no OpenRouter API key is \
+                             configured; add it in the app (Settings, Credentials) or set \
+                             OPENROUTER_API_KEY before using this model",
                             ctx.strongest_model
                         )
-                    })?;
+                    },
+                )?;
 
                 let mut or_completer = crate::llm::OpenRouterCompleter::for_agent(
                     key,
@@ -2519,6 +2571,7 @@ impl camerata_fleet::orchestrator::OrchestratorDriverFactory for ServerOrchestra
                     rule_subset.clone(),
                     self.run_session_id.clone(),
                     self.gate_events_file.clone(),
+                    self.backend,
                 );
 
                 let orch_config = camerata_gateway::delegate::OrchestratorConfig {
@@ -2539,12 +2592,18 @@ impl camerata_fleet::orchestrator::OrchestratorDriverFactory for ServerOrchestra
                 Ok(Box::new(driver))
             }
             // "claude" or any unrecognised provider: the Anthropic Messages API native
-            // orchestrator when CAMERATA_LLM_BACKEND=api + ANTHROPIC_API_KEY are set, else
-            // the CLI orchestrator path (unchanged). Either way the lead is the ONLY stage
-            // this factory builds, so only the lead can carry delegate/fan_out; its children
-            // are built per-model + gated by the embedded ServerChildDriverFactory.
+            // orchestrator when the resolution says `Api`, else the CLI orchestrator path.
+            // Either way the lead is the ONLY stage this factory builds, so only the lead can
+            // carry delegate/fan_out; its children are built per-model + gated by the embedded
+            // ServerChildDriverFactory.
+            //
+            // The compliance-safety gate (`docs/design/2026-09-22_per-project-backend.md`):
+            // resolved from THIS run's project backend setting BEFORE any driver is built.
+            // `Blocked` refuses to build the lead at all (propagates as `Err`, so the run
+            // never starts).
             _ => {
-                if let Some(key) = anthropic_api_backend_key(self.creds.as_ref()) {
+                let key = resolve_claude_backend(self.creds.as_ref(), self.backend)?;
+                if let Some(key) = key {
                     // Native Anthropic-shape orchestrator. Mirrors the OpenRouter arm: a
                     // ServerChildDriverFactory resolves each delegate/fan_out child to ITS
                     // model's provider (CLI / Anthropic API / OpenRouter), gated.
@@ -2559,6 +2618,7 @@ impl camerata_fleet::orchestrator::OrchestratorDriverFactory for ServerOrchestra
                         rule_subset.clone(),
                         self.run_session_id.clone(),
                         self.gate_events_file.clone(),
+                        self.backend,
                     );
 
                     let orch_config = camerata_gateway::delegate::OrchestratorConfig {
@@ -2570,23 +2630,25 @@ impl camerata_fleet::orchestrator::OrchestratorDriverFactory for ServerOrchestra
                         child_driver_factory: Some(Arc::new(child_factory)),
                     };
 
-                    let driver = ApiAgentDriver::new(Arc::new(AnthropicNoopCompleter), ctx.strongest_model)
-                        .with_rule_subset(rule_subset)
-                        .with_worktree(ctx.worktree.to_path_buf())
-                        .with_shape(ApiShape::Anthropic)
-                        .with_anthropic_api_key(key)
-                        // ORCHESTRATOR-ONLY: only the lead is ever built here.
-                        .as_orchestrator(true)
-                        .with_orchestrator_config(orch_config);
+                    let driver =
+                        ApiAgentDriver::new(Arc::new(AnthropicNoopCompleter), ctx.strongest_model)
+                            .with_rule_subset(rule_subset)
+                            .with_worktree(ctx.worktree.to_path_buf())
+                            .with_shape(ApiShape::Anthropic)
+                            .with_anthropic_api_key(key)
+                            // ORCHESTRATOR-ONLY: only the lead is ever built here.
+                            .as_orchestrator(true)
+                            .with_orchestrator_config(orch_config);
                     return Ok(Box::new(driver));
                 }
 
-                let mut cli_driver =
-                    camerata_agent::ClaudeCliDriver::new(ctx.session.mcp_config.display().to_string())
-                        .with_worktree(ctx.worktree)
-                        // ORCHESTRATOR-ONLY: delegate/fan_out in --allowedTools, delegate
-                        // env in the session mcp-config (delegate ON).
-                        .as_orchestrator(true);
+                let mut cli_driver = camerata_agent::ClaudeCliDriver::new(
+                    ctx.session.mcp_config.display().to_string(),
+                )
+                .with_worktree(ctx.worktree)
+                // ORCHESTRATOR-ONLY: delegate/fan_out in --allowedTools, delegate
+                // env in the session mcp-config (delegate ON).
+                .as_orchestrator(true);
                 if !ctx.strongest_model.trim().is_empty() {
                     cli_driver = cli_driver.with_model(ctx.strongest_model);
                 }
@@ -2603,10 +2665,44 @@ impl camerata_fleet::orchestrator::OrchestratorDriverFactory for ServerOrchestra
 
 #[cfg(test)]
 mod tests {
+    /// One credential read per driver build: the key that decides the resolution is the key
+    /// that is returned (no second keychain read, so no second prompt).
+    #[test]
+    #[serial_test::serial(process_env)]
+    fn resolve_claude_backend_reads_the_store_exactly_once() {
+        use crate::credentials::{CredentialError, CredentialStore};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct Counting(AtomicUsize);
+        impl CredentialStore for Counting {
+            fn set(&self, _: &str, _: &str) -> Result<(), CredentialError> {
+                Ok(())
+            }
+            fn get(&self, _: &str) -> Result<Option<String>, CredentialError> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(Some("sk-ant-once".to_string()))
+            }
+            fn delete(&self, _: &str) -> Result<(), CredentialError> {
+                Ok(())
+            }
+        }
+        let _env = camerata_test_env::EnvGuard::remove("ANTHROPIC_API_KEY");
+        let store = Counting(AtomicUsize::new(0));
+        let key = resolve_claude_backend(&store, crate::llm::ProjectBackend::Api).unwrap();
+        assert_eq!(key.as_deref(), Some("sk-ant-once"));
+        assert_eq!(store.0.load(Ordering::SeqCst), 1, "one store read, not two");
+        // Cli resolves to no key (still one read).
+        store.0.store(0, Ordering::SeqCst);
+        assert_eq!(
+            resolve_claude_backend(&store, crate::llm::ProjectBackend::Cli).unwrap(),
+            None
+        );
+        assert_eq!(store.0.load(Ordering::SeqCst), 1);
+    }
+
     use super::*;
+    use crate::credentials::CredentialStore as _;
     use camerata_core::Role;
     use camerata_gateway::{enforced_gate_rules, gov1_rule};
-    use crate::credentials::CredentialStore as _;
     use std::sync::Arc;
 
     // ── test helpers ─────────────────────────────────────────────────────────
@@ -2642,7 +2738,7 @@ mod tests {
     #[test]
     fn build_system_prompt_embeds_kernel_and_working_discipline() {
         let role = test_role();
-        let p = build_system_prompt(&role, "claude-opus-4-8").expect("prompt is Some");
+        let p = build_system_prompt(&role, "claude-opus-5").expect("prompt is Some");
 
         // Kernel markers + a couple of load-bearing clauses.
         assert!(
@@ -2653,8 +2749,14 @@ mod tests {
             p.contains("=== END OPERATING PROTOCOL ==="),
             "system prompt must embed the governance kernel closing marker"
         );
-        assert!(p.contains("GROUND EVERY FACT"), "kernel clause 1 must be present");
-        assert!(p.contains("VERIFY BEFORE DONE"), "kernel clause 5 must be present");
+        assert!(
+            p.contains("GROUND EVERY FACT"),
+            "kernel clause 1 must be present"
+        );
+        assert!(
+            p.contains("VERIFY BEFORE DONE"),
+            "kernel clause 5 must be present"
+        );
 
         // Working discipline + if-unsure blocks.
         assert!(
@@ -2684,8 +2786,14 @@ mod tests {
         let role = test_role();
         let p = build_system_prompt(&role, "").expect("prompt is Some");
         assert!(p.contains("=== CAMERATA OPERATING PROTOCOL"));
-        assert!(!p.contains("TIER DISCIPLINE"), "no per-tier addendum for an empty model");
-        assert!(p.contains("gated_write"), "constraints block must be preserved");
+        assert!(
+            !p.contains("TIER DISCIPLINE"),
+            "no per-tier addendum for an empty model"
+        );
+        assert!(
+            p.contains("gated_write"),
+            "constraints block must be preserved"
+        );
     }
 
     /// A stub `LlmPort` that always returns a fixed final text (no tool calls).
@@ -2704,6 +2812,7 @@ mod tests {
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
                 or_cache_discount: None,
+                truncated: false,
             })
         }
         async fn complete_streaming(
@@ -2785,6 +2894,7 @@ mod tests {
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
                 or_cache_discount: None,
+                truncated: false,
             })
         }
 
@@ -2810,8 +2920,8 @@ mod tests {
         role: &Role,
         wt: Option<PathBuf>,
     ) -> ApiAgentDriver {
-        let mut d = ApiAgentDriver::new(completer, "stub-model")
-            .with_rule_subset(role.rule_subset.clone());
+        let mut d =
+            ApiAgentDriver::new(completer, "stub-model").with_rule_subset(role.rule_subset.clone());
         if let Some(w) = wt {
             d = d.with_worktree(w);
         }
@@ -2828,11 +2938,23 @@ mod tests {
             .collect();
 
         // Must include gated_write (the governed path).
-        assert!(names.contains(&"gated_write"), "gated_write must be in schemas");
+        assert!(
+            names.contains(&"gated_write"),
+            "gated_write must be in schemas"
+        );
 
         // Must NOT include any escape tool.
-        for escape in ["Write", "Edit", "Bash", "Task", "MultiEdit", "NotebookEdit",
-                       "shell", "exec", "run"] {
+        for escape in [
+            "Write",
+            "Edit",
+            "Bash",
+            "Task",
+            "MultiEdit",
+            "NotebookEdit",
+            "shell",
+            "exec",
+            "run",
+        ] {
             assert!(
                 !names.contains(&escape),
                 "escape tool `{escape}` must NOT appear in worker schemas"
@@ -2860,8 +2982,8 @@ mod tests {
 
         let beats = Arc::new(AtomicUsize::new(0));
         let beats_cb = beats.clone();
-        let driver = driver_with(completer, &role, Some(wt))
-            .with_on_activity(Arc::new(move || {
+        let driver =
+            driver_with(completer, &role, Some(wt)).with_on_activity(Arc::new(move || {
                 beats_cb.fetch_add(1, Ordering::SeqCst);
             }));
 
@@ -2938,7 +3060,10 @@ mod tests {
         let (result, denial) = execute_gated_write(&driver, &role, &inv);
         // Must be denied.
         assert!(denial.is_some(), "GOV-1 must deny the write: {result}");
-        assert!(result.contains("DENIED"), "result must say DENIED: {result}");
+        assert!(
+            result.contains("DENIED"),
+            "result must say DENIED: {result}"
+        );
         // File must NOT exist.
         assert!(
             !wt.join("forbidden/secret.rs").exists(),
@@ -2969,6 +3094,35 @@ mod tests {
         assert!(
             wt.join("src/lib.rs").exists(),
             "allowed write must create the file"
+        );
+    }
+
+    /// A governed run still in flight when its checkout was deleted must not recreate the
+    /// worktree folder (and with it the deleted checkout's path) by writing into it.
+    #[tokio::test]
+    async fn gated_write_into_a_vanished_worktree_writes_and_creates_nothing() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let wt = tmp
+            .path()
+            .join("acme")
+            .join("app")
+            .join(".camerata-worktrees")
+            .join("wt");
+        let role = all_rules_role();
+        let driver = driver_with(Arc::new(StubCompleter("x".into())), &role, Some(wt.clone()));
+        let inv = ToolInvocation {
+            id: "call-gone".to_string(),
+            name: "gated_write".to_string(),
+            input: serde_json::json!({ "path": "src/lib.rs", "content": "pub fn hello() {}" }),
+        };
+
+        let (result, denial) = execute_gated_write(&driver, &role, &inv);
+
+        assert!(denial.is_some(), "the write is refused: {result}");
+        assert!(result.contains("no longer exists"), "{result}");
+        assert!(
+            !tmp.path().join("acme").exists(),
+            "nothing under the vanished worktree's path was created"
         );
     }
 
@@ -3008,7 +3162,10 @@ mod tests {
         );
         // Even orchestrator must NOT expose shell/exec/Bash/Task.
         for escape in ["Bash", "Write", "Edit", "Task", "shell"] {
-            assert!(!names.contains(&escape), "escape tool `{escape}` must not appear even in orchestrator schemas");
+            assert!(
+                !names.contains(&escape),
+                "escape tool `{escape}` must not appear even in orchestrator schemas"
+            );
         }
     }
 
@@ -3033,17 +3190,17 @@ mod tests {
         };
         let (result, denial) = execute_tool(&driver, &role, &inv).await;
         assert!(denial.is_some(), "worker delegate call must be denied");
-        assert!(result.contains("DENIED"), "result must say DENIED: {result}");
+        assert!(
+            result.contains("DENIED"),
+            "result must say DENIED: {result}"
+        );
     }
 
     #[tokio::test]
     async fn invariant_fan_out_rejected_for_non_orchestrator_execution() {
         let role = test_role();
-        let driver = ApiAgentDriver::new(
-            Arc::new(StubCompleter("x".into())),
-            "stub",
-        )
-        .with_rule_subset(role.rule_subset.clone());
+        let driver = ApiAgentDriver::new(Arc::new(StubCompleter("x".into())), "stub")
+            .with_rule_subset(role.rule_subset.clone());
 
         let inv = ToolInvocation {
             id: "fo1".to_string(),
@@ -3052,7 +3209,10 @@ mod tests {
         };
         let (result, denial) = execute_tool(&driver, &role, &inv).await;
         assert!(denial.is_some(), "worker fan_out call must be denied");
-        assert!(result.contains("DENIED"), "result must say DENIED: {result}");
+        assert!(
+            result.contains("DENIED"),
+            "result must say DENIED: {result}"
+        );
     }
 
     // ── INVARIANT 3: shell / Task never exposed ────────────────────────────────
@@ -3065,8 +3225,16 @@ mod tests {
                 .iter()
                 .filter_map(|s| s["function"]["name"].as_str())
                 .collect();
-            for forbidden in ["shell", "Task", "exec", "Bash", "Write", "Edit",
-                              "MultiEdit", "NotebookEdit"] {
+            for forbidden in [
+                "shell",
+                "Task",
+                "exec",
+                "Bash",
+                "Write",
+                "Edit",
+                "MultiEdit",
+                "NotebookEdit",
+            ] {
                 assert!(
                     !names.contains(&forbidden),
                     "`{forbidden}` must never appear in tool schemas (orchestrator={orchestrator})"
@@ -3236,6 +3404,7 @@ mod tests {
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
             or_cache_discount: None,
+            truncated: false,
         };
         match parse_response(&resp) {
             ParsedResponse::FinalText(t) => assert_eq!(t, "Task complete!"),
@@ -3269,6 +3438,7 @@ mod tests {
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
             or_cache_discount: None,
+            truncated: false,
         };
         match parse_response(&resp) {
             ParsedResponse::ToolCalls { calls, .. } => {
@@ -3303,6 +3473,7 @@ mod tests {
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
             or_cache_discount: None,
+            truncated: false,
         };
         match parse_response(&resp) {
             ParsedResponse::ToolCalls { calls, .. } => {
@@ -3326,6 +3497,7 @@ mod tests {
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
             or_cache_discount: None,
+            truncated: false,
         };
         match parse_response(&resp) {
             ParsedResponse::FinalText(t) => assert_eq!(t, "plain response with no JSON"),
@@ -3343,6 +3515,7 @@ mod tests {
     /// (the ClaudeCliDriver path never reads credentials). For an "openrouter"
     /// model WITH a valid key it must also succeed (ApiAgentDriver path).
     #[test]
+    #[serial_test::serial(process_env)]
     fn driver_selection_claude_provider_succeeds_without_openrouter_key() {
         // Registry with only the static Claude entries (no OpenRouter entries).
         let registry = crate::model_registry::ModelRegistry::new();
@@ -3351,7 +3524,7 @@ mod tests {
         let limiter = Arc::new(crate::rate_limit::ProviderRateLimiter::new());
 
         // Pick any Claude model id (it's in the static registry with provider = "claude").
-        let model_id = "claude-sonnet-4-6";
+        let model_id = "claude-sonnet-5";
 
         let result = build_agent_driver(
             model_id,
@@ -3363,10 +3536,11 @@ mod tests {
             None,                 // worktree
             false,                // orchestrator
             limiter,
-            None,                 // run_session_id
-            false, // escalation
-            None,  // on_activity — no heartbeat in this unit test
-            None, // governance — no log wired in this unit test
+            None,                            // run_session_id
+            false,                           // escalation
+            None,                            // on_activity — no heartbeat in this unit test
+            None,                            // governance — no log wired in this unit test
+            crate::llm::ProjectBackend::Cli, // this test exercises routing, not the compliance gate
         );
         assert!(
             result.is_ok(),
@@ -3390,6 +3564,7 @@ mod tests {
             weight: 0,
             caching: false,
             vision: false,
+            price_known: true,
         }
     }
 
@@ -3418,10 +3593,11 @@ mod tests {
             None,
             false,
             limiter,
-            None, // run_session_id
-            false, // escalation
-            None,  // on_activity — no heartbeat in this unit test
-            None, // governance — no log wired in this unit test
+            None,                            // run_session_id
+            false,                           // escalation
+            None,                            // on_activity — no heartbeat in this unit test
+            None,                            // governance — no log wired in this unit test
+            crate::llm::ProjectBackend::Cli, // irrelevant to the openrouter branch
         );
         assert!(
             result.is_ok(),
@@ -3450,10 +3626,11 @@ mod tests {
             None,
             false,
             limiter,
-            None, // run_session_id
-            false, // escalation
-            None,  // on_activity — no heartbeat in this unit test
-            None, // governance — no log wired in this unit test
+            None,                            // run_session_id
+            false,                           // escalation
+            None,                            // on_activity — no heartbeat in this unit test
+            None,                            // governance — no log wired in this unit test
+            crate::llm::ProjectBackend::Cli, // irrelevant to the openrouter branch
         );
         assert!(
             result.is_err(),
@@ -3503,8 +3680,15 @@ mod tests {
 
         let outcome = driver.run(&role, "write the hello function").await.unwrap();
         assert_eq!(outcome.result, "Done! I wrote src/lib.rs.");
-        assert!(outcome.denials.is_empty(), "no denials expected: {:?}", outcome.denials);
-        assert!(wt.join("src/lib.rs").exists(), "file must have been written");
+        assert!(
+            outcome.denials.is_empty(),
+            "no denials expected: {:?}",
+            outcome.denials
+        );
+        assert!(
+            wt.join("src/lib.rs").exists(),
+            "file must have been written"
+        );
     }
 
     #[tokio::test]
@@ -3567,8 +3751,14 @@ mod tests {
             .with_governance(log.clone(), "run-deny-gov-1");
 
         let outcome = driver.run(&role, "write to forbidden").await.unwrap();
-        assert!(!outcome.denials.is_empty(), "denial must still be recorded in the outcome");
-        assert!(!wt.join("forbidden/config.rs").exists(), "denied file must not exist");
+        assert!(
+            !outcome.denials.is_empty(),
+            "denial must still be recorded in the outcome"
+        );
+        assert!(
+            !wt.join("forbidden/config.rs").exists(),
+            "denied file must not exist"
+        );
 
         let events = log.by_run("run-deny-gov-1").await.expect("by_run");
         let deny = events
@@ -3577,14 +3767,20 @@ mod tests {
             .expect("a gate_deny row must be recorded in the governance log");
         assert_eq!(deny.severity, "warn");
         assert_eq!(deny.actor, "agent");
-        assert!(deny.rule_id.is_some(), "the Layer-1 rule id must be carried");
+        assert!(
+            deny.rule_id.is_some(),
+            "the Layer-1 rule id must be carried"
+        );
         // The reason must be READABLE — the gate's actual denial text — never a bare hash.
         let reason = deny.reason.as_deref().expect("reason present");
         assert!(
             !reason.chars().all(|c| c.is_ascii_hexdigit()) || reason.len() < 8,
             "reason must not look like a bare hash: {reason}"
         );
-        assert!(reason.contains(' '), "reason must be a readable phrase, not a code: {reason}");
+        assert!(
+            reason.contains(' '),
+            "reason must be a readable phrase, not a code: {reason}"
+        );
         // agent_step + gate_allow/deny both recorded — the routine trail plus the deny.
         assert!(
             events.iter().any(|e| e.kind == "agent_step"),
@@ -3621,8 +3817,15 @@ mod tests {
             .with_governance(log.clone(), "run-allow-gov-1");
 
         let outcome = driver.run(&role, "write the hello function").await.unwrap();
-        assert!(outcome.denials.is_empty(), "no denials expected: {:?}", outcome.denials);
-        assert!(wt.join("src/lib.rs").exists(), "file must have been written");
+        assert!(
+            outcome.denials.is_empty(),
+            "no denials expected: {:?}",
+            outcome.denials
+        );
+        assert!(
+            wt.join("src/lib.rs").exists(),
+            "file must have been written"
+        );
 
         let events = log.by_run("run-allow-gov-1").await.expect("by_run");
         assert!(
@@ -3655,8 +3858,7 @@ mod tests {
         let driver = ApiAgentDriver::new(Arc::new(or_completer), "openrouter/model");
         // session_id must be inherited (non-empty, matches what the completer reports).
         assert_eq!(
-            driver.session_id,
-            "my-story-id-123",
+            driver.session_id, "my-story-id-123",
             "driver must inherit the completer's session id"
         );
     }
@@ -3664,22 +3866,16 @@ mod tests {
     /// Non-OR completers (stubs) generate a per-instance session token (non-empty).
     #[test]
     fn driver_generates_session_id_for_non_or_completer() {
-        let driver = ApiAgentDriver::new(
-            Arc::new(StubCompleter("done".to_string())),
-            "stub-model",
-        );
+        let driver = ApiAgentDriver::new(Arc::new(StubCompleter("done".to_string())), "stub-model");
         assert!(
             !driver.session_id.is_empty(),
             "session_id must be non-empty even for non-OR completers"
         );
         // Two distinct drivers must get different session ids (no collision).
-        let driver2 = ApiAgentDriver::new(
-            Arc::new(StubCompleter("done".to_string())),
-            "stub-model",
-        );
+        let driver2 =
+            ApiAgentDriver::new(Arc::new(StubCompleter("done".to_string())), "stub-model");
         assert_ne!(
-            driver.session_id,
-            driver2.session_id,
+            driver.session_id, driver2.session_id,
             "two drivers must have distinct session ids"
         );
     }
@@ -3695,7 +3891,7 @@ mod tests {
             default_policy(),
             crate::model_registry::ModelRegistry::new(),
         )
-            .with_session_id("custom-session-xyz");
+        .with_session_id("custom-session-xyz");
         assert_eq!(completer.session_id_for_agent(), "custom-session-xyz");
     }
 
@@ -3709,7 +3905,7 @@ mod tests {
             default_policy(),
             crate::model_registry::ModelRegistry::new(),
         )
-            .with_session_id("");
+        .with_session_id("");
         // Empty override must leave the auto-generated session id in place (non-empty).
         assert!(
             !completer.session_id_for_agent().is_empty(),
@@ -3720,10 +3916,8 @@ mod tests {
     /// `bust_cache_on_next_call` sets `bust_cache = true` on the driver.
     #[test]
     fn bust_cache_flag_is_settable() {
-        let mut driver = ApiAgentDriver::new(
-            Arc::new(StubCompleter("done".to_string())),
-            "stub-model",
-        );
+        let mut driver =
+            ApiAgentDriver::new(Arc::new(StubCompleter("done".to_string())), "stub-model");
         assert!(!driver.bust_cache, "bust_cache must start false");
         driver.bust_cache_on_next_call();
         assert!(driver.bust_cache, "bust_cache must be true after call");
@@ -3751,10 +3945,11 @@ mod tests {
             None,
             false,
             limiter,
-            Some("uow-story-id-42"), // run_session_id
-            false, // escalation
-            None,  // on_activity — no heartbeat in this unit test
-            None, // governance — no log wired in this unit test
+            Some("uow-story-id-42"),         // run_session_id
+            false,                           // escalation
+            None,                            // on_activity — no heartbeat in this unit test
+            None,                            // governance — no log wired in this unit test
+            crate::llm::ProjectBackend::Cli, // irrelevant to the openrouter branch
         )
         .expect("build must succeed");
 
@@ -3779,11 +3974,15 @@ mod tests {
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
             or_cache_discount: None,
+            truncated: false,
         };
         assert!(resp.or_cache_discount.is_none(), "default is None");
 
         // A response with a discount set (simulates what call_api_inner would produce).
-        let resp_cached = LlmResponse { or_cache_discount: Some(0.75), ..resp.clone() };
+        let resp_cached = LlmResponse {
+            or_cache_discount: Some(0.75),
+            ..resp.clone()
+        };
         assert_eq!(resp_cached.or_cache_discount, Some(0.75));
     }
 
@@ -3804,6 +4003,7 @@ mod tests {
             vec![gov1_rule()],
             None,
             None,
+            crate::llm::ProjectBackend::Cli, // these routing tests aren't exercising the compliance gate
         )
     }
 
@@ -3811,6 +4011,7 @@ mod tests {
     /// OpenRouter credential — proving the factory routed it to the CLI provider (the CLI
     /// path never reads creds). The build is the gated, non-orchestrator worker path.
     #[test]
+    #[serial_test::serial(process_env)]
     fn factory_routes_claude_model_to_cli_child_no_creds_needed() {
         let registry = crate::model_registry::ModelRegistry::new();
         let creds: Arc<dyn crate::credentials::CredentialStore> =
@@ -3818,7 +4019,7 @@ mod tests {
         let factory = factory_with(registry, creds);
 
         let tmp = tempfile::tempdir().unwrap();
-        let child = factory.build_child("claude-sonnet-4-6", tmp.path(), &[]);
+        let child = factory.build_child("claude-sonnet-5", tmp.path(), &[]);
         assert!(
             child.is_ok(),
             "claude model must build a CLI child without an OpenRouter key: {:?}",
@@ -3834,7 +4035,8 @@ mod tests {
         let registry = crate::model_registry::ModelRegistry::new();
         registry.seed_openrouter_entries(vec![openrouter_test_entry("openrouter/mistral-7b")]);
         let mem = crate::credentials::MemoryCredentialStore::new();
-        mem.set(crate::credentials::OPENROUTER_API_KEY, "sk-or-test").unwrap();
+        mem.set(crate::credentials::OPENROUTER_API_KEY, "sk-or-test")
+            .unwrap();
         let creds: Arc<dyn crate::credentials::CredentialStore> = Arc::new(mem);
         let factory = factory_with(registry, creds);
 
@@ -3859,9 +4061,16 @@ mod tests {
 
         let tmp = tempfile::tempdir().unwrap();
         let child = factory.build_child("openrouter/mistral-7b", tmp.path(), &[]);
-        assert!(child.is_err(), "openrouter child without key must fail closed");
         assert!(
-            child.err().unwrap().to_string().contains("OPENROUTER_API_KEY"),
+            child.is_err(),
+            "openrouter child without key must fail closed"
+        );
+        assert!(
+            child
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("OPENROUTER_API_KEY"),
             "error must mention the missing OpenRouter key"
         );
     }
@@ -3881,8 +4090,15 @@ mod tests {
             .collect();
         assert!(names.contains(&"gated_write"));
         for forbidden in [
-            "delegate", "fan_out", "Task", "Bash", "Write", "Edit", "MultiEdit",
-            "NotebookEdit", "shell",
+            "delegate",
+            "fan_out",
+            "Task",
+            "Bash",
+            "Write",
+            "Edit",
+            "MultiEdit",
+            "NotebookEdit",
+            "shell",
         ] {
             assert!(
                 !names.contains(&forbidden),
@@ -3904,8 +4120,8 @@ mod tests {
         camerata_gateway::delegate::OrchestratorConfig {
             models: camerata_gateway::delegate::DelegateModels {
                 fast: "claude-haiku-4-5-20251001".to_string(),
-                balanced: "claude-sonnet-4-6".to_string(),
-                strongest: "claude-opus-4-8".to_string(),
+                balanced: "claude-sonnet-5".to_string(),
+                strongest: "claude-opus-5".to_string(),
                 vision: String::new(),
             },
             worktree_root: PathBuf::from("/tmp/wt"),
@@ -4016,15 +4232,23 @@ mod tests {
         let schemas = build_tool_schemas_for(false, ApiShape::Anthropic);
         assert!(!schemas.is_empty());
         for s in &schemas {
-            assert!(s.get("name").and_then(|v| v.as_str()).is_some(),
-                "anthropic tool must have a top-level `name`: {s}");
-            assert!(s.get("input_schema").is_some(),
-                "anthropic tool must have `input_schema`: {s}");
+            assert!(
+                s.get("name").and_then(|v| v.as_str()).is_some(),
+                "anthropic tool must have a top-level `name`: {s}"
+            );
+            assert!(
+                s.get("input_schema").is_some(),
+                "anthropic tool must have `input_schema`: {s}"
+            );
             // Must NOT carry the OpenAI envelope.
-            assert!(s.get("function").is_none(),
-                "anthropic tool must NOT have `function`: {s}");
-            assert!(s.get("type").is_none(),
-                "anthropic tool must NOT have a `type` discriminator: {s}");
+            assert!(
+                s.get("function").is_none(),
+                "anthropic tool must NOT have `function`: {s}"
+            );
+            assert!(
+                s.get("type").is_none(),
+                "anthropic tool must NOT have a `type` discriminator: {s}"
+            );
         }
         // gated_write must still be present (allowlist unchanged across shapes).
         let names: Vec<&str> = schemas.iter().filter_map(|s| s["name"].as_str()).collect();
@@ -4040,8 +4264,10 @@ mod tests {
                 .iter()
                 .filter_map(|s| s["function"]["name"].as_str())
                 .collect();
-            let mut an_names: Vec<&str> =
-                anthropic.iter().filter_map(|s| s["name"].as_str()).collect();
+            let mut an_names: Vec<&str> = anthropic
+                .iter()
+                .filter_map(|s| s["name"].as_str())
+                .collect();
             or_names.sort_unstable();
             an_names.sort_unstable();
             assert_eq!(
@@ -4056,8 +4282,15 @@ mod tests {
         let schemas = build_tool_schemas_for(false, ApiShape::Anthropic);
         let names: Vec<&str> = schemas.iter().filter_map(|s| s["name"].as_str()).collect();
         for forbidden in [
-            "delegate", "fan_out", "Task", "Bash", "Write", "Edit", "MultiEdit",
-            "NotebookEdit", "shell",
+            "delegate",
+            "fan_out",
+            "Task",
+            "Bash",
+            "Write",
+            "Edit",
+            "MultiEdit",
+            "NotebookEdit",
+            "shell",
         ] {
             assert!(
                 !names.contains(&forbidden),
@@ -4096,18 +4329,24 @@ mod tests {
         let schemas = build_tool_schemas_for(false, ApiShape::Anthropic);
         let messages = vec![serde_json::json!({"role": "user", "content": "do it"})];
         let (body, use_caching) = build_anthropic_request_body(
-            "claude-opus-4-8",
+            "claude-opus-5",
             Some("You are governed."),
             &messages,
             &schemas,
         );
         assert!(use_caching, "system present → caching active");
-        assert_eq!(body["model"].as_str(), Some("claude-opus-4-8"));
+        assert_eq!(body["model"].as_str(), Some("claude-opus-5"));
         assert!(body["max_tokens"].as_u64().is_some());
         // Top-level system as a cache_control text block (NOT a bare string, NOT inside messages).
         assert_eq!(body["system"][0]["type"].as_str(), Some("text"));
-        assert_eq!(body["system"][0]["text"].as_str(), Some("You are governed."));
-        assert_eq!(body["system"][0]["cache_control"]["type"].as_str(), Some("ephemeral"));
+        assert_eq!(
+            body["system"][0]["text"].as_str(),
+            Some("You are governed.")
+        );
+        assert_eq!(
+            body["system"][0]["cache_control"]["type"].as_str(),
+            Some("ephemeral")
+        );
         // Anthropic tools format (input_schema, not function) present in the body.
         assert!(body["tools"].is_array());
         assert!(body["tools"][0]["input_schema"].is_object());
@@ -4117,8 +4356,7 @@ mod tests {
 
     #[test]
     fn anthropic_request_body_no_system_no_caching() {
-        let (body, use_caching) =
-            build_anthropic_request_body("claude-opus-4-8", None, &[], &[]);
+        let (body, use_caching) = build_anthropic_request_body("claude-opus-5", None, &[], &[]);
         assert!(!use_caching, "no system → no caching header");
         assert!(body.get("system").is_none());
         // No tools → no tools/tool_choice keys.
@@ -4153,14 +4391,23 @@ mod tests {
         let task = "=== PROJECT GROUNDING ===\ndigest here\n=== END PROJECT GROUNDING ===\n\n## Story\ndo the thing";
         let messages = vec![serde_json::json!({"role": "user", "content": task})];
         let (body, use_caching) =
-            build_anthropic_request_body("claude-opus-4-8", None, &messages, &[]);
+            build_anthropic_request_body("claude-opus-5", None, &messages, &[]);
         // Even without a system prompt, the grounding breakpoint activates caching.
         assert!(use_caching, "grounded first message → caching active");
         let content = &body["messages"][0]["content"];
-        assert!(content.is_array(), "first message content must be a two-block array");
+        assert!(
+            content.is_array(),
+            "first message content must be a two-block array"
+        );
         assert_eq!(content[0]["type"].as_str(), Some("text"));
-        assert_eq!(content[0]["cache_control"]["type"].as_str(), Some("ephemeral"));
-        assert!(content[0]["text"].as_str().unwrap().ends_with(LAYER2_GROUNDING_TERMINATOR));
+        assert_eq!(
+            content[0]["cache_control"]["type"].as_str(),
+            Some("ephemeral")
+        );
+        assert!(content[0]["text"]
+            .as_str()
+            .unwrap()
+            .ends_with(LAYER2_GROUNDING_TERMINATOR));
         // Second block is the volatile tail with NO cache_control.
         assert!(content[1]["text"].as_str().unwrap().contains("## Story"));
         assert!(content[1].get("cache_control").is_none());
@@ -4168,11 +4415,15 @@ mod tests {
 
     #[test]
     fn anthropic_first_user_message_unchanged_without_grounding() {
-        let messages = vec![serde_json::json!({"role": "user", "content": "plain task, no grounding"})];
+        let messages =
+            vec![serde_json::json!({"role": "user", "content": "plain task, no grounding"})];
         let (body, _use_caching) =
-            build_anthropic_request_body("claude-opus-4-8", Some("sys"), &messages, &[]);
+            build_anthropic_request_body("claude-opus-5", Some("sys"), &messages, &[]);
         // No grounding marker → first message content stays a plain string.
-        assert_eq!(body["messages"][0]["content"].as_str(), Some("plain task, no grounding"));
+        assert_eq!(
+            body["messages"][0]["content"].as_str(),
+            Some("plain task, no grounding")
+        );
     }
 
     #[test]
@@ -4183,7 +4434,7 @@ mod tests {
             serde_json::json!({"role": "user", "content": "plain opener no marker"}),
             serde_json::json!({"role": "user", "content": "later =[END PROJECT GROUNDING]= x\n\ntail"}),
         ];
-        let (body, _) = build_anthropic_request_body("claude-opus-4-8", None, &messages, &[]);
+        let (body, _) = build_anthropic_request_body("claude-opus-5", None, &messages, &[]);
         // Index 0 has no marker → stays a string; index 1 is passed through untouched.
         assert!(body["messages"][0]["content"].is_string());
         assert!(body["messages"][1]["content"].is_string());
@@ -4240,7 +4491,7 @@ mod tests {
                 "id": "msg_01",
                 "type": "message",
                 "role": "assistant",
-                "model": "claude-opus-4-8",
+                "model": "claude-opus-5",
                 "stop_reason": "tool_use",
                 "content": [
                     {"type": "text", "text": "I'll write the file."},
@@ -4254,7 +4505,7 @@ mod tests {
                 "usage": {"input_tokens": 10, "output_tokens": 5}
             })
             .to_string(),
-            model: "claude-opus-4-8".into(),
+            model: "claude-opus-5".into(),
             backend: "anthropic/api/agentic".into(),
             cost_usd: None,
             input_tokens: Some(10),
@@ -4262,6 +4513,7 @@ mod tests {
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
             or_cache_discount: None,
+            truncated: false,
         };
         match parse_response(&resp) {
             ParsedResponse::ToolCalls { calls, .. } => {
@@ -4279,13 +4531,17 @@ mod tests {
     #[test]
     fn default_shape_is_openrouter_back_compat() {
         let d = ApiAgentDriver::new(Arc::new(StubCompleter("x".into())), "m");
-        assert_eq!(d.shape, ApiShape::OpenRouter, "default shape must stay OpenRouter");
+        assert_eq!(
+            d.shape,
+            ApiShape::OpenRouter,
+            "default shape must stay OpenRouter"
+        );
         assert!(d.anthropic_api_key.is_none());
     }
 
     #[test]
     fn with_shape_and_key_set_anthropic_fields() {
-        let d = ApiAgentDriver::new(Arc::new(AnthropicNoopCompleter), "claude-opus-4-8")
+        let d = ApiAgentDriver::new(Arc::new(AnthropicNoopCompleter), "claude-opus-5")
             .with_shape(ApiShape::Anthropic)
             .with_anthropic_api_key("sk-ant-test");
         assert_eq!(d.shape, ApiShape::Anthropic);
@@ -4294,184 +4550,119 @@ mod tests {
 
     #[test]
     fn empty_anthropic_key_is_noop() {
-        let d = ApiAgentDriver::new(Arc::new(AnthropicNoopCompleter), "m")
-            .with_anthropic_api_key("");
-        assert!(d.anthropic_api_key.is_none(), "empty key must not be stored");
+        let d =
+            ApiAgentDriver::new(Arc::new(AnthropicNoopCompleter), "m").with_anthropic_api_key("");
+        assert!(
+            d.anthropic_api_key.is_none(),
+            "empty key must not be stored"
+        );
     }
 
     // ── Routing: build_claude_driver respects backend + key ───────────────────
     //
-    // anthropic_api_backend_key() reads the backend from process env and the key
-    // store-first (env fallback). These tests exercise the ENV-fallback path with an
-    // EMPTY credential store, so they mutate env and run serially under a shared mutex.
+    // Per `docs/design/2026-09-22_per-project-backend.md`, `backend` is an explicit
+    // parameter now (`ProjectBackend::Cli` | `ProjectBackend::Api`), never read from env —
+    // these tests build a `MemoryCredentialStore` directly and set/omit the Anthropic key
+    // on IT, with no process-env mutation and no shared mutex needed.
 
-    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        LOCK.lock().unwrap_or_else(|e| e.into_inner())
-    }
-
-    /// An empty credential store: the helper's key lookup misses and falls back to the
-    /// `ANTHROPIC_API_KEY` env var these routing tests set.
+    /// An empty credential store (no Anthropic key).
     fn empty_creds() -> crate::credentials::MemoryCredentialStore {
         crate::credentials::MemoryCredentialStore::new()
     }
 
-    /// RAII guard that snapshots + restores the two env vars routing depends on.
-    struct EnvSnapshot {
-        backend: Option<String>,
-        key: Option<String>,
-    }
-    impl EnvSnapshot {
-        fn capture() -> Self {
-            Self {
-                backend: std::env::var("CAMERATA_LLM_BACKEND").ok(),
-                key: std::env::var("ANTHROPIC_API_KEY").ok(),
-            }
-        }
-        fn set(name: &str, val: Option<&str>) {
-            match val {
-                Some(v) => std::env::set_var(name, v),
-                None => std::env::remove_var(name),
-            }
-        }
-    }
-    impl Drop for EnvSnapshot {
-        fn drop(&mut self) {
-            Self::set("CAMERATA_LLM_BACKEND", self.backend.as_deref());
-            Self::set("ANTHROPIC_API_KEY", self.key.as_deref());
-        }
-    }
+    // `AgentDriver` is not `Any`, so we can't downcast `Arc<dyn AgentDriver>` to the concrete
+    // type; instead we exercise the exact Anthropic construction `build_claude_driver`
+    // performs (verified separately in `with_shape_and_key_set_anthropic_fields`) and assert
+    // the resolution-gated path is the one that fires. End-to-end, both `build_agent_driver`
+    // and `build_claude_driver` must SUCCEED (no spawn, no credential lookup) on the
+    // claude+api path.
 
     #[test]
-    fn anthropic_backend_key_requires_both_signals() {
-        let _g = env_lock();
-        let _snap = EnvSnapshot::capture();
-        // Empty store: the key comes from the env fallback these assertions set.
-        let creds = empty_creds();
-
-        // Neither set → None.
-        std::env::remove_var("CAMERATA_LLM_BACKEND");
-        std::env::remove_var("ANTHROPIC_API_KEY");
-        assert!(anthropic_api_backend_key(&creds).is_none());
-
-        // backend=api but no key → None.
-        std::env::set_var("CAMERATA_LLM_BACKEND", "api");
-        std::env::remove_var("ANTHROPIC_API_KEY");
-        assert!(anthropic_api_backend_key(&creds).is_none());
-
-        // key but backend not api (default cli) → None.
-        std::env::remove_var("CAMERATA_LLM_BACKEND");
-        std::env::set_var("ANTHROPIC_API_KEY", "sk-ant-x");
-        assert!(anthropic_api_backend_key(&creds).is_none());
-
-        // backend=cli explicitly + key → None.
-        std::env::set_var("CAMERATA_LLM_BACKEND", "cli");
-        std::env::set_var("ANTHROPIC_API_KEY", "sk-ant-x");
-        assert!(anthropic_api_backend_key(&creds).is_none());
-
-        // Both signals → Some(key).
-        std::env::set_var("CAMERATA_LLM_BACKEND", "api");
-        std::env::set_var("ANTHROPIC_API_KEY", "sk-ant-x");
-        assert_eq!(anthropic_api_backend_key(&creds).as_deref(), Some("sk-ant-x"));
-
-        // backend=api + empty key → None.
-        std::env::set_var("ANTHROPIC_API_KEY", "   ");
-        assert!(anthropic_api_backend_key(&creds).is_none());
-    }
-
-    /// ROUTES-9: the credential STORE is consulted first for the Anthropic key, so a
-    /// store-saved key routes to the Anthropic API path with NO `ANTHROPIC_API_KEY` env set
-    /// (proving the removed per-request `set_var` is no longer needed for no-restart effect).
-    #[test]
-    fn anthropic_backend_key_reads_store_without_env() {
-        use crate::credentials::CredentialStore as _;
-        let _g = env_lock();
-        let _snap = EnvSnapshot::capture();
-
-        // Backend=api (startup-hydrated env), NO ANTHROPIC_API_KEY env at all.
-        std::env::set_var("CAMERATA_LLM_BACKEND", "api");
-        std::env::remove_var("ANTHROPIC_API_KEY");
-
-        let creds = empty_creds();
-        // Empty store + no env → None.
-        assert!(anthropic_api_backend_key(&creds).is_none());
-
-        // Save the key to the store only → helper returns it with no env mutation.
-        creds.set(crate::credentials::ANTHROPIC_API_KEY, "sk-ant-store").unwrap();
-        assert_eq!(
-            anthropic_api_backend_key(&creds).as_deref(),
-            Some("sk-ant-store"),
-            "a store-saved key must route to the API path with no env set"
-        );
-        assert!(
-            std::env::var("ANTHROPIC_API_KEY").is_err(),
-            "reading the store must not have mutated process env"
-        );
-    }
-
-    // The driver-selection routing decision is `anthropic_api_backend_key()` (exhaustively
-    // tested above) combined with the construction path. `AgentDriver` is not `Any`, so we
-    // can't downcast `Arc<dyn AgentDriver>` to the concrete type; instead we exercise the
-    // exact Anthropic construction `build_claude_driver` performs (verified separately in
-    // `with_shape_and_key_set_anthropic_fields`) and assert the env-gated path is the one
-    // that fires. End-to-end, both `build_agent_driver` and `build_claude_driver` must
-    // SUCCEED (no spawn, no credential lookup) on the claude+api path.
-
-    #[test]
+    #[serial_test::serial(process_env)]
     fn build_claude_driver_builds_on_api_and_cli_paths_without_spawn() {
-        let _g = env_lock();
-        let _snap = EnvSnapshot::capture();
-        let creds = empty_creds();
+        use crate::credentials::CredentialStore as _;
 
-        // claude + api + key: routing helper fires, driver builds (no claude spawn).
-        std::env::set_var("CAMERATA_LLM_BACKEND", "api");
-        std::env::set_var("ANTHROPIC_API_KEY", "sk-ant-test");
-        assert!(anthropic_api_backend_key(&creds).is_some());
+        // claude + Api + key present in the store: driver builds (no claude spawn).
+        let creds_with_key = empty_creds();
+        creds_with_key
+            .set(crate::credentials::ANTHROPIC_API_KEY, "sk-ant-test")
+            .unwrap();
         let _api_driver = build_claude_driver(
-            "claude-opus-4-8",
-            &creds,
+            "claude-opus-5",
+            &creds_with_key,
             "/tmp/fake-mcp.json",
             vec![gov1_rule()],
             Some(PathBuf::from("/tmp/wt")),
             false,
             false, // escalation
             None,  // on_activity — no heartbeat in this unit test
-            None, // governance — no log wired in this unit test
-        ); // building must not panic / spawn
+            None,  // governance — no log wired in this unit test
+            crate::llm::ProjectBackend::Api,
+        )
+        .expect("building must not panic / spawn"); // Result — the compliance gate can fail-closed
 
-        // default cli: routing helper does not fire, CLI driver builds.
-        std::env::remove_var("CAMERATA_LLM_BACKEND");
-        std::env::remove_var("ANTHROPIC_API_KEY");
-        assert!(anthropic_api_backend_key(&creds).is_none());
+        // claude + Cli: CLI driver builds regardless of key presence.
+        let creds_no_key = empty_creds();
         let _cli_driver = build_claude_driver(
-            "claude-opus-4-8",
-            &creds,
+            "claude-opus-5",
+            &creds_no_key,
             "/tmp/fake-mcp.json",
             vec![gov1_rule()],
             None,
             false,
             false, // escalation
             None,  // on_activity — no heartbeat in this unit test
-            None, // governance — no log wired in this unit test
+            None,  // governance — no log wired in this unit test
+            crate::llm::ProjectBackend::Cli,
+        )
+        .expect("building must not panic / spawn");
+    }
+
+    // ── The compliance-safety backend gate ────────────────────────────────────
+
+    /// `ProjectBackend::Api` + no key -> `build_claude_driver` must refuse to build
+    /// ANYTHING, returning `Err` with the block message. No driver, no fallback to the CLI.
+    #[test]
+    #[serial_test::serial(process_env)]
+    fn build_claude_driver_blocks_on_api_backend_with_no_key() {
+        let creds = empty_creds();
+
+        let result = build_claude_driver(
+            "claude-opus-5",
+            &creds,
+            "/tmp/fake-mcp.json",
+            vec![gov1_rule()],
+            None,
+            false,
+            false,                           // escalation
+            None,                            // on_activity
+            None,                            // governance
+            crate::llm::ProjectBackend::Api, // Api backend, and no key is configured
+        );
+        let err = result
+            .err()
+            .expect("an Api-backend project with no key must be blocked");
+        assert!(
+            err.to_string().contains("Anthropic API"),
+            "block message must be user-visible: {err}"
         );
     }
 
     #[test]
     fn build_agent_driver_claude_api_backend_succeeds() {
-        let _g = env_lock();
-        let _snap = EnvSnapshot::capture();
-        std::env::set_var("CAMERATA_LLM_BACKEND", "api");
-        std::env::set_var("ANTHROPIC_API_KEY", "sk-ant-test");
+        use crate::credentials::CredentialStore as _;
 
         let registry = crate::model_registry::ModelRegistry::new();
         let creds = crate::credentials::MemoryCredentialStore::new();
+        creds
+            .set(crate::credentials::ANTHROPIC_API_KEY, "sk-ant-test")
+            .unwrap();
         let limiter = Arc::new(crate::rate_limit::ProviderRateLimiter::new());
 
-        // Routing decision fires, and build_agent_driver must succeed (Anthropic API path,
-        // no OpenRouter credential needed, no claude binary spawn at build time).
-        assert!(anthropic_api_backend_key(&creds).is_some());
+        // build_agent_driver must succeed (Anthropic API path, no OpenRouter credential
+        // needed, no claude binary spawn at build time).
         let result = build_agent_driver(
-            "claude-sonnet-4-6",
+            "claude-sonnet-5",
             &registry,
             &default_policy(),
             &creds,
@@ -4483,25 +4674,26 @@ mod tests {
             None,
             false, // escalation
             None,  // on_activity — no heartbeat in this unit test
-            None, // governance — no log wired in this unit test
+            None,  // governance — no log wired in this unit test
+            crate::llm::ProjectBackend::Api,
         );
-        assert!(result.is_ok(), "claude+api+key must build: {:?}", result.err().map(|e| e.to_string()));
+        assert!(
+            result.is_ok(),
+            "claude+api+key must build: {:?}",
+            result.err().map(|e| e.to_string())
+        );
     }
 
     #[test]
+    #[serial_test::serial(process_env)]
     fn build_agent_driver_claude_cli_default_succeeds() {
-        let _g = env_lock();
-        let _snap = EnvSnapshot::capture();
-        std::env::remove_var("CAMERATA_LLM_BACKEND");
-        std::env::remove_var("ANTHROPIC_API_KEY");
-
         let registry = crate::model_registry::ModelRegistry::new();
         let creds = crate::credentials::MemoryCredentialStore::new();
         let limiter = Arc::new(crate::rate_limit::ProviderRateLimiter::new());
 
-        assert!(anthropic_api_backend_key(&creds).is_none());
+        // ProjectBackend::Cli builds successfully with no key at all — the zero-setup path.
         let result = build_agent_driver(
-            "claude-sonnet-4-6",
+            "claude-sonnet-5",
             &registry,
             &default_policy(),
             &creds,
@@ -4513,30 +4705,44 @@ mod tests {
             None,
             false, // escalation
             None,  // on_activity — no heartbeat in this unit test
-            None, // governance — no log wired in this unit test
+            None,  // governance — no log wired in this unit test
+            crate::llm::ProjectBackend::Cli,
         );
-        assert!(result.is_ok(), "claude+cli must build: {:?}", result.err().map(|e| e.to_string()));
+        assert!(
+            result.is_ok(),
+            "claude+cli must build: {:?}",
+            result.err().map(|e| e.to_string())
+        );
     }
 
-    // ── Child factory: claude model under backend=api builds an Anthropic API child ──
+    // ── Child factory: claude model under an Api-backend project builds an Anthropic API child ──
 
     #[test]
     fn factory_claude_model_under_api_backend_builds_anthropic_api_child() {
-        let _g = env_lock();
-        let _snap = EnvSnapshot::capture();
-        std::env::set_var("CAMERATA_LLM_BACKEND", "api");
-        std::env::set_var("ANTHROPIC_API_KEY", "sk-ant-test");
+        use crate::credentials::CredentialStore as _;
 
         let registry = crate::model_registry::ModelRegistry::new();
-        let creds: Arc<dyn crate::credentials::CredentialStore> =
-            Arc::new(crate::credentials::MemoryCredentialStore::new());
-        let factory = factory_with(registry, creds);
+        let mem = crate::credentials::MemoryCredentialStore::new();
+        mem.set(crate::credentials::ANTHROPIC_API_KEY, "sk-ant-test")
+            .unwrap();
+        let creds: Arc<dyn crate::credentials::CredentialStore> = Arc::new(mem);
+        let factory = ServerChildDriverFactory::new(
+            registry,
+            default_policy(),
+            creds,
+            Arc::new(crate::rate_limit::ProviderRateLimiter::new()),
+            PathBuf::from("/tmp/fake-camerata-gateway"),
+            vec![gov1_rule()],
+            None,
+            None,
+            crate::llm::ProjectBackend::Api,
+        );
 
         let tmp = tempfile::tempdir().unwrap();
-        let child = factory.build_child("claude-sonnet-4-6", tmp.path(), &[]);
+        let child = factory.build_child("claude-sonnet-5", tmp.path(), &[]);
         assert!(
             child.is_ok(),
-            "claude child under backend=api must build (Anthropic API child): {:?}",
+            "claude child under an Api-backend project must build (Anthropic API child): {:?}",
             child.err().map(|e| e.to_string())
         );
     }
@@ -4548,20 +4754,28 @@ mod tests {
         // An Anthropic-shape worker (what build_claude_driver builds for a Claude tier under
         // backend=api) must be orchestrator=false (no delegate/fan_out), jailed to a
         // worktree, and its (Anthropic-format) tool schemas must be gated_write + reads only.
-        let driver = ApiAgentDriver::new(Arc::new(AnthropicNoopCompleter), "claude-opus-4-8")
+        let driver = ApiAgentDriver::new(Arc::new(AnthropicNoopCompleter), "claude-opus-5")
             .with_rule_subset(vec![gov1_rule()])
             .with_worktree(PathBuf::from("/tmp/wt"))
             .with_shape(ApiShape::Anthropic)
             .with_anthropic_api_key("sk-ant-test");
         // orchestrator=false (default) → workers can never delegate/fan_out.
-        assert!(!driver.orchestrator, "Anthropic worker must be orchestrator=false");
-        assert!(driver.worktree.is_some(), "Anthropic worker must be jailed to a worktree");
+        assert!(
+            !driver.orchestrator,
+            "Anthropic worker must be orchestrator=false"
+        );
+        assert!(
+            driver.worktree.is_some(),
+            "Anthropic worker must be jailed to a worktree"
+        );
 
         // delegate/fan_out absent from the Anthropic worker's schemas; gated_write present.
         let schemas = build_tool_schemas_for(driver.orchestrator, driver.shape);
         let names: Vec<&str> = schemas.iter().filter_map(|s| s["name"].as_str()).collect();
         assert!(names.contains(&"gated_write"));
-        for forbidden in ["delegate", "fan_out", "Bash", "Write", "Edit", "Task", "shell"] {
+        for forbidden in [
+            "delegate", "fan_out", "Bash", "Write", "Edit", "Task", "shell",
+        ] {
             assert!(!names.contains(&forbidden), "`{forbidden}` must not appear");
         }
 

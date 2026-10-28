@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used)]
 //! Hermetic end-to-end regression net for PROJECT EXPORT / IMPORT round-trip.
 //!
 //! THE CLAIM under test (ADR `2026-06-21_project_config_vs_data_separation` + the
@@ -162,7 +163,10 @@ fn scope1_ruleset_onboarded_repos_travel_through_export_import() {
     let imported = import_via_handler_path(&dst_store, &export, false);
 
     // repos travel.
-    assert_eq!(imported.repos, vec!["me/api".to_string(), "me/web".to_string()]);
+    assert_eq!(
+        imported.repos,
+        vec!["me/api".to_string(), "me/web".to_string()]
+    );
 
     // onboarded set travels.
     assert_eq!(
@@ -179,11 +183,20 @@ fn scope1_ruleset_onboarded_repos_travel_through_export_import() {
         Some("opt-b"),
         "the chosen alternative must travel"
     );
-    assert_eq!(imported.ruleset.cross_repo[0].rule_id, "INTEGRATION-API-CONTRACT-1");
-    assert_eq!(imported.ruleset.process[0].rule_id, "PROCESS-CONVENTIONAL-COMMIT-1");
+    assert_eq!(
+        imported.ruleset.cross_repo[0].rule_id,
+        "INTEGRATION-API-CONTRACT-1"
+    );
+    assert_eq!(
+        imported.ruleset.process[0].rule_id,
+        "PROCESS-CONVENTIONAL-COMMIT-1"
+    );
     assert_eq!(imported.ruleset.custom.len(), 1);
     assert_eq!(imported.ruleset.custom[0].name, "house-style");
-    assert_eq!(imported.ruleset.custom[0].body, "Prefer explicit over terse.");
+    assert_eq!(
+        imported.ruleset.custom[0].body,
+        "Prefer explicit over terse."
+    );
 }
 
 #[test]
@@ -194,7 +207,10 @@ fn scope1_ruleset_export_helper_round_trips() {
     let source = rich_source_project(&store);
     let json = export_ruleset(&source);
     let back = parse_ruleset(&json).unwrap();
-    assert_eq!(back, source.ruleset, "ruleset survives export_ruleset -> parse_ruleset");
+    assert_eq!(
+        back, source.ruleset,
+        "ruleset survives export_ruleset -> parse_ruleset"
+    );
 }
 
 // ════════════════════════════════════════════════════════════════════════════════════
@@ -242,14 +258,14 @@ fn scope2_export_document_carries_no_uow_or_settings_or_drafts() {
 #[test]
 fn scope3_same_name_import_overwrites_in_place_keeping_id() {
     let store = ProjectStore::new();
-    let original = store
-        .create("Twin", vec!["me/old".to_string()])
-        .unwrap();
+    let original = store.create("Twin", vec!["me/old".to_string()]).unwrap();
     let original_id = original.id.clone();
 
     // A second project (export from "elsewhere") with the SAME name but new config.
     let source_store = ProjectStore::new();
-    let mut source = source_store.create("Twin", vec!["me/new".to_string()]).unwrap();
+    let mut source = source_store
+        .create("Twin", vec!["me/new".to_string()])
+        .unwrap();
     source = source_store
         .update(&source.id, |p| {
             p.ruleset.selections = vec![sel("R-IMPORTED", None, &["me/new"])];
@@ -264,7 +280,11 @@ fn scope3_same_name_import_overwrites_in_place_keeping_id() {
     assert_eq!(imported.repos, vec!["me/new".to_string()]);
     assert_eq!(imported.ruleset.selections[0].rule_id, "R-IMPORTED");
     assert_eq!(imported.onboarded, vec!["me/new".to_string()]);
-    assert_eq!(store.list().len(), 1, "no duplicate project created on same-name import");
+    assert_eq!(
+        store.list().len(),
+        1,
+        "no duplicate project created on same-name import"
+    );
 }
 
 #[test]
@@ -274,7 +294,9 @@ fn scope3_custom_rules_preserved_on_a_base_rules_import() {
     // custom rules. This mirrors the real `import_project_ruleset` handler (upsert_base_rules
     // + merge_custom).
     let store = ProjectStore::new();
-    let p = store.create("KeepCustom", vec!["me/api".to_string()]).unwrap();
+    let p = store
+        .create("KeepCustom", vec!["me/api".to_string()])
+        .unwrap();
     store
         .update(&p.id, |proj| {
             proj.ruleset.selections = vec![sel("OLD-BASE", None, &["me/api"])];
@@ -289,7 +311,10 @@ fn scope3_custom_rules_preserved_on_a_base_rules_import() {
 
     // Import a BASE-only ruleset (no custom) — exactly what the ruleset import handler does.
     let incoming = ProjectRuleset {
-        selections: vec![sel("NEW-BASE-1", None, &["me/api"]), sel("NEW-BASE-2", None, &["me/api"])],
+        selections: vec![
+            sel("NEW-BASE-1", None, &["me/api"]),
+            sel("NEW-BASE-2", None, &["me/api"]),
+        ],
         ..Default::default()
     };
     let updated = store
@@ -307,7 +332,11 @@ fn scope3_custom_rules_preserved_on_a_base_rules_import() {
     assert_eq!(updated.ruleset.selections.len(), 2);
     assert_eq!(updated.ruleset.selections[0].rule_id, "NEW-BASE-1");
     // ...custom rule PRESERVED.
-    assert_eq!(updated.ruleset.custom.len(), 1, "custom rule survives a base-rules import");
+    assert_eq!(
+        updated.ruleset.custom.len(),
+        1,
+        "custom rule survives a base-rules import"
+    );
     assert_eq!(updated.ruleset.custom[0].name, "house-style");
     assert_eq!(updated.ruleset.custom[0].body, "Prefer explicit.");
 }
@@ -335,7 +364,10 @@ fn scope4_bug_tier_map_must_travel_through_import() {
         imported.tier_map.strongest, "EXPORT-STRONGEST",
         "tier_map.strongest must travel with the export (ADR: tier_map is transferable config)"
     );
-    assert_eq!(imported.tier_map.balanced, vec!["EXPORT-BALANCED".to_string()]);
+    assert_eq!(
+        imported.tier_map.balanced,
+        vec!["EXPORT-BALANCED".to_string()]
+    );
     assert_eq!(imported.tier_map.fast, vec!["EXPORT-FAST".to_string()]);
     assert_eq!(imported.tier_map.vision, vec!["EXPORT-VISION".to_string()]);
 }
@@ -350,7 +382,10 @@ fn scope4_bug_step_models_must_travel_through_import() {
 
     // step models now round-trip through the import path (#111).
     assert_eq!(imported.model_for_step(StepKind::Audit), "EXPORT-AUDIT");
-    assert_eq!(imported.model_for_step(StepKind::Decomposition), "EXPORT-DECOMP");
+    assert_eq!(
+        imported.model_for_step(StepKind::Decomposition),
+        "EXPORT-DECOMP"
+    );
 }
 
 #[test]
@@ -363,7 +398,10 @@ fn scope4_bug_l3_profile_vision_must_travel_through_import() {
 
     // l3_review + model_profile + vision_enabled now round-trip through the import path (#111).
     assert!(imported.l3_review.enabled, "l3_review.enabled must travel");
-    assert_eq!(imported.l3_review.model, "EXPORT-L3", "l3_review.model must travel");
+    assert_eq!(
+        imported.l3_review.model, "EXPORT-L3",
+        "l3_review.model must travel"
+    );
     assert_eq!(
         imported.model_profile,
         ModelProfile::Custom,
@@ -384,27 +422,42 @@ fn scope4_bug_l3_profile_vision_must_travel_through_import() {
 /// Assert that `imported` reproduces EVERY transferable config field of the rich source.
 fn assert_full_config_round_trips(imported: &Project) {
     // repos / onboarded / ruleset (selections incl. chosen_option, cross-repo, process, custom).
-    assert_eq!(imported.repos, vec!["me/api".to_string(), "me/web".to_string()]);
+    assert_eq!(
+        imported.repos,
+        vec!["me/api".to_string(), "me/web".to_string()]
+    );
     assert_eq!(imported.onboarded, vec!["me/api".to_string()]);
     assert_eq!(imported.ruleset.selections[0].rule_id, "RUST-DOMAIN-1");
     assert_eq!(
         imported.ruleset.selections[0].chosen_option.as_deref(),
         Some("opt-b")
     );
-    assert_eq!(imported.ruleset.cross_repo[0].rule_id, "INTEGRATION-API-CONTRACT-1");
-    assert_eq!(imported.ruleset.process[0].rule_id, "PROCESS-CONVENTIONAL-COMMIT-1");
+    assert_eq!(
+        imported.ruleset.cross_repo[0].rule_id,
+        "INTEGRATION-API-CONTRACT-1"
+    );
+    assert_eq!(
+        imported.ruleset.process[0].rule_id,
+        "PROCESS-CONVENTIONAL-COMMIT-1"
+    );
     assert_eq!(imported.ruleset.custom.len(), 1);
     assert_eq!(imported.ruleset.custom[0].name, "house-style");
 
     // tier_map (full chain incl. vision).
     assert_eq!(imported.tier_map.strongest, "EXPORT-STRONGEST");
-    assert_eq!(imported.tier_map.balanced, vec!["EXPORT-BALANCED".to_string()]);
+    assert_eq!(
+        imported.tier_map.balanced,
+        vec!["EXPORT-BALANCED".to_string()]
+    );
     assert_eq!(imported.tier_map.fast, vec!["EXPORT-FAST".to_string()]);
     assert_eq!(imported.tier_map.vision, vec!["EXPORT-VISION".to_string()]);
 
     // step_models.
     assert_eq!(imported.model_for_step(StepKind::Audit), "EXPORT-AUDIT");
-    assert_eq!(imported.model_for_step(StepKind::Decomposition), "EXPORT-DECOMP");
+    assert_eq!(
+        imported.model_for_step(StepKind::Decomposition),
+        "EXPORT-DECOMP"
+    );
 
     // l3_review / model_profile / vision_enabled.
     assert!(imported.l3_review.enabled);
@@ -433,10 +486,16 @@ fn scope5_full_config_round_trips_through_import_new_and_overwrite() {
     // (b) Overwrite-in-place import: a target seeded with all-default config, then overwritten
     //     by the rich export, must end up with the rich config (same id, full replace).
     let ow_store = ProjectStore::new();
-    let stub = ow_store.create("RichProj", vec!["stale/repo".to_string()]).unwrap();
+    let stub = ow_store
+        .create("RichProj", vec!["stale/repo".to_string()])
+        .unwrap();
     let stub_id = stub.id.clone();
     let imported_ow = import_via_handler_path(&ow_store, &export, true);
     assert_eq!(imported_ow.id, stub_id, "overwrite keeps the same id");
-    assert_eq!(ow_store.list().len(), 1, "no duplicate on same-name overwrite");
+    assert_eq!(
+        ow_store.list().len(),
+        1,
+        "no duplicate on same-name overwrite"
+    );
     assert_full_config_round_trips(&imported_ow);
 }

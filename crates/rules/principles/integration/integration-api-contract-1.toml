@@ -1,9 +1,11 @@
 id = "INTEGRATION-API-CONTRACT-1"
+version = 1
 title = "Consumer endpoint calls match a producer route and shape"
-tag = "stack"
 domain = "integration"
 layer = "universal"
 enforcement = "mechanical"
+kind = "default_with_exceptions"
+inspectable = true
 # No adopted default: this is a cross-agent seam rule, opted into per project when
 # the story spans a producer (API) and a consumer (UI / worker) agent.
 default = false
@@ -15,6 +17,8 @@ opt_in_only = true
 # on the integrated tree (the third tier), NOT an agentic review.
 layer3_only = false
 verification = "grounded"
+
+qualifies = "Checked across the whole assembled system rather than per-component: a per-stack extractor normalizes each repo into produced routes (method, normalized path, request/response shape, status codes) and consumed calls, matched by method and normalized path with field names compared case-insensitively so only genuine drift fails; a stack with no extractor is reported review-tier for human QA, never a faked pass. Intentional exceptions are waived per-endpoint with an inline camerata:allow comment or a baseline entry."
 
 [[sources]]
 url = "docs/decisions/2026-06-15_cross_agent_integration_gate.md"
@@ -35,11 +39,16 @@ why = "A single story decomposed across agents (an API agent and a UI agent) can
 [[option]]
 id = "reconcile-consumer-calls-against-producer-routes"
 label = "Reconcile consumer endpoint calls against producer routes (deterministic)"
-directive = "On the assembled tree (all role agents' worktrees combined), run the integration gate's reconciliation engine for this rule. A per-stack extractor normalizes each repo's source into PRODUCED routes (method + normalized path + optional request/response shape + status codes) and CONSUMED calls. Every consumed endpoint must match a produced route by method and normalized path; where both sides carry a recoverable shape, the shapes must agree (the consumer must not read a response field the producer does not emit, nor send a request field it does not accept, nor handle a status code it never returns). Field names are matched casing-insensitively (member_id == memberId) so only genuine drift fails. A mismatch bounces to the responsible agent with the specific delta; a genuine two-sides-incompatible design fork escalates to the architect. Where a seam's stack has no extractor, the seam is reported review-tier (human QA), never a faked green. Intentional exceptions are waived per-endpoint with an inline `camerata:allow INTEGRATION-API-CONTRACT-1 -- <reason>` or a baseline entry."
+directive = "Every endpoint a consumer calls resolves to a route the producer actually exposes, with a matching HTTP method and path and compatible request and response shapes — the consumer reads no response field the producer does not emit, sends none it does not accept, and handles no status code it never returns. This holds across the whole system end to end, because a consumer and the producer it calls commonly live in different components and a per-component check cannot see the seam."
+remediation = """
+Fix the mismatched endpoint call: either add the missing route (or field) on the producer side, or correct the consumer to call the route and shape the producer actually exposes. If the mismatch is intentional (a known, deliberate design fork), add an inline waiver comment with a reason rather than leaving it unreconciled. Verify by re-running the integration gate's reconciliation on the assembled tree and confirming the specific consumer call now matches a produced route by method, path, and shape.
+"""
+effort = "low"
 why = "The contract becomes a deterministic comparison of neutral records on the integrated whole — the one place positioned to see both sides of the seam — instead of a per-agent gate that structurally cannot, or an LLM eyeballing whether prose contracts line up (probabilistic convention wearing the gate's uniform)."
 
 [[option]]
 id = "no-cross-agent-contract-check"
+violates = true
 label = "No cross-agent contract check (per-agent gates only)"
-directive = "the project relies solely on the per-agent Layer-1 and Layer-2 gates and does not reconcile consumer endpoint calls against producer routes on the assembled tree, so a producer/consumer contract drift across the agent seam ships undetected when the stack has no shared compiled type holding the boundary"
+directive = "Consumer endpoint calls are not reconciled against producer routes across the whole system; each component is checked only in isolation, so a consumer calling a route the producer does not expose, or with an incompatible shape, ships undetected."
 why = "Both per-agent tiers can pass green for every agent while the seam between them is broken; without the integration gate the drift surfaces only when the pieces are combined in production, exactly the gap this tier exists to close."

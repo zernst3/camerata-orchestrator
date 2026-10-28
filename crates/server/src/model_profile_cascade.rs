@@ -10,8 +10,8 @@ use crate::project::{L3ReviewConfig, ModelProfile, StepModels};
 
 // ── Known model ids ───────────────────────────────────────────────────────────
 
-const OPUS: &str = "claude-opus-4-8";
-const SONNET: &str = "claude-sonnet-4-6";
+const OPUS: &str = "claude-opus-5";
+const SONNET: &str = "claude-sonnet-5";
 const HAIKU: &str = "claude-haiku-4-5-20251001";
 
 // ── Assignment output ─────────────────────────────────────────────────────────
@@ -109,7 +109,11 @@ fn best_free_coder(registry: &ModelRegistry) -> Option<String> {
         .all_entries()
         .into_iter()
         .filter(|e| e.free && e.tool_use && e.provider != "claude")
-        .max_by(|a, b| a.coding.partial_cmp(&b.coding).unwrap_or(std::cmp::Ordering::Equal))
+        .max_by(|a, b| {
+            a.coding
+                .partial_cmp(&b.coding)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
         .map(|e| e.id)
 }
 
@@ -124,7 +128,11 @@ fn smallest_free_model(registry: &ModelRegistry) -> Option<String> {
     if free.is_empty() {
         return None;
     }
-    free.sort_by(|a, b| a.coding.partial_cmp(&b.coding).unwrap_or(std::cmp::Ordering::Equal));
+    free.sort_by(|a, b| {
+        a.coding
+            .partial_cmp(&b.coding)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     Some(free[0].id.clone())
 }
 
@@ -198,6 +206,7 @@ mod tests {
             weight: 0,
             caching: false,
             vision: false,
+            price_known: true,
         }
     }
 
@@ -215,6 +224,7 @@ mod tests {
             weight: 0,
             caching: false,
             vision: false,
+            price_known: true,
         }
     }
 

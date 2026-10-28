@@ -1,0 +1,12 @@
+# FIXTURE (crates/server/tests/corpus_load_failure_e2e.rs): this manifest is DATA, not a
+# workspace member. It exists only so `onboard::detect_stack` recognizes this fixture as a
+# Rust repo when scanned, exactly as `self_measurement_parity_repo/Cargo.toml` does.
+#
+# SYNTHETIC BY CONSTRUCTION. Nothing here is copied from, derived from, or modelled on any
+# benchmark repository. The benchmark repos are a sealed external measurement surface; reusing
+# one as an in-repo fixture would destroy its value as a measurement. Every file below is
+# invented to exercise a pipeline SHAPE, never a particular repo's content.
+[package]
+name = "corpus-load-failure-fixture"
+version = "0.0.0"
+edition = "2021"

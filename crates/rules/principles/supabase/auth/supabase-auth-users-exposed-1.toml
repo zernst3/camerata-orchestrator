@@ -1,9 +1,16 @@
 id = "SUPABASE-AUTH-USERS-EXPOSED-1"
+version = 1
 title = "auth.users must never be exposed to anon/authenticated via a view, materialized view, or grant in an exposed schema"
-tag = "stack"
 domain = "supabase:auth"
 layer = "platform"
 enforcement = "structured"
+kind = "defect"
+inspectable = true
+# Severity floor. Rationale: there is no partial-exposure form of this defect. auth.users holds
+# every account's email, phone and metadata, so ANY reference to it from an API-exposed object is
+# a full account-directory leak through PostgREST — and the correct pattern (a curated
+# application-owned profiles table) exists precisely to avoid it. Critical, with no carve-out.
+min_severity = "critical"
 default = true
 verification = "grounded"
 qualifies = "Enforced by a statement-granular scan for SQL referencing auth.users inside a CREATE VIEW, CREATE MATERIALIZED VIEW, or GRANT statement whose target object lives in an API-exposed schema (public by default, or per SUPABASE-EXPOSURE-SCHEMAS-1). auth.users carries every account's email, phone number, and metadata; exposing any of it through PostgREST is a full account-directory leak. Conformance holds when no exposed-schema object selects from or grants access to auth.users directly — legitimate app-level user data belongs in an application-owned public.profiles-style table populated via trigger, never a direct view over auth.users."
@@ -14,7 +21,7 @@ title = "Supabase Database Linter — 0002_auth_users_exposed (\"User data expos
 linter = "splinter: auth_users_exposed"
 
 [decision]
-question = "Is any exposed-schema view, materialized view, or grant that references auth.users treated as a critical finding?"
+question = "Does any view, materialized view, or grant in an API-exposed schema read from auth.users directly?"
 default = "flag-any-exposed-auth-users-reference"
 why = """
 auth.users is Supabase's own internal identity table — it holds every user's email, phone number,
@@ -36,18 +43,28 @@ auth schema itself.
 
 [[option]]
 id = "flag-any-exposed-auth-users-reference"
-label = "Flag any exposed-schema CREATE VIEW / CREATE MATERIALIZED VIEW / GRANT referencing auth.users, unconditionally critical"
+label = "No API-exposed view, materialized view, or grant reads from auth.users"
 directive = """
-Scan CREATE VIEW, CREATE MATERIALIZED VIEW, and GRANT statements whose target schema is
-API-exposed for any reference to auth.users. Any match is a critical, unconditional finding:
-"Your entire user list — emails included — is readable through your public API." Remediation:
-replace the view with an application-owned profiles table populated via an auth.users insert
-trigger, exposing only the specific non-sensitive columns the app needs.
+Nothing in an API-exposed schema selects from `auth.users` or grants access to it. That table is
+Supabase's internal identity store — every account's email, phone number and `raw_user_meta_data` —
+and any exposed object reading it makes the whole user directory readable through PostgREST, which
+is a full account-list leak rather than a partial one. Where the application needs user information
+of its own, it keeps an application-owned table (a `public.profiles` or similar) populated by a
+trigger on `auth.users` inserts, exposing only the specific columns the product actually shares.
+Convenience joins "to get user info" are written against that table, never against the auth schema.
+"""
+remediation = """
+Drop or restrict the exposed-schema object referencing `auth.users` in `<file>`. Replace it with
+an application-owned `public.profiles` table, populated by a trigger on `auth.users` inserts,
+that exposes only the specific non-sensitive columns your app actually needs (never email or
+other identifying fields unless the feature requires them). Verify by confirming no exposed-schema
+view, materialized view, or grant references `auth.users` directly anymore.
 """
 why = "There is no legitimate reason for an exposed-schema object to reference auth.users directly — the correct pattern (a curated profiles table) exists precisely to avoid this, so an unconditional critical with no carve-out is the right severity."
 
 [[option]]
 id = "allow-column-restricted-views-over-auth-users"
-label = "Allow a view over auth.users when it explicitly selects only non-sensitive columns (e.g. just the id)"
-directive = "Permit an exposed view referencing auth.users if its column list is limited to non-identifying fields such as id, and flag only views that select email/phone/metadata columns."
+violates = true
+label = "An API-exposed view reads from auth.users but limits its column list to non-identifying fields such as id"
+directive = "An exposed-schema view selects from `auth.users` with its column list restricted to non-identifying fields such as `id`, on the basis that no email, phone or metadata column is included."
 why = "Rejected: even an id-only view over auth.users still confirms which UUIDs exist as real accounts (an enumeration primitive) and, more importantly, is a fragile pattern that silently widens the moment someone adds `select *` or another column to the same view later — a change a reviewer is unlikely to recognize as security-relevant since the view already existed. The application-owned profiles-table pattern achieves the same legitimate need (referencing a user by id) without ever exposing the auth schema itself."

@@ -1,9 +1,11 @@
 id = "JAVASCRIPT-VUE-COMPUTED-OVER-METHODS-1"
+version = 1
 title = "Use computed properties for derived state, not methods with side effects"
-tag = "stack"
 domain = "javascript:vue"
 layer = "framework"
 enforcement = "prose"
+kind = "defect"
+inspectable = true
 default = true
 verification = "grounded"
 
@@ -27,10 +29,14 @@ why = "A computed property derives a value from reactive data and caches the res
 id = "computed-for-derived-state"
 label = "Use computed properties for derived state"
 directive = "Derived values that depend on reactive data are computed properties. A computed property transforms or filters reactive data without side effects and is only recomputed when its dependencies change. Methods are used for event handlers or actions with side effects (API calls, mutations), not for deriving state."
+remediation = """
+Convert the method that derives a value from reactive data with no side effects into a computed property, and have the template reference the computed property instead of calling the method. Verify by confirming the derived value is only recalculated when its underlying reactive dependencies change, not on every re-render or template access.
+"""
 why = "Computed properties cache derived state and improve performance."
 
 [[option]]
 id = "methods-for-derived-state"
+violates = true
 label = "Use methods for derived state"
 directive = "Derived values are computed using methods. The method is called from the template and recomputes every time it is invoked."
 why = "Using a method to derive state means the computation runs on every template render and every call, even when the underlying reactive data has not changed, because methods have no caching. Calling the same method twice in a template runs the transformation twice; in a list render, it runs once per row per render cycle. This choice trades the free cache that computed properties provide for code that looks simpler at the definition site but silently re-executes more than intended."

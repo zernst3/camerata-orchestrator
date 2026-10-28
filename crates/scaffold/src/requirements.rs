@@ -166,7 +166,10 @@ mod tests {
 
     #[test]
     fn digit_leading_name_gets_prefixed() {
-        assert_eq!(reqs("3D Printer Queue").package_name(), "app_3d_printer_queue");
+        assert_eq!(
+            reqs("3D Printer Queue").package_name(),
+            "app_3d_printer_queue"
+        );
     }
 
     #[test]
@@ -177,7 +180,10 @@ mod tests {
 
     #[test]
     fn already_snake_case_is_unchanged() {
-        assert_eq!(reqs("already_snake_case").package_name(), "already_snake_case");
+        assert_eq!(
+            reqs("already_snake_case").package_name(),
+            "already_snake_case"
+        );
     }
 
     // ── Visibility (FOLD D: default-private skeleton lock) ──────────────────────

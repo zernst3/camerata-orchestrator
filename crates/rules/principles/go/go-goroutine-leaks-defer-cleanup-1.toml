@@ -1,11 +1,15 @@
 id = "GO-GOROUTINE-LEAKS-DEFER-CLEANUP-1"
+version = 1
 title = "Resources are cleaned up via defer; goroutines are never left running when a function exits"
-tag = "stack"
 domain = "go"
 layer = "language"
 enforcement = "structured"
+kind = "decision"
+inspectable = true
 default = true
 verification = "grounded"
+
+qualifies = "A deferred function is paired with every resource acquire (file.Open, net.Listen, db.Begin, goroutine spawn). Goroutines spawned by a function should either join (via a sync.WaitGroup or channel) before the function returns, or be anchored to a context that the function cancels. Leaks manifest as growing process memory, orphaned database connections, or stuck goroutines; they are difficult to debug once deployed."
 
 [[sources]]
 url = "https://go.dev/doc/effective_go#defer"
@@ -14,7 +18,6 @@ title = "Effective Go — Defer"
 [[sources]]
 url = "https://go.dev/wiki/CodeReviewComments#goroutine-lifetimes"
 title = "Go Code Review Comments — Goroutine Lifetimes"
-qualifies = "A deferred function is paired with every resource acquire (file.Open, net.Listen, db.Begin, goroutine spawn). Goroutines spawned by a function should either join (via a sync.WaitGroup or channel) before the function returns, or be anchored to a context that the function cancels. Leaks manifest as growing process memory, orphaned database connections, or stuck goroutines; they are difficult to debug once deployed."
 
 [decision]
 question = "How are resources and goroutines cleaned up when a function returns?"
@@ -25,6 +28,9 @@ why = "Go's defer statement schedules a cleanup function to run when the enclosi
 id = "defer-cleanup-and-context-cancellation"
 label = "pair every resource acquire with defer; manage goroutines via context"
 directive = "Every resource acquired (file open, database connection begin, listener start, etc.) is immediately followed by a deferred cleanup function (defer f.Close(), defer tx.Rollback(), etc.). Goroutines spawned to handle a request are governed by a context that flows down from the handler; when the handler exits, it cancels that context, signalling all spawned goroutines to exit."
+remediation = """
+Add a deferred cleanup call (defer f.Close(), defer tx.Rollback(), etc.) immediately after the resource is acquired, rather than relying on an explicit cleanup call at the end of the function that an early return could skip. Have any goroutine spawned to handle the request derive its lifetime from the request's context so it is cancelled when the handler returns. Verify by triggering an early return or panic path and confirming the resource is still released and no goroutine is left running.
+"""
 why = "Defer cleanup ensures every code path cleans up; context cancellation ensures goroutines do not leak and stale work does not accumulate."
 
 [[option]]

@@ -28,9 +28,8 @@ use serde::Serialize;
 /// error object rather than taking the process down (mirrors `crates/mcp`'s
 /// `dto_tool_result` non-panicking fallback for the same edge case).
 fn to_json_string(value: &impl Serialize) -> String {
-    serde_json::to_string_pretty(value).unwrap_or_else(|e| {
-        format!("{{\"error\": \"response serialization failed: {e}\"}}")
-    })
+    serde_json::to_string_pretty(value)
+        .unwrap_or_else(|e| format!("{{\"error\": \"response serialization failed: {e}\"}}"))
 }
 
 /// `stories` — `GET /api/stories` via [`Client::list_stories`].
@@ -206,9 +205,13 @@ mod tests {
             .await;
 
         let client = Client::with_base(server.uri());
-        let json = handle_assign(&client, "github:owner/repo#1".to_string(), "octocat".to_string())
-            .await
-            .expect("must succeed");
+        let json = handle_assign(
+            &client,
+            "github:owner/repo#1".to_string(),
+            "octocat".to_string(),
+        )
+        .await
+        .expect("must succeed");
         let parsed: serde_json::Value = serde_json::from_str(&json).expect("must be JSON");
         assert_eq!(parsed["ok"], true);
         assert_eq!(parsed["assignees"][0], "octocat");
@@ -220,7 +223,7 @@ mod tests {
         Mock::given(method("POST"))
             .and(path("/api/stories/story-1/run"))
             .and(body_json(serde_json::json!({
-                "model": "claude-sonnet-4-6",
+                "model": "claude-sonnet-5",
                 "skip_layer2": true,
             })))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
@@ -236,7 +239,7 @@ mod tests {
         let json = handle_start_run(
             &client,
             "story-1",
-            Some("claude-sonnet-4-6".to_string()),
+            Some("claude-sonnet-5".to_string()),
             true,
         )
         .await

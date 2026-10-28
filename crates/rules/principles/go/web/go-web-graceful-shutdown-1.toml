@@ -1,9 +1,11 @@
 id = "GO-WEB-GRACEFUL-SHUTDOWN-1"
+version = 1
 title = "Server shutdown is graceful: in-flight requests are allowed to complete; new requests are rejected after shutdown is signaled"
-tag = "stack"
 domain = "go:web"
 layer = "framework"
 enforcement = "structured"
+kind = "defect"
+inspectable = true
 default = true
 verification = "grounded"
 
@@ -20,16 +22,21 @@ why = "A server that stops abruptly mid-request corrupts in-flight transactions,
 id = "graceful-shutdown-with-timeout"
 label = "Graceful shutdown: wait for in-flight requests with a deadline, then force-close"
 directive = "The application sets up a signal handler (SIGTERM, SIGINT) that, on receiving the signal, binds both return values of context.WithTimeout before calling Shutdown, since context.WithTimeout(parent, duration) returns (context.Context, context.CancelFunc) and cannot be passed inline as Shutdown's single argument: `ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)`, then `defer cancel()`, then `if err := server.Shutdown(ctx); err != nil { /* handle err */ }`. This stops accepting new connections and waits up to 30 seconds for in-flight requests to complete. If the context deadline is exceeded, Shutdown returns an error and the server is closed forcefully. The main function waits for Shutdown to return before exiting, ensuring all in-flight work is given a chance to complete, and defer cancel() ensures the timer backing the context is released rather than leaked."
+remediation = """
+Add a signal handler for SIGTERM/SIGINT that calls the server's Shutdown method with a bounded context timeout, allowing in-flight requests to finish before forcing a close, instead of terminating immediately or waiting indefinitely. Verify by sending a shutdown signal during an in-flight request and confirming it completes before the process exits, while a new request after the signal is rejected.
+"""
 why = "Graceful shutdown ensures in-flight requests complete, database transactions finish, and the process terminates cleanly; the deadline prevents indefinite hangs."
 
 [[option]]
 id = "immediate-termination"
+violates = true
 label = "Server terminates immediately on signal"
 directive = "The application ignores shutdown signals or calls os.Exit immediately upon receiving them, terminating all in-flight requests and goroutines."
-why = "Simplicity; trades request consistency and clean shutdown for speed. In-flight requests are interrupted mid-operation, potentially leaving partial transactions and resource leaks."
+why = "Terminating without draining cuts requests off mid-operation, so a write that had started but not committed leaves partial data behind and the client gets a connection reset instead of a response. Every deploy and every restart does this to whatever traffic was in flight at the time."
 
 [[option]]
 id = "shutdown-no-timeout"
+violates = true
 label = "Graceful shutdown without a deadline; waits indefinitely for requests to complete"
 directive = "Shutdown is called without a context deadline; the server waits for all in-flight requests to complete, no matter how long it takes."
-why = "Ensures all requests complete; risks indefinite hangs if a request is stuck or loops endlessly."
+why = "One request that is stuck or looping never finishes, so the shutdown never completes and the process hangs until something kills it, which then interrupts every other in-flight request anyway. Waiting without a bound turns a single bad request into a failed deploy."

@@ -1,9 +1,11 @@
 id = "SQL-DB-NPLUSONE-1"
+version = 1
 title = "No N+1 query patterns"
-tag = "stack"
 domain = "sql"
 layer = "universal"
 enforcement = "prose"
+kind = "defect"
+inspectable = true
 default = true
 qualifies = "Prose check: a query-count assertion in tests exercises each list-returning code path and fails when the number of database round-trips grows with the size of the result set rather than staying constant (the textbook N+1 signature). The realistic mechanism is a test-harness query counter (an ORM query-log assertion, a per-request query-count budget, or a strict-loading mode that raises on lazy N+1 access) plus review for loops issuing a per-item query. Conformance holds when such a query-count guard runs in CI and a loop-with-per-item-query path fails it; it fails when no per-path query-count check exists and N+1 patterns can merge unnoticed."
 verification = "grounded"
@@ -25,10 +27,14 @@ why = "N+1 access patterns cause 10-100x slowdowns at scale and are invisible at
 id = "no-n-1-query-patterns"
 label = "No N+1 query patterns"
 directive = "Iterating a collection with a per-item database call is banned. Use a single batched query (or 1-2 queries with a join / eager-load), never N+1."
+remediation = """
+Replace the loop that issues one database call per item with a single batched query, or a join/eager-load that fetches the related data in one or two queries total. Verify by running the code path under a query-count profiler and confirming the number of queries no longer scales with the number of items iterated.
+"""
 why = "N+1 access patterns cause 10-100x slowdowns at scale and are invisible at small data sizes."
 
 [[option]]
 id = "code-fetches-a-list-of-rows-and-then-loops-over"
+violates = true
 label = "Loop over rows issuing a query per item"
 directive = "code fetches a list of rows and then loops over the list, issuing a database call per item to fetch related data, rather than using a single batched query or an eager-load with a join"
 why = "Natural to write because per-item queries appear correct on small datasets, but degrades by orders of magnitude as production row counts grow. The slowdown is invisible in unit tests with five rows, then surfaces in latency dashboards once the list endpoint is serving real users, with no warning before it becomes an incident."

@@ -59,10 +59,10 @@
 //! real domain state is advanced on a non-live run.
 
 use std::path::Path;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
-use camerata_agent::{HeartbeatFn, prepare_session};
+use camerata_agent::{prepare_session, HeartbeatFn};
 use camerata_core::AgentDriver;
 use camerata_fleet::{governed_role, locate_gateway_bin};
 use camerata_worktracker::investigation::InvestigationArtifact;
@@ -275,6 +275,9 @@ pub async fn execute_investigation_run(
 /// The resume context was persisted at the pause point and is CONSUMED here (so a run
 /// cannot be double-resumed). The clarify question itself is already marked answered by
 /// the 3a store before this is called.
+// too_many_arguments: the resume entry point takes the app's stores by value (each is a cheap
+// `Arc` handle) plus the persisted resume context; they are independent, not one concept.
+#[allow(clippy::too_many_arguments)]
 pub async fn resume_investigation_after_clarification(
     runs: RunStore,
     uow: UowStore,
@@ -305,7 +308,8 @@ pub async fn resume_investigation_after_clarification(
         },
     );
 
-    let task = investigation_resume_prompt(&ctx.original_task, &ctx.asked_question, &answer_summary);
+    let task =
+        investigation_resume_prompt(&ctx.original_task, &ctx.asked_question, &answer_summary);
     run_one_investigation_pass(
         runs,
         uow,
@@ -461,7 +465,11 @@ async fn run_one_investigation_pass(
                     content_hash: None,
                 },
             );
-            uow.append_history(&story_id, "note", &format!("Investigation run failed: {reason}"));
+            uow.append_history(
+                &story_id,
+                "note",
+                &format!("Investigation run failed: {reason}"),
+            );
             runs.fail_with_reason(&run_id, reason);
             return;
         }
@@ -485,7 +493,11 @@ async fn run_one_investigation_pass(
                     content_hash: None,
                 },
             );
-            uow.append_history(&story_id, "note", &format!("Investigation run failed: {reason}"));
+            uow.append_history(
+                &story_id,
+                "note",
+                &format!("Investigation run failed: {reason}"),
+            );
             runs.fail_with_reason(&run_id, reason);
             return;
         }
@@ -520,7 +532,11 @@ async fn run_one_investigation_pass(
                     content_hash: None,
                 },
             );
-            uow.append_history(&story_id, "note", &format!("Investigation run failed: {reason}"));
+            uow.append_history(
+                &story_id,
+                "note",
+                &format!("Investigation run failed: {reason}"),
+            );
             runs.fail_with_reason(&run_id, reason);
             return;
         }
@@ -532,7 +548,11 @@ async fn run_one_investigation_pass(
     // Wire the activity heartbeat so streamed agent output keeps last_activity_ms fresh.
     // Destructure spawn so the _dir (TempDir RAII guard) is held independently while
     // the driver is consumed. The dir stays alive until `_session_dir` is dropped.
-    let camerata_agent::SessionSpawn { driver: raw_driver, _dir: _session_dir, .. } = spawn;
+    let camerata_agent::SessionSpawn {
+        driver: raw_driver,
+        _dir: _session_dir,
+        ..
+    } = spawn;
     let store_hb = runs.clone();
     let rid_hb = run_id.clone();
     let on_activity: HeartbeatFn = Arc::new(move || store_hb.touch_activity(&rid_hb, None));
@@ -645,7 +665,11 @@ fn record_investigation_outcome(
                         content_hash: None,
                     },
                 );
-                uow.append_history(story_id, "note", &format!("Investigation run failed: {reason}"));
+                uow.append_history(
+                    story_id,
+                    "note",
+                    &format!("Investigation run failed: {reason}"),
+                );
                 runs.fail_with_reason(run_id, reason);
                 return;
             }
@@ -697,7 +721,11 @@ fn record_investigation_outcome(
                     content_hash: None,
                 },
             );
-            uow.append_history(story_id, "note", &format!("Investigation run failed: {reason}"));
+            uow.append_history(
+                story_id,
+                "note",
+                &format!("Investigation run failed: {reason}"),
+            );
             runs.fail_with_reason(run_id, reason);
         }
     }
@@ -726,7 +754,14 @@ mod tests {
             cost_usd: None,
             denials: Vec::new(),
         };
-        record_investigation_outcome(&runs, &uow, &run_id, "CAM-INV-EMPTY", Ok(outcome), &next_seq);
+        record_investigation_outcome(
+            &runs,
+            &uow,
+            &run_id,
+            "CAM-INV-EMPTY",
+            Ok(outcome),
+            &next_seq,
+        );
 
         let run = runs.get(&run_id).expect("run exists");
         assert!(run.done, "a failed run is terminal");
@@ -748,7 +783,9 @@ mod tests {
         );
         let history = uow.get_or_create("CAM-INV-EMPTY").history;
         assert!(
-            history.iter().any(|h| h.text.contains("Investigation run failed")),
+            history
+                .iter()
+                .any(|h| h.text.contains("Investigation run failed")),
             "the failure must be recorded on the UoW history, not just the run's events"
         );
     }
@@ -997,7 +1034,7 @@ mod tests {
                 "CAM-7",
                 "Add export",
                 "Members CSV export.",
-                "claude-opus-4-8",
+                "claude-opus-5",
                 &investigation_prompt("CAM-7", "Add export", "Members CSV export.", None),
                 req,
                 1,
@@ -1033,15 +1070,23 @@ mod tests {
             .find(|c| c.id == parked_clar_id)
             .expect("question survived reload");
         assert!(restored_q.is_open());
-        assert_eq!(restored_q.question, "Include archived members in the export?");
+        assert_eq!(
+            restored_q.question,
+            "Include archived members in the export?"
+        );
 
         // The resume context survived and carries enough to re-spawn with the Q in context.
-        let ctx = resume.get(&parked_clar_id).expect("resume ctx survived reload");
+        let ctx = resume
+            .get(&parked_clar_id)
+            .expect("resume ctx survived reload");
         assert_eq!(ctx.run_id, run_id);
         assert_eq!(ctx.phase, PausedPhase::Investigation);
-        assert_eq!(ctx.model, "claude-opus-4-8");
+        assert_eq!(ctx.model, "claude-opus-5");
         assert!(ctx.original_task.contains("CAM-7"));
-        assert_eq!(ctx.asked_question, "Include archived members in the export?");
+        assert_eq!(
+            ctx.asked_question,
+            "Include archived members in the export?"
+        );
 
         // Now ANSWER it (as the answer endpoint does) and verify the resume path can
         // consume the context exactly once and build a prompt carrying the Q + the answer.
@@ -1065,10 +1110,11 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn investigation_run_honors_cancel_before_start() {
         // A cancel that landed before the executor ran leaves the run terminal Cancelled
         // and does NOT advance it to AwaitingQa or record a placeholder note.
-        std::env::remove_var("CAMERATA_LIVE_BUILD");
+        let _env = camerata_test_env::EnvGuard::remove("CAMERATA_LIVE_BUILD");
         let runs = RunStore::new();
         let uow = UowStore::new();
         let clarifications = ClarificationStore::new();
@@ -1087,7 +1133,7 @@ mod tests {
             "CAM-INV-CANCEL".to_string(),
             "A story".to_string(),
             "Some description.".to_string(),
-            "claude-opus-4-8".to_string(),
+            "claude-opus-5".to_string(),
             None,
             None,
             Vec::new(),
@@ -1098,15 +1144,19 @@ mod tests {
         assert_eq!(run.status, RunStatus::Cancelled);
         assert!(run.done);
         // No placeholder investigation event was recorded (the executor returned early).
-        assert!(!run.events.iter().any(|e| e.detail.contains("live mode off")));
+        assert!(!run
+            .events
+            .iter()
+            .any(|e| e.detail.contains("live mode off")));
     }
 
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn investigation_run_without_live_refuses_and_leaves_note_untouched() {
         // Live mode off (default in tests): no agent spawned. The run now REFUSES honestly
         // (Failed) rather than writing a synthetic "pending" note. The UoW investigation note
         // stays UNTOUCHED. This is the CI-safe path.
-        std::env::remove_var("CAMERATA_LIVE_BUILD");
+        let _env = camerata_test_env::EnvGuard::remove("CAMERATA_LIVE_BUILD");
         let runs = RunStore::new();
         let uow = UowStore::new();
         let clarifications = ClarificationStore::new();
@@ -1121,7 +1171,7 @@ mod tests {
             "CAM-INV-1".to_string(),
             "A story".to_string(),
             "Some description.".to_string(),
-            "claude-opus-4-8".to_string(),
+            "claude-opus-5".to_string(),
             None,
             None,
             Vec::new(),

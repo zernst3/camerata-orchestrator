@@ -1,4 +1,10 @@
-//! camerata-checks: layer-2 post-task gate.
+//! camerata-checks: the layer-2 post-task gate AND the deterministic
+//! architectural-checker engine.
+//!
+//! The crate grew a second responsibility and this header used to describe only the
+//! first, so take both halves as the map.
+//!
+//! # Half one: the layer-2 toolchain gate
 //!
 //! Implements [`camerata_core::CheckRunner`] for Rust worktrees. Three concrete
 //! runners, composed by [`RustCheckRunner`]:
@@ -12,7 +18,38 @@
 //!
 //! The subprocess invocation layer ([`subprocess`]) and the output-to-RuleId
 //! mapping layer ([`parse`]) are kept separate so the mapping logic can be
-//! unit-tested without spawning real subprocesses.
+//! unit-tested without spawning real subprocesses. [`multilang`] carries the
+//! cross-language runners and the worktree selector; [`manifest`] /
+//! [`manifest_runner`] drive a repo's own `.camerata/checks.toml`.
+//!
+//! # Half two: the deterministic architectural checkers
+//!
+//! [`arch_checker`] is the `ArchChecker` trait, `RepoView`, `ArchViolation` and the
+//! checker registry (`all_checkers`); [`arch_check_runner`] drives it as a check.
+//! [`extract`] is the AST extractor layer the checkers read through, so a checker
+//! reasons over extracted structure rather than over text. The individual checkers
+//! live in their own modules ([`import_boundary_checker`],
+//! [`handler_no_db_checker`], [`strict_layering_call_checker`],
+//! [`resource_lifecycle_checker`], [`weak_randomness_checker`],
+//! [`query_grammar_injection_checker`], and others).
+//!
+//! [`architecture_config`] is the layer/boundary map these checkers need. It is read
+//! from a repo's authored `.camerata/architecture.toml` when one exists, and
+//! otherwise **INFERRED from the repo** by `infer_architecture_config` (added
+//! 2026-10-09, finding A4). Inference matters because the config gate used to
+//! silence the import-boundary and strict-layering checkers on every brownfield
+//! repo: an operator will never write Camerata's config format before an audit they
+//! have not yet bought, so gating the product's architecture analysis on that file
+//! gated it on nothing happening. Inference is conservative by construction -- it
+//! returns `None` unless at least two distinct canonical layers each own a file the
+//! extractor understands, its segment vocabulary excludes every overloaded directory
+//! name, its inferred import map denies only UPWARD edges, and findings from an
+//! inferred map are `medium` rather than `high` and say in their own message that
+//! the map was inferred and from which globs.
+//!
+//! This crate is deliberately free of any `camerata-server` dependency, which is
+//! what lets `camerata-check` ship the architectural registry as a standalone
+//! binary for a client's own CI.
 
 /// The deterministic architectural-rule executor seam: the `ArchChecker` trait, `RepoView`,
 /// `ArchViolation`, and the checker registry (`all_checkers`). See
@@ -47,6 +84,11 @@ pub mod import_boundary_checker;
 /// Row Level Security and `SECURITY DEFINER` search_path hygiene. See `supabase/mod.rs`.
 pub mod supabase;
 
+/// Firebase / Firestore coverage (MASTER-SEQUENCE item 24): the rules-file reader, the rule
+/// checkers and Cloud Functions recognition. See `firebase/mod.rs` and
+/// `docs/design/2026-10-25_firebase-rules.md`.
+pub mod firebase;
+
 /// Pass 4a "Group A" — cheap architectural checkers on the [`arch_checker`] seam that need
 /// no AST, no new dependencies, and no config: pure path/naming logic over the Python test
 /// tree. See `docs/design/2026-07-27_ast-extractor-layer.md` §4.
@@ -79,6 +121,60 @@ pub mod strict_layering_call_checker;
 /// `docs/design/2026-07-27_ast-extractor-layer.md` §4 Group D.
 pub mod resource_lifecycle_checker;
 
+/// D2 (`docs/plans/2026-09-29_codebase-inspection-hardening.md`) — lexical (comment-aware)
+/// detection of `SEC-NO-WEAK-TOKEN-RANDOMNESS-1`: a general-purpose PRNG (`Math.random`,
+/// Python's `random.*`, `rand()`, `new Random()`) feeding a value whose surrounding identifier
+/// marks it as a security credential (token/secret/password/session/nonce/CSRF/OTP/reset-code/
+/// share-link/access-id), discriminated against non-security uses (UI jitter, animation,
+/// sampling, shuffling). See `crates/rules/principles/universal/sec-no-weak-token-randomness-1.toml`.
+pub mod weak_randomness_checker;
+
+/// D3 (`docs/plans/2026-09-29_codebase-inspection-hardening.md`) — lexical (comment-aware)
+/// detection of `SEC-NO-QUERY-GRAMMAR-INJECTION-1`: user-controlled data concatenated or
+/// interpolated into a query/filter GRAMMAR string — PostgREST `.or()`/`.filter()`, a raw SQL
+/// string issued via `.query()`/`.execute()`/`.raw()`, a MongoDB `$where` clause, or an LDAP
+/// `filter:` value — rather than passed as a bound argument. See
+/// `crates/rules/principles/universal/sec-no-query-grammar-injection-1.toml`.
+pub mod query_grammar_injection_checker;
+
+/// `ARCH-ONE-IMPORT-PATH-1` (W29, `docs/design/2026-10-21_w29-detector-implementation.md`):
+/// a symbol with a re-export is imported by outside code through two different paths (its
+/// origin file AND a barrel). Canonicalizes every named/default import through the re-export
+/// graph to its `(origin_file, name)` before grouping. See
+/// `crates/rules/principles/javascript/arch-one-import-path-1.toml`.
+pub mod one_import_path_checker;
+
+/// `ARCH-SHARED-CONSTANT-1` (W29, `docs/design/2026-10-21_w29-detector-implementation.md`):
+/// a domain value (a separated lowercase name, a route template, a multi-word upper-case token,
+/// or a decimal rate in arithmetic) written as a bare literal in several modules instead of one
+/// named home. Reads [`extract::literals`]; the definition of "domain value" is deliberately
+/// narrow. See `crates/rules/principles/universal/arch-shared-constant-1.toml`.
+pub mod shared_constant_checker;
+
+/// `ARCH-DEAD-CODE-1` (W29, `docs/design/2026-10-21_w29-detector-implementation.md`): a source
+/// file nothing reaches. File-level in v1 (unused individual exports are a separate future
+/// rule). Flags only when the file is unreachable from every entry point AND its name appears
+/// in no live file AND no framework, manifest or marker convention explains it; Rust files by
+/// the `mod` declaration closure. See
+/// `crates/rules/principles/universal/arch-dead-code-1.toml`.
+pub mod dead_code_checker;
+
+/// The candidate producer for `ARCH-SINGLE-SOURCE-LOGIC-1`, `ARCH-NAMING-ONE-CONCEPT-1` and
+/// `UI-SHARED-PRIMITIVE-1` (W29 Wave C, `docs/design/2026-10-21_w29-detector-implementation.md`).
+/// Deliberately NOT registered in [`arch_checker::all_checkers`]: whether a repeated block is
+/// one decision, one concept or one UI mechanism is a judgment, so this module produces
+/// candidates only and the server's advisory seam puts a model judgment between a candidate and
+/// a finding. Reads the shared clone index ([`extract::clone`]).
+pub mod clone_rules;
+/// `UI-REACT-HOOKS-LINT-1` (W29, `docs/design/2026-10-21_w29-detector-implementation.md`): a
+/// React repo whose own ESLint setup does not enable the two React Hooks rules
+/// (`react-hooks/rules-of-hooks`, `react-hooks/exhaustive-deps`). The violations those rules
+/// report are NOT this checker's: they ride the provisioned-eslint scan tier under the existing
+/// `JAVASCRIPT-REACT-*` rule ids. This checker reads only the repository's own lint
+/// configuration, and stays silent whenever a configuration cannot be read with certainty. See
+/// `crates/rules/principles/javascript/react/ui-react-hooks-lint-1.toml`.
+pub mod react_hooks_lint_checker;
+
 /// The Layer-2 (Governed Development write-time gate) executor for [`arch_checker`]'s
 /// checker registry — "Plug point B" in
 /// `docs/design/2026-07-26_architectural-executor-feasibility.md` §2.3. Composed into
@@ -100,9 +196,9 @@ pub use arch_check_runner::NativeArchCheckRunner;
 /// `docs/decisions/2026-06-22_layer2_ruby_java_csharp_runners.md`.
 pub mod multilang;
 pub use multilang::{
-    detect_language, runner_for_worktree, runner_for_worktree_with_heartbeat,
-    CombinedCheckRunner, CSharpCheckRunner, GoCheckRunner,
-    JavaCheckRunner, JsCheckRunner, PythonCheckRunner, RubyCheckRunner, WorktreeLanguage,
+    detect_language, runner_for_worktree, runner_for_worktree_with_heartbeat, CSharpCheckRunner,
+    CombinedCheckRunner, GoCheckRunner, JavaCheckRunner, JsCheckRunner, PythonCheckRunner,
+    RubyCheckRunner, WorktreeLanguage,
 };
 
 /// Single source of truth manifest (`.camerata/checks.toml`) — schema, loader,
@@ -154,8 +250,8 @@ pub mod verification_gate;
 
 use anyhow::Context as _;
 use async_trait::async_trait;
-use camerata_liveness::HeartbeatFn;
 use camerata_core::{CheckOutcome, CheckRunner, Role, RuleId};
+use camerata_liveness::HeartbeatFn;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
@@ -257,7 +353,10 @@ fn check_build_disk_headroom(worktree: &Path) -> anyhow::Result<()> {
     // `<clone>/.camerata-worktrees/<branch>` layout). `None` for an out-of-band
     // worktree — reclaim is simply skipped in that case, same fail-open stance as
     // `derive_shared_target_dir`'s own doc comment.
-    let clone = worktree.parent().and_then(|p| p.parent()).map(|p| p.to_path_buf());
+    let clone = worktree
+        .parent()
+        .and_then(|p| p.parent())
+        .map(|p| p.to_path_buf());
 
     let mut reclaimed_log: Vec<janitor::ReclaimLogEntry> = Vec::new();
     let outcome = janitor::check_headroom_with_reclaim(
@@ -284,7 +383,10 @@ fn check_build_disk_headroom(worktree: &Path) -> anyhow::Result<()> {
     match outcome {
         janitor::HeadroomOutcome::CannotQuery => Ok(()), // fail-open, unchanged
         janitor::HeadroomOutcome::Sufficient { .. } => Ok(()),
-        janitor::HeadroomOutcome::ReclaimedSufficient { reclaimed_bytes, available } => {
+        janitor::HeadroomOutcome::ReclaimedSufficient {
+            reclaimed_bytes,
+            available,
+        } => {
             let reclaimed_gb = reclaimed_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
             let available_gb = available as f64 / (1024.0 * 1024.0 * 1024.0);
             tracing::info!(
@@ -294,7 +396,10 @@ fn check_build_disk_headroom(worktree: &Path) -> anyhow::Result<()> {
             );
             Ok(())
         }
-        janitor::HeadroomOutcome::StillInsufficient { available, reclaimed_bytes } => {
+        janitor::HeadroomOutcome::StillInsufficient {
+            available,
+            reclaimed_bytes,
+        } => {
             let available_gb = available as f64 / (1024.0 * 1024.0 * 1024.0);
             let required_gb = min as f64 / (1024.0 * 1024.0 * 1024.0);
             let reclaimed_gb = reclaimed_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
@@ -365,7 +470,9 @@ impl FmtCheckRunner {
     /// the cargo subprocess. Use this at call sites where a `RunStore` run id
     /// is in scope (dev-cycle checks inside a tracked run).
     pub fn with_heartbeat(cb: HeartbeatFn) -> Self {
-        Self { on_progress: Some(cb) }
+        Self {
+            on_progress: Some(cb),
+        }
     }
 }
 
@@ -381,9 +488,10 @@ impl CheckRunner for FmtCheckRunner {
         // Disk-headroom preflight: refuse to start a build if disk is low.
         check_build_disk_headroom(worktree)?;
         let target_dir = derive_shared_target_dir(worktree);
-        let output = subprocess::run_fmt_check(worktree, target_dir.as_deref(), self.on_progress.as_ref())
-            .await
-            .context("running cargo fmt --check")?;
+        let output =
+            subprocess::run_fmt_check(worktree, target_dir.as_deref(), self.on_progress.as_ref())
+                .await
+                .context("running cargo fmt --check")?;
 
         let violated = parse::map_fmt_output(&output);
         // Only carry the captured stdout/stderr when there IS a violation — a
@@ -412,7 +520,9 @@ impl ClippyCheckRunner {
 
     /// Create a `ClippyCheckRunner` that fires `cb` on every stdout line.
     pub fn with_heartbeat(cb: HeartbeatFn) -> Self {
-        Self { on_progress: Some(cb) }
+        Self {
+            on_progress: Some(cb),
+        }
     }
 }
 
@@ -428,9 +538,10 @@ impl CheckRunner for ClippyCheckRunner {
         // Disk-headroom preflight: refuse to start a build if disk is low.
         check_build_disk_headroom(worktree)?;
         let target_dir = derive_shared_target_dir(worktree);
-        let output = subprocess::run_clippy(worktree, target_dir.as_deref(), self.on_progress.as_ref())
-            .await
-            .context("running cargo clippy")?;
+        let output =
+            subprocess::run_clippy(worktree, target_dir.as_deref(), self.on_progress.as_ref())
+                .await
+                .context("running cargo clippy")?;
 
         let violated = parse::map_clippy_output(&output);
         let diagnostics = diagnostics_for("cargo clippy", &output.combined, &violated);
@@ -457,7 +568,9 @@ impl TestCheckRunner {
 
     /// Create a `TestCheckRunner` that fires `cb` on every stdout line.
     pub fn with_heartbeat(cb: HeartbeatFn) -> Self {
-        Self { on_progress: Some(cb) }
+        Self {
+            on_progress: Some(cb),
+        }
     }
 }
 
@@ -473,9 +586,10 @@ impl CheckRunner for TestCheckRunner {
         // Disk-headroom preflight: refuse to start a build if disk is low.
         check_build_disk_headroom(worktree)?;
         let target_dir = derive_shared_target_dir(worktree);
-        let output = subprocess::run_test(worktree, target_dir.as_deref(), self.on_progress.as_ref())
-            .await
-            .context("running cargo test")?;
+        let output =
+            subprocess::run_test(worktree, target_dir.as_deref(), self.on_progress.as_ref())
+                .await
+                .context("running cargo test")?;
 
         let violated = parse::map_test_output(&output);
         let diagnostics = diagnostics_for("cargo test", &output.combined, &violated);

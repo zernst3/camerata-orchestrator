@@ -7,15 +7,31 @@
 //! Extraction from `camerata-ui` is incremental (see `docs/plans/2026-07-01_ui-core-extraction.md`);
 //! modules are added here as each surface's logic moves over.
 
+pub mod adopt;
+pub mod backend;
+pub mod decision_memory;
 pub mod designs;
 pub mod git;
 pub mod govdev;
-pub mod llm_backend;
+pub mod lenient;
 pub mod models;
+pub mod order_preset;
+pub mod palette;
+pub mod pane_context;
+pub mod progress;
 pub mod provider_safety;
 pub mod readiness;
+pub mod review_stats;
+pub mod review_timer;
 pub mod rules;
 pub mod run;
+pub mod save_queue;
 pub mod scan;
 pub mod schedule;
+pub mod source;
+pub mod stack;
+#[cfg(test)]
+pub(crate) mod test_support;
 pub mod triage;
+pub mod viewer;
+pub mod viewer_find;

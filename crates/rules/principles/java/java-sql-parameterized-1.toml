@@ -1,9 +1,17 @@
 id = "JAVA-SQL-PARAMETERIZED-1"
+version = 1
 title = "SQL queries are parameterized with PreparedStatement or JPA parameters; strings are never built via concatenation"
-tag = "stack"
 domain = "java"
 layer = "language"
-enforcement = "mechanical"
+# Enforcement-tier correction (the declared tier must match a detector that really runs): this
+# rule's `qualifies` text names SpotBugs/Semgrep/IDE linters, but no such check is actually wired
+# today (no registered ArchChecker, no gateway rule arm, no bundled Semgrep rule, and Java is not
+# one of the Clippy/Ruff/ESLint preview tools). Declaring `mechanical` here claimed a hard check
+# that never ran. Corrected to `structured` (evaluated by the semantic/AI audit tier, not
+# mechanically enforced) until a real SpotBugs/Semgrep detector is wired.
+enforcement = "structured"
+kind = "defect"
+inspectable = true
 default = true
 qualifies = "Enforced by static analysis (SpotBugs, Semgrep, IDE linters) that detect SQL string concatenation, string interpolation, or format() flowing into query execution. Conformance holds when the gate runs in CI and concatenated queries fail the build."
 verification = "grounded"
@@ -22,10 +30,15 @@ linter = "SpotBugs/FindSecBugs: SQL_INJECTION_JDBC"
 id = "parameterized-queries"
 label = "use PreparedStatement bind parameters or JPA parameter syntax"
 directive = "Every dynamic value in a SQL statement is passed as a bound parameter (? placeholders in PreparedStatement, :name/:? in JPA, or parameterized ORM queries), never concatenated into the query string. String concatenation, StringBuilder, or String.format() are forbidden anywhere a value flows into query execution. Table or column names that must be dynamic come from a fixed allow-list, never from request input."
+remediation = """
+Replace the string-concatenated or manually-escaped SQL with bound parameters, using PreparedStatement's ? placeholders or the ORM's parameterized query syntax. Remove the manual escaping logic once parameter binding replaces it. Verify by passing a value containing a SQL metacharacter as a bound parameter and confirming it is treated as data, not executable SQL.
+"""
+effort = "low"
 why = "Parameterization prevents SQL injection entirely by sending SQL and values to the database separately."
 
 [[option]]
 id = "string-concatenation-with-escaping"
+violates = true
 label = "build query strings by concatenating with manual escaping"
 directive = "Dynamic values are added to SQL strings via concatenation with custom escaping or quoting logic rather than parameterized binding."
-why = "Reads naturally but is fragile and error-prone; every site is a latent injection waiting for unsanitized input. Escaping is incomplete across database dialects and contexts."
+why = "Escaping is applied by hand at each callsite, so one query that misses it lets user input change the SQL that runs against your database. Escape routines are also incomplete across dialects and contexts, which means a callsite that looks correctly escaped can still be exploitable, and nothing fails until it is."

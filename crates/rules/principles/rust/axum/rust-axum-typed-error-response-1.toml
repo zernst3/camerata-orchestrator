@@ -1,9 +1,18 @@
 id = "RUST-AXUM-TYPED-ERROR-RESPONSE-1"
+version = 1
 title = "Handlers return typed error types that implement IntoResponse, not raw HTTP responses"
-tag = "stack"
 domain = "rust:axum"
 layer = "framework"
 enforcement = "structured"
+kind = "decision"
+inspectable = true
+# Deviation-ceiling escape hatch, INHERITED from ARCH-STRUCTURED-ERRORS-1: severity must describe
+# the PROBLEM, not which rule happened to fire. Without this, a repo on this stack caps the
+# identical architectural defect at medium while an unmirrored stack reaches high under the
+# general rule. This rule mirrors ARCH-STRUCTURED-ERRORS-1 because it re-litigates the same error
+# contract: handlers return typed error types implementing IntoResponse, never raw HTTP responses
+# assembled per endpoint.
+deviation_ceiling = "high"
 default = true
 verification = "grounded"
 
@@ -16,6 +25,9 @@ why = "Axum handlers return Result<T, E> where the error type E implements IntoR
 id = "typed-errors-implement-intoresponse"
 label = "Handlers return typed error types that implement IntoResponse"
 directive = "Handlers return a domain Result type (e.g., Result<User, UserError>). The error type UserError implements IntoResponse, so the handler just returns the Result and Axum converts UserError into a status code and response body. Error mapping is centralized in the IntoResponse impl, not duplicated in handlers."
+remediation = """
+Change the handler's error type to a domain error that implements IntoResponse, and return it through the handler's Result type instead of constructing a StatusCode and response body inline in the handler. Centralize the status-code mapping in the IntoResponse implementation. Verify by triggering the error case and confirming the handler's own code no longer builds the HTTP response directly.
+"""
 why = "Typed errors centralize error-to-HTTP mapping and keep handlers focused on business logic."
 
 [[option]]

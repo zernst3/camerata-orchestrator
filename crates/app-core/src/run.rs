@@ -12,26 +12,21 @@
 //! transcripts) stay in the `camerata-server` adapter, which re-exports the items here so
 //! existing `crate::run::X` call sites are unchanged.
 
-use serde::{Deserialize, Serialize};
 use serde::de::{self, Deserializer};
 use serde::ser::Serializer;
+use serde::{Deserialize, Serialize};
 
 use camerata_core::RuleId;
 use camerata_liveness::LivenessTracker;
 
 /// Whether a run is interactive (watched by the architect) or autonomous (walk-away/routine).
 /// Determines which stall threshold and policy apply.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum RunKind {
+    #[default]
     Watched,
     Autonomous,
-}
-
-impl Default for RunKind {
-    fn default() -> Self {
-        RunKind::Watched
-    }
 }
 
 impl RunKind {
@@ -44,19 +39,14 @@ impl RunKind {
 }
 
 /// What the server does when a run stalls (exceeds its idle threshold).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum StallPolicy {
     /// Surface a stall alert to the UI; do NOT cancel the run.
+    #[default]
     Alert,
     /// Automatically cancel the run when the stall threshold is exceeded.
     Cancel,
-}
-
-impl Default for StallPolicy {
-    fn default() -> Self {
-        StallPolicy::Alert
-    }
 }
 
 /// The lifecycle status of a run, in Camerata's vocabulary.
@@ -102,7 +92,9 @@ pub enum RunStatus {
     AwaitingReview,
     AwaitingQa,
     /// The run failed with a human-readable reason (e.g. stall timeout, infra error).
-    Failed { reason: String },
+    Failed {
+        reason: String,
+    },
     /// The run was explicitly cancelled (by the architect or by automatic stall policy).
     Cancelled,
 }
@@ -485,8 +477,7 @@ mod tests {
             }
         );
 
-        let from_obj: RunStatus =
-            serde_json::from_str(r#"{"failed":{"reason":"boom"}}"#).unwrap();
+        let from_obj: RunStatus = serde_json::from_str(r#"{"failed":{"reason":"boom"}}"#).unwrap();
         assert_eq!(
             from_obj,
             RunStatus::Failed {

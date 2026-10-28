@@ -1,9 +1,25 @@
 id = "RUST-SQLX-TRANSACTIONS-MULTI-WRITE-1"
+version = 1
 title = "Wrap multiple writes in an explicit transaction to ensure atomicity"
-tag = "stack"
 domain = "rust:sqlx"
 layer = "framework"
 enforcement = "structured"
+kind = "defect"
+inspectable = true
+# Deviation-ceiling escape hatch, INHERITED from ARCH-EXPLICIT-TX-1: severity must describe the
+# PROBLEM, not which rule happened to fire. Without this, a repo on this stack caps the identical
+# architectural defect at medium while an unmirrored stack reaches high under the general rule.
+# This rule mirrors ARCH-EXPLICIT-TX-1 because it re-litigates the same transactional-ownership
+# contract: any operation performing multiple writes is wrapped in one explicit
+# `sqlx::Transaction`, and its violating option ("rely on implicit transactions for each
+# statement") is the spine rule's own rejected "per-call short transactions" option in sqlx form,
+# with the same stated consequence — partial state with dangling references and no rollback path.
+#
+# Why this line is cheap rather than risky: this rule is `kind = "defect"`, so it never enters the
+# alternatives pass and therefore emits NO deviation rows today, which makes the ceiling inert as
+# shipped. It is authored anyway so the per-stack mirror set stays internally consistent, and so
+# the bound is already correct if this rule is ever reclassified to a deviation-producing kind.
+deviation_ceiling = "high"
 default = true
 verification = "grounded"
 
@@ -16,10 +32,14 @@ why = "A transaction groups multiple SQL statements and ensures all succeed or a
 id = "use-explicit-transactions"
 label = "Wrap multiple writes in explicit transactions"
 directive = "Any operation that performs multiple database writes (inserts, updates, or deletes across one or more tables) is wrapped in a transaction via sqlx::Transaction or connection.begin(). If any write fails, the transaction is rolled back. A single write that does not require atomicity with other writes does not require an explicit transaction."
+remediation = """
+Wrap the multiple related writes in an explicit sqlx::Transaction (via connection.begin()), committing on success and rolling back on any failure, instead of letting each write run as its own implicit transaction. Verify by forcing one of the writes to fail and confirming none of the other writes in the same operation are persisted.
+"""
 why = "Explicit transactions ensure consistency and prevent partial state corruption."
 
 [[option]]
 id = "no-explicit-transactions"
+violates = true
 label = "Rely on implicit transactions for each statement"
 directive = "Each SQL statement runs in an implicit transaction. Multiple writes are executed as separate statements without an explicit transaction group."
 why = "When one write in a multi-step operation fails after another has already succeeded, the database is left in a partial state with dangling references or stale data; there is no rollback to restore consistency, and the only recovery is manual correction of the database, often under production pressure."

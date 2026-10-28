@@ -1,21 +1,26 @@
 id = "RUST-ENTITIES-9"
+version = 1
 title = "Self-referential FKs: single belongs_to + impl Related<Entity> for Entity"
-tag = "stack"
 domain = "rust:seaorm"
 layer = "library"
 enforcement = "structured"
+kind = "decision"
+inspectable = true
 default = true
 verification = "grounded"
 
 [decision]
 question = "What position does the project take on: Self-referential FKs: single belongs_to + impl Related<Entity> for Entity?"
-default = "self-referential-fks-single-belongs-to-impl-rela"
+default = "self-referential-fks-single-belongs-to-impl-related-entity-for-entity"
 why = "DeriveRelation cannot disambiguate a has_many pointing at the same Entity as the inverse belongs_to; both directions can't coexist for a self-relation. Trying to declare both belongs_to and has_many variants is blocked by the macro's coherence rule and will not compile, so it is not a viable alternative even if it reads as the more uniform shape. Omitting impl Related entirely is mechanically possible but produces worse ergonomics, because every caller that wants to traverse the relation has to spell out the join inline at the call site rather than going through the framework's relation hooks."
 
 [[option]]
-id = "self-referential-fks-single-belongs-to-impl-rela"
+id = "self-referential-fks-single-belongs-to-impl-related-entity-for-entity"
 label = "Self-referential FKs: single belongs_to + impl Related<Entity> for Entity"
 directive = "Declare only the belongs_to (with explicit from/to) and add impl Related<Entity> for Entity. Reverse traversal is done via find().filter(...). Use role-based variant naming (e.g. Inviter, not User)."
+remediation = """
+Reduce the self-referential relation to a single belongs_to with explicit from/to, add an impl of the Related trait for the entity itself, and do reverse traversal via find().filter(...) rather than a second has_many variant on the same pair or omitting the Related impl entirely. Use role-based variant naming (Inviter, not User). Verify by confirming the entity declares exactly one belongs_to for the self-reference and callers use find_related rather than spelling out the join inline.
+"""
 why = "DeriveRelation cannot disambiguate a has_many pointing at the same Entity as the inverse belongs_to; both directions can't coexist for a self-relation."
 
 [[option]]

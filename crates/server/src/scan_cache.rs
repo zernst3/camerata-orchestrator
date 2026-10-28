@@ -29,7 +29,67 @@ use crate::onboard::Finding;
 
 /// Bump if the fingerprint scheme or manifest shape changes in a way that should invalidate
 /// every existing manifest (forcing one clean full scan after an upgrade).
-const MANIFEST_VERSION: u32 = 1;
+///
+/// Version 2: findings are redacted at construction (docs/design/2026-10-23_secret-redaction-
+/// and-release-gate.md). A version 1 manifest holds findings whose snippets were stored BEFORE
+/// that, so a secret value sits in it on disk; [`ScanCacheStore::load_or_new`] drops every
+/// non-current manifest and rewrites the file at once, so the raw content is gone on first
+/// start rather than on the next scan.
+///
+/// Version 3: carried AI findings are keyed by the question they answered ([`AiScanKey`]: the
+/// model, the calibration model, the prompt-schema version and the rule directives), not only
+/// by file fingerprint and rule ids. A version 2 manifest has no such key, so it cannot be shown
+/// to still answer the current question and is dropped, which costs one full scan after the
+/// upgrade.
+pub(crate) const MANIFEST_VERSION: u32 = 3;
+
+/// The question a set of AI findings answered: everything besides the file content and the rule
+/// ids that decides what the model would say today. A carried-forward finding is reusable only
+/// when today's key equals the key it was produced under; otherwise the file is re-scanned.
+///
+/// Before this key the cache matched on the file fingerprint and the rule ids alone, so
+/// switching the model, editing the audit prompt, or choosing a different option (a different
+/// directive) for the same rule id all silently served the previous answer.
+///
+/// Lives on the manifest, never on a client export.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AiScanKey {
+    /// The RESOLVED audit model (see [`crate::ai_audit::resolve_audit_model`]).
+    pub audit_model: String,
+    /// The calibration model pick; empty when the audit model calibrates. Carried findings keep
+    /// the severity and confidence calibration gave them.
+    pub calibration_model: String,
+    /// [`crate::ai_audit::AUDIT_PROMPT_SCHEMA_VERSION`] when the findings were produced. `0` only
+    /// for a manifest that predates the key, which never matches a real one.
+    pub prompt_schema_version: u32,
+    /// Order-independent digest of every selected rule's id AND directive text, which is what the
+    /// audit prompt actually asks.
+    pub directives_fingerprint: String,
+}
+
+impl AiScanKey {
+    /// The key a scan running now would produce. `audit_model` must already be resolved.
+    pub fn new(
+        audit_model: &str,
+        calibration_model: Option<&str>,
+        rules: &[crate::onboard::SelectedRule],
+    ) -> Self {
+        let mut parts: Vec<String> = rules
+            .iter()
+            .map(|r| format!("{}\u{1f}{}", r.id, r.directive))
+            .collect();
+        parts.sort_unstable();
+        Self {
+            audit_model: audit_model.to_string(),
+            calibration_model: calibration_model.unwrap_or_default().to_string(),
+            prompt_schema_version: crate::ai_audit::AUDIT_PROMPT_SCHEMA_VERSION,
+            directives_fingerprint: format!(
+                "{:016x}",
+                crate::suppression::fnv1a(&parts.join("\u{1e}"))
+            ),
+        }
+    }
+}
 
 /// Fingerprint a file's EXACT content with the stable FNV-1a hash the suppression baseline uses.
 ///
@@ -62,6 +122,33 @@ pub struct ScanManifest {
     /// NOT cached here — they are cheap to recompute and must never go stale.
     #[serde(default)]
     pub findings: Vec<Finding>,
+    /// Whether the AI (semantic) review actually ran and completed on THIS manifest's scan —
+    /// i.e. `run_ai_review` was on AND no fatal AI error occurred. An AI-off run (the toggle was
+    /// off), a compliance-`Blocked` run, or a run where the AI pass errored out still stamps a
+    /// manifest (file fingerprints are always worth caching), but with `ai_covered = false` — its
+    /// `findings` are empty/stale-shaped AI-wise and must never be treated as a real "AI found
+    /// nothing" baseline.
+    ///
+    /// `#[serde(default)]` makes the zero value `false`, which is the SAFE default and doubles as
+    /// a self-heal for every manifest written before this field existed: those legacy JSON blobs
+    /// have no `ai_covered` key at all, so they deserialize with `ai_covered = false` and are
+    /// automatically treated as "no AI baseline" by the next AI-on scan (see `matches_rules`'s
+    /// caller in `onboard::audit_repos`, which additionally requires `ai_covered` before reusing
+    /// a prior manifest) — no migration or manual cache-bust needed.
+    #[serde(default)]
+    pub ai_covered: bool,
+    /// The question [`Self::findings`] answered (see [`AiScanKey`]). Defaults to the empty key,
+    /// which matches no real scan, so a manifest without it is simply not reused.
+    #[serde(default)]
+    pub ai_key: AiScanKey,
+    /// The clone-candidate judge's verdicts (Wave C, `onboard::clone_advisory`), keyed by the
+    /// CONTENT of the question so an unchanged family on a re-scan is never re-billed. Persisted
+    /// beside the file fingerprints in the app data directory, never in the client's repository.
+    /// `serde(default)` and additive: a manifest written before this field existed loads with an
+    /// empty cache and `MANIFEST_VERSION` is not bumped (the verdicts are an optimisation, never
+    /// evidence, so a missing cache only costs one scan's judge calls).
+    #[serde(default)]
+    pub clone_verdicts: crate::onboard::clone_advisory::VerdictCache,
 }
 
 /// Fingerprint the selected rule set (ids + their repo bindings) so a change to the selection
@@ -91,11 +178,23 @@ impl ScanManifest {
         self.rules_fingerprint == rules_fp
     }
 
+    /// Whether this manifest's carried AI findings may be reused by a scan running under
+    /// `rules_fp` and `ai_key`: current schema, same rule selection, the AI review actually
+    /// completed, and the findings answered the same question (model, prompt, rule text). The one
+    /// place the reuse decision is made.
+    pub fn is_reusable_baseline(&self, rules_fp: &str, ai_key: &AiScanKey) -> bool {
+        self.is_current()
+            && self.matches_rules(rules_fp)
+            && self.ai_covered
+            && self.ai_key == *ai_key
+    }
+
     /// The fingerprint recorded for a file on the last scan, if any.
     fn fingerprint_of(&self, repo: &str, path: &str) -> Option<&str> {
         self.files
-            .get(repo)
-            .and_then(|m| m.get(path))
+            .iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case(repo))
+            .and_then(|(_, m)| m.get(path))
             .map(String::as_str)
     }
 }
@@ -160,7 +259,7 @@ pub fn partition(
     let carried: Vec<Finding> = prior
         .findings
         .iter()
-        .filter(|f| f.repo == repo && unchanged_paths.contains(&f.path))
+        .filter(|f| f.repo.eq_ignore_ascii_case(repo) && unchanged_paths.contains(&f.path))
         .cloned()
         .collect();
 
@@ -182,6 +281,9 @@ pub struct ManifestBuilder {
     rules_fingerprint: String,
     files: BTreeMap<String, BTreeMap<String, String>>,
     findings: Vec<Finding>,
+    ai_covered: bool,
+    ai_key: AiScanKey,
+    clone_verdicts: crate::onboard::clone_advisory::VerdictCache,
 }
 
 impl ManifestBuilder {
@@ -196,6 +298,33 @@ impl ManifestBuilder {
         self
     }
 
+    /// Stamp whether the AI review actually ran and completed on this scan (see
+    /// [`ScanManifest::ai_covered`]'s doc comment for exactly what that means). Defaults to
+    /// `false` (the safe value) when never called, so a caller that forgets this stamp produces a
+    /// manifest that is correctly treated as "no AI baseline" rather than silently trusted.
+    pub fn with_ai_covered(mut self, covered: bool) -> Self {
+        self.ai_covered = covered;
+        self
+    }
+
+    /// Stamp the question this scan's AI findings answered (see [`AiScanKey`]). Defaults to the
+    /// empty key when never called, which no real scan matches, so a caller that forgets this
+    /// stamp produces a manifest that is never reused rather than one that is wrongly trusted.
+    pub fn with_ai_key(mut self, key: AiScanKey) -> Self {
+        self.ai_key = key;
+        self
+    }
+
+    /// Carry the clone judge's verdict cache (the prior manifest's verdicts plus this scan's) into
+    /// the manifest being built, so the next scan can reuse them.
+    pub fn with_clone_verdicts(
+        mut self,
+        verdicts: crate::onboard::clone_advisory::VerdictCache,
+    ) -> Self {
+        self.clone_verdicts = verdicts;
+        self
+    }
+
     /// Record one repo's full current file set (fingerprinting each) and the AI findings that
     /// apply to it after this scan. `ai_findings` must already be the post-merge AI set for the
     /// repo (fresh ∪ carried); deterministic-floor findings should NOT be passed here.
@@ -204,8 +333,12 @@ impl ManifestBuilder {
         for (path, content) in files {
             entry.insert(path.clone(), content_fingerprint(content));
         }
-        self.findings
-            .extend(ai_findings.iter().filter(|f| f.repo == repo).cloned());
+        self.findings.extend(
+            ai_findings
+                .iter()
+                .filter(|f| f.repo.eq_ignore_ascii_case(repo))
+                .cloned(),
+        );
     }
 
     /// Finalize into a persistable manifest stamped with the current schema version.
@@ -215,6 +348,9 @@ impl ManifestBuilder {
             rules_fingerprint: self.rules_fingerprint,
             files: self.files,
             findings: self.findings,
+            ai_covered: self.ai_covered,
+            ai_key: self.ai_key,
+            clone_verdicts: self.clone_verdicts,
         }
     }
 }
@@ -227,6 +363,40 @@ impl ManifestBuilder {
 struct CacheState {
     /// project id → that project's scan manifest.
     by_project: BTreeMap<String, ScanManifest>,
+}
+
+/// What [`ScanCacheStore::remove_repo`] took out of the cache.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RemovedFromCache {
+    /// The cache held something for the repo.
+    pub had_entry: bool,
+    /// Fingerprinted files dropped.
+    pub files: u64,
+    /// Serialized size of what was dropped (fingerprints and findings).
+    pub bytes: u64,
+}
+
+/// How much of `manifest` belongs to `repo` (case-insensitive): fingerprinted files plus cached
+/// findings, sized by their serialized form.
+fn repo_slice_stats(manifest: &ScanManifest, repo: &str) -> RemovedFromCache {
+    let mut stats = RemovedFromCache::default();
+    for (key, files) in &manifest.files {
+        if key.eq_ignore_ascii_case(repo) {
+            stats.had_entry = true;
+            stats.files += files.len() as u64;
+            stats.bytes += serde_json::to_vec(files).map_or(0, |b| b.len() as u64);
+        }
+    }
+    let findings: Vec<&Finding> = manifest
+        .findings
+        .iter()
+        .filter(|f| f.repo.eq_ignore_ascii_case(repo))
+        .collect();
+    if !findings.is_empty() {
+        stats.had_entry = true;
+        stats.bytes += serde_json::to_vec(&findings).map_or(0, |b| b.len() as u64);
+    }
+    stats
 }
 
 /// Thread-safe, file-backed store of per-project scan manifests.
@@ -245,14 +415,26 @@ impl ScanCacheStore {
 
     /// Load from `path` (or start empty), persisting every change back to it.
     pub fn load_or_new(path: std::path::PathBuf) -> Self {
-        let state = std::fs::read_to_string(&path)
+        let mut state = std::fs::read_to_string(&path)
             .ok()
             .and_then(|s| serde_json::from_str::<CacheState>(&s).ok())
             .unwrap_or_default();
-        Self {
+        // Drop every manifest from an older schema (see MANIFEST_VERSION) and, when any was
+        // dropped, rewrite the file now: serving nothing from it is not enough, the raw
+        // snippets it holds must not stay on disk until some later scan happens to overwrite it.
+        let before = state.by_project.len();
+        state.by_project.retain(|_, manifest| manifest.is_current());
+        let purged = state.by_project.len() != before;
+        let store = Self {
             inner: std::sync::Arc::new(Mutex::new(state)),
             path: Some(std::sync::Arc::new(path)),
+        };
+        if purged {
+            if let Ok(state) = store.inner.lock() {
+                store.save_locked(&state);
+            }
         }
+        store
     }
 
     /// The stored manifest for a project, if any (and only if it's the current schema version).
@@ -286,6 +468,49 @@ impl ScanCacheStore {
         }
     }
 
+    /// Remove everything this cache holds about ONE repo of a project: its file fingerprints and
+    /// every cached finding (snippets included) that belongs to it. The project's manifest is
+    /// dropped entirely when no repo is left in it, so the file does not keep an empty shell.
+    /// Persists atomically with the lock held (same discipline as [`Self::put`]).
+    ///
+    /// Source deletion calls this: the manifest is a copy of client code (excerpts) that must go
+    /// with the checkout, while the rest of the project's entries must survive.
+    ///
+    /// Returns what was removed (`had_entry == false` when the cache held nothing for the repo).
+    pub fn remove_repo(&self, project_id: &str, repo: &str) -> RemovedFromCache {
+        let Ok(mut s) = self.inner.lock() else {
+            return RemovedFromCache::default();
+        };
+        let Some(manifest) = s.by_project.get_mut(project_id) else {
+            return RemovedFromCache::default();
+        };
+        let removed = repo_slice_stats(manifest, repo);
+        manifest.files.retain(|k, _| !k.eq_ignore_ascii_case(repo));
+        manifest
+            .findings
+            .retain(|f| !f.repo.eq_ignore_ascii_case(repo));
+        if manifest.files.is_empty() {
+            s.by_project.remove(project_id);
+        }
+        if removed.had_entry {
+            self.save_locked(&s);
+        }
+        removed
+    }
+
+    /// What [`Self::remove_repo`] WOULD remove, without removing it (the deletion preview).
+    pub fn peek_repo(&self, project_id: &str, repo: &str) -> RemovedFromCache {
+        self.inner
+            .lock()
+            .ok()
+            .and_then(|s| {
+                s.by_project
+                    .get(project_id)
+                    .map(|m| repo_slice_stats(m, repo))
+            })
+            .unwrap_or_default()
+    }
+
     /// Write `state` to disk while the caller already holds the mutex guard.
     ///
     /// Separated from `save` so `put` / `clear` can call it while they own the lock,
@@ -317,6 +542,15 @@ impl ScanCacheStore {
     }
 }
 
+pub mod state_dir;
+
+#[cfg(test)]
+mod ai_key_tests;
+#[cfg(test)]
+mod redaction_tests;
+#[cfg(test)]
+mod remove_repo_tests;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -327,7 +561,9 @@ mod tests {
 
     fn finding(repo: &str, path: &str, rule: &str) -> Finding {
         Finding {
+            could_be_intentional: false,
             repo: repo.to_string(),
+            kind: None,
             path: path.to_string(),
             line: 1,
             rule_id: rule.to_string(),
@@ -344,6 +580,11 @@ mod tests {
             effort: None,
             category: None,
             located: true,
+            captures: Default::default(),
+            evaluated_option_id: None,
+            also_locations: Vec::new(),
+            fix_specific: None,
+            calibration_rationale: None,
         }
     }
 
@@ -453,6 +694,30 @@ mod tests {
         );
     }
 
+    /// The same repo spelled with different case (a project's `Acme/App`, an origin's `acme/app`)
+    /// is one repo: its unchanged files and their cached findings carry forward either way,
+    /// exactly as `repo_delta` and the cache purge already treat it.
+    #[test]
+    fn partition_matches_the_repo_case_insensitively() {
+        let files = vec![file("a.rs", "code a")];
+        let mut b = ManifestBuilder::new();
+        b.record_repo("Me/Api", &files, &[finding("Me/Api", "a.rs", "ARCH-1")]);
+        let prior = b.finish();
+
+        let p = partition(Some(&prior), "me/api", &files);
+
+        assert_eq!(p.unchanged_count, 1, "the file is recognised as unchanged");
+        assert_eq!(p.carried.len(), 1, "and its finding carries forward");
+    }
+
+    #[test]
+    fn recording_a_repo_keeps_findings_spelled_in_another_case() {
+        let files = vec![file("a.rs", "code a")];
+        let mut b = ManifestBuilder::new();
+        b.record_repo("me/api", &files, &[finding("Me/Api", "a.rs", "ARCH-1")]);
+        assert_eq!(b.finish().findings.len(), 1);
+    }
+
     #[test]
     fn rules_fingerprint_is_order_independent_and_change_sensitive() {
         let a = rules_fingerprint(
@@ -548,6 +813,123 @@ mod tests {
             "only this repo's findings are recorded"
         );
         assert_eq!(m.findings[0].rule_id, "R1");
+    }
+
+    // ── ai_covered: stamping + self-heal ────────────────────────────────────────
+
+    #[test]
+    fn manifest_builder_defaults_ai_covered_to_false() {
+        // A caller that forgets to call `with_ai_covered` must get the SAFE default (false),
+        // not an implicitly-trusted manifest.
+        let mut b = ManifestBuilder::new();
+        b.record_repo("me/api", &[file("a.rs", "x")], &[]);
+        let m = b.finish();
+        assert!(
+            !m.ai_covered,
+            "ai_covered must default to false when the builder never stamps it"
+        );
+    }
+
+    #[test]
+    fn manifest_builder_stamps_ai_covered_true_when_told() {
+        let mut b = ManifestBuilder::new().with_ai_covered(true);
+        b.record_repo(
+            "me/api",
+            &[file("a.rs", "x")],
+            &[finding("me/api", "a.rs", "R1")],
+        );
+        let m = b.finish();
+        assert!(m.ai_covered, "with_ai_covered(true) must stamp true");
+    }
+
+    #[test]
+    fn manifest_builder_stamps_ai_covered_false_when_told() {
+        // Simulates an AI-off / blocked / errored run: the manifest is still built (file
+        // fingerprints recorded) but explicitly marked as having no AI baseline.
+        let mut b = ManifestBuilder::new().with_ai_covered(false);
+        b.record_repo("me/api", &[file("a.rs", "x")], &[]);
+        let m = b.finish();
+        assert!(
+            !m.ai_covered,
+            "an AI-off run's manifest must be stamped ai_covered = false"
+        );
+        assert_eq!(
+            m.files["me/api"].len(),
+            1,
+            "file fingerprints are still recorded even when the AI didn't run"
+        );
+    }
+
+    #[test]
+    fn ai_covered_round_trips_through_json_serde() {
+        let mut b = ManifestBuilder::new().with_ai_covered(true);
+        b.record_repo(
+            "me/api",
+            &[file("a.rs", "x")],
+            &[finding("me/api", "a.rs", "R1")],
+        );
+        let m = b.finish();
+        let json = serde_json::to_string(&m).expect("serialize");
+        let back: ScanManifest = serde_json::from_str(&json).expect("deserialize");
+        assert!(
+            back.ai_covered,
+            "ai_covered = true must round-trip through JSON"
+        );
+    }
+
+    #[test]
+    fn legacy_manifest_json_without_ai_covered_self_heals_to_false() {
+        // A manifest persisted BEFORE the `ai_covered` field existed has no such key in its
+        // JSON at all. `#[serde(default)]` must deserialize that as `false` — the safe
+        // value — so every already-written (potentially AI-poisoned) manifest on disk
+        // self-heals the moment it's loaded, with no migration step required.
+        let legacy_json = r#"{
+            "version": 1,
+            "rules_fingerprint": "abc123",
+            "files": {"me/api": {"a.rs": "deadbeefdeadbeef"}},
+            "findings": []
+        }"#;
+        let m: ScanManifest = serde_json::from_str(legacy_json)
+            .expect("legacy manifest JSON (no ai_covered key) must still deserialize");
+        assert!(
+            !m.ai_covered,
+            "a legacy manifest with no ai_covered key must self-heal to false"
+        );
+        assert_eq!(
+            m.rules_fingerprint, "abc123",
+            "other fields still parse normally"
+        );
+    }
+
+    #[test]
+    fn legacy_manifest_without_ai_covered_is_ignored_by_ai_on_gate() {
+        // End-to-end proof of the self-heal: a legacy manifest (no ai_covered key, so it
+        // deserializes false) must fail the caller's `ai_covered` gate exactly like a
+        // freshly-stamped ai_covered=false manifest would — full AI audit, not a reused
+        // empty result.
+        let legacy_json = r#"{
+            "version": 1,
+            "rules_fingerprint": "RULES-V1",
+            "files": {"me/api": {"a.rs": "deadbeefdeadbeef"}},
+            "findings": []
+        }"#;
+        let legacy: ScanManifest = serde_json::from_str(legacy_json).expect("deserialize");
+
+        // Mirrors onboard::audit_repos's `effective_prior` gate.
+        let effective_prior = Some(&legacy).filter(|m| m.matches_rules("RULES-V1") && m.ai_covered);
+        assert!(
+            effective_prior.is_none(),
+            "a legacy (ai_covered=false) manifest must be treated as no AI baseline"
+        );
+
+        let files = vec![file("a.rs", "unchanged content")];
+        let p = partition(effective_prior, "me/api", &files);
+        assert_eq!(
+            p.changed.len(),
+            1,
+            "with no usable AI baseline, the file is treated as changed → re-audited"
+        );
+        assert_eq!(p.unchanged_count, 0);
     }
 
     #[test]
@@ -680,14 +1062,8 @@ mod tests {
         assert_eq!(m.files["me/api"].len(), 2);
         assert_eq!(m.files["me/web"].len(), 2);
         // Verify findings are separated by repo.
-        assert_eq!(
-            m.findings.iter().filter(|f| f.repo == "me/api").count(),
-            2
-        );
-        assert_eq!(
-            m.findings.iter().filter(|f| f.repo == "me/web").count(),
-            2
-        );
+        assert_eq!(m.findings.iter().filter(|f| f.repo == "me/api").count(), 2);
+        assert_eq!(m.findings.iter().filter(|f| f.repo == "me/web").count(), 2);
     }
 
     #[test]
@@ -699,17 +1075,17 @@ mod tests {
             rules_fingerprint: "".to_string(),
             files: {
                 let mut m = BTreeMap::new();
-                m.insert(
-                    "me/api".to_string(),
-                    {
-                        let mut inner = BTreeMap::new();
-                        inner.insert("a.rs".to_string(), content_fingerprint("unchanged"));
-                        inner
-                    },
-                );
+                m.insert("me/api".to_string(), {
+                    let mut inner = BTreeMap::new();
+                    inner.insert("a.rs".to_string(), content_fingerprint("unchanged"));
+                    inner
+                });
                 m
             },
             findings: vec![],
+            ai_covered: true,
+            ai_key: AiScanKey::default(),
+            clone_verdicts: Default::default(),
         };
 
         let p = partition(Some(&stale), "me/api", &files);
@@ -734,28 +1110,52 @@ mod tests {
 
         // Two sequential puts must both be visible and not overwrite each other.
         let mut b1 = ManifestBuilder::new();
-        b1.record_repo("me/api", &[file("a.rs", "x")], &[finding("me/api", "a.rs", "R1")]);
+        b1.record_repo(
+            "me/api",
+            &[file("a.rs", "x")],
+            &[finding("me/api", "a.rs", "R1")],
+        );
         store.put("proj-alpha", b1.finish());
 
         let mut b2 = ManifestBuilder::new();
-        b2.record_repo("me/web", &[file("b.ts", "y")], &[finding("me/web", "b.ts", "R2")]);
+        b2.record_repo(
+            "me/web",
+            &[file("b.ts", "y")],
+            &[finding("me/web", "b.ts", "R2")],
+        );
         store.put("proj-beta", b2.finish());
 
         // Both projects must be present after the two puts.
-        let alpha = store.get("proj-alpha").expect("proj-alpha must be present after put");
-        assert!(alpha.files.contains_key("me/api"), "proj-alpha must have me/api fingerprints");
+        let alpha = store
+            .get("proj-alpha")
+            .expect("proj-alpha must be present after put");
+        assert!(
+            alpha.files.contains_key("me/api"),
+            "proj-alpha must have me/api fingerprints"
+        );
         assert_eq!(alpha.findings.len(), 1);
         assert_eq!(alpha.findings[0].rule_id, "R1");
 
-        let beta = store.get("proj-beta").expect("proj-beta must be present after put");
-        assert!(beta.files.contains_key("me/web"), "proj-beta must have me/web fingerprints");
+        let beta = store
+            .get("proj-beta")
+            .expect("proj-beta must be present after put");
+        assert!(
+            beta.files.contains_key("me/web"),
+            "proj-beta must have me/web fingerprints"
+        );
         assert_eq!(beta.findings.len(), 1);
         assert_eq!(beta.findings[0].rule_id, "R2");
 
         // After clear, the cleared project is gone but the other survives.
         store.clear("proj-alpha");
-        assert!(store.get("proj-alpha").is_none(), "proj-alpha must be absent after clear");
-        assert!(store.get("proj-beta").is_some(), "proj-beta must survive clear of proj-alpha");
+        assert!(
+            store.get("proj-alpha").is_none(),
+            "proj-alpha must be absent after clear"
+        );
+        assert!(
+            store.get("proj-beta").is_some(),
+            "proj-beta must survive clear of proj-alpha"
+        );
     }
 
     /// Verify that `put` after `clear` restores the manifest without any stale state.
@@ -763,16 +1163,30 @@ mod tests {
     fn bug11_put_after_clear_restores_cleanly() {
         let store = ScanCacheStore::new();
         let mut b = ManifestBuilder::new();
-        b.record_repo("me/api", &[file("a.rs", "x")], &[finding("me/api", "a.rs", "R1")]);
+        b.record_repo(
+            "me/api",
+            &[file("a.rs", "x")],
+            &[finding("me/api", "a.rs", "R1")],
+        );
         store.put("proj-x", b.finish());
         store.clear("proj-x");
-        assert!(store.get("proj-x").is_none(), "clear must remove the manifest");
+        assert!(
+            store.get("proj-x").is_none(),
+            "clear must remove the manifest"
+        );
 
         // Re-put must work correctly after a clear.
         let mut b2 = ManifestBuilder::new();
-        b2.record_repo("me/api", &[file("a.rs", "x2")], &[finding("me/api", "a.rs", "R2")]);
+        b2.record_repo(
+            "me/api",
+            &[file("a.rs", "x2")],
+            &[finding("me/api", "a.rs", "R2")],
+        );
         store.put("proj-x", b2.finish());
         let got = store.get("proj-x").expect("re-put must restore manifest");
-        assert_eq!(got.findings[0].rule_id, "R2", "re-put must store the new manifest, not the cleared one");
+        assert_eq!(
+            got.findings[0].rule_id, "R2",
+            "re-put must store the new manifest, not the cleared one"
+        );
     }
 }

@@ -1,13 +1,17 @@
 id = "INTEGRATION-EVENT-WIRING-1"
+version = 1
 title = "Every emitted event has a consumer and every subscription is emitted"
-tag = "stack"
 domain = "integration"
 layer = "universal"
 enforcement = "mechanical"
+kind = "decision"
+inspectable = true
 default = false
 opt_in_only = true
 layer3_only = false
 verification = "policy"
+
+qualifies = "Checked across the whole assembled system in both directions: a per-stack extractor normalizes each repo into emitted events and subscriptions, and every emit must have a matching subscribe and vice versa. A stack with no extractor is reported review-tier for human QA."
 
 [[sources]]
 url = "docs/decisions/2026-06-15_cross_agent_integration_gate.md"
@@ -24,11 +28,15 @@ why = "Event wiring is a cross-agent invariant: the emitter agent and the subscr
 [[option]]
 id = "reconcile-event-emit-vs-consume"
 label = "Reconcile emitted events against subscriptions (both directions, deterministic)"
-directive = "On the assembled tree, run the integration gate's event reconciliation for this rule. A per-stack extractor normalizes each repo's source into PRODUCED events (emit / publish / dispatch) and CONSUMED events (subscribe / on / listen). Every produced event must have at least one consumer across the agents, and every consumed event must have at least one emitter. A dangling emit or a dangling subscription fails deterministically and bounces to the responsible agent with the event name and location. Where a stack has no event extractor, the event seam is reported review-tier, never a faked green. Intentional exceptions (e.g. an event published for an external subscriber outside the fleet) are waived with an inline `camerata:allow INTEGRATION-EVENT-WIRING-1 -- <reason>` or a baseline entry."
+directive = "Every event the system emits has at least one subscriber somewhere in it, and every subscription corresponds to an event that is actually emitted — checked across all components, so neither a dangling emit (a signal nothing listens for) nor a dangling subscription (a consumer waiting on an event nobody sends) ships."
+remediation = """
+Add the missing consumer for an event that is emitted but never subscribed to, or add the missing producer/emit call for a subscription that is waiting on an event nothing ever publishes. Remove the dead emit or dead subscription instead if it turns out to be leftover from removed functionality. Verify by re-running the integration gate's event reconciliation on the assembled tree and confirming every emitted event now has at least one matching consumer and every subscription has a matching emitter.
+"""
+effort = "low"
 why = "The wiring-completeness check runs on the integrated whole — the only place both the emit and the subscribe are visible at once — as a deterministic comparison of neutral event records, not an LLM guessing whether the ends connect."
 
 [[option]]
 id = "no-event-wiring-check"
 label = "No cross-agent event-wiring check"
-directive = "the project does not reconcile emitted events against subscriptions on the assembled tree, so a dangling emit (dead signal) or a dangling subscription (a consumer waiting on an event that is never published) ships undetected across the agent seam"
+directive = "Emitted events and subscriptions are not reconciled across the system, so a dangling emit or a dangling subscription ships undetected."
 why = "Without the integration gate the dangling end surfaces only at runtime, when the expected event never arrives or an emitted event is silently dropped, exactly the wiring gap this tier exists to close."

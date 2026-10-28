@@ -1,11 +1,15 @@
 id = "GO-NO-GOROUTINE-GLOBALS-1"
+version = 1
 title = "Goroutine-unsafe state is never stored in global or package-level variables; mutable state is thread-local or guarded by locks"
-tag = "stack"
 domain = "go"
 layer = "language"
 enforcement = "structured"
+kind = "defect"
+inspectable = true
 default = true
 verification = "grounded"
+
+qualifies = "Package-level variables that are not read-only or protected by locks (mutex, channels) can be accessed concurrently by multiple goroutines, causing races. Go's -race detector catches many such bugs at runtime; the rule is to avoid the situation entirely by keeping mutable state off the package level."
 
 [[sources]]
 url = "https://go.dev/doc/articles/race_detector"
@@ -14,7 +18,6 @@ title = "Go Data Race Detector"
 [[sources]]
 url = "https://go.dev/doc/effective_go#goroutines"
 title = "Effective Go — Goroutines"
-qualifies = "Package-level variables that are not read-only or protected by locks (mutex, channels) can be accessed concurrently by multiple goroutines, causing races. Go's -race detector catches many such bugs at runtime; the rule is to avoid the situation entirely by keeping mutable state off the package level."
 
 [decision]
 question = "Where are goroutine-unsafe mutable values stored?"
@@ -25,10 +28,14 @@ why = "Go programs are concurrent by default: any http.Handler or background tas
 id = "no-goroutine-unsafe-globals"
 label = "never store mutable state in globals; use structs with locks or channels"
 directive = "Mutable state is never stored in package-level variables. If multiple goroutines need to coordinate (e.g., a service instance that holds a database connection pool), that state is stored in a struct that is instantiated once and passed to goroutines, or it is protected by a sync.Mutex / sync.RWMutex. If state must be shared globally (rare), it is read-only after initialization or guarded by atomic operations or channels."
+remediation = """
+Move the mutable package-level variable into a struct instantiated once and passed explicitly to the goroutines that need it, or guard it with a sync.Mutex/sync.RWMutex if it must remain shared state. Verify by running the code under go test -race and confirming no data race is reported on the previously-global variable.
+"""
 why = "Avoiding globals eliminates race conditions and makes concurrency explicit and testable."
 
 [[option]]
 id = "sync-globals-minimally"
+violates = true
 label = "store mutable state in globals but protect with locks"
 directive = "Global variables may be mutated if they are guarded by a lock (sync.Mutex at the file level or inside a synced wrapper)."
 why = "Still allows global state, increasing cognitive load; requires developers to remember to lock before every access."

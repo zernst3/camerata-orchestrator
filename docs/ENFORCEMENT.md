@@ -1,8 +1,11 @@
 # ENFORCEMENT.md — how Camerata rules become real
 
-Camerata holds a large corpus of *principles* (the camerata-ai library at
-`/Users/zacharyernst/Documents/Repos/camerata-ai/principles`, 100+ files). A
-principle is only worth as much as the mechanism that enforces it. This document
+Camerata holds a large corpus of *principles*: **417 TOML rules, vendored into
+this repo** at `crates/rules/principles/` (417 as of 2026-10-11). That is what
+`camerata_rules::DEFAULT_CORPUS_PATH` resolves to and what the server actually
+loads; override it with `CAMERATA_CORPUS_PATH`. The sibling `camerata-ai` repo is
+where the corpus FORMAT originates and is no longer the corpus this build reads.
+A principle is only worth as much as the mechanism that enforces it. This document
 states, precisely and honestly, **which rules are enforced by executable code
 today, which are no-ops, and through which of the three enforcement lanes.**
 

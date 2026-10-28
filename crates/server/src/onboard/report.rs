@@ -1,8 +1,8 @@
 //! Report-building functions: assemble `ScanReport`, render CSV/issue-body output,
 //! create GitHub issues, and merge deep-tier reports.
 
-use super::{Finding, RepoStack, ScanProvenance, ScanReport};
 use super::propose::propose_rules;
+use super::{Finding, RepoStack, ScanProvenance, ScanReport};
 
 /// Build a report from already-aggregated findings + per-repo stacks. Pure.
 pub fn build_report(
@@ -20,14 +20,22 @@ pub fn build_report(
         files_excluded: 0,
         excluded_mechanical_rules: Vec::new(),
         code_chars: 0,
+        code_lines: 0,
+        code_lines_by_language: Vec::new(),
         findings,
         proposed_rules,
         gated: false,
+        blocked: false,
+        ai_blocked_reason: None,
+        ai_error: None,
         message: None,
         actual_usage: None,
         deep: None,
         coverage_notes: Vec::new(),
         provenance: ScanProvenance::default(),
+        recommendations: std::collections::HashMap::new(),
+        failed_passes: Vec::new(),
+        ledger: crate::scan_ledger::ScanLedger::new(),
     }
 }
 

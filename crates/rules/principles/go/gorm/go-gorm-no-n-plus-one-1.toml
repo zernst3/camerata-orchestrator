@@ -1,9 +1,11 @@
 id = "GO-GORM-NO-N-PLUS-ONE-1"
+version = 1
 title = "Related data is loaded with Preload or Join in a single query; no N+1 patterns where a loop fetches related records one-by-one"
-tag = "stack"
 domain = "go:gorm"
 layer = "library"
 enforcement = "structured"
+kind = "default_with_exceptions"
+inspectable = true
 default = true
 verification = "grounded"
 
@@ -20,13 +22,17 @@ why = "A query that fetches N parent records, then in a loop calls a database qu
 id = "preload-join-one-query"
 label = "Related data is loaded in a single query using Preload or Join"
 directive = "When a handler or service needs to fetch records and their related associations, the repository method loads them in a single query using GORM's Preload() for separate queries per association (optimized into a second query for all children), or Join() for a single JOIN query. The repository method signature includes the associations it loads; callers do not load related data in a loop."
+remediation = """
+Replace the per-parent loop that issues one query per child with a single query using GORM's Preload() or Join() to fetch the related records together. Verify by running the endpoint under a query-count profiler and confirming the number of queries no longer scales with the number of parent records returned.
+"""
 why = "GORM's Preload and Join are optimized to load related data efficiently; one query or two instead of N+1."
 
 [[option]]
 id = "lazy-loading-in-loop"
+violates = true
 label = "Each record's related data is fetched in a loop"
 directive = "A handler or service fetches a list of parents, then iterates over them and calls a database query for each parent to fetch its children."
-why = "Simple to code; results in N+1 queries and poor performance. Easy to introduce without realizing the cost."
+why = "Each record in the result set triggers its own query for its related data, so the query count grows linearly with the result size and latency degrades as the table fills. Against a handful of development rows the cost is invisible; in production it shows up as a slow endpoint with no single expensive query to point at."
 
 [[option]]
 id = "manual-join-in-app"

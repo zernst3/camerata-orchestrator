@@ -1,9 +1,20 @@
 id = "CSHARP-EFCORE-EXPLICIT-TRANSACTIONS-1"
+version = 1
 title = "Multi-write operations are wrapped in an explicit transaction; partial writes are not observable"
-tag = "stack"
 domain = "csharp:efcore"
 layer = "library"
 enforcement = "structured"
+kind = "default_with_exceptions"
+inspectable = true
+# Deviation-ceiling escape hatch, INHERITED from ARCH-EXPLICIT-TX-1: severity must describe the
+# PROBLEM, not which rule happened to fire. Without this, a repo on this stack caps the identical
+# architectural defect at medium while an unmirrored stack reaches high under the general rule.
+# This rule mirrors ARCH-EXPLICIT-TX-1 because it re-litigates the same transactional-ownership
+# contract: the SERVICE method that spans multiple SaveChanges opens, commits, and rolls back the
+# explicit transaction, and its violating option (multiple SaveChanges calls each riding its own
+# implicit per-call transaction) is the spine rule's own rejected "per-call short transactions"
+# option in EF Core form, with the same stated consequence — partial state on failure.
+deviation_ceiling = "high"
 default = true
 
 verification = "grounded"
@@ -16,6 +27,9 @@ why = "EF Core's SaveChanges/SaveChangesAsync wraps all pending changes in a sin
 id = "explicit-transaction-for-multi-write"
 label = "Explicit transaction wrapping all SaveChanges calls that form one logical operation"
 directive = "Any service method that calls SaveChangesAsync more than once within a single logical operation wraps both calls in using var tx = await context.Database.BeginTransactionAsync(); ... await tx.CommitAsync() (with the full async/await pattern for rollback on exception). If the operation can be restructured so that EF Core's implicit per-SaveChanges transaction covers it (by adding all entities to the same tracked context instance and calling SaveChanges once), that restructuring is preferred over an explicit transaction. Calling SaveChanges twice without an explicit transaction, where the second call's success is required for the first call's result to be valid, is forbidden."
+remediation = """
+Wrap the multiple SaveChangesAsync calls in this logical operation in an explicit transaction (using var tx = await context.Database.BeginTransactionAsync(); ... await tx.CommitAsync()), with rollback on exception. Where the operation can be restructured to a single SaveChanges call instead, prefer that and skip the explicit transaction. Verify by forcing an exception between the two SaveChanges calls and confirming neither write is persisted.
+"""
 why = "Explicit transactions guarantee that multi-step writes are atomic: a failure after the first SaveChanges but before the second rolls back the first, leaving no partial state."
 
 [[option]]
@@ -26,6 +40,7 @@ why = "Cleaner than an explicit transaction when EF Core can detect and order th
 
 [[option]]
 id = "multiple-saveschanges-no-transaction"
+violates = true
 label = "Multiple SaveChanges calls without an explicit transaction"
 directive = "Service methods call SaveChangesAsync multiple times within a logical operation without wrapping them in an explicit transaction. Each SaveChanges has its own implicit per-call transaction."
 why = "Leaves the database in partial state if any call after the first fails; the committed rows from the first call remain, requiring compensating writes or manual cleanup. Forbidden when the second call's success is required for the first call's result to be valid."

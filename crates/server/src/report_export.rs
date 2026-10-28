@@ -72,6 +72,182 @@ pub struct ReportOptions {
     pub prepared_by: String,
     #[serde(default)]
     pub executive_summary_override: Option<String>,
+    /// The AUDITING AGENCY's own brand (e.g. "Cantus Works") — distinct from `client_name`
+    /// (who the report is prepared FOR). Owner's hard constraint (2026-09-13 branding pass):
+    /// Camerata is the licensable application; the agency running it is not Camerata's to
+    /// name. Blank here falls through to the `CAMERATA_REPORT_BRAND` env var
+    /// ([`apply_env_defaults`]), then to no brand at all — never a baked-in literal. See
+    /// [`resolve_brand`].
+    #[serde(default)]
+    pub brand: String,
+    /// Every rule's PROJECT-level chosen alternative option (uppercased rule id -> option
+    /// id) — the `resolve_fix` fallback source for a finding with no `evaluated_option_id`
+    /// (see its doc comment). NEVER sent by the export dialog client-side (the client has no
+    /// business knowing this); the export handlers populate it server-side from the project's
+    /// `ruleset` before calling `build_report_json`/`build_workbook`/`build_findings_export`.
+    /// `#[serde(default)]` so a client that omits it (every real client) degrades to an empty
+    /// map, i.e. `resolve_fix` falls straight through to the corpus default — today's exact
+    /// behavior for any project this feature hasn't touched.
+    #[serde(default)]
+    pub chosen_options: std::collections::HashMap<String, String>,
+    /// The backend and provider that ran the inspection, for the manifest and README
+    /// provenance. Server-populated, never client-supplied (`serde(skip)`).
+    #[serde(skip)]
+    pub model: Option<crate::ModelRecord>,
+}
+
+/// Env var carrying the STANDING default for [`ReportOptions::brand`] when the export dialog
+/// doesn't POST one. Brand-neutral name (not `CANTUS_*`) so a future Camerata licensee sets
+/// their OWN agency's value here without touching Camerata source — see the "Branding" section
+/// of `docs/design/2026-09-13_audit-deliverable-review-fixes.md`.
+pub const REPORT_BRAND_ENV: &str = "CAMERATA_REPORT_BRAND";
+
+/// Env var carrying the standing default for [`ReportOptions::prepared_by`]. Same precedence
+/// and neutrality rationale as [`REPORT_BRAND_ENV`].
+pub const REPORT_PREPARED_BY_ENV: &str = "CAMERATA_REPORT_PREPARED_BY";
+
+/// The cover title (and PDF metadata title) when no brand resolves at all — no agency name,
+/// and NEVER the word "Camerata" (Camerata is the instrument, named only in Methodology; see
+/// the Branding section of the design doc). Exported so the template-generation site and any
+/// test asserting on the exact fallback string share one literal.
+///
+/// P6 (2026-09-29): the product is "Codebase Inspection" — client-facing copy says
+/// "inspection"/"Inspection", never "audit"/"Audit" (internal code identifiers, rule ids, and
+/// doc-comment cross-references are exempt; see the product-hardening plan's P6 section).
+pub const NEUTRAL_COVER_TITLE: &str = "Codebase Inspection Report";
+
+/// The standing default for [`ReportOptions::prepared_by`] / [`REPORT_PREPARED_BY_ENV`] when
+/// NEITHER resolves to a non-blank value — P6 (2026-09-29): the cover's "Prepared by" row must
+/// NEVER render "N/A" (promise 1: "one person reads every finding and signs the report"), so
+/// the ultimate fallback is a real name, not an empty string. A per-report `prepared_by` or the
+/// env var still wins over this (see [`resolve_prepared_by`]'s precedence).
+pub const DEFAULT_PREPARED_BY: &str = "Zachary Ernst, Cantus Works";
+
+/// Precedence resolver: the per-report field wins when non-blank, else the env value when
+/// non-blank, else `None`/empty. Pure — takes the env value as an explicit `Option<&str>`
+/// rather than calling `std::env::var` itself, so it stays unit-testable without mutating real
+/// process env state (which parallel `cargo test` threads would otherwise race on). Shared by
+/// [`resolve_brand`] and [`resolve_prepared_by`].
+fn resolve_with_env_default(field: &str, env: Option<&str>) -> Option<String> {
+    let field = field.trim();
+    if !field.is_empty() {
+        return Some(field.to_string());
+    }
+    env.map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+/// Resolve the report's brand per the owner's precedence: per-report `ReportOptions::brand` >
+/// `CAMERATA_REPORT_BRAND` env var > no brand (`None`). `None` means the cover/footer/PDF
+/// title must render the brand-neutral fallback ([`NEUTRAL_COVER_TITLE`]) with no agency name
+/// and no "Camerata" literal — never a fabricated brand.
+pub(crate) fn resolve_brand(opts: &ReportOptions, env_brand: Option<&str>) -> Option<String> {
+    resolve_with_env_default(&opts.brand, env_brand)
+}
+
+/// Resolve the report's "prepared by" line: per-report `ReportOptions::prepared_by` >
+/// `CAMERATA_REPORT_PREPARED_BY` env var > [`DEFAULT_PREPARED_BY`]. P6 (2026-09-29): the last
+/// step used to be an empty string, which the cover table's `or_na` rendered as "Prepared by
+/// N/A" — a report promising "one person reads every finding and signs the report" must never
+/// say nobody prepared it, so the floor is a real name now, never blank.
+pub(crate) fn resolve_prepared_by(opts: &ReportOptions, env_prepared_by: Option<&str>) -> String {
+    resolve_with_env_default(&opts.prepared_by, env_prepared_by)
+        .unwrap_or_else(|| DEFAULT_PREPARED_BY.to_string())
+}
+
+impl ReportOptions {
+    /// Fold the `CAMERATA_REPORT_BRAND`/`CAMERATA_REPORT_PREPARED_BY` env vars into this
+    /// struct's blank fields, IN PLACE. Call this exactly ONCE, at the HTTP boundary (the
+    /// `/audit-report` and `/product-export` handlers in `lib.rs`), BEFORE `build_report_json`
+    /// — that keeps `build_report_json` itself free of direct env access (pure, no I/O, per
+    /// its own doc comment) while still honoring the env-default precedence end to end. Real
+    /// `std::env::var` reads live here, not in [`resolve_brand`]/[`resolve_prepared_by`], so
+    /// those stay unit-testable with explicit values.
+    pub fn apply_env_defaults(&mut self) {
+        self.brand = resolve_brand(self, std::env::var(REPORT_BRAND_ENV).ok().as_deref())
+            .unwrap_or_default();
+        self.prepared_by =
+            resolve_prepared_by(self, std::env::var(REPORT_PREPARED_BY_ENV).ok().as_deref());
+    }
+}
+
+/// C4-R3: zero-width and byte-order-mark code points. None of these carry any visual
+/// information in ANY of the three report artifacts (the Typst-rendered PDF, `findings.json`,
+/// the xlsx workbook) — their only observable effect is to silently corrupt an otherwise
+/// identical-looking string for exact-match search/grep/diff/copy-paste. A scanned repo CAN
+/// legitimately contain one of these in a file name or a pasted snippet (adversarial or just
+/// odd source encoding); this list is also what the PDF template's own `breakable()` helper
+/// must never introduce as a side effect of wrapping a long path (see that function's doc
+/// comment in `templates/audit_report.typ`).
+const ZERO_WIDTH_CODEPOINTS: [char; 5] = [
+    '\u{200B}', // zero width space
+    '\u{200C}', // zero width non-joiner
+    '\u{200D}', // zero width joiner
+    '\u{FEFF}', // BOM / zero width no-break space
+    '\u{2060}', // word joiner
+];
+
+/// Strip every [`ZERO_WIDTH_CODEPOINTS`] character out of `s`, borrowing unchanged when none
+/// are present (the overwhelming common case) so this is free to call defensively.
+pub(crate) fn strip_zero_width(s: &str) -> std::borrow::Cow<'_, str> {
+    if s.chars().any(|c| ZERO_WIDTH_CODEPOINTS.contains(&c)) {
+        std::borrow::Cow::Owned(
+            s.chars()
+                .filter(|c| !ZERO_WIDTH_CODEPOINTS.contains(c))
+                .collect(),
+        )
+    } else {
+        std::borrow::Cow::Borrowed(s)
+    }
+}
+
+/// Apply [`strip_zero_width`] (then secret redaction) to the [`Finding`]'s free-text fields that flow,
+/// verbatim or near-verbatim, into every report artifact: `path` (the PDF's `raw()` path
+/// rendering, the xlsx "Location" column, `findings.json`'s `path` field), `snippet` (the PDF's
+/// code block, and — for a dependency-advisory finding — the package name), `detail` (the
+/// curated-finding body), and every `captures` value (substituted into authored remediation
+/// text by [`instantiate_remediation`]). This is the ONE ingestion point both
+/// [`build_report_json`] and `xlsx_export::partition_rows` call before doing anything else with
+/// a scan's findings, so neither artifact can drift from the other on this invariant, and no
+/// future field added to either builder needs its own copy of this defense.
+pub(crate) fn sanitize_finding_text(finding: &Finding) -> Finding {
+    let mut f = finding.clone();
+    f.path = strip_zero_width(&f.path).into_owned();
+    f.snippet = strip_zero_width(&f.snippet).into_owned();
+    f.detail = strip_zero_width(&f.detail).into_owned();
+    for v in f.captures.values_mut() {
+        *v = strip_zero_width(v).into_owned();
+    }
+    // The three free-text fields this sanitizer used to miss, all of which reach the client:
+    // the model-written fix (`fix_specific`), every absorbed evidence site's snippet, and the
+    // severity rationale. This gap is exactly where the sweep exports' leaked keys sat.
+    if let Some(fix) = f.fix_specific.as_mut() {
+        *fix = strip_zero_width(fix).into_owned();
+    }
+    if let Some(rationale) = f.calibration_rationale.as_mut() {
+        *rationale = strip_zero_width(rationale).into_owned();
+    }
+    for site in &mut f.also_locations {
+        site.snippet = strip_zero_width(&site.snippet).into_owned();
+    }
+    // Zero-width characters are stripped FIRST so one inserted inside a key cannot hide it from
+    // the detector; then the secret redaction (belt and braces: every producer already redacted
+    // at construction, see `onboard::redact`). Idempotent.
+    crate::onboard::redact::redact_finding(&mut f);
+    f
+}
+
+/// Apply [`sanitize_finding_text`] to every finding in `report`, returning an owned clone — the
+/// shared ingestion step for [`build_report_json`] and `xlsx_export::partition_rows`. Clones
+/// the whole report (not just `findings`) so the caller can shadow its `report: &ScanReport`
+/// parameter with the sanitized value and leave every other line in the function unchanged.
+pub(crate) fn sanitize_report_findings(report: &ScanReport) -> ScanReport {
+    let mut report = report.clone();
+    for f in report.findings.iter_mut() {
+        *f = sanitize_finding_text(f);
+    }
+    report
 }
 
 /// Stable identity for a `Finding`, matching `camerata_ui_core::triage::finding_key`'s
@@ -105,6 +281,30 @@ pub fn finding_key(f: &Finding) -> String {
 pub(crate) enum Disposition {
     /// No triage decision yet this session (the default for an absent/unrecognized entry).
     Unresolved,
+    /// THE AFFIRMATIVE DISPOSITION (Pass 2 step 3): the auditor read this finding, judged it
+    /// REAL, and it ships in the report as a live finding.
+    ///
+    /// Before this existed, every exit from `Unresolved` was a way of NOT shipping a row
+    /// (`Ignored` accepts the risk, `TechDebt*` defers the fix, `FalsePositive` excludes it
+    /// outright), so the only way to keep a finding live was to leave it undecided — and the
+    /// export could not tell a finding the auditor had read and confirmed from one he had
+    /// never opened. The product's first promise is that one person reads every finding and
+    /// signs; this is the variant that puts data behind it.
+    ///
+    /// Semantically it is "real", NOT "scheduled" and NOT "accepted":
+    ///
+    /// * [`matrix_bucket`] gives it the SAME severity-derived quadrant an `Unresolved` row
+    ///   gets. Confirming states that the finding is genuine, which is exactly what the
+    ///   quadrant already assumed; it says nothing about when or whether to fix it.
+    /// * it counts as STILL OPEN in the executive summary and the category scorecard, because
+    ///   a confirmed-and-unfixed finding is outstanding work for the client.
+    /// * it DOES flip [`ReviewState`] to `Reviewed` — unlike `BaselineAccepted`/`WaivedInline`
+    ///   it is this session's human judgment, which is the whole point of it.
+    ///
+    /// Client-local, like `FalsePositive`: it is read out of the draft's disposition map by
+    /// the export and commits nothing at Process (owner's Q2 ruling, 2026-10-12 — a durable
+    /// per-finding record across engagements is a backend surface Pass 2 must not invent).
+    Confirmed,
     /// Real, accepted risk — the client's `Ignored` disposition, this session.
     Ignored,
     /// Tech debt, pulled into the do-now bucket.
@@ -134,30 +334,111 @@ pub(crate) enum Disposition {
 /// partition loop) — a PDF export must never be able to panic the server on triage data, so a
 /// future refactor that lets one slip through fails soft to `Unresolved` (debug-asserts in
 /// debug builds so the invariant is still loud in tests/dev) rather than `unreachable!`.
+///
+/// Grading-cycle fix (2026-10-07): `BaselineAccepted` is a FALSE ATTESTATION unless a real
+/// baseline record backs it — the client text ("pre-existing accepted debt (baseline
+/// suppression)" / xlsx's "accepted in a PRIOR run") says someone already triaged and
+/// accepted this exact finding. The ONLY legitimate producer of `status ==
+/// "suppressed-baseline"` is `onboard::audit::classify_repo_findings`, which stamps it
+/// strictly when a finding's `(rule_id, content fingerprint)` matches an entry actually
+/// present in the repo's committed `.camerata/baseline.json` — and that classification pass
+/// runs ONLY over the pre-preview finding set (`repo_findings`, before `merge_scan_preview`
+/// appends anything). A PREVIEW/external-tool row (`finding.preview == true` — Semgrep,
+/// Clippy, Ruff, ESLint rows from `scan_tools::run_scan_tools`/`preview_finding`) is appended
+/// to the report AFTER that pass and so can NEVER have gone through real baseline matching,
+/// no matter what its raw `status` string claims. Before this fix, `scan_tools::
+/// preview_finding`/`note_finding` defaulted every preview row's `status` to
+/// `"suppressed-baseline"` (meaning only "not yet wired into CI") and this function trusted
+/// that string blindly — stamping "baseline accepted" on repos that had never been triaged
+/// at all (3/4/6 rows across three graded fixtures, zero baseline file, zero waiver). A
+/// preview row can therefore never classify as `BaselineAccepted` here, defense-in-depth,
+/// even if some future producer repeats the same mistake: it downgrades to `Unresolved`
+/// (open; still routes to `held` if another gate, e.g. `needs_review`, independently
+/// applies) rather than shipping as an accepted disposition with no record behind it. See
+/// `scan_tools::preview_finding`'s doc comment for the matching source-side fix, and
+/// `tests::a_preview_finding_with_suppressed_baseline_status_is_never_baseline_accepted` for
+/// the test-time guard.
 pub(crate) fn classify(finding: &Finding, wire: Option<&DispositionWire>) -> Disposition {
-    match wire {
-        Some(d) => match d.state.as_str() {
-            "Ignored" => Disposition::Ignored,
-            "TechDebt" => {
-                if d.bucket == "Now" {
-                    Disposition::TechDebtNow
-                } else {
-                    Disposition::TechDebtLater
-                }
+    // W28: what the row's OWN STATUS implies, with no triage decision in play. Used both when
+    // there is no wire entry and when there is one this version cannot read — see below.
+    let from_status = || match finding.status.as_str() {
+        "suppressed-baseline" if !finding.preview => Disposition::BaselineAccepted,
+        "suppressed-inline" => Disposition::WaivedInline,
+        _ => Disposition::Unresolved,
+    };
+
+    let Some(d) = wire else {
+        return from_status();
+    };
+
+    match d.state.as_str() {
+        "Confirmed" => Disposition::Confirmed,
+        "Ignored" => Disposition::Ignored,
+        "TechDebt" => {
+            if d.bucket == "Now" {
+                Disposition::TechDebtNow
+            } else {
+                Disposition::TechDebtLater
             }
-            "FalsePositive" => {
-                debug_assert!(
-                    false,
-                    "FalsePositive must be partitioned out before classify() is called; see \
-                     build_report_json. Falling through to Unresolved rather than panicking."
-                );
-                Disposition::Unresolved
-            }
-            _ => Disposition::Unresolved,
-        },
-        None if finding.status == "suppressed-baseline" => Disposition::BaselineAccepted,
-        None if finding.status == "suppressed-inline" => Disposition::WaivedInline,
-        None => Disposition::Unresolved,
+        }
+        "FalsePositive" => {
+            debug_assert!(
+                false,
+                "FalsePositive must be partitioned out before classify() is called; see \
+                 build_report_json. Falling through to the status rather than panicking."
+            );
+            from_status()
+        }
+        // W28 — an UNRECOGNISED state falls back to the status, not to `Unresolved`.
+        //
+        // This arm used to return `Unresolved`, which renders "Open (recommended: …)". That
+        // asserted a human judgment nobody made: an unrecognised state is a parse miss or a
+        // producer from a different version, never a decision to leave the row open. On a
+        // row whose own `status` reads `suppressed-baseline` it also made the export
+        // self-contradicting, and the 2026-10-16 sweep shipped 38 rows in exactly that shape.
+        //
+        // A RECOGNISED state still wins over the status, above: an auditor who confirmed or
+        // ignored a baseline-suppressed row made a real decision this session, and
+        // overriding the suppression is what a disposition is for. The fallback applies only
+        // where there is no decision to honour.
+        _ => from_status(),
+    }
+}
+
+/// P5: whether this export reflects an auditor's actual THIS-SESSION triage pass over the
+/// findings, or is a raw, no-human-touch snapshot straight off the engine. Derived, never
+/// client-supplied — see `build_report_json`'s partition loop, which flips this to `Reviewed`
+/// the moment any finding carries an explicit `Ignored` / `TechDebt*` / `FalsePositive` wire
+/// disposition. A pre-existing `BaselineAccepted` or `WaivedInline` disposition (both sourced
+/// from `Finding.status`, a PRIOR/code-level fact rather than this session's human judgment —
+/// see `classify`'s doc comment) does NOT flip this to `Reviewed`: those findings were never
+/// looked at by anyone THIS run.
+///
+/// Gates two things:
+/// - The narrative voice (`default_narrative`): `Raw` describes what the ENGINE did and never
+///   claims a human reviewed or dispositioned anything; `Reviewed` describes the reviewer's
+///   actual dispositions.
+/// - The PDF's per-page "DRAFT: not yet reviewed" banner (`Raw` only) — see the Typst
+///   template's `d.review_state` read.
+///
+/// See `docs/plans/2026-09-29_codebase-inspection-hardening.md`'s P5 section: the bug this
+/// fixes is a raw (nobody-reviewed) export whose narrative said "N were reviewed... 0 were
+/// dispositioned as false positives by the auditor" — a flat fabrication, since reviewing
+/// something is precisely what had not happened.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewState {
+    /// No finding in this scan carries an explicit THIS-SESSION auditor disposition.
+    Raw,
+    /// At least one finding carries an explicit THIS-SESSION auditor disposition
+    /// (`Ignored` / `TechDebt{Now,Later}` / `FalsePositive`).
+    Reviewed,
+}
+
+impl ReviewState {
+    /// Whether the PDF's draft banner must render on every page.
+    pub fn is_draft(self) -> bool {
+        matches!(self, ReviewState::Raw)
     }
 }
 
@@ -169,15 +450,16 @@ pub(crate) fn classify(finding: &Finding, wire: Option<&DispositionWire>) -> Dis
 /// bucket by construction; see `matrix_bucket`'s doc comment).
 ///
 /// # Never fabricate a client disposition
-/// A real audit often ships before any client conversation has happened (e.g. a pre-engagement
-/// scan of an OSS repo, or the very first draft of a fresh engagement) — there is no "team" to
-/// have confirmed anything. `confirmed_by_client` (from `DispositionWire`, default `false`) is
-/// the ONLY thing that unlocks "Accepted risk: {reason}" wording for an `Ignored` finding; when
-/// it is `false` (the safe default), the reader sees "Needs client confirmation" instead, no
-/// matter how confident the auditor's own `reason` prose reads — the auditor's proposed
-/// rationale is still surfaced, but honestly attributed to the auditor, never invented as a
-/// client's words. This is a deliberate rendering constraint, not just a fixture-content fix:
-/// the serializer itself cannot produce "confirmed" language without that explicit flag.
+/// A real inspection often ships before any client conversation has happened (e.g. a
+/// pre-engagement scan of an OSS repo, or the very first draft of a fresh engagement) — there
+/// is no "team" to have confirmed anything. `confirmed_by_client` (from `DispositionWire`,
+/// default `false`) is the ONLY thing that unlocks "Accepted risk: {reason}" wording for an
+/// `Ignored` finding; when it is `false` (the safe default), the reader sees "Needs client
+/// confirmation" instead, no matter how confident the reviewer's own `reason` prose reads — the
+/// reviewer's proposed rationale is still surfaced, but honestly attributed to the reviewer,
+/// never invented as a client's words. This is a deliberate rendering constraint, not just a
+/// fixture-content fix: the serializer itself cannot produce "confirmed" language without that
+/// explicit flag.
 ///
 /// No em/en dashes (house style for this client deliverable) — see `bucket_title`.
 pub(crate) fn disposition_label(
@@ -187,10 +469,33 @@ pub(crate) fn disposition_label(
     confirmed_by_client: bool,
 ) -> String {
     match disposition {
+        // C5-4: a calibration hedge (any severity) reads as a distinct "held for review" call
+        // to action, never the low-stakes "Convention to consider" wording the `informational`
+        // appendix uses — a high/critical row the calibrator itself flagged debatable must never
+        // read like a style note. C5-7: the `held` bucket now also carries a SECOND, unrelated
+        // reason (a high/critical uncited AI-tier finding — see `is_uncited_ai_finding`), so
+        // this label is deliberately reason-agnostic rather than naming "calibration"
+        // specifically; the row's own headline already states the concrete reason ("calibration
+        // flagged..." / "Needs review (uncited...)") right next to it.
+        Disposition::Unresolved if bucket == "held" => {
+            "Held for review (a human reviewer's judgment call is needed before this can be \
+             actioned)"
+                .to_string()
+        }
         Disposition::Unresolved if bucket == "informational" => {
             "Convention to consider (informational)".to_string()
         }
         Disposition::Unresolved => format!("Open (recommended: {})", bucket_title(bucket)),
+        // The affirmative call, stated as the auditor's own and nobody else's. It names the
+        // same recommended bucket an open row names — confirming establishes that the finding
+        // is real, not when it gets fixed — but it says WHO decided, which is the difference
+        // the reader cannot otherwise see.
+        Disposition::Confirmed => {
+            format!(
+                "Confirmed by the reviewer (recommended: {})",
+                bucket_title(bucket)
+            )
+        }
         Disposition::Ignored => {
             if confirmed_by_client {
                 if reason.trim().is_empty() {
@@ -201,7 +506,7 @@ pub(crate) fn disposition_label(
             } else if reason.trim().is_empty() {
                 "Needs client confirmation".to_string()
             } else {
-                format!("Needs client confirmation (auditor's proposed rationale: {reason})")
+                format!("Needs client confirmation (reviewer's proposed rationale: {reason})")
             }
         }
         Disposition::TechDebtNow => "Tech debt, resolve now".to_string(),
@@ -221,6 +526,7 @@ pub(crate) fn bucket_title(bucket: &str) -> &'static str {
         "do_next" => "Do next",
         "plan" => "Plan",
         "informational" => "Informational",
+        "held" => "Held for review",
         _ => "Accepted",
     }
 }
@@ -241,6 +547,186 @@ pub(crate) fn normalize_severity(raw: &str) -> String {
         // informational stance note would silently re-enter the plan/low action tier.
         "info" => "info".to_string(),
         _ => "low".to_string(),
+    }
+}
+
+/// E2 (`docs/plans/2026-10-09_audit-findings-tracker.md`): clamp `severity` DOWN to `rule_id`'s
+/// corpus-declared [`camerata_rules::Rule::max_severity`], when one is declared and `severity`
+/// currently ranks ABOVE it (a lower [`severity_rank`] number is more severe, so "above the
+/// ceiling" means `severity_rank(severity) < severity_rank(ceiling)`). Never RAISES a severity
+/// that already ranks at or below the ceiling — this is a ceiling, not a floor, and applying it
+/// is always safe regardless of how `severity` got to its current value (a model's own
+/// judgment, the D5 severity floor, the D6/D7 severity ceiling rules — ALL of those run
+/// upstream, inside `ai_audit.rs`, before a finding ever reaches this export layer; this is the
+/// LAST clamp, applied once per finding at the single choke-point every exporter (the PDF's
+/// `build_report_json`, the xlsx/`findings.json` `partition_rows`) already shares for severity
+/// normalization, so "no report may exceed it" holds for every artifact, not just one).
+///
+/// `rule_id` is resolved through [`corpus_rule_for`] (not a bare `corpus.get_by_id`), so an
+/// external-tool/preview finding whose `rule_id` is the TOOL's own id (e.g. a Semgrep rule
+/// name) still resolves to the grounded corpus rule that may carry a ceiling. Absent corpus,
+/// absent rule, or absent `max_severity` all degrade to a no-op — the overwhelming majority of
+/// findings have no ceiling to apply.
+pub(crate) fn clamp_to_rule_max_severity(
+    severity: String,
+    rule_id: &str,
+    corpus: Option<&camerata_rules::RuleSet>,
+) -> String {
+    let Some(rule) = corpus_rule_for(rule_id, corpus) else {
+        return severity;
+    };
+    let Some(raw_ceiling) = rule.max_severity.as_deref() else {
+        return severity;
+    };
+    let ceiling = normalize_severity(raw_ceiling);
+    if severity_rank(&severity) < severity_rank(&ceiling) {
+        ceiling
+    } else {
+        severity
+    }
+}
+
+/// W8 / W5-Q2 (`docs/plans/2026-10-09_audit-findings-tracker.md`): RAISE `severity` UP to
+/// `f`'s corpus-declared [`camerata_rules::Rule::min_severity`], when one is declared and
+/// `severity` currently ranks BELOW it. The exact structural mirror of
+/// [`clamp_to_rule_max_severity`], built because the owner ruled that a rule's prose statement
+/// of a single severity is a FLOOR:
+///
+/// > **"Floor, it's the minimum rating."**
+///
+/// Never LOWERS a severity that already ranks at or above the floor — this is a floor, not a
+/// ceiling. Absent corpus, absent rule, or absent `min_severity` all degrade to a no-op, which
+/// is the overwhelming majority of findings. `rule_id` is resolved through [`corpus_rule_for`]
+/// for the same reason the ceiling does it: an external-tool/preview finding carrying the
+/// TOOL's own id must still reach the grounded corpus rule that may carry a floor.
+///
+/// # Two preconditions, both deliberate — a floor is not as safe as a ceiling
+///
+/// A ceiling can only lower a severity, so it is safe to apply unconditionally. A floor RAISES
+/// one, so an over-broad floor is a false alarm shipped to a client. Two guards bound it:
+///
+/// 1. **An ACCUSING kind, explicitly present.** The floor applies only when
+///    [`camerata_api_types::audit::FindingKind`] is present and NOT informational — i.e.
+///    `Defect` or `Deviation`. A `ConventionObserved` / `NoConvention` / `NotAssessed` row says
+///    something is FINE (or was not evaluated) and "always ship at `info` severity" by W3's
+///    design; raising one to `high` would both lie to the client and, via
+///    [`is_informational`]'s severity test, re-route it into an action bucket. An ABSENT kind
+///    is excluded too, under W3's standing honesty rule that nothing may silently default to
+///    `Defect` — the same reason [`clamp_deviation_severity`] refuses to assume an unkinded row
+///    is a deviation.
+/// 2. **A real location.** A finding with BOTH an empty `path` and `line == 0` established
+///    nothing concrete to rate, and [`downgrade_unlocated_above_informational`] (C4-R1) exists
+///    to force exactly that shape to `info`. Declining the floor there, rather than relying on
+///    running before C4-R1, makes the floor ORDER-INDEPENDENT with respect to that safety net:
+///    it cannot undo it from any position in the chain.
+///
+/// # Where this sits relative to the ceiling
+///
+/// Applied at the same export choke-points as the ceiling (the PDF's `build_report_json`
+/// partition, the xlsx/`findings.json` `partition_rows`), so every artifact agrees — but
+/// FIRST in that chain, so `max_severity` and the A5.2 deviation ceiling both still get the
+/// last word. The corpus-load gate (`camerata_rules::rules_with_invalid_severity_floor`)
+/// rejects a `min_severity` ranking above the same rule's `max_severity`, so the two can never
+/// state an unsatisfiable pair; with that guaranteed, floor-then-ceiling always lands inside
+/// `[min_severity, max_severity]`.
+pub(crate) fn raise_to_rule_min_severity(
+    severity: String,
+    f: &Finding,
+    corpus: Option<&camerata_rules::RuleSet>,
+) -> String {
+    match &f.kind {
+        Some(kind) if !kind.is_informational() => {}
+        // Informational, or no kind at all — see precondition 1 above.
+        _ => return severity,
+    }
+    if f.path.is_empty() && f.line == 0 {
+        // Nothing concrete to rate — see precondition 2 above.
+        return severity;
+    }
+    let Some(rule) = corpus_rule_for(&f.rule_id, corpus) else {
+        return severity;
+    };
+    let Some(raw_floor) = rule.min_severity.as_deref() else {
+        return severity;
+    };
+    let floor = normalize_severity(raw_floor);
+    if severity_rank(&severity) > severity_rank(&floor) {
+        floor
+    } else {
+        severity
+    }
+}
+
+/// A5.2 (`docs/plans/2026-10-09_audit-findings-tracker.md`): the severity ceiling for a
+/// CONSISTENCY DEVIATION. The default a deviation may never exceed, absent an authored
+/// per-rule escape hatch — the owner's driver is FORWARD DRIFT COST ("consistency issues
+/// would be a problem moving forward with new features moreso than the existing code"), so
+/// the default cap sits at `medium`, and a rule whose decision domain genuinely compounds
+/// (where drift is expensive) raises it by AUTHORING `deviation_ceiling = "high"` in the
+/// corpus — an authoring-time structured field, never a prose-scanning runtime heuristic.
+pub(crate) const DEVIATION_DEFAULT_CEILING: &str = "medium";
+
+/// A5.2: clamp a [`camerata_api_types::audit::FindingKind::Deviation`] row's severity DOWN
+/// to its rule's authored `deviation_ceiling`, defaulting to
+/// [`DEVIATION_DEFAULT_CEILING`] when the rule authors none. A no-op for every other kind
+/// (a Defect under the same rule is untouched) and for a row with no kind at all (a
+/// legacy/unspecified row is NOT assumed to be a deviation). Like
+/// [`clamp_to_rule_max_severity`] this is a ceiling, never a floor — it cannot raise — and
+/// it is applied at the same export choke-points (the PDF's `build_report_json` partition
+/// and the xlsx/`findings.json` `partition_rows`), so every artifact agrees. The kind is a
+/// STRUCTURED field set at emission (`ai_audit::assign_deviation_kinds`); nothing here
+/// inspects prose.
+pub(crate) fn clamp_deviation_severity(
+    severity: String,
+    f: &Finding,
+    corpus: Option<&camerata_rules::RuleSet>,
+) -> String {
+    if !matches!(
+        f.kind,
+        Some(camerata_api_types::audit::FindingKind::Deviation(_))
+    ) {
+        return severity;
+    }
+    let ceiling = corpus_rule_for(&f.rule_id, corpus)
+        .and_then(|r| r.deviation_ceiling.as_deref())
+        .map(normalize_severity)
+        .unwrap_or_else(|| DEVIATION_DEFAULT_CEILING.to_string());
+    if severity_rank(&severity) < severity_rank(&ceiling) {
+        ceiling
+    } else {
+        severity
+    }
+}
+
+/// C4-R1: the pipeline-wide null-location safety net. No finding above `informational` (any
+/// normalized severity other than `"info"`) may ship with BOTH an empty `path` AND `line == 0`
+/// — that combination means nothing concrete was ever established for the location this
+/// finding supposedly cites, which reads as "deterministic rule asserting a falsehood" rather
+/// than a real, actionable defect. This was discovered via a Supabase RLS checker over-firing
+/// at `critical` with an empty path/line-0 "last established" fact (see
+/// `camerata_checks::supabase::rls_checker`'s own C4-R1 fix, which now avoids triggering this
+/// at the source by citing a real policy location) — but the invariant is enforced HERE, at the
+/// single place every checker's findings funnel through before bucketing, so any OTHER
+/// checker/producer that ever ships an unlocated above-informational finding is caught too,
+/// not just this one rule.
+///
+/// Downgrades the SEVERITY only (to `"info"`, so `is_informational` routes it to the
+/// `informational` appendix exactly like any other info-tier finding) — never drops the
+/// finding. A client should still see "something was flagged, but the scan couldn't pin down
+/// where," rather than losing the observation entirely (the over-tell rule, applied here at the
+/// pipeline-integrity level rather than a triage-confidence one).
+///
+/// This is a property of the FINDING (an unlocated finding is not actionable at its stated
+/// severity), not of how one artifact presents it, so it lives in the shared bound chain
+/// ([`crate::severity_bounds::bounded_severity`]: floor, then this, then the ceilings) and every
+/// surface applies it: the live scan, the PDF, and the workbook / CSV / JSON / `findings.json`.
+/// Until 2026-10-21 only the PDF did, so one unlocated finding read `info` in the PDF and `high`
+/// everywhere else.
+pub(crate) fn downgrade_unlocated_above_informational(severity: String, f: &Finding) -> String {
+    if severity != "info" && f.path.is_empty() && f.line == 0 {
+        "info".to_string()
+    } else {
+        severity
     }
 }
 
@@ -304,12 +790,33 @@ pub struct CoverStatsJson {
     pub dependency_advisories: usize,
 }
 
+/// P6 (2026-09-29): the cover's real "code volume" figure — non-blank source lines (never
+/// characters; a raw char count reads as noise to a non-engineer reader) broken out by
+/// language, straight from [`crate::onboard::ScanReport::code_lines`]/`code_lines_by_language`.
+/// `CoverJson::code_volume` is `None` (never `Some` with a zero `lines`) whenever
+/// `code_lines == 0` — see [`build_report_json`]'s construction of it — so the template can
+/// gate the whole row on presence rather than ever rendering "0 characters"/"0 lines".
+#[derive(Debug, Clone, Serialize)]
+pub struct CodeVolumeJson {
+    pub lines: usize,
+    /// Sorted by line count descending (see `onboard::finalize_language_breakdown`). May be
+    /// empty even when `lines > 0` (every scanned file had an unrecognized extension) — the
+    /// template must render the total either way and only additionally list languages when
+    /// this is non-empty.
+    pub by_language: Vec<crate::onboard::LanguageVolume>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct CoverJson {
     pub repos: Vec<String>,
     pub files_scanned: usize,
     pub files_excluded: usize,
     pub code_chars: usize,
+    /// See [`CodeVolumeJson`]'s doc comment: `None` whenever no real code volume is known
+    /// (0 lines), so the template hides the "Code volume" row entirely instead of rendering a
+    /// zero. Never render `d.cover.code_chars` directly in the template for this reason — it
+    /// carries the identical "zero means hide, not print 0" problem this field was added to fix.
+    pub code_volume: Option<CodeVolumeJson>,
     pub audited_refs: Vec<AuditedRefJson>,
     pub audit_model: Option<String>,
     pub calibration_model: Option<String>,
@@ -320,6 +827,12 @@ pub struct CoverJson {
     pub client_name: String,
     pub project_title: String,
     pub prepared_by: String,
+    /// The resolved auditing-agency brand ([`resolve_brand`]'s output, already folded through
+    /// `ReportOptions::apply_env_defaults` by the time this JSON is built) — `None` means no
+    /// brand resolved at all; the template must render [`NEUTRAL_COVER_TITLE`] with no agency
+    /// name and no "Camerata" literal on the cover. See the Branding section of
+    /// `docs/design/2026-09-13_audit-deliverable-review-fixes.md`.
+    pub brand: Option<String>,
     pub stats: CoverStatsJson,
 }
 
@@ -332,14 +845,35 @@ pub struct ExecutiveSummaryJson {
     pub candidates_reviewed: usize,
     pub excluded_false_positive: usize,
     pub curated_total: usize,
+    /// P5 / C5-4: findings held out of the curated action tiers for a human reviewer's judgment
+    /// call — `matrix.informational.len() + matrix.held.len()`, NOT `informational.len()`
+    /// alone. The two buckets are both "held for review" for this reconciling purpose but
+    /// deliberately distinct destinations: `informational` is the severity-capped (≤ medium)
+    /// conventions-to-consider appendix, while `held` (C5-4) is the calibration hedge
+    /// (`needs_review`/`confidence == "needs-review"`) at ANY severity, including high/critical
+    /// — see [`crate::report_export::is_held_for_review`]'s doc comment for why that split
+    /// exists and the prior regression (a high/critical hedge silently NOT counted here because
+    /// it stayed in `do_now`/`do_next`) this field's current formula fixes. This is the
+    /// previously-invisible "other 23" in the reconciling count
+    /// `candidates_reviewed == curated_total + held_for_review + excluded_false_positive
+    /// + dependency_advisories`. Always shown in the narrative, in BOTH review states.
+    pub held_for_review: usize,
+    /// P5: `DEP_AUDIT_RULE_ID` findings that survived the false-positive filter — carved into
+    /// their own `dependency_snapshot` table, but still a real piece of `candidates_reviewed`'s
+    /// reconciliation (see `held_for_review`'s doc comment).
+    pub dependency_advisories: usize,
     pub do_now: usize,
     pub do_next: usize,
     pub plan: usize,
     pub accepted: usize,
     pub open: usize,
-    /// Up to 3 one-liners: `"{headline} ({repo}/{path}:{line}, {rule_id})"` (S3 + S7 +
-    /// item 1: defect-first, not the rule's invariant title).
-    pub top_do_now: Vec<String>,
+    /// W6: one explicit sentence per audit pass that FAILED or timed out this run (e.g. the
+    /// alternative-recommendation pass hitting the CLI hang timeout) — see
+    /// `failed_pass_disclosures`'s doc comment. Empty on the happy path. Rendered in the
+    /// summary so a reader never has to infer a gap from an absence; the SAME strings also
+    /// render in `MethodologyJson::failed_passes` for the more technical section.
+    #[serde(default)]
+    pub failed_passes: Vec<String>,
 }
 
 /// Item 7: "If you only do three things this week" — a half-page box right after the
@@ -357,6 +891,12 @@ pub struct ThreeThingsItemJson {
     /// A rough, LABELED-as-rough hour estimate (e.g. `"2 to 4 hours"`), never a bare number
     /// dressed up as precise — see `effort_hours_bounds`.
     pub hours_label: String,
+    /// FIX 7 (2026-09-13 review): one FACTUAL sentence of what this exposure MEANS in plain
+    /// business terms (e.g. "A public bucket serves any object to anyone who has, or can
+    /// guess, its URL..."), never fear-selling. `None` when no impact sentence is authored yet
+    /// for this rule — the template must omit the line gracefully rather than render a blank
+    /// one. See [`business_impact_for_rule`].
+    pub impact: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -404,6 +944,46 @@ pub struct FindingRefJson {
     /// Carried through so item 7's "If you only do three things this week" box can map effort
     /// to a rough hour estimate without re-joining back to the original `Finding`.
     pub effort: Option<String>,
+    /// C3-6: this finding's own [`effective_bucket`] result (`"do_now"` | `"do_next"` |
+    /// `"plan"` | `"accepted"` | `"informational"` | `"held"` (C5-4)) — which `MatrixJson` vec
+    /// this ref lives in is already implied by position, but the explicit field lets every consumer
+    /// (`xlsx_export`, a cross-artifact test) assert the label directly rather than
+    /// re-deriving or inferring it from array membership.
+    pub bucket: String,
+    /// Calibration-review fix: whether this finding's own text or calibration justification
+    /// records an exploit precondition (`ai_audit::mentions_exploit_precondition`) — e.g.
+    /// "exploitation requires forging a session cookie". `0` for an unconditional finding,
+    /// `1` when a precondition is recorded. Used ONLY as a tie-break in the "do now" ranking
+    /// ([`build_report_json`]'s `do_now_sorted`) so an unconditional critical always outranks
+    /// a critical whose note records a precondition — never to change severity or drop/
+    /// re-bucket the finding itself.
+    pub precondition_count: usize,
+    /// Secondary tie-break for the "do now" ranking, after severity and
+    /// `precondition_count`: `0` for a clear/confident finding (`confidence == Some("high")`,
+    /// or a finding calibration never scored at all — the deterministic floor/preview tier,
+    /// which was never in doubt to begin with) and `1` for `needs-review`. Lower ranks first.
+    pub confidence_rank: u8,
+    /// C6-B2 design point 3: every credential/secret root-cause identity token
+    /// (`ai_audit::root_cause_credential_identities`) this finding's own text names — empty when
+    /// none were found. Used ONLY by the "three things this week" top-3 selector
+    /// (`build_report_json`'s `top3_do_now`) as an independent, defense-in-depth distinctness
+    /// check: a row that shares a non-empty token with an ALREADY-SELECTED row is skipped in
+    /// favor of the next-ranked row, so three "do this week" slots are never spent on three sites
+    /// of ONE leaked credential. This is a safety net, not the primary fix — the primary fix is
+    /// the merge pass itself (`ai_audit::backfill_credential_identity` feeding the pre-existing
+    /// `shared_captured_object` cross-file merge signal) collapsing those sites into ONE row
+    /// before the report is ever built; this field only catches the case where the merge pass
+    /// conservatively left two rows distinct. Never used for bucket placement, severity, or any
+    /// other decision — an empty set (the common case: no detected credential) never blocks
+    /// selection, and every skipped row still ships normally wherever `do_now`/the matrix already
+    /// placed it; nothing is dropped.
+    pub root_cause_keys: Vec<String>,
+    /// Pass-1 W3 (A5.6): what this row IS — flattened
+    /// [`camerata_api_types::audit::KindOnWire`], so the serialized row carries a flat
+    /// `"kind"` discriminator (plus the variant's payload fields as siblings) on EVERY row;
+    /// an absent kind renders the explicit `"unspecified"` tag, never a silent `"defect"`.
+    #[serde(flatten)]
+    pub kind: camerata_api_types::audit::KindOnWire,
 }
 
 /// The severity×effort action matrix — the money page. Cell membership is driven by the
@@ -418,13 +998,155 @@ pub struct MatrixJson {
     pub plan: Vec<FindingRefJson>,
     pub accepted: Vec<FindingRefJson>,
     /// Bug 4's "Conventions to consider" appendix: absence-type stance/architecture notes,
-    /// `needs-review` low/medium rows, testing-style deviations in a repo with no test corpus,
-    /// and any `info`-severity finding. VISIBLE (over-tell preserved) but deliberately OUTSIDE
-    /// the do_now/do_next/plan action tiers and excluded from `curated_total` — a report
-    /// appendix, not a work item. A critical or high finding is NEVER placed here (see
-    /// `is_informational`).
+    /// testing-style deviations in a repo with no test corpus, and any `info`-severity finding.
+    /// VISIBLE (over-tell preserved) but deliberately OUTSIDE the do_now/do_next/plan action
+    /// tiers and excluded from `curated_total` — a report appendix, not a work item. A critical
+    /// or high finding is NEVER placed here (see `is_informational`). C5-4: a calibration hedge
+    /// (`needs-review`) is NOT one of this bucket's signals any more, at ANY severity — see
+    /// `held` below, the bucket that now owns that signal.
     #[serde(default)]
     pub informational: Vec<FindingRefJson>,
+    /// C5-4: findings the calibrator itself flagged debatable (`needs_review` /
+    /// `confidence == "needs-review"`), held out of every action tier (do_now/do_next/plan) AT
+    /// ANY SEVERITY — unlike `informational`, there is NO severity ceiling here: a high/critical
+    /// row the calibrator doubts is precisely the row a client must see called out as unresolved
+    /// doubt, not silently kept in an action tier next to findings nobody doubts. See
+    /// `is_held_for_review` for the gate and its doc comment for the regression this bucket
+    /// closes (a prior cycle folded this signal into `informational`, whose hard "critical/high
+    /// is never informational" invariant then kept a high/critical hedge stuck in `do_now`/
+    /// `do_next`, contradicting its own exported `needs_review: true`).
+    #[serde(default)]
+    pub held: Vec<FindingRefJson>,
+}
+
+// ── FIX 6: the real severity x effort priority grid ─────────────────────────────
+
+/// One finding placed in a [`GridCellJson`] — just enough to render a short, readable tag in a
+/// crowded cell (never the full curated-findings prose; that lives in its own section).
+#[derive(Debug, Clone, Serialize)]
+pub struct GridTagJson {
+    pub rule_id: String,
+    pub repo: String,
+    pub path: String,
+    pub line: usize,
+    pub headline: String,
+}
+
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct GridCellJson {
+    pub findings: Vec<GridTagJson>,
+}
+
+/// One severity row of the grid, with one cell per [`PriorityGridJson::columns`] entry
+/// (same length, same order — the template zips them positionally rather than looking a
+/// column up by name).
+#[derive(Debug, Clone, Serialize)]
+pub struct GridRowJson {
+    pub severity: String,
+    pub cells: Vec<GridCellJson>,
+}
+
+/// FIX 6 (2026-09-13 review) — the ACTUAL severity-rows x effort-columns priority grid,
+/// replacing the old 4-bucket list ("Do now" / "Do next" / "Plan" / "Accepted" rendered as 4
+/// unrelated boxes, not a 2-D placement) that used to live under this section's heading. Built
+/// by [`build_priority_grid`] from the SAME `do_now`/`do_next`/`plan` partition
+/// `MatrixJson` already computed — never a second, independent bucketing pass. Accepted and
+/// Informational findings are explicitly OUT OF SCOPE for this grid (an accepted-risk item or
+/// an appendix note isn't a prioritization decision); their counts are surfaced as a footnote
+/// instead of silently vanishing.
+#[derive(Debug, Clone, Serialize)]
+pub struct PriorityGridJson {
+    /// Effort column keys present this run (`"low"` | `"medium"` | `"high"` | `"unscoped"`),
+    /// in that fixed order, filtered to the ones at least one row actually uses.
+    pub columns: Vec<String>,
+    /// Severity rows present this run (`"critical"` | `"high"` | `"medium"` | `"low"`), in
+    /// that fixed order, filtered to the ones with at least one finding.
+    pub rows: Vec<GridRowJson>,
+    pub accepted_count: usize,
+    pub informational_count: usize,
+}
+
+/// Normalize an OPTIONAL calibrated effort into one of the grid's 4 fixed column keys. `None`
+/// (a deterministic-floor/preview finding never gets a calibrated effort estimate — see
+/// `effort_hours_bounds`) and any value outside `low`/`medium`/`high` both land in
+/// `"unscoped"` rather than silently dropping the finding from the grid.
+fn grid_effort_key(effort: Option<&str>) -> &'static str {
+    match effort {
+        Some("low") => "low",
+        Some("medium") => "medium",
+        Some("high") => "high",
+        _ => "unscoped",
+    }
+}
+
+/// FIX 6 — project the `do_now`/`do_next`/`plan` findings (Accepted and Informational are OUT
+/// OF SCOPE, see [`PriorityGridJson`]'s doc comment) into the real 2-D grid. Rows/columns are
+/// fixed orderings but only emitted when at least one finding uses them, so a small scan's
+/// grid stays small instead of always rendering a fixed 4x4 of mostly-empty cells.
+pub(crate) fn build_priority_grid(matrix: &MatrixJson) -> PriorityGridJson {
+    const SEVERITY_ORDER: [&str; 4] = ["critical", "high", "medium", "low"];
+    const EFFORT_ORDER: [&str; 4] = ["low", "medium", "high", "unscoped"];
+
+    let action_findings: Vec<&FindingRefJson> = matrix
+        .do_now
+        .iter()
+        .chain(matrix.do_next.iter())
+        .chain(matrix.plan.iter())
+        .collect();
+
+    let present_severities: Vec<&str> = SEVERITY_ORDER
+        .iter()
+        .copied()
+        .filter(|sev| action_findings.iter().any(|f| f.severity == *sev))
+        .collect();
+    let present_efforts: Vec<&str> = EFFORT_ORDER
+        .iter()
+        .copied()
+        .filter(|eff| {
+            action_findings
+                .iter()
+                .any(|f| grid_effort_key(f.effort.as_deref()) == *eff)
+        })
+        .collect();
+
+    let rows = present_severities
+        .iter()
+        .map(|sev| {
+            let cells = present_efforts
+                .iter()
+                .map(|eff| {
+                    let mut findings: Vec<GridTagJson> = action_findings
+                        .iter()
+                        .filter(|f| {
+                            f.severity == *sev && grid_effort_key(f.effort.as_deref()) == *eff
+                        })
+                        .map(|f| GridTagJson {
+                            rule_id: f.rule_id.clone(),
+                            repo: f.repo.clone(),
+                            path: f.path.clone(),
+                            line: f.line,
+                            headline: f.headline.clone(),
+                        })
+                        .collect();
+                    findings.sort_by(|a, b| {
+                        (&a.repo, &a.path, a.line).cmp(&(&b.repo, &b.path, b.line))
+                    });
+                    GridCellJson { findings }
+                })
+                .collect();
+            GridRowJson {
+                severity: sev.to_string(),
+                cells,
+            }
+        })
+        .collect();
+
+    PriorityGridJson {
+        columns: present_efforts.into_iter().map(String::from).collect(),
+        rows,
+        accepted_count: matrix.accepted.len(),
+        informational_count: matrix.informational.len(),
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -455,16 +1177,71 @@ pub struct CuratedSiteJson {
     pub effort: Option<String>,
     pub confidence: Option<String>,
     pub disposition: String,
+    /// C3-6: the SAME [`effective_bucket`] value `disposition`'s label was derived from (see
+    /// `disposition_label`'s `bucket` parameter) — carried as its own field so a test (or a
+    /// future template revision) can compare this site's bucket against its `FindingRefJson`
+    /// counterpart in `matrix` directly, instead of parsing it back out of the label prose.
+    pub bucket: String,
+    /// C4-P2: this SITE's own resolved citation ([`citation_for_finding`]) — NOT necessarily
+    /// identical to the parent [`CuratedGroupJson::citation`] shown once at the group header
+    /// (which is that same call applied to the group's FIRST site only). Exists so a consumer
+    /// needing the per-finding citation never has to assume group membership implies a shared
+    /// citation; the cross-artifact equality gate compares this against `findings.json`'s
+    /// `FindingRow::citation_label`/`citation_urls` for the same finding.
+    pub citation: CitationJson,
+    /// Raw rule ids absorbed into this finding during P1 clustering — an INTERNAL/traceability
+    /// field (registry cross-reference, test assertions) never rendered as-is in any
+    /// client-facing artifact. See [`also_matches_titles`] for the human-readable form the
+    /// template actually renders.
     pub also_matches: Vec<String>,
+    /// C4-P4 (residual defect 2): the human-readable TITLES of `also_matches`, resolved via
+    /// [`also_matches_titles`] — this is what the PDF's "Also violates:" line renders. Never the
+    /// raw ids above; an id with no resolvable corpus title is simply absent here.
+    pub also_matches_titles: Vec<String>,
     /// The defect at THIS object (see `defect_headline`) — the template renders this as the
     /// bold per-finding heading; the group's own rule id + invariant title (`CuratedGroupJson`)
     /// is demoted to a smaller subtitle line for registry traceability.
     pub headline: String,
-    /// The rule's corpus-default remediation directive (see [`resolve_fix`]), rendered as its
-    /// own "Fix:" line in the template — distinct from `detail`'s explanation of the
-    /// violation. Empty string (never fabricated) when the rule has no corpus entry, no
-    /// options, or no default option/directive.
-    pub fix: String,
+    /// The rule's AUTHORED, client-facing remediation text (see [`resolve_fix`]) — rendered as
+    /// its own "Fix:" line in the template, distinct from `detail`'s explanation of the
+    /// violation. Placeholder tokens (`<table>`, `<function-name>`, `<bucket>`, …) have already
+    /// been substituted with this finding's own `path`/`captures` (or a readable generic when
+    /// unfilled) — nothing downstream needs to re-resolve tokens. `None` (never a fabricated
+    /// sentence, and NEVER the rule's `directive` — see [`resolve_fix`]'s doc comment) when the
+    /// rule's default option has no authored `remediation` yet: the template must omit the Fix
+    /// block entirely in that case rather than render an empty line.
+    pub fix: Option<String>,
+    /// **P2 (2026-09-29): the PRIMARY fix.** A codebase-specific remediation for THIS
+    /// finding — names the real file/symbol/column from the finding's own evidence, and
+    /// points at the repo's own correct pattern elsewhere when one exists. Generated at scan
+    /// time by [`crate::ai_audit::generate_fix_specifics`] (this layer stays pure/
+    /// synchronous — it only reads `Finding::fix_specific`, never calls a model) with a
+    /// bounded validate-and-regenerate self-check (identifier grounding + non-contradiction;
+    /// see that function's doc comment). The template renders this ABOVE `fix` — the rule's
+    /// generic authored remediation above is now SECONDARY context only, never the lead line.
+    /// `None` when fix-generation never ran (a deterministic-only scan makes no model calls
+    /// at all) or gave up after retries — the template must render `fix` alone in that case,
+    /// never a bare "Fix:" label with nothing after it. C3-1b: a fix-generation failure is a
+    /// PIPELINE gap, not a confidence signal — it never hedges the finding or moves it out of
+    /// `do_now`; `fix` (the rule's own authored remediation) still renders as the primary Fix
+    /// line, so the row never ships with no fix at all.
+    pub fix_for_this_finding: Option<String>,
+    /// Pass-1 W7 (C5): every evidence site a merge ABSORBED into this row
+    /// (`Finding::also_locations`, verbatim) — carried in the PDF's own data so the three
+    /// artifacts describe the same site multiplicity. Before W7 this reached NO artifact:
+    /// a row representing three detected sites exported as one line at one `path:line`, so
+    /// an over-merge was observationally identical to a detection miss (tracker C5). The
+    /// template does not render it yet (the PDF is the summary — Pass 3 owns presentation);
+    /// the data is here so it CAN, and so the report JSON is complete.
+    pub also_locations: Vec<crate::onboard::MergedLocation>,
+    /// Pass-1 W7 (C5): total distinct evidence sites this row represents — its own
+    /// `path:line` plus every `also_locations` entry. `1` for an un-merged row.
+    pub site_count: usize,
+    /// Pass-1 W3 (A5.6): what this site's row IS — same flattened always-present kind wire
+    /// as [`FindingRefJson::kind`], so the PDF's own data carries the taxonomy losslessly
+    /// too (the PDF renders what it already renders; Pass 2/3 own presentation).
+    #[serde(flatten)]
+    pub kind: camerata_api_types::audit::KindOnWire,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -480,6 +1257,19 @@ pub struct HealthyRuleJson {
     pub rule_id: String,
     pub title: String,
     pub citation: CitationJson,
+}
+
+/// W1: one rule the ledger confirms did NOT run this scan, with the real reason — the
+/// "excluded from this audit" section. Never a rule that merely wasn't SELECTED (this is
+/// populated only from `ScanLedger::excluded_rules`, which only ever carries rules the
+/// pipeline actually considered and then could not run).
+#[derive(Debug, Clone, Serialize)]
+pub struct ExcludedRuleJson {
+    pub rule_id: String,
+    pub title: String,
+    /// Why this rule did not run this scan (e.g. "declares mechanical/architectural
+    /// enforcement but has no wired detector", "AI/semantic review not requested this run").
+    pub reason: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -517,23 +1307,76 @@ pub struct DependencySnapshotJson {
 pub struct MethodologyJson {
     pub candidates_reviewed: usize,
     pub excluded_false_positive: usize,
+    /// P5: mirrors `ExecutiveSummaryJson::held_for_review` — carried here too so the
+    /// Methodology section's own reconciling line (§`typ` "N candidate findings...") can show
+    /// it without the template reaching back into `executive_summary`.
+    pub held_for_review: usize,
+    /// FIX 3 (2026-09-13 review): a short, FACTUAL "what happens next" paragraph, rendered in
+    /// its own section right before Methodology (`typ:397`'s heading). Authored prose, same
+    /// pattern as `deterministic_note`/`ai_tier_note` below — never an LLM call, never
+    /// pitch-toned framing (no urgency language, no pricing claims beyond "the rate herein").
+    pub next_steps: String,
     pub deterministic_note: String,
     pub ai_tier_note: String,
     pub not_done: Vec<String>,
     pub severity_scale_note: String,
+    /// W6: same disclosure list as `ExecutiveSummaryJson::failed_passes` — see
+    /// `failed_pass_disclosures`'s doc comment. Rendered here too (never JUST in the
+    /// summary) so the more technical Methodology section also states explicitly that a pass
+    /// did not run, rather than the reader having to notice its absence from the findings.
+    #[serde(default)]
+    pub failed_passes: Vec<String>,
 }
 
 /// The serializer's single output type — mirrors the §4 anatomy sections in
 /// `docs/design/2026-07-23_brownfield-audit-report.md` in order.
 #[derive(Debug, Clone, Serialize)]
 pub struct AuditReportJson {
+    /// P5: `"raw"` (nobody has reviewed anything this session) or `"reviewed"` (at least one
+    /// finding carries an explicit auditor disposition). Read directly by the Typst template
+    /// (`d.review_state`) to gate the per-page draft banner and the Methodology section's
+    /// review-claim wording — see [`ReviewState`]'s doc comment.
+    pub review_state: ReviewState,
     pub cover: CoverJson,
     pub executive_summary: ExecutiveSummaryJson,
     pub three_things: ThreeThingsJson,
     pub scorecard: ScorecardJson,
     pub matrix: MatrixJson,
+    /// FIX 6 (2026-09-13 review): the real severity x effort grid the template renders under
+    /// the "Severity x effort" heading — derived from `matrix` (see [`build_priority_grid`]),
+    /// not an independent bucketing. `matrix` itself is kept (still backs the exec-summary
+    /// counts and the "Three things this week" box's `do_now` selection); the template no
+    /// longer reads `matrix` directly for its own section.
+    pub priority_grid: PriorityGridJson,
+    /// C4-P4 (residual defect 5): ordered by severity desc, then bucket (do_now -> do_next ->
+    /// plan -> accepted), then confidence — see [`curated_group_sort_key`] — NEVER the old
+    /// BTreeMap-alphabetical-by-rule-id iteration order, which could and did land a live
+    /// critical pages deep behind a run of alphabetically-earlier lows. A group qualifies for
+    /// THIS list when at least one of its sites is in an action/accepted bucket (i.e. not
+    /// EVERY site in the group is informational or held (C5-4)) — see
+    /// [`held_for_review_findings`] for the complementary, fully-appendix groups.
     pub curated_findings: Vec<CuratedGroupJson>,
+    /// C4-P4 (residual defect 5) / C5-4: a group whose sites are ALL `bucket == "informational"`
+    /// or `bucket == "held"` never belongs under "Curated findings" client-facing prose (that
+    /// heading promises action items) — it renders in its own "Held for review" section instead,
+    /// titled to match the executive summary's own "held for a human reviewer's judgment call"
+    /// framing. This is also where a high/critical calibration hedge (`held`) now lands — see
+    /// `is_held_for_review`'s doc comment — rendered with its OWN true severity, not capped like
+    /// an `informational` row. A MIXED group (some sites curated, some
+    /// informational/held — proven possible by
+    /// `matrix_and_curated_site_bucket_fields_agree_and_a_hedged_finding_is_never_an_action_bucket`'s
+    /// sibling cross-artifact test) stays entirely in `curated_findings` above: splitting a
+    /// single rule's sites across two top-level sections would fragment one finding's
+    /// citation/title header across two places in the document for no reader benefit, so the
+    /// bar for moving a GROUP here is "zero curated sites," not "any informational/held site."
+    pub held_for_review_findings: Vec<CuratedGroupJson>,
     pub whats_healthy: WhatsHealthyJson,
+    /// W1: rules the ledger confirms did NOT run this scan, each with its real reason — the
+    /// "excluded from this audit" section. Empty whenever `report.ledger` carries no rule
+    /// data (pre-W1 reports / fixtures that never populate it) — see `has_rule_ledger_data`
+    /// in `build_report_json`. Sorted by rule id for stable output.
+    #[serde(default)]
+    pub rules_not_run: Vec<ExcludedRuleJson>,
     pub dependency_snapshot: DependencySnapshotJson,
     pub methodology: MethodologyJson,
     pub disclaimer: String,
@@ -547,10 +1390,310 @@ pub const AUDIT_REPORT_DISCLAIMER: &str =
     "This report is an advisory architectural and security assessment based on static \
      analysis of the repository state identified on the cover page. It is not a \
      certification, warranty, or guarantee of security. Findings reflect evidence present in \
-     the audited code at scan time and may not represent the live production system. All \
+     the inspected code at scan time and may not represent the live production system. All \
      remediation should be validated by the client's engineering team against the live \
-     environment. The preparing auditor accepts no liability for actions taken on the basis \
+     environment. The preparing reviewer accepts no liability for actions taken on the basis \
      of this report.";
+
+/// W6: turn every [`crate::ai_audit::FailedPass`] this scan recorded into ONE explicit,
+/// factual disclosure sentence — e.g. "Rule-alternative recommendations for owner/repo: not
+/// computed — pass failed (Claude CLI timed out after 300s...)." Shared verbatim between
+/// `ExecutiveSummaryJson::failed_passes` and `MethodologyJson::failed_passes` (see
+/// [`build_report_json`]) so a reader hits the same honest statement whether they read the
+/// summary or the methodology — never a silent gap in either. Empty input yields an empty
+/// list, which both sections render as nothing (no fabricated "everything ran cleanly"
+/// claim needed — the absence of a disclosure IS the claim, because every real gap here is
+/// always disclosed when one exists).
+/// W7 (G1/G3): one concise, client-facing disclosure line per NON-dependency tool whose
+/// coverage notes record incomplete coverage this scan. Before W7, only `tool ==
+/// "osv-scanner"` notes were exported (into the dependency snapshot); semgrep/eslint/ruff/
+/// clippy notes reached the UI and the ledger but NO client artifact, so a whole tool tier
+/// could fail and the client's PDF/xlsx/JSON said nothing — the ESLint wholesale failure
+/// (C11's cost side) was invisible to a client even when disclosed internally.
+///
+/// G3 is the owner's constraint and this function's shape: coverage IS client-facing, but
+/// **concise and useful, not exhaustive** — ONE line per affected tool, written for a client,
+/// never the notes' own internal diagnostics (tool exit codes, config paths, per-rule
+/// repetition). The full per-note detail stays where it already lives: the UI and the ledger.
+/// Rendered via the existing `failed_passes` channel (executive summary + methodology in the
+/// PDF/JSON — no template change) and as the Coverage sheet's "Tool coverage notes" section.
+///
+/// W13 adds a third arm for [`crate::RULE_CORPUS_COVERAGE_TOOL`] — a rule whose own `.toml`
+/// would not parse, so the rule never entered the scan. It gets ONE line for the whole scan
+/// (with a count, because "how much of the rule library was missing" is the only quantity a
+/// client can act on) and it deliberately carries NEITHER the file path NOR the `RulesError`
+/// text: both name the reviewer's filesystem and TOML internals, and both stay in the note's
+/// own `message` plus the `tracing::error!` line, which no client artifact reads.
+pub(crate) fn tool_coverage_disclosures(notes: &[crate::onboard::CoverageNote]) -> Vec<String> {
+    // Counted per tool, not merely collected: the W13 arm states HOW MANY rules were missing
+    // from the library, which one deduplicated tool name cannot express.
+    let mut counts: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+    for note in notes.iter().filter(|n| n.tool != "osv-scanner") {
+        *counts.entry(note.tool.as_str()).or_insert(0) += 1;
+    }
+    counts
+        .into_iter()
+        .map(|(tool, count)| {
+            if tool == "unrouted" {
+                // Not a tool name a client would recognize: these notes mean "a selected
+                // check had no scan-time tool available at all".
+                "Some selected checks had no scan-time preview tool available this run; \
+                 they are not reflected in this report and enforce once wired into CI."
+                    .to_string()
+            } else if tool == crate::FIREBASE_SCOPE_COVERAGE_TOOL {
+                // Not a tool either: the one written statement of what Firebase coverage is.
+                crate::FIREBASE_SCOPE_SENTENCE.to_string()
+            } else if tool == crate::RULE_CORPUS_COVERAGE_TOOL {
+                // Also not a tool name: these notes mean "a rule file in the library could
+                // not be read, so that rule was never applied".
+                format!(
+                    "{} in the rule library could not be loaded this scan and did not run; \
+                     anything they would have reported is not reflected in this report.",
+                    noun(count, "rule", "rules"),
+                )
+            } else {
+                format!(
+                    "The {tool} static-analysis checks did not fully run this scan; \
+                     anything they would have reported is not reflected in this report."
+                )
+            }
+        })
+        .collect()
+}
+
+fn failed_pass_disclosures(failed_passes: &[crate::ai_audit::FailedPass]) -> Vec<String> {
+    failed_passes
+        .iter()
+        .map(|f| {
+            let mut pass = f.pass.clone();
+            if let Some(first) = pass.get_mut(0..1) {
+                first.make_ascii_uppercase();
+            }
+            format!(
+                "{pass} for {}: not computed — pass failed ({}).",
+                f.repo, f.reason
+            )
+        })
+        .collect()
+}
+
+/// FIX 3 (2026-09-13 review) — a short, FACTUAL "what happens next" paragraph, rendered in a
+/// new section before Methodology. Deliberately non-pitch: no urgency language. Three factual
+/// steps, one paragraph, no em/en dashes (house style for this client deliverable — see
+/// `AUDIT_REPORT_DISCLAIMER`'s doc comment).
+///
+/// C4-P4 (residual defect 4, 2026-10-01): this used to end step one with "at the rate set out
+/// in the engagement" — a placeholder that promised a number (the design doc's public promise
+/// 2: "the fix rate is written into the report before the client decides") without ever stating
+/// one. A real dollar/hour billing rate genuinely isn't this report's to invent (there is no
+/// such field anywhere in `ReportOptions`, and fabricating one would be worse than the
+/// placeholder it replaces). The number this report CAN state honestly, because every input to
+/// it is already computed for the executive-summary/methodology reconciliation a few lines
+/// above this one, is the TRIAGE fix rate.
+///
+/// C5-6 (REG-6, 2026-10-02): the triage fix rate above used to be `(candidates_reviewed -
+/// excluded_false_positive) / candidates_reviewed` — "kept" counted EVERY non-excluded
+/// candidate, including rows still sitting in [`MatrixJson::held`] / `informational` with no
+/// human disposition at all. On a fresh, unreviewed DRAFT export that produced a flatly false
+/// "100% fix rate" sentence calling undecided held rows "real, actionable items" before a
+/// reviewer had looked at a single one of them. Two independent bugs, both fixed here:
+///
+/// - **No percentage before a human has triaged anything.** [`ReviewState::Raw`] (see its doc
+///   comment — nobody this session has dispositioned a single finding) can never print a
+///   fix-rate percentage, full stop; there is no "rate" yet, only an unreviewed backlog. It
+///   prints the held count instead: "Fix rate not yet established: N of M candidates are held
+///   for a reviewer's decision; 0 excluded so far" — `0 excluded` is not a placeholder, it is
+///   always true here, because [`ReviewState::Raw`] is derived from "no finding carries an
+///   explicit this-session auditor disposition," and an excluded-as-false-positive row IS such
+///   a disposition (see `build_report_json`'s partition loop).
+/// - **Held rows never belong in the rate's numerator OR denominator**, even once a reviewer
+///   has acted on OTHER findings. A row still sitting in `held`/`informational` was not kept as
+///   "real, actionable," nor was it excluded as noise — it is neither, by construction. The
+///   fix rate is now `curated_total / (curated_total + excluded_false_positive)` only: the
+///   share of DECIDED candidates (curated for action vs. excluded as a false positive) that
+///   were kept. The "excluding the rest as likely false positives" clause is appended only when
+///   `excluded_false_positive > 0` — with nothing excluded, "excluding the rest" describes
+///   nothing and is simply dropped, not forced to read "excluding 0."
+///
+/// A zero-candidate (clean) run has no fix rate to report; the paragraph says so plainly
+/// instead of dividing by zero or rendering a percentage that implies findings existed. The
+/// same "nothing to compute a rate from" sentence is reused, defensively, if a `Reviewed`
+/// export somehow has zero curated AND zero excluded candidates (every candidate is held or a
+/// dependency advisory) — dividing zero by zero is not a 0% or 100% fix rate, it is "not yet
+/// established," identically to the draft case.
+pub(crate) fn next_steps_note(
+    review_state: ReviewState,
+    candidates_reviewed: usize,
+    curated_total: usize,
+    held_for_review: usize,
+    excluded_false_positive: usize,
+) -> String {
+    let not_yet_established = || {
+        format!(
+            "Fix rate not yet established: {held_for_review} of {} are held for a reviewer's \
+             decision; 0 excluded so far.",
+            noun(candidates_reviewed, "candidate", "candidates"),
+        )
+    };
+    let fix_rate_sentence = if candidates_reviewed == 0 {
+        "This run produced no candidate findings, so there is no fix rate to report.".to_string()
+    } else if matches!(review_state, ReviewState::Raw) {
+        not_yet_established()
+    } else {
+        let denominator = curated_total + excluded_false_positive;
+        if denominator == 0 {
+            not_yet_established()
+        } else {
+            let pct = (curated_total as f64 / denominator as f64) * 100.0;
+            let excluding_clause = if excluded_false_positive > 0 {
+                ", excluding the rest as likely false positives"
+            } else {
+                ""
+            };
+            format!(
+                "This run kept {curated_total} of {} as real, actionable items (a {pct:.0}% \
+                 fix rate){excluding_clause}.",
+                noun(denominator, "candidate finding", "candidate findings"),
+            )
+        }
+    };
+    format!(
+        "There are three steps from here. First, the do-now items above get fixed, by your own \
+         team, an outside contractor, or the reviewing engineer. {fix_rate_sentence} Second, a \
+         retest: the reviewing engineer re-scans the repository once the fixes are in and signs \
+         a short addendum confirming each item is closed. Third, ongoing coverage: a monthly \
+         delta rescan plus on-call architect availability for anything new the codebase \
+         introduces between engagements."
+    )
+}
+
+// ── FIX 7 business-impact map (§"If you only do three things this week") ───────────
+
+/// FIX 7 (2026-09-13 review) — one FACTUAL, non-fear-selling sentence of what a rule's
+/// exposure MEANS in plain business terms, authored per `rule_id`. Deliberately a small Rust
+/// map, NOT a corpus TOML field: the corpus-wide `remediation` authoring pass (FIX 1, Phase
+/// 2a) runs in parallel against these same TOML files, and folding a second authored-prose
+/// field into that same parallel-editable surface risks a merge collision over the same lines
+/// for no benefit — this is a small, independently-owned map instead. Covers the Supabase
+/// pack (the corpus currently backing the do-now items the flagship sample exercises) plus the
+/// handful of universal/deterministic-floor rules most likely to land in "do now" on a typical
+/// scan. Returns `None` for anything not yet authored — the template must omit the line
+/// gracefully in that case, never fabricate one. NOTE: this could migrate to a corpus `impact`
+/// field alongside `remediation` once the two authoring passes are no longer running in
+/// parallel; deliberately not done in this pass.
+pub(crate) fn business_impact_for_rule(rule_id: &str) -> Option<&'static str> {
+    match rule_id {
+        // ── Supabase: RLS ──────────────────────────────────────────────────────────
+        "SUPABASE-RLS-ENABLED-1" => Some(
+            "No RLS on this table means every row is readable and writable by anyone holding \
+             the public anon key, with no login required.",
+        ),
+        "SUPABASE-RLS-NO-POLICY-1" => Some(
+            "RLS enabled with zero policies denies all access by default, which typically \
+             breaks the feature for real users rather than exposing data, and often gets \
+             patched with an overly permissive policy under deadline pressure.",
+        ),
+        "SUPABASE-RLS-POLICY-DISABLED-1" => Some(
+            "A policy exists but RLS itself is off, so the policy is decorative: every row is \
+             exposed exactly as if no policy had ever been written.",
+        ),
+        "SUPABASE-RLS-PERMISSIVE-TRUE-1" => Some(
+            "A policy that always evaluates to true grants every anon or authenticated caller \
+             full access to the table, which is functionally the same exposure as having no \
+             RLS at all.",
+        ),
+        "SUPABASE-RLS-USER-METADATA-1" => Some(
+            "Authorizing against user-editable metadata lets any authenticated user grant \
+             themselves elevated access by editing their own profile fields.",
+        ),
+        "SUPABASE-RLS-VIEW-INVOKER-1" => Some(
+            "A view without security_invoker runs with the view creator's privileges, so it \
+             can silently bypass the Row Level Security policies protecting the underlying \
+             tables.",
+        ),
+        "SUPABASE-RLS-INITPLAN-1" => Some(
+            "This is a performance defect, not an access hole: unwrapped auth calls \
+             re-evaluate once per row and can make an otherwise-correct RLS policy time out \
+             under real load.",
+        ),
+        // ── Supabase: auth ─────────────────────────────────────────────────────────
+        "SUPABASE-AUTH-EDGE-JWT-1" => Some(
+            "An edge function reachable with no authentication check can be invoked by anyone \
+             on the internet, including for state-changing operations like a payment.",
+        ),
+        "SUPABASE-AUTH-GETSESSION-SERVER-1" => Some(
+            "Trusting an unverified session cookie on the server lets a forged cookie \
+             impersonate any user at that code path.",
+        ),
+        "SUPABASE-AUTH-SERVICE-ROLE-BYPASS-1" => Some(
+            "A service-role client bypasses Row Level Security entirely, so a request handler \
+             using it without its own authorization check grants full database access to \
+             whoever can reach that endpoint.",
+        ),
+        "SUPABASE-AUTH-USERS-EXPOSED-1" => Some(
+            "Exposing auth.users through a view or grant leaks every user's email, phone, and \
+             identity metadata to anyone who can query it.",
+        ),
+        // ── Supabase: secrets, storage, exposure, functions ───────────────────────────
+        "SUPABASE-KEY-SERVICE-ROLE-CLIENT-1" => Some(
+            "A service-role key shipped to the browser bypasses Row Level Security and grants \
+             full read and write access to every table to anyone who opens developer tools.",
+        ),
+        "SUPABASE-STORAGE-PUBLIC-BUCKET-1" => Some(
+            "A public bucket serves any object to anyone who has, or can guess, its URL, with \
+             no login and no access policy involved.",
+        ),
+        "SUPABASE-STORAGE-OBJECT-POLICY-1" => Some(
+            "Unscoped write or delete access on storage objects lets any caller overwrite or \
+             delete files that belong to other users.",
+        ),
+        "SUPABASE-EXPOSURE-MATVIEW-1" => Some(
+            "A materialized view cannot carry row-level policies, so exposing it in the API \
+             makes it all-or-nothing: every row is visible to anyone who can query it.",
+        ),
+        "SUPABASE-EXPOSURE-SCHEMAS-1" => Some(
+            "Every schema added to the exposed-schemas list becomes reachable over the API, \
+             including any table in it that was never reviewed for Row Level Security.",
+        ),
+        "SUPABASE-FUNC-SEARCH-PATH-1" => Some(
+            "A SECURITY DEFINER function without a fixed search_path can be hijacked into \
+             running an attacker-created function with the function owner's elevated \
+             privileges.",
+        ),
+        // ── Universal / deterministic-floor ────────────────────────────────────────
+        "ARCH-NO-SECRETS-IN-URL-1" => Some(
+            "A credential carried in a URL is written into proxy logs, browser history, and \
+             server access logs by default, which is a durable exposure even after the \
+             credential is rotated.",
+        ),
+        "SEC-NO-PRIVATE-KEY-1" => Some(
+            "A private key committed to the repository is exposed to everyone with repository \
+             access, past and future, and stays readable in git history even after the file \
+             is deleted.",
+        ),
+        "SEC-NO-SECRET-FILE-1" => Some(
+            "A committed secret-bearing file (a private key, keystore, or real .env) is \
+             exposed to everyone with repository access, past and future.",
+        ),
+        "SEC-NO-HARDCODED-SECRETS-1" => Some(
+            "A hardcoded credential in source is exposed to everyone with repository access, \
+             and to anyone who ever receives a copy of the build.",
+        ),
+        "SEC-NO-DISABLED-TLS-1" => Some(
+            "Disabled certificate verification lets any network position between the client \
+             and server intercept or alter traffic without detection.",
+        ),
+        "SEC-NO-UNSAFE-DESERIALIZATION-1" => Some(
+            "Deserializing untrusted input without safeguards can let an attacker execute \
+             arbitrary code on the server simply by controlling the input.",
+        ),
+        "SEC-NO-RAW-SQL-CONCAT-1" => Some(
+            "String-concatenated SQL lets an attacker who controls any part of the input \
+             read, modify, or delete arbitrary rows in the database.",
+        ),
+        _ => None,
+    }
+}
 
 // ── Citation join (§4.4) ─────────────────────────────────────────────────────────
 
@@ -569,12 +1712,37 @@ fn is_external_source_url(url: &str) -> bool {
     url.starts_with("http://") || url.starts_with("https://")
 }
 
+/// Join `rule_id` against `corpus`, falling back to the external-tool grounding maps
+/// (`crate::external_tool_floor_category` — Semgrep's `semgrep_floor_category` plus
+/// ESLint's `eslint_floor_category`) when `rule_id` is an external tool's OWN rule id
+/// (e.g. `camerata.security.taint-sql-injection-python`, or `react-hooks/exhaustive-deps`)
+/// rather than one of our corpus ids. This is the single place "which corpus TOML entry
+/// supplies this finding's citation/remediation/effort" is decided, so `resolve_citation`,
+/// `resolve_fix`, and `resolve_effort` can't drift from each other on what "grounded"
+/// means for a preview finding. The finding's OWN `rule_id` (and `preview_tool`) are never
+/// touched by this — only which corpus rule's authored facts get joined in.
+///
+/// A direct hit (`rule_id` IS a corpus id) always wins over the grounding map, so this
+/// is fully backward compatible with every existing call site that already passes a
+/// corpus id directly (e.g. `resolve_citation("SEC-NO-RAW-SQL-CONCAT-1", ...)`).
+pub(crate) fn corpus_rule_for<'c>(
+    rule_id: &str,
+    corpus: Option<&'c camerata_rules::RuleSet>,
+) -> Option<&'c camerata_rules::Rule> {
+    corpus.and_then(|c| {
+        c.get_by_id(rule_id).or_else(|| {
+            crate::external_tool_floor_category(rule_id)
+                .and_then(|grounded_id| c.get_by_id(grounded_id))
+        })
+    })
+}
+
 pub(crate) fn resolve_citation(
     rule_id: &str,
     preview_tool: Option<&str>,
     corpus: Option<&camerata_rules::RuleSet>,
 ) -> CitationJson {
-    if let Some(rule) = corpus.and_then(|c| c.get_by_id(rule_id)) {
+    if let Some(rule) = corpus_rule_for(rule_id, corpus) {
         let sources: Vec<CitationSourceJson> = rule
             .sources
             .iter()
@@ -599,11 +1767,16 @@ pub(crate) fn resolve_citation(
         }
     }
     if let Some(tool) = preview_tool {
+        // Client-facing fix (2026-10-07): this used to read "Deterministic preview, enforced
+        // by {tool} ({rule_id}); not yet wired into the CI gate" — calling a tool-sourced row
+        // "Deterministic" (a word this report otherwise reserves for Camerata's own proven
+        // floor checks) in the SAME sentence that says nothing enforces it, plus internal
+        // "wired into the CI gate" phrasing. The row's own tier IS "preview", named with its
+        // tool, never "Deterministic" — see `classify_ai_finding`'s sibling fix and the
+        // `xlsx_export::provenance` computation this label feeds.
         return CitationJson {
             kind: "preview".to_string(),
-            label: format!(
-                "Deterministic preview, enforced by {tool} ({rule_id}); not yet wired into the CI gate"
-            ),
+            label: format!("Preview check by {tool} ({rule_id}); not yet part of your CI pipeline"),
             sources: Vec::new(),
         };
     }
@@ -614,32 +1787,679 @@ pub(crate) fn resolve_citation(
     }
 }
 
-/// Join `rule_id` against the loaded corpus to recover its DEFAULT option's `directive` — the
-/// rule's own canonical prescribed remediation action (e.g. "Enable Row Level Security on
-/// every table exposed via the anon/authenticated Supabase API roles."). This is a
-/// serialization-time join exactly like [`resolve_citation`] — computed here, not stored on
-/// [`Finding`] — because the directive is a property of the RULE, not of any one finding site.
-///
-/// Returns an empty string (never a fabricated sentence) when: the corpus is absent, the rule
-/// id has no corpus entry, the rule has no options at all (a mechanical rule with no
-/// alternatives to codify), the rule has no adopted DEFAULT option (the architect must choose
-/// one and hasn't), or the resolved option's `directive` field is itself blank in the TOML.
-/// Surfaced as the PDF's "Fix:" line (`CuratedSiteJson::fix`, rendered by `render_site` in
-/// `audit_report.typ`) and the workbook's "Recommended Fix" column — same join, both places,
-/// so an absent directive reads as honestly blank in both artifacts rather than one inventing
-/// text the other doesn't have.
-pub(crate) fn resolve_fix(rule_id: &str, corpus: Option<&camerata_rules::RuleSet>) -> String {
-    let Some(rule) = corpus.and_then(|c| c.get_by_id(rule_id)) else {
-        return String::new();
-    };
-    // `chosen_option = None`: the report has no notion of a per-project chosen option today
-    // (that lives in onboarding's `SelectedRule` binding, not in a `Finding`/`ScanReport`), so
-    // this always resolves the rule's own DEFAULT — matching the design doc's "the corpus
-    // rule's default `[[option]].directive`" wording exactly, not a project-specific choice.
-    match rule.resolved_option(None) {
-        Some(option) if !option.directive.trim().is_empty() => option.directive.clone(),
-        _ => String::new(),
+// ── P3 (2026-09-29): the citation gate ──────────────────────────────────────────────
+//
+// Several of the report's MOST important findings — a cross-tenant RLS policy, RLS
+// disabled on a payments table, a stored-XSS sink — are produced by the AI tier, which
+// invents its own rule id (an `AI-`-prefixed id; see `is_ai_tier`) the corpus never saw.
+// `resolve_citation` is honest about that: it labels such a finding "AI-advisory,
+// model-inferred." rather than dressing it up. But the product promises every CURATED
+// finding cites the published standard it breaks (the hardening plan's bar item 3) — a
+// citation-less finding sitting in the curated set falsifies that promise, for exactly
+// the findings a client is most likely to act on first.
+//
+// The fix is NOT to invent a bespoke Rust-side citation per finding (that just moves the
+// "trust me" problem into this file instead of a TOML). Instead: classify the AI finding
+// into one of a small, closed set of well-known defect CLASSES by its rule id tokens +
+// `category` + detail-text keywords (never a fixture-specific string — see
+// `classify_ai_finding`'s doc comment), then reuse an EXISTING grounded corpus rule's own
+// citation for that class. Where a class had no corpus rule yet, one was added under
+// `crates/rules/principles/universal/sec-no-*-1.toml` rather than inventing a citation in
+// Rust — grounding always means a published standard or a real linter rule.
+//
+// A finding that still resolves to "advisory" after this fallback (its class has no
+// mapping, or it does not classify into any known class at all) is the CURATION GATE's
+// job: `is_uncited_ai_finding` reports it as uncited, and `build_report_json` routes it
+// to the informational/held-for-review bucket and EXCLUDES it from `curated_findings`
+// entirely. It is never silently dropped (over-tell over under-tell) — it still surfaces
+// as a `FindingRefJson` with an honest "needs review (uncited)" headline, just outside the
+// curated action tiers.
+
+/// Whether `finding` came from the AI tier (the model-inferred prose/deep-audit pass) as
+/// opposed to the deterministic floor or a scan-time preview tool. Mirrors the signal
+/// `ai_audit::finding_origin` already uses to distinguish AI output (an `AI-`-prefixed
+/// invented rule id, or a calibration-set `confidence`) without reaching into that
+/// module's private `Origin` enum — this file only needs the yes/no answer. Deliberately
+/// gates the P3 citation fallback/exclusion to ONLY AI-tier findings: a deterministic
+/// floor rule that happens to lack a corpus citation (a separate, pre-existing gap — e.g.
+/// `SEC-NO-RAW-SQL-CONCAT-1`, which has no TOML entry at all) is untouched by this gate.
+pub(crate) fn is_ai_tier(finding: &Finding) -> bool {
+    finding.rule_id.starts_with("AI-") || finding.confidence.is_some()
+}
+
+/// The closed set of defect classes an otherwise-uncited AI-tier finding is checked
+/// against before being allowed into the curated set (P3). Each variant names a corpus
+/// rule ([`AiFindingClass::grounding_rule_id`]) whose `[[sources]]` are a real published
+/// standard or linter — the class NEVER carries its own bespoke citation text, so there is
+/// exactly one place (`crates/rules/principles/**`) an auditor edits to correct or extend
+/// a citation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AiFindingClass {
+    /// Row Level Security disabled, missing, or permissive on an exposed table (a
+    /// cross-tenant read, RLS disabled on a payments table, an always-true policy, …).
+    Rls,
+    /// Stored or reflected cross-site scripting via a raw-HTML sink
+    /// (`dangerouslySetInnerHTML`, `innerHTML`, `document.write`, `v-html`, …).
+    Xss,
+    /// A redirect target derived from user input with no allowlist check.
+    OpenRedirect,
+    /// A security token/nonce/session id generated from a general-purpose PRNG instead of
+    /// a cryptographically secure source.
+    WeakTokenRandomness,
+    /// User-controlled data concatenated into a query/filter GRAMMAR (PostgREST
+    /// `.or()`/`.filter()`, a NoSQL operator string, an LDAP filter) rather than passed as
+    /// a bound argument.
+    QueryGrammarInjection,
+    /// A CORS policy pairing a wildcard or reflected `Origin` with
+    /// `Access-Control-Allow-Credentials: true`.
+    PermissiveCors,
+}
+
+impl AiFindingClass {
+    /// The corpus rule id whose `sources` ground this class. Reused verbatim via
+    /// `resolve_citation` — never re-derived here — so correcting or extending a citation
+    /// is a one-file TOML change, not a second Rust-side copy to keep in sync.
+    fn grounding_rule_id(self) -> &'static str {
+        match self {
+            AiFindingClass::Rls => "SUPABASE-RLS-ENABLED-1",
+            AiFindingClass::Xss => "SEC-NO-UNSAFE-HTML-SINK-1",
+            AiFindingClass::OpenRedirect => "SEC-NO-OPEN-REDIRECT-1",
+            AiFindingClass::WeakTokenRandomness => "SEC-NO-WEAK-TOKEN-RANDOMNESS-1",
+            AiFindingClass::QueryGrammarInjection => "SEC-NO-QUERY-GRAMMAR-INJECTION-1",
+            AiFindingClass::PermissiveCors => "SEC-NO-PERMISSIVE-CORS-CREDENTIALS-1",
+        }
     }
+}
+
+/// Classify an AI-tier finding into the P3 closed taxonomy, by RULE-ID TOKENS + the
+/// existing semantic `category` field + DETAIL-TEXT keywords — never a fixture-specific
+/// rule id or file/table name (the AI tier invents its own rule id per finding, so a
+/// fixture-keyed match would only ever fire on one benchmark). General by construction:
+/// every signal here is a defect-family vocabulary word (an OWASP/CWE term or the
+/// framework API a real fix touches — `dangerouslySetInnerHTML`, `.or(`, `Origin`), not
+/// any one repo's own identifiers. Returns `None` when nothing matches — the caller
+/// (`is_uncited_ai_finding`) treats that as genuinely uncited, never guesses.
+pub(crate) fn classify_ai_finding(
+    rule_id: &str,
+    category: Option<&str>,
+    detail: &str,
+) -> Option<AiFindingClass> {
+    let id = rule_id.to_ascii_uppercase();
+    let det = detail.to_ascii_lowercase();
+    let has_id = |needle: &str| id.contains(needle);
+    let has_det = |needle: &str| det.contains(needle);
+
+    // RLS: disabled, missing, or overly permissive Row Level Security on an exposed table.
+    if category == Some("rls-policy")
+        || has_id("RLS")
+        || has_id("ROW-LEVEL")
+        || has_det("row level security")
+        || has_det("row-level security")
+    {
+        return Some(AiFindingClass::Rls);
+    }
+    // Stored/reflected XSS via a raw-HTML sink.
+    if has_id("XSS")
+        || has_id("INNERHTML")
+        || has_det("dangerouslysetinnerhtml")
+        || has_det("innerhtml")
+        || has_det("cross-site scripting")
+        || has_det("cross site scripting")
+        || has_det("stored xss")
+        || has_det("reflected xss")
+    {
+        return Some(AiFindingClass::Xss);
+    }
+    // Open redirect: a redirect target with no allowlist check.
+    if has_id("OPEN-REDIRECT")
+        || has_det("open redirect")
+        || has_det("unvalidated redirect")
+        || (has_det("redirect")
+            && (has_det("attacker")
+                || has_det("untrusted")
+                || has_det("arbitrary")
+                || has_det("user-controlled")
+                || has_det("unvalidated")))
+    {
+        return Some(AiFindingClass::OpenRedirect);
+    }
+    // Insecure randomness backing a security token/nonce/session id.
+    if has_det("math.random")
+        || has_det("random.random(")
+        || has_det("insecure random")
+        || has_det("weak random")
+        || has_det("predictable token")
+        || has_det("prng")
+        || has_det("non-cryptographic")
+        || ((has_id("RANDOM") || has_id("PRNG"))
+            && (has_id("TOKEN") || has_id("SESSION") || has_id("NONCE") || has_id("SECRET")))
+        || (has_det("random")
+            && (has_det("token")
+                || has_det("nonce")
+                || has_det("session id")
+                || has_det("password reset")
+                || has_det("api key")
+                || has_det("share link")))
+    {
+        return Some(AiFindingClass::WeakTokenRandomness);
+    }
+    // Query/filter-grammar injection: PostgREST .or()/.filter(), a NoSQL operator string,
+    // an LDAP filter — built from interpolated user input rather than a bound argument.
+    if has_id("FILTER-INJECT")
+        || has_id("QUERY-GRAMMAR")
+        || has_id("GRAMMAR-INJECT")
+        || has_det(".or(")
+        || has_det(".filter(")
+        || has_det("query grammar")
+        || has_det("filter grammar")
+        || has_det("postgrest")
+        || has_det("$where")
+        || has_det("ldap filter")
+    {
+        return Some(AiFindingClass::QueryGrammarInjection);
+    }
+    // Permissive CORS: a wildcard/reflected origin combined with allowed credentials.
+    let mentions_cors = has_id("CORS") || has_det("cors") || has_det("access-control-allow-origin");
+    let mentions_credentials = has_id("CREDENTIAL")
+        || has_det("credential")
+        || has_det("allow-credentials")
+        || has_det("cookie");
+    if mentions_cors && mentions_credentials {
+        return Some(AiFindingClass::PermissiveCors);
+    }
+    None
+}
+
+/// Resolve `finding`'s citation, applying the P3 class fallback when its OWN rule id has
+/// no grounded corpus citation and no preview tool (`resolve_citation`'s "advisory"
+/// branch) — but ONLY for an AI-tier finding (`is_ai_tier`); a deterministic finding's
+/// advisory citation is a different, pre-existing gap this pass does not touch. Returns
+/// the ORIGINAL citation unchanged in every other case (already grounded, already
+/// preview-labeled, not AI-tier, or AI-tier but unclassifiable).
+pub(crate) fn citation_for_finding(
+    finding: &Finding,
+    corpus: Option<&camerata_rules::RuleSet>,
+) -> CitationJson {
+    let base = resolve_citation(&finding.rule_id, finding.preview_tool.as_deref(), corpus);
+    if base.kind != "advisory" || !is_ai_tier(finding) {
+        return base;
+    }
+    match classify_ai_finding(
+        &finding.rule_id,
+        finding.category.as_deref(),
+        &finding.detail,
+    ) {
+        Some(class) => {
+            let grounded = resolve_citation(class.grounding_rule_id(), None, corpus);
+            if grounded.kind == "grounded" {
+                grounded
+            } else {
+                base
+            }
+        }
+        None => base,
+    }
+}
+
+/// Human-readable title for `finding`'s rule (C4-P2). Prefers, in order:
+/// 1. the finding's OWN rule id's corpus title — unchanged from every pre-existing call site
+///    (a deterministic/preview finding always has a corpus entry, so this is the only branch
+///    that ever fires for one);
+/// 2. for an AI-tier finding whose own invented rule id has no corpus entry, the GROUNDING
+///    rule's corpus title — the same rule [`citation_for_finding`] already borrows a citation
+///    from for this finding's class, so the header and the citation underneath it describe the
+///    SAME standard rather than a human-readable citation sitting under a header that is
+///    nothing but the model's own invented id repeated;
+/// 3. the bare rule id — truly unclassifiable, last resort, never fabricated (identical to the
+///    pre-existing behavior for this case).
+pub(crate) fn title_for_finding(
+    finding: &Finding,
+    corpus: Option<&camerata_rules::RuleSet>,
+) -> String {
+    if let Some(rule) = corpus.and_then(|c| c.get_by_id(&finding.rule_id)) {
+        return rule.title.clone();
+    }
+    if is_ai_tier(finding) {
+        if let Some(class) = classify_ai_finding(
+            &finding.rule_id,
+            finding.category.as_deref(),
+            &finding.detail,
+        ) {
+            if let Some(rule) = corpus.and_then(|c| c.get_by_id(class.grounding_rule_id())) {
+                return rule.title.clone();
+            }
+        }
+    }
+    finding.rule_id.clone()
+}
+
+/// C4-P4 (residual defect 2): human-readable TITLES for a finding's `also_matches` list (other
+/// rule ids absorbed into this one during P1 clustering) — NEVER the raw rule ids themselves.
+/// Client-facing prose (the PDF curated-site "Also violates" line, the xlsx/`findings.json`
+/// "Also matches" column) must never surface an internal rule-id token, which a reader has no
+/// way to decode. An id with no resolvable corpus title is DROPPED from the list entirely
+/// rather than falling back to the bare id — unlike [`title_for_finding`]'s last-resort bare-id
+/// fallback (fine for a finding's OWN primary title, since that's the only identifier left to
+/// show at all) applying that same fallback here would just reintroduce the raw-id leak this
+/// function exists to close. Shared by both call sites so the PDF and the xlsx/JSON sibling can
+/// never render two different label sets for the same underlying ids.
+pub(crate) fn also_matches_titles(
+    ids: &[String],
+    corpus: Option<&camerata_rules::RuleSet>,
+) -> Vec<String> {
+    ids.iter()
+        .filter_map(|id| {
+            corpus
+                .and_then(|c| c.get_by_id(id))
+                .map(|rule| rule.title.clone())
+        })
+        .collect()
+}
+
+/// The P3 curation gate: true when `finding` is AI-tier AND its citation is still
+/// "advisory" after the class-fallback attempt above — i.e. it cannot be honestly
+/// presented as grounded. `build_report_json` excludes such a finding from
+/// `curated_findings` entirely and routes it to the informational/held-for-review bucket
+/// with an explicit "needs review (uncited)" headline, REGARDLESS of severity — unlike
+/// `is_informational`'s other signals, this one is a report-integrity gate, not a
+/// triage-confidence signal: a critical, uncited finding is PRECISELY the case this gate
+/// exists to catch, so it is never dropped, never silently demoted into an ordinary
+/// severity-capped appendix row, and (C5-7) never squashed into `informational` at a
+/// severity that invariant was never meant to carry — see [`effective_bucket`]'s doc comment
+/// for the held-vs-informational split this feeds into (held at high/critical, informational
+/// at medium/low/info, both still fully visible and both still excluded from
+/// `curated_findings`).
+pub(crate) fn is_uncited_ai_finding(
+    finding: &Finding,
+    corpus: Option<&camerata_rules::RuleSet>,
+) -> bool {
+    is_ai_tier(finding) && citation_for_finding(finding, corpus).kind == "advisory"
+}
+
+/// Join `rule_id` against the loaded corpus to recover its DEFAULT option's AUTHORED
+/// `remediation` text, then instantiate that text's placeholder tokens (`<table>`,
+/// `<function-name>`, `<bucket>`, `<path>`, …) from `finding`'s own `path`/`captures`. This is a
+/// serialization-time join exactly like [`resolve_citation`] for the RULE-level lookup, plus a
+/// per-FINDING instantiation step — the authored text is a property of the rule, but naming the
+/// specific table/function/bucket in THIS codebase is a property of the finding.
+///
+/// # `remediation`, never `directive` (2026-09-13 product-review Fix 1)
+/// `remediation` is an authored field with one job: 2-4 imperative sentences telling the
+/// CLIENT what to change, where, and how to verify the fix. This function binds ONLY to it and
+/// must NEVER fall back to `directive` or any other rule field when it is absent — fail-safe
+/// here means silently omitting the Fix block. See
+/// `docs/design/2026-09-13_audit-deliverable-review-fixes.md` Fix 1.
+///
+/// **Correction, 2026-10-20.** This comment used to justify that rule by calling `directive`
+/// "the rule's DETECTION/enforcement recipe — internal, agent-facing instructions for how
+/// Camerata itself finds this defect", which "leaks internals and confuses a paying client".
+/// The BEHAVIOUR is right and unchanged; the characterisation was wrong, and
+/// `docs/RULE_AUTHORING.md`'s 2026-10-19 correction identifies it as the misreading that let
+/// detector voice into the corpus in the first place.
+///
+/// `directive` is not internal. `arm.rs::render_rule` emits it VERBATIM into the client's own
+/// `AGENTS.md`/`CONVENTIONS.md` as a convention their project follows — which is the product,
+/// not a leak. A well-written directive is a behavioural commitment an engineer or agent in
+/// that repo can follow, and it is perfectly fine in front of a client. What is not fine is a
+/// directive written as a scanner recipe, and that text is wrong for the scanning MODEL too,
+/// which gets told to behave like a regex engine instead of being told what the code must do.
+///
+/// So the reason this function binds only to `remediation` is narrower than the old comment
+/// claimed, and still sound: a directive states what the code must BE, while a Fix line must
+/// say what to CHANGE and how to verify it. Those are different sentences, and substituting
+/// one for the other produces a Fix block that restates the problem.
+///
+/// Returns `None` (never a fabricated sentence, never `directive`) when: the corpus is absent,
+/// the rule id has no corpus entry, the rule has no options at all, the rule has no adopted
+/// DEFAULT option, or the resolved option's `remediation` field is itself absent/blank in the
+/// TOML (not yet authored — the common case until the corpus-wide authoring pass in Phase 2a
+/// lands). Surfaced as the PDF's "Fix:" line (`CuratedSiteJson::fix`) and the workbook's
+/// "Recommended Fix" column / `findings.json`'s `fix` field (`FindingRow::fix`) — same join, all
+/// three, so an absent remediation reads as an honestly OMITTED Fix block everywhere rather than
+/// one artifact inventing text the others don't have.
+/// Resolve for the option this finding was ACTUALLY evaluated under, so the report's Fix
+/// text matches what was judged, never a stale default (2026-09-22 audit-integrated
+/// alternatives, extending the 2026-09-13 Fix-1 mechanism below). Resolution order, via
+/// [`camerata_rules::Rule::resolved_option`]:
+/// 1. `finding.evaluated_option_id` — the option the audit (or a targeted
+///    `rescan-alternatives` call) actually judged this specific finding against, when the
+///    rule is multi-option and semantic;
+/// 2. `chosen_option` — the project's persisted `RuleSelection.chosen_option` for this rule,
+///    passed in by the caller (`ReportOptions::chosen_options`), when the finding predates
+///    this field or belongs to a rule the AI audit never tagged (e.g. a legacy persisted
+///    finding);
+/// 3. the corpus rule's own `default_option` — `resolved_option`'s own fallback, unchanged
+///    from before this feature.
+pub(crate) fn resolve_fix(
+    rule_id: &str,
+    corpus: Option<&camerata_rules::RuleSet>,
+    finding: &Finding,
+    chosen_option: Option<&str>,
+) -> Option<String> {
+    let rule = corpus_rule_for(rule_id, corpus)?;
+    let evaluated = finding.evaluated_option_id.as_deref().or(chosen_option);
+    let option = rule.resolved_option(evaluated)?;
+    let remediation = option.remediation.as_deref()?.trim();
+    if remediation.is_empty() {
+        return None;
+    }
+    Some(instantiate_remediation(
+        remediation,
+        &finding.path,
+        &finding.captures,
+    ))
+}
+
+/// C5-8 (R7 amended): whether `finding` has ANY fix text available to show a client, if it
+/// lands in an action bucket — either a this-codebase specific fix
+/// (`ai_audit::generate_fix_specifics`'s `Finding::fix_specific`) or the rule's own authored
+/// remediation ([`resolve_fix`], the exact join `CuratedSiteJson::fix` itself performs). A
+/// pipeline failure on the FIRST (fix-generation gave up or never ran) is routine and never
+/// gates anything by itself — see the C3-1b module comment above — because the SECOND normally
+/// still ships a usable fix.
+///
+/// Deliberately does NOT, by itself, treat "the rule id has no corpus entry at all" as missing
+/// a fix — see [`is_action_row_missing_a_fix`], the actual bucket-routing gate, for why that
+/// case is scoped out separately rather than folded in here.
+fn has_any_fix(
+    finding: &Finding,
+    corpus: Option<&camerata_rules::RuleSet>,
+    chosen_option: Option<&str>,
+) -> bool {
+    finding
+        .fix_specific
+        .as_deref()
+        .is_some_and(|s| !s.trim().is_empty())
+        || resolve_fix(&finding.rule_id, corpus, finding, chosen_option).is_some()
+}
+
+// ── P4 (2026-09-29): floor findings get finding-level treatment ────────────────────
+//
+// A deterministic/floor finding's `detail` is set at scan time
+// (`onboard::audit::title_for`) from the GATE's own rule description — internal, agent-facing
+// enforcement prose ("Deny writing a file whose path marks it as secret-bearing…"), never
+// authored for a client to read. Left alone, that text flows straight into both the headline
+// (`defect_headline` takes its first sentence) and the detail of every curated site for a
+// floor rule. [`resolve_floor_finding_text`] is the render-time escape hatch, mirroring
+// [`resolve_fix`] exactly: an AUTHORED template lives on the rule's resolved option in the
+// corpus (`RuleOption::finding_headline` / `finding_detail`), instantiated from the SAME
+// `<path>`/`<file>`/capture placeholders `resolve_fix` already substitutes, so a rule author
+// writes ONE specific, plain-language pair per rule and every finding of that rule gets a
+// repo-specific rendering for free. `is_ai_tier` findings never reach this function in
+// practice (they invent their own rule id, which the corpus never resolves) but nothing here
+// assumes that — it degrades to `None` for any rule id the corpus doesn't know, same as
+// `resolve_fix`.
+
+/// Resolve the authored, client-facing (headline, detail) pair for a DETERMINISTIC FLOOR
+/// finding (P4), instantiating `<path>`/`<file>`/capture placeholders exactly as
+/// [`resolve_fix`] does for `remediation`. Returns `None` — the caller then falls back to the
+/// pre-P4 `defect_headline(&finding.detail, …)` / `finding.detail.clone()` behavior — when: the
+/// corpus is absent, the rule id has no corpus entry, the rule has no resolvable option, or
+/// either `finding_headline` or `finding_detail` is absent/blank on that option (authored as a
+/// PAIR; never render one half authored and the other the gate's raw text). This is the ONLY
+/// path by which a floor finding's client-facing headline/detail can differ from its raw
+/// `Finding::detail` — see the module-level comment above for why that indirection exists.
+pub(crate) fn resolve_floor_finding_text(
+    rule_id: &str,
+    corpus: Option<&camerata_rules::RuleSet>,
+    finding: &Finding,
+    chosen_option: Option<&str>,
+) -> Option<(String, String)> {
+    let rule = corpus.and_then(|c| c.get_by_id(rule_id))?;
+    let evaluated = finding.evaluated_option_id.as_deref().or(chosen_option);
+    let option = rule.resolved_option(evaluated)?;
+    let headline_tpl = option.finding_headline.as_deref()?.trim();
+    let detail_tpl = option.finding_detail.as_deref()?.trim();
+    if headline_tpl.is_empty() || detail_tpl.is_empty() {
+        return None;
+    }
+    let headline = instantiate_remediation(headline_tpl, &finding.path, &finding.captures);
+    let detail = instantiate_remediation(detail_tpl, &finding.path, &finding.captures);
+    Some((headline, detail))
+}
+
+/// Client-facing (headline, detail) for ONE finding, preferring the P4 authored floor
+/// template ([`resolve_floor_finding_text`]) and falling back to the pre-P4 derivation
+/// (`defect_headline` over `finding.detail`, `finding.detail` verbatim) when no authored
+/// template is available for this rule/option — an AI-tier finding (whose own prose already
+/// leads with a plain-language sentence by house convention) or a floor rule not yet authored.
+/// Centralizing this join means the matrix headline and the curated site's headline+detail can
+/// never drift onto two different derivations of the same finding.
+pub(crate) fn client_headline_and_detail(
+    finding: &Finding,
+    corpus: Option<&camerata_rules::RuleSet>,
+    fallback_title: &str,
+    chosen_option: Option<&str>,
+) -> (String, String) {
+    match resolve_floor_finding_text(&finding.rule_id, corpus, finding, chosen_option) {
+        Some((headline, detail)) => (headline, detail),
+        None => (
+            defect_headline(&finding.detail, fallback_title),
+            finding.detail.clone(),
+        ),
+    }
+}
+
+/// The readable, never-internal-sounding generic noun phrase substituted for a placeholder
+/// token when the finding carries no captured value for it. Keyed by the token's bare name
+/// (angle brackets stripped) exactly as it appears in authored `remediation` (and, before it,
+/// the corpus rules' own `directive`) text — extend this map when a new rule introduces a new
+/// domain token, so its remediation can still render something readable before a detector is
+/// wired to capture the real object. `<path>`/`<file>` are handled separately in
+/// [`instantiate_remediation`] (filled from the finding's own `path`, which is always present),
+/// so they are not listed here; the catch-all arm below is still a safe fallback for them too if
+/// `path` is ever empty.
+/// True when `token` (already stripped of any leading `a:` prefix) has the SHAPE every real
+/// placeholder in this corpus uses: lowercase ASCII letters, digits, and hyphens only (`path`,
+/// `function-name`, `secret-kind`, …). C4-R3: authored `remediation`/`finding_*` prose
+/// occasionally needs to show a literal angle-bracketed EXAMPLE inline — e.g. an XSS rule's
+/// "verify a payload like <img src=x onerror=alert(1)> renders as inert text" — and
+/// [`instantiate_remediation`] used to treat every `<...>` span as a token to fill, so that
+/// literal example's own `<img ...>` markup got swallowed and replaced by the generic filler,
+/// rendering the nonsense sentence "a payload like the affected resource renders as inert
+/// text." A real token is never spelled with spaces, `=`, or uppercase letters; this check lets
+/// [`instantiate_remediation`] tell the two apart and leave a non-token span exactly as the
+/// rule author wrote it.
+fn is_placeholder_token_shape(token: &str) -> bool {
+    !token.is_empty()
+        && token
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+}
+
+fn generic_placeholder_filler(token: &str) -> &'static str {
+    match token {
+        "table" => "the affected table",
+        "function-name" | "function" => "the affected function",
+        "bucket" => "the affected bucket",
+        "view" => "the affected view",
+        "matview" => "the affected materialized view",
+        "schema" => "the affected schema",
+        "policy" => "the affected policy",
+        "path" | "file" => "the affected file",
+        // P4: the secret-shaped floor rules' context-fact tokens (`onboard::audit::
+        // enrich_secret_context` / `onboard::attach_secret_history_capture`). The first two
+        // are always populated once the rule fires (the enrichment is unconditional and
+        // pure); `history-status` is best-effort (needs a real local git checkout), so this
+        // fallback is its realistic path, not just defensive dead code.
+        // Bare noun (no leading article) — see `onboard::audit::classify_secret_kind`'s doc
+        // comment (W4, 2026-09-30): this fallback shares that contract so it can never double
+        // an article a template already supplies, and can be safely used with `<a:secret-kind>`
+        // where the template wants one computed dynamically instead.
+        "secret-kind" => "hardcoded credential",
+        "gitignore-status" => "not confirmed against this repository's `.gitignore`",
+        "history-status" => "not checked against this repository's commit history",
+        _ => "the affected resource",
+    }
+}
+
+/// Acronym-initial letters whose NAME (when read letter-by-letter, as an acronym is) begins
+/// with a vowel SOUND even though the letter itself is a consonant: "F" is "ef", "H" is
+/// "aitch", "L" is "el", "M" is "em", "N" is "en", "R" is "ar", "S" is "es", "X" is "ex".
+/// English indefinite-article choice follows the SOUND, not the letter — "an SSH key", "an
+/// FAQ", "an HTML page", "an MRI" are all correct despite S/F/H/M being consonants. Used by
+/// [`indefinite_article`].
+const VOWEL_SOUND_ACRONYM_INITIALS: &[char] = &['F', 'H', 'L', 'M', 'N', 'R', 'S', 'X'];
+
+/// Choose `"a"` or `"an"` for the noun phrase `phrase`, based on its first word. Handles the
+/// two cases the corpus's authored templates actually need: an ordinary word (vowel-LETTER
+/// check) and an ALL-CAPS acronym read letter-by-letter (vowel-SOUND check via
+/// [`VOWEL_SOUND_ACRONYM_INITIALS`]) — e.g. `"SSH private key"` needs `"an"`, not `"a"`,
+/// because "S" is pronounced "ess". Deliberately scoped to this plain technical vocabulary —
+/// no dictionary of irregular exceptions (`"hour"`, `"European"`, …) that this corpus's
+/// substituted values never produce. See [`instantiate_remediation`]'s `<a:token>` handling,
+/// the caller this exists for.
+pub(crate) fn indefinite_article(phrase: &str) -> &'static str {
+    let first_word = phrase.split_whitespace().next().unwrap_or("");
+    let Some(first_char) = first_word.chars().next() else {
+        return "a";
+    };
+    let is_acronym = first_word.len() >= 2 && first_word.chars().all(|c| c.is_ascii_uppercase());
+    let starts_with_vowel_letter =
+        matches!(first_char.to_ascii_lowercase(), 'a' | 'e' | 'i' | 'o' | 'u');
+    // A vowel-LETTER initial sounds like a vowel whether or not the word is an acronym read
+    // letter-by-letter ("AWS" -> "ay") — that case is already covered by the plain check. The
+    // acronym exception set only needs to add the CONSONANT letters whose own name starts with
+    // a vowel sound ("S" -> "ess").
+    let vowel_sound = starts_with_vowel_letter
+        || (is_acronym && VOWEL_SOUND_ACRONYM_INITIALS.contains(&first_char));
+    if vowel_sound {
+        "an"
+    } else {
+        "a"
+    }
+}
+
+/// Substitute every `<token>` placeholder in authored `remediation` text with a concrete value,
+/// so the same authored sentence names the actual object in THIS codebase. Resolution order per
+/// token: (1) `<path>`/`<file>` always resolve to `path` (the finding's own path) when it is
+/// non-empty; (2) any other token resolves to `captures.get(token)` when the detector populated
+/// one; (3) otherwise a readable generic from [`generic_placeholder_filler`]. This function is
+/// the SOLE gate between authored text and the client, so it is deliberately exhaustive: EVERY
+/// well-formed `<...>` span found in `remediation` is replaced by construction — there is no
+/// code path that can leave a raw `<token>` in the returned string. A malformed span (a bare `<`
+/// with no matching `>` anywhere after it) is passed through unmodified rather than guessed at,
+/// since that is prose, not a token — this can only happen if a rule author literally types an
+/// unmatched `<` in remediation copy, not from anything a detector or the finding data supplies.
+///
+/// # `<a:token>` — a dynamically-chosen indefinite article (W4, 2026-09-30)
+/// A token spelled `<a:token>` (e.g. `<a:secret-kind>`) resolves `token` exactly as above, then
+/// prepends `"a "`/`"an "` (via [`indefinite_article`]) to the resolved value. Every substituted
+/// value in this corpus is now a bare noun phrase with NO leading article of its own (see
+/// `onboard::audit::classify_secret_kind`'s doc comment) — a template either supplies its own
+/// fixed article ahead of an adjective (`"a live <secret-kind>"`, correct regardless of the
+/// noun's own sound, since the article agrees with "live") or, when the placeholder opens the
+/// clause with nothing of its own in front of it, requests `<a:token>` so the RESOLVED value's
+/// own initial sound picks the right article. Before this existed, a template could only
+/// hardcode a literal article, which silently DOUBLED whenever the substituted value already
+/// carried one of its own (`"a live a vendor credential token"`) — the exact W4 bug class this
+/// mechanism removes structurally, for this token and any future one.
+pub(crate) fn instantiate_remediation(
+    remediation: &str,
+    path: &str,
+    captures: &std::collections::BTreeMap<String, String>,
+) -> String {
+    let mut out = String::with_capacity(remediation.len());
+    let mut rest = remediation;
+    while let Some(start) = rest.find('<') {
+        out.push_str(&rest[..start]);
+        let after_open = &rest[start + 1..];
+        let Some(end) = after_open.find('>') else {
+            // No closing bracket anywhere ahead — not a well-formed token. Emit the remainder
+            // verbatim rather than treating a stray `<` as something to defend against.
+            out.push_str(&rest[start..]);
+            rest = "";
+            break;
+        };
+        let raw_token = after_open[..end].trim();
+        let (token, want_article) = match raw_token.strip_prefix("a:") {
+            Some(bare) => (bare.trim(), true),
+            None => (raw_token, false),
+        };
+        if !is_placeholder_token_shape(token) {
+            // C4-R3: not a real placeholder — emit the original bracketed span verbatim. Running
+            // a literal example (HTML markup, a generic-type snippet, …) through the generic
+            // filler would replace the author's own words with nonsense; a malformed span gets
+            // the identical verbatim treatment just below in the no-closing-bracket branch.
+            out.push_str(&rest[start..start + 1 + end + 1]);
+            rest = &after_open[end + 1..];
+            continue;
+        }
+        let filled = if matches!(token, "path" | "file") && !path.trim().is_empty() {
+            path.to_string()
+        } else {
+            captures
+                .get(token)
+                .map(|v| v.trim())
+                .filter(|v| !v.is_empty())
+                .map(str::to_string)
+                .unwrap_or_else(|| generic_placeholder_filler(token).to_string())
+        };
+        let filled = if want_article {
+            format!("{} {filled}", indefinite_article(&filled))
+        } else {
+            filled
+        };
+        out.push_str(&filled);
+        rest = &after_open[end + 1..];
+    }
+    out.push_str(rest);
+    out
+}
+
+// ── Export reproducibility: one clock reading, taken from the scan ───────────────
+
+/// The strftime format every client-facing "generated at" string uses (the PDF cover's
+/// `generated_at`, the workbook Index's "Generated" row). Minute precision, explicit UTC.
+/// Shared so [`generated_at_label`] and the parse back out of it in [`compile_pdf`] can never
+/// drift apart.
+pub(crate) const GENERATED_AT_FORMAT: &str = "%Y-%m-%d %H:%M UTC";
+
+/// The instant this audit RAN, recovered from the scan's own provenance: `finished_at` when it
+/// is a real RFC3339 instant, else `started_at`, else `None` (a report whose provenance was
+/// never stamped, or was stamped with something unparseable — never a silently invented time).
+///
+/// Every timestamp a deliverable embeds derives from this, never from the wall clock at
+/// serialization time: the PDF cover's "Generated" line, the PDF's own `SOURCE_DATE_EPOCH`
+/// creation timestamp, the workbook Index's "Generated" row and the workbook's
+/// `docProps/core.xml` `dcterms:created`/`dcterms:modified`.
+///
+/// Two reasons, and the second is the stronger one:
+///   1. Reproducibility. With the clock read at serialization time, two exports of ONE report
+///      were not byte-identical, so the product could not prove two deliverables were the same
+///      report. (It also made `crates/cli/tests/inspect_export_equivalence.rs` flake about one
+///      run in four, which is how the problem was noticed rather than what it was.)
+///   2. Correctness for a client deliverable. A client reading the file's metadata wants to
+///      know when the AUDIT ran. "When the bytes happened to be serialized" is an answer to a
+///      question nobody asked, and it actively misleads on a re-export: a PDF regenerated
+///      months later from an unchanged report claimed to have been generated months after the
+///      audit it describes.
+///
+/// Deliberately NOT a constant. Pinning to a fixed epoch would buy reproducibility while
+/// throwing away the true statement, which is the half that matters to the reader.
+pub(crate) fn scan_instant(
+    provenance: &crate::onboard::ScanProvenance,
+) -> Option<chrono::DateTime<chrono::Utc>> {
+    for raw in [&provenance.finished_at, &provenance.started_at] {
+        if let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(raw.trim()) {
+            return Some(parsed.with_timezone(&chrono::Utc));
+        }
+    }
+    None
+}
+
+/// The client-facing "generated at" string for a scan: [`scan_instant`] rendered in
+/// [`GENERATED_AT_FORMAT`].
+///
+/// Falls back to the wall clock ONLY when provenance carries no parseable instant at all. That
+/// case is non-reproducible by construction and is accepted rather than papered over: a report
+/// with no recorded scan time has no true answer to give, and inventing a fixed one would
+/// print a confident lie. Every real scan path stamps `started_at`/`finished_at`.
+pub(crate) fn generated_at_label(provenance: &crate::onboard::ScanProvenance) -> String {
+    scan_instant(provenance)
+        .unwrap_or_else(chrono::Utc::now)
+        .format(GENERATED_AT_FORMAT)
+        .to_string()
 }
 
 /// A small, generic technical-acronym allowlist for cosmetic title-casing — NOT a rule
@@ -679,7 +2499,9 @@ fn prettify_category_key(key: &str) -> String {
         .take(2)
         .collect();
     if tokens.is_empty() {
-        return "Other".to_string();
+        // Same generic bucket the A9 ladder ends in, named once — a key with no usable
+        // tokens and a rule id no source can categorize are the same situation to a reader.
+        return UNCATEGORIZED_CATEGORY.to_string();
     }
     tokens
         .iter()
@@ -688,16 +2510,102 @@ fn prettify_category_key(key: &str) -> String {
         .join(" ")
 }
 
-/// Category for the scorecard: the corpus rule's own `domain` when known, else a fallback
-/// built from the rule id itself — both prettified the same way (S5), rather than a bare
-/// lowercased/raw key (`"supabase:rls"` or `"supabase"`). Still a fallback for the
-/// corpus-absent case, not a taxonomy — good enough for a scorecard grouping, not
-/// load-bearing.
+/// The ONE label a category falls back to when no real category can be established: not from
+/// the corpus (the rule has no entry), not from the finding's own calibrated `category`, and
+/// not from the closed semantic taxonomy. One honest generic bucket, in client language.
+///
+/// A9: this replaced slugifying the rule id itself. The old terminal fallback was
+/// `prettify_category_key(rule_id)`, which turns `ARCH-NO-CROSS-BOUNDARY-IMPORTS-1` into
+/// `"Arch No"` and `LEGACY-UNMAPPED-1` into `"Legacy Unmapped"`. Those strings reached the PDF
+/// scorecard's Category column AND — because `xlsx_export` names its per-area worksheets from
+/// the category — became client-facing Excel TAB names. A client opened the deliverable and
+/// saw a tab called "Arch No". A rule id is internal vocabulary; no amount of title-casing
+/// turns it into a category, and a per-rule mangled label is strictly worse than one honest
+/// generic one because it also fragments the scorecard into bogus single-row categories.
+pub(crate) const UNCATEGORIZED_CATEGORY: &str = "Other";
+
+/// Client-facing display labels for the closed semantic taxonomy
+/// (`ai_audit::KNOWN_CATEGORIES`). Only the keys whose mechanical prettification is INTERNAL
+/// vocabulary are listed; every other key already reads as client language through
+/// `prettify_category_key` (`injection` -> "Injection", `rls-policy` -> "RLS Policy",
+/// `secret-exposure` -> "Secret Exposure", ...) and is deliberately not restated here, so this
+/// table cannot drift into a second, parallel taxonomy. It RENAMES the existing taxonomy for
+/// the reader; it never adds to it.
+const CATEGORY_DISPLAY_OVERRIDES: &[(&str, &str)] = &[
+    // "Arch Conformance" is our governance vocabulary; the client's word is "Architecture".
+    ("arch-conformance", "Architecture"),
+    // "Testing Style" names an internal rule family; the client-facing subject is testing.
+    ("testing-style", "Testing"),
+];
+
+/// Render a category KEY (a corpus rule's `domain`, or a closed-taxonomy class) as the label a
+/// client reads: an explicit override where the mechanical prettification would leak internal
+/// vocabulary, otherwise [`prettify_category_key`].
+fn category_display_label(key: &str) -> String {
+    if let Some((_, label)) = CATEGORY_DISPLAY_OVERRIDES.iter().find(|(k, _)| *k == key) {
+        return (*label).to_string();
+    }
+    prettify_category_key(key)
+}
+
+/// Category for the scorecard: the corpus rule's own `domain` when known, else the closed
+/// semantic taxonomy the rule id's TOKENS classify into
+/// (`crate::ai_audit::categorize_rule_id` — the same repo-agnostic classifier calibration
+/// uses), else [`UNCATEGORIZED_CATEGORY`].
+///
+/// A9: what this function must never do is return the rule id itself with title case applied.
+/// A rule id is an internal identifier; its first two tokens are not a category, and the
+/// three-deep ladder above exists so that the only way to reach the generic bucket is for
+/// every real source of a category to have genuinely come up empty. See
+/// [`UNCATEGORIZED_CATEGORY`] for the client-facing damage the old fallback did.
 pub(crate) fn category_for(rule_id: &str, corpus: Option<&camerata_rules::RuleSet>) -> String {
     if let Some(rule) = corpus.and_then(|c| c.get_by_id(rule_id)) {
-        return prettify_category_key(&rule.domain);
+        return category_display_label(&rule.domain);
     }
-    prettify_category_key(rule_id)
+    if let Some(class) = crate::ai_audit::categorize_rule_id(rule_id) {
+        return category_display_label(&class);
+    }
+    UNCATEGORIZED_CATEGORY.to_string()
+}
+
+/// Category for a specific FINDING, preferred over [`category_for`] wherever a `Finding` (not
+/// just a bare rule id) is available: a calibrated finding knows its own semantic class, and
+/// that first-hand answer beats anything inferred from an id.
+///
+/// An AI-tier finding invents its own rule id per occurrence (`"AI-SQL-INJECTION-7"`), which
+/// has no corpus entry to join against. Before C4-P2 the fallback mangled that invented id's
+/// own tokens into a category key (`"AI-SQL-INJECTION-7"` -> `"Ai SQL"`), scattering AI
+/// findings across nonsense per-finding "categories" instead of grouping them with their real
+/// defect family, and leaving the scorecard's `audited_rules` count for that bogus category at
+/// 0 (nothing in `provenance.audited_rule_ids` was ever going to share a made-up key).
+///
+/// C4-P2 (partial mitigation): when the finding's own rule id has no corpus entry, prefer its
+/// structured `category` field — the closed taxonomy calibration already classified it into
+/// (see `ai_audit::apply_verdicts`'s `is_known_category` gate, which only ever writes a
+/// trusted value there) — over anything derived from the rule id.
+///
+/// A9 (the rest of it): that mitigation only ever covered a CALIBRATED finding. A finding
+/// whose `category` was never populated — a native-checker finding from `crates/checks`, an
+/// AI-tier finding from a run where calibration did not write a known category, a row from a
+/// report that predates the taxonomy — still fell through to `prettify_category_key(rule_id)`
+/// and reached the client mangled. The tail is now [`category_for`]'s own three-deep ladder
+/// (corpus domain, then the closed taxonomy by rule-id TOKENS, then one honest generic
+/// bucket), so no path through this function can return a slugified rule id. The first branch
+/// is unchanged: a deterministic finding with a real corpus entry is completely unaffected.
+pub(crate) fn category_for_finding(
+    finding: &Finding,
+    corpus: Option<&camerata_rules::RuleSet>,
+) -> String {
+    if let Some(rule) = corpus.and_then(|c| c.get_by_id(&finding.rule_id)) {
+        return category_display_label(&rule.domain);
+    }
+    if let Some(cat) = finding.category.as_deref() {
+        let cat = cat.trim();
+        if !cat.is_empty() {
+            return category_display_label(cat);
+        }
+    }
+    category_for(&finding.rule_id, corpus)
 }
 
 /// Which matrix cell a finding lands in. The auditor's OWN disposition wins where one
@@ -721,7 +2629,12 @@ pub(crate) fn matrix_bucket(
         }
         Disposition::TechDebtNow => "do_now",
         Disposition::TechDebtLater => "plan",
-        Disposition::Unresolved => {
+        // `Confirmed` shares `Unresolved`'s arm ON PURPOSE. The three dispositions above all
+        // override the computed quadrant because each records a decision about WHEN or
+        // WHETHER to fix; confirming records only that the finding is REAL, which is what the
+        // quadrant already assumed. Giving it its own cell would be the UI inventing a
+        // scheduling decision the auditor never made.
+        Disposition::Confirmed | Disposition::Unresolved => {
             if severity == "critical" {
                 return "do_now";
             }
@@ -734,6 +2647,313 @@ pub(crate) fn matrix_bucket(
         }
     }
 }
+
+/// THE single bucket computation for a finding (C3-6). Reused UNMODIFIED by all three export
+/// surfaces — `build_report_json`'s matrix pass, that same function's curated-findings
+/// disposition label (both in this file), and `xlsx_export::partition_rows`'s own
+/// `FindingRow::bucket` — so a finding's bucket is computed exactly once and every artifact
+/// renders that one answer. Before this, `matrix_bucket` alone was "the" bucket function in two
+/// of those three call sites, with `is_informational`/`is_uncited_ai_finding` applied as a
+/// separate caller-side gate ahead of it; the xlsx partition had NO such gate at all, so a
+/// hedged (`needs-review`) or uncited-AI-tier row that the PDF/JSON correctly held out of
+/// do_now/do_next/plan could still land in an action tier in the workbook — the root cause of
+/// the three artifacts disagreeing on bucket counts.
+///
+/// This is also the fix for "bucket is a pure function of severity": folding the hedge/
+/// provenance gates INTO the bucket function itself (rather than a pre-check some callers
+/// remembered to apply and one didn't) means a finding's bucket is now genuinely
+/// `f(severity, provenance tier, hedge state, disposition, effort)` — a hedged row, or an
+/// AI-tier finding with no grounded citation, can route out of an action tier even though its
+/// raw severity×effort quadrant alone would have placed it there. See `is_informational` and
+/// `is_uncited_ai_finding` for the individual signals folded in here.
+///
+/// C5-4: [`is_held_for_review`] is checked FIRST, ahead of `is_informational` — a calibration
+/// hedge routes to `"held"` at ANY severity, including critical/high, which `is_informational`'s
+/// own hard invariant would otherwise keep in an action tier. See that function's doc comment
+/// for the regression this closes.
+///
+/// C5-7 (closes the gate's `C5-5`-flagged open invariant): [`is_uncited_ai_finding`] is now
+/// checked as its OWN branch, ahead of `is_informational`, rather than folded into the same
+/// `|| is_uncited_ai_finding(...)` arm that fed `"informational"`. That shared arm is how a
+/// high/critical uncited AI finding used to end up in `matrix.informational` carrying its real
+/// (high/critical) severity — `is_uncited_ai_finding` is deliberately severity-blind (see its
+/// own doc comment: "a critical, uncited finding is PRECISELY the case this gate exists to
+/// catch"), but `informational` is everywhere else in this module a severity-CAPPED appendix
+/// (`is_informational`'s hard "critical/high is never informational" rule), and the shared arm
+/// silently exempted this one signal from that invariant. At high/critical severity an uncited
+/// AI finding now routes to `"held"` instead — the same severity-unbounded "a human must decide"
+/// destination `is_held_for_review` uses (here, the human decision needed is "supply or confirm
+/// a citation" rather than "resolve a calibration hedge", but the destination, visibility, and
+/// real-severity badge are identical). At medium/low/info it still routes to `"informational"`,
+/// exactly as before — nothing changes for the severity band `is_informational`'s cap was
+/// already written for.
+///
+/// C5-8 (R7 amended — re-route, never block): a FINAL check, after every other gate has had its
+/// say, for the one case none of them cover — a row that earns an action bucket
+/// (do_now/do_next/plan) on severity/effort/disposition alone, survives every other gate, but
+/// has no fix to put in front of the client. Delegates entirely to
+/// [`is_action_row_missing_a_fix`] — see that function's doc comment for the exact scope (in
+/// particular, why an UNRECOGNIZED rule id is deliberately exempt). Shipping a recognized-but-
+/// unauthored rule's row as an action item with a blank Fix block is worse than silence — it
+/// reads as "we checked, here is what to do" when there is nothing to do yet. It is NOT dropped
+/// (over-tell, never under-tell) and NOT a new refuse-to-export gate (this function always
+/// returns a destination, never an error) — it is re-routed to `"held"`, the same
+/// severity-unbounded bucket `is_held_for_review` and the C5-7 uncited-AI case both use, with
+/// its own disclosed reason ("fix not generated" — a caller building this row's headline calls
+/// `is_action_row_missing_a_fix` separately to know WHICH held-for-review reason applied,
+/// mirroring `gate_uncited`'s identical pattern a few lines up in `build_report_json`).
+/// `"accepted"` is deliberately EXEMPT: an auditor who already accepted the risk is not
+/// expecting a fix at all, so a missing one there is not a gap this check needs to catch.
+pub(crate) fn effective_bucket(
+    finding: &Finding,
+    disposition: Disposition,
+    severity: &str,
+    corpus: Option<&camerata_rules::RuleSet>,
+    test_file_count: usize,
+    chosen_option: Option<&str>,
+) -> &'static str {
+    if is_held_for_review(finding, disposition) {
+        return "held";
+    }
+    if is_uncited_ai_finding(finding, corpus) {
+        return if severity_rank(severity) <= severity_rank("high") {
+            "held"
+        } else {
+            "informational"
+        };
+    }
+    if is_informational(finding, disposition, severity, corpus, test_file_count) {
+        return "informational";
+    }
+    let bucket = matrix_bucket(disposition, severity, finding.effort.as_deref());
+    if is_action_row_missing_a_fix(
+        finding,
+        disposition,
+        severity,
+        corpus,
+        test_file_count,
+        chosen_option,
+    ) {
+        return "held";
+    }
+    // C6-B4 (amended): a missing ESTIMATE must NOT demote a row out of its action bucket.
+    //
+    // The fix gate above is a different case and stays: an action item with no fix of any kind is
+    // unusable, so held-with-a-disclosed-reason is the honest destination. A missing effort band
+    // is only a PACKAGING gap — the finding itself is confident, cited and actionable. Demoting it
+    // would hide the engine's strongest rows (a deterministic security HIGH with no authored band
+    // yet) out of the queue the reviewer reads first, which is the completeness failure this
+    // product exists to avoid: noise is handled by merge/re-rank/re-badge/route, never by pushing a
+    // real action item out of sight over a field the ESTIMATOR failed to supply. The row therefore
+    // keeps its action bucket and renders an honest "not estimated this run" instead; the
+    // corpus-load test (`every_deterministic_rule_option_with_remediation_has_an_authored_effort_band`)
+    // is where missing bands get driven to zero, at BUILD time, where nothing is hidden from anyone.
+    bucket
+}
+
+/// C5-8 (R7 amended): true when `finding` would land in an ACTION bucket
+/// (do_now/do_next/plan) by severity/effort/disposition alone, survives every other
+/// `effective_bucket` gate, and has no fix to show — neither a codebase-specific fix
+/// (`Finding::fix_specific`) nor the rule's own authored remediation ([`resolve_fix`]).
+/// [`effective_bucket`] delegates its own final check here (so the two can never drift) and a
+/// caller building this row's headline calls this a SECOND time to know WHICH held-for-review
+/// reason applied — the same duplication `gate_uncited`/`is_uncited_ai_finding` already accept
+/// in `build_report_json`'s matrix-building loop, for the identical reason.
+///
+/// # Scoped to RECOGNIZED corpus rules only
+/// This is the runtime safety net for the residual case P3's corpus-load gate is meant to make
+/// rare: a rule the corpus KNOWS ABOUT, which should therefore already carry authored
+/// remediation, somehow does not. It is deliberately NOT triggered merely because
+/// `finding.rule_id` has no corpus entry at all — an unrecognized id (an AI-tier finding's own
+/// invented rule id, or any rule the loaded corpus simply does not define) was never going to
+/// have a rule-level fix to begin with; that is a separate, pre-existing, already-documented gap
+/// (see `is_ai_tier`'s doc comment and `citation_join_still_labels_a_non_ai_tier_unknown_rule_id_as_ai_advisory`'s
+/// test — e.g. `SEC-NO-RAW-SQL-CONCAT-1` has no TOML entry at all and is untouched by the P3
+/// citation gate for the same reason), not a NEW one this check exists to catch. Concretely: an
+/// AI-tier finding that classifies into a grounded citation class (C5-7's `AiFindingClass`) but
+/// whose own invented rule id still has no corpus entry, and whose `fix_specific` generation
+/// hasn't run in a given synchronous test, is UNCHANGED by this gate — exactly as it was before
+/// C5-8 — because `resolve_fix` was never going to find a rule-level remediation for an invented
+/// id regardless of this feature.
+pub(crate) fn is_action_row_missing_a_fix(
+    finding: &Finding,
+    disposition: Disposition,
+    severity: &str,
+    corpus: Option<&camerata_rules::RuleSet>,
+    test_file_count: usize,
+    chosen_option: Option<&str>,
+) -> bool {
+    if is_held_for_review(finding, disposition) || is_uncited_ai_finding(finding, corpus) {
+        return false;
+    }
+    if is_informational(finding, disposition, severity, corpus, test_file_count) {
+        return false;
+    }
+    let bucket = matrix_bucket(disposition, severity, finding.effort.as_deref());
+    if !matches!(bucket, "do_now" | "do_next" | "plan") {
+        return false;
+    }
+    if has_any_fix(finding, corpus, chosen_option) {
+        return false;
+    }
+    // Neither fix half exists. Only count that as the C5-8 gap when the rule is one the
+    // loaded corpus actually recognizes — see this function's doc comment.
+    corpus.and_then(|c| c.get_by_id(&finding.rule_id)).is_some()
+}
+
+/// C6-B4: the fix-availability gate's exact mirror for the OTHER half of a usable action row
+/// — true when `finding` would land in an ACTION bucket (do_now/do_next/plan) by
+/// severity/effort/disposition alone, survives every other `effective_bucket` gate, and has
+/// NO remediation-effort estimate from ANY source ([`resolve_effort`]: neither the finding's
+/// own calibrated `effort` nor the rule's authored band).
+///
+/// # Why this should rarely fire post-C6-B4.1
+/// The corpus-wide test `every_deterministic_rule_option_with_remediation_has_an_authored_
+/// effort_band` (in `camerata-rules`) now guarantees every deterministic (mechanical/
+/// architectural) rule option that carries client-facing `remediation` ALSO carries an
+/// authored `effort` band — which means a recognized rule's row almost never reaches this
+/// gate in practice going forward: if it has a fix to show, [`resolve_effort`] can virtually
+/// always find a number to go with it. This function exists as the SAME kind of belt-and-
+/// suspenders runtime safety net [`is_action_row_missing_a_fix`] is for its own invariant
+/// (a corpus-authoring gap slipping past the build-time test some other way, a non-default
+/// resolved option, a corpus that failed to load at render time) — not an expected steady
+/// state. The fifth-consecutive-run alarm C6-B4 exists to close is exactly this: an
+/// unestimated deterministic row shipping silently in an action bucket. Now it either gets an
+/// estimate or is visibly, honestly held — never silently shipped unestimated.
+///
+/// # Scoped to RECOGNIZED corpus rules only (mirrors the fix gate exactly)
+/// Deliberately NOT triggered merely because `finding.rule_id` has no corpus entry, or no
+/// corpus was loaded at all — that is the PRE-EXISTING, honestly-disclosed "not yet
+/// estimated" gap the C4-P3 guardrail protects
+/// (`a_row_with_no_calibration_and_no_corpus_still_exports_unrefused`: a bare finding with
+/// no calibration and no corpus must still export, in its severity-driven action bucket,
+/// reporting "not yet estimated" rather than vanishing). This gate only catches the NEWER,
+/// narrower case: a rule the loaded corpus DOES recognize, which per C6-B4.1 should already
+/// carry an authored band whenever it has a fix, somehow still has neither.
+pub(crate) fn is_action_row_missing_an_estimate(
+    finding: &Finding,
+    disposition: Disposition,
+    severity: &str,
+    corpus: Option<&camerata_rules::RuleSet>,
+    test_file_count: usize,
+    chosen_option: Option<&str>,
+) -> bool {
+    if is_held_for_review(finding, disposition) || is_uncited_ai_finding(finding, corpus) {
+        return false;
+    }
+    if is_informational(finding, disposition, severity, corpus, test_file_count) {
+        return false;
+    }
+    let bucket = matrix_bucket(disposition, severity, finding.effort.as_deref());
+    if !matches!(bucket, "do_now" | "do_next" | "plan") {
+        return false;
+    }
+    if resolve_effort(finding, &finding.rule_id, corpus, chosen_option).is_some() {
+        return false;
+    }
+    // No estimate from any source. Only count that as the C6-B4 gap when the rule is one the
+    // loaded corpus actually recognizes — see this function's doc comment.
+    corpus.and_then(|c| c.get_by_id(&finding.rule_id)).is_some()
+}
+
+/// Severity rank for ordering (0 = most severe, ascending). The canonical mapping for any
+/// severity-based sort in this module; `xlsx_export::severity_rank` (same crate) delegates
+/// here rather than keeping its own copy, so the two artifacts' tie-breaks can never drift.
+pub(crate) fn severity_rank(sev: &str) -> u8 {
+    match sev {
+        "critical" => 0,
+        "high" => 1,
+        "medium" => 2,
+        _ => 3,
+    }
+}
+
+/// C4-P4 (residual defect 5): bucket rank for ordering the "Curated findings" section — action
+/// tiers lead (in the same do_now -> do_next -> plan order the severity x effort matrix and the
+/// "three things" box already use), "accepted" (dispositioned risk, still curated) comes next,
+/// and "informational"/"held" (C5-4) both sort last. In practice a group that reaches this
+/// ranking always has at least one non-informational, non-held site (see
+/// [`AuditReportJson::curated_findings`]'s doc comment on the group-eligibility rule), so the
+/// `_ => 4` arm only ever matters for computing the MIN across a mixed group's sites, where a
+/// same-rule informational/held companion site must never win the group's own (best) rank away
+/// from its curated sibling.
+fn curated_bucket_rank(bucket: &str) -> u8 {
+    match bucket {
+        "do_now" => 0,
+        "do_next" => 1,
+        "plan" => 2,
+        "accepted" => 3,
+        _ => 4, // "informational" | "held" (C5-4) or anything unrecognized.
+    }
+}
+
+/// C4-P4 (residual defect 5): confidence rank for the FINAL tie-break in curated-group
+/// ordering (after severity, then bucket) — a confidently-asserted finding sorts ahead of an
+/// equally-severe, equally-bucketed one the calibrator flagged as debatable. Takes
+/// [`CuratedSiteJson::confidence`] verbatim (already the canonical [`hedge_confidence`] value,
+/// never a raw unreconciled read); an absent confidence (no calibration pass ran at all) is
+/// treated as ordinary/medium rather than either extreme, since "no opinion recorded" is not
+/// the same claim as "needs review."
+fn curated_confidence_rank(confidence: Option<&str>) -> u8 {
+    match confidence {
+        Some("high") => 0,
+        Some("medium") => 1,
+        Some("low") => 2,
+        Some("needs-review") => 3,
+        _ => 1,
+    }
+}
+
+/// C4-P4 (residual defect 5): the full sort key for one curated GROUP — the MIN (best/most
+/// urgent) of `(severity_rank, curated_bucket_rank, curated_confidence_rank)` across every site
+/// in the group, with the group's own `rule_id` as a final deterministic tie-break so two
+/// equally-ranked groups never depend on map/vec iteration order. Using the MIN across sites
+/// (rather than, say, the first site after the existing repo/path/line sort) means a mixed
+/// group's own curated site always determines its position, never an informational companion
+/// that happens to sort first within the group.
+fn curated_group_sort_key(group: &CuratedGroupJson) -> (u8, u8, u8, String) {
+    let best = group
+        .sites
+        .iter()
+        .map(|s| {
+            (
+                severity_rank(&s.severity),
+                curated_bucket_rank(&s.bucket),
+                curated_confidence_rank(s.confidence.as_deref()),
+            )
+        })
+        .min()
+        .unwrap_or((u8::MAX, u8::MAX, u8::MAX));
+    (best.0, best.1, best.2, group.rule_id.clone())
+}
+
+/// Provenance-tier rank for the WITHIN-bucket sort (C3-6, item 3): a deterministic/grounded
+/// citation (a published standard, a real linter rule) outranks a scan-time preview tool,
+/// which outranks an ungrounded AI-advisory citation — so a security-floor finding (typically
+/// `"grounded"`) never prints after an architecture/advisory note (typically `"advisory"`) of
+/// the same severity, even though raw severity alone can't tell them apart. 0 sorts first.
+/// Takes a [`CitationJson::kind`] string (`"grounded"` | `"preview"` | `"advisory"`); anything
+/// else is treated as the lowest tier rather than panicking on an unrecognized value.
+pub(crate) fn provenance_tier_rank(citation_kind: &str) -> u8 {
+    match citation_kind {
+        "grounded" => 0,
+        "preview" => 1,
+        _ => 2,
+    }
+}
+
+// C3-1b (`docs/plans/2026-09-30_cycle2-queue-hardening.md`): there used to be a
+// `fix_generation_failed` gate here that read a `"[needs review: fix not generated]"` tag
+// off `detail` and demoted a would-be `do_now` finding to `do_next` — conflating a PIPELINE
+// failure (the fix-specific generation pass gave up) with a CONFIDENCE judgement about the
+// finding. `crate::ai_audit::generate_fix_specifics` no longer writes that tag (or sets
+// `needs_review`) on failure at all: it only logs to stderr and leaves `fix_specific` at
+// `None`, and the row still ships a usable fix because `resolve_fix` (below) renders the
+// rule's own authored remediation as `CuratedSiteJson::fix` regardless of whether
+// `fix_specific` generated. Bucket placement is therefore driven ONLY by the finding's own
+// severity/effort/disposition (`matrix_bucket`) and calibration's own doubt signal
+// (`is_informational`'s `confidence == "needs-review"` check) — never by whether a SEPARATE
+// AI pass happened to produce prose for it.
 
 /// A style rule needs an established corpus before deviations are findings (Bug 4 §2d). A
 /// repo with fewer than this many test files has no test corpus to speak of, so
@@ -748,18 +2968,56 @@ pub(crate) const MIN_STYLE_CORPUS_FILES: usize = 3;
 /// `permissions`, `iac`, `ci-cd`) are deliberately ABSENT: a located violation there is a real
 /// defect even in a tiny app. A whitelist (not a blacklist) so an unrecognized future domain
 /// fails OPEN to over-telling — it stays in the action tier rather than being auto-demoted.
-pub(crate) const STANCE_LAYER_DOMAINS: &[&str] =
-    &["universal", "api-layer", "fullstack", "ui", "javascript", "integration"];
+pub(crate) const STANCE_LAYER_DOMAINS: &[&str] = &[
+    "universal",
+    "api-layer",
+    "fullstack",
+    "ui",
+    "javascript",
+    "integration",
+];
+
+/// C5-4: whether a finding is HELD for a human reviewer's judgment call, INDEPENDENT of its own
+/// severity — the calibrator's own hedge (`needs_review` / `confidence == "needs-review"`),
+/// applied only to an OPEN (`Unresolved`) row (an auditor's explicit disposition — accepted /
+/// tech-debt / FP — is a human call that already supersedes calibration's own doubt; see
+/// `is_informational`'s identical "only ever re-bucket an OPEN row" gate for the same
+/// reasoning). Routes to the `held` bucket (see [`MatrixJson::held`]), which — UNLIKE
+/// `informational` — has NO severity ceiling: a high/critical row the calibrator itself flagged
+/// debatable is precisely the row a client must see called out as unresolved doubt, not silently
+/// left in an action tier next to findings nobody doubts.
+///
+/// This is the SECOND attempt at this fix (C5-4; the first, cycle-4's P2, regressed): the root
+/// cause was that `is_informational`'s hard "a critical/high finding is never informational"
+/// invariant was the ONLY gate checked, and `needs-review` was folded into that SAME
+/// severity-capped predicate — so a high/critical hedge fell through the hard invariant and
+/// stayed in `do_now`/`do_next`, contradicting its own exported `needs_review: true`, and the
+/// executive summary's "held for review" count (which only ever counted the `informational`
+/// appendix) silently undercounted the true number of hedged rows. Splitting the hedge gate out
+/// into its OWN function, checked BEFORE `is_informational` in [`effective_bucket`], closes that
+/// gap structurally: a hedge is a hedge regardless of severity, and `informational` stays
+/// reserved for the three genuinely low-stakes signals `is_informational` still owns.
+pub(crate) fn is_held_for_review(finding: &Finding, disposition: Disposition) -> bool {
+    if disposition != Disposition::Unresolved {
+        return false;
+    }
+    finding.needs_review || finding.confidence.as_deref() == Some("needs-review")
+}
 
 /// Whether a finding is a "convention to consider" rather than an action item (Bug 4). Routes
 /// to the `informational` matrix appendix instead of do_now/do_next/plan. NEVER true for a
 /// critical/high finding or for a finding the auditor has explicitly dispositioned — the hard
-/// invariant that keeps true defects in the action tiers. `severity` must already be
-/// normalized. The four independent informational signals (design §2a/2c/2d + the `info` tier
-/// itself):
+/// invariant that keeps true defects in the action tiers, with ONE deliberate exception (D8,
+/// below). `severity` must already be normalized. The four independent informational signals
+/// (design §2a/2d + the `info` tier itself, plus D8) — the calibrator's own `needs-review`
+/// hedge (former §2c) is now its OWN gate, [`is_held_for_review`], checked ahead of this one in
+/// [`effective_bucket`]: a hedge routes to the `held` bucket at ANY severity, never into this
+/// severity-capped appendix:
+///   - D8: the `ARCH-OBSERVABILITY-*` convention class (`crate::is_observability_convention_class`),
+///     checked BEFORE the hard critical/high invariant — the one rule-identity-driven signal
+///     that is exempt from it, by owner mandate (see that function's doc comment),
 ///   - `info`-severity (e.g. the unexposed-schema RLS note from I3),
 ///   - `testing-style` category in a repo below the test-corpus threshold (§2d),
-///   - `needs-review` confidence at ≤ medium severity (§2c),
 ///   - absence-type (`located == false`) `structured` stance-layer rule at ≤ medium (§2a).
 pub(crate) fn is_informational(
     finding: &Finding,
@@ -773,6 +3031,24 @@ pub(crate) fn is_informational(
     if disposition != Disposition::Unresolved {
         return false;
     }
+    // D8 (owner-mandated opinion-class cap): the ARCH-OBSERVABILITY-* convention class is
+    // checked FIRST, ahead of the hard "critical/high is never informational" invariant right
+    // below — deliberately, and ONLY for this one rule-IDENTITY-driven class. Every other
+    // signal this function owns is a SEVERITY-DERIVED heuristic (an info-tier note, an
+    // under-corpus testing-style deviation, an absence-type stance rule), which is exactly
+    // what that hard invariant exists to protect — a buggy heuristic must never bury a real
+    // high/critical defect. A rule-id match against an explicitly-authored, owner-mandated
+    // LOW-cap class is not that kind of signal: it is an authored classification applied
+    // before any severity was even assigned, not a derived guess about an already-produced
+    // severity. `ai_audit`'s D8 ceiling pass (`apply_severity_ceiling_rule`) also forces this
+    // class's exported severity to exactly Low in the normal pipeline; this check is the
+    // structural backstop that keeps the bucket guarantee holding even if that pass somehow
+    // did not run first (see `crate::is_observability_convention_class`'s doc comment for the
+    // full two-part design — capping the severity string alone is not sufficient, since
+    // `matrix_bucket` routes a bare "low" severity to the `"plan"` action bucket by default).
+    if crate::is_observability_convention_class(&finding.rule_id) {
+        return true;
+    }
     // Hard invariant: a critical or high finding is never auto-informational, whatever family.
     if severity == "critical" || severity == "high" {
         return false;
@@ -782,12 +3058,9 @@ pub(crate) fn is_informational(
         return true;
     }
     // §2d — testing-style deviation with no test corpus to deviate FROM.
-    if finding.category.as_deref() == Some("testing-style") && test_file_count < MIN_STYLE_CORPUS_FILES
+    if finding.category.as_deref() == Some("testing-style")
+        && test_file_count < MIN_STYLE_CORPUS_FILES
     {
-        return true;
-    }
-    // §2c — a low/medium finding the calibrator itself flagged as debatable.
-    if finding.confidence.as_deref() == Some("needs-review") {
         return true;
     }
     // §2a — an absence-type structured stance-rule note (the generic-arch/style over-firing).
@@ -803,7 +3076,102 @@ pub(crate) fn is_informational(
     false
 }
 
-fn finding_ref(f: &Finding, severity: &str, headline: String) -> FindingRefJson {
+/// Whether `f`'s own calibration justification — its `detail` (which carries any
+/// `[calibrated: reason]`/`[needs review: reason]` tag `ai_audit::apply_verdicts` appends)
+/// plus its `calibration_rationale` (set by the D5/D6 deterministic passes, or by the
+/// upward-calibration guardrail itself) — records an exploit precondition. See
+/// [`FindingRefJson::precondition_count`]'s doc comment: this is a RANKING tie-break only,
+/// never a severity or bucket change.
+fn finding_precondition_count(f: &Finding) -> usize {
+    let text = format!(
+        "{} {}",
+        f.detail,
+        f.calibration_rationale.as_deref().unwrap_or("")
+    );
+    usize::from(crate::ai_audit::mentions_exploit_precondition(&text))
+}
+
+/// See [`FindingRefJson::confidence_rank`]'s doc comment. Reads BOTH hedge fields (C4-P2 —
+/// see [`is_held_for_review`]'s check for why) rather than `confidence` alone.
+fn finding_confidence_rank(f: &Finding) -> u8 {
+    u8::from(f.needs_review || f.confidence.as_deref() == Some("needs-review"))
+}
+
+// ── C4-P2 / C5-4: one hedge source of truth, shared by findings.json / the xlsx workbook / the
+// PDF ──────────────────────────────────────────────────────────────────────────────────────
+//
+// Bug family (artifact-consistency hardening, see docs/plans for the originating report): the
+// executive summary's "held for review" count, the structured `needs_review` boolean, and the
+// `confidence` string could each tell a different story for the SAME finding — a row routed to
+// the informational/held appendix for a reason OTHER than calibration doubt (an `info`-severity
+// note, a testing-style deviation with no corpus, an absence-type stance rule) rendered with
+// `needs_review: false` / `confidence: "high"` in `findings.json`/the workbook, even though the
+// narrative text calls that same row "held for a human reviewer's judgment call" — an unhedged
+// row sitting in the bucket whose entire definition is "needs a human to decide". Separately, a
+// raw desync between `f.needs_review` and `f.confidence` (a verdict re-application, a merge)
+// could make the two structured fields themselves disagree.
+//
+// The fix: ONE function decides whether a finding is hedged for EXPORT purposes, folding in
+// BOTH raw calibration doubt (`f.needs_review` / `f.confidence == "needs-review"`) AND bucket
+// placement (`bucket == "informational"` or `bucket == "held"` (C5-4) — being held for review IS
+// a hedge, by definition of either bucket). `build_report_json` (the PDF's
+// `CuratedSiteJson.confidence`) and `xlsx_export::partition_rows`
+// (`FindingRow.confidence`/`FindingRow.needs_review`, which `findings.json` serializes verbatim)
+// both call this ONE function with their own already-computed `bucket` (itself a single shared
+// computation — see `effective_bucket`) — never re-deriving hedge state independently. This does
+// NOT change bucket placement (a finding explicitly dispositioned out of `Unresolved` still
+// routes via `matrix_bucket`, so a calibration-hedged row CAN legitimately sit in `"plan"`
+// rather than `"held"` — see `is_held_for_review`'s "only an `Unresolved` row" gate); it only
+// guarantees that WHEREVER a finding lands, its exported confidence/needs_review fields never
+// contradict each other or the bucket that put it there.
+pub(crate) fn is_hedged(f: &Finding, bucket: &str) -> bool {
+    f.needs_review
+        || f.confidence.as_deref() == Some("needs-review")
+        || bucket == "informational"
+        || bucket == "held"
+}
+
+/// The canonical EXPORTED confidence string for `f`, reconciled against [`is_hedged`] — never
+/// `"needs-review"` unless `is_hedged` agrees, and never anything OTHER than `"needs-review"`
+/// when it does. This is the one producer of the `confidence == "needs-review" ⇔ needs_review`
+/// biconditional every artifact renders (`CuratedSiteJson::confidence`, `FindingRow::confidence`
+/// / `FindingRow::needs_review`) — see [`is_hedged`]'s doc comment for the full rationale.
+///
+/// C4-P3: a deterministic-floor / RLS-replay finding never goes through the AI calibration pass
+/// (`ai_audit::verify_findings`), so `f.confidence` is `None` for it FOREVER — not "not yet
+/// evaluated", genuinely never evaluated, because there is no judgment call left for calibration
+/// to make: the mini schema-state replay / content-rule match either holds or it does not. Left
+/// as `None`, this prints "Confidence: not evaluated this run" beside a PROVEN critical (a live
+/// secret, an unprotected table, a definer function with no pinned search_path) — which reads as
+/// "we are not sure" next to exactly the findings a client is paying to act on first. Once a row
+/// has survived [`is_hedged`] above (so R1's null-location downgrade, `is_informational`'s
+/// absence/needs-review/testing-style checks, and a raw `needs_review` flag have ALL already had
+/// their say — see the module-level doc comment on [`is_hedged`]), a `None`-confidence,
+/// non-AI-tier row (`!is_ai_tier(f)`, i.e. origin `Deterministic` per `ai_audit::finding_origin`'s
+/// own definition of that origin — `AdoptedAi`/`InventedAi` findings carry a real `confidence` or
+/// are gated separately) is reported `"high"` BY CONSTRUCTION. This never fires for an AI-tier
+/// finding whose confidence is `None` because ITS OWN calibration pass genuinely failed — that
+/// stays `None` (the honest "not evaluated this run" gap is real there, since a model verdict was
+/// actually expected and never arrived).
+pub(crate) fn hedge_confidence(f: &Finding, bucket: &str) -> Option<String> {
+    if is_hedged(f, bucket) {
+        Some("needs-review".to_string())
+    } else if f.confidence.is_none() && !is_ai_tier(f) {
+        Some("high".to_string())
+    } else {
+        f.confidence.clone()
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn finding_ref(
+    f: &Finding,
+    severity: &str,
+    headline: String,
+    bucket: &str,
+    corpus: Option<&camerata_rules::RuleSet>,
+    chosen_option: Option<&str>,
+) -> FindingRefJson {
     FindingRefJson {
         rule_id: f.rule_id.clone(),
         repo: f.repo.clone(),
@@ -811,7 +3179,19 @@ fn finding_ref(f: &Finding, severity: &str, headline: String) -> FindingRefJson 
         line: f.line,
         severity: severity.to_string(),
         headline,
-        effort: f.effort.clone(),
+        // C4-P3: calibration's effort, else the rule's authored band — see `resolve_effort`'s
+        // doc comment. Keeps the matrix table AND the "three things this week" box (which reads
+        // `FindingRefJson::effort` for its hour estimate / total) in lockstep with
+        // `CuratedSiteJson::effort`, so a proven do-now critical never shows an estimate in the
+        // curated findings section but "not yet estimated" in the summary box above it.
+        effort: resolve_effort(f, &f.rule_id, corpus, chosen_option),
+        bucket: bucket.to_string(),
+        precondition_count: finding_precondition_count(f),
+        confidence_rank: finding_confidence_rank(f),
+        root_cause_keys: crate::ai_audit::root_cause_credential_identities(f)
+            .into_iter()
+            .collect(),
+        kind: camerata_api_types::audit::KindOnWire(f.kind.clone()),
     }
 }
 
@@ -829,70 +3209,283 @@ pub(crate) fn defect_headline(detail: &str, fallback: &str) -> String {
     if trimmed.is_empty() {
         return fallback.to_string();
     }
-    // First sentence boundary: prefer ". " (mid-paragraph), else a bare trailing '.', else the
-    // first '.' found anywhere, else the whole (short, presumably headline-shaped) string.
-    let end = if let Some(idx) = trimmed.find(". ") {
-        idx + 1
-    } else if let Some(idx) = trimmed.find('.') {
-        idx + 1
-    } else {
-        trimmed.len()
-    };
-    let mut headline = trimmed[..end].trim().to_string();
-    if !headline.ends_with('.') {
-        headline.push('.');
+    // C4-P4 (residual defect 1, 2026-10-01): sentence-boundary detection used to be "first '.'
+    // anywhere" (falling back through ". ", then a bare trailing '.', then any bare '.'), which
+    // cut a headline off mid-abbreviation any time `detail` led with "(e.g. ...)" / "i.e. ..." /
+    // "etc." before its real first sentence ended — the period in the abbreviation looked
+    // identical to a sentence-ending period to the old scan. `sentence_boundary` below is a
+    // REAL sentence-boundary scan: a '.' only counts when it is outside an open `(...)`
+    // parenthetical, not immediately preceded by a known abbreviation, and followed by
+    // whitespace+an uppercase letter (or end of string). When no such boundary exists at all
+    // (a single long run-on sentence with no real ending in sight), the headline is capped by
+    // LENGTH with an ellipsis instead of truncating at an arbitrary/wrong character — never an
+    // unbounded wall of text standing in for a "headline".
+    match sentence_boundary(trimmed) {
+        Some(end) => {
+            let mut headline = trimmed[..end].trim().to_string();
+            if !headline.ends_with('.') {
+                headline.push('.');
+            }
+            headline
+        }
+        None => {
+            if trimmed.chars().count() > HEADLINE_LENGTH_CAP {
+                let capped: String = trimmed.chars().take(HEADLINE_LENGTH_CAP).collect();
+                format!("{}...", capped.trim_end())
+            } else {
+                // Short enough to use whole (no ellipsis needed) — same trailing-period
+                // normalization as the real-boundary branch above, for a consistent
+                // headline-reads-like-a-sentence shape either way.
+                let mut headline = trimmed.to_string();
+                if !headline.ends_with('.') {
+                    headline.push('.');
+                }
+                headline
+            }
+        }
     }
-    headline
+}
+
+/// Headline length cap (characters), only ever applied when `detail` has no real sentence
+/// boundary at all within that many characters — see `defect_headline`'s doc comment.
+const HEADLINE_LENGTH_CAP: usize = 200;
+
+/// Known sentence-internal abbreviations whose own period must never be mistaken for a
+/// sentence-ending period, GENERAL across any `detail` text (not keyed to one rule/fixture) —
+/// see `defect_headline`'s doc comment for the bug this closes. Matched case-insensitively
+/// against the text immediately BEFORE and INCLUDING the candidate period.
+const SENTENCE_ABBREVIATIONS: &[&str] = &["e.g.", "i.e.", "etc.", "vs."];
+
+/// Find the end index (exclusive, just past the period) of the first REAL sentence boundary in
+/// `s`, or `None` if there is no such boundary anywhere. See [`sentence_boundaries`] for the
+/// full rule set (this is just its first hit) — kept as its own function because
+/// [`defect_headline`] only ever wants the first boundary, not every one.
+fn sentence_boundary(s: &str) -> Option<usize> {
+    sentence_boundaries(s).first().copied()
+}
+
+/// REG-5: find every REAL sentence-boundary index (exclusive, just past the punctuation) in
+/// `s` — the general scan [`sentence_boundary`] (first hit only) and
+/// [`crate::ai_audit::split_into_sentences`] (every hit, to tokenize a `detail` into sentences
+/// without fragmenting identifiers) both build on. A `.`/`!`/`?` is a real boundary only when
+/// ALL of the following hold:
+///
+/// - it sits outside any backtick-delimited span (`` `...` `` is treated as fully opaque —
+///   code/identifiers quoted in prose, e.g. `` `foo.bar()` ``, must never be scanned for
+///   sentence punctuation at all, regardless of what they contain);
+/// - it sits outside any open `(...)` parenthetical (so "(e.g. allowing X)" never splits there);
+/// - for `.` specifically, it is NOT immediately preceded by a known abbreviation
+///   (`SENTENCE_ABBREVIATIONS`, so a bare "i.e." / "etc." outside parens doesn't split either);
+/// - it is followed, with NO whitespace required, by an uppercase letter (this is what still
+///   catches a genuinely run-together sentence like "end.Start" and inserts the missing space
+///   when the caller rejoins kept sentences with `" "` — the ONLY legitimate reason this
+///   machinery was built), OR by whitespace then an uppercase letter, OR it is the very last
+///   character in the string (a clean trailing sentence with nothing after it).
+///
+/// This is deliberately NOT "any `.` is a boundary" — that naive scan is REG-5: it used to treat
+/// every period in `detail` (including the ones inside dotted calls, filenames, version
+/// strings, and abbreviations — `client.auth.method()`, `settings.toml`,
+/// `0001_migration.sql:12`, `e.g.`, `v1.2.3`) as a sentence end, fragment on it, then rejoin the
+/// fragments with a forced single space — silently inserting a space after every such period
+/// across headline/detail prose in the PDF, xlsx, and JSON alike (all three artifacts derive
+/// from the same stored `Finding::detail`). A period is only a genuine boundary here when the
+/// text immediately after it is SHAPED like the start of a new sentence (uppercase letter, or
+/// end of string) — a lowercase letter or digit right after the period (the identifier/
+/// filename/version/dotted-call case) never qualifies, boundary-shaped-ness alone included.
+pub(crate) fn sentence_boundaries(s: &str) -> Vec<usize> {
+    let mut out = Vec::new();
+    let mut paren_depth: i32 = 0;
+    let mut in_backtick = false;
+    for (i, c) in s.char_indices() {
+        if c == '`' {
+            in_backtick = !in_backtick;
+            continue;
+        }
+        if in_backtick {
+            continue;
+        }
+        match c {
+            '(' => paren_depth += 1,
+            ')' => paren_depth = (paren_depth - 1).max(0),
+            '.' | '!' | '?' if paren_depth == 0 => {
+                if c == '.' && ends_with_known_abbreviation(&s[..=i]) {
+                    continue;
+                }
+                let rest_trimmed = s[i + c.len_utf8()..].trim_start();
+                let boundary_shaped = rest_trimmed
+                    .chars()
+                    .next()
+                    .map(char::is_uppercase)
+                    .unwrap_or(true); // nothing after it at all: a clean trailing sentence.
+                if boundary_shaped {
+                    out.push(i + c.len_utf8());
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+fn ends_with_known_abbreviation(prefix: &str) -> bool {
+    let lower = prefix.to_ascii_lowercase();
+    SENTENCE_ABBREVIATIONS.iter().any(|a| lower.ends_with(a))
 }
 
 /// Deterministic exec-summary narrative (never an LLM call). Overridden verbatim by
 /// `ReportOptions::executive_summary_override` when the client supplies one. Special-cases
 /// zero candidates (a plain "0 candidate finding(s) were reviewed..." reads as broken, not
 /// clean) and uses real pluralization throughout (`noun`) rather than the "(s)" CLI-ism.
-/// Item 2: LEAD with blast radius in plain English (composed from the top do-now findings'
-/// own defect headlines — never a separately hand-written sentence that could drift from what
-/// the report actually found), THEN the counts. The counts sentence is a single, ONE-PASS
-/// partition: `do_now + do_next + plan + accepted == curated_total` ALWAYS (every code finding
-/// lands in exactly one matrix bucket by construction — see `matrix_bucket`), so listing all
-/// four counts once is a complete, self-checking picture. The previous wording additionally
-/// tacked on "and N still open" — a SUBSET of the very counts just listed (do_now/do_next/plan
-/// are inherently the still-open ones; only `accepted` is closed out) — which forced the reader
-/// to do arithmetic to figure out whether that was new information or a restatement. Dropped
-/// entirely rather than reworded, because the four-bucket partition already says it once.
+///
+/// FIX 4 (2026-09-13 review, "page 3 states the top-3 three times"): this used to LEAD with a
+/// blast-radius sentence composed from the top do-now findings' own headlines — the SAME 3
+/// findings the "If you only do three things this week" box (immediately below, on the same
+/// page) already names in full. Between that box and the (also-dropped) "Top priority items"
+/// bullet list, the top 3 were stated three separate times on one page. The exec summary is
+/// now curation-and-counts ONLY: the false-positive triage line, then the single one-pass
+/// bucket-count partition.
+///
+/// # P5: review-state honesty + full reconciliation
+/// `default_narrative` now takes `review_state` and branches on it — this is the fix for a
+/// raw (nobody has reviewed anything this run) export whose narrative used to claim "N were
+/// reviewed... 0 were dispositioned as false positives by the reviewer" no matter what, even
+/// when NO reviewer had ever opened the report. See [`ReviewState`]'s doc comment for the
+/// derivation.
+/// - `Raw`: describes what the ENGINE did ("The engine analyzed N files and produced C
+///   candidate findings..."). NEVER the phrase "reviewed by a human reviewer" or
+///   "dispositioned by a human reviewer" — grep-tested (see
+///   `raw_export_carries_the_draft_flag_and_a_fully_reconciling_engine_voiced_narrative`).
+/// - `Reviewed`: describes the reviewer's actual dispositions, same voice as before this pass.
+///
+/// In BOTH states the narrative reconciles EVERY candidate finding, with each number shown:
+/// `candidates_reviewed == curated_total + held_for_review + excluded_fp +
+/// dependency_advisories` always holds (by construction — see `build_report_json`: every
+/// finding lands in exactly one of those four buckets). This is the fix for the "41 reviewed;
+/// 0 excluded... 18 curated" bug, where the other 23 needs-review rows were held out of the
+/// curated set and never counted anywhere in the narrative.
+#[allow(clippy::too_many_arguments)]
 fn default_narrative(
+    review_state: ReviewState,
+    files_scanned: usize,
     candidates_reviewed: usize,
     excluded_fp: usize,
     curated_total: usize,
+    held_for_review: usize,
+    dependency_advisories: usize,
     do_now: usize,
     do_next: usize,
     plan: usize,
     accepted: usize,
-    blast_radius_headlines: &[String],
 ) -> String {
     if candidates_reviewed == 0 {
         return "The scan surfaced no candidate findings to review in this run.".to_string();
     }
-    let mut s = String::new();
-    if !blast_radius_headlines.is_empty() {
-        s.push_str("As shipped: ");
-        s.push_str(&blast_radius_headlines.join(" "));
-        s.push(' ');
+    let dep_clause = if dependency_advisories == 0 {
+        String::new()
+    } else {
+        format!(
+            " A further {} tracked separately in the dependency snapshot.",
+            noun(
+                dependency_advisories,
+                "dependency advisory is",
+                "dependency advisories are"
+            ),
+        )
+    };
+    match review_state {
+        ReviewState::Raw => format!(
+            "This is a draft export: no finding in this run has had a human triage pass. The \
+             engine analyzed {} and produced {}. {curated_total} {} curated for action \
+             ({do_now} do now, {do_next} do next, {plan} planned, {accepted} already carried \
+             as accepted risk from a prior baseline or in-code waiver), {held_for_review} {} \
+             held for a human reviewer's judgment call, and {excluded_fp} {} auto-excluded as \
+             likely false positives.{dep_clause}",
+            noun(files_scanned, "file", "files"),
+            noun(
+                candidates_reviewed,
+                "candidate finding",
+                "candidate findings"
+            ),
+            if curated_total == 1 { "is" } else { "are" },
+            if held_for_review == 1 { "is" } else { "are" },
+            if excluded_fp == 1 { "was" } else { "were" },
+        ),
+        ReviewState::Reviewed => format!(
+            "{} were reviewed by a human reviewer; {} {} dispositioned as false positives and \
+             excluded entirely from this report. Of the remaining {}, {curated_total} {} \
+             curated for action ({do_now} do now, {do_next} do next, {plan} planned, \
+             {accepted} accepted as risk) and {held_for_review} {} held for further review.\
+             {dep_clause}",
+            noun(
+                candidates_reviewed,
+                "candidate finding",
+                "candidate findings"
+            ),
+            excluded_fp,
+            if excluded_fp == 1 { "was" } else { "were" },
+            noun(curated_total + held_for_review, "finding", "findings"),
+            if curated_total == 1 { "is" } else { "are" },
+            if held_for_review == 1 { "is" } else { "are" },
+        ),
     }
-    // Deliberately ONE prose paragraph after the blast-radius lead, no embedded list —
-    // `top_do_now` / `three_things` are separate structured fields the template renders as
-    // their own bulleted lists (a Typst string value doesn't reliably turn embedded "\n"s into
-    // paragraph/list breaks, so mixing prose and list markup into one opaque string would
-    // render as a flat run-on in the PDF).
-    s.push_str(&format!(
-        "{} were reviewed; {} {} dispositioned as false positives by the auditor and excluded \
-         entirely from this report. Of the remaining {}: {do_now} do now, {do_next} do next, \
-         {plan} planned, and {accepted} accepted as risk.",
-        noun(candidates_reviewed, "candidate finding", "candidate findings"),
-        excluded_fp,
-        if excluded_fp == 1 { "was" } else { "were" },
-        noun(curated_total, "curated finding", "curated findings"),
-    ));
-    s
+}
+
+/// P5: the AI-tier Methodology paragraph must never claim a human already reviewed advisory
+/// findings when this export is [`ReviewState::Raw`] — the paragraph used to unconditionally
+/// say "Every advisory finding is reviewed and dispositioned by a human reviewer before it
+/// appears here", which is a flat fabrication on a raw, pre-review export. Neither branch
+/// contains the literal phrases "reviewed by a human reviewer" or "dispositioned by a human
+/// reviewer" in the `Raw` case — grep-tested alongside `default_narrative`'s own gate.
+fn ai_tier_note_for(review_state: ReviewState) -> String {
+    match review_state {
+        ReviewState::Reviewed => {
+            "A second, advisory tier uses a calibrated language-model review for findings that \
+             require semantic judgment. Every advisory finding in this export has been \
+             reviewed and dispositioned by a human reviewer; lower-confidence items are marked \
+             needs-review."
+                .to_string()
+        }
+        ReviewState::Raw => {
+            "A second, advisory tier uses a calibrated language-model review for findings that \
+             require semantic judgment. This export has not yet had a human triage pass: every \
+             advisory finding here is the engine's own calibrated output, awaiting a human \
+             reviewer's judgment before any is accepted, marked tech debt, or ruled out. \
+             Lower-confidence items are marked needs-review."
+                .to_string()
+        }
+    }
+}
+
+/// C4-P3: the EXPORTED remediation-effort tier for `f`, reconciled against the rule it violates.
+/// Order of preference:
+/// 1. `f.effort` — the finding's OWN estimate, whether set by the AI calibration pass
+///    (`ai_audit::verify_findings`) or by a deterministic detector's own sensible default at
+///    finding-creation time (e.g. `onboard::audit::default_effort_for`). Never second-guessed
+///    here.
+/// 2. Failing that, the rule's AUTHORED effort band on the option this finding resolves against
+///    (`RuleOption::effort`, set in the corpus TOML) — the rule author's floor/default estimate
+///    for a finding that never went through calibration and whose detector built a bare
+///    `Finding` with no per-finding default (the architectural/RLS-replay checkers —
+///    `onboard::architectural::arch_violation_to_finding` sets `effort: None` unconditionally).
+///    This is the fix for a PROVEN critical (an unprotected table, a definer function with no
+///    pinned search_path) rendering "not estimated this run" forever just because its detector
+///    never set one: the rule itself already carries a defensible default.
+/// 3. `None` — genuinely no estimate available from either source. The caller's existing
+///    "not yet estimated" render (`effort_hours_bounds`) and the run-wide `FailedPass{pass:
+///    "hour estimation", ..}` disclosure (`ai_audit::verify_findings`) are the honest way to
+///    say so; this function never fabricates a number, and — per the C4-P3 guardrail — nothing
+///    downstream may ever refuse or drop a row because this returns `None`.
+pub(crate) fn resolve_effort(
+    f: &Finding,
+    rule_id: &str,
+    corpus: Option<&camerata_rules::RuleSet>,
+    chosen_option: Option<&str>,
+) -> Option<String> {
+    f.effort.clone().or_else(|| {
+        corpus_rule_for(rule_id, corpus)
+            .and_then(|rule| rule.resolved_option(chosen_option))
+            .and_then(|opt| opt.effort.clone())
+    })
 }
 
 /// Item 7's effort -> rough-hour mapping (a judgment call, documented here rather than buried
@@ -906,8 +3499,14 @@ fn default_narrative(
 pub(crate) fn effort_hours_bounds(effort: Option<&str>) -> (Option<(u32, u32)>, String) {
     match effort {
         Some("low") => (Some((2, 4)), "2 to 4 hours".to_string()),
-        Some("medium") => (Some((8, 16)), "1 to 2 days (about 8 to 16 hours)".to_string()),
-        Some("high") => (Some((24, 40)), "3 to 5 days (about 24 to 40 hours)".to_string()),
+        Some("medium") => (
+            Some((8, 16)),
+            "1 to 2 days (about 8 to 16 hours)".to_string(),
+        ),
+        Some("high") => (
+            Some((24, 40)),
+            "3 to 5 days (about 24 to 40 hours)".to_string(),
+        ),
         _ => (None, "not yet estimated".to_string()),
     }
 }
@@ -933,7 +3532,7 @@ fn total_hours_label(items: &[&FindingRefJson]) -> String {
     }
     let counted = items.len() - uncounted;
     if counted == 0 {
-        return "None of these items has a calibrated effort estimate yet; ask the auditor for \
+        return "None of these items has a calibrated effort estimate yet; ask the reviewer for \
                 a rough scoping pass before pricing remediation."
             .to_string();
     }
@@ -947,6 +3546,294 @@ fn total_hours_label(items: &[&FindingRefJson]) -> String {
     }
     label.push('.');
     label
+}
+
+/// Defect 4 (2026-10-07 grading pass) — the "evidence of violation" gate: a conservative,
+/// deliberately simple NEGATION-PHRASE detector over a zero-finding rule's own
+/// [`crate::ai_audit::RuleRecommendation::evidence`] text. Across three graded fixtures, a
+/// multi-option/structured rule's own evidence sometimes reads as a plain description of the
+/// exact violation the rule exists to catch — e.g. "three sequential writes with no
+/// transaction", "an external chargeable call with no idempotency-key handling",
+/// "authorization done as ad hoc checks inside business logic" — while the rule still reports
+/// ZERO findings and ships under "What's healthy", because compliance was checked against
+/// whichever option the model picked (which can itself be the non-compliant option the
+/// evidence describes) rather than against the rule's own requirement. The engine wrote down
+/// WHY the rule is violated and then told the client the rule is satisfied.
+///
+/// Any one of these phrases appearing is treated as "this evidence negates the rule's own
+/// requirement" — deliberately conservative (a false positive costs a genuinely-healthy rule
+/// one extra human look in `held`, never a dropped finding or a refused export; a false
+/// negative is just the pre-existing gap this gate narrows, not a regression it introduces).
+/// See [`build_report_json`]'s "What's healthy" section for the call site, and
+/// [`parse_evidence_citation`] for how the matching advisory finding is anchored.
+pub(crate) fn evidence_negates_requirement(evidence: &str) -> bool {
+    const NEGATION_PHRASES: &[&str] = &["no ", "without ", "not ", "ad hoc", "only ", "missing"];
+    let lower = evidence.to_ascii_lowercase();
+    NEGATION_PHRASES.iter().any(|phrase| lower.contains(phrase))
+}
+
+/// Best-effort split of a [`crate::ai_audit::RuleRecommendation::evidence`] citation
+/// (`"path:line"` or `"path:line — short note"`, per that field's own doc comment) into its
+/// path/line parts, anchoring the [`evidence_negates_requirement`] advisory finding at a real
+/// location whenever the model's citation parses. Splits ONLY on an em dash or " - " (never a
+/// bare hyphen) so a hyphenated path (`src/my-service/orders.rs:142`) is never mistaken for a
+/// "path — note" separator.
+///
+/// # On the unparseable case (W21, 2026-10-19)
+///
+/// Returns `("", 0)` — an EMPTY path, not the evidence text.
+///
+/// It used to return `(evidence, 0)`, reasoned as "never drops the evidence text". The intent
+/// was right and the mechanism was wrong: `path` is a client-facing FILE LOCATION rendered in
+/// the PDF and the workbook, and the fallback put model prose into it. The measured result on
+/// hearth was ten rows whose `path` was a sentence up to 180 characters long, e.g.
+/// `"app/api/bookings/route.ts:15-39 — booking insert, payment insert, and slot update execute
+/// as three separate awaits with no transaction boundary"`, shipped as a file path.
+///
+/// Nothing is actually lost. All three callers already put the evidence text in `snippet`
+/// (and `report_export`'s gate quotes it in `detail` as well), so the text survives in the
+/// fields built to hold prose. What changes is that a row which cannot be anchored now says
+/// so by carrying no location, which is what `located: false` exists to express.
+pub(crate) fn parse_evidence_citation(evidence: &str) -> (String, usize) {
+    let trimmed = evidence.trim();
+    let head = trimmed
+        .split(" — ")
+        .next()
+        .and_then(|s| s.split(" - ").next())
+        .unwrap_or(trimmed)
+        .trim();
+    if let Some((path, line_str)) = head.rsplit_once(':') {
+        if let Ok(line) = line_str.trim().parse::<usize>() {
+            if !path.is_empty() {
+                return (path.to_string(), line);
+            }
+        }
+    }
+    (String::new(), 0)
+}
+
+/// Defect 4's injection point: for every rule the ledger would otherwise credit as healthy
+/// (`ran && findings_emitted == 0`, and genuinely zero findings in `report.findings` too) whose
+/// `RuleRecommendation::evidence` [`evidence_negates_requirement`], synthesize ONE advisory
+/// `Finding` and append it to `report.findings` IN PLACE.
+///
+/// # Pass-1 W1 seal fix (2026-10-09)
+///
+/// This used to run INSIDE [`build_report_json`], against a CLONED report, with the clone then
+/// silently shadowing that function's own `report` parameter — so the PDF's JSON saw the
+/// synthetic rows, but `xlsx_export::build_workbook` / `build_findings_export` (which read the
+/// ORIGINAL, un-injected `ScanReport` directly, never the exporter-local clone) never did. That
+/// was the exact shape of the measured defect: `findings.json`'s own `summary` (cloned from the
+/// PDF's `AuditReportJson`) described `N+K` rows while its `findings` array held only `N`.
+///
+/// The fix is a POSITION fix, not a logic fix: this function is now part of the SCAN pipeline,
+/// not the export pipeline. It must run exactly once, after every other row-adding pass
+/// (`crate::onboard::audit_repos`'s merges, `crate::merge_scan_preview`, the dependency audit)
+/// and strictly BEFORE [`crate::onboard::ScanReport::seal`] — see that method's doc comment for
+/// the full pipeline order. Every exporter then reads the SAME already-sealed row set, so the
+/// three artifacts can never disagree on which rows exist. Records its own
+/// `"evidence-gate-synthesis"` [`crate::scan_ledger::StageAccounting`] entry (an ADDITION-side
+/// stage — see that type's doc comment) so the rows it adds are accounted exactly as a
+/// row-removing merge stage already is, never invisible to the pipeline-integrity ledger.
+///
+/// A no-op (including no ledger stage — nothing to disclose) when `report.recommendations` is
+/// empty, which covers the overwhelming majority of scans (deterministic-only, or no
+/// multi-option rule selected this run). **Test-fixture note:** a fixture that wants to exercise
+/// this gate must populate `recommendations` — the standing `export_invariants_gate` fixture in
+/// this file does NOT (by design, to keep its own invariants independent of this gate), which is
+/// exactly why this defect shipped undetected; see the `req_d1`/`req_d2`/`req_c1` fixtures below
+/// for ones that deliberately populate it and assert `K > 0`.
+pub fn apply_evidence_gate(report: &mut crate::onboard::ScanReport) {
+    apply_zero_finding_evidence_check(report);
+    apply_sites_vs_rows_check(report);
+}
+
+/// The marker sentence every [`apply_sites_vs_rows_check`] shortfall row's `detail` begins
+/// with — also the gate's own idempotency key (a rule already carrying a shortfall row is
+/// never checked again, so the gate can never ratchet).
+const SITES_VS_ROWS_SHORTFALL_PREFIX: &str =
+    "Site count integrity: the evaluation for this rule established";
+
+/// W7 (C2) — the sites-vs-rows integrity check, exporting shortfalls as HELD rows (never a
+/// refused export).
+///
+/// The original C2 defect: the zero-finding evidence check below skips any rule with >= 1
+/// finding, so an N-sites-but-1-row shortfall was never checked at ANY N — on one graded
+/// fixture the recommendation pass wrote down the planted site, the coverage evidence named
+/// both relevant sites, and "Findings this run" was 1, with nothing anywhere comparing the
+/// two numbers.
+///
+/// The check uses the STRUCTURED fields only (per the review: never re-derive counts from
+/// prose): a `FindingKind::Deviation` payload carries the GROUP-level `deviating_sites`
+/// numerator, computed structurally when the kind was stamped
+/// (`ai_audit::assign_deviation_kinds`: surviving rows plus absorbed merge sites). Later
+/// passes (cross-scan grouping, preview merges) can still lose sites AFTER that stamp — and a
+/// site lost after the stamp is exactly the "recall loss to over-merge looks like a detection
+/// miss" shape. So, pre-seal: for every rule whose rows claim `deviating_sites == N`, count
+/// the sites actually REPRESENTED (rows under the rule + `also_locations` entries under it);
+/// a shortfall becomes ONE held, needs-review row stating both numbers — visible to the
+/// curator and the client, never a dropped row and never an aborted export.
+fn apply_sites_vs_rows_check(report: &mut crate::onboard::ScanReport) {
+    use camerata_api_types::audit::FindingKind;
+    // claimed deviating_sites per rule (group-level, identical on every row of the rule by
+    // construction — max is a safe reconciliation if they ever diverge), plus whether the
+    // rule already carries a shortfall row from a previous invocation.
+    let mut claimed: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    let mut already_disclosed: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for f in &report.findings {
+        if let Some(FindingKind::Deviation(d)) = &f.kind {
+            let e = claimed.entry(f.rule_id.to_ascii_uppercase()).or_insert(0);
+            *e = (*e).max(d.deviating_sites);
+        }
+        if f.detail.starts_with(SITES_VS_ROWS_SHORTFALL_PREFIX) {
+            already_disclosed.insert(f.rule_id.to_ascii_uppercase());
+        }
+    }
+    if claimed.is_empty() {
+        return;
+    }
+    let mut synthetic: Vec<Finding> = Vec::new();
+    for (rule_key, n_claimed) in &claimed {
+        if already_disclosed.contains(rule_key) {
+            continue;
+        }
+        let represented: usize = report
+            .findings
+            .iter()
+            .map(|f| {
+                usize::from(f.rule_id.eq_ignore_ascii_case(rule_key))
+                    + f.also_locations
+                        .iter()
+                        .filter(|l| l.rule_id.eq_ignore_ascii_case(rule_key))
+                        .count()
+            })
+            .sum();
+        if represented >= *n_claimed {
+            continue;
+        }
+        let missing = n_claimed - represented;
+        // Anchor the disclosure on the rule's first surviving row (same repo/file family);
+        // the missing sites' own locations are exactly what was lost, so line 0 is honest.
+        let Some(anchor) = report
+            .findings
+            .iter()
+            .find(|f| f.rule_id.eq_ignore_ascii_case(rule_key))
+        else {
+            continue;
+        };
+        synthetic.push(Finding {
+            repo: anchor.repo.clone(),
+            path: anchor.path.clone(),
+            line: 0,
+            rule_id: anchor.rule_id.clone(),
+            severity: "medium".to_string(),
+            snippet: format!(
+                "{n_claimed} deviating site(s) established; {represented} represented in this \
+                 report"
+            ),
+            detail: format!(
+                "{SITES_VS_ROWS_SHORTFALL_PREFIX} {n_claimed} deviating site(s) for this \
+                 rule, but only {represented} of them {} represented in this report's rows \
+                 and merged-site records. The remaining {missing} {} not individually listed \
+                 — held for a human reviewer rather than silently omitted.",
+                if represented == 1 { "is" } else { "are" },
+                if missing == 1 { "site is" } else { "sites are" },
+            ),
+            needs_review: true,
+            confidence: Some("needs-review".to_string()),
+            located: false,
+            // The shortfall row belongs to the same deviation group it reconciles — carry
+            // the group's own structured payload so the numerator/denominator stay on the
+            // wire (A5.6), rather than inventing a new kind for an honesty row.
+            kind: anchor.kind.clone(),
+            ..Finding::default()
+        });
+    }
+    if synthetic.is_empty() {
+        return;
+    }
+    let rows_in = report.findings.len();
+    let added = synthetic.len();
+    report.findings.extend(synthetic);
+    let rows_out = report.findings.len();
+    let mut acc = crate::scan_ledger::StageAccounting::default();
+    acc.push_added("sites_vs_rows_shortfall_disclosed", added);
+    report
+        .ledger
+        .record_stage("sites-vs-rows-gate", rows_in, rows_out, acc);
+}
+
+/// The ORIGINAL evidence gate (Defect 4): the zero-finding half. See
+/// [`apply_evidence_gate`]'s doc comment — this is its body, split out when W7 added the
+/// sites-vs-rows check so each half keeps its own no-op early return.
+fn apply_zero_finding_evidence_check(report: &mut crate::onboard::ScanReport) {
+    if report.recommendations.is_empty() {
+        return;
+    }
+    let healthy_ids: std::collections::HashSet<String> = if report.ledger.rules().next().is_some() {
+        report.ledger.healthy_rule_ids().into_iter().collect()
+    } else {
+        report.provenance.audited_rule_ids.iter().cloned().collect()
+    };
+    let rule_ids_with_any_finding: std::collections::HashSet<String> = report
+        .findings
+        .iter()
+        .flat_map(|f| std::iter::once(f.rule_id.clone()).chain(f.also_matches.iter().cloned()))
+        .collect();
+    let mut synthetic = Vec::new();
+    for rid in &healthy_ids {
+        if rule_ids_with_any_finding.contains(rid.as_str()) {
+            continue;
+        }
+        let Some(rec) = report.recommendations.get(&rid.to_ascii_uppercase()) else {
+            continue;
+        };
+        let Some(evidence) = rec.evidence.as_deref() else {
+            continue;
+        };
+        if !evidence_negates_requirement(evidence) {
+            continue;
+        }
+        let (path, line) = parse_evidence_citation(evidence);
+        // W21: an unparseable citation yields an empty path, so this row is only `located`
+        // when the model's evidence actually named a file. The evidence text itself is still
+        // carried in `snippet` and quoted in `detail` below, so nothing is lost by refusing
+        // to call a sentence a location.
+        let located = !path.is_empty();
+        synthetic.push(Finding {
+            repo: report.repos.first().cloned().unwrap_or_default(),
+            path,
+            line,
+            rule_id: rid.clone(),
+            severity: "medium".to_string(),
+            snippet: evidence.chars().take(200).collect(),
+            detail: format!(
+                "This rule's own evaluation evidence reads \"{evidence}\", which appears to \
+                 negate the rule's own requirement, even though the rule reported zero \
+                 findings this run. Flagged here for manual confirmation rather than listed as \
+                 healthy."
+            ),
+            needs_review: true,
+            confidence: Some("needs-review".to_string()),
+            located,
+            // A5.6: the gate's claim is that the rule's own requirement is negated — an
+            // objective-fault claim (held for review), never a consistency observation.
+            kind: Some(camerata_api_types::audit::FindingKind::Defect),
+            ..Finding::default()
+        });
+    }
+    if synthetic.is_empty() {
+        return;
+    }
+    let rows_in = report.findings.len();
+    let added = synthetic.len();
+    report.findings.extend(synthetic);
+    let rows_out = report.findings.len();
+    let mut acc = crate::scan_ledger::StageAccounting::default();
+    acc.push_added("evidence_gate_synthesized", added);
+    report
+        .ledger
+        .record_stage("evidence-gate-synthesis", rows_in, rows_out, acc);
 }
 
 /// Build the report's single output type from a completed scan + the client's triage
@@ -971,11 +3858,21 @@ fn total_hours_label(items: &[&FindingRefJson]) -> String {
 /// SQL-concat bug" and "your lockfile pins a CVE'd package" into one table would blur two
 /// very different remediation types (edit code vs. bump a version).
 pub fn build_report_json(
-    report: &ScanReport,
+    report: &crate::onboard::SealedReport,
     dispositions: &HashMap<String, DispositionWire>,
     corpus: Option<&camerata_rules::RuleSet>,
     opts: &ReportOptions,
 ) -> AuditReportJson {
+    // Pass-1 W1 seal fix: the evidence-of-violation gate used to run HERE, against a private
+    // clone that then shadowed `report` — see `apply_evidence_gate`'s doc comment for the full
+    // defect this caused. It now runs upstream, as part of the scan pipeline, strictly before
+    // `report` was ever sealed — `report: &SealedReport` above is the compile-time guarantee
+    // that it already has.
+    // C4-R3: sanitize zero-width/BOM code points out of every finding ONCE, here, before any
+    // downstream section touches `path`/`snippet`/`detail`/`captures` — see
+    // `sanitize_report_findings`'s doc comment. Shadows the parameter so every other line below
+    // (and every other use of `report` in this function) is unchanged.
+    let report = &sanitize_report_findings(report);
     let candidates_reviewed = report.findings.len();
 
     // Partition: false positives out (counted once), everything else keeps its finding +
@@ -983,18 +3880,42 @@ pub fn build_report_json(
     // here, so no downstream section can silently mis-bucket a `"Critical"`-cased finding as
     // low severity by matching `finding.severity.as_str()` ad hoc).
     let mut excluded_fp = 0usize;
+    // P5: `Reviewed` the moment ANY finding carries an explicit THIS-SESSION auditor
+    // disposition — see `ReviewState`'s doc comment for why `BaselineAccepted`/`WaivedInline`
+    // (sourced from `Finding.status`, not the wire map) never flip this.
+    let mut auditor_touched_any_finding = false;
     let mut live: Vec<(&Finding, Disposition, String, String)> = Vec::new();
     for f in &report.findings {
         let wire = dispositions.get(&finding_key(f));
+        if let Some(w) = wire {
+            if matches!(
+                w.state.as_str(),
+                "Confirmed" | "Ignored" | "TechDebt" | "FalsePositive"
+            ) {
+                auditor_touched_any_finding = true;
+            }
+        }
         if wire.map(|d| d.state.as_str()) == Some("FalsePositive") {
             excluded_fp += 1;
             continue;
         }
         let disposition = classify(f, wire);
         let reason = wire.map(|d| d.reason.clone()).unwrap_or_default();
-        let severity = normalize_severity(&f.severity);
+        // Every severity bound, in one shared definition: normalize, the rule's `min_severity`
+        // FLOOR (W8), the C4-R1 null-location safety net, then the `max_severity` and deviation
+        // ceilings (E2, A5.2), which get the last word. The live scan and the workbook / CSV /
+        // JSON partition call the same function, so no surface can disagree with the PDF; see
+        // `severity_bounds`. Applied here once, so every downstream section (matrix bucketing,
+        // curated findings, the scorecard) sees the ALREADY-bounded severity and can never
+        // independently re-derive the pre-bound one.
+        let severity = crate::severity_bounds::bounded_severity(f, corpus);
         live.push((f, disposition, reason, severity));
     }
+    let review_state = if auditor_touched_any_finding {
+        ReviewState::Reviewed
+    } else {
+        ReviewState::Raw
+    };
 
     // Dependency findings get their own §7 lane — carve them out of every other section.
     let (dep_findings, code_findings): (Vec<_>, Vec<_>) = live
@@ -1002,92 +3923,412 @@ pub fn build_report_json(
         .partition(|(f, _, _, _)| f.rule_id == DEP_AUDIT_RULE_ID);
 
     // ── Matrix + curated findings + scorecard, over code_findings only ───────────
-    let mut matrix = MatrixJson::default();
+    // C3-6: ONE bucket computation per finding (`effective_bucket`, which now folds in the
+    // informational/uncited-AI gates below `matrix_bucket` always needed a caller to apply
+    // separately) — buffered per bucket with an explicit (severity, provenance tier, location)
+    // sort key rather than pushed straight into `matrix` in iteration order. Ordering within a
+    // bucket is now a real signal (a security-floor medium must rank ahead of an architecture/
+    // advisory medium of the same severity), so it can no longer be left to insertion order.
+    #[allow(clippy::type_complexity)]
+    let mut bucketed: HashMap<
+        &'static str,
+        Vec<((u8, u8, String, String, usize), FindingRefJson)>,
+    > = HashMap::new();
     for (f, disposition, _, severity) in &code_findings {
         // Bug 4: convention-to-consider rows are diverted to the informational appendix BEFORE
         // the severity×effort quadrant — they must never reach do_now/do_next/plan. The
         // invariant that a critical/high is never informational lives in `is_informational`.
-        let bucket = if is_informational(f, *disposition, severity, corpus, report.test_file_count) {
-            "informational"
+        // P3: an AI-tier finding with no grounded citation (`is_uncited_ai_finding`) is ALSO
+        // routed here — deliberately independent of severity (see that function's doc
+        // comment), since the whole point is to catch the critical/high findings that would
+        // otherwise sit in the curated set carrying "AI-advisory, model-inferred." C5-8 adds a
+        // THIRD such signal (an action-tier row with no fix to show at all). All three gates
+        // now live INSIDE `effective_bucket` itself (C3-6) — kept as separate bools here only
+        // because the appendix headline below needs to say WHICH reason applied.
+        // `chosen_option_for_rule` is needed by `effective_bucket`'s C5-8 "has a fix" check
+        // below, so it is computed here, ahead of that call, rather than after it as before.
+        let chosen_option_for_rule = opts
+            .chosen_options
+            .get(&f.rule_id.to_ascii_uppercase())
+            .map(String::as_str);
+        let gate_uncited = is_uncited_ai_finding(f, corpus);
+        let gate_no_fix = is_action_row_missing_a_fix(
+            f,
+            *disposition,
+            severity,
+            corpus,
+            report.test_file_count,
+            chosen_option_for_rule,
+        );
+        // C6-B4: computed independently (same pattern as `gate_no_fix` just above) purely so
+        // the headline below can say WHICH held-for-review reason applied — `effective_bucket`
+        // checks `is_action_row_missing_a_fix` FIRST, so when both this and `gate_no_fix` are
+        // true the fix-missing reason wins in the headline below, matching the bucket the two
+        // gates agree on either way (both route to "held").
+        let gate_no_estimate = is_action_row_missing_an_estimate(
+            f,
+            *disposition,
+            severity,
+            corpus,
+            report.test_file_count,
+            chosen_option_for_rule,
+        );
+        let bucket = effective_bucket(
+            f,
+            *disposition,
+            severity,
+            corpus,
+            report.test_file_count,
+            chosen_option_for_rule,
+        );
+        // C4-P2: `title_for_finding` (not a bare corpus-or-rule_id join) so an AI-tier finding
+        // grounded via the P3 class fallback gets a human-readable title too, instead of a
+        // header that is nothing but the model's own invented rule id repeated.
+        let fallback_title = title_for_finding(f, corpus);
+        // P4: a deterministic floor finding renders its AUTHORED, repo-specific headline
+        // (never the gate's raw "Deny…" directive) when the corpus has one for this rule;
+        // an AI-tier / not-yet-authored finding falls back to the pre-P4 derivation exactly
+        // as before. See `client_headline_and_detail`'s doc comment.
+        let (base_headline, _) =
+            client_headline_and_detail(f, corpus, &fallback_title, chosen_option_for_rule);
+        // P3 / C5-8 / C6-B4: an honest "why is this not curated" marker for the appendix row,
+        // distinct from the other informational/held reasons (which the appendix count
+        // doesn't otherwise distinguish either — see `matrix.informational`'s doc comment).
+        // `gate_uncited` is mutually exclusive with the other two by construction
+        // (`effective_bucket` checks `is_uncited_ai_finding` before ever reaching either
+        // fix/estimate-availability check); `gate_no_fix` and `gate_no_estimate` can both be
+        // true for the same row (no fix usually means no estimate either), so `gate_no_fix`'s
+        // arm is checked first and wins the headline in that case — not an ordering ambiguity,
+        // just a priority pick between two reasons that both land the SAME row in "held".
+        let headline = if gate_uncited {
+            format!("Needs review (uncited — no grounded citation found): {base_headline}")
+        } else if gate_no_fix {
+            format!(
+                "Needs review (fix not generated — no codebase-specific or rule-level \
+                 remediation available): {base_headline}"
+            )
+        } else if gate_no_estimate && (bucket == "held" || bucket == "informational") {
+            // C6-B4 (amended): a missing estimate NO LONGER routes a row to held, so this
+            // "why is this not curated" marker must only render when the row genuinely IS
+            // out of the action tier for some other reason. A curated action row that merely
+            // lacks an effort band keeps its own headline and renders an honest "not estimated
+            // this run" in its effort field instead — labelling it "Needs review" would be a
+            // false hedge on a confident finding.
+            format!(
+                "Needs review (effort not estimated — no calibrated or rule-level estimate \
+                 available): {base_headline}"
+            )
         } else {
-            matrix_bucket(*disposition, severity, f.effort.as_deref())
+            base_headline
         };
-        let target = match bucket {
-            "do_now" => &mut matrix.do_now,
-            "do_next" => &mut matrix.do_next,
-            "plan" => &mut matrix.plan,
-            "informational" => &mut matrix.informational,
-            _ => &mut matrix.accepted,
+        // C3-6 item 3: provenance tier for the within-bucket sort, via `citation_for_finding`
+        // (not the plain `resolve_citation`) so an AI-tier finding upgraded to a grounded class
+        // (P3) sorts by the SAME resolved citation the curated-findings section shows for it.
+        let provenance_rank = provenance_tier_rank(&citation_for_finding(f, corpus).kind);
+        let sort_key = (
+            severity_rank(severity),
+            provenance_rank,
+            f.repo.clone(),
+            f.path.clone(),
+            f.line,
+        );
+        bucketed.entry(bucket).or_default().push((
+            sort_key,
+            finding_ref(
+                f,
+                severity,
+                headline,
+                bucket,
+                corpus,
+                chosen_option_for_rule,
+            ),
+        ));
+    }
+    let mut matrix = MatrixJson::default();
+    for (key, target) in [
+        ("do_now", &mut matrix.do_now),
+        ("do_next", &mut matrix.do_next),
+        ("plan", &mut matrix.plan),
+        ("accepted", &mut matrix.accepted),
+        ("informational", &mut matrix.informational),
+        ("held", &mut matrix.held),
+    ] {
+        if let Some(mut entries) = bucketed.remove(key) {
+            entries.sort_by(|a, b| a.0.cmp(&b.0));
+            *target = entries.into_iter().map(|(_, e)| e).collect();
+        }
+    }
+
+    // ── W1: report-build-time ledger stage ────────────────────────────────────────
+    // `has_rule_ledger_data` gates every ledger-derived section below on whether `report`
+    // actually carries real per-rule facts (the live pipeline always populates these via
+    // `onboard::audit_repos`) — a report built before W1, or a test fixture that never
+    // touches `report.ledger`, falls back to the pre-W1 derivation so existing behavior is
+    // unchanged. `report_ledger` is a CLONE (this function stays pure/no-mutation of
+    // `report`) that additionally records THIS function's own row-accounting: every
+    // `code_finding` is either curated (do_now/do_next/plan/accepted), held, informational,
+    // excluded as a false positive, or carved into the dependency snapshot — see
+    // `StageAccounting::other` for the last two, which don't fit the four named buckets.
+    let has_rule_ledger_data = report.ledger.rules().next().is_some();
+    let mut report_ledger = report.ledger.clone();
+    {
+        let rows_in = candidates_reviewed;
+        let rows_out =
+            matrix.do_now.len() + matrix.do_next.len() + matrix.plan.len() + matrix.accepted.len();
+        let mut acc = crate::scan_ledger::StageAccounting {
+            routed_held: matrix.held.len(),
+            routed_informational: matrix.informational.len(),
+            ..Default::default()
         };
-        let fallback_title = corpus
-            .and_then(|c| c.get_by_id(&f.rule_id))
-            .map(|r| r.title.clone())
-            .unwrap_or_else(|| f.rule_id.clone());
-        let headline = defect_headline(&f.detail, &fallback_title);
-        target.push(finding_ref(f, severity, headline));
+        acc.other
+            .push(("excluded_false_positive".to_string(), excluded_fp));
+        acc.other.push((
+            "dependency_snapshot_carve_out".to_string(),
+            dep_findings.len(),
+        ));
+        report_ledger.record_stage("report-build-partition", rows_in, rows_out, acc);
     }
 
     // Curated findings: grouped by rule (sorted for deterministic output), each rule's
     // sites sorted by repo/path/line.
     #[allow(clippy::type_complexity)]
-    let mut by_rule: std::collections::BTreeMap<String, Vec<(&Finding, Disposition, String, String)>> =
-        std::collections::BTreeMap::new();
+    let mut by_rule: std::collections::BTreeMap<
+        String,
+        Vec<(&Finding, Disposition, String, String)>,
+    > = std::collections::BTreeMap::new();
+    // C6-B1 (closes a client-facing "counted but never rendered" bug): this loop used to
+    // `continue` past an `is_uncited_ai_finding` row entirely — the stale reasoning (see the
+    // removed comment, and `uncited_ai_row_provenance_and_citation_are_never_borrowed_from_a_
+    // sibling`'s now-outdated doc comment) was "it was already routed to `matrix.informational`
+    // above, so no `CuratedGroupJson` is needed for it." That was true ONLY of the gate's
+    // original, pre-C5-7 shape, where an uncited AI finding always landed in `informational`.
+    // C5-7 (see `effective_bucket`'s doc comment) now routes a high/critical uncited finding to
+    // `"held"` instead — a severity-unbounded bucket the "Held for review" PDF section (and the
+    // cover/scorecard/xlsx counts, all of which tally `code_findings` directly) already expect
+    // to see rendered. Skipping the row here left it counted in `matrix.held`, the cover severity
+    // strip, the category scorecard and `findings.json`/the workbook, while the PDF renderer
+    // never emitted it anywhere — not the matrix (expected: held is out of scope for the
+    // severity x effort grid), not curated (expected: this gate's whole point), and NOT Held for
+    // review either, because no site ever existed for it to render. Every `code_findings` row
+    // now unconditionally gets a `CuratedSiteJson` here; the uncited-AI gate still keeps it OUT
+    // of `curated_findings` — the actual client-facing guarantee — via the bucket-based
+    // `curated_findings` / `held_for_review_findings` partition below (its `bucket` field is
+    // already `"informational"` or `"held"`, never an action tier, for exactly this finding; see
+    // `effective_bucket`), not by erasing the row from existence.
     for (f, disposition, reason, severity) in &code_findings {
-        by_rule
-            .entry(f.rule_id.clone())
-            .or_default()
-            .push((f, *disposition, reason.clone(), severity.clone()));
+        by_rule.entry(f.rule_id.clone()).or_default().push((
+            f,
+            *disposition,
+            reason.clone(),
+            severity.clone(),
+        ));
     }
-    let mut curated_findings: Vec<CuratedGroupJson> = Vec::new();
+    let mut all_curated_groups: Vec<CuratedGroupJson> = Vec::new();
     for (rule_id, mut sites) in by_rule {
         sites.sort_by(|a, b| {
             (&a.0.repo, &a.0.path, a.0.line).cmp(&(&b.0.repo, &b.0.path, b.0.line))
         });
-        let preview_tool = sites.iter().find_map(|(f, _, _, _)| f.preview_tool.as_deref());
-        let citation = resolve_citation(&rule_id, preview_tool, corpus);
-        let title = corpus
-            .and_then(|c| c.get_by_id(&rule_id))
-            .map(|r| r.title.clone())
-            .unwrap_or_else(|| rule_id.clone());
+        // `sites` is only ever populated via `.or_default().push(...)` above — a `rule_id` key
+        // only exists in `by_rule` because at least one finding was pushed under it, so the
+        // group is non-empty by construction.
+        let first_site = sites
+            .first()
+            .expect("a curated-findings group is only built from a non-empty site list")
+            .0;
+        // C4-P2: the group header's citation/title render next to `sites[0]` specifically (see
+        // the template's `render_site(group.sites.at(0), after_headline: [...group.citation...])`)
+        // — so they must be THAT SITE's own resolved values, never independently re-derived
+        // from the bare `rule_id` or picked from whichever OTHER member of the group happens to
+        // classify into a grounded citation first. Every site in `sites` already passed the P3
+        // citation gate (not AI-tier, or AI-tier and grounded — see the `continue` above), so
+        // `first_site`'s own citation is always already non-advisory (or, for a non-AI-tier
+        // group, identical across every member since it depends only on the shared `rule_id`)
+        // — this is never a downgrade from the prior "first non-advisory across all members"
+        // derivation, just the same answer computed without a cross-member search that could
+        // silently diverge from `sites[0]` if a future change weakened the gate above.
+        let citation = citation_for_finding(first_site, corpus);
+        let title = title_for_finding(first_site, corpus);
         let site_jsons = sites
             .iter()
             .map(|(f, disposition, reason, severity)| {
-                // Bug 4: keep the curated-site LABEL in lockstep with the matrix cell this
-                // finding actually lands in — an informational row reads "Convention to
-                // consider", never "Open (recommended: Plan)".
-                let bucket =
-                    if is_informational(f, *disposition, severity, corpus, report.test_file_count) {
-                        "informational"
-                    } else {
-                        matrix_bucket(*disposition, severity, f.effort.as_deref())
-                    };
+                // `chosen_option_for_rule` feeds `effective_bucket`'s C5-8 "has a fix" check
+                // below, so (same reordering as the matrix-building loop above) it is computed
+                // ahead of that call now, not after it.
+                let chosen_option_for_rule = opts
+                    .chosen_options
+                    .get(&rule_id.to_ascii_uppercase())
+                    .map(String::as_str);
+                // Bug 4 / C3-6: keep the curated-site LABEL in lockstep with the matrix cell
+                // this finding actually lands in — an informational row reads "Convention to
+                // consider", never "Open (recommended: Plan)". `effective_bucket` is the SAME
+                // call the matrix-building pass above makes for this finding, so the two can
+                // never compute a different answer for the same row.
+                let bucket = effective_bucket(
+                    f,
+                    *disposition,
+                    severity,
+                    corpus,
+                    report.test_file_count,
+                    chosen_option_for_rule,
+                );
+                // C5-8: a no-fix-held row still appears here — same rule, same group, just this
+                // one site's `bucket` is `"held"` instead of an action tier. Disclose WHY in its
+                // own headline too, not only via `disposition_label`'s generic held-for-review
+                // wording, so a reader scanning this site within its rule's curated group sees
+                // the concrete reason right next to it.
+                let gate_no_fix = is_action_row_missing_a_fix(
+                    f,
+                    *disposition,
+                    severity,
+                    corpus,
+                    report.test_file_count,
+                    chosen_option_for_rule,
+                );
+                // C6-B4: same disclosure pattern as `gate_no_fix` just above — see that gate's
+                // sibling-ordering note in the matrix-bucketing loop for why `gate_no_fix` wins
+                // the headline when both are true for the same row.
+                let gate_no_estimate = is_action_row_missing_an_estimate(
+                    f,
+                    *disposition,
+                    severity,
+                    corpus,
+                    report.test_file_count,
+                    chosen_option_for_rule,
+                );
+                // C6-B1: same disclosure for the uncited-AI gate, now that this loop no longer
+                // `continue`s past such a finding (see the `by_rule`-population loop above) —
+                // mirrors the identical `gate_uncited` headline prefix the matrix-bucketing loop
+                // computes for the same row, so the wording is identical wherever the row renders.
+                let gate_uncited = is_uncited_ai_finding(f, corpus);
                 let confirmed_by_client = dispositions
                     .get(&finding_key(f))
                     .map(|d| d.confirmed_by_client)
                     .unwrap_or(false);
+                // P4: prefer the authored, repo-specific (headline, detail) pair over the raw
+                // gate text — see `client_headline_and_detail`'s doc comment. `detail` here is
+                // NOT `f.detail.clone()` unconditionally anymore: for a floor finding with an
+                // authored template, it's the authored client-facing detail instead of the
+                // gate's own "Deny…" enforcement prose.
+                let (base_headline, detail) =
+                    client_headline_and_detail(f, corpus, &title, chosen_option_for_rule);
+                let headline = if gate_uncited {
+                    format!("Needs review (uncited — no grounded citation found): {base_headline}")
+                } else if gate_no_fix {
+                    format!(
+                        "Needs review (fix not generated — no codebase-specific or rule-level \
+                         remediation available): {base_headline}"
+                    )
+                } else if gate_no_estimate && (bucket == "held" || bucket == "informational") {
+                    // C6-B4 (amended) — see the identical guard in the matrix-bucketing loop:
+                    // a missing estimate no longer routes a row out of the action tier, so this
+                    // marker renders only when the row is genuinely held/informational for
+                    // another reason. A curated row simply shows "not estimated this run".
+                    format!(
+                        "Needs review (effort not estimated — no calibrated or rule-level \
+                         estimate available): {base_headline}"
+                    )
+                } else {
+                    base_headline
+                };
                 CuratedSiteJson {
                     repo: f.repo.clone(),
                     path: f.path.clone(),
                     line: f.line,
                     snippet: cap_snippet(&f.snippet),
-                    detail: f.detail.clone(),
+                    detail,
                     severity: severity.clone(),
-                    effort: f.effort.clone(),
-                    confidence: f.confidence.clone(),
-                    disposition: disposition_label(*disposition, reason, bucket, confirmed_by_client),
+                    // C4-P3: calibration's own effort, else the rule's authored effort band —
+                    // see `resolve_effort`'s doc comment. Never `f.effort.clone()` alone: that
+                    // left every architectural/RLS-replay floor finding (no calibration, no
+                    // per-finding default) rendering "not estimated this run" even when the
+                    // rule itself carries a defensible authored band.
+                    effort: resolve_effort(f, &rule_id, corpus, chosen_option_for_rule),
+                    // C4-P2: the canonical reconciled confidence (see `hedge_confidence`'s doc
+                    // comment) — never the raw `f.confidence` alone, so a row the matrix pass
+                    // above bucketed "informational" for a NON-confidence reason (an
+                    // `info`-severity note, a testing-style deviation, an absence-type stance
+                    // rule) still shows `"needs-review"` here, matching the narrative's own
+                    // "held for a human reviewer's judgment call" framing instead of printing
+                    // "high"/blank next to a row that is, by construction, not curated.
+                    confidence: hedge_confidence(f, bucket),
+                    disposition: disposition_label(
+                        *disposition,
+                        reason,
+                        bucket,
+                        confirmed_by_client,
+                    ),
+                    bucket: bucket.to_string(),
                     also_matches: f.also_matches.clone(),
-                    headline: defect_headline(&f.detail, &title),
-                    fix: resolve_fix(&rule_id, corpus),
+                    also_matches_titles: also_matches_titles(&f.also_matches, corpus),
+                    // C4-P2: this SITE's own resolved citation — never the group's (which
+                    // renders once, next to `sites[0]`, in the template) — so a consumer that
+                    // wants the per-finding citation (the cross-artifact equality gate, a future
+                    // template revision) never has to assume group membership implies an
+                    // identical citation for every site.
+                    citation: citation_for_finding(f, corpus),
+                    headline,
+                    // P2: `f.fix_specific` was generated at SCAN time by
+                    // `ai_audit::generate_fix_specifics` (this layer stays pure/synchronous —
+                    // no model access here, just a read) — a codebase-specific fix that the
+                    // template renders ABOVE `fix` (the rule's generic remediation is now
+                    // secondary context only). `None` when generation never ran (a
+                    // deterministic-only scan) or gave up after retries — in the latter case
+                    // `fix` (resolved just above from the rule's own authored remediation)
+                    // still renders as the primary "Fix:" line (C3-1b: a pipeline failure here
+                    // never removes the finding's fix, only its codebase-specific flavor).
+                    //
+                    // C6-B3: a give-up no longer always leaves `fix_specific` (and therefore
+                    // `fix_for_this_finding`) at `None` — `generate_fix_specifics` now
+                    // instantiates the rule's OWN authored remediation against this finding's
+                    // own identifiers and writes THAT into `fix_specific`, via the exact same
+                    // `resolve_fix` machinery this `fix` field below calls. When it does, the
+                    // two fields would otherwise render the IDENTICAL sentence twice (a bold
+                    // "Fix:" line immediately followed by a "General guidance:" line repeating
+                    // it verbatim) — `fix` is suppressed here whenever it's byte-identical to
+                    // `fix_for_this_finding`, so the template's secondary line only ever adds
+                    // information, never echoes the primary line back.
+                    fix: {
+                        let generic = resolve_fix(&rule_id, corpus, f, chosen_option_for_rule);
+                        if generic.as_deref() == f.fix_specific.as_deref() {
+                            None
+                        } else {
+                            generic
+                        }
+                    },
+                    fix_for_this_finding: f.fix_specific.clone(),
+                    // W7 (C5): the absorbed sites, verbatim — see the field's doc comment.
+                    also_locations: f.also_locations.clone(),
+                    site_count: 1 + f.also_locations.len(),
+                    kind: camerata_api_types::audit::KindOnWire(f.kind.clone()),
                 }
             })
             .collect();
-        curated_findings.push(CuratedGroupJson {
+        all_curated_groups.push(CuratedGroupJson {
             rule_id,
             title,
             citation,
             sites: site_jsons,
         });
     }
+
+    // C4-P4 (residual defect 5) / C5-4: split fully-informational-or-held groups into their own
+    // section, then order the remaining (genuinely curated) groups by severity desc / bucket /
+    // confidence — see `AuditReportJson::curated_findings`'s and `::held_for_review_findings`'s
+    // doc comments for the eligibility rule and `curated_group_sort_key` for the ordering
+    // itself. `"held"` (C5-4) is treated identically to `"informational"` here: a group whose
+    // every site is either appendix-worthy or calibration-hedged (at ANY severity) is never
+    // curated, and a high/critical hedge must land in `held_for_review_findings`, not
+    // `curated_findings` — that is the whole point of the C5-4 fix.
+    let (mut curated_findings, mut held_for_review_findings): (
+        Vec<CuratedGroupJson>,
+        Vec<CuratedGroupJson>,
+    ) = all_curated_groups.into_iter().partition(|g| {
+        g.sites
+            .iter()
+            .any(|s| !matches!(s.bucket.as_str(), "informational" | "held"))
+    });
+    curated_findings.sort_by_key(curated_group_sort_key);
+    held_for_review_findings.sort_by_key(curated_group_sort_key);
 
     // Scorecard: group by category, over code_findings (all of them, so an accepted
     // high-severity item still shows up in the severity counts — only the STATUS chip
@@ -1098,8 +4339,12 @@ pub fn build_report_json(
         Vec<&(&Finding, Disposition, String, String)>,
     > = std::collections::BTreeMap::new();
     for entry in &code_findings {
+        // C4-P2: `category_for_finding` (not the bare rule-id `category_for`) so an AI-tier
+        // finding with no corpus entry groups under its real semantic category (e.g.
+        // "Rls Policy") instead of a mangled rule-id-derived key — see that function's doc
+        // comment for the "0 rules checked" bug this closes.
         by_category
-            .entry(category_for(&entry.0.rule_id, corpus))
+            .entry(category_for_finding(entry.0, corpus))
             .or_default()
             .push(entry);
     }
@@ -1111,6 +4356,34 @@ pub fn build_report_json(
     for rid in &report.provenance.audited_rule_ids {
         by_category.entry(category_for(rid, corpus)).or_default();
     }
+    // C5-1 (coverage accounting): a rule counts as "matched this run" if it fired as a PRIMARY
+    // (`f.rule_id`) OR survived only as a merged `also_matches` member — a rule demoted into
+    // `also_matches` by `ai_audit::merge_location_group`/`merge_semantic_group` genuinely fired;
+    // it just lost the primary slot to another finding describing the same defect. Before this,
+    // `rule_ids_with_findings`/`rule_ids_with_any_finding` below only ever looked at the
+    // PRIMARY's own `rule_id`, so an absorbed rule — most commonly the deterministic rule a
+    // pre-fix merge used to demote behind an inflated AI primary (see `merge_semantic_group`'s
+    // `primary_rank` doc comment) — showed 0 findings in the Coverage sheet and was listed as
+    // "verified clean" even though it fired and was merged into a visible row. Keyed by each
+    // absorbed id's OWN category (via `category_for`, the same join `audited_rule_ids` uses just
+    // above) since an absorbed AI/adopted id can belong to a different category than the
+    // primary's — a member matched under ITS category, not necessarily the row's displayed one.
+    let mut matched_rule_ids_by_category: std::collections::BTreeMap<
+        String,
+        std::collections::HashSet<String>,
+    > = std::collections::BTreeMap::new();
+    for (f, _, _, _) in &code_findings {
+        matched_rule_ids_by_category
+            .entry(category_for_finding(f, corpus))
+            .or_default()
+            .insert(f.rule_id.clone());
+        for also_id in &f.also_matches {
+            matched_rule_ids_by_category
+                .entry(category_for(also_id, corpus))
+                .or_default()
+                .insert(also_id.clone());
+        }
+    }
     let mut scorecard_rows: Vec<CategoryRowJson> = Vec::new();
     for (category, entries) in &by_category {
         let mut critical = 0usize;
@@ -1119,7 +4392,7 @@ pub fn build_report_json(
         let mut low = 0usize;
         let mut open_high_or_critical = false;
         let mut open_medium = false;
-        let mut rule_ids_with_findings: std::collections::HashSet<&str> =
+        let mut rule_ids_with_findings: std::collections::HashSet<String> =
             std::collections::HashSet::new();
         for entry in entries.iter() {
             let f = entry.0;
@@ -1131,10 +4404,16 @@ pub fn build_report_json(
                 "medium" => medium += 1,
                 _ => low += 1,
             }
-            rule_ids_with_findings.insert(f.rule_id.as_str());
+            rule_ids_with_findings.insert(f.rule_id.clone());
+            // `Confirmed` is still open: the auditor has established that the finding is real,
+            // which is the opposite of it having been dealt with. Omitting it here would let a
+            // fully-reviewed scan of real criticals report its category as "Clean".
             let still_open = matches!(
                 disposition,
-                Disposition::Unresolved | Disposition::TechDebtNow | Disposition::TechDebtLater
+                Disposition::Unresolved
+                    | Disposition::Confirmed
+                    | Disposition::TechDebtNow
+                    | Disposition::TechDebtLater
             );
             if still_open {
                 match severity {
@@ -1151,6 +4430,13 @@ pub fn build_report_json(
         } else {
             "Clean"
         };
+        // C5-1: fold in every rule id absorbed into THIS category via `also_matches` (see the
+        // doc comment on `matched_rule_ids_by_category` above) — a rule that only survived as a
+        // merged member still genuinely matched and must count toward `audited_rules`/never
+        // toward `clean_rules`.
+        if let Some(absorbed) = matched_rule_ids_by_category.get(category) {
+            rule_ids_with_findings.extend(absorbed.iter().cloned());
+        }
         let audited_in_category: Vec<&str> = report
             .provenance
             .audited_rule_ids
@@ -1158,10 +4444,24 @@ pub fn build_report_json(
             .map(String::as_str)
             .filter(|rid| category_for(rid, corpus) == *category)
             .collect();
-        let audited_rules = audited_in_category.len();
+        // C4-P2: "rules checked" for this category is the UNION of the declared-audited set
+        // (`audited_in_category` — the deterministic/preview rules Camerata ran against this
+        // repo) and every DISTINCT rule id that actually fired a finding here. An AI-tier
+        // finding's invented rule id is never in `provenance.audited_rule_ids` (the AI tier
+        // doesn't pre-declare which ids it might invent), so without this a category whose
+        // only findings are AI-tier reads "0 rules checked" next to a nonzero finding count —
+        // a logical impossibility (you cannot find a violation of a rule you never checked).
+        // `clean_rules` is deliberately UNCHANGED: "clean" means a DECLARED rule that produced
+        // zero findings, which an ad hoc AI-tier id (by definition fired at least once to even
+        // exist here) can never be.
+        let audited_rules = audited_in_category.len()
+            + rule_ids_with_findings
+                .iter()
+                .filter(|rid| !audited_in_category.contains(&rid.as_str()))
+                .count();
         let clean_rules = audited_in_category
             .iter()
-            .filter(|rid| !rule_ids_with_findings.contains(*rid))
+            .filter(|rid| !rule_ids_with_findings.contains(**rid))
             .count();
         scorecard_rows.push(CategoryRowJson {
             category: category.clone(),
@@ -1192,13 +4492,45 @@ pub fn build_report_json(
     // corpus doesn't turn this section into dozens of bullets that read as padding; the
     // remainder is summarized in one honest count line instead of silently dropped.
     const WHATS_HEALTHY_CAP: usize = 10;
-    let rule_ids_with_any_finding: std::collections::HashSet<&str> = code_findings
+    // C5-1: a rule that only survived a merge as an absorbed `also_matches` member (never its
+    // own primary row) still genuinely fired this run — see `matched_rule_ids_by_category`'s doc
+    // comment above for the full "0 in Coverage, listed as verified clean" bug this closes.
+    // "Healthy" is global (not per-category, unlike the scorecard above), so this folds every
+    // `also_matches` id in directly rather than going through the per-category map.
+    //
+    // W23 (2026-10-20): `also_locations` is folded in for the SAME reason, and its omission
+    // was the C5-1 defect one channel over. `also_matches` carries a same-location demotion
+    // (a rule id set); `also_locations` carries a MERGE ABSORPTION (one entry per absorbed
+    // finding, each with its own originating `rule_id`). A rule that survived only as an
+    // absorbed location fired just as genuinely as one that survived as a demotion, and
+    // listing it clean is the same false statement.
+    //
+    // Measured on the 2026-10-18 hearth export: SEC-NO-SECRET-FILE-1 (a committed
+    // `.env.production`, CRITICAL) had two `also_locations` entries and no direct row, and
+    // ARCH-OBSERVABILITY-SILENT-FAILURE-1 one. Both were eligible for "What's healthy" — the
+    // report would have told the client their committed secret belonged to a verified-clean
+    // rule.
+    let rule_ids_with_any_finding: std::collections::HashSet<String> = code_findings
         .iter()
-        .map(|(f, _, _, _)| f.rule_id.as_str())
+        .flat_map(|(f, _, _, _)| {
+            std::iter::once(f.rule_id.clone())
+                .chain(f.also_matches.iter().cloned())
+                .chain(f.also_locations.iter().map(|l| l.rule_id.clone()))
+        })
         .collect();
-    let mut healthy_rules: Vec<HealthyRuleJson> = report
-        .provenance
-        .audited_rule_ids
+    // W1: "verified clean" is sourced from the LEDGER (`ran && findings_emitted == 0`) when
+    // the scan populated one — a rule the ledger knows did NOT run (e.g. the item-4 defect:
+    // declares mechanical enforcement with no wired detector) can never appear here just
+    // because it was merely SELECTED. `report.provenance.audited_rule_ids` (every selected
+    // rule, regardless of execution) remains the fallback for a report with no ledger data
+    // (pre-W1 persisted reports, or a test fixture that never populates `report.ledger`), so
+    // existing behavior is unchanged there.
+    let healthy_candidate_ids: Vec<String> = if has_rule_ledger_data {
+        report_ledger.healthy_rule_ids()
+    } else {
+        report.provenance.audited_rule_ids.clone()
+    };
+    let mut healthy_rules: Vec<HealthyRuleJson> = healthy_candidate_ids
         .iter()
         .filter(|rid| !rule_ids_with_any_finding.contains(rid.as_str()))
         .map(|rid| HealthyRuleJson {
@@ -1212,10 +4544,39 @@ pub fn build_report_json(
         .collect();
     healthy_rules.sort_by(|a, b| {
         let grounded_first = |kind: &str| if kind == "grounded" { 0 } else { 1 };
-        (grounded_first(&a.citation.kind), &a.rule_id).cmp(&(grounded_first(&b.citation.kind), &b.rule_id))
+        (grounded_first(&a.citation.kind), &a.rule_id)
+            .cmp(&(grounded_first(&b.citation.kind), &b.rule_id))
     });
     let further_clean_count = healthy_rules.len().saturating_sub(WHATS_HEALTHY_CAP);
     healthy_rules.truncate(WHATS_HEALTHY_CAP);
+
+    // ── W1: "excluded from this audit" — rules the ledger confirms did NOT run ───
+    // Only ever populated from the ledger. There is no pre-W1 fallback source for this
+    // section, and in particular `ScanReport::excluded_mechanical_rules` is NOT one: it is a
+    // different, older field that is now VESTIGIAL. `split_scannable_rules_from` has returned
+    // a hard-coded `Vec::new()` for it since W4 dropped CI-tier exclusion from the semantic
+    // pass ("Every selected rule reaches the semantic pass now — no CI-tier exclusion"), so
+    // nothing populates it and its two remaining readers — the cockpit scan header and
+    // `xlsx_export::write_coverage_sheet`'s "Excluded from this code-only audit" block — can
+    // only ever render empty. Left in place rather than removed: it is persisted on
+    // `ScanReport`, and a pre-W4 report loaded from disk could still carry real content.
+    let mut rules_not_run: Vec<ExcludedRuleJson> = if has_rule_ledger_data {
+        report_ledger
+            .excluded_rules()
+            .into_iter()
+            .map(|(rid, reason)| ExcludedRuleJson {
+                rule_id: rid.to_string(),
+                title: corpus
+                    .and_then(|c| c.get_by_id(rid))
+                    .map(|r| r.title.clone())
+                    .unwrap_or_else(|| rid.to_string()),
+                reason: reason.to_string(),
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    rules_not_run.sort_by(|a, b| a.rule_id.cmp(&b.rule_id));
 
     // ── §7 Dependency snapshot ─────────────────────────────────────────────────
     let dep_rows: Vec<DependencyFindingJson> = dep_findings
@@ -1241,54 +4602,170 @@ pub fn build_report_json(
     };
 
     // ── Executive summary ──────────────────────────────────────────────────────
-    // Bug 4: informational (appendix) rows are NOT curated action items — they sit outside the
-    // four-bucket partition, so `curated_total` excludes them and the self-checking narrative
-    // invariant `do_now + do_next + plan + accepted == curated_total` still holds exactly.
+    // Bug 4 / C5-4: informational (appendix) AND held (calibration-hedge, any severity) rows are
+    // NOT curated action items — they sit outside the four-bucket partition, so `curated_total`
+    // excludes BOTH and the self-checking narrative invariant
+    // `do_now + do_next + plan + accepted == curated_total` still holds exactly.
+    // `held_for_review_total` is the SINGLE reconciling count the executive summary and
+    // methodology both show — see `ExecutiveSummaryJson::held_for_review`'s doc comment for why
+    // this must be `informational.len() + held.len()`, not `informational.len()` alone (the
+    // C5-4 regression this closes): a high/critical calibration hedge never lands in
+    // `informational` (the hard "critical/high is never informational" invariant), but it is
+    // still held out of every action tier via the separate `held` bucket, and must still count
+    // toward "held for review" or the total silently undercounts every needs-review row above
+    // medium severity.
     let informational = matrix.informational.len();
-    let curated_total = code_findings.len() - informational;
+    let held = matrix.held.len();
+    let held_for_review_total = informational + held;
+    let curated_total = code_findings.len() - held_for_review_total;
     let do_now = matrix.do_now.len();
     let do_next = matrix.do_next.len();
     let plan = matrix.plan.len();
     let accepted = matrix.accepted.len();
-    // Still-open action items (every informational row is Unresolved by construction — see
-    // `is_informational` — so subtracting them keeps `open` an ACTION count, not an appendix one).
+    // Still-open action items (every informational/held row is Unresolved by construction — see
+    // `is_informational`/`is_held_for_review` — so subtracting them keeps `open` an ACTION
+    // count, not an appendix one).
+    // `Confirmed` counts here for the same reason it counts in `still_open` above: the auditor
+    // established the finding is real and nobody has fixed it. Subtracting
+    // `held_for_review_total` stays valid because every informational/held row is `Unresolved`
+    // by construction (both gates return early on any other disposition), so confirming a row
+    // removes it from that bucket before it is ever counted there.
     let open = code_findings
         .iter()
-        .filter(|(_, d, _, _)| *d == Disposition::Unresolved)
+        .filter(|(_, d, _, _)| matches!(d, Disposition::Unresolved | Disposition::Confirmed))
         .count()
-        - informational;
+        - held_for_review_total;
+    // Calibration-review fix: rank by (severity desc, precondition_count asc, confidence) —
+    // an unconditional critical must always outrank a critical whose own justification
+    // records an exploit precondition (see `FindingRefJson::precondition_count`'s doc
+    // comment), with confidence as the final tie-break. `Vec::sort_by_key` is a STABLE sort,
+    // so two findings tied on all three keys keep their prior relative order (the severity/
+    // provenance/location order the matrix bucket itself was already sorted by) — this is
+    // purely a RANKING change, nothing is dropped or re-bucketed.
     let mut do_now_sorted = matrix.do_now.clone();
-    do_now_sorted.sort_by_key(|f| match f.severity.as_str() {
-        "critical" => 0,
-        "high" => 1,
-        "medium" => 2,
-        _ => 3,
+    do_now_sorted.sort_by_key(|f| {
+        (
+            severity_rank(&f.severity),
+            f.precondition_count,
+            f.confidence_rank,
+        )
     });
-    let top3_do_now: Vec<&FindingRefJson> = do_now_sorted.iter().take(3).collect();
-    // S3 + S7 + item 1: lead with the DEFECT headline (already computed per finding, never the
-    // rule's own invariant title), not just a bare rule id + path — ambiguous in a multi-repo
-    // audit, and a rule id alone means nothing to a board reader.
-    let top_do_now: Vec<String> = top3_do_now
-        .iter()
-        .map(|f| format!("{} ({}/{}:{}, {})", f.headline, f.repo, f.path, f.line, f.rule_id))
-        .collect();
-    // Item 2: the blast-radius lead sentence(s) are composed straight from these SAME top
-    // do-now findings' own headlines — never a separately hand-written sentence that could
-    // drift from what the report actually found.
-    let blast_radius_headlines: Vec<String> =
-        top3_do_now.iter().map(|f| f.headline.clone()).collect();
+    // FIX 4 (2026-09-13 review): `top3_do_now` still feeds the "Three things this week" box
+    // below (the ONE place these findings are now named) — the exec-summary's own
+    // `top_do_now` bullet list and blast-radius lead sentence are gone (see
+    // `default_narrative`'s doc comment).
+    //
+    // C6-B2 design point 3: walk `do_now_sorted` in rank order, but SKIP a row that shares a
+    // non-empty root-cause credential token (`FindingRefJson::root_cause_keys`) with a row
+    // already selected — the defense-in-depth distinctness check for the case the merge pass
+    // (`ai_audit::merge_semantic_groups` / `backfill_credential_identity`) conservatively left
+    // several sites of ONE leaked credential as separate rows. A skipped row is simply not
+    // chosen for THIS box; `do_now_sorted`/`matrix.do_now` are never mutated, so it still ships
+    // normally everywhere else the report lists do-now findings.
+    //
+    // W24 (2026-10-20): the credential-token check above is gated on `!root_cause_keys
+    // .is_empty()`, so a row carrying NO token skipped it entirely and was always selected.
+    // Three rows of one rule — three tables missing RLS, three endpoints missing one guard —
+    // could therefore fill all three slots, which the graders observed as "top-3 listing one
+    // root cause three times".
+    //
+    // The fallback is the RULE ID. For THIS box that is the right granularity even though
+    // the rows are all genuine: the box asks the client to do three things this week, and
+    // three instances of one rule are one thing ("enable RLS on these tables"). Spending
+    // every slot on it hides the other two problems, which is the opposite of what the box
+    // is for. Everywhere else the report still lists all of them — `do_now_sorted` and
+    // `matrix.do_now` are untouched, exactly as the credential check already promised.
+    let mut top3_do_now: Vec<&FindingRefJson> = Vec::new();
+    let mut selected_root_causes: std::collections::HashSet<&str> =
+        std::collections::HashSet::new();
+    let mut selected_rule_ids: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for f in &do_now_sorted {
+        if top3_do_now.len() >= 3 {
+            break;
+        }
+        let shares_selected_root_cause = !f.root_cause_keys.is_empty()
+            && f.root_cause_keys
+                .iter()
+                .any(|k| selected_root_causes.contains(k.as_str()));
+        if shares_selected_root_cause || selected_rule_ids.contains(f.rule_id.as_str()) {
+            continue;
+        }
+        selected_rule_ids.insert(f.rule_id.as_str());
+        top3_do_now.push(f);
+        selected_root_causes.extend(f.root_cause_keys.iter().map(String::as_str));
+    }
+    let dependency_advisories = dependency_snapshot.rows.len();
+    // W6: never a silent omission — one explicit sentence per pass that failed/timed out
+    // this scan, shared verbatim between the summary and the methodology below.
+    // W1: fold in a disclosure for EVERY stage-level ledger integrity gap — every scan-time
+    // stage `report.ledger` already carried PLUS this function's own just-recorded
+    // report-build-partition stage — deduped against whatever `report.failed_passes` already
+    // carries (the real pipeline, `onboard::audit_repos`, pushes scan-time disclosures there
+    // itself; a report built directly from a populated ledger, e.g. in tests, has none yet).
+    // Rides the SAME existing `FailedPass` mechanism as every other disclosure, rather than a
+    // parallel string list.
+    let mut failed_passes_for_report = report.failed_passes.clone();
+    let repo_label_for_ledger = report.repos.join(", ");
+    for stage in report_ledger.stages() {
+        if let Some(fp) = crate::scan_ledger::stage_disclosure(&repo_label_for_ledger, stage) {
+            if !failed_passes_for_report.contains(&fp) {
+                failed_passes_for_report.push(fp);
+            }
+        }
+    }
+    let mut failed_pass_notes = failed_pass_disclosures(&failed_passes_for_report);
+    // Client-report fix (2026-10-07 grading pass): a rule that declares mechanical/
+    // architectural enforcement but has no wired detector IS a real pipeline gap worth
+    // disclosing, but it is an ENGINEERING fact, not a client-facing one — the registry names
+    // ("arch_checker registry", "gateway rule registry", "Semgrep mapping", ...) and the
+    // per-rule repetition belong in the ledger (`camerata inspect` / `render_ledger_summary`)
+    // and the logs, never in the deliverable. This used to call `rule_disclosure` once PER
+    // excluded rule and push each as its own `FailedPass`, so a corpus with 19 such rules
+    // printed 19 internal-vocabulary bullets, duplicated in both the executive summary and
+    // methodology (38 bullets total, ~3 pages on a real export). The client gets exactly ONE
+    // plain, factual sentence instead, and only when the count is nonzero.
+    let no_wired_detector_count = report_ledger
+        .rules()
+        .filter(|r| {
+            !r.ran
+                && r.skip_reason
+                    .as_deref()
+                    .unwrap_or("")
+                    .contains(crate::scan_ledger::NO_WIRED_DETECTOR_REASON)
+        })
+        .count();
+    if no_wired_detector_count > 0 {
+        failed_pass_notes.push(format!(
+            "{} could not be mechanically checked this run and {} reviewed by the model \
+             instead.",
+            noun(no_wired_detector_count, "rule", "rules"),
+            if no_wired_detector_count == 1 {
+                "was"
+            } else {
+                "were"
+            },
+        ));
+    }
+    // W7 (G1/G3): non-dependency tool-coverage gaps reach the client artifacts — one concise
+    // line per affected tool, through the SAME failed_passes channel the template already
+    // renders in both the executive summary and the methodology. See
+    // `tool_coverage_disclosures`'s doc comment for the honesty hole this closes.
+    failed_pass_notes.extend(tool_coverage_disclosures(&report.coverage_notes));
     let (narrative, is_override) = match &opts.executive_summary_override {
         Some(text) if !text.trim().is_empty() => (text.clone(), true),
         _ => (
             default_narrative(
+                review_state,
+                report.files_scanned,
                 candidates_reviewed,
                 excluded_fp,
                 curated_total,
+                held_for_review_total,
+                dependency_advisories,
                 do_now,
                 do_next,
                 plan,
                 accepted,
-                &blast_radius_headlines,
             ),
             false,
         ),
@@ -1299,12 +4776,14 @@ pub fn build_report_json(
         candidates_reviewed,
         excluded_false_positive: excluded_fp,
         curated_total,
+        held_for_review: held_for_review_total,
+        dependency_advisories,
         do_now,
         do_next,
         plan,
         accepted,
         open,
-        top_do_now,
+        failed_passes: failed_pass_notes.clone(),
     };
 
     // ── Item 7: "If you only do three things this week" ───────────────────────
@@ -1322,6 +4801,7 @@ pub fn build_report_json(
                 rule_id: f.rule_id.clone(),
                 severity: f.severity.clone(),
                 hours_label,
+                impact: business_impact_for_rule(&f.rule_id).map(str::to_string),
             }
         })
         .collect();
@@ -1352,19 +4832,37 @@ pub fn build_report_json(
         accepted,
         dependency_advisories: dependency_snapshot.rows.len(),
     };
+    // P6: hide the "Code volume" row entirely rather than ever render "0 characters"/"0
+    // lines" — `None` whenever this run genuinely has no real line count (a compliance-blocked
+    // AI-only request, or any other path that never read a local file).
+    let code_volume = (report.code_lines > 0).then(|| CodeVolumeJson {
+        lines: report.code_lines,
+        by_language: report.code_lines_by_language.clone(),
+    });
     let cover = CoverJson {
         repos: report.repos.clone(),
         files_scanned: report.files_scanned,
         files_excluded: report.files_excluded,
         code_chars: report.code_chars,
+        code_volume,
         audited_refs,
         audit_model: report.provenance.audit_model.clone(),
         calibration_model: report.provenance.calibration_model.clone(),
         camerata_version: report.provenance.camerata_version.clone(),
-        generated_at: chrono::Utc::now().format("%Y-%m-%d %H:%M UTC").to_string(),
+        // The SCAN time, not the wall clock at serialization — see `generated_at_label`.
+        generated_at: generated_at_label(&report.provenance),
         client_name: opts.client_name.clone(),
         project_title: opts.project_title.clone(),
-        prepared_by: opts.prepared_by.clone(),
+        // `build_report_json` stays pure/no-I/O (per its own doc comment): it does NOT read
+        // `CAMERATA_REPORT_BRAND`/`CAMERATA_REPORT_PREPARED_BY` itself. By the time `opts`
+        // reaches here the HTTP handler has already called `ReportOptions::apply_env_defaults`
+        // (which does the real env read), so `opts.brand`/`opts.prepared_by` already carry the
+        // resolved precedence. Re-running them through the resolver here with `env: None` is
+        // just the same blank/non-blank -> `Option<String>` normalization, not a second env
+        // lookup, so a direct unit test (which never calls `apply_env_defaults`) still gets
+        // correct precedence semantics by setting `opts.brand`/`opts.prepared_by` directly.
+        prepared_by: resolve_prepared_by(opts, None),
+        brand: resolve_brand(opts, None),
         stats,
     };
 
@@ -1372,18 +4870,21 @@ pub fn build_report_json(
     let methodology = MethodologyJson {
         candidates_reviewed,
         excluded_false_positive: excluded_fp,
+        held_for_review: held_for_review_total,
+        next_steps: next_steps_note(
+            review_state,
+            candidates_reviewed,
+            curated_total,
+            held_for_review_total,
+            excluded_fp,
+        ),
         deterministic_note:
             "Camerata runs a two-tier engine. A deterministic security floor (proven-defect \
              SAST rules plus a migration-timeline replay for Supabase Row Level Security) \
              produces findings that either hold or do not, with no model judgment. These are \
              labeled deterministic in the report."
                 .to_string(),
-        ai_tier_note:
-            "A second, advisory tier uses a calibrated language-model audit for findings that \
-             require semantic judgment. Every advisory finding is reviewed and dispositioned \
-             by a human auditor before it appears here; lower-confidence items are marked \
-             needs-review."
-                .to_string(),
+        ai_tier_note: ai_tier_note_for(review_state),
         not_done: vec![
             "No penetration testing or live exploitation was performed.".to_string(),
             "No runtime or dynamic analysis; findings derive from static repository state."
@@ -1404,9 +4905,13 @@ pub fn build_report_json(
              grade: a grade hides which specific object is exposed, which is exactly what a \
              remediation team needs to know."
                 .to_string(),
+        failed_passes: failed_pass_notes,
     };
 
+    let priority_grid = build_priority_grid(&matrix);
+
     AuditReportJson {
+        review_state,
         cover,
         executive_summary,
         three_things,
@@ -1414,12 +4919,15 @@ pub fn build_report_json(
             rows: scorecard_rows,
         },
         matrix,
+        priority_grid,
         curated_findings,
+        held_for_review_findings,
         whats_healthy: WhatsHealthyJson {
             rules: healthy_rules,
             further_clean_count,
             dependency_clean,
         },
+        rules_not_run,
         dependency_snapshot,
         methodology,
         disclaimer: AUDIT_REPORT_DISCLAIMER.to_string(),
@@ -1428,22 +4936,52 @@ pub fn build_report_json(
 
 // ── Typst compile ────────────────────────────────────────────────────────────────
 
-/// Compile `json` into a PDF via a bundled Typst template. Self-contained: the template
+/// The UNIX timestamp to stamp into the compiled PDF, read back out of the report's OWN stated
+/// generation time (`cover.generated_at`, which [`generated_at_label`] derived from the scan
+/// time).
+///
+/// Reading it back from the cover rather than taking a second `&ScanProvenance` parameter is
+/// deliberate: it makes the PDF's metadata and the PDF's printed cover line the same fact by
+/// construction, so they cannot disagree. The string was written in [`GENERATED_AT_FORMAT`],
+/// so the round-trip is exact; `None` only if a caller hand-built an `AuditReportJson` with
+/// some other string in that field.
+fn creation_epoch(data_json: &str) -> Option<i64> {
+    let data: serde_json::Value = serde_json::from_str(data_json).ok()?;
+    let generated_at = data.get("cover")?.get("generated_at")?.as_str()?;
+    chrono::NaiveDateTime::parse_from_str(generated_at.trim(), GENERATED_AT_FORMAT)
+        .ok()
+        .map(|naive| naive.and_utc().timestamp())
+}
+
+/// Serialize the PDF's data: the ONE `data.json` the Typst template reads. The release gate
+/// inspects these exact bytes, so what it checks is byte-identical to what Typst renders.
+pub fn render_data_json(json: &AuditReportJson) -> anyhow::Result<String> {
+    serde_json::to_string(json).context("could not serialize the report to JSON")
+}
+
+/// [`compile_pdf_from_data`] over a structured report. For tests and diagnostics: production
+/// exports go through `release_gate::build_product_package`, which keeps the `data.json` bytes
+/// so the release gate can inspect them (a source-grep test pins that).
+pub async fn compile_pdf(json: &AuditReportJson) -> anyhow::Result<Vec<u8>> {
+    compile_pdf_from_data(&render_data_json(json)?).await
+}
+
+/// Compile `data_json` (from [`render_data_json`]) into a PDF via a bundled Typst template.
+/// Self-contained: the template
 /// text is embedded in the binary (`include_str!`), so no external file needs to ship
 /// alongside the server. Fails soft with an actionable message when `typst` isn't on PATH
 /// (matches the dep-audit coverage-note tone: name the tool, name the fix).
 ///
 /// Runs `typst compile report.typ report.pdf --root <tmpdir>` in a scratch temp dir (RAII
-/// cleanup on drop) with a 30s timeout. The template reads `data.json` via Typst's own
+/// cleanup on drop) with a 30s timeout, with `SOURCE_DATE_EPOCH` pinned to the report's own
+/// generation time (see [`creation_epoch`]). The template reads `data.json` via Typst's own
 /// `json()` builtin — no `--input` plumbing needed.
-pub async fn compile_pdf(json: &AuditReportJson) -> anyhow::Result<Vec<u8>> {
+pub async fn compile_pdf_from_data(data_json: &str) -> anyhow::Result<Vec<u8>> {
     let tmp = tempfile::tempdir().context("could not create a temp dir for the PDF export")?;
     let data_path = tmp.path().join("data.json");
     let template_path = tmp.path().join("report.typ");
     let pdf_path = tmp.path().join("report.pdf");
 
-    let data_json =
-        serde_json::to_string(json).context("could not serialize the report to JSON")?;
     tokio::fs::write(&data_path, data_json)
         .await
         .context("could not write data.json")?;
@@ -1462,6 +5000,30 @@ pub async fn compile_pdf(json: &AuditReportJson) -> anyhow::Result<Vec<u8>> {
         .arg("--root")
         .arg(tmp.path())
         .kill_on_drop(true);
+    // Reproducibility: pin the PDF's creation timestamp instead of letting Typst read the wall
+    // clock. Typst stamps that clock into FIVE places — the Info dict's `/CreationDate` and
+    // `/ModDate`, the XMP packet's `xmp:CreateDate`, `xmp:ModifyDate`, `xmpMM:InstanceID` and
+    // `xmpMM:DocumentID`, and the trailer's `/ID` (which it derives from content AND time) — so
+    // two compiles of one report were never byte-identical and the product could not prove two
+    // deliverables were the same report.
+    //
+    // `SOURCE_DATE_EPOCH` (the reproducible-builds standard) rather than the equivalent
+    // `--creation-timestamp` flag: both exist on the installed Typst 0.15.0 and the flag is
+    // documented as reading this very variable as its default, but an env var a Typst that
+    // does not support the feature simply ignores, where an unrecognised ARGUMENT makes it exit
+    // non-zero. A client machine on an older Typst degrades to today's behaviour instead of
+    // failing the export outright.
+    //
+    // Verified against the installed Typst 0.15.0, not assumed: two compiles of identical
+    // source two seconds apart are byte-for-byte identical with the variable set (XMP packet,
+    // Info dict and trailer `/ID` all included) and differ without it.
+    //
+    // Set UNCONDITIONALLY. On the degenerate path where the report carries no parseable time,
+    // an explicit `now` is still better than leaving the variable unset, because the server
+    // process could otherwise inherit an unrelated `SOURCE_DATE_EPOCH` from its environment and
+    // silently stamp a client deliverable with a build timestamp from somewhere else entirely.
+    let epoch = creation_epoch(data_json).unwrap_or_else(|| chrono::Utc::now().timestamp());
+    cmd.env("SOURCE_DATE_EPOCH", epoch.to_string());
 
     let output = match tokio::time::timeout(Duration::from_secs(30), cmd.output()).await {
         Ok(Ok(out)) => out,
@@ -1485,7 +5047,7 @@ pub async fn compile_pdf(json: &AuditReportJson) -> anyhow::Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::onboard::{AuditedRef, CoverageNote, ScanProvenance};
+    use crate::onboard::{AuditedRef, CoverageNote, LanguageVolume, ScanProvenance};
 
     fn finding(rule_id: &str, path: &str, line: usize, severity: &str) -> Finding {
         Finding {
@@ -1508,10 +5070,24 @@ mod tests {
             test_file_count: 0,
             files_excluded: 2,
             code_chars: 5000,
+            code_lines: 400,
+            code_lines_by_language: vec![
+                LanguageVolume {
+                    language: "TypeScript".to_string(),
+                    lines: 300,
+                },
+                LanguageVolume {
+                    language: "Rust".to_string(),
+                    lines: 100,
+                },
+            ],
             excluded_mechanical_rules: Vec::new(),
             findings,
             proposed_rules: Vec::new(),
             gated: false,
+            blocked: false,
+            ai_blocked_reason: None,
+            ai_error: None,
             message: None,
             actual_usage: None,
             deep: None,
@@ -1522,9 +5098,11 @@ mod tests {
                     sha: Some("abcdef1234567890".to_string()),
                     branch: Some("main".to_string()),
                     dirty: false,
+                    ..AuditedRef::default()
                 }],
                 audit_model: Some("test-model".to_string()),
                 calibration_model: Some("test-cal-model".to_string()),
+                clone_judge_model: None,
                 mode: "parallel".to_string(),
                 thorough: false,
                 deep: false,
@@ -1534,7 +5112,11 @@ mod tests {
                 osv_scanner_version: Some("1.9.0".to_string()),
                 started_at: "2026-07-23T00:00:00Z".to_string(),
                 finished_at: "2026-07-23T00:05:00Z".to_string(),
+                model_sessions: Vec::new(),
             },
+            recommendations: std::collections::HashMap::new(),
+            failed_passes: Vec::new(),
+            ledger: crate::scan_ledger::ScanLedger::new(),
         }
     }
 
@@ -1575,6 +5157,270 @@ mod tests {
         assert_eq!(key, expected);
     }
 
+    // ── C4-R3 defect 3: zero-width/BOM code points never survive into JSON/xlsx fields ──
+
+    #[test]
+    fn strip_zero_width_removes_every_listed_codepoint_and_borrows_when_clean() {
+        let dirty = "apps/web/\u{200B}src/\u{FEFF}a.ts\u{200C}\u{200D}\u{2060}";
+        let cleaned = strip_zero_width(dirty);
+        assert_eq!(cleaned, "apps/web/src/a.ts");
+        for c in ZERO_WIDTH_CODEPOINTS {
+            assert!(!cleaned.contains(c));
+        }
+        // The common case (nothing to strip) must not allocate a new string.
+        assert!(matches!(
+            strip_zero_width("clean/path.rs"),
+            std::borrow::Cow::Borrowed(_)
+        ));
+    }
+
+    #[test]
+    fn sanitize_finding_text_strips_zero_width_from_path_snippet_detail_and_captures() {
+        let mut f = finding("SEC-1", "apps/\u{200B}web/a.ts", 1, "high");
+        f.snippet = "const x = 1\u{FEFF};".to_string();
+        f.detail = "secret\u{200D} found".to_string();
+        f.captures
+            .insert("table".to_string(), "pro\u{200C}files".to_string());
+
+        let cleaned = sanitize_finding_text(&f);
+        assert_eq!(cleaned.path, "apps/web/a.ts");
+        assert_eq!(cleaned.snippet, "const x = 1;");
+        assert_eq!(cleaned.detail, "secret found");
+        assert_eq!(cleaned.captures.get("table").unwrap(), "profiles");
+    }
+
+    /// `build_report_json` must sanitize BEFORE anything downstream reads `path` — the
+    /// JSON this builds is what both the Typst template and `findings.json` ultimately render,
+    /// so a zero-width space planted in a scanned repo's own file name (adversarial or just an
+    /// odd encoding) must never reach either artifact.
+    #[test]
+    fn build_report_json_strips_zero_width_characters_from_finding_paths() {
+        let f = finding("SEC-1", "apps/\u{200B}web/\u{FEFF}a.ts", 1, "critical");
+        let report = report_with(vec![f], vec!["SEC-1"]);
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
+        let serialized = serde_json::to_string(&json).unwrap();
+        for c in ZERO_WIDTH_CODEPOINTS {
+            assert!(
+                !serialized.contains(c),
+                "build_report_json's output must never contain U+{:04X}",
+                c as u32
+            );
+        }
+        assert!(serialized.contains("apps/web/a.ts"));
+    }
+
+    /// Same invariant, the xlsx/`findings.json` path (`xlsx_export::partition_rows`, exercised
+    /// here via `build_findings_export`) — a separate implementation from `build_report_json`,
+    /// so it needs its own regression rather than relying on the PDF-JSON test above.
+    #[test]
+    fn build_findings_export_strips_zero_width_characters_from_finding_paths() {
+        let f = finding("SEC-1", "apps/\u{200B}web/\u{FEFF}a.ts", 1, "critical");
+        let report = report_with(vec![f], vec!["SEC-1"]);
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
+        let export = crate::xlsx_export::build_findings_export(
+            &report.clone().seal(),
+            &HashMap::new(),
+            None,
+            &json,
+            &HashMap::new(),
+        );
+        let serialized = serde_json::to_string(&export).unwrap();
+        for c in ZERO_WIDTH_CODEPOINTS {
+            assert!(
+                !serialized.contains(c),
+                "build_findings_export's output must never contain U+{:04X}",
+                c as u32
+            );
+        }
+        assert!(serialized.contains("apps/web/a.ts"));
+    }
+
+    /// REG-5 golden-export gate: scan `field` for `<alnum>. <lowercase-or-digit>` — the
+    /// signature of a space wrongly inserted after a period embedded in an identifier, dotted
+    /// call, filename, version string, or abbreviation (`client. auth. method()`,
+    /// `settings. toml`, `0001_migration. sql:12`, `e. g.`, `v1. 2. 3`) — EXCLUDING a match
+    /// immediately preceded by a known abbreviation (`e.g.`/`i.e.`/`etc.`/`vs.`), which is
+    /// correct, un-corrupted English (e.g. "...accepts unsafe values, e.g. eval.") and must not
+    /// be flagged as a false positive. Returns the first offending match, if any.
+    fn find_period_space_corruption(field: &str) -> Option<&str> {
+        let corruption =
+            regex::Regex::new(r"[A-Za-z0-9]\. [a-z0-9]").expect("static regex must compile");
+        for m in corruption.find_iter(field) {
+            // The matched alnum is a single ASCII byte, so the period sits at `m.start() + 1`.
+            let period_idx = m.start() + 1;
+            if !ends_with_known_abbreviation(&field[..=period_idx]) {
+                return Some(m.as_str());
+            }
+        }
+        None
+    }
+
+    /// Pull a named string field off a `serde_json::Value` object, if present and non-null.
+    fn json_str_field<'a>(obj: &'a serde_json::Value, key: &str) -> Option<&'a str> {
+        obj.get(key).and_then(|v| v.as_str())
+    }
+
+    /// Every headline/detail/snippet/fix-shaped field on one `CuratedSiteJson`/`FindingRefJson`/
+    /// `GridTagJson`/`ThreeThingsItemJson`/`FindingRow`-shaped JSON object — the full set of
+    /// client-facing per-finding text fields across the PDF/JSON and xlsx/findings.json shapes.
+    const FINDING_TEXT_FIELD_KEYS: [&str; 5] = [
+        "headline",
+        "detail",
+        "snippet",
+        "fix",
+        "fix_for_this_finding",
+    ];
+
+    fn assert_no_corruption_in_finding_fields(obj: &serde_json::Value, artifact: &str) {
+        for key in FINDING_TEXT_FIELD_KEYS {
+            if let Some(s) = json_str_field(obj, key) {
+                assert!(
+                    find_period_space_corruption(s).is_none(),
+                    "{artifact}'s `{key}` field contains a period-space corruption artifact \
+                     ({:?}): {s:?}",
+                    find_period_space_corruption(s)
+                );
+            }
+        }
+        // `findings.json`'s `FindingRow` names the primary-fix column `fix_specific`, not
+        // `fix_for_this_finding` — same field shape, different wire name.
+        if let Some(s) = json_str_field(obj, "fix_specific") {
+            assert!(
+                find_period_space_corruption(s).is_none(),
+                "{artifact}'s `fix_specific` field contains a period-space corruption artifact \
+                 ({:?}): {s:?}",
+                find_period_space_corruption(s)
+            );
+        }
+    }
+
+    /// REG-5 golden-export gate: no client-facing per-finding text field (headline, detail,
+    /// snippet, fix/fix_specific) in ANY of the three artifacts (the PDF/JSON's
+    /// `AuditReportJson`, and `findings.json`/the xlsx's `FindingsExport`) may ever contain the
+    /// period-space corruption pattern — scoped to the FINDING fields specifically (never the
+    /// static narrative/methodology/disclaimer prose, which legitimately contains sentences
+    /// that start with a digit — "...produced 1 candidate finding. 1 is curated for action..."
+    /// — a shape this regex cannot distinguish from corruption and was never meant to police).
+    /// This is a DURABLE regression gate, not a one-off fixture check: the synthetic finding
+    /// below exercises the full real pipeline — `ai_audit::merge_semantic_groups` (where the
+    /// corruption was actually introduced, in `split_into_sentences`/
+    /// `strip_cross_reference_sentences`'s split-then-rejoin) feeding into `build_report_json`
+    /// and `xlsx_export::build_findings_export` — so any FUTURE change anywhere in that chain
+    /// that reintroduces a naive "split on every period" step will fail this test loudly,
+    /// regardless of which function it lands in.
+    #[test]
+    fn no_export_artifact_ever_contains_a_space_inserted_inside_an_identifier_or_abbreviation() {
+        let mut f = finding(
+            "SEC-REG5-IDENTIFIER-HEAVY-1",
+            "src/api/invoices.ts",
+            42,
+            "critical",
+        );
+        f.detail = "The call to client.auth.method() in config/settings.toml bypasses the \
+                     session check. See 0001_migration.sql:12 for the original schema, e.g. the \
+                     v1.2.3 release notes at https://x.y/z document the same gap. Anyone with \
+                     the anon key can read and write every row."
+            .to_string();
+
+        // Run the finding through the SAME merge pass the real pipeline applies before a
+        // report is ever built — this is where REG-5 actually lived.
+        let merged = crate::ai_audit::merge_semantic_groups(vec![f], &[]);
+
+        let report = report_with(merged, vec!["SEC-REG5-IDENTIFIER-HEAVY-1"]);
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
+        let json_value = serde_json::to_value(&json).unwrap();
+
+        let mut checked_any = false;
+        for bucket in [
+            "do_now",
+            "do_next",
+            "plan",
+            "accepted",
+            "informational",
+            "held",
+        ] {
+            for item in json_value["matrix"][bucket]
+                .as_array()
+                .into_iter()
+                .flatten()
+            {
+                assert_no_corruption_in_finding_fields(item, "AuditReportJson.matrix");
+                checked_any = true;
+            }
+        }
+        for item in json_value["three_things"]["items"]
+            .as_array()
+            .into_iter()
+            .flatten()
+        {
+            assert_no_corruption_in_finding_fields(item, "AuditReportJson.three_things");
+            checked_any = true;
+        }
+        for row in json_value["priority_grid"]["rows"]
+            .as_array()
+            .into_iter()
+            .flatten()
+        {
+            for cell in row["cells"].as_array().into_iter().flatten() {
+                for item in cell["findings"].as_array().into_iter().flatten() {
+                    assert_no_corruption_in_finding_fields(item, "AuditReportJson.priority_grid");
+                    checked_any = true;
+                }
+            }
+        }
+        for group_key in ["curated_findings", "held_for_review_findings"] {
+            for group in json_value[group_key].as_array().into_iter().flatten() {
+                for site in group["sites"].as_array().into_iter().flatten() {
+                    assert_no_corruption_in_finding_fields(site, "AuditReportJson sites");
+                    checked_any = true;
+                }
+            }
+        }
+        assert!(
+            checked_any,
+            "the fixture finding must reach at least one checked section for this gate to mean \
+             anything"
+        );
+        // Sanity check the fixture's identifiers actually survived verbatim into the artifact.
+        let json_serialized = serde_json::to_string(&json).unwrap();
+        assert!(
+            json_serialized.contains("client.auth.method()")
+                && json_serialized.contains("settings.toml")
+                && json_serialized.contains("0001_migration.sql:12")
+                && json_serialized.contains("v1.2.3"),
+            "fixture identifiers must survive into the report untouched for this gate to mean \
+             anything: {json_serialized}"
+        );
+
+        let findings_export = crate::xlsx_export::build_findings_export(
+            &report.clone().seal(),
+            &HashMap::new(),
+            None,
+            &json,
+            &HashMap::new(),
+        );
+        let findings_value = serde_json::to_value(&findings_export).unwrap();
+        let mut checked_any_rows = false;
+        for row in findings_value["findings"].as_array().into_iter().flatten() {
+            assert_no_corruption_in_finding_fields(row, "FindingsExport.findings");
+            checked_any_rows = true;
+        }
+        assert!(
+            checked_any_rows,
+            "the fixture finding must reach findings.json/the xlsx export for this gate to mean \
+             anything"
+        );
+        let findings_serialized = serde_json::to_string(&findings_export).unwrap();
+        assert!(
+            findings_serialized.contains("client.auth.method()")
+                && findings_serialized.contains("settings.toml")
+                && findings_serialized.contains("0001_migration.sql:12")
+                && findings_serialized.contains("v1.2.3"),
+            "fixture identifiers must survive into the findings export untouched for this gate \
+             to mean anything: {findings_serialized}"
+        );
+    }
+
     // ── FP exclusion ───────────────────────────────────────────────────────────
 
     #[test]
@@ -1587,7 +5433,7 @@ mod tests {
             wire("FalsePositive", "generated fixture", ""),
         );
         let report = report_with(vec![f1, f2], vec![]);
-        let json = build_report_json(&report, &dispositions, None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &dispositions, None, &empty_opts());
 
         assert_eq!(json.methodology.candidates_reviewed, 2);
         assert_eq!(json.methodology.excluded_false_positive, 1);
@@ -1606,7 +5452,7 @@ mod tests {
         let mut dispositions = HashMap::new();
         dispositions.insert(finding_key(&f), confirmed_wire("accepted for now"));
         let report = report_with(vec![f], vec![]);
-        let json = build_report_json(&report, &dispositions, None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &dispositions, None, &empty_opts());
 
         assert_eq!(
             json.curated_findings[0].sites[0].disposition,
@@ -1631,13 +5477,17 @@ mod tests {
             wire("Ignored", "looks like defense-in-depth only", ""),
         );
         let report = report_with(vec![f], vec![]);
-        let json = build_report_json(&report, &dispositions, None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &dispositions, None, &empty_opts());
 
         assert_eq!(
             json.curated_findings[0].sites[0].disposition,
-            "Needs client confirmation (auditor's proposed rationale: looks like defense-in-depth only)"
+            "Needs client confirmation (reviewer's proposed rationale: looks like defense-in-depth only)"
         );
-        assert_eq!(json.matrix.accepted.len(), 1, "still an accepted-bucket disposition");
+        assert_eq!(
+            json.matrix.accepted.len(),
+            1,
+            "still an accepted-bucket disposition"
+        );
     }
 
     #[test]
@@ -1646,7 +5496,7 @@ mod tests {
         let mut dispositions = HashMap::new();
         dispositions.insert(finding_key(&f), wire("Ignored", "", ""));
         let report = report_with(vec![f], vec![]);
-        let json = build_report_json(&report, &dispositions, None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &dispositions, None, &empty_opts());
 
         assert_eq!(
             json.curated_findings[0].sites[0].disposition,
@@ -1664,7 +5514,7 @@ mod tests {
         dispositions.insert(finding_key(&now_f), wire("TechDebt", "", "Now"));
         dispositions.insert(finding_key(&later_f), wire("TechDebt", "", "Later"));
         let report = report_with(vec![now_f, later_f], vec![]);
-        let json = build_report_json(&report, &dispositions, None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &dispositions, None, &empty_opts());
 
         assert_eq!(json.matrix.do_now.len(), 1);
         assert_eq!(json.matrix.plan.len(), 1);
@@ -1679,7 +5529,7 @@ mod tests {
         let mut f = finding("SEC-1", "a.rs", 1, "critical");
         f.effort = Some("low".to_string());
         let report = report_with(vec![f], vec![]);
-        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
 
         assert_eq!(json.matrix.do_now.len(), 1);
         assert_eq!(json.executive_summary.open, 1);
@@ -1694,7 +5544,7 @@ mod tests {
         // No calibration ran (effort = None) — must NOT be treated as low-effort.
         let f = finding("SEC-1", "a.rs", 1, "high");
         let report = report_with(vec![f], vec![]);
-        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
         assert_eq!(json.matrix.do_next.len(), 1);
         assert_eq!(json.matrix.do_now.len(), 0);
     }
@@ -1703,7 +5553,7 @@ mod tests {
     fn unresolved_low_severity_is_plan() {
         let f = finding("STYLE-1", "a.rs", 1, "low");
         let report = report_with(vec![f], vec![]);
-        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
         assert_eq!(json.matrix.plan.len(), 1);
     }
 
@@ -1716,14 +5566,17 @@ mod tests {
         // — the worst finding in the report could sit un-actioned. A critical must be Do now
         // regardless of effort.
         let f = finding("SEC-NO-HARDCODED-SECRETS-1", "a.rs", 1, "critical");
-        assert_eq!(f.effort, None, "test fixture must not carry an effort estimate");
+        assert_eq!(
+            f.effort, None,
+            "test fixture must not carry an effort estimate"
+        );
         let report = report_with(vec![f], vec![]);
-        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
         assert_eq!(json.matrix.do_now.len(), 1, "{:?}", json.matrix);
         assert_eq!(json.matrix.do_next.len(), 0);
         assert!(
-            !json.executive_summary.top_do_now.is_empty(),
-            "top_do_now must not be empty when a critical do_now finding exists"
+            !json.three_things.items.is_empty(),
+            "the three-things box must not be empty when a critical do_now finding exists"
         );
     }
 
@@ -1733,7 +5586,7 @@ mod tests {
         // conservative behavior: Do next, never Do now, never silently downgraded to Plan.
         let f = finding("ARCH-1", "a.rs", 1, "high");
         let report = report_with(vec![f], vec![]);
-        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
         assert_eq!(json.matrix.do_next.len(), 1);
         assert_eq!(json.matrix.do_now.len(), 0);
         assert_eq!(json.matrix.plan.len(), 0);
@@ -1745,7 +5598,7 @@ mod tests {
     fn unresolved_disposition_label_names_do_next_bucket() {
         let f = finding("ARCH-1", "a.rs", 1, "high");
         let report = report_with(vec![f], vec![]);
-        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
         assert_eq!(
             json.curated_findings[0].sites[0].disposition,
             "Open (recommended: Do next)"
@@ -1756,7 +5609,7 @@ mod tests {
     fn unresolved_disposition_label_names_plan_bucket() {
         let f = finding("STYLE-1", "a.rs", 1, "low");
         let report = report_with(vec![f], vec![]);
-        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
         assert_eq!(
             json.curated_findings[0].sites[0].disposition,
             "Open (recommended: Plan)"
@@ -1769,12 +5622,584 @@ mod tests {
     fn severity_casing_drift_is_normalized_not_silently_demoted_to_low() {
         let f = finding("SEC-1", "a.rs", 1, "Critical"); // upstream casing drift
         let report = report_with(vec![f], vec!["SEC-1"]);
-        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
         // Must land in `do_now` (critical), never counted as `low` in the scorecard.
         assert_eq!(json.matrix.do_now.len(), 1, "{:?}", json.matrix);
         assert_eq!(json.scorecard.rows[0].critical, 1);
         assert_eq!(json.scorecard.rows[0].low, 0);
         assert_eq!(json.curated_findings[0].sites[0].severity, "critical");
+    }
+
+    // ── Pass-1 W3 (A5.2/A5.6): the deviation ceiling + the kind on the PDF wire ──────────
+
+    /// A deviation-kind finding under `rule_id` — exactly what
+    /// `ai_audit::assign_deviation_kinds` emits for a rule decided to a non-violates option.
+    fn deviation_finding(rule_id: &str, path: &str, line: usize, severity: &str) -> Finding {
+        use camerata_api_types::audit::{DeviationKind, FindingKind};
+        let mut f = finding(rule_id, path, line, severity);
+        f.kind = Some(FindingKind::Deviation(DeviationKind {
+            deviating_sites: 2,
+            assessed_sites: Some(47),
+            convention_option_id: Some("default".to_string()),
+            convention_label: "Default".to_string(),
+        }));
+        f
+    }
+
+    /// Same single-rule corpus as [`ruleset_with_max_severity`], but authoring the A5.2
+    /// `deviation_ceiling` escape hatch instead of the E2 `max_severity` ceiling.
+    fn ruleset_with_deviation_ceiling(
+        rule_id: &str,
+        ceiling: Option<&str>,
+    ) -> camerata_rules::RuleSet {
+        let mut rule = camerata_rules::bare_rule(rule_id, "test-fixture");
+        // max_severity "critical" = effectively no E2 clamp; isolate the deviation clamp.
+        rule.max_severity = Some("critical".to_string());
+        rule.deviation_ceiling = ceiling.map(str::to_string);
+        rule.default_option = Some("default".to_string());
+        rule.options = vec![camerata_rules::RuleOption {
+            id: "default".to_string(),
+            label: "Default".to_string(),
+            directive: "do the right thing".to_string(),
+            why: "because".to_string(),
+            remediation: Some("Fix the thing.".to_string()),
+            finding_headline: None,
+            finding_detail: None,
+            escalation: None,
+            effort: None,
+            violates: false,
+        }];
+        let mut set = camerata_rules::RuleSet::default();
+        set.push(rule);
+        set
+    }
+
+    /// req A5.2: a consistency deviation caps at `medium` BY DEFAULT (no authored ceiling) —
+    /// the forward-drift-cost default — while a Defect under the SAME rule at the same
+    /// severity is untouched, and a legacy row with NO kind is never treated as a deviation.
+    /// FAILS BEFORE THE FIX: `clamp_deviation_severity` did not exist; a deviation-kind
+    /// finding arriving at `high` exported `high` unconditionally.
+    #[test]
+    fn req_a5_2_deviation_severity_caps_at_medium_by_default() {
+        let corpus = ruleset_with_deviation_ceiling("DEV-RULE-1", None);
+        let dev = deviation_finding("DEV-RULE-1", "a.rs", 1, "high");
+        assert_eq!(
+            clamp_deviation_severity("high".to_string(), &dev, Some(&corpus)),
+            "medium"
+        );
+        // Never a floor: a low deviation stays low.
+        assert_eq!(
+            clamp_deviation_severity("low".to_string(), &dev, Some(&corpus)),
+            "low"
+        );
+        // A Defect under the same rule is untouched.
+        let mut defect = finding("DEV-RULE-1", "a.rs", 2, "high");
+        defect.kind = Some(camerata_api_types::audit::FindingKind::Defect);
+        assert_eq!(
+            clamp_deviation_severity("high".to_string(), &defect, Some(&corpus)),
+            "high"
+        );
+        // A legacy row (no kind) is NOT assumed to be a deviation.
+        let legacy = finding("DEV-RULE-1", "a.rs", 3, "high");
+        assert_eq!(
+            clamp_deviation_severity("high".to_string(), &legacy, Some(&corpus)),
+            "high"
+        );
+        // No corpus at all -> the default ceiling still applies to a deviation (the cap is a
+        // pipeline default, not a corpus privilege).
+        assert_eq!(
+            clamp_deviation_severity("critical".to_string(), &dev, None),
+            "medium"
+        );
+    }
+
+    /// req A5.2 escape hatch: a rule authoring `deviation_ceiling = "high"` lets a genuinely
+    /// problematic deviation reach `high` — and the ceiling still caps `critical`.
+    /// FAILS BEFORE THE FIX: no `deviation_ceiling` corpus field existed to author.
+    #[test]
+    fn req_a5_2_authored_deviation_ceiling_lets_a_deviation_reach_high() {
+        let corpus = ruleset_with_deviation_ceiling("DEV-RULE-1", Some("high"));
+        let dev = deviation_finding("DEV-RULE-1", "a.rs", 1, "high");
+        assert_eq!(
+            clamp_deviation_severity("high".to_string(), &dev, Some(&corpus)),
+            "high",
+            "the authored escape hatch must let a deviation reach high"
+        );
+        assert_eq!(
+            clamp_deviation_severity("critical".to_string(), &dev, Some(&corpus)),
+            "high",
+            "the authored ceiling is still a ceiling"
+        );
+    }
+
+    /// req A5.2 END-TO-END through `build_report_json`: a deviation arriving at `high` lands
+    /// in the artifact at `medium` (matrix row AND curated site agree), while a defect under
+    /// the same rule keeps `high`. FAILS BEFORE THE FIX: both exported `high`.
+    #[test]
+    fn req_a5_2_report_json_caps_a_deviation_at_medium_but_not_a_defect() {
+        let corpus = ruleset_with_deviation_ceiling("DEV-RULE-1", None);
+        let dev = deviation_finding("DEV-RULE-1", "a.rs", 1, "high");
+        let mut defect = finding("DEV-RULE-1", "b.rs", 2, "high");
+        defect.kind = Some(camerata_api_types::audit::FindingKind::Defect);
+        let report = report_with(vec![dev, defect], vec!["DEV-RULE-1"]);
+        let json = build_report_json(
+            &report.clone().seal(),
+            &HashMap::new(),
+            Some(&corpus),
+            &empty_opts(),
+        );
+        let sev_of = |path: &str| -> String {
+            [
+                &json.matrix.do_now,
+                &json.matrix.do_next,
+                &json.matrix.plan,
+                &json.matrix.accepted,
+                &json.matrix.informational,
+                &json.matrix.held,
+            ]
+            .iter()
+            .flat_map(|v| v.iter())
+            .find(|r| r.path == path)
+            .unwrap_or_else(|| panic!("no matrix row for {path}"))
+            .severity
+            .clone()
+        };
+        assert_eq!(sev_of("a.rs"), "medium", "deviation capped");
+        assert_eq!(sev_of("b.rs"), "high", "defect untouched");
+    }
+
+    /// req A5.6: the PDF's own data rows carry the kind LOSSLESSLY — a deviation matrix row
+    /// serializes the flat `"kind": "deviation"` discriminator plus the full structured
+    /// sentence (numerator/denominator/convention), and a legacy row with no kind serializes
+    /// the explicit `"unspecified"` tag, never `"defect"` and never a missing key.
+    /// FAILS BEFORE THE FIX: `FindingRefJson` had no kind field at all.
+    #[test]
+    fn req_a5_6_report_json_rows_carry_kind_and_legacy_renders_unspecified() {
+        let dev = deviation_finding("DEV-RULE-1", "a.rs", 1, "high");
+        let legacy = finding("LEGACY-RULE-1", "b.rs", 2, "high");
+        let report = report_with(vec![dev, legacy], vec!["DEV-RULE-1", "LEGACY-RULE-1"]);
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
+        let v = serde_json::to_value(&json.matrix).expect("matrix serializes");
+        let rows: Vec<&serde_json::Value> = [
+            "do_now",
+            "do_next",
+            "plan",
+            "accepted",
+            "informational",
+            "held",
+        ]
+        .iter()
+        .flat_map(|b| v[*b].as_array().into_iter().flatten())
+        .collect();
+        let row_for = |path: &str| -> &serde_json::Value {
+            rows.iter()
+                .find(|r| r["path"] == path)
+                .unwrap_or_else(|| panic!("no serialized matrix row for {path}"))
+        };
+        let dev_row = row_for("a.rs");
+        assert_eq!(dev_row["kind"], "deviation");
+        assert_eq!(dev_row["deviating_sites"], 2);
+        assert_eq!(dev_row["assessed_sites"], 47);
+        assert_eq!(dev_row["convention_label"], "Default");
+        let legacy_row = row_for("b.rs");
+        assert_eq!(
+            legacy_row["kind"], "unspecified",
+            "an absent kind must surface explicitly, never silently"
+        );
+        assert_ne!(legacy_row["kind"], "defect");
+        // The curated sites carry it too.
+        let curated = serde_json::to_value(&json.curated_findings).expect("curated serializes");
+        let kinds: Vec<String> = curated
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|g| g["sites"].as_array().into_iter().flatten())
+            .map(|s| s["kind"].as_str().unwrap_or_default().to_string())
+            .collect();
+        assert!(
+            kinds.iter().any(|k| k == "deviation") || kinds.iter().any(|k| k == "unspecified"),
+            "curated sites must serialize a kind key: {kinds:?}"
+        );
+    }
+
+    // ── E2 (`docs/plans/2026-10-09_audit-findings-tracker.md`): a rule's `max_severity`
+    // ceiling, applied LAST — never exceeded by any report, never raising a lower severity ──
+
+    /// Every site severity a report actually exported, scanning BOTH top-level row sections.
+    ///
+    /// W5-Q4, ruled by Zach on 2026-10-11 (*"yes, widen these tests"*): a severity test that
+    /// reads only `curated_findings` is structurally BLIND to the rules whose severity bound is
+    /// most emphatically authored. `is_informational` routes the `ARCH-OBSERVABILITY-*` class
+    /// out of every action bucket by rule IDENTITY, so its group renders under
+    /// `held_for_review_findings` and `curated_findings[0]` *panics* rather than failing
+    /// cleanly. Every pre-existing `req_e2_*` test had that shape. This helper is the fix, and
+    /// it matches the one `tests/real_corpus_severity_ceiling_e2e.rs` already uses.
+    fn exported_site_severities(json: &AuditReportJson) -> Vec<String> {
+        json.curated_findings
+            .iter()
+            .chain(json.held_for_review_findings.iter())
+            .flat_map(|g| g.sites.iter())
+            .map(|s| s.severity.clone())
+            .collect()
+    }
+
+    /// [`exported_site_severities`] for the single-row case, asserting the row was exported
+    /// exactly once — so a silently DROPPED row can never read as a passing clamp or raise.
+    fn exported_site_severity(json: &AuditReportJson) -> String {
+        let severities = exported_site_severities(json);
+        assert_eq!(
+            severities.len(),
+            1,
+            "expected exactly one exported site; a dropped row is not a severity result: \
+             {severities:?}"
+        );
+        severities[0].clone()
+    }
+
+    /// A single-rule corpus with `max_severity` set AND a real, authored default option — so
+    /// the finding has a resolvable fix and is NOT diverted to the `held` bucket by the C5-8
+    /// "action-tier row with no fix to show at all" gate, which would otherwise make
+    /// `curated_findings` empty for reasons unrelated to what this test is proving.
+    fn ruleset_with_max_severity(rule_id: &str, max_severity: &str) -> camerata_rules::RuleSet {
+        let mut rule = camerata_rules::bare_rule(rule_id, "test-fixture");
+        rule.max_severity = Some(max_severity.to_string());
+        rule.default_option = Some("default".to_string());
+        rule.options = vec![camerata_rules::RuleOption {
+            id: "default".to_string(),
+            label: "Default".to_string(),
+            directive: "do the right thing".to_string(),
+            why: "because".to_string(),
+            remediation: Some("Fix the thing.".to_string()),
+            finding_headline: None,
+            finding_detail: None,
+            escalation: None,
+            effort: None,
+            violates: false,
+        }];
+        let mut set = camerata_rules::RuleSet::default();
+        set.push(rule);
+        set
+    }
+
+    /// req_e2: a rule declaring `max_severity = "high"` never exports `critical`, even when
+    /// the finding's own (pre-export) severity is already `"critical"` — standing in for "a
+    /// severity floor would otherwise raise it" (D5's floor runs upstream in `ai_audit.rs`,
+    /// before a finding ever reaches this export layer; a finding arriving here already at
+    /// `critical` is exactly what a floor-raise looks like by the time this layer sees it).
+    ///
+    /// FAILS BEFORE THE FIX: before `Rule::max_severity`/`clamp_to_rule_max_severity` existed,
+    /// there was no corpus field to read a ceiling from at all — this exact finding would have
+    /// exported as `critical` unconditionally (see the sibling
+    /// `severity_casing_drift_is_normalized_not_silently_demoted_to_low` test just above, which
+    /// pins today's un-clamped `critical` behavior for a rule with no ceiling).
+    #[test]
+    fn req_e2_max_severity_clamps_a_critical_finding_down_to_the_declared_ceiling() {
+        let corpus = ruleset_with_max_severity("CEILING-1", "high");
+        let f = finding("CEILING-1", "a.rs", 1, "critical");
+        let report = report_with(vec![f], vec!["CEILING-1"]);
+        let json = build_report_json(
+            &report.clone().seal(),
+            &HashMap::new(),
+            Some(&corpus),
+            &empty_opts(),
+        );
+        // W5-Q4: both sections, via `exported_site_severities` — see its doc comment. The
+        // asserted value is unchanged.
+        assert_eq!(
+            exported_site_severity(&json),
+            "high",
+            "a max_severity=\"high\" rule must never export critical"
+        );
+        assert_eq!(json.scorecard.rows[0].critical, 0, "{:?}", json.scorecard);
+        assert_eq!(
+            json.matrix.do_now.len(),
+            0,
+            "critical-only do_now must be empty: {:?}",
+            json.matrix
+        );
+    }
+
+    /// req_e2: the ceiling is a CEILING, not a floor — a finding already BELOW the declared
+    /// `max_severity` must never be raised up to it.
+    #[test]
+    fn req_e2_max_severity_never_raises_a_lower_severity_up_to_the_ceiling() {
+        let corpus = ruleset_with_max_severity("CEILING-1", "high");
+        let f = finding("CEILING-1", "a.rs", 1, "low");
+        let report = report_with(vec![f], vec!["CEILING-1"]);
+        let json = build_report_json(
+            &report.clone().seal(),
+            &HashMap::new(),
+            Some(&corpus),
+            &empty_opts(),
+        );
+        // W5-Q4: both sections — see `exported_site_severities`. Asserted value unchanged.
+        assert_eq!(
+            exported_site_severity(&json),
+            "low",
+            "max_severity must never RAISE a severity that already ranks below it"
+        );
+    }
+
+    /// req_e2, pure unit coverage of the clamp function itself (independent of the full
+    /// `build_report_json` pipeline): no ceiling declared is a no-op.
+    #[test]
+    fn req_e2_clamp_to_rule_max_severity_is_a_noop_when_the_rule_has_no_ceiling() {
+        let mut rule = camerata_rules::bare_rule("NO-CEILING-1", "test-fixture");
+        rule.max_severity = None;
+        let mut set = camerata_rules::RuleSet::default();
+        set.push(rule);
+        assert_eq!(
+            clamp_to_rule_max_severity("critical".to_string(), "NO-CEILING-1", Some(&set)),
+            "critical"
+        );
+    }
+
+    /// req_e2, pure unit coverage: an unknown corpus (`None`) or an unknown rule id both
+    /// degrade to a no-op rather than panicking or fabricating a ceiling.
+    #[test]
+    fn req_e2_clamp_to_rule_max_severity_degrades_gracefully_with_no_corpus_or_unknown_rule() {
+        assert_eq!(
+            clamp_to_rule_max_severity("critical".to_string(), "ANY-RULE-1", None),
+            "critical"
+        );
+        let set = ruleset_with_max_severity("CEILING-1", "high");
+        assert_eq!(
+            clamp_to_rule_max_severity("critical".to_string(), "SOME-OTHER-RULE-1", Some(&set)),
+            "critical"
+        );
+    }
+
+    // ── W8 / W5-Q2: a rule's `min_severity` FLOOR — the structured mirror of the ceiling.
+    // Zach, 2026-10-11: "Floor, it's the minimum rating." ──────────────────────────────────
+
+    /// [`ruleset_with_max_severity`]'s floor counterpart: a single-rule corpus authoring
+    /// `min_severity` (and optionally `max_severity`), with a real default option so the row
+    /// is not diverted by the C5-8 no-fix gate for reasons unrelated to severity.
+    fn ruleset_with_min_severity(
+        rule_id: &str,
+        min_severity: &str,
+        max_severity: Option<&str>,
+    ) -> camerata_rules::RuleSet {
+        let mut rule = camerata_rules::bare_rule(rule_id, "test-fixture");
+        rule.min_severity = Some(min_severity.to_string());
+        rule.max_severity = max_severity.map(str::to_string);
+        rule.default_option = Some("default".to_string());
+        rule.options = vec![camerata_rules::RuleOption {
+            id: "default".to_string(),
+            label: "Default".to_string(),
+            directive: "do the right thing".to_string(),
+            why: "because".to_string(),
+            remediation: Some("Fix the thing.".to_string()),
+            finding_headline: None,
+            finding_detail: None,
+            escalation: None,
+            effort: None,
+            violates: false,
+        }];
+        let mut set = camerata_rules::RuleSet::default();
+        set.push(rule);
+        set
+    }
+
+    /// A `Defect`-kind finding — what every accusing producer actually emits
+    /// (`ai_audit::parse_findings`, `apply_alternative_decision`, `dep_audit`, the
+    /// deterministic floor). The floor declines a row with NO kind by design, so a floor test
+    /// built on a bare `finding()` would be testing the decline path, not the raise.
+    fn defect_finding(rule_id: &str, path: &str, line: usize, severity: &str) -> Finding {
+        let mut f = finding(rule_id, path, line, severity);
+        f.kind = Some(camerata_api_types::audit::FindingKind::Defect);
+        f
+    }
+
+    fn exported_with(corpus: &camerata_rules::RuleSet, f: Finding) -> AuditReportJson {
+        let rule_id = f.rule_id.clone();
+        let report = report_with(vec![f], vec![&rule_id]);
+        build_report_json(&report.seal(), &HashMap::new(), Some(corpus), &empty_opts())
+    }
+
+    /// req_w8: a rule declaring `min_severity = "high"` never exports anything BELOW high —
+    /// the exact mirror of `req_e2_max_severity_clamps_a_critical_finding_down_to_the_declared_
+    /// ceiling`, in the opposite direction.
+    ///
+    /// FAILS BEFORE THE FIX: `Rule::min_severity` and `raise_to_rule_min_severity` did not
+    /// exist, so there was no corpus field to author a minimum in and a `low` finding exported
+    /// `low` unconditionally — the sibling
+    /// `req_e2_max_severity_never_raises_a_lower_severity_up_to_the_ceiling` pins exactly that
+    /// un-raised behaviour for a rule with no floor.
+    #[test]
+    fn req_w8_min_severity_raises_a_finding_up_to_the_declared_floor() {
+        let corpus = ruleset_with_min_severity("FLOOR-1", "high", None);
+        let json = exported_with(&corpus, defect_finding("FLOOR-1", "a.rs", 1, "low"));
+        assert_eq!(
+            exported_site_severity(&json),
+            "high",
+            "a min_severity=\"high\" rule must never export below high"
+        );
+    }
+
+    /// req_w8: the floor is a FLOOR, not a ceiling — a finding already ABOVE it is untouched.
+    /// The mirror of the ceiling's own never-raises test, and the assertion that stops a
+    /// mis-signed rank comparison from reading as a pass.
+    #[test]
+    fn req_w8_min_severity_never_lowers_a_severity_already_above_the_floor() {
+        let corpus = ruleset_with_min_severity("FLOOR-1", "medium", None);
+        let json = exported_with(&corpus, defect_finding("FLOOR-1", "a.rs", 1, "critical"));
+        assert_eq!(
+            exported_site_severity(&json),
+            "critical",
+            "min_severity must never LOWER a severity that already ranks above it"
+        );
+    }
+
+    /// req_w8: the floor NEVER touches an informational kind. A `ConventionObserved` row tells
+    /// the client "your codebase already does this"; raising it to `critical` would both lie
+    /// and, via `is_informational`'s severity test, re-route a compliment into an action
+    /// bucket. This is the single most dangerous thing a floor could do, so it is asserted on
+    /// the function directly rather than only through the export.
+    #[test]
+    fn req_w8_the_floor_never_applies_to_an_informational_kind() {
+        use camerata_api_types::audit::{
+            ConventionObservedKind, FindingKind, NotAssessedKind, NotAssessedReason,
+        };
+        let corpus = ruleset_with_min_severity("FLOOR-1", "critical", None);
+        let mut observed = finding("FLOOR-1", "a.rs", 1, "info");
+        observed.kind = Some(FindingKind::ConventionObserved(ConventionObservedKind {
+            convention_option_id: "default".to_string(),
+            convention_label: "Default".to_string(),
+        }));
+        assert_eq!(
+            raise_to_rule_min_severity("info".to_string(), &observed, Some(&corpus)),
+            "info",
+            "a convention-observed row must never be raised by a defect floor"
+        );
+        let mut not_assessed = finding("FLOOR-1", "a.rs", 2, "info");
+        not_assessed.kind = Some(FindingKind::NotAssessed(NotAssessedKind {
+            reason: NotAssessedReason::ToolFailed,
+            reason_detail: "the tool failed".to_string(),
+        }));
+        assert_eq!(
+            raise_to_rule_min_severity("info".to_string(), &not_assessed, Some(&corpus)),
+            "info",
+            "an honesty row must never be raised by a defect floor"
+        );
+    }
+
+    /// req_w8: an ABSENT kind is excluded too. W3's standing rule is that nothing may silently
+    /// default to `Defect`; treating an unkinded legacy row as eligible for a defect floor
+    /// would be exactly that. Same decline `clamp_deviation_severity` makes for the same
+    /// reason.
+    #[test]
+    fn req_w8_the_floor_never_applies_to_a_row_with_no_kind() {
+        let corpus = ruleset_with_min_severity("FLOOR-1", "critical", None);
+        let legacy = finding("FLOOR-1", "a.rs", 1, "low");
+        assert_eq!(
+            raise_to_rule_min_severity("low".to_string(), &legacy, Some(&corpus)),
+            "low",
+            "an absent kind must not be assumed to be a Defect"
+        );
+    }
+
+    /// req_w8: the floor cannot defeat the C4-R1 null-location safety net. A finding with an
+    /// empty path AND `line == 0` established nothing concrete to rate, and
+    /// `downgrade_unlocated_above_informational` forces that shape to `info`. The floor
+    /// declines it at its own precondition, so the guarantee holds from ANY position in the
+    /// chain and on any surface.
+    #[test]
+    fn req_w8_the_floor_cannot_defeat_the_unlocated_downgrade() {
+        let corpus = ruleset_with_min_severity("FLOOR-1", "critical", None);
+        let mut unlocated = defect_finding("FLOOR-1", "", 0, "low");
+        unlocated.path = String::new();
+        unlocated.line = 0;
+        assert_eq!(
+            raise_to_rule_min_severity("low".to_string(), &unlocated, Some(&corpus)),
+            "low",
+            "a floor must not manufacture a critical for a finding with no location"
+        );
+        let json = exported_with(&corpus, unlocated);
+        assert_eq!(
+            exported_site_severity(&json),
+            "info",
+            "C4-R1 must still demote the unlocated row to info"
+        );
+    }
+
+    /// req_w8: `min_severity` and `max_severity` set to the SAME value pin the rule at exactly
+    /// that severity from both sides — which is what several rules' prose actually authors
+    /// ("a high-severity finding for review, not an automatic critical"). The corpus-load gate
+    /// deliberately permits the equal case; this proves it behaves.
+    #[test]
+    fn req_w8_a_floor_equal_to_the_ceiling_pins_the_rule_from_both_sides() {
+        let corpus = ruleset_with_min_severity("PINNED-1", "high", Some("high"));
+        assert_eq!(
+            exported_site_severity(&exported_with(
+                &corpus,
+                defect_finding("PINNED-1", "a.rs", 1, "critical")
+            )),
+            "high",
+            "the ceiling must still clamp a critical down"
+        );
+        assert_eq!(
+            exported_site_severity(&exported_with(
+                &corpus,
+                defect_finding("PINNED-1", "b.rs", 2, "low")
+            )),
+            "high",
+            "the floor must still raise a low up"
+        );
+    }
+
+    /// req_w8: the A5.2 deviation ceiling still binds over a floor. A rule authoring
+    /// `min_severity = "high"` with no `deviation_ceiling` raises a `Deviation` row to high and
+    /// then caps it back at the `medium` default — deviations describe forward drift cost, and
+    /// A5.2's default is not overridable by a defect-oriented floor.
+    #[test]
+    fn req_w8_a_deviation_row_is_still_bounded_by_the_a5_2_deviation_ceiling() {
+        // `max_severity = "critical"` isolates the deviation clamp exactly as
+        // `ruleset_with_deviation_ceiling` does; the rule authors NO `deviation_ceiling`, so
+        // A5.2's `medium` default applies.
+        let corpus = ruleset_with_min_severity("DEV-FLOOR-1", "high", Some("critical"));
+        let dev = deviation_finding("DEV-FLOOR-1", "a.rs", 1, "low");
+        assert_eq!(
+            raise_to_rule_min_severity("low".to_string(), &dev, Some(&corpus)),
+            "high",
+            "a deviation is an accusing kind, so the floor does reach it"
+        );
+        let json = exported_with(&corpus, dev);
+        assert_eq!(
+            exported_site_severity(&json),
+            "medium",
+            "A5.2's default deviation ceiling must still cap the raised severity"
+        );
+    }
+
+    /// req_w8, pure unit coverage mirroring
+    /// `req_e2_clamp_to_rule_max_severity_degrades_gracefully_with_no_corpus_or_unknown_rule`:
+    /// absent corpus, unknown rule, and a rule with no floor all degrade to a no-op rather
+    /// than panicking or fabricating a floor.
+    #[test]
+    fn req_w8_raise_to_rule_min_severity_degrades_gracefully() {
+        let f = defect_finding("ANY-RULE-1", "a.rs", 1, "low");
+        assert_eq!(
+            raise_to_rule_min_severity("low".to_string(), &f, None),
+            "low",
+            "no corpus is a no-op"
+        );
+        let set = ruleset_with_min_severity("FLOOR-1", "high", None);
+        assert_eq!(
+            raise_to_rule_min_severity("low".to_string(), &f, Some(&set)),
+            "low",
+            "an unknown rule id is a no-op"
+        );
+        let no_floor = ruleset_with_max_severity("NO-FLOOR-1", "critical");
+        assert_eq!(
+            raise_to_rule_min_severity(
+                "low".to_string(),
+                &defect_finding("NO-FLOOR-1", "a.rs", 1, "low"),
+                Some(&no_floor)
+            ),
+            "low",
+            "a rule declaring no floor is a no-op"
+        );
     }
 
     // ── Item 1: defect headline, not the rule's invariant title ────────────────
@@ -1799,6 +6224,113 @@ mod tests {
         );
     }
 
+    // ── C4-P4 residual defect 1: headline truncation at an abbreviation (golden tests) ────
+
+    #[test]
+    fn defect_headline_does_not_truncate_inside_an_eg_parenthetical() {
+        assert_eq!(
+            defect_headline(
+                "The handler accepts an insecure default (e.g. allowing GET requests) before \
+                 validating the session. This is exploitable without authentication.",
+                "fallback"
+            ),
+            "The handler accepts an insecure default (e.g. allowing GET requests) before \
+             validating the session."
+        );
+    }
+
+    #[test]
+    fn defect_headline_does_not_truncate_at_a_bare_eg_abbreviation() {
+        assert_eq!(
+            defect_headline(
+                "Error handling is inconsistent, e.g. some handlers return 500 and others \
+                 throw. Fix this before shipping.",
+                "fallback"
+            ),
+            "Error handling is inconsistent, e.g. some handlers return 500 and others throw."
+        );
+    }
+
+    #[test]
+    fn defect_headline_does_not_truncate_at_a_bare_ie_abbreviation() {
+        assert_eq!(
+            defect_headline(
+                "This bypasses auth, i.e. anyone can reach the admin panel without a token. \
+                 That is unacceptable.",
+                "fallback"
+            ),
+            "This bypasses auth, i.e. anyone can reach the admin panel without a token."
+        );
+    }
+
+    #[test]
+    fn defect_headline_does_not_truncate_at_an_etc_abbreviation() {
+        assert_eq!(
+            defect_headline(
+                "The config accepts unsafe values like eval, exec, etc. without sanitization. \
+                 This must be fixed.",
+                "fallback"
+            ),
+            "The config accepts unsafe values like eval, exec, etc. without sanitization."
+        );
+    }
+
+    #[test]
+    fn defect_headline_does_not_truncate_at_a_vs_abbreviation() {
+        assert_eq!(
+            defect_headline(
+                "Credentials compare via string equality vs. constant-time comparison, which \
+                 leaks timing info. Rotate the credential now.",
+                "fallback"
+            ),
+            "Credentials compare via string equality vs. constant-time comparison, which leaks \
+             timing info."
+        );
+    }
+
+    #[test]
+    fn defect_headline_caps_by_length_with_an_ellipsis_when_no_real_sentence_boundary_exists() {
+        let run_on = "a".repeat(250);
+        let headline = defect_headline(&run_on, "fallback");
+        assert!(
+            headline.ends_with("..."),
+            "a boundary-less run-on must be capped with an ellipsis: {headline}"
+        );
+        assert!(
+            headline.chars().count() <= HEADLINE_LENGTH_CAP + 3,
+            "the capped headline must not exceed the length cap plus the ellipsis: {headline}"
+        );
+    }
+
+    #[test]
+    fn defect_headline_still_splits_on_a_genuine_non_abbreviation_period() {
+        // Regression guard: the abbreviation/parenthetical carve-outs above must never swallow
+        // a REAL sentence boundary that merely happens to sit near a parenthetical elsewhere in
+        // the text.
+        assert_eq!(
+            defect_headline(
+                "The profiles table has no RLS (confirmed via migration replay). Anyone with \
+                 the anon key can read and write every row.",
+                "fallback"
+            ),
+            "The profiles table has no RLS (confirmed via migration replay)."
+        );
+    }
+
+    #[test]
+    fn sentence_boundary_skips_an_abbreviation_period_even_before_a_capitalized_continuation() {
+        // "e.g." followed by a capitalized word looks EXACTLY like a real sentence boundary
+        // (period + space + uppercase letter) to a naive scan — the abbreviation check must
+        // still skip it, proving this isn't just the capitalization check doing the work.
+        let s = "Error handling is inconsistent, e.g. Some handlers return 500 while others \
+                 throw. Fix this before shipping.";
+        let end = sentence_boundary(s).expect("a real boundary exists later in the string");
+        assert_eq!(
+            &s[..end],
+            "Error handling is inconsistent, e.g. Some handlers return 500 while others throw."
+        );
+    }
+
     #[test]
     fn curated_and_matrix_findings_carry_a_defect_headline_distinct_from_the_rule_title() {
         let mut f = finding("SEC-1", "a.rs", 1, "critical");
@@ -1806,7 +6338,7 @@ mod tests {
                     Security."
             .to_string();
         let report = report_with(vec![f], vec![]);
-        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
 
         assert_eq!(
             json.curated_findings[0].sites[0].headline,
@@ -1818,21 +6350,37 @@ mod tests {
         );
         // The rule's own title/id is still carried separately, for registry traceability.
         assert_eq!(json.curated_findings[0].rule_id, "SEC-1");
-        // top_do_now leads with the headline, not the rule id.
-        assert!(json.executive_summary.top_do_now[0].starts_with("A service_role key ships"));
+        // FIX 4 (2026-09-13 review): the "Three things this week" box leads with the headline,
+        // not the rule id — this is now the ONE place the exec-summary page names a do-now
+        // finding (see `narrative_does_not_restate_the_top_do_now_headline` below).
+        assert!(json.three_things.items[0]
+            .headline
+            .starts_with("A service_role key ships"));
     }
 
-    // ── Item 2: exec-summary blast radius + one-pass counts ────────────────────
+    // ── Item 2 / FIX 4: exec-summary is counts-only, no restated top-3 ─────────
 
     #[test]
-    fn narrative_leads_with_blast_radius_composed_from_top_do_now_headlines() {
+    fn narrative_does_not_restate_the_top_do_now_headline() {
+        // FIX 4 (2026-09-13 review, "page 3 states the top-3 three times"): the narrative used
+        // to LEAD with "As shipped: {top do-now headline}" — the same finding the "Three
+        // things this week" box (and, before this fix, a "Top priority items" bullet list)
+        // already names on the same page. The exec summary is now curation + counts only.
         let mut f = finding("SEC-1", "a.rs", 1, "critical");
         f.detail = "The profiles table has no RLS.".to_string();
         let report = report_with(vec![f], vec![]);
-        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
         assert!(
-            json.executive_summary.narrative.starts_with("As shipped: The profiles table has no RLS."),
+            !json.executive_summary.narrative.contains("As shipped"),
             "{}",
+            json.executive_summary.narrative
+        );
+        assert!(
+            !json
+                .executive_summary
+                .narrative
+                .contains("The profiles table has no RLS."),
+            "the narrative must not restate the do-now finding's own headline: {}",
             json.executive_summary.narrative
         );
     }
@@ -1845,14 +6393,16 @@ mod tests {
         let f1 = finding("SEC-1", "a.rs", 1, "critical");
         let f2 = finding("SEC-2", "b.rs", 2, "low");
         let report = report_with(vec![f1, f2], vec![]);
-        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
         assert!(
             !json.executive_summary.narrative.contains("still open"),
             "{}",
             json.executive_summary.narrative
         );
         assert!(
-            json.executive_summary.narrative.contains("1 do now, 0 do next, 1 planned, and 0 accepted as risk"),
+            json.executive_summary
+                .narrative
+                .contains("1 do now, 0 do next, 1 planned, 0 already carried as accepted risk"),
             "{}",
             json.executive_summary.narrative
         );
@@ -1883,7 +6433,7 @@ mod tests {
         f2.effort = Some("low".to_string());
         f2.detail = "The service_role key ships to the browser.".to_string();
         let report = report_with(vec![f1, f2], vec![]);
-        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
 
         assert_eq!(json.three_things.items.len(), 2);
         assert_eq!(json.three_things.items[0].hours_label, "2 to 4 hours");
@@ -1901,7 +6451,7 @@ mod tests {
         let f = finding("SEC-1", "a.rs", 1, "critical");
         assert_eq!(f.effort, None);
         let report = report_with(vec![f], vec![]);
-        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
         assert_eq!(json.three_things.items[0].hours_label, "not yet estimated");
         assert!(
             json.three_things
@@ -1923,7 +6473,7 @@ mod tests {
         f2.effort = Some("low".to_string());
         let f3 = finding("SEC-3", "c.rs", 3, "critical"); // no effort estimate
         let report = report_with(vec![f1, f2, f3], vec![]);
-        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
         assert_eq!(json.three_things.items.len(), 3);
         assert_eq!(
             json.three_things.total_hours_label,
@@ -1935,9 +6485,153 @@ mod tests {
     #[test]
     fn three_things_box_is_empty_when_no_do_now_items_exist() {
         let report = report_with(vec![], vec![]);
-        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
         assert!(json.three_things.items.is_empty());
-        assert_eq!(json.three_things.total_hours_label, "No do-now items this run.");
+        assert_eq!(
+            json.three_things.total_hours_label,
+            "No do-now items this run."
+        );
+    }
+
+    // ── C6-B2: top-3 "three distinct root causes" selector ─────────────────────────────────
+    // Defense in depth for the case the merge pass (`ai_audit::merge_semantic_groups` /
+    // `backfill_credential_identity`) conservatively leaves several sites of ONE leaked
+    // credential as separate rows: the top-3 box must still never spend more than one slot on
+    // them. These findings are deliberately fed to `build_report_json` WITHOUT running the merge
+    // pipeline first (report_export never merges on its own), so this specifically exercises the
+    // selector's OWN distinctness check, independent of whether the merge pass also caught it.
+
+    #[test]
+    fn three_things_box_shows_three_distinct_root_causes_not_three_sites_of_one_credential() {
+        // Deliberately NOT "AI-"-prefixed: that tier goes through the separate P3 citation
+        // gate (`is_ai_tier` / `is_uncited_ai_finding`), which is an orthogonal concern this
+        // test is not about. Deterministic-shaped rule ids keep the fixture focused on the
+        // root-cause distinctness check alone.
+        let mut holder = finding("SEC-NO-HARDCODED-SECRETS-1", "config.ts", 5, "critical");
+        holder.detail =
+            "STRIPE_SECRET_KEY is committed in plaintext in this config file.".to_string();
+        let mut constructor = finding(
+            "SEC-STRIPE-CLIENT-FROM-LEAKED-KEY-1",
+            "stripeClient.ts",
+            12,
+            "critical",
+        );
+        constructor.detail =
+            "Builds a Stripe client directly from the committed STRIPE_SECRET_KEY.".to_string();
+        let mut call_site = finding(
+            "SEC-PAYMENT-CALL-USES-LEAKED-KEY-1",
+            "charge.ts",
+            40,
+            "critical",
+        );
+        call_site.detail =
+            "Issues a charge using the client built from STRIPE_SECRET_KEY.".to_string();
+        let mut distinct_a = finding("SEC-UNRELATED-CRITICAL-1", "other1.ts", 1, "critical");
+        distinct_a.detail = "Totally separate unauthenticated admin export.".to_string();
+        let mut distinct_b = finding("SEC-UNRELATED-CRITICAL-2", "other2.ts", 1, "critical");
+        distinct_b.detail = "A second, unrelated, totally distinct critical.".to_string();
+
+        let report = report_with(
+            vec![holder, constructor, call_site, distinct_a, distinct_b],
+            vec![],
+        );
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
+
+        assert_eq!(
+            json.matrix.do_now.len(),
+            5,
+            "nothing is dropped from the queue — all 5 still ship as do-now rows: {:?}",
+            json.matrix.do_now
+        );
+        assert_eq!(
+            json.three_things.items.len(),
+            3,
+            "three slots still fill when enough DISTINCT candidates exist: {:?}",
+            json.three_things.items
+        );
+        let top3_ids: std::collections::HashSet<&str> = json
+            .three_things
+            .items
+            .iter()
+            .map(|i| i.rule_id.as_str())
+            .collect();
+        assert!(
+            top3_ids.contains("SEC-UNRELATED-CRITICAL-1")
+                && top3_ids.contains("SEC-UNRELATED-CRITICAL-2"),
+            "both genuinely distinct criticals must be in the top-3, never crowded out by one \
+             root cause: {top3_ids:?}"
+        );
+        let credential_chain_ids = [
+            "SEC-NO-HARDCODED-SECRETS-1",
+            "SEC-STRIPE-CLIENT-FROM-LEAKED-KEY-1",
+            "SEC-PAYMENT-CALL-USES-LEAKED-KEY-1",
+        ];
+        let credential_rows_selected = credential_chain_ids
+            .iter()
+            .filter(|id| top3_ids.contains(**id))
+            .count();
+        assert_eq!(
+            credential_rows_selected, 1,
+            "only ONE of the three same-credential rows may fill a top-3 slot, never three: \
+             {top3_ids:?}"
+        );
+    }
+
+    // ── Calibration-review fix: precondition tie-break in the do-now ranking ──────────
+    //
+    // The bug this guards: a High "unverified session read" finding whose own note recorded
+    // an exploit precondition was promoted to Critical by calibration and took a top-3
+    // do-now slot from a genuinely unconditional critical (an unauthenticated export
+    // exploitable with one request). `build_report_json`'s `do_now_sorted` must rank an
+    // unconditional critical ahead of a critical whose justification records a precondition,
+    // even though both are the same severity — pure RANKING, no bucket/severity change.
+
+    #[test]
+    fn three_things_ranks_the_unconditional_critical_ahead_of_a_preconditioned_one() {
+        // Alphabetically "a.rs" would naturally sort first in the bucket's own (severity,
+        // provenance, repo, path, line) ordering — deliberately putting the PRECONDITIONED
+        // finding there proves the tie-break actually reorders rather than coincidentally
+        // agreeing with path order.
+        let mut preconditioned = finding("SEC-PRECONDITIONED", "a.rs", 1, "critical");
+        preconditioned.detail =
+            "Server code authorizes from an unverified session read; exploitation requires \
+             forging a session cookie."
+                .to_string();
+        let mut unconditional = finding("SEC-UNCONDITIONAL", "b.rs", 2, "critical");
+        unconditional.detail =
+            "The export endpoint returns every user's records with no authorization check and \
+             is reachable with a single unauthenticated request."
+                .to_string();
+        let report = report_with(vec![preconditioned, unconditional], vec![]);
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
+
+        assert_eq!(
+            json.matrix.do_now.len(),
+            2,
+            "both are critical do-now items"
+        );
+        assert_eq!(
+            json.three_things.items[0].rule_id, "SEC-UNCONDITIONAL",
+            "the unconditional critical must rank first, ahead of the preconditioned one: {:?}",
+            json.three_things.items
+        );
+        assert_eq!(json.three_things.items[1].rule_id, "SEC-PRECONDITIONED");
+    }
+
+    #[test]
+    fn three_things_order_is_unchanged_for_two_unconditional_criticals() {
+        let f1 = finding("SEC-FIRST", "a.rs", 1, "critical");
+        let f2 = finding("SEC-SECOND", "b.rs", 2, "critical");
+        let report = report_with(vec![f1, f2], vec![]);
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
+
+        assert_eq!(json.matrix.do_now.len(), 2);
+        assert_eq!(
+            json.three_things.items[0].rule_id, "SEC-FIRST",
+            "with neither finding preconditioned, today's (repo/path/line) order must hold: {:?}",
+            json.three_things.items
+        );
+        assert_eq!(json.three_things.items[1].rule_id, "SEC-SECOND");
     }
 
     // ── S5: fallback categories are title-cased (not raw lowercase tokens) ─────
@@ -1946,18 +6640,322 @@ mod tests {
     fn category_fallback_is_title_cased_without_a_corpus() {
         let f = finding("SUPABASE-RLS-ENABLED-1", "a.sql", 1, "critical");
         let report = report_with(vec![f], vec![]);
-        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
-        assert_eq!(json.scorecard.rows[0].category, "Supabase RLS");
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
+        // A9: the label is the closed taxonomy's, not the rule id's own first two tokens.
+        // Before A9 this read "Supabase RLS" — which happens to be readable only because
+        // this rule id is domain-first; the SAME mechanism produced "Arch No" for
+        // `ARCH-NO-CROSS-BOUNDARY-IMPORTS-1`. See `req_a9_*`.
+        assert_eq!(json.scorecard.rows[0].category, "RLS Policy");
+    }
+
+    // ── A9: a category is never a slugified rule id ───────────────────────────
+
+    /// Rule ids whose own first two tokens are NOT a category. Each one is a real shape the
+    /// product emits: a native-checker id (`crates/checks`), an AI-tier id invented per
+    /// occurrence, and a rule that predates the taxonomy backfill. None has a corpus entry,
+    /// which is exactly the condition the old fallback mangled.
+    const A9_UNMAPPED_RULE_IDS: &[&str] = &[
+        "ARCH-NO-CROSS-BOUNDARY-IMPORTS-1",
+        "SEC-INJECTION-RAW-SQL-BUILD-1",
+        "LEGACY-UNMAPPED-1",
+    ];
+
+    /// req_a9: no category that reaches a client is the rule id's own tokens with title case
+    /// applied.
+    ///
+    /// FAILS BEFORE THE CHANGE: `category_for`/`category_for_finding` both terminated in
+    /// `prettify_category_key(rule_id)`, so these three ids produced the scorecard categories
+    /// "Arch No", "Sec Injection" and "Legacy Unmapped" — and because `xlsx_export` names its
+    /// per-area worksheets from the category, "Arch No" was a client-facing Excel tab name.
+    /// Red output was three assertion failures of the form `scorecard category "Arch No" is
+    /// ARCH-NO-CROSS-BOUNDARY-IMPORTS-1 slugified`.
+    #[test]
+    fn req_a9_no_scorecard_category_is_a_slugified_rule_id() {
+        let findings: Vec<Finding> = A9_UNMAPPED_RULE_IDS
+            .iter()
+            .enumerate()
+            .map(|(i, id)| finding(id, &format!("src/a9_{i}.rs"), i + 1, "high"))
+            .collect();
+        let report = report_with(findings, A9_UNMAPPED_RULE_IDS.to_vec());
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
+
+        let categories: Vec<&str> = json
+            .scorecard
+            .rows
+            .iter()
+            .map(|r| r.category.as_str())
+            .collect();
+        assert!(
+            !categories.is_empty(),
+            "the fixture must produce scorecard rows, or this test proves nothing"
+        );
+        for rule_id in A9_UNMAPPED_RULE_IDS {
+            let slug = prettify_category_key(rule_id);
+            assert!(
+                !categories.contains(&slug.as_str()),
+                "scorecard category {slug:?} is {rule_id} slugified — a rule id is internal \
+                 vocabulary and must never reach a client as a category. All rows: {categories:?}"
+            );
+        }
+    }
+
+    /// req_a9: when NO real category can be established — no corpus entry, no calibrated
+    /// `category`, nothing the closed taxonomy recognises — the label is ONE honest generic
+    /// bucket, not a per-rule invention.
+    ///
+    /// FAILS BEFORE THE CHANGE: `LEGACY-UNMAPPED-1` and `VENDOR-THING-2` produced two
+    /// different mangled categories ("Legacy Unmapped" and "Vendor Thing") instead of both
+    /// landing in one.
+    #[test]
+    fn req_a9_unmappable_rule_ids_share_one_generic_category() {
+        assert_eq!(
+            category_for("LEGACY-UNMAPPED-1", None),
+            UNCATEGORIZED_CATEGORY
+        );
+        assert_eq!(category_for("VENDOR-THING-2", None), UNCATEGORIZED_CATEGORY);
+    }
+
+    /// req_a9: a rule id the closed semantic taxonomy DOES recognise gets that taxonomy's
+    /// client label, not the generic bucket — the fallback must not be a blanket "Other" that
+    /// throws away a category we can actually establish.
+    #[test]
+    fn req_a9_taxonomy_recognised_rule_ids_get_their_real_category() {
+        assert_eq!(
+            category_for("ARCH-NO-CROSS-BOUNDARY-IMPORTS-1", None),
+            "Architecture"
+        );
+        assert_eq!(
+            category_for("SEC-INJECTION-RAW-SQL-BUILD-1", None),
+            "Injection"
+        );
+        assert_eq!(
+            category_for("ARCH-NO-SECRETS-IN-URL-1", None),
+            "Secret Exposure"
+        );
+    }
+
+    // ── req_det: the cover's generated-at is the scan time, not the wall clock ─
+
+    /// req_det: `cover.generated_at` is derived from the scan's own provenance, so building
+    /// the same report twice produces the same string. Everything downstream (the workbook's
+    /// Index row and `docProps/core.xml`, the PDF's creation timestamp) is pinned from this
+    /// one value, so this is the root of export reproducibility.
+    ///
+    /// FAILS BEFORE THE CHANGE: `generated_at` was `chrono::Utc::now()`, so it read today's
+    /// date rather than the 2026-07-23 scan this fixture describes.
+    #[test]
+    fn req_det_cover_generated_at_is_the_scan_time() {
+        let report = report_with(vec![finding("SEC-1", "a.rs", 1, "high")], vec![]);
+        let sealed = report.clone().seal();
+        let first = build_report_json(&sealed, &HashMap::new(), None, &empty_opts());
+        let second = build_report_json(&sealed, &HashMap::new(), None, &empty_opts());
+        assert_eq!(
+            first.cover.generated_at, "2026-07-23 00:05 UTC",
+            "the cover must state when the AUDIT ran (provenance.finished_at), not when the \
+             bytes were serialized"
+        );
+        assert_eq!(first.cover.generated_at, second.cover.generated_at);
+    }
+
+    /// req_det: `scan_instant` prefers `finished_at`, falls back to `started_at`, and reports
+    /// `None` only when neither is a real instant — the three cases every pinned timestamp
+    /// downstream depends on.
+    #[test]
+    fn req_det_scan_instant_prefers_finished_then_started_then_none() {
+        let mut p = report_with(Vec::new(), Vec::new()).provenance;
+        assert_eq!(
+            scan_instant(&p).map(|t| t.timestamp()),
+            chrono::DateTime::parse_from_rfc3339("2026-07-23T00:05:00Z")
+                .ok()
+                .map(|t| t.timestamp())
+        );
+        p.finished_at = String::new();
+        assert_eq!(
+            scan_instant(&p).map(|t| t.timestamp()),
+            chrono::DateTime::parse_from_rfc3339("2026-07-23T00:00:00Z")
+                .ok()
+                .map(|t| t.timestamp()),
+            "an unfinished/unstamped run must fall back to when it STARTED"
+        );
+        p.started_at = "not a timestamp".to_string();
+        assert!(
+            scan_instant(&p).is_none(),
+            "neither field parseable must report None, never a silently invented instant"
+        );
     }
 
     // ── S6: what's-healthy caps long lists and reports a remainder count ──────
+
+    /// W23 — a rule whose finding was ABSORBED by a merge is not "verified clean".
+    ///
+    /// C5-1 already closed this for `also_matches` (a same-location demotion), and its
+    /// comment above `rule_ids_with_any_finding` explains exactly why: a rule that survived
+    /// only as an absorbed member still genuinely fired, so listing it as clean is a false
+    /// statement about the client's code. But `also_locations` — the merge-absorption
+    /// channel, one entry per absorbed FINDING rather than per rule id — was never folded in.
+    ///
+    /// This is not hypothetical. On the 2026-10-18 hearth export `SEC-NO-SECRET-FILE-1`
+    /// (a committed `.env.production`, CRITICAL) appeared with `also_locations = 2` and no
+    /// direct row of its own, and `ARCH-OBSERVABILITY-SILENT-FAILURE-1` likewise. Both were
+    /// therefore eligible for "What's healthy" while their findings sat inside another row —
+    /// the report telling a client their committed secret is a verified-clean rule.
+    /// W28 — a row's `status` and its `disposition` must not contradict each other.
+    ///
+    /// `classify` consults `finding.status` only in its `None`-wire arms. When a wire entry
+    /// EXISTS but carries a state this function does not recognise, the `_` arm returns
+    /// `Unresolved` — which renders as "Open (recommended: …)" — without ever looking at the
+    /// status that says the row is baseline-suppressed.
+    ///
+    /// An unrecognised state is not a triage decision; it is a parse miss or a producer from
+    /// a different version. Treating it as "the auditor left this open" asserts a human
+    /// judgment that nobody made, and it contradicts the row's own status in the same export.
+    /// The 2026-10-16 sweep shipped 38 rows in exactly this shape.
+    ///
+    /// A RECOGNISED state must still win: an auditor who explicitly confirmed or ignored a
+    /// baseline-suppressed row has made a real decision this session, and that is precisely
+    /// what a disposition is for.
+    /// W24 — "Three things this week" must name three distinct problems.
+    ///
+    /// The distinctness check exists, and it works, but it is gated on
+    /// `!f.root_cause_keys.is_empty()`. A row carrying NO credential token therefore skips
+    /// the check entirely and is always selected, so three rows of the same rule — three
+    /// tables missing RLS, three endpoints missing the same guard — can fill all three slots.
+    ///
+    /// For this box specifically that is wrong even though the rows are genuine. The box asks
+    /// the client to do three things this week; three instances of one rule are ONE thing
+    /// ("enable RLS on these tables"), and spending all three slots on it hides the other two
+    /// problems entirely. The graders saw exactly this: a top-3 listing one root cause three
+    /// times.
+    #[test]
+    fn req_w24_three_things_never_spends_all_slots_on_one_rule() {
+        // Three rows of ONE rule, then two genuinely different problems. All do-now severity,
+        // and none carries a root-cause credential token — the gap in the existing check.
+        let mut findings = vec![
+            finding("SUPABASE-RLS-ENABLED-1", "db/a.sql", 1, "critical"),
+            finding("SUPABASE-RLS-ENABLED-1", "db/b.sql", 2, "critical"),
+            finding("SUPABASE-RLS-ENABLED-1", "db/c.sql", 3, "critical"),
+            finding("SEC-NO-SECRET-FILE-1", ".env.production", 1, "critical"),
+            finding("ARCH-EXACT-DECIMALS-1", "db/pay.sql", 9, "critical"),
+        ];
+        for f in &mut findings {
+            f.located = true;
+        }
+        let report = report_with(findings, vec![]);
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
+
+        let picked: Vec<&str> = json
+            .three_things
+            .items
+            .iter()
+            .map(|i| i.rule_id.as_str())
+            .collect();
+        let distinct: std::collections::HashSet<&str> = picked.iter().copied().collect();
+        assert_eq!(
+            picked.len(),
+            distinct.len(),
+            "the three-things box must name three DIFFERENT problems; one rule filling \
+             several slots hides the others: {picked:?}"
+        );
+        // And the other two problems must actually surface, which is the point of the box.
+        assert!(
+            distinct.contains("SEC-NO-SECRET-FILE-1") && distinct.contains("ARCH-EXACT-DECIMALS-1"),
+            "the genuinely distinct problems must not be crowded out: {picked:?}"
+        );
+    }
+
+    #[test]
+    fn req_w28_an_unrecognised_disposition_state_falls_back_to_status_not_to_open() {
+        let mut suppressed = finding("SEC-1", "a.rs", 1, "high");
+        suppressed.status = "suppressed-baseline".to_string();
+
+        // No wire at all: already correct today, pinned so the fallback cannot regress.
+        assert_eq!(classify(&suppressed, None), Disposition::BaselineAccepted);
+
+        // A wire entry whose state this version does not know. Must NOT become Open.
+        let unknown = DispositionWire {
+            state: "SomeFutureState".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(
+            classify(&suppressed, Some(&unknown)),
+            Disposition::BaselineAccepted,
+            "an unrecognised state is a parse miss, not a decision to leave the row open - \
+             and reporting it Open contradicts the row's own baseline-suppressed status"
+        );
+
+        // An EMPTY state is the same case and the likelier one in practice.
+        let empty = DispositionWire::default();
+        assert_eq!(
+            classify(&suppressed, Some(&empty)),
+            Disposition::BaselineAccepted
+        );
+
+        // The converse, so the fix cannot swallow real triage: a RECOGNISED state still wins
+        // over the status, because that is an actual human judgment this session.
+        let confirmed = DispositionWire {
+            state: "Confirmed".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(
+            classify(&suppressed, Some(&confirmed)),
+            Disposition::Confirmed,
+            "an explicit triage decision must still override a baseline suppression"
+        );
+
+        // And a row with no suppression and an unknown state is genuinely Unresolved - the
+        // fallback must not invent a disposition where the status offers none.
+        let plain = finding("SEC-2", "b.rs", 2, "low");
+        assert_eq!(classify(&plain, Some(&unknown)), Disposition::Unresolved);
+    }
+
+    #[test]
+    fn req_w23_a_rule_absorbed_into_another_rows_locations_is_never_verified_clean() {
+        let mut carrier = finding("SEC-NO-VENDOR-TOKEN-1", ".env.production", 4, "critical");
+        carrier.also_locations = vec![crate::onboard::MergedLocation {
+            repo: "owner/repo".to_string(),
+            path: ".env.production".to_string(),
+            line: 1,
+            rule_id: "SEC-NO-SECRET-FILE-1".to_string(),
+            snippet: "committed secret file".to_string(),
+            consequence: false,
+        }];
+
+        // Both rules were audited. Only the carrier has a row of its own.
+        let report = report_with(
+            vec![carrier],
+            vec![
+                "SEC-NO-VENDOR-TOKEN-1",
+                "SEC-NO-SECRET-FILE-1",
+                "SEC-UNRELATED-1",
+            ],
+        );
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
+
+        let healthy: Vec<&str> = json
+            .whats_healthy
+            .rules
+            .iter()
+            .map(|r| r.rule_id.as_str())
+            .collect();
+        assert!(
+            !healthy.contains(&"SEC-NO-SECRET-FILE-1"),
+            "a rule absorbed into another row's `also_locations` still FIRED; listing it as \
+             verified clean tells the client a real finding does not exist. healthy = {healthy:?}"
+        );
+        // The converse, so this cannot pass by emptying the section: a rule that genuinely
+        // found nothing is still reported clean.
+        assert!(
+            healthy.contains(&"SEC-UNRELATED-1"),
+            "a genuinely clean rule must still be listed: {healthy:?}"
+        );
+    }
 
     #[test]
     fn whats_healthy_caps_at_ten_and_reports_further_clean_count() {
         let audited_owned: Vec<String> = (0..15).map(|i| format!("SEC-{i}")).collect();
         let audited: Vec<&str> = audited_owned.iter().map(String::as_str).collect();
         let report = report_with(vec![], audited);
-        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
         assert_eq!(json.whats_healthy.rules.len(), 10);
         assert_eq!(json.whats_healthy.further_clean_count, 5);
     }
@@ -1967,9 +6965,12 @@ mod tests {
     #[test]
     fn snippet_is_capped_at_max_lines_with_a_truncated_marker() {
         let mut f = finding("SEC-1", "a.rs", 1, "high");
-        f.snippet = (0..50).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+        f.snippet = (0..50)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
         let report = report_with(vec![f], vec![]);
-        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
         let capped = &json.curated_findings[0].sites[0].snippet;
         assert!(capped.lines().count() <= SNIPPET_MAX_LINES + 1, "{capped}");
         assert!(capped.contains("(truncated)"), "{capped}");
@@ -1987,7 +6988,7 @@ mod tests {
         let mut dispositions = HashMap::new();
         dispositions.insert(finding_key(&ignored), wire("Ignored", "known", ""));
         let report = report_with(vec![critical, high, ignored, dep], vec![]);
-        let json = build_report_json(&report, &dispositions, None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &dispositions, None, &empty_opts());
         assert_eq!(json.cover.stats.critical, 1);
         assert_eq!(json.cover.stats.high, 1);
         assert_eq!(json.cover.stats.medium, 1);
@@ -1995,10 +6996,414 @@ mod tests {
         assert_eq!(json.cover.stats.dependency_advisories, 1);
     }
 
+    // ── P1: deduplication + cross-tier merge, end-to-end through build_report_json ──────────
+    // docs/plans/2026-09-29_codebase-inspection-hardening.md, P1. Runs the SAME two merge
+    // passes the real audit pipeline runs (`ai_audit::merge_by_location` then
+    // `ai_audit::merge_semantic_groups`) over a faktura-SHAPED synthetic fixture — never the
+    // real fixture, never a fixture-specific rule/file/table name — then builds the report and
+    // asserts the cover's counts reflect the MERGED, distinct-defect set.
+
+    #[tokio::test]
+    async fn p1_e2e_cover_counts_and_security_finding_survive_post_merge() {
+        // Defect 1: one SQL-injection defect, flagged by BOTH a deterministic floor rule and an
+        // AI rule at the exact same location (same file+line+snippet) — must collapse to one
+        // critical row, not two.
+        let sql_code = "SELECT * FROM t WHERE name ILIKE '%${name}%'";
+        let mut det_sql = finding("SEC-NO-RAW-SQL-CONCAT-1", "api/query.ts", 10, "critical");
+        det_sql.snippet = sql_code.to_string();
+        let mut ai_sql = finding("AI-SQL-INJECTION", "api/query.ts", 10, "critical");
+        ai_sql.snippet = sql_code.to_string();
+
+        // Defect 2: a config flag and the handler that trusts it, in DIFFERENT files, tied
+        // together only by a shared captured object — must collapse to one medium row.
+        let mut config_flag = finding("CONFIG-FLAG-DEBUG-MODE", "config.rs", 5, "medium");
+        config_flag
+            .captures
+            .insert("flag".to_string(), "debug_mode".to_string());
+        let mut handler_flag = finding("AI-HANDLER-TRUSTS-DEBUG-FLAG", "handler.rs", 80, "medium");
+        handler_flag
+            .captures
+            .insert("flag".to_string(), "debug_mode".to_string());
+
+        // Defect 3: the canonical security-vs-structure overlap — a low-value structural rule
+        // and a genuine AI security finding (reflected-origin CORS with credentials) at the
+        // same line. The security finding must survive as the primary, never hidden.
+        let cors_code = "app.use(cors())";
+        let mut structural = finding("ARCH-MIDDLEWARE-FIRST-1", "middleware.ts", 12, "high");
+        structural.snippet = cors_code.to_string();
+        let mut security = finding(
+            "AI-CORS-REFLECTED-ORIGIN-CREDENTIALS",
+            "middleware.ts",
+            12,
+            "medium",
+        );
+        security.snippet = cors_code.to_string();
+
+        let files = vec![
+            ("api/query.ts".to_string(), sql_code.to_string()),
+            ("middleware.ts".to_string(), cors_code.to_string()),
+        ];
+        let raw = vec![
+            det_sql,
+            ai_sql,
+            config_flag,
+            handler_flag,
+            structural,
+            security,
+        ];
+
+        // The real pipeline's two merge passes, in the real order: exact-location first, then
+        // cross-tier/cross-file.
+        let merged = crate::ai_audit::merge_semantic_groups(
+            crate::ai_audit::merge_by_location(raw, &files),
+            &files,
+        );
+        assert_eq!(
+            merged.len(),
+            3,
+            "six raw findings, three distinct defects — merging must land on exactly three"
+        );
+
+        // P3: the CORS security finding is an AI-tier rule id the corpus never saw (an
+        // invented "AI-CORS-REFLECTED-ORIGIN-CREDENTIALS" id) — the citation gate only lets
+        // it survive in `curated_findings` when its class maps to a REAL grounded corpus
+        // rule (`SEC-NO-PERMISSIVE-CORS-CREDENTIALS-1`), which requires the real corpus to
+        // be loaded rather than `None`.
+        let corpus_path = camerata_rules::corpus_path();
+        let (corpus, corpus_errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+        assert!(
+            corpus_errors.is_empty(),
+            "corpus must load cleanly, got errors: {corpus_errors:?}"
+        );
+
+        let report = report_with(merged, vec![]);
+        let json = build_report_json(
+            &report.clone().seal(),
+            &HashMap::new(),
+            Some(&corpus),
+            &empty_opts(),
+        );
+
+        // Cover critical count == distinct criticals: the SQL-injection defect is the only
+        // critical among the three merged defects, and it must count ONCE.
+        assert_eq!(
+            json.cover.stats.critical, 1,
+            "the merged SQL-injection defect must count once, not twice"
+        );
+
+        // The CORS security finding must survive as its own curated row, never absorbed under
+        // (or hidden behind) the structural rule id, and at medium severity or higher.
+        let cors_group = json
+            .curated_findings
+            .iter()
+            .find(|g| g.rule_id == "AI-CORS-REFLECTED-ORIGIN-CREDENTIALS")
+            .expect("the security finding must survive the merge as the primary, not be hidden");
+        assert!(
+            matches!(
+                cors_group.sites[0].severity.as_str(),
+                "medium" | "high" | "critical"
+            ),
+            "the security finding must never be downgraded below medium: {}",
+            cors_group.sites[0].severity
+        );
+        assert!(cors_group.sites[0]
+            .also_matches
+            .contains(&"ARCH-MIDDLEWARE-FIRST-1".to_string()));
+
+        // The structural rule id must NOT appear as its own curated row (it lost primacy to the
+        // security finding it clustered with).
+        assert!(
+            !json
+                .curated_findings
+                .iter()
+                .any(|g| g.rule_id == "ARCH-MIDDLEWARE-FIRST-1"),
+            "the structural row must not survive as its own peer row once absorbed"
+        );
+    }
+
+    // ── C5-1: REG-1/REG-2 (merge primacy + severity) + coverage accounting ──────────────────
+    // docs: the deterministic/AI merge-primacy regression + the coverage-accounting bug it
+    // caused. Synthetic findings only.
+
+    /// The canonical REG-1/REG-2 scenario end to end: a deterministic floor rule (medium,
+    /// grounded, authored fix) and an AI-tier rule (critical, hedged, no fix of its own)
+    /// describe the SAME defect at the SAME site. Before C5-1, the AI row's inflated severity
+    /// won primacy (`primary_rank` ranked severity ahead of origin), demoting the clean
+    /// deterministic finding to `also_matches` and reporting it as "verified clean" in Coverage
+    /// (REG-1); the merged severity then inherited the AI member's inflated critical (REG-2).
+    /// After the fix: the deterministic rule is primary, the merged severity is its own grounded
+    /// "medium" (never the AI member's "critical"), its authored fix survives, and BOTH rule ids
+    /// count as matched in Coverage — neither is listed healthy/"verified clean".
+    #[tokio::test]
+    async fn c5_1_deterministic_primary_wins_merge_and_coverage_counts_both_rule_ids() {
+        let code = "db.query(`DELETE FROM t WHERE id=${id}`)";
+        let mut det = finding("SEC-DETERMINISTIC-SITE-1", "a.ts", 10, "medium");
+        det.snippet = code.to_string();
+        det.fix_specific =
+            Some("Use a parameterized query via the shared `db` client.".to_string());
+        let mut ai = finding("AI-SITE-DEFECT-1", "a.ts", 10, "critical");
+        ai.snippet = code.to_string();
+        ai.confidence = Some("needs-review".to_string());
+        ai.needs_review = true;
+
+        let files = vec![("a.ts".to_string(), code.to_string())];
+        let merged = crate::ai_audit::merge_by_location(vec![det, ai], &files);
+        assert_eq!(
+            merged.len(),
+            1,
+            "same-site findings must collapse to one row"
+        );
+        assert_eq!(
+            merged[0].rule_id, "SEC-DETERMINISTIC-SITE-1",
+            "the deterministic rule must win primacy, regardless of the AI member's higher \
+             (uncalibrated) severity"
+        );
+        assert_eq!(
+            merged[0].severity, "medium",
+            "the merged severity must be the deterministic primary's own, never the AI member's \
+             inflated critical"
+        );
+        assert!(merged[0]
+            .also_matches
+            .contains(&"AI-SITE-DEFECT-1".to_string()));
+
+        let report = report_with(merged, vec!["SEC-DETERMINISTIC-SITE-1", "AI-SITE-DEFECT-1"]);
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
+
+        let group = json
+            .curated_findings
+            .iter()
+            .find(|g| g.rule_id == "SEC-DETERMINISTIC-SITE-1")
+            .expect("the deterministic rule must survive as the curated primary");
+        assert_eq!(group.sites.len(), 1);
+        let site = &group.sites[0];
+        assert_eq!(site.severity, "medium");
+        assert_eq!(
+            site.confidence.as_deref(),
+            Some("high"),
+            "an un-hedged deterministic finding resolves to high confidence"
+        );
+        assert_eq!(
+            site.fix_for_this_finding.as_deref(),
+            Some("Use a parameterized query via the shared `db` client."),
+            "the deterministic primary's own authored fix must survive"
+        );
+        assert!(site.also_matches.contains(&"AI-SITE-DEFECT-1".to_string()));
+
+        // Coverage: BOTH rule ids count as matched this run — neither is "verified clean".
+        let healthy_ids: Vec<&str> = json
+            .whats_healthy
+            .rules
+            .iter()
+            .map(|r| r.rule_id.as_str())
+            .collect();
+        assert!(
+            !healthy_ids.contains(&"SEC-DETERMINISTIC-SITE-1"),
+            "the primary rule must never be listed as healthy/clean: {healthy_ids:?}"
+        );
+        assert!(
+            !healthy_ids.contains(&"AI-SITE-DEFECT-1"),
+            "the absorbed AI member must never be listed as healthy/clean either: {healthy_ids:?}"
+        );
+
+        let det_category = category_for("SEC-DETERMINISTIC-SITE-1", None);
+        let ai_category = category_for("AI-SITE-DEFECT-1", None);
+        let det_row = json
+            .scorecard
+            .rows
+            .iter()
+            .find(|r| r.category == det_category)
+            .expect("the deterministic rule's category must have a scorecard row");
+        assert!(
+            det_row.audited_rules >= 1 && det_row.clean_rules == 0,
+            "the primary must count as matched (>= 1), never clean: {det_row:?}"
+        );
+        let ai_row = json
+            .scorecard
+            .rows
+            .iter()
+            .find(|r| r.category == ai_category)
+            .expect("the AI rule's own category must have a scorecard row");
+        assert!(
+            ai_row.audited_rules >= 1 && ai_row.clean_rules == 0,
+            "the absorbed AI member must count as matched (>= 1) in Coverage, never \
+             'verified clean': {ai_row:?}"
+        );
+    }
+
+    /// Safe twin: two findings of DIFFERENT defect classes/categories at one site (line 0 —
+    /// uncited/file-level, so `merge_by_location`'s "unrelated file-level issues legitimately
+    /// share line 0" carve-out applies, and the categories are deliberately disjoint so
+    /// `merge_semantic_groups` has no shared signal either) must NEVER merge — they stay two
+    /// independent rows, and both are counted. Proves C5-1's primacy/severity changes only
+    /// affect findings that WERE already matched into one group; they never cause two distinct
+    /// defects to collapse into one.
+    #[test]
+    fn c5_1_safe_twin_different_defect_classes_at_one_site_stay_two_rows() {
+        let mut a = finding("ARCH-NO-VERSIONING-1", "app.ts", 0, "medium");
+        a.category = Some("api-layer".to_string());
+        a.snippet = "no API versioning scheme is in use".to_string();
+        let mut b = finding("AI-MISSING-RATE-LIMIT-1", "app.ts", 0, "low");
+        b.category = Some("transport-security".to_string());
+        b.snippet = "no rate limiting is configured".to_string();
+
+        let merged = crate::ai_audit::merge_semantic_groups(
+            crate::ai_audit::merge_by_location(vec![a, b], &[]),
+            &[],
+        );
+        assert_eq!(
+            merged.len(),
+            2,
+            "two findings of different defect classes at one site must stay two rows: {merged:?}"
+        );
+
+        let report = report_with(merged, vec![]);
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
+        // Every code finding gets a `FindingRefJson` in exactly one matrix bucket regardless of
+        // citation (the uncited-AI gate only changes WHICH bucket, never whether it's counted at
+        // all) — so scanning every bucket is the general "both survive, nothing silently
+        // dropped" check, unlike `curated_findings` alone (which the P3 citation gate can hold
+        // an uncited AI-tier id out of entirely).
+        let rule_ids: std::collections::HashSet<&str> = json
+            .matrix
+            .do_now
+            .iter()
+            .chain(json.matrix.do_next.iter())
+            .chain(json.matrix.plan.iter())
+            .chain(json.matrix.accepted.iter())
+            .chain(json.matrix.informational.iter())
+            .chain(json.matrix.held.iter())
+            .map(|f| f.rule_id.as_str())
+            .collect();
+        assert!(rule_ids.contains("ARCH-NO-VERSIONING-1"));
+        assert!(rule_ids.contains("AI-MISSING-RATE-LIMIT-1"));
+    }
+
+    /// Cover-count invariant: however many raw findings merge into however many real defects,
+    /// the cover's critical count must equal the number of critical rows ACTUALLY RENDERED in
+    /// the report body — never the raw pre-merge count. Two real critical defects, each
+    /// independently double-reported (a deterministic floor rule + a duplicate AI rule at the
+    /// same site) — 4 raw findings, 2 real defects — must land on a critical count of 2.
+    #[tokio::test]
+    async fn c5_1_cover_critical_count_equals_rendered_critical_rows_after_merge() {
+        // Deliberately disjoint structural objects (`accountsRepo` vs `sessionsRepo`) and
+        // distinct detail prose, so the two sites are genuinely two SEPARATE defects — no
+        // cross-file semantic signal (shared captured object / description overlap / same-rule
+        // same-file) should fuse them together; only each site's OWN deterministic+AI pair
+        // merges via the exact-location pass.
+        let code_a = "accountsRepo.query(`DELETE FROM accounts WHERE id=${id}`)";
+        let mut det_a = finding("SEC-NO-RAW-SQL-CONCAT-1", "a.ts", 10, "critical");
+        det_a.snippet = code_a.to_string();
+        det_a.detail =
+            "Unsanitized input flows into a raw SQL delete against accounts.".to_string();
+        let mut ai_a = finding("AI-SQL-INJECTION-A", "a.ts", 10, "critical");
+        ai_a.snippet = code_a.to_string();
+        ai_a.detail = det_a.detail.clone();
+
+        let code_b = "sessionsRepo.execute(`DELETE FROM sessions WHERE token=${t}`)";
+        let mut det_b = finding("SEC-NO-RAW-SQL-CONCAT-1", "b.ts", 20, "critical");
+        det_b.snippet = code_b.to_string();
+        det_b.detail =
+            "Unsanitized input flows into a raw SQL delete against sessions.".to_string();
+        let mut ai_b = finding("AI-SQL-INJECTION-B", "b.ts", 20, "critical");
+        ai_b.snippet = code_b.to_string();
+        ai_b.detail = det_b.detail.clone();
+
+        let files = vec![
+            ("a.ts".to_string(), code_a.to_string()),
+            ("b.ts".to_string(), code_b.to_string()),
+        ];
+        let raw = vec![det_a, ai_a, det_b, ai_b];
+        let merged = crate::ai_audit::merge_semantic_groups(
+            crate::ai_audit::merge_by_location(raw, &files),
+            &files,
+        );
+        assert_eq!(
+            merged.len(),
+            2,
+            "4 raw findings describing 2 real defects must land on exactly 2 rows: {merged:?}"
+        );
+
+        let report = report_with(merged, vec![]);
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
+
+        let rendered_critical_rows = json
+            .curated_findings
+            .iter()
+            .flat_map(|g| &g.sites)
+            .filter(|s| s.severity == "critical")
+            .count();
+        assert_eq!(
+            json.cover.stats.critical, rendered_critical_rows,
+            "the cover's critical count must equal the number of critical rows actually \
+             rendered in the body"
+        );
+        assert_eq!(
+            json.cover.stats.critical, 2,
+            "merging must land on exactly 2 criticals, never the raw pre-merge count of 4"
+        );
+    }
+
+    /// Invariant: a row the `is_informational` gate routes to the appendix (testing-style/
+    /// absence-type/info-tier — the three signals in that function's doc comment, since C5-4
+    /// moved the former needs-review §2c signal to its own severity-unbounded `is_held_for_review`
+    /// gate/`held` bucket) NEVER carries a critical/high severity badge, by the hard invariant at
+    /// the top of `is_informational` itself. Pinned here as an explicit regression test over
+    /// `build_report_json`'s actual output, scoped to those three signals specifically: the
+    /// SEPARATE, pre-existing, and deliberately severity-blind `is_uncited_ai_finding` gate
+    /// (see that function's own doc comment — "a critical, uncited finding is PRECISELY the
+    /// case this gate exists to catch") is an intentional report-integrity carve-out, not part
+    /// of this invariant, and is untouched by C5-1.
+    #[test]
+    fn c5_1_is_informational_routed_rows_never_exceed_medium_severity() {
+        // One finding that genuinely routes to the informational appendix via a remaining
+        // `is_informational` signal (the `info` tier itself), and one SEPARATE needs-review
+        // finding (medium severity) proving C5-4's split: it now routes to `held`, NOT
+        // `informational` — the inverse of the old (regressed) behavior this test used to pin.
+        let mut hedged_medium = finding("ARCH-DEBATABLE-1", "a.rs", 1, "medium");
+        hedged_medium.confidence = Some("needs-review".to_string());
+        hedged_medium.needs_review = true;
+        let info_tier = finding("ARCH-INFO-NOTE-1", "b.rs", 2, "info");
+
+        let report = report_with(vec![hedged_medium, info_tier], vec![]);
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
+        assert_eq!(
+            json.matrix.informational.len(),
+            1,
+            "only the info-tier finding routes to the informational appendix: {:?}",
+            json.matrix.informational
+        );
+        for row in &json.matrix.informational {
+            assert!(
+                severity_rank(&row.severity) >= severity_rank("medium"),
+                "an is_informational-routed row must never exceed medium severity: {row:?}"
+            );
+        }
+        // C5-4: the needs-review medium finding routes to `held`, never `informational` —
+        // severity is preserved (not downgraded), unlike an `informational` row, and it is
+        // never dropped.
+        assert_eq!(
+            json.matrix.held.len(),
+            1,
+            "the needs-review finding must route to held, not informational: {:?}",
+            json.matrix.held
+        );
+        assert_eq!(json.matrix.held[0].rule_id, "ARCH-DEBATABLE-1");
+        assert_eq!(
+            json.matrix.held[0].severity, "medium",
+            "held rows keep their real severity, never capped"
+        );
+    }
+
     #[test]
     fn scorecard_rows_are_ordered_action_needed_before_clean() {
-        let action_needed = finding("ZZZ-1", "a.rs", 1, "critical");
-        let clean_category_finding = finding("AAA-1", "b.rs", 2, "critical");
+        // A9: the two rule ids must land in DIFFERENT categories for this test to have two
+        // rows to order. Before A9 any two distinct ids did, because each was slugified into
+        // its own category; now an id the taxonomy cannot place falls into the shared generic
+        // bucket, so the fixture names two ids the taxonomy genuinely separates (the old
+        // `ZZZ-1`/`AAA-1` both resolve to "Other" and collapse into one row).
+        let action_needed = finding("SEC-NO-HARDCODED-SECRETS-1", "a.rs", 1, "critical");
+        let clean_category_finding = finding("PERF-N-PLUS-ONE-1", "b.rs", 2, "critical");
         let mut dispositions = HashMap::new();
         // The AAA-1 finding is accepted, so its category's status is "Clean" (no OPEN
         // high/critical exposure) even though a critical finding exists in it.
@@ -2007,10 +7412,37 @@ mod tests {
             wire("Ignored", "accepted", ""),
         );
         let report = report_with(vec![action_needed, clean_category_finding], vec![]);
-        let json = build_report_json(&report, &dispositions, None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &dispositions, None, &empty_opts());
         assert_eq!(json.scorecard.rows[0].status, "Action-needed");
-        assert_eq!(json.scorecard.rows[0].category, "Zzz");
+        assert_eq!(json.scorecard.rows[0].category, "Secret Exposure");
         assert_eq!(json.scorecard.rows[1].status, "Clean");
+    }
+
+    /// C4-P4 residual defect 6 (verification): a category with >= 1 finding must show "rules
+    /// checked" >= 1, even when the firing rule id was never in the pre-declared
+    /// `audited_rule_ids` list (an AI-tier finding invents its own id; a rule can also just not
+    /// be pre-declared) — `category_for_finding`'s "declared-audited UNION distinct-fired-rule-
+    /// ids" derivation closes that gap. This is a general, corpus-free regression pin for the
+    /// same contract `xlsx_export::ai_tier_finding_citation_title_and_category_are_consistent_
+    /// and_grounded` already exercises end-to-end against the real corpus; confirmed STILL
+    /// fixed as of this residual-defects pass — see that test's own
+    /// `cat_row.audited_rules >= 1` assertion.
+    #[test]
+    fn scorecard_rules_checked_is_at_least_one_for_a_category_whose_rule_was_never_pre_declared() {
+        let f = finding("SOME-UNDECLARED-RULE-1", "a.rs", 1, "critical");
+        let report = report_with(vec![f], vec![]); // audited_rule_ids deliberately empty.
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
+        let row = json
+            .scorecard
+            .rows
+            .iter()
+            .find(|r| r.critical == 1)
+            .expect("the finding's category must appear in the scorecard");
+        assert!(
+            row.audited_rules >= 1,
+            "a category with >= 1 finding must show >= 1 rules checked, got {}",
+            row.audited_rules
+        );
     }
 
     #[test]
@@ -2020,26 +7452,35 @@ mod tests {
         // — otherwise a fully clean category is silently invisible instead of visibly
         // reading "Clean", and there is nothing for the Action-needed -> Clean ordering to
         // place at the bottom.
-        let flagged = finding("ZZZ-1", "a.rs", 1, "critical");
-        let clean_only = finding("AAA-1", "b.rs", 2, "high");
+        // A9: two ids the taxonomy genuinely separates, for the same reason as
+        // `scorecard_rows_are_ordered_action_needed_before_clean` — the old `ZZZ-1`/`AAA-1`
+        // now share the generic bucket and would collapse these two rows into one.
+        let flagged = finding("SEC-NO-HARDCODED-SECRETS-1", "a.rs", 1, "critical");
+        let clean_only = finding("PERF-N-PLUS-ONE-1", "b.rs", 2, "high");
         let mut dispositions = HashMap::new();
         dispositions.insert(
             finding_key(&clean_only),
             wire("FalsePositive", "not exploitable", ""),
         );
-        let report = report_with(vec![flagged, clean_only], vec!["ZZZ-1", "AAA-1"]);
-        let json = build_report_json(&report, &dispositions, None, &empty_opts());
+        let report = report_with(
+            vec![flagged, clean_only],
+            vec!["SEC-NO-HARDCODED-SECRETS-1", "PERF-N-PLUS-ONE-1"],
+        );
+        let json = build_report_json(&report.clone().seal(), &dispositions, None, &empty_opts());
         assert_eq!(json.scorecard.rows.len(), 2, "{:?}", json.scorecard.rows);
         let clean_row = json
             .scorecard
             .rows
             .iter()
-            .find(|r| r.category == "Aaa")
-            .expect("AAA-1's category must still get a row despite zero real findings");
+            .find(|r| r.category == "Performance")
+            .expect("the clean rule's category must still get a row despite zero real findings");
         assert_eq!(clean_row.status, "Clean");
         assert_eq!(clean_row.audited_rules, 1);
         assert_eq!(clean_row.clean_rules, 1);
-        assert_eq!(clean_row.critical + clean_row.high + clean_row.medium + clean_row.low, 0);
+        assert_eq!(
+            clean_row.critical + clean_row.high + clean_row.medium + clean_row.low,
+            0
+        );
     }
 
     // ── Suppressed-baseline -> pre-existing accepted debt ──────────────────────
@@ -2049,12 +7490,43 @@ mod tests {
         let mut f = finding("SEC-1", "a.rs", 1, "high");
         f.status = "suppressed-baseline".to_string();
         let report = report_with(vec![f], vec![]);
-        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
         assert_eq!(
             json.curated_findings[0].sites[0].disposition,
             "Pre-existing accepted debt (baseline suppression)"
         );
         assert_eq!(json.matrix.accepted.len(), 1);
+    }
+
+    /// Defect 2 (2026-10-07 grading pass): the SAME `status == "suppressed-baseline"` string
+    /// the test above correctly honors for a genuine floor finding must NEVER be honored for a
+    /// PREVIEW/external-tool row — no real baseline record can ever back one (see `classify`'s
+    /// doc comment: `classify_repo_findings`, the only legitimate producer of this status,
+    /// runs exclusively over the pre-preview finding set). Before this fix, every scan-time
+    /// preview finding (`scan_tools::preview_finding` defaults `status` to this exact string)
+    /// rendered "Pre-existing accepted debt (baseline suppression)" on a repo that had never
+    /// been triaged at all.
+    #[test]
+    fn a_preview_finding_with_suppressed_baseline_status_is_never_baseline_accepted() {
+        let mut f = finding("SEC-1", "a.rs", 1, "high");
+        f.status = "suppressed-baseline".to_string();
+        f.preview = true;
+        f.preview_tool = Some("semgrep".to_string());
+        let report = report_with(vec![f], vec![]);
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
+        assert_ne!(
+            json.curated_findings[0].sites[0].disposition,
+            "Pre-existing accepted debt (baseline suppression)",
+            "a preview row must never be stamped as baseline-accepted"
+        );
+        assert_eq!(
+            json.matrix.accepted.len(),
+            0,
+            "a preview row with no real baseline record must not land in Accepted"
+        );
+        // It still renders — never dropped — as an ordinary open row the severity×effort
+        // quadrant can place normally.
+        assert_ne!(json.curated_findings[0].sites[0].bucket, "accepted");
     }
 
     #[test]
@@ -2066,7 +7538,7 @@ mod tests {
         let mut dispositions = HashMap::new();
         dispositions.insert(finding_key(&f), wire("TechDebt", "", "Now"));
         let report = report_with(vec![f], vec![]);
-        let json = build_report_json(&report, &dispositions, None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &dispositions, None, &empty_opts());
         assert_eq!(json.matrix.do_now.len(), 1);
     }
 
@@ -2079,7 +7551,7 @@ mod tests {
         let mut f = finding("SEC-1", "a.rs", 1, "high");
         f.status = "suppressed-inline".to_string();
         let report = report_with(vec![f], vec![]);
-        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
         assert_eq!(
             json.curated_findings[0].sites[0].disposition,
             "Waived in code (inline camerata:allow)"
@@ -2095,7 +7567,7 @@ mod tests {
         let mut dispositions = HashMap::new();
         dispositions.insert(finding_key(&f), wire("TechDebt", "", "Now"));
         let report = report_with(vec![f], vec![]);
-        let json = build_report_json(&report, &dispositions, None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &dispositions, None, &empty_opts());
         assert_eq!(json.matrix.do_now.len(), 1);
     }
 
@@ -2111,7 +7583,12 @@ mod tests {
         );
         let f = finding("SEC-NO-UNSAFE-DESERIALIZATION-1", "a.py", 1, "critical");
         let report = report_with(vec![f], vec![]);
-        let json = build_report_json(&report, &HashMap::new(), Some(&corpus), &empty_opts());
+        let json = build_report_json(
+            &report.clone().seal(),
+            &HashMap::new(),
+            Some(&corpus),
+            &empty_opts(),
+        );
 
         let group = &json.curated_findings[0];
         assert_eq!(group.citation.kind, "grounded");
@@ -2126,53 +7603,1553 @@ mod tests {
         );
     }
 
-    // ── Recommended-Fix corpus-directive join ──────────────────────────────────
+    // ── Recommended-Fix: binds to authored `remediation`, NEVER `directive` (Fix 1) ─────
 
     #[tokio::test]
-    async fn resolve_fix_joins_the_default_option_directive_from_the_corpus() {
+    async fn resolve_fix_binds_to_the_authored_remediation_and_substitutes_captures() {
         let corpus_path = camerata_rules::corpus_path();
         let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
-        assert!(errors.is_empty(), "corpus must load cleanly, got errors: {errors:?}");
-        let fix = resolve_fix("SEC-NO-UNSAFE-DESERIALIZATION-1", Some(&corpus));
         assert!(
-            fix.contains("yaml.safe_load") || fix.contains("SafeLoader"),
-            "expected the rule's default-option directive (safe-deserialization guidance), got: {fix:?}"
+            errors.is_empty(),
+            "corpus must load cleanly, got errors: {errors:?}"
+        );
+        let mut f = finding(
+            "SUPABASE-RLS-ENABLED-1",
+            "supabase/migrations/1.sql",
+            1,
+            "critical",
+        );
+        f.captures
+            .insert("table".to_string(), "profiles".to_string());
+        let fix = resolve_fix("SUPABASE-RLS-ENABLED-1", Some(&corpus), &f, None)
+            .expect("SUPABASE-RLS-ENABLED-1 must have authored remediation");
+        assert!(
+            fix.contains("`profiles`") || fix.contains("profiles"),
+            "expected the captured table name substituted into the authored remediation, got: {fix:?}"
+        );
+        assert!(
+            !fix.to_lowercase().contains("timeline replay")
+                && !fix.contains("emit a critical finding"),
+            "must bind to the client-facing `remediation` text, never the detection-recipe \
+             `directive` (which mentions the replay mechanism), got: {fix:?}"
         );
     }
 
     #[test]
-    fn resolve_fix_is_empty_not_fabricated_when_corpus_is_absent() {
-        assert_eq!(resolve_fix("SEC-NO-UNSAFE-DESERIALIZATION-1", None), "");
+    fn resolve_fix_never_falls_back_to_directive_when_remediation_is_unauthored() {
+        // Every real corpus rule's default option now has authored `remediation` (the corpus-wide
+        // authoring passes closed that gap), so no REAL rule id can demonstrate the "unauthored"
+        // path anymore — hardcoding one here would silently start asserting nothing the moment the
+        // next rule got authored. Instead build a synthetic single-rule corpus via
+        // `ruleset_with_unauthored_rule`: a real, resolvable default option with a real `directive`,
+        // but `remediation: None`. This pins the fail-safe permanently, independent of authoring
+        // state: absent remediation means an omitted Fix, never the directive text.
+        let corpus = camerata_rules::ruleset_with_unauthored_rule("SEC-TEST-UNAUTHORED-1");
+        let f = finding("SEC-TEST-UNAUTHORED-1", "a.py", 1, "critical");
+        let fix = resolve_fix("SEC-TEST-UNAUTHORED-1", Some(&corpus), &f, None);
+        assert_eq!(
+            fix, None,
+            "must omit the Fix block, not fall back to the rule's directive, when remediation is unauthored"
+        );
     }
 
-    #[tokio::test]
-    async fn resolve_fix_is_empty_when_rule_id_is_unknown_to_the_corpus() {
-        let corpus_path = camerata_rules::corpus_path();
-        let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
-        assert!(errors.is_empty(), "corpus must load cleanly, got errors: {errors:?}");
-        assert_eq!(resolve_fix("AI-CUSTOM-ARCH-RULE-1", Some(&corpus)), "");
-    }
-
-    #[tokio::test]
-    async fn curated_finding_site_carries_the_fix_line_populated_from_the_corpus() {
-        let corpus_path = camerata_rules::corpus_path();
-        let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
-        assert!(errors.is_empty(), "corpus must load cleanly, got errors: {errors:?}");
+    #[test]
+    fn resolve_fix_is_none_not_fabricated_when_corpus_is_absent() {
         let f = finding("SEC-NO-UNSAFE-DESERIALIZATION-1", "a.py", 1, "critical");
-        let report = report_with(vec![f], vec![]);
-        let json = build_report_json(&report, &HashMap::new(), Some(&corpus), &empty_opts());
+        assert_eq!(
+            resolve_fix("SEC-NO-UNSAFE-DESERIALIZATION-1", None, &f, None),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_fix_is_none_when_rule_id_is_unknown_to_the_corpus() {
+        let corpus_path = camerata_rules::corpus_path();
+        let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
         assert!(
-            !json.curated_findings[0].sites[0].fix.is_empty(),
-            "curated site's fix line must be populated from the corpus directive"
+            errors.is_empty(),
+            "corpus must load cleanly, got errors: {errors:?}"
+        );
+        let f = finding("AI-CUSTOM-ARCH-RULE-1", "a.rs", 1, "medium");
+        assert_eq!(
+            resolve_fix("AI-CUSTOM-ARCH-RULE-1", Some(&corpus), &f, None),
+            None
+        );
+    }
+
+    // ── resolve_fix honors the evaluated/chosen option (2026-09-22 audit-integrated
+    // alternatives), not always the rule's default ──────────────────────────────────
+
+    /// `SUPABASE-RLS-ENABLED-1` has two options: the default
+    /// `enforce-rls-enabled-replayed-end-state` (authored remediation) and
+    /// `regex-grep-each-migration-independently` (NO authored remediation — a deliberately
+    /// rejected alternative in the corpus). This makes it a real fixture for proving
+    /// `evaluated_option_id` genuinely changes which option's remediation renders, not just
+    /// which rule's default happens to be picked.
+    #[tokio::test]
+    async fn resolve_fix_uses_the_finding_evaluated_option_id_over_the_project_chosen_option() {
+        let corpus_path = camerata_rules::corpus_path();
+        let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+        assert!(
+            errors.is_empty(),
+            "corpus must load cleanly, got errors: {errors:?}"
+        );
+        let mut f = finding(
+            "SUPABASE-RLS-ENABLED-1",
+            "supabase/migrations/1.sql",
+            1,
+            "critical",
+        );
+        f.evaluated_option_id = Some("enforce-rls-enabled-replayed-end-state".to_string());
+        // The chosen_option PARAMETER disagrees with the finding's evaluated_option_id — the
+        // finding's tag must win (it's what this SPECIFIC finding was actually judged under).
+        let fix = resolve_fix(
+            "SUPABASE-RLS-ENABLED-1",
+            Some(&corpus),
+            &f,
+            Some("regex-grep-each-migration-independently"),
+        );
+        assert!(
+            fix.is_some(),
+            "the evaluated option has authored remediation and must win over the chosen_option param"
+        );
+    }
+
+    /// When the finding carries no `evaluated_option_id` (a legacy finding, or a rule the AI
+    /// tier never tagged), `resolve_fix` falls back to the project's `chosen_option` parameter
+    /// — and correctly OMITS the Fix block when that specific option has no authored
+    /// remediation, proving the per-option (not just per-rule) omit-if-unauthored contract.
+    #[tokio::test]
+    async fn resolve_fix_falls_back_to_the_chosen_option_param_when_the_finding_has_none() {
+        let corpus_path = camerata_rules::corpus_path();
+        let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+        assert!(
+            errors.is_empty(),
+            "corpus must load cleanly, got errors: {errors:?}"
+        );
+        let f = finding(
+            "SUPABASE-RLS-ENABLED-1",
+            "supabase/migrations/1.sql",
+            1,
+            "critical",
+        );
+        assert!(f.evaluated_option_id.is_none());
+        let fix = resolve_fix(
+            "SUPABASE-RLS-ENABLED-1",
+            Some(&corpus),
+            &f,
+            Some("regex-grep-each-migration-independently"),
+        );
+        assert_eq!(
+            fix, None,
+            "the chosen (non-default) option has no authored remediation — must omit, not \
+             fall back to the default option's remediation or the directive"
+        );
+    }
+
+    /// With neither `evaluated_option_id` nor a `chosen_option` param, resolution falls all the
+    /// way through to the corpus rule's own default — today's exact pre-feature behavior,
+    /// unchanged.
+    #[tokio::test]
+    async fn resolve_fix_falls_back_to_the_corpus_default_when_nothing_else_is_set() {
+        let corpus_path = camerata_rules::corpus_path();
+        let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+        assert!(
+            errors.is_empty(),
+            "corpus must load cleanly, got errors: {errors:?}"
+        );
+        let f = finding(
+            "SUPABASE-RLS-ENABLED-1",
+            "supabase/migrations/1.sql",
+            1,
+            "critical",
+        );
+        let fix = resolve_fix("SUPABASE-RLS-ENABLED-1", Some(&corpus), &f, None);
+        assert!(
+            fix.is_some(),
+            "the corpus default option has authored remediation"
+        );
+    }
+
+    #[tokio::test]
+    async fn curated_finding_site_carries_the_fix_line_populated_from_authored_remediation() {
+        let corpus_path = camerata_rules::corpus_path();
+        let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+        assert!(
+            errors.is_empty(),
+            "corpus must load cleanly, got errors: {errors:?}"
+        );
+        let mut f = finding(
+            "SUPABASE-RLS-ENABLED-1",
+            "supabase/migrations/1.sql",
+            1,
+            "critical",
+        );
+        f.captures
+            .insert("table".to_string(), "profiles".to_string());
+        let report = report_with(vec![f], vec![]);
+        let json = build_report_json(
+            &report.clone().seal(),
+            &HashMap::new(),
+            Some(&corpus),
+            &empty_opts(),
+        );
+        let fix = json.curated_findings[0].sites[0]
+            .fix
+            .as_deref()
+            .expect("curated site's fix line must be populated from authored remediation");
+        assert!(fix.contains("profiles"));
+    }
+
+    #[test]
+    fn curated_finding_site_fix_is_none_not_fabricated_without_a_corpus() {
+        // Deliberately NOT an `AI-`-prefixed rule id: this test is about `resolve_fix`
+        // (the "Fix:" line), not the P3 citation gate — an `AI-` id with no corpus would
+        // also be held out of `curated_findings` entirely as uncited (see
+        // `citation_gate_holds_an_unclassifiable_ai_finding_out_of_curated_as_uncited`),
+        // which would make `json.curated_findings[0]` panic here for an unrelated reason.
+        let f = finding("CUSTOM-ARCH-RULE-1", "a.rs", 1, "medium");
+        let report = report_with(vec![f], vec![]);
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
+        assert_eq!(json.curated_findings[0].sites[0].fix, None);
+    }
+
+    #[test]
+    fn curated_finding_site_fix_is_none_when_remediation_is_unauthored() {
+        // Same rationale as `resolve_fix_never_falls_back_to_directive_when_remediation_is_unauthored`
+        // above: every real corpus rule is now authored, so a synthetic single-rule corpus (via
+        // `ruleset_with_unauthored_rule`) is the only way to permanently pin the "unauthored
+        // remediation omits the Fix line" fail-safe, independent of corpus authoring state.
+        //
+        // C5-8: a row with NEITHER a rule-level fix NOR a codebase-specific one is now re-routed
+        // to `held` entirely (see `curated_row_with_neither_fix_half_and_a_known_unauthored_rule_
+        // is_held_not_curated` below) — that is a DIFFERENT, newer invariant than the one this
+        // test exists to pin (that `resolve_fix`/`CuratedSiteJson::fix` itself never fabricates a
+        // directive-sourced fallback). Giving the finding a `fix_specific` here keeps it curated
+        // so this test still exercises exactly what it always did, undisturbed by C5-8.
+        let corpus = camerata_rules::ruleset_with_unauthored_rule("SEC-TEST-UNAUTHORED-1");
+        let mut f = finding("SEC-TEST-UNAUTHORED-1", "a.py", 1, "critical");
+        f.fix_specific = Some(
+            "A codebase-specific fix, independent of the rule's own (absent) \
+                                authored remediation."
+                .to_string(),
+        );
+        // C6-B4: this test is about the FIX half only — give it its own calibrated effort so
+        // `is_action_row_missing_an_estimate` (a separate, newer gate for the OTHER half)
+        // doesn't also re-route it to held and mask the assertion below.
+        f.effort = Some("medium".to_string());
+        let report = report_with(vec![f], vec![]);
+        let json = build_report_json(
+            &report.clone().seal(),
+            &HashMap::new(),
+            Some(&corpus),
+            &empty_opts(),
+        );
+        assert_eq!(
+            json.curated_findings[0].sites[0].fix, None,
+            "an unauthored rule's Fix block must be omitted (None), never backfilled from directive"
+        );
+    }
+
+    /// C5-8 (R7 amended): the actual target scenario `curated_finding_site_fix_is_none_when_
+    /// remediation_is_unauthored` above used to (incorrectly, pre-C5-8) leave curated — a KNOWN
+    /// corpus rule with no authored remediation, paired with a finding that also has no
+    /// codebase-specific fix. Both fix halves are empty, so this row must never ship as a
+    /// do_now item with a blank Fix block: it is re-routed to `held`, fully visible, with the
+    /// reason disclosed in its own headline.
+    #[test]
+    fn curated_row_with_neither_fix_half_and_a_known_unauthored_rule_is_held_not_curated() {
+        let corpus = camerata_rules::ruleset_with_unauthored_rule("SEC-TEST-UNAUTHORED-1");
+        let f = finding("SEC-TEST-UNAUTHORED-1", "a.py", 1, "critical");
+        assert_eq!(
+            f.fix_specific, None,
+            "sanity check: the shared `finding()` helper must not default to a fix_specific"
+        );
+        let report = report_with(vec![f], vec![]);
+        let json = build_report_json(
+            &report.clone().seal(),
+            &HashMap::new(),
+            Some(&corpus),
+            &empty_opts(),
+        );
+
+        assert!(
+            json.curated_findings.is_empty(),
+            "a row with no fix at all must never ship as a curated action item: {:?}",
+            json.curated_findings
+        );
+        assert_eq!(
+            json.matrix.held.len(),
+            1,
+            "it must be re-routed to held, not dropped: {:?}",
+            json.matrix.held
+        );
+        assert_eq!(
+            json.matrix.held[0].severity, "critical",
+            "held never downgrades severity"
+        );
+        assert!(
+            json.matrix.held[0]
+                .headline
+                .to_lowercase()
+                .contains("fix not generated"),
+            "the held row's own headline must disclose WHY: {}",
+            json.matrix.held[0].headline
+        );
+        // It is still fully present in the held-for-review appendix group too, never dropped.
+        let group = json
+            .held_for_review_findings
+            .iter()
+            .find(|g| g.rule_id == "SEC-TEST-UNAUTHORED-1")
+            .expect("the row must still be present in held_for_review_findings");
+        assert_eq!(group.sites[0].bucket, "held");
+        assert_eq!(group.sites[0].fix, None);
+        assert_eq!(group.sites[0].fix_for_this_finding, None);
+    }
+
+    /// C5-8: a curated row WITH a fix (either half) is entirely unaffected — this is the
+    /// companion "never over-applies" half of the gate's test matrix.
+    #[tokio::test]
+    async fn curated_row_with_a_fix_stays_in_its_action_bucket() {
+        let corpus = camerata_rules::ruleset_with_unauthored_rule("SEC-TEST-UNAUTHORED-1");
+
+        // Half A: no rule-level remediation, but a codebase-specific fix WAS generated.
+        let mut with_specific = finding("SEC-TEST-UNAUTHORED-1", "a.py", 1, "critical");
+        with_specific.fix_specific =
+            Some("Rotate the credential and remove it from source.".to_string());
+        // C6-B4: give it its own calibrated effort so the separate estimate-availability gate
+        // (`is_action_row_missing_an_estimate`) doesn't also re-route it to held — this test
+        // is isolating the FIX half only, exactly like the test above.
+        with_specific.effort = Some("low".to_string());
+        let report = report_with(vec![with_specific], vec![]);
+        let json = build_report_json(
+            &report.clone().seal(),
+            &HashMap::new(),
+            Some(&corpus),
+            &empty_opts(),
+        );
+        assert_eq!(json.matrix.held.len(), 0);
+        assert_eq!(json.matrix.do_now.len(), 1);
+        assert_eq!(json.curated_findings.len(), 1);
+
+        // Half B: no codebase-specific fix, but the rule itself DOES carry authored remediation.
+        let corpus_path = camerata_rules::corpus_path();
+        let (real_corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+        assert!(errors.is_empty(), "corpus must load cleanly: {errors:?}");
+        let mut rls = finding(
+            "SUPABASE-RLS-ENABLED-1",
+            "supabase/migrations/1.sql",
+            1,
+            "critical",
+        );
+        rls.captures
+            .insert("table".to_string(), "profiles".to_string());
+        let report2 = report_with(vec![rls], vec!["SUPABASE-RLS-ENABLED-1"]);
+        let json2 = build_report_json(
+            &report2.clone().seal(),
+            &HashMap::new(),
+            Some(&real_corpus),
+            &empty_opts(),
+        );
+        assert_eq!(json2.matrix.held.len(), 0);
+        assert_eq!(json2.matrix.do_now.len(), 1);
+        assert_eq!(json2.curated_findings.len(), 1);
+        assert!(json2.curated_findings[0].sites[0].fix.is_some());
+    }
+
+    // ── P4: floor findings get finding-level treatment ──────────────────────────────────
+
+    /// Every AUDIT_RULES floor rule fired against a synthetic (never a fixture/benchmark)
+    /// snippet, run through the REAL bundled corpus — no client-facing string (a curated
+    /// site's `headline`, its `detail`, or any matrix `FindingRefJson::headline`) may ever
+    /// start with "Deny": that word is the gate's own internal enforcement directive
+    /// (`camerata_gateway::RULE_REGISTRY`), never authored client prose. General over the
+    /// whole floor, not one rule — this is the P4 contract test the plan calls for.
+    #[tokio::test]
+    async fn no_client_facing_string_begins_with_deny_for_any_floor_rule_that_fires() {
+        let corpus_path = camerata_rules::corpus_path();
+        let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+        assert!(
+            errors.is_empty(),
+            "corpus must load cleanly, got errors: {errors:?}"
+        );
+
+        let files = vec![
+            (".env".to_string(), "SERVICE_ROLE_KEY=abc\n".to_string()),
+            (
+                "a.py".to_string(),
+                "API_KEY = \"hardcoded-not-a-real-secret-abcdefgh\"\n".to_string(),
+            ),
+            (
+                "b.py".to_string(),
+                concat!("token = \"sk_li", "ve_abcdefghijklmnopqrstuvwx\"\n").to_string(),
+            ),
+            (
+                "c.pem".to_string(),
+                concat!(
+                    "-----BEGIN RSA PRIV",
+                    "ATE KEY-----\nMIIBFAKEFAKEFAKE\n-----END RSA PRIV",
+                    "ATE KEY-----\n"
+                )
+                .to_string(),
+            ),
+            (
+                "d.py".to_string(),
+                "q = \"SELECT * FROM users WHERE id = \" + user_id\n".to_string(),
+            ),
+            (
+                "e.py".to_string(),
+                "url = f\"https://api.example.com/x?api_key={key}\"\n".to_string(),
+            ),
+            (
+                "f.py".to_string(),
+                "requests.get(url, verify=False)\n".to_string(),
+            ),
+            ("g.py".to_string(), "yaml.load(data)\n".to_string()),
+        ];
+        let findings = crate::onboard::audit_files("owner/repo", &files);
+        assert!(
+            findings.len() >= 6,
+            "fixture must actually trip most of the floor rules under test, got: {findings:?}"
+        );
+
+        let report = report_with(findings, Vec::new());
+        let json = build_report_json(
+            &report.clone().seal(),
+            &HashMap::new(),
+            Some(&corpus),
+            &empty_opts(),
+        );
+
+        let mut offenders = Vec::new();
+        for group in &json.curated_findings {
+            for site in &group.sites {
+                if site.headline.starts_with("Deny") {
+                    offenders.push(format!("{} headline: {:?}", group.rule_id, site.headline));
+                }
+                if site.detail.starts_with("Deny") {
+                    offenders.push(format!("{} detail: {:?}", group.rule_id, site.detail));
+                }
+            }
+        }
+        let matrix_buckets: [&Vec<FindingRefJson>; 6] = [
+            &json.matrix.do_now,
+            &json.matrix.do_next,
+            &json.matrix.plan,
+            &json.matrix.accepted,
+            &json.matrix.informational,
+            &json.matrix.held,
+        ];
+        for bucket in matrix_buckets {
+            for f in bucket {
+                if f.headline.starts_with("Deny") {
+                    offenders.push(format!("matrix headline: {:?}", f.headline));
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "client-facing strings must never start with \"Deny\" (the gate's own internal \
+             directive): {offenders:#?}"
+        );
+    }
+
+    /// Every curated finding (floor or AI-tier) must carry a non-empty `est_hours` label — a
+    /// deterministic floor finding must never render "not yet estimated" (see
+    /// `default_effort_for` in `onboard::audit` and `effort_hours_bounds` above).
+    #[tokio::test]
+    async fn every_curated_finding_has_a_non_empty_est_hours() {
+        let corpus_path = camerata_rules::corpus_path();
+        let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+        assert!(
+            errors.is_empty(),
+            "corpus must load cleanly, got errors: {errors:?}"
+        );
+        let files = vec![(".env".to_string(), "SERVICE_ROLE_KEY=abc\n".to_string())];
+        let findings = crate::onboard::audit_files("owner/repo", &files);
+        assert!(!findings.is_empty());
+        let report = report_with(findings, Vec::new());
+        let json = build_report_json(
+            &report.clone().seal(),
+            &HashMap::new(),
+            Some(&corpus),
+            &empty_opts(),
+        );
+        for group in &json.curated_findings {
+            for site in &group.sites {
+                let (_, hours_label) = effort_hours_bounds(site.effort.as_deref());
+                assert_ne!(
+                    hours_label, "not yet estimated",
+                    "{}: curated finding must carry a real estimate, not the honest-gap label",
+                    group.rule_id
+                );
+            }
+        }
+    }
+
+    // ── C4-P3: deterministic confidence-by-construction + estimate fallback ────────────────
+    //
+    // Deterministic-floor and RLS-replay rows never go through AI calibration, so `confidence`
+    // and `effort` are `None` on them forever unless something else fills them in. Before this
+    // pass, a PROVEN critical (a live secret, an unprotected table, a definer function with no
+    // pinned search_path) rendered "Confidence: not evaluated this run" / "Effort: not
+    // estimated this run" beside it — which reads as doubt next to exactly the findings a
+    // client is paying to act on first.
+
+    /// A deterministic finding (a realistic architectural-checker shape: `arch_violation_to_
+    /// finding` never sets `confidence` or `effort`) with a REAL location, against a rule whose
+    /// corpus TOML carries an authored effort band (`SUPABASE-FUNC-SEARCH-PATH-1`, authored
+    /// `effort = "low"` on its default option), must export `confidence == "high"` AND a
+    /// non-empty estimate — in `findings.json` (`CuratedSiteJson`), the xlsx `FindingRow`, AND
+    /// the compiled PDF's rendered text. Never "not evaluated this run" / "not estimated this
+    /// run" next to a proven defect.
+    #[tokio::test]
+    async fn deterministic_finding_with_real_location_exports_high_confidence_and_an_estimate() {
+        let corpus_path = camerata_rules::corpus_path();
+        let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+        assert!(
+            errors.is_empty(),
+            "corpus must load cleanly, got errors: {errors:?}"
+        );
+
+        // Exactly the shape `onboard::architectural::arch_violation_to_finding` produces: no
+        // calibration ever touches this finding, so `confidence`/`effort` start (and, absent
+        // this fix, would stay) `None`.
+        let f = finding(
+            "SUPABASE-FUNC-SEARCH-PATH-1",
+            "supabase/migrations/1.sql",
+            8,
+            "high",
+        );
+        assert_eq!(f.confidence, None, "fixture must simulate never-calibrated");
+        assert_eq!(f.effort, None, "fixture must simulate never-calibrated");
+
+        let report = report_with(vec![f.clone()], vec!["SUPABASE-FUNC-SEARCH-PATH-1"]);
+        let json = build_report_json(
+            &report.clone().seal(),
+            &HashMap::new(),
+            Some(&corpus),
+            &empty_opts(),
+        );
+
+        // ── findings.json (CuratedSiteJson) ──
+        let site = &json
+            .curated_findings
+            .iter()
+            .find(|g| g.rule_id == "SUPABASE-FUNC-SEARCH-PATH-1")
+            .expect("must be curated, not held out")
+            .sites[0];
+        assert_eq!(
+            site.confidence,
+            Some("high".to_string()),
+            "a deterministic finding with a real location exports confidence 'high' by \
+             construction: {:?}",
+            site.confidence
+        );
+        assert_eq!(
+            site.effort,
+            Some("low".to_string()),
+            "must fall back to the rule's authored effort band: {:?}",
+            site.effort
+        );
+
+        // ── xlsx FindingRow (via the same findings.json export the product route ships) ──
+        // `FindingRow`'s fields are private to `xlsx_export` (only the struct is `pub`), so a
+        // sibling module inspects it the same way an external consumer of `findings.json`
+        // would: through its serialized shape.
+        let findings_export = crate::xlsx_export::build_findings_export(
+            &report.clone().seal(),
+            &HashMap::new(),
+            Some(&corpus),
+            &json,
+            &HashMap::new(),
+        );
+        let export_value =
+            serde_json::to_value(&findings_export).expect("FindingsExport must serialize");
+        let row = export_value["findings"]
+            .as_array()
+            .expect("findings must be an array")
+            .iter()
+            .find(|r| r["rule_id"] == "SUPABASE-FUNC-SEARCH-PATH-1")
+            .expect("row must be present in the xlsx/findings.json export");
+        assert_eq!(
+            row["confidence"], "high",
+            "xlsx confidence must match the PDF/json"
+        );
+        assert_eq!(
+            row["effort"], "low",
+            "xlsx effort must fall back to the authored band"
+        );
+
+        // ── PDF source ──
+        if which_typst().is_none() {
+            eprintln!(
+                "skipping the PDF leg of \
+                 deterministic_finding_with_real_location_exports_high_confidence_and_an_estimate: \
+                 typst not on PATH"
+            );
+            return;
+        }
+        let pdf = compile_pdf(&json).await.expect("compile_pdf must succeed");
+        let text = pdf_extract::extract_text_from_mem(&pdf)
+            .expect("must be able to extract text from the compiled PDF");
+        assert!(
+            text.contains("Confidence: high"),
+            "the PDF must render the deterministic-by-construction confidence: {text:?}"
+        );
+        assert!(
+            !text.contains("Confidence: not evaluated this run"),
+            "a proven deterministic finding must never render as unevaluated: {text:?}"
+        );
+        assert!(
+            !text.contains("Effort: not estimated this run"),
+            "a deterministic finding with an authored effort band must never render \
+             unestimated: {text:?}"
+        );
+    }
+
+    /// Sequencing proof with R1 (`downgrade_unlocated_above_informational`): a deterministic
+    /// finding downgraded to informational because it carries NO real location (empty path,
+    /// `line == 0` — the absence-only / platform-owned shape) must NOT get the "high by
+    /// construction" treatment. It stays hedged (`"needs-review"`), exactly like any other
+    /// informational row — proving the deterministic-confidence rule runs AFTER R1's downgrade
+    /// has already had its say, never before it.
+    #[test]
+    fn deterministic_finding_downgraded_to_informational_is_not_high() {
+        let unlocated = finding("SUPABASE-RLS-POLICY-DISABLED-1", "", 0, "critical");
+        assert_eq!(unlocated.confidence, None, "never calibrated");
+        let report = report_with(vec![unlocated], vec!["SUPABASE-RLS-POLICY-DISABLED-1"]);
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
+
+        assert_eq!(
+            json.matrix.informational.len(),
+            1,
+            "R1 must still downgrade the unlocated finding to informational: {:?}",
+            json.matrix
+        );
+        // C4-P4 (residual defect 5): this finding's whole group is entirely informational (its
+        // only site), so it lives in `held_for_review_findings`, not `curated_findings` — see
+        // `AuditReportJson::curated_findings`'s doc comment.
+        assert!(json.curated_findings.is_empty());
+        let site = &json.held_for_review_findings[0].sites[0];
+        assert_eq!(
+            site.confidence,
+            Some("needs-review".to_string()),
+            "an informational deterministic row must stay hedged, never 'high': {:?}",
+            site.confidence
+        );
+    }
+
+    /// An AI-tier finding the calibrator genuinely marked doubtful keeps its calibrated
+    /// `"needs-review"` confidence (never overwritten to `"high"` — `is_ai_tier` excludes it from
+    /// the deterministic-by-construction path), and its calibrated effort still renders even
+    /// though the row is hedged — a needs-review verdict is a confidence judgement, not an
+    /// estimate failure. C5-4: a `high`-severity hedge like this one routes to `held` (never an
+    /// action bucket, regardless of severity) — the site lives in `held_for_review_findings`,
+    /// not `curated_findings`.
+    #[tokio::test]
+    async fn ai_tier_needs_review_row_keeps_its_confidence_and_still_carries_an_estimate() {
+        let corpus_path = camerata_rules::corpus_path();
+        let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+        assert!(
+            errors.is_empty(),
+            "corpus must load cleanly, got errors: {errors:?}"
+        );
+        let mut f = finding(
+            "SUPABASE-RLS-ENABLED-1",
+            "supabase/migrations/1.sql",
+            1,
+            "high",
+        );
+        f.confidence = Some("needs-review".to_string());
+        f.needs_review = true;
+        f.effort = Some("medium".to_string());
+        let report = report_with(vec![f], vec!["SUPABASE-RLS-ENABLED-1"]);
+        let json = build_report_json(
+            &report.clone().seal(),
+            &HashMap::new(),
+            Some(&corpus),
+            &empty_opts(),
+        );
+        assert!(
+            json.curated_findings.is_empty(),
+            "a hedged row — even high severity — must never render under Curated findings: {:?}",
+            json.curated_findings
+        );
+        let site = &json.held_for_review_findings[0].sites[0];
+        assert_eq!(
+            site.bucket, "held",
+            "a high hedge routes to held, not an action bucket"
+        );
+        assert_eq!(
+            site.severity, "high",
+            "held never downgrades severity, unlike the informational appendix"
+        );
+        assert_eq!(
+            site.confidence,
+            Some("needs-review".to_string()),
+            "a genuine calibration doubt verdict must be preserved, never promoted to high"
+        );
+        assert_eq!(
+            site.effort,
+            Some("medium".to_string()),
+            "a hedged row still carries its own calibrated estimate — doubt about the \
+             finding is not the same thing as an unestimated fix"
+        );
+    }
+
+    /// The C4-P3 guardrail: nothing downstream may ever refuse or drop a row because it has no
+    /// calibration and no corpus to fall back on — the honest degrade is "not yet estimated",
+    /// never an omitted row. A bare deterministic finding with NO corpus at all (so neither a
+    /// calibrated effort NOR an authored band is available) still exports, still lands in its
+    /// severity-driven bucket, and still carries the deterministic-by-construction confidence.
+    #[test]
+    fn a_row_with_no_calibration_and_no_corpus_still_exports_unrefused() {
+        let f = finding("ARCH-NEVER-CALIBRATED-1", "a.rs", 1, "high");
+        assert_eq!(f.confidence, None);
+        assert_eq!(f.effort, None);
+        let report = report_with(vec![f], vec![]);
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
+
+        assert_eq!(
+            json.curated_findings.len(),
+            1,
+            "a finding with no calibration and no corpus must still be curated, never dropped"
+        );
+        let site = &json.curated_findings[0].sites[0];
+        assert_eq!(
+            site.confidence,
+            Some("high".to_string()),
+            "still gets the deterministic-by-construction confidence even with no corpus"
+        );
+        assert_eq!(
+            site.effort, None,
+            "with neither a calibrated effort nor a corpus to fall back on, the row \
+             honestly reports no estimate rather than fabricating one"
+        );
+        // Bucket placement is untouched by any of this — a high-severity finding still lands
+        // somewhere actionable, never silently excluded.
+        let in_some_action_bucket =
+            json.matrix.do_now.len() + json.matrix.do_next.len() + json.matrix.plan.len() == 1;
+        assert!(
+            in_some_action_bucket,
+            "the row must land in exactly one action bucket, never vanish: {:?}",
+            json.matrix
+        );
+    }
+
+    /// A committed-secret floor finding (`SEC-NO-SECRET-FILE-1` on a real `.env`) renders a
+    /// headline naming the actual file, PLUS a `.gitignore`-coverage context fact in its
+    /// detail — never the gate's own "Deny writing a file whose path marks it as
+    /// secret-bearing…" directive.
+    #[tokio::test]
+    async fn committed_secret_finding_renders_a_specific_headline_and_a_context_fact() {
+        let corpus_path = camerata_rules::corpus_path();
+        let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+        assert!(
+            errors.is_empty(),
+            "corpus must load cleanly, got errors: {errors:?}"
+        );
+        let files = vec![
+            (".gitignore".to_string(), "node_modules/\n".to_string()),
+            (".env".to_string(), "SERVICE_ROLE_KEY=abc\n".to_string()),
+        ];
+        let findings = crate::onboard::audit_files("owner/repo", &files);
+        let report = report_with(findings, Vec::new());
+        let json = build_report_json(
+            &report.clone().seal(),
+            &HashMap::new(),
+            Some(&corpus),
+            &empty_opts(),
+        );
+        let group = json
+            .curated_findings
+            .iter()
+            .find(|g| g.rule_id == "SEC-NO-SECRET-FILE-1")
+            .expect("SEC-NO-SECRET-FILE-1 must be curated for a real committed .env");
+        let site = &group.sites[0];
+        assert!(
+            site.headline.contains(".env"),
+            "headline must name the actual file, got: {:?}",
+            site.headline
+        );
+        assert!(
+            !site.headline.starts_with("Deny") && !site.detail.starts_with("Deny"),
+            "must never render the gate directive: headline={:?} detail={:?}",
+            site.headline,
+            site.detail
+        );
+        assert!(
+            site.detail.contains("gitignore") || site.detail.contains(".gitignore"),
+            "detail must carry the gitignore-coverage context fact, got: {:?}",
+            site.detail
+        );
+    }
+
+    /// `SEC-NO-RAW-SQL-CONCAT-1` had NO corpus entry at all before P4 (flagged by P3's own
+    /// doc comment on `is_ai_tier`) — it must now resolve to a GROUNDED citation (CWE-89 +
+    /// OWASP), never "AI-advisory, model-inferred." (it isn't even AI-tier — it's a
+    /// deterministic floor rule, which makes the pre-P4 "advisory" label doubly wrong).
+    #[tokio::test]
+    async fn sec_no_raw_sql_concat_1_resolves_to_a_grounded_citation() {
+        let corpus_path = camerata_rules::corpus_path();
+        let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+        assert!(
+            errors.is_empty(),
+            "corpus must load cleanly, got errors: {errors:?}"
+        );
+        let citation = resolve_citation("SEC-NO-RAW-SQL-CONCAT-1", None, Some(&corpus));
+        assert_eq!(
+            citation.kind, "grounded",
+            "SEC-NO-RAW-SQL-CONCAT-1 must resolve to a grounded citation, got: {citation:?}"
+        );
+        assert!(
+            citation
+                .sources
+                .iter()
+                .any(|s| s.url.contains("cwe.mitre.org/data/definitions/89")),
+            "must cite CWE-89 (SQL Injection), got: {:?}",
+            citation.sources
+        );
+        assert!(
+            citation.sources.iter().any(|s| s.url.contains("owasp.org")),
+            "must also cite OWASP, got: {:?}",
+            citation.sources
+        );
+
+        // End-to-end: a real finding of this rule, run through the curated-set builder,
+        // must carry that same grounded citation — not fall through to "advisory".
+        let f = finding("SEC-NO-RAW-SQL-CONCAT-1", "a.py", 1, "critical");
+        let report = report_with(vec![f], vec![]);
+        let json = build_report_json(
+            &report.clone().seal(),
+            &HashMap::new(),
+            Some(&corpus),
+            &empty_opts(),
+        );
+        let group = json
+            .curated_findings
+            .iter()
+            .find(|g| g.rule_id == "SEC-NO-RAW-SQL-CONCAT-1")
+            .expect("SEC-NO-RAW-SQL-CONCAT-1 must be curated, not held out as uncited");
+        assert_eq!(group.citation.kind, "grounded");
+    }
+
+    /// W3 (commodity-class taint layer) grounded-mapping test: a SYNTHETIC external-tool
+    /// finding whose OWN rule id is the semgrep taint rule's id (not a corpus id) still
+    /// resolves to OUR grounded citation (CWE-89/OWASP), OUR authored remediation, and never
+    /// loses its external-tool provenance (`preview = true`, `preview_tool = Some("semgrep")`)
+    /// — it must never render as our own deterministic tier, and never borrow a citation from
+    /// an unrelated rule.
+    #[tokio::test]
+    async fn taint_sqli_tool_rule_id_resolves_through_the_grounding_map() {
+        let corpus_path = camerata_rules::corpus_path();
+        let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+        assert!(
+            errors.is_empty(),
+            "corpus must load cleanly, got errors: {errors:?}"
+        );
+
+        let mut f = finding(
+            "camerata.security.taint-sql-injection-go",
+            "internal/db.go",
+            88,
+            "high",
+        );
+        f.preview = true;
+        f.preview_tool = Some("semgrep".to_string());
+
+        let citation = resolve_citation(&f.rule_id, f.preview_tool.as_deref(), Some(&corpus));
+        assert_eq!(
+            citation.kind, "grounded",
+            "a taint rule's OWN (non-corpus) rule id must still resolve to a grounded citation \
+             via the grounding map, got: {citation:?}"
+        );
+        assert!(
+            citation
+                .sources
+                .iter()
+                .any(|s| s.url.contains("cwe.mitre.org/data/definitions/89")),
+            "must cite CWE-89 (the SAME citation SEC-NO-RAW-SQL-CONCAT-1 cites), got: {:?}",
+            citation.sources
+        );
+
+        let fix = resolve_fix(&f.rule_id, Some(&corpus), &f, None);
+        assert!(
+            fix.is_some_and(|s| !s.trim().is_empty()),
+            "must resolve OUR authored remediation via the grounding map"
+        );
+
+        // Provenance stays honest: never promoted to our own deterministic tier.
+        assert!(
+            f.preview,
+            "grounding a citation must never flip preview to false"
+        );
+        assert_eq!(
+            f.preview_tool.as_deref(),
+            Some("semgrep"),
+            "grounding a citation must never clear preview_tool (never 'our own tier')"
+        );
+
+        // End-to-end: the curated-set builder renders it grounded too, not advisory.
+        let report = report_with(vec![f], vec![]);
+        let json = build_report_json(
+            &report.clone().seal(),
+            &HashMap::new(),
+            Some(&corpus),
+            &empty_opts(),
+        );
+        let group = json
+            .curated_findings
+            .iter()
+            .find(|g| g.rule_id == "camerata.security.taint-sql-injection-go")
+            .expect("must be curated, not held out as uncited");
+        assert_eq!(group.citation.kind, "grounded");
+    }
+
+    /// Sensitive-data-in-logs taint class grounded-mapping test: SYNTHETIC external-tool
+    /// findings for BOTH the secret/credential family (`...taint-log-secret-python`, "high")
+    /// and the PII family (`...taint-log-pii-python`, "medium") resolve to the SAME grounded
+    /// corpus rule (SEC-NO-SENSITIVE-DATA-IN-LOGS-1 / CWE-532) with our citation and authored
+    /// remediation, while each KEEPS its own distinct severity — confirming the grounding join
+    /// (`corpus_rule_for`) never touches a finding's own severity (see that function's doc
+    /// comment), which is what makes the two-severity design in the YAML's section comment
+    /// actually hold end to end rather than being silently flattened once grounded.
+    #[tokio::test]
+    async fn taint_log_sink_tool_rule_ids_resolve_through_the_grounding_map_with_distinct_severities(
+    ) {
+        let corpus_path = camerata_rules::corpus_path();
+        let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+        assert!(
+            errors.is_empty(),
+            "corpus must load cleanly, got errors: {errors:?}"
+        );
+
+        for (rule_id, severity) in [
+            ("camerata.security.taint-log-secret-python", "high"),
+            ("camerata.security.taint-log-pii-python", "medium"),
+        ] {
+            let mut f = finding(rule_id, "app/handlers.py", 23, severity);
+            f.preview = true;
+            f.preview_tool = Some("semgrep".to_string());
+
+            let citation = resolve_citation(&f.rule_id, f.preview_tool.as_deref(), Some(&corpus));
+            assert_eq!(
+                citation.kind, "grounded",
+                "{rule_id} must resolve to a grounded citation via the grounding map, got: {citation:?}"
+            );
+            assert!(
+                citation
+                    .sources
+                    .iter()
+                    .any(|s| s.url.contains("cwe.mitre.org/data/definitions/532")),
+                "{rule_id} must cite CWE-532 (Insertion of Sensitive Information into Log File), got: {:?}",
+                citation.sources
+            );
+
+            let fix = resolve_fix(&f.rule_id, Some(&corpus), &f, None);
+            assert!(
+                fix.is_some_and(|s| !s.trim().is_empty()),
+                "{rule_id} must resolve OUR authored remediation via the grounding map"
+            );
+
+            assert!(
+                f.preview,
+                "grounding a citation must never flip preview to false"
+            );
+            assert_eq!(f.preview_tool.as_deref(), Some("semgrep"));
+
+            // End-to-end: the curated-set builder renders it grounded, AND preserves this
+            // finding's own distinct severity — never flattened to one shared value.
+            let report = report_with(vec![f], vec![]);
+            let json = build_report_json(
+                &report.clone().seal(),
+                &HashMap::new(),
+                Some(&corpus),
+                &empty_opts(),
+            );
+            let group = json
+                .curated_findings
+                .iter()
+                .find(|g| g.rule_id == rule_id)
+                .unwrap_or_else(|| panic!("{rule_id} must be curated, not held out as uncited"));
+            assert_eq!(group.citation.kind, "grounded");
+            assert_eq!(
+                group.sites.first().map(|s| s.severity.as_str()),
+                Some(severity),
+                "{rule_id} must keep its own severity ({severity}) through the curated-set builder"
+            );
+        }
+    }
+
+    /// ESLint wiring (JAVASCRIPT-REACT-EXHAUSTIVE-DEPS-1 / RULES-OF-HOOKS-1): a SYNTHETIC
+    /// eslint finding whose OWN rule id is the real ESLint SARIF `ruleId`
+    /// (`react-hooks/exhaustive-deps`, not a corpus id) still resolves to OUR grounded
+    /// citation (the React docs lint-rule page), OUR authored remediation, and never loses
+    /// its external-tool provenance (`preview = true`, `preview_tool = Some("eslint")`) —
+    /// it must never render as our own deterministic tier. Mirrors
+    /// `taint_sqli_tool_rule_id_resolves_through_the_grounding_map` above for Semgrep.
+    #[tokio::test]
+    async fn react_hooks_exhaustive_deps_tool_rule_id_resolves_through_the_grounding_map() {
+        let corpus_path = camerata_rules::corpus_path();
+        let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+        assert!(
+            errors.is_empty(),
+            "corpus must load cleanly, got errors: {errors:?}"
+        );
+
+        let mut f = finding(
+            "react-hooks/exhaustive-deps",
+            "src/UseThing.tsx",
+            42,
+            "medium",
+        );
+        f.preview = true;
+        f.preview_tool = Some("eslint".to_string());
+
+        let citation = resolve_citation(&f.rule_id, f.preview_tool.as_deref(), Some(&corpus));
+        assert_eq!(
+            citation.kind, "grounded",
+            "the eslint-native rule id must still resolve to a grounded citation via the \
+             grounding map, got: {citation:?}"
+        );
+        assert!(
+            citation.sources.iter().any(|s| s
+                .url
+                .contains("react.dev/reference/eslint-plugin-react-hooks")),
+            "must cite the SAME React docs source JAVASCRIPT-REACT-EXHAUSTIVE-DEPS-1 cites, \
+             got: {:?}",
+            citation.sources
+        );
+
+        let fix = resolve_fix(&f.rule_id, Some(&corpus), &f, None);
+        assert!(
+            fix.is_some_and(|s| !s.trim().is_empty()),
+            "must resolve OUR authored remediation via the grounding map"
+        );
+
+        // Provenance stays honest: never promoted to our own deterministic tier.
+        assert!(
+            f.preview,
+            "grounding a citation must never flip preview to false"
+        );
+        assert_eq!(
+            f.preview_tool.as_deref(),
+            Some("eslint"),
+            "grounding a citation must never clear preview_tool (never 'our own tier')"
+        );
+
+        // End-to-end: the curated-set builder renders it grounded too, not advisory.
+        let report = report_with(vec![f], vec![]);
+        let json = build_report_json(
+            &report.clone().seal(),
+            &HashMap::new(),
+            Some(&corpus),
+            &empty_opts(),
+        );
+        let group = json
+            .curated_findings
+            .iter()
+            .find(|g| g.rule_id == "react-hooks/exhaustive-deps")
+            .expect("must be curated, not held out as uncited");
+        assert_eq!(group.citation.kind, "grounded");
+    }
+
+    /// A tool rule id with NO grounding mapping at all (an unrecognized id) must still fall
+    /// back to the honest generic "preview" label — the grounding map is additive, it never
+    /// makes an ungrounded id LOOK grounded.
+    #[test]
+    fn ungrounded_tool_rule_id_still_falls_back_to_preview_label() {
+        let citation =
+            resolve_citation("camerata.security.some-future-rule", Some("semgrep"), None);
+        assert_eq!(citation.kind, "preview");
+        assert!(citation.label.contains("semgrep"));
+    }
+
+    /// Defect 1/3 (2026-10-07 grading pass): the preview citation label must never say
+    /// "Deterministic" (reserved for Camerata's own proven floor checks) or use internal
+    /// "wired into the CI gate" phrasing — both leaked into the client PDF/xlsx via this
+    /// exact label before the fix.
+    #[test]
+    fn preview_citation_label_has_no_deterministic_or_ci_gate_phrasing() {
+        let citation =
+            resolve_citation("camerata.security.some-future-rule", Some("semgrep"), None);
+        assert_eq!(citation.kind, "preview");
+        for banned in ["Deterministic", "wired into the CI gate"] {
+            assert!(
+                !citation.label.contains(banned),
+                "preview citation label must never contain {banned:?}: {}",
+                citation.label
+            );
+        }
+    }
+
+    /// A clean repo (no floor findings at all) must still render without panicking, with an
+    /// empty curated set and empty matrix — the P4 machinery must never assume at least one
+    /// floor finding exists.
+    #[tokio::test]
+    async fn a_clean_repo_with_no_floor_findings_still_renders_fine() {
+        let corpus_path = camerata_rules::corpus_path();
+        let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+        assert!(
+            errors.is_empty(),
+            "corpus must load cleanly, got errors: {errors:?}"
+        );
+        let files = vec![("a.py".to_string(), "print('hello world')\n".to_string())];
+        let findings = crate::onboard::audit_files("owner/repo", &files);
+        assert!(findings.is_empty(), "fixture must genuinely be clean");
+        let report = report_with(findings, Vec::new());
+        let json = build_report_json(
+            &report.clone().seal(),
+            &HashMap::new(),
+            Some(&corpus),
+            &empty_opts(),
+        );
+        assert!(json.curated_findings.is_empty());
+        assert_eq!(json.matrix.do_now.len(), 0);
+        assert_eq!(json.matrix.do_next.len(), 0);
+        assert_eq!(json.matrix.plan.len(), 0);
+        assert_eq!(json.matrix.informational.len(), 0);
+    }
+
+    // ── P2: fix_specific shown as the PRIMARY fix, generic `fix` secondary ──────────────
+
+    #[test]
+    fn curated_finding_site_shows_fix_specific_as_fix_for_this_finding() {
+        let mut f = finding("ARCH-1", "app/auth/signout/route.ts", 12, "high");
+        f.fix_specific = Some(
+            "Use `safeInternalPath` from lib/redirect.ts, as app/auth/signin/route.ts does."
+                .to_string(),
+        );
+        let report = report_with(vec![f], vec![]);
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
+        assert_eq!(
+            json.curated_findings[0].sites[0]
+                .fix_for_this_finding
+                .as_deref(),
+            Some("Use `safeInternalPath` from lib/redirect.ts, as app/auth/signin/route.ts does.")
         );
     }
 
     #[test]
-    fn curated_finding_site_fix_is_empty_not_fabricated_without_a_corpus() {
-        let f = finding("AI-CUSTOM-ARCH-RULE-1", "a.rs", 1, "medium");
+    fn curated_finding_site_fix_for_this_finding_is_none_when_never_generated() {
+        // Back-compat / deterministic-only-scan case: `fix_specific` was never set.
+        let f = finding("ARCH-1", "a.rs", 1, "high");
         let report = report_with(vec![f], vec![]);
-        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
-        assert_eq!(json.curated_findings[0].sites[0].fix, "");
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
+        assert_eq!(json.curated_findings[0].sites[0].fix_for_this_finding, None);
+    }
+
+    // ── C3-1b: fix-generation failure is a PIPELINE gap, never a confidence hedge ───────
+
+    /// The deterministic finding from the C3-1b spec: its specific fix failed to generate
+    /// (`fix_specific: None`, exactly `generate_fix_specifics`' new no-hedge failure state —
+    /// `needs_review: false`, `confidence: None`, `detail` carrying no pipeline-state tag).
+    /// It must export UNHEDGED (disposition is never demoted), it must NOT be
+    /// informational/out-of-bucket, it must still land in `do_now` on its own severity/effort
+    /// merits, and it must carry the RULE-level fix (`resolve_fix`'s authored remediation) so
+    /// the row still ships a usable fix even with no codebase-specific one.
+    ///
+    /// C4-P3: `confidence` is NOT `None` here — this finding never went through AI calibration
+    /// (`f.confidence` starts `None` and stays that way), so by `hedge_confidence`'s
+    /// deterministic-by-construction rule it exports `"high"`. This is the exact fix C4-P3
+    /// targets: before it, this SUPABASE-RLS-ENABLED-1 do_now critical rendered "Confidence: not
+    /// evaluated this run" next to a proven defect. The "ONLY hedge source is calibration"
+    /// invariant this test originally asserted is still true in spirit — a fix-generation
+    /// failure still never HEDGES this row (never flips it to `"needs-review"` or
+    /// informational) — it just no longer leaves a non-hedged, never-calibrated row blank.
+    #[tokio::test]
+    async fn fix_generation_failure_exports_unhedged_with_the_rule_level_fix_in_do_now() {
+        let corpus_path = camerata_rules::corpus_path();
+        let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+        assert!(
+            errors.is_empty(),
+            "corpus must load cleanly, got errors: {errors:?}"
+        );
+        let mut f = finding(
+            "SUPABASE-RLS-ENABLED-1",
+            "supabase/migrations/1.sql",
+            1,
+            "critical",
+        );
+        f.captures
+            .insert("table".to_string(), "profiles".to_string());
+        // The exact post-failure state `generate_fix_specifics` now leaves behind: no
+        // fix_specific, no hedge, no tag — see that function's tests in ai_audit.rs.
+        f.fix_specific = None;
+        f.needs_review = false;
+        f.confidence = None;
+
+        let report = report_with(vec![f], vec!["SUPABASE-RLS-ENABLED-1"]);
+        let json = build_report_json(
+            &report.clone().seal(),
+            &HashMap::new(),
+            Some(&corpus),
+            &empty_opts(),
+        );
+
+        assert_eq!(
+            json.matrix.do_now.len(),
+            1,
+            "a critical finding must stay in do_now even when its specific fix failed to \
+             generate: {:?}",
+            json.matrix
+        );
+        assert!(
+            json.matrix.informational.is_empty(),
+            "a fix-generation failure must never route a finding to the informational \
+             appendix: {:?}",
+            json.matrix.informational
+        );
+        let site = &json.curated_findings[0].sites[0];
+        assert_eq!(
+            site.confidence,
+            Some("high".to_string()),
+            "C4-P3: a never-calibrated, non-hedged deterministic finding exports confidence \
+             'high' by construction, instead of blank — a fix-generation failure must not \
+             change that"
+        );
+        assert_eq!(
+            site.fix_for_this_finding, None,
+            "no codebase-specific fix was generated"
+        );
+        assert!(
+            site.fix.is_some(),
+            "the row must still carry the rule's own authored remediation as its fix: {:?}",
+            site.fix
+        );
+        assert!(
+            !site.detail.contains('['),
+            "detail must carry no bracketed pipeline-state text: {:?}",
+            site.detail
+        );
+        assert!(
+            site.disposition.to_ascii_lowercase().contains("do now"),
+            "the site's own disposition label must not be demoted either: {:?}",
+            site.disposition
+        );
+    }
+
+    /// The other half of the C3-1b contract: a finding the CALIBRATOR itself explicitly
+    /// flagged doubtful (`confidence: Some("needs-review")`) still exports hedged — proving
+    /// confidence hedging is driven by calibration doubt, not by whether a separate AI pass
+    /// (fix-generation) happened to succeed. C5-4: this `high`-severity hedge lives in
+    /// `held_for_review_findings` (the `held` bucket), not `curated_findings`.
+    #[tokio::test]
+    async fn calibrator_flagged_doubt_still_exports_hedged() {
+        // Setting `confidence` marks a finding AI-tier (`is_ai_tier`), which routes an
+        // uncited AI finding to the informational appendix and OUT of `curated_findings`
+        // entirely (P3's citation gate) — a real corpus rule keeps this finding grounded so
+        // the test exercises the hedge itself, not that unrelated gate.
+        let corpus_path = camerata_rules::corpus_path();
+        let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+        assert!(
+            errors.is_empty(),
+            "corpus must load cleanly, got errors: {errors:?}"
+        );
+        let mut f = finding(
+            "SUPABASE-RLS-ENABLED-1",
+            "supabase/migrations/1.sql",
+            1,
+            "high",
+        );
+        f.confidence = Some("needs-review".to_string());
+        f.needs_review = true;
+        let report = report_with(vec![f], vec!["SUPABASE-RLS-ENABLED-1"]);
+        let json = build_report_json(
+            &report.clone().seal(),
+            &HashMap::new(),
+            Some(&corpus),
+            &empty_opts(),
+        );
+        assert!(
+            json.curated_findings.is_empty(),
+            "a hedged row, even high severity, must never render under Curated findings: {:?}",
+            json.curated_findings
+        );
+        assert_eq!(
+            json.held_for_review_findings[0].sites[0].confidence,
+            Some("needs-review".to_string()),
+            "a genuine calibration doubt verdict must still render as hedged"
+        );
+    }
+
+    #[test]
+    fn a_critical_finding_with_a_valid_fix_still_lands_in_do_now() {
+        // A critical finding whose fix-generation ran and succeeded behaves exactly as one
+        // that never went through fix-generation at all (e.g. a deterministic-only scan) —
+        // bucket placement never depended on `fix_specific` being present.
+        let f = finding("ARCH-1", "a.rs", 1, "critical");
+        let report = report_with(vec![f], vec![]);
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
+        assert_eq!(json.matrix.do_now.len(), 1);
+    }
+
+    // ── Placeholder substitution helper ─────────────────────────────────────────
+
+    #[test]
+    fn instantiate_remediation_fills_known_tokens_from_captures() {
+        let mut captures = std::collections::BTreeMap::new();
+        captures.insert("table".to_string(), "profiles".to_string());
+        captures.insert("bucket".to_string(), "avatars".to_string());
+        let text = instantiate_remediation(
+            "Enable RLS on `<table>` and lock down the `<bucket>` bucket.",
+            "supabase/migrations/1.sql",
+            &captures,
+        );
+        assert_eq!(
+            text,
+            "Enable RLS on `profiles` and lock down the `avatars` bucket."
+        );
+    }
+
+    #[test]
+    fn instantiate_remediation_fills_path_and_file_tokens_from_the_finding_path() {
+        let captures = std::collections::BTreeMap::new();
+        let text = instantiate_remediation(
+            "Fix the issue in <path> (also see <file>).",
+            "apps/web/lib/analytics.ts",
+            &captures,
+        );
+        assert_eq!(
+            text,
+            "Fix the issue in apps/web/lib/analytics.ts (also see apps/web/lib/analytics.ts)."
+        );
+    }
+
+    #[test]
+    fn instantiate_remediation_falls_back_to_a_readable_generic_for_unfilled_known_tokens() {
+        let captures = std::collections::BTreeMap::new();
+        let text = instantiate_remediation(
+            "Re-enable verify_jwt for <function-name>.",
+            "supabase/config.toml",
+            &captures,
+        );
+        assert_eq!(text, "Re-enable verify_jwt for the affected function.");
+    }
+
+    #[test]
+    fn instantiate_remediation_never_emits_a_raw_token_for_an_unknown_placeholder() {
+        let captures = std::collections::BTreeMap::new();
+        let text = instantiate_remediation(
+            "Check <some-totally-unmapped-token> before shipping.",
+            "a.rs",
+            &captures,
+        );
+        assert!(
+            !text.contains('<') && !text.contains('>'),
+            "raw token escaped: {text:?}"
+        );
+        assert_eq!(text, "Check the affected resource before shipping.");
+    }
+
+    // ── C4-R3 defect 4: a literal angle-bracketed EXAMPLE in authored prose is not a token ──
+
+    /// General regression for the "a payload like the affected resource renders as inert text"
+    /// bug: `instantiate_remediation` used to treat EVERY `<...>` span as a placeholder to
+    /// fill, so an authored sentence showing a literal HTML/markup example got its own example
+    /// swallowed by the generic filler. A real placeholder token is always a bare
+    /// lowercase-and-hyphens identifier (`<path>`, `<function-name>`, `<a:secret-kind>`, …); a
+    /// span containing spaces, `=`, or uppercase letters is prose, not a token, and must render
+    /// completely unchanged.
+    #[test]
+    fn instantiate_remediation_treats_a_literal_bracketed_example_as_prose_not_a_placeholder() {
+        let captures = std::collections::BTreeMap::new();
+        let text = instantiate_remediation(
+            "Verify by confirming a payload like <img src=x onerror=alert(1)> renders as \
+             inert text or is stripped, never executes.",
+            "a.tsx",
+            &captures,
+        );
+        assert_eq!(
+            text,
+            "Verify by confirming a payload like <img src=x onerror=alert(1)> renders as \
+             inert text or is stripped, never executes."
+        );
+        assert!(
+            !text.contains("the affected resource"),
+            "a literal example must never be replaced by the generic placeholder filler: {text:?}"
+        );
+    }
+
+    /// A real, known placeholder token sitting right next to a literal bracketed example in the
+    /// SAME sentence must still be filled normally — the token-shape check must not become
+    /// overly broad and start treating legitimate tokens as prose too.
+    #[test]
+    fn instantiate_remediation_still_fills_a_real_token_alongside_a_literal_example() {
+        let mut captures = std::collections::BTreeMap::new();
+        captures.insert("table".to_string(), "profiles".to_string());
+        let text = instantiate_remediation(
+            "Enable RLS on <table>; an example payload like <SELECT 1> must then fail.",
+            "a.sql",
+            &captures,
+        );
+        assert_eq!(
+            text,
+            "Enable RLS on profiles; an example payload like <SELECT 1> must then fail."
+        );
+    }
+
+    #[test]
+    fn is_placeholder_token_shape_accepts_only_lowercase_hyphenated_identifiers() {
+        assert!(is_placeholder_token_shape("path"));
+        assert!(is_placeholder_token_shape("function-name"));
+        assert!(is_placeholder_token_shape("secret-kind"));
+        assert!(!is_placeholder_token_shape(""));
+        assert!(!is_placeholder_token_shape("img src=x onerror=alert(1)"));
+        assert!(!is_placeholder_token_shape("SELECT 1"));
+        assert!(!is_placeholder_token_shape("Entity"));
+        assert!(!is_placeholder_token_shape("T, E"));
+    }
+
+    #[test]
+    fn instantiate_remediation_fills_p4_context_fact_tokens_from_captures_and_generic_fallback() {
+        let mut captures = std::collections::BTreeMap::new();
+        captures.insert(
+            "secret-kind".to_string(),
+            "a live Stripe secret key".to_string(),
+        );
+        let filled = instantiate_remediation(
+            "Found <secret-kind> in <path>, which is <gitignore-status>.",
+            ".env",
+            &captures,
+        );
+        assert_eq!(
+            filled,
+            "Found a live Stripe secret key in .env, which is not confirmed against this \
+             repository's `.gitignore`."
+        );
+    }
+
+    #[test]
+    fn instantiate_remediation_prefers_a_capture_over_the_generic_even_when_both_available() {
+        let mut captures = std::collections::BTreeMap::new();
+        captures.insert("table".to_string(), "orders".to_string());
+        let text = instantiate_remediation("Review <table> now.", "a.sql", &captures);
+        assert_eq!(text, "Review orders now.");
+    }
+
+    // ── W4 (2026-09-30): headline-rewriter grammar bugs ─────────────────────────────
+    //
+    // Doubled article ("a live a <vendor> secret key") and a self-referential substitution
+    // ("a live .env file that is committed to this repository" — the file described as
+    // containing itself). Both were template/variable-substitution bugs: every value
+    // `classify_secret_kind` (onboard::audit) returns is now a BARE noun phrase, and
+    // `instantiate_remediation`'s `<a:token>` syntax computes the correct article at
+    // substitution time via `indefinite_article` rather than a template hardcoding one that
+    // can collide with a value that already carries its own.
+
+    #[test]
+    fn indefinite_article_uses_the_vowel_letter_for_an_ordinary_word() {
+        assert_eq!(indefinite_article("vendor credential token"), "a");
+        assert_eq!(indefinite_article("Anthropic API key"), "an");
+        assert_eq!(indefinite_article("Java key store"), "a");
+    }
+
+    #[test]
+    fn indefinite_article_uses_the_vowel_sound_for_an_acronym_read_letter_by_letter() {
+        // "SSH" is pronounced "ess-ess-aitch" — a vowel SOUND despite "S" being a consonant
+        // LETTER. A naive first-letter check would wrongly pick "a".
+        assert_eq!(indefinite_article("SSH private key"), "an");
+        // "AWS" ("ay-double-u-ess") already starts on a vowel LETTER too, so both checks agree.
+        assert_eq!(indefinite_article("AWS access key"), "an");
+        // "PKCS#12 key store" — acronym, but "P" is not in the vowel-sound exception set.
+        assert_eq!(indefinite_article("PKCS#12 key store"), "a");
+    }
+
+    #[test]
+    fn instantiate_remediation_a_token_prepends_the_correct_article_without_doubling() {
+        let mut captures = std::collections::BTreeMap::new();
+        captures.insert("secret-kind".to_string(), "live `.env` file".to_string());
+        let text = instantiate_remediation(
+            "Your `<path>` file is <a:secret-kind> committed to this repository.",
+            ".env",
+            &captures,
+        );
+        assert_eq!(
+            text,
+            "Your `.env` file is a live `.env` file committed to this repository."
+        );
+        assert!(!text.contains("a a") && !text.contains("an a") && !text.contains("a an"));
+    }
+
+    #[test]
+    fn instantiate_remediation_a_token_falls_back_to_the_generic_bare_noun() {
+        // No "secret-kind" capture at all — `<a:secret-kind>` must still resolve through the
+        // generic fallback (also a bare noun, per its own doc comment) and prepend one article,
+        // never leave a raw token or double up.
+        let captures = std::collections::BTreeMap::new();
+        let text = instantiate_remediation("Found <a:secret-kind> here.", "a.py", &captures);
+        assert_eq!(text, "Found a hardcoded credential here.");
+    }
+
+    /// Golden-string, secret-FILE case (the self-referential bug's original shape): a real
+    /// `.env` committed to the repo. The old template read "…contains a live `.env` file that
+    /// is committed to this repository" — describing the file as containing itself. Pinned to
+    /// the exact rewritten sentence so a future edit can't reintroduce either bug silently.
+    #[tokio::test]
+    async fn w4_golden_secret_file_headline_has_no_doubled_article_and_is_not_self_referential() {
+        let corpus_path = camerata_rules::corpus_path();
+        let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+        assert!(errors.is_empty(), "corpus must load cleanly: {errors:?}");
+        let files = vec![(".env".to_string(), "SERVICE_ROLE_KEY=abc\n".to_string())];
+        let findings = crate::onboard::audit_files("owner/repo", &files);
+        let f = findings
+            .iter()
+            .find(|f| f.rule_id == "SEC-NO-SECRET-FILE-1")
+            .expect("a real committed .env must fire SEC-NO-SECRET-FILE-1")
+            .clone();
+        let (headline, _detail) =
+            resolve_floor_finding_text("SEC-NO-SECRET-FILE-1", Some(&corpus), &f, None)
+                .expect("SEC-NO-SECRET-FILE-1 must have an authored floor template");
+        assert_eq!(
+            headline,
+            "Your `.env` file is a live `.env` file committed to this repository."
+        );
+        for doubled in ["a a ", "an a ", "a an ", "a live a ", "an an "] {
+            assert!(
+                !headline.contains(doubled),
+                "doubled article {doubled:?} in {headline:?}"
+            );
+        }
+        assert!(
+            !headline.contains("contains") || !headline.contains("that is committed"),
+            "must not describe the file as containing a committed copy of itself: {headline:?}"
+        );
+    }
+
+    /// Golden-string, vendor-TOKEN case (the doubled-article bug's original shape): a
+    /// hardcoded AWS access key. The old template read "…contains a live an AWS access key"
+    /// (`"a live <secret-kind>"` with a secret-kind value that already carried its own
+    /// article) — pinned to the exact rewritten sentence.
+    #[tokio::test]
+    async fn w4_golden_vendor_token_headline_has_no_doubled_article() {
+        let corpus_path = camerata_rules::corpus_path();
+        let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+        assert!(errors.is_empty(), "corpus must load cleanly: {errors:?}");
+        let files = vec![(
+            "config.py".to_string(),
+            concat!("aws_key = \"AK", "IAABCDEFGHIJKLMNOP\"\n").to_string(),
+        )];
+        let findings = crate::onboard::audit_files("owner/repo", &files);
+        let f = findings
+            .iter()
+            .find(|f| f.rule_id == "SEC-NO-VENDOR-TOKEN-1")
+            .expect("a hardcoded AWS key must fire SEC-NO-VENDOR-TOKEN-1")
+            .clone();
+        let (headline, _detail) =
+            resolve_floor_finding_text("SEC-NO-VENDOR-TOKEN-1", Some(&corpus), &f, None)
+                .expect("SEC-NO-VENDOR-TOKEN-1 must have an authored floor template");
+        assert_eq!(
+            headline,
+            "Your `config.py` file contains a live AWS access key."
+        );
+        for doubled in ["a a ", "an a ", "a an ", "a live a ", "a live an "] {
+            assert!(
+                !headline.contains(doubled),
+                "doubled article {doubled:?} in {headline:?}"
+            );
+        }
     }
 
     // ── Item 3: what's-healthy / curated-finding citations are EXTERNAL authorities only ──
@@ -2186,11 +9163,17 @@ mod tests {
         // de-emphasize it.
         let corpus_path = camerata_rules::corpus_path();
         let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
-        assert!(errors.is_empty(), "corpus must load cleanly, got errors: {errors:?}");
+        assert!(
+            errors.is_empty(),
+            "corpus must load cleanly, got errors: {errors:?}"
+        );
         let citation = resolve_citation("SEC-NO-UNSAFE-DESERIALIZATION-1", None, Some(&corpus));
         assert_eq!(citation.kind, "grounded");
         assert!(
-            !citation.sources.iter().any(|s| !is_external_source_url(&s.url)),
+            !citation
+                .sources
+                .iter()
+                .any(|s| !is_external_source_url(&s.url)),
             "an internal (non http/https) source leaked into the report: {:?}",
             citation.sources
         );
@@ -2214,16 +9197,591 @@ mod tests {
         assert!(!is_external_source_url(""));
     }
 
+    // ── Defect 4: evidence_negates_requirement / parse_evidence_citation ──────────────
+
     #[test]
-    fn citation_join_labels_unknown_rule_id_as_ai_advisory() {
-        let f = finding("AI-CUSTOM-ARCH-RULE-1", "a.rs", 1, "medium");
+    fn evidence_negates_requirement_detects_the_three_real_world_examples() {
+        assert!(evidence_negates_requirement(
+            "three sequential writes with no transaction"
+        ));
+        assert!(evidence_negates_requirement(
+            "an external chargeable call with no idempotency-key handling"
+        ));
+        assert!(evidence_negates_requirement(
+            "authorization done as ad hoc checks inside business logic"
+        ));
+    }
+
+    #[test]
+    fn evidence_negates_requirement_is_false_for_a_positive_confirmation() {
+        // The positive twin: evidence that CONFIRMS compliance, with no negation phrase, must
+        // never trip the gate.
+        assert!(!evidence_negates_requirement(
+            "opens a transaction and passes the handle to each repository call"
+        ));
+        assert!(!evidence_negates_requirement(
+            "every external chargeable call is issued with a client-generated idempotency key"
+        ));
+        assert!(!evidence_negates_requirement(
+            "authorization is centralized in a single policy-enforcement middleware"
+        ));
+    }
+
+    #[test]
+    fn evidence_negates_requirement_is_case_insensitive() {
+        assert!(evidence_negates_requirement(
+            "THREE SEQUENTIAL WRITES WITH NO TRANSACTION"
+        ));
+    }
+
+    #[test]
+    fn parse_evidence_citation_splits_path_and_line_on_em_dash() {
+        assert_eq!(
+            parse_evidence_citation("src/orders/service.rs:142 — three sequential writes"),
+            ("src/orders/service.rs".to_string(), 142)
+        );
+    }
+
+    #[test]
+    fn parse_evidence_citation_handles_a_bare_path_colon_line_with_no_note() {
+        assert_eq!(
+            parse_evidence_citation("src/billing/charge.rs:58"),
+            ("src/billing/charge.rs".to_string(), 58)
+        );
+    }
+
+    #[test]
+    fn parse_evidence_citation_never_mistakes_a_hyphenated_path_for_a_note_separator() {
+        // A bare hyphen inside the path (no surrounding spaces) must NOT be treated as a
+        // "path - note" separator — only " — " (em dash) or " - " (spaced hyphen) count.
+        assert_eq!(
+            parse_evidence_citation("src/my-service/orders.rs:142"),
+            ("src/my-service/orders.rs".to_string(), 142)
+        );
+    }
+
+    /// W21 — an unparseable citation yields NO path, rather than a sentence masquerading as
+    /// one. This test previously asserted the opposite (`path == the whole evidence text`),
+    /// on the reasoning that the fallback should "never drop the evidence text". The text is
+    /// still never dropped: every caller puts it in `snippet`, and the negated-requirement
+    /// gate also quotes it in `detail`. What changed is that it no longer arrives in `path`,
+    /// a client-facing file location, where it shipped ten rows on hearth with sentences up
+    /// to 180 characters long rendered as file paths in the PDF and the workbook.
+    #[test]
+    fn parse_evidence_citation_yields_no_path_when_unparseable() {
+        let (path, line) =
+            parse_evidence_citation("this evidence has no file:line citation at all");
+        assert_eq!(line, 0);
+        assert_eq!(path, "", "prose must never be returned as a file path");
+    }
+
+    /// The real shape that leaked, taken verbatim from the 2026-10-18 hearth export: a
+    /// citation whose line part is a RANGE (`15-39`), not a single number, followed by a
+    /// prose note. `rsplit_once(':')` leaves `"15-39"`, which does not parse as a `usize`, so
+    /// this falls to the unparseable branch — which is why the whole sentence used to become
+    /// the path.
+    #[test]
+    fn parse_evidence_citation_rejects_a_line_range_rather_than_pathifying_the_note() {
+        let (path, line) = parse_evidence_citation(
+            "app/api/bookings/route.ts:15-39 — booking insert, payment insert, and slot \
+             update execute as three separate awaits with no transaction boundary",
+        );
+        assert_eq!(line, 0);
+        assert_eq!(
+            path, "",
+            "a line RANGE is not a parseable citation, and the note must not become the path"
+        );
+    }
+
+    #[test]
+    fn citation_join_still_labels_a_non_ai_tier_unknown_rule_id_as_ai_advisory() {
+        // P3 scopes the citation gate to AI-TIER findings only (`is_ai_tier`) — a
+        // non-AI-tier finding (no `AI-` rule id, no calibration `confidence`) whose rule id
+        // has no corpus entry is a DIFFERENT, pre-existing gap (e.g. `SEC-NO-RAW-SQL-CONCAT-1`
+        // has no TOML entry at all) that this pass does not touch: it stays exactly as
+        // before, curated with the honest "AI-advisory, model-inferred." label.
+        let f = finding("CUSTOM-ARCH-RULE-1", "a.rs", 1, "medium");
         let report = report_with(vec![f], vec![]);
-        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
         assert_eq!(json.curated_findings[0].citation.kind, "advisory");
         assert_eq!(
             json.curated_findings[0].citation.label,
             "AI-advisory, model-inferred."
         );
+    }
+
+    // ── P3 (2026-09-29): the citation gate ──────────────────────────────────────────────
+    // docs/plans/2026-09-29_codebase-inspection-hardening.md, P3.
+
+    /// An AI-tier finding (`AI-`-prefixed rule id) whose defect does not classify into any
+    /// of the P3 closed taxonomy classes must be held OUT of `curated_findings` entirely —
+    /// never rendered with "AI-advisory, model-inferred." on a curated row — and instead
+    /// surfaces in the informational/held-for-review appendix with an honest "uncited"
+    /// headline, counted in the reconciling totals.
+    #[test]
+    fn citation_gate_holds_an_unclassifiable_ai_finding_out_of_curated_as_uncited() {
+        let f = finding("AI-CUSTOM-ARCH-RULE-1", "a.rs", 1, "medium");
+        let report = report_with(vec![f], vec![]);
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
+        assert!(
+            json.curated_findings.is_empty(),
+            "an uncited AI finding must never appear in curated_findings: {:?}",
+            json.curated_findings
+        );
+        assert_eq!(
+            json.matrix.informational.len(),
+            1,
+            "the uncited finding must still surface (over-tell), just outside the action tiers"
+        );
+        assert_eq!(
+            json.matrix.informational[0].rule_id,
+            "AI-CUSTOM-ARCH-RULE-1"
+        );
+        assert!(
+            json.matrix.informational[0]
+                .headline
+                .to_lowercase()
+                .contains("uncited"),
+            "the appendix row must say WHY it's held out: {}",
+            json.matrix.informational[0].headline
+        );
+        assert_eq!(json.executive_summary.held_for_review, 1);
+        assert_eq!(json.executive_summary.curated_total, 0);
+        // Reconciliation still holds: nothing is silently dropped.
+        assert_eq!(
+            json.executive_summary.candidates_reviewed,
+            json.executive_summary.curated_total
+                + json.executive_summary.held_for_review
+                + json.executive_summary.excluded_false_positive
+                + json.executive_summary.dependency_advisories
+        );
+    }
+
+    /// The gate applies REGARDLESS of severity — a critical, uncited AI finding (exactly
+    /// the "MOST important findings" the plan's problem statement calls out) must still be
+    /// excluded from curated, unlike `is_informational`'s other signals which deliberately
+    /// never touch critical/high.
+    ///
+    /// C5-7: a critical/high uncited finding used to land in `matrix.informational` — the SAME
+    /// bucket `is_informational`'s own hard invariant caps at `<= medium` everywhere else,
+    /// which this row silently violated (the gate's own `C5-5`-flagged open test). It now
+    /// routes to `matrix.held` instead, at its real (uncited) severity — never informational,
+    /// never an action bucket, never dropped.
+    #[test]
+    fn citation_gate_routes_a_critical_uncited_ai_finding_to_held_not_informational() {
+        let f = finding("AI-SOME-NOVEL-DEFECT", "a.rs", 1, "critical");
+        let report = report_with(vec![f], vec![]);
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
+        assert!(json.curated_findings.is_empty());
+        assert_eq!(json.matrix.do_now.len(), 0);
+        assert_eq!(
+            json.matrix.informational.len(),
+            0,
+            "a critical uncited finding must never sit in the severity-capped informational \
+             appendix: {:?}",
+            json.matrix.informational
+        );
+        assert_eq!(
+            json.matrix.held.len(),
+            1,
+            "a critical uncited finding must route to held, the severity-unbounded needs-\
+             review bucket: {:?}",
+            json.matrix.held
+        );
+        assert_eq!(
+            json.matrix.held[0].severity, "critical",
+            "held never downgrades severity, same as the calibration-hedge case"
+        );
+        assert_eq!(json.matrix.held[0].rule_id, "AI-SOME-NOVEL-DEFECT");
+        // The severity histogram (cover stats) still honestly reflects it — over-tell, not
+        // hidden from the reader entirely, just excluded from the curated action tiers.
+        assert_eq!(json.cover.stats.critical, 1);
+    }
+
+    /// C5-7: provenance/citation are ALWAYS the tier/citation of the row's OWN rule id, never
+    /// a sibling finding's — a held, uncited AI-tier row must never display "Deterministic"
+    /// provenance or another rule's citation, even when a genuinely grounded deterministic
+    /// finding is exported right alongside it in the same report. Exercised through
+    /// `findings.json` (`FindingRow`), the one exported shape that resolves `provenance` and
+    /// `citation_urls` independently of the PDF's curated/held-for-review grouping, so this
+    /// stays a meaningful cross-check of `FindingRow`'s own resolution regardless of which
+    /// `CuratedGroupJson` bucket (C6-B1) the same row also lands in.
+    #[tokio::test]
+    async fn uncited_ai_row_provenance_and_citation_are_never_borrowed_from_a_sibling() {
+        let corpus_path = camerata_rules::corpus_path();
+        let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+        assert!(errors.is_empty(), "corpus must load cleanly: {errors:?}");
+
+        let grounded = finding("SEC-NO-HARDCODED-SECRETS-1", "a.rs", 1, "critical");
+        let uncited_ai = finding("AI-SOME-NOVEL-DEFECT", "b.rs", 2, "critical");
+        let report = report_with(vec![grounded, uncited_ai], vec![]);
+        let json = build_report_json(
+            &report.clone().seal(),
+            &HashMap::new(),
+            Some(&corpus),
+            &empty_opts(),
+        );
+        let findings_export = crate::xlsx_export::build_findings_export(
+            &report.clone().seal(),
+            &HashMap::new(),
+            Some(&corpus),
+            &json,
+            &HashMap::new(),
+        );
+        // `FindingRow`'s fields are private to `xlsx_export` (only `findings.json`'s serialized
+        // shape is the stable public contract) — go through `serde_json::Value`, same as the
+        // `export_invariants_gate` module's own fixture crawlers do.
+        let export_value =
+            serde_json::to_value(&findings_export).expect("FindingsExport must serialize");
+        let rows = export_value["findings"]
+            .as_array()
+            .expect("findings must be an array");
+
+        let ai_row = rows
+            .iter()
+            .find(|r| r["rule_id"].as_str() == Some("AI-SOME-NOVEL-DEFECT"))
+            .expect("the uncited AI row must still be exported in findings.json");
+        assert_eq!(
+            ai_row["provenance"].as_str(),
+            Some("AI-advisory"),
+            "an uncited AI-tier row must never display borrowed \"Deterministic\" provenance: \
+             {ai_row:?}"
+        );
+        assert!(
+            ai_row["citation_urls"].as_str().unwrap_or("").is_empty(),
+            "an uncited AI-tier row's citation must be its own model-inferred label, not a \
+             sibling's URLs: {:?}",
+            ai_row["citation_urls"]
+        );
+
+        let secret_row = rows
+            .iter()
+            .find(|r| r["rule_id"].as_str() == Some("SEC-NO-HARDCODED-SECRETS-1"))
+            .expect("the grounded deterministic row must still be exported");
+        assert_eq!(secret_row["provenance"].as_str(), Some("Deterministic"));
+
+        // And the bucket split itself: the uncited critical AI row is held, out of every
+        // action bucket and out of informational; the grounded deterministic row stays curated.
+        assert_eq!(json.matrix.held.len(), 1);
+        assert_eq!(json.matrix.held[0].rule_id, "AI-SOME-NOVEL-DEFECT");
+        assert_eq!(json.matrix.do_now.len(), 1);
+        assert_eq!(json.matrix.do_now[0].rule_id, "SEC-NO-HARDCODED-SECRETS-1");
+    }
+
+    /// C5-7: a grounded AI-tier row (its class fallback resolves to a real published standard
+    /// — here, RLS) is UNAFFECTED by the held-routing fix: it is not uncited, so
+    /// `is_uncited_ai_finding` never fires for it, and a critical grounded AI finding stays
+    /// exactly where its severity×effort quadrant puts it (`do_now`), never diverted to `held`.
+    #[tokio::test]
+    async fn a_grounded_ai_row_with_a_real_citation_is_unaffected_by_the_held_route() {
+        let corpus_path = camerata_rules::corpus_path();
+        let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+        assert!(errors.is_empty(), "corpus must load cleanly: {errors:?}");
+
+        let mut rls = finding(
+            "AI-CROSS-TENANT-RLS-1",
+            "supabase/migrations/1.sql",
+            1,
+            "critical",
+        );
+        rls.detail = "Row Level Security is disabled on the payments table.".to_string();
+        let report = report_with(vec![rls], vec![]);
+        let json = build_report_json(
+            &report.clone().seal(),
+            &HashMap::new(),
+            Some(&corpus),
+            &empty_opts(),
+        );
+
+        assert!(is_ai_tier(&finding(
+            "AI-CROSS-TENANT-RLS-1",
+            "x",
+            1,
+            "critical"
+        )));
+        assert_eq!(
+            json.matrix.held.len(),
+            0,
+            "a grounded AI finding must never be routed to held: {:?}",
+            json.matrix.held
+        );
+        assert_eq!(json.matrix.do_now.len(), 1);
+        assert_eq!(json.matrix.do_now[0].rule_id, "AI-CROSS-TENANT-RLS-1");
+        assert_eq!(json.curated_findings.len(), 1);
+        assert_ne!(json.curated_findings[0].citation.kind, "advisory");
+    }
+
+    /// A non-AI-tier finding's own advisory citation is untouched by the gate (see
+    /// `citation_join_still_labels_a_non_ai_tier_unknown_rule_id_as_ai_advisory` above) —
+    /// this is the `is_uncited_ai_finding` unit-level lock-in of that same scoping decision.
+    #[test]
+    fn is_uncited_ai_finding_is_false_for_a_non_ai_tier_finding_even_when_advisory() {
+        let f = finding("CUSTOM-ARCH-RULE-1", "a.rs", 1, "medium");
+        assert!(!is_ai_tier(&f));
+        assert!(!is_uncited_ai_finding(&f, None));
+    }
+
+    #[test]
+    fn is_ai_tier_detects_the_ai_prefixed_rule_id_or_a_calibration_confidence() {
+        let invented = finding("AI-SOME-DEFECT", "a.rs", 1, "medium");
+        assert!(is_ai_tier(&invented));
+
+        let mut adopted = finding("SUPABASE-RLS-ENABLED-1", "a.rs", 1, "critical");
+        adopted.confidence = Some("high".to_string());
+        assert!(is_ai_tier(&adopted));
+
+        let deterministic = finding("SEC-NO-RAW-SQL-CONCAT-1", "a.rs", 1, "critical");
+        assert!(!is_ai_tier(&deterministic));
+    }
+
+    // ── classify_ai_finding: pure, unit-testable, no model calls ────────────────────────
+
+    #[test]
+    fn classify_ai_finding_maps_each_required_class_by_general_keywords() {
+        // Every signal is a defect-family vocabulary word (an OWASP/CWE term or the real
+        // framework API a fix touches), never a fixture-specific rule id or identifier —
+        // these rule ids are deliberately generic/invented, distinct from any one benchmark.
+        assert_eq!(
+            classify_ai_finding(
+                "AI-DEFECT-1",
+                Some("rls-policy"),
+                "Row Level Security is disabled on the orders table, allowing cross-tenant reads."
+            ),
+            Some(AiFindingClass::Rls)
+        );
+        assert_eq!(
+            classify_ai_finding(
+                "AI-DEFECT-2",
+                None,
+                "User-supplied comment text is passed to dangerouslySetInnerHTML without sanitization, a stored XSS sink."
+            ),
+            Some(AiFindingClass::Xss)
+        );
+        assert_eq!(
+            classify_ai_finding(
+                "AI-DEFECT-3",
+                None,
+                "The `next` query parameter is redirected to without validation, an open redirect to an attacker-controlled host."
+            ),
+            Some(AiFindingClass::OpenRedirect)
+        );
+        assert_eq!(
+            classify_ai_finding(
+                "AI-DEFECT-4",
+                None,
+                "The password-reset token is generated with Math.random(), an insecure randomness source for a security token."
+            ),
+            Some(AiFindingClass::WeakTokenRandomness)
+        );
+        assert_eq!(
+            classify_ai_finding(
+                "AI-DEFECT-5",
+                None,
+                "User input is concatenated directly into a PostgREST .or() filter grammar expression, a query-grammar injection."
+            ),
+            Some(AiFindingClass::QueryGrammarInjection)
+        );
+        assert_eq!(
+            classify_ai_finding(
+                "AI-DEFECT-6",
+                None,
+                "The CORS middleware reflects the request's Origin header while Access-Control-Allow-Credentials is true."
+            ),
+            Some(AiFindingClass::PermissiveCors)
+        );
+    }
+
+    #[test]
+    fn classify_ai_finding_also_matches_on_rule_id_tokens_alone() {
+        assert_eq!(
+            classify_ai_finding("AI-XSS-COMMENT-RENDER-1", None, "unrelated detail text"),
+            Some(AiFindingClass::Xss)
+        );
+        assert_eq!(
+            classify_ai_finding("AI-CORS-REFLECTED-ORIGIN-CREDENTIALS", None, "detail"),
+            Some(AiFindingClass::PermissiveCors)
+        );
+    }
+
+    #[test]
+    fn classify_ai_finding_returns_none_for_an_unmapped_defect() {
+        assert_eq!(
+            classify_ai_finding(
+                "AI-SOME-NOVEL-ARCHITECTURAL-OBSERVATION",
+                None,
+                "The service layer bypasses the repository abstraction in a way nothing above classifies."
+            ),
+            None
+        );
+    }
+
+    // ── The class -> corpus-rule mapping is grounded in the REAL bundled corpus ─────────
+
+    /// A conservative allowlist of real, well-known standards/linter-doc hosts a P3 grounded
+    /// citation is permitted to cite — a Camerata-internal doc citing itself would fail this,
+    /// which is the whole point (see `resolve_citation`'s `is_external_source_url`, which this
+    /// complements with a stronger "is it actually a recognized authority" check).
+    fn is_known_authority_url(url: &str) -> bool {
+        const KNOWN_AUTHORITY_HOSTS: &[&str] = &[
+            "cwe.mitre.org",
+            "owasp.org",
+            "cheatsheetseries.owasp.org",
+            "supabase.com",
+            "react.dev",
+            "developer.mozilla.org",
+            "postgrest.org",
+        ];
+        is_external_source_url(url)
+            && KNOWN_AUTHORITY_HOSTS.iter().any(|host| {
+                url.starts_with(&format!("https://{host}/"))
+                    || url.starts_with(&format!("http://{host}/"))
+            })
+    }
+
+    #[tokio::test]
+    async fn each_required_class_resolves_to_a_grounded_citation_from_a_known_authority() {
+        let corpus_path = camerata_rules::corpus_path();
+        let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+        assert!(
+            errors.is_empty(),
+            "corpus must load cleanly, got errors: {errors:?}"
+        );
+
+        for class in [
+            AiFindingClass::Rls,
+            AiFindingClass::Xss,
+            AiFindingClass::OpenRedirect,
+            AiFindingClass::WeakTokenRandomness,
+            AiFindingClass::QueryGrammarInjection,
+            AiFindingClass::PermissiveCors,
+        ] {
+            let rule_id = class.grounding_rule_id();
+            let citation = resolve_citation(rule_id, None, Some(&corpus));
+            assert_eq!(
+                citation.kind, "grounded",
+                "{rule_id} (class {class:?}) must resolve to a grounded citation"
+            );
+            assert!(
+                !citation.label.trim().is_empty(),
+                "{rule_id}'s citation label must not be empty"
+            );
+            assert_ne!(
+                citation.label, "AI-advisory, model-inferred.",
+                "{rule_id} must never render the AI-advisory fallback label"
+            );
+            assert!(
+                !citation.sources.is_empty(),
+                "{rule_id} must carry at least one real source"
+            );
+            for source in &citation.sources {
+                assert!(
+                    is_known_authority_url(&source.url),
+                    "{rule_id}'s source {:?} is not a well-formed, known-authority URL",
+                    source
+                );
+            }
+        }
+    }
+
+    /// Full-report contract test (EXTENSIVE per the plan): a synthetic fixture carries one
+    /// AI-tier finding per required class plus one unmappable AI finding and one
+    /// non-AI-tier finding with no corpus entry. After `build_report_json`, ZERO curated
+    /// findings may carry a model-inferred or empty citation, and the unmapped finding must
+    /// be the only one held out as uncited.
+    #[tokio::test]
+    async fn zero_curated_findings_carry_a_model_inferred_or_empty_citation() {
+        let corpus_path = camerata_rules::corpus_path();
+        let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+        assert!(
+            errors.is_empty(),
+            "corpus must load cleanly, got errors: {errors:?}"
+        );
+
+        let mut rls = finding(
+            "AI-CROSS-TENANT-RLS-1",
+            "supabase/migrations/1.sql",
+            1,
+            "critical",
+        );
+        rls.detail = "Row Level Security is disabled on the payments table.".to_string();
+
+        let mut xss = finding("AI-STORED-XSS-1", "web/comment.tsx", 12, "high");
+        xss.detail =
+            "A stored comment body is rendered via dangerouslySetInnerHTML without sanitization."
+                .to_string();
+
+        let mut redirect = finding("AI-LOGIN-REDIRECT-1", "web/login.ts", 40, "medium");
+        redirect.detail =
+            "The `next` redirect target is not validated against an allowlist, an open redirect."
+                .to_string();
+
+        let mut token = finding("AI-RESET-TOKEN-1", "api/reset.ts", 8, "high");
+        token.detail =
+            "The password-reset token uses Math.random(), insecure randomness for a security token."
+                .to_string();
+
+        let mut grammar = finding("AI-FILTER-INJECTION-1", "api/search.ts", 22, "high");
+        grammar.detail =
+            "A search term is concatenated into a PostgREST .or() filter grammar expression."
+                .to_string();
+
+        let mut cors = finding("AI-CORS-CREDS-1", "middleware.ts", 5, "medium");
+        cors.detail =
+            "CORS reflects the request Origin while Access-Control-Allow-Credentials is true."
+                .to_string();
+
+        let unmapped = finding("AI-SOME-NOVEL-DEFECT", "a.rs", 1, "medium");
+
+        let report = report_with(
+            vec![rls, xss, redirect, token, grammar, cors, unmapped],
+            vec![],
+        );
+        let json = build_report_json(
+            &report.clone().seal(),
+            &HashMap::new(),
+            Some(&corpus),
+            &empty_opts(),
+        );
+
+        assert_eq!(
+            json.curated_findings.len(),
+            6,
+            "the six mapped AI-tier findings must all survive as curated, distinct groups: {:?}",
+            json.curated_findings
+                .iter()
+                .map(|g| &g.rule_id)
+                .collect::<Vec<_>>()
+        );
+        for group in &json.curated_findings {
+            assert_ne!(
+                group.citation.kind, "advisory",
+                "curated rule {} carries an advisory (uncited) citation",
+                group.rule_id
+            );
+            assert!(
+                !group.citation.label.trim().is_empty(),
+                "curated rule {} carries an empty citation label",
+                group.rule_id
+            );
+            assert_ne!(
+                group.citation.label, "AI-advisory, model-inferred.",
+                "curated rule {} renders the model-inferred fallback label",
+                group.rule_id
+            );
+        }
+        assert!(
+            !json
+                .curated_findings
+                .iter()
+                .any(|g| g.rule_id == "AI-SOME-NOVEL-DEFECT"),
+            "the unmapped AI finding must never appear in curated_findings"
+        );
+        assert_eq!(
+            json.matrix.informational.len(),
+            1,
+            "exactly the one unmapped AI finding is held for review"
+        );
+        assert_eq!(json.matrix.informational[0].rule_id, "AI-SOME-NOVEL-DEFECT");
     }
 
     #[test]
@@ -2232,7 +9790,7 @@ mod tests {
         f.preview = true;
         f.preview_tool = Some("ruff".to_string());
         let report = report_with(vec![f], vec![]);
-        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
         assert_eq!(json.curated_findings[0].citation.kind, "preview");
         assert!(json.curated_findings[0].citation.label.contains("ruff"));
     }
@@ -2243,7 +9801,7 @@ mod tests {
     fn whats_healthy_is_audited_rules_minus_rules_with_findings() {
         let f = finding("SEC-1", "a.rs", 1, "high");
         let report = report_with(vec![f], vec!["SEC-1", "SEC-2", "SEC-3"]);
-        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
         let healthy_ids: Vec<&str> = json
             .whats_healthy
             .rules
@@ -2264,7 +9822,7 @@ mod tests {
             wire("FalsePositive", "not exploitable", ""),
         );
         let report = report_with(vec![f], vec!["SEC-1"]);
-        let json = build_report_json(&report, &dispositions, None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &dispositions, None, &empty_opts());
         let healthy_ids: Vec<&str> = json
             .whats_healthy
             .rules
@@ -2282,7 +9840,7 @@ mod tests {
         f.snippet = "time@0.3.20".to_string();
         f.detail = "RUSTSEC-2023-0001: potential segfault (affects time@0.3.20)".to_string();
         let report = report_with(vec![f], vec![]);
-        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
 
         assert!(
             json.curated_findings.is_empty(),
@@ -2303,7 +9861,7 @@ mod tests {
     #[test]
     fn dependency_snapshot_clean_when_no_dep_findings() {
         let report = report_with(vec![], vec![]);
-        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
         assert!(json.dependency_snapshot.clean);
         assert!(json.whats_healthy.dependency_clean);
     }
@@ -2321,9 +9879,199 @@ mod tests {
                 message: "ruff not installed".to_string(),
             },
         ];
-        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
         assert_eq!(json.dependency_snapshot.coverage_notes.len(), 1);
         assert!(json.dependency_snapshot.coverage_notes[0].contains("network unavailable"));
+    }
+
+    /// req_g1 (W7): a NON-dependency tool's coverage gap reaches the client artifacts.
+    /// Before W7, only `osv-scanner` notes were exported anywhere; a wholesale eslint/
+    /// semgrep/ruff/clippy failure reached the UI and the ledger but no PDF/xlsx/JSON — a
+    /// whole tool tier could fail and the client's artifacts said nothing (the ESLint
+    /// failure was invisible to a client even when disclosed internally).
+    #[test]
+    fn req_g1_non_osv_tool_coverage_gap_is_disclosed_in_summary_and_methodology() {
+        let mut report = report_with(vec![], vec![]);
+        report.coverage_notes = vec![
+            CoverageNote {
+                tool: "eslint".to_string(),
+                message: "Could not preview 12 rule(s) with eslint: spawn ENOENT at \
+                          /internal/path/node_modules/.bin/eslint. It enforces once wired \
+                          into CI."
+                    .to_string(),
+            },
+            CoverageNote {
+                tool: "eslint".to_string(),
+                message: "Could not preview 3 rule(s) with eslint: exit code 2.".to_string(),
+            },
+            CoverageNote {
+                tool: "osv-scanner".to_string(),
+                message: "dependency audit did not run: network unavailable".to_string(),
+            },
+        ];
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
+        let eslint_lines = |notes: &[String]| {
+            notes
+                .iter()
+                .filter(|n| n.contains("eslint"))
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        let summary_lines = eslint_lines(&json.executive_summary.failed_passes);
+        let methodology_lines = eslint_lines(&json.methodology.failed_passes);
+        assert_eq!(
+            summary_lines.len(),
+            1,
+            "exactly ONE concise line per affected tool (G3: concise and useful, never an \
+             exhaustive dump): {:?}",
+            json.executive_summary.failed_passes
+        );
+        assert_eq!(methodology_lines, summary_lines);
+        // G3: client language, never the notes' internal diagnostics.
+        assert!(
+            !summary_lines[0].contains("ENOENT") && !summary_lines[0].contains("/internal/path"),
+            "the disclosure must not dump internal diagnostics: {:?}",
+            summary_lines[0]
+        );
+        // The osv note stays where it already lived (the dependency snapshot), not duplicated
+        // into the tool lines.
+        assert!(
+            !json
+                .executive_summary
+                .failed_passes
+                .iter()
+                .any(|n| n.contains("osv-scanner")),
+            "osv-scanner notes belong to the dependency snapshot, not the tool lines: {:?}",
+            json.executive_summary.failed_passes
+        );
+    }
+
+    /// req_w13 (G3): a rule whose own corpus file would not parse gets ONE concise,
+    /// client-facing line — with a count, because "how much of the rule library was missing"
+    /// is the only quantity a client can act on — and NEVER the file path or the `RulesError`
+    /// text, both of which name the reviewer's filesystem and TOML internals.
+    ///
+    /// FAILS BEFORE THE FIX: `tool_coverage_disclosures` had no arm for
+    /// `RULE_CORPUS_COVERAGE_TOOL`, so two such notes rendered as "The rule-corpus
+    /// static-analysis checks did not fully run this scan" — a sentence that names a tool the
+    /// client does not have, says nothing about how many rules were missing, and reads as a
+    /// tool failure rather than a rule-library gap. (And upstream of that, nothing produced
+    /// the notes at all: the whole channel is W13's.)
+    #[test]
+    fn req_w13_the_client_facing_corpus_load_line_is_one_concise_line_with_a_count() {
+        let mut report = report_with(vec![], vec![]);
+        report.coverage_notes = vec![
+            CoverageNote {
+                tool: crate::RULE_CORPUS_COVERAGE_TOOL.to_string(),
+                message: "/Users/someone/corpus/supabase/rls/a.toml did not parse, so rule \
+                          SUPABASE-RLS-ENABLED-1 was not loaded and did not run: TOML parse \
+                          error in a.toml: unknown variant `architectual`"
+                    .to_string(),
+            },
+            CoverageNote {
+                tool: crate::RULE_CORPUS_COVERAGE_TOOL.to_string(),
+                message: "/Users/someone/corpus/universal/b.toml did not parse, so rule \
+                          SEC-NO-RAW-SQL-CONCAT-1 was not loaded and did not run: TOML parse \
+                          error in b.toml: expected a value"
+                    .to_string(),
+            },
+        ];
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
+
+        let lines: Vec<&String> = json
+            .executive_summary
+            .failed_passes
+            .iter()
+            .filter(|n| n.contains("rule library"))
+            .collect();
+        assert_eq!(
+            lines.len(),
+            1,
+            "G3: exactly ONE line for the whole scan, never one per broken file: {:?}",
+            json.executive_summary.failed_passes
+        );
+        let line = lines[0];
+        assert_eq!(
+            line,
+            "2 rules in the rule library could not be loaded this scan and did not run; \
+             anything they would have reported is not reflected in this report.",
+            "the exact client-facing wording is pinned: it ships in a client PDF"
+        );
+        // The same line, verbatim, in the methodology — a reader must hit the identical
+        // statement wherever they look, which is the W7 shape this reuses.
+        assert!(json.methodology.failed_passes.contains(line));
+
+        // G3's prohibition: never the raw diagnostics.
+        for leak in [
+            "/Users/someone",
+            ".toml",
+            "TOML parse error",
+            "architectual",
+            "unknown variant",
+            "rule-corpus",
+        ] {
+            assert!(
+                !line.contains(leak),
+                "the client line must not carry {leak:?}: {line}"
+            );
+        }
+        // No em/en dash (house style for this deliverable — see `AUDIT_REPORT_DISCLAIMER`).
+        assert!(
+            !line.contains('\u{2014}') && !line.contains('\u{2013}'),
+            "{line}"
+        );
+    }
+
+    /// Item 24: a Firebase repository's report states what Firebase coverage means, in the one
+    /// written sentence, once, in both the executive summary and the methodology, with no dash.
+    #[test]
+    fn the_firebase_scope_sentence_reaches_the_summary_and_methodology_verbatim() {
+        let mut report = report_with(vec![], vec![]);
+        report.coverage_notes = vec![CoverageNote {
+            tool: crate::FIREBASE_SCOPE_COVERAGE_TOOL.to_string(),
+            message: "operator note".to_string(),
+        }];
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
+        let line = crate::FIREBASE_SCOPE_SENTENCE;
+        assert_eq!(
+            json.executive_summary
+                .failed_passes
+                .iter()
+                .filter(|n| n.as_str() == line)
+                .count(),
+            1,
+            "{:?}",
+            json.executive_summary.failed_passes
+        );
+        assert!(json.methodology.failed_passes.iter().any(|n| n == line));
+        assert!(
+            !line.contains('\u{2014}') && !line.contains('\u{2013}'),
+            "{line}"
+        );
+        assert!(
+            !line.contains("static-analysis"),
+            "not the generic tool wording"
+        );
+    }
+
+    /// req_w13: the line pluralizes honestly. One broken rule file is "1 rule", not
+    /// "1 rule(s)" — the same real-pluralization bar the rest of this report holds (S8).
+    #[test]
+    fn req_w13_the_client_facing_corpus_load_line_pluralizes_correctly() {
+        let mut report = report_with(vec![], vec![]);
+        report.coverage_notes = vec![CoverageNote {
+            tool: crate::RULE_CORPUS_COVERAGE_TOOL.to_string(),
+            message: "x.toml did not parse".to_string(),
+        }];
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
+        assert!(
+            json.executive_summary
+                .failed_passes
+                .iter()
+                .any(|n| n.starts_with("1 rule in the rule library")),
+            "expected singular '1 rule', got: {:?}",
+            json.executive_summary.failed_passes
+        );
     }
 
     // ── Executive summary override ─────────────────────────────────────────────
@@ -2333,7 +10081,7 @@ mod tests {
         let report = report_with(vec![], vec![]);
         let mut opts = empty_opts();
         opts.executive_summary_override = Some("Custom hand-written summary.".to_string());
-        let json = build_report_json(&report, &HashMap::new(), None, &opts);
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &opts);
         assert_eq!(
             json.executive_summary.narrative,
             "Custom hand-written summary."
@@ -2346,7 +10094,7 @@ mod tests {
         // S7: a zero-candidate scan gets its own honest sentence, not a mechanical
         // "0 candidate finding(s) were reviewed... 0 do now, 0 do next..." run-on.
         let report = report_with(vec![], vec![]);
-        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
         assert!(!json.executive_summary.is_override);
         assert_eq!(
             json.executive_summary.narrative,
@@ -2359,9 +10107,11 @@ mod tests {
         // S8: real pluralization ("1 candidate finding", not "1 candidate finding(s)").
         let f = finding("SEC-1", "a.rs", 1, "critical");
         let report = report_with(vec![f], vec![]);
-        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
         assert!(
-            json.executive_summary.narrative.contains("1 candidate finding "),
+            json.executive_summary
+                .narrative
+                .contains("1 candidate finding."),
             "expected singular 'finding', got: {:?}",
             json.executive_summary.narrative
         );
@@ -2369,6 +10119,273 @@ mod tests {
             !json.executive_summary.narrative.contains("finding(s)"),
             "must not contain the CLI-ism '(s)': {:?}",
             json.executive_summary.narrative
+        );
+    }
+
+    // ── C4-R3: four renderer defects, verified against the REAL compiled PDF's extracted
+    // text (not just "it compiled") — a smoke check that only asserts `%PDF` magic bytes is
+    // blind to exactly these bugs (a doubled banner, a stray "None", an embedded U+200B, an
+    // unfilled placeholder are all still a valid, compiling PDF). `pdf_extract` gives these
+    // tests the same read on the artifact a human (or a grep/copy-paste workflow) would get.
+
+    /// The long path shared by every C4-R3 test below: long enough (well past `breakable()`'s
+    /// default 40-char chunk size) to force a wrap in both the curated-finding site line and
+    /// the narrower severity×effort grid cell.
+    const C4_R3_LONG_PATH: &str = "apps/web/src/components/very/deeply/nested/directory/\
+        structure/that/goes/on/ForeverLongComponentFileName.tsx";
+
+    /// Builds a two-finding, multi-page RAW report that exercises all four C4-R3 defects at
+    /// once: a long path (zero-width-space wrap bug), an empty severity×effort cell (the
+    /// "None" bug — this report deliberately has findings in only ONE of the two
+    /// severity/effort combinations it surfaces, so the other cell in the grid is empty), the
+    /// real corpus's `SEC-NO-UNSAFE-HTML-SINK-1` remediation (the unfilled-placeholder bug,
+    /// whose authored text contains a literal `<img ...>` HTML example), and a RAW
+    /// (unreviewed) review state spanning several pages (the draft-banner-doubling bug).
+    async fn c4_r3_report_and_pdf() -> (AuditReportJson, Vec<u8>) {
+        let corpus_path = camerata_rules::corpus_path();
+        let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+        assert!(errors.is_empty(), "corpus must load cleanly: {errors:?}");
+
+        let mut long_path_finding =
+            finding("SEC-NO-UNSAFE-HTML-SINK-1", C4_R3_LONG_PATH, 42, "critical");
+        long_path_finding.effort = Some("low".to_string());
+        long_path_finding.confidence = Some("high".to_string());
+
+        let mut other_finding = finding("SEC-NO-HARDCODED-SECRETS-1", "b.rs", 1, "low");
+        other_finding.effort = Some("high".to_string());
+
+        let report = report_with(
+            vec![long_path_finding, other_finding],
+            vec!["SEC-NO-UNSAFE-HTML-SINK-1", "SEC-NO-HARDCODED-SECRETS-1"],
+        );
+        let json = build_report_json(
+            &report.clone().seal(),
+            &HashMap::new(),
+            Some(&corpus),
+            &empty_opts(),
+        );
+        assert_eq!(
+            json.review_state,
+            ReviewState::Raw,
+            "report must be RAW to exercise the draft banner"
+        );
+        assert!(
+            json.priority_grid
+                .rows
+                .iter()
+                .any(|r| r.cells.iter().any(|c| c.findings.is_empty())),
+            "the grid must contain at least one empty cell to exercise the 'None' bug"
+        );
+
+        let pdf = compile_pdf(&json)
+            .await
+            .expect("compile_pdf must succeed for the C4-R3 regression report");
+        (json, pdf)
+    }
+
+    /// Defect 1: the per-page draft banner must render EXACTLY ONCE per page — never doubled
+    /// into "DRAFTDRAFT: ..." by a redundant short echo elsewhere on the same or an adjacent
+    /// page. Every occurrence of the bare word "DRAFT" anywhere in the document must be part
+    /// of the one full banner sentence; a standalone "DRAFT" (the old footer echo) is exactly
+    /// what let it collide with the next page's banner.
+    #[tokio::test]
+    async fn compile_pdf_renders_the_draft_banner_exactly_once_never_doubled() {
+        if which_typst().is_none() {
+            eprintln!(
+                "skipping compile_pdf_renders_the_draft_banner_exactly_once_never_doubled: \
+                 typst not on PATH"
+            );
+            return;
+        }
+        let (_, pdf) = c4_r3_report_and_pdf().await;
+        let text = pdf_extract::extract_text_from_mem(&pdf)
+            .expect("must be able to extract text from the compiled PDF");
+        assert!(
+            !text.contains("DRAFTDRAFT"),
+            "the draft banner must never render doubled: {text:?}"
+        );
+        let bare_draft_count = text.matches("DRAFT").count();
+        let full_banner_count = text
+            .matches("DRAFT: not yet reviewed by a human reviewer")
+            .count();
+        assert!(
+            full_banner_count >= 1,
+            "the draft banner must render at least once: {text:?}"
+        );
+        assert_eq!(
+            bare_draft_count, full_banner_count,
+            "every occurrence of the word DRAFT must be part of the one full banner sentence, \
+             never a standalone echo elsewhere on the page: {text:?}"
+        );
+    }
+
+    /// Defect 2: an empty severity×effort matrix cell must render as blank — never the
+    /// literal string "None" (a Rust `Option`/Typst `none` stringified instead of omitted) or
+    /// "null". The whole document is checked, not just the matrix section, since neither
+    /// string is legitimate ANYWHERE in this report's authored prose.
+    #[tokio::test]
+    async fn compile_pdf_never_renders_the_literal_none_for_an_empty_matrix_cell() {
+        if which_typst().is_none() {
+            eprintln!(
+                "skipping compile_pdf_never_renders_the_literal_none_for_an_empty_matrix_cell: \
+                 typst not on PATH"
+            );
+            return;
+        }
+        let (_, pdf) = c4_r3_report_and_pdf().await;
+        let text = pdf_extract::extract_text_from_mem(&pdf)
+            .expect("must be able to extract text from the compiled PDF");
+        assert!(
+            !text.contains("None"),
+            "no cell may render the literal word None: {text:?}"
+        );
+        assert!(
+            !text.contains("null"),
+            "no cell may render the literal word null: {text:?}"
+        );
+    }
+
+    /// Defect 3: wrapping a long path/snippet/package must never splice a zero-width space (or
+    /// any other zero-width/BOM code point) into the rendered text — that invisible character
+    /// used to survive into the PDF's copy/search/grep layer and corrupt an otherwise-exact
+    /// path. The long path in `c4_r3_report_and_pdf` is long enough to force a wrap.
+    #[tokio::test]
+    async fn compile_pdf_never_embeds_a_zero_width_character_when_wrapping_a_long_path() {
+        if which_typst().is_none() {
+            eprintln!(
+                "skipping compile_pdf_never_embeds_a_zero_width_character_when_wrapping_a_long_path: \
+                 typst not on PATH"
+            );
+            return;
+        }
+        let (_, pdf) = c4_r3_report_and_pdf().await;
+        let text = pdf_extract::extract_text_from_mem(&pdf)
+            .expect("must be able to extract text from the compiled PDF");
+        for c in ZERO_WIDTH_CODEPOINTS {
+            assert!(
+                !text.contains(c),
+                "rendered text must never contain U+{:04X}: {text:?}",
+                c as u32
+            );
+        }
+        // A genuine visual line wrap is expected to introduce ORDINARY whitespace at the break
+        // point (a real PDF reader/extractor represents any two-line text that way — that's not
+        // the bug) — collapsing all whitespace must still reconstruct the exact original path
+        // with NOTHING else spliced in. This is the real discriminator from the old bug: the
+        // zero-width space survived even collapsing whitespace, because it is not whitespace.
+        let collapsed: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+        assert!(
+            collapsed.contains(C4_R3_LONG_PATH),
+            "wrapping the long path must never introduce anything other than incidental \
+             whitespace at the break point: reconstructed={collapsed:?}"
+        );
+    }
+
+    /// Defect 4: an authored remediation's literal angle-bracketed EXAMPLE (the real corpus's
+    /// `SEC-NO-UNSAFE-HTML-SINK-1` remediation shows `<img src=x onerror=alert(1)>` as prose,
+    /// not a placeholder) must render verbatim — never swallowed by the generic-placeholder
+    /// filler into a nonsense sentence like "a payload like the affected resource renders as
+    /// inert text".
+    #[tokio::test]
+    async fn compile_pdf_never_swallows_a_literal_html_example_into_a_generic_placeholder() {
+        if which_typst().is_none() {
+            eprintln!(
+                "skipping \
+                 compile_pdf_never_swallows_a_literal_html_example_into_a_generic_placeholder: \
+                 typst not on PATH"
+            );
+            return;
+        }
+        let (json, pdf) = c4_r3_report_and_pdf().await;
+        assert!(
+            json.curated_findings
+                .iter()
+                .any(|g| g.rule_id == "SEC-NO-UNSAFE-HTML-SINK-1"),
+            "the HTML-sink finding must survive triage into curated findings"
+        );
+        let text = pdf_extract::extract_text_from_mem(&pdf)
+            .expect("must be able to extract text from the compiled PDF");
+        assert!(
+            !text.contains("a payload like the affected resource"),
+            "the literal <img ...> example must not be replaced by the generic filler: {text:?}"
+        );
+        assert!(
+            text.contains("payload like") && text.contains("renders as inert text"),
+            "the authored remediation sentence must still render: {text:?}"
+        );
+    }
+
+    /// UTF8-BREAK-1: `breakable()` used to chunk a path/snippet by raw BYTE offset
+    /// (`s.slice(i, e)`), and Typst hard-errors the WHOLE compile when a slice index lands
+    /// mid-character — so any finding whose path, snippet, or package name contained a
+    /// multi-byte character (an accented Latin letter, a CJK character, an emoji) crashed the
+    /// entire PDF export with NO deliverable produced at all. `UNIT` mixes all three; the path
+    /// repeats it 5x and the snippet 8x specifically because that lands a UTF-8 continuation
+    /// byte exactly at byte offset 40 (the path's default chunk size) and 70 (the snippet's
+    /// explicit `n: 70`) — i.e. this is a literal repro of the byte-boundary crash, not just
+    /// "contains some multi-byte text somewhere".
+    #[tokio::test]
+    async fn compile_pdf_survives_multi_byte_characters_in_path_and_snippet() {
+        if which_typst().is_none() {
+            eprintln!(
+                "skipping compile_pdf_survives_multi_byte_characters_in_path_and_snippet: \
+                 typst not on PATH"
+            );
+            return;
+        }
+        const UNIT: &str = "café日本語😀";
+        let multibyte_path = format!("apps/{}/file.tsx", UNIT.repeat(5));
+        let multibyte_snippet = format!(
+            "const secretToken = '{}'; // trailing comment to extend the line further for padding",
+            UNIT.repeat(8)
+        );
+
+        let mut f = finding(
+            "SEC-NO-HARDCODED-SECRETS-1",
+            &multibyte_path,
+            10,
+            "critical",
+        );
+        f.snippet = multibyte_snippet.clone();
+        let report = report_with(vec![f], vec!["SEC-NO-HARDCODED-SECRETS-1"]);
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
+        assert_eq!(
+            json.curated_findings.len(),
+            1,
+            "the multi-byte finding must survive triage into curated findings"
+        );
+        assert_eq!(json.curated_findings[0].sites[0].path, multibyte_path);
+        assert_eq!(json.curated_findings[0].sites[0].snippet, multibyte_snippet);
+
+        let pdf = compile_pdf(&json).await.expect(
+            "compile_pdf must not crash on a multi-byte path/snippet — breakable() must chunk \
+             by character cluster, never by raw byte offset",
+        );
+        assert!(
+            pdf.starts_with(b"%PDF"),
+            "output must start with the PDF magic bytes"
+        );
+
+        let text = pdf_extract::extract_text_from_mem(&pdf)
+            .expect("must be able to extract text from the compiled PDF");
+        assert!(
+            !text.contains('\u{FFFD}'),
+            "no UTF-8 replacement character may appear in the extracted text: {text:?}"
+        );
+        // Same discriminator the C4-R3 zero-width-space test uses: a real visual line wrap
+        // introduces only ORDINARY whitespace at the break point, so collapsing all whitespace
+        // must still reconstruct every multi-byte run byte-for-byte, with nothing dropped,
+        // reordered, or replaced.
+        let collapsed: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+        assert!(
+            collapsed.contains(&UNIT.repeat(5)),
+            "the path's accented/CJK/emoji characters must survive intact: \
+             reconstructed={collapsed:?}"
+        );
+        assert!(
+            collapsed.contains(&UNIT.repeat(8)),
+            "the snippet's accented/CJK/emoji characters must survive intact: \
+             reconstructed={collapsed:?}"
         );
     }
 
@@ -2398,7 +10415,7 @@ mod tests {
         opts.client_name = "Acme Corp".to_string();
         opts.project_title = "Acme Backend Audit".to_string();
         opts.prepared_by = "Camerata".to_string();
-        let json = build_report_json(&report, &HashMap::new(), None, &opts);
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &opts);
 
         let pdf = compile_pdf(&json)
             .await
@@ -2408,6 +10425,645 @@ mod tests {
             pdf.starts_with(b"%PDF"),
             "output must start with the PDF magic bytes"
         );
+    }
+
+    // ── req_det: two exports of ONE report are byte-identical ─────────────────
+
+    /// req_det: compiling the SAME report twice, across a second boundary, must produce
+    /// byte-identical PDFs.
+    ///
+    /// This is the property the product needs in order to claim two deliverables ARE the same
+    /// report. Without it the claim is unverifiable: you cannot diff two PDFs and say anything.
+    ///
+    /// FAILS BEFORE THE CHANGE: `compile_pdf` set neither `SOURCE_DATE_EPOCH` nor
+    /// `--creation-timestamp`, so typst stamped the wall clock into five places — the Info
+    /// dict's `/CreationDate` and `/ModDate`, the XMP packet's `xmp:CreateDate`,
+    /// `xmp:ModifyDate`, `xmpMM:InstanceID` and `xmpMM:DocumentID`, and the trailer's `/ID`.
+    /// Red output was `the two PDFs must be byte-identical … first difference at byte 10029`
+    /// inside the XMP packet, with the two windows showing `08:49:30` and `08:49:32`.
+    ///
+    /// The sleep is deliberate and is why this test is trustworthy: without it the two
+    /// compiles usually land in the same second and the OLD code passes, which is precisely
+    /// how this defect survived — a test that is usually green teaches you to rerun, not to
+    /// look.
+    #[tokio::test]
+    async fn req_det_two_compiles_of_one_report_are_byte_identical() {
+        if which_typst().is_none() {
+            eprintln!(
+                "skipping req_det_two_compiles_of_one_report_are_byte_identical: typst not on PATH"
+            );
+            return;
+        }
+        let report = report_with(
+            vec![finding(
+                "SEC-NO-HARDCODED-SECRETS-1",
+                "src/a.rs",
+                10,
+                "critical",
+            )],
+            vec!["SEC-NO-HARDCODED-SECRETS-1"],
+        );
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
+
+        let first = compile_pdf(&json)
+            .await
+            .expect("first compile must succeed");
+        tokio::time::sleep(Duration::from_millis(1_100)).await;
+        let second = compile_pdf(&json)
+            .await
+            .expect("second compile must succeed");
+
+        assert!(first.starts_with(b"%PDF") && !first.is_empty());
+        let first_diff = first
+            .iter()
+            .zip(&second)
+            .position(|(a, b)| a != b)
+            .unwrap_or_else(|| first.len().min(second.len()));
+        assert_eq!(
+            first,
+            second,
+            "two compiles of ONE report must be byte-identical; lengths {} vs {}, first \
+             difference at byte {first_diff}",
+            first.len(),
+            second.len()
+        );
+    }
+
+    /// req_det: the PDF's embedded creation timestamp is the SCAN time — not a constant, and
+    /// not the moment the bytes were serialized. A client reading the file's metadata must be
+    /// told when the audit ran.
+    ///
+    /// FAILS BEFORE THE CHANGE: the Info dict carried the wall clock at compile time, which
+    /// for this fixture (a scan stamped `2026-07-23T00:05:00Z`) is years off.
+    #[tokio::test]
+    async fn req_det_pdf_creation_timestamp_is_the_scan_time() {
+        if which_typst().is_none() {
+            eprintln!(
+                "skipping req_det_pdf_creation_timestamp_is_the_scan_time: typst not on PATH"
+            );
+            return;
+        }
+        let report = report_with(
+            vec![finding(
+                "SEC-NO-HARDCODED-SECRETS-1",
+                "src/a.rs",
+                10,
+                "critical",
+            )],
+            vec!["SEC-NO-HARDCODED-SECRETS-1"],
+        );
+        // `report_with` stamps finished_at = 2026-07-23T00:05:00Z; the cover string is
+        // minute-precision, so the pinned instant is 00:05:00 of that day.
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
+        assert_eq!(json.cover.generated_at, "2026-07-23 00:05 UTC");
+
+        let pdf = compile_pdf(&json).await.expect("compile must succeed");
+        let text = String::from_utf8_lossy(&pdf);
+        assert!(
+            text.contains("D:20260723000500"),
+            "the PDF must carry the SCAN instant as its creation date, not the wall clock"
+        );
+    }
+
+    /// W6: the real Typst template must compile cleanly with a non-empty `failed_passes` list
+    /// — exercising the new disclosure block in BOTH the summary and the methodology section,
+    /// not just the gated-off "empty list" path every other `compile_pdf_*` test above covers.
+    #[tokio::test]
+    async fn compile_pdf_renders_the_failed_pass_disclosure_block() {
+        if which_typst().is_none() {
+            eprintln!(
+                "skipping compile_pdf_renders_the_failed_pass_disclosure_block: typst not on PATH"
+            );
+            return;
+        }
+        let mut report = report_with(
+            vec![finding(
+                "SEC-NO-HARDCODED-SECRETS-1",
+                "src/a.rs",
+                10,
+                "critical",
+            )],
+            vec!["SEC-NO-HARDCODED-SECRETS-1"],
+        );
+        report.failed_passes = vec![crate::ai_audit::FailedPass {
+            repo: "acme/widgets".to_string(),
+            pass: "rule-alternative recommendations".to_string(),
+            reason: "Claude CLI timed out after 300s (no output).".to_string(),
+        }];
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
+        assert_eq!(json.executive_summary.failed_passes.len(), 1);
+        assert_eq!(json.methodology.failed_passes.len(), 1);
+
+        let pdf = compile_pdf(&json)
+            .await
+            .expect("compile_pdf must succeed with a failed-pass disclosure present");
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    /// P2: the real Typst template must compile cleanly with `fix_for_this_finding` SET
+    /// (the new primary-fix branch), alongside a generic `fix` from the corpus — exercising
+    /// the "both present" path this pass added, not just the pre-existing "neither present"
+    /// path the test above already covers.
+    #[tokio::test]
+    async fn compile_pdf_renders_fix_specific_and_generic_fix_together() {
+        if which_typst().is_none() {
+            eprintln!(
+                "skipping compile_pdf_renders_fix_specific_and_generic_fix_together: typst not \
+                 on PATH"
+            );
+            return;
+        }
+        let corpus_path = camerata_rules::corpus_path();
+        let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+        assert!(
+            errors.is_empty(),
+            "corpus must load cleanly, got errors: {errors:?}"
+        );
+        let mut f = finding(
+            "SUPABASE-RLS-ENABLED-1",
+            "supabase/migrations/1.sql",
+            1,
+            "critical",
+        );
+        f.captures
+            .insert("table".to_string(), "profiles".to_string());
+        f.fix_specific = Some(
+            "Enable RLS on `profiles` directly (see supabase/migrations/2.sql for the pattern \
+             this repo already uses on `orders`)."
+                .to_string(),
+        );
+        let report = report_with(vec![f], vec!["SUPABASE-RLS-ENABLED-1"]);
+        let json = build_report_json(
+            &report.clone().seal(),
+            &HashMap::new(),
+            Some(&corpus),
+            &empty_opts(),
+        );
+        assert!(json.curated_findings[0].sites[0]
+            .fix_for_this_finding
+            .is_some());
+        assert!(json.curated_findings[0].sites[0].fix.is_some());
+        let pdf = compile_pdf(&json)
+            .await
+            .expect("compile_pdf must succeed with both fix_for_this_finding and fix set");
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    // ── C4-P4 residual defect 5: curated ordering + held-for-review separation ─────────
+
+    /// Render test (compiles the real Typst template): "Curated findings" must be ordered by
+    /// severity desc (never alphabetically by rule id — the fixture deliberately gives the LOW
+    /// finding a rule id that sorts alphabetically FIRST, so a passing test can only mean the
+    /// severity sort actually fired), and an entirely-informational finding must render under
+    /// its own "Held for review" heading, strictly AFTER every curated finding, never under
+    /// "Curated findings" itself.
+    #[tokio::test]
+    async fn curated_findings_are_severity_ordered_and_informational_rows_are_held_for_review_separately(
+    ) {
+        if which_typst().is_none() {
+            eprintln!("skipping curated_findings_are_severity_ordered_...: typst not on PATH");
+            return;
+        }
+        let mut low = finding("AAA-LOW-COSMETIC-1", "a.rs", 1, "low");
+        low.detail = "A low severity cosmetic logging format issue was observed here. This is \
+                      not urgent."
+            .to_string();
+        let mut critical = finding("ZZZ-CRITICAL-AUTH-1", "z.rs", 2, "critical");
+        critical.detail = "A critical authentication bypass allows any unauthenticated user \
+                            full admin access. Immediate action is required."
+            .to_string();
+        let mut info = finding("MMM-STYLE-NOTE-1", "m.rs", 3, "info");
+        info.detail = "A minor style preference about variable naming conventions was observed \
+                       in this file."
+            .to_string();
+
+        let report = report_with(vec![low, critical, info], vec![]);
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
+
+        // JSON-level contract: 2 genuinely curated groups (ordered critical-first despite the
+        // alphabetical trap), 1 fully-informational group moved out to its own list.
+        assert_eq!(
+            json.curated_findings.len(),
+            2,
+            "{:?}",
+            json.curated_findings
+        );
+        assert_eq!(json.held_for_review_findings.len(), 1);
+        assert_eq!(
+            json.curated_findings[0].sites[0].severity, "critical",
+            "the first curated finding must be the max severity present, not the \
+             alphabetically-first rule id: {:?}",
+            json.curated_findings
+        );
+        assert_eq!(json.curated_findings[1].sites[0].severity, "low");
+        assert_eq!(
+            json.held_for_review_findings[0].sites[0].bucket,
+            "informational"
+        );
+        assert!(json
+            .curated_findings
+            .iter()
+            .all(|g| g.sites.iter().all(|s| s.bucket != "informational")));
+
+        let pdf = compile_pdf(&json)
+            .await
+            .expect("compile_pdf must succeed for the severity-ordering fixture");
+        let text = pdf_extract::extract_text_from_mem(&pdf)
+            .expect("must be able to extract text from the compiled PDF");
+
+        // Both headings also appear once each in the clickable table of contents, and some of
+        // the headline text also appears in the "three things this week" box and the severity
+        // matrix earlier in the document — `rfind` anchors on the real SECTION headings (the
+        // last occurrence of each), and the comparisons below are scoped to the text BETWEEN
+        // (and after) those two anchors, so none of those earlier incidental occurrences can
+        // produce a false pass.
+        let curated_anchor = text
+            .rfind("Curated findings")
+            .expect("the Curated findings section heading must render");
+        let held_anchor = text
+            .rfind("Held for review")
+            .expect("the Held for review section heading must render");
+        assert!(
+            curated_anchor < held_anchor,
+            "the Curated findings section must render before Held for review: {text:?}"
+        );
+
+        let curated_section = &text[curated_anchor..held_anchor];
+        let held_section = &text[held_anchor..];
+
+        let critical_idx = curated_section
+            .find("authentication bypass")
+            .expect("the critical finding's headline must render in Curated findings");
+        let low_idx = curated_section
+            .find("cosmetic logging format")
+            .expect("the low finding's headline must render in Curated findings");
+        assert!(
+            critical_idx < low_idx,
+            "the critical (max-severity) finding must render BEFORE the low finding within \
+             Curated findings, never alphabetically: {curated_section:?}"
+        );
+
+        assert!(
+            held_section.contains("variable naming conventions"),
+            "the informational finding must render in Held for review: {held_section:?}"
+        );
+        assert!(
+            !curated_section.contains("variable naming conventions"),
+            "no informational row may appear inside Curated findings (i.e. before a curated \
+             one): {curated_section:?}"
+        );
+    }
+
+    // ── C6-B1: a held-bucket row counted but never rendered (fixed above in the
+    // `by_rule`-population loop) ──────────────────────────────────────────────────────────
+
+    /// Reproduces the exact client-facing shape of the bug: six criticals, one of them a
+    /// hedged (`needs_review: true`), uncited AI-tier finding that — before this fix — was
+    /// tallied into `matrix.held`/the cover strip/the category scorecard via the independent
+    /// `code_findings` pass but never got a `CuratedSiteJson` at all, because the `by_rule`
+    /// loop `continue`d past any `is_uncited_ai_finding` row before building one (stale
+    /// reasoning left over from before C5-7 — see that loop's updated doc comment). The
+    /// client counts six criticals on the cover and finds five in the PDF; the missing one is
+    /// a critical. This test pins both halves: the row is counted, AND it has a real,
+    /// independently discoverable site block, AND that block actually renders in the "Held
+    /// for review" section of the compiled PDF.
+    #[tokio::test]
+    async fn hedged_uncited_critical_in_held_bucket_is_counted_and_renders_in_held_for_review() {
+        if which_typst().is_none() {
+            eprintln!("skipping hedged_uncited_critical_in_held_bucket_...: typst not on PATH");
+            return;
+        }
+        let mut hedge = finding(
+            "AI-CUSTOM-NOVEL-DEFECT-1",
+            "apps/api/src/risky.ts",
+            7,
+            "critical",
+        );
+        hedge.detail = "zzqy-hedged-uncited-critical: a genuinely novel defect class the model \
+                         flagged with low confidence, naming none of the known grounded \
+                         vocabulary."
+            .to_string();
+        hedge.needs_review = true;
+
+        // Five ordinary criticals that render normally, so the fixture matches the client's
+        // own report exactly: six criticals counted, one of six missing from the PDF body.
+        let mut findings: Vec<Finding> = (1..=5)
+            .map(|n| {
+                let mut f = finding(
+                    &format!("SEC-TEST-ORDINARY-CRIT-{n}"),
+                    &format!("apps/api/src/ordinary_{n}.ts"),
+                    n,
+                    "critical",
+                );
+                f.detail = format!("zzqy-ordinary-critical-{n}: an uncontested critical finding.");
+                f
+            })
+            .collect();
+        findings.push(hedge);
+
+        let report = report_with(findings, vec![]);
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
+
+        // ── Counted ──
+        assert_eq!(
+            json.cover.stats.critical, 6,
+            "the cover must count all six criticals, hedged row included: {:?}",
+            json.cover.stats
+        );
+        assert_eq!(
+            json.matrix.held.len(),
+            1,
+            "the hedged, uncited row must sit in the severity-unbounded held bucket: {:?}",
+            json.matrix.held
+        );
+        assert_eq!(json.matrix.held[0].severity, "critical");
+        assert_eq!(json.matrix.held[0].rule_id, "AI-CUSTOM-NOVEL-DEFECT-1");
+
+        // ── Has a rendered-eligible site ──
+        let held_group = json
+            .held_for_review_findings
+            .iter()
+            .find(|g| g.rule_id == "AI-CUSTOM-NOVEL-DEFECT-1")
+            .expect(
+                "the hedged, uncited critical finding must have its own CuratedGroupJson in \
+                 held_for_review_findings, not merely a matrix.held tally",
+            );
+        assert_eq!(held_group.sites.len(), 1);
+        assert_eq!(held_group.sites[0].severity, "critical");
+        assert_eq!(held_group.sites[0].bucket, "held");
+        assert!(
+            json.curated_findings
+                .iter()
+                .all(|g| g.rule_id != "AI-CUSTOM-NOVEL-DEFECT-1"),
+            "the uncited gate must still keep this row OUT of curated_findings: {:?}",
+            json.curated_findings
+        );
+
+        // ── Actually renders ──
+        let pdf = compile_pdf(&json)
+            .await
+            .expect("compile_pdf must succeed for the hedged-uncited-critical fixture");
+        let text = pdf_extract::extract_text_from_mem(&pdf)
+            .expect("must be able to extract text from the compiled PDF");
+
+        // C6-B1: anchor on the HEADING specifically, not any substring occurrence — a `held`
+        // row's own disposition label literally reads "Held for review (a human reviewer's
+        // judgment call is needed before this can be actioned)" (see `disposition_label`), so a
+        // naive `rfind("Held for review")` matches that IN-BODY label (which sorts after the
+        // row's own content) rather than the section heading, truncating the slice to AFTER the
+        // very content being tested for. The heading alone is followed by a bare newline in the
+        // extracted text (the ToC entry is followed by dot-leader spaces; the in-body label is
+        // followed by " ("), so anchoring on the heading-plus-newline disambiguates all three.
+        let curated_anchor = text
+            .find("Curated findings\n")
+            .expect("heading must render");
+        let held_anchor = text.find("Held for review\n").expect("heading must render");
+        let held_section = &text[held_anchor..];
+        let curated_section = &text[curated_anchor..held_anchor];
+
+        for n in 1..=5 {
+            assert!(
+                text.contains(&format!("zzqy-ordinary-critical-{n}")),
+                "ordinary critical #{n} must render somewhere: {text:?}"
+            );
+        }
+        assert!(
+            held_section.contains("zzqy-hedged-uncited-critical"),
+            "the hedged, uncited critical row must render in the Held for review section — \
+             this is the exact bug: counted on the cover/scorecard, absent from every \
+             rendered section: {held_section:?}"
+        );
+        assert!(
+            !curated_section.contains("zzqy-hedged-uncited-critical"),
+            "the hedged, uncited row must never render inside Curated findings: \
+             {curated_section:?}"
+        );
+    }
+
+    /// The cover's critical tally must equal the number of critical-severity site BLOCKS
+    /// actually built across `curated_findings` + `held_for_review_findings` combined — never
+    /// a count computed independently of what gets a rendered block. Six criticals, split
+    /// across every destination a critical row can reach (two ordinary curated do_now rows,
+    /// two calibration-hedged held rows, two uncited-AI held rows), all six render.
+    #[tokio::test]
+    async fn cover_critical_count_equals_the_number_of_critical_blocks_actually_rendered() {
+        let mut findings = Vec::new();
+        for n in 1..=2 {
+            let mut f = finding(
+                &format!("SEC-CURATED-CRIT-{n}"),
+                &format!("a{n}.rs"),
+                n,
+                "critical",
+            );
+            f.detail = format!("zzqy-curated-critical-{n}");
+            findings.push(f);
+        }
+        for n in 1..=2 {
+            let mut f = finding(
+                &format!("ARCH-HEDGE-CRIT-{n}"),
+                &format!("b{n}.rs"),
+                n,
+                "critical",
+            );
+            f.detail = format!("zzqy-hedged-critical-{n}");
+            f.needs_review = true;
+            findings.push(f);
+        }
+        for n in 1..=2 {
+            let mut f = finding(
+                &format!("AI-UNCITED-CRIT-{n}"),
+                &format!("c{n}.rs"),
+                n,
+                "critical",
+            );
+            f.detail = format!(
+                "zzqy-uncited-critical-{n}: no grounded citation vocabulary anywhere in this \
+                 sentence."
+            );
+            findings.push(f);
+        }
+
+        let report = report_with(findings, vec![]);
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
+
+        let rendered_critical_blocks = json
+            .curated_findings
+            .iter()
+            .chain(json.held_for_review_findings.iter())
+            .flat_map(|g| &g.sites)
+            .filter(|s| s.severity == "critical")
+            .count();
+
+        assert_eq!(json.cover.stats.critical, 6, "{:?}", json.cover.stats);
+        assert_eq!(
+            rendered_critical_blocks, 6,
+            "every one of the six critical rows must have an actual rendered site block"
+        );
+        assert_eq!(
+            json.cover.stats.critical, rendered_critical_blocks,
+            "the cover's critical tally must equal the number of critical blocks actually \
+             rendered, never a count computed independently of rendering"
+        );
+
+        if which_typst().is_none() {
+            eprintln!(
+                "skipping PDF leg of cover_critical_count_equals_the_number_of_critical_blocks_actually_rendered: \
+                 typst not on PATH"
+            );
+            return;
+        }
+        let pdf = compile_pdf(&json)
+            .await
+            .expect("compile_pdf must succeed for the six-critical fixture");
+        let text = pdf_extract::extract_text_from_mem(&pdf)
+            .expect("must be able to extract text from the compiled PDF");
+        for n in 1..=2 {
+            assert!(
+                text.contains(&format!("zzqy-curated-critical-{n}")),
+                "{text:?}"
+            );
+            assert!(
+                text.contains(&format!("zzqy-hedged-critical-{n}")),
+                "{text:?}"
+            );
+            assert!(
+                text.contains(&format!("zzqy-uncited-critical-{n}")),
+                "{text:?}"
+            );
+        }
+    }
+
+    /// Every (bucket x severity) combination the report pipeline can actually produce must
+    /// emit a real, independently findable site block — curated at critical/high/medium/low
+    /// (never info, which is always informational by `is_informational`'s hard rule), held at
+    /// EVERY severity including critical/high (C5-4: severity-unbounded by design), and
+    /// informational only at medium/low/info (never critical/high: `is_informational`'s other
+    /// hard invariant). `informational x critical` and `informational x high` are not
+    /// included below because they are IMPOSSIBLE combinations by design, not untested ones —
+    /// seprately pinned by `critical_and_high_are_never_informational`. One shared report, one
+    /// shared `build_report_json` call, one shared PDF compile — twelve independent
+    /// assertions, so a renderer change that silently drops any ONE combination fails exactly
+    /// that assertion rather than a vague aggregate count.
+    #[tokio::test]
+    async fn every_bucket_severity_combination_emits_a_rendered_block() {
+        let severities = ["critical", "high", "medium", "low"];
+        let mut findings = Vec::new();
+        let mut expectations: Vec<(&'static str, &'static str, String)> = Vec::new();
+
+        // curated x {critical, high, medium, low}
+        for sev in severities {
+            let tag = format!("zzqy-curated-{sev}");
+            let mut f = finding(
+                &format!("SEC-COMBO-CURATED-{}", sev.to_ascii_uppercase()),
+                &format!("curated-{sev}.rs"),
+                1,
+                sev,
+            );
+            f.detail = tag.clone();
+            findings.push(f);
+            expectations.push(("curated", sev, tag));
+        }
+
+        // held x {critical, high, medium, low, info} — a calibration hedge, severity-unbounded.
+        for sev in ["critical", "high", "medium", "low", "info"] {
+            let tag = format!("zzqy-held-{sev}");
+            let mut f = finding(
+                &format!("ARCH-COMBO-HELD-{}", sev.to_ascii_uppercase()),
+                &format!("held-{sev}.rs"),
+                1,
+                sev,
+            );
+            f.detail = tag.clone();
+            f.needs_review = true;
+            findings.push(f);
+            expectations.push(("held", sev, tag));
+        }
+
+        // informational x {medium, low} — the §2d testing-style gate (this fixture's
+        // `test_file_count` is 0, below `MIN_STYLE_CORPUS_FILES`).
+        for sev in ["medium", "low"] {
+            let tag = format!("zzqy-informational-{sev}");
+            let mut f = finding(
+                &format!("ARCH-COMBO-INFO-{}", sev.to_ascii_uppercase()),
+                &format!("info-{sev}.rs"),
+                1,
+                sev,
+            );
+            f.detail = tag.clone();
+            f.category = Some("testing-style".to_string());
+            findings.push(f);
+            expectations.push(("informational", sev, tag));
+        }
+
+        // informational x info — the plain `info`-severity rule, no hedge needed.
+        {
+            let tag = "zzqy-informational-info".to_string();
+            let mut f = finding("ARCH-COMBO-INFO-INFO", "info-info.rs", 1, "info");
+            f.detail = tag.clone();
+            findings.push(f);
+            expectations.push(("informational", "info", tag));
+        }
+
+        let report = report_with(findings, vec![]);
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
+
+        for (bucket, sev, tag) in &expectations {
+            let (group_list, group_list_name) = match *bucket {
+                "curated" => (&json.curated_findings, "curated_findings"),
+                _ => (&json.held_for_review_findings, "held_for_review_findings"),
+            };
+            let site = group_list
+                .iter()
+                .flat_map(|g| &g.sites)
+                .find(|s| s.detail == *tag)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "no rendered site found for ({bucket}, {sev}) in {group_list_name}: \
+                         tag {tag:?} — curated_findings={:?}, held_for_review_findings={:?}",
+                        json.curated_findings, json.held_for_review_findings
+                    )
+                });
+            assert_eq!(
+                site.severity, *sev,
+                "the site found for tag {tag:?} must keep its real severity"
+            );
+            let expected_site_bucket = if *bucket == "curated" {
+                // Any action tier counts — do_now/do_next/plan all mean "genuinely curated".
+                assert!(
+                    !matches!(site.bucket.as_str(), "informational" | "held"),
+                    "tag {tag:?} expected to be curated (an action tier), got bucket {:?}",
+                    site.bucket
+                );
+                continue;
+            } else {
+                *bucket
+            };
+            assert_eq!(
+                site.bucket, expected_site_bucket,
+                "tag {tag:?} expected site bucket {expected_site_bucket:?}, got {:?}",
+                site.bucket
+            );
+        }
+
+        if which_typst().is_none() {
+            eprintln!(
+                "skipping PDF leg of every_bucket_severity_combination_emits_a_rendered_block: \
+                 typst not on PATH"
+            );
+            return;
+        }
+        let pdf = compile_pdf(&json)
+            .await
+            .expect("compile_pdf must succeed for the full bucket x severity combo fixture");
+        let text = pdf_extract::extract_text_from_mem(&pdf)
+            .expect("must be able to extract text from the compiled PDF");
+        for (bucket, sev, tag) in &expectations {
+            assert!(
+                text.contains(tag.as_str()),
+                "({bucket}, {sev}) tagged {tag:?} must render somewhere in the compiled PDF: \
+                 {text:?}"
+            );
+        }
     }
 
     /// Best-effort `typst` presence check for the compile test's skip gate (mirrors the
@@ -2470,8 +11126,10 @@ mod tests {
     //
     // `is_informational` is the single gate that diverts a low-signal OPEN finding out of the
     // do_now/do_next/plan action tiers into the visible-but-advisory `informational` appendix.
-    // These pin the four independent signals AND the two hard invariants (never critical/high,
-    // never a dispositioned finding) that keep real defects in the action tiers.
+    // These pin the three independent signals (C5-4 moved the former needs-review signal to its
+    // own severity-unbounded `is_held_for_review` gate — see `needs_review_confidence_is_held_not_informational`
+    // below) AND the two hard invariants (never critical/high, never a dispositioned finding)
+    // that keep real defects in the action tiers.
 
     /// The `info` severity tier is informational by definition — nothing below `low` is an
     /// action item (e.g. the unexposed-schema RLS note from I3).
@@ -2532,21 +11190,25 @@ mod tests {
         ));
     }
 
-    /// §2c — a low/medium finding the calibrator itself flagged `needs-review` (debatable /
-    /// theoretical / under-evidenced) is advisory, not an action item.
+    /// C5-4: a finding the calibrator itself flagged `needs-review` is held out of action tiers
+    /// via `is_held_for_review` — a SEPARATE gate from `is_informational` now (the former §2c
+    /// signal), with NO severity ceiling, so `is_informational` itself must say `false` for it
+    /// at every severity (it is no longer one of `is_informational`'s own signals at all).
     #[test]
-    fn needs_review_confidence_is_informational_at_low_severity() {
+    fn needs_review_confidence_is_held_not_informational() {
         let mut f = finding("SOME-RULE-1", "a.rs", 1, "medium");
         f.confidence = Some("needs-review".to_string());
-        assert!(is_informational(
-            &f,
-            Disposition::Unresolved,
-            "medium",
-            None,
-            0
-        ));
-        // But a high-confidence low finding is a normal (if minor) action item.
+        assert!(
+            is_held_for_review(&f, Disposition::Unresolved),
+            "a needs-review finding must be held for review"
+        );
+        assert!(
+            !is_informational(&f, Disposition::Unresolved, "medium", None, 0),
+            "needs-review is no longer one of is_informational's own signals (C5-4)"
+        );
+        // A high-confidence finding is neither held nor informational — a normal action item.
         f.confidence = Some("high".to_string());
+        assert!(!is_held_for_review(&f, Disposition::Unresolved));
         assert!(!is_informational(
             &f,
             Disposition::Unresolved,
@@ -2592,7 +11254,10 @@ mod tests {
         let rule = corpus
             .get_by_id("ARCH-SERVICE-DI-1")
             .expect("ARCH-SERVICE-DI-1 must exist in the bundled corpus");
-        assert_eq!(rule.enforcement, camerata_rules::EnforcementKind::Structured);
+        assert_eq!(
+            rule.enforcement,
+            camerata_rules::EnforcementKind::Structured
+        );
         assert_eq!(rule.domain, "api-layer");
 
         let mut f = finding("ARCH-SERVICE-DI-1", "src/svc.rs", 1, "medium");
@@ -2618,6 +11283,163 @@ mod tests {
         );
     }
 
+    // ── D6 ceiling interaction (2026-09-30 cycle-2 queue-hardening) ────────────────
+    //
+    // R1 (`ai_audit::apply_severity_ceiling_rule`) re-routes a self-hedged finding to
+    // needs-review + Low severity; R2 clamps a browser-mediated CORS misconfiguration to
+    // exactly Medium. These pin the OUTPUT side here: that the R1 shape is what
+    // `is_held_for_review` keys on (C5-4: the hedge signal now lives there, not
+    // `is_informational`), and that R2's medium landing spot buckets into "plan" — never
+    // "do_now" — so it can never displace a genuine critical from the top action tier.
+
+    /// An R1-shaped finding (severity capped to Low, confidence flagged needs-review by the D6
+    /// ceiling) routes to the `held` bucket (C5-4), out of every action bucket.
+    #[test]
+    fn r1_shaped_low_needs_review_finding_is_held_for_review() {
+        let mut f = finding("AI-HEDGE-1", "a.rs", 1, "low");
+        f.confidence = Some("needs-review".to_string());
+        assert!(
+            is_held_for_review(&f, Disposition::Unresolved),
+            "an R1-shaped (low + needs-review) finding must be held for review"
+        );
+        assert_eq!(
+            effective_bucket(&f, Disposition::Unresolved, "low", None, 0, None),
+            "held",
+            "it must route to the held bucket, not an action tier"
+        );
+    }
+
+    /// A medium-severity CORS finding (the R2 ceiling's landing severity) buckets into "plan" —
+    /// never "do_now" — so it can never displace a genuine critical finding from the top tier.
+    #[test]
+    fn r2_medium_cors_finding_lands_in_plan_not_do_now() {
+        let bucket = matrix_bucket(Disposition::Unresolved, "medium", None);
+        assert_eq!(
+            bucket, "plan",
+            "a medium finding (R2's landing severity) belongs in Plan"
+        );
+        assert_ne!(
+            bucket, "do_now",
+            "a medium finding must never displace a critical in do_now"
+        );
+    }
+
+    // ── D8 ceiling (owner-mandated observability/under-logging convention-class cap) ──────
+    //
+    // Capability 2: under-logging / observability thoroughness is SEMANTIC and opinion-shaped
+    // by the owner's own framing, so it must be capped structurally — a finding from this
+    // class must NEVER occupy an action bucket (do_now/do_next/plan) on its own, regardless of
+    // what severity is PROPOSED for it (by a model, by the D5 floor, by anything). The two
+    // tests below are the bidirectional pin the task calls for: the gate fires for every
+    // ARCH-OBSERVABILITY-* id at every proposed severity (including critical), and a genuine,
+    // non-observability rule id at the SAME proposed severities reaches its normal action
+    // bucket unchanged — proving this is a rule-IDENTITY gate, not a global neutering of high/
+    // critical severities.
+
+    /// Every `ARCH-OBSERVABILITY-*` rule, at every severity band a model could possibly
+    /// propose (including critical), routes to `"informational"` — never an action bucket.
+    #[test]
+    fn observability_convention_class_never_reaches_an_action_bucket_at_any_proposed_severity() {
+        for rule_id in [
+            "ARCH-OBSERVABILITY-SILENT-FAILURE-1",
+            "ARCH-OBSERVABILITY-LOG-CONSISTENCY-1",
+            "ARCH-OBSERVABILITY-CORRELATION-ID-1",
+        ] {
+            for proposed_severity in ["critical", "high", "medium", "low", "info"] {
+                let mut f = finding(rule_id, "a.rs", 1, proposed_severity);
+                // Even a "low-effort" hint must not help it sneak into do_now via the
+                // high+low-effort matrix cell — the gate must win regardless of effort too.
+                f.effort = Some("low".to_string());
+                let bucket = effective_bucket(
+                    &f,
+                    Disposition::Unresolved,
+                    proposed_severity,
+                    None,
+                    0,
+                    None,
+                );
+                assert_eq!(
+                    bucket, "informational",
+                    "{rule_id} at proposed severity {proposed_severity} must route to \
+                     informational, got {bucket}"
+                );
+                assert!(
+                    !matches!(bucket, "do_now" | "do_next" | "plan"),
+                    "{rule_id} at proposed severity {proposed_severity} must never occupy an \
+                     action bucket, got {bucket}"
+                );
+            }
+        }
+    }
+
+    /// Bidirectional control for the test above: a genuine (non-observability) rule id DOES
+    /// reach its normal action bucket at the severities that earn one, proving the D8 gate is
+    /// scoped to rule IDENTITY rather than a hidden global change to bucket placement.
+    #[test]
+    fn non_observability_rule_still_reaches_its_action_bucket_at_matching_proposed_severities() {
+        let critical = finding("SEC-SOME-REAL-DEFECT-1", "a.rs", 1, "critical");
+        assert_eq!(
+            effective_bucket(
+                &critical,
+                Disposition::Unresolved,
+                "critical",
+                None,
+                0,
+                None
+            ),
+            "do_now",
+            "a genuine critical finding must still reach do_now"
+        );
+
+        let mut high_low_effort = finding("SEC-SOME-REAL-DEFECT-1", "a.rs", 1, "high");
+        high_low_effort.effort = Some("low".to_string());
+        assert_eq!(
+            effective_bucket(
+                &high_low_effort,
+                Disposition::Unresolved,
+                "high",
+                None,
+                0,
+                None
+            ),
+            "do_now",
+            "a genuine high+low-effort finding must still reach do_now"
+        );
+
+        let medium = finding("SEC-SOME-REAL-DEFECT-1", "a.rs", 1, "medium");
+        assert_eq!(
+            effective_bucket(&medium, Disposition::Unresolved, "medium", None, 0, None),
+            "plan",
+            "a genuine medium finding must still reach plan"
+        );
+    }
+
+    /// End-to-end at the `ai_audit` calibration-pipeline level: `apply_severity_ceiling_rules`
+    /// (D8) forces an ARCH-OBSERVABILITY-* finding's severity to exactly `"low"` regardless of
+    /// whatever severity it carried going in — including a model proposing critical — never
+    /// raising OR lowering any OTHER rule's severity in the same pass.
+    #[test]
+    fn d8_ceiling_forces_observability_findings_to_low_regardless_of_input_severity() {
+        for input_severity in ["critical", "high", "medium", "info"] {
+            let f = finding(
+                "ARCH-OBSERVABILITY-SILENT-FAILURE-1",
+                "a.rs",
+                1,
+                input_severity,
+            );
+            let out = crate::ai_audit::apply_severity_ceiling_rules(vec![f]);
+            assert_eq!(
+                out[0].severity, "low",
+                "input severity {input_severity} must be forced to low"
+            );
+        }
+
+        // Control: an unrelated rule's severity is untouched by this pass.
+        let untouched = finding("SEC-SOME-REAL-DEFECT-1", "a.rs", 1, "critical");
+        let out = crate::ai_audit::apply_severity_ceiling_rules(vec![untouched]);
+        assert_eq!(out[0].severity, "critical");
+    }
+
     /// End-to-end at the `build_report_json` level: an `info`-severity finding lands in the
     /// `informational` appendix, NEVER in an action tier, and the curated four-bucket invariant
     /// `do_now + do_next + plan + accepted == curated_total` still holds exactly (informational
@@ -2630,11 +11452,19 @@ mod tests {
             vec![action, advisory],
             vec!["SEC-NO-HARDCODED-SECRETS-1", "SOME-RULE-1"],
         );
-        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
 
-        assert_eq!(json.matrix.informational.len(), 1, "the info finding is in the appendix");
+        assert_eq!(
+            json.matrix.informational.len(),
+            1,
+            "the info finding is in the appendix"
+        );
         assert_eq!(json.matrix.informational[0].path, "b.rs");
-        assert_eq!(json.matrix.do_now.len(), 1, "the critical is an action item");
+        assert_eq!(
+            json.matrix.do_now.len(),
+            1,
+            "the critical is an action item"
+        );
 
         // No info-severity finding may appear in any action tier.
         for tier in [&json.matrix.do_now, &json.matrix.do_next, &json.matrix.plan] {
@@ -2650,7 +11480,4127 @@ mod tests {
             + json.matrix.do_next.len()
             + json.matrix.plan.len()
             + json.matrix.accepted.len();
-        assert_eq!(summed, curated, "do_now+do_next+plan+accepted must equal curated_total");
-        assert_eq!(curated, 1, "only the critical is curated; the info note is appendix-only");
+        assert_eq!(
+            summed, curated,
+            "do_now+do_next+plan+accepted must equal curated_total"
+        );
+        assert_eq!(
+            curated, 1,
+            "only the critical is curated; the info note is appendix-only"
+        );
+    }
+
+    /// C4-R1: the pipeline-wide null-location safety net. A synthetic `critical` finding with
+    /// an EMPTY path and `line == 0` — the exact shape the Supabase RLS over-firing regression
+    /// produced (a deterministic rule asserting a falsehood with no real evidence behind it) —
+    /// must be DOWNGRADED to `info` (never dropped) by `build_report_json`, landing in the
+    /// `informational` appendix rather than `do_now`. A normally-located critical finding in
+    /// the SAME report is completely unaffected, proving this is a location-shaped gate, not a
+    /// blanket demotion of the rule or severity.
+    #[test]
+    fn build_report_json_downgrades_an_unlocated_above_informational_finding_but_never_drops_it() {
+        let located_critical = finding("SEC-NO-HARDCODED-SECRETS-1", "a.rs", 10, "critical");
+        let unlocated_critical = finding("SUPABASE-RLS-POLICY-DISABLED-1", "", 0, "critical");
+        let report = report_with(
+            vec![located_critical, unlocated_critical],
+            vec![
+                "SEC-NO-HARDCODED-SECRETS-1",
+                "SUPABASE-RLS-POLICY-DISABLED-1",
+            ],
+        );
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
+
+        // Still present — downgraded, not dropped.
+        assert_eq!(
+            json.matrix.informational.len(),
+            1,
+            "the unlocated critical must still ship, re-bucketed to informational: {:?}",
+            json.matrix.informational
+        );
+        assert_eq!(
+            json.matrix.informational[0].rule_id,
+            "SUPABASE-RLS-POLICY-DISABLED-1"
+        );
+        assert_eq!(
+            json.matrix.informational[0].severity, "info",
+            "the empty-path/line-0 finding's severity must be downgraded to info"
+        );
+
+        // The normally-located critical is completely unaffected — this is a location-shaped
+        // gate, not a general severity cap.
+        assert_eq!(
+            json.matrix.do_now.len(),
+            1,
+            "the located critical stays an action item"
+        );
+        assert_eq!(json.matrix.do_now[0].rule_id, "SEC-NO-HARDCODED-SECRETS-1");
+        assert_eq!(json.matrix.do_now[0].severity, "critical");
+
+        // No action tier may ever contain the unlocated finding.
+        for tier in [&json.matrix.do_now, &json.matrix.do_next, &json.matrix.plan] {
+            assert!(
+                tier.iter()
+                    .all(|r| r.rule_id != "SUPABASE-RLS-POLICY-DISABLED-1"),
+                "the unlocated finding must never land in an action tier: {tier:?}"
+            );
+        }
+    }
+
+    /// P7 end-to-end: N occurrences of one needs-review STRUCTURAL rule, grouped by
+    /// `crate::ai_audit::group_structural_needs_review` into ONE finding, land as a SINGLE row
+    /// in the `held` bucket (C5-4: a needs-review row, which is what the grouped finding carries)
+    /// — never one row per occurrence, and never in a curated action tier — while a genuine
+    /// critical finding in the same report is untouched.
+    #[test]
+    fn grouped_structural_needs_review_finding_is_a_single_held_row() {
+        let mut occ1 = finding("ARCH-SOME-PREFERENCE-1", "a.rs", 10, "medium");
+        occ1.category = Some("arch-conformance".to_string());
+        occ1.confidence = Some("needs-review".to_string());
+        let mut occ2 = finding("ARCH-SOME-PREFERENCE-1", "b.rs", 20, "medium");
+        occ2.category = Some("arch-conformance".to_string());
+        occ2.confidence = Some("needs-review".to_string());
+        let mut occ3 = finding("ARCH-SOME-PREFERENCE-1", "c.rs", 30, "medium");
+        occ3.category = Some("arch-conformance".to_string());
+        occ3.confidence = Some("needs-review".to_string());
+        let critical = finding("SEC-NO-HARDCODED-SECRETS-1", "d.rs", 1, "critical");
+
+        // Run the SAME grouping pass the real scan pipeline runs before build_report, proving
+        // this test exercises the actual N-rows-to-one-row behavior, not just is_informational.
+        let grouped =
+            crate::ai_audit::group_structural_needs_review(vec![occ1, occ2, occ3, critical]);
+        assert_eq!(
+            grouped.len(),
+            2,
+            "three structural occurrences + one critical must collapse to 2 findings: {grouped:?}"
+        );
+
+        let report = report_with(
+            grouped,
+            vec!["ARCH-SOME-PREFERENCE-1", "SEC-NO-HARDCODED-SECRETS-1"],
+        );
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
+
+        assert_eq!(
+            json.matrix.held.len(),
+            1,
+            "the grouped structural finding is ONE held row, not N: {:?}",
+            json.matrix.held
+        );
+        assert_eq!(json.matrix.held[0].rule_id, "ARCH-SOME-PREFERENCE-1");
+        assert!(
+            json.matrix.informational.is_empty(),
+            "a needs-review row never routes to informational (C5-4): {:?}",
+            json.matrix.informational
+        );
+        // None of the three original locations leak into an action tier as separate rows.
+        for tier in [&json.matrix.do_now, &json.matrix.do_next, &json.matrix.plan] {
+            assert!(
+                tier.iter().all(|r| r.rule_id != "ARCH-SOME-PREFERENCE-1"),
+                "the grouped rule must never appear in a curated action tier: {tier:?}"
+            );
+        }
+        // The critical finding is unaffected — still curated, still do_now.
+        assert_eq!(json.matrix.do_now.len(), 1);
+        assert_eq!(json.matrix.do_now[0].rule_id, "SEC-NO-HARDCODED-SECRETS-1");
+    }
+
+    // ── C3-6: one bucket computation, read consistently everywhere in the JSON ─────────
+
+    /// `FindingRefJson::bucket` (the matrix entry) and `CuratedSiteJson::bucket` (the SAME
+    /// finding's held-for-review row) must read the SAME value — both come from exactly one
+    /// `effective_bucket` call per finding now (previously two independent `is_informational`
+    /// and `matrix_bucket` call sites in this file, which happened to agree today but had no
+    /// structural guarantee against drifting apart). A hedged (`needs-review`) finding is the
+    /// sharpest case: it must read `"held"` (C5-4) in BOTH places, never an action bucket — and
+    /// it still ships (over-tell, never dropped), just consistently re-bucketed.
+    ///
+    /// C4-P4 (residual defect 5, 2026-10-01) / C5-4: this finding's whole group is now ENTIRELY
+    /// held (its only site), so it moved out of `curated_findings` into
+    /// `held_for_review_findings` — see `AuditReportJson::curated_findings`'s doc comment. The
+    /// bucket-agreement assertions below are unchanged; only which top-level list the group
+    /// lives in changed (and the bucket label is `"held"`, not `"informational"` — C5-4 split
+    /// the two).
+    #[test]
+    fn matrix_and_curated_site_bucket_fields_agree_and_a_hedged_finding_is_never_an_action_bucket()
+    {
+        let mut hedged = finding("SOME-HEDGED-RULE-1", "a.rs", 1, "medium");
+        hedged.confidence = Some("needs-review".to_string());
+        // A non-`None` `confidence` makes `is_ai_tier` true (it treats any calibrated finding
+        // as AI-tier — see that function's doc comment); without a preview tool or grounded
+        // citation, the SEPARATE P3 "uncited AI finding" gate would exclude this row from
+        // `curated_findings`/`held_for_review_findings` entirely rather than routing it to the
+        // held bucket. Giving it a preview tool keeps its citation `"preview"` (not
+        // `"advisory"`), isolating THIS test to the hedge/confidence signal this test is
+        // actually about.
+        hedged.preview_tool = Some("clippy".to_string());
+        let report = report_with(vec![hedged], vec!["SOME-HEDGED-RULE-1"]);
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
+
+        assert_eq!(json.matrix.held.len(), 1);
+        assert_eq!(json.matrix.held[0].bucket, "held");
+        assert!(
+            json.matrix.informational.is_empty(),
+            "a needs-review row never routes to informational (C5-4): {:?}",
+            json.matrix.informational
+        );
+        for tier in [&json.matrix.do_now, &json.matrix.do_next] {
+            assert!(
+                tier.is_empty(),
+                "a hedged finding must never land in an action bucket: {tier:?}"
+            );
+        }
+        assert!(
+            json.curated_findings
+                .iter()
+                .all(|g| g.rule_id != "SOME-HEDGED-RULE-1"),
+            "an entirely-held finding must never render under Curated findings: {:?}",
+            json.curated_findings
+        );
+
+        let group = json
+            .held_for_review_findings
+            .iter()
+            .find(|g| g.rule_id == "SOME-HEDGED-RULE-1")
+            .expect("the hedged finding still ships, as a held row in held_for_review_findings");
+        assert_eq!(group.sites.len(), 1, "the finding must not be dropped");
+        assert_eq!(
+            group.sites[0].bucket, "held",
+            "the curated site's own bucket field must read held too"
+        );
+        assert_eq!(
+            group.sites[0].bucket, json.matrix.held[0].bucket,
+            "matrix and curated-site bucket fields must never disagree for the same finding"
+        );
+    }
+
+    // ── Branding (2026-09-13 review): precedence + neutral fallback ────────────────
+
+    #[test]
+    fn resolve_brand_prefers_the_per_report_field_over_env() {
+        let mut opts = empty_opts();
+        opts.brand = "Cantus Works".to_string();
+        assert_eq!(
+            resolve_brand(&opts, Some("Some Other Agency")),
+            Some("Cantus Works".to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_brand_falls_back_to_env_when_the_report_field_is_blank() {
+        let opts = empty_opts();
+        assert_eq!(
+            resolve_brand(&opts, Some("Cantus Works")),
+            Some("Cantus Works".to_string())
+        );
+        // Whitespace-only counts as "not supplied" too.
+        let mut whitespace_opts = empty_opts();
+        whitespace_opts.brand = "   ".to_string();
+        assert_eq!(
+            resolve_brand(&whitespace_opts, Some("Cantus Works")),
+            Some("Cantus Works".to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_brand_is_none_when_neither_the_field_nor_env_is_set() {
+        let opts = empty_opts();
+        assert_eq!(resolve_brand(&opts, None), None);
+        assert_eq!(resolve_brand(&opts, Some("")), None);
+        assert_eq!(resolve_brand(&opts, Some("   ")), None);
+    }
+
+    #[test]
+    fn resolve_prepared_by_follows_the_same_precedence() {
+        let mut opts = empty_opts();
+        opts.prepared_by = "Zachary Ernst".to_string();
+        assert_eq!(
+            resolve_prepared_by(&opts, Some("Someone Else")),
+            "Zachary Ernst"
+        );
+        let empty = empty_opts();
+        assert_eq!(
+            resolve_prepared_by(&empty, Some("Someone Else")),
+            "Someone Else"
+        );
+        // P6: with neither the per-report field nor the env var set, the resolver falls all
+        // the way to the real default name, never an empty string ("Prepared by N/A" is the
+        // bug this closes).
+        assert_eq!(resolve_prepared_by(&empty, None), DEFAULT_PREPARED_BY);
+    }
+
+    #[test]
+    fn cover_brand_is_some_when_report_options_brand_is_set() {
+        let f = finding("SEC-1", "a.rs", 1, "low");
+        let report = report_with(vec![f], vec![]);
+        let mut opts = empty_opts();
+        opts.brand = "Cantus Works".to_string();
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &opts);
+        assert_eq!(json.cover.brand, Some("Cantus Works".to_string()));
+    }
+
+    #[test]
+    fn cover_brand_is_none_with_no_brand_option_set_the_neutral_fallback_case() {
+        // `build_report_json` never reads the `CAMERATA_REPORT_BRAND` env var itself (see
+        // `ReportOptions::apply_env_defaults`'s doc comment) — with a blank `opts.brand` (the
+        // state an un-mutated `ReportOptions` is always in), `cover.brand` must be `None`, the
+        // exact case the template renders as `NEUTRAL_COVER_TITLE` with no agency name and no
+        // "Camerata" on the cover.
+        let f = finding("SEC-1", "a.rs", 1, "low");
+        let report = report_with(vec![f], vec![]);
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
+        assert_eq!(json.cover.brand, None);
+    }
+
+    #[test]
+    fn neutral_cover_title_constant_matches_the_documented_fallback_string() {
+        assert_eq!(NEUTRAL_COVER_TITLE, "Codebase Inspection Report");
+    }
+
+    #[test]
+    #[serial_test::serial(process_env)]
+    fn apply_env_defaults_fills_blank_fields_only() {
+        // Real env mutation, scoped to this one test and restored by the `EnvGuard`s on drop —
+        // every other precedence case above goes through the pure `resolve_brand`/
+        // `resolve_prepared_by` helpers instead specifically to avoid relying on process-global
+        // env state. `cargo test` runs this crate's tests on threads of one process, and other
+        // tests (the product-export / client-artifact ones) DO read these vars through
+        // `apply_env_defaults`, so every test that touches them carries the shared
+        // `process_env` serial key.
+        let _env = camerata_test_env::EnvGuard::set(REPORT_BRAND_ENV, "Env Agency");
+        let _env2 = camerata_test_env::EnvGuard::set(REPORT_PREPARED_BY_ENV, "Env Preparer");
+
+        let mut blank = ReportOptions::default();
+        blank.apply_env_defaults();
+        assert_eq!(blank.brand, "Env Agency");
+        assert_eq!(blank.prepared_by, "Env Preparer");
+
+        let mut already_set = ReportOptions {
+            brand: "Cantus Works".to_string(),
+            prepared_by: "Zachary Ernst".to_string(),
+            ..Default::default()
+        };
+        already_set.apply_env_defaults();
+        assert_eq!(already_set.brand, "Cantus Works");
+        assert_eq!(already_set.prepared_by, "Zachary Ernst");
+    }
+
+    // ── FIX 6: the real severity x effort priority grid ─────────────────────────
+
+    #[test]
+    fn priority_grid_places_findings_in_the_right_severity_by_effort_cell() {
+        let mut critical_low = finding("SUPABASE-RLS-ENABLED-1", "a.sql", 1, "critical");
+        critical_low.effort = Some("low".to_string());
+        let mut high_medium = finding("SUPABASE-AUTH-EDGE-JWT-1", "b.toml", 2, "high");
+        high_medium.effort = Some("medium".to_string());
+        let mut high_uncalibrated = finding("ARCH-1", "c.rs", 3, "high");
+        high_uncalibrated.effort = None; // deterministic-floor: never calibrated
+        let mut low_sev = finding("STYLE-1", "d.rs", 4, "low");
+        low_sev.effort = Some("low".to_string());
+
+        let report = report_with(
+            vec![critical_low, high_medium, high_uncalibrated, low_sev],
+            vec![],
+        );
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
+        let grid = &json.priority_grid;
+
+        // Row/column presence: critical, high, low severities all appear (all land in an
+        // action tier); low/medium/unscoped effort columns all appear.
+        assert!(grid.rows.iter().any(|r| r.severity == "critical"));
+        assert!(grid.rows.iter().any(|r| r.severity == "high"));
+        assert!(grid.rows.iter().any(|r| r.severity == "low"));
+        assert!(grid.columns.contains(&"low".to_string()));
+        assert!(grid.columns.contains(&"medium".to_string()));
+        assert!(grid.columns.contains(&"unscoped".to_string()));
+
+        let cell = |sev: &str, eff: &str| -> &GridCellJson {
+            let row = grid.rows.iter().find(|r| r.severity == sev).unwrap();
+            let col_idx = grid.columns.iter().position(|c| c == eff).unwrap();
+            &row.cells[col_idx]
+        };
+
+        assert_eq!(cell("critical", "low").findings.len(), 1);
+        assert_eq!(
+            cell("critical", "low").findings[0].rule_id,
+            "SUPABASE-RLS-ENABLED-1"
+        );
+        // `high_medium` is do_next (high severity, medium effort is not "low"); still an
+        // ACTION-tier finding, so it must still land in the grid.
+        assert_eq!(cell("high", "medium").findings.len(), 1);
+        assert_eq!(
+            cell("high", "medium").findings[0].rule_id,
+            "SUPABASE-AUTH-EDGE-JWT-1"
+        );
+        // An uncalibrated effort normalizes to the "unscoped" column, never dropped.
+        assert_eq!(cell("high", "unscoped").findings.len(), 1);
+        assert_eq!(cell("high", "unscoped").findings[0].rule_id, "ARCH-1");
+        assert_eq!(cell("low", "low").findings.len(), 1);
+        assert_eq!(cell("low", "low").findings[0].rule_id, "STYLE-1");
+    }
+
+    #[test]
+    fn priority_grid_excludes_accepted_and_informational_but_counts_them() {
+        let mut accepted = finding("SEC-1", "a.rs", 1, "high");
+        accepted.effort = Some("low".to_string());
+        let info = finding("SOME-RULE-1", "b.rs", 2, "info");
+        let mut dispositions = HashMap::new();
+        dispositions.insert(
+            finding_key(&accepted),
+            wire("Ignored", "accepted for now", ""),
+        );
+        let report = report_with(vec![accepted, info], vec![]);
+        let json = build_report_json(&report.clone().seal(), &dispositions, None, &empty_opts());
+
+        // Neither finding appears in any grid cell.
+        for row in &json.priority_grid.rows {
+            for cell in &row.cells {
+                assert!(
+                    cell.findings
+                        .iter()
+                        .all(|f| f.rule_id != "SEC-1" && f.rule_id != "SOME-RULE-1"),
+                    "accepted/informational findings must never appear in the priority grid"
+                );
+            }
+        }
+        assert_eq!(json.priority_grid.accepted_count, 1);
+        assert_eq!(json.priority_grid.informational_count, 1);
+    }
+
+    #[test]
+    fn priority_grid_is_empty_when_no_action_tier_findings_exist() {
+        let report = report_with(vec![], vec![]);
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
+        assert!(json.priority_grid.rows.is_empty());
+        assert!(json.priority_grid.columns.is_empty());
+    }
+
+    // ── FIX 7: business-impact map ───────────────────────────────────────────────
+
+    #[test]
+    fn business_impact_is_authored_for_the_sample_fixture_do_now_rules() {
+        for rule_id in [
+            "SUPABASE-RLS-ENABLED-1",
+            "SUPABASE-KEY-SERVICE-ROLE-CLIENT-1",
+            "SUPABASE-STORAGE-PUBLIC-BUCKET-1",
+        ] {
+            assert!(
+                business_impact_for_rule(rule_id).is_some(),
+                "{rule_id} should have an authored business-impact sentence"
+            );
+        }
+    }
+
+    #[test]
+    fn business_impact_is_none_for_an_unauthored_rule_never_fabricated() {
+        assert_eq!(business_impact_for_rule("SOME-RULE-NEVER-AUTHORED-1"), None);
+    }
+
+    #[test]
+    fn three_things_items_carry_the_authored_impact_when_present() {
+        let mut f = finding("SUPABASE-RLS-ENABLED-1", "a.sql", 1, "critical");
+        f.effort = Some("low".to_string());
+        let report = report_with(vec![f], vec![]);
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
+        assert_eq!(
+            json.three_things.items[0].impact,
+            business_impact_for_rule("SUPABASE-RLS-ENABLED-1").map(str::to_string)
+        );
+    }
+
+    #[test]
+    fn three_things_items_impact_is_none_for_an_unauthored_rule() {
+        let f = finding("ARCH-1", "a.rs", 1, "critical");
+        let report = report_with(vec![f], vec![]);
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
+        assert_eq!(json.three_things.items[0].impact, None);
+    }
+
+    // ── FIX 3 / C4-P4 residual defect 4: Next steps + the fix rate ─────────────────
+
+    #[test]
+    fn methodology_next_steps_reports_no_fix_rate_for_a_zero_candidate_run() {
+        let report = report_with(vec![], vec![]);
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
+        assert!(!json.methodology.next_steps.is_empty());
+        assert!(
+            json.methodology
+                .next_steps
+                .contains("no candidate findings, so there is no fix rate to report"),
+            "a clean run must honestly say there is no fix rate, never fabricate one or divide \
+             by zero: {}",
+            json.methodology.next_steps
+        );
+        assert!(!json.methodology.next_steps.contains('%'));
+    }
+
+    /// Public promise 2 ("the fix rate is written into the report before the client decides"):
+    /// the next-steps paragraph must contain a real NUMBER, never the old placeholder sentence
+    /// ("at the rate set out in the engagement").
+    #[test]
+    fn methodology_next_steps_contains_a_numeric_fix_rate_not_the_placeholder_sentence() {
+        let f1 = finding("SEC-1", "a.rs", 1, "critical");
+        let f2 = finding("SEC-2", "b.rs", 2, "high");
+        let f3 = finding("SEC-3", "c.rs", 3, "medium");
+        let f4 = finding("SEC-4", "d.rs", 4, "low");
+        let mut dispositions = HashMap::new();
+        dispositions.insert(
+            finding_key(&f4),
+            wire("FalsePositive", "generated fixture", ""),
+        );
+        let report = report_with(vec![f1, f2, f3, f4], vec![]);
+        let json = build_report_json(&report.clone().seal(), &dispositions, None, &empty_opts());
+
+        assert_eq!(json.methodology.candidates_reviewed, 4);
+        assert_eq!(json.methodology.excluded_false_positive, 1);
+
+        let notes = &json.methodology.next_steps;
+        assert!(
+            !notes.contains("at the rate set out in the engagement"),
+            "the old placeholder sentence must be gone: {notes}"
+        );
+        // 3 of 4 kept -> 75% fix rate.
+        assert!(
+            notes.contains("kept 3 of 4 candidate findings"),
+            "the paragraph must state the real kept/total counts: {notes}"
+        );
+        assert!(
+            notes.contains("75% fix rate"),
+            "the paragraph must state the computed numeric fix rate: {notes}"
+        );
+        let has_digit = notes.chars().any(|c| c.is_ascii_digit());
+        assert!(
+            has_digit,
+            "the next-steps text must contain a number: {notes}"
+        );
+    }
+
+    #[test]
+    fn next_steps_note_singular_finding_noun_at_exactly_one_candidate() {
+        let note = next_steps_note(ReviewState::Reviewed, 1, 1, 0, 0);
+        assert!(
+            note.contains("kept 1 of 1 candidate finding as"),
+            "a single candidate must use the singular noun, not 'findings': {note}"
+        );
+    }
+
+    // ── C5-6 (REG-6): fix-rate sentence must be true or absent ─────────────────────────
+
+    /// Draft export, nothing excluded yet, some rows held for review: no percentage must ever
+    /// appear, and the held count must be named so the backlog isn't invisible.
+    #[test]
+    fn next_steps_note_draft_with_held_rows_names_the_held_count_with_no_percentage() {
+        let note = next_steps_note(ReviewState::Raw, 23, 0, 23, 0);
+        assert!(
+            !note.contains('%'),
+            "a draft export must never print a fix-rate percentage: {note}"
+        );
+        assert!(
+            !note.contains("real, actionable"),
+            "held rows on a draft export must never be called real, actionable items: {note}"
+        );
+        assert!(
+            note.contains("Fix rate not yet established"),
+            "a draft export must say the fix rate is not yet established: {note}"
+        );
+        assert!(
+            note.contains("23 of 23 candidates are held for a reviewer's decision"),
+            "the held count must be named plainly: {note}"
+        );
+        assert!(
+            note.contains("0 excluded so far"),
+            "a draft export has excluded nothing yet, and must say so: {note}"
+        );
+    }
+
+    /// Reviewed export, 17 curated and 3 excluded (0 held): the fix rate is curated / (curated
+    /// + excluded) = 85%, and the exclusion clause appears because something was excluded.
+    #[test]
+    fn next_steps_note_reviewed_with_exclusions_shows_percentage_and_exclusion_clause() {
+        let note = next_steps_note(ReviewState::Reviewed, 20, 17, 0, 3);
+        assert!(
+            note.contains("17 of 20") && note.contains("85%"),
+            "the fix rate must be curated/(curated+excluded) = 17/20 = 85%: {note}"
+        );
+        assert!(
+            note.contains("excluding the rest as likely false positives"),
+            "excluded > 0 must surface the exclusion clause: {note}"
+        );
+    }
+
+    /// Reviewed export, 20 curated and 0 excluded: still a percentage (100%), but the
+    /// "excluding the rest" clause must not appear since nothing was excluded.
+    #[test]
+    fn next_steps_note_reviewed_with_no_exclusions_omits_the_exclusion_clause() {
+        let note = next_steps_note(ReviewState::Reviewed, 20, 20, 0, 0);
+        assert!(
+            note.contains("20 of 20") && note.contains("100%"),
+            "zero excluded still yields a (100%) fix rate over curated candidates: {note}"
+        );
+        assert!(
+            !note.contains("excluding the rest"),
+            "excluded == 0 must never print the exclusion clause: {note}"
+        );
+    }
+
+    // ── W6: a failed/timed-out pass must be disclosed, never omitted silently ──────
+
+    #[test]
+    fn a_failed_pass_renders_the_not_computed_disclosure_in_both_methodology_and_summary() {
+        let mut report = report_with(vec![], vec![]);
+        report.failed_passes = vec![crate::ai_audit::FailedPass {
+            repo: "acme/widgets".to_string(),
+            pass: "rule-alternative recommendations".to_string(),
+            reason: "Claude CLI timed out after 300s (no output).".to_string(),
+        }];
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
+
+        assert_eq!(json.methodology.failed_passes.len(), 1);
+        assert!(
+            json.methodology.failed_passes[0].contains("not computed"),
+            "methodology must explicitly state the pass was not computed: {:?}",
+            json.methodology.failed_passes
+        );
+        assert!(
+            json.methodology.failed_passes[0].contains("acme/widgets"),
+            "methodology disclosure must name the affected repo: {:?}",
+            json.methodology.failed_passes
+        );
+        assert!(
+            json.methodology.failed_passes[0].contains("Claude CLI timed out after 300s"),
+            "methodology disclosure must carry the real reason verbatim: {:?}",
+            json.methodology.failed_passes
+        );
+
+        // The SAME disclosure also renders in the executive summary — never JUST the
+        // methodology (a reader of only the summary must not be left in the dark either).
+        assert_eq!(
+            json.executive_summary.failed_passes, json.methodology.failed_passes,
+            "the summary and methodology must carry the identical disclosure text"
+        );
+    }
+
+    #[test]
+    fn no_failed_pass_means_no_not_computed_disclosure_anywhere() {
+        let report = report_with(vec![], vec![]);
+        assert!(
+            report.failed_passes.is_empty(),
+            "sanity: the base fixture has no failed pass"
+        );
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
+
+        assert!(
+            json.methodology.failed_passes.is_empty(),
+            "a clean run must not fabricate a not-computed disclosure: {:?}",
+            json.methodology.failed_passes
+        );
+        assert!(
+            json.executive_summary.failed_passes.is_empty(),
+            "a clean run must not fabricate a not-computed disclosure: {:?}",
+            json.executive_summary.failed_passes
+        );
+    }
+
+    /// The Typst template only renders the disclosure block when the list is non-empty, and
+    /// renders it in BOTH sections when it is — pins the gating + duplication so a future
+    /// edit can't silently drop one of the two renders.
+    #[test]
+    fn shipped_template_gates_the_failed_pass_disclosure_on_both_sections() {
+        let template = include_str!("../templates/audit_report.typ");
+        assert_eq!(
+            template
+                .matches("d.executive_summary.failed_passes.len() > 0")
+                .count(),
+            1,
+            "the summary section must gate the disclosure block on a non-empty list"
+        );
+        assert_eq!(
+            template
+                .matches("d.methodology.failed_passes.len() > 0")
+                .count(),
+            1,
+            "the methodology section must gate the disclosure block on a non-empty list"
+        );
+    }
+
+    // ── C3-1b: no field ever renders a literal "N/A" for a pipeline gap ─────────────
+
+    /// An unestimated `effort`/`confidence` is a PIPELINE gap (the calibration pass never
+    /// produced an opinion for this finding this run), not a legitimate "not applicable"
+    /// value — `or_na`'s "N/A" reads as the latter. Pins that the shipped template uses the
+    /// field-specific placeholders for both fields in the per-finding chip line, never `or_na`.
+    #[test]
+    fn shipped_template_never_renders_na_for_effort_or_confidence() {
+        let template = include_str!("../templates/audit_report.typ");
+        assert!(
+            template.contains("or_not_estimated(site.effort)"),
+            "an unestimated effort must render \"not estimated this run\", not \"N/A\""
+        );
+        assert!(
+            template.contains("or_not_evaluated(site.confidence)"),
+            "an unevaluated confidence must render \"not evaluated this run\", not \"N/A\""
+        );
+        assert!(
+            !template.contains("or_na(site.effort)"),
+            "the per-finding effort chip must never fall back to the generic N/A placeholder"
+        );
+        assert!(
+            !template.contains("or_na(site.confidence)"),
+            "the per-finding confidence chip must never fall back to the generic N/A placeholder"
+        );
+    }
+
+    /// C3-1b, W6 wiring: a run where `ai_audit::verify_findings` recorded a run-wide "hour
+    /// estimation" `FailedPass` must (a) disclose it in BOTH methodology and summary, exactly
+    /// like the pre-existing alternative-recommendation disclosure, and (b) still ship the
+    /// unestimated finding in the curated set / matrix — a failed estimation pass degrades
+    /// honestly, it never drops a row.
+    #[test]
+    fn a_failed_estimation_pass_is_disclosed_and_unestimated_rows_still_ship() {
+        let f = finding("ARCH-1", "a.rs", 1, "high"); // effort: None (never estimated)
+        assert_eq!(
+            f.effort, None,
+            "test fixture must simulate the unestimated state"
+        );
+        let mut report = report_with(vec![f], vec![]);
+        report.failed_passes = vec![crate::ai_audit::FailedPass {
+            repo: "owner/repo".to_string(),
+            pass: "hour estimation".to_string(),
+            reason: "the calibration pass returned no usable remediation-effort estimate for \
+                     any finding this run"
+                .to_string(),
+        }];
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
+
+        assert_eq!(json.methodology.failed_passes.len(), 1);
+        assert!(
+            json.methodology.failed_passes[0].contains("not computed"),
+            "methodology must explicitly disclose the estimation pass was not computed: {:?}",
+            json.methodology.failed_passes
+        );
+        assert!(
+            json.methodology.failed_passes[0]
+                .to_ascii_lowercase()
+                .contains("hour estimation"),
+            "the disclosure must name the failed pass: {:?}",
+            json.methodology.failed_passes
+        );
+        assert_eq!(
+            json.executive_summary.failed_passes, json.methodology.failed_passes,
+            "the disclosure must appear identically in both sections"
+        );
+
+        // The row is NOT dropped — it still ships in the matrix and the curated findings,
+        // carrying `effort: None` for the template to render honestly.
+        assert_eq!(
+            json.matrix.do_next.len() + json.matrix.do_now.len(),
+            1,
+            "an unestimated finding must still ship in an action bucket: {:?}",
+            json.matrix
+        );
+        assert_eq!(json.curated_findings[0].sites[0].effort, None);
+    }
+
+    // ── Template regressions (2026-09-13 review) ────────────────────────────────
+
+    /// FIX 1 rendering bug this pass fixes: `CuratedSiteJson.fix`/`fix_for_this_finding` are
+    /// `Option<String>`, which serialize to JSON `null` and parse in Typst as `none` — NOT an
+    /// empty string. A `!= ""` guard would let `none` fall into the render branch and print a
+    /// bare "Fix:" label with nothing after it. Pins the correct `!= none` guard in the shipped
+    /// template so this can't regress silently.
+    #[test]
+    fn shipped_template_gates_the_fix_block_on_none_not_empty_string() {
+        let template = include_str!("../templates/audit_report.typ");
+        assert!(
+            template.contains("if site.fix != none"),
+            "the Fix block must be gated on `!= none` (Option<String> -> JSON null -> Typst \
+             none), not `!= \"\"` — see report_export::CuratedSiteJson::fix's doc comment"
+        );
+        assert!(
+            !template.contains("if site.fix != \"\""),
+            "the old `!= \"\"` gate must not come back"
+        );
+        assert!(
+            template.contains("site.fix_for_this_finding != none"),
+            "the template must gate on `fix_for_this_finding`'s presence, not just `fix`'s"
+        );
+    }
+
+    /// P2 (2026-09-29): `fix_for_this_finding` (the codebase-specific fix) must be the
+    /// PRIMARY "Fix:" line, with the rule's generic `fix` demoted to a secondary line
+    /// UNDER it — never the reverse order this template used before fix-generation existed.
+    #[test]
+    fn shipped_template_renders_fix_specific_before_the_generic_fix() {
+        let template = include_str!("../templates/audit_report.typ");
+        let primary_idx = template
+            .find(r#"if site.fix_for_this_finding != none ["#)
+            .expect("the primary branch must gate on fix_for_this_finding first");
+        let fix_label_idx = template[primary_idx..]
+            .find(r#"[Fix: ]#site.fix_for_this_finding"#)
+            .expect("the PRIMARY Fix: line must render fix_for_this_finding, not fix");
+        let secondary_idx = template[primary_idx..]
+            .find("General guidance: ")
+            .expect("the rule's generic fix must render as secondary \"General guidance\" text");
+        assert!(
+            fix_label_idx < secondary_idx,
+            "fix_for_this_finding's Fix: line must render BEFORE the generic General guidance \
+             line"
+        );
+    }
+
+    /// The fallback path (fix-generation never ran or gave up) must still show the rule's
+    /// generic remediation as the ONLY Fix line — never silently drop it.
+    #[test]
+    fn shipped_template_falls_back_to_the_generic_fix_when_no_fix_specific() {
+        let template = include_str!("../templates/audit_report.typ");
+        assert!(
+            template.contains("] else if site.fix != none ["),
+            "the fallback branch must still render the generic fix alone when \
+             fix_for_this_finding is none"
+        );
+    }
+
+    /// FIX 4 regression: the exec summary's own "Top priority items" bullet list (and its
+    /// `top_do_now` feed) must not come back — the "Three things this week" box is the one
+    /// place page 3 names the top do-now findings.
+    #[test]
+    fn shipped_template_has_no_top_priority_items_bullet_list() {
+        let template = include_str!("../templates/audit_report.typ");
+        assert!(!template.contains("Top priority items"));
+        assert!(!template.contains("executive_summary.top_do_now"));
+    }
+
+    /// FIX 5 regression: the scorecard's "checked/clean" column must read as words, not a bare
+    /// numeric fraction that reads like a grade.
+    #[test]
+    fn shipped_template_scorecard_spells_out_checked_and_clean() {
+        let template = include_str!("../templates/audit_report.typ");
+        assert!(template.contains("Rules checked"));
+        assert!(template.contains("Rules clean"));
+        assert!(
+            !template.contains("row.audited_rules)/#str(row.clean_rules"),
+            "the scorecard must not render a bare N/M fraction"
+        );
+    }
+
+    /// FIX 6 regression: the severity x effort section must render the real 2-D
+    /// `d.priority_grid` table, not the old 4-box bucket list keyed off `d.matrix`.
+    #[test]
+    fn shipped_template_renders_the_priority_grid_not_the_old_bucket_list() {
+        let template = include_str!("../templates/audit_report.typ");
+        assert!(template.contains("d.priority_grid"));
+        assert!(
+            !template.contains("d.matrix.do_now") && !template.contains("d.matrix.accepted"),
+            "the severity x effort section must read from d.priority_grid, not d.matrix directly"
+        );
+    }
+
+    /// Branding regression: no hardcoded agency/"Camerata" cover title, no "Brownfield".
+    #[test]
+    fn shipped_template_has_no_hardcoded_cover_title() {
+        let template = include_str!("../templates/audit_report.typ");
+        assert!(!template.contains("Camerata Brownfield Audit Report"));
+        assert!(!template.contains("Brownfield"));
+        assert!(template.contains("brand_title"));
+        assert!(template.contains(NEUTRAL_COVER_TITLE));
+    }
+
+    /// Branding regression: Audit model / Calibration model must not render on the cover table
+    /// anymore (they moved into Methodology, alongside the Camerata version line).
+    #[test]
+    fn shipped_template_cover_table_omits_audit_and_calibration_model() {
+        let template = include_str!("../templates/audit_report.typ");
+        let cover_start = template.find("── 1. Cover").expect("cover section marker");
+        let cover_end = template.find("── ToC").expect("ToC section marker");
+        let cover_section = &template[cover_start..cover_end];
+        assert!(!cover_section.contains("Audit model"));
+        assert!(!cover_section.contains("Calibration model"));
+        assert!(
+            template.contains("Scanned with Camerata v"),
+            "the model/version provenance line must still render, just in Methodology"
+        );
+    }
+
+    // ── P5: review-state honesty + reconciling narrative ────────────────────────
+
+    /// Pure reconciliation check, independent of `build_report_json`'s much larger fixture
+    /// surface: every candidate finding a scan surfaces lands in exactly one of the four
+    /// top-level buckets (curated — itself do_now + do_next + plan + accepted — held for
+    /// review, excluded as a false positive, or its own dependency-advisory lane).
+    #[allow(clippy::too_many_arguments)]
+    fn reconciles(
+        candidates: usize,
+        curated_total: usize,
+        do_now: usize,
+        do_next: usize,
+        plan: usize,
+        accepted: usize,
+        held_for_review: usize,
+        excluded_false_positive: usize,
+        dependency_advisories: usize,
+    ) -> bool {
+        curated_total == do_now + do_next + plan + accepted
+            && candidates
+                == curated_total + held_for_review + excluded_false_positive + dependency_advisories
+    }
+
+    #[test]
+    fn reconciliation_holds_across_fixtures_including_the_41_18_23_0_shape() {
+        // (candidates, curated_total, do_now, do_next, plan, accepted, held_for_review,
+        //  excluded_false_positive, dependency_advisories)
+        #[allow(clippy::type_complexity)]
+        let fixtures: &[(
+            usize,
+            usize,
+            usize,
+            usize,
+            usize,
+            usize,
+            usize,
+            usize,
+            usize,
+        )] = &[
+            // The exact bug shape from the P5 writeup: 41 candidates, 18 curated, 23 held for
+            // review (previously invisible), 0 excluded, no dependency advisories in play.
+            (41, 18, 5, 6, 7, 0, 23, 0, 0),
+            // A reviewed run: false positives excluded, one dependency advisory carved out.
+            (10, 6, 2, 1, 2, 1, 0, 3, 1),
+            // Zero-finding scan.
+            (0, 0, 0, 0, 0, 0, 0, 0, 0),
+            // Nothing curated yet, everything held for a human reviewer's judgment call.
+            (5, 0, 0, 0, 0, 0, 5, 0, 0),
+        ];
+        for &(candidates, curated_total, do_now, do_next, plan, accepted, held, excluded, dep) in
+            fixtures
+        {
+            assert!(
+                reconciles(
+                    candidates,
+                    curated_total,
+                    do_now,
+                    do_next,
+                    plan,
+                    accepted,
+                    held,
+                    excluded,
+                    dep
+                ),
+                "fixture failed to reconcile: {:?}",
+                (
+                    candidates,
+                    curated_total,
+                    do_now,
+                    do_next,
+                    plan,
+                    accepted,
+                    held,
+                    excluded,
+                    dep
+                )
+            );
+        }
+        // Deliberately broken shapes must NOT reconcile — proves the check discriminates
+        // rather than vacuously passing everything.
+        assert!(
+            !reconciles(41, 18, 5, 6, 7, 0, 22, 0, 0),
+            "an off-by-one held_for_review must fail to reconcile"
+        );
+        assert!(
+            !reconciles(41, 19, 5, 6, 7, 0, 23, 0, 0),
+            "a curated_total that doesn't match its own do_now+do_next+plan+accepted must fail"
+        );
+    }
+
+    /// A finding the SCAN produced but the AUDITOR has never opened this session (no wire
+    /// dispositions at all) must export as `Raw` — the honest starting state.
+    #[test]
+    fn no_dispositions_at_all_is_raw_review_state() {
+        let f = finding("SEC-1", "a.rs", 1, "critical");
+        let report = report_with(vec![f], vec![]);
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
+        assert_eq!(json.review_state, ReviewState::Raw);
+        assert!(json.review_state.is_draft());
+    }
+
+    /// `BaselineAccepted` (a PRIOR run's suppression) and `WaivedInline` (an in-code waiver) are
+    /// both sourced from `Finding.status`, not this session's triage — see `ReviewState`'s doc
+    /// comment. Neither may flip the export to `Reviewed`; nobody looked at this finding THIS
+    /// session.
+    #[test]
+    fn baseline_or_inline_disposition_alone_does_not_flip_review_state_to_reviewed() {
+        let mut baseline = finding("SEC-1", "a.rs", 1, "high");
+        baseline.status = "suppressed-baseline".to_string();
+        let mut inline = finding("SEC-2", "b.rs", 2, "high");
+        inline.status = "suppressed-inline".to_string();
+        let report = report_with(vec![baseline, inline], vec![]);
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
+        assert_eq!(
+            json.review_state,
+            ReviewState::Raw,
+            "a prior-run baseline suppression or an in-code waiver is not THIS session's \
+             auditor reviewing anything"
+        );
+    }
+
+    /// An explicit wire disposition of any recognized kind (`Ignored` / `TechDebt` /
+    /// `FalsePositive`) on even ONE finding is enough to flip the whole export to `Reviewed`.
+    #[test]
+    fn a_single_auditor_disposition_flips_the_whole_export_to_reviewed() {
+        let f1 = finding("SEC-1", "a.rs", 1, "critical");
+        let f2 = finding("SEC-2", "b.rs", 2, "critical");
+        let mut dispositions = HashMap::new();
+        dispositions.insert(finding_key(&f1), wire("Ignored", "defense in depth", ""));
+        let report = report_with(vec![f1, f2], vec![]);
+        let json = build_report_json(&report.clone().seal(), &dispositions, None, &empty_opts());
+        assert_eq!(json.review_state, ReviewState::Reviewed);
+        assert!(!json.review_state.is_draft());
+    }
+
+    /// req_pass2_10 (THE DEFECT, stated against the export): a finding the auditor READ AND
+    /// CONFIRMED must be distinguishable, in the exported artifacts, from one he never opened.
+    ///
+    /// RED BEFORE THE FIX, on `1a61a7c`, as two separate failures:
+    ///
+    /// 1. `review_state` came back `Raw`, so the PDF stamped "DRAFT: not yet reviewed" on
+    ///    every page and the narrative spoke in the engine's voice — on a scan the auditor had
+    ///    reviewed end to end. The product's first public promise is "one person reads every
+    ///    finding and signs"; a confirmation that does not reach `review_state` leaves that
+    ///    promise with no data behind it.
+    /// 2. `classify`'s catch-all mapped the unrecognized wire value `"Confirmed"` to
+    ///    `Disposition::Unresolved`, so the confirmed row's own site label read "Open
+    ///    (recommended: ...)" — byte-identical to the row nobody had looked at.
+    ///
+    /// Together those are the "ships inert" shape: a disposition that exists only in the UI.
+    #[test]
+    fn req_pass2_10_a_confirmed_finding_is_distinguishable_from_an_unopened_one_in_the_export() {
+        let confirmed = finding("SEC-1", "a.rs", 1, "critical");
+        let never_opened = finding("SEC-2", "b.rs", 2, "critical");
+        let mut dispositions = HashMap::new();
+        dispositions.insert(finding_key(&confirmed), wire("Confirmed", "", ""));
+        let report = report_with(vec![confirmed.clone(), never_opened.clone()], vec![]);
+        let json = build_report_json(&report.clone().seal(), &dispositions, None, &empty_opts());
+
+        // (1) The sign-off promise, backed by data.
+        assert_eq!(
+            json.review_state,
+            ReviewState::Reviewed,
+            "confirming a finding IS this session's auditor dispositioning it"
+        );
+        assert!(!json.review_state.is_draft());
+
+        // (2) The two rows do not read the same.
+        let label_for = |rule_id: &str| -> String {
+            json.curated_findings
+                .iter()
+                .chain(json.held_for_review_findings.iter())
+                .flat_map(|g| g.sites.iter())
+                .find(|s| s.path == if rule_id == "SEC-1" { "a.rs" } else { "b.rs" })
+                .unwrap_or_else(|| panic!("{rule_id} must appear in the export"))
+                .disposition
+                .clone()
+        };
+        let confirmed_label = label_for("SEC-1");
+        let unopened_label = label_for("SEC-2");
+        assert_ne!(
+            confirmed_label, unopened_label,
+            "a reviewed-and-confirmed finding must not read identically to one nobody opened"
+        );
+        assert!(
+            confirmed_label.to_lowercase().contains("confirmed"),
+            "the confirmed row says so in words; got {confirmed_label:?}"
+        );
+        assert!(
+            unopened_label.starts_with("Open ("),
+            "and the unopened row still reads as open; got {unopened_label:?}"
+        );
+    }
+
+    /// req_pass2_10: a confirmed finding is DECIDED, but it is not FIXED and it is not
+    /// accepted — so it keeps its severity-derived action bucket exactly as an open row would,
+    /// and it still counts as outstanding work for the client.
+    ///
+    /// This is the half of the semantics that is easy to get wrong in the other direction:
+    /// `Ignored`/`TechDebt*` all move a row out of its computed quadrant because they record a
+    /// decision about WHEN or WHETHER to fix it. `Confirmed` records only that the finding is
+    /// REAL, which is precisely what the quadrant already assumed.
+    #[test]
+    fn req_pass2_10_confirmed_keeps_the_severity_derived_bucket_and_still_counts_as_open() {
+        assert_eq!(
+            matrix_bucket(Disposition::Confirmed, "critical", None),
+            matrix_bucket(Disposition::Unresolved, "critical", None),
+            "confirming does not reschedule the fix"
+        );
+        assert_eq!(
+            matrix_bucket(Disposition::Confirmed, "high", Some("low")),
+            "do_now"
+        );
+        assert_eq!(
+            matrix_bucket(Disposition::Confirmed, "medium", None),
+            "plan"
+        );
+
+        let confirmed = finding("SEC-1", "a.rs", 1, "critical");
+        let mut dispositions = HashMap::new();
+        dispositions.insert(finding_key(&confirmed), wire("Confirmed", "", ""));
+        let report = report_with(vec![confirmed.clone()], vec![]);
+        let json = build_report_json(&report.clone().seal(), &dispositions, None, &empty_opts());
+        assert_eq!(json.executive_summary.do_now, 1);
+        assert_eq!(
+            json.executive_summary.open, 1,
+            "confirmed-and-unfixed is still open work for the client"
+        );
+        assert_eq!(json.executive_summary.excluded_false_positive, 0);
+        assert_eq!(json.executive_summary.held_for_review, 0);
+    }
+
+    /// The core P5 raw-export contract: the JSON carries the draft flag, the narrative
+    /// reconciles with EVERY number shown (candidates == curated + held + excluded), and the
+    /// narrative never claims a human reviewed or dispositioned anything.
+    #[test]
+    fn raw_export_carries_the_draft_flag_and_a_fully_reconciling_engine_voiced_narrative() {
+        let mut f1 = finding("SEC-1", "a.rs", 1, "critical"); // -> do_now, curated
+        f1.detail = "The profiles table has no RLS.".to_string();
+        let mut f2 = finding("SEC-2", "b.rs", 2, "medium"); // -> needs-review, held
+        f2.confidence = Some("needs-review".to_string());
+        let report = report_with(vec![f1, f2], vec![]);
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
+
+        // The flag.
+        assert_eq!(json.review_state, ReviewState::Raw);
+        assert!(json.review_state.is_draft());
+
+        // The reconciling numbers, each present on the JSON.
+        assert_eq!(json.executive_summary.candidates_reviewed, 2);
+        assert_eq!(json.executive_summary.curated_total, 1);
+        assert_eq!(json.executive_summary.held_for_review, 1);
+        assert_eq!(json.executive_summary.excluded_false_positive, 0);
+        assert!(reconciles(
+            json.executive_summary.candidates_reviewed,
+            json.executive_summary.curated_total,
+            json.executive_summary.do_now,
+            json.executive_summary.do_next,
+            json.executive_summary.plan,
+            json.executive_summary.accepted,
+            json.executive_summary.held_for_review,
+            json.executive_summary.excluded_false_positive,
+            json.executive_summary.dependency_advisories,
+        ));
+
+        // Every one of those numbers is actually visible in the prose, not just the JSON.
+        let n = &json.executive_summary.narrative;
+        assert!(n.contains("2 candidate findings"), "{n}");
+        assert!(n.contains('1'), "{n}"); // curated_total / held_for_review both literally "1"
+        assert!(n.contains("0 were auto-excluded"), "{n}");
+
+        // Never claims a human reviewed or dispositioned anything.
+        assert!(!n.contains("reviewed by a human reviewer"), "{n}");
+        assert!(!n.contains("dispositioned by a human reviewer"), "{n}");
+        assert!(!n.contains("were reviewed"), "{n}");
+        assert!(
+            !json
+                .methodology
+                .ai_tier_note
+                .contains("reviewed by a human reviewer"),
+            "{}",
+            json.methodology.ai_tier_note
+        );
+        assert!(
+            !json
+                .methodology
+                .ai_tier_note
+                .contains("dispositioned by a human reviewer"),
+            "{}",
+            json.methodology.ai_tier_note
+        );
+    }
+
+    /// The P5 reviewed-export contract: reviewer dispositions actually appear, the narrative
+    /// reconciles, no draft flag, and reviewed-voice phrasing IS allowed (because it's true).
+    #[test]
+    fn reviewed_export_reconciles_in_auditor_voice_with_no_draft_flag() {
+        let mut ignored = finding("SEC-1", "a.rs", 1, "critical"); // -> accepted, curated
+        ignored.detail = "The profiles table has no RLS.".to_string();
+        let mut held = finding("SEC-2", "b.rs", 2, "medium"); // -> needs-review, held
+        held.confidence = Some("needs-review".to_string());
+        let excluded = finding("SEC-3", "c.rs", 3, "critical"); // -> FalsePositive, excluded
+
+        let mut dispositions = HashMap::new();
+        dispositions.insert(
+            finding_key(&ignored),
+            wire("Ignored", "defense in depth only", ""),
+        );
+        dispositions.insert(
+            finding_key(&excluded),
+            wire("FalsePositive", "not exploitable", ""),
+        );
+
+        let report = report_with(vec![ignored, held, excluded], vec![]);
+        let json = build_report_json(&report.clone().seal(), &dispositions, None, &empty_opts());
+
+        assert_eq!(json.review_state, ReviewState::Reviewed);
+        assert!(!json.review_state.is_draft());
+
+        assert_eq!(json.executive_summary.candidates_reviewed, 3);
+        assert_eq!(json.executive_summary.excluded_false_positive, 1);
+        assert_eq!(json.executive_summary.curated_total, 1);
+        assert_eq!(json.executive_summary.held_for_review, 1);
+        assert_eq!(json.executive_summary.accepted, 1);
+        assert!(reconciles(
+            json.executive_summary.candidates_reviewed,
+            json.executive_summary.curated_total,
+            json.executive_summary.do_now,
+            json.executive_summary.do_next,
+            json.executive_summary.plan,
+            json.executive_summary.accepted,
+            json.executive_summary.held_for_review,
+            json.executive_summary.excluded_false_positive,
+            json.executive_summary.dependency_advisories,
+        ));
+
+        let n = &json.executive_summary.narrative;
+        assert!(
+            n.contains("3 candidate findings were reviewed by a human reviewer"),
+            "{n}"
+        );
+        assert!(n.contains("1 was dispositioned as false positives"), "{n}");
+        assert!(n.contains("1 accepted as risk"), "{n}");
+        assert!(n.contains("held for further review"), "{n}");
+        assert!(
+            json.methodology
+                .ai_tier_note
+                .contains("reviewed and dispositioned by a human reviewer"),
+            "{}",
+            json.methodology.ai_tier_note
+        );
+    }
+
+    /// Zero-candidate raw scans keep the pre-P5 honest empty-state sentence — no draft-banner
+    /// noise added to a run that surfaced nothing at all.
+    #[test]
+    fn zero_candidates_raw_scan_keeps_the_empty_state_sentence() {
+        let report = report_with(vec![], vec![]);
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
+        assert_eq!(json.review_state, ReviewState::Raw);
+        assert_eq!(
+            json.executive_summary.narrative,
+            "The scan surfaced no candidate findings to review in this run."
+        );
+    }
+
+    /// The Typst template's per-page draft banner must be gated on `d.review_state`, and the
+    /// literal banner text the design calls for must be present.
+    #[test]
+    fn shipped_template_gates_the_draft_banner_on_review_state() {
+        let template = include_str!("../templates/audit_report.typ");
+        assert!(
+            template.contains("d.review_state == \"raw\""),
+            "the draft banner must be gated on d.review_state"
+        );
+        assert!(
+            template.contains("DRAFT: not yet reviewed by a human reviewer"),
+            "the required banner text must be present verbatim"
+        );
+        // The gate must live inside `#set page(...)`'s `header:` so it renders on EVERY page,
+        // not just the cover.
+        let page_start = template.find("#set page(").expect("page setup block");
+        let is_draft_def = template
+            .find("#let is_draft")
+            .expect("is_draft let-binding");
+        assert!(
+            is_draft_def < page_start,
+            "is_draft must be defined before the page setup that reads it in header:"
+        );
+    }
+
+    /// C4-R3 defect 1: the template used to ALSO echo a bare " · DRAFT" in the footer, on top
+    /// of the header's full banner — a standalone "DRAFT" immediately ahead of the next page's
+    /// full banner sentence in reading order, which collapsed into "DRAFTDRAFT: not yet
+    /// reviewed..." under a naive multi-page text read. The banner text must appear in exactly
+    /// ONE place in the template source (the header), never echoed a second time in the footer.
+    #[test]
+    fn shipped_template_does_not_echo_the_draft_banner_a_second_time_in_the_footer() {
+        let template = include_str!("../templates/audit_report.typ");
+        // The rendered banner CONTENT (not a comment mentioning it) is this exact bracketed
+        // Typst markup span — it must appear exactly once (in the header), never a second time
+        // anywhere else in the template.
+        assert_eq!(
+            template
+                .matches("[DRAFT: not yet reviewed by a human reviewer]")
+                .count(),
+            1,
+            "the rendered draft banner content must appear exactly once in the template"
+        );
+        let footer_start = template.find("footer: context [").expect("footer block");
+        let footer_end = footer_start + template[footer_start..].find("],").expect("footer close");
+        let footer_body = &template[footer_start..footer_end];
+        assert!(
+            !footer_body.contains("[ · DRAFT]") && !footer_body.contains("[DRAFT]"),
+            "the footer must not render its own standalone DRAFT echo — the header banner \
+             already marks every page, and a bare echo there used to sit immediately ahead of \
+             the next page's full banner, concatenating into \"DRAFTDRAFT: not yet \
+             reviewed...\" under a naive multi-page text read: {footer_body}"
+        );
+    }
+
+    /// C4-R3 defect 2: an empty severity×effort matrix cell used to render the literal word
+    /// "None" — a stringified absent value, not an intentional empty state. The template must
+    /// render empty content for a zero-finding cell, never the word "None" (or "null").
+    #[test]
+    fn shipped_template_renders_an_empty_matrix_cell_as_blank_not_the_word_none() {
+        let template = include_str!("../templates/audit_report.typ");
+        let fn_start = template
+            .find("#let grid_cell_content(cell) = {")
+            .expect("grid_cell_content definition");
+        let fn_end = fn_start + template[fn_start..].find("\n}\n").expect("function close");
+        let body = &template[fn_start..fn_end];
+        assert!(
+            !body.contains("[None]") && !body.contains("[null]"),
+            "an empty grid cell must never render the literal word None/null: {body}"
+        );
+    }
+
+    /// The Methodology section's own reconciling line (separate literal text from the exec
+    /// summary) must ALSO be gated — it used to unconditionally say "... reviewed; ...
+    /// dispositioned as false positives by the auditor and excluded" no matter what.
+    #[test]
+    fn shipped_template_methodology_line_is_gated_on_review_state() {
+        let template = include_str!("../templates/audit_report.typ");
+        assert!(
+            template.contains("if d.review_state == \"reviewed\""),
+            "the methodology reconciling line must branch on review_state"
+        );
+        assert!(
+            template.contains("has not yet had a human triage pass"),
+            "the raw branch must say so explicitly"
+        );
+        assert!(
+            template.contains("held for a human reviewer's judgment call"),
+            "the raw branch must surface held_for_review, not just candidates/excluded"
+        );
+    }
+
+    /// W5: a RAW (unreviewed) export must compile cleanly through the now-gated sign-off
+    /// block — the new `if is_draft [...] else [...]` branch in the signature block must not be
+    /// a Typst syntax trap on the raw path, the one that is actually exercised by default (no
+    /// disposition ever recorded).
+    #[tokio::test]
+    async fn compile_pdf_succeeds_for_an_unreviewed_draft_with_the_gated_signoff() {
+        if which_typst().is_none() {
+            eprintln!(
+                "skipping compile_pdf_succeeds_for_an_unreviewed_draft_with_the_gated_signoff: \
+                 typst not on PATH"
+            );
+            return;
+        }
+        let f = finding("SEC-NO-HARDCODED-SECRETS-1", "src/a.rs", 10, "critical");
+        let report = report_with(vec![f], vec!["SEC-NO-HARDCODED-SECRETS-1"]);
+        // No dispositions recorded at all -> Raw/unreviewed, same source of truth the draft
+        // banner and the sign-off block both read.
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
+        assert_eq!(json.review_state, ReviewState::Raw);
+        assert!(json.review_state.is_draft());
+
+        let pdf = compile_pdf(&json)
+            .await
+            .expect("compile_pdf must succeed for an unreviewed draft export");
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    /// Regression (cycle-3 scan): a finding with an EMPTY path must not crash the PDF compile.
+    /// `breakable("")` used to hit `().join(sep)`, which is `none` in Typst, and `#raw(none)`
+    /// fails the whole compile ("expected string, found none"). A real scan produced a top-3
+    /// do-now finding with an empty path and took the entire export down; the `breakable()` guard
+    /// (none/empty -> "") fixes it. Critical severity routes the finding into the "three things"
+    /// box that renders `#raw(breakable(item.path))`, exercising the crash path.
+    #[tokio::test]
+    async fn compile_pdf_succeeds_when_a_top_finding_has_an_empty_path() {
+        if which_typst().is_none() {
+            eprintln!(
+                "skipping compile_pdf_succeeds_when_a_top_finding_has_an_empty_path: \
+                 typst not on PATH"
+            );
+            return;
+        }
+        let f = finding("SEC-NO-HARDCODED-SECRETS-1", "", 0, "critical");
+        let report = report_with(vec![f], vec!["SEC-NO-HARDCODED-SECRETS-1"]);
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
+        let pdf = compile_pdf(&json)
+            .await
+            .expect("compile_pdf must succeed even when a finding has an empty path");
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    /// End-to-end smoke test (typst-present-only, mirrors `compile_pdf_produces_a_real_pdf_
+    /// when_typst_is_present`): a REVIEWED export (with a real disposition) must still compile
+    /// cleanly through the gated template — the conditional banner/methodology logic must not
+    /// be a Typst syntax trap that only happens to work on the (more commonly exercised) raw
+    /// path. W5 companion to the test above: the sign-off block's reviewed branch must also
+    /// still be valid Typst.
+    #[tokio::test]
+    async fn compile_pdf_succeeds_for_a_reviewed_export_with_the_gated_template() {
+        if which_typst().is_none() {
+            eprintln!(
+                "skipping compile_pdf_succeeds_for_a_reviewed_export_with_the_gated_template: \
+                 typst not on PATH"
+            );
+            return;
+        }
+        let f = finding("SEC-NO-HARDCODED-SECRETS-1", "src/a.rs", 10, "critical");
+        let mut dispositions = HashMap::new();
+        dispositions.insert(finding_key(&f), wire("Ignored", "test fixture only", ""));
+        let report = report_with(vec![f], vec!["SEC-NO-HARDCODED-SECRETS-1"]);
+        let json = build_report_json(&report.clone().seal(), &dispositions, None, &empty_opts());
+        assert_eq!(json.review_state, ReviewState::Reviewed);
+
+        let pdf = compile_pdf(&json)
+            .await
+            .expect("compile_pdf must succeed for a reviewed export");
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    // ── P6 (2026-09-29): cover, branding, product name ──────────────────────────────
+
+    /// The cover title: brand_title (both the branded and neutral forms) must say
+    /// "Codebase Inspection", never "Codebase Audit" — see `NEUTRAL_COVER_TITLE` and the
+    /// template's `brand_title` binding.
+    #[test]
+    fn shipped_template_brand_title_says_codebase_inspection_not_audit() {
+        let template = include_str!("../templates/audit_report.typ");
+        assert!(template.contains(NEUTRAL_COVER_TITLE));
+        assert!(template.contains(" - Codebase Inspection"));
+        assert!(!template.contains("Codebase Audit"));
+    }
+
+    /// The per-page footer keeps "(advisory, not a certification)" verbatim (explicitly
+    /// required to survive the rebrand) but the word in front of it is now "inspection".
+    #[test]
+    fn shipped_template_footer_says_inspection_report_and_keeps_the_advisory_caveat() {
+        let template = include_str!("../templates/audit_report.typ");
+        assert!(template.contains("inspection report (advisory, not a certification)"));
+        assert!(!template.contains("audit report (advisory"));
+    }
+
+    /// The draft banner (raw-export only) no longer attributes the pending review to "the
+    /// auditor" — client-facing role language is "a human reviewer" throughout.
+    #[test]
+    fn shipped_template_draft_banner_says_reviewer_not_auditor() {
+        let template = include_str!("../templates/audit_report.typ");
+        assert!(template.contains("DRAFT: not yet reviewed by a human reviewer"));
+        assert!(!template.contains("reviewed by the auditor"));
+    }
+
+    /// A signature block exists (promise 1: "one person reads every finding and signs the
+    /// report") and it renders the real, resolved preparer name.
+    #[test]
+    fn shipped_template_has_a_signature_block_naming_the_preparer() {
+        let template = include_str!("../templates/audit_report.typ");
+        assert!(template.contains("Prepared and signed off by"));
+        assert!(template.contains("d.cover.prepared_by"));
+    }
+
+    /// W5: the sign-off block used to render "Prepared and signed off by: NAME / DATE"
+    /// unconditionally — including on a raw (nobody-has-looked-at-this-yet) export, directly
+    /// contradicting the per-page DRAFT banner above it. It must now be gated on the exact same
+    /// `is_draft` signal the draft banner reads (not a second, independently-derived flag), so
+    /// the two can never disagree again.
+    #[test]
+    fn shipped_template_signoff_is_gated_on_the_same_is_draft_signal_as_the_draft_banner() {
+        let template = include_str!("../templates/audit_report.typ");
+        let signoff_pos = template
+            .find("Prepared and signed off by")
+            .expect("signature block must exist");
+
+        // The nearest `is_draft` check ABOVE the sign-off line must be the one that guards it
+        // (`#if is_draft [ ... ] else [ ... Prepared and signed off by ... ]`) — found via
+        // `rfind` on the (byte-boundary-safe, since `signoff_pos` came from `find`) prefix, so
+        // this can't accidentally match the draft banner's own `is_draft` check way up in the
+        // page header.
+        let if_draft_pos = template[..signoff_pos]
+            .rfind("if is_draft")
+            .expect("an `if is_draft` branch must guard the sign-off block");
+        let between = &template[if_draft_pos..signoff_pos];
+        assert!(
+            between.len() < 300,
+            "the `if is_draft` guarding the sign-off block must sit directly above it, not be \
+             some unrelated earlier use of the signal; gap was {} bytes: {between:?}",
+            between.len()
+        );
+        assert!(
+            between.contains("] else ["),
+            "the sign-off line must be in the `else` (reviewed) branch of the is_draft check"
+        );
+        assert!(
+            between.contains("unreviewed draft"),
+            "the draft branch must explicitly say this is an unreviewed draft"
+        );
+        assert!(
+            between.contains("not signed off"),
+            "the draft branch must not claim a sign-off happened"
+        );
+
+        // The reviewed branch (only) still pairs the preparer name with a date.
+        let reviewed_branch_end = template.len().min(signoff_pos + 200);
+        let reviewed_branch = &template[signoff_pos..reviewed_branch_end];
+        assert!(reviewed_branch.contains("d.cover.generated_at"));
+    }
+
+    /// Contract test: no CLIENT-FACING string in the shipped template says "audit"/"Audit".
+    /// Typst line comments (developer-facing design commentary, never rendered) are stripped
+    /// first; the three JSON field-accessor tokens that happen to spell "audit" as part of a
+    /// Rust struct field name (`d.cover.audited_refs`, `d.cover.audit_model`,
+    /// `row.audited_rules` — internal identifiers, exempt per the plan) are scrubbed before the
+    /// word-boundary scan so they don't produce a false positive.
+    #[test]
+    fn shipped_template_client_facing_text_has_no_audit_word() {
+        let template = include_str!("../templates/audit_report.typ");
+        let code_only: String = template
+            .lines()
+            .map(|line| line.split("//").next().unwrap_or(""))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let scrubbed = code_only
+            .replace("d.cover.audited_refs", "")
+            .replace("d.cover.audit_model", "")
+            .replace("row.audited_rules", "");
+        let re = regex::Regex::new(r"(?i)\baudit\w*\b").unwrap();
+        let hits: Vec<&str> = re.find_iter(&scrubbed).map(|m| m.as_str()).collect();
+        assert!(
+            hits.is_empty(),
+            "client-facing template text still says audit: {hits:?}"
+        );
+    }
+
+    /// Contract test: none of the authored, client-facing prose this module PRODUCES (the
+    /// disclaimer, the next-steps note, both methodology AI-tier notes, both narrative voices,
+    /// and the disposition labels) says "audit"/"Audit". Internal identifiers/rule ids are a
+    /// separate, non-rendered surface and are exempt.
+    #[test]
+    fn no_client_facing_authored_string_contains_the_word_audit() {
+        let candidates: Vec<String> = vec![
+            AUDIT_REPORT_DISCLAIMER.to_string(),
+            next_steps_note(ReviewState::Reviewed, 10, 7, 0, 3),
+            next_steps_note(ReviewState::Raw, 0, 0, 0, 0),
+            ai_tier_note_for(ReviewState::Raw),
+            ai_tier_note_for(ReviewState::Reviewed),
+            default_narrative(ReviewState::Raw, 10, 3, 1, 1, 1, 0, 1, 0, 0, 0),
+            default_narrative(ReviewState::Reviewed, 10, 3, 1, 1, 1, 0, 1, 0, 0, 0),
+            disposition_label(Disposition::Ignored, "some reason", "accepted", false),
+            disposition_label(Disposition::Ignored, "some reason", "accepted", true),
+            disposition_label(Disposition::Unresolved, "", "do_now", false),
+        ];
+        for s in &candidates {
+            assert!(
+                !s.to_lowercase().contains("audit"),
+                "client-facing string still says audit: {s}"
+            );
+        }
+    }
+
+    /// "Prepared by" must never render blank/"N/A" with default (un-mutated) options — the
+    /// resolver's floor is a real name (promise 1).
+    #[test]
+    fn cover_prepared_by_is_never_blank_with_default_options() {
+        let f = finding("SEC-1", "a.rs", 1, "low");
+        let report = report_with(vec![f], vec![]);
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
+        assert_eq!(json.cover.prepared_by, DEFAULT_PREPARED_BY);
+        assert_ne!(json.cover.prepared_by, "");
+    }
+
+    /// Zero real code volume (no local file was ever read this run) must HIDE the cover's
+    /// code-volume field entirely — never render a zero.
+    #[test]
+    fn cover_code_volume_is_none_when_the_scan_has_no_real_line_count() {
+        let f = finding("SEC-1", "a.rs", 1, "low");
+        let mut report = report_with(vec![f], vec![]);
+        report.code_lines = 0;
+        report.code_lines_by_language = Vec::new();
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
+        assert!(
+            json.cover.code_volume.is_none(),
+            "zero code_lines must hide the row, not print a zero"
+        );
+    }
+
+    /// A real line count produces `Some(CodeVolumeJson)` with the per-language breakdown
+    /// carried straight through from the scan (`report_with`'s fixture sets 400 lines split
+    /// TypeScript 300 / Rust 100).
+    #[test]
+    fn cover_code_volume_is_some_with_real_lines_and_language_breakdown_when_known() {
+        let f = finding("SEC-1", "a.rs", 1, "low");
+        let report = report_with(vec![f], vec![]);
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
+        let cv = json
+            .cover
+            .code_volume
+            .expect("a nonzero code_lines must produce Some");
+        assert_eq!(cv.lines, 400);
+        assert_eq!(cv.by_language.len(), 2);
+        assert_eq!(cv.by_language[0].language, "TypeScript");
+        assert_eq!(cv.by_language[0].lines, 300);
+        assert_eq!(cv.by_language[1].language, "Rust");
+        assert_eq!(cv.by_language[1].lines, 100);
+    }
+
+    /// The template never has an unconditional "characters"-suffixed render of the raw char
+    /// count any more (the bug: "0 characters" always rendered regardless of value) — the row
+    /// is now built from the gated `code_volume_rows` array.
+    #[test]
+    fn shipped_template_never_unconditionally_renders_code_chars_as_characters() {
+        let template = include_str!("../templates/audit_report.typ");
+        assert!(
+            !template.contains("thousands(d.cover.code_chars) characters"),
+            "the old unconditional zero-prone render must be gone"
+        );
+        assert!(template.contains("code_volume_rows"));
+        assert!(template.contains("d.cover.code_volume"));
+    }
+
+    /// P6: extends the existing P1 e2e coverage
+    /// (`p1_e2e_cover_counts_and_security_finding_survive_post_merge`, which already pins
+    /// `cover.stats.critical`) to the high/medium buckets: two raw findings at the exact same
+    /// file+line must merge into ONE finding before the cover ever counts severities, so
+    /// `cover.stats.high` reads 1, not 2.
+    #[tokio::test]
+    async fn cover_stats_high_bucket_also_reflects_post_merge_counts() {
+        let cors_code = "app.use(cors())";
+        let mut det = finding("ARCH-MIDDLEWARE-FIRST-1", "middleware.ts", 12, "high");
+        det.snippet = cors_code.to_string();
+        let mut sibling = finding("SOME-OTHER-HIGH-RULE", "middleware.ts", 12, "high");
+        sibling.snippet = cors_code.to_string();
+        let files = vec![("middleware.ts".to_string(), cors_code.to_string())];
+        let merged = crate::ai_audit::merge_semantic_groups(
+            crate::ai_audit::merge_by_location(vec![det, sibling], &files),
+            &files,
+        );
+        assert_eq!(
+            merged.len(),
+            1,
+            "two raw findings at the same file+line must merge to one before counting"
+        );
+        let report = report_with(merged, vec![]);
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
+        assert_eq!(
+            json.cover.stats.high, 1,
+            "the merged high finding must count once, not twice"
+        );
+        assert_eq!(json.cover.stats.critical, 0);
+        assert_eq!(json.cover.stats.medium, 0);
+    }
+
+    /// End-to-end (typst-present-only): a scan with NO real code-volume figure must still
+    /// compile cleanly through the template — the `code_volume_rows` conditional is not a
+    /// Typst syntax trap on the empty-array branch.
+    #[tokio::test]
+    async fn compile_pdf_succeeds_with_zero_code_lines_hiding_the_code_volume_row() {
+        if which_typst().is_none() {
+            eprintln!(
+                "skipping compile_pdf_succeeds_with_zero_code_lines_hiding_the_code_volume_row: \
+                 typst not on PATH"
+            );
+            return;
+        }
+        let f = finding("SEC-NO-HARDCODED-SECRETS-1", "src/a.rs", 10, "critical");
+        let mut report = report_with(vec![f], vec!["SEC-NO-HARDCODED-SECRETS-1"]);
+        report.code_lines = 0;
+        report.code_lines_by_language = Vec::new();
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
+        assert!(json.cover.code_volume.is_none());
+
+        let pdf = compile_pdf(&json)
+            .await
+            .expect("compile_pdf must succeed with the code-volume row hidden");
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    /// `sample-report/audit_report.typ` is a PREVIEW COPY of the shipped template (used to
+    /// regenerate the sample PDF/PNGs) and must stay byte-identical to it — a drifted copy
+    /// means the sample deliverable stops representing what the app actually ships. This
+    /// caught real drift as of this pass (the sample copy predated the P2/P6 template edits).
+    ///
+    /// `sample-report/` is a LOCAL-ONLY, self-ignoring directory (its own `.gitignore` is `*`),
+    /// so it does not exist in a fresh clone or in CI. The copy is therefore read at RUNTIME and
+    /// the check is skipped when it is absent; an `include_str!` here made the whole lib-test
+    /// target fail to compile on any checkout without the preview directory.
+    #[test]
+    fn sample_report_template_copy_is_byte_identical_to_the_shipped_template() {
+        let shipped = include_str!("../templates/audit_report.typ");
+        let sample_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../sample-report/audit_report.typ");
+        let sample = match std::fs::read_to_string(&sample_path) {
+            Ok(sample) => sample,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                eprintln!(
+                    "skipping drift check: {} is absent (sample-report/ is local-only)",
+                    sample_path.display()
+                );
+                return;
+            }
+            Err(e) => panic!("read {}: {e}", sample_path.display()),
+        };
+        assert_eq!(
+            shipped, sample,
+            "sample-report/audit_report.typ has drifted from the shipped template — copy the \
+             shipped file over it"
+        );
+    }
+}
+
+// ════════════════════════════════════════════════════════════════════════════════════════
+// C5-3: the consolidated export-invariants regression gate
+// ════════════════════════════════════════════════════════════════════════════════════════
+//
+// The last several cycles (W3/W4, R1/R2, C3-6, C4-P2/P3/P4, C5-1, REG-5 — see `git log
+// --oneline` on this file for the full list) each fixed ONE cross-cutting export defect, then
+// added ONE narrowly-scoped regression test for it, usually in `mod tests` above or in
+// `xlsx_export`'s own test module. Each test is real and still passes, but there has never
+// been a SINGLE place that builds one representative report and checks the whole FAMILY of
+// invariants together — so a change that re-breaks one of them (a new code path that forgets
+// to call `client_headline_and_detail`, a new bucket gate that skips `effective_bucket`, a new
+// text field that skips `sanitize_report_findings`) only fails loudly if it happens to also
+// break one of the narrow fixture-specific tests. This module is that single place: ONE
+// synthetic report (`build_fixture`, below) run through the REAL `build_report_json` /
+// `xlsx_export::build_findings_export` / `xlsx_export::build_workbook` pipeline, then a set of
+// named, independent `#[tokio::test]` functions — one invariant (or one closely related pair)
+// per function — so a future regression in ANY of them fails here first, by name, rather than
+// waiting to be independently rediscovered.
+//
+// The twelve invariants this gate owns (add new ones here as future cycles close more gaps —
+// this doc comment is the canonical index, not the individual test doc comments):
+//
+//  1. No client-facing field (headline/detail/snippet/fix) in the JSON or the xlsx begins with
+//     an imperative gate-verb (`^(Deny|Require|Disallow|Forbid|Enforce)\b`) — the internal
+//     gate's own enforcement prose must always be rewritten before it reaches a client. Traces
+//     to W3 (2026-09-30) / C4-P2 (`client_headline_and_detail`) / C4-P4 defect 1.
+//     STANDING (passes): `gate_verb_directives_never_leak_into_any_client_facing_field`.
+//  2. No field carries a zero-width/BOM codepoint (U+200B, U+200C, U+200D, U+FEFF). Traces to
+//     C4-R3 (`sanitize_report_findings`/`strip_zero_width`).
+//     STANDING (passes): `zero_width_and_bom_codepoints_never_survive_into_any_export_field`.
+//  3. No field contains the identifier-spacing artifact (`[A-Za-z0-9]\. [a-z0-9]` outside a
+//     genuine sentence boundary or a known abbreviation) — a dotted call, filename, version
+//     string, or abbreviation must survive untouched. Traces to REG-5 (2026-10-02).
+//     STANDING (passes): `identifier_heavy_text_never_gets_a_period_space_corruption_artifact`.
+//  4. No headline contains a raw rule-id token (`[A-Z]+(-[A-Z0-9]+){2,}`); an absorbed
+//     `also_matches` member renders as its corpus TITLE (or not at all), never its bare id.
+//     Traces to C4-P4 defect 2 (`also_matches_titles`) / C5-1 (deterministic merge primacy).
+//     STANDING (passes): `also_matches_renders_titles_never_raw_rule_id_tokens`.
+//  5. Hedge single source of truth: `needs_review ⇔ confidence == "needs-review"` for every
+//     row (biconditional — PASSES, by construction of `is_hedged`/`hedge_confidence`, C4-P2);
+//     the executive summary's "held for review" count equals the total number of
+//     `needs_review` rows. C5-4 (this cycle, second attempt — cycle-4's P2 regressed): the
+//     root cause was that `is_informational`'s hard "critical/high is never informational" rule
+//     was the ONLY gate a `needs-review` hedge went through, so a high/critical hedge stayed in
+//     `do_now`/`do_next` and was never counted. Fixed by splitting the hedge signal into its
+//     own gate (`is_held_for_review`) and its own bucket (`matrix.held`, severity-unbounded),
+//     checked BEFORE `is_informational` in `effective_bucket`; the executive summary's
+//     `held_for_review` is now `matrix.informational.len() + matrix.held.len()`. STANDING (both
+//     halves now pass): `hedge_confidence_is_a_strict_biconditional_on_every_row` and
+//     `held_for_review_count_equals_total_needs_review_count`.
+//  6. Bucket invariant: a row with `bucket ∈ {informational}` has `severity <= medium`. CLOSED
+//     (C5-7, was OPEN/`#[ignore]`d as C5-5): `is_uncited_ai_finding` (P3) is deliberately
+//     severity-blind (see that function's own doc comment: "a critical, uncited finding is
+//     PRECISELY the case this gate exists to catch"), so a high/critical uncited finding used
+//     to be shoved into `informational` anyway, with its real (high/critical) severity shown —
+//     the one documented exception to this invariant, and the ignored test pinned it as a
+//     known gap rather than silently passing. Fixed by giving that signal its OWN destination
+//     in `effective_bucket`: a high/critical uncited finding now routes to `matrix.held` (the
+//     same severity-unbounded "a human must decide" bucket [`is_held_for_review`] uses) instead
+//     of `informational`; only a medium/low/info uncited finding still lands in `informational`,
+//     where the severity cap was always meant to apply. STANDING (no exception remains):
+//     `informational_bucket_severity_is_bounded_with_no_exceptions`.
+//  7. Provenance equals the tier of the row's OWN rule; a merged row's citation is its PRIMARY
+//     site's own resolved citation, never an absorbed member's. Traces to C4-P2
+//     (`citation_for_finding` called per-site, not per-group-first-site-only in error) / C3-6.
+//     STANDING (passes): `provenance_and_citation_belong_to_the_rows_own_rule_never_an_absorbed_member`.
+//  8. Coverage: a rule that appears ONLY as a merged `also_matches` member still counts as
+//     matched — never listed in "what's healthy" / a category's clean-rule count. Traces to
+//     C5-1 (2026-10-02, `rule_ids_with_any_finding` / `matched_rule_ids_by_category`).
+//     STANDING (passes): `a_rule_absorbed_only_via_also_matches_counts_as_matched`.
+//  9. Cover/scorecard severity totals equal the counts over the RENDERED (non-FP, non-
+//     dependency) row set — both are sums over the exact same `code_findings` partition by
+//     construction. STANDING (passes): `cover_and_scorecard_severity_totals_match_the_rendered_row_set`.
+//  10. No fix field contains an unfilled template artifact: a literal `{`, an un-substituted
+//      `<token>` span, or `TODO`. STANDING (passes):
+//      `fix_fields_never_contain_raw_template_syntax`. Separately (OPEN, C5-6 — a product-
+//      polish gap, not a correctness bug): the GENERIC placeholder filler
+//      (`generic_placeholder_filler`) legitimately renders "the affected table"/"the affected
+//      file"/etc. when a detector captured no concrete object name, which reads as boilerplate
+//      next to an otherwise-specific fix: `fix_fields_can_fall_back_to_the_generic_affected_noun_phrase`.
+//  11. Every curated (action-bucket) row for a rule with AUTHORED remediation has a non-empty
+//      `fix` and a non-empty hour estimate — never a silently missing Fix block for a rule this
+//      corpus actually authors one for. (This is deliberately scoped to AUTHORED rules — a
+//      rule with no corpus entry at all legitimately renders `fix: None`; see
+//      `curated_finding_site_fix_is_none_when_remediation_is_unauthored` above, which pins that
+//      as the accepted exception, not a regression.) STANDING (passes):
+//      `curated_rows_for_authored_floor_rules_have_a_non_empty_fix_and_estimate`.
+//  12. Pipeline-integrity ledger: a representative synthetic scan run through BOTH row-reducing
+//      merge stages (`ai_audit::merge_semantic_groups` — "cross-family-merge" — and
+//      `ai_audit::group_structural_needs_review` — "structural-needs-review-merge"), accounted
+//      for via `onboard::account_location_merge`, produces ZERO unaccounted rows at EVERY
+//      recorded stage. Traces to the real-world "cross-family-merge rows 45 -> 32 merged=8 ...
+//      unaccounted=5" defect: the OLD instrumentation diffed `also_matches` (a deduplicated
+//      rule-id SET) instead of `also_locations` (one entry per absorbed FINDING), so an
+//      absorption whose rule id collided with the primary's — the common "N occurrences of one
+//      rule" shape — vanished from the ledger with no recorded disposition even though its
+//      evidence site survived. STANDING (passes):
+//      `pipeline_integrity_ledger_has_zero_unaccounted_rows_across_every_merge_stage`.
+//  13. (2026-10-07 grading pass, defect 1) Client-facing "no wired detector" disclosure is ONE
+//      plain sentence naming a count, never a per-rule bullet list in internal vocabulary
+//      (no "arch_checker registry"/"gateway rule registry"/"Semgrep mapping" phrases, no raw
+//      rule ids) — regardless of how many rules the ledger excludes for that reason. STANDING
+//      (passes): `many_no_wired_detector_exclusions_collapse_to_one_plain_sentence`.
+//  14. (defect 2) A row with `Finding.status == "suppressed-baseline"` and `preview == true`
+//      (the scan-time preview/external-tool shape — no real baseline record can ever back it;
+//      see `classify`'s doc comment) NEVER classifies as `Disposition::BaselineAccepted` and
+//      NEVER renders "Pre-existing accepted debt" / "accepted in a prior run" anywhere in the
+//      exported report, no matter how many such rows exist. STANDING (passes):
+//      `tests::a_preview_finding_with_suppressed_baseline_status_is_never_baseline_accepted`.
+//  15. (defect 3) A preview/external-tool row's `xlsx_export` provenance column always names
+//      its tool ("Preview: {tool}"), even when its citation independently resolves to
+//      `"grounded"` via the P3/commodity-taint grounding map — provenance and citation-kind
+//      are different axes, and only the citation axis is allowed to say "grounded"/cite a
+//      standard; the provenance axis never says "Deterministic" for a row this scan's own
+//      preview pass produced. STANDING (passes), in `xlsx_export::tests` (this invariant is
+//      about that module's own provenance computation, not this file's):
+//      `a_grounded_preview_row_never_renders_deterministic_provenance`.
+//  16. (defect 4) A zero-finding rule whose own `RuleRecommendation::evidence` text negates the
+//      rule's requirement (a conservative negation-phrase match) is NEVER listed under "what's
+//      healthy" — it is held for review instead, with its own advisory finding anchored at the
+//      evidence's citation. The positive twin (evidence CONFIRMS compliance, no negation
+//      phrase) stays healthy. STANDING (passes):
+//      `evidence_negating_rule_requirement_is_held_not_healthy_positive_twin_stays_healthy`.
+#[cfg(test)]
+mod export_invariants_gate {
+    use super::*;
+    use crate::onboard::{AuditedRef, LanguageVolume, ScanProvenance};
+    use crate::xlsx_export;
+
+    // ── Fixture builders (own copies, matching the convention every test module in this
+    // crate already follows — `report_export::tests` and `xlsx_export::tests` each keep their
+    // own, never importing a sibling module's private helpers) ──────────────────────────────
+
+    fn finding(rule_id: &str, repo: &str, path: &str, line: usize, severity: &str) -> Finding {
+        Finding {
+            repo: repo.to_string(),
+            path: path.to_string(),
+            line,
+            rule_id: rule_id.to_string(),
+            severity: severity.to_string(),
+            snippet: format!("snippet-{line}"),
+            detail: format!("detail for {rule_id}"),
+            ..Finding::default()
+        }
+    }
+
+    fn report_with(findings: Vec<Finding>, audited_rule_ids: Vec<&str>) -> ScanReport {
+        ScanReport {
+            repos: vec!["demo/portal".to_string()],
+            stacks: Vec::new(),
+            files_scanned: 40,
+            test_file_count: 5,
+            files_excluded: 3,
+            code_chars: 20_000,
+            code_lines: 1_200,
+            code_lines_by_language: vec![LanguageVolume {
+                language: "TypeScript".to_string(),
+                lines: 1_200,
+            }],
+            excluded_mechanical_rules: Vec::new(),
+            findings,
+            proposed_rules: Vec::new(),
+            gated: false,
+            blocked: false,
+            ai_blocked_reason: None,
+            ai_error: None,
+            message: None,
+            actual_usage: None,
+            deep: None,
+            coverage_notes: Vec::new(),
+            provenance: ScanProvenance {
+                audited_refs: vec![AuditedRef {
+                    repo: "demo/portal".to_string(),
+                    sha: Some("1234567890abcdef".to_string()),
+                    branch: Some("main".to_string()),
+                    dirty: false,
+                    ..AuditedRef::default()
+                }],
+                audit_model: Some("test-model".to_string()),
+                calibration_model: Some("test-cal-model".to_string()),
+                clone_judge_model: None,
+                mode: "parallel".to_string(),
+                thorough: false,
+                deep: false,
+                rules_fingerprint: "fp".to_string(),
+                audited_rule_ids: audited_rule_ids.into_iter().map(String::from).collect(),
+                camerata_version: "0.0.0-test".to_string(),
+                osv_scanner_version: Some("1.9.0".to_string()),
+                started_at: "2026-10-02T00:00:00Z".to_string(),
+                finished_at: "2026-10-02T00:05:00Z".to_string(),
+                model_sessions: Vec::new(),
+            },
+            recommendations: std::collections::HashMap::new(),
+            failed_passes: Vec::new(),
+            ledger: crate::scan_ledger::ScanLedger::new(),
+        }
+    }
+
+    fn empty_opts() -> ReportOptions {
+        ReportOptions::default()
+    }
+
+    /// One built-and-exported representative report, shared verbatim by every invariant test
+    /// below (each test calls [`build_fixture`] itself — corpus load is a local TOML-file walk,
+    /// cheap enough that re-running it per test is simpler and safer than a shared `OnceCell`
+    /// racing `cargo test`'s parallel test threads over a mutable fixture).
+    struct Fixture {
+        json: AuditReportJson,
+        json_value: serde_json::Value,
+        findings_export_value: serde_json::Value,
+        workbook: Vec<u8>,
+    }
+
+    /// Build the ONE synthetic report this whole gate shares. Six findings, chosen to cover
+    /// every scenario the module doc comment's invariant list needs a live example of:
+    ///
+    /// - `SEC-NO-HARDCODED-SECRETS-1` ("f_secret"): a real, AUTHORED floor rule (critical,
+    ///   deterministic) whose raw `detail` deliberately opens with "Deny" — the gate's own
+    ///   internal directive voice — to prove invariant 1's rewrite. Its `also_matches` carries
+    ///   BOTH an uncorroborated invented AI-tier id (no corpus entry — must be silently
+    ///   dropped, never leaked as a raw id) and a SECOND real floor rule id
+    ///   (`ARCH-NO-SECRETS-IN-URL-1`, deliberately given NO Finding row of its own) — the
+    ///   "deterministic + AI pair merged at one site" case, and the vehicle for invariants 4, 7,
+    ///   and 8.
+    /// - `SUPABASE-RLS-ENABLED-1` ("f_rls"): a second real, authored floor rule, deliberately
+    ///   given NO `captures`, so its authored `remediation`'s `<table>` token falls through to
+    ///   the generic filler ("the affected table") — the vehicle for invariant 10's two halves.
+    /// - `ARCH-CUSTOM-FLAGGED-1` ("f_hedge"): a high-severity, non-AI-tier finding the
+    ///   calibrator flagged `needs_review` — C5-4: routes to the `held` bucket (NOT `do_now`;
+    ///   high/critical is never auto-informational, but a hedge is held at ANY severity) while
+    ///   still exporting `needs_review: true` and keeping its real `high` severity — the vehicle
+    ///   for invariant 5's reconciliation count.
+    /// - `ARCH-STYLE-NOTE-1` ("f_informational"): a plain `info`-severity note — the "ordinary"
+    ///   held-for-review row (no confidence hedge at all; routed on severity alone).
+    /// - `ARCH-CUSTOM-IDENTIFIER-1` ("f_identifier"): run through the REAL
+    ///   `ai_audit::merge_semantic_groups` pass (a singleton group — nothing to merge WITH, but
+    ///   this is exactly where REG-5 lived: the cross-reference-stripping pass that runs over
+    ///   every finding regardless of group size) — detail text packed with a dotted call, a
+    ///   filename, a migration-line reference, and an abbreviation, to exercise invariant 3.
+    /// - `AI-STALE-SESSION-INVALIDATION-1` ("f_ai_advisory"): a standalone, high-severity,
+    ///   genuinely uncited AI-tier finding (no RLS/XSS/open-redirect/weak-token/query-
+    ///   injection/CORS vocabulary anywhere in its id or detail, so `classify_ai_finding` can't
+    ///   ground it) — the vehicle for invariant 6 (C5-7: routes to `matrix.held`, at its real
+    ///   `high` severity, never `informational`) and invariant 7's "AI-advisory" provenance
+    ///   check.
+    async fn build_fixture() -> Fixture {
+        let corpus_path = camerata_rules::corpus_path();
+        let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+        assert!(
+            errors.is_empty(),
+            "the bundled rule corpus must load cleanly for this gate to mean anything: {errors:?}"
+        );
+
+        let mut f_secret = finding(
+            "SEC-NO-HARDCODED-SECRETS-1",
+            "demo/portal",
+            "apps/api/src/config.rs",
+            10,
+            "critical",
+        );
+        f_secret.snippet = "const API_KEY = \"abcdef1234567890ab\";".to_string();
+        f_secret.detail = "Deny committing this credential literal to version control: the \
+                            config.rs file ships a live-looking API key that grants full \
+                            billing access."
+            .to_string();
+        f_secret.also_matches = vec![
+            "AI-WEAK-AUTH-SESSION-1".to_string(),
+            "ARCH-NO-SECRETS-IN-URL-1".to_string(),
+        ];
+
+        let mut f_rls = finding(
+            "SUPABASE-RLS-ENABLED-1",
+            "demo/portal",
+            "supabase/migrations/0001_init.sql",
+            5,
+            "critical",
+        );
+        f_rls.snippet = "create table public.payments (\n  id uuid primary key\n);".to_string();
+        f_rls.detail = "The payments table has no Row Level Security: the anon key can read \
+                         and write every row."
+            .to_string();
+        // Deliberately no `captures` entry for "table" — exercises the generic-filler fallback
+        // in the authored `remediation`'s `<table>` token (invariant 10).
+
+        let mut f_hedge = finding(
+            "ARCH-CUSTOM-FLAGGED-1",
+            "demo/portal",
+            "apps/web/src/session.ts",
+            22,
+            "high",
+        );
+        f_hedge.snippet = "renewSessionToken(req);".to_string();
+        f_hedge.detail = "Session renewal does not independently re-check the caller's role; \
+                           whether an unauthenticated request can reach it depends on \
+                           middleware this scan cannot fully trace."
+            .to_string();
+        f_hedge.needs_review = true;
+        f_hedge.effort = Some("low".to_string());
+
+        let mut f_informational = finding(
+            "ARCH-STYLE-NOTE-1",
+            "demo/portal",
+            "apps/web/src/utils/formatDate.ts",
+            3,
+            "info",
+        );
+        f_informational.snippet = "export function formatDate(d: Date) { /* ... */ }".to_string();
+        f_informational.detail = "This date-formatting helper duplicates logic already present \
+                                   in the shared date utility module; consider consolidating."
+            .to_string();
+
+        let mut f_identifier = finding(
+            "ARCH-CUSTOM-IDENTIFIER-1",
+            "demo/portal",
+            "apps/api/src/invoices.ts",
+            42,
+            "medium",
+        );
+        f_identifier.snippet = "const total = client.billing.computeTotal(invoice);".to_string();
+        f_identifier.detail = "The call to client.billing.computeTotal() in \
+                                config/settings.toml bypasses the discount check. See \
+                                0002_pricing_migration.sql:7 for the original schema, e.g. the \
+                                v2.4.1 release notes document the same gap. Anyone with the \
+                                anon key can read every invoice total."
+            .to_string();
+        f_identifier.effort = Some("medium".to_string());
+        // REG-5 lived in `merge_semantic_groups`'s cross-reference-stripping pass, which runs
+        // over EVERY finding regardless of group size — route this one through the real
+        // function (a singleton group) rather than hand-simulating its output.
+        let f_identifier = crate::ai_audit::merge_semantic_groups(vec![f_identifier], &[])
+            .into_iter()
+            .next()
+            .expect("a singleton merge group must still return exactly one finding");
+
+        let mut f_ai_advisory = finding(
+            "AI-STALE-SESSION-INVALIDATION-1",
+            "demo/portal",
+            "apps/api/src/auth/password.ts",
+            58,
+            "high",
+        );
+        f_ai_advisory.snippet = "await db.users.update({ id }, { passwordHash });".to_string();
+        f_ai_advisory.detail = "Existing sessions are not invalidated when a user changes their \
+                                 password, so a previously stolen session token stays valid \
+                                 indefinitely even after a successful password reset."
+            .to_string();
+        f_ai_advisory.confidence = Some("high".to_string());
+
+        let report = report_with(
+            vec![
+                f_secret,
+                f_rls,
+                f_hedge,
+                f_informational,
+                f_identifier,
+                f_ai_advisory,
+            ],
+            vec![
+                "SEC-NO-HARDCODED-SECRETS-1",
+                "SUPABASE-RLS-ENABLED-1",
+                "ARCH-NO-SECRETS-IN-URL-1",
+            ],
+        );
+
+        let json = build_report_json(
+            &report.clone().seal(),
+            &HashMap::new(),
+            Some(&corpus),
+            &empty_opts(),
+        );
+        let findings_export = xlsx_export::build_findings_export(
+            &report.clone().seal(),
+            &HashMap::new(),
+            Some(&corpus),
+            &json,
+            &HashMap::new(),
+        );
+        let workbook = xlsx_export::build_workbook(
+            &report.clone().seal(),
+            &HashMap::new(),
+            Some(&corpus),
+            &empty_opts(),
+        )
+        .expect("the workbook must build for the representative synthetic report");
+
+        Fixture {
+            json_value: serde_json::to_value(&json).expect("AuditReportJson must serialize"),
+            findings_export_value: serde_json::to_value(&findings_export)
+                .expect("FindingsExport must serialize"),
+            json,
+            workbook,
+        }
+    }
+
+    // ── Shared text-field crawlers (same explicit-per-shape approach REG-5's own gate uses —
+    // a generic recursive walk would also pick up static narrative/methodology prose and
+    // `rule_id`-labeled fields that legitimately carry raw ids, both of which would make
+    // several of these checks false-positive) ─────────────────────────────────────────────
+
+    /// Every client-facing per-finding text field across BOTH artifact shapes: the PDF/JSON's
+    /// `AuditReportJson` (matrix headlines, curated/held-for-review site prose, three-things,
+    /// the priority grid) and `findings.json`/the xlsx's `FindingRow` set. Returns
+    /// `(location-label, text)` pairs for debuggable failure messages.
+    fn all_client_text_fields(fx: &Fixture) -> Vec<(String, String)> {
+        let mut out = Vec::new();
+        let mut add = |loc: String, v: Option<&str>| {
+            if let Some(s) = v {
+                if !s.is_empty() {
+                    out.push((loc, s.to_string()));
+                }
+            }
+        };
+
+        for bucket in [
+            "do_now",
+            "do_next",
+            "plan",
+            "accepted",
+            "informational",
+            "held",
+        ] {
+            for item in fx.json_value["matrix"][bucket]
+                .as_array()
+                .into_iter()
+                .flatten()
+            {
+                add(
+                    format!("matrix.{bucket}.headline"),
+                    item["headline"].as_str(),
+                );
+            }
+        }
+        for item in fx.json_value["three_things"]["items"]
+            .as_array()
+            .into_iter()
+            .flatten()
+        {
+            add(
+                "three_things.headline".to_string(),
+                item["headline"].as_str(),
+            );
+        }
+        for row in fx.json_value["priority_grid"]["rows"]
+            .as_array()
+            .into_iter()
+            .flatten()
+        {
+            for cell in row["cells"].as_array().into_iter().flatten() {
+                for tag in cell["findings"].as_array().into_iter().flatten() {
+                    add(
+                        "priority_grid.headline".to_string(),
+                        tag["headline"].as_str(),
+                    );
+                }
+            }
+        }
+        for group_key in ["curated_findings", "held_for_review_findings"] {
+            for group in fx.json_value[group_key].as_array().into_iter().flatten() {
+                for site in group["sites"].as_array().into_iter().flatten() {
+                    add(format!("{group_key}.headline"), site["headline"].as_str());
+                    add(format!("{group_key}.detail"), site["detail"].as_str());
+                    add(format!("{group_key}.snippet"), site["snippet"].as_str());
+                    add(format!("{group_key}.fix"), site["fix"].as_str());
+                    add(
+                        format!("{group_key}.fix_for_this_finding"),
+                        site["fix_for_this_finding"].as_str(),
+                    );
+                }
+            }
+        }
+        for row in fx.findings_export_value["findings"]
+            .as_array()
+            .into_iter()
+            .flatten()
+        {
+            add(
+                "findings_export.headline".to_string(),
+                row["headline"].as_str(),
+            );
+            add("findings_export.detail".to_string(), row["detail"].as_str());
+            add(
+                "findings_export.snippet".to_string(),
+                row["snippet"].as_str(),
+            );
+            add("findings_export.fix".to_string(), row["fix"].as_str());
+            add(
+                "findings_export.fix_specific".to_string(),
+                row["fix_specific"].as_str(),
+            );
+        }
+        out
+    }
+
+    /// Read `xl/sharedStrings.xml` out of a built workbook's zip — the shared-string pool every
+    /// non-numeric cell's text lives in (see `xlsx_export::tests::cell_text`'s identical
+    /// approach for a single-cell lookup; this gate wants EVERY string in the workbook, not one
+    /// cell, so it skips the `<c r="...">` indirection entirely).
+    fn workbook_shared_strings_xml(bytes: &[u8]) -> String {
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes))
+            .expect("workbook must be a valid zip");
+        let mut file = archive
+            .by_name("xl/sharedStrings.xml")
+            .expect("workbook must have a shared-strings table");
+        let mut s = String::new();
+        std::io::Read::read_to_string(&mut file, &mut s).expect("shared strings must be UTF-8");
+        s
+    }
+
+    /// Every `<t>...</t>` run's decoded text out of a shared-strings XML blob — every write
+    /// call in `xlsx_export` goes through `write_string_with_format`/`write_string`, which
+    /// `rust_xlsxwriter` always emits as a single plain `<t>` run (never rich-text runs), so
+    /// this simple regex extraction is exhaustive for this workbook.
+    fn workbook_shared_string_texts(xml: &str) -> Vec<String> {
+        let re = regex::Regex::new(r"(?s)<t[^>]*>(.*?)</t>").expect("static regex must compile");
+        re.captures_iter(xml)
+            .map(|c| {
+                c[1].replace("&amp;", "&")
+                    .replace("&lt;", "<")
+                    .replace("&gt;", ">")
+                    .replace("&apos;", "'")
+                    .replace("&quot;", "\"")
+            })
+            .collect()
+    }
+
+    // ── Invariant 1 (STANDING) ──────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn gate_verb_directives_never_leak_into_any_client_facing_field() {
+        let fx = build_fixture().await;
+        let gate_verb = regex::Regex::new(r"^(Deny|Require|Disallow|Forbid|Enforce)\b")
+            .expect("static regex must compile");
+
+        let mut offenders = Vec::new();
+        for (loc, text) in all_client_text_fields(&fx) {
+            if gate_verb.is_match(&text) {
+                offenders.push(format!("{loc}: {text:?}"));
+            }
+        }
+        for s in workbook_shared_string_texts(&workbook_shared_strings_xml(&fx.workbook)) {
+            if gate_verb.is_match(&s) {
+                offenders.push(format!("xlsx shared string: {s:?}"));
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "a client-facing field begins with the gate's own internal enforcement verb \
+             (never rewritten — see `client_headline_and_detail`): {offenders:#?}"
+        );
+        // Sanity check the fixture's raw "Deny ..." detail was actually REWRITTEN away rather
+        // than simply never reached: the raw opener must be gone, and the rule's authored
+        // template text (which `client_headline_and_detail` substitutes in its place) must be
+        // present — proving the rewrite ran, not just that nothing matched the regex because
+        // the fixture's own text never made it into either artifact at all.
+        let combined = format!("{}{}", fx.json_value, fx.findings_export_value);
+        assert!(
+            !combined.contains("Deny committing this credential"),
+            "fixture's raw gate-voiced detail must not survive verbatim into either artifact"
+        );
+        assert!(
+            combined.contains("credential value hardcoded directly in the source"),
+            "the rule's authored finding_headline/finding_detail template must have replaced \
+             the raw detail for this gate to mean anything: {combined}"
+        );
+    }
+
+    // ── Invariant 2 (STANDING) ──────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn zero_width_and_bom_codepoints_never_survive_into_any_export_field() {
+        const ZERO_WIDTH: [char; 4] = ['\u{200B}', '\u{200C}', '\u{200D}', '\u{FEFF}'];
+
+        // Build a SECOND fixture, deliberately contaminated, rather than threading a zero-width
+        // char through the shared fixture — keeps this test's intent self-contained and avoids
+        // coupling a mutation into the other ten tests' shared input.
+        let corpus_path = camerata_rules::corpus_path();
+        let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+        assert!(errors.is_empty(), "corpus must load cleanly: {errors:?}");
+
+        let mut f = finding(
+            "SEC-NO-HARDCODED-SECRETS-1",
+            "demo/portal",
+            "apps/api\u{200B}/src/config.rs",
+            10,
+            "critical",
+        );
+        f.detail = "A secret\u{FEFF} literal is hardcoded here\u{200D}.".to_string();
+        f.snippet = "const API_KEY = \"abc\u{200C}def\";".to_string();
+        let report = report_with(vec![f], vec!["SEC-NO-HARDCODED-SECRETS-1"]);
+        let json = build_report_json(
+            &report.clone().seal(),
+            &HashMap::new(),
+            Some(&corpus),
+            &empty_opts(),
+        );
+        let findings_export = xlsx_export::build_findings_export(
+            &report.clone().seal(),
+            &HashMap::new(),
+            Some(&corpus),
+            &json,
+            &HashMap::new(),
+        );
+        let workbook = xlsx_export::build_workbook(
+            &report.clone().seal(),
+            &HashMap::new(),
+            Some(&corpus),
+            &empty_opts(),
+        )
+        .expect("workbook must build");
+
+        let json_text = serde_json::to_string(&json).expect("must serialize");
+        let findings_text = serde_json::to_string(&findings_export).expect("must serialize");
+        let shared_strings = workbook_shared_strings_xml(&workbook);
+
+        for (artifact, text) in [
+            ("AuditReportJson", json_text.as_str()),
+            ("FindingsExport", findings_text.as_str()),
+            ("xlsx sharedStrings.xml", shared_strings.as_str()),
+        ] {
+            for c in ZERO_WIDTH {
+                assert!(
+                    !text.contains(c),
+                    "{artifact} contains a zero-width/BOM codepoint {c:?} that \
+                     `sanitize_report_findings` should have stripped"
+                );
+            }
+        }
+    }
+
+    // ── Invariant 3 (STANDING) ──────────────────────────────────────────────────────────
+
+    /// Mirrors `tests::find_period_space_corruption` (REG-5) exactly, duplicated rather than
+    /// shared across the sibling `tests`/`export_invariants_gate` modules — same convention
+    /// every test module in this crate already follows for its own fixture helpers.
+    fn find_period_space_corruption(field: &str) -> Option<&str> {
+        let corruption =
+            regex::Regex::new(r"[A-Za-z0-9]\. [a-z0-9]").expect("static regex must compile");
+        for m in corruption.find_iter(field) {
+            let period_idx = m.start() + 1;
+            if !ends_with_known_abbreviation(&field[..=period_idx]) {
+                return Some(m.as_str());
+            }
+        }
+        None
+    }
+
+    #[tokio::test]
+    async fn identifier_heavy_text_never_gets_a_period_space_corruption_artifact() {
+        let fx = build_fixture().await;
+
+        let mut offenders = Vec::new();
+        for (loc, text) in all_client_text_fields(&fx) {
+            if let Some(m) = find_period_space_corruption(&text) {
+                offenders.push(format!("{loc}: {m:?} in {text:?}"));
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "a dotted call / filename / version string / abbreviation was corrupted by a \
+             wrongly-inserted space (REG-5): {offenders:#?}"
+        );
+
+        // Sanity check the fixture's identifiers actually survived verbatim — this gate means
+        // nothing if the identifier-heavy finding never reached either artifact.
+        let combined = format!("{}{}", fx.json_value, fx.findings_export_value);
+        for needle in [
+            "client.billing.computeTotal()",
+            "config/settings.toml",
+            "0002_pricing_migration.sql:7",
+            "v2.4.1",
+        ] {
+            assert!(
+                combined.contains(needle),
+                "fixture identifier {needle:?} must survive into at least one artifact \
+                 untouched for this gate to mean anything"
+            );
+        }
+    }
+
+    // ── Invariant 4 (STANDING) ──────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn also_matches_renders_titles_never_raw_rule_id_tokens() {
+        let fx = build_fixture().await;
+        let rule_id_token =
+            regex::Regex::new(r"[A-Z]+(-[A-Z0-9]+){2,}").expect("static regex must compile");
+
+        let mut offenders = Vec::new();
+        for (loc, text) in all_client_text_fields(&fx) {
+            if loc.ends_with(".headline") {
+                if let Some(m) = rule_id_token.find(&text) {
+                    offenders.push(format!("{loc}: {:?} in {text:?}", m.as_str()));
+                }
+            }
+            // The two absorbed ids must never appear verbatim in ANY client-facing field,
+            // headline or otherwise — belt-and-suspenders on top of the generic token regex.
+            for raw_id in ["AI-WEAK-AUTH-SESSION-1", "ARCH-NO-SECRETS-IN-URL-1"] {
+                if text.contains(raw_id) {
+                    offenders.push(format!(
+                        "{loc} leaks the raw absorbed id {raw_id:?}: {text:?}"
+                    ));
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "a headline (or other client field) leaked a raw rule-id token instead of a \
+             resolved title: {offenders:#?}"
+        );
+
+        // Positive check: the real, resolvable absorbed member's TITLE must actually show up
+        // somewhere (silence alone doesn't prove the title resolution ran) — and the
+        // unresolvable invented AI id must be the ONLY one dropped, not both.
+        let group = fx
+            .json
+            .curated_findings
+            .iter()
+            .chain(fx.json.held_for_review_findings.iter())
+            .find(|g| g.rule_id == "SEC-NO-HARDCODED-SECRETS-1")
+            .expect("the merged finding's group must exist");
+        assert_eq!(
+            group.sites[0].also_matches_titles.len(),
+            1,
+            "exactly one of the two absorbed ids has a corpus entry (the invented AI id never \
+             does): {:?}",
+            group.sites[0].also_matches_titles
+        );
+        assert!(
+            !group.sites[0].also_matches_titles[0].is_empty(),
+            "the resolved title must be non-empty"
+        );
+    }
+
+    // ── Invariant 5 ──────────────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn hedge_confidence_is_a_strict_biconditional_on_every_row() {
+        let fx = build_fixture().await;
+        let mut offenders = Vec::new();
+        for row in fx.findings_export_value["findings"]
+            .as_array()
+            .into_iter()
+            .flatten()
+        {
+            let needs_review = row["needs_review"].as_bool().unwrap_or(false);
+            let confidence = row["confidence"].as_str().unwrap_or("");
+            let hedged_by_confidence = confidence == "needs-review";
+            if needs_review != hedged_by_confidence {
+                offenders.push(format!(
+                    "rule {:?} at {:?}:{}: needs_review={needs_review} confidence={confidence:?}",
+                    row["rule_id"], row["path"], row["line"]
+                ));
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "needs_review and confidence==\"needs-review\" must be a strict biconditional on \
+             every exported row (C4-P2): {offenders:#?}"
+        );
+    }
+
+    /// C5-4 (closed, second attempt — cycle-4's P2 regressed): `is_informational`'s hard
+    /// "critical/high is never informational" rule used to be the ONLY gate a calibration hedge
+    /// went through, so a high/critical row the calibrator flagged needs-review (`f_hedge` in
+    /// this fixture) was hedged (`needs_review=true`) but never landed in `matrix.informational`,
+    /// and `held_for_review` silently undercounted the total `needs_review` rows. Fixed by
+    /// splitting the hedge signal into its own severity-unbounded gate/bucket
+    /// (`is_held_for_review` / `matrix.held`, checked ahead of `is_informational` in
+    /// `effective_bucket`) and reconciling `held_for_review` as
+    /// `matrix.informational.len() + matrix.held.len()`.
+    #[tokio::test]
+    async fn held_for_review_count_equals_total_needs_review_count() {
+        let fx = build_fixture().await;
+        let held_for_review = fx.json.executive_summary.held_for_review;
+        let total_needs_review = fx.findings_export_value["findings"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|row| row["needs_review"].as_bool().unwrap_or(false))
+            .count();
+        assert_eq!(
+            held_for_review, total_needs_review,
+            "the executive summary's \"held for review\" count must equal the total number of \
+             needs_review rows across the whole export"
+        );
+    }
+
+    // ── Invariant 6 (STANDING — C5-7 closed the former C5-5 open exception) ───────────────
+
+    /// C5-5 (closed by C5-7): this gate test used to be `#[ignore]`d, pinning a KNOWN
+    /// exception — `is_uncited_ai_finding` (P3) is deliberately severity-blind (see that
+    /// function's own doc comment: "a critical, uncited finding is PRECISELY the case this
+    /// gate exists to catch"), and `f_ai_advisory` (`high` severity, uncited) used to still
+    /// route to `matrix.informational`, silently breaking the "informational implies
+    /// low-stakes" invariant this test checks. `effective_bucket` now gives a high/critical
+    /// uncited finding its OWN destination (`matrix.held`, the same severity-unbounded bucket
+    /// [`is_held_for_review`] uses) instead of `informational`, so the invariant holds with NO
+    /// exception left — this test is un-ignored, and a second assertion locks in WHERE the
+    /// former exception actually went: `f_ai_advisory` must now be in `held`, at its real
+    /// `high` severity, out of both `informational` and every action bucket.
+    #[tokio::test]
+    async fn informational_bucket_severity_is_bounded_with_no_exceptions() {
+        let fx = build_fixture().await;
+        let mut offenders = Vec::new();
+        for item in fx.json.matrix.informational.iter() {
+            if severity_rank(&item.severity) < severity_rank("medium") {
+                offenders.push(format!(
+                    "{} ({}): {}",
+                    item.rule_id, item.severity, item.headline
+                ));
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "a bucket==informational row must have severity <= medium, with no exceptions \
+             left: {offenders:#?}"
+        );
+
+        // The former exception's destination: the uncited, high-severity AI finding must now
+        // be in `held`, not informational and not any action bucket, with its real severity.
+        let held_ai = fx
+            .json
+            .matrix
+            .held
+            .iter()
+            .find(|f| f.rule_id == "AI-STALE-SESSION-INVALIDATION-1")
+            .expect("the uncited high-severity AI finding must be in matrix.held");
+        assert_eq!(
+            held_ai.severity, "high",
+            "held never downgrades severity: {held_ai:?}"
+        );
+        assert!(
+            !fx.json
+                .matrix
+                .informational
+                .iter()
+                .any(|f| f.rule_id == "AI-STALE-SESSION-INVALIDATION-1"),
+            "the uncited AI finding must not ALSO appear in informational"
+        );
+        for (bucket_name, bucket) in [
+            ("do_now", &fx.json.matrix.do_now),
+            ("do_next", &fx.json.matrix.do_next),
+            ("plan", &fx.json.matrix.plan),
+            ("accepted", &fx.json.matrix.accepted),
+        ] {
+            assert!(
+                !bucket
+                    .iter()
+                    .any(|f| f.rule_id == "AI-STALE-SESSION-INVALIDATION-1"),
+                "the uncited AI finding must never land in the action bucket {bucket_name}"
+            );
+        }
+    }
+
+    // ── Invariant 7 (STANDING) ───────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn provenance_and_citation_belong_to_the_rows_own_rule_never_an_absorbed_member() {
+        let fx = build_fixture().await;
+
+        // The merged row's displayed citation must be SEC-NO-HARDCODED-SECRETS-1's own
+        // (CWE-798 + OWASP secrets-management), never the absorbed ARCH-NO-SECRETS-IN-URL-1's
+        // (CWE-598 / RFC 9110 §17.9).
+        let group = fx
+            .json
+            .curated_findings
+            .iter()
+            .chain(fx.json.held_for_review_findings.iter())
+            .find(|g| g.rule_id == "SEC-NO-HARDCODED-SECRETS-1")
+            .expect("the merged finding's group must exist");
+        let site = &group.sites[0];
+        let urls: Vec<&str> = site
+            .citation
+            .sources
+            .iter()
+            .map(|s| s.url.as_str())
+            .collect();
+        assert!(
+            urls.iter().any(|u| u.contains("798")),
+            "the merged row's citation must be its OWN rule's (CWE-798), got: {urls:?}"
+        );
+        assert!(
+            !urls.iter().any(|u| u.contains("598") || u.contains("9110")),
+            "the merged row's citation must never be the absorbed member's (CWE-598 / \
+             RFC 9110), got: {urls:?}"
+        );
+
+        // The standalone uncited AI-tier row's exported provenance must say "AI-advisory",
+        // never a grounded/preview label borrowed from some other rule.
+        let ai_row = fx.findings_export_value["findings"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|r| r["rule_id"].as_str() == Some("AI-STALE-SESSION-INVALIDATION-1"))
+            .expect("the AI-tier row must be present in the export");
+        assert_eq!(
+            ai_row["provenance"].as_str(),
+            Some("AI-advisory"),
+            "an uncited AI-tier finding must render \"AI-advisory\" provenance, got: {ai_row:?}"
+        );
+        let citation_label = ai_row["citation_label"].as_str().unwrap_or("");
+        assert!(
+            citation_label.to_ascii_lowercase().contains("advisory")
+                || citation_label
+                    .to_ascii_lowercase()
+                    .contains("model-inferred"),
+            "the AI-tier row's own citation label must say so, got: {citation_label:?}"
+        );
+    }
+
+    // ── Invariant 8 (STANDING) ───────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn a_rule_absorbed_only_via_also_matches_counts_as_matched() {
+        let fx = build_fixture().await;
+        assert!(
+            !fx.json
+                .whats_healthy
+                .rules
+                .iter()
+                .any(|r| r.rule_id == "ARCH-NO-SECRETS-IN-URL-1"),
+            "ARCH-NO-SECRETS-IN-URL-1 was absorbed into SEC-NO-HARDCODED-SECRETS-1's \
+             also_matches this run — it must never be listed as a verified-clean rule just \
+             because it has no Finding row of its own: {:?}",
+            fx.json
+                .whats_healthy
+                .rules
+                .iter()
+                .map(|r| &r.rule_id)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    // ── Invariant 9 (STANDING) ───────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn cover_and_scorecard_severity_totals_match_the_rendered_row_set() {
+        let fx = build_fixture().await;
+        let stats = &fx.json.cover.stats;
+        let cover_total = stats.critical + stats.high + stats.medium + stats.low;
+
+        let scorecard_total: usize = fx
+            .json
+            .scorecard
+            .rows
+            .iter()
+            .map(|r| r.critical + r.high + r.medium + r.low)
+            .sum();
+
+        // The fixture has 6 non-FP, non-dependency code findings (f_secret, f_rls, f_hedge,
+        // f_informational, f_identifier, f_ai_advisory) — every one of them lands in exactly
+        // one category row's severity tally (an `info`-severity row folds into "low", same
+        // collapse the xlsx Index sheet applies — see `category_status`/Index-sheet matrix).
+        const EXPECTED_RENDERED_ROWS: usize = 6;
+
+        assert_eq!(
+            cover_total, EXPECTED_RENDERED_ROWS,
+            "cover.stats severity totals must equal the rendered (non-FP, non-dependency) row \
+             count"
+        );
+        assert_eq!(
+            scorecard_total, EXPECTED_RENDERED_ROWS,
+            "scorecard severity totals must equal the rendered (non-FP, non-dependency) row \
+             count"
+        );
+        assert_eq!(
+            cover_total, scorecard_total,
+            "the cover stat strip and the scorecard must reconcile to the exact same total"
+        );
+    }
+
+    // ── Invariant 10 ─────────────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn fix_fields_never_contain_raw_template_syntax() {
+        let fx = build_fixture().await;
+        let unfilled_token = regex::Regex::new(r"<[^<>]*>").expect("static regex must compile");
+
+        let mut offenders = Vec::new();
+        for (loc, text) in all_client_text_fields(&fx) {
+            if !(loc.ends_with(".fix")
+                || loc.ends_with(".fix_for_this_finding")
+                || loc.ends_with(".fix_specific"))
+            {
+                continue;
+            }
+            if text.contains('{') || text.contains("TODO") || unfilled_token.is_match(&text) {
+                offenders.push(format!("{loc}: {text:?}"));
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "a fix field contains raw, un-substituted template syntax ({{, <token>, or TODO): \
+             {offenders:#?}"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "C5-6 open (product-polish, not a correctness bug): `generic_placeholder_filler` \
+                legitimately renders \"the affected table\" when a detector captured no \
+                concrete object name for a rule's `<table>`-style token (f_rls in this \
+                fixture, which deliberately omits the `table` capture) — this is FILLED text, \
+                never a raw/dangling placeholder, but it reads as generic boilerplate right \
+                next to an otherwise-specific Fix line. Worth deciding whether the fix line \
+                should instead omit the sentence, or whether every AUDIT_RULES floor checker \
+                should be required to populate its own `captures` (several already do — see \
+                `onboard::audit::enrich_secret_context`)."]
+    async fn fix_fields_can_fall_back_to_the_generic_affected_noun_phrase() {
+        let fx = build_fixture().await;
+        let mut offenders = Vec::new();
+        for (loc, text) in all_client_text_fields(&fx) {
+            if !(loc.ends_with(".fix") || loc.ends_with(".fix_for_this_finding")) {
+                continue;
+            }
+            if text.contains("the affected ") {
+                offenders.push(format!("{loc}: {text:?}"));
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "a fix field falls back to the generic \"the affected <noun>\" phrase instead of \
+             naming the real object: {offenders:#?}"
+        );
+    }
+
+    // ── Invariant 11 (STANDING) ──────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn curated_rows_for_authored_floor_rules_have_a_non_empty_fix_and_estimate() {
+        let fx = build_fixture().await;
+
+        for rule_id in ["SEC-NO-HARDCODED-SECRETS-1", "SUPABASE-RLS-ENABLED-1"] {
+            let group = fx
+                .json
+                .curated_findings
+                .iter()
+                .find(|g| g.rule_id == rule_id)
+                .unwrap_or_else(|| panic!("{rule_id} must be a curated (action-bucket) group"));
+            let site = &group.sites[0];
+            assert!(
+                matches!(
+                    site.bucket.as_str(),
+                    "do_now" | "do_next" | "plan" | "accepted"
+                ),
+                "{rule_id}'s site must be in an action bucket, got {:?}",
+                site.bucket
+            );
+            assert!(
+                site.fix.as_deref().is_some_and(|f| !f.trim().is_empty()),
+                "{rule_id} is an authored floor rule — its curated site's fix must be \
+                 non-empty, got {:?}",
+                site.fix
+            );
+
+            let row = fx.findings_export_value["findings"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .find(|r| r["rule_id"].as_str() == Some(rule_id))
+                .unwrap_or_else(|| panic!("{rule_id} must have a FindingRow in the export"));
+            let est_hours = row["est_hours"].as_str().unwrap_or("");
+            assert!(
+                !est_hours.is_empty() && est_hours != "not yet estimated",
+                "{rule_id}'s FindingRow est_hours must be a real estimate, got {est_hours:?}"
+            );
+        }
+    }
+
+    // ── Invariant 12 (STANDING — REG-3) ─────────────────────────────────────────────────
+
+    /// REG-3: `ai_audit::semantic_pair_merges`'s same-construct-security override used to
+    /// absorb ANY co-located rule into a security finding's `also_matches` as long as one side
+    /// was security-tier, with no requirement the two findings share a defect class — so an
+    /// unrelated indexing-strategy or pagination-convention finding could vanish from its own
+    /// category/Coverage count by riding along in a security row's "Also violates" list. Fixed
+    /// in `semantic_pair_merges` itself (now requires a category-class match or a shared
+    /// captured object); this is the EXPORT-LEVEL trip wire that makes a future re-loosening of
+    /// that predicate visible here too, without needing to know the merge internals: across
+    /// every curated/held-for-review group in the exported report, an `also_matches` member's
+    /// rule-id category must never differ from its group's primary rule-id category whenever
+    /// BOTH have a known `categorize_rule_id` class. (An unmapped/invented id has no category to
+    /// compare and is not flagged by this id-only check — the full category-OR-shared-object
+    /// predicate is exercised directly, with synthetic same-construct fixtures, by the
+    /// `p1_c4_same_construct_*` tests in `ai_audit::tests`; this gate is the belt-and-suspenders
+    /// check that the real export pipeline's `also_matches` never contradicts it.)
+    #[tokio::test]
+    async fn also_matches_members_never_cross_category_without_a_shared_captured_object() {
+        let fx = build_fixture().await;
+        let mut offenders = Vec::new();
+        for group in fx
+            .json
+            .curated_findings
+            .iter()
+            .chain(fx.json.held_for_review_findings.iter())
+        {
+            let primary_category = crate::ai_audit::categorize_rule_id(&group.rule_id);
+            for site in &group.sites {
+                for member_id in &site.also_matches {
+                    let member_category = crate::ai_audit::categorize_rule_id(member_id);
+                    if let (Some(pc), Some(mc)) = (&primary_category, &member_category) {
+                        if pc != mc {
+                            offenders.push(format!(
+                                "{} (category {pc:?}) absorbed {member_id} (category {mc:?}) \
+                                 into also_matches with no shared captured object",
+                                group.rule_id
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "REG-3: an also_matches member must never cross category away from its primary's \
+             without a shared captured object: {offenders:#?}"
+        );
+    }
+
+    /// REG-3 regression test at the full export layer (mirrors the `ai_audit::tests` unit
+    /// coverage, but exercised end to end through `merge_semantic_groups` →
+    /// [`build_report_json`]): an injection finding and an unrelated pagination-convention
+    /// finding, co-located in one construct, with different categories and no shared captured
+    /// object, must export as TWO distinct curated groups — never one row with the pagination
+    /// rule swallowed into `also_matches` and hidden from its own category's Coverage count.
+    #[tokio::test]
+    async fn same_construct_injection_and_pagination_pair_export_as_two_distinct_groups() {
+        let corpus_path = camerata_rules::corpus_path();
+        let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+        assert!(errors.is_empty(), "corpus must load cleanly: {errors:?}");
+
+        let content =
+            "fn handler() {\n let q = raw_sql(id);\n let page = rows.skip(n).take(k);\n}\n";
+        let files = vec![("src/api/handler.rs".to_string(), content.to_string())];
+        let mut injection = finding(
+            "SEC-SQL-INJECTION-SINK-1",
+            "demo/portal",
+            "src/api/handler.rs",
+            2,
+            "critical",
+        );
+        injection.detail = "User-controlled input flows into a raw SQL query.".to_string();
+        let mut pagination = finding(
+            "PERF-PAGINATION-MISSING-1",
+            "demo/portal",
+            "src/api/handler.rs",
+            3,
+            "medium",
+        );
+        pagination.detail = "This handler returns every row with no pagination.".to_string();
+
+        let merged = crate::ai_audit::merge_semantic_groups(vec![injection, pagination], &files);
+        assert_eq!(
+            merged.len(),
+            2,
+            "REG-3: an injection finding and an unrelated pagination finding co-located in one \
+             construct must stay two rows: {merged:?}"
+        );
+
+        let report = report_with(merged, vec![]);
+        let json = build_report_json(
+            &report.clone().seal(),
+            &HashMap::new(),
+            Some(&corpus),
+            &empty_opts(),
+        );
+        let groups: Vec<&str> = json
+            .curated_findings
+            .iter()
+            .chain(json.held_for_review_findings.iter())
+            .map(|g| g.rule_id.as_str())
+            .collect();
+        assert!(
+            groups.contains(&"SEC-SQL-INJECTION-SINK-1"),
+            "the injection finding must export as its own group: {groups:?}"
+        );
+        assert!(
+            groups.contains(&"PERF-PAGINATION-MISSING-1"),
+            "the pagination finding must export as its own group, never absorbed into the \
+             injection row's also_matches: {groups:?}"
+        );
+    }
+
+    // ── Invariant 13 (STANDING — C6-B1) ──────────────────────────────────────────────────
+
+    /// C6-B1: a row counted but never rendered — the exact client-facing failure this
+    /// invariant exists to catch. Root cause: the `by_rule`-population loop in
+    /// `build_report_json` used to `continue` past any `is_uncited_ai_finding` row BEFORE a
+    /// `CuratedSiteJson` was ever built for it, on the stale assumption that the row "was
+    /// already routed to `matrix.informational`" — true before C5-7, false after it (C5-7
+    /// routes a high/critical uncited finding to the severity-unbounded `held` bucket
+    /// instead). The row stayed counted everywhere that tallies `code_findings` directly
+    /// (`matrix.held`, the cover severity strip, the category scorecard, `findings.json`/the
+    /// workbook) while the PDF renderer never emitted it in ANY section. Fixed by always
+    /// building a site (see that loop's updated doc comment); this test is the STANDING gate
+    /// against a regression of the same SHAPE from a different cause — any future change that
+    /// drops, skips, or double-renders a row fails this assertion, a build-breaking TEST-gate
+    /// failure, never a silent count/render divergence a client discovers first.
+    ///
+    /// Asserted two ways over the one shared fixture (6 live code findings: `f_secret`,
+    /// `f_rls`, `f_hedge`, `f_informational`, `f_identifier`, `f_ai_advisory` — see
+    /// `build_fixture`'s doc comment):
+    /// 1. rows in the JSON (`candidates_reviewed` minus excluded false positives minus
+    ///    dependency-audit rows — the same `code_findings` total the cover/scorecard/xlsx all
+    ///    tally against) equals rendered blocks (`curated_findings` + `held_for_review_findings`
+    ///    site counts combined, which between them account for every informational AND held
+    ///    row, not just curated ones);
+    /// 2. restated directly against the cover severity strip, the one artifact closest to
+    ///    what a client reads first.
+    #[tokio::test]
+    async fn rows_in_json_equal_rendered_blocks_across_curated_and_held_for_review() {
+        let fx = build_fixture().await;
+
+        let rendered_blocks: usize = fx
+            .json
+            .curated_findings
+            .iter()
+            .chain(fx.json.held_for_review_findings.iter())
+            .map(|g| g.sites.len())
+            .sum();
+
+        // `code_findings.len()` itself is private to `build_report_json`, but it is exactly
+        // `candidates_reviewed - excluded_false_positive - dependency_advisories` by
+        // construction (see that function's own executive-summary reconciliation) — the same
+        // total `cover.stats`/`scorecard` already tally against directly.
+        let rows_in_json = fx.json.executive_summary.candidates_reviewed
+            - fx.json.executive_summary.excluded_false_positive
+            - fx.json.executive_summary.dependency_advisories;
+
+        assert_eq!(
+            rendered_blocks, rows_in_json,
+            "every row counted in the JSON must have exactly one rendered block across \
+             curated_findings + held_for_review_findings combined — a mismatch means some row \
+             is counted (cover/scorecard/xlsx) without ever being rendered, or rendered more \
+             than once. rendered_blocks={rendered_blocks}, rows_in_json={rows_in_json}, \
+             curated_findings={:?}, held_for_review_findings={:?}",
+            fx.json.curated_findings, fx.json.held_for_review_findings
+        );
+
+        let cover_total = fx.json.cover.stats.critical
+            + fx.json.cover.stats.high
+            + fx.json.cover.stats.medium
+            + fx.json.cover.stats.low;
+        assert_eq!(
+            rendered_blocks, cover_total,
+            "the cover severity strip must tally exactly as many rows as actually got a \
+             rendered block — never a count computed independently of what rendered"
+        );
+    }
+
+    // ── W1: pipeline-integrity ledger invariants ───────────────────────────────────────────
+    // 12. Ledger-sourced coverage: a rule the ledger confirms did NOT run can never appear in
+    //     "What's healthy"; a rule that genuinely fired can never appear in either "healthy"
+    //     or "excluded from this audit"; and a fully-reconciled scan (every stage's rows_in ==
+    //     rows_out + accounted) never emits a "pipeline integrity" disclosure. Traces to W1
+    //     (docs/plans — the pipeline-integrity ledger): rules that never ran being reported as
+    //     "verified clean" while the selector's own evidence described the violation.
+    #[tokio::test]
+    async fn ledger_sourced_healthy_and_excluded_never_overlap_and_a_reconciled_scan_discloses_nothing(
+    ) {
+        let f_fired = finding(
+            "ARCH-STRICT-LAYERING-1",
+            "demo/portal",
+            "apps/api/src/handlers/users.rs",
+            12,
+            "high",
+        );
+        let mut report = report_with(vec![f_fired], vec![]);
+
+        let mut ledger = crate::scan_ledger::ScanLedger::new();
+        // Genuinely ran, zero findings -> healthy.
+        ledger.record_rule(
+            "SEC-NO-HARDCODED-SECRETS-1",
+            crate::scan_ledger::RuleTier::Deterministic,
+            true,
+            None,
+            40,
+            0,
+        );
+        // Genuinely ran AND fired (matches the one real Finding above) -> neither healthy nor
+        // excluded.
+        ledger.record_rule(
+            "ARCH-STRICT-LAYERING-1",
+            crate::scan_ledger::RuleTier::Deterministic,
+            true,
+            None,
+            40,
+            1,
+        );
+        // The W1-item-4 defect shape: declared mechanical, no wired detector -> excluded with
+        // a reason, never healthy.
+        ledger.record_rule(
+            "PYTHON-PARAMETERIZED-SQL-1",
+            crate::scan_ledger::RuleTier::Deterministic,
+            false,
+            Some(
+                "declares mechanical/architectural enforcement but has no wired detector"
+                    .to_string(),
+            ),
+            0,
+            0,
+        );
+        // A fully-accounted stage (e.g. a merge that absorbed one row into the fired primary)
+        // — rows_in == rows_out + merged, so unaccounted == 0.
+        let mut acc = crate::scan_ledger::StageAccounting::default();
+        acc.push_merge("AI-SOME-INVENTED-ID-1", "ARCH-STRICT-LAYERING-1");
+        ledger.record_stage("cross-family-merge", 2, 1, acc);
+        report.ledger = ledger;
+
+        let corpus_path = camerata_rules::corpus_path();
+        let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+        assert!(errors.is_empty(), "corpus must load cleanly: {errors:?}");
+
+        let json = build_report_json(
+            &report.clone().seal(),
+            &HashMap::new(),
+            Some(&corpus),
+            &empty_opts(),
+        );
+
+        let healthy_ids: std::collections::HashSet<&str> = json
+            .whats_healthy
+            .rules
+            .iter()
+            .map(|r| r.rule_id.as_str())
+            .collect();
+        let excluded_ids: std::collections::HashSet<&str> = json
+            .rules_not_run
+            .iter()
+            .map(|r| r.rule_id.as_str())
+            .collect();
+
+        assert!(
+            healthy_ids.contains("SEC-NO-HARDCODED-SECRETS-1"),
+            "a rule that ran with zero findings must be healthy: {healthy_ids:?}"
+        );
+        assert!(
+            !healthy_ids.contains("PYTHON-PARAMETERIZED-SQL-1"),
+            "a rule the ledger says did NOT run must never be healthy: {healthy_ids:?}"
+        );
+        assert!(
+            excluded_ids.contains("PYTHON-PARAMETERIZED-SQL-1"),
+            "a not-run rule must appear in excluded-from-this-audit with its reason: {:?}",
+            json.rules_not_run
+        );
+        let python_entry = json
+            .rules_not_run
+            .iter()
+            .find(|r| r.rule_id == "PYTHON-PARAMETERIZED-SQL-1")
+            .expect("present per the assertion above");
+        assert!(
+            python_entry.reason.contains("no wired detector"),
+            "the excluded entry must carry the REAL reason, not a placeholder: {:?}",
+            python_entry.reason
+        );
+        assert!(
+            !healthy_ids.contains("ARCH-STRICT-LAYERING-1")
+                && !excluded_ids.contains("ARCH-STRICT-LAYERING-1"),
+            "a rule that genuinely fired must appear in neither healthy nor excluded: \
+             healthy={healthy_ids:?} excluded={excluded_ids:?}"
+        );
+        assert!(
+            healthy_ids.is_disjoint(&excluded_ids),
+            "no rule id may EVER appear in both healthy and excluded: healthy={healthy_ids:?} \
+             excluded={excluded_ids:?}"
+        );
+
+        // A fully-reconciled scan (every stage's rows_in == rows_out + accounted, which this
+        // fixture's single merge stage satisfies by construction, and the report-build
+        // partition stage satisfies because the one real finding lands squarely in an action
+        // bucket with none excluded/held/informational) must emit NO "pipeline integrity"
+        // disclosure anywhere a reader would see it.
+        let all_disclosures = json
+            .methodology
+            .failed_passes
+            .iter()
+            .chain(json.executive_summary.failed_passes.iter());
+        for note in all_disclosures {
+            assert!(
+                !note.to_ascii_lowercase().contains("pipeline integrity"),
+                "a fully-reconciled scan must never disclose a pipeline-integrity gap: {note}"
+            );
+        }
+    }
+
+    /// The flip side: a stage the ledger could NOT fully reconcile (a row vanished with no
+    /// recorded disposition) DOES surface as an explicit "pipeline integrity" disclosure —
+    /// proving the invariant above is actually load-bearing, not vacuously true because
+    /// nothing ever checks the unreconciled case.
+    #[tokio::test]
+    async fn an_unreconciled_stage_discloses_a_pipeline_integrity_gap() {
+        let report = report_with(Vec::new(), vec![]);
+        let mut report = report;
+        let mut ledger = crate::scan_ledger::ScanLedger::new();
+        // 5 rows in, 3 out, NOTHING explained -> 2 unaccounted.
+        ledger.record_stage(
+            "cross-family-merge",
+            5,
+            3,
+            crate::scan_ledger::StageAccounting::default(),
+        );
+        report.ledger = ledger;
+
+        let corpus_path = camerata_rules::corpus_path();
+        let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+        assert!(errors.is_empty(), "corpus must load cleanly: {errors:?}");
+        let json = build_report_json(
+            &report.clone().seal(),
+            &HashMap::new(),
+            Some(&corpus),
+            &empty_opts(),
+        );
+
+        let found = json
+            .methodology
+            .failed_passes
+            .iter()
+            .chain(json.executive_summary.failed_passes.iter())
+            .any(|note| {
+                note.to_ascii_lowercase().contains("pipeline integrity")
+                    && note.contains("cross-family-merge")
+            });
+        assert!(
+            found,
+            "an unreconciled stage must disclose a pipeline-integrity gap naming the stage: \
+             methodology={:?} executive_summary={:?}",
+            json.methodology.failed_passes, json.executive_summary.failed_passes
+        );
+    }
+
+    /// Invariant 12. Builds a REPRESENTATIVE synthetic scan that deliberately exercises BOTH
+    /// row-reducing merge stages with the exact shapes that used to defeat the ledger:
+    ///
+    /// - An `also_matches`-id collision within `cross-family-merge` itself: three findings
+    ///   sharing ONE rule id collapse via `merge_semantic_group`'s "N occurrences of one rule"
+    ///   signal, which records NOTHING in `also_matches` (the id is already `seen` from the
+    ///   primary) — the exact shape of the real "rows 45 -> 32 ... unaccounted=5" defect.
+    /// - A SECOND collapse, `structural-needs-review-merge`, over findings that were themselves
+    ///   ALREADY-merged primaries carrying their own `also_matches`/`also_locations` — the real
+    ///   data-loss bug `build_structural_group_finding` used to have (nested absorbed members
+    ///   silently dropped on the second collapse).
+    ///
+    /// Both stages are instrumented the SAME way production code (`onboard::audit_repos`) does —
+    /// via `onboard::account_location_merge` — and the resulting ledger must reconcile to zero
+    /// unaccounted rows at EVERY stage. If a stage can structurally never reconcile, the fix
+    /// belongs in the instrumentation, never in loosening this assertion.
+    #[test]
+    fn pipeline_integrity_ledger_has_zero_unaccounted_rows_across_every_merge_stage() {
+        use crate::onboard::MergedLocation;
+
+        fn finding(rule_id: &str, path: &str, line: usize, severity: &str) -> Finding {
+            Finding {
+                repo: "demo/portal".to_string(),
+                path: path.to_string(),
+                line,
+                rule_id: rule_id.to_string(),
+                severity: severity.to_string(),
+                snippet: format!("snippet-{line}"),
+                detail: format!("detail for {rule_id}"),
+                ..Finding::default()
+            }
+        }
+
+        let mut ledger = crate::scan_ledger::ScanLedger::new();
+
+        // ── Stage 1: cross-family-merge, same-rule-id N-site collapse PLUS a fresh-vs-
+        // already-absorbed key collision ───────────────────────────────────────────────────
+        // The first three rows are the N-site collapse shape (`also_matches` records nothing —
+        // the id is already `seen` from the primary). The last two rows are the DIFFERENT,
+        // real-world `rows 116 -> 83 merged=32 ... unaccounted=1` shape: `collision_primary`
+        // already absorbed a site (acme/widgets, handler.rs, 52, SEC-COLLISION-DEMO-1) in an
+        // EARLIER stage (simulated via its own pre-populated `also_locations`), and
+        // `collision_fresh` is a SEPARATE, genuinely distinct top-level finding whose own
+        // identity happens to be IDENTICAL to that already-absorbed site —
+        // `ai_audit::merge_semantic_group` used to silently drop `collision_fresh`'s own
+        // absorption because its key collided with the pre-existing entry.
+        let mut collision_primary = finding("SEC-COLLISION-DEMO-1", "handler.rs", 50, "medium");
+        collision_primary.repo = "acme/widgets".to_string();
+        collision_primary.also_locations = vec![crate::onboard::MergedLocation {
+            repo: "acme/widgets".to_string(),
+            path: "handler.rs".to_string(),
+            line: 52,
+            rule_id: "SEC-COLLISION-DEMO-1".to_string(),
+            snippet: "already-absorbed-earlier".to_string(),
+            consequence: false,
+        }];
+        let mut collision_fresh = finding("SEC-COLLISION-DEMO-1", "handler.rs", 52, "medium");
+        collision_fresh.repo = "acme/widgets".to_string();
+
+        let cross_family_input = vec![
+            finding("ARCH-NO-DIRECT-DB-1", "svc.rs", 10, "medium"),
+            finding("ARCH-NO-DIRECT-DB-1", "svc.rs", 200, "medium"),
+            finding("ARCH-NO-DIRECT-DB-1", "svc.rs", 400, "medium"),
+            collision_primary,
+            collision_fresh,
+        ];
+        let rows_in = cross_family_input.len();
+        let pre = cross_family_input.clone();
+        let merged = crate::ai_audit::merge_semantic_groups(cross_family_input, &[]);
+        let rows_out = merged.len();
+        assert_eq!(
+            rows_out, 2,
+            "sanity: the N-site collapse and the collision pair are two independent groups, \
+             each producing one row: {merged:?}"
+        );
+        let collision_row = merged
+            .iter()
+            .find(|f| f.repo == "acme/widgets")
+            .expect("the collision group's primary must survive as its own row");
+        let sites_at_52 = collision_row
+            .also_locations
+            .iter()
+            .filter(|l| l.path == "handler.rs" && l.line == 52)
+            .count();
+        assert_eq!(
+            sites_at_52, 2,
+            "the pre-existing absorbed site and collision_fresh's own fresh absorption must \
+             BOTH survive as distinct also_locations entries: {:?}",
+            collision_row.also_locations
+        );
+        let acc = crate::onboard::account_location_merge(&pre, &merged);
+        let stage1 = ledger
+            .record_stage("cross-family-merge", rows_in, rows_out, acc)
+            .clone();
+        assert_eq!(
+            stage1.unaccounted, 0,
+            "cross-family-merge must fully reconcile, including the fresh-vs-already-absorbed \
+             collision: {stage1:?}"
+        );
+
+        // ── Stage 2: structural-needs-review-merge, over ALREADY-merged primaries ──────────
+        // `a`/`b` each simulate a finding that survived stage 1 as a merged primary, carrying
+        // its own already-absorbed rule id + site — exactly what `build_structural_group_finding`
+        // used to silently drop on this second collapse.
+        let mut a = finding("ARCH-SOME-PREFERENCE-1", "a.rs", 1, "medium");
+        a.category = Some("arch-conformance".to_string());
+        a.confidence = Some("needs-review".to_string());
+        a.also_matches = vec!["AI-ALREADY-MERGED-A-1".to_string()];
+        a.also_locations = vec![MergedLocation {
+            repo: a.repo.clone(),
+            path: "already-merged-a.rs".to_string(),
+            line: 99,
+            rule_id: "AI-ALREADY-MERGED-A-1".to_string(),
+            snippet: "prior evidence".to_string(),
+            consequence: false,
+        }];
+        let mut b = finding("ARCH-SOME-PREFERENCE-1", "b.rs", 2, "medium");
+        b.category = Some("arch-conformance".to_string());
+        b.confidence = Some("needs-review".to_string());
+        b.also_matches = vec!["AI-ALREADY-MERGED-B-1".to_string()];
+        b.also_locations = vec![MergedLocation {
+            repo: b.repo.clone(),
+            path: "already-merged-b.rs".to_string(),
+            line: 199,
+            rule_id: "AI-ALREADY-MERGED-B-1".to_string(),
+            snippet: "prior evidence".to_string(),
+            consequence: false,
+        }];
+        let structural_input = vec![a, b];
+        let rows_in = structural_input.len();
+        let pre = structural_input.clone();
+        let grouped = crate::ai_audit::group_structural_needs_review(structural_input);
+        let rows_out = grouped.len();
+        assert_eq!(
+            rows_out, 1,
+            "sanity: both occurrences of one rule collapse to one row: {grouped:?}"
+        );
+        let acc = crate::onboard::account_location_merge(&pre, &grouped);
+        let stage2 = ledger
+            .record_stage("structural-needs-review-merge", rows_in, rows_out, acc)
+            .clone();
+        assert_eq!(
+            stage2.unaccounted, 0,
+            "structural-needs-review-merge must fully reconcile: {stage2:?}"
+        );
+
+        // Both already-absorbed ids/sites must still be reachable in the final grouped row —
+        // the second collapse must not have dropped what the first collapse already recorded.
+        assert!(grouped[0]
+            .also_matches
+            .contains(&"AI-ALREADY-MERGED-A-1".to_string()));
+        assert!(grouped[0]
+            .also_matches
+            .contains(&"AI-ALREADY-MERGED-B-1".to_string()));
+        assert!(grouped[0]
+            .also_locations
+            .iter()
+            .any(|l| l.path == "already-merged-a.rs" && l.line == 99));
+        assert!(grouped[0]
+            .also_locations
+            .iter()
+            .any(|l| l.path == "already-merged-b.rs" && l.line == 199));
+
+        // The whole-scan identity: every stage, summed, has zero unaccounted rows.
+        assert_eq!(
+            ledger.total_unaccounted(),
+            0,
+            "a representative synthetic scan must leave NO stage unaccounted: {:#?}",
+            ledger.stages()
+        );
+    }
+
+    // ── 13 (defect 1): no-wired-detector exclusions collapse to one plain sentence ──────
+
+    /// Invariant 13: N rules the ledger excludes for the W1-item-4 "no wired detector" reason
+    /// must read as ONE plain, factual sentence naming the real count — never one bullet per
+    /// rule, never duplicated beyond the ONE sentence each of the executive summary and
+    /// methodology carries (by the SAME pre-existing shared-disclosure design every other
+    /// `FailedPass` note uses), and never leaking the internal registry/mapping vocabulary a
+    /// real such reason string names. The full per-rule detail (rule id + real reason) is
+    /// NOT lost — it is still in `rules_not_run`, which is exactly what `camerata inspect`'s
+    /// `render_ledger_summary` (`crates/cli/src/inspect_cmd.rs`) prints in full under its own
+    /// `== NOT RUN (N) ==` section.
+    #[tokio::test]
+    async fn many_no_wired_detector_exclusions_collapse_to_one_plain_sentence() {
+        let mut report = report_with(Vec::new(), vec![]);
+        let mut ledger = crate::scan_ledger::ScanLedger::new();
+        let rule_ids = [
+            "PYTHON-PARAMETERIZED-SQL-1",
+            "RUBY-FROZEN-STRING-LITERAL-1",
+            "JAVA-PREPARED-STATEMENT-1",
+            "GO-NO-RAW-SQL-1",
+            "RUST-NO-UNWRAP-IN-HANDLER-1",
+        ];
+        for rid in rule_ids {
+            ledger.record_rule(
+                rid,
+                crate::scan_ledger::RuleTier::Deterministic,
+                false,
+                Some(
+                    "declares mechanical/architectural enforcement but has no wired detector \
+                     (not in the arch_checker registry, gateway rule registry, Semgrep \
+                     mapping, or scan-preview linter source)"
+                        .to_string(),
+                ),
+                0,
+                0,
+            );
+        }
+        report.ledger = ledger;
+
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
+
+        assert_eq!(
+            json.executive_summary.failed_passes.len(),
+            1,
+            "5 rules sharing the same reason must collapse to ONE sentence, not 5: {:?}",
+            json.executive_summary.failed_passes
+        );
+        assert_eq!(
+            json.methodology.failed_passes.len(),
+            1,
+            "methodology must carry exactly one sentence too, never a per-rule list: {:?}",
+            json.methodology.failed_passes
+        );
+        let sentence = &json.executive_summary.failed_passes[0];
+        assert!(
+            sentence.contains('5'),
+            "the sentence must name the real count: {sentence}"
+        );
+        for banned in [
+            "arch_checker",
+            "registry",
+            "Semgrep mapping",
+            "scan-preview linter",
+            "PYTHON-PARAMETERIZED-SQL-1",
+            "no wired detector",
+        ] {
+            assert!(
+                !sentence.contains(banned),
+                "client-facing sentence must never leak internal vocabulary {banned:?}: \
+                 {sentence}"
+            );
+        }
+
+        // The full per-rule detail still lives in `rules_not_run` — never dropped, just kept
+        // out of the client narrative.
+        assert_eq!(
+            json.rules_not_run.len(),
+            5,
+            "the full per-rule detail must still be present in rules_not_run: {:?}",
+            json.rules_not_run
+        );
+        for rid in rule_ids {
+            assert!(
+                json.rules_not_run.iter().any(|r| r.rule_id == rid),
+                "rules_not_run must still carry {rid}"
+            );
+        }
+    }
+
+    /// A single-digit edge case: exactly one excluded rule still gets the collapsed-sentence
+    /// treatment (singular "1 rule ... was reviewed", not a pluralization bug, and no bullet
+    /// list of one).
+    #[tokio::test]
+    async fn one_no_wired_detector_exclusion_still_renders_the_plain_sentence() {
+        let mut report = report_with(Vec::new(), vec![]);
+        let mut ledger = crate::scan_ledger::ScanLedger::new();
+        ledger.record_rule(
+            "PYTHON-PARAMETERIZED-SQL-1",
+            crate::scan_ledger::RuleTier::Deterministic,
+            false,
+            Some(
+                "declares mechanical/architectural enforcement but has no wired detector"
+                    .to_string(),
+            ),
+            0,
+            0,
+        );
+        report.ledger = ledger;
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
+        assert_eq!(json.executive_summary.failed_passes.len(), 1);
+        assert!(json.executive_summary.failed_passes[0].contains("1 rule"));
+        assert!(!json.executive_summary.failed_passes[0].contains("PYTHON-PARAMETERIZED-SQL-1"));
+    }
+
+    // ── 16 (defect 4): the evidence-of-violation gate ────────────────────────────────────
+
+    /// Invariant 16, negative case: a zero-finding rule whose own `RuleRecommendation`
+    /// evidence NEGATES the rule's requirement (contains a conservative negation phrase —
+    /// here, literally the three real-world examples the grading pass surfaced) must NEVER
+    /// appear in "what's healthy" — it is held for review instead, as an advisory finding
+    /// anchored at the evidence's own citation.
+    #[tokio::test]
+    async fn evidence_negating_rule_requirement_is_held_not_healthy_positive_twin_stays_healthy() {
+        for (evidence, label) in [
+            (
+                "src/orders/service.rs:142 — three sequential writes with no transaction",
+                "no-transaction",
+            ),
+            (
+                "src/billing/charge.rs:58 — an external chargeable call with no \
+                 idempotency-key handling",
+                "no-idempotency",
+            ),
+            (
+                "src/api/admin.rs:30 — authorization done as ad hoc checks inside business \
+                 logic",
+                "ad-hoc-authz",
+            ),
+        ] {
+            let mut report = report_with(Vec::new(), vec!["ARCH-EXPLICIT-TX-1"]);
+            let mut ledger = crate::scan_ledger::ScanLedger::new();
+            ledger.record_rule(
+                "ARCH-EXPLICIT-TX-1",
+                crate::scan_ledger::RuleTier::Semantic,
+                true,
+                None,
+                10,
+                0,
+            );
+            report.ledger = ledger;
+            report.recommendations.insert(
+                "ARCH-EXPLICIT-TX-1".to_string(),
+                crate::ai_audit::RuleRecommendation {
+                    rule_id: "ARCH-EXPLICIT-TX-1".to_string(),
+                    recommended_option_id: "some-option".to_string(),
+                    recommendation_reasoning: "the model's pick".to_string(),
+                    hallucinated: false,
+                    operator_chosen: false,
+                    evidence: Some(evidence.to_string()),
+                    applicable: true,
+                    ..Default::default()
+                },
+            );
+            // Pass-1 W1 seal fix (exception (a) — a deliberate code/data-structure change this
+            // test must adapt to): the evidence gate used to run IMPLICITLY inside
+            // `build_report_json` (see `apply_evidence_gate`'s doc comment for why that was
+            // itself the bug); it is now an explicit upstream pipeline step the caller runs
+            // BEFORE sealing, exactly like `onboard_audit`/`onboard_audit_start` do in
+            // `lib.rs`. Every assertion below is unchanged — only the missing call is added.
+            apply_evidence_gate(&mut report);
+
+            let json =
+                build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
+
+            assert!(
+                !json
+                    .whats_healthy
+                    .rules
+                    .iter()
+                    .any(|r| r.rule_id == "ARCH-EXPLICIT-TX-1"),
+                "[{label}] a rule whose own evidence negates its requirement must NEVER be \
+                 healthy: {:?}",
+                json.whats_healthy.rules
+            );
+            let held = json
+                .held_for_review_findings
+                .iter()
+                .find(|g| g.rule_id == "ARCH-EXPLICIT-TX-1");
+            assert!(
+                held.is_some(),
+                "[{label}] the preferred behavior (an advisory held row) must be present: \
+                 {:?}",
+                json.held_for_review_findings
+            );
+            let (expected_path, expected_line) = parse_evidence_citation(evidence);
+            let site = &held.unwrap().sites[0];
+            assert_eq!(
+                site.path, expected_path,
+                "[{label}] the advisory row must anchor at the evidence's own citation"
+            );
+            assert_eq!(
+                site.line, expected_line,
+                "[{label}] line must match the citation"
+            );
+            assert_eq!(site.bucket, "held");
+        }
+    }
+
+    /// Invariant 16, positive twin: the SAME rule, SAME shape, but evidence that CONFIRMS
+    /// compliance (no negation phrase) must stay healthy — the gate is conservative and must
+    /// never punish a genuinely clean rule.
+    #[tokio::test]
+    async fn evidence_confirming_compliance_still_renders_healthy() {
+        let mut report = report_with(Vec::new(), vec!["ARCH-EXPLICIT-TX-1"]);
+        let mut ledger = crate::scan_ledger::ScanLedger::new();
+        ledger.record_rule(
+            "ARCH-EXPLICIT-TX-1",
+            crate::scan_ledger::RuleTier::Semantic,
+            true,
+            None,
+            10,
+            0,
+        );
+        report.ledger = ledger;
+        report.recommendations.insert(
+            "ARCH-EXPLICIT-TX-1".to_string(),
+            crate::ai_audit::RuleRecommendation {
+                rule_id: "ARCH-EXPLICIT-TX-1".to_string(),
+                recommended_option_id:
+                    "services-own-the-transaction-lifecycle-repositories-receive-the-handle"
+                        .to_string(),
+                recommendation_reasoning: "the codebase already does it this way".to_string(),
+                hallucinated: false,
+                operator_chosen: false,
+                evidence: Some(
+                    "src/orders/service.rs:140 — opens a transaction and passes the handle to \
+                     each repository call"
+                        .to_string(),
+                ),
+                applicable: true,
+                ..Default::default()
+            },
+        );
+        // Pass-1 W1 seal fix (exception (a), same as the negative-case test above): the gate
+        // must run explicitly now. Without this call the test would still pass, but
+        // VACUOUSLY — it would no longer actually exercise the gate's "confirms compliance,
+        // never flags" branch at all.
+        apply_evidence_gate(&mut report);
+
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
+
+        assert!(
+            json.whats_healthy
+                .rules
+                .iter()
+                .any(|r| r.rule_id == "ARCH-EXPLICIT-TX-1"),
+            "a rule whose evidence CONFIRMS compliance must stay healthy: {:?}",
+            json.whats_healthy.rules
+        );
+        assert!(
+            !json
+                .held_for_review_findings
+                .iter()
+                .any(|g| g.rule_id == "ARCH-EXPLICIT-TX-1"),
+            "a genuinely healthy rule must not ALSO render a spurious advisory row: {:?}",
+            json.held_for_review_findings
+        );
+    }
+
+    /// A rule with NO recommendation at all (no multi-option evidence ever recorded — the
+    /// overwhelming majority of rules/scans) must be completely unaffected by this gate: it
+    /// stays healthy exactly as before.
+    #[tokio::test]
+    async fn a_zero_finding_rule_with_no_recommendation_is_unaffected_by_the_evidence_gate() {
+        let mut report = report_with(Vec::new(), vec!["SEC-NO-HARDCODED-SECRETS-1"]);
+        let mut ledger = crate::scan_ledger::ScanLedger::new();
+        ledger.record_rule(
+            "SEC-NO-HARDCODED-SECRETS-1",
+            crate::scan_ledger::RuleTier::Deterministic,
+            true,
+            None,
+            10,
+            0,
+        );
+        report.ledger = ledger;
+        // Pass-1 W1 seal fix: explicit now (a no-op here — `report.recommendations` is empty —
+        // but called for consistency with the real pipeline order; see the sibling tests above).
+        apply_evidence_gate(&mut report);
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
+        assert!(json
+            .whats_healthy
+            .rules
+            .iter()
+            .any(|r| r.rule_id == "SEC-NO-HARDCODED-SECRETS-1"));
+    }
+
+    // ── Pass-1 W7 (C2): the sites-vs-rows integrity check ─────────────────────────────────
+
+    /// req_c2: an N-sites-but-M-rows shortfall is checked at EVERY N — including rules with
+    /// >= 1 finding, which the zero-finding evidence check deliberately skips (the original
+    /// C2 defect: "the recommendation pass wrote down the planted site and nothing used
+    /// it"). A rule whose rows claim `deviating_sites == 3` (the structured, group-level
+    /// numerator stamped at kind assignment) while only 1 site is represented must export a
+    /// HELD row stating both numbers — never a dropped site, never a refused export.
+    #[tokio::test]
+    async fn req_c2_a_sites_vs_rows_shortfall_exports_a_held_row_never_a_refused_export() {
+        use camerata_api_types::audit::{DeviationKind, FindingKind};
+        let mut f = finding(
+            "ARCH-API-VERSIONING-1",
+            "demo/portal",
+            "src/api/routes.rs",
+            42,
+            "medium",
+        );
+        // The group-level claim, stamped structurally by assign_deviation_kinds BEFORE later
+        // passes could lose sites. This fixture simulates exactly that loss: 3 claimed, one
+        // row, no absorbed also_locations entries.
+        f.kind = Some(FindingKind::Deviation(DeviationKind {
+            deviating_sites: 3,
+            assessed_sites: Some(47),
+            convention_option_id: Some("versioned".to_string()),
+            convention_label: "URI-versioned endpoints".to_string(),
+        }));
+        let mut report = report_with(vec![f], vec!["ARCH-API-VERSIONING-1"]);
+        let rows_before = report.findings.len();
+        apply_evidence_gate(&mut report);
+        assert_eq!(
+            report.findings.len(),
+            rows_before + 1,
+            "the shortfall must synthesize exactly one disclosure row"
+        );
+        let held = report
+            .findings
+            .iter()
+            .find(|f| f.needs_review && f.line == 0)
+            .expect("the shortfall row must exist");
+        assert_eq!(held.rule_id, "ARCH-API-VERSIONING-1");
+        assert_eq!(held.confidence.as_deref(), Some("needs-review"));
+        assert!(
+            held.detail.contains('3') && held.detail.contains('1'),
+            "the disclosure must state both the claimed and the represented count: {}",
+            held.detail
+        );
+        // The row carries the deviation group's own structured payload (A5.6).
+        assert!(
+            matches!(&held.kind, Some(FindingKind::Deviation(d)) if d.deviating_sites == 3),
+            "{:?}",
+            held.kind
+        );
+        // Accounted in the ledger as an addition-side stage, same as the evidence gate.
+        assert!(
+            report
+                .ledger
+                .stages()
+                .iter()
+                .any(|s| s.stage == "sites-vs-rows-gate" && s.unaccounted == 0),
+            "{:#?}",
+            report.ledger.stages()
+        );
+        // And downstream it is HELD — outside every action tier — not an action row and not
+        // a refused export.
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
+        let in_held = json
+            .matrix
+            .held
+            .iter()
+            .any(|r| r.line == 0 && r.rule_id == "ARCH-API-VERSIONING-1");
+        let in_informational = json
+            .matrix
+            .informational
+            .iter()
+            .any(|r| r.line == 0 && r.rule_id == "ARCH-API-VERSIONING-1");
+        assert!(
+            in_held || in_informational,
+            "the shortfall row must land in a held-for-review bucket, never an action tier: \
+             held={:?} informational={:?}",
+            json.matrix.held,
+            json.matrix.informational
+        );
+    }
+
+    /// req_c2: no shortfall, no row — a rule whose claimed deviating sites are fully
+    /// represented (rows + absorbed `also_locations`) is untouched, and the gate is
+    /// idempotent (a second invocation adds nothing on a report already carrying its
+    /// disclosure).
+    #[tokio::test]
+    async fn req_c2_no_shortfall_adds_nothing_and_the_gate_is_idempotent() {
+        use camerata_api_types::audit::{DeviationKind, FindingKind};
+        let deviation_kind = Some(FindingKind::Deviation(DeviationKind {
+            deviating_sites: 2,
+            assessed_sites: None,
+            convention_option_id: None,
+            convention_label: "observed majority".to_string(),
+        }));
+        let mut fully_represented = finding(
+            "ARCH-API-VERSIONING-1",
+            "demo/portal",
+            "src/api/routes.rs",
+            42,
+            "medium",
+        );
+        fully_represented.kind = deviation_kind.clone();
+        fully_represented.also_locations = vec![crate::onboard::MergedLocation {
+            repo: "demo/portal".to_string(),
+            path: "src/api/users.rs".to_string(),
+            line: 7,
+            rule_id: "ARCH-API-VERSIONING-1".to_string(),
+            snippet: "router.get(\"/users\", ...)".to_string(),
+            consequence: false,
+        }];
+        let mut report = report_with(vec![fully_represented], vec!["ARCH-API-VERSIONING-1"]);
+        let rows_before = report.findings.len();
+        apply_evidence_gate(&mut report);
+        assert_eq!(
+            report.findings.len(),
+            rows_before,
+            "2 claimed, 2 represented: nothing to disclose"
+        );
+
+        // Idempotency on a genuine shortfall: running the gate twice adds exactly one row.
+        let mut short = finding(
+            "ARCH-API-VERSIONING-1",
+            "demo/portal",
+            "src/api/routes.rs",
+            42,
+            "medium",
+        );
+        short.kind = Some(FindingKind::Deviation(DeviationKind {
+            deviating_sites: 3,
+            assessed_sites: None,
+            convention_option_id: None,
+            convention_label: "observed majority".to_string(),
+        }));
+        let mut report = report_with(vec![short], vec!["ARCH-API-VERSIONING-1"]);
+        apply_evidence_gate(&mut report);
+        let after_first = report.findings.len();
+        apply_evidence_gate(&mut report);
+        assert_eq!(
+            report.findings.len(),
+            after_first,
+            "a second invocation must not ratchet more disclosure rows"
+        );
+    }
+
+    // ── Pass-1 W1: the seal (docs/plans/2026-10-09_audit-findings-tracker.md) ─────────────
+    //
+    // C1 — every row the engine produces reaches the reader; nothing may be added after the
+    //      row set is final.
+    // D1 — the PDF, the spreadsheet and the JSON contain exactly the same rows.
+    // D2 — every count printed anywhere is computed over that same set of rows.
+    //
+    // The shipped defect (verified by two independent audits): `apply_evidence_gate` (then
+    // `inject_evidence_gate_findings`) ran INSIDE `build_report_json` against a CLONED report
+    // that silently shadowed the function's own parameter — `xlsx_export::build_workbook` /
+    // `build_findings_export` read the ORIGINAL, un-injected `ScanReport` directly, so the PDF
+    // rendered N+K rows while `findings.json`/the xlsx rendered N. The fix moves the gate
+    // upstream of `ScanReport::seal` (see that method's doc comment for the full pipeline
+    // order) and changes all three exporters to take `&SealedReport`.
+    //
+    // CRITICAL FIXTURE NOTE: the standing `export_invariants_gate` fixture above
+    // (`build_fixture`) sets `recommendations: HashMap::new()` via `report_with`, which makes
+    // the evidence gate return early — that is EXACTLY why this bug shipped undetected. The
+    // fixture below deliberately populates `recommendations` so the gate actually fires, and
+    // `req_d1_the_seal_fixture_actually_exercises_the_evidence_gate_and_preview_merge` below
+    // asserts `k > 0` directly, so this cannot silently regress to a no-op.
+
+    /// Build one report whose evidence gate AND external-tool preview merge BOTH fire, run
+    /// through the exact same scan-pipeline steps `onboard_audit`/`onboard_audit_start`
+    /// (`crates/server/src/lib.rs`) apply in production — a simulated
+    /// `external-tool-preview-merge` ledger stage (standing in for `merge_scan_preview`, which
+    /// mutates `report.findings` in place before this point in the real pipeline), then
+    /// [`apply_evidence_gate`], then [`crate::onboard::ScanReport::seal`] — never the other
+    /// order. Returns `(sealed, k)` where `k` is how many rows the evidence gate actually
+    /// synthesized, so callers can assert `k > 0` per the CRITICAL fixture note above.
+    async fn build_seal_fixture() -> (crate::onboard::SealedReport, usize) {
+        let mut f_floor = finding(
+            "SEC-NO-HARDCODED-SECRETS-1",
+            "demo/portal",
+            "apps/api/src/config.rs",
+            10,
+            "critical",
+        );
+        f_floor.snippet = "const API_KEY = \"abcdef1234567890ab\";".to_string();
+
+        // Simulates `merge_scan_preview` having already appended a scan-time external-tool
+        // finding to `report.findings` BEFORE the evidence gate / seal run, exactly as the real
+        // pipeline orders it (see `crate::merge_scan_preview`'s doc comment).
+        let mut f_preview = finding(
+            "SEC-NO-RAW-SQL-CONCAT-1",
+            "demo/portal",
+            "apps/api/src/db.rs",
+            22,
+            "high",
+        );
+        f_preview.preview_tool = Some("semgrep".to_string());
+
+        let mut report = report_with(
+            vec![f_floor, f_preview],
+            vec![
+                "SEC-NO-HARDCODED-SECRETS-1",
+                "SEC-NO-RAW-SQL-CONCAT-1",
+                "ARCH-EXPLICIT-TX-1",
+            ],
+        );
+
+        let mut ledger = crate::scan_ledger::ScanLedger::new();
+        ledger.record_rule(
+            "SEC-NO-HARDCODED-SECRETS-1",
+            crate::scan_ledger::RuleTier::Deterministic,
+            true,
+            None,
+            40,
+            1,
+        );
+        ledger.record_rule(
+            "SEC-NO-RAW-SQL-CONCAT-1",
+            crate::scan_ledger::RuleTier::ExternalTool,
+            true,
+            None,
+            40,
+            1,
+        );
+        // The zero-finding, multi-option rule the evidence gate will flag.
+        ledger.record_rule(
+            "ARCH-EXPLICIT-TX-1",
+            crate::scan_ledger::RuleTier::Semantic,
+            true,
+            None,
+            10,
+            0,
+        );
+        report.ledger = ledger;
+
+        // The external-tool-preview-merge ledger stage the real pipeline records in
+        // `merge_scan_preview` (`lib.rs`): 1 row in (the floor finding), 2 out (the preview
+        // finding net-added) — see `crate::scan_ledger::record_addition_stage`.
+        crate::scan_ledger::record_addition_stage(
+            &mut report.ledger,
+            "external-tool-preview-merge",
+            1,
+            2,
+            "external_tool_preview_findings",
+        );
+
+        report.recommendations.insert(
+            "ARCH-EXPLICIT-TX-1".to_string(),
+            crate::ai_audit::RuleRecommendation {
+                rule_id: "ARCH-EXPLICIT-TX-1".to_string(),
+                recommended_option_id: "some-option".to_string(),
+                recommendation_reasoning: "the model's pick".to_string(),
+                hallucinated: false,
+                operator_chosen: false,
+                evidence: Some(
+                    "src/orders/service.rs:142 — three sequential writes with no transaction"
+                        .to_string(),
+                ),
+                applicable: true,
+                ..Default::default()
+            },
+        );
+
+        let rows_before_gate = report.findings.len();
+        apply_evidence_gate(&mut report);
+        let k = report.findings.len() - rows_before_gate;
+
+        (report.seal(), k)
+    }
+
+    /// Guards the fixture itself against silently regressing to a no-op (the CRITICAL fixture
+    /// note above): the evidence gate must actually synthesize at least one row, and the
+    /// external-tool-preview-merge ledger stage must actually be present with a nonzero
+    /// addition — otherwise every test below would pass vacuously.
+    #[tokio::test]
+    async fn req_d1_the_seal_fixture_actually_exercises_the_evidence_gate_and_preview_merge() {
+        let (sealed, k) = build_seal_fixture().await;
+        assert!(
+            k > 0,
+            "fixture precondition failed: the evidence gate produced zero rows, so this \
+             fixture cannot prove anything about the gate's cross-artifact behavior — see the \
+             CRITICAL fixture note"
+        );
+        let preview_stage = sealed
+            .ledger
+            .stages()
+            .iter()
+            .find(|s| s.stage == "external-tool-preview-merge")
+            .expect("the preview-merge stage must be present in the fixture");
+        assert!(
+            preview_stage.added_total() > 0,
+            "fixture precondition failed: the external-tool preview merge must have added at \
+             least one row: {preview_stage:?}"
+        );
+    }
+
+    /// req_d1: the PDF (via `build_report_json`), the spreadsheet (`build_workbook`) and the
+    /// machine-readable sibling (`build_findings_export`) must contain EXACTLY the same rows —
+    /// both by COUNT and by IDENTITY (rule_id, repo, path, line) — when built from one sealed
+    /// report whose evidence gate AND external-tool preview merge both fired. Before the fix,
+    /// the PDF's row set (via the clone-shadowed `inject_evidence_gate_findings`) held N+K rows
+    /// while `findings.json`/the xlsx held only N; this asserts the gap is fully closed.
+    #[tokio::test]
+    async fn req_d1_pdf_findings_json_and_xlsx_contain_exactly_the_same_rows() {
+        let (sealed, k) = build_seal_fixture().await;
+        assert!(
+            k > 0,
+            "fixture must exercise the evidence gate — see the dedicated guard test"
+        );
+
+        let corpus_path = camerata_rules::corpus_path();
+        let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+        assert!(errors.is_empty(), "corpus must load cleanly: {errors:?}");
+
+        let json = build_report_json(&sealed, &HashMap::new(), Some(&corpus), &empty_opts());
+        let workbook =
+            xlsx_export::build_workbook(&sealed, &HashMap::new(), Some(&corpus), &empty_opts())
+                .expect("the workbook must build");
+        let findings_export = xlsx_export::build_findings_export(
+            &sealed,
+            &HashMap::new(),
+            Some(&corpus),
+            &json,
+            &HashMap::new(),
+        );
+
+        // The PDF's row-identity set: every FindingRefJson across all six matrix buckets (the
+        // full `code_findings` partition — do_now/do_next/plan/accepted/informational/held).
+        let mut pdf_ids: std::collections::BTreeSet<(String, String, String, usize)> =
+            std::collections::BTreeSet::new();
+        for bucket in [
+            &json.matrix.do_now,
+            &json.matrix.do_next,
+            &json.matrix.plan,
+            &json.matrix.accepted,
+            &json.matrix.informational,
+            &json.matrix.held,
+        ] {
+            for f in bucket {
+                pdf_ids.insert((f.rule_id.clone(), f.repo.clone(), f.path.clone(), f.line));
+            }
+        }
+
+        // `findings.json`'s row-identity set — read via `serde_json::Value` since
+        // `xlsx_export::FindingRow`'s fields are private to that module (same convention
+        // `all_client_text_fields` above already uses for this exact type).
+        let findings_export_value =
+            serde_json::to_value(&findings_export).expect("FindingsExport must serialize");
+        let mut findings_json_ids: std::collections::BTreeSet<(String, String, String, usize)> =
+            std::collections::BTreeSet::new();
+        for row in findings_export_value["findings"]
+            .as_array()
+            .expect("must be an array")
+        {
+            findings_json_ids.insert((
+                row["rule_id"].as_str().expect("rule_id").to_string(),
+                row["repo"].as_str().expect("repo").to_string(),
+                row["path"].as_str().expect("path").to_string(),
+                row["line"].as_u64().expect("line") as usize,
+            ));
+        }
+
+        // The comparison is the release gate's own `row_parity` (the identity set, in both
+        // directions): the test and the runtime check call the same function.
+        let problems = crate::release_gate::row_parity(&json, &findings_export);
+        assert!(
+            problems.is_empty(),
+            "the PDF and findings.json must render the IDENTICAL row-identity set: {problems:?} \
+             (pdf={pdf_ids:#?}, findings_json={findings_json_ids:#?})"
+        );
+        // Both the evidence-gate-synthesized row and the external-tool-preview row must
+        // actually be present in BOTH artifacts — not merely equal-sized by coincidence.
+        assert!(
+            pdf_ids.iter().any(|(rid, ..)| rid == "ARCH-EXPLICIT-TX-1"),
+            "the evidence-gate-synthesized row must reach the PDF: {pdf_ids:#?}"
+        );
+        assert!(
+            findings_json_ids
+                .iter()
+                .any(|(rid, ..)| rid == "ARCH-EXPLICIT-TX-1"),
+            "the evidence-gate-synthesized row must reach findings.json: {findings_json_ids:#?}"
+        );
+        assert!(
+            pdf_ids
+                .iter()
+                .any(|(rid, ..)| rid == "SEC-NO-RAW-SQL-CONCAT-1"),
+            "the external-tool-preview row must reach the PDF: {pdf_ids:#?}"
+        );
+        assert!(
+            findings_json_ids
+                .iter()
+                .any(|(rid, ..)| rid == "SEC-NO-RAW-SQL-CONCAT-1"),
+            "the external-tool-preview row must reach findings.json: {findings_json_ids:#?}"
+        );
+
+        // The xlsx: proven via its shared-strings pool (the same technique invariants 1/2 at
+        // the top of this module already use) rather than parsing worksheet XML relationships —
+        // both rule ids, including the evidence-gate-synthesized one, must appear somewhere in
+        // the workbook's text, proving it was ALSO exported there, not just in findings.json.
+        let shared_strings = workbook_shared_string_texts(&workbook_shared_strings_xml(&workbook));
+        let joined = shared_strings.join("\n");
+        assert!(
+            joined.contains("ARCH-EXPLICIT-TX-1"),
+            "the evidence-gate-synthesized row's rule id must appear in the xlsx"
+        );
+        assert!(
+            joined.contains("SEC-NO-RAW-SQL-CONCAT-1"),
+            "the external-tool-preview row's rule id must appear in the xlsx"
+        );
+    }
+
+    /// req_d2: every count printed anywhere (the executive summary's `candidates_reviewed`, the
+    /// cover's severity totals, and the hedge/held-for-review counts) must reconcile against the
+    /// SAME sealed row set — never computed over a set an exporter did not actually render.
+    #[tokio::test]
+    async fn req_d2_candidates_reviewed_cover_totals_and_hedge_counts_reconcile_against_the_sealed_set(
+    ) {
+        let (sealed, k) = build_seal_fixture().await;
+        assert!(
+            k > 0,
+            "fixture must exercise the evidence gate — see the dedicated guard test"
+        );
+
+        let corpus_path = camerata_rules::corpus_path();
+        let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+        assert!(errors.is_empty(), "corpus must load cleanly: {errors:?}");
+
+        let total_rows = sealed.findings.len();
+        let json = build_report_json(&sealed, &HashMap::new(), Some(&corpus), &empty_opts());
+
+        // `candidates_reviewed` must equal the sealed set's total row count exactly — no
+        // disposition in this fixture excludes anything as a false positive, and there are no
+        // dependency-audit rows.
+        assert_eq!(
+            json.executive_summary.candidates_reviewed, total_rows,
+            "candidates_reviewed must equal the sealed report's own finding count"
+        );
+        assert_eq!(json.executive_summary.excluded_false_positive, 0);
+        assert_eq!(json.executive_summary.dependency_advisories, 0);
+
+        // The cover's severity strip must tally exactly the same total as candidates_reviewed
+        // (same identity `rows_in_json_equal_rendered_blocks_across_curated_and_held_for_review`
+        // asserts for the standing fixture above — restated here against THIS sealed set).
+        let cover_total = json.cover.stats.critical
+            + json.cover.stats.high
+            + json.cover.stats.medium
+            + json.cover.stats.low;
+        assert_eq!(
+            cover_total, total_rows,
+            "the cover severity strip must reconcile against the sealed row count exactly: \
+             cover_total={cover_total} total_rows={total_rows}"
+        );
+
+        // Hedge count: the evidence-gate-synthesized row carries `needs_review: true` /
+        // `confidence: needs-review`, so it must land in the `held` bucket, and the executive
+        // summary's `held_for_review` reconciling count must include it.
+        assert!(
+            json.matrix
+                .held
+                .iter()
+                .any(|f| f.rule_id == "ARCH-EXPLICIT-TX-1"),
+            "the evidence-gate row must be a hedge (held bucket): {:?}",
+            json.matrix.held
+        );
+        let held_for_review_total = json.matrix.informational.len() + json.matrix.held.len();
+        assert_eq!(
+            json.executive_summary.held_for_review, held_for_review_total,
+            "held_for_review must equal informational.len() + held.len() over the sealed set"
+        );
+        assert!(
+            json.executive_summary.held_for_review >= 1,
+            "at least the evidence-gate row must be held for review"
+        );
+
+        // findings.json's `summary` is REUSED verbatim from the PDF's own `executive_summary`
+        // (never independently recomputed — see `build_findings_export`'s doc comment), so it
+        // is the SAME shared helper by construction; pin that explicitly so a future change
+        // that makes it recompute its own summary independently is caught here.
+        let findings_export = xlsx_export::build_findings_export(
+            &sealed,
+            &HashMap::new(),
+            Some(&corpus),
+            &json,
+            &HashMap::new(),
+        );
+        assert_eq!(
+            findings_export.summary.candidates_reviewed, total_rows,
+            "findings.json's summary must reconcile against the same sealed row count"
+        );
+        assert_eq!(
+            findings_export.summary.held_for_review, held_for_review_total,
+            "findings.json's summary must report the SAME held-for-review count as the PDF, \
+             never its own independently-recomputed one"
+        );
+    }
+
+    /// req_c1: the final row count must equal the last ledger stage's `rows_out`, and the
+    /// ledger must account for row ADDITIONS (the external-tool-preview-merge and
+    /// evidence-gate-synthesis stages) exactly as it already accounts for deletions (every
+    /// pre-existing merge stage) — `total_unaccounted() == 0` across the whole scan.
+    #[tokio::test]
+    async fn req_c1_final_row_count_equals_last_ledger_stage_rows_out_additions_are_accounted() {
+        let (sealed, k) = build_seal_fixture().await;
+        assert!(
+            k > 0,
+            "fixture must exercise the evidence gate — see the dedicated guard test"
+        );
+
+        let stages = sealed.ledger.stages();
+        assert!(
+            stages.len() >= 2,
+            "fixture must record at least the preview-merge AND the \
+             evidence-gate-synthesis stages: {stages:#?}"
+        );
+
+        let last_stage = stages
+            .last()
+            .expect("at least one stage was just asserted present");
+        assert_eq!(
+            last_stage.stage, "evidence-gate-synthesis",
+            "the evidence gate must be the LAST row-adding pass before the seal: {stages:#?}"
+        );
+        assert_eq!(
+            last_stage.rows_out,
+            sealed.findings.len(),
+            "the final row count must equal the last ledger stage's rows_out exactly"
+        );
+
+        // Both addition-side stages must have disclosed their additions — the ledger's
+        // addition-accounting is real, not merely present-but-empty.
+        let preview_stage = stages
+            .iter()
+            .find(|s| s.stage == "external-tool-preview-merge")
+            .expect("preview-merge stage must be present");
+        assert!(
+            preview_stage.added_total() > 0,
+            "preview merge must disclose its additions"
+        );
+        assert!(
+            last_stage.added_total() > 0,
+            "evidence gate must disclose its additions"
+        );
+        assert_eq!(
+            last_stage.added_total(),
+            k,
+            "the evidence-gate stage's disclosed addition count must equal the actual number of \
+             synthesized rows"
+        );
+
+        // Fully reconciled: not one row, in either direction, is unaccounted anywhere in the
+        // scan — the ledger genuinely explains every row it has ever seen appear or vanish.
+        assert_eq!(
+            sealed.ledger.total_unaccounted(),
+            0,
+            "a fully-instrumented scan must leave zero unaccounted rows, in either direction: \
+             {:#?}",
+            sealed.ledger.stages()
+        );
     }
 }

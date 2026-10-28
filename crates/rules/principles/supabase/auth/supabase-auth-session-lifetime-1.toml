@@ -1,0 +1,79 @@
+id = "SUPABASE-AUTH-SESSION-LIFETIME-1"
+version = 1
+title = "JWT expiry and refresh-token rotation are tuned deliberately for the project's risk profile, not left at whichever default was never revisited"
+domain = "supabase:auth"
+layer = "platform"
+enforcement = "structured"
+kind = "defect"
+inspectable = true
+# Severity floor. Rationale: with rotation off, nothing in the system ever invalidates a leaked
+# refresh token — it mints new access tokens indefinitely, CWE-613 with no bound at all. That is
+# the branch the floor is set for. The jwt_expiry side is a risk-profile judgement with no single
+# correct value, carries no severity of its own, and is routed to review rather than asserted.
+min_severity = "high"
+default = true
+verification = "grounded"
+qualifies = "Enforced by a scan over supabase/config.toml's `[auth]` section for `jwt_expiry`, `enable_refresh_token_rotation`, and `refresh_token_reuse_interval`. `enable_refresh_token_rotation = false` is an unconditional finding (rotation off has no legitimate counter-example once the default is deliberately disabled). `jwt_expiry` set far beyond Supabase's own default (3600s / 1 hour) with no accompanying comment or justification is `needs_review`, since the right value genuinely depends on the application's sensitivity. Conformance holds when refresh-token rotation is enabled and the access-token lifetime is a deliberate, reviewable choice rather than an unexplained outlier."
+
+[[sources]]
+url = "https://supabase.com/docs/guides/local-development/cli/config"
+title = "Supabase CLI config reference — auth.jwt_expiry (default 3600s), auth.enable_refresh_token_rotation (default true), auth.refresh_token_reuse_interval (default 10s)"
+
+[[sources]]
+url = "https://cwe.mitre.org/data/definitions/613.html"
+title = "CWE-613: Insufficient Session Expiration"
+
+[decision]
+question = "Is refresh-token rotation enabled, and is the JWT access-token lifetime a deliberate, reviewable choice rather than an unexplained departure from the default?"
+default = "rotate-refresh-tokens-and-bound-jwt-expiry"
+why = """
+Supabase ships sane defaults for both knobs — `jwt_expiry = 3600` (a one-hour access token) and
+`enable_refresh_token_rotation = true` (each refresh exchanges the old refresh token for a new one, with
+`refresh_token_reuse_interval` giving a short grace window for in-flight requests) — but both are project-level
+settings a team can change, and both directions of change carry a real cost. Disabling refresh-token rotation means
+a single leaked or stolen refresh token remains valid to mint new access tokens INDEFINITELY, with no
+rotation-based detection or invalidation when the legitimate holder's own refresh request reuses it; this is
+CWE-613 (Insufficient Session Expiration) in close to its purest form, since there is no longer any mechanism that
+bounds the leaked credential's useful life at all. Extending `jwt_expiry` well beyond the default has a smaller but
+related effect: it widens the window during which a stolen access token keeps working even after the legitimate
+session would otherwise be forced to re-authenticate.
+
+Neither knob has a single universally-correct value — a low-sensitivity consumer app and a project handling
+financial or health data have different legitimate risk tolerances — which is why this rule does not assert a hard
+numeric ceiling on `jwt_expiry`. What it asserts is that rotation stays on (there is no legitimate reason to turn it
+off; it exists purely as a security improvement with no functional downside) and that an unusually long
+`jwt_expiry` reads as a deliberate decision the project can point to a reason for, not a default nobody looked at
+again after the project scaffolded its config.toml.
+"""
+
+[[option]]
+id = "rotate-refresh-tokens-and-bound-jwt-expiry"
+label = "Refresh-token rotation stays on, and the access-token lifetime is a deliberate, documented choice"
+directive = """
+`enable_refresh_token_rotation` stays `true` in `supabase/config.toml`'s `[auth]` section. Rotation
+exchanges the old refresh token on every refresh, so a leaked one stops working as soon as the
+legitimate holder refreshes; with it off, nothing in the system ever expires that token and it mints
+new access tokens indefinitely. It is a security control with no functional downside, so there is no
+general-purpose reason to turn it off. `jwt_expiry` is a genuine risk-profile judgement — a
+low-sensitivity consumer app and one handling financial or health data differ legitimately — so this
+project either keeps it near Supabase's 3600-second default or records, in a comment beside the
+setting, why a longer-lived access token is right here. A longer expiry widens the window in which a
+stolen access token keeps working, so the number is chosen rather than inherited.
+"""
+remediation = """
+In supabase/config.toml, set `enable_refresh_token_rotation = true` (the Supabase default) unless there is a
+specific, documented reason your project needs it off — there is no general-purpose justification for disabling
+it. Review `jwt_expiry`: either return it to a value close to the 3600-second default, or leave a comment in the
+config recording why your project's risk profile calls for a longer-lived access token. Verify by confirming a
+refresh token that has already been exchanged once is rejected on reuse, and that the access-token lifetime matches
+what you intended.
+"""
+effort = "low"
+why = "Refresh-token rotation is a strictly beneficial, no-downside security control that Supabase enables by default — there is no legitimate reason to turn it off, so flagging it unconditionally is correct; the JWT-expiry side genuinely depends on risk profile, so it is scoped to needs_review rather than a hard assertion."
+
+[[option]]
+id = "disable-rotation-or-extend-expiry-for-fewer-refreshes"
+violates = true
+label = "Refresh-token rotation is off, or jwt_expiry is set long, so sessions refresh less often"
+directive = "`enable_refresh_token_rotation` is off, or `jwt_expiry` is set well beyond the one-hour default, so client sessions refresh or re-authenticate less frequently — and a stolen refresh or access token stays usable correspondingly longer."
+why = "Rejected: disabling rotation removes the ONLY mechanism that bounds a leaked refresh token's useful life — once off, a stolen refresh token is valid indefinitely, with no event (a legitimate refresh) that would ever invalidate it. Extending jwt_expiry for the same convenience reason widens the exposure window of a stolen access token proportionally. Both trade a real, uncapped security cost for a marginal reduction in how often a client-side refresh call fires, which is not a meaningful problem the rotation/expiry defaults were causing in the first place."

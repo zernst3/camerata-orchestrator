@@ -4,7 +4,7 @@
 //!
 //! - The behavior (the `LlmPort` trait (formerly named `Completer`), the `Llm` Anthropic
 //!   transport with its CLI/API/Message-Batches paths, `OpenRouterCompleter`, the
-//!   `build_completer` factory, `call_with_fallback`, `MODELS`, `Vendor`, `Backend`,
+//!   `build_completer` factory, `call_with_fallback`, `models`, `Vendor`, `Backend`,
 //!   `select_backend`, `kill_inflight_claude`, the batch item/result types, ...) now
 //!   lives in `camerata_llm::llm`.
 //! - The pure DTOs relocated in Phase A (`LlmResponse` in `camerata_api_types::llm`,

@@ -1,10 +1,37 @@
 id = "GO-HANDLER-SERVICE-REPOSITORY-1"
+version = 1
 title = "Business logic is layered: HTTP handlers call services, services call repositories; no business logic in handlers"
-tag = "stack"
 domain = "go"
 layer = "architecture"
 enforcement = "structured"
+kind = "default_with_exceptions"
+inspectable = true
+# Deviation-ceiling escape hatch, INHERITED from ARCH-STRICT-LAYERING-1: severity must describe
+# the PROBLEM, not which rule happened to fire. Without this, a repo on this stack caps the
+# identical architectural defect at medium while an unmirrored stack reaches high under the
+# general rule. This rule mirrors ARCH-STRICT-LAYERING-1 because it re-litigates that boundary
+# almost verbatim: handlers translate HTTP only, services hold the business rules, and
+# repositories own all data access behind an interface — which is the spine rule's own title.
+#
+# The ceiling is authored without touching this rule's `kind`, and is safe either way: as a
+# `decision` rule it already emits deviation rows, so the ceiling only BOUNDS rows that exist
+# today; were it ever reclassified as `defect` the ceiling becomes dead config rather than wrong
+# behaviour.
+deviation_ceiling = "high"
 default = true
+verification = "policy"
+
+[[sources]]
+url = "https://grafana.com/blog/2024/02/09/how-i-write-http-services-in-go-after-13-years/"
+title = "Mat Ryer — How I write HTTP services in Go after 13 years"
+
+[[sources]]
+url = "https://www.gobeyond.dev/standard-package-layout/"
+title = "Ben Johnson — Standard Package Layout"
+
+[[sources]]
+url = "https://martinfowler.com/eaaCatalog/repository.html"
+title = "Martin Fowler — Repository (Patterns of Enterprise Application Architecture)"
 
 [decision]
 question = "Where does business logic live relative to HTTP handlers and data access?"
@@ -15,10 +42,14 @@ why = "An HTTP handler exists to translate HTTP into a call and back; when busin
 id = "handler-service-repository-layers"
 label = "use handler, service, and repository layers"
 directive = "HTTP handlers (in a handlers/ or api/ package) parse and validate input, call a service-layer function, and shape the HTTP response. Services (in a services/ package) contain business rules, orchestrate multi-step workflows, and call repository methods; they take plain arguments and return plain domain objects, never http.Request. Repositories (in a repositories/ or persistence/ package) own all data access (SQL queries, caching, external API calls) behind an interface; services call repository interfaces, not concrete implementations."
+remediation = """
+Move the business logic and database queries out of the handler and into a service function that the handler calls, with the service in turn calling a repository method for persistence. Keep the handler limited to parsing input, calling the service, and shaping the HTTP response. Verify by confirming the handler function contains no direct database call and the business rule can be unit-tested against the service alone.
+"""
 why = "A service layer makes business logic reusable and testable in isolation; repositories decouple services from storage implementation."
 
 [[option]]
 id = "logic-in-handlers"
+violates = true
 label = "put business logic and data access directly in handlers"
 directive = "HTTP handlers directly execute business rules, make database queries, and shape the response."
 why = "Ties the logic to the HTTP stack: it cannot be reused outside HTTP or tested without the web framework; rules get duplicated across endpoints."

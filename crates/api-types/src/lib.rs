@@ -7,6 +7,10 @@
 //! on it without pulling in transport/framework code.
 //!
 //! Modules mirror their source of origin:
+//! - [`audit`] — NEW here (not relocated): the five-kind finding taxonomy
+//!   (`FindingKind`, Pass-1 W3 / requirement A5.6) shared by the scan pipeline
+//!   (`camerata_server::onboard::Finding`) and every export artifact, defined at the
+//!   wire-contract leaf so the kind is on the wire by construction.
 //! - [`uow`] — relocated from `camerata_app_core::uow`.
 //! - [`project`] — relocated from `camerata_app_core::project` (the fully self-contained
 //!   sub-shapes only; `Project` itself stays in `camerata_app_core`).
@@ -37,17 +41,31 @@
 //!   `GET /api/feedback/recent`. Unlike `governance`, this is NOT a hand-mirrored DTO —
 //!   `camerata-persistence` depends on this crate and stores `DefectReport` directly.
 //!
+//! - [`fingerprint`]: the finding fingerprint (`fnv1a`, `fingerprint`), moved out of
+//!   `camerata_server::suppression` so the review UI's decision memory and the suppression
+//!   baseline call one implementation.
+//!
+//! - [`review_timing`]: the INTERNAL-ONLY review-time field names (the timer, the per-row
+//!   reviewed record, the stats) as a deny-list the export tests check every client artifact
+//!   against. Names only, no shapes: the shapes live in `camerata-ui-core`.
+//!
 //! Every relocated module's origin re-exports everything below so existing call sites
 //! (`camerata_app_core::uow::X`, `crate::llm::LlmResponse`, etc.) resolve unchanged.
 
+pub mod audit;
+pub mod claude_cli;
 pub mod credentials;
 pub mod feedback;
+pub mod fingerprint;
 pub mod governance;
 pub mod lifecycle;
 pub mod llm;
 pub mod model_registry;
 pub mod project;
+pub mod review_timing;
 pub mod run;
+pub mod snippet;
 pub mod stories;
+pub mod symbol;
 pub mod uow;
 pub mod workitems;

@@ -1,9 +1,11 @@
 id = "JAVA-OPTIONAL-OVER-NULL-1"
+version = 1
 title = "Methods return Optional<T> instead of null; null is used only for legacy compatibility or internal state"
-tag = "stack"
 domain = "java"
 layer = "language"
 enforcement = "prose"
+kind = "default_with_exceptions"
+inspectable = true
 default = true
 qualifies = "Enforced by code review and Checkstyle/SpotBugs rules that flag @Nullable return types and recommend Optional. IDEs can also hint that methods should return Optional instead of null."
 verification = "grounded"
@@ -21,13 +23,17 @@ title = "java.util.Optional javadoc — API Note: Optional is intended primarily
 id = "optional-return-types"
 label = "return Optional<T> instead of null"
 directive = "Methods that might not have a value to return use Optional<T> as the return type (e.g., Optional<User> findById(int id)). Callers explicitly handle the absence with ifPresent(), orElse(), orElseThrow(), or other Optional methods. Null is used only for internal fields that are immediately assigned in initialization or legacy APIs that cannot be changed."
+remediation = """
+Change the method's return type from a nullable reference to Optional of the value type, and update its callers to handle absence explicitly via ifPresent(), orElse(), or orElseThrow() instead of a null check. Reserve a bare null only for internal fields never exposed as a return value. Verify by confirming the method's signature no longer implies a nullable return and callers fail to compile if they skip handling the empty case.
+"""
 why = "Optional makes absence explicit in the type system, forces callers to handle it, and avoids NullPointerException."
 
 [[option]]
 id = "return-null"
+violates = true
 label = "return null to indicate absence"
 directive = "Methods return null to indicate a missing or absent value. Callers must explicitly check for null before using the return value."
-why = "Common but error-prone; callers can forget null checks, leading to NullPointerException. The contract of 'might be null' is not enforced by the type system."
+why = "A method that returns null gives the caller no signal that a check is required, so a missed check compiles cleanly and fails at runtime with a NullPointerException at whatever line dereferenced it, often far from the method that produced the null. The 'may be absent' half of the contract lives only in documentation, which the compiler cannot enforce."
 
 [[option]]
 id = "throw-exception"

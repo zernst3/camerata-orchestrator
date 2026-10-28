@@ -13,9 +13,11 @@
 //!     is added verbatim.
 //!   - When `cost_usd` is `None` but tokens are present (the shape a future Gemini arm will
 //!     produce — Gemini reports tokens but no dollar field), the cost is DERIVED from
-//!     [`crate::llm::MODELS`] list pricing for that model id. So a Gemini call still yields a
-//!     `$` figure with zero changes here, the moment its `MODELS` entries + `complete` arm land.
-//!   - When the model id is absent from `MODELS`, tokens still accumulate at `$0` (never a panic).
+//!     [`crate::llm::models`] pricing (sourced from the live model registry) for that model
+//!     id. So a Gemini call still yields a `$` figure with zero changes here, the moment its
+//!     registry entries + `complete` arm land.
+//!   - When the model id is absent from the registry, tokens still accumulate at `$0` (never
+//!     a panic).
 //!
 //! **Rate-limited state.** The ledger also carries a transient "we are being rate-limited"
 //! flag. [`is_rate_limit_signal`] is the provider-agnostic detector: it recognizes the
@@ -32,7 +34,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::llm::{LlmResponse, MODELS};
+use crate::llm::{models, LlmResponse};
 
 /// Per-model accumulated usage, surfaced as the `by_model` breakdown.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, PartialEq)]
@@ -140,17 +142,19 @@ impl UsageLedger {
     ///
     /// PROVIDER-AGNOSTIC COST RULE:
     ///   1. If `cost_usd` is present (Anthropic CLI), use it verbatim.
-    ///   2. Else derive from [`MODELS`] list pricing for `model_id`:
-    ///      `input_tokens * price_in + output_tokens * price_out`, both `$/Mtok`. This is the
-    ///      Gemini-shape path (tokens reported, no cost field) — and the API path's own
-    ///      computation, recomputed here so the ledger is self-contained.
-    ///   3. Else (model id not in `MODELS`) -> `0.0`, so unknown models still accumulate
+    ///   2. Else derive from [`crate::llm::models`] pricing (sourced from the live model
+    ///      registry) for `model_id`: `input_tokens * price_in + output_tokens * price_out`,
+    ///      both `$/Mtok`. This is the Gemini-shape path (tokens reported, no cost field) —
+    ///      and the API path's own computation, recomputed here so the ledger is
+    ///      self-contained.
+    ///   3. Else (model id not in the registry) -> `0.0`, so unknown models still accumulate
     ///      tokens without crashing or poisoning the dollar total.
     fn cost_for(model_id: &str, r: &LlmResponse) -> f64 {
         if let Some(c) = r.cost_usd {
             return c;
         }
-        let Some(info) = MODELS.iter().find(|m| m.id == model_id) else {
+        let list = models();
+        let Some(info) = list.iter().find(|m| m.id == model_id) else {
             return 0.0;
         };
         let input = r.input_tokens.unwrap_or(0) as f64;
@@ -261,6 +265,7 @@ mod tests {
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
             or_cache_discount: None,
+            truncated: false,
         }
     }
 
@@ -276,20 +281,24 @@ mod tests {
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
             or_cache_discount: None,
+            truncated: false,
         }
     }
 
     #[test]
     fn accumulates_across_calls_with_cache_and_by_model() {
         let l = UsageLedger::new();
-        let mut a = anthropic_resp("claude-opus-4-8", 100, 50, 0.01);
+        let mut a = anthropic_resp("claude-opus-5", 100, 50, 0.01);
         a.cache_read_input_tokens = 30;
         a.cache_creation_input_tokens = 20;
-        l.record("claude-opus-4-8", &a);
-        l.record("claude-opus-4-8", &anthropic_resp("claude-opus-4-8", 200, 100, 0.02));
+        l.record("claude-opus-5", &a);
         l.record(
-            "claude-sonnet-4-6",
-            &anthropic_resp("claude-sonnet-4-6", 10, 5, 0.001),
+            "claude-opus-5",
+            &anthropic_resp("claude-opus-5", 200, 100, 0.02),
+        );
+        l.record(
+            "claude-sonnet-5",
+            &anthropic_resp("claude-sonnet-5", 10, 5, 0.001),
         );
 
         let s = l.snapshot();
@@ -303,13 +312,13 @@ mod tests {
         // by_model: opus has 2 calls / 450 tokens, sonnet has 1 / 15 tokens.
         assert_eq!(s.by_model.len(), 2);
         // Sorted by descending cost -> opus first.
-        assert_eq!(s.by_model[0].model, "claude-opus-4-8");
+        assert_eq!(s.by_model[0].model, "claude-opus-5");
         assert_eq!(s.by_model[0].calls, 2);
         assert_eq!(s.by_model[0].tokens, 450);
         let sonnet = s
             .by_model
             .iter()
-            .find(|m| m.model == "claude-sonnet-4-6")
+            .find(|m| m.model == "claude-sonnet-5")
             .expect("sonnet row present");
         assert_eq!(sonnet.calls, 1);
         assert_eq!(sonnet.tokens, 15);
@@ -317,29 +326,32 @@ mod tests {
 
     #[test]
     fn cost_fallback_derives_from_pricing_for_known_model() {
-        // Gemini-shape: no cost_usd, but a model id present in MODELS -> derive cost.
-        // claude-opus-4-8 is $15/Mtok in, $75/Mtok out.
+        // Gemini-shape: no cost_usd, but a model id present in the registry -> derive cost.
+        // claude-opus-5 is $5/Mtok in, $25/Mtok out (the live registry price — see
+        // crate::model_registry::CLAUDE_REGISTRY_MODELS; NOT the stale $15/$75 a prior,
+        // independently-maintained price list used to carry).
         let l = UsageLedger::new();
         l.record(
-            "claude-opus-4-8",
-            &gemini_shape_resp("claude-opus-4-8", 1_000_000, 1_000_000),
+            "claude-opus-5",
+            &gemini_shape_resp("claude-opus-5", 1_000_000, 1_000_000),
         );
         let s = l.snapshot();
-        // 1M * 15 + 1M * 75 over 1M = 90.0.
-        assert!((s.total_cost_usd - 90.0).abs() < 1e-6, "got {}", s.total_cost_usd);
+        // 1M * 5 + 1M * 25 over 1M = 30.0.
+        assert!(
+            (s.total_cost_usd - 30.0).abs() < 1e-6,
+            "got {}",
+            s.total_cost_usd
+        );
         assert_eq!(s.by_model.len(), 1);
-        assert!((s.by_model[0].cost - 90.0).abs() < 1e-6);
+        assert!((s.by_model[0].cost - 30.0).abs() < 1e-6);
         assert_eq!(s.by_model[0].tokens, 2_000_000);
     }
 
     #[test]
     fn cost_fallback_unknown_model_is_zero_no_panic() {
         let l = UsageLedger::new();
-        // No cost field, model id NOT in MODELS -> tokens accumulate, cost stays 0, no panic.
-        l.record(
-            "gemini-3-pro",
-            &gemini_shape_resp("gemini-3-pro", 500, 200),
-        );
+        // No cost field, model id NOT in the registry -> tokens accumulate, cost stays 0, no panic.
+        l.record("gemini-3-pro", &gemini_shape_resp("gemini-3-pro", 500, 200));
         let s = l.snapshot();
         assert_eq!(s.input_tokens, 500);
         assert_eq!(s.output_tokens, 200);
@@ -356,24 +368,30 @@ mod tests {
         // both accumulate correctly into the same ledger.
         let l = UsageLedger::new();
         l.record(
-            "claude-sonnet-4-6",
-            &anthropic_resp("claude-sonnet-4-6", 100, 100, 0.0018),
+            "claude-sonnet-5",
+            &anthropic_resp("claude-sonnet-5", 100, 100, 0.0018),
         );
         // sonnet pricing 3/15: 1M in + 1M out -> 3 + 15 = 18.0.
         l.record(
-            "claude-sonnet-4-6",
-            &gemini_shape_resp("claude-sonnet-4-6", 1_000_000, 1_000_000),
+            "claude-sonnet-5",
+            &gemini_shape_resp("claude-sonnet-5", 1_000_000, 1_000_000),
         );
         let s = l.snapshot();
         assert_eq!(s.calls, 2);
         assert_eq!(s.input_tokens, 1_000_100);
         // 0.0018 (reported) + 18.0 (derived) = 18.0018.
-        assert!((s.total_cost_usd - 18.0018).abs() < 1e-6, "got {}", s.total_cost_usd);
+        assert!(
+            (s.total_cost_usd - 18.0018).abs() < 1e-6,
+            "got {}",
+            s.total_cost_usd
+        );
     }
 
     #[test]
     fn rate_limit_signal_detection() {
-        assert!(is_rate_limit_signal("Anthropic API HTTP 429: too many requests"));
+        assert!(is_rate_limit_signal(
+            "Anthropic API HTTP 429: too many requests"
+        ));
         assert!(is_rate_limit_signal("the service is Overloaded right now"));
         assert!(is_rate_limit_signal(
             r#"{"error":{"type":"rate_limit_error"}}"#
@@ -383,8 +401,12 @@ mod tests {
             "claude produced no model output for 120s — treating as a hang (likely rate-limited/queued; set CAMERATA_LLM_IDLE_SECS to tune)"
         ));
         // Normal text / unrelated errors must NOT trip it.
-        assert!(!is_rate_limit_signal("parse claude CLI JSON: unexpected token"));
-        assert!(!is_rate_limit_signal("here is a normal completion of some prose"));
+        assert!(!is_rate_limit_signal(
+            "parse claude CLI JSON: unexpected token"
+        ));
+        assert!(!is_rate_limit_signal(
+            "here is a normal completion of some prose"
+        ));
         assert!(!is_rate_limit_signal("findings: 4 high, 2 medium"));
     }
 
@@ -408,7 +430,7 @@ mod tests {
 
         // A successful record CLEARS the flag (we're being served again). The last_rate_limit
         // history is retained for the UI.
-        l.record("claude-opus-4-8", &anthropic_resp("claude-opus-4-8", 1, 1, 0.0));
+        l.record("claude-opus-5", &anthropic_resp("claude-opus-5", 1, 1, 0.0));
         let s2 = l.snapshot();
         assert!(!s2.rate_limited);
         assert!(s2.last_rate_limit.is_some(), "history retained after clear");

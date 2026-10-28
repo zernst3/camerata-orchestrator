@@ -1,0 +1,46 @@
+id = "FIREBASE-RULES-RECURSIVE-WILDCARD-1"
+version = 2
+title = "A broad wildcard grant does not override the narrower rules written beneath it"
+domain = "firebase"
+layer = "platform"
+enforcement = "architectural"
+kind = "defect"
+inspectable = true
+cwe = ["CWE-284"]
+max_severity = "critical"
+min_severity = "medium"
+default = true
+verification = "grounded"
+qualifies = "Deterministic over Firestore and Storage rules the project deploys. A match block with a recursive wildcard (match /{document=**}, or a wildcard in the middle of a path) carrying an allow that is unconditional, signed in only or the test mode scaffold, while the same file has narrower match blocks under that path with stricter conditions on overlapping methods, is reported once, at the grade and severity of the broad grant, with every overridden line listed. This is the single owner of the fact: the open, test mode and signed in rules do not report the same allow again. A recursive wildcard locked with if false, an admin override with a claims condition, and a wildcard with no narrower rules (reported by the open rule) are not reported. In the first rules version a recursive wildcard matches one or more segments, in the second zero or more. A rules file that firebase.json does not name (found only by its conventional name, or in a repository with no firebase.json) or that sits under an examples, example, samples, sample or docs folder is held for review with the reason stated, never asserted, and a critical severity is lowered to high. Rules edited in the Firebase console never land in the repository, so a repository scan reads only the rules file the project deploys."
+
+[[sources]]
+url = "https://firebase.google.com/docs/firestore/security/rules-structure"
+title = "Structuring Cloud Firestore Security Rules"
+
+[[sources]]
+url = "https://firebase.google.com/docs/rules/rules-language"
+title = "Security Rules language"
+
+[[sources]]
+url = "https://firebase.google.com/docs/storage/security/core-syntax"
+title = "Cloud Storage: Core syntax"
+
+[decision]
+question = "Does any broad wildcard grant override the narrower rules beneath it?"
+default = "broad-wildcard-grants-do-not-override-narrower-rules"
+why = "Firestore and Storage grant a request when any matching rule allows it. A broad wildcard grant therefore makes every narrower rule under it ineffective, however strict, because the broad rule alone is enough to allow the request. The narrower rules read as protection but protect nothing."
+
+[[option]]
+id = "broad-wildcard-grants-do-not-override-narrower-rules"
+label = "No broad wildcard grant makes the narrower rules beneath it ineffective"
+directive = "Access is granted when any matching rule allows it, so a recursive wildcard that grants broadly leaves the narrower rules beneath it nothing to enforce. Either the wildcard is locked with if false and each collection grants only what it needs, or the narrower rules are removed because the wildcard is the intended policy."
+remediation = "Change the broad grant on `<path>` to `if false`, or narrow it to the collections that really need it, so the stricter rules beneath it decide access. Deploy and confirm in the emulator that a request the narrower rules would deny is now denied."
+effort = "low"
+why = "The strict rules take effect once nothing broader allows the request first."
+
+[[option]]
+id = "a-broad-wildcard-grant-overrides-the-narrower-rules"
+violates = true
+label = "A broad wildcard grant overrides the narrower rules written beneath it"
+directive = "Keep a broad wildcard grant alongside narrower rules for the same paths."
+why = "Because access is granted when any matching rule allows it, the broad grant allows every request the narrower rules were written to deny. The stricter rules look like protection but never take effect, so the data they were meant to guard is as open as the wildcard."

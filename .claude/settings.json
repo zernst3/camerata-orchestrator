@@ -1,0 +1,30 @@
+{
+  "permissions": {
+    "allow": [
+      "Edit(./**)",
+      "Write(./**)",
+      "Bash(cargo:*)",
+      "Bash(git:*)",
+      "Bash(gh:*)"
+    ],
+    "deny": [
+      "Read(//Users/zacharyernst/Documents/Repos/Camerata tests/_keys/**)",
+      "Read(//Users/zacharyernst/Documents/Repos/Camerata tests/faktura-ANSWER-KEY.md)",
+      "Read(**/*-ANSWER-KEY.md)",
+      "Read(//Users/zacharyernst/Documents/Repos/Camerata tests/tutorly-ANSWER-KEY.md)",
+      "Read(//Users/zacharyernst/Documents/Repos/_workspace/brownfield-audits/BENCHMARK_SCORECARD.md)",
+      "Read(**/GRADE-FULL.md)",
+      "Read(**/score.json)",
+      "Read(**/feedback-classes.md)",
+      "Read(**/scorecard.md)",
+      "Read(**/grader-raw.json)",
+      "Read(**/grader-stdout.log)",
+      "Read(//Users/zacharyernst/Documents/Repos/Camerata tests/tutorly/**)",
+      "Read(//Users/zacharyernst/Documents/Repos/Camerata tests/lumen/**)",
+      "Read(//Users/zacharyernst/Documents/Repos/Camerata tests/hearth/**)",
+      "Read(//Users/zacharyernst/Documents/Repos/Camerata tests/membersclub/**)",
+      "Read(//Users/zacharyernst/Documents/Repos/Camerata tests/faktura/**)",
+      "Read(//Users/zacharyernst/Documents/Repos/Camerata tests/supabase-portal-fixture/**)"
+    ]
+  }
+}

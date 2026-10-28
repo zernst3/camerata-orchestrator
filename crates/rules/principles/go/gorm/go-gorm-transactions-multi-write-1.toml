@@ -1,9 +1,20 @@
 id = "GO-GORM-TRANSACTIONS-MULTI-WRITE-1"
+version = 1
 title = "Multiple write operations to different tables are wrapped in a transaction; consistency is enforced at the database level"
-tag = "stack"
 domain = "go:gorm"
 layer = "library"
 enforcement = "structured"
+kind = "default_with_exceptions"
+inspectable = true
+# Deviation-ceiling escape hatch, INHERITED from ARCH-EXPLICIT-TX-1: severity must describe the
+# PROBLEM, not which rule happened to fire. Without this, a repo on this stack caps the identical
+# architectural defect at medium while an unmirrored stack reaches high under the general rule.
+# This rule mirrors ARCH-EXPLICIT-TX-1 because it re-litigates the same transactional-ownership
+# contract: a multi-write operation opens ONE explicit transaction and every write inside it uses
+# the passed `tx` handle rather than the ambient `db`, which is precisely the spine rule's
+# "repositories receive the handle as a parameter" posture in GORM form, and its violating option
+# (separate uncoordinated writes) is the spine rule's rejected per-call-transaction one.
+deviation_ceiling = "high"
 default = true
 verification = "grounded"
 
@@ -20,13 +31,17 @@ why = "A transaction groups multiple writes into an atomic unit: either all succ
 id = "transactions-multi-write"
 label = "Multi-step writes use transactions; all-or-nothing consistency"
 directive = "Any operation that performs multiple writes (insert user, insert profile; transfer from account A to account B) wraps the writes in a transaction using db.WithContext(ctx).Transaction(func(tx *gorm.DB) error { ...; return nil }). All writes inside the function use tx, not db. If any write fails, the function returns an error, the transaction rolls back, and the database is not left in a partial state; returning nil commits the transaction. Single writes do not require a transaction (the database ensures single-write atomicity)."
+remediation = """
+Wrap the multiple related writes in db.WithContext(ctx).Transaction(func(tx *gorm.DB) error { ... }), and change every write inside that function to use tx instead of db. Verify by forcing one of the writes to fail and confirming none of the other writes in the same operation are persisted.
+"""
 why = "Transactions enforce all-or-nothing semantics; the database is always consistent."
 
 [[option]]
 id = "no-transactions"
+violates = true
 label = "Writes are not coordinated; no transaction wrapping"
 directive = "Multiple writes are performed as separate db.Create(...) calls without a transaction wrapper. If one fails mid-operation, the database is left in a partial state."
-why = "Simpler to code; high risk of consistency violations. Acceptable only for truly independent writes with no invariants (e.g., logging)."
+why = "A failure part-way through a multi-write operation leaves the earlier writes committed and the later ones not, so the database holds a state no code path was written to handle and someone has to repair it by hand. Tolerable only where the writes share no invariant at all, as with append-only logging."
 
 [[option]]
 id = "transaction-one-per-request"

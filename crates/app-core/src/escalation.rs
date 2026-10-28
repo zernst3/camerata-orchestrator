@@ -502,7 +502,7 @@ mod tests {
         let json = r#"{"decision":"Use Postgres","directive":"Provision a Postgres backend and continue.","confident":true}"#;
         let driver = CannedDriver(json.to_string());
         let payload =
-            translate_answer_ai(&driver, &esc, "go with postgres", "claude-sonnet-4-6", None).await;
+            translate_answer_ai(&driver, &esc, "go with postgres", "claude-sonnet-5", None).await;
         assert_eq!(payload.decision, "Use Postgres");
         assert!(payload.directive.contains("Postgres"));
         assert!(payload.confident);

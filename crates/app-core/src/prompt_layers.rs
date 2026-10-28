@@ -138,8 +138,8 @@ mod tests {
 
     #[test]
     fn stable_prefix_len_matches_prefix_and_marks_render_boundary() {
-        let p = LayeredPrompt::new("kernel-block", "story-and-error")
-            .with_grounding("grounding-block");
+        let p =
+            LayeredPrompt::new("kernel-block", "story-and-error").with_grounding("grounding-block");
         let n = p.stable_prefix_len();
         let rendered = p.render();
         assert_eq!(n, p.stable_prefix().len());

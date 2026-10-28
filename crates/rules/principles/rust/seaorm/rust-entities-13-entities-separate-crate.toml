@@ -1,9 +1,11 @@
 id = "RUST-ENTITIES-13"
+version = 1
 title = "Where persistence entities live: their own crate, the infrastructure crate, or the mapper crate"
-tag = "stack"
 domain = "rust:seaorm"
 layer = "library"
 enforcement = "structured"
+kind = "decision"
+inspectable = true
 default = false
 verification = "grounded"
 
@@ -12,21 +14,30 @@ question = "Where do persistence entity definitions live relative to the rest of
 why = "The right placement follows from whether the project keeps a separate mapper layer between domain and persistence, not from a presumed winner. A dedicated entities crate holding only entity definitions (no pool, driver, or repository code) lets a mapper crate depend on it without depending on infrastructure, which is what keeps the import graph acyclic when a mapper layer sits between domain and persistence — the natural fit for a layered hexagonal arrangement, at the cost of one more crate. Co-locating entities in the infrastructure crate alongside the pool, driver, and repositories removes that crate and is the simplest shape when there is no separate mapper layer to satisfy (entities are mapped inline within infrastructure, or the project maps domain types directly); its trade-off is that any mapper that needs the entities would then have to depend on infrastructure, which is why this option only works without a standalone mapper layer. Putting the repository implementations in the mapper crate alongside the translation code keeps data access and translation in one place, which some projects prefer for cohesion; its trade-off is that translation and adapter logic then share a crate despite having different lifecycles and test surfaces. Choose by whether a separate mapper layer is part of the architecture."
 
 [[option]]
-id = "entities-live-in-their-own-crate-separate-from-i"
+id = "entities-live-in-their-own-crate-separate-from-infrastructure"
 label = "Entities live in their own crate, separate from infrastructure"
 directive = "The entities crate holds entity definitions only: no DB pool, no driver, no repository implementations. Canonical layout: domain ← mappers ← infrastructure ← app_services ← server, with entities ← mappers and domain ← everything."
+remediation = """
+Move the entity definitions out of the infrastructure or mapper crate and into a dedicated entities crate holding only entity definitions, with no DB pool, driver, or repository implementation. Verify by confirming the entities crate's Cargo.toml has no database-driver dependency beyond what SeaORM's derive macros require, and no repository implementation lives there.
+"""
 why = "Lets a mapper crate depend on entities without depending on infrastructure, which is what keeps the import graph acyclic when a mapper layer sits between domain and persistence. The strongest fit for a layered hexagonal arrangement where entities are pure data that several crates may reference; its trade-off is one additional crate to define and build."
 
 [[option]]
 id = "the-entities-live-in-the-infrastructure-crate-al"
 label = "Entities live in the infrastructure crate"
 directive = "the entities live in the infrastructure crate alongside the DB pool, driver, and repository implementations, with mappers inlined into infrastructure or dropped entirely"
+remediation = """
+Move the entity definitions into the infrastructure crate alongside the DB pool, driver, and repository implementations, inlining or dropping the separate mappers crate. Verify by confirming the entities are defined in the same crate as the infrastructure layer's DB pool and repository code.
+"""
 why = "Removes the separate entities crate and keeps the whole persistence layer in one place, the simplest shape when there is no standalone mapper layer to satisfy — translation happens inline within infrastructure, or domain types are mapped directly. Its trade-off is the reason it only works in that case: any mapper that needed the entities would then have to depend on infrastructure, reintroducing the cycle the separate crate exists to avoid."
 
 [[option]]
-id = "repository-implementations-live-in-the-mapper-cr"
+id = "repository-implementations-live-in-the-mapper-crate"
 label = "Repository implementations live in the mapper crate"
 directive = "repository implementations live in the mapper crate alongside the translation logic, rather than in the infrastructure crate"
+remediation = """
+Move the repository implementation out of the infrastructure crate and into the mapper crate, alongside the domain-entity translation logic. Verify by confirming the repository implementation's code lives in the same crate as the mapper functions it depends on.
+"""
 why = "Keeps data access and the translation it depends on in a single crate, which some projects prefer for cohesion — a repository method and the mapper it calls are read and changed together. Its trade-off is that translation and adapter logic then share a crate despite having different lifecycles and test surfaces, so a change to one sits next to the other and the two blend in review."
 
 [[sources]]

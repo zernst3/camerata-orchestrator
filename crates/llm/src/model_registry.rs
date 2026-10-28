@@ -21,7 +21,7 @@ use std::sync::{Arc, Mutex};
 
 use serde::Deserialize;
 
-use crate::credentials::{CredentialStore, OPENROUTER_API_KEY};
+use crate::credentials::CredentialStore;
 use crate::provider_policy::SafeProviders;
 
 // ── Registry entry (the unified shape) ───────────────────────────────────────
@@ -32,7 +32,7 @@ use crate::provider_policy::SafeProviders;
 // fetch types below. Re-exported so every existing `crate::model_registry::X` call site
 // keeps resolving unchanged.
 pub use camerata_api_types::model_registry::{
-    RefreshResp, RegistryEntry, RegistryEntryStatic, RegistryResp,
+    AnthropicRefreshResp, RefreshResp, RegistryEntry, RegistryEntryStatic, RegistryResp,
 };
 
 // ── Static Claude catalog ────────────────────────────────────────────────────
@@ -41,11 +41,27 @@ pub use camerata_api_types::model_registry::{
 ///
 /// No list-models API exists for the Claude Code CLI, so this is data. Trivial to update
 /// when new models ship. Weights are relative subscription-quota cost: Haiku=1, Sonnet=3,
-/// Opus=10.
+/// Opus=10, Fable=15 (the priciest, most-capable tier — an option, never the default).
 pub const CLAUDE_REGISTRY_MODELS: &[RegistryEntryStatic] = &[
     RegistryEntryStatic {
-        display: "Opus 4.8",
-        id: "claude-opus-4-8",
+        display: "Fable 5",
+        id: "claude-fable-5",
+        context: 1_000_000,
+        weight: 15,
+        // Anthropic list price: $10 / $50 per million tokens (input / output). NOT
+        // live-verified against the Anthropic /v1/models API (no key in this
+        // environment) — corroborated instead via the owner's own CLI default
+        // (`~/.claude/settings.json`) and a live OpenRouter pull of
+        // `anthropic/claude-fable-5` on 2026-08-06. Same caveat as the opus-5/sonnet-5
+        // refresh. This is the priciest, most-capable tier — an OPTION, never the
+        // default (see `camerata_api_types::project::DEFAULT_MODEL`, which stays
+        // `claude-sonnet-5`).
+        price_in: 10.0,
+        price_out: 50.0,
+    },
+    RegistryEntryStatic {
+        display: "Opus 5",
+        id: "claude-opus-5",
         context: 200_000,
         weight: 10,
         // Anthropic list price: $5 / $25 per million tokens (input / output).
@@ -53,8 +69,8 @@ pub const CLAUDE_REGISTRY_MODELS: &[RegistryEntryStatic] = &[
         price_out: 25.0,
     },
     RegistryEntryStatic {
-        display: "Sonnet 4.6",
-        id: "claude-sonnet-4-6",
+        display: "Sonnet 5",
+        id: "claude-sonnet-5",
         context: 200_000,
         weight: 3,
         // Anthropic list price: $3 / $15 per million tokens (input / output).
@@ -91,7 +107,10 @@ pub fn caching_heuristic(provider: &str, id: &str) -> bool {
 
 /// Build the static Claude portion of the registry.
 pub fn claude_entries() -> Vec<RegistryEntry> {
-    CLAUDE_REGISTRY_MODELS.iter().map(|m| m.to_entry()).collect()
+    CLAUDE_REGISTRY_MODELS
+        .iter()
+        .map(|m| m.to_entry())
+        .collect()
 }
 
 // ── OpenRouter model shape (subset of the /api/v1/models response) ───────────
@@ -185,6 +204,7 @@ impl OpenRouterModelRaw {
             weight: 0,
             caching,
             vision,
+            price_known: true, // OpenRouter always reports a definitive price (0.0 = free, not unknown).
         }
     }
 }
@@ -197,8 +217,16 @@ impl OpenRouterModelRaw {
 fn coding_score(id: &str, name: &str, tool_use: bool) -> f32 {
     let haystack = format!("{} {}", id.to_lowercase(), name.to_lowercase());
     let coding_signals = [
-        "coder", "code", "codex", "starcoder", "deepseek-coder", "qwen-coder",
-        "coding", "devstral", "granite-code", "wizard-coder",
+        "coder",
+        "code",
+        "codex",
+        "starcoder",
+        "deepseek-coder",
+        "qwen-coder",
+        "coding",
+        "devstral",
+        "granite-code",
+        "wizard-coder",
     ];
     if coding_signals.iter().any(|&s| haystack.contains(s)) {
         return 1.0;
@@ -226,6 +254,13 @@ struct RegistryInner {
     /// Cached OpenRouter entries. `None` = not yet fetched. `Some([])` = fetched but
     /// either the key is absent or the API returned zero models.
     openrouter_cache: Option<Vec<RegistryEntry>>,
+    /// Cached, LIVE Anthropic `/v1/models` entries (Feature A). `None` = never fetched.
+    /// `Some([])` = a fetch was attempted but failed (bad key, network, non-200) or the
+    /// key was absent — see [`ModelRegistry::refresh_anthropic`]. Consumers MUST treat
+    /// `Some([])` the same as `None` for display purposes (fall back to the hardcoded
+    /// `CLAUDE_REGISTRY_MODELS` catalog, never show an empty Claude picker) — see
+    /// [`ModelRegistry::claude_entries_for_backend`], the only reader.
+    anthropic_cache: Option<Vec<RegistryEntry>>,
     /// Cached provider data-policy catalog (`/api/frontend/v1/all-providers`), keyed by
     /// provider slug. `None` = not yet fetched. Shared across all models — fetched once,
     /// lazily, on the first call that needs it.
@@ -305,12 +340,109 @@ impl ModelRegistry {
     /// (even on error — the cache is updated to `Some([])` on failure so the UI doesn't
     /// keep re-fetching automatically).
     pub async fn try_refresh_from_store(&self, creds: &dyn CredentialStore) -> bool {
-        let key = match creds.get(OPENROUTER_API_KEY) {
-            Ok(Some(k)) if !k.is_empty() => k,
-            _ => return false,
+        let Some(key) = crate::credentials::openrouter_api_key(creds) else {
+            return false;
         };
         self.refresh_openrouter(&key).await;
         true
+    }
+
+    // ── Live Anthropic `/v1/models` (Feature A) ─────────────────────────────────
+    //
+    // See `docs/design/2026-08-27_backend-safety-and-live-models.md`'s "Feature A" section.
+    // Mirrors the OpenRouter fetch/cache/refresh shape above exactly (same three refresh
+    // triggers: startup, credential-save, manual button — wired in `camerata-server`), with
+    // one behavioral difference driven by the Claude picker's "never empty" requirement:
+    // OpenRouter's `Some([])` is a valid, DISPLAYED state (zero OpenRouter models is a real
+    // thing to show); Anthropic's `Some([])` is a FAILURE state that must never be displayed
+    // — [`Self::claude_entries_for_backend`] is the only reader, and it always substitutes
+    // the hardcoded catalog when the live cache is `None` or `Some([])`.
+
+    /// Whether a live Anthropic `/v1/models` fetch has ever been attempted (success or
+    /// failure) in this process. Mirrors [`Self::openrouter_fetched`].
+    pub fn anthropic_fetched(&self) -> bool {
+        self.inner
+            .lock()
+            .map(|g| g.anthropic_cache.is_some())
+            .unwrap_or(false)
+    }
+
+    /// Fetch live Anthropic models using `api_key`, replace the cache, and return the new
+    /// entries. On ANY error (network, parse, auth/non-200), logs to stderr and caches (and
+    /// returns) an empty list — never panics, and never leaves the picker without a Claude
+    /// list because [`Self::claude_entries_for_backend`] treats an empty live cache as "fall
+    /// back to hardcoded". Idempotent: re-calling refreshes the cache.
+    pub async fn refresh_anthropic(&self, api_key: &str) -> Vec<RegistryEntry> {
+        let result = fetch_anthropic_models(api_key).await;
+        let entries = match result {
+            Ok(e) => e,
+            Err(err) => {
+                eprintln!("[model-registry] Anthropic /v1/models fetch failed: {err}");
+                Vec::new()
+            }
+        };
+        if let Ok(mut inner) = self.inner.lock() {
+            inner.anthropic_cache = Some(entries.clone());
+        }
+        entries
+    }
+
+    /// Directly seed the Anthropic cache with a set of entries — a TEST-ONLY seam, mirrors
+    /// [`Self::seed_openrouter_entries`]. `#[doc(hidden)]`, not `#[cfg(test)]` so integration
+    /// tests in `tests/` can use it without a live HTTP call.
+    #[doc(hidden)]
+    pub fn seed_anthropic_entries(&self, entries: Vec<RegistryEntry>) {
+        if let Ok(mut inner) = self.inner.lock() {
+            inner.anthropic_cache = Some(entries);
+        }
+    }
+
+    /// Attempt to refresh the Anthropic cache using the credential store. No-op (returns
+    /// `false`) when the key is not set; returns `true` when the fetch was attempted (even
+    /// on error). Mirrors [`Self::try_refresh_from_store`].
+    pub async fn try_refresh_anthropic_from_store(&self, creds: &dyn CredentialStore) -> bool {
+        // The one resolver (store first, `ANTHROPIC_API_KEY` env fallback), so the live model
+        // list is fetched with the same key every other call uses.
+        let Some(key) = crate::credentials::anthropic_api_key(creds) else {
+            return false;
+        };
+        self.refresh_anthropic(&key).await;
+        true
+    }
+
+    /// The Claude portion of the picker, backend-aware: the live Anthropic list when
+    /// `use_live_anthropic` is `true` AND a successful, non-empty fetch is cached; the
+    /// hardcoded [`CLAUDE_REGISTRY_MODELS`] catalog in every other case (CLI backend, no
+    /// key, never fetched, or the last fetch failed/returned zero models). This is the fail-
+    /// soft floor: the Claude picker is NEVER empty, regardless of Anthropic API health.
+    pub fn claude_entries_for_backend(&self, use_live_anthropic: bool) -> Vec<RegistryEntry> {
+        if use_live_anthropic {
+            if let Ok(inner) = self.inner.lock() {
+                if let Some(ref live) = inner.anthropic_cache {
+                    if !live.is_empty() {
+                        return live.clone();
+                    }
+                }
+            }
+        }
+        claude_entries()
+    }
+
+    /// The full registry the picker should render for the CURRENT backend: the
+    /// backend-aware Claude portion (see [`Self::claude_entries_for_backend`]) plus any
+    /// cached OpenRouter entries (unaffected by the Claude backend choice). This is the
+    /// ONLY entry point whose Claude portion varies by backend — [`Self::all_entries`]
+    /// (read by the subscription-quota cascade and driver cost lookups, which reason
+    /// about the hardcoded weight/CLI-quota model regardless of the API picker's live
+    /// state) is untouched and always returns the hardcoded catalog.
+    pub fn entries_for_backend(&self, use_live_anthropic: bool) -> Vec<RegistryEntry> {
+        let mut entries = self.claude_entries_for_backend(use_live_anthropic);
+        if let Ok(inner) = self.inner.lock() {
+            if let Some(ref or_entries) = inner.openrouter_cache {
+                entries.extend(or_entries.iter().cloned());
+            }
+        }
+        entries
     }
 
     // ── Provider-safety data (endpoints + data-policy join) ────────────────────
@@ -487,6 +619,164 @@ async fn fetch_openrouter_models(api_key: &str) -> anyhow::Result<Vec<RegistryEn
 
     let body: OpenRouterModelsResp = resp.json().await?;
     let entries: Vec<RegistryEntry> = body.data.iter().map(|m| m.to_entry()).collect();
+    Ok(entries)
+}
+
+// ── Live Anthropic `/v1/models` (Feature A) ──────────────────────────────────
+//
+// `GET https://api.anthropic.com/v1/models` — Anthropic's own model-listing endpoint,
+// authenticated with the SAME `x-api-key` header (+ `anthropic-version`) every other
+// Anthropic API call in this codebase uses. Returns `data[].{id, display_name,
+// created_at}` — id and display name, but deliberately NOT pricing (Anthropic's pricing
+// lives on their pricing page, not this endpoint). See the module doc and the design
+// doc's Feature A section for why: this lets the picker show exactly the models an
+// account/org is actually served (e.g. whether `claude-fable-5` has rolled out to it)
+// without Camerata hand-maintaining an id list, while pricing still comes from the
+// hardcoded [`CLAUDE_REGISTRY_MODELS`] table via [`price_join_for_claude_id`].
+
+const ANTHROPIC_MODELS_URL: &str = "https://api.anthropic.com/v1/models";
+
+/// Anthropic API version header. Pinned (not "latest") so a future breaking API version
+/// bump doesn't silently change this endpoint's shape out from under us — mirrors every
+/// other Anthropic API call site's version pin in `crate::llm`.
+const ANTHROPIC_API_VERSION: &str = "2023-06-01";
+
+/// Hard cap on pagination pages for `/v1/models`. Anthropic paginates via `has_more` +
+/// `last_id`; this bounds a misbehaving or malicious response (`has_more: true` forever)
+/// to a finite number of requests rather than looping indefinitely. Comfortably above any
+/// real catalog size (Anthropic ships a handful of active model ids at a time).
+const ANTHROPIC_MODELS_MAX_PAGES: usize = 20;
+
+#[derive(Debug, Deserialize)]
+struct AnthropicModelsResp {
+    #[serde(default)]
+    data: Vec<AnthropicModelRaw>,
+    /// Whether another page follows. Missing/absent is treated as `false` (no more pages)
+    /// — the safe default when the field is omitted, rather than looping forever.
+    #[serde(default)]
+    has_more: bool,
+    /// The id to pass as `after_id` to fetch the next page. `None` even when `has_more` is
+    /// `true` is treated as malformed and stops pagination rather than looping — see
+    /// [`fetch_anthropic_models`].
+    #[serde(default)]
+    last_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AnthropicModelRaw {
+    id: String,
+    /// Human-readable name. Falls back to `id` when absent (defensive; Anthropic's
+    /// documented response always includes it, but the picker must never show a blank
+    /// label on a malformed/older response).
+    #[serde(default)]
+    display_name: Option<String>,
+    /// ISO-8601 creation timestamp. Carried for potential future "newest first" sorting;
+    /// not consumed by Pass-1 (Feature A) logic today.
+    #[serde(default)]
+    #[allow(dead_code)]
+    created_at: Option<String>,
+}
+
+/// Look up `id` in the hardcoded Claude price table. `None` when the live-fetched id
+/// isn't in the static catalog (e.g. a brand-new model Anthropic just enabled for this
+/// account, ahead of Camerata's own hardcoded-list update) — the caller marks the price
+/// unknown rather than guessing or defaulting to `0.0`-as-if-free.
+fn price_join_for_claude_id(id: &str) -> Option<&'static RegistryEntryStatic> {
+    CLAUDE_REGISTRY_MODELS.iter().find(|m| m.id == id)
+}
+
+impl AnthropicModelRaw {
+    /// Convert to a [`RegistryEntry`], joining pricing (+ context/weight, which `/v1/models`
+    /// also doesn't return) from the hardcoded catalog by id. Context/weight fall back to
+    /// `0` for an id absent from the catalog — same "don't guess" posture as price: `0`
+    /// context simply omits the context-window badge in the picker (see
+    /// `crates/ui/src/cockpit/scan.rs`'s `model_badge_label`), rather than showing a wrong
+    /// number. All Claude models are assumed tool-use + caching + vision capable, matching
+    /// [`RegistryEntryStatic::to_entry`]'s identical assumption for the whole family.
+    fn to_entry(&self) -> RegistryEntry {
+        let display = self.display_name.clone().unwrap_or_else(|| self.id.clone());
+        match price_join_for_claude_id(&self.id) {
+            Some(static_entry) => RegistryEntry {
+                provider: "claude".to_string(),
+                display,
+                id: self.id.clone(),
+                free: false,
+                tool_use: true,
+                context: static_entry.context,
+                coding: 1.0,
+                price_in: static_entry.price_in,
+                price_out: static_entry.price_out,
+                weight: static_entry.weight,
+                caching: true,
+                vision: true,
+                price_known: true,
+            },
+            None => RegistryEntry {
+                provider: "claude".to_string(),
+                display,
+                id: self.id.clone(),
+                free: false,
+                tool_use: true,
+                context: 0,
+                coding: 1.0,
+                price_in: 0.0,
+                price_out: 0.0,
+                weight: 0,
+                caching: true,
+                vision: true,
+                price_known: false,
+            },
+        }
+    }
+}
+
+/// Fetch and parse Anthropic's `GET /v1/models`, following `has_more`/`last_id`
+/// pagination up to [`ANTHROPIC_MODELS_MAX_PAGES`] pages. Uses the shared, timeout-bounded
+/// `reqwest::Client` from `crate::llm` (never an unbounded ad-hoc client — a stalled
+/// connection to Anthropic must not hang the registry refresh forever).
+async fn fetch_anthropic_models(api_key: &str) -> anyhow::Result<Vec<RegistryEntry>> {
+    fetch_anthropic_models_from(ANTHROPIC_MODELS_URL, api_key).await
+}
+
+/// [`fetch_anthropic_models`] against an explicit endpoint URL. The split exists so the
+/// pagination loop can be exercised against a local mock server; production always passes
+/// [`ANTHROPIC_MODELS_URL`].
+async fn fetch_anthropic_models_from(
+    models_url: &str,
+    api_key: &str,
+) -> anyhow::Result<Vec<RegistryEntry>> {
+    let client = crate::llm::shared_http_client();
+    let mut entries = Vec::new();
+    let mut after_id: Option<String> = None;
+
+    for _ in 0..ANTHROPIC_MODELS_MAX_PAGES {
+        let mut req = client
+            .get(models_url)
+            .header("x-api-key", api_key)
+            .header("anthropic-version", ANTHROPIC_API_VERSION);
+        if let Some(ref id) = after_id {
+            req = req.query(&[("after_id", id.as_str())]);
+        }
+
+        let resp = req.send().await?;
+        if !resp.status().is_success() {
+            anyhow::bail!("Anthropic /v1/models returned {}", resp.status());
+        }
+
+        let body: AnthropicModelsResp = resp.json().await?;
+        entries.extend(body.data.iter().map(|m| m.to_entry()));
+
+        if !body.has_more {
+            break;
+        }
+        match body.last_id {
+            Some(id) => after_id = Some(id),
+            // `has_more: true` with no `last_id` is malformed — stop rather than looping
+            // on the same page forever (we'd re-request the exact same first page).
+            None => break,
+        }
+    }
+
     Ok(entries)
 }
 
@@ -728,7 +1018,9 @@ async fn fetch_model_endpoints(
 ) -> anyhow::Result<Vec<OpenRouterEndpointRaw>> {
     let client = reqwest::Client::new();
     let mut req = client
-        .get(format!("https://openrouter.ai/api/v1/models/{model_id}/endpoints"))
+        .get(format!(
+            "https://openrouter.ai/api/v1/models/{model_id}/endpoints"
+        ))
         .header("HTTP-Referer", "https://camerata.ai")
         .header("X-Title", "Camerata");
     if let Some(key) = api_key {
@@ -756,18 +1048,22 @@ mod tests {
     // ── Claude static catalog ─────────────────────────────────────────────────
 
     #[test]
-    fn claude_entries_has_all_three_tiers() {
+    fn claude_entries_has_all_four_tiers() {
         let entries = claude_entries();
-        assert_eq!(entries.len(), 3, "expect exactly 3 Claude tiers");
-        assert!(entries.iter().any(|e| e.id == "claude-opus-4-8"));
-        assert!(entries.iter().any(|e| e.id == "claude-sonnet-4-6"));
+        assert_eq!(entries.len(), 4, "expect exactly 4 Claude tiers");
+        assert!(entries.iter().any(|e| e.id == "claude-fable-5"));
+        assert!(entries.iter().any(|e| e.id == "claude-opus-5"));
+        assert!(entries.iter().any(|e| e.id == "claude-sonnet-5"));
         assert!(entries.iter().any(|e| e.id == "claude-haiku-4-5-20251001"));
     }
 
     #[test]
     fn claude_entries_all_have_provider_claude() {
         for e in claude_entries() {
-            assert_eq!(e.provider, "claude", "Claude entries must carry provider='claude'");
+            assert_eq!(
+                e.provider, "claude",
+                "Claude entries must carry provider='claude'"
+            );
         }
     }
 
@@ -781,16 +1077,30 @@ mod tests {
     #[test]
     fn claude_entries_are_never_free() {
         for e in claude_entries() {
-            assert!(!e.free, "{} must not be marked free (subscription path)", e.id);
+            assert!(
+                !e.free,
+                "{} must not be marked free (subscription path)",
+                e.id
+            );
         }
     }
 
     #[test]
-    fn claude_opus_has_highest_weight() {
+    fn claude_fable_has_highest_weight() {
         let entries = claude_entries();
-        let opus = entries.iter().find(|e| e.id == "claude-opus-4-8").unwrap();
-        let sonnet = entries.iter().find(|e| e.id == "claude-sonnet-4-6").unwrap();
-        let haiku = entries.iter().find(|e| e.id == "claude-haiku-4-5-20251001").unwrap();
+        let fable = entries.iter().find(|e| e.id == "claude-fable-5").unwrap();
+        let opus = entries.iter().find(|e| e.id == "claude-opus-5").unwrap();
+        let sonnet = entries.iter().find(|e| e.id == "claude-sonnet-5").unwrap();
+        let haiku = entries
+            .iter()
+            .find(|e| e.id == "claude-haiku-4-5-20251001")
+            .unwrap();
+        assert!(
+            fable.weight > opus.weight,
+            "Fable weight must exceed Opus (got {} vs {})",
+            fable.weight,
+            opus.weight
+        );
         assert!(
             opus.weight > sonnet.weight,
             "Opus weight must exceed Sonnet (got {} vs {})",
@@ -809,8 +1119,8 @@ mod tests {
     fn claude_entries_ids_match_fleet_tier_defaults() {
         // These must stay in sync with fleet/src/tier.rs default_*_model().
         let entries = claude_entries();
-        assert!(entries.iter().any(|e| e.id == "claude-opus-4-8"));
-        assert!(entries.iter().any(|e| e.id == "claude-sonnet-4-6"));
+        assert!(entries.iter().any(|e| e.id == "claude-opus-5"));
+        assert!(entries.iter().any(|e| e.id == "claude-sonnet-5"));
         assert!(entries.iter().any(|e| e.id == "claude-haiku-4-5-20251001"));
     }
 
@@ -822,17 +1132,43 @@ mod tests {
     // tests together.
 
     #[test]
+    fn claude_fable_carries_list_price_10_50() {
+        let entries = claude_entries();
+        let fable = entries.iter().find(|e| e.id == "claude-fable-5").unwrap();
+        assert!(
+            (fable.price_in - 10.0).abs() < f64::EPSILON,
+            "Fable 5 price_in must be $10/M, got {}",
+            fable.price_in
+        );
+        assert!(
+            (fable.price_out - 50.0).abs() < f64::EPSILON,
+            "Fable 5 price_out must be $50/M, got {}",
+            fable.price_out
+        );
+    }
+
+    #[test]
+    fn claude_fable_has_1m_context() {
+        let entries = claude_entries();
+        let fable = entries.iter().find(|e| e.id == "claude-fable-5").unwrap();
+        assert_eq!(
+            fable.context, 1_000_000,
+            "Fable 5 must carry a 1M-token context window"
+        );
+    }
+
+    #[test]
     fn claude_opus_carries_list_price_5_25() {
         let entries = claude_entries();
-        let opus = entries.iter().find(|e| e.id == "claude-opus-4-8").unwrap();
+        let opus = entries.iter().find(|e| e.id == "claude-opus-5").unwrap();
         assert!(
             (opus.price_in - 5.0).abs() < f64::EPSILON,
-            "Opus 4.8 price_in must be $5/M, got {}",
+            "Opus 5 price_in must be $5/M, got {}",
             opus.price_in
         );
         assert!(
             (opus.price_out - 25.0).abs() < f64::EPSILON,
-            "Opus 4.8 price_out must be $25/M, got {}",
+            "Opus 5 price_out must be $25/M, got {}",
             opus.price_out
         );
     }
@@ -840,15 +1176,15 @@ mod tests {
     #[test]
     fn claude_sonnet_carries_list_price_3_15() {
         let entries = claude_entries();
-        let sonnet = entries.iter().find(|e| e.id == "claude-sonnet-4-6").unwrap();
+        let sonnet = entries.iter().find(|e| e.id == "claude-sonnet-5").unwrap();
         assert!(
             (sonnet.price_in - 3.0).abs() < f64::EPSILON,
-            "Sonnet 4.6 price_in must be $3/M, got {}",
+            "Sonnet 5 price_in must be $3/M, got {}",
             sonnet.price_in
         );
         assert!(
             (sonnet.price_out - 15.0).abs() < f64::EPSILON,
-            "Sonnet 4.6 price_out must be $15/M, got {}",
+            "Sonnet 5 price_out must be $15/M, got {}",
             sonnet.price_out
         );
     }
@@ -923,7 +1259,10 @@ mod tests {
         let raw = OpenRouterModelRaw {
             id: "qwen/qwen3-coder:free".to_string(),
             name: "Qwen3 235B Coder (free)".to_string(),
-            pricing: OpenRouterPricing { prompt: 0.0, completion: 0.0 },
+            pricing: OpenRouterPricing {
+                prompt: 0.0,
+                completion: 0.0,
+            },
             context_length: 32_768,
             supported_parameters: vec!["tools".to_string()],
             architecture: OpenRouterArchitecture::default(),
@@ -943,7 +1282,10 @@ mod tests {
             id: "openai/gpt-4o".to_string(),
             name: "GPT-4o".to_string(),
             // $0.000005 per token = $5 per million tokens input
-            pricing: OpenRouterPricing { prompt: 0.000005, completion: 0.000015 },
+            pricing: OpenRouterPricing {
+                prompt: 0.000005,
+                completion: 0.000015,
+            },
             context_length: 128_000,
             supported_parameters: vec!["tools".to_string()],
             architecture: OpenRouterArchitecture::default(),
@@ -980,14 +1322,23 @@ mod tests {
         let creds = crate::credentials::MemoryCredentialStore::new();
         // No key ever set on this store — mirrors a fresh install / no OpenRouter key saved.
         let attempted = reg.try_refresh_from_store(&creds).await;
-        assert!(!attempted, "no key configured: must no-op, not attempt a live call");
+        assert!(
+            !attempted,
+            "no key configured: must no-op, not attempt a live call"
+        );
         assert!(
             !reg.openrouter_fetched(),
             "cache must stay unpopulated (None), not Some([]) — that's the fetch-attempted state"
         );
         let all = reg.all_entries();
-        assert!(all.iter().any(|e| e.provider == "claude"), "Claude entries unaffected");
-        assert!(!all.iter().any(|e| e.provider == "openrouter"), "no OpenRouter entries appear");
+        assert!(
+            all.iter().any(|e| e.provider == "claude"),
+            "Claude entries unaffected"
+        );
+        assert!(
+            !all.iter().any(|e| e.provider == "openrouter"),
+            "no OpenRouter entries appear"
+        );
     }
 
     #[tokio::test]
@@ -1025,6 +1376,7 @@ mod tests {
             weight: 0,
             caching: false,
             vision: false,
+            price_known: true,
         };
         {
             let mut inner = reg.inner.lock().unwrap();
@@ -1068,8 +1420,9 @@ mod tests {
     #[test]
     fn caching_heuristic_claude_provider_always_true() {
         // All claude-provider models are caching-capable (the subscription/CLI path).
-        assert!(caching_heuristic("claude", "claude-opus-4-8"));
-        assert!(caching_heuristic("claude", "claude-sonnet-4-6"));
+        assert!(caching_heuristic("claude", "claude-fable-5"));
+        assert!(caching_heuristic("claude", "claude-opus-5"));
+        assert!(caching_heuristic("claude", "claude-sonnet-5"));
         assert!(caching_heuristic("claude", "claude-haiku-4-5-20251001"));
     }
 
@@ -1081,18 +1434,27 @@ mod tests {
 
     #[test]
     fn caching_heuristic_gemini_openrouter_true() {
-        assert!(caching_heuristic("openrouter", "google/gemini-2.0-flash-001"));
+        assert!(caching_heuristic(
+            "openrouter",
+            "google/gemini-2.0-flash-001"
+        ));
         assert!(caching_heuristic("openrouter", "google/gemini-pro"));
     }
 
     #[test]
     fn caching_heuristic_anthropic_openrouter_true() {
-        assert!(caching_heuristic("openrouter", "anthropic/claude-3-5-sonnet"));
+        assert!(caching_heuristic(
+            "openrouter",
+            "anthropic/claude-3-5-sonnet"
+        ));
     }
 
     #[test]
     fn caching_heuristic_random_openrouter_model_false() {
-        assert!(!caching_heuristic("openrouter", "meta-llama/llama-3.1-8b-instruct"));
+        assert!(!caching_heuristic(
+            "openrouter",
+            "meta-llama/llama-3.1-8b-instruct"
+        ));
         assert!(!caching_heuristic("openrouter", "openai/gpt-4o"));
         assert!(!caching_heuristic("openrouter", "qwen/qwen3-235b-a22b"));
     }
@@ -1108,7 +1470,7 @@ mod tests {
 
     #[test]
     fn claude_4x_entries_all_have_vision_true() {
-        // All three Claude 4.x models in the static catalog are multimodal.
+        // All four Claude models in the static catalog are multimodal.
         for e in claude_entries() {
             assert!(
                 e.vision,
@@ -1125,7 +1487,10 @@ mod tests {
         let raw = OpenRouterModelRaw {
             id: "minimax/minimax-01".to_string(),
             name: "MiniMax-01".to_string(),
-            pricing: OpenRouterPricing { prompt: 0.0, completion: 0.0 },
+            pricing: OpenRouterPricing {
+                prompt: 0.0,
+                completion: 0.0,
+            },
             context_length: 1_000_000,
             supported_parameters: vec!["tools".to_string()],
             architecture: OpenRouterArchitecture {
@@ -1145,7 +1510,10 @@ mod tests {
         let raw = OpenRouterModelRaw {
             id: "qwen/qwen3-235b:free".to_string(),
             name: "Qwen3 235B (free)".to_string(),
-            pricing: OpenRouterPricing { prompt: 0.0, completion: 0.0 },
+            pricing: OpenRouterPricing {
+                prompt: 0.0,
+                completion: 0.0,
+            },
             context_length: 32_768,
             supported_parameters: vec!["tools".to_string()],
             architecture: OpenRouterArchitecture {
@@ -1166,7 +1534,10 @@ mod tests {
         let raw = OpenRouterModelRaw {
             id: "some/text-model".to_string(),
             name: "Text Model".to_string(),
-            pricing: OpenRouterPricing { prompt: 0.0, completion: 0.0 },
+            pricing: OpenRouterPricing {
+                prompt: 0.0,
+                completion: 0.0,
+            },
             context_length: 8_192,
             supported_parameters: vec![],
             architecture: OpenRouterArchitecture::default(),
@@ -1294,7 +1665,10 @@ mod tests {
     fn provider_slug_from_tag_splits_on_first_slash() {
         assert_eq!(provider_slug_from_tag("deepinfra/fp4"), "deepinfra");
         assert_eq!(provider_slug_from_tag("streamlake"), "streamlake");
-        assert_eq!(provider_slug_from_tag("google-vertex/us-south1"), "google-vertex");
+        assert_eq!(
+            provider_slug_from_tag("google-vertex/us-south1"),
+            "google-vertex"
+        );
     }
 
     #[test]
@@ -1317,7 +1691,10 @@ mod tests {
         endpoints.push(OpenRouterEndpointRaw {
             provider_name: "DeepSeek".to_string(),
             tag: Some("deepseek".to_string()),
-            pricing: OpenRouterPricing { prompt: 0.0000002, completion: 0.0000008 },
+            pricing: OpenRouterPricing {
+                prompt: 0.0000002,
+                completion: 0.0000008,
+            },
         });
         let policies = sample_policies();
         let joined = join_endpoints_with_policy(&endpoints, &policies);
@@ -1338,7 +1715,10 @@ mod tests {
         let endpoints = sample_endpoints();
         let policies = sample_policies();
         let joined = join_endpoints_with_policy(&endpoints, &policies);
-        let streamlake = joined.iter().find(|e| e.provider_slug == "streamlake").unwrap();
+        let streamlake = joined
+            .iter()
+            .find(|e| e.provider_slug == "streamlake")
+            .unwrap();
         assert!(streamlake.retains_prompts);
         assert!(!streamlake.training);
         assert!(!streamlake.is_safe());
@@ -1482,5 +1862,385 @@ mod tests {
             result,
             SafeProviders::Known(vec!["deepinfra".to_string(), "novita".to_string()])
         );
+    }
+
+    // ── Feature A: live Anthropic `/v1/models` ──────────────────────────────────
+    // See docs/design/2026-08-27_backend-safety-and-live-models.md.
+
+    /// A trimmed, single-page `/v1/models` response shape, matching Anthropic's
+    /// documented `data[].{id,display_name,created_at}` fields plus the top-level
+    /// `has_more`/`last_id` pagination envelope.
+    const SAMPLE_ANTHROPIC_MODELS_PAGE_1: &str = r#"{
+        "data": [
+            {"id": "claude-sonnet-5", "display_name": "Claude Sonnet 5", "created_at": "2026-01-01T00:00:00Z"},
+            {"id": "claude-fable-5", "display_name": "Claude Fable 5", "created_at": "2026-06-01T00:00:00Z"}
+        ],
+        "has_more": true,
+        "last_id": "claude-fable-5"
+    }"#;
+
+    const SAMPLE_ANTHROPIC_MODELS_PAGE_2: &str = r#"{
+        "data": [
+            {"id": "claude-brand-new-model", "display_name": "Claude Brand New", "created_at": "2026-08-20T00:00:00Z"}
+        ],
+        "has_more": false
+    }"#;
+
+    /// `fetch_anthropic_models_from` follows `has_more`/`last_id` across pages: page 2 is
+    /// requested with `after_id` = page 1's `last_id`, and the entries of BOTH pages come back
+    /// in order. (This is the consumer of `SAMPLE_ANTHROPIC_MODELS_PAGE_2`.)
+    #[tokio::test]
+    async fn fetch_anthropic_models_follows_pagination_across_pages() {
+        use wiremock::matchers::{header, method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        // Page 2 only matches when `after_id` is present; higher priority (lower number) so it
+        // wins over the catch-all page-1 mock for that request.
+        Mock::given(method("GET"))
+            .and(path("/v1/models"))
+            .and(query_param("after_id", "claude-fable-5"))
+            .and(header("x-api-key", "sk-test"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_raw(SAMPLE_ANTHROPIC_MODELS_PAGE_2, "application/json"),
+            )
+            .with_priority(1)
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v1/models"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_raw(SAMPLE_ANTHROPIC_MODELS_PAGE_1, "application/json"),
+            )
+            .with_priority(5)
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let url = format!("{}/v1/models", server.uri());
+        let entries = fetch_anthropic_models_from(&url, "sk-test")
+            .await
+            .expect("both pages fetch");
+        let ids: Vec<&str> = entries.iter().map(|e| e.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec![
+                "claude-sonnet-5",
+                "claude-fable-5",
+                "claude-brand-new-model"
+            ],
+            "entries of page 1 then page 2, in order"
+        );
+        let brand_new = entries.last().expect("page 2 entry");
+        assert!(
+            !brand_new.price_known,
+            "an id absent from the static catalog is marked price-unknown, not free"
+        );
+    }
+
+    /// `has_more: true` with no `last_id` is malformed: pagination must stop after the one
+    /// page rather than re-requesting the same first page until the page cap.
+    #[tokio::test]
+    async fn fetch_anthropic_models_stops_when_has_more_lacks_last_id() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/models"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                r#"{"data": [{"id": "claude-sonnet-5", "display_name": "Claude Sonnet 5"}], "has_more": true}"#,
+                "application/json",
+            ))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let url = format!("{}/v1/models", server.uri());
+        let entries = fetch_anthropic_models_from(&url, "sk-test")
+            .await
+            .expect("one page fetched");
+        assert_eq!(entries.len(), 1);
+    }
+
+    /// A non-2xx response is an error (the caller keeps the static catalog), not an empty list.
+    #[tokio::test]
+    async fn fetch_anthropic_models_errors_on_non_success_status() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(401))
+            .mount(&server)
+            .await;
+
+        let url = format!("{}/v1/models", server.uri());
+        let err = fetch_anthropic_models_from(&url, "bad-key")
+            .await
+            .expect_err("401 must surface as an error");
+        assert!(err.to_string().contains("401"), "error was: {err}");
+    }
+
+    #[test]
+    fn anthropic_models_response_parses_known_shape() {
+        let resp: AnthropicModelsResp =
+            serde_json::from_str(SAMPLE_ANTHROPIC_MODELS_PAGE_1).unwrap();
+        assert_eq!(resp.data.len(), 2);
+        assert_eq!(resp.data[0].id, "claude-sonnet-5");
+        assert_eq!(
+            resp.data[0].display_name.as_deref(),
+            Some("Claude Sonnet 5")
+        );
+        assert!(resp.has_more);
+        assert_eq!(resp.last_id.as_deref(), Some("claude-fable-5"));
+    }
+
+    #[test]
+    fn anthropic_model_missing_display_name_falls_back_to_id() {
+        let json = r#"{"id": "claude-mystery-model"}"#;
+        let raw: AnthropicModelRaw = serde_json::from_str(json).unwrap();
+        let entry = raw.to_entry();
+        assert_eq!(
+            entry.display, "claude-mystery-model",
+            "no display_name -> falls back to id"
+        );
+    }
+
+    #[test]
+    fn anthropic_models_response_missing_has_more_defaults_to_false() {
+        // A response omitting `has_more` entirely must not be treated as "more pages
+        // follow" (which would send a spurious extra request or, worse, loop).
+        let json = r#"{"data": [{"id": "claude-sonnet-5", "display_name": "Claude Sonnet 5"}]}"#;
+        let resp: AnthropicModelsResp = serde_json::from_str(json).unwrap();
+        assert!(!resp.has_more);
+        assert_eq!(resp.last_id, None);
+    }
+
+    // ── Price join ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn known_claude_id_joins_price_context_weight_from_static_catalog() {
+        let raw: AnthropicModelRaw =
+            serde_json::from_str(r#"{"id": "claude-opus-5", "display_name": "Claude Opus 5"}"#)
+                .unwrap();
+        let entry = raw.to_entry();
+        assert_eq!(entry.provider, "claude");
+        assert!(
+            entry.price_known,
+            "opus-5 is in the static catalog: price must be known"
+        );
+        assert_eq!(entry.price_in, 5.0);
+        assert_eq!(entry.price_out, 25.0);
+        assert_eq!(entry.context, 200_000);
+        assert_eq!(entry.weight, 10);
+        assert!(entry.tool_use);
+        assert!(entry.caching);
+        assert!(entry.vision);
+        assert!(!entry.free);
+    }
+
+    #[test]
+    fn unknown_claude_id_marks_price_unknown_not_zero_as_free() {
+        // A model Anthropic serves this account that isn't in Camerata's hardcoded catalog
+        // yet (e.g. brand new, ahead of a Camerata update) must be selectable but marked
+        // price_known=false — never silently priced at $0 as if it were free.
+        let raw: AnthropicModelRaw = serde_json::from_str(
+            r#"{"id": "claude-brand-new-model", "display_name": "Claude Brand New"}"#,
+        )
+        .unwrap();
+        let entry = raw.to_entry();
+        assert_eq!(entry.id, "claude-brand-new-model");
+        assert!(
+            !entry.price_known,
+            "id absent from the static catalog: price must be UNKNOWN"
+        );
+        assert_eq!(entry.price_in, 0.0);
+        assert_eq!(entry.price_out, 0.0);
+        assert!(
+            !entry.free,
+            "unknown price is NOT the same as free — must stay false"
+        );
+        // Still fully selectable: tool-use/caching/vision assumptions hold for the whole
+        // Claude family regardless of catalog presence.
+        assert!(entry.tool_use);
+        assert!(entry.caching);
+        assert!(entry.vision);
+    }
+
+    #[test]
+    fn price_join_for_claude_id_finds_all_four_static_tiers() {
+        for id in [
+            "claude-fable-5",
+            "claude-opus-5",
+            "claude-sonnet-5",
+            "claude-haiku-4-5-20251001",
+        ] {
+            assert!(
+                price_join_for_claude_id(id).is_some(),
+                "{id} must resolve against the static catalog"
+            );
+        }
+        assert!(price_join_for_claude_id("totally-unknown-id").is_none());
+    }
+
+    // ── ModelRegistry: Anthropic cache + backend-aware selection ────────────────
+
+    #[test]
+    fn anthropic_not_fetched_before_any_refresh() {
+        let reg = ModelRegistry::new();
+        assert!(!reg.anthropic_fetched());
+    }
+
+    #[test]
+    fn seeding_anthropic_entries_marks_fetched() {
+        let reg = ModelRegistry::new();
+        reg.seed_anthropic_entries(vec![live_claude_entry(
+            "claude-sonnet-5",
+            "Claude Sonnet 5",
+        )]);
+        assert!(reg.anthropic_fetched());
+    }
+
+    /// The core Feature-A selection contract: CLI backend (or API with
+    /// `use_live_anthropic=false`) ALWAYS gets the hardcoded catalog, regardless of what's
+    /// cached — the live list must never leak into a context that didn't ask for it.
+    #[test]
+    fn cli_backend_always_uses_hardcoded_catalog_even_with_live_cache_present() {
+        let reg = ModelRegistry::new();
+        reg.seed_anthropic_entries(vec![live_claude_entry("claude-sonnet-5", "Live Sonnet")]);
+        let entries = reg.claude_entries_for_backend(false);
+        assert_eq!(
+            entries,
+            claude_entries(),
+            "CLI/non-live path must equal the hardcoded catalog exactly"
+        );
+        assert!(!entries.iter().any(|e| e.display == "Live Sonnet"));
+    }
+
+    /// API backend with a successful, non-empty live fetch: the picker must serve the LIVE
+    /// list, not the hardcoded one — this is the whole point of Feature A (a model the
+    /// hardcoded list doesn't know about yet, e.g. `claude-fable-5` availability, must
+    /// still show up).
+    #[test]
+    fn api_backend_with_live_cache_uses_live_list() {
+        let reg = ModelRegistry::new();
+        reg.seed_anthropic_entries(vec![
+            live_claude_entry("claude-sonnet-5", "Live Sonnet"),
+            live_claude_entry("claude-brand-new-model", "Brand New"),
+        ]);
+        let entries = reg.claude_entries_for_backend(true);
+        assert_eq!(entries.len(), 2);
+        assert!(entries.iter().any(|e| e.id == "claude-brand-new-model"));
+        assert!(
+            !entries.iter().any(|e| e.id == "claude-opus-5"),
+            "the live list, not a union with the hardcoded catalog, is what's shown"
+        );
+    }
+
+    /// Fail-soft floor: API backend requested, but the live fetch was never attempted (no
+    /// key, fresh install) — must fall back to the hardcoded catalog, not an empty list.
+    #[test]
+    fn api_backend_with_no_live_cache_falls_back_to_hardcoded() {
+        let reg = ModelRegistry::new();
+        let entries = reg.claude_entries_for_backend(true);
+        assert_eq!(entries, claude_entries());
+    }
+
+    /// Fail-soft floor: API backend requested, a fetch WAS attempted but failed (bad key /
+    /// network error), leaving the cache at `Some([])` — must still fall back to the
+    /// hardcoded catalog, not show an empty Claude picker.
+    #[test]
+    fn api_backend_with_failed_live_fetch_falls_back_to_hardcoded() {
+        let reg = ModelRegistry::new();
+        reg.seed_anthropic_entries(vec![]); // simulates a fetch that failed or returned zero
+        assert!(
+            reg.anthropic_fetched(),
+            "a failed fetch still marks fetched=true"
+        );
+        let entries = reg.claude_entries_for_backend(true);
+        assert_eq!(
+            entries,
+            claude_entries(),
+            "empty live cache must fall back to hardcoded, never render empty"
+        );
+    }
+
+    /// `entries_for_backend` combines the backend-aware Claude portion with the (backend-
+    /// independent) cached OpenRouter portion, exactly like `all_entries` does for the
+    /// hardcoded-only path.
+    #[test]
+    fn entries_for_backend_includes_openrouter_alongside_live_claude() {
+        let reg = ModelRegistry::new();
+        reg.seed_anthropic_entries(vec![live_claude_entry("claude-sonnet-5", "Live Sonnet")]);
+        reg.seed_openrouter_entries(vec![RegistryEntry {
+            provider: "openrouter".to_string(),
+            display: "Qwen3 Coder (free)".to_string(),
+            id: "qwen/qwen3-coder:free".to_string(),
+            free: true,
+            tool_use: true,
+            context: 32_768,
+            coding: 1.0,
+            price_in: 0.0,
+            price_out: 0.0,
+            weight: 0,
+            caching: false,
+            vision: false,
+            price_known: true,
+        }]);
+        let entries = reg.entries_for_backend(true);
+        assert_eq!(entries.len(), 2);
+        assert!(entries
+            .iter()
+            .any(|e| e.provider == "claude" && e.display == "Live Sonnet"));
+        assert!(entries.iter().any(|e| e.provider == "openrouter"));
+    }
+
+    /// `all_entries()` (used by the subscription-quota cascade and driver cost lookups —
+    /// Feature-B-adjacent call sites explicitly out of scope for this change) must stay on
+    /// the hardcoded catalog even after a live Anthropic cache is populated — only
+    /// `entries_for_backend`/`claude_entries_for_backend` vary by backend.
+    #[test]
+    fn all_entries_unaffected_by_live_anthropic_cache() {
+        let reg = ModelRegistry::new();
+        reg.seed_anthropic_entries(vec![live_claude_entry(
+            "claude-brand-new-model",
+            "Brand New",
+        )]);
+        let entries = reg.all_entries();
+        assert!(
+            !entries.iter().any(|e| e.id == "claude-brand-new-model"),
+            "all_entries must not pick up the live cache"
+        );
+        assert_eq!(
+            entries.iter().filter(|e| e.provider == "claude").count(),
+            claude_entries().len(),
+            "all_entries' Claude portion stays exactly the hardcoded catalog"
+        );
+    }
+
+    /// Test helper: a minimal live-fetched-shaped Claude entry (as `AnthropicModelRaw::
+    /// to_entry` would produce for an id NOT in the static catalog — price/context/weight
+    /// zeroed, price_known=false), used to distinguish "this came from the live cache" from
+    /// "this came from claude_entries()" in the assertions above via its display string.
+    fn live_claude_entry(id: &str, display: &str) -> RegistryEntry {
+        RegistryEntry {
+            provider: "claude".to_string(),
+            display: display.to_string(),
+            id: id.to_string(),
+            free: false,
+            tool_use: true,
+            context: 0,
+            coding: 1.0,
+            price_in: 0.0,
+            price_out: 0.0,
+            weight: 0,
+            caching: true,
+            vision: true,
+            price_known: false,
+        }
     }
 }

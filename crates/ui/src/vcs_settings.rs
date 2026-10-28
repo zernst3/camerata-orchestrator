@@ -76,10 +76,13 @@ struct ConventionalCommitConfigView {
 }
 
 fn default_cc_types() -> Vec<String> {
-    ["feat", "fix", "chore", "docs", "refactor", "test", "perf", "build", "ci", "style", "revert"]
-        .iter()
-        .map(|s| s.to_string())
-        .collect()
+    [
+        "feat", "fix", "chore", "docs", "refactor", "test", "perf", "build", "ci", "style",
+        "revert",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect()
 }
 
 impl Default for ConventionalCommitConfigView {
@@ -251,10 +254,7 @@ async fn fetch_process_rule_config(project_id: &str) -> Option<ProcessRuleConfig
     serde_json::from_value(v.get("process_rule_config")?.clone()).ok()
 }
 
-async fn save_process_rule_config(
-    project_id: &str,
-    config: &ProcessRuleConfigView,
-) -> bool {
+async fn save_process_rule_config(project_id: &str, config: &ProcessRuleConfigView) -> bool {
     reqwest::Client::new()
         .post(format!(
             "{}/api/projects/{}/process-rule-config",
@@ -382,9 +382,17 @@ pub fn VcsGateSettings(project_id: String) -> Element {
                 let ok = save_process_rule_config(&pid, &cfg).await;
                 saving.set(false);
                 if ok {
-                    crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, "VCS gate settings saved.");
+                    crate::toast::push_toast(
+                        toasts,
+                        crate::toast::ToastKind::Info,
+                        "VCS gate settings saved.",
+                    );
                 } else {
-                    crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, "Failed to save VCS gate settings.");
+                    crate::toast::push_toast(
+                        toasts,
+                        crate::toast::ToastKind::Error,
+                        "Failed to save VCS gate settings.",
+                    );
                 }
             });
         }
@@ -446,7 +454,7 @@ pub fn VcsGateSettings(project_id: String) -> Element {
                         r#type: "checkbox",
                         checked: cfg.commit_doc.enabled,
                         onchange: {
-                            let mut config = config.clone();
+                            let mut config = config;
                             move |e: Event<FormData>| {
                                 let checked = e.value() == "true" || e.checked();
                                 if let Some(c) = config.write().as_mut() {
@@ -467,7 +475,7 @@ pub fn VcsGateSettings(project_id: String) -> Element {
                                 min: "0",
                                 value: cfg.commit_doc.min_body_chars.to_string(),
                                 oninput: {
-                                    let mut config = config.clone();
+                                    let mut config = config;
                                     move |e: Event<FormData>| {
                                         if let Ok(n) = e.value().parse::<usize>() {
                                             if let Some(c) = config.write().as_mut() {
@@ -483,7 +491,7 @@ pub fn VcsGateSettings(project_id: String) -> Element {
                                 r#type: "checkbox",
                                 checked: cfg.commit_doc.require_story_id,
                                 onchange: {
-                                    let mut config = config.clone();
+                                    let mut config = config;
                                     move |e: Event<FormData>| {
                                         let checked = e.value() == "true" || e.checked();
                                         if let Some(c) = config.write().as_mut() {
@@ -511,7 +519,7 @@ pub fn VcsGateSettings(project_id: String) -> Element {
                                         placeholder: "e.g. AB or PROJ (empty = bare #42)",
                                         value: cfg.commit_doc.story_id_format.prefix.clone(),
                                         oninput: {
-                                            let mut config = config.clone();
+                                            let mut config = config;
                                             move |e: Event<FormData>| {
                                                 if let Some(c) = config.write().as_mut() {
                                                     c.commit_doc.story_id_format.prefix = e.value().clone();
@@ -525,7 +533,7 @@ pub fn VcsGateSettings(project_id: String) -> Element {
                                     select {
                                         class: "vcs-settings-select",
                                         onchange: {
-                                            let mut config = config.clone();
+                                            let mut config = config;
                                             move |e: Event<FormData>| {
                                                 let sep = if e.value() == "-" { '-' } else { '#' };
                                                 if let Some(c) = config.write().as_mut() {
@@ -569,7 +577,7 @@ pub fn VcsGateSettings(project_id: String) -> Element {
                         r#type: "checkbox",
                         checked: cfg.conventional_commit.enabled,
                         onchange: {
-                            let mut config = config.clone();
+                            let mut config = config;
                             move |e: Event<FormData>| {
                                 let checked = e.value() == "true" || e.checked();
                                 if let Some(c) = config.write().as_mut() {
@@ -589,7 +597,7 @@ pub fn VcsGateSettings(project_id: String) -> Element {
                                 r#type: "text",
                                 value: cfg.conventional_commit.types.join(", "),
                                 oninput: {
-                                    let mut config = config.clone();
+                                    let mut config = config;
                                     move |e: Event<FormData>| {
                                         let types: Vec<String> = e.value()
                                             .split(',')
@@ -626,7 +634,7 @@ pub fn VcsGateSettings(project_id: String) -> Element {
                         r#type: "checkbox",
                         checked: cfg.branch_naming.enabled,
                         onchange: {
-                            let mut config = config.clone();
+                            let mut config = config;
                             move |e: Event<FormData>| {
                                 let checked = e.value() == "true" || e.checked();
                                 if let Some(c) = config.write().as_mut() {
@@ -646,7 +654,7 @@ pub fn VcsGateSettings(project_id: String) -> Element {
                                 r#type: "text",
                                 value: cfg.branch_naming.prefixes.join(", "),
                                 oninput: {
-                                    let mut config = config.clone();
+                                    let mut config = config;
                                     move |e: Event<FormData>| {
                                         let prefixes: Vec<String> = e.value()
                                             .split(',')
@@ -684,7 +692,7 @@ pub fn VcsGateSettings(project_id: String) -> Element {
                         r#type: "checkbox",
                         checked: cfg.ado_link.enabled,
                         onchange: {
-                            let mut config = config.clone();
+                            let mut config = config;
                             move |e: Event<FormData>| {
                                 let checked = e.value() == "true" || e.checked();
                                 if let Some(c) = config.write().as_mut() {
@@ -705,7 +713,7 @@ pub fn VcsGateSettings(project_id: String) -> Element {
                                 placeholder: "e.g. AB",
                                 value: cfg.ado_link.prefix.clone(),
                                 oninput: {
-                                    let mut config = config.clone();
+                                    let mut config = config;
                                     move |e: Event<FormData>| {
                                         if let Some(c) = config.write().as_mut() {
                                             c.ado_link.prefix = e.value().clone();
@@ -740,7 +748,7 @@ pub fn VcsGateSettings(project_id: String) -> Element {
                         r#type: "checkbox",
                         checked: cfg.pr.apply_body_rule,
                         onchange: {
-                            let mut config = config.clone();
+                            let mut config = config;
                             move |e: Event<FormData>| {
                                 let checked = e.value() == "true" || e.checked();
                                 if let Some(c) = config.write().as_mut() {
@@ -756,7 +764,7 @@ pub fn VcsGateSettings(project_id: String) -> Element {
                         r#type: "checkbox",
                         checked: cfg.pr.apply_id_rule,
                         onchange: {
-                            let mut config = config.clone();
+                            let mut config = config;
                             move |e: Event<FormData>| {
                                 let checked = e.value() == "true" || e.checked();
                                 if let Some(c) = config.write().as_mut() {
@@ -851,10 +859,7 @@ mod tests {
 
     #[test]
     fn vcs_rule_selected_true_when_present() {
-        let selections = vec![
-            "SOME-OTHER-RULE-1".to_string(),
-            RULE_COMMIT_DOC.to_string(),
-        ];
+        let selections = vec!["SOME-OTHER-RULE-1".to_string(), RULE_COMMIT_DOC.to_string()];
         assert!(vcs_rule_selected(&selections, RULE_COMMIT_DOC));
     }
 
@@ -941,7 +946,10 @@ mod tests {
     #[test]
     fn bug2_pr_coverage_defaults_to_true_true() {
         let cfg: ProcessRuleConfigView = serde_json::from_str("{}").expect("empty obj must deser");
-        assert!(cfg.pr.apply_body_rule, "apply_body_rule must default to true");
+        assert!(
+            cfg.pr.apply_body_rule,
+            "apply_body_rule must default to true"
+        );
         assert!(cfg.pr.apply_id_rule, "apply_id_rule must default to true");
     }
 
@@ -978,7 +986,7 @@ mod tests {
     /// GET helper: gathers selected corpus-rule ids from all three ruleset buckets
     /// (`selections`, `cross_repo`, `process`) into a single flat Vec.
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn fetch_selected_rule_ids_flattens_all_three_buckets() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -998,9 +1006,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let ids = super::fetch_selected_rule_ids("proj-1").await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         let ids = ids.expect("ok:true response parses to Some");
         assert!(ids.contains(&"PROCESS-COMMIT-DOC-1".to_string()));
@@ -1012,7 +1019,7 @@ mod tests {
     /// GET helper: an `ok:false` response yields `None` (the panel then treats no rules
     /// as selected and shows the select-first hint).
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn fetch_selected_rule_ids_returns_none_on_ok_false() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1021,15 +1028,13 @@ mod tests {
         Mock::given(method("GET"))
             .and(path("/api/projects/proj-2/ruleset"))
             .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_json(serde_json::json!({ "ok": false })),
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": false })),
             )
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let ids = super::fetch_selected_rule_ids("proj-2").await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         assert!(ids.is_none(), "ok:false must map to None");
     }
@@ -1037,7 +1042,7 @@ mod tests {
     /// GET helper: parses the `process_rule_config` block into a `ProcessRuleConfigView`,
     /// preserving non-default values that round-trip through serde.
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn fetch_process_rule_config_parses_the_config_block() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1057,9 +1062,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let cfg = super::fetch_process_rule_config("proj-3").await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         let cfg = cfg.expect("ok:true with config block parses to Some");
         assert_eq!(cfg.commit_doc.min_body_chars, 99);
@@ -1072,7 +1076,7 @@ mod tests {
 
     /// GET helper: `ok:false` yields `None`.
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn fetch_process_rule_config_returns_none_on_ok_false() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1081,15 +1085,13 @@ mod tests {
         Mock::given(method("GET"))
             .and(path("/api/projects/proj-4/process-rule-config"))
             .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_json(serde_json::json!({ "ok": false })),
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": false })),
             )
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let cfg = super::fetch_process_rule_config("proj-4").await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         assert!(cfg.is_none(), "ok:false must map to None");
     }
@@ -1097,7 +1099,7 @@ mod tests {
     /// POST helper: serializes the FULL config (including the `pr` block — BUG-2) to the
     /// project's process-rule-config endpoint and reports success on a 2xx.
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn save_process_rule_config_posts_the_full_config_body() {
         use wiremock::matchers::{body_json, method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1119,14 +1121,15 @@ mod tests {
         Mock::given(method("POST"))
             .and(path("/api/projects/proj-5/process-rule-config"))
             .and(body_json(expected_body))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": true })))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": true })),
+            )
             .expect(1)
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let ok = super::save_process_rule_config("proj-5", &cfg).await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         assert!(ok, "a 2xx response reports success");
         // `.expect(1)` + `body_json` assert (on server drop) that the helper POSTed the
@@ -1135,7 +1138,7 @@ mod tests {
 
     /// POST helper: a non-success status maps to `false`.
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn save_process_rule_config_returns_false_on_error_status() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1147,9 +1150,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let ok = super::save_process_rule_config("proj-6", &ProcessRuleConfigView::default()).await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         assert!(!ok, "a 500 response reports failure");
     }
@@ -1157,7 +1159,7 @@ mod tests {
     /// POST helper: a successful bypass returns `Ok(Some(record))`. Asserts the exact
     /// request body (the commit action + reason) and that the record JSON is surfaced.
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn test_bypass_returns_record_when_bypassed() {
         use wiremock::matchers::{body_json, method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1178,9 +1180,9 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
-        let result = super::test_bypass("proj-7", "auto merge", "machine-generated merge commit").await;
-        std::env::remove_var("CAMERATA_BFF_URL");
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
+        let result =
+            super::test_bypass("proj-7", "auto merge", "machine-generated merge commit").await;
 
         let record = result.expect("ok:true is not an Err");
         let record = record.expect("bypassed:true yields Some(record)");
@@ -1192,7 +1194,7 @@ mod tests {
 
     /// POST helper: `bypassed:false` (the action already passes the gate) returns `Ok(None)`.
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn test_bypass_returns_none_when_action_already_passes() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1207,17 +1209,19 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let result = super::test_bypass("proj-8", "feat: real subject", "n/a").await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         let inner = result.expect("ok:true is not an Err");
-        assert!(inner.is_none(), "bypassed:false maps to Ok(None) — no bypass needed");
+        assert!(
+            inner.is_none(),
+            "bypassed:false maps to Ok(None) — no bypass needed"
+        );
     }
 
     /// POST helper: `ok:false` returns `Err(message)` carrying the server's message string.
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn test_bypass_returns_err_with_server_message_on_rejection() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1232,9 +1236,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let result = super::test_bypass("proj-9", "auto merge", "").await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         let err = result.expect_err("ok:false must be an Err");
         assert_eq!(err, "empty reason is rejected");

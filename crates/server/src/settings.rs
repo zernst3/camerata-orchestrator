@@ -10,6 +10,29 @@ use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 
+pub use camerata_llm::ProjectBackend;
+
+/// Tolerant deserialization for `chat_backend`: accepts the field missing entirely
+/// (`#[serde(default)]` handles that), an explicit `null` (the shape the OLD `llm_backend:
+/// Option<String>` field could persist), or a `"cli"`/`"api"` string (the OLD field's other
+/// values, and the CURRENT wire representation) — collapsing anything that isn't exactly
+/// `"api"` (case-insensitive, trimmed) to `ProjectBackend::Cli`, the default. This is what
+/// lets an old `settings.json` with `"llm_backend": null` or `"llm_backend": "api"` still
+/// load cleanly under the new field (via `#[serde(alias = "llm_backend")]`) instead of
+/// hard-failing the whole document's parse.
+fn deserialize_chat_backend<'de, D>(deserializer: D) -> Result<ProjectBackend, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let opt: Option<String> = Option::deserialize(deserializer)?;
+    Ok(
+        match opt.as_deref().map(|s| s.trim().to_ascii_lowercase()) {
+            Some(ref s) if s == "api" => ProjectBackend::Api,
+            _ => ProjectBackend::Cli,
+        },
+    )
+}
+
 /// The persisted settings document.
 #[derive(Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Settings {
@@ -29,16 +52,24 @@ pub struct Settings {
     /// per-request `model` on the chat POST still overrides this (highest precedence).
     #[serde(default)]
     pub chat_model: Option<String>,
-    /// APP-LEVEL LLM backend selection: `"cli"` (spawn the logged-in Claude Code CLI, no
-    /// API key) or `"api"` (Anthropic Messages API + `ANTHROPIC_API_KEY`). `None` means
-    /// "not chosen here" — the selection then falls back to the `CAMERATA_LLM_BACKEND` env
-    /// var, else the `cli` default. Only `"cli"`/`"api"` are ever stored; anything else is
-    /// rejected at the setter (clamped to `None`). On boot this hydrates the env var so the
-    /// existing env-driven selection sites ([`crate::llm::Llm::from_env`] and the agent
-    /// driver) honor the stored choice unchanged (precedence: stored setting > `.env` >
-    /// default `cli`).
-    #[serde(default)]
-    pub llm_backend: Option<String>,
+    /// The GLOBAL CHAT backend (`docs/design/2026-09-22_per-project-backend.md`): used
+    /// ONLY by the project-less chatbox assistant — nothing project-related reads this.
+    /// `Cli` (the default) spawns the logged-in Claude Code CLI (no API key); `Api` uses the
+    /// Anthropic Messages API (the key saved in the app, `ANTHROPIC_API_KEY` as fallback). No env fallback for the backend choice and no cross-setting
+    /// override: this is the assistant's ENTIRE backend input.
+    ///
+    /// Renamed from the old `llm_backend: Option<String>` field, which used to ALSO govern
+    /// project-scoped work (the pre-per-project-backend model) and had a three-way
+    /// precedence (stored setting > `CAMERATA_LLM_BACKEND` env > `cli` default) — both are
+    /// gone. `#[serde(alias = "llm_backend")]` + the tolerant [`deserialize_chat_backend`]
+    /// means an old settings.json (key `llm_backend`, value `null`/`"cli"`/`"api"`/anything
+    /// else) still loads cleanly, collapsing straight to this field.
+    #[serde(
+        default,
+        alias = "llm_backend",
+        deserialize_with = "deserialize_chat_backend"
+    )]
+    pub chat_backend: ProjectBackend,
     /// OpenRouter provider-safety policy (safe-by-default no-train/no-retain provider
     /// enforcement) — see `docs/design/2026-07-28_openrouter-provider-safety.md`.
     /// `#[serde(default)]` so a settings file predating this field (or a hand-trimmed
@@ -134,27 +165,21 @@ impl SettingsStore {
         updated
     }
 
-    /// The app-level LLM backend selection (`"cli"` or `"api"`), if one is stored.
-    /// `None` when unset (the selection then falls back to env / the `cli` default).
-    pub fn llm_backend(&self) -> Option<String> {
-        self.get().llm_backend.filter(|b| !b.trim().is_empty())
+    /// The GLOBAL CHAT backend (`Cli` | `Api`) — used ONLY by the project-less chatbox
+    /// assistant. Never `None`: `Cli` is both the serde default and the [`Default`] impl, so
+    /// this always resolves to a concrete value with no env fallback of any kind.
+    pub fn chat_backend(&self) -> ProjectBackend {
+        self.get().chat_backend
     }
 
-    /// Set (or clear) the app-level LLM backend, persisting the change. Only `"cli"` and
-    /// `"api"` are accepted (case-insensitively, trimmed); any other value — including an
-    /// empty string — clears the setting to `None`. Returns the updated settings.
-    pub fn set_llm_backend(&self, backend: Option<String>) -> Settings {
-        let normalized = backend.and_then(|b| match b.trim().to_ascii_lowercase().as_str() {
-            "cli" => Some("cli".to_string()),
-            "api" => Some("api".to_string()),
-            _ => None,
-        });
+    /// Set the global chat backend, persisting the change. Returns the updated settings.
+    pub fn set_chat_backend(&self, backend: ProjectBackend) -> Settings {
         let updated = {
             let mut s = match self.inner.lock() {
                 Ok(s) => s,
                 Err(_) => return Settings::default(),
             };
-            s.llm_backend = normalized;
+            s.chat_backend = backend;
             s.clone()
         };
         self.save();
@@ -272,8 +297,8 @@ mod tests {
     fn set_and_get_chat_model() {
         let store = SettingsStore::new();
         assert!(store.chat_model().is_none());
-        store.set_chat_model(Some("claude-opus-4-8".to_string()));
-        assert_eq!(store.chat_model().as_deref(), Some("claude-opus-4-8"));
+        store.set_chat_model(Some("claude-opus-5".to_string()));
+        assert_eq!(store.chat_model().as_deref(), Some("claude-opus-5"));
         // Empty / whitespace clears it.
         store.set_chat_model(Some("   ".to_string()));
         assert!(store.chat_model().is_none());
@@ -283,7 +308,10 @@ mod tests {
     fn provider_policy_defaults_to_safe_mode_on_with_no_pin_before_anything_is_set() {
         let store = SettingsStore::new();
         let policy = store.provider_policy();
-        assert!(policy.safe_mode, "a fresh store must read as safe_mode=true");
+        assert!(
+            policy.safe_mode,
+            "a fresh store must read as safe_mode=true"
+        );
         assert_eq!(policy.pinned_provider, None);
     }
 
@@ -323,16 +351,23 @@ mod tests {
     /// field. This is the fail-safe-on-upgrade guarantee.
     #[test]
     fn settings_file_without_provider_policy_key_loads_as_safe_default() {
-        let dir = std::env::temp_dir()
-            .join(format!("camerata-settings-legacy-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("camerata-settings-legacy-{}", std::process::id()));
         let path = dir.join("settings.json");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         // A settings file with only the pre-existing fields, no `provider_policy` key.
-        std::fs::write(&path, r#"{"workspace_root": "/tmp/ws", "chat_model": null, "llm_backend": null}"#).unwrap();
+        std::fs::write(
+            &path,
+            r#"{"workspace_root": "/tmp/ws", "chat_model": null, "llm_backend": null}"#,
+        )
+        .unwrap();
         let store = SettingsStore::load_or_new(path);
         let policy = store.provider_policy();
-        assert!(policy.safe_mode, "missing provider_policy key must default to safe_mode=true");
+        assert!(
+            policy.safe_mode,
+            "missing provider_policy key must default to safe_mode=true"
+        );
         assert_eq!(policy.pinned_provider, None);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -346,11 +381,17 @@ mod tests {
             safe_mode: false,
             pinned_provider: Some("deepinfra".to_string()),
         });
-        assert!(!store.provider_policy().safe_mode, "precondition: testing mode was on");
+        assert!(
+            !store.provider_policy().safe_mode,
+            "precondition: testing mode was on"
+        );
 
         let reset = store.reset_provider_policy_to_safe_on_startup();
 
-        assert!(reset.safe_mode, "the reset must force safe_mode back to true");
+        assert!(
+            reset.safe_mode,
+            "the reset must force safe_mode back to true"
+        );
         assert_eq!(
             reset.pinned_provider.as_deref(),
             Some("deepinfra"),
@@ -390,8 +431,8 @@ mod tests {
     /// silently left on across sessions").
     #[test]
     fn startup_reset_survives_a_simulated_process_restart() {
-        let dir = std::env::temp_dir()
-            .join(format!("camerata-settings-reset-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("camerata-settings-reset-{}", std::process::id()));
         let path = dir.join("settings.json");
         let _ = std::fs::remove_dir_all(&dir);
         {
@@ -406,52 +447,94 @@ mod tests {
             // "Session 2": a fresh process boots, loads the same file, and runs the reset —
             // exactly the `AppState::from_env` sequence.
             let store = SettingsStore::load_or_new(path.clone());
-            assert!(!store.provider_policy().safe_mode, "loaded the OFF value from disk");
+            assert!(
+                !store.provider_policy().safe_mode,
+                "loaded the OFF value from disk"
+            );
             store.reset_provider_policy_to_safe_on_startup();
         }
         // "Session 3": reload again to prove the reset itself persisted (not just an
         // in-memory return value that a real process boot would also throw away).
         let reloaded = SettingsStore::load_or_new(path);
-        assert!(reloaded.provider_policy().safe_mode, "safe_mode must never survive a restart as OFF");
-        assert_eq!(reloaded.provider_policy().pinned_provider.as_deref(), Some("deepinfra"));
+        assert!(
+            reloaded.provider_policy().safe_mode,
+            "safe_mode must never survive a restart as OFF"
+        );
+        assert_eq!(
+            reloaded.provider_policy().pinned_provider.as_deref(),
+            Some("deepinfra")
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn set_and_get_llm_backend() {
+    fn set_and_get_chat_backend() {
         let store = SettingsStore::new();
-        assert!(store.llm_backend().is_none());
-        store.set_llm_backend(Some("api".to_string()));
-        assert_eq!(store.llm_backend().as_deref(), Some("api"));
-        // Case-insensitive + trimmed normalization to the canonical lowercase form.
-        store.set_llm_backend(Some("  CLI ".to_string()));
-        assert_eq!(store.llm_backend().as_deref(), Some("cli"));
-        // A bogus value clears it (clamped to None), never stored.
-        store.set_llm_backend(Some("gemini".to_string()));
-        assert!(store.llm_backend().is_none());
-        // Empty / whitespace clears it too.
-        store.set_llm_backend(Some("api".to_string()));
-        store.set_llm_backend(Some("   ".to_string()));
-        assert!(store.llm_backend().is_none());
-        // Explicit None clears it.
-        store.set_llm_backend(Some("cli".to_string()));
-        store.set_llm_backend(None);
-        assert!(store.llm_backend().is_none());
+        assert_eq!(
+            store.chat_backend(),
+            ProjectBackend::Cli,
+            "a fresh store defaults to Cli"
+        );
+        store.set_chat_backend(ProjectBackend::Api);
+        assert_eq!(store.chat_backend(), ProjectBackend::Api);
+        store.set_chat_backend(ProjectBackend::Cli);
+        assert_eq!(store.chat_backend(), ProjectBackend::Cli);
     }
 
     #[test]
-    fn llm_backend_persists_across_reload() {
-        let dir =
-            std::env::temp_dir().join(format!("camerata-settings-llm-{}", std::process::id()));
+    fn chat_backend_persists_across_reload() {
+        let dir = std::env::temp_dir().join(format!(
+            "camerata-settings-chatbackend-{}",
+            std::process::id()
+        ));
         let path = dir.join("settings.json");
         let _ = std::fs::remove_dir_all(&dir);
         {
             let store = SettingsStore::load_or_new(path.clone());
-            store.set_llm_backend(Some("api".to_string()));
+            store.set_chat_backend(ProjectBackend::Api);
         }
         // A fresh load sees the persisted backend.
         let reloaded = SettingsStore::load_or_new(path);
-        assert_eq!(reloaded.llm_backend().as_deref(), Some("api"));
+        assert_eq!(reloaded.chat_backend(), ProjectBackend::Api);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// MIGRATION: a settings.json persisted by the OLD `llm_backend: Option<String>` model
+    /// (key `llm_backend`, not `chat_backend`) must still load — via `#[serde(alias =
+    /// "llm_backend")]` — collapsing straight onto the new `chat_backend` field.
+    #[test]
+    fn legacy_llm_backend_key_migrates_to_chat_backend() {
+        let dir = std::env::temp_dir().join(format!(
+            "camerata-settings-legacy-backend-{}",
+            std::process::id()
+        ));
+        let path = dir.join("settings.json");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        std::fs::write(&path, r#"{"llm_backend": "api"}"#).unwrap();
+        let store = SettingsStore::load_or_new(path.clone());
+        assert_eq!(
+            store.chat_backend(),
+            ProjectBackend::Api,
+            "a legacy llm_backend=\"api\" settings.json must migrate to chat_backend=Api"
+        );
+
+        std::fs::write(&path, r#"{"llm_backend": null}"#).unwrap();
+        let store_null = SettingsStore::load_or_new(path.clone());
+        assert_eq!(
+            store_null.chat_backend(),
+            ProjectBackend::Cli,
+            "a legacy llm_backend=null settings.json must migrate to chat_backend=Cli"
+        );
+
+        std::fs::write(&path, "{}").unwrap();
+        let store_absent = SettingsStore::load_or_new(path);
+        assert_eq!(
+            store_absent.chat_backend(),
+            ProjectBackend::Cli,
+            "a settings.json with no llm_backend/chat_backend key at all defaults to Cli"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

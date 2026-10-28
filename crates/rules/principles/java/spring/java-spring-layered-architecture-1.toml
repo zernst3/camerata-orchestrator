@@ -1,9 +1,17 @@
 id = "JAVA-SPRING-LAYERED-ARCHITECTURE-1"
+version = 1
 title = "Spring components follow a strict layered hierarchy: @RestController calls @Service; @Service calls @Repository; no layer calls a higher layer"
-tag = "stack"
 domain = "java:spring"
 layer = "framework"
 enforcement = "structured"
+kind = "default_with_exceptions"
+inspectable = true
+# Deviation-ceiling escape hatch, INHERITED from ARCH-STRICT-LAYERING-1: severity must describe
+# the PROBLEM, not which rule happened to fire. Without this, a repo on this stack caps the
+# identical architectural defect at medium while an unmirrored stack reaches high under the
+# general rule. This rule mirrors ARCH-STRICT-LAYERING-1 because it re-litigates the same
+# hierarchy, stack-flavoured: @RestController calls @Service, @Service calls @Repository.
+deviation_ceiling = "high"
 default = true
 verification = "grounded"
 
@@ -24,16 +32,21 @@ title = "Spring Framework Reference — Using @Transactional (service-layer plac
 id = "strict-layer-hierarchy"
 label = "Controllers depend on services; services depend on repositories; no upward dependencies"
 directive = "@RestController classes inject only @Service (or @Component) beans, not @Repository beans. @Service classes inject @Repository beans and other @Service beans; they do not inject @RestController beans. @Repository interfaces (Spring Data) or classes inject only JPA infrastructure (EntityManager, JdbcTemplate); they do not inject @Service or @RestController beans. This hierarchy is the single direction of dependency: Controller → Service → Repository. Any injection that points upward in this hierarchy (Service → Controller, Repository → Service) is forbidden and indicates that the logic should be refactored to a lower-layer component."
+remediation = """
+Move the repository call currently made directly from the controller into a service method, and have the controller inject and call the service instead of the repository. Confirm no service class calls a controller and no repository calls a service. Verify by confirming the controller's dependencies are limited to services and the business logic that used to live inline in the controller now lives in the service layer.
+"""
 why = "Strict layer hierarchy ensures @Transactional semantics apply at the right scope, HTTP concerns stay in controllers, persistence concerns stay in repositories, and each layer is independently testable."
 
 [[option]]
 id = "controller-accesses-repository-directly"
+violates = true
 label = "Controllers inject repositories directly for simple CRUD endpoints"
 directive = "For endpoints that perform simple CRUD operations (list, get by ID, delete), the @RestController injects the @Repository or Spring Data interface directly, bypassing the service layer. A service layer is introduced only when business logic is needed."
-why = "Reduces boilerplate for simple CRUD; bypasses @Transactional service-layer semantics, encourages business-logic creep into controllers as requirements evolve, and creates inconsistency between endpoints that do and do not use the service layer."
+why = "The controller bypasses the service layer's @Transactional boundary, so a request that performs more than one write can commit part of it and leave the rest unapplied. Business rules then accumulate in the controller as requirements grow, and endpoints that do go through the service layer start behaving differently from the ones that do not, for reasons a reader of either cannot see."
 
 [[option]]
 id = "no-formal-layering"
+violates = true
 label = "no enforced layering; classes handle multiple concerns"
 directive = "Services and repositories are mixed; a single @Service class both handles business logic and queries the database directly instead of delegating to a @Repository."
 why = "Code is difficult to test (every test needs a database), hard to reuse (CLI or worker clients cannot call business logic without going through HTTP), and tightly coupled across concerns."

@@ -23,7 +23,11 @@ use camerata_checks::{run_gate, GateRepo, GateWaiver};
 /// detector picks the JS extractors) plus the given source files.
 fn scaffold_js_repo(dir: &Path, files: &[(&str, &str)]) {
     std::fs::create_dir_all(dir).unwrap();
-    std::fs::write(dir.join("package.json"), "{\"name\":\"e2e\",\"version\":\"1.0.0\"}\n").unwrap();
+    std::fs::write(
+        dir.join("package.json"),
+        "{\"name\":\"e2e\",\"version\":\"1.0.0\"}\n",
+    )
+    .unwrap();
     for (name, content) in files {
         let p = dir.join(name);
         if let Some(parent) = p.parent() {
@@ -57,8 +61,14 @@ fn e2e_matching_producer_consumer_pair_passes() {
 
     let verdict = run_gate(
         &[
-            GateRepo { repo: "acme/api".into(), dir: api },
-            GateRepo { repo: "acme/ui".into(), dir: ui },
+            GateRepo {
+                repo: "acme/api".into(),
+                dir: api,
+            },
+            GateRepo {
+                repo: "acme/ui".into(),
+                dir: ui,
+            },
         ],
         &["INTEGRATION-API-CONTRACT-1".into()],
         &[],
@@ -69,7 +79,11 @@ fn e2e_matching_producer_consumer_pair_passes() {
         "matching producer/consumer pair must pass; failures: {:?}",
         verdict.failures
     );
-    assert!(verdict.review.is_empty(), "no review-tier seam expected: {:?}", verdict.review);
+    assert!(
+        verdict.review.is_empty(),
+        "no review-tier seam expected: {:?}",
+        verdict.review
+    );
 }
 
 #[test]
@@ -79,13 +93,25 @@ fn e2e_drifting_pair_bounces_to_consumer() {
     let ui = root.path().join("ui");
 
     // Producer serves POST /members/export; consumer calls POST /members/csv (drift).
-    scaffold_js_repo(&api, &[("src/routes.js", "app.post('/members/export', exportCsv)\n")]);
-    scaffold_js_repo(&ui, &[("src/client.js", "await axios.post('/members/csv', body)\n")]);
+    scaffold_js_repo(
+        &api,
+        &[("src/routes.js", "app.post('/members/export', exportCsv)\n")],
+    );
+    scaffold_js_repo(
+        &ui,
+        &[("src/client.js", "await axios.post('/members/csv', body)\n")],
+    );
 
     let verdict = run_gate(
         &[
-            GateRepo { repo: "acme/api".into(), dir: api },
-            GateRepo { repo: "acme/ui".into(), dir: ui },
+            GateRepo {
+                repo: "acme/api".into(),
+                dir: api,
+            },
+            GateRepo {
+                repo: "acme/ui".into(),
+                dir: ui,
+            },
         ],
         &["INTEGRATION-API-CONTRACT-1".into()],
         &[],
@@ -99,7 +125,10 @@ fn e2e_drifting_pair_bounces_to_consumer() {
     );
     // The delta names the offending route.
     assert!(
-        verdict.failures.iter().any(|f| f.detail.contains("/members/csv")),
+        verdict
+            .failures
+            .iter()
+            .any(|f| f.detail.contains("/members/csv")),
         "delta must name the offending route: {:?}",
         verdict.failures
     );
@@ -114,13 +143,19 @@ fn e2e_stack_with_no_extractor_is_review_tier_not_green() {
     std::fs::write(mystery.join("main.cobol"), "DISPLAY 'HELLO'.\n").unwrap();
 
     let verdict = run_gate(
-        &[GateRepo { repo: "acme/mystery".into(), dir: mystery }],
+        &[GateRepo {
+            repo: "acme/mystery".into(),
+            dir: mystery,
+        }],
         &["INTEGRATION-API-CONTRACT-1".into()],
         &[],
     );
 
     // Honest: no mechanical failure, but the seam is REVIEW-TIER (human QA), not a pass.
-    assert!(verdict.failures.is_empty(), "no mechanical failure on an unknown stack");
+    assert!(
+        verdict.failures.is_empty(),
+        "no mechanical failure on an unknown stack"
+    );
     assert!(
         verdict.review.iter().any(|r| r.repo == "acme/mystery"),
         "the uncovered stack must be reported review-tier: {:?}",
@@ -153,15 +188,29 @@ fn e2e_auth_seam_per_seam_firing_and_waiver() {
     );
 
     let repos = vec![
-        GateRepo { repo: "acme/api".into(), dir: api },
-        GateRepo { repo: "acme/ui".into(), dir: ui },
+        GateRepo {
+            repo: "acme/api".into(),
+            dir: api,
+        },
+        GateRepo {
+            repo: "acme/ui".into(),
+            dir: ui,
+        },
     ];
 
     // Without a waiver: the gated /ban affordance on an unguarded endpoint FAILS; the
     // ungated /health call is NOT flagged (per-seam firing).
     let no_waiver = run_gate(&repos, &["INTEGRATION-AUTH-SEAM-1".into()], &[]);
-    assert!(!no_waiver.passed(), "gated affordance without a guarded endpoint must fail");
-    assert_eq!(no_waiver.failures.len(), 1, "only the gated seam fires: {:?}", no_waiver.failures);
+    assert!(
+        !no_waiver.passed(),
+        "gated affordance without a guarded endpoint must fail"
+    );
+    assert_eq!(
+        no_waiver.failures.len(),
+        1,
+        "only the gated seam fires: {:?}",
+        no_waiver.failures
+    );
     assert!(
         no_waiver.failures[0].artifact.contains("/members/{}/ban"),
         "the ban endpoint is the finding, not health: {:?}",
@@ -175,6 +224,14 @@ fn e2e_auth_seam_per_seam_firing_and_waiver() {
         reason: Some("intentionally public in this deployment".into()),
     };
     let waived = run_gate(&repos, &["INTEGRATION-AUTH-SEAM-1".into()], &[waiver]);
-    assert!(waived.passed(), "explicit waiver clears the finding: {:?}", waived.failures);
-    assert_eq!(waived.waived.len(), 1, "the waived finding is in the audit trail");
+    assert!(
+        waived.passed(),
+        "explicit waiver clears the finding: {:?}",
+        waived.failures
+    );
+    assert_eq!(
+        waived.waived.len(),
+        1,
+        "the waived finding is in the audit trail"
+    );
 }

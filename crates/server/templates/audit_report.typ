@@ -5,6 +5,14 @@
 // No em/en dashes in the placeholder itself (house no-dash rule) — "N/A", not "\u{2014}".
 #let or_na(x) = if x == none or x == "" { "N/A" } else { x }
 
+// C3-1b: `effort`/`confidence` are the CALIBRATION pass's OWN outputs — an absent value here
+// means that pass never produced an opinion for THIS finding this run (a failed/timed-out
+// pass, or a malformed response), not a legitimate "not applicable" answer the way a blank
+// cover-page option field is. "N/A" reads as a settled non-answer rather than an honest gap,
+// so these two fields get their own, field-specific placeholders instead of `or_na`.
+#let or_not_estimated(x) = if x == none or x == "" { "not estimated this run" } else { x }
+#let or_not_evaluated(x) = if x == none or x == "" { "not evaluated this run" } else { x }
+
 #let plural(n, singular, plural_form) = if n == 1 { singular } else { plural_form }
 
 // S13: thousands separators so "486203 characters" on the cover reads as "486,203".
@@ -23,34 +31,99 @@
 
 // M8: a long unbroken raw string (a deep node_modules path, a one-line minified snippet, a
 // scoped package name) has no natural break character, and Typst's raw/monospace rendering
-// does not wrap inside such a run — it overflows the page edge. Insert an invisible
-// zero-width-space break opportunity every `n` characters so it wraps instead, with zero
-// visual change to the text itself.
+// does not wrap inside such a run — it overflows the page edge.
+//
+// C4-R3: this used to insert an invisible zero-width space (U+200B) between chunks as the
+// break opportunity — but that is a REAL character that survives into the PDF's text/copy
+// layer, so selecting or grepping a path out of the report came back with invisible junk
+// spliced into it, silently breaking the exact copy-paste-into-a-terminal workflow a report
+// reader needs most. `h(0pt, weak: true)` is pure layout spacing: zero width, so it never
+// shows up in copied or extracted text, yet it still gives the line breaker an optional break
+// point between the surrounding raw() chunks. Returns CONTENT (one raw() per chunk), never a
+// plain string — call sites use the result directly; wrapping it in another raw() call would
+// flatten everything back into one unbreakable run and reintroduce the overflow this fixes.
+// UTF8-BREAK-1: `s.slice(i, e)` indexes BYTES, and Typst's `str.slice` hard-errors the whole
+// compile when an index lands mid-character ("byte index is not a char boundary"). `s.len()`
+// is also a byte count. Chunking by byte offset is therefore only safe for pure-ASCII input —
+// any path, snippet or package name containing a multi-byte character (an accented letter, a
+// CJK character, an emoji) took down the entire PDF export with no deliverable produced. Fix:
+// chunk over `.clusters()` (extended grapheme clusters — the "perceived character" unit, so a
+// multi-codepoint emoji/ZWJ sequence stays exactly one chunk-unit rather than being split
+// across chunks) instead of raw bytes. `n` keeps its original meaning of "roughly how many
+// characters before a break", just measured in clusters instead of bytes now.
 #let breakable(s, n: 40) = {
-  let len = s.len()
+  // Guard: a none/empty input must yield empty content, never `none` or a crash. Typst's
+  // raw(none) fails the whole compile ("expected string, found none") — so any finding with an
+  // empty path/snippet/package would crash the report without this.
+  if s == none { return raw("") }
+  let clusters = s.clusters()
+  let len = clusters.len()
+  if len == 0 { return raw("") }
   let i = 0
   let out = ()
   while i < len {
     let e = calc.min(i + n, len)
-    out.push(s.slice(i, e))
+    out.push(raw(clusters.slice(i, e).join()))
     i = e
   }
-  out.join("\u{200B}")
+  out.intersperse(h(0pt, weak: true)).join()
+}
+
+// Branding (2026-09-13 review, owner's hard constraint): Camerata is the licensable
+// APPLICATION; the auditing agency running it is not Camerata's to name. `d.cover.brand` is
+// already fully resolved (per-report ReportOptions.brand > CAMERATA_REPORT_BRAND env var > no
+// brand at all) by `report_export::build_report_json` — this template just renders it, never
+// invents a fallback agency name. Hyphen, not an em/en dash (house no-dash rule, see `or_na`
+// above) — "Cantus Works - Codebase Inspection", not "Cantus Works \u{2014} Codebase Inspection".
+//
+// P6 (2026-09-29): the product is "Codebase Inspection" — this literal must stay in sync with
+// `report_export::NEUTRAL_COVER_TITLE` (a Rust const the template cannot import directly; a
+// test pins the two together — see `shipped_template_has_no_hardcoded_cover_title`).
+#let brand_title = if d.cover.brand != none {
+  d.cover.brand + " - Codebase Inspection"
+} else {
+  "Codebase Inspection Report"
 }
 
 #let doc_title = if d.cover.project_title != "" {
-  d.cover.project_title + ", Camerata Audit Report"
+  d.cover.project_title + ", " + brand_title
 } else {
-  "Camerata Audit Report"
+  brand_title
 }
 #set document(title: doc_title)
+
+// P5: `d.review_state` is `"raw"` when NO finding in this scan carries an explicit
+// THIS-SESSION auditor disposition (see `report_export::ReviewState`'s doc comment) — a nobody-
+// has-looked-at-this-yet export. `is_draft` gates a banner on EVERY page (header, so it survives
+// no matter how many pages the report grows to) so a raw export can never be mistaken for a
+// signed-off deliverable, matching the exec summary's own engine-voice narrative on page 2.
+#let is_draft = d.review_state == "raw"
+
 #set page(
   paper: "us-letter",
   margin: (x: 2.2cm, y: 2cm),
   numbering: "1",
+  header: context [
+    #if is_draft [
+      #align(center)[
+        #box(fill: rgb("#fdeaea"), stroke: 0.75pt + rgb("#c0392b"), inset: (x: 8pt, y: 3pt), radius: 2pt)[
+          #text(size: 8.5pt, weight: "bold", fill: rgb("#c0392b"))[DRAFT: not yet reviewed by a human reviewer]
+        ]
+      ]
+    ]
+  ],
+  // C4-R3: the footer used to echo a bare " · DRAFT" after the page-number line, ON TOP OF the
+  // header's full banner above it — on every page, that bare word sits immediately before the
+  // NEXT page's "DRAFT: not yet reviewed..." in reading/selection/extraction order, with
+  // nothing but a page boundary between them, so a copy-paste or a naive multi-page text
+  // extraction read back "...page 1 · DRAFTDRAFT: not yet reviewed...". The header banner
+  // above already marks EVERY page unambiguously; render the draft state once per page, not
+  // twice.
   footer: context [
     #set text(size: 8pt, fill: rgb("#808080"))
-    #align(center)[Camerata audit report (advisory, not a certification), page #counter(page).display()]
+    #align(center)[
+      #if d.cover.brand != none [#d.cover.brand ]inspection report (advisory, not a certification), page #counter(page).display()
+    ]
   ],
 )
 #set text(size: 10.5pt)
@@ -90,10 +163,14 @@
 
 // Item 6: the category scorecard as a compact heat-grid. Native Typst primitives only (no
 // packages) — a small, hand-picked light-to-dark palette per severity, indexed by count, so a
-// "critical" cell with 4 findings reads visibly heavier than one with 1. The owner's ruling:
-// this is the ONE approved visual addition; the severity x effort matrix stays a plain
-// bucketed list (that IS the chart), and no other decorative visual gets added here beyond
-// this heat-grid — restrained, engineer-made, not marketing.
+// "critical" cell with 4 findings reads visibly heavier than one with 1. The owner's original
+// ruling made this the ONE approved visual addition and kept the severity x effort section a
+// plain bucketed list. FIX 6 (2026-09-13 review) revisited that second half: the bucketed list
+// duplicated page 3's "Three things this week" box without ever delivering the 2-D placement
+// its own heading promised, so the owner approved replacing it with a real severity-rows x
+// effort-columns `table()` (see `d.priority_grid` below) — still a plain Typst table, not a
+// new chart primitive. No OTHER decorative visual gets added beyond this heat-grid and that
+// table: restrained, engineer-made, not marketing.
 #let heat_bg(sev, n) = {
   let palette = if sev == "critical" {
     (rgb("#fdeaea"), rgb("#f8b8b0"), rgb("#f2887a"), rgb("#e2574a"), rgb("#c0392b"))
@@ -120,35 +197,75 @@
 
 // One curated-finding site row — factored out so the FIRST site of a group can be kept
 // together with its heading (S4) while later sites are free to break across pages.
-#let render_site(site) = {
+//
+// FIX 8 (2026-09-13 review): "the plain-English headline leads; the engineer-normative rule
+// title renders smaller/grey BENEATH it." `site.headline` was already the primary bold
+// heading (Item 1, above) — but for a group's FIRST site, the once-per-group `rule_id: title`
+// subtitle used to render ABOVE it (see the curated-findings loop below), so the reading order
+// put the engineer-facing rule id first after all. `after_headline` lets the caller inject
+// that subtitle (plus the citation) directly UNDER this site's headline instead, so it always
+// reads headline-first regardless of which site in the group is rendering.
+#let render_site(site, after_headline: none) = {
   block(inset: (left: 8pt, top: 4pt, bottom: 4pt))[
     // Item 1: the DEFECT at this object is the primary, bold heading — never the rule's own
     // invariant title (that reads as a clean bill of health out of context).
     #text(size: 11pt, weight: "bold")[#site.headline]
+    #if after_headline != none [
+      #v(2pt)
+      #after_headline
+    ]
     #v(2pt)
-    #text(size: 8.5pt, fill: rgb("#666666"))[*#site.repo* / #raw(breakable(site.path)):#str(site.line)] #severity_chip(site.severity)
+    #text(size: 8.5pt, fill: rgb("#666666"))[*#site.repo* / #breakable(site.path):#str(site.line)] #severity_chip(site.severity)
     #if site.snippet != "" [
-      #block(fill: rgb("#f5f5f5"), inset: 5pt, radius: 2pt, width: 100%)[#raw(breakable(site.snippet, n: 70))]
+      #block(fill: rgb("#f5f5f5"), inset: 5pt, radius: 2pt, width: 100%)[#breakable(site.snippet, n: 70)]
     ]
     #site.detail
-    #if site.fix != "" [
+    // FIX 1 contract (report_export.rs's `CuratedSiteJson.fix`): `Option<String>` serializes
+    // to JSON `null`, which Typst's `json()` parses as `none` — NOT an empty string. Every
+    // check below must be `!= none`; a `!= ""` check would let a `none` value fall into the
+    // branch and render a bare "Fix:" label with nothing after it.
+    //
+    // P2 (2026-09-29): `fix_for_this_finding` (the codebase-specific fix — see that field's
+    // doc comment in report_export.rs) is now the PRIMARY "Fix:" line whenever it's present;
+    // the rule's generic authored `fix` demotes to a secondary "General guidance:" line
+    // underneath it. When fix-generation never ran or gave up (`fix_for_this_finding ==
+    // none` — a deterministic-only scan, or a needs-review "fix not generated" finding), the
+    // generic `fix` — if any — is still shown, as the ONLY "Fix:" line, exactly like before
+    // this pass. Nothing renders when BOTH are `none`.
+    #if site.fix_for_this_finding != none [
+      #v(0.1cm)
+      #text(size: 8.5pt)[#text(weight: "bold")[Fix: ]#site.fix_for_this_finding]
+      #if site.fix != none [
+        #v(0.05cm)
+        #text(size: 8pt, fill: rgb("#888888"))[General guidance: #site.fix]
+      ]
+    ] else if site.fix != none [
       #v(0.1cm)
       #text(size: 8.5pt)[#text(weight: "bold")[Fix: ]#site.fix]
     ]
     #v(0.1cm)
     #text(size: 8.5pt)[
-      #mini_chip("Effort: " + or_na(site.effort)) #mini_chip("Confidence: " + or_na(site.confidence)) #text(weight: "bold")[#site.disposition]
+      #mini_chip("Effort: " + or_not_estimated(site.effort)) #mini_chip("Confidence: " + or_not_evaluated(site.confidence)) #text(weight: "bold")[#site.disposition]
     ]
-    #if site.also_matches.len() > 0 [
-      #text(size: 8pt, fill: rgb("#888888"))[Also violates: #site.also_matches.join(", ")]
+    // C4-P4 (residual defect 2): human-readable TITLES, never raw rule ids — see
+    // `report_export::also_matches_titles`'s doc comment.
+    #if site.also_matches_titles.len() > 0 [
+      #text(size: 8pt, fill: rgb("#888888"))[Also violates: #site.also_matches_titles.join(", ")]
     ]
   ]
 }
 
 // ── 1. Cover ─────────────────────────────────────────────────────────────
+// Branding (2026-09-13 review): the cover title is `brand_title` (computed above from the
+// resolved `d.cover.brand`, never a hardcoded agency or "Camerata" literal), and the old
+// scan-category qualifier ("Brown" + "field") is gone from it entirely. The two model-name
+// rows that used to sit in this table (which model audited, which model calibrated) plus the
+// Camerata-version row have moved off the cover into Methodology further down (see "Scanned
+// with Camerata v..." there): Camerata is the auditing INSTRUMENT, legitimately named where
+// methodology is discussed, not on the client-facing cover.
 #align(center)[
   #v(2cm)
-  #text(size: 22pt, weight: "bold")[Camerata Brownfield Audit Report]
+  #text(size: 22pt, weight: "bold")[#brand_title]
   #if d.cover.project_title != "" [
     #v(0.4cm)
     #text(size: 14pt)[#d.cover.project_title]
@@ -158,18 +275,37 @@
   #v(1cm)
 ]
 
+// P6 (2026-09-29): real code volume, never "0 characters". `d.cover.code_volume` is `none`
+// whenever `report_export::build_report_json` has no real line count for this run (see that
+// field's doc comment) — the row is OMITTED entirely in that case, never rendered as a zero.
+// `d.cover.code_chars` (raw character count) is deliberately NOT used here any more: a bare
+// character count reads as noise to a non-engineer reader next to a real line-count figure.
+#let code_volume_label(cv) = {
+  let base = thousands(cv.lines) + " " + plural(cv.lines, "line", "lines") + " of code"
+  if cv.by_language.len() == 0 {
+    base
+  } else {
+    base + " (" + cv.by_language.map(l => l.language + ": " + thousands(l.lines)).join(", ") + ")"
+  }
+}
+#let code_volume_rows = if d.cover.code_volume != none {
+  (([*Code volume*], [#code_volume_label(d.cover.code_volume)]),)
+} else {
+  ()
+}
+
 #table(
   columns: (auto, 1fr),
   stroke: none,
   inset: 4pt,
-  [*Repos audited*], [#d.cover.repos.join(", ")],
+  [*Repos inspected*], [#d.cover.repos.join(", ")],
   [*Files scanned*], [#thousands(d.cover.files_scanned) (#thousands(d.cover.files_excluded) excluded as noise)],
-  [*Code volume*], [#thousands(d.cover.code_chars) characters],
-  [*Camerata version*], [#or_na(d.cover.camerata_version)],
-  [*Audit model*], [#or_na(d.cover.audit_model)],
-  [*Calibration model*], [#or_na(d.cover.calibration_model)],
+  ..code_volume_rows.flatten(),
   [*Generated*], [#d.cover.generated_at],
-  [*Prepared by*], [#or_na(d.cover.prepared_by)],
+  // P6: `d.cover.prepared_by` is resolved server-side (`resolve_prepared_by`) with a real
+  // default name as the final fallback — it is NEVER blank, so this must NEVER render "N/A"
+  // (promise 1: "one person reads every finding and signs the report").
+  [*Prepared by*], [#d.cover.prepared_by],
 )
 
 // Nice-to-have: a cover stat strip so the story starts on page 1, not page 2.
@@ -181,7 +317,7 @@
 // Nice-to-have: gate the heading when there is nothing under it.
 #if d.cover.audited_refs.len() > 0 [
   #v(0.4cm)
-  #text(weight: "bold")[Audited git state]
+  #text(weight: "bold")[Inspected git state]
   #for r in d.cover.audited_refs [
     #block(above: 2pt, below: 2pt)[
       - *#r.repo*: #if r.sha == none and r.branch == none [
@@ -206,16 +342,28 @@
 #d.executive_summary.narrative
 
 #if d.executive_summary.is_override [
-  #text(size: 8.5pt, style: "italic", fill: rgb("#666666"))[Summary text supplied by the auditor.]
+  #text(size: 8.5pt, style: "italic", fill: rgb("#666666"))[Summary text supplied by the reviewer.]
 ]
 
-#if d.executive_summary.top_do_now.len() > 0 [
-  #v(0.3cm)
-  #text(weight: "bold")[Top priority items]
-  #for line in d.executive_summary.top_do_now [
-    - #line
+// W6: a failed/timed-out pass must be disclosed, never omitted silently. Rendered here
+// (the summary) AND again in Methodology & limitations below — the same strings both times,
+// see `report_export::failed_pass_disclosures`. Gated on non-empty so a clean run renders
+// nothing extra.
+#if d.executive_summary.failed_passes.len() > 0 [
+  #block(above: 8pt, below: 4pt, stroke: 0.6pt + rgb("#c0392b"), inset: 8pt, radius: 3pt)[
+    #text(weight: "bold", size: 9pt)[Not computed this run]
+    #for note in d.executive_summary.failed_passes [
+      - #note
+    ]
   ]
 ]
+
+// FIX 4 (2026-09-13 review, "page 3 states the top-3 three times"): the executive summary used
+// to ALSO restate the top do-now findings as its own bulleted "priority items" list right
+// here — on top of the narrative's own blast-radius lead sentence (dropped, see
+// `report_export::default_narrative`'s doc comment) and the "Three things this week" box
+// immediately below. The exec summary is now curation + counts only; the box below is the ONE
+// place that names the top items.
 
 // ── Item 7: "If you only do three things this week" ───────────────────────
 // A buyer pricing remediation reads "these two criticals are about four hours of work total"
@@ -231,10 +379,17 @@
       #block(above: 4pt, below: 8pt)[
         #severity_chip(item.severity) *#item.headline*
         #text(size: 8.5pt, fill: rgb("#666666"))[
-          #item.repo / #raw(breakable(item.path)):#str(item.line) (#item.rule_id)
+          #item.repo / #breakable(item.path):#str(item.line) (#item.rule_id)
         ]
         #v(1pt)
         #text(size: 9pt)[Rough estimate: #item.hours_label]
+        // FIX 7 (2026-09-13 review): one factual sentence of what the exposure MEANS, when
+        // one is authored for this rule (`report_export::business_impact_for_rule`) — omitted
+        // gracefully (no blank line, no "impact unknown" filler) when it isn't.
+        #if item.impact != none [
+          #v(1pt)
+          #text(size: 8.5pt, style: "italic", fill: rgb("#555555"))[#item.impact]
+        ]
       ]
     ]
     #line(length: 100%, stroke: 0.4pt + rgb("#dddddd"))
@@ -249,23 +404,26 @@
 = Category scorecard
 
 #if d.scorecard.rows.len() == 0 [
-  No findings were produced by any audited category.
+  No findings were produced by any inspected category.
 ] else [
   #table(
     // Item 6: the critical/high/medium/low columns get a FIXED width (not "auto") because
     // heat_cell's box is itself fixed-width — an "auto" column sized against a 100%-relative
     // child creates a circular sizing problem that corrupts the whole table's row layout.
-    columns: (1.4fr, 2.1cm, 2.1cm, 2.1cm, 2.1cm, auto, 1.2fr),
+    // FIX 5 (2026-09-13 review): the "checked/clean" column is now spelled out in words
+    // ("N checked, M clean") rather than a bare "N/M" fraction that reads as a grade — widened
+    // from `auto` to a fixed width to keep that longer text from cramping the table.
+    columns: (1.3fr, 2.1cm, 2.1cm, 2.1cm, 2.1cm, 2.9cm, 1.1fr),
     stroke: 0.5pt + rgb("#dddddd"),
     inset: 5pt,
-    [*Category*], [*Critical*], [*High*], [*Medium*], [*Low*], [*Checked / clean*], [*Status*],
+    [*Category*], [*Critical*], [*High*], [*Medium*], [*Low*], [*Rules checked · Rules clean*], [*Status*],
     ..d.scorecard.rows.map(row => (
       [#row.category],
       heat_cell(row.critical, "critical"),
       heat_cell(row.high, "high"),
       heat_cell(row.medium, "medium"),
       heat_cell(row.low, "low"),
-      [#str(row.audited_rules)/#str(row.clean_rules)],
+      [#str(row.audited_rules) checked · #str(row.clean_rules) clean],
       [#chip(row.status, status_kind(row.status))],
     )).flatten()
   )
@@ -274,72 +432,145 @@
 #pagebreak()
 
 // ── 4. Severity × effort matrix ───────────────────────────────────────────
+// FIX 6 (2026-09-13 review, "build the real 2-D grid"): this used to be 4 unrelated boxes
+// (Do now / Do next / Plan / Accepted) under a heading that promised a 2-D placement it never
+// delivered — and it duplicated page 3's "Three things this week" box. `d.priority_grid`
+// (`report_export::build_priority_grid`) is the ACTUAL severity-rows x effort-columns grid:
+// each open finding sits in exactly one cell. Accepted and Informational findings are
+// deliberately out of scope (a footnote, not a row/column) — see the struct's doc comment.
 = Severity × effort matrix
 
-#let matrix_cell(title, items) = {
-  block(width: 100%, inset: 8pt, stroke: 0.5pt + rgb("#dddddd"), radius: 2pt)[
-    #text(weight: "bold")[#title (#str(items.len()))]
-    #if items.len() == 0 [
-      #text(fill: rgb("#999999"), size: 9pt)[None this run.]
-    ] else [
-      #let cap = 10
-      #let shown = items.slice(0, calc.min(cap, items.len()))
-      #for it in shown [
-        - #severity_chip(it.severity) #it.repo / #raw(breakable(it.path)):#str(it.line)
-      ]
-      #if items.len() > cap [
-        #text(size: 8pt, fill: rgb("#888888"))[+#str(items.len() - cap) more (see Curated findings)]
+#let effort_col_label(key) = {
+  if key == "low" { "Low effort" }
+  else if key == "medium" { "Medium effort" }
+  else if key == "high" { "High effort" }
+  else { "Not yet estimated" }
+}
+
+// C4-R3: a cell with no findings in it used to render the literal word "None" — read by a
+// non-engineer client as something having GONE WRONG (a stringified absent value), not as the
+// intended "nothing landed in this severity x effort bucket" empty state. An empty cell now
+// renders as blank — the row/column headers already say which bucket it is, so a blank cell at
+// their intersection reads as "zero" without needing a word for it (and this house style never
+// uses an em/en dash as a placeholder either, see `or_na` above).
+#let grid_cell_content(cell) = {
+  if cell.findings.len() == 0 [] else [
+    #for f in cell.findings [
+      #block(above: 2pt, below: 4pt)[
+        #text(size: 8pt)[#f.headline]
+        #linebreak()
+        #text(size: 7.5pt, fill: rgb("#888888"))[#f.repo / #breakable(f.path, n: 24):#str(f.line) (#f.rule_id)]
       ]
     ]
   ]
 }
 
-#grid(
-  columns: (1fr, 1fr),
-  gutter: 8pt,
-  matrix_cell("Do now", d.matrix.do_now),
-  matrix_cell("Do next", d.matrix.do_next),
-  matrix_cell("Plan", d.matrix.plan),
-  matrix_cell("Accepted", d.matrix.accepted),
-)
+#if d.priority_grid.rows.len() == 0 [
+  No do-now, do-next, or plan findings this run.
+] else [
+  #table(
+    columns: (auto,) + d.priority_grid.columns.map(c => 1fr),
+    stroke: 0.5pt + rgb("#dddddd"),
+    inset: 6pt,
+    [*Severity*],
+    ..d.priority_grid.columns.map(c => [*#effort_col_label(c)*]),
+    ..d.priority_grid.rows.map(row => (
+      [#severity_chip(row.severity)],
+      ..row.cells.map(cell => grid_cell_content(cell)),
+    )).flatten()
+  )
+]
+
+#if d.priority_grid.accepted_count > 0 or d.priority_grid.informational_count > 0 [
+  #v(0.3cm)
+  #text(size: 8.5pt, fill: rgb("#888888"))[
+    #if d.priority_grid.accepted_count > 0 [
+      #str(d.priority_grid.accepted_count) #plural(d.priority_grid.accepted_count, "finding is", "findings are") accepted risk and out of scope for this grid (see Curated findings).
+    ]
+    #if d.priority_grid.informational_count > 0 [
+      #str(d.priority_grid.informational_count) further #plural(d.priority_grid.informational_count, "item is", "items are") informational and out of scope for this grid.
+    ]
+  ]
+]
 
 #pagebreak()
 
+// One curated-findings GROUP (one rule, its citation/title header, and every site it covers) —
+// factored out so "Curated findings" and the separate "Held for review" section (C4-P4 residual
+// defect 5) render identically instead of maintaining two copies of this block.
+//
+// S4: keep the group heading + citation + FIRST site together (orphan control) — later sites in
+// the same group are free to break across pages normally.
+//
+// FIX 8 (2026-09-13 review): the BOLD, primary heading for each finding is the per-site defect
+// headline (`render_site`'s own `site.headline`, Item 1) and now LEADS the block outright — the
+// rule id + its own invariant title, plus the citation, render as a small gray SUBTITLE directly
+// BENEATH that headline (via `render_site`'s `after_headline`), kept for registry traceability,
+// never as the thing a reader sees first.
+#let render_curated_group(group) = {
+  block(breakable: false)[
+    #block(above: 12pt, below: 2pt)[
+      #if group.sites.len() > 0 [
+        #render_site(group.sites.at(0), after_headline: [
+          #text(size: 8.5pt, fill: rgb("#888888"))[#group.rule_id: #group.title] #text(size: 8.5pt, fill: rgb("#888888"))[(#str(group.sites.len()) #plural(group.sites.len(), "site", "sites"))]
+          // Item 5: show the citation ONCE. When real external sources exist, the bulleted
+          // title+URL list IS the citation — the run-on `citation.label` (a redundant join of
+          // those same titles) is dropped. `label` is shown only when there are no external
+          // sources to bullet (the advisory/preview case), where it is the sole honesty note.
+          #if group.citation.sources.len() > 0 [
+            #for s in group.citation.sources [
+              #text(size: 8.5pt, fill: rgb("#555555"))[- #s.title #if s.url != "" [(#s.url)]]
+            ]
+          ] else [
+            #text(size: 8.5pt, fill: rgb("#555555"))[#group.citation.label]
+          ]
+        ])
+      ]
+    ]
+  ]
+  for site in group.sites.slice(1) [
+    #render_site(site)
+  ]
+}
+
 // ── 5. Curated findings ───────────────────────────────────────────────────
+// C4-P4 (residual defect 5): `d.curated_findings` is already ordered by the server (severity
+// desc, then bucket do_now -> do_next -> plan -> accepted, then confidence) — see
+// `report_export::curated_group_sort_key` — never re-sorted (alphabetically or otherwise) here.
 = Curated findings
 
 #if d.curated_findings.len() == 0 [
   No open code findings survived triage.
 ] else [
   #for group in d.curated_findings [
-    // S4: keep the group heading + citation + FIRST site together (orphan control) — later
-    // sites in the same group are free to break across pages normally.
-    //
-    // Item 1: the BOLD, primary heading for each finding is now the per-site defect headline
-    // (rendered inside render_site) — the rule id + its own invariant title is demoted here to
-    // a small gray SUBTITLE line, kept for registry traceability, not as the headline.
-    #block(breakable: false)[
-      #block(above: 12pt, below: 2pt)[
-        #text(size: 8.5pt, fill: rgb("#888888"))[#group.rule_id: #group.title] #text(size: 8.5pt, fill: rgb("#888888"))[(#str(group.sites.len()) #plural(group.sites.len(), "site", "sites"))]
-      ]
-      // Item 5: show the citation ONCE. When real external sources exist, the bulleted
-      // title+URL list IS the citation — the run-on `citation.label` (a redundant join of
-      // those same titles) is dropped. `label` is shown only when there are no external
-      // sources to bullet (the advisory/preview case), where it is the sole honesty note.
-      #if group.citation.sources.len() > 0 [
-        #for s in group.citation.sources [
-          #text(size: 8.5pt, fill: rgb("#555555"))[- #s.title #if s.url != "" [(#s.url)]]
-        ]
-      ] else [
-        #text(size: 8.5pt, fill: rgb("#555555"))[#group.citation.label]
-      ]
-      #if group.sites.len() > 0 [
-        #render_site(group.sites.at(0))
-      ]
-    ]
-    #for site in group.sites.slice(1) [
-      #render_site(site)
-    ]
+    #render_curated_group(group)
+  ]
+]
+
+#pagebreak()
+
+// ── Held for review ─────────────────────────────────────────────────────────
+// C4-P4 (residual defect 5) / C5-4: a group whose sites are ALL informational (the severity-
+// capped, <= medium conventions-to-consider appendix) or ALL held (a calibration hedge at ANY
+// severity, including high/critical — see report_export::is_held_for_review) never renders under
+// "Curated findings" — that heading promises action items. Both route here, matching the
+// executive summary's own "held for a human reviewer's judgment call" framing. `render_site`
+// renders each site's own real severity via `severity_chip` and its own `disposition` label
+// (computed server-side, distinct wording for "informational" vs "held") — no bucket-specific
+// branching needed here. Same row-level content, own heading, own page, strictly AFTER every
+// curated finding above.
+= Held for review
+
+#if d.held_for_review_findings.len() == 0 [
+  No findings held for a reviewer's judgment call this run.
+] else [
+  #text(size: 9pt, style: "italic", fill: rgb("#666666"))[
+    Held for a human reviewer's judgment call — not an open action item, but worth a second \
+    look.
+  ]
+  #v(4pt)
+  #for group in d.held_for_review_findings [
+    #render_curated_group(group)
   ]
 ]
 
@@ -377,7 +608,7 @@
     inset: 5pt,
     [*Package*], [*Repo*], [*Advisory*], [*Severity*],
     ..d.dependency_snapshot.rows.map(row => (
-      [#raw(breakable(row.package, n: 24))],
+      [#breakable(row.package, n: 24)],
       [#row.repo],
       [#row.advisory],
       [#severity_chip(row.severity)],
@@ -393,6 +624,16 @@
 
 #pagebreak()
 
+// ── Next steps (FIX 3, 2026-09-13 review) ───────────────────────────────────────────
+// A short, FACTUAL "what happens after this report" paragraph, opening the ladder before the
+// reader gets to Methodology's more technical detail. `d.methodology.next_steps` is authored
+// prose (`report_export::next_steps_note`, which also computes and states the run's real
+// numeric fix rate per promise 2), never an LLM call, same pattern as the deterministic/ai-tier
+// notes below.
+= Next steps
+
+#d.methodology.next_steps
+
 // ── 8 + 9. Methodology & limitations + Disclaimer (S1: share a page) ────────────────
 = Methodology & limitations
 
@@ -400,7 +641,23 @@
 
 #d.methodology.ai_tier_note
 
-*#str(d.methodology.candidates_reviewed) candidate #plural(d.methodology.candidates_reviewed, "finding", "findings") reviewed; #str(d.methodology.excluded_false_positive) dispositioned as false positives by the auditor and excluded.*
+// Branding (2026-09-13 review): Audit model / Calibration model / Camerata version used to sit
+// on the cover; they now render here instead. Camerata is the inspecting INSTRUMENT,
+// legitimately named where methodology is discussed, never on the client-facing cover (see
+// `brand_title` above) and never a substitute for the agency's own resolved brand.
+Scanned with Camerata v#or_na(d.cover.camerata_version). Inspection model: #or_na(d.cover.audit_model). Calibration model: #or_na(d.cover.calibration_model).
+
+// P5: this reconciling line must never claim a human "reviewed"/"dispositioned" a finding
+// unless `d.review_state == "reviewed"` (at least one finding this session carries an explicit
+// auditor disposition — see `report_export::ReviewState`'s doc comment). The two branches also
+// each show EVERY number in the partition (curated total is implied by the do-now/next/plan/
+// accepted breakdown above; this line adds the two counts that used to be invisible: held for
+// review and false positives), so `candidates_reviewed` always reconciles on the page.
+#if d.review_state == "reviewed" [
+  *#str(d.methodology.candidates_reviewed) candidate #plural(d.methodology.candidates_reviewed, "finding", "findings") reviewed by a human reviewer; #str(d.methodology.excluded_false_positive) dispositioned as false positives and excluded; #str(d.methodology.held_for_review) held for further review.*
+] else [
+  *#str(d.methodology.candidates_reviewed) candidate #plural(d.methodology.candidates_reviewed, "finding", "findings") produced by the engine; #str(d.methodology.held_for_review) held for a human reviewer's judgment call; #str(d.methodology.excluded_false_positive) auto-excluded as likely false positives. This export has not yet had a human triage pass.*
+]
 
 #d.methodology.severity_scale_note
 
@@ -409,8 +666,44 @@ Not performed in this engagement:
   - #item
 ]
 
+// W6: a failed/timed-out pass must be disclosed, never omitted silently — same strings as
+// the Executive summary's box above (see `report_export::failed_pass_disclosures`), restated
+// here for the more technical Methodology reader. Gated on non-empty.
+#if d.methodology.failed_passes.len() > 0 [
+  #v(0.2cm)
+  Not computed this run (pass failed or timed out):
+  #for note in d.methodology.failed_passes [
+    - #note
+  ]
+]
+
 = Disclaimer
 
 #block(stroke: 0.5pt + rgb("#cccccc"), inset: 10pt, radius: 2pt)[
   #d.disclaimer
+]
+
+// P6 (2026-09-29), promise 1 ("one person reads every finding and signs the report"): a
+// signature block naming the real preparer. `d.cover.prepared_by` is resolved server-side
+// (`report_export::resolve_prepared_by`) with a real default name as its final fallback — it
+// is NEVER blank, so this block always names an actual person, never "N/A".
+//
+// W5 (2026-09-30): this block used to render the same NAME-plus-DATE attestation no matter
+// what, including on a raw (nobody-has-looked-at-this-yet) export — contradicting the DRAFT
+// banner above and reading to a client as a completed human sign-off that never happened. Now
+// gated on `is_draft` (the exact same `d.review_state` signal the draft banner reads, defined
+// once near the top of this file) so the banner and this block can never disagree again: a
+// reviewed run keeps the real name+date sign-off below; a raw/unreviewed draft gets no
+// name+date attestation at all, just an explicit unreviewed-draft label.
+#v(0.5cm)
+#block(stroke: 0.75pt + rgb("#333333"), inset: 10pt, radius: 2pt, width: 100%)[
+  #text(size: 9pt)[
+    #if is_draft [
+      Prepared by: #text(weight: "bold")[#d.cover.prepared_by] (unreviewed draft, not signed off)
+    ] else [
+      Prepared and signed off by: #text(weight: "bold")[#d.cover.prepared_by]
+      #linebreak()
+      #text(fill: rgb("#666666"))[#d.cover.generated_at]
+    ]
+  ]
 ]

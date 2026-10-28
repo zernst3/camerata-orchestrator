@@ -1,9 +1,11 @@
 id = "CICD-DEPENDENCY-AUDIT-1"
+version = 1
 title = "Scan dependencies for known vulnerabilities (osv-scanner)"
-tag = "stack"
 domain = "ci-cd"
 layer = "universal"
 enforcement = "mechanical"
+kind = "decision"
+inspectable = true
 # No adopted default: the cadence (when/how often the scan runs) is a project
 # decision — weekly CI job, per-PR, in-loop, or on-demand. Selecting this rule
 # forces a conscious cadence choice.
@@ -15,6 +17,21 @@ opt_in_only = true
 # no full program build), so it is NOT layer-3-only.
 layer3_only = false
 verification = "grounded"
+qualifies = """
+How the engine tracks this: once the team picks a cadence, register osv-scanner in the project's `.camerata/checks.toml` manifest so the engine enforces the check and pins the tool version:
+
+[[check]]
+id       = "CICD-DEPENDENCY-AUDIT-1"
+name     = "dependency vulnerability scan"
+tool     = "osv-scanner"
+version  = "<x.y.z>"          # EXACT pinned version — no ranges
+install  = "curl -sSfL https://github.com/google/osv-scanner/releases/download/v<x.y.z>/osv-scanner_linux_amd64 -o osv-scanner && chmod +x osv-scanner && sudo mv osv-scanner /usr/local/bin/"
+command  = "osv-scanner -r ."
+severity = "high"
+in_loop  = false              # CI-only cadences (weekly, per-PR, manual); set true for the every-pass option
+
+The `in_loop` flag maps the chosen cadence onto the engine's layers: in_loop = false runs the check in CI only (Layer 3); in_loop = true additionally runs it in the Camerata Layer-2 in-loop dev gate after each agent task, which is what the every-pass option selects. The Layer-2 runner picks up in_loop = true automatically from the manifest, and findings fold into Camerata triage with stable rule ids.
+"""
 
 [[sources]]
 url = "https://google.github.io/osv-scanner/"
@@ -41,7 +58,7 @@ why = "Camerata does not build a scheduling or cadence engine. The cadence is a 
 [[option]]
 id = "dep-audit-weekly-ci"
 label = "Scheduled weekly CI job (recommended — low noise, catches newly-disclosed CVEs)"
-directive = """Wire osv-scanner as a scheduled weekly CI job, NOT on every PR. The scan catches newly-disclosed CVEs that affect already-merged dependencies, which per-PR runs miss entirely. A weekly schedule is the standard cadence for dependency scanning: low noise, actionable findings, no per-PR friction.
+directive = """Run osv-scanner in CI as a scheduled weekly job, NOT on every PR. The scan catches newly-disclosed CVEs that affect already-merged dependencies, which per-PR runs miss entirely. A weekly schedule is the standard cadence for dependency scanning: low noise, actionable findings, no per-PR friction. Pin an exact osv-scanner version (no ranges) and fail the job on findings at or above the chosen severity.
 
 Implementation — GitHub Actions example:
 
@@ -69,27 +86,17 @@ jobs:
         run: osv-scanner -r . 2>&1 || exit 1
 ```
 
-Pin the exact osv-scanner version (replace `<x.y.z>`) and add the manifest entry to `.camerata/checks.toml`:
-
-```toml
-[[check]]
-id       = "CICD-DEPENDENCY-AUDIT-1"
-name     = "dependency vulnerability scan"
-tool     = "osv-scanner"
-version  = "<x.y.z>"          # EXACT pinned version — no ranges
-install  = "curl -sSfL https://github.com/google/osv-scanner/releases/download/v<x.y.z>/osv-scanner_linux_amd64 -o osv-scanner && chmod +x osv-scanner && sudo mv osv-scanner /usr/local/bin/"
-command  = "osv-scanner -r ."
-severity = "high"
-in_loop  = false               # CI-only cadence; not run in the in-loop dev gate
-```
-
-The developer owns the cron schedule and CI wiring. Camerata enforces the check once it is in the manifest; the manifest entry here sets `in_loop = false` so it does not run on every agent task — only in CI on the weekly schedule."""
+Replace `<x.y.z>` with an exact pinned osv-scanner version. The team owns the cron schedule and CI wiring."""
+remediation = """
+Add a scheduled weekly CI job that runs osv-scanner against the project's dependency lock file, rather than running it on every PR. Verify by checking the CI history for a completed weekly dependency-scan run and confirming it would catch a dependency with a newly-disclosed CVE.
+"""
+effort = "medium"
 why = "A weekly scheduled CI job is the industry-standard cadence for dependency scanning: it catches newly-disclosed CVEs (which per-PR scans miss) without adding per-PR friction. It is the right trade for most teams. The developer implements the cron schedule in CI; Camerata carries the rule and the manifest entry as guidance."
 
 [[option]]
 id = "dep-audit-per-pr"
 label = "Run in CI on every pull request / push"
-directive = """Wire osv-scanner in CI on every pull_request and push event. This catches a vulnerable dependency the moment it is introduced in a PR, at the cost of added per-PR latency. Best for teams with a low-tolerance security posture or regulated environments.
+directive = """Run osv-scanner in CI on every pull_request and push event. This catches a vulnerable dependency the moment it is introduced in a PR, at the cost of added per-PR latency. Best for teams with a low-tolerance security posture or regulated environments. Pin an exact osv-scanner version (no ranges) and fail the job on findings at or above the chosen severity.
 
 Implementation — GitHub Actions example:
 
@@ -116,51 +123,29 @@ jobs:
         run: osv-scanner -r . 2>&1 || exit 1
 ```
 
-Add the manifest entry to `.camerata/checks.toml`:
-
-```toml
-[[check]]
-id       = "CICD-DEPENDENCY-AUDIT-1"
-name     = "dependency vulnerability scan"
-tool     = "osv-scanner"
-version  = "<x.y.z>"          # EXACT pinned version — no ranges
-install  = "curl -sSfL https://github.com/google/osv-scanner/releases/download/v<x.y.z>/osv-scanner_linux_amd64 -o osv-scanner && chmod +x osv-scanner && sudo mv osv-scanner /usr/local/bin/"
-command  = "osv-scanner -r ."
-severity = "high"
-in_loop  = false               # CI gate; not run in the in-loop dev gate
-```
-
-The developer owns the trigger wiring in the CI workflow. Camerata enforces the check via the manifest once CI runs it."""
+Replace `<x.y.z>` with an exact pinned osv-scanner version. The team owns the trigger wiring in the CI workflow."""
+remediation = """
+Wire osv-scanner into CI to run on every pull request and push, so a vulnerable dependency is caught the moment it is introduced. Verify by opening a PR that introduces a known-vulnerable dependency version and confirming the CI check fails on it.
+"""
+effort = "medium"
 why = "Per-PR scanning catches vulnerabilities the moment they are introduced. Appropriate for high-security-posture or regulated teams that can accept the added PR latency. The developer implements the trigger; Camerata carries the rule."
 
 [[option]]
 id = "dep-audit-every-pass"
-label = "Run in BOTH the in-loop dev gate (Layer 2) AND CI (Layer 3) — highest coverage"
-directive = """Wire osv-scanner at both layers: set `in_loop = true` in the manifest so it also runs in the Camerata Layer-2 in-loop dev gate after each agent task, AND in CI. This is the highest-coverage option: every agent task AND every CI run is gated. It adds latency to the in-loop dev cycle; accept that trade only if the security posture demands it.
+label = "Run both locally during development AND in CI — highest coverage"
+directive = """Run osv-scanner both in CI and continuously during development: locally on every change (for example as a pre-commit or pre-push hook, or a file-watch task) AND in CI on a schedule or per-PR. This is the highest-coverage option: every local change AND every CI run is gated. It adds latency to the local dev cycle; accept that trade only if the security posture demands it.
 
-osv-scanner is fast (it reads lock files, not a full build), so in-loop overhead is typically a few seconds per run.
-
-Add the manifest entry to `.camerata/checks.toml`:
-
-```toml
-[[check]]
-id       = "CICD-DEPENDENCY-AUDIT-1"
-name     = "dependency vulnerability scan"
-tool     = "osv-scanner"
-version  = "<x.y.z>"          # EXACT pinned version — no ranges
-install  = "curl -sSfL https://github.com/google/osv-scanner/releases/download/v<x.y.z>/osv-scanner_linux_amd64 -o osv-scanner && chmod +x osv-scanner && sudo mv osv-scanner /usr/local/bin/"
-command  = "osv-scanner -r ."
-severity = "high"
-in_loop  = true                # bounces the agent at Layer 2 too; also in CI
-```
-
-For the CI trigger, pair with any schedule or pull_request workflow — the manifest drives both layers. The developer wires the CI cadence (weekly cron, per-PR, or both); Camerata's Layer-2 runner picks up `in_loop = true` automatically from the manifest."""
+osv-scanner is fast (it reads lock files, not a full build), so the local overhead is typically a few seconds per run. Pin an exact osv-scanner version (no ranges) and fail on findings at or above the chosen severity in both places. The team wires the local hook and the CI cadence (weekly cron, per-PR, or both)."""
+remediation = """
+Wire osv-scanner into both the in-loop development gate (set in_loop = true in the manifest) and CI, so every agent task and every CI run is scanned. Verify by confirming a vulnerable dependency is caught both during local/agent development and again in the CI run.
+"""
+effort = "medium"
 why = "The every-pass option maximises coverage by running at both Layer 2 (in-loop dev gate) and Layer 3 (CI), because osv-scanner is lightweight enough to run locally. Best for teams with strict security requirements; accept the in-loop latency in exchange for the tightest possible gate."
 
 [[option]]
 id = "dep-audit-manual"
 label = "Manual / on-demand only (workflow_dispatch)"
-directive = """Wire osv-scanner as a manual on-demand workflow only. No scheduled or PR-triggered runs; the team fires the scan deliberately when they choose (before a release, after a dependency bump, etc.). Use this when automated scanning is not yet appropriate (early-stage project, no CI budget, explicit opt-in culture).
+directive = """Run osv-scanner as a manual, on-demand workflow only (workflow_dispatch). No scheduled or PR-triggered runs; the team fires the scan deliberately when they choose (before a release, after a dependency bump, etc.). Use this when automated scanning is not yet appropriate (early-stage project, no CI budget, explicit opt-in culture). Pin an exact osv-scanner version (no ranges) and fail on findings at or above the chosen severity.
 
 Implementation — GitHub Actions example:
 
@@ -184,19 +169,9 @@ jobs:
         run: osv-scanner -r . 2>&1 || exit 1
 ```
 
-Add the manifest entry to `.camerata/checks.toml` so Camerata tracks the tool version and install command (even though `in_loop = false` and the workflow is manual-only):
-
-```toml
-[[check]]
-id       = "CICD-DEPENDENCY-AUDIT-1"
-name     = "dependency vulnerability scan"
-tool     = "osv-scanner"
-version  = "<x.y.z>"          # EXACT pinned version — no ranges
-install  = "curl -sSfL https://github.com/google/osv-scanner/releases/download/v<x.y.z>/osv-scanner_linux_amd64 -o osv-scanner && chmod +x osv-scanner && sudo mv osv-scanner /usr/local/bin/"
-command  = "osv-scanner -r ."
-severity = "high"
-in_loop  = false               # manual-only; not run automatically
-```
-
-The developer owns the decision of when to fire the workflow. Upgrade to a scheduled or per-PR cadence as the project matures."""
+Replace `<x.y.z>` with an exact pinned osv-scanner version. The team owns the decision of when to fire the workflow, and can upgrade to a scheduled or per-PR cadence as the project matures."""
+remediation = """
+Add a manual, on-demand osv-scanner workflow (workflow_dispatch) with no scheduled or PR-triggered runs, and have the team run it deliberately before releases or after dependency bumps. Verify by manually triggering the workflow and confirming it reports known vulnerabilities in the current lock file.
+"""
+effort = "medium"
 why = "Manual-only scanning is appropriate for early-stage projects or teams not ready for automated scanning. It documents the decision and the tool, and is easily upgraded to an automated cadence later."

@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 
 /// The default model when none is configured / requested. Capable by default; override
 /// per call or via `CAMERATA_LLM_MODEL`.
-pub const DEFAULT_MODEL: &str = "claude-sonnet-4-6";
+pub const DEFAULT_MODEL: &str = "claude-sonnet-5";
 
 /// serde default for each [`StepModels`] field — the shipped [`DEFAULT_MODEL`]. Used so a
 /// project JSON written before a given step field existed deserializes to the default
@@ -46,12 +46,54 @@ pub fn default_routine_secs() -> u64 {
         .unwrap_or(DEFAULT_ROUTINE_STALL_SECS)
 }
 
+/// The backend a project (or the global chat assistant) uses for every one of its AI calls
+/// — see `docs/design/2026-09-22_per-project-backend.md`. Replaces the old per-project
+/// `cli_active: bool` compliance-safety flag AND the global `CAMERATA_LLM_BACKEND`-driven
+/// app preference: there are now exactly two backend SETTINGS in the whole app (this type
+/// used for both) and no env-driven third axis.
+///
+/// - **`Cli`** (the serde default AND the [`Default`] impl, i.e. the value of an ABSENT
+///   `backend` field in a legacy persisted file, so legacy behavior never changes) — the
+///   Claude Code CLI, i.e. the operator's own logged-in subscription. No API key needed.
+///   A NEW project does not start here: it starts on [`ProjectBackend::for_new_project`].
+/// - **`Api`** — the Anthropic Messages API. Needs an Anthropic key (saved in the app, else the `ANTHROPIC_API_KEY` env fallback). A
+///   missing key never falls back to the CLI — `resolve_backend` reports
+///   `BackendResolution::Blocked` and the caller must not start any model call. This is the
+///   compliant, metered, single-party chain nameable in a client contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ProjectBackend {
+    #[default]
+    Cli,
+    Api,
+}
+
+impl ProjectBackend {
+    /// The backend a brand-new project starts on: the metered Anthropic API, the compliant
+    /// single-party chain. Deliberately distinct from [`Default`] (`Cli`), which is what a
+    /// legacy persisted project WITHOUT a `backend` field deserializes to, so changing what
+    /// new projects start on never silently switches an existing one.
+    pub fn for_new_project() -> Self {
+        ProjectBackend::Api
+    }
+
+    /// The lowercase name this backend serializes as, for the places that record or print it
+    /// (the export manifest, the README, the operator report). Deliberately NOT named `label`:
+    /// an inherent `label` would shadow the UI's display-label extension ("CLI" / "API").
+    pub fn provenance_name(self) -> &'static str {
+        match self {
+            ProjectBackend::Cli => "cli",
+            ProjectBackend::Api => "api",
+        }
+    }
+}
+
 /// Per-project Layer-3 (agentic code-review) configuration (R7).
 ///
 /// Default: off, using the project's `balanced` tier model when enabled.
 /// Serialises with `serde(default)` so projects written before this field existed
 /// deserialise to the disabled default without migration.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct L3ReviewConfig {
     /// Whether L3 is enabled for this project.
     #[serde(default)]
@@ -59,15 +101,6 @@ pub struct L3ReviewConfig {
     /// The model id that runs the L3 reviewer. Empty = use the project's `balanced` tier model.
     #[serde(default)]
     pub model: String,
-}
-
-impl Default for L3ReviewConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            model: String::new(),
-        }
-    }
 }
 
 /// Per-project stall detection thresholds, split by context (watched = interactive,

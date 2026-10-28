@@ -59,7 +59,7 @@ use std::collections::HashSet;
 use syn::visit::Visit;
 use syn::Expr;
 
-use crate::arch_checker::{ArchChecker, ArchViolation, RepoView, SEVERITY_MEDIUM};
+use crate::arch_checker::{ArchChecker, ArchViolation, RepoView, ViolationGrade, SEVERITY_MEDIUM};
 
 pub const RULE_RESOURCE_LIFECYCLE: &str = "ARCH-RESOURCE-LIFECYCLE-1";
 
@@ -100,7 +100,7 @@ impl ArchChecker for ResourceLifecycleChecker {
 }
 
 fn spawn_chain_violations(path: &str, source: &str) -> Vec<ArchViolation> {
-    let Ok(file) = syn::parse_file(source) else {
+    let Some(file) = crate::extract::rust_syn::parse_file(source) else {
         return Vec::new();
     };
 
@@ -110,19 +110,30 @@ fn spawn_chain_violations(path: &str, source: &str) -> Vec<ArchViolation> {
     let mut tracked: HashSet<String> = HashSet::new();
     let mut protected: HashSet<String> = HashSet::new();
     {
-        let mut collector = LocalBindingVisitor { tracked: &mut tracked, protected: &mut protected };
+        let mut collector = LocalBindingVisitor {
+            tracked: &mut tracked,
+            protected: &mut protected,
+        };
         collector.visit_file(&file);
     }
 
     // Pass 2: a `<var>.kill_on_drop(true)` call ANYWHERE in the file (a separate statement,
     // not just chained at bind time) also marks that tracked variable protected.
     {
-        let mut protector = ProtectVisitor { tracked: &tracked, protected: &mut protected };
+        let mut protector = ProtectVisitor {
+            tracked: &tracked,
+            protected: &mut protected,
+        };
         protector.visit_file(&file);
     }
 
     // Pass 3: find every terminal spawn call (inline-chain or tracked-variable) and decide.
-    let mut finder = TerminalCallVisitor { path, tracked: &tracked, protected: &protected, out: Vec::new() };
+    let mut finder = TerminalCallVisitor {
+        path,
+        tracked: &tracked,
+        protected: &protected,
+        out: Vec::new(),
+    };
     finder.visit_file(&file);
     finder.out
 }
@@ -150,7 +161,12 @@ fn path_is_command_new(p: &syn::ExprPath) -> bool {
     if p.qself.is_some() {
         return false;
     }
-    let segs: Vec<String> = p.path.segments.iter().map(|s| s.ident.to_string()).collect();
+    let segs: Vec<String> = p
+        .path
+        .segments
+        .iter()
+        .map(|s| s.ident.to_string())
+        .collect();
     let Some(last) = segs.last() else {
         return false;
     };
@@ -283,6 +299,7 @@ impl<'a, 'ast> Visit<'ast> for TerminalCallVisitor<'a> {
 impl<'a> TerminalCallVisitor<'a> {
     fn push(&mut self, node: &syn::ExprMethodCall, method: &str) {
         self.out.push(ArchViolation {
+            grade: ViolationGrade::Defect,
             rule_id: RULE_RESOURCE_LIFECYCLE.to_string(),
             file: self.path.to_string(),
             line: node.method.span().start().line,
@@ -305,11 +322,17 @@ mod tests {
     use super::*;
 
     fn view<'a>(files: &'a [(String, String)]) -> RepoView<'a> {
-        RepoView { spec: "test/repo", files }
+        RepoView {
+            spec: "test/repo",
+            files,
+        }
     }
 
     fn files(pairs: Vec<(&str, &str)>) -> Vec<(String, String)> {
-        pairs.into_iter().map(|(p, c)| (p.to_string(), c.to_string())).collect()
+        pairs
+            .into_iter()
+            .map(|(p, c)| (p.to_string(), c.to_string()))
+            .collect()
     }
 
     // ── fires on a real violation ──────────────────────────────────────────────
@@ -375,8 +398,14 @@ mod tests {
     #[test]
     fn output_and_status_terminal_methods_are_also_checked() {
         let f = files(vec![
-            ("src/a.rs", "async fn f() {\n    let _ = Command::new(\"ls\").output();\n}\n"),
-            ("src/b.rs", "async fn f() {\n    let _ = Command::new(\"ls\").status();\n}\n"),
+            (
+                "src/a.rs",
+                "async fn f() {\n    let _ = Command::new(\"ls\").output();\n}\n",
+            ),
+            (
+                "src/b.rs",
+                "async fn f() {\n    let _ = Command::new(\"ls\").status();\n}\n",
+            ),
         ]);
         let vs = ResourceLifecycleChecker.check(&view(&f));
         assert_eq!(vs.len(), 2, "{vs:#?}");
@@ -408,7 +437,10 @@ mod tests {
 
     #[test]
     fn tokio_spawn_free_function_is_not_a_method_call_and_is_ignored() {
-        let f = files(vec![("src/x.rs", "fn run() {\n    tokio::spawn(async {});\n}\n")]);
+        let f = files(vec![(
+            "src/x.rs",
+            "fn run() {\n    tokio::spawn(async {});\n}\n",
+        )]);
         assert!(ResourceLifecycleChecker.check(&view(&f)).is_empty());
     }
 
@@ -430,7 +462,10 @@ mod tests {
     #[test]
     fn non_rust_file_is_not_scoped_in() {
         let f = files(vec![("src/x.ts", "Command.new('ls').spawn();\n")]);
-        assert!(!crate::arch_checker::checker_applies(&ResourceLifecycleChecker, &f));
+        assert!(!crate::arch_checker::checker_applies(
+            &ResourceLifecycleChecker,
+            &f
+        ));
     }
 
     // ── D3: always advisory-coexisting, never config-gated ───────────────────
@@ -445,15 +480,50 @@ mod tests {
         let ids = crate::arch_checker::all_checker_rule_ids();
         assert!(!ids.contains(RULE_RESOURCE_LIFECYCLE), "{ids:?}");
         // But the checker IS registered and answers the rule id.
-        let all_ids: HashSet<&str> =
-            crate::arch_checker::all_checkers().iter().flat_map(|c| c.rule_ids().iter().copied()).collect();
+        let all_ids: HashSet<&str> = crate::arch_checker::all_checkers()
+            .iter()
+            .flat_map(|c| c.rule_ids().iter().copied())
+            .collect();
         assert!(all_ids.contains(RULE_RESOURCE_LIFECYCLE), "{all_ids:?}");
     }
 
     #[test]
     fn checker_is_registered() {
-        let ids: HashSet<&str> =
-            crate::arch_checker::all_checkers().iter().flat_map(|c| c.rule_ids().iter().copied()).collect();
+        let ids: HashSet<&str> = crate::arch_checker::all_checkers()
+            .iter()
+            .flat_map(|c| c.rule_ids().iter().copied())
+            .collect();
         assert!(ids.contains(RULE_RESOURCE_LIFECYCLE), "{ids:?}");
+    }
+
+    // ── mutation-gap tests (docs/plans/2026-10-19_MASTER-SEQUENCE.md section 2b) ────────
+
+    #[test]
+    fn kill_on_drop_false_does_not_protect_an_inline_chain() {
+        let f = files(vec![(
+            "src/x.rs",
+            "async fn run() {\n    let _ = Command::new(\"ls\").kill_on_drop(false).spawn();\n}\n",
+        )]);
+        assert_eq!(ResourceLifecycleChecker.check(&view(&f)).len(), 1);
+    }
+
+    #[test]
+    fn kill_on_drop_false_does_not_protect_a_tracked_variable() {
+        let f = files(vec![(
+            "src/x.rs",
+            "async fn run() {\n    let mut cmd = Command::new(\"ls\");\n    cmd.kill_on_drop(false);\n    let _ = cmd.spawn();\n}\n",
+        )]);
+        assert_eq!(ResourceLifecycleChecker.check(&view(&f)).len(), 1);
+    }
+
+    #[test]
+    fn a_variable_with_a_type_annotation_is_still_tracked() {
+        let f = files(vec![(
+            "src/x.rs",
+            "async fn run() {\n    let mut cmd: Command = Command::new(\"ls\");\n    let _ = cmd.spawn();\n}\n",
+        )]);
+        let vs = ResourceLifecycleChecker.check(&view(&f));
+        assert_eq!(vs.len(), 1, "{vs:#?}");
+        assert_eq!(vs[0].line, 3);
     }
 }

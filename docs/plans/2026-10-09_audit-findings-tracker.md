@@ -1,0 +1,1459 @@
+# Audit findings tracker (2026-10-09)
+
+## FINAL DECISIONS (2026-10-09) — all requirement groups closed by Zach
+
+- **E2 AGREED** — rules may declare a maximum severity; no report may exceed it.
+- **G3 DECIDED** — coverage IS client-facing, but **concise and useful, not exhaustive**. A one-line
+  summary, written for a client, never an internal diagnostic dump.
+- **H1 AGREED, with a sharpening** — every rule must be CAPABLE of running. A rule that does not run
+  because it is irrelevant to the scanned stack is CORRECT. A rule that could never run for ANY stack
+  is a DEFECT. The ~94 orphaned rules are defects.
+- **I1 + I2 ABSOLUTELY AGREED** — self-measurement is a V1 requirement, not a nice-to-have. Zach's
+  added rationale: these two also **prevent overspending on tokens** by catching regressions before
+  an external graded run.
+- **GRADER UPGRADE CONFIRMED and BLOCKING for the next measured run.** The grader must distinguish the
+  finding kinds, must still abide by the answer key, and must ALSO grade on presentation.
+- **SEQUENCING** — Zach: "it really doesn't matter because both things need to be done." Mid-layer and
+  detection coverage both proceed.
+
+## THREE-PASS SEQUENCE (Zach, 2026-10-09)
+
+**Pass 1 — BACKEND (current).** The underlying data structure, the AI scanning, and every requirement
+group working as intended. Nothing about presentation. Confirmed working and accurate before Pass 2
+begins.
+
+**Pass 2 — UI.** How all of this is presented in Camerata for the human curator. One table that flips
+between views; a lot of interconnected data (findings, conventions, deviations, coverage). Zach's
+point: this cannot be designed until the data structures are concrete and visible. Likely a dedicated
+Fable agent specialising in UI/information design, producing presentation suggestions.
+**Design goal: make it as easy as possible for the curator to review everything and decide.** This is
+where Zach does the actual product work (triage, false positives, adoption), so the UI is not cosmetic.
+
+**Pass 3 — CLIENT DELIVERABLES.**
+- **PDF = the summary.** Does NOT need every row. Already correct in shape; leave it alone.
+- **Excel = the meat and potatoes.** Needs rethinking: separate worksheets for findings, conventions,
+  deviations, coverage. This is where the specifics live.
+- **JSON = just the data structure.** Fine as-is; no work needed.
+
+## TEST DISCIPLINE (Zach, non-negotiable)
+> "I don't want code that confidently thinks it's doing what is written here in the product
+> requirements, but actually isn't."
+
+1. Every product requirement above becomes **named unit and end-to-end tests**. The requirement id
+   appears in the test name or its doc comment so the mapping is machine-checkable.
+2. A traceability check fails the build if any requirement has **zero** tests referencing it.
+3. **Old tests must keep passing and must not be edited**, with exactly two exceptions, each of which
+   must be stated explicitly in the commit message:
+   (a) a deliberate code or data-structure change the test must adapt to;
+   (b) a product requirement here that supersedes the old test's expectation.
+   Any other edit to an existing test is treated as a regression being hidden.
+4. Tests must fail BEFORE the fix and pass after; a test that passes on unfixed code proves nothing.
+
+
+Working doc. Zach is reviewing each finding individually. Status is per-finding and only HE closes one.
+Nothing here is implemented until it is marked DECIDED with a direction.
+
+Legend: `[ ]` awaiting Zach · `[x] DECIDED` · `[~] PARTIAL` (decided in principle, detail open) · `[-] DEFERRED`
+
+---
+
+## ROUTED TO ZACH — two operational decisions, not applied unilaterally
+
+### [ ] R1 — `cargo fmt` has destroyed this working tree three times
+No `rustfmt.toml` exists, and the hand-written style disagrees with rustfmt's defaults: an agent
+running `cargo fmt` reformats **189 files (+10,878 / −4,386)**, burying real work and misreporting it
+as pre-existing. It has happened three times in this effort. Every agent brief now carries an explicit
+never-run-a-formatter instruction, which is mitigation, not a cure.
+
+Two real fixes, both structural, so both are yours:
+- **(a)** One deliberate repo-wide `cargo fmt` commit at a quiet moment. The tree becomes fmt-clean
+  permanently and the hazard disappears. Cost: one enormous diff in the history, and it must land when
+  no agent holds the tree.
+- **(b)** A `rustfmt.toml` tuned until `cargo fmt` is a no-op against the current style. Preserves the
+  hand style, no mass diff, but requires experimentation to derive and may not be fully achievable.
+
+Recommend **(a)**. It is the only option that actually ends the failure mode rather than narrowing it.
+Not applied: a 189-file reformat is a topology-level change to the repo and routes to you by policy.
+
+### [ ] R2 — the never-run-a-formatter directive belongs in `AGENTS.md`, which is generated
+`AGENTS.md` is Camerata-generated ("Do not edit this file by hand"), and its `CUSTOM-*` entries come
+from the project store, not from any file in the repo. So the durable form of R1's mitigation is a new
+custom rule in Camerata's own project — which means changing Camerata's governed rule set for its own
+repo. Pleasingly self-referential, and exactly the kind of change that routes rather than auto-applies.
+Say the word and it goes in as a custom governance rule.
+
+Noticed while checking: `.camerata/features.toml` exists but `.camerata/architecture.toml` does **not** —
+which is precisely the A4 config gate that switched off all four real `ARCH-*` checkers on every
+benchmark repo. A brownfield client repo will never have that file either.
+
+---
+
+## GRADER UPGRADE — v2 shipped 2026-10-09 (prompt), ONE BLOCKER REMAINS
+
+`~/Documents/Repos/Camerata tests/_grader/GRADER_PROMPT.md` is now **v2**. It grades four axes instead
+of two, per Zach's decision that "the answer key should be abided by but the grader also needs to grade
+on presentation":
+
+1. **QUEUE** (unchanged from v1) — detection, severity, ranking. The axis that stops the loop.
+2. **KIND** (new) — is each row the right KIND of statement? A planted defect reported as
+   `ConventionObserved` or `NoConvention` is **NOT a hit**; it is a named KIND FAULT. A safe pattern
+   reported as `ConventionObserved` is correct and must NOT be penalised. Every `Deviation` must state
+   its denominator. `NotAssessed` is honesty, never penalised for being present.
+3. **PRESENTATION** (new) — per artifact, against that artifact's own standard. PDF is the summary and
+   **omitting rows is not a PDF fault**; xlsx is the detail surface and a missing row IS a fault; JSON
+   is graded on internal consistency. Coverage must be concise (G3), and an exhaustive coverage dump is
+   itself a presentation fault.
+4. **PRODUCT** (unchanged from v1) — generated content curation does not rewrite.
+
+Also added: **artifact parity is its own verdict**, stated explicitly even when clean. A row in one
+artifact and absent from another is a PARITY FAULT by name, never silently absorbed as a hit or a miss.
+That is the exact blindness that let hearth score 0/12 on a class while three rows for it existed in
+the PDF only. Scorecard entries now record `grader: v2`; QUEUE is the only axis comparable to pre-v2 runs.
+
+### [ ] BLOCKER — `grade.py` is not kind-aware and will FLATTER the engine
+The deterministic scorer matches a planted defect on **text plus severity** and picks the best hit by
+severity (`quality()`); it never reads a row's kind, and it reads only `findings.json` (never the xlsx
+or the PDF, so it cannot see presentation or parity — that part is correctly the LLM grader's job).
+
+Consequence: **once `FindingKind` ships, a planted defect emitted as `ConventionObserved` will still
+score as a HIT in `grade.py`.** That is precisely the worst defect this engine has had — the
+alternatives pass treating a planted defect as the codebase's chosen convention — scored as a success.
+The LLM grader is instructed to override the scorer on this axis and say so, but a deterministic scorer
+biased in the engine's favour is not acceptable as the number of record.
+
+Fix was one small change, deliberately deferred until W3 fixed the field's name rather than guessed at
+it (guessing is how this codebase accumulated its lexical heuristics in the first place).
+
+### [x] CLOSED 2026-10-09 — `grade.py` is now kind-aware
+W3 fixed the wire contract as `"kind"` with snake_case tags, so the scorer was updated the same day:
+
+- `ACCUSING_KINDS` = {`defect`, `deviation`} vs `INFORMATIONAL_KINDS` = {`convention_observed`,
+  `no_convention`, `not_assessed`}. **Only an accusing row can detect a planted defect.**
+- A planted defect matched only by `convention_observed` / `no_convention` is a new verdict,
+  **`kind_fault`** — reported as "the engine told the client this is the codebase's chosen pattern."
+  Counted separately from `miss`, because it is worse than silence.
+- Matched only by `not_assessed` stays a `miss` but is flagged `missed_but_disclosed_as_not_assessed`.
+  Honest non-detection and silent non-detection must never be conflated.
+- A planted high/critical defect reported as a `deviation` is a `kind_undercall`: deviations cap at
+  medium by design, so it can never rank where it belongs. Reported without voiding the hit.
+- A `deviation` with no `assessed_sites` is counted as having no denominator.
+- **Decoys: informational rows no longer count as flagged.** A safe pattern described as a convention
+  the repo already follows is correct behaviour, and penalising it would punish the A5.5 feature.
+- Rows with no kind are counted as `unspecified_kind_rows` — an emission path never mapped to a kind.
+
+Still correctly absent from the scorer: parity and presentation. It reads only `findings.json`, so
+those remain the LLM grader's axes by design.
+
+---
+
+## AUDIT A — architecture coverage
+
+### [x] A5 — DECIDED (2026-10-09): architecture rules are decision rules, not defect detectors
+**Finding.** `ai_audit.rs:5906-5930` — the alternatives pass picks which option the repo follows and
+REPLACES the rule's directive with it. When the chosen option IS the defect ("No boundary validation",
+"No idempotency contract", "Direct handler database queries"), conformance is perfect and the rule
+emits zero. No `violates` field exists on `RuleOption`.
+
+**Zach's context (new, important).** The original design was: Zach picks the alternative, the AI holds
+the repo to it. He later changed it so the AI reads the repo, recommends the alternative, then judges
+violations against that recommendation. He now believes that may have been wrong, because
+**"consistently incorrect is still a violation" and the AI has no way to determine that.**
+He also notes the genuine ambiguity: for a rule like API versioning the alternatives really do hold
+equal weight, and even a human cannot easily say which a given repo should use. Greenfield decision-
+making reused for brownfield auditing is the underlying tension.
+
+**Zach's proposed product framing.** "All but 2 of your API endpoints do NOT use API versioning,
+therefore you have 2 consistency violations." Wants suggestions on a practical approach.
+
+**Direction agreed: three rule kinds, not one.** See the response for detail. Open sub-questions
+below still need his call.
+
+- [x] A5.1 DECIDED — three-kind taxonomy CONFIRMED (`defect` / `decision` / `default-with-exceptions`)
+- [~] A5.2 PARTIAL — consistency caps low/medium by DEFAULT, but must be able to reach HIGH when
+      genuinely problematic. Zach's key insight: **the real cost of inconsistency is on FUTURE
+      features, not existing code.** Severity driver is forward drift cost, not current risk.
+      Open: the exact escape-hatch mechanism (see `deviation_ceiling` proposal).
+- [x] A5.3 DECIDED — "no convention adopted" is ONE informational row, not N violations
+- [x] A5.4 DECIDED — the alternatives pass may never silence a rule; context only, never a gate
+- [x] A5.5 DECIDED — the proposed convention set SHIPS IN THIS PRODUCT (audit derives the decisions,
+      governance later enforces them)
+
+### [ ] A5.6 — NEW, raised by Zach: the finding data structure itself must change
+The product and its post-inspection table were built on a binary premise: a row is a violation or it
+is not. That premise no longer holds. An inspection now returns true violations, consistency
+deviations, suggested conventions with ZERO violations, and "no convention adopted". Zach wants the
+new structure locked down tight and unambiguous before anything is built on it.
+Proposal under review in the response of 2026-10-09; open questions listed there.
+
+### [-] A5.7 — 58 ambiguous rule classifications: PAUSED BY ZACH (2026-10-09)
+W2 classified all 417 rules (`docs/plans/2026-10-09_rule-kind-classification.md`): defect 132,
+default_with_exceptions 117, decision-clear 110, decision-ambiguous 58. The 58 were presented to Zach
+grouped into five patterns (security-phrased-as-choice 16; detector-precision meta-rules 7; genuine
+philosophy debates 6; under-authored/every-option-degenerate 9; three that are personally his; plus
+~20 architectural/testing yes-no rules). **Zach: "pause the rule review for me for when I can sit
+down and look at these."** HOLD — do not classify these without him.
+
+Nothing is blocked by the hold: all 58 ship as `kind = "decision"` with no option marked `violates`,
+so none can emit a false defect. Worst case today is that a genuine security defect reports as a
+consistency observation instead of a violation, which is an under-call, not a false positive.
+
+### [ ] A1/A2 — React rules fired and were counted as code quality; arming hypothesis refuted
+### [ ] A3 — the ledger's "Architectural checks" family contains zero ARCH-* rules (naming/taxonomy)
+### [ ] A4 — the 4 real ARCH checkers are config-gated off absent `.camerata/architecture.toml`
+### [ ] A6 — 104 rules (25% of corpus) orphaned; their domains are never emitted for any stack
+### [ ] A7 — `UI-UTC-DATES-1` omits `verification`, defaults to Draft, has never armed anywhere
+### [ ] A8 — `SPIRIT-FILE-SIZE-1` doubly disarmed (policy verification + SPIRIT- prefix)
+### [ ] A9 — our taxonomy has no "architecture" family; `category` is the slugified domain
+### [ ] A10 — per-class verdict: 1 not-armed, 4 predicate-mismatch, 3 no-rule, 2 combination
+
+---
+
+## AUDIT B — artifact parity, hedge counts, merge
+
+### [ ] B1/B2/B3 — no sealed row set; two injection points after the merge horizon; findings.json self-contradicts
+### [ ] B4 — hedge divergence equals K exactly on all four repos
+### [ ] B5 — post-merge row addition equals the Semgrep preview row count on all four
+### [ ] B6 — `CREDENTIAL_IDENTIFIER_KEYWORDS` is a closed 12-word list; misses `VITE_SUPABASE_SERVICE_ROLE_KEY`
+### [ ] B7 — `same_construct` false for brace-free files; blind over .env/.sql/.toml/.yaml
+### [ ] B8 — clustering compares against the group SEED only; non-transitive, order-dependent
+### [ ] B9 — `e.g` registered as a structural object; 5 of 51 merge vetoes
+### [ ] B10 — the invariant gate's fixture has empty `recommendations`, so the gate it guards cannot fire
+### [ ] B11 — proposed fix: `SealedReport` newtype making post-seal injection a compile error
+
+---
+
+## AUDIT C — severity, decoys, ranking
+
+### [ ] C1 — both regressed classes have no deterministic detector; single model sample by design
+### [ ] C2 — the recommendation pass wrote down the planted site; the evidence gate skips rules with >=1 finding
+### [ ] C3 — `evidence_negates_requirement` is a 6-phrase substring scan; matches compliance prose
+### [ ] C4 — `objects_conflict` requires disjoint sets; one shared container token defeats it
+### [ ] C5 — `also_locations` reaches no artifact; over-merge is indistinguishable from a miss
+### [ ] C6 — xlsx Coverage counts primaries only; a merged-away rule renders "clean"
+### [ ] C7 — the D5 floor reads model prose, is class-blind and raise-only
+### [ ] C8 — no `max_severity` in the corpus schema; TOMLs author ceilings the pipeline cannot read
+### [ ] C9 — top-3 distinctness keys on the same credential allowlist; no-op in practice
+### [ ] C10 — an existing test asserts `items.len() == 3`, codifying the no-dedup bug
+### [ ] C11 — ESLint preview failed wholesale; zero detector coverage, all cost
+### [ ] C12 — synthesis: remedy is a different division of labour, not more downstream capping
+### [ ] C13 — proposed decisive measurement: paraphrase prose, require zero severity change
+
+---
+
+## FABLE REVIEW — returned 2026-10-09
+
+**Independently VERIFIED against source + artifacts:** A5, A3, A4, A6 (direction; count ~94 not 104),
+B1, B2, B3, B4, B6, B10, C1, C2, C3, C7, C8, C9.
+
+**STRUCK — C10 is WRONG.** The test at report_export.rs:5131-5148 concerns effort-total labelling and
+its three criticals are three DISTINCT rules in three DISTINCT files, so asserting 3 items is correct
+behaviour, not a codified bug. The adjacent test at :5167 shows the distinctness selector IS tested
+where identity exists. C10 is removed from the plan.
+
+**UNDER-EVIDENCED — B5.** The reviewer could not reconcile "post-merge delta == semgrep row count";
+the ledgers read external-tool findings 8/6/13/25, not 4/0/4/6. Plausible but unproven. Do not build on it.
+
+**Corrections to the audits:** tutorly's secret is 5 rows in the exported JSON, not 8 (the grader's 8
+likely counts the PDF tier). C7's second example is arguably a correct critical reached by an unsound
+mechanism — wrong-reason, not wrong-answer.
+
+**Narrative discipline:** B's "one cause" covers B1-B5 only; B6-B9 are unrelated merge defects grouped
+under the heading. C's "lexical stack" is real for C3/C4/C7/B6/C9 but NOT for C1 (sampling variance),
+C11 (plumbing) or C5/C6 (artifact plumbing); C12's "all three outcomes are interaction failures" is
+overreach. A's category error is correct and the deepest of the three.
+
+**The causal chain none of the three told (this is the remediation map):**
+A5 silences the architecture rule -> C3's lexical gate partially catches it -> B2 injects the catch
+into the PDF only -> the grader reads JSON -> hearth architecture 0/12 with 3 PDF-only ghosts.
+
+**Merge tension RESOLVED — both true, different mechanisms.** Cross-file merge needs a POSITIVE
+identity signal; absent, nothing joins (under-collapse). Within eligible groups the NEGATIVE veto
+requires full disjointness; one shared container token disables it (over-collapse). A merge keyed on
+prose-token overlap fails open in BOTH directions, and tuning one direction worsens the other.
+Implication: structured identity, never keyword-list adjustment.
+
+**SPLIT VERDICT on "running in circles":** the DETECTION substrate is (a) under-plumbed and converging
+(hearth 15->24, tutorly 11->12 present, lumen floor 3/5->4/5). The MID-LAYER (calibration, merge,
+packaging) is (b) accruing surface area faster than correctness.
+
+**The question none of the audits asked:** why does only the external grader ever catch these? The
+in-repo suite cannot see them by construction. The engine has elaborate HONESTY machinery (ledgers,
+FailedPass) and no SELF-MEASUREMENT machinery.
+
+### Fable's priority order
+1. [ ] Seal the row set (B11) + move evidence-gate injection inside the seal
+2. [ ] A5 at the corpus: `violates` marker + machine-readable severity ceiling (closes C8) + the
+       sites-vs-rows integrity check exporting shortfalls as HELD rows (never a refused export)
+3. [ ] Structured identity for merge and top-3 (detector-populated captures as join keys).
+       **EXPLICITLY BANNED: adding words to the credential keyword list.**
+4. [ ] Fix the eslint preview EOF (zero coverage at nonzero cost today)
+5. [ ] In-repo golden-fixture parity harness (synthetic, not the graded repos)
+
+### Explicitly NOT YET
+- C13's paraphrase gate — right ACCEPTANCE test after structured fields exist, useless as a first
+  measurement (it would fail trivially today and teach nothing).
+- Wholesale rewrite of the calibration stack — after step 2 most layers become DELETABLE, not rewritable.
+- Any new rules for uncovered classes — adding detection capacity while the mid-layer eats existing
+  recall is how the last two cycles were spent.
+
+### Watch list (cure repeating the disease)
+- Do NOT tune the evidence gate's six phrases; fixing A5 at the corpus demotes it to belt-and-braces.
+- Do NOT add `SERVICE_ROLE`/`KEY` to the credential list; the detector that matched the secret already
+  KNOWS its identity and should emit it as a structured capture.
+
+---
+
+# PASS-1 IMPLEMENTATION LOG (2026-10-09 → 10-10)
+
+These are notes on what now has CODE behind it. **Nothing here closes a finding** — status marks above
+stay Zach's. Read this as "the mechanism exists and is tested"; read the rulings section below as
+"and here is what it cannot decide without you."
+
+## Landed
+
+| Workstream | Findings addressed | What exists now |
+|---|---|---|
+| W1 | B1, B2, B11, part of C2 | `SealedReport` newtype: post-seal row injection is a **compile error**. Evidence gate moved upstream of the seal. |
+| W2 | A5.1, A5.4, C8 (schema half) | `RuleKind` / `RuleOption::violates` / `Rule::max_severity` schema + corpus-load gate. The alternatives pass can no longer silence a rule. All 417 rules classified. |
+| W3 | A5.6, A5.2, A5.3, A5.5 | `FindingKind` on the wire — five kinds, internally tagged, flattened into every export row and reaching `findings.json`. Deviation carries structured numerator/denominator. Absent kind renders `"unspecified"`, never silently `Defect`. N "no convention" rows are structurally unreachable. |
+| W4 | A6, H1, A7, A8, A3, A4 | Every corpus domain reachable, **gated in the build**. `verification` can no longer disarm a rule everywhere. Tier family labels name the engine, not a rule family. Layer map inferred, so the four real `ARCH-*` analysers run on a brownfield repo with no `.camerata/architecture.toml`. |
+| W6 | I1, I2, C11 | In-repo synthetic parity harness (8 tests, ~1s, zero spend) + `camerata integrity-gate` with a three-way exit code. ESLint root cause fixed. |
+| Grader | the blocking item | `GRADER_PROMPT.md` v2: four axes + parity as its own verdict. `grade.py` kind-aware. |
+
+## Two findings corrected by implementation, worth recording
+
+**C5 is no longer a theory — it is measured.** W6's harness, on its first run, found the pipeline
+detects 3 sites, absorbs 2, and **exports 1**: singular headline, `also_matches: ""`, no
+`also_locations`. Both absorptions *are* ledger-recorded, so `unaccounted == 0` and conservation
+legitimately passes. The client is told there is one site. There are three. A red `#[ignore]`d test
+(`req_i1_c5_an_absorbed_row_must_be_observable_in_some_artifact`) names it and accepts any fix shape.
+This is the single clearest statement of why the mid-layer, not detection, is the problem.
+
+**C11's root cause was not an ESLint config problem.** `--format @microsoft/eslint-formatter-sarif`
+names an npm package that ESLint resolves against the **scanned repo**, not Camerata's workspace — so
+it failed on every repo, every run, and `run_capture_stdout` discarded the stderr that said so. The
+operator saw only a parse error about column 0 of an empty document. Three further defects each
+independently zeroed the pass, including a provisioning probe that asked only `--version` while 3 of 6
+packages were missing and the config was four months stale.
+
+**The E2 mechanism shipped inert.** `max_severity`, `clamp_to_rule_max_severity` and all the `req_e2_*`
+tests pass against a corpus where **zero rules author a ceiling**. W5 is transcribing the ceilings that
+were already authored in prose (C8). Recording this because it is precisely the failure Zach named:
+code that confidently thinks it is meeting the requirement while doing nothing.
+
+## OPEN RULINGS — waiting on Zach, nothing proceeds on these
+
+1. **[ ] The 58 rule classifications.** On hold at his request; grouped into five patterns (A5.7).
+2. **[ ] `deviation_ceiling` escalation (A5.2).** W3 built a per-rule authored ceiling; default caps
+   every deviation at medium. Question: should per-finding runtime escalation exist at all, or is
+   authoring-time the whole mechanism? Deliberately not built either way.
+3. **[ ] C5's representation.** `also_locations` to the exporters, a site count on the row, or a
+   pluralised headline. W7 will implement and recommend; the final call is his.
+4. **[ ] R1 — the repo-wide `cargo fmt` decision.** Recommendation: one deliberate commit.
+5. **[ ] R2 — the never-run-a-formatter directive as a Camerata custom rule** for Camerata's own repo.
+6. **[ ] `rules_not_run` is in the report JSON but no PDF template reference.** Deliberate or omission?
+   Note Pass 3 says the PDF is "already correct in shape; leave it alone", so this is propose-only.
+7. **[ ] Ledger "healthy" interaction.** `audit_repos` counts new informational rows in a rule's
+   `emitted`, so a convention-observed rule no longer appears under "What's healthy". W3 left it that
+   way deliberately: never-falsely-healthy is the safe direction. Confirm or reverse.
+8. **[ ] Should CI exercise the live ESLint binary?** The C11 test currently skips without a
+   provisioned workspace, so CI never runs the real thing.
+
+## Deliberately NOT done, with the reason
+
+- **C7** (D5 floor reads model prose) — deferred on Fable's judgement that after structured identity
+  and the severity ceiling land, "most layers become DELETABLE, not rewritable."
+- **C13** (paraphrase gate) — the right acceptance test *after* structured fields exist, "useless as a
+  first measurement."
+- **B6** (credential keyword list) — banned. The detector already knows the identity and must emit it
+  as a structured capture.
+- **B5** — under-evidenced by the independent review. "Do not build on it."
+- **C10** — STRUCK as wrong. The three criticals are three distinct rules in three distinct files.
+- **New rules for uncovered classes** — banned until the mid-layer stops eating existing recall.
+
+---
+
+# W5 RESULT — E2/C8 severity ceilings, and four questions for Zach (2026-10-11)
+
+**The brief was confirmed exactly.** At `2799284`: **0 of 417** rules declared `max_severity`, 0
+declared `deviation_ceiling`, and all four `req_e2_*` tests passed anyway. Both mechanisms were
+fully inert while fully "tested" — the clearest instance yet of the thing Zach named.
+
+| | count |
+|---|---|
+| Rules whose prose already authored an explicit upper bound | 11 |
+| Transcribed to `max_severity` | 11 |
+| `deviation_ceiling = "high"` authored (architectural spine only) | 7 |
+| Handed back as genuinely ambiguous | 25 |
+| Rule `kind` fields changed | **0** (the hold is intact) |
+
+**Discipline applied:** a ceiling was authored ONLY where the prose carries an explicit upper-bound
+construction ("not an automatic critical", "capped low (owner directive)", "regardless of the model's
+proposed severity", "a lower severity than [sibling]", or an explicitly rejected higher-severity
+option). The much larger class that merely names one severity for one failure mode ("Flag as high
+severity: …") was NOT transcribed, because that phrasing is ambiguous between a bound and a per-branch
+floor, and over-reach silently caps real findings with nothing to catch it. Under-reach is recoverable;
+over-reach is a silent regression.
+
+**Architectural win worth recording:** the three observability caps previously existed ONLY as a
+hard-coded rule-id list inside `ai_audit`/`report_export` (`is_observability_convention_class`). The
+same intent is now a declaration at the authoring site. A rule-id list in engine code became corpus data.
+
+**A latent trap the new gate closes:** `report_export::normalize_severity` maps every unrecognized
+string to `"low"`. So `max_severity = "critcal"` would neither error nor no-op — it would silently
+become the *harshest* ceiling in the vocabulary and cap every finding of that rule at low. Same class
+as the inert mechanism. It now fails the build, alongside two anti-inertness gates (the corpus must
+declare at least one of each ceiling) and a test that inlines the 58 held rule ids so the hold survives
+edits to the plan doc.
+
+## [ ] W5-Q1 — the sharpest one: two SECURITY DEFINER rules
+`SUPABASE-FUNC-DEFINER-CROSS-TENANT-READ-1` and `SUPABASE-FUNC-PRIVILEGED-NO-AUTHZ-1` both state a
+flat "**Severity is High.**" Their folder sibling `SUPABASE-FUNC-DYNAMIC-SQL-INJECTION-1` explicitly
+authors "**High by default; Critical when** the same function is GRANTed …". Same folder, same hand —
+that deliberate three-way contrast reads as a bound.
+
+**Not authored, deliberately.** These are IDOR-in-the-database and privileged-write-with-no-authz,
+genuinely critical-class. A wrong `high` cap here is exactly the silent regression no test would catch.
+One word settles both.
+
+## [ ] W5-Q2 — is a single named severity a ceiling or a floor? (23 rules)
+Does "Flag as high severity: …" bound the rule, or just tell the detector what to emit while leaving
+calibration free to raise it? **One answer settles all 23.** They are the `SQL-*`, `SUPABASE-AUTH-*`,
+`SUPABASE-REALTIME-*`, `SUPABASE-STORAGE-*` and `ARCH-SERVER-COMPUTED-AMOUNT-1` set listed in W5's report.
+
+## [ ] W5-Q3 — the ~20 per-stack `deviation_ceiling` mirrors
+The `high` deviation ceiling went on the universal architectural spine only (layering, repo-returns-
+domain, service DI, explicit transactions, structured errors, fetch-then-authorize, Rust crate errors).
+The ~20 per-stack re-litigations of the same domains (`JAVA-SPRING-LAYERED-ARCHITECTURE-1`,
+`JAVASCRIPT-EXPRESS-THIN-CONTROLLERS-1`, `CSHARP-ASPNETCORE-AUTHORIZE-ATTRIBUTE-1`,
+`PYTHON-FLASK-ERROR-HANDLERS-1`, …) did not. Should they inherit it? Judged a question, not an inference.
+
+## [ ] W5-Q4 — incidental, and it indicts the older tests
+A test helper reading `curated_findings[0].sites[0]` — the shape **every pre-existing `req_e2_*` test
+uses** — *panics* on the observability rules, because `is_informational` routes that class out of every
+action bucket by rule identity, so the group renders under `held_for_review_findings`.
+
+So a ceiling test reading only `curated_findings` is structurally blind to precisely the rules whose cap
+is most emphatically authored. W5's own helper scans both sections. Worth deciding whether the older
+tests should be widened the same way.
+
+---
+
+# W7 RESULT — structured merge identity + coverage honesty (2026-10-11)
+
+**The review's prescription was followed literally: structured identity, never keyword-list
+adjustment.** `CREDENTIAL_IDENTIFIER_KEYWORDS` and the six evidence-gate phrases are **byte-identical**
+to before. Confirmed, because the temptation to tune them is what produced the last two cycles.
+
+## What changed, by mechanism
+
+**C4 — the veto that could not veto.** `objects_conflict` now consults **detector captures first**:
+two findings whose `Finding::captures` are both non-empty and disjoint are a structured
+different-things proof. The positive signal (`shared_captured_object`) already exempted a pair, so
+captures are now the identity signal in **both** directions. Prose survives only as a fallback, and
+there it is **container-blind**: a shared parent token (`public` beside `public.orders`) is no longer
+identity evidence, so two tables in one schema conflict again.
+
+**B9 — fixed as a class, not a blacklist.** `dotted_run_is_identifier` requires an alphabetic segment
+of 3+ chars, so `e.g` / `i.e` / `U.S` / version strings stop registering as objects while
+`public.orders` and `module.spec.ts` still do. The finding was "`e.g` is an object"; the defect was
+"the extractor reads English."
+
+**C5 — SOLVED and verified by a test written before the fix, by a different agent.**
+Representation chosen: `also_locations` reaching the exporters verbatim, plus a `site_count` field on
+every row. Rejected the pluralised headline because that is presentation and belongs to Pass 2/3,
+while the other two are lossless structured data any consumer can use. Reaches `findings.json`, the
+workbook ("Sites" + "Also found at"), and the PDF's **data** (template untouched per Pass 3).
+`req_i1_c5_an_absorbed_row_must_be_observable_in_some_artifact` is **un-ignored and green**; it was run
+red first, reproducing W6's documented `0 of 2 absorptions observable`.
+
+**`primary_rank` was NOT kind-aware** — confirmed. A deterministic `ConventionObserved` row could
+outrank an AI-tier `Defect` and absorb it. That is W3's data model and W7's merge interacting to
+*delete a real violation into a compliment*. Fixed at three layers plus `kind_actionability_rank` as
+`primary_rank`'s first key.
+
+**C2 — the sites-vs-rows gate.** `apply_sites_vs_rows_check` runs pre-seal, reconciling the structural
+`deviating_sites` numerator against sites actually represented. A shortfall becomes **one held
+needs-review row stating both numbers**, ledger-accounted as its own addition stage, idempotent.
+**Never a refused export**, per Fable's instruction.
+
+**C6 / G1 / G3 — coverage honesty.** The Coverage sheet counts primaries **plus** absorbed sites, and a
+rule with zero site records still counts its `also_matches` demotions, so a fired rule can never render
+clean. Non-osv tool failures now emit **one concise client-facing line per tool** (never the internal
+diagnostics, and that is tested) through the existing `failed_passes` channel the PDF already renders —
+so the honesty reaches the client with **no template change**. The ESLint failure would now be visible
+to a client; before, a whole tool tier could fail silently.
+
+**B7 / B8.** `same_construct` falls back to the blank-line stanza for fully brace-free content, so
+`.env` / `.sql` / `.toml` / `.yaml` stop being a blind spot; brace-bearing files keep old semantics
+exactly. Clustering now joins on **any member** rather than only the group seed, fixing the
+non-transitivity that blocked 13 of 32 eligible pairs.
+
+## [ ] W7-Q1 — `rules_not_run` and the PDF template
+W7's answer: **an omission, but correctly left alone.** The template renders `failed_passes` and
+`whats_healthy` but never references `rules_not_run`. Given Pass 3's "the PDF is the summary; leave it
+alone", no template change was made. **Proposal for Zach**, consistent with PDF-as-summary — one
+Methodology line, a count rather than a table:
+`#if d.rules_not_run.len() > 0 [N selected rule(s) did not run this scan; each is named with its reason in the data export.]`
+The data already reaches the report JSON and now the workbook.
+
+## [ ] W7-Q2 — the C1 traceability collision needs an owner
+The mis-named `req_c1_*` accounting tests live partly in `scan_ledger.rs`, which was not W7's to touch.
+They must be renamed to the conservation requirement they actually serve. Until then C1 reads as
+covered while having no tests, and the accounting tests are untraceable to their real requirement.
+
+## RESOLVED WITHOUT A RULING — the flaky credential tests
+Three `resolve_*` tests in `crates/llm/src/credentials.rs` mutated the process-global
+`CAMERATA_GITHUB_TOKEN` while the harness ran them in parallel threads. Each passed in isolation; one
+failed intermittently under `--workspace`, and W7 hit it twice in three runs.
+
+Fixed with a mutex plus an `EnvVarGuard` restoring the prior value in `Drop`, so a failing assertion
+cannot unwind and leave the variable set for the next test. Verified over 12 consecutive runs.
+
+**Flagged explicitly because it edits existing tests and is neither exception (a) nor (b).** Every
+assertion and expected value is byte-identical; only the env mutation is serialized. The reason it was
+worth doing at all: this entire effort now rests on build gates, and a gate is worthless if a green run
+cannot be trusted. An intermittent failure in unrelated code teaches everyone to re-run until green,
+which is exactly how a real regression gets waved through.
+
+---
+
+# ZACH'S RULINGS — 2026-10-11
+
+## [x] W5-Q2 DECIDED — a single named severity is a **FLOOR**, not a ceiling
+Zach: *"Floor, it's the minimum rating."*
+
+So "Flag as high severity: …" in a rule's prose means **at least high**, and calibration may raise it.
+Consequences:
+
+1. The 23 ambiguous rules correctly received **no** `max_severity`. W5's under-reach was right.
+2. **This opens a real, symmetric gap.** We built the ceiling half (`max_severity`) and there is **no
+   structured floor**. The only existing floor is `severity_calibration_floor` (the D5 floor), which
+   decides severity by scanning the MODEL'S ENGLISH PROSE against a phrase table — finding C7, which
+   was deliberately deferred. Zach's ruling makes that the live gap: **23 rules author a minimum
+   severity in prose the pipeline cannot read.** That is C8's complaint exactly, but for floors.
+   → New workstream **W8**: a structured `min_severity`, mirroring `max_severity`, with the same
+   corpus-load gate and the same anti-inertness test. C7 becomes relevant again, not deferred.
+
+## [x] W5-Q1 RESOLVED BY W5-Q2 — the two SECURITY DEFINER rules keep NO ceiling
+The floor reading is coherent across all three rules in that folder:
+`SUPABASE-FUNC-DYNAMIC-SQL-INJECTION-1`'s "High by default; **Critical when** GRANTed …" is a floor of
+high with an explicitly named escalation; the two flat "Severity is High." rules are floors of high with
+no escalation named, which does not forbid one. No ceiling on any of them.
+
+This is also the safe direction: `SUPABASE-FUNC-DEFINER-CROSS-TENANT-READ-1` is IDOR-in-the-database and
+`SUPABASE-FUNC-PRIVILEGED-NO-AUTHZ-1` is a privileged write with no authorization check. Both are
+genuinely critical-class, and a `high` cap would have silently downgraded them with no test to notice.
+Flagged for Zach to override if he meant to distinguish Q1 from Q2.
+
+## [x] W5-Q3 DECIDED — the per-stack mirrors MATCH the architectural spine
+Zach: *"yes these should match."*
+
+So the ~20 per-stack re-litigations of layering / error-contract / auth / transactions inherit the same
+`deviation_ceiling = "high"` as the 7 universal architectural rules. Rationale he endorsed: severity must
+describe the PROBLEM, not which rule happened to fire. Without this, a Java repo with broken layering
+caps at medium under `JAVA-SPRING-LAYERED-ARCHITECTURE-1` while an unmirrored stack reaches high under
+`ARCH-STRICT-LAYERING-1` — identical defect, different severity, decided by corpus filing.
+
+Routed to W8 (it holds `crates/rules/principles/**`). Each mirror must be matched to the spine rule it
+mirrors, not blanket-assigned: a per-stack rule that does NOT correspond to one of the 7 gets nothing.
+
+## [x] W5-Q4 DECIDED — widen the old severity tests to scan both report sections
+Zach: *"yes, widen these tests."*
+
+Every pre-existing `req_e2_*` test reads only `curated_findings`, so it is structurally blind to the
+observability rules — `is_informational` routes that class out of every action bucket by rule identity,
+rendering the group under `held_for_review_findings`. A test reading one section *panics* rather than
+failing cleanly, and the rules it cannot see are precisely the three whose cap is most emphatically
+authored ("CAPPED LOW (owner directive)").
+
+This is **test blindness, not a behaviour change** — the tests were giving false assurance. Authorized
+under exception (a); the commit must state it. W5's own helper already scans both sections and is the
+pattern to follow. Routed to W8 (it holds `report_export.rs`).
+
+**Still open for Zach:** the 58 rule classifications (paused at his request), W7-Q1 (the PDF
+`rules_not_run` line), W7-Q2 (an owner for the C1 traceability collision in `scan_ledger.rs`), R1
+(repo-wide `cargo fmt`), R2 (formatter directive as a custom rule), and sign-off on the `crates/llm`
+credential-test edit (assertions byte-identical, only the env mutation serialized).
+
+---
+
+# W8 RESULT — the structured severity FLOOR, W5-Q3, W5-Q4, and the C7 verdict (2026-10-11)
+
+## The mechanism
+
+`Rule::min_severity`, built as the exact structural mirror of `max_severity` because that pattern is
+proven here: same free-form lowercase vocabulary, same `corpus_rule_for` resolution (so an
+external-tool finding carrying the tool's own id still reaches the grounded rule), same
+`severity_rank` comparison, opposite direction. Enforced by
+`report_export::raise_to_rule_min_severity` at **both** export choke-points, the PDF's
+`build_report_json` partition and the xlsx/`findings.json` `partition_rows`, so no artifact can
+disagree with another.
+
+**Where it sits relative to the ceiling: FIRST.** The floor runs ahead of the C4-R1 null-location
+downgrade and both ceilings, so `max_severity` keeps the last word and E2's "no report may exceed
+it" still holds absolutely. The corpus gate forbids an unsatisfiable pair, so floor-then-ceiling
+always lands inside `[min_severity, max_severity]`, and a property test asserts that for every rule
+authoring both.
+
+**Two preconditions a ceiling does not need.** A ceiling only lowers, so it is safe
+unconditionally. A floor raises, so an over-broad one is a false alarm shipped to a client:
+
+1. **An accusing `FindingKind`, explicitly present.** Defect/Deviation only. A
+   `ConventionObserved` row tells the client "your codebase already does this" and ships at `info`
+   by W3's design; raising it to high would both lie and, through `is_informational`'s severity
+   test, re-route a compliment into an action bucket. An ABSENT kind is excluded too, under W3's
+   standing rule that nothing may silently default to `Defect`.
+2. **A real location.** Empty `path` AND `line == 0` means nothing concrete was established to
+   rate. Declining there, rather than relying on running before C4-R1, makes the floor
+   order-independent with respect to that safety net: it cannot undo it from any position, in any
+   exporter. (As of 2026-10-21 every exporter and the live scan apply C4-R1 in the shared
+   chain, `severity_bounds::bounded_severity`; the xlsx partition no longer differs.)
+
+## The corpus-load gate
+
+`rules_with_invalid_severity_floor` fails the BUILD on two shapes: a value outside the severity
+vocabulary, and a `min_severity` ranking above the same rule's `max_severity`. The second is
+genuinely unsatisfiable, and which side would bind depends purely on the order the pipeline applies
+them in, which is exactly the positional surprise a gate exists to prevent.
+`min_severity == max_severity` is deliberately LEGAL: ten rules' prose pins one exact severity from
+both sides, e.g. "a high-severity finding for review, not an automatic critical".
+
+The typo case has teeth in the floor direction for the mirror-image reason it does for ceilings.
+`normalize_severity` maps every unrecognized string to `"low"`, and `"low"` ranks at or below
+everything, so a typo'd floor does not error and does not no-op: **it silently evaporates.** A field
+that looks authored and does nothing is the inert-mechanism failure this whole effort exists to
+stop, so it fails the build.
+
+## Transcription
+
+| | count |
+|---|---|
+| Corpus rules whose prose names a severity (examined) | 53 |
+| Transcribed to `min_severity` | **41** |
+| Genuinely ambiguous, handed back below | 4 |
+| Deliberately not floors, reason recorded below | 8 |
+| Rule `kind` fields changed | **0** (the hold is intact) |
+
+Of the 41: 6 critical, 25 high, 5 medium, plus 5 multi-branch rules floored at the LOWEST severity
+their prose names. Every `min_severity` line in the corpus carries a comment quoting the sentence it
+came from. Authored by rule DOMAIN: no fixture or benchmark repository was read, and no value was
+chosen for what it would do to any repo's grade.
+
+**Discipline, mirroring W5's in the opposite direction.** `needs_review` and "ambiguous matches"
+clauses name no severity and are confidence/routing qualifiers in this pipeline, not severity
+branches, which `SUPABASE-STORAGE-PUBLIC-BUCKET-1`'s own "emit a high-severity `needs_review`
+finding" proves. Those do not block transcription. What DOES block it is a second branch the prose
+explicitly DENIES the named severity.
+
+**The anti-inertness gate E2 did not have.** `req_w8_the_corpus_actually_declares_severity_floors`
+fails the build if zero rules declare a floor, and it was verified RED at `55515b5` (0 of 417).
+Five of the six real-corpus e2e tests were verified red the same way, by
+`git checkout 55515b5 -- crates/rules/principles/`, re-running, then restoring. The sixth is the
+attribution control and passes in both states by design.
+
+**The hold guard is an allow-list, not a ban.** A plain "no floors on held rules" rule would have
+silently dropped 17 rules whose own prose authors a floor, most of the `SUPABASE-FUNC-*` and
+`SUPABASE-STORAGE-*` set among them. Instead
+`req_w8_a_held_rule_carries_a_floor_only_if_its_own_prose_authored_one` inlines the 58 held ids and
+the 17 allow-listed transcriptions, so the hold survives edits to the plan doc and a later agent
+cannot add a floor to a held rule without deliberately editing the list. It caught two rules on its
+first run.
+
+### [ ] W8-Q1 — 4 rules where the prose is genuinely ambiguous. Not authored.
+- **`SUPABASE-RLS-ENABLED-1`** names `critical` for an exposed-schema table but explicitly denies it
+  for the other branch: "A table in a non-exposed schema with no RLS is a demoted defense-in-depth
+  note, **not a critical finding**." No severity is named for the demoted branch, so there is no
+  rule-level floor that honours both sentences.
+- **`SUPABASE-AUTH-EDGE-JWT-1`** names "(high severity)" for one branch, and its own rationale
+  insists "only genuinely uncompensated functions get the high-severity framing". A rule-level high
+  floor would hand the softened branch the framing the prose withholds from it.
+- **`SUPABASE-STORAGE-SIGNED-URL-1`** names no absolute severity at all: "Flag as `needs_review` any
+  expiry at ..." and then "a distinct, **higher-severity** finding", which is relative to an
+  unnamed baseline.
+- **`RUST-DIOXUS-2-FUNCTIONAL-COMPONENTS`** says "a low-severity style note ... never as a
+  correctness or performance defect". That is an upper bound, so it is a `max_severity` candidate,
+  not a floor, and a `low` floor is inert anyway because `severity_rank` ranks `low` and `info`
+  identically.
+
+### Deliberately not floors (8), reason recorded
+The three `ARCH-OBSERVABILITY-*` rules say "a LOW finding (never higher)", which is a ceiling and is
+already transcribed as one; a test asserts they carry NO floor, so a blanket assignment fails.
+`CICD-DEPENDENCY-AUDIT-1`, `CICD-CODEQL-SECURITY-SCAN-1`, `CICD-SEMGREP-SECURITY-SCAN-1` and
+`CSHARP-NO-HARDCODED-SECRETS-1` name a severity belonging to an external tool's gate threshold or an
+option-level `escalation` spec, never the rule's own finding severity.
+`AGENTIC-NO-TEST-TAMPER-1`'s `severity = "hard-pause"` is an escalation action outside the severity
+vocabulary entirely.
+
+## W5-Q3 — the per-stack mirrors, matched one at a time
+
+16 mirrors inherited `deviation_ceiling = "high"`, each matched to the ONE spine rule it
+re-litigates and each carrying a comment naming it:
+
+| spine rule | mirrors |
+|---|---|
+| `ARCH-STRICT-LAYERING-1` | `JAVA-SPRING-LAYERED-ARCHITECTURE-1`, `JAVA-SPRING-THIN-CONTROLLERS-1`, `JAVASCRIPT-EXPRESS-THIN-CONTROLLERS-1`, `JAVASCRIPT-NEST-THIN-CONTROLLERS-DELEGATE-1`, `CSHARP-ASPNETCORE-THIN-CONTROLLERS-1`, `RUST-AXUM-HANDLERS-THIN-DELEGATE-1` |
+| `ARCH-SERVICE-DI-1` | `JAVA-SPRING-CONSTRUCTOR-INJECTION-1`, `JAVASCRIPT-NEST-MODULES-PROVIDERS-DI-1`, `RUST-AXUM-STATE-SHARED-DEPS-1` |
+| `ARCH-EXPLICIT-TX-1` | `JAVA-SPRING-TRANSACTIONAL-SERVICE-LAYER-1`, `RUST-DOMAIN-7`, `RUST-SEAORM-INTRA-AGGREGATE-TX-1` |
+| `ARCH-STRUCTURED-ERRORS-1` | `PYTHON-FLASK-ERROR-HANDLERS-1`, `JAVASCRIPT-EXPRESS-CENTRAL-ERROR-HANDLER-1`, `GO-WEB-STRUCTURED-ERROR-RESPONSES-1`, `RUST-AXUM-TYPED-ERROR-RESPONSE-1` |
+
+`req_w5_q3_every_per_stack_mirror_inherits_its_spine_rules_deviation_ceiling` asserts both sides of
+every pair, so a spine rule LOSING its ceiling fails too, plus a control over four same-folder rules
+that re-litigate none of the seven and must carry nothing. That control is what makes a
+blanket-by-folder assignment fail instead of pass.
+
+### [ ] W8-Q2 — three spine rules got no mirror, each for a stated reason
+- **`ARCH-FETCH-THEN-AUTHORIZE-1`.** The declarative-authorization rules
+  (`JAVA-SPRING-METHOD-SECURITY-1`, `CSHARP-ASPNETCORE-AUTHORIZE-ATTRIBUTE-1`,
+  `JAVASCRIPT-NEST-GUARDS-FOR-AUTH-1`, `PYTHON-FASTAPI-AUTH-DEPENDENCY-1`,
+  `PYTHON-FLASK-AUTH-ON-PROTECTED-ROUTES-1`) are about WHERE authorization is declared. The spine
+  rule is about its ORDER relative to the fetch, and its own `why` says a check that "runs before
+  the resource is loaded cannot see those facts, so it either under-checks ... or duplicates a
+  fetch". An annotation that fires before the method body is closer to the option the spine rule
+  REJECTS than to the one it adopts, so calling them mirrors would assert an equivalence the corpus
+  text contradicts. **Two of these were named as examples in W8's brief; this is a deliberate
+  disagreement with that, flagged rather than quietly dropped.** If Zach reads them as mirrors
+  anyway, it is one word and 5 TOML edits.
+- **`ARCH-REPO-RETURNS-DOMAIN-1`.** Its only real mirror, `RUST-SEAORM-RAW-SQL-ESCAPE-1`, is on the
+  58-rule hold. The DTO-boundary rules (`JAVA-SPRING-DTO-BOUNDARY-1`,
+  `PYTHON-FASTAPI-PYDANTIC-MODELS-1`) guard the HTTP boundary, not the repository boundary: a
+  different seam, so not a mirror.
+- **`RUST-DOMAIN-6`.** No cross-stack mirror exists. Its nearest neighbour, `RUST-DOMAIN-4`
+  ("errors via thiserror enums per crate"), is a same-stack sibling rather than a per-stack
+  re-litigation, so it falls outside the ruling as written. Worth a word.
+
+### [x] W8-Q3 RESOLVED BY W9 — the five held layering mirrors are AUTHORIZED and authored
+`PYTHON-FLASK-SERVICE-LAYER-1`, `PYTHON-SERVICE-LAYER-1`, `PYTHON-DJANGO-FAT-MODEL-SERVICE-1`,
+`RUBY-RAILS-SKINNY-CONTROLLERS-1`, `GO-HANDLER-SERVICE-REPOSITORY-1`. Every one is an unambiguous
+`ARCH-STRICT-LAYERING-1` mirror by its own title, and W5-Q3 says they should match. But all five sit
+on the 58-rule classification hold, a `deviation_ceiling` presumes the deviation-producing
+classification that was paused, and `req_a5_7_no_held_rule_carries_an_inferred_deviation_ceiling`
+enforces exactly that. Two of his rulings pointed opposite ways, so W8 applied nothing.
+
+Zach, 2026-10-11: *"Lift the hold and ensure all are consistent here, regardless of any holds or
+locks in place, you can make individual changes based on what I direct. In this case, I direct that
+they all must be consistent, so make it so."*
+
+All five now carry `deviation_ceiling = "high"`. **The hold on `kind` is NOT lifted** — not one
+rule's `kind` was touched, the classification review of the 58 stays paused, and `A5.7` stays
+`Exempt` in the traceability registry. The authorization is recorded as an explicit five-id
+allow-list inside `req_a5_7_*`, with his words quoted in the doc comment, so every OTHER held rule
+is still blocked; proved by temporarily authoring a ceiling on `SPIRIT-ROBUSTNESS-1` and watching
+the test red.
+
+Why the ceiling was safe where a `kind` edit would not have been: all five ship as
+`kind = "decision"`, so they already emit deviation rows, and a ceiling only BOUNDS rows that exist
+today. It presumes nothing about the paused classification. Reclassify one as `defect` later and the
+ceiling becomes dead config, not wrong behaviour.
+
+## [x] C7 ASSESSMENT — the D5 prose floor is NOT redundant, but its remaining job is now exactly the unsound part
+
+Asked and answered, nothing deleted. `ai_audit.rs` is byte-identical.
+
+**What is now redundant.** D5 has four branches: (A) unauthenticated / full-compromise to critical,
+(B) authenticated cross-tenant read to high, or critical with an escalating data class, (C) an
+exploit-precondition cap lowering a critical floor to high, (D) an RLS-hedge guard raising to high.
+For the 31 rules that now floor at high or critical, A and B's outcomes are structurally dead:
+25 already floor at high, and the 6 critical-floor rules cannot be raised further because critical
+is the top of the vocabulary. For `SUPABASE-RLS-NO-POLICY-1` and `SUPABASE-RLS-INITPLAN-1`, which
+author floor AND ceiling both at medium, a D5 raise is **entirely erased** at the export boundary
+by `clamp_to_rule_max_severity`: work that cannot survive.
+
+**What is NOT redundant, and this is the operative part.**
+1. **Scope.** `min_severity` reaches 41 of 417 rules, and only findings whose `rule_id` resolves to
+   a corpus rule. D5 scans every finding, including AI-advisory rows with no corpus rule at all and
+   external-tool preview rows.
+2. **Instance-level escalation is a live function the FLOOR ruling itself created.** W5-Q1's
+   resolution is that a flat "Severity is High." is a floor "with no escalation named, which does
+   not forbid one". For a deterministic-floor finding, which never sees the LLM calibration pass and
+   whose severity is set by the checker, D5 is today the ONLY mechanism that performs that
+   escalation. Delete it and `SUPABASE-FUNC-DEFINER-CROSS-TENANT-READ-1` can never exceed high on a
+   deterministic detection, contradicting the stated reason for leaving it uncapped (IDOR in the
+   database, genuinely critical-class).
+3. **Branch D is rationale-shaped, not rule-shaped.** "Do not under-rate because the calibration
+   reasoning speculated RLS probably covers it" is a statement about the MODEL'S REASONING. No
+   per-rule structured field can express it. The real fix is for the model to emit a structured
+   mitigating-control capture, which is W7's structured-identity prescription applied one layer
+   over, not a deletion.
+4. Branch C corrects DOWNWARD, so an upward-only floor cannot subsume it at all.
+
+**New evidence, and it is worth more than the redundancy verdict.** The matcher is not merely
+polarity-blind as C7 states. It is blind to WORD BOUNDARIES. `READ_VERBS` and the data-class lists
+are bare `str::contains` tests, and several entries are substrings of extremely common English:
+
+| entry | ordinary words that match it |
+|---|---|
+| `read` | **already**, thread, spread, readonly, readme, breadcrumb |
+| `view` | **review**, **reviewed**, **preview**, interview, overview |
+| `see` | seen, seems, seed, oversee |
+| `list` | **allowlist**, denylist, checklist, listener |
+| `access` | accessible, accessed |
+
+`mentions_authenticated_cross_tenant_read` is "any cross-tenant phrase AND any read verb", over
+`detail + snippet + category`. So a finding whose text contains "another user's" and the word
+**"already"** floors to high. One containing "cross-tenant" and the word **"review"** floors to
+high, and `needs_review` prose is pervasive in this corpus, including in the rule details D5 scans.
+Add `mentions_escalating_data_class`, whose `CREDENTIAL_DATA_PHRASES` includes the bare word
+`"credential"`, and it floors to **critical**: "another tenant's credentials are already rotated
+correctly" is a critical finding today.
+
+The documented `UNAUTHENTICATED` example is the same class, not a separate one:
+`UNAUTHENTICATED_OR_FULL_COMPROMISE_PHRASES`' first entry is the bare substring `"unauthenticated"`,
+which matches the error-code token, `UnauthenticatedError`, and "rejects unauthenticated requests".
+Its own doc comment claims the list is "deliberately phrase-based (not a single keyword) ... every
+phrase here asserts the ABSENCE of auth". The first entry is a single keyword. The comment describes
+an intent the data does not implement.
+
+### [ ] W8-Q4 — recommended disposition for C7: NARROW it, do not delete and do not rewrite
+1. **Word-boundary matching instead of `contains`** for `READ_VERBS` and the data-class lists. Ten
+   lines, and it is literally the fix W7 already applied for B9: "the finding was '`e.g` is an
+   object'; the defect was 'the extractor reads English'." Same defect, one layer over.
+2. **Skip branches A and B for any finding whose rule declares a `min_severity` at or above what
+   the branch would produce.** Dead work today, and the only thing it can do there is mis-fire.
+3. **Keep C and D** until the model emits a structured mitigating-control capture. Neither is
+   expressible as a per-rule field.
+
+This is the "DELETABLE, not rewritable" prediction coming out half right: the floor's RAISE-to-high
+half is now deletable, and the part that remains is small, specific, and fixable in ten lines rather
+than rewritten.
+
+## W5-Q4 — the blind tests are widened
+
+Both pre-existing `req_e2_*` tests that read `json.curated_findings[0].sites[0]` now read through a
+shared `exported_site_severities` helper that scans `curated_findings` AND
+`held_for_review_findings`. Widened where they LOOK; nothing about what they ASSERT changed, both
+expected values are byte-identical, and the helper ADDS an assertion (exactly one exported site), so
+a silently dropped row can no longer read as a passing clamp. Test-discipline exception (a), stated
+in the commit. No widened test failed, so there was no hidden finding behind the blindness.
+
+## Verification
+
+`cargo test --workspace` in the foreground: **exit 0, 5489 passed, 0 failed, 7 ignored, across 110
+test binaries.** `./scripts/self-measurement.sh`: **exit 0, "SELF-MEASUREMENT: all green."**
+
+## Touched outside W8's file list, called out
+- `crates/server/src/xlsx_export.rs`: one import and one line, committed alone (`d94c463`). Without
+  it the floor would be a PDF-only correction and the two artifacts would disagree on every floored
+  rule, which is the parity-fault class the grader names as its own verdict.
+- `crates/server/src/onboard.rs` (+2) and `crates/server/src/scan_tools.rs` (+1): each constructs
+  `Rule` exhaustively in a `#[cfg(test)]` helper, so a new field needs one mechanical
+  `min_severity: None,` line. No behaviour, no assertions.
+- `crates/server/tests/requirement_traceability.rs`: registered W5-Q2, W5-Q3 and W5-Q4.
+
+---
+
+# W9 RESULT — the per-stack mirror set becomes internally consistent (2026-10-11)
+
+W5-Q3's defect was never that the mirrors were wrong; it was that the set was **incomplete across
+three spine concepts**, so severity was still decided by which rule happened to fire. A Python repo
+with broken layering reported lower than a Java repo with the identical problem. Ten mirrors now
+inherit their spine rule's `deviation_ceiling = "high"`, each matched to the ONE spine rule it
+re-litigates and each carrying a comment naming it. Total authored ceilings: **33** (7 spine +
+16 from W8 + 10 here).
+
+| spine rule | mirrors added by W9 | held? |
+|---|---|---|
+| `ARCH-STRICT-LAYERING-1` | `GO-HANDLER-SERVICE-REPOSITORY-1`, `PYTHON-DJANGO-FAT-MODEL-SERVICE-1`, `PYTHON-FLASK-SERVICE-LAYER-1`, `PYTHON-SERVICE-LAYER-1`, `RUBY-RAILS-SKINNY-CONTROLLERS-1` | yes — W8-Q3, authorized by W9 |
+| `ARCH-SERVICE-DI-1` | `CSHARP-DEPENDENCY-INJECTION-CONSTRUCTOR-1`, `JAVASCRIPT-ANGULAR-DI-CONSTRUCTOR-OR-INJECT-1` | no — W8 never matched them |
+| `ARCH-EXPLICIT-TX-1` | `CSHARP-EFCORE-EXPLICIT-TRANSACTIONS-1`, `GO-GORM-TRANSACTIONS-MULTI-WRITE-1`, `RUST-SQLX-TRANSACTIONS-MULTI-WRITE-1` | no — W8 never matched them |
+
+The match was made from each rule's own TOML, not its name. The DI and TX pairs are the strongest
+kind of evidence available: each one names as its **violating** option the very option the spine rule
+rejects — the service locator, manual `new` past the container, the per-call short transaction.
+
+## [ ] W9-Q1 — two of the ten are INERT on arrival, and it is worth one word
+`JAVASCRIPT-ANGULAR-DI-CONSTRUCTOR-OR-INJECT-1` and `RUST-SQLX-TRANSACTIONS-MULTI-WRITE-1` already
+ship as `kind = "defect"`. A `defect`-kind rule never enters the alternatives pass
+(`Rule::is_defect_kind`), so `assign_deviation_kinds` never reaches it and it emits **no deviation
+rows at all** — their ceilings are dead config as shipped. Authored anyway, because the owner's
+direction was that the set be consistent and because the bound is then already correct if either is
+ever reclassified; each says so in a comment above its own line. **But if the intent was a live
+behaviour change on those two stacks, the lever is the `kind`, not the ceiling** — and `kind` is
+exactly what nobody is touching while the 58-rule review is paused. Flagged rather than silently
+shipped as if it did something.
+
+## [ ] W9-Q2 — `ARCH-REPO-RETURNS-DOMAIN-1` is still asymmetric, and W9 did not fix it
+W8-Q2 recorded that this spine rule's only real mirror, `RUST-SEAORM-RAW-SQL-ESCAPE-1`, is on the
+58-rule hold. The W9 direction was given against W8-Q3, which names five layering rules; it did not
+name this one, so it stays unauthored and the narrow reading of the authorization was kept. The
+consequence is that one of the seven spine concepts still caps its only per-stack re-litigation at
+`medium`. **One word settles it, exactly as it did for the other five.**
+
+## Two judgement calls, assessed and deliberately NOT authored
+- **`PYTHON-FASTAPI-DI-SESSION-1` is not an `ARCH-SERVICE-DI-1` mirror.** Agreeing with the brief's
+  own reading. Its decided axis is the **lifecycle of a resource**, not the project's DI posture: its
+  two rejected options are "construct a session in the handler" (leaks the connection on early
+  return) and "share a module-level global session" (unsafe across concurrent requests). Neither is
+  "depend on a concrete instead of an abstraction". A `Session` is also not a repository abstraction;
+  it is the concrete handle the spine rule would have a service receive. `Depends` is the mechanism
+  here, not the decision.
+- **`CSHARP-ASPNETCORE-MINIMAL-API-VS-CONTROLLERS-1` is not an `ARCH-STRICT-LAYERING-1` mirror.**
+  Also agreeing. It is `default = false` — it authors no default position at all — and its question
+  is which routing style the project adopts. Decisively: **both** of its legitimate options already
+  require layering in their own directives ("endpoint handlers delegate to service-layer methods;
+  business logic does not live inline in the lambda" / the controller action calling "the same
+  service"). Layering is a shared *precondition* of both options, not the thing being decided. Its
+  only bad option is mixing the two styles arbitrarily, which is a complaint about maintaining two
+  programming models, not about layer boundaries.
+
+## [ ] W9-Q3 — a RULE-COVERAGE gap, not a ceiling gap: Java, C# and Ruby have no structured-error rule
+`ARCH-STRUCTURED-ERRORS-1` has mirrors for Python/Flask, JS/Express, Go/web and Rust/Axum. It has
+**none** for Java, C# or Ruby, and the reason is that no such rule exists to author a ceiling on.
+Searched by behaviour rather than by guessed name — a corpus-wide sweep for `problem+json`,
+`ProblemDetails`, `ControllerAdvice`, `ExceptionHandler`, `rescue_from`, "error envelope", "error
+response", "machine-readable code", "error code" — plus a full read of all 42 Java, C# and Ruby rule
+titles. Nothing in those three stacks governs the shape of an API error body. The near misses, and
+why each is not one:
+- `JAVA-EXCEPTION-HANDLING-1` / `CSHARP-NO-SWALLOWED-EXCEPTIONS-1` — both govern **internal** catch
+  blocks (never swallow; log, rethrow, or add context). Neither says anything about what the client
+  receives. Different seam.
+- `CSHARP-ASPNETCORE-MIDDLEWARE-ORDERING-1` — mentions `UseExceptionHandler`, but only as a position
+  in the registration order. The decision is ordering.
+- `CSHARP-ASPNETCORE-MODEL-VALIDATION-1` — its directive does mention an "RFC 7807 problem-details
+  400", but as a **consequence** of `[ApiController]`; the decided axis is automatic rejection vs.
+  manual `ModelState.IsValid` guards, scoped to validation 400s rather than the project's error
+  contract across every 4xx/5xx.
+- Ruby has nothing adjacent at all: no `rescue_from`, no `ActionController::API` error rule.
+
+**No rule was authored** — new rules are banned in this effort. Recorded here as the finding:
+`ARCH-STRUCTURED-ERRORS-1` is the one spine concept where three stacks have no per-stack
+re-litigation to inherit from, so a Java, C# or Ruby repo with per-endpoint ad-hoc error shapes is
+caught only by the universal rule, if at all. **Candidate for three new rules, Zach's call.**
+
+## The two guard tests, neither weakened
+- **`req_a5_7_no_held_rule_carries_an_inferred_deviation_ceiling`** gained an explicit five-id
+  `AUTHORIZED_BY_W9_DIRECTION` allow-list with Zach's words quoted verbatim in the doc comment, plus
+  the reasoning for why a ceiling is safe on a held rule where a `kind` edit is not. It was NOT
+  loosened into a predicate: every other held rule is still blocked, and **three anti-rot assertions
+  were added** — an allow-listed id must really be on the hold list, must really still carry a
+  ceiling, and must carry `high` specifically, so the list cannot decay into a standing exemption at
+  an arbitrary severity. Proved still live by temporarily authoring a ceiling on
+  `SPIRIT-ROBUSTNESS-1` (held, unnamed) and observing the red, then reverting.
+- **`req_w5_q3_every_per_stack_mirror_inherits_its_spine_rules_deviation_ceiling`** gained the ten
+  new pairs. It still asserts **both** sides of every pair, so a spine rule losing its ceiling fails
+  too, and the four same-folder control rules that re-litigate none of the seven and must carry
+  nothing are untouched — that control is still what makes a blanket-by-folder assignment fail.
+
+Test-discipline **exception (a)** for both: a deliberate data change they must adapt to. No other
+test was edited. Neither was weakened; both gained assertions.
+
+## Verification
+Both tests run RED against the real corpus first, by `git stash push -- crates/rules/principles/`
+and re-running at `2d80e2f`: `req_w5_q3_*` red on `GO-HANDLER-SERVICE-REPOSITORY-1`
+(`left: None, right: Some("high")`), `req_a5_7_*` red naming all five held ids as `None`, and a
+direct grep confirming all ten files carried zero `deviation_ceiling` lines at base.
+
+## Touched outside `crates/rules/**`
+- This document only: the W8-Q3 section was marked resolved (it read "nothing was applied", which is
+  now false and would mislead the next agent) and this section was added. No source file outside
+  `crates/rules/` was touched; `A5.7` stays `Exempt` in the traceability registry because the `kind`
+  hold is genuinely still in force.
+
+---
+
+# W10 RESULT — the mirror sweep is complete across the whole corpus (2026-10-11)
+
+Zach, 2026-10-11: *"Extend it. Consider this directive, get all the rules consistent in this sense,
+you have the green light for ALL instances of this."*
+
+W8 matched 16 mirrors, W9 added 10 under a narrow five-rule authorization. W10 swept all 417 rules
+**by decided axis, never by name or folder**, and found **three** further genuine mirrors. Total
+authored ceilings: **36** (7 spine + 16 W8 + 10 W9 + 3 W10). Six of the seven spine concepts now
+have a matched mirror set; the seventh has no mirror in the corpus to match.
+
+| spine rule | mirrors added by W10 | held? | live? |
+|---|---|---|---|
+| `ARCH-STRICT-LAYERING-1` | `JAVASCRIPT-ANGULAR-TYPED-HTTPCLIENT-1` | no | yes |
+| `ARCH-STRUCTURED-ERRORS-1` | `GO-GRPC-STATUS-CODES-CORRECT-1` | no | **no — `kind = "defect"`** |
+| `ARCH-REPO-RETURNS-DOMAIN-1` | `RUST-SEAORM-RAW-SQL-ESCAPE-1` | **yes** | yes |
+
+## The method, and why it matters more than the result
+
+Each spine rule's decided axis was stated in one sentence from its own `[decision]` block and option
+set, then the corpus was swept for rules deciding **that same axis in a stack-specific vocabulary** —
+by phrase sweeps over option directives (`service locator`, `composition root`, `transaction`,
+`error envelope`, `machine-readable`, `persistence representation`, `row type`, `per-resource`,
+`ownership check`, `crate boundary`, `anyhow`) plus a full read of all 417 rule titles, kinds and
+option labels with their `violates` flags. The decisive signal, as predicted: **a true mirror names,
+as its own violating option, the very option the spine rule rejects.**
+
+### Per spine rule
+
+**1. `ARCH-STRICT-LAYERING-1`** — *axis: whether business logic and data-access calls are confined to
+designated layers, or may happen anywhere.* Mirrors: the 11 already matched, plus
+`JAVASCRIPT-ANGULAR-TYPED-HTTPCLIENT-1`. The corpus asserts that last equivalence **itself**: the
+rule's own `why` says "The pattern parallels the Express backend rule: route handlers delegate to a
+service layer; Angular components delegate to a service layer", and
+`JAVASCRIPT-EXPRESS-THIN-CONTROLLERS-1` is already a matched mirror. Its rejected option (components
+inject `HttpClient` and handle request, response and error inline) is the spine's "DB access can
+happen from any layer regardless of role" with the presentation layer doing its own data access.
+
+Ruled out: `JAVASCRIPT-ANGULAR-SMART-PRESENTATIONAL-PATTERN-1` (decides responsibility distribution
+*among* components; both options keep a service layer); `JAVA-PACKAGE-BY-FEATURE-1` and
+`GO-PACKAGE-BOUNDARIES-CLEAR-1` (namespace and import-graph axes — the latter mirrors
+`ARCH-NO-CROSS-BOUNDARY-IMPORTS-1`, which carries no ceiling); `RUST-HEADLESS-CORE-1` (separates the
+*renderer*, `default = false`, authors no position); `ARCH-REPO-PER-AGGREGATE-1` (granularity of the
+abstraction, and universal, not per-stack); `JAVASCRIPT-NEXT-DUAL-API-1` (runtime axis);
+`CSHARP-ASPNETCORE-MINIMAL-API-VS-CONTROLLERS-1` (W9's ruling, preserved).
+
+`ARCH-HANDLER-NO-DB-1` and `ARCH-NO-CROSS-BOUNDARY-IMPORTS-1` deserve their own line: the spine rule
+names them explicitly as "two narrower, mechanically-precise checks that each enforce one facet of
+it". They are **universal siblings, not per-stack mirrors**, so they fall outside the directive as
+worded — but they are the closest thing to a counter-example in the corpus, and if Zach reads
+"all instances" as including them, `ARCH-HANDLER-NO-DB-1` is one word (it is `kind = "defect"`, so
+the ceiling would be inert).
+
+**2. `ARCH-SERVICE-DI-1`** — *axis: how a class obtains its dependencies — an abstraction injected at
+a composition root, a concrete it builds itself, or a global locator it resolves from.* **No new
+mirrors.** The five matched are complete.
+
+Ruled out: `RUST-DIOXUS-4` (the strongest near-miss — "provided at or near the app root" vs. "global
+statics" reads exactly like the spine rule, but the thing provided is cross-tree UI *state* and every
+rationale is re-render scope, not abstraction-vs-concrete or test substitution);
+`JAVA-SMALL-INTERFACES-1` (interface granularity by cohesion, and its own `why` explicitly disclaims
+the DI rationale — "not mockability"); `CSHARP-ASPNETCORE-OPTIONS-PATTERN-1` (all three options inject
+*something*; the axis is typed-POCO vs. string-keyed config); `CSHARP-EFCORE-DBCONTEXT-SCOPED-1`
+(DI *lifetime*, same reasoning W9 applied to `PYTHON-FASTAPI-DI-SESSION-1`);
+`GO-NO-GOROUTINE-GLOBALS-1` (thread-safety of globals); `GO-ACCEPT-INTERFACES-RETURN-STRUCTS-1`
+(signature convention); the test-double rules (`RUST-TESTING-5`,
+`GO-TESTING-MOCK-AT-INTERFACE-BOUNDARY-1`) — test-scoped.
+
+**3. `ARCH-EXPLICIT-TX-1`** — *axis: who owns the transaction lifecycle for a multi-write unit of work
+and how the handle reaches the data-access code.* **No new mirrors.** The six matched are complete; a
+`grep` for `transaction` across all 417 rules returns nothing else on this axis
+(`SQL-PRIVILEGED-WRITE-AUDIT-1` and `ARCH-WEBHOOK-EVENT-DEDUP-1` both merely *require* a transaction
+for a different purpose).
+
+**4. `ARCH-STRUCTURED-ERRORS-1`** — *axis: does every error response carry a stable machine-readable
+discriminator the client can branch on, in one consistent shape across endpoints.* Mirrors: the four
+already matched, plus `GO-GRPC-STATUS-CODES-CORRECT-1`. gRPC fixes the envelope at the protocol level
+(status + message — which is the spine rule's own legitimate "status code only, no body" option), so
+the **code is** the error contract there. Both of its violating options are spine-rejected positions:
+"all errors are returned as INTERNAL, the error message contains the full detail" is the rejected
+"plain string error responses ... clients are expected to pattern-match on the human-readable
+wording", and "status codes are assigned inconsistently across handlers" is the rejected
+"each endpoint defines its own custom error response shape". Its `why` restates the spine rule's
+rationale almost verbatim: clients rely on the code for retry and recovery, never on the wording.
+`GO-WEB-STRUCTURED-ERROR-RESPONSES-1` already covers this stack's HTTP transport; this is the same
+commitment on its RPC transport.
+
+Ruled out: `ARCH-NO-LEAKY-ERROR-DETAILS-1` — **its own title rules it out**, "regardless of the
+envelope shape"; `JAVA-EXCEPTION-HANDLING-1`, `CSHARP-NO-SWALLOWED-EXCEPTIONS-1`,
+`PYTHON-NO-BARE-EXCEPT-1`, `ARCH-OBSERVABILITY-SILENT-FAILURE-1`, `GO-ERRORS-MUST-BE-CHECKED-1`,
+`GO-ERROR-WRAPPING-WITH-FMT-W-1` (all internal catch/propagate, never what the client receives);
+`CSHARP-ASPNETCORE-MIDDLEWARE-ORDERING-1` and `CSHARP-ASPNETCORE-MODEL-VALIDATION-1` (W9's rulings,
+preserved). **W9-Q3 stands unchanged**: Java, C# and Ruby still have no rule governing an API error
+body's shape, so there is nothing to author a ceiling on.
+
+**5. `ARCH-REPO-RETURNS-DOMAIN-1`** — *axis: what type crosses the repository boundary — a domain type
+produced by a mapping step inside the repository, or the persistence library's row/entity type.*
+Mirror: `RUST-SEAORM-RAW-SQL-ESCAPE-1`, closing **W9-Q2**. Its title names the seam ("... at the
+repository boundary"), its adopted directive states the spine commitment verbatim ("only typed domain
+types cross the trait boundary"), and its rejected option — repository methods "return the framework's
+raw result-set or row types directly through the repository trait surface" — is the spine's own
+rejected "return the persistence library's row or entity type directly, with no translation ... at the
+boundary". Zach verified this mapping himself before directing it.
+
+Ruled out, and this one is load-bearing: `JAVA-SPRING-DTO-BOUNDARY-1`,
+`PYTHON-FASTAPI-PYDANTIC-MODELS-1` and `RUST-ENTITIES-2` all guard the **HTTP/serialization**
+boundary, so they mirror **`ARCH-API-DTOS-1`** — a different spine rule, which carries **no ceiling**.
+That is a principled reason rather than a judgement call: capping them would silently promote a second
+spine concept. `RUST-ENTITIES-2` is the sharpest case (its directive "forces every API response
+through an explicit DTO plus mapper"). Also out: `RUST-MAPPER-1` and `RUST-ENTITIES-13` (crate
+placement), `ARCH-SERVER-CLIENT-PROJECTION-1` / `ARCH-RESPONSE-FIELD-PROJECTION-1` (client boundary),
+`CSHARP-EFCORE-ASNOTRACKING-1` (change tracking).
+
+**6. `ARCH-FETCH-THEN-AUTHORIZE-1`** — *axis: the ORDER of per-resource authorization relative to the
+fetch, and whether the passed check is encoded in a type.* **Still zero mirrors**, and W8-Q2's
+reasoning survives a deliberate re-examination under the broader direction: the five declarative-auth
+rules (`JAVA-SPRING-METHOD-SECURITY-1`, `CSHARP-ASPNETCORE-AUTHORIZE-ATTRIBUTE-1`,
+`JAVASCRIPT-NEST-GUARDS-FOR-AUTH-1`, `PYTHON-FASTAPI-AUTH-DEPENDENCY-1`,
+`PYTHON-FLASK-AUTH-ON-PROTECTED-ROUTES-1`) decide **where authorization is declared**, and their
+adopted option — an annotation, guard or decorator firing *before the method body* — is nearer the
+spine rule's **rejected** `request-only-authz` than its adopted `fetch-then-authorize`. Three of the
+five are about *authentication*, not per-resource authorization, at all.
+
+Two further near-misses, both genuinely closer and both still out: `ARCH-REFUND-AUTHORIZATION-1`
+rejects "a general 'can issue refunds' permission, with no per-charge ownership check", which *is* the
+spine's request-only option — but it is a universal payments-domain `defect` rule, a narrower instance
+rather than a per-stack re-litigation, and its axis also carries the refundable-amount bound.
+`SUPABASE-FUNC-DEFINER-CROSS-TENANT-READ-1` and `SUPABASE-FUNC-PRIVILEGED-NO-AUTHZ-1` are
+IDOR-in-the-database and per-resource by nature — **but W5-Q1 deliberately left them uncapped because
+they are critical-class, so a `high` ceiling would DOWNGRADE them.** Authoring one there would
+contradict a settled ruling and cause real harm. Named here so nobody "completes the set" into that
+trap later.
+
+**7. `RUST-DOMAIN-6`** — *axis: how a crate's public-boundary typed error enums are organized, by
+failure category or by module/aggregate.* **Still zero mirrors.** No other stack's corpus governs
+crate-boundary error-type organization; a sweep for `error enum`, `typed enum`, `exhaustive match`,
+`crate boundary`, `anyhow`, `Box<dyn Error>` returns only `RUST-DOMAIN-4`, `RUST-ENTITIES-12` (pgEnum
+mapping) and `RUST-DIOXUS-7` (unrelated). See W10-Q2 for `RUST-DOMAIN-4`.
+
+## [ ] W10-Q1 — the `kind` disagreements across all 29 spine/mirror pairs
+
+**20 of 29 pairs disagree on `kind`.** Not one `kind` was touched; the 58-rule review stays paused.
+They split cleanly into two classes, and conflating them would be the mistake.
+
+**Class A — 17 pairs, `decision` vs. `default_with_exceptions`. Behaviourally benign, semantically
+real.** Both kinds are non-defect, so both enter the alternatives pass and emit deviation rows; the
+ceiling bites identically on either. What differs is what the rule *claims*: `default_with_exceptions`
+says the spine position is the adopted default with named carve-outs, `decision` says it is one of
+several equally-live options. The pattern is systematic and points one way:
+
+| spine | spine `kind` | mirrors agreeing | mirrors disagreeing |
+|---|---|---|---|
+| `ARCH-STRICT-LAYERING-1` | `default_with_exceptions` | 2 of 12 | 10 (all `decision`) |
+| `ARCH-SERVICE-DI-1` | `default_with_exceptions` | 3 of 5 | 1 `decision`, 1 `defect` |
+| `ARCH-EXPLICIT-TX-1` | `decision` | 2 of 6 | 3 `default_with_exceptions`, 1 `defect` |
+| `ARCH-STRUCTURED-ERRORS-1` | `default_with_exceptions` | 2 of 5 | 2 `decision`, 1 `defect` |
+| `ARCH-REPO-RETURNS-DOMAIN-1` | `default_with_exceptions` | 0 of 1 | 1 `decision` |
+
+My reading: **layering is the one worth a decision.** The universal layer says strict layering is the
+default and a deviation is an exception, while 10 of its 12 per-stack re-litigations say it is an open
+choice. That is the same "severity decided by which rule fired" asymmetry one level up — it decides
+whether the finding is framed to the client as *a deviation from an adopted default* or as *one
+legitimate option among several*. The transaction row is the mirror image and arguably the more
+defensible one: the spine rule is `decision` (four genuine postures) while three stack rules are
+`default_with_exceptions` (at the stack level, "wrap multi-writes" really is the default). The rest I
+read as corpus-authoring drift rather than intent.
+
+**Class B — 3 pairs where the mirror is `defect` and the spine is not. This is the material one.**
+
+| pair | the tension |
+|---|---|
+| `ARCH-EXPLICIT-TX-1` / `RUST-SQLX-TRANSACTIONS-MULTI-WRITE-1` | per-call implicit transactions: a **choosable option** at the universal layer, a **fault** at the stack layer |
+| `ARCH-SERVICE-DI-1` / `JAVASCRIPT-ANGULAR-DI-CONSTRUCTOR-OR-INJECT-1` | constructor-parameter injection is `violates = true` here, while the spine rule's *adopted* option is injection at the composition root |
+| `ARCH-STRUCTURED-ERRORS-1` / `GO-GRPC-STATUS-CODES-CORRECT-1` | "status code only, no body" is a legitimate spine option; gRPC's whole contract lives there and the stack rule treats mis-assignment as a defect |
+
+The brief named the first. **My reading on it: correct, and for the reason suggested — the axes
+genuinely differ.** `ARCH-EXPLICIT-TX-1` decides *where the boundary is owned* (service vs. ambient vs.
+annotation vs. per-call), and "per-call short transactions" is a coherent posture for a codebase with
+no cross-aggregate units of work. `RUST-SQLX-TRANSACTIONS-MULTI-WRITE-1` fires only once a code path
+*already performs multiple writes*, and at that point atomicity is not a posture, it is correctness —
+its own `why` names partial state with dangling references and no rollback path. A project may
+legitimately choose per-call transactions; it may not choose a half-applied multi-write. Same words,
+different predicate.
+
+**The third is correct for the same shape of reason** (choosing the wrong code from a fixed vocabulary
+is a mapping error, not an envelope posture), **but the second is the one I would flag as a genuine
+coherence bug.** `JAVASCRIPT-ANGULAR-DI-CONSTRUCTOR-OR-INJECT-1` marks *constructor-parameter
+injection* as `violates = true`, which is not merely a stricter reading of the spine rule — it is
+`ARCH-SERVICE-DI-1`'s **adopted** option declared a violation, on the grounds that Angular now prefers
+`inject()`. A framework-ergonomics preference has been encoded with the same flag the corpus uses for
+architectural faults. Nothing about it is dangerous today (the rule is `defect`, so it emits no
+deviation rows), but if it is ever reclassified it will report a project following the universal spine
+rule as violating the stack rule.
+
+> **Factual correction, 2026-10-11 (docs pass, status mark untouched and still yours).** The Class B
+> item you flagged as "a genuine coherence bug" has been fixed. `ece0d7d` removed `violates = true`
+> from `JAVASCRIPT-ANGULAR-DI-CONSTRUCTOR-OR-INJECT-1`'s constructor-parameter-injection option, on
+> that rule's own evidence (its option `why` calls it "a legitimate OOP-style option" and the rule's
+> `why` says "Constructor injection remains valid for standard component/service classes" while "The
+> rule's forbidden pattern ... is manual instantiation"). Only "Manual instantiation with new"
+> remains flagged, so the corpus no longer calls the same practice correct in Java and C# and a
+> violation in Angular. `kind` was not touched on that rule or any other, so the `kind` disagreement
+> this item is actually about is unchanged and the item stays open.
+
+## [ ] W10-Q2 — `RUST-DOMAIN-4` is the spine rule's PARENT, and that is the one asymmetry left
+
+`RUST-DOMAIN-6`'s own `why` says it "assumes `rust-domain-4-errors-via-thiserror`'s default ... and
+addresses the narrower, separate question of how the variants within that enum are organized — it is
+not an alternative to rust-domain-4". So `RUST-DOMAIN-4` is upstream of a spine rule, not a mirror of
+one. Both can fire on the same code — "the crate returns `anyhow::Error` at its public boundary" is a
+bad option under `RUST-DOMAIN-4` *and* a named boundary failure under `RUST-DOMAIN-6` — and today that
+caps at `medium` under the parent and `high` under the child.
+
+**Not authored, deliberately.** A ceiling on `RUST-DOMAIN-4` would *extend the spine set from seven to
+eight*, which is a different decision from "mirrors match their spine", and W8 and W9 both treated
+same-stack siblings as out of scope. **One word settles it if Zach wants it**, exactly as it did for
+the other six. Pinned as a near-miss control in `req_w5_q3_*` so the ruling cannot drift silently.
+
+## [ ] W10-Q3 — `RUST-DOMAIN-6`'s `violates` flags are INVERTED, and it is a spine rule
+
+Found while reading spine/mirror pairs. **Not fixed — out of W10's scope (ceilings only), and it
+changes behaviour.** In `rust-domain-6-shared-repository-error.toml`, `violates = true` sits on the two
+options the rule's own `why` calls the legitimate organizational choices:
+
+- `errors-are-category-scoped-one-shared-enum-per-f` → `violates = true`
+- `each-function-or-aggregate-defines-its-own-error` → `violates = true`
+
+and is **absent** from all three the same `why` calls "boundary failures ... the options to avoid":
+the single grab-bag enum, re-exporting the driver's error type, and `Box<dyn Error>`/`anyhow`. The
+`remediation` blocks confirm the polarity is flipped wholesale: options 1 and 2 tell you to *move to*
+them, while options 3-5 tell you to *consolidate into* them. Compare `ARCH-STRICT-LAYERING-1`, where
+`violates = true` sits on "No layer separation" and nowhere else.
+
+Consequence: a Rust crate that organizes its boundary errors correctly is reported as violating
+`RUST-DOMAIN-6`, and one returning `anyhow::Error` from every public function is not — **and the
+ceiling authored on this rule is bounding the wrong rows.** The same class exists at least twice more
+(`RUST-DOMAIN-3` flags "Newtype validated strings", its own adopted position; `ARCH-CURSOR-PAGINATION-1`
+flags "paginate by opaque cursor"), so this is worth a dedicated polarity audit rather than three
+one-off fixes. **Highest-value finding in W10 after the sweep itself.**
+
+> **Factual correction, 2026-10-11 (docs pass, status mark untouched and still yours).** "Not fixed"
+> above is no longer accurate, and the recommended polarity audit happened: W11 audited the
+> `violates` flags corpus-wide against each rule's own `why` / `directive` / `remediation` /
+> `title`, and all three rules named in this item have landed flag corrections. `RUST-DOMAIN-6`'s
+> wholesale inversion was reversed in `330734b` (flags moved off both legitimate organizations and
+> onto the three the rule calls boundary failures); `RUST-DOMAIN-3`'s half-inversion in the same
+> commit; `ARCH-CURSOR-PAGINATION-1` in `79ee0f2`. The wider sweep is `a0118da`, `ffee7b2`,
+> `79ee0f2`, `330734b`, `aa003f3`, `ece0d7d`, `bc9e78e`, `0ca0632`. Flags only in all of them: no
+> `kind`, no severity, no `deviation_ceiling`, no rule added or removed. The consequence you note
+> about this rule's ceiling bounding the wrong rows is therefore also resolved. The item is left
+> open and unmarked because closing a finding is yours, and because W11 is a flag audit rather than
+> an answer to the question of whether the polarity audit is now complete.
+
+## [ ] W10-Q4 — three per-stack COVERAGE gaps, same class as W9-Q3
+
+No rule exists to author a ceiling on, so these are rule-coverage gaps, not ceiling gaps:
+
+- **`ARCH-EXPLICIT-TX-1`** has mirrors for Java/Spring, C#/EFCore, Go/GORM and three Rust libraries.
+  **Python, Ruby and JS/TS have no transaction rule at all** — a Django or Rails or Express repo with
+  a non-atomic multi-write is caught only by the universal rule, if at all.
+- **`ARCH-SERVICE-DI-1`** has no Python, Go or Ruby mirror.
+- **`ARCH-STRUCTURED-ERRORS-1`** has no Java, C# or Ruby mirror (W9-Q3, unchanged).
+
+New rules remain banned in this effort, so all three are recorded rather than filled. Zach's call.
+
+## The two guard tests, neither weakened
+
+- **`req_a5_7_no_held_rule_carries_an_inferred_deviation_ceiling`.** The allow-list was renamed
+  `AUTHORIZED_BY_OWNER_DIRECTION` and became `[(&str, &str); 6]` — **each id now carries the spine
+  rule it mirrors**, so the pairing is reviewable without opening six files. The new W10 direction is
+  quoted verbatim in the doc comment, alongside an explicit statement that it was read as *"every held
+  rule that is a genuine per-stack mirror"* and **deliberately not** loosened into a predicate such as
+  "any held rule may carry a ceiling" — which the broader wording would have superficially licensed
+  and which would have made the test unable to fail. All three anti-rot assertions are preserved
+  (allow-listed id must be held, must carry a ceiling, must carry `high`), and a **fourth was added**:
+  the spine rule each exemption claims to inherit from must itself carry the ceiling, so an exemption
+  cannot survive as a bare carve-out wearing a justification. The other **52** held rules are still
+  blocked.
+- **`req_w5_q3_every_per_stack_mirror_inherits_its_spine_rules_deviation_ceiling`.** Gained a fifth
+  spine entry (`ARCH-REPO-RETURNS-DOMAIN-1`) and the three new pairs. Still asserts **both** sides of
+  every pair. The four same-folder controls are untouched, and **three more were added** — one in each
+  folder W10 touched (`JAVASCRIPT-ANGULAR-ONPUSH-CHANGE-DETECTION-1`,
+  `GO-GRPC-PROTO-GENERATED-IMMUTABLE-1`, `RUST-ENTITIES-4`) — because without them a
+  blanket-by-folder assignment would have started passing again in exactly the folders this round
+  widened. A **second control block** now pins all 15 near-misses with the reason each was ruled out,
+  so reversing one of W8's, W9's or W10's judgement calls requires deliberately editing that list.
+
+Test-discipline **exception (a)** for both: a deliberate data change they must adapt to. No other test
+was edited. Neither was weakened; both gained assertions.
+
+## Verification
+
+Both guards run RED against the real corpus first, by `git stash push -- crates/rules/principles/` at
+`b814dd2` and re-running:
+
+- `req_w5_q3_*`: `assertion left == right failed: JAVASCRIPT-ANGULAR-TYPED-HTTPCLIENT-1 mirrors
+  ARCH-STRICT-LAYERING-1 ... left: None, right: Some("high")`
+- `req_a5_7_*`: `... each allow-listed held rule must carry its spine rule's own deviation_ceiling =
+  "high" ... ["RUST-SEAORM-RAW-SQL-ESCAPE-1 (mirror of ARCH-REPO-RETURNS-DOMAIN-1) = None"]` — the
+  fourth anti-rot assertion catching the missing data.
+
+Then green with the data restored. **The guard was proved to still BLOCK** by temporarily authoring a
+`deviation_ceiling = "high"` on `SUPABASE-STORAGE-SIGNED-URL-1` (held, unnamed, not a mirror of
+anything — W9 used `SPIRIT-ROBUSTNESS-1`, so a different rule was chosen on purpose) and observing
+`req_a5_7_*` red naming it, then reverting from a byte-identical copy (sha256 confirmed,
+`git diff` on that file empty).
+
+`rustfmt --edition 2024 --check` on `crates/rules/src/lib.rs` reports the **same 15 pre-existing
+diffs, all at or below line 4670**, before and after — W10's additions carry zero new formatter debt.
+No formatter was ever run in its mutating form.
+
+## Touched outside `crates/rules/**`
+- This document only. No source file outside `crates/rules/` was touched; `A5.7` stays `Exempt` in the
+  traceability registry because the `kind` hold is genuinely still in force.
+
+---
+
+# A5.7 HOLD STATUS — narrowed by Zach's directives, 2026-10-11
+
+Recording this because the documentation audit correctly flagged that kinds had been reclassified with
+**no explicit ruling on record**. That was a bookkeeping failure on my part, not a quiet override.
+
+The hold was never lifted wholesale. It was narrowed twice, by two explicit directives:
+
+1. **"Change the kind flag of the Java package rule and any related ones, implement the actual fix"** —
+   unlocked `kind` for the 11 rules declaring `kind = "default_with_exceptions"` alongside
+   `default = false`. The authority was the engine's own taxonomy doc
+   (`crates/rules/src/lib.rs` ~140), which names package-by-feature and API versioning as canonical
+   `decision`-kind examples and states that **no option on a `decision`-kind rule should carry
+   `violates = true`**.
+2. **"Classifying the security rules as defect, do that so we fix the issue of them being reported as
+   a consistently wrong thing in the code"** — unlocked `kind` for 19 security rules that shared one
+   shape: `kind = "decision"`, zero `violates` flags, exactly 2 options, exactly one option whose
+   `why` opens with the literal token `Rejected:`. A `decision` rule with no flag cannot report a
+   violation at all, so "no RLS policy", "`service_role` key in client code" and "dynamic SQL
+   injection" were all reporting as conventions the codebase had chosen.
+
+**Measured against the 58-rule list in `docs/plans/2026-10-09_rule-kind-classification.md`:**
+
+| | count |
+|---|---|
+| Rules on the hold list | 58 |
+| Resolved by the directives above (now non-decision) | **19** |
+| **Still awaiting Zach's review** | **39** |
+
+Corpus-wide kind distribution after both directives: **defect 151 · decision 156 ·
+default_with_exceptions 110** (417 total). Was defect 132 / decision 168 / default_with_exceptions 117.
+
+**The remaining 39 are still held.** The five-group presentation still applies to them, minus the
+security group that is now resolved. Nothing outside those two directives was reclassified.
+
+### [ ] NEW — the taxonomy has no slot for "several legitimate options PLUS degenerate faults"
+Confirmed independently by two agents. `RUST-DOMAIN-6` calls two options "a genuine organizational
+choice" and three others "boundary failures ... the options to avoid". That is neither `decision`
+(where the source forbids flags) nor `default_with_exceptions` (one default, the rest deviations).
+
+Worth knowing: a fourth kind would need **zero new pipeline behaviour** — the `violates` branch and
+the no-convention gate are already independent of each other. So the shape is already expressible;
+it just has no name. Zach's call.
+
+### [ ] NEW, SEVERE — a malformed rule silently vanishes from every scan
+Production loads the corpus leniently and **discards the parse errors**: five sites in
+`crates/server/src/lib.rs` do `let (corpus, _errs) = load_corpus_lenient(...)`. The test suite
+captures `corpus_errors`; production does not. So a rule with a typo'd enum value fails to parse, the
+rule disappears from every scan, and nothing reports it — not the ledger, not the coverage sheet, not
+`camerata integrity-gate`.
+
+This defeats the H1 requirement ("a rule that could never run for ANY stack is a DEFECT") by a second,
+invisible route, and it slips under the integrity gate that exists to make silent non-execution
+impossible. Compounding it: `deny_unknown_fields` is off for the rule struct, so a **misspelled field
+name vanishes without complaint**, and `tag` and `layer` are authored on all 417 rules while being
+parsed by nothing at all.
+
+---
+
+# CORRECTION — my `default = false` "contradiction" claim was WRONG (2026-10-11)
+
+I told Zach, and recorded above, that `kind = "default_with_exceptions"` together with `default = false`
+is "a genuine contradiction: the kind name asserts a default exists, the field says none does." I also
+recommended it as a build gate. **The mechanism I described is wrong and the gate would have been a
+false-positive generator.** Retracting both.
+
+**What `default` actually governs.** `docs/RULE_AUTHORING.md` lists it under "What a rule CAN have":
+`default = true  # ships an adopted default option (else the architect MUST choose)`. And
+`crates/rules/src/lib.rs:3446` is explicit:
+
+> "A rule can ALSO legitimately ship with no adopted default (`default = false`, typically paired with
+> `opt_in_only = true` — e.g. a rule whose right answer depends on project-specific infrastructure the
+> architect must consciously choose)."
+
+So `default` governs **onboarding adoption** and `kind` governs **option semantics**. They are
+orthogonal. `default = false` is a first-class, documented authoring choice, not a defect.
+
+**Blast radius of the gate I proposed:** 13 rules declare `opt_in_only = true`. Any of those that are
+`default_with_exceptions` would have failed the build for being authored exactly as the guide
+prescribes. `INTEGRATION-API-CONTRACT-1` and `INTEGRATION-AUTH-SEAM-1` both declare `opt_in_only = true`
+with an inline comment saying so, and were false positives of my framing.
+
+**What WAS true, and worth keeping.** The correlation was real and predictive even though my
+explanation of it was wrong: of the 11 rules I flagged, **7 were genuinely mislabeled** and were
+reclassified to `decision`, and 1 (`ARCH-HOT-READ-CACHE-1`) had a genuinely wrong `default` field. So
+it was a useful heuristic resting on a false theory. That distinction matters for gate design: the
+signal belongs in a **report**, never in a build failure.
+
+**A second correction, to W11's own report.** It described the two integration rules as "textbook
+`Defect`, not `default_with_exceptions`", and noted `INTEGRATION-AUTH-SEAM-1` cites OWASP A01 while
+sitting outside the security sweep — implying it might be silent like the 19 were. **It is not.** Both
+rules carry exactly one `violates` flag and therefore do emit. The `defect` vs
+`default_with_exceptions` question for them is a real but much smaller classification point about
+whether they should enter the alternatives pass at all, not a silence bug.
+
+**Process note.** This is the same failure this whole effort has been hunting — a confident claim that
+does not survive checking — committed by me, in the analysis rather than the code. It was caught
+because the agent was told to decide from the rule's own text and to flag disagreement rather than
+comply. That instruction is why it surfaced, and it is worth keeping in every brief.
+
+---
+
+# CORRECTION 2 — "19 security rules could not report a violation" was overstated (2026-10-12)
+
+I told Zach that 19 security rules "cannot report a violation at all", and illustrated it with three
+examples: no RLS policy, a `service_role` key in client code, and dynamic SQL injection, each
+"reporting as a convention the codebase chose". I used that to escalate the item above everything else
+in his queue.
+
+**The defect was real but it affected 8 of the 19, and all three of my examples were in the other 11.**
+
+Only `Prose` and `Structured` enforcement tiers enter the alternatives pass. `EnforcementKind::is_ci_enforced`
+(`crates/rules/src/lib.rs:108`) excludes `Mechanical` and `Architectural` already. Measured:
+
+| rule I cited | enforcement | entered the alternatives pass? |
+|---|---|---|
+| `SUPABASE-RLS-NO-POLICY-1` | architectural | **no** |
+| `SUPABASE-KEY-SERVICE-ROLE-CLIENT-1` | mechanical | **no** |
+| `SUPABASE-FUNC-DYNAMIC-SQL-INJECTION-1` | architectural | **no** |
+| `SUPABASE-STORAGE-KEY-SANITIZATION-1` | structured | **yes** -- genuinely silent |
+
+Several of the 11 have live deterministic detectors in `crates/checks/src/supabase/*_checker.rs` and
+were emitting findings the whole time. W12 said this plainly in its report and chose a genuinely
+silent rule for its red-before proof rather than one of my headline examples.
+
+**What remains true:** for the 8 `prose`/`structured` rules the silence was exactly as described, and
+W12's measurement on one of them is unambiguous: no finding emitted, the vulnerability adopted as the
+project's effective directive, and a `ConventionObserved` row asserting the codebase consistently
+follows that "convention". For the other 11 the reclassification is a correctness fix that moves the
+exclusion onto the rule's own semantics instead of leaving it to depend incidentally on its
+enforcement tier. It does not by itself make them newly emit.
+
+## The pattern in my own three errors this session, and the fix
+
+1. `default = false` is a "contradiction" -- inferred from a doc comment, never traced to how the field
+   is used. Wrong; would have gated 13 legitimately opt-in rules.
+2. `deny_unknown_fields` "is now on" -- inferred from a grep count going 2 to 6, never read the matches.
+   All six were comments explaining why it is off.
+3. "19 rules could not report a violation" -- inferred from `kind` plus flag count, never checked the
+   enforcement tier that gates the pass.
+
+Each time I verified the **data** and skipped the **code path**. `docs/RULES_REFERENCE.md` exists
+precisely because that tracing is hard, and I did not use it on my own claims.
+
+**Standing correction to my own method: before asserting a behavioural consequence, trace the field to
+its consumer and cite `file.rs:line`, which is the standard every agent brief in this effort demands.**
+All three errors were caught by agents who were told to verify from source and flag disagreement rather
+than comply. That instruction is load-bearing and stays in every brief.
+
+### [ ] NEW — 9 detector-precision rules, not 5, and 5 of them invert the Defect definition
+W12 found 4 more beyond the 5 already known: `SUPABASE-RLS-NO-POLICY-1`, `SUPABASE-RLS-PERMISSIVE-TRUE-1`,
+`SUPABASE-RLS-DISABLED-NOT-RESTORED-1`, `SUPABASE-STORAGE-OBJECT-POLICY-1`.
+
+Sharper: in five of the nine (`RLS-PERMISSIVE-TRUE` and the four `FUNC-*`) the **rejected option is MORE
+aggressive than the correct one**. So `violates = true` there does not mean "this codebase is unsafe", it
+means "this scanner calibration is not an acceptable alternative" -- which contradicts the taxonomy's own
+definition of Defect ("every option other than the correct one describes the absence or a degenerate
+form"). No behavioural risk today, since defect-kind rules never enter the alternatives pass and the flag
+is inert. But the option text is product configuration in a client-facing costume and needs removing from
+the rule, not reclassifying.
+
+---
+
+# Pointer (docs pass, 2026-10-14) -- no rulings changed
+
+Appended by a documentation pass. Nothing above was edited; no `[ ]` / `[x]` mark was touched.
+This note only records where the reference documentation now stands relative to this log, so a
+reader arriving here does not have to re-derive it.
+
+Three items recorded above as open are now closed in code, and `docs/RULES_REFERENCE.md` has
+been updated to match:
+
+- The **`decision`-kind / `violates` invariant** is now a build gate,
+  `decision_kind_rules_with_violates_flag` (`crates/rules/src/lib.rs:2007`).
+- The **`Rejected:` convention** is now a build gate in one direction (prose implies flag),
+  `options_with_rejected_prose_but_no_violates_flag` (`crates/rules/src/lib.rs:1916`). The
+  `decision`-kind case routes to an advisory roster instead, deliberately, because the A5.7
+  hold is still open.
+- The **`RUST-DOMAIN-6` taxonomy gap** is closed by a fourth `RuleKind`,
+  `decision_with_floor`, with `RUST-DOMAIN-6` as its sole member asserted by equality.
+
+Two corrections recorded above have been carried into `docs/RULES_REFERENCE.md`, which had
+printed both of the superseded claims: the `default = false` + `default_with_exceptions`
+"contradiction" is retracted there (gotcha 2, including the heuristic that survived it), and
+the "19 silent security rules" figure is corrected to 8 with the enforcement-tier reasoning
+(gotcha 3).
+
+Still open per this log and reflected as open in the reference: the dangling
+`[decision].default` gate, the `effort` vocabulary gate, the `stack_exception.framework`
+vocabulary gate, the proposal path still discarding corpus parse errors (W13 fixed the scan
+path only), and the 9 detector-precision rules in the item directly above.

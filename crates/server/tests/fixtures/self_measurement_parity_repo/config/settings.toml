@@ -1,0 +1,15 @@
+# FIXTURE (crates/server/tests/self_measurement_parity_e2e.rs): a second brace-free file type
+# (SHAPE 3), and one that counts toward `files_scanned` because .toml is in CODE_EXTS.
+#
+# Deliberately carries NO credential-shaped value. The credential keyword list is explicitly
+# off-limits to this workstream ("EXPLICITLY BANNED: adding words to the credential keyword
+# list"), so this fixture must not create pressure to touch it.
+
+[service]
+name = "orders-api"
+timeout_seconds = 30
+retries = 3
+
+[telemetry]
+enabled = true
+sample_rate = 0.1

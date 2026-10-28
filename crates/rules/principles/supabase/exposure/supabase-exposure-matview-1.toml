@@ -1,9 +1,19 @@
 id = "SUPABASE-EXPOSURE-MATVIEW-1"
+version = 1
 title = "A materialized view in an API-exposed schema cannot be row-secured; its exposure is all-or-nothing"
-tag = "stack"
 domain = "supabase:exposure"
 layer = "platform"
 enforcement = "structured"
+kind = "defect"
+inspectable = true
+# Severity ceiling. Rationale: a rollup or aggregate materialized view is often genuinely meant
+# to be public, so the exposure fact alone can never justify an automatic critical — the reader
+# has to judge whether this view's all-or-nothing contents are appropriate for public access.
+max_severity = "high"
+# Severity floor. Rationale: Postgres gives materialized views no per-row policy hook at all, so
+# an exposed one is unconditionally unscopeable — there is no partial remediation and no weaker
+# reading of the fact. Floor and ceiling are both high: this rule is pinned at exactly high.
+min_severity = "high"
 default = true
 verification = "grounded"
 qualifies = "Enforced by a statement scan for CREATE MATERIALIZED VIEW targeting an API-exposed schema (public by default, or per SUPABASE-EXPOSURE-SCHEMAS-1's config parse). Postgres materialized views do not support Row Level Security at all — there is no policy mechanism to apply, so any exposed materialized view grants either full access to its contents or none. Conformance holds when materialized views are kept out of exposed schemas (moved to a non-exposed schema and accessed only through a RLS-capable wrapper, e.g. a security_invoker view or a function) or are deliberately, reviewably intended as fully public data."
@@ -14,7 +24,7 @@ title = "Supabase Database Linter — 0016_materialized_view_in_api (\"Materiali
 linter = "splinter: materialized_view_in_api"
 
 [decision]
-question = "Is every materialized view in an API-exposed schema flagged, given that Postgres materialized views structurally cannot support RLS?"
+question = "Does any materialized view sit in an API-exposed schema, where Postgres can apply no row-level security to it?"
 default = "flag-exposed-materialized-views"
 why = """
 Row Level Security policies attach to TABLES and (via security_invoker) ordinary VIEWS — Postgres
@@ -36,18 +46,29 @@ public, so this ships as a high-severity finding for review, not an automatic cr
 
 [[option]]
 id = "flag-exposed-materialized-views"
-label = "Flag every materialized view in an exposed schema, naming the structural all-or-nothing limitation"
+label = "Materialized views stay out of API-exposed schemas unless their full contents are meant to be public"
 directive = """
-Scan CREATE MATERIALIZED VIEW statements targeting exposed schemas. Emit a high-severity finding
-for each: "Your `<matview>` snapshot table can't be row-secured at all, and it's reachable from the
-public API." Remediation: move the materialized view to a non-exposed schema and access it only
-through a security_invoker view or a SECURITY DEFINER function that applies its own row-scoping
-logic before returning data, or confirm the view's full contents are intentionally public.
+Row Level Security attaches to tables and, through `security_invoker`, to ordinary views. Postgres
+offers no equivalent for MATERIALIZED views: they are stored snapshots with no per-row policy hook,
+so one reachable through PostgREST is either entirely readable by whatever role can query it or not
+exposed at all. There is no middle setting to configure. Materialized views therefore live in a
+schema that is not listed in `supabase/config.toml`'s `[api] schemas`, and anything the API needs
+from them is read through a thin `security_invoker` view or a SECURITY DEFINER function that applies
+its own row-scoping first. The exception is deliberate: a rollup or aggregate whose every row is
+genuinely meant to be public can stay exposed, as a choice someone made rather than a default.
+"""
+remediation = """
+Move `<matview>` to a schema that is NOT listed in `supabase/config.toml`'s `[api] schemas`, then
+create a thin `security_invoker` view (or a SECURITY DEFINER function with its own row-scoping
+check) in an exposed schema that reads from it, so RLS applies at that layer. If every row in
+`<matview>` is genuinely meant to be public, no change is needed beyond confirming that
+intentionally. Verify by confirming `<matview>` itself is no longer directly reachable through
+the PostgREST API (only the wrapping view/function is).
 """
 why = "The finding is unconditional given the exposure fact — there is no RLS mechanism a materialized view could adopt — so naming every instance and explaining the structural limitation is the correct, honest framing rather than a probabilistic guess."
 
-[[option]]
-id = "ignore-materialized-views-treat-as-equivalent-to-regular-views"
-label = "Treat materialized views the same as ordinary views; rely on SUPABASE-RLS-VIEW-INVOKER-1's security_invoker check"
-directive = "Apply the security_invoker check to materialized views as if they were ordinary views, and skip a dedicated exposure rule."
-why = "Rejected: security_invoker is not a valid WITH-option for CREATE MATERIALIZED VIEW in Postgres — there is no RLS-equivalent mechanism to check for, so applying the ordinary-view rule would either silently no-op or produce a nonsensical finding. The exposure fact itself (materialized view + exposed schema) is the entire signal; a dedicated rule naming that structural limitation is the only correct treatment."
+# Design note (W22, 2026-10-20): this rule previously carried a second `[[option]]`
+# describing a REJECTED scanner/corpus design, not a client-code state. Removed — a
+# single-option defect is the right shape here, the fault is the absence of the option
+# above. The rejected design was: " security_invoker is not a valid WITH-option for CREATE MATERIALIZED VIEW in Postgres — there is no RLS-equivalent mechanism to check for, so applying the ordinary-view rule would either silently no-
+

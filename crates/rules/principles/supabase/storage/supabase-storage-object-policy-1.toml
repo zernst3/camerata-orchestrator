@@ -1,9 +1,21 @@
 id = "SUPABASE-STORAGE-OBJECT-POLICY-1"
+version = 1
 title = "storage.objects policies must not grant unconditional or unscoped anon write/delete access"
-tag = "stack"
 domain = "supabase:storage"
 layer = "platform"
 enforcement = "structured"
+kind = "defect"
+inspectable = true
+# Severity ceiling. Rationale: storage authorization IS RLS on storage.objects, so this rule
+# mirrors SUPABASE-RLS-PERMISSIVE-TRUE-1's bounds for the same reason — publicly readable buckets
+# are a routine, often intentional pattern, so the ceiling stays at high and never reaches
+# critical.
+max_severity = "high"
+# Severity floor. Rationale: same two-branch split as its table-policy sibling, floored at the
+# LOWER branch so it cannot inflate either. An unconditional or unscoped INSERT/UPDATE/DELETE
+# policy lets anyone upload into, overwrite, or delete from the bucket and is the high branch; a
+# read-only unscoped policy is the medium one, routed to review rather than asserted.
+min_severity = "medium"
 default = true
 verification = "grounded"
 qualifies = "Enforced by the same policy-predicate scan machinery as SUPABASE-RLS-PERMISSIVE-TRUE-1, specialized to storage.objects: a policy on storage.objects with USING (true) / WITH CHECK (true), or with no owner/folder scoping (no predicate referencing auth.uid() = owner, or a bucket_id + folder-prefix check) targeting anon or public, is flagged — with the finding naming the specific BUCKET (extracted from the policy's bucket_id predicate) rather than a generic table. Write/delete matches are high severity; read-only matches are medium with `needs_review`, mirroring the RLS-permissive-true severity split. Conformance holds when every storage.objects policy scopes write/delete operations to the resource's owner or an equivalent folder/ownership predicate."
@@ -17,7 +29,7 @@ url = "https://owasp.org/Top10/2021/A01_2021-Broken_Access_Control/index.html"
 title = "OWASP Top 10:2021 — A01 Broken Access Control"
 
 [decision]
-question = "Are storage.objects policies granting unconditional or unscoped anon write/delete access flagged, with the finding naming the specific bucket?"
+question = "Do any storage.objects policies grant unconditional or unscoped anon write/delete access to a bucket?"
 default = "flag-unscoped-object-policies-by-bucket"
 why = """
 Supabase documents storage authorization explicitly as RLS applied to the storage.objects table:
@@ -40,19 +52,31 @@ already covers generically.
 
 [[option]]
 id = "flag-unscoped-object-policies-by-bucket"
-label = "Flag unscoped/unconditional storage.objects policies, naming the specific bucket from the policy's bucket_id predicate"
+label = "storage.objects policies scope writes and deletes to the object's owner, per bucket"
 directive = """
-Scan CREATE POLICY statements targeting storage.objects. Extract the bucket_id literal from the
-predicate when present. Flag policies with USING (true) / WITH CHECK (true) targeting anon/public,
-or INSERT/UPDATE/DELETE policies with no ownership/folder scoping, as high severity: "Anyone can
-upload into — or delete from — your `<bucket>` bucket, not just the file's owner." SELECT-only
-unscoped policies are medium with `needs_review`, mirroring SUPABASE-RLS-PERMISSIVE-TRUE-1's
-read/write severity split.
+Storage authorization is Row Level Security on the `storage.objects` table — Supabase allows no
+uploads to a bucket until a policy on that table permits them — so every concern that applies to a
+table policy applies here unchanged.
+
+Policies on `storage.objects` that cover INSERT, UPDATE or DELETE scope the operation to the
+object's owner: `using (bucket_id = '<bucket>' and owner = auth.uid())`, or a folder-prefix
+convention keyed to the user's id. They are not `USING (true)` / `WITH CHECK (true)`, and they do
+not grant to `anon` or `public` without an ownership predicate, because either shape lets anyone
+upload into, overwrite, or delete from the bucket rather than just the person whose file it is.
+Read access is scoped the same way unless the bucket's contents are deliberately public.
+"""
+remediation = """
+Rewrite the `storage.objects` policy scoped to the `<bucket>` bucket so writes/deletes require
+matching the uploader, for example `using (bucket_id = '<bucket>' and owner = auth.uid())` (or a
+folder-prefix check keyed to the user's id) instead of an unconditional `true`. Verify by
+confirming one authenticated user can no longer upload into or delete another user's objects in
+`<bucket>`.
 """
 why = "Storage authorization is RLS on storage.objects in every respect that matters for this check; naming the bucket from the policy's own bucket_id predicate is what turns a generic 'a policy is too permissive' finding into an actionable, buyer-legible one."
 
 [[option]]
-id = "treat-storage-policies-as-covered-by-the-generic-rls-rule"
-label = "Do not author a storage-specific rule; rely on SUPABASE-RLS-PERMISSIVE-TRUE-1 running generically against storage.objects"
-directive = "Apply only the generic table-permissive-policy scan to storage.objects, without bucket-name extraction or storage-specific framing."
-why = "Rejected: SUPABASE-RLS-PERMISSIVE-TRUE-1 would still catch the true-predicate case, but its finding text says 'your `objects` table', which is meaningless to a non-technical buyer who has no idea storage.objects is where their file uploads live. The bucket-name extraction is the entire value-add — reporting 'your `uploads` bucket accepts anonymous writes' rather than 'the storage.objects table has a permissive policy' is the difference between an actionable finding and a confusing one."
+id = "unscoped-storage-write-policy-for-anon-or-public"
+violates = true
+label = "A storage.objects write or delete policy for anon or public is unscoped to the object's owner"
+directive = "A `storage.objects` policy granting INSERT/UPDATE/DELETE to anon or public carries `USING (true)` / `WITH CHECK (true)` with no owner or per-user folder predicate, so anyone can upload into, overwrite, or delete from the bucket."
+why = "Rejected: an unscoped write grant on storage.objects reachable by anon/public is a world-writable bucket. A SELECT-only unscoped policy for deliberately public read data is the default option's reviewed case."

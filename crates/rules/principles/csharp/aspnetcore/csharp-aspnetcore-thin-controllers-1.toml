@@ -1,9 +1,17 @@
 id = "CSHARP-ASPNETCORE-THIN-CONTROLLERS-1"
+version = 1
 title = "Controllers contain no business logic; they translate HTTP to service calls and service results to HTTP"
-tag = "stack"
 domain = "csharp:aspnetcore"
 layer = "framework"
 enforcement = "structured"
+kind = "default_with_exceptions"
+inspectable = true
+# Deviation-ceiling escape hatch, INHERITED from ARCH-STRICT-LAYERING-1: severity must describe
+# the PROBLEM, not which rule happened to fire. Without this, a repo on this stack caps the
+# identical architectural defect at medium while an unmirrored stack reaches high under the
+# general rule. This rule mirrors ARCH-STRICT-LAYERING-1 because it re-litigates the same
+# hierarchy: controllers translate HTTP to service calls and contain no business logic.
+deviation_ceiling = "high"
 default = true
 
 verification = "grounded"
@@ -16,13 +24,17 @@ why = "A controller action's job is protocol translation: read the validated req
 id = "thin-controllers-service-layer"
 label = "Controllers translate HTTP to service calls; all business logic lives in a service layer"
 directive = "Controller actions and Minimal API endpoint handlers are limited to: reading validated input from the request, calling one service method, and returning an IActionResult (or typed result) that maps the service's success or error. Business rules, conditional logic, validation beyond schema constraints, and data-access calls do not appear inside controllers or endpoint lambdas. Service classes own domain rules; repository classes own data access. A controller method body longer than ~10 lines is a signal that logic has leaked into the controller."
+remediation = """
+Move the business logic and data access currently inline in the controller action into a service method, so the action only reads validated input, calls the service, and maps the result to an HTTP response. Verify by confirming the action method body is a few lines long with no conditional business logic or direct DbContext/repository calls.
+"""
 why = "Controllers that translate protocol to service calls are independently testable, reusable across entry points, and insulated from domain changes."
 
 [[option]]
 id = "fat-controllers-inline-logic"
+violates = true
 label = "Business logic and data access inline in controller actions"
 directive = "Controller actions contain the full implementation: validate input, apply business rules, query the database directly (via DbContext or repositories), and compose the response, all inline in the action body."
-why = "Inlining logic in controller actions avoids the extra file and indirection of a service layer, which can seem like unnecessary ceremony for simple endpoints. The cost is that the logic is only reachable through an HTTP request, cannot be unit-tested without framework infrastructure, cannot be reused across a background job or a second endpoint without copying, and causes the controller to change for two unrelated reasons: HTTP contract changes and domain rule changes."
+why = "Logic placed inside a controller action is reachable only through an HTTP request, so it cannot be unit-tested without framework infrastructure and cannot be reused from a background job or a second endpoint without being copied. The controller then changes for two unrelated reasons, an HTTP contract change and a domain rule change, and the copies drift apart as soon as one of them is updated."
 
 [[option]]
 id = "no-repository-over-ef-core"

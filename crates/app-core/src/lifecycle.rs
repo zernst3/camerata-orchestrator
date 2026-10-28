@@ -47,9 +47,7 @@
 
 use serde::Serialize;
 
-use camerata_worktracker::investigation::{
-    decisions_approved_for_development, DecisionRecord,
-};
+use camerata_worktracker::investigation::{decisions_approved_for_development, DecisionRecord};
 
 /// The `UowStage` enum itself + its pure inherent impl (`label`, `wire_str`,
 /// `from_wire`, `ordinal`) were relocated to `camerata_api_types::lifecycle` (Phase A of
@@ -323,9 +321,7 @@ mod tests {
     #[test]
     fn approve_decisions_from_wrong_stage_errors_even_if_approved() {
         let decisions = vec![approved_decision("a")];
-        let err = UowStage::Intake
-            .approve_decisions(&decisions)
-            .unwrap_err();
+        let err = UowStage::Intake.approve_decisions(&decisions).unwrap_err();
         assert!(matches!(
             err,
             TransitionError::WrongStage {
@@ -360,10 +356,7 @@ mod tests {
         let err = UowStage::DecisionsApproved
             .start_development(&decisions)
             .unwrap_err();
-        assert!(matches!(
-            err,
-            TransitionError::DecisionsNotApproved { .. }
-        ));
+        assert!(matches!(err, TransitionError::DecisionsNotApproved { .. }));
     }
 
     #[test]
@@ -570,9 +563,7 @@ mod tests {
     fn transition_table_approve_decisions_with_bad_records_from_investigating() {
         // Even the legal source stage must not succeed when the gate is not satisfied.
         let bad = vec![approved_decision("a"), pending_decision("b")];
-        let err = UowStage::Investigating
-            .approve_decisions(&bad)
-            .unwrap_err();
+        let err = UowStage::Investigating.approve_decisions(&bad).unwrap_err();
         assert!(
             matches!(
                 err,
@@ -588,9 +579,7 @@ mod tests {
     #[test]
     fn transition_table_approve_decisions_with_empty_records_from_investigating() {
         // No decisions at all is also a gate failure (gate requires at least one).
-        let err = UowStage::Investigating
-            .approve_decisions(&[])
-            .unwrap_err();
+        let err = UowStage::Investigating.approve_decisions(&[]).unwrap_err();
         assert!(
             matches!(
                 err,
@@ -774,7 +763,9 @@ mod tests {
 
         // DecisionsApproved: only start_development (with good records) succeeds.
         assert!(UowStage::DecisionsApproved.begin_investigation().is_err());
-        assert!(UowStage::DecisionsApproved.approve_decisions(&good).is_err());
+        assert!(UowStage::DecisionsApproved
+            .approve_decisions(&good)
+            .is_err());
         assert!(UowStage::DecisionsApproved.start_development(&good).is_ok());
         assert!(UowStage::DecisionsApproved.finish_development().is_err());
         assert!(UowStage::DecisionsApproved.sign_off().is_err());

@@ -1,0 +1,103 @@
+id = "SUPABASE-FUNC-DYNAMIC-SQL-INJECTION-1"
+version = 1
+title = "A database function must not EXECUTE a dynamically-assembled query string built via non-quoting interpolation (|| concatenation or format()'s %s)"
+domain = "supabase:database-functions"
+# General Postgres, not just Supabase: a plpgsql function that EXECUTEs a dynamically-built query
+# string assembled via `||` concatenation or `format()`'s non-escaping `%s` placeholder is
+# exploitable in ANY Postgres database, whether or not the repo also uses Supabase. Without this,
+# a plain-Postgres repo (hand-written .sql, no supabase/ layout, no @supabase/* dependency) gets
+# only the generic `sql` domain from stack detection, which never matches this rule's
+# folder-derived `supabase:database-functions` domain — so the rule would never be proposed/armed
+# for it. `extra_domains` is the general mechanism (identical to this folder's sibling
+# SUPABASE-FUNC-SEARCH-PATH-1): this rule stays filed under supabase/database-functions/ (keeping
+# its existing supabase:* grouping/behavior), but ALSO matches any repo whose stack carries the
+# `sql` domain.
+extra_domains = ["sql"]
+layer = "platform"
+enforcement = "architectural"
+kind = "defect"
+inspectable = true
+# Severity floor. Rationale: an attacker-controlled value flowing into an EXECUTE'd string built
+# without escaping is SQL injection inside the database (CWE-89), invisible to any checker that
+# only reads application-language source. High is the minimum, and deliberately no ceiling: the
+# reachability escalation recorded in `qualifies` — a co-present GRANT EXECUTE to
+# anon/public/authenticated, which puts the injection one unauthenticated API call away — raises
+# the same defect to critical, and a ceiling here would silently flatten that.
+min_severity = "high"
+default = true
+verification = "grounded"
+qualifies = "Enforced by a statement-splitter-aware scan over CREATE FUNCTION/PROCEDURE bodies: a dollar-quoted plpgsql body containing an EXECUTE statement whose assembled string uses `||` concatenation with a non-literal operand, or a format() call whose template uses the non-escaping %s placeholder alongside a non-literal argument, is flagged. This is deterministic once a function body is isolated as a whole (the EXECUTE statement and its string-building shape are both facts about the same statement), and the match-set has no known benign counter-example (format()'s own %L/%I escaping placeholders and EXECUTE ... USING's bound-argument form are both excluded by construction) — making this a floor-tier candidate on the same statement-splitter infrastructure SUPABASE-FUNC-SEARCH-PATH-1 already depends on. Severity is additionally keyed on a co-present GRANT EXECUTE ... TO anon/public/authenticated in the same scanned SQL corpus, which elevates the finding from High to Critical (an anonymous/public-facing caller can reach the injection directly). Conformance holds when every EXECUTE'd dynamic query is built with format()'s %L/%I or a bound USING argument instead of %s or ||."
+
+[[sources]]
+url = "https://cwe.mitre.org/data/definitions/89.html"
+title = "CWE-89: Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')"
+
+[[sources]]
+url = "https://www.postgresql.org/docs/current/plpgsql-statements.html#PLPGSQL-STATEMENTS-EXECUTING-DYN"
+title = "PostgreSQL docs — PL/pgSQL: Executing Dynamic Commands (EXECUTE, and the warning against building query strings by direct concatenation of untrusted data)"
+
+[[sources]]
+url = "https://www.postgresql.org/docs/current/functions-string.html#FUNCTIONS-STRING-FORMAT"
+title = "PostgreSQL docs — format(): %L quotes a literal, %I quotes an identifier, %s inserts a string value AS-IS with no escaping"
+
+[decision]
+question = "Must a database function's dynamically-assembled EXECUTE'd query string always use an escaping/bound channel (format()'s %L/%I, or EXECUTE ... USING) rather than || concatenation or format()'s %s placeholder?"
+default = "require-escaping-or-bound-dynamic-sql"
+why = """
+PostgreSQL's own PL/pgSQL documentation is explicit about this exact attack: when a dynamic
+command is assembled by directly concatenating an untrusted value into the query string, "there
+is a potential security risk" of SQL injection, the same class of defect CWE-89 names for any
+language. `EXECUTE`'s dynamically-built string has no SQL-parser-level distinction between code
+and data once it's been assembled — exactly like string-built SQL in application code (the
+existing SEC-NO-QUERY-GRAMMAR-INJECTION-1 rule's own target), except this shape lives INSIDE the
+database, in a function body, invisible to any checker that only scans application-language
+source files.
+
+`format()`'s own documentation draws the exact safe/unsafe line this rule enforces: `%L` quotes
+its argument as an SQL literal (escaping embedded quotes), `%I` quotes it as a double-quoted
+identifier — both are SAFE because they neutralize the value's ability to terminate the intended
+token. `%s` inserts the argument's string value with NO escaping at all — if the argument is
+attacker-controlled, `%s` provides zero protection, functionally identical to naive `||`
+concatenation. `EXECUTE '...' USING value` is Postgres's bound-parameter form for dynamic SQL,
+exactly analogous to a prepared statement's placeholder, and is unconditionally safe regardless
+of what flows into it.
+
+Severity is driven by reachability: a function with this defect that is additionally GRANTed
+EXECUTE to `anon`/`public`/`authenticated` (Supabase/PostgREST's own anonymous-caller and
+Postgres's own everyone-pseudo-role) is directly reachable by an unauthenticated API request, so
+it is Critical rather than High — the technical defect is identical either way, but who can
+trigger it changes the urgency.
+"""
+
+[[option]]
+id = "require-escaping-or-bound-dynamic-sql"
+label = "Dynamic SQL is assembled with format()'s %L/%I or a bound USING argument, never with || or %s"
+directive = """
+Every query string a database function builds and runs through `EXECUTE` is assembled through a
+channel that neutralises its inputs. `format()`'s `%L` quotes a value as an SQL literal and `%I`
+quotes it as an identifier; `EXECUTE '... $1 ...' USING value` binds the value the way a prepared
+statement's placeholder does. Any of those is safe regardless of what flows into it.
+
+`||` concatenation and `format()`'s `%s` are not: `%s` inserts its argument verbatim with no
+escaping, which makes it exactly as exposed as naive concatenation. Once a string has been
+assembled that way, the SQL parser has no distinction left between the code the author wrote and
+the data a caller supplied, so an attacker-controlled value injects arbitrary SQL. Fully static
+EXECUTE strings are fine; the defect is the non-escaping channel, not dynamic SQL itself.
+"""
+remediation = """
+For `<function-name>`, replace the unsafe interpolation with an escaping or bound channel: use
+`format('...%I...', column_name)` to quote an identifier, `format('...%L...', literal_value)` to
+quote a literal value, or rewrite the EXECUTE as `EXECUTE '... $1 ...' USING value` to bind the
+value instead of concatenating it into the string. Verify by confirming a payload containing the
+target quoting character (a single quote for %L/USING, a double quote or dot for %I) no longer
+changes which statement actually executes.
+"""
+effort = "low"
+why = "Postgres's own format() function already ships the correct safe primitives (%L/%I) and EXECUTE already ships a bound-argument form (USING) — the fix is substituting the escaping/bound form for the non-escaping one, not introducing new infrastructure."
+
+[[option]]
+id = "dynamic-sql-assembled-by-concatenation"
+violates = true
+label = "A function EXECUTEs a dynamic SQL string assembled by concatenation or unescaped interpolation"
+directive = "A function body EXECUTEs a query string built with `||` concatenation of a non-literal operand, or `format()`'s `%s` with a non-literal argument, inserting the value with no escaping."
+why = "Rejected: `||` and `%s` insert the value unescaped, so a value reaching a broadly-granted function is a SQL injection reachable from an unauthenticated API request. The safe forms are `format()` `%L`/`%I` or `EXECUTE … USING`."

@@ -1,9 +1,31 @@
 id = "RUST-SEAORM-RAW-SQL-ESCAPE-1"
+version = 1
 title = "Raw-SQL queries are wrapped in a typed domain projection at the repository boundary"
-tag = "stack"
 domain = "rust:seaorm"
 layer = "library"
 enforcement = "structured"
+kind = "decision"
+inspectable = true
+# Deviation-ceiling escape hatch, INHERITED from ARCH-REPO-RETURNS-DOMAIN-1: severity must
+# describe the PROBLEM, not which rule happened to fire. Before this line, one of the seven spine
+# concepts capped its only per-stack re-litigation at medium while the spine rule itself reached
+# high.
+#
+# This rule mirrors ARCH-REPO-RETURNS-DOMAIN-1 because it applies that spine rule's decision to
+# SeaORM's raw-SQL escape hatch, at the same seam. Its title names the seam ("... at the
+# repository boundary") and its adopted directive states the spine rule's commitment verbatim:
+# "The raw result-set types and untyped row types of the ORM do not appear in the repository trait
+# surface; only typed domain types cross the trait boundary." Its rejected option, "repository
+# methods ... return the framework's raw result-set or row types directly through the repository
+# trait surface, and callers parse field values out of those raw types themselves", is the spine
+# rule's own rejected "repository methods return the persistence library's row or entity type
+# directly, with no translation into a separate domain type at the boundary".
+#
+# The ceiling is authored without touching this rule's `kind`, and is safe either way: as a
+# `decision` rule it already emits deviation rows, so the ceiling only BOUNDS rows that exist
+# today; were it ever reclassified as `defect` the ceiling becomes dead config rather than wrong
+# behaviour.
+deviation_ceiling = "high"
 default = true
 verification = "grounded"
 
@@ -16,6 +38,9 @@ why = "Raw SQL is genuinely necessary for query shapes the typed builder cannot 
 id = "typed-domain-projection-at-boundary"
 label = "Raw SQL allowed, but only parsed into a typed domain projection"
 directive = "When a repository method's query cannot be expressed through the SeaORM typed query builder (for example JSON-path extraction, conditional aggregates, window functions, or correlated subqueries the typed API cannot chain), the implementation may use the raw-statement escape hatch only when the result is parsed into a typed domain projection struct that derives the SeaORM result-mapping trait. The raw result-set types and untyped row types of the ORM do not appear in the repository trait surface; only typed domain types cross the trait boundary. Each raw-SQL block carries a one-line comment naming the upstream source it mirrors so schema-drift review can connect repository code to migrations that touch its tables and columns."
+remediation = """
+Wrap the raw-SQL escape hatch's result in a typed domain projection at the repository boundary instead of returning the ORM's raw result/row type through the trait or refusing raw SQL outright. Verify by confirming the repository trait's method signature returns a typed domain type, with the raw-row parsing contained inside the repository implementation, not exposed to callers.
+"""
 why = "Raw SQL is sometimes unavoidable, but routing its result through a struct that derives the result-mapping trait converts silent schema drift into a loud runtime error, and the upstream-source comment ties repository code back to the migrations it depends on."
 
 [[option]]

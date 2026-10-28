@@ -1,23 +1,26 @@
 id = "SQL-AUDIT-COLUMNS-1"
+version = 1
 title = "Three audit-column strategies; pick by table semantics"
-tag = "stack"
 domain = "sql"
 layer = "universal"
 enforcement = "structured"
+kind = "default_with_exceptions"
+inspectable = true
 default = true
 verification = "policy"
 
 [[sources]]
 url = "https://cheatsheetseries.owasp.org/cheatsheets/Logging_Cheat_Sheet.html"
-title = "OWASP Logging Cheat Sheet (low authority — supports capturing who-did-what generally; the specific three-strategy split by table semantics is this project's own convention, not something the cheat sheet itself prescribes)"
+title = "OWASP Logging Cheat Sheet"
+relevance = "Authority note (author-facing): low authority — supports capturing who-did-what generally; the specific three-strategy split by table semantics is this project's own convention, not something the cheat sheet itself prescribes"
 
 [decision]
 question = "What position does the project take on: Three audit-column strategies; pick by table semantics?"
-default = "three-audit-column-strategies-pick-by-table-sema"
+default = "three-audit-column-strategies-pick-by-table-semantics"
 why = "A blanket created_by/modified_by/created_at/modified_at quartet on every table is wasteful (most user-generated rows never have a modified_by consumer) and misleading (event-log rows have no meaningful creator). Tagging the strategy by what produces the rows keeps the schema honest about its own provenance and avoids columns that are always NULL or always equal to a value already encoded elsewhere. Putting the full four-column audit quartet on every table wastes storage, misleads about who edited what for system-generated rows, and produces always-NULL columns in tables where the strategy does not apply. Skipping audit columns entirely loses the attribution that admin and user-generated tables genuinely consume in workflows, and makes incident review and rollback significantly harder. Using ORM-level lifecycle hooks instead of explicit columns couples the audit trail to the framework; rows written outside the ORM (data migrations, replication, direct SQL maintenance) get no audit data."
 
 [[option]]
-id = "three-audit-column-strategies-pick-by-table-sema"
+id = "three-audit-column-strategies-pick-by-table-semantics"
 label = "Three audit-column strategies; pick by table semantics"
 directive = """
 Pick one of three audit-column strategies per table, by what produces the rows.
@@ -27,22 +30,28 @@ Admin-curated reference tables (categories, roles, system config, lookup tables)
 User-generated content tables (posts, comments, applications, submissions): created_at timestamp + updated_at timestamp + an author foreign key. The author FK already attributes the row; separate created_by and modified_by would duplicate it.
 
 System-managed event or log tables (audit_log, ingest_events, webhook_deliveries): domain-specific timestamps (received_at, processed_at, occurred_at) and no created_by or modified_by. The row's origin is the system, not a user."""
+remediation = """
+Pick the audit-column strategy matching this table's semantics (admin-curated reference data gets created_by/created_on/modified_by/modified_on; other table kinds get their corresponding strategy) instead of applying the same four-column quartet everywhere, omitting audit columns entirely, or relying on ORM lifecycle hooks to populate them. Declare the audit columns explicitly in the schema so a write that bypasses the ORM still populates them. Verify by writing a row through a path that bypasses the ORM (a raw SQL insert) and confirming the audit columns are still populated by the database, not left null.
+"""
 why = "A blanket created_by/modified_by/created_at/modified_at quartet on every table is wasteful (most user-generated rows never have a modified_by consumer) and misleading (event-log rows have no meaningful creator)."
 
 [[option]]
 id = "every-table-carries-the-same-four-column-audit-q"
+violates = true
 label = "Every table carries the four-column audit quartet"
 directive = "every table carries the same four-column audit quartet (created_by, created_on, modified_by, modified_on) regardless of whether the table is admin-curated, user-generated, or system-managed"
 why = "Simpler to apply uniformly (no per-table judgment required), but produces always-NULL columns on system-generated event tables where no user attribution exists, and duplicates author information on user-generated tables where an author foreign key already encodes provenance."
 
 [[option]]
 id = "no-table-in-the-schema-carries-any-audit-columns"
+violates = true
 label = "No table carries any audit columns"
 directive = "no table in the schema carries any audit columns; provenance is reconstructed after the fact from logs or external systems"
 why = "Eliminates schema columns that consume storage and require migration hygiene, but loses the in-database attribution that admin workflows and incident reviews consume directly. Reconstructing who created or modified a row from external logs is slow, unreliable across log rotation boundaries, and unavailable to queries."
 
 [[option]]
 id = "the-audit-columns-are-written-by-orm-level-lifec"
+violates = true
 label = "Audit columns written by ORM lifecycle hooks"
 directive = "the audit columns are written by ORM-level lifecycle hooks rather than declared as explicit columns in the schema, so any write that bypasses the ORM leaves the audit data unset"
 why = "Keeps the audit logic in code where it can be unit-tested and changed without a schema migration, but any write that bypasses the ORM (data migrations, direct SQL maintenance, replication, bulk imports) silently leaves the audit columns NULL or stale, defeating the audit trail for exactly the high-risk operations it is meant to cover."

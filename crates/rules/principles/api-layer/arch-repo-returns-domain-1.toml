@@ -1,9 +1,15 @@
 id = "ARCH-REPO-RETURNS-DOMAIN-1"
+version = 1
 title = "Repositories return domain types, never persistence representations"
-tag = "stack"
 domain = "api-layer"
 layer = "universal"
 enforcement = "structured"
+kind = "default_with_exceptions"
+inspectable = true
+# Deviation-ceiling escape hatch: once some repositories return persistence representations
+# and others return domain types, every future service method must know which kind it holds,
+# and the persistence coupling spreads with each new caller rather than staying put.
+deviation_ceiling = "high"
 default = true
 verification = "grounded"
 
@@ -13,29 +19,35 @@ title = "Martin Fowler — Patterns of Enterprise Application Architecture: Repo
 
 [decision]
 question = "What position does the project take on: Repositories return domain types, never persistence representations?"
-default = "repositories-return-domain-types-never-persisten"
+default = "repositories-return-domain-types-never-persistence-representations"
 why = "Keeping the persistence representation an infrastructure detail is what makes the domain layer survive persistence-library changes. A schema migration, an ORM upgrade, or a switch to a different storage engine should not require recompiling business logic or rewriting service signatures. When repositories leak persistence types upward, every consumer becomes coupled to the storage library, and the cost of any library change cascades through unrelated code. Exposing the persistence library's row or entity type directly from repository methods is cheaper to write at first but turns every persistence upgrade into a domain-wide refactor, and lazy-loading or session-scoped behavior leaks into business code. Returning a thin wrapper over the persistence type that adds helper methods looks lightweight but still couples consumers to the underlying library's lifecycle, fetch semantics, and inheritance shape. Returning persistence types from some repositories and domain types from others depending on what is convenient loses the architectural property: reviewers cannot tell at a call site whether they are receiving a domain type or a persistence type, so the boundary's value disappears."
 
 [[option]]
-id = "repositories-return-domain-types-never-persisten"
+id = "repositories-return-domain-types-never-persistence-representations"
 label = "Repositories return domain types, never persistence representations"
 directive = "Repository methods take and return domain types only. The translation between the persistence library's row, entity, or document representation and the domain type happens inside the repository implementation (via a mapping layer). The domain layer never imports or names a persistence representation."
+remediation = """
+Add a mapping step inside the repository implementation that translates the persistence library's row/entity/document into the domain type before returning it. Remove any place the domain layer imports or names the persistence representation directly. Verify by confirming the repository method's return type is the domain type and no persistence-library type leaks past the repository boundary.
+"""
 why = "Keeping the persistence representation an infrastructure detail is what makes the domain layer survive persistence-library changes."
 
 [[option]]
 id = "repository-methods-return-the-persistence-librar"
+violates = true
 label = "Return persistence types directly"
 directive = "repository methods return the persistence library's row or entity type directly, with no translation into a separate domain type at the boundary"
 why = "Returning the library's row type directly turns every persistence upgrade into a domain-wide refactor, and lazy-loading or session-scoped behavior leaks into business code that was not designed to handle it."
 
 [[option]]
 id = "repository-methods-return-a-thin-wrapper-over-th"
+violates = true
 label = "Thin wrapper over persistence"
 directive = "repository methods return a thin wrapper over the persistence type that exposes additional helper methods on top of the underlying library's row representation, lifecycle, and fetch semantics"
 why = "A thin wrapper looks lightweight but still couples consumers to the underlying library's lifecycle, fetch semantics, and inheritance shape, so it does not actually decouple the domain from persistence."
 
 [[option]]
 id = "repository-methods-return-persistence-types-from"
+violates = true
 label = "Mixed return types per repo"
 directive = "repository methods return persistence types from some repositories and domain types from others, with the choice made per repository based on what is convenient at the time"
 why = "Mixed return types lose the architectural property entirely: reviewers cannot tell at a call site whether they are receiving a domain type or a persistence type, so the boundary's value disappears."

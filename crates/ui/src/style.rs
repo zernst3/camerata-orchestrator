@@ -1046,6 +1046,8 @@ html, body {
 .onboard-gate-dot { width: 8px; height: 8px; border-radius: 50%; background: #ca8a04; margin-top: 5px; flex: none; }
 .onboard-gate-h { font-weight: 700; font-size: 13px; color: #fbbf24; }
 .onboard-gate-b { font-size: 12px; color: var(--ink-soft); margin-top: 3px; line-height: 1.5; }
+/* Feature B (backend-safety gate): the "add a key or enable CLI" hint on a `Blocked` scan. */
+.onboard-gate-hint { font-size: 12px; color: var(--ink-soft); margin-top: 6px; line-height: 1.5; font-style: italic; }
 .mono { font-family: "Courier Prime", ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .92em; }
 .onboard-repo-block { display: flex; flex-direction: column; gap: 6px; margin-bottom: 22px; }
 .onboard-repo-label { font-size: 12px; color: var(--ink-soft); }
@@ -1094,6 +1096,14 @@ html, body {
 .onboard-step-b { font-size: 12px; color: var(--ink-soft); margin-top: 2px; line-height: 1.5; }
 .scan-results { margin-top: 18px; }
 .scan-note { font-size: 12px; color: #fbbf24; background: rgba(202,138,4,0.10); border: 1px solid rgba(202,138,4,0.4); border-radius: 8px; padding: 8px 11px; margin-bottom: 12px; }
+/* Feature B (backend-safety gate): a `⚠ COMPLIANCE:` note (CliFallbackWarn — the scan ran on
+   the operator's personal Claude subscription, not the API) pulled out of the routine
+   `.scan-note` line into its own higher-alarm banner. Reuses the `.scan-stat-n.high` red so a
+   compliance event reads at a different severity than an ordinary amber coverage note. */
+.compliance-warning-banner { display: flex; gap: 10px; align-items: flex-start; background: rgba(154,53,38,0.12); border: 1px solid rgba(154,53,38,0.45); border-radius: 8px; padding: 10px 12px; margin-bottom: 12px; }
+.compliance-warning-icon { font-size: 15px; line-height: 1; color: #9a3526; flex: none; margin-top: 1px; }
+.compliance-warning-title { font-size: 12px; font-weight: 700; color: #9a3526; margin: 0; }
+.compliance-warning-text { font-size: 12px; color: var(--ink); margin: 3px 0 0; line-height: 1.5; }
 .scan-summary { display: flex; gap: 18px; margin-bottom: 16px; }
 .scan-stat { font-size: 12px; color: var(--ink-soft); }
 .scan-stat-n { font-size: 16px; font-weight: 700; color: var(--ink); margin-right: 4px; }
@@ -1136,15 +1146,251 @@ html, body {
 .rule-gate-warning-icon { color: #b8860b; font-size: 14px; line-height: 1.3; flex-shrink: 0; }
 .rule-gate-warning strong { color: var(--ink); font-weight: 600; }
 
-/* Key above the findings table: what the stripe means. */
-.findings-key { display: flex; flex-wrap: wrap; gap: 16px; margin: 4px 0 10px; }
-.findings-key-item {
-  display: inline-flex; align-items: center; gap: 7px;
-  font-size: 12px; color: var(--ink-soft);
+/* The `.findings-key` legend was REMOVED with its markup (design §9.5); its rules are gone
+   with it so the stylesheet cannot keep a dead selector alive for a future reintroduction. The
+   red full-row critical highlight it purported to explain is `.finding-row-critical`, which
+   stays. */
+
+/* Order bar above the findings table (Pass 2 step 2): which order the Queue is showing, and
+   one click back to the curated default. Sits flush against the sticky header it describes so
+   the sentence and chorale's own ↑/↓ arrow read together. The `.manual` state is deliberately
+   the louder one — the default is the resting state and should not shout, but "you are looking
+   at your own cut, not the curated order" is worth an accent. */
+.queue-order {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 10px;
+  margin: 0 0 6px; font-size: 12px; line-height: 1.4;
 }
-.findings-key-swatch { width: 14px; height: 14px; border-radius: 3px; flex: none; }
-.findings-key-swatch.crit { background: #d4332b; }
-.findings-key-swatch.arch { background: var(--surface); border: 1px solid var(--line); }
+.queue-order-eyebrow {
+  flex: none; text-transform: uppercase; letter-spacing: 0.06em;
+  font-size: 10px; font-weight: 700; color: var(--ink-faint);
+}
+/* The order preset select (work order B.4): how the Queue is cut, beside the sentence that says
+   which order is on screen. */
+.queue-order-preset { display: inline-flex; align-items: center; gap: 6px; flex: none; }
+.queue-order-select {
+  padding: 3px 8px; border: 1px solid var(--line); border-radius: 7px; font: inherit;
+  font-size: 12px; background: var(--paper); color: var(--ink); cursor: pointer;
+}
+.queue-order-value { color: var(--ink-soft); cursor: help; }
+.queue-order-value.manual { color: var(--ink); font-weight: 600; }
+.findings-toolbar + .queue-order { margin-top: 2px; }
+
+/* Rule-level deviation decisions (Pass 2 step 2, design §2/§4). One line per deviation rule
+   group in the current view: the rule, its structured sentence, and the bulk action. Styled to
+   read as an extension of the group headers below it — same accent family, same density —
+   because that is conceptually where it belongs; chorale 0.2.3 has no group-header content
+   slot, so it sits above the table instead (see `DeviationBulkBar`'s docs). The sentence is
+   allowed to wrap and the button never shrinks, so a long convention label pushes the row
+   taller rather than squeezing the control. */
+.deviation-bulk {
+  display: flex; flex-direction: column; gap: 4px;
+  margin: 0 0 8px; padding: 8px 10px;
+  border: 1px solid var(--line); border-left: 3px solid #4a90e2;
+  border-radius: 4px; background: var(--surface);
+}
+.deviation-bulk-eyebrow {
+  text-transform: uppercase; letter-spacing: 0.06em;
+  font-size: 10px; font-weight: 700; color: var(--ink-faint);
+}
+.deviation-bulk-group {
+  display: flex; align-items: baseline; flex-wrap: wrap; gap: 8px;
+  font-size: 12px; line-height: 1.45;
+}
+.deviation-bulk-rule { font-weight: 700; color: var(--ink); flex: none; }
+.deviation-bulk-sentence { color: var(--ink-soft); flex: 1 1 260px; min-width: 0; }
+/* Both rule-level buttons keep their intrinsic width; Confirm renders first because it is the
+   far more common answer for a deviation group (see `DeviationBulkBar`'s docs). */
+.deviation-bulk-confirm { flex: none; }
+.deviation-bulk-fp { flex: none; }
+
+/* ── THE DOCKED DETAIL PANE (Pass 2 step 4, design §2; the owner's Q5 ruling §13) ──────────
+   The Queue table and its pane, side by side. The pane is a flex sibling of the table rather
+   than content inside it: chorale 0.2.3's `detail_renderer` is an expandable INLINE row
+   detail (`<tr><td colspan=N>` beneath its parent row), and an inline panel would push every
+   row below it down the page, so cursor-down-read-decide would reflow the table under the
+   cursor on every move. See `FindingDetailPane`'s doc comment.
+
+   The pane is sticky so it stays beside the cursor through a long scroll, and it has its own
+   scroll context so a merged row's site list cannot push the disposition controls off screen
+   — the controls are the whole point of the surface. Below 1100px the split stacks, because
+   two 420px columns in a 900px window is two unusable columns. */
+.queue-split { display: flex; align-items: flex-start; gap: 12px; }
+.queue-split-table { flex: 1 1 auto; min-width: 0; }
+.finding-pane {
+  flex: 0 0 380px; align-self: flex-start; position: sticky; top: 8px;
+  max-height: calc(100vh - 120px); overflow-y: auto;
+  padding: 10px 12px; border: 1px solid var(--line); border-radius: 4px;
+  background: var(--surface); font-size: 12px; line-height: 1.5;
+}
+/* The focus ring is load-bearing, not decoration: "the detail pane holds focus" is the
+   condition the disposition keys are scoped to, so the curator has to be able to SEE it. */
+.finding-pane:focus,
+.finding-pane:focus-within { outline: 2px solid #4a90e2; outline-offset: 1px; }
+@media (max-width: 1100px) {
+  .queue-split { flex-direction: column; }
+  .finding-pane { flex: 1 1 auto; width: 100%; position: static; max-height: none; }
+}
+.pane-head { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-bottom: 6px; }
+.pane-rule { font-weight: 700; color: var(--ink); }
+.pane-pos { margin-left: auto; color: var(--ink-faint); font-size: 11px; }
+.pane-full-detail { flex: none; }
+.pane-meta { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
+/* A deviation's structured claim, in the pane for the same reason it is on the group header:
+   it is the thing the disposition agrees or disagrees with. */
+.pane-claim {
+  margin: 0 0 8px; padding: 6px 8px; border-left: 3px solid #4a90e2;
+  background: var(--surface-alt, transparent); color: var(--ink); font-weight: 600;
+}
+/* Decision memory (work order B.5): what the draft already decided about this shape. Information
+   only, so it is quiet: no fill, no button look. The reason in it is text. */
+.pane-previously {
+  margin: 0 0 8px; padding: 0 0 0 8px; border-left: 3px solid var(--line);
+  color: var(--ink-soft); font-size: 12px; overflow-wrap: anywhere;
+}
+/* The progress strip (work order B.7): one line of counts above the table. */
+.progress-strip {
+  margin: 0 0 8px; color: var(--ink-soft); font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+.progress-strip .progress-counts { color: var(--ink); }
+/* The review timer's part of the strip (step 7a, internal): its state, the Pause / Resume button
+   and the door to the internal stats. Wraps on a narrow window instead of overflowing. */
+.progress-strip { display: flex; flex-wrap: wrap; align-items: center; column-gap: 2px; row-gap: 4px; }
+.progress-timer { display: inline-flex; align-items: center; gap: 6px; }
+.progress-timer-btn, .progress-stats-btn { margin-left: 6px; }
+.review-stats { max-width: 760px; }
+.review-stats-head { margin: 14px 0 4px; font-size: 13px; }
+.review-stats-total { margin: 4px 0; font-variant-numeric: tabular-nums; }
+.review-stats-table { width: 100%; border-collapse: collapse; font-size: 12px; font-variant-numeric: tabular-nums; }
+.review-stats-table th, .review-stats-table td { text-align: left; padding: 3px 8px 3px 0; border-bottom: 1px solid var(--line); }
+.pane-snippet {
+  margin: 0 0 8px; padding: 6px 8px; overflow-x: auto;
+  border: 1px solid var(--line); border-radius: 3px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px;
+  white-space: pre-wrap; word-break: break-word;
+}
+/* The pane's code context (work order B.3): the stored line and three lines either side, under
+   the stored snippet. Reuses the finding modal's `.finding-ctx-*` line styling; only the frame
+   differs, to sit tight under the snippet it extends. */
+.pane-ctx { margin: -4px 0 8px; font-size: 11px; line-height: 1.5; border-radius: 3px; }
+/* Absorbed sites (design §6) — the full-disclosure surface C5 lacked. A consequence site is
+   visually subordinated rather than hidden: it IS a place the defect reaches, it just has no
+   independently-fixable code of its own. */
+.pane-sites { list-style: none; margin: 0 0 8px; padding: 0; }
+.pane-site {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px;
+  padding: 3px 0; border-bottom: 1px solid var(--line);
+}
+.pane-site:last-child { border-bottom: none; }
+.pane-site-primary .pane-site-loc { font-weight: 700; }
+.pane-site-consequence { padding-left: 12px; opacity: 0.82; }
+.pane-site-sub {
+  flex: none; text-transform: uppercase; letter-spacing: 0.06em;
+  font-size: 9px; font-weight: 700; color: var(--ink-faint);
+}
+.pane-site-loc { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; }
+.pane-site-rule { color: var(--ink-faint); font-size: 11px; }
+.pane-site-snippet { flex: 1 1 100%; color: var(--ink-soft); font-size: 11px; }
+.pane-fix-head { display: flex; align-items: baseline; gap: 8px; }
+.pane-effort { flex: none; }
+/* The five-second undo (Q5). Docked in the pane rather than in the app-wide toast stack: that
+   stack's cards are informational and run their own timer, while this one carries an action
+   whose window is the model's, and it has to sit where the curator's eyes already are. */
+.pane-undo {
+  display: flex; align-items: center; gap: 8px;
+  margin: 8px 0; padding: 6px 8px; border-radius: 3px;
+  border: 1px solid #4a90e2; background: rgba(74, 144, 226, 0.12);
+}
+.pane-undo-msg { flex: 1 1 auto; min-width: 0; }
+.pane-undo-btn { flex: none; }
+.pane-undo-left { flex: none; color: var(--ink-faint); font-variant-numeric: tabular-nums; }
+.pane-reason-prompt {
+  display: flex; flex-direction: column; gap: 4px;
+  margin: 8px 0; padding: 8px; border-radius: 3px;
+  border: 1px solid var(--line); border-left: 3px solid #d4a017;
+}
+.pane-reason-input { width: 100%; }
+.pane-prompt-actions { display: flex; gap: 6px; }
+/* THE QUEUE TOOLBAR'S ON-DEMAND REASON PROMPT (design §3, §9.2) — the replacement for the two
+   always-visible textareas. Deliberately the SAME amber-edged card as the pane's prompt: it is
+   the same act (a required justification, raised by the gesture that needs it), and giving one
+   of them its own look would suggest they are two different mechanisms. */
+.queue-reason-prompt {
+  display: flex; flex-direction: column; gap: 4px;
+  margin: 8px 0; padding: 8px; border-radius: 3px;
+  border: 1px solid var(--line); border-left: 3px solid #d4a017;
+}
+.queue-reason-input { width: 100%; min-width: 220px; resize: vertical; font-family: inherit; }
+.queue-prompt-actions { display: flex; gap: 6px; }
+.pane-actions {
+  display: flex; flex-wrap: wrap; gap: 6px; align-items: center;
+  margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--line);
+}
+/* The armed/off indicator. Its text comes from `pane_keys_armed`, which is DEFINED as "would
+   C produce a command" — so a pane that looks armed while the handler refuses is not
+   reachable. The two states are deliberately different colours: a curator about to press C
+   should be able to tell at a glance whether it will land. */
+.pane-keys {
+  flex: 1 1 100%; font-size: 10px; letter-spacing: 0.03em;
+}
+.pane-keys.armed { color: #2e7d32; font-weight: 700; }
+.pane-keys.off { color: var(--ink-faint); }
+.pane-dispose { flex: none; }
+.pane-empty { color: var(--ink-faint); margin: 0; }
+
+/* The per-row Confirm button in the Unresolved toolbar. Visually first and primary (it reuses
+   `btn-run`), with a margin that separates it from the two reason-bearing actions beside it:
+   it is the only action in that toolbar that takes no textarea, and grouping it with the ones
+   that do invites a confirm click while an unrelated reason sits half-typed next to it. */
+.triage-confirm { margin-right: 10px; }
+
+/* Rule-alternatives review panel (audit-integrated alternative recommendation,
+   docs/design/2026-09-22_audit-integrated-alternatives.md). Lists every multi-option rule the
+   audit evaluated, including zero-violation ones, with its recommended option, a Why
+   explanation, and a Change dropdown that stages an override. Rendered directly above the
+   findings table: chorale's grouped Table exposes no group-header content-injection hook, so
+   this panel stands in for a per-rule "group header" control line as well as the standalone
+   review panel — one surface, one piece of staged-override state, no risk of the two diverging. */
+.rec-panel { margin: 4px 0 16px; padding: 12px 14px; border: 1px solid var(--line); border-radius: var(--r-sm); background: var(--surface); }
+.rec-panel-head { font-size: 13px; font-weight: 700; color: var(--ink); margin-bottom: 2px; }
+.rec-panel-sub { font-size: 12px; color: var(--ink-soft); margin-bottom: 10px; line-height: 1.5; }
+/* Bounded internal scroll (matches `.op-list` / `.mem-list`): with up to ~46 rules the list used
+   to grow one row per rule and drag the whole page down, pushing the sticky rescan bar and
+   Accept button out of easy reach. Only this inner list scrolls; the panel head/sub, the
+   `RescanStickyBar`, and the Accept button (both rendered as siblings AFTER this div) stay put. */
+.rec-rows { display: flex; flex-direction: column; gap: 8px; max-height: 360px; overflow-y: auto; padding-right: 3px; }
+/* Uniform card: column layout (header block, then "Evaluated against" line, then the Change
+   dropdown on its own full-width line) so every row reads the same regardless of content width —
+   previously `flex-wrap: wrap` let the "Evaluated against" block land beside OR below the header
+   depending on how long the title/evidence text was. */
+.rec-row {
+  display: flex; flex-direction: column; gap: 8px; padding: 10px 12px;
+  border: 1px solid var(--line); border-radius: var(--r-sm); background: var(--paper);
+}
+.rec-row-main { display: flex; flex-direction: column; gap: 2px; }
+.rec-row-id { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; font-weight: 700; color: var(--ink); }
+.rec-row-title { font-size: 12px; color: var(--ink-soft); }
+.rec-row-count { font-size: 11px; color: var(--ink-faint); }
+.rec-line { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 12.5px; color: var(--ink-soft); }
+.rec-line strong { color: var(--ink); }
+.rec-evidence { display: block; font-size: 11.5px; color: var(--ink-faint); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.rec-not-applicable { display: inline-block; font-size: 10px; font-weight: 800; letter-spacing: .03em; text-transform: uppercase; padding: 2px 8px; border-radius: 999px; background: rgba(217,158,22,0.18); color: #b8860b; }
+.rec-select { width: 100%; box-sizing: border-box; padding: 5px 8px; border: 1px solid var(--line); border-radius: 7px; font: inherit; font-size: 12px; background: var(--paper); color: var(--ink); }
+.rec-badge { font-size: 10px; font-weight: 800; letter-spacing: .03em; text-transform: uppercase; padding: 2px 8px; border-radius: 999px; white-space: nowrap; }
+.rec-badge-ai { background: var(--accent-wash); color: var(--ink-soft); border: 1px solid var(--line); }
+.rec-badge-yours { background: rgba(47,95,158,0.18); color: #7ca8e0; }
+.rec-badge-pending { background: rgba(217,158,22,0.18); color: #b8860b; }
+.rec-badge-accepted { background: rgba(34,139,87,0.18); color: #2f8f5b; }
+.rec-hallucinated-note { display: block; font-size: 11px; font-style: italic; color: var(--ink-faint); margin-top: 4px; }
+.rec-modal-reasoning { font-size: 13px; color: var(--ink); line-height: 1.6; white-space: pre-wrap; }
+.rec-sticky-bar {
+  position: sticky; bottom: 0; z-index: 5;
+  display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px;
+  margin: 10px 0; padding: 10px 14px;
+  background: var(--paper); border: 1px solid var(--accent); border-radius: var(--r-sm);
+  box-shadow: 0 -2px 10px rgba(0,0,0,0.15);
+}
+.rec-sticky-label { font-size: 13px; font-weight: 600; color: var(--ink); }
 .alts { margin-top: 22px; }
 .alts-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
 .alt-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 10px 0; border-bottom: 1px solid var(--line); }
@@ -1757,7 +2003,8 @@ html, body {
 .addressee-input:focus { outline: none; border-color: var(--accent); }
 /* The findings-table "reason to ignore" box is a recorded justification — same treatment
    as .uow-waive-reason (a small labeled textarea), not a cramped single-line input. */
-textarea.ignore-reason { width: 100%; min-width: 220px; resize: vertical; font-family: inherit; }
+/* `.ignore-reason` went out with the two always-visible Queue textareas (design §9.2). The
+   on-demand prompt that replaces them styles itself through `.queue-reason-prompt` below. */
 .clarify-thread { display: flex; flex-direction: column; gap: 9px; margin-top: 14px; }
 .clar-card { border: 1px solid var(--line); border-radius: 9px; padding: 10px 12px; background: var(--surface); }
 .clar-card.open { border-left: 3px solid #d9a441; }
@@ -2179,8 +2426,8 @@ textarea.ignore-reason { width: 100%; min-width: 220px; resize: vertical; font-f
 .sup-ticket { font-size: 11px; font-weight: 600; color: var(--accent-ink); }
 .sup-who { font-size: 11px; color: var(--ink-faint); }
 .sup-stale-tag { font-size: 10px; font-weight: 700; text-transform: uppercase; color: #c0392b; border: 1px solid #e3b7ac; border-radius: 5px; padding: 2px 6px; }
-.ignore-reason { flex: 1; min-width: 160px; }
-.ignore-ticket { width: 130px; flex: none; }
+/* `.ignore-reason` / `.ignore-ticket`: removed with the §9.2 textareas. `.ignore-ticket` had
+   already outlived its markup. */
 /* Suppressions registry — read-only table with its OWN scroll (so it never stretches the page),
    a sticky header, and a table-row override for .sup-row (which is flex in the legacy list view). */
 .sups-scroll { max-height: 320px; overflow-y: auto; margin-top: 10px; border: 1px solid var(--line); border-radius: 8px; }
@@ -2305,12 +2552,10 @@ textarea.ignore-reason { width: 100%; min-width: 220px; resize: vertical; font-f
 }
 .pg-onboard-badge.done { color: #4ade80; background: rgba(22,163,74,0.18); border-color: rgba(22,163,74,0.35); }
 
-.nr-flag {
-  display: inline-block; font-size: 10px; font-weight: 800; letter-spacing: .03em;
-  text-transform: uppercase; color: #92400e; background: #fde68a; border-radius: 999px;
-  padding: 1px 8px; white-space: nowrap;
-}
-.nr-reason { font-size: 11.5px; color: var(--ink-soft); }
+/* `.nr-flag` and `.nr-reason` went out with the "Needs review" column's cell renderer
+   (design §9.3) — the chip is now chorale's own badge and the 300px inline reason is gone.
+   `.nr-inline` stays: it bolds the `[needs review: …]` marker inside the detail pane's and
+   the finding modal's explanation body, which is exactly where §9.3 relocates the text. */
 .nr-inline { color: #92400e; }
 
 .arm-note { font-size: 11.5px; color: var(--ink-soft); line-height: 1.5; margin: 8px 0 0; max-width: 90ch; }
@@ -2323,6 +2568,198 @@ textarea.ignore-reason { width: 100%; min-width: 220px; resize: vertical; font-f
 .apply-overwrite-files { list-style: disc; margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 3px; }
 .apply-overwrite-files li { font-size: 12px; color: var(--ink-soft); }
 .apply-overwrite-files code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; background: var(--accent-wash); padding: 1px 5px; border-radius: 5px; }
+
+/* ── Pass 2: the five-kind taxonomy on the curator workbench ──────────────────────────────
+   The kind switcher is the PRIMARY axis (one tab per kind surface); the triage switch below
+   it is secondary and belongs to the Queue alone. */
+.kind-switch { display: flex; gap: 6px; margin: 4px 0 10px; flex-wrap: wrap; }
+.kind-tab {
+  display: inline-flex; align-items: center; gap: 7px;
+  border: 1px solid var(--line); background: var(--surface); color: var(--ink-soft);
+  font-size: 13px; font-weight: 700; padding: 8px 15px; border-radius: 8px; cursor: pointer;
+  transition: border-color .15s var(--ease), color .15s var(--ease), background .15s var(--ease);
+}
+.kind-tab:hover { border-color: var(--accent); color: var(--ink); }
+.kind-tab.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+.kind-tab.active .triage-tab-count { background: rgba(255,255,255,.25); color: #fff; }
+/* The alarm chip: rows with no kind at all. Red and loud, because it means an unmapped
+   emission path upstream — a pipeline bug, not a finding class. */
+.kind-unspecified-chip {
+  font-size: 10.5px; font-weight: 800; letter-spacing: .02em; white-space: nowrap;
+  padding: 1px 7px; border-radius: 999px;
+  color: #fff; background: #d4332b; border: 1px solid #d4332b;
+}
+
+/* Kind chip in the findings row. Defect = red family, Deviation = blue family; unspecified is
+   a red OUTLINE so it never reads as "just another kind". */
+.kind-chip {
+  display: inline-block; font-size: 10px; font-weight: 800; letter-spacing: .03em;
+  text-transform: uppercase; border-radius: 999px; padding: 1px 8px; white-space: nowrap;
+}
+.kind-chip.kind-defect { color: #7f1d1d; background: #fecaca; border: 1px solid #fecaca; }
+.kind-chip.kind-deviation { color: #1e3a8a; background: #bfdbfe; border: 1px solid #bfdbfe; }
+.kind-chip.kind-unspecified { color: #d4332b; background: transparent; border: 1px dashed #d4332b; }
+/* The three informational kinds share ONE neutral treatment. They are not a severity ladder
+   and not an accusation; giving each its own colour would imply a ranking between "you follow
+   this convention", "you are split" and "we could not look". */
+.kind-chip.kind-informational { color: #334155; background: #e2e8f0; border: 1px solid #e2e8f0; }
+
+/* ── THE RULE HUB (design §8) ────────────────────────────────────────────────
+   One join, reached from every surface that shows a rule id. `.rule-hub-link` is that door:
+   a button that reads as the rule id it names, so the affordance is the identifier itself
+   rather than a separate icon the eye has to find 400 times in a sitting. */
+.rule-hub-link {
+  appearance: none; background: none; border: none; padding: 0; margin: 0;
+  font: inherit; color: var(--accent); cursor: pointer;
+  text-decoration: underline; text-decoration-style: dotted; text-underline-offset: 3px;
+}
+.rule-hub-link:hover { text-decoration-style: solid; }
+.rule-hub { display: flex; flex-direction: column; gap: 8px; }
+.rule-hub-eyebrow {
+  margin: 0; font-size: 10.5px; font-weight: 800; letter-spacing: .06em;
+  text-transform: uppercase; color: var(--ink-soft);
+}
+.rule-hub-head { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }
+.rule-hub-id { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; font-weight: 800; }
+.rule-hub-outcome { margin: 0; font-size: 13.5px; line-height: 1.5; color: var(--ink); }
+.rule-hub-meta { display: flex; gap: 6px; flex-wrap: wrap; }
+/* The conforming count, and the sentence that says there is nothing behind it. Styled as a
+   note rather than as a link-looking row precisely because it is NOT clickable: the
+   conforming sites are not in the scan data, only their count. */
+.rule-hub-conforming {
+  margin: 0; font-size: 12px; color: var(--ink-soft); line-height: 1.5;
+  border-left: 2px solid var(--line); padding-left: 9px;
+}
+.rule-hub-conflict {
+  margin: 0; font-size: 12px; line-height: 1.5; color: #7f1d1d;
+  background: #fef2f2; border: 1px solid #fecaca; border-radius: 7px; padding: 8px 10px;
+}
+/* The ALTERNATIVES CONTEXT inside the hub (design §9.1): which option the rule was judged
+   against, who chose it, and why. Read-only — it adds no control, which is what keeps §8's
+   "exactly one navigation" invariant true of the hub. */
+.rule-hub-alt {
+  display: flex; flex-direction: column; gap: 6px;
+  border-top: 1px solid var(--line); padding-top: 9px;
+}
+.rule-hub-alt-line {
+  margin: 0; font-size: 12.5px; color: var(--ink); line-height: 1.6;
+  display: flex; align-items: center; gap: 7px; flex-wrap: wrap;
+}
+.rule-hub-alt-why { margin: 0; font-size: 12px; color: var(--ink-soft); line-height: 1.55; max-width: 80ch; }
+.rule-hub-alt-where { margin: 0; font-size: 11.5px; color: var(--ink-faint); line-height: 1.5; }
+.rule-hub-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 2px; }
+.rule-hub-modal { max-width: 620px; }
+
+/* The three informational panels. Deliberately plain lists at this stage: their real
+   per-rule decisions (adopt, recommend) land in a later step, and a button with nothing
+   behind it is a dead affordance. NO severity is rendered on any of them — these kinds ship
+   at `info` by construction, so a severity badge would imply a ranking that does not exist. */
+.kind-panel { margin: 4px 0 14px; }
+.kind-panel-sub { font-size: 12.5px; color: var(--ink-soft); line-height: 1.55; margin: 0 0 10px; max-width: 95ch; }
+.kind-panel-empty { font-size: 12.5px; color: var(--ink-soft); margin: 10px 0 14px; }
+.kind-panel-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 1px; }
+.kind-panel-row {
+  display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap;
+  padding: 7px 11px; background: var(--surface); border: 1px solid var(--line); border-radius: 7px;
+}
+.kind-panel-rule { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px; font-weight: 700; }
+.kind-panel-label { font-size: 12.5px; color: var(--ink); flex: 1 1 320px; }
+.kind-panel-repo { font-size: 11px; color: var(--ink-soft); }
+.kind-panel-group { margin: 0 0 12px; }
+.kind-panel-group-h {
+  font-size: 11px; font-weight: 800; letter-spacing: .04em; text-transform: uppercase;
+  color: var(--ink-soft); margin: 0 0 5px;
+}
+
+/* THE GATED CONVENTION COMMIT (design §3; the owner's Q3 + Q4 rulings). Adoption is opt-out,
+   so the two things that must be legible at a glance are (a) which rows are selected and
+   (b) which selected rows the curator has never opened. The "not opened" flag is therefore
+   loud, and it is the same flag in the panel and in the dialog's list. */
+.adopt-exceptions-note { color: var(--ink-faint); }
+.adopt-group { margin-bottom: 18px; }
+.adopt-row { align-items: center; }
+.adopt-row.skipped { opacity: .62; }
+.adopt-state {
+  font-size: 10.5px; font-weight: 800; letter-spacing: .05em; text-transform: uppercase;
+  border-radius: 5px; padding: 2px 7px; white-space: nowrap;
+}
+.adopt-state.on { color: #14532d; background: #bbf7d0; }
+.adopt-state.off { color: var(--ink-soft); background: var(--paper); border: 1px solid var(--line); }
+.adopt-status { font-size: 11.5px; color: var(--ink-soft); white-space: nowrap; }
+.adopt-unopened-flag {
+  font-size: 10.5px; font-weight: 800; letter-spacing: .04em; text-transform: uppercase;
+  color: #92400e; background: #fde68a; border-radius: 5px; padding: 2px 7px; white-space: nowrap;
+}
+.adopt-open, .adopt-toggle { font-size: 11.5px; padding: 3px 9px; }
+.adopt-jump { font-size: 11.5px; padding: 3px 9px; margin-top: 2px; }
+.adopt-pick { font-size: 12px; padding: 3px 6px; max-width: 280px; }
+.adopt-detail {
+  flex: 1 1 100%; margin-top: 6px; padding: 8px 10px;
+  background: var(--paper); border-radius: 7px; border: 1px solid var(--line);
+}
+.adopt-detail-line { margin: 0 0 5px; font-size: 12px; color: var(--ink-soft); line-height: 1.55; }
+.adopt-detail-line:last-child { margin-bottom: 0; }
+.adopt-detail-blocked { margin: 0 0 5px; font-size: 12px; color: #92400e; line-height: 1.55; }
+.adopt-filter-bar {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  margin: 0 0 10px; padding: 7px 11px; border-radius: 7px;
+  background: rgba(253,230,138,.28); border: 1px solid #fde68a;
+}
+.adopt-filter-label { font-size: 12px; color: var(--ink); }
+.adopt-filter-clear { font-size: 11.5px; padding: 3px 9px; }
+.adopt-commit-bar {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  margin-top: 8px; padding: 9px 11px; border-radius: 7px;
+  background: var(--paper); border: 1px solid var(--line);
+}
+.adopt-commit-counts { font-size: 12px; color: var(--ink-soft); flex: 1 1 auto; }
+.adopt-commit-unopened {
+  font-size: 11px; font-weight: 700; color: #92400e; background: #fde68a;
+  border-radius: 5px; padding: 2px 8px;
+}
+.adopt-commit-btn { font-size: 12.5px; }
+
+/* The dialog. Narrower than the rule modal and deliberately dense: every line in it is a
+   fact the curator has to read before typing the destination. */
+.adopt-dialog { max-width: 560px; }
+.adopt-dialog-headline { margin: 12px 0 10px; font-size: 14px; font-weight: 700; color: var(--ink); line-height: 1.5; }
+.adopt-dialog-dest { margin: 0 0 6px; font-size: 12.5px; color: var(--ink-soft); }
+.adopt-dialog-dest-name {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-weight: 700;
+  color: var(--accent-ink);
+}
+.adopt-dialog-counts { margin: 0 0 10px; font-size: 12px; color: var(--ink-soft); }
+.adopt-dialog-warning {
+  margin: 0 0 12px; padding: 9px 11px; border-radius: 7px; line-height: 1.55;
+  font-size: 12.5px; font-weight: 600; color: #92400e;
+  background: #fde68a; border: 1px solid #f59e0b;
+}
+.adopt-dialog-list {
+  list-style: none; margin: 0 0 14px; padding: 0; max-height: 180px; overflow-y: auto;
+  display: flex; flex-direction: column; gap: 1px;
+}
+.adopt-dialog-item { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; font-size: 11.5px; padding: 3px 0; }
+.adopt-dialog-item-rule { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-weight: 700; }
+.adopt-dialog-item-label { color: var(--ink-soft); flex: 1 1 auto; }
+.adopt-dialog-confirm-label { display: block; margin: 0 0 6px; font-size: 12.5px; color: var(--ink); }
+.adopt-dialog-confirm-input {
+  width: 100%; box-sizing: border-box; padding: 8px 10px; border-radius: 7px;
+  border: 1px solid var(--line); background: var(--surface); color: var(--ink);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px;
+}
+.adopt-dialog-hint { margin: 7px 0 0; font-size: 12px; color: var(--ink-soft); line-height: 1.5; }
+.adopt-dialog-exits { display: flex; justify-content: flex-end; gap: 9px; flex-wrap: wrap; margin-top: 16px; }
+.adopt-dialog-commit.shut { opacity: .5; }
+
+/* One-rule-one-surface invariant violation: a PIPELINE bug, surfaced rather than tolerated. */
+.kind-conflict-banner {
+  margin: 10px 0 14px; padding: 11px 14px; border-radius: 9px;
+  background: rgba(212,51,43,0.10); border: 1px solid #d4332b;
+}
+.kind-conflict-h { margin: 0 0 5px; font-size: 13px; font-weight: 800; color: #d4332b; }
+.kind-conflict-b { margin: 0 0 7px; font-size: 12.5px; color: var(--ink-soft); line-height: 1.55; max-width: 95ch; }
+.kind-conflict-list { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 2px; }
+.kind-conflict-list li { font-size: 12px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 
 .triage-switch { display: flex; gap: 6px; margin: 4px 0 12px; flex-wrap: wrap; }
 .triage-tab {
@@ -2428,6 +2865,30 @@ textarea.ignore-reason { width: 100%; min-width: 220px; resize: vertical; font-f
 .audit-thorough-toggle { display: inline-flex; align-items: center; gap: 7px; font-size: 13px; color: var(--ink); cursor: pointer; }
 .audit-thorough-toggle input { width: 15px; height: 15px; cursor: pointer; accent-color: var(--accent); }
 .audit-mode-rec { font-size: 11.5px; font-weight: 700; color: var(--accent-ink); white-space: nowrap; }
+
+/* Product-export options (AuditReportExportPanel: client name / project title / prepared by /
+   executive-summary override). Each field is a `.audit-model-row` (the same label|value grid
+   the audit-config rows above it use) so the bottom of the panel aligns with the rest of the
+   form instead of drifting to its own look. These used to be bare `.addressee-input`s with no
+   layout wrapper — that class is a small chip-style input meant to sit inside ITS OWN flex row
+   (see `.pg-create-row .addressee-input` etc.), so naked here it rendered inconsistently
+   sized/positioned. */
+.audit-export-fields { margin: 10px 0; }
+.audit-export-input {
+  width: 100%; box-sizing: border-box;
+  border: 1px solid var(--line); background: var(--surface); color: var(--ink);
+  font: inherit; font-size: 13px; padding: 8px 11px; border-radius: 8px;
+}
+.audit-export-input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-wash); }
+/* The executive-summary override is a multi-sentence narrative that REPLACES a whole report
+   section, not a short label — it needs real room, not the 2-row box it used to get. Sized
+   like `.clarify-q`'s textarea treatment, just taller. */
+.audit-export-summary {
+  width: 100%; box-sizing: border-box; min-height: 170px;
+  border: 1px solid var(--line); border-radius: 9px; padding: 10px 12px;
+  font: inherit; font-size: 13.5px; color: var(--ink); line-height: 1.5; resize: vertical; background: var(--surface);
+}
+.audit-export-summary:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-wash); }
 
 /* Async-job live progress bar (Mode 3). */
 .job-progress { display: flex; align-items: center; gap: 11px; margin: 10px 0; }
@@ -2674,6 +3135,42 @@ textarea.ignore-reason { width: 100%; min-width: 220px; resize: vertical; font-f
 .ws-repo-pr { font-size: 12.5px; margin: 10px 0 0; }
 .ws-repo-pr a { color: var(--accent-ink); }
 .ws-repo-msg { font-size: 12.5px; color: var(--ink-soft); margin: 8px 0 0; }
+/* ── Client source lifecycle (delete / re-fetch / rescan changes) ───────────────── */
+.ws-repo-state.deleted { color: var(--danger-color); font-weight: 600; }
+.ws-repo-source { font-size: 12.5px; color: var(--ink-soft); margin: 0 0 10px; }
+.ws-repo-source.deleted { color: var(--danger-color); font-weight: 600; margin-bottom: 4px; }
+.ws-repo-source.mismatch { color: var(--warning-color); }
+.ws-repo-source-summary { font-size: 12px; color: var(--ink-faint); margin: 0 0 10px; }
+.ws-source-actions { margin-bottom: 10px; }
+.ws-danger { margin-top: 14px; border-top: 1px dashed var(--line); padding-top: 10px; }
+.ws-danger-summary { font-size: 12px; color: var(--ink-faint); cursor: pointer; }
+.ws-danger-text { font-size: 12px; color: var(--ink-faint); margin: 8px 0; }
+.src-modal { max-width: 720px; }
+.src-plan { list-style: none; margin: 10px 0 4px; padding: 0; font-size: 12.5px; }
+.src-plan li { display: flex; gap: 10px; align-items: baseline; padding: 3px 0; border-bottom: 1px solid var(--line); }
+.src-plan-label { flex: 0 0 130px; color: var(--ink-soft); }
+.src-plan-path { flex: 1; min-width: 0; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px; word-break: break-all; }
+.src-plan-counts { flex: 0 0 auto; color: var(--ink-faint); }
+.src-plan-total { font-size: 12.5px; font-weight: 600; margin: 6px 0 10px; }
+.src-warning { font-size: 12.5px; color: var(--warning-color); margin: 4px 0; }
+.src-tick { display: flex; align-items: center; gap: 8px; font-size: 13px; margin: 10px 0; }
+.src-method { font-size: 11.5px; color: var(--ink-faint); margin: 8px 0; }
+.src-confirm-label { display: block; font-size: 12.5px; margin: 12px 0 6px; }
+.src-confirm-input { width: 100%; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.src-refusal { font-size: 12.5px; color: var(--danger-color); margin: 10px 0 0; }
+.src-modal-foot { display: flex; justify-content: flex-end; gap: 10px; margin-top: 16px; }
+.src-radio { display: flex; align-items: center; gap: 8px; font-size: 13px; margin: 10px 0 4px; }
+.src-destination { font-size: 12px; color: var(--ink-faint); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; margin: 12px 0 0; word-break: break-all; }
+.src-record { margin-top: 10px; }
+.src-record-text { font-size: 11.5px; line-height: 1.5; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 12px; max-height: 320px; overflow: auto; white-space: pre-wrap; }
+.src-record-actions { display: flex; gap: 10px; margin-top: 8px; }
+.scan-block-hint { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 12.5px; color: var(--ink-soft); margin: 8px 0; }
+.scan-block-link { flex: 0 0 auto; }
+.src-fieldset { border: 0; padding: 0; margin: 0; min-width: 0; }
+.repo-health-icon.deleted { color: var(--ink-faint); }
+.finding-ctx-banner { font-size: 12.5px; color: var(--warning-color); border: 1px solid var(--warning-color); border-radius: 8px; padding: 6px 10px; margin: 0 0 8px; }
+.finding-ctx-newer { font-size: 11.5px; color: var(--ink-faint); margin: 6px 0 0; }
+.finding-ctx-deleted { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .ws-project-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .ws-health { display: flex; gap: 8px; flex-wrap: wrap; margin: 10px 0 4px; }
 .ws-health-stat { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; padding: 3px 10px; border-radius: 20px; border: 1px solid var(--line); background: var(--surface); color: var(--ink-soft); }
@@ -3609,6 +4106,19 @@ textarea.ignore-reason { width: 100%; min-width: 220px; resize: vertical; font-f
 }
 .app-update-dismiss:hover { color: var(--ink); }
 
+/* Corpus-freshness line of the update banner. The alert reuses .app-update-banner above; the
+   never-confirmed note is deliberately small and muted (it is the honest pre-first-sweep
+   state of every pack, and must not shout). */
+.corpus-freshness-note {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 16px;
+  font-size: 12px;
+  color: var(--ink-faint);
+  flex-shrink: 0;
+}
+
 /* Rule-drift notice (Feature 2) */
 .drift-notice {
   border: 1px solid #fcd34d;
@@ -3671,6 +4181,10 @@ textarea.ignore-reason { width: 100%; min-width: 220px; resize: vertical; font-f
   font-size: 11px;
   color: var(--ink-faint);
   font-style: italic;
+}
+.drift-entry-version {
+  font-size: 11px;
+  color: var(--ink-faint);
 }
 .drift-update-btn {
   margin-left: auto;
@@ -5537,6 +6051,15 @@ select:focus {
 .credentials-save-btn {
   flex-shrink: 0;
 }
+.credentials-remove-btn {
+  flex-shrink: 0;
+  background: transparent;
+  border: 1px solid var(--line);
+  color: inherit;
+  border-radius: 6px;
+  padding: 6px 12px;
+  cursor: pointer;
+}
 
 /* ── Bombe animation settings (inside the Settings panel) ── */
 .bombe-settings-section {
@@ -6059,13 +6582,10 @@ textarea.uow-decision-input { resize: vertical; min-height: 60px; }
 .scan-coverage-note-tool { font-weight: 700; color: var(--ink); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 .scan-coverage-note-msg { color: var(--ink-soft); }
 
-/* ── Part 2: "Test" badge (scan.rs) — reuses the dark amber chip pattern (like the
-   chorale-badge-yellow / .nr-flag family) instead of the undefined .badge/.badge-yellow. ── */
-.test-flag {
-  display: inline-block; font-size: 10px; font-weight: 800; letter-spacing: .03em;
-  text-transform: uppercase; color: #fbbf24; background: rgba(202,138,4,0.20);
-  border-radius: 999px; padding: 1px 8px; white-space: nowrap;
-}
+/* `.test-flag` was the "Test" chip the removed "Needs review" cell renderer drew for an
+   `in_test` row (design §9.3). The Confidence column keeps that state — `confidence_tag`
+   returns `test` first, before any confidence reading — and renders it as chorale's own
+   yellow badge, so the hand-rolled chip and its rule are gone with the renderer. */
 
 /* ── Part 1.5: research chat context-visibility strip (ChatBubble "what this
    assistant can see" panel) + the small "New chat" affordance — new since the
@@ -6094,4 +6614,242 @@ textarea.uow-decision-input { resize: vertical; min-height: 60px; }
 }
 .chat-clear-btn:hover { color: var(--ink-soft); border-color: var(--ink-faint); }
 
+/* ── The in-app code viewer (cockpit/viewer.rs; WORK_ORDER_REVIEW_SPEED.md A.1 to A.9) ──
+   A full-window overlay over the Queue. Colours are the theme's own variables, so a dark or
+   light pass changes it with the rest of the app. `--code-line-h` is set inline from
+   `CODE_LINE_H_PX`: scrollTop maps to a line by arithmetic, so the line height is FIXED. */
+.cv-overlay { z-index: 1090; padding: 14px; align-items: stretch; justify-content: stretch; }
+.cv-panel {
+  --cv-sev: var(--ink-faint);
+  display: flex; flex-direction: column; flex: 1 1 auto; min-width: 0; min-height: 0;
+  background: #16130f; color: var(--ink); border-radius: var(--r-md); box-shadow: var(--shadow-pop);
+  border: 1px solid var(--line); outline: none; overflow: hidden;
+}
+.cv-panel:focus { border-color: var(--accent); }
+.cv-empty { align-items: center; justify-content: center; gap: 10px; }
+.cv-head {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 8px 12px;
+  border-bottom: 1px solid var(--line); font-size: 12px;
+}
+.cv-repo, .cv-rev, .cv-path { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.cv-repo { color: var(--ink-soft); }
+.cv-rev { color: var(--ink-faint); }
+.cv-path { color: var(--ink); font-weight: 700; }
+.cv-sep { color: var(--ink-faint); }
+.cv-pos { color: var(--ink-soft); }
+.cv-rule { margin-left: auto; font-weight: 700; color: var(--ink-soft); }
+.cv-rule.critical { color: var(--danger-color); }
+.cv-rule.high { color: var(--warning-color); }
+.cv-rule.medium { color: var(--accent); }
+.cv-close { margin-left: 4px; }
+.cv-banner { padding: 6px 12px; font-size: 12px; border-bottom: 1px solid var(--line); }
+.cv-banner-amber { color: var(--warning-color); background: var(--accent-wash); border-bottom-color: var(--warning-color); }
+.cv-banner-muted { color: var(--ink-faint); }
+.cv-status { padding: 4px 12px; font-size: 12px; color: var(--accent); border-bottom: 1px solid var(--line); }
+.cv-note { padding: 18px 16px; font-size: 13px; color: var(--ink-soft); overflow: auto; }
+.cv-note-text { margin: 0 0 10px; color: var(--ink); }
+.cv-note-btn { margin-bottom: 10px; }
+.cv-deleted .cv-note-text { color: var(--warning-color); }
+
+/* The body: the scroll container and the minimap strip beside it. */
+.cv-body { position: relative; display: flex; flex: 1 1 auto; min-height: 0; }
+.cv-scroll { flex: 1 1 auto; min-width: 0; overflow: auto; }
+.cv-lines {
+  min-width: max-content; box-sizing: content-box;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px;
+}
+.cv-line {
+  display: flex; align-items: stretch; height: var(--code-line-h); line-height: var(--code-line-h);
+  white-space: pre; --cv-sev: var(--ink-faint);
+}
+/* The enclosing block is a soft band; the violation line is the strong highlight with a left
+   border in the finding's severity colour. */
+.cv-line-band { background: var(--accent-wash); }
+.cv-line-hit { background: rgba(202, 138, 4, 0.30); box-shadow: inset 3px 0 0 var(--cv-sev); }
+.cv-line-cursor { outline: 1px dotted var(--ink-faint); outline-offset: -1px; }
+.cv-gutter {
+  position: sticky; left: 0; z-index: 1; flex: 0 0 22px; display: flex; align-items: center;
+  justify-content: center; background: #16130f;
+}
+.cv-num {
+  position: sticky; left: 22px; z-index: 1; flex: 0 0 auto; min-width: 52px; padding: 0 10px;
+  text-align: right; color: var(--ink-faint); background: #16130f; user-select: none; cursor: pointer;
+}
+.cv-num:hover { color: var(--ink); }
+.cv-code { flex: 1 0 auto; padding: 0 16px 0 8px; color: var(--ink); }
+.cv-more { color: var(--ink-faint); font-style: italic; }
+
+/* Severity colours: the ones the Severity badge uses. */
+.cv-sev-critical { --cv-sev: var(--danger-color); }
+.cv-sev-high { --cv-sev: var(--warning-color); }
+.cv-sev-medium { --cv-sev: var(--accent); }
+.cv-sev-low { --cv-sev: var(--ink-faint); }
+
+/* Other findings in this file: a solid dot while open, hollow once decided. */
+.cv-mark {
+  position: relative; width: 10px; height: 10px; padding: 0; border-radius: 50%;
+  border: 2px solid var(--cv-sev); background: var(--cv-sev); cursor: pointer;
+}
+.cv-mark:disabled { cursor: default; }
+.cv-mark-hollow { background: transparent; }
+.cv-count {
+  position: absolute; left: 9px; top: -7px; font-size: 9px; line-height: 1; color: var(--ink);
+  background: #16130f; border-radius: 6px; padding: 1px 3px;
+}
+
+/* The minimap: the same dots at file scale. */
+.cv-minimap { position: relative; flex: 0 0 14px; background: #120f0c; border-left: 1px solid var(--line); }
+.cv-mini {
+  position: absolute; left: 3px; width: 8px; height: 8px; border-radius: 50%;
+  border: 2px solid var(--cv-sev); background: var(--cv-sev);
+}
+.cv-mini.cv-mark-hollow { background: transparent; }
+.cv-mini-cur { position: absolute; left: 0; width: 14px; height: 2px; background: var(--ink); }
+
+/* Syntax tokens, on the theme's own variables. */
+.tok-keyword { color: var(--accent); }
+.tok-string { color: var(--good); }
+.tok-comment { color: var(--ink-faint); font-style: italic; }
+.tok-number { color: var(--warning-color); }
+.tok-function { color: var(--accent-ink); font-weight: 600; }
+.tok-type { color: var(--ink-soft); font-weight: 600; }
+.tok-variable { color: var(--ink); }
+.tok-property { color: var(--ink-soft); }
+.tok-punctuation { color: var(--ink-faint); }
+.tok-operator { color: var(--ink-soft); }
+
+.cv-help { padding: 8px 14px; border-top: 1px solid var(--line); font-size: 12px; }
+.cv-help table { border-collapse: collapse; }
+.cv-help td { padding: 2px 14px 2px 0; color: var(--ink-soft); }
+.cv-help-keys { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--ink); white-space: nowrap; }
+.cv-undo, .cv-prompt, .cv-goto { margin: 0; border-radius: 0; border-left: 0; border-right: 0; padding: 6px 12px; }
+.cv-goto { display: flex; align-items: center; gap: 8px; border-top: 1px solid var(--line); }
+.cv-goto-input { width: 140px; }
+.cv-goto-error { color: var(--warning-color); font-size: 12px; }
+.cv-keys { padding: 5px 12px; font-size: 11px; border-top: 1px solid var(--line); color: var(--ink-faint); }
+.cv-keys.armed { color: var(--ink-soft); }
+
+/* The main row: the code (or a note) and, when `S` was pressed, the references list. The popover
+   floats over its lower left. */
+.cv-main { position: relative; display: flex; flex: 1 1 auto; min-height: 0; min-width: 0; }
+.cv-main > .cv-body, .cv-main > .cv-note { flex: 1 1 0; min-width: 0; }
+.cv-refchip {
+  font-size: 11px; padding: 1px 7px; border-radius: 999px; border: 1px solid var(--accent);
+  color: var(--accent);
+}
+
+/* In-file search: the field, and the matches (the current one stronger). */
+.cv-search {
+  display: flex; align-items: center; gap: 8px; padding: 6px 12px;
+  border-bottom: 1px solid var(--line);
+}
+.cv-search-input { width: 280px; }
+.cv-search-status { font-size: 12px; color: var(--ink-soft); }
+.cv-match { background: rgba(120, 170, 255, 0.28); border-radius: 2px; }
+.cv-match-cur { background: rgba(120, 170, 255, 0.62); outline: 1px solid var(--accent); }
+
+/* Symbol references: a list at the right of the code. */
+.cv-symbol-input { width: 260px; }
+.cv-refs {
+  flex: 0 0 380px; display: flex; flex-direction: column; min-height: 0;
+  border-left: 1px solid var(--line); background: #120f0c; font-size: 12px;
+}
+.cv-refs-head { padding: 8px 10px; color: var(--ink); font-weight: 700; border-bottom: 1px solid var(--line); }
+.cv-refs-note { padding: 10px; color: var(--ink-soft); }
+.cv-refs-list { flex: 1 1 auto; min-height: 0; overflow: auto; }
+.cv-ref { padding: 4px 10px; cursor: pointer; border-bottom: 1px solid var(--line); }
+.cv-ref:hover { background: var(--accent-wash); }
+.cv-ref-sel { background: var(--accent-wash); box-shadow: inset 3px 0 0 var(--accent); }
+.cv-ref-loc { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--ink); }
+.cv-ref-text {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--ink-soft);
+  white-space: pre; overflow: hidden; text-overflow: ellipsis;
+}
+.cv-refs-keys { padding: 5px 10px; color: var(--ink-faint); border-top: 1px solid var(--line); }
+
+/* The stacked group view (cockpit/stack.rs; WORK_ORDER_REVIEW_SPEED.md B.2). The overlay layers,
+   lowest to highest, by explicit z-index and not by source order:
+     1085  .sk-overlay          this view
+     1090  .cv-overlay          the code viewer, which a card opens ABOVE the stack (Esc comes back)
+     1100  .rule-modal-overlay  the rule hub and the finding modal, which open above both
+   The stack carries `rule-modal-overlay` for its backdrop, so the selector is doubled to beat
+   that rule's 1100 whatever order the stylesheet is concatenated in. */
+.rule-modal-overlay.sk-overlay { z-index: 1085; }
+.sk-head { gap: 10px; }
+.sk-label { font-weight: 700; overflow-wrap: anywhere; }
+.sk-summary { margin-left: auto; }
+.sk-actions {
+  display: flex; flex-wrap: wrap; gap: 8px; padding: 8px 12px; border-bottom: 1px solid var(--line);
+}
+.sk-list { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 10px 12px; }
+.sk-card {
+  --cv-sev: var(--ink-faint);
+  border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; margin-bottom: 10px;
+  background: #1b1813; cursor: default;
+}
+.sk-card-sel { border-color: var(--accent); box-shadow: inset 3px 0 0 var(--accent); }
+.sk-card-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 6px; }
+.sk-check {
+  flex: 0 0 auto; width: 16px; height: 16px; border-radius: 4px; border: 2px solid var(--ink-faint);
+  box-sizing: border-box; cursor: pointer; position: relative;
+}
+.sk-check-on { border-color: var(--accent); background: var(--accent); }
+.sk-check-on::after {
+  content: ""; position: absolute; left: 3px; top: 0; width: 4px; height: 8px;
+  border: solid #16130f; border-width: 0 2px 2px 0; transform: rotate(45deg);
+}
+.sk-dot { flex: 0 0 auto; width: 10px; height: 10px; border-radius: 50%; background: var(--cv-sev); }
+.sk-loc { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--ink); font-size: 12px; }
+.sk-status { margin-left: auto; }
+.sk-ctx, .sk-snippet { margin: 0; }
+.sk-snippet { white-space: pre-wrap; overflow-wrap: anywhere; }
+
+/* The finding popover: at most eight short lines. */
+.cv-popover {
+  position: absolute; left: 96px; bottom: 10px; z-index: 3; max-width: 520px;
+  padding: 8px 12px; background: #1d1913; color: var(--ink); font-size: 12px;
+  border: 1px solid var(--line); border-radius: var(--r-md); box-shadow: var(--shadow-pop);
+}
+.cv-popover-pinned { border-color: var(--accent); }
+.cv-pop-line { margin: 2px 0; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.cv-pop-rule, .cv-pop-link {
+  background: transparent; border: 0; padding: 0; cursor: pointer; color: var(--accent);
+  font: inherit; font-weight: 700; text-decoration: underline;
+}
+.cv-pop-link { font-weight: 400; margin-right: 6px; }
+.cv-pop-auth { color: var(--ink-soft); }
+.cv-pop-headline { font-weight: 700; }
+.cv-pop-directive { color: var(--ink-soft); }
+.cv-pop-review { color: var(--warning-color); }
+.cv-pop-dim, .cv-pop-prev { color: var(--ink-faint); }
+.cv-pop-sev.critical { color: var(--danger-color); }
+.cv-pop-sev.high { color: var(--warning-color); }
+.cv-pop-sev.medium { color: var(--accent); }
+.finding-ctx-door { margin: 6px 0; }
+.pane-code-link { cursor: pointer; background: transparent; }
+.pane-code-link:hover { border-color: var(--accent); color: var(--ink); }
+
+/* The review command palette (cockpit/palette.rs; WORK_ORDER_REVIEW_SPEED.md B.8). It opens only
+   over the Queue (the viewer and the stacked view refuse it), so it sits below both, at 1080;
+   `.rule-modal-overlay` carries the backdrop and 1100, so the selector is doubled to beat it. */
+.rule-modal-overlay.pal-overlay { z-index: 1080; align-items: flex-start; padding-top: 12vh; }
+.pal-panel {
+  width: min(560px, 100%); max-height: 70vh; display: flex; flex-direction: column;
+  background: #1d1913; border: 1px solid var(--line); border-radius: var(--r-md);
+  box-shadow: var(--shadow-pop); overflow: hidden;
+}
+.pal-input { width: 100%; box-sizing: border-box; border: 0; border-bottom: 1px solid var(--line); border-radius: 0; padding: 12px 14px; font-size: 14px; }
+.pal-list { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 4px 0; }
+.pal-row {
+  display: flex; align-items: center; gap: 12px; padding: 7px 14px; cursor: pointer; color: var(--ink);
+}
+.pal-row:hover { background: var(--accent-wash); }
+.pal-row-sel { background: var(--accent-wash); box-shadow: inset 3px 0 0 var(--accent); }
+.pal-label { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+.pal-hint {
+  flex: 0 0 auto; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px;
+  color: var(--ink-soft); border: 1px solid var(--line); border-radius: 4px; padding: 1px 6px;
+}
+.pal-empty { margin: 0; padding: 10px 14px; color: var(--ink-soft); }
+.pal-keys { margin: 0; padding: 6px 14px; font-size: 11px; color: var(--ink-faint); border-top: 1px solid var(--line); }
 "#;

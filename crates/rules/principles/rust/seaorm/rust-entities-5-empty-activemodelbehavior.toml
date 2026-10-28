@@ -1,21 +1,26 @@
 id = "RUST-ENTITIES-5"
+version = 1
 title = "Empty ActiveModelBehavior unless a hook is genuinely needed"
-tag = "stack"
 domain = "rust:seaorm"
 layer = "library"
 enforcement = "structured"
+kind = "decision"
+inspectable = true
 default = true
 verification = "grounded"
 
 [decision]
 question = "What position does the project take on: Empty ActiveModelBehavior unless a hook is genuinely needed?"
-default = "empty-activemodelbehavior-unless-a-hook-is-genui"
+default = "empty-activemodelbehavior-unless-a-hook-is-genuinely-needed"
 why = "The vast majority of entities need no hooks; stubbing concrete hook bodies in across the codebase adds noise without value, since reviewer attention is then spent on placeholder hooks that do not run. The empty impl block itself, however, is not optional: SeaORM's documentation explicitly directs entity authors not to delete the ActiveModelBehavior impl block even when it is empty, so the rule pairs the empty-by-default position with a never-delete clause on the block itself. The first alternative (stub bodies everywhere) trades the rule's silence for visual uniformity but spends reviewer attention on noise; the second alternative (delete the block when empty) contradicts the SeaORM guidance and removes part of the entity's required surface."
 
 [[option]]
-id = "empty-activemodelbehavior-unless-a-hook-is-genui"
+id = "empty-activemodelbehavior-unless-a-hook-is-genuinely-needed"
 label = "Empty ActiveModelBehavior unless a hook is genuinely needed"
 directive = "Each entity includes the ActiveModelBehavior impl block on its ActiveModel, left empty by default. Hooks are added deliberately when an entity actually needs one. The empty impl block is never deleted, because SeaORM's official entity-format guidance requires its presence on every entity even when no hooks are defined."
+remediation = """
+Add the ActiveModelBehavior impl block to the entity's ActiveModel, left empty unless the entity genuinely needs a hook, rather than omitting the impl entirely or filling it with an unused stub. Verify by confirming every entity's ActiveModel has an ActiveModelBehavior impl present, non-empty only where a hook is actually used.
+"""
 why = "The vast majority of entities need no hooks; stubbing concrete hook bodies in across the codebase adds noise without value, since reviewer attention is then spent on placeholder hooks that do not run."
 
 [[option]]

@@ -881,7 +881,11 @@ pub async fn build_from_plan_with_tier_map_layer2_and_activity(
         if Some(i) == lead_idx {
             stage_task.push_str(&orchestrator::orchestrator_prompt_suffix(vision_enabled));
         }
-        stages.push(FleetStage::new(roles[i].clone(), stage_task, drivers[i].as_ref()));
+        stages.push(FleetStage::new(
+            roles[i].clone(),
+            stage_task,
+            drivers[i].as_ref(),
+        ));
     }
 
     // ── Run the governed fleet with the language-matched layer-2 runner ──────
@@ -972,10 +976,8 @@ mod tests {
     /// install step. Confirms the bypass skips layer 2 (and only layer 2).
     #[tokio::test]
     async fn layer2_runner_skips_when_bootstrap_and_runs_real_otherwise() {
-        let dir = std::env::temp_dir().join(format!(
-            "camerata-fleet-test-layer2-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("camerata-fleet-test-layer2-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         // A JS manifest with no lint/test → the real runner fails closed.
@@ -999,7 +1001,9 @@ mod tests {
         let noop = layer2_runner_with_activity(&dir, true, None);
         let noop_res = noop.check(&role, &dir).await;
         assert_eq!(
-            noop_res.expect("the bootstrap no-op runner must not error").violated,
+            noop_res
+                .expect("the bootstrap no-op runner must not error")
+                .violated,
             Vec::<RuleId>::new(),
             "the bootstrap no-op runner reports no violations (skips layer 2)"
         );
@@ -1024,7 +1028,10 @@ mod tests {
     /// scaffolded crate, same as the existing `fmt_real_subprocess` integration test.
     #[tokio::test]
     async fn layer2_runner_with_activity_forwards_heartbeat_to_rust_runner() {
-        use std::sync::{Arc, atomic::{AtomicU64, Ordering}};
+        use std::sync::{
+            atomic::{AtomicU64, Ordering},
+            Arc,
+        };
 
         let dir = std::env::temp_dir().join(format!(
             "camerata-fleet-test-heartbeat-{}",
@@ -1040,7 +1047,8 @@ mod tests {
         std::fs::write(
             dir.join("Cargo.toml"),
             "[package]\nname = \"heartbeat_test\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
-        ).unwrap();
+        )
+        .unwrap();
         std::fs::write(dir.join("src").join("lib.rs"), "// empty\n").unwrap();
 
         let tick_count = Arc::new(AtomicU64::new(0));
@@ -1069,7 +1077,9 @@ mod tests {
         );
 
         // And the crate must be clean (no violations on a minimal canonical crate).
-        let violations = result.expect("layer2_runner_with_activity must not error on a valid Rust crate").violated;
+        let violations = result
+            .expect("layer2_runner_with_activity must not error on a valid Rust crate")
+            .violated;
         assert!(
             violations.is_empty(),
             "a canonical Rust crate must produce no layer-2 violations, got {violations:?}"
@@ -1086,7 +1096,7 @@ mod tests {
     /// nothing about the gate. Built with synthetic reports — no I/O, no tokens.
     #[test]
     fn emit_stage_reports_maps_layer2_revise_and_finished() {
-        use camerata_core::{AgentOutcome, FleetReport, RunReport, RuleId, StageReport};
+        use camerata_core::{AgentOutcome, FleetReport, RuleId, RunReport, StageReport};
         use std::sync::Mutex;
 
         fn outcome(session: &str) -> AgentOutcome {
@@ -1144,13 +1154,16 @@ mod tests {
         let events = events.into_inner().unwrap();
 
         // Stage 0 (clean): no ReviseIteration, a passed Layer2Result, a clean StageFinished.
-        assert!(!events.iter().any(|e| matches!(
-            e,
-            BuildEvent::ReviseIteration { index: 0, .. }
-        )));
+        assert!(!events
+            .iter()
+            .any(|e| matches!(e, BuildEvent::ReviseIteration { index: 0, .. })));
         assert!(events.iter().any(|e| matches!(
             e,
-            BuildEvent::Layer2Result { index: 0, passed: true, .. }
+            BuildEvent::Layer2Result {
+                index: 0,
+                passed: true,
+                ..
+            }
         )));
 
         // Stage 1 (bounced, resolved): a ReviseIteration citing RUST-FMT, then passed.
@@ -1160,7 +1173,11 @@ mod tests {
         )));
         assert!(events.iter().any(|e| matches!(
             e,
-            BuildEvent::Layer2Result { index: 1, passed: true, .. }
+            BuildEvent::Layer2Result {
+                index: 1,
+                passed: true,
+                ..
+            }
         )));
 
         // Stage 2 (bounced, residual): a ReviseIteration, then a FAILED Layer2Result
@@ -1171,7 +1188,12 @@ mod tests {
         )));
         assert!(events.iter().any(|e| matches!(
             e,
-            BuildEvent::StageFinished { index: 2, clean: false, bounced: true, .. }
+            BuildEvent::StageFinished {
+                index: 2,
+                clean: false,
+                bounced: true,
+                ..
+            }
         )));
     }
 
@@ -1262,7 +1284,7 @@ mod tests {
         let e6 = BuildEvent::AgentTier {
             index: 0,
             role: "Lead-1".to_string(),
-            model: "claude-opus-4-8".to_string(),
+            model: "claude-opus-5".to_string(),
             is_lead: true,
         };
         let _ = format!("{:?}", e6.clone());
@@ -1318,7 +1340,7 @@ mod tests {
             bin: &std::path::Path,
         ) {
             // Both should accept the same event type.
-            let _: std::pin::Pin<Box<dyn std::future::Future<Output = _>>> =
+            let _signature_check: std::pin::Pin<Box<dyn std::future::Future<Output = _>>> =
                 Box::pin(build_from_plan_with_model(plan, root, bin, None, &|_| {}));
         }
         fn _check_some_compiles(
@@ -1326,9 +1348,14 @@ mod tests {
             root: &std::path::Path,
             bin: &std::path::Path,
         ) {
-            let _: std::pin::Pin<Box<dyn std::future::Future<Output = _>>> = Box::pin(
-                build_from_plan_with_model(plan, root, bin, Some("claude-sonnet-4-6"), &|_| {}),
-            );
+            let _signature_check: std::pin::Pin<Box<dyn std::future::Future<Output = _>>> =
+                Box::pin(build_from_plan_with_model(
+                    plan,
+                    root,
+                    bin,
+                    Some("claude-sonnet-5"),
+                    &|_| {},
+                ));
         }
         // This test proves the API compiles with both None and Some; the _ suffix
         // functions are never called, so no I/O or infra is required.
@@ -1349,7 +1376,7 @@ mod tests {
             bin: &std::path::Path,
         ) {
             let tier_map = crate::tier::TierMap::default();
-            let _: std::pin::Pin<Box<dyn std::future::Future<Output = _>>> =
+            let _signature_check: std::pin::Pin<Box<dyn std::future::Future<Output = _>>> =
                 Box::pin(build_from_plan_with_tier_map(
                     plan,
                     root,
@@ -1367,7 +1394,7 @@ mod tests {
     /// Frontend -> Sonnet). This is a pure-logic test — no I/O needed.
     #[test]
     fn tier_map_resolves_correct_models_for_mixed_plan() {
-        use crate::tier::{CapabilityBand, TierMap, classify_task};
+        use crate::tier::{classify_task, CapabilityBand, TierMap};
         use camerata_intake::{Plan, PlanTask, TaskKind};
 
         let tier_map = TierMap::default();
@@ -1399,9 +1426,9 @@ mod tests {
         };
 
         let expected = [
-            (CapabilityBand::Balanced, "claude-sonnet-4-6"),
-            (CapabilityBand::Strongest, "claude-opus-4-8"),
-            (CapabilityBand::Balanced, "claude-sonnet-4-6"),
+            (CapabilityBand::Balanced, "claude-sonnet-5"),
+            (CapabilityBand::Strongest, "claude-opus-5"),
+            (CapabilityBand::Balanced, "claude-sonnet-5"),
             (CapabilityBand::Fast, "claude-haiku-4-5-20251001"),
         ];
 
@@ -1490,7 +1517,7 @@ mod tests {
         .unwrap();
         let cb: HeartbeatFn = Arc::new(|| {});
         let ctx = LeadBuildContext {
-            strongest_model: "claude-opus-4-8",
+            strongest_model: "claude-opus-5",
             session: &session,
             worktree: std::path::Path::new("/work/crate"),
             tier_map: &crate::tier::TierMap::default(),
@@ -1499,10 +1526,20 @@ mod tests {
         };
         let _driver = factory.build_lead(&ctx).unwrap();
         let calls = factory.calls.lock().unwrap();
-        assert_eq!(calls.len(), 1, "build_lead called exactly once for the lead");
-        assert_eq!(calls[0].0, "claude-opus-4-8", "lead built for the strongest model");
+        assert_eq!(
+            calls.len(),
+            1,
+            "build_lead called exactly once for the lead"
+        );
+        assert_eq!(
+            calls[0].0, "claude-opus-5",
+            "lead built for the strongest model"
+        );
         assert_eq!(calls[0].1, std::path::PathBuf::from("/work/crate"));
-        assert!(calls[0].2, "the activity heartbeat is threaded to build_lead");
+        assert!(
+            calls[0].2,
+            "the activity heartbeat is threaded to build_lead"
+        );
     }
 
     /// The session carries the lead role's rule subset so the native (non-CLI) lead path can
@@ -1512,7 +1549,10 @@ mod tests {
     fn orchestrator_session_carries_role_rule_subset() {
         let role = Role {
             name: "Lead".into(),
-            rule_subset: vec![RuleId("GOV-1".into()), RuleId("SEC-NO-PATH-ESCAPE-1".into())],
+            rule_subset: vec![
+                RuleId("GOV-1".into()),
+                RuleId("SEC-NO-PATH-ESCAPE-1".into()),
+            ],
             allowed_paths: vec!["crate/".into()],
         };
         let session = orchestrator::prepare_orchestrator_session(
@@ -1542,15 +1582,34 @@ mod tests {
             // None => CLI orchestrator (back-compat).
             let _none: std::pin::Pin<Box<dyn std::future::Future<Output = _>>> =
                 Box::pin(build_from_plan_with_tier_map_layer2_and_activity(
-                    plan, root, bin, &tier_map, 1, false, &|_| {}, None, false, None, None,
+                    plan,
+                    root,
+                    bin,
+                    &tier_map,
+                    1,
+                    false,
+                    &|_| {},
+                    None,
+                    false,
+                    None,
+                    None,
                 ));
             // Some => lead via the factory.
             let _some: std::pin::Pin<Box<dyn std::future::Future<Output = _>>> =
                 Box::pin(build_from_plan_with_tier_map_layer2_and_activity(
-                    plan, root, bin, &tier_map, 1, false, &|_| {}, None, false, Some(factory), None,
+                    plan,
+                    root,
+                    bin,
+                    &tier_map,
+                    1,
+                    false,
+                    &|_| {},
+                    None,
+                    false,
+                    Some(factory),
+                    None,
                 ));
         }
-        let _ = _check
-            as fn(_, _, _, SharedOrchestratorDriverFactory);
+        let _ = _check as fn(_, _, _, SharedOrchestratorDriverFactory);
     }
 }

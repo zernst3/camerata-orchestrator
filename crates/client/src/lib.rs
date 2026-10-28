@@ -280,7 +280,10 @@ impl Client {
     /// `GET /api/projects/:id/feedback` — one project's defect reports, newest first.
     /// Empty when no feedback store is open server-side. See
     /// `crates/server/src/lib.rs::project_feedback`.
-    pub async fn project_feedback(&self, project_id: &str) -> Result<Vec<DefectReport>, ClientError> {
+    pub async fn project_feedback(
+        &self,
+        project_id: &str,
+    ) -> Result<Vec<DefectReport>, ClientError> {
         self.get_json(&format!(
             "/api/projects/{}/feedback",
             Self::enc_seg(project_id)
@@ -418,7 +421,7 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/api/stories/story-1/run"))
-            .and(body_json(serde_json::json!({ "model": "claude-sonnet-4-6" })))
+            .and(body_json(serde_json::json!({ "model": "claude-sonnet-5" })))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "run_id": "run-42",
                 "story_id": "story-1",
@@ -433,7 +436,7 @@ mod tests {
             .start_run(
                 "story-1",
                 StartRunRequest {
-                    model: Some("claude-sonnet-4-6".to_string()),
+                    model: Some("claude-sonnet-5".to_string()),
                     ..Default::default()
                 },
             )
@@ -692,8 +695,7 @@ mod tests {
         Mock::given(method("GET"))
             .and(path("/api/projects/proj-x/feedback"))
             .respond_with(
-                ResponseTemplate::new(500)
-                    .set_body_json(serde_json::json!({ "error": "boom" })),
+                ResponseTemplate::new(500).set_body_json(serde_json::json!({ "error": "boom" })),
             )
             .expect(1)
             .mount(&server)

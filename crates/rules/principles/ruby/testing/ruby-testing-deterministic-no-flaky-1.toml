@@ -1,9 +1,11 @@
 id = "RUBY-TESTING-DETERMINISTIC-NO-FLAKY-1"
+version = 1
 title = "Tests run in random order with --order random and pass on any seed; no time, sequence, or state leakage"
-tag = "stack"
 domain = "ruby:testing"
 layer = "language"
 enforcement = "structured"
+kind = "defect"
+inspectable = true
 default = true
 verification = "grounded"
 
@@ -16,13 +18,17 @@ why = "A test suite that only passes when examples run in a fixed order has hidd
 id = "random-order-no-leakage"
 label = "config.order = :random; DatabaseCleaner or transactional fixtures; freeze time in time-sensitive specs"
 directive = "In spec_helper.rb or rails_helper.rb set: config.order = :random and Kernel.srand config.seed. Use database_cleaner-active_record (or Rails transactional fixtures with config.use_transactional_fixtures = true) to reset the database between examples. Wrap time-sensitive assertions with travel_to(Time.zone.now) { } or Timecop.freeze. Reset any global / class-level state modified during a spec in an after(:each) block. Never set a before(:all) block that creates persisted records without a matching cleanup. Use rspec --seed <N> to reproduce failures and rspec --bisect to isolate the minimal failing set. The rubocop-rspec cop RSpec/BeforeAfterAll warns when before(:all) is used."
+remediation = """
+Set config.order = :random and Kernel.srand config.seed in spec_helper.rb/rails_helper.rb, and add database_cleaner-active_record (or enable transactional fixtures) to reset the database between examples. Freeze time in any spec that depends on the current time. Verify by running the suite with a randomized seed several times and confirming it passes consistently regardless of execution order.
+"""
 why = "Random order + DatabaseCleaner eliminates the two most common sources of flakiness."
 
 [[option]]
 id = "fixed-order-no-cleanup"
+violates = true
 label = "Run tests in defined order; rely on AR rollback implicitly"
 directive = "Tests run in definition order (default before config.order = :random was added). No explicit DatabaseCleaner configuration; rely on ActiveRecord rollback happening automatically."
-why = "Simpler setup but hides order-dependent failures and can leak database state across examples in the same transaction group."
+why = "Running examples in a fixed order lets one example quietly depend on state another left behind, so the suite passes while hiding a dependency that breaks the moment the order changes or an example is run on its own. Without cleanup, database rows leak between examples in the same transaction group and the failure shows up in an unrelated test."
 
 [[sources]]
 url = "https://www.fastruby.io/blog/rspec/debug/how-to-debug-non-deterministic-specs.html"

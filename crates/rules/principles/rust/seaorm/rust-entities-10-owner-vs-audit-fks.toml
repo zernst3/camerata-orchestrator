@@ -1,9 +1,11 @@
 id = "RUST-ENTITIES-10"
+version = 1
 title = "Owner + audit FKs to the same parent: belongs_to on child only; no reverse has_many for audit FKs"
-tag = "stack"
 domain = "rust:seaorm"
 layer = "library"
 enforcement = "structured"
+kind = "default_with_exceptions"
+inspectable = true
 default = true
 verification = "grounded"
 
@@ -16,16 +18,21 @@ why = "Audit-direction reverse traversal is rare in practice and would balloon t
 id = "owner-audit-fks-to-the-same-parent-belongs-to-on"
 label = "Owner + audit FKs to the same parent: belongs_to on child only; no reverse has_many for audit FKs"
 directive = "When an entity has an owner FK plus audit FKs (e.g. created_by, modified_by) all pointing at the same parent, declare the reverse has_many on the parent for the OWNER only. Reverse traversal for audit FKs goes through filtered queries or an audit_log table."
+remediation = """
+Remove the reverse has_many variant declared for an audit FK (created_by, modified_by) on the parent entity, keeping the reverse has_many only for the owner FK, and route audit-FK reverse traversal through a filtered query or an audit_log table instead. Verify by confirming the parent entity's relation enum has exactly one reverse has_many variant for this child, corresponding to the owner FK.
+"""
 why = "Audit-direction reverse traversal is rare in practice and would balloon the parent entity file with near-identical variants."
 
 [[option]]
 id = "the-parent-entity-declares-a-reverse-has-many-va"
+violates = true
 label = "Reverse has_many variant for every audit FK"
 directive = "the parent entity declares a reverse has_many variant for every audit FK pointing at it, alongside the variant for the owner FK"
 why = "Bloats the parent entity file with near-identical declarations for traversal directions the project rarely needs, and the bloat compounds as new audit columns are added across entities; the macro's coherence rule also caps find_related at one variant per pair, so additional variants require via_rel disambiguation that adds complexity without proportional benefit."
 
 [[option]]
 id = "the-entity-stores-its-audit-relationships-create"
+violates = true
 label = "Audit relationships stored as plain Uuid columns"
 directive = "the entity stores its audit relationships (created_by, modified_by) as plain Uuid columns rather than as foreign keys to the parent entity"
 why = "Gives the file a diet but loses SeaORM's type-checked relation traversal (find_related, relation-driven joins) for those columns — that is a Rust-side navigation loss, not a database-enforcement loss: whether a deleted user can leave a dangling Uuid behind depends on the REFERENCES constraint (or lack of one) on that column in the migration, which is independent of whether an ORM relation is declared for it. Audit columns should still carry a real DB-level FK constraint even when the project chooses not to declare the corresponding ORM relation."

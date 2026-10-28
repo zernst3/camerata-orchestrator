@@ -1,9 +1,11 @@
 id = "JAVASCRIPT-ANGULAR-ROUTE-GUARDS-1"
+version = 1
 title = "Protected routes are guarded by canActivate guards, not checked in component ngOnInit"
-tag = "stack"
 domain = "javascript:angular"
 layer = "framework"
 enforcement = "structured"
+kind = "defect"
+inspectable = true
 default = true
 verification = "grounded"
 
@@ -17,17 +19,21 @@ title = "Angular API — CanActivateFn"
 
 [decision]
 question = "What position does the project take on: Protected routes are guarded by canActivate guards, not checked in component ngOnInit?"
-default = "protected-routes-are-guarded-by-canactivate-guard"
+default = "protected-routes-are-guarded-by-canactivate-guards"
 why = "A canActivate route guard is evaluated before the route activates, making the authorization decision at the boundary. If the guard denies access, the component is never instantiated, and no setup work (subscriptions, state initialization, data fetching) occurs. If authorization is checked inside ngOnInit or a component method, the component is already loaded, its lifecycle is running, and the user might see a partial view before being redirected. This is an authorization bypass that is invisible: the component is in memory, rendering is underway, and only after initialization does the check run and redirect away. The correct pattern is to attach a guard to the route in the routing configuration, have the guard check permissions, and return true (allow) or false/UrlTree (deny). The component is never instantiated if the guard denies access. The rule is: all protected routes must have a canActivate guard; checking authorization inside a component is forbidden."
 
 [[option]]
-id = "protected-routes-are-guarded-by-canactivate-guard"
+id = "protected-routes-are-guarded-by-canactivate-guards"
 label = "Protected routes are guarded by canActivate guards, not checked in component ngOnInit"
 directive = "All routes that require authentication or authorization are protected by a canActivate guard attached to the route configuration in the routing module. The guard checks permissions and returns true (allow navigation) or false / UrlTree (deny and redirect). Components do not check authorization in ngOnInit or component methods; the guard is the sole authorization boundary. A component loaded via a route without a guard cannot assume the user is authenticated or has permission to view it."
+remediation = """
+Move the authorization check out of the component's ngOnInit (or other lifecycle hook) and into a canActivate guard attached to the route configuration. Verify by navigating directly to the route's URL as an unauthorized user and confirming navigation is blocked or redirected before the component ever initializes.
+"""
 why = "Route guards authorize at the boundary before the component instantiates, preventing partial renders and wasted initialization for unauthorized users."
 
 [[option]]
 id = "authorization-is-checked-in-component-oninitonaf"
+violates = true
 label = "Check in component lifecycle"
 directive = "authorization checks are performed inside component lifecycle hooks (ngOnInit) or component methods, redirecting to a login or access-denied page if the user lacks permission"
 why = "Checking authorization inside ngOnInit or component methods means the component is already loaded and its lifecycle is already running when the authorization decision is made: the user may see a partial render before being redirected, and the component's subscriptions and state initialization have already executed for an unauthorized user. A wrong or missing check in one ngOnInit cannot be caught structurally; every new component must independently remember to include the check."

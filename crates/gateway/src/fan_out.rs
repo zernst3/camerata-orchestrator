@@ -203,14 +203,9 @@ pub async fn run_fan_out(
         let tier = "balanced".to_string();
 
         join_set.spawn(async move {
-            let output = run_delegated(
-                &worker_config,
-                rule_subset_clone,
-                &framed_subtask,
-                &tier,
-            )
-            .await
-            .unwrap_or_else(|e| e.to_string());
+            let output = run_delegated(&worker_config, rule_subset_clone, &framed_subtask, &tier)
+                .await
+                .unwrap_or_else(|e| e.to_string());
 
             let incomplete = output.contains("INCOMPLETE:");
             WorkerResult {
@@ -242,9 +237,9 @@ pub async fn run_fan_out(
 /// `DuplicateRepo` is rejected at `run_fan_out` validation time, so by
 /// construction no two workers share a repo key — this map is always
 /// conflict-free.
-pub fn assemble_by_repo<'a>(
-    results: &'a [WorkerResult],
-) -> std::collections::BTreeMap<String, &'a WorkerResult> {
+pub fn assemble_by_repo(
+    results: &[WorkerResult],
+) -> std::collections::BTreeMap<String, &WorkerResult> {
     let mut map = std::collections::BTreeMap::new();
     for result in results {
         map.insert(result.repo.clone(), result);
@@ -262,8 +257,8 @@ mod tests {
     fn models() -> DelegateModels {
         DelegateModels {
             fast: "claude-haiku-4-5-20251001".to_string(),
-            balanced: "claude-sonnet-4-6".to_string(),
-            strongest: "claude-opus-4-8".to_string(),
+            balanced: "claude-sonnet-5".to_string(),
+            strongest: "claude-opus-5".to_string(),
             vision: String::new(),
         }
     }
@@ -296,9 +291,7 @@ mod tests {
             entry("frontend", "ui", "add page"),
             entry("backend", "api2", "another backend task"), // collision!
         ];
-        let err = run_fan_out(&cfg(0, 1), vec![], entries)
-            .await
-            .unwrap_err();
+        let err = run_fan_out(&cfg(0, 1), vec![], entries).await.unwrap_err();
         assert_eq!(err, FanOutError::DuplicateRepo("backend".to_string()));
     }
 
@@ -316,9 +309,7 @@ mod tests {
             entry("backend", "api", "do something"),
             entry("frontend", "ui", "do something else"),
         ];
-        let err = run_fan_out(&cfg(1, 1), vec![], entries)
-            .await
-            .unwrap_err();
+        let err = run_fan_out(&cfg(1, 1), vec![], entries).await.unwrap_err();
         assert_eq!(
             err,
             FanOutError::DepthExceeded {
@@ -341,10 +332,7 @@ mod tests {
     fn absolute_repo_is_used_as_is() {
         let base = std::path::Path::new("/work/project");
         let jail = worker_jail(base, "/repos/other-service");
-        assert_eq!(
-            jail,
-            std::path::PathBuf::from("/repos/other-service")
-        );
+        assert_eq!(jail, std::path::PathBuf::from("/repos/other-service"));
     }
 
     // ── assembly tests ────────────────────────────────────────────────────────
@@ -422,7 +410,9 @@ mod tests {
         ) -> std::io::Result<Box<dyn AgentDriver>> {
             self.models.lock().unwrap().push(model.to_string());
             self.worktrees.lock().unwrap().push(worktree.to_path_buf());
-            Ok(Box::new(EchoChild { model: model.into() }))
+            Ok(Box::new(EchoChild {
+                model: model.into(),
+            }))
         }
     }
 
@@ -433,7 +423,7 @@ mod tests {
         // repo partition (write-isolation), proving both per-model coupling and the jail.
         let factory = Arc::new(RecordingFactory::default());
         let config = OrchestratorConfig {
-            models: models(), // balanced = claude-sonnet-4-6
+            models: models(), // balanced = claude-sonnet-5
             worktree_root: std::path::PathBuf::from("/work/project"),
             gateway_bin: std::path::PathBuf::from("/bin/camerata-gateway"),
             depth: 0,
@@ -449,12 +439,14 @@ mod tests {
             .unwrap();
         assert_eq!(results.len(), 2);
         // Both workers ran via the factory (echo marker for the balanced model).
-        assert!(results.iter().all(|r| r.output.contains("ECHO model=claude-sonnet-4-6")));
+        assert!(results
+            .iter()
+            .all(|r| r.output.contains("ECHO model=claude-sonnet-5")));
 
         // The factory was asked for the balanced model TWICE (one per worker).
         let asked = factory.models.lock().unwrap().clone();
         assert_eq!(asked.len(), 2);
-        assert!(asked.iter().all(|m| m == "claude-sonnet-4-6"));
+        assert!(asked.iter().all(|m| m == "claude-sonnet-5"));
 
         // Each worker was jailed to its OWN repo partition (write-isolation invariant).
         let jails: std::collections::HashSet<String> = factory
@@ -472,7 +464,10 @@ mod tests {
 
     #[test]
     fn fan_out_error_display_messages_are_descriptive() {
-        let e = FanOutError::DepthExceeded { depth: 1, max_depth: 1 };
+        let e = FanOutError::DepthExceeded {
+            depth: 1,
+            max_depth: 1,
+        };
         assert!(e.to_string().contains("depth guard tripped"));
         assert!(e.to_string().contains("depth=1"));
 

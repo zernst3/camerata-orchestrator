@@ -1,9 +1,18 @@
 id = "JAVA-SPRING-TRANSACTIONAL-SERVICE-LAYER-1"
+version = 1
 title = "@Transactional belongs on the service layer; controllers and repositories do not own transactions"
-tag = "stack"
 domain = "java:spring"
 layer = "framework"
 enforcement = "structured"
+kind = "default_with_exceptions"
+inspectable = true
+# Deviation-ceiling escape hatch, INHERITED from ARCH-EXPLICIT-TX-1: severity must describe the
+# PROBLEM, not which rule happened to fire. Without this, a repo on this stack caps the identical
+# architectural defect at medium while an unmirrored stack reaches high under the general rule.
+# This rule mirrors ARCH-EXPLICIT-TX-1 because it re-litigates the same question (which layer owns
+# the transaction lifecycle), answered identically: @Transactional belongs on the service layer,
+# never on controllers or repositories.
+deviation_ceiling = "high"
 default = true
 verification = "grounded"
 
@@ -20,6 +29,9 @@ title = "Spring Framework Reference — Using @Transactional (service-layer exam
 id = "transactional-on-service"
 label = "@Transactional on service methods; controllers and repositories are transaction-free"
 directive = "@Transactional is applied on public service-layer methods (or on the service class, with per-method overrides where needed). @RestController and @Repository classes do not carry @Transactional. readOnly = true is used on service methods that only read data (SELECTS, no writes) to allow the JPA provider to optimize for read-only mode. @Transactional(rollbackFor = Exception.class) is specified when checked exceptions must also trigger rollback (Spring's default rollback policy is unchecked exceptions only)."
+remediation = """
+Move the @Transactional annotation from the repository or controller method onto the service-layer method that orchestrates the unit of work, and remove it from the controller and repository. Add readOnly = true on service methods that only read data. Verify by forcing a failure partway through a multi-step service method and confirming all of its writes roll back together, not just the one that failed.
+"""
 why = "Service methods represent logical units of work that must be atomic; @Transactional on the service layer gives Spring the transaction boundary at the level of business operations, not individual SQL statements or HTTP request handlers."
 
 [[option]]
@@ -30,6 +42,7 @@ why = "Provides per-statement rollback only; a service method that calls three r
 
 [[option]]
 id = "transactional-on-controller"
+violates = true
 label = "@Transactional on controller action methods"
 directive = "@Transactional is applied on @RequestMapping methods in @RestController classes. The HTTP request handler owns the transaction boundary."
 why = "Mixes HTTP concerns with transactional concerns; prevents the service from being called transactionally from non-HTTP entry points; and couples the transaction boundary to the request lifecycle rather than the business-operation boundary."

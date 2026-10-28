@@ -104,7 +104,10 @@ impl std::fmt::Debug for GenericCliDriver {
             .field("base_args", &self.base_args)
             .field("task_flag", &self.task_flag)
             .field("worktree", &self.worktree)
-            .field("on_activity", &self.on_activity.as_ref().map(|_| "<callback>"))
+            .field(
+                "on_activity",
+                &self.on_activity.as_ref().map(|_| "<callback>"),
+            )
             .finish()
     }
 }
@@ -333,32 +336,63 @@ mod tests {
         let base = "/Users/me/ws/acme/api/.camerata-worktrees";
         let wt_a = PathBuf::from(base).join("story-a");
         let wt_b = PathBuf::from(base).join("story-b");
-        assert_eq!(derive_shared_target_dir(&wt_a), derive_shared_target_dir(&wt_b));
-    }
-
-    /// `build_command` injects CARGO_TARGET_DIR when a canonical worktree is set.
-    /// We verify by inspecting the command's env via the std command representation.
-    #[test]
-    fn build_command_injects_cargo_target_dir_for_canonical_worktree() {
-        let wt = PathBuf::from("/tmp/clone/.camerata-worktrees/story-1");
-        let driver =
-            GenericCliDriver::new("my-agent", "-p", &[]).with_worktree(wt.clone());
-        // build_command is private; verify indirectly through the worktree field and
-        // the derive function (which build_command calls).
-        let expected_target = derive_shared_target_dir(&wt);
-        assert!(expected_target.is_some(), "canonical worktree must derive a target dir");
         assert_eq!(
-            expected_target.unwrap(),
-            PathBuf::from("/tmp/clone/.camerata-shared-target")
+            derive_shared_target_dir(&wt_a),
+            derive_shared_target_dir(&wt_b)
         );
     }
 
-    /// No worktree → no CARGO_TARGET_DIR injection (nothing to derive from).
+    /// The value `build_command` set for `key` on the command's environment, if any.
+    fn env_set_on(cmd: &tokio::process::Command, key: &str) -> Option<std::ffi::OsString> {
+        cmd.as_std()
+            .get_envs()
+            .find(|(k, _)| *k == std::ffi::OsStr::new(key))
+            .and_then(|(_, v)| v.map(std::ffi::OsStr::to_os_string))
+    }
+
+    /// `build_command` injects CARGO_TARGET_DIR (the shared per-clone store) and sets the
+    /// working directory when a canonical worktree is set. Asserted on the real `Command`
+    /// that `run` would spawn, via the std command's env/cwd accessors.
+    #[test]
+    fn build_command_injects_cargo_target_dir_for_canonical_worktree() {
+        let wt = PathBuf::from("/tmp/clone/.camerata-worktrees/story-1");
+        let driver = GenericCliDriver::new("my-agent", "-p", &[]).with_worktree(wt.clone());
+        let cmd = driver.build_command(&role(), "task");
+        assert_eq!(
+            env_set_on(&cmd, "CARGO_TARGET_DIR"),
+            Some(std::ffi::OsString::from(
+                "/tmp/clone/.camerata-shared-target"
+            )),
+            "a canonical worktree must inject the shared target dir"
+        );
+        assert_eq!(
+            cmd.as_std().get_current_dir(),
+            Some(wt.as_path()),
+            "the command runs inside the worktree"
+        );
+    }
+
+    /// A worktree too shallow to have a clone root (no grandparent) falls back silently:
+    /// still run in the worktree, but no CARGO_TARGET_DIR is injected.
+    #[test]
+    fn build_command_no_cargo_target_dir_for_shallow_worktree() {
+        let wt = PathBuf::from("/story-1");
+        assert!(
+            derive_shared_target_dir(&wt).is_none(),
+            "precondition: this layout derives no shared target dir"
+        );
+        let driver = GenericCliDriver::new("my-agent", "-p", &[]).with_worktree(wt.clone());
+        let cmd = driver.build_command(&role(), "task");
+        assert_eq!(env_set_on(&cmd, "CARGO_TARGET_DIR"), None);
+        assert_eq!(cmd.as_std().get_current_dir(), Some(wt.as_path()));
+    }
+
+    /// No worktree -> no CARGO_TARGET_DIR injection and no working-directory override.
     #[test]
     fn build_command_no_cargo_target_dir_without_worktree() {
         let driver = GenericCliDriver::new("my-agent", "-p", &[]);
-        assert!(driver.worktree.is_none(), "no worktree set");
-        // derive_shared_target_dir is never called when worktree is None;
-        // just confirm the field is unset — the build_command branch is not reached.
+        let cmd = driver.build_command(&role(), "task");
+        assert_eq!(env_set_on(&cmd, "CARGO_TARGET_DIR"), None);
+        assert_eq!(cmd.as_std().get_current_dir(), None);
     }
 }

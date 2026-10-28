@@ -1,9 +1,11 @@
 id = "ARCH-UTC-TIMESTAMPS-1"
+version = 1
 title = "Domain timestamps are anchored to UTC; mappers normalize at the persistence boundary"
-tag = "stack"
 domain = "api-layer"
 layer = "universal"
 enforcement = "structured"
+kind = "decision"
+inspectable = true
 default = true
 verification = "grounded"
 
@@ -17,13 +19,16 @@ title = "PostgreSQL — 8.5. Date/Time Types (timestamptz stores UTC; the wire o
 
 [decision]
 question = "What position does the project take on: Domain timestamps are anchored to UTC; mappers normalize at the persistence boundary?"
-default = "domain-timestamps-are-anchored-to-utc-mappers-no"
+default = "domain-timestamps-are-anchored-to-utc"
 why = "TIMESTAMPTZ and equivalent column types store UTC; the wire offset is session-determined noise. Letting offset-bearing or naive timestamps propagate past the persistence boundary means every downstream layer has to remember to handle the timezone question, and the answer drifts across the codebase. Normalizing once at the boundary gives the domain a single canonical clock and turns 'is this timestamp UTC?' from a runtime question into a type-level fact. Letting timestamps carry their fixed offset through the domain propagates a representational detail past the boundary, and every consumer becomes responsible for normalizing the same way, which they will not. Using naive timezone-less timestamps in the domain loses the UTC fact entirely and produces silent off-by-hours bugs when the storage layer or a downstream consumer assumes a different timezone. Storing and passing timestamps as raw integers or strings sheds the language's date-time API and adds a parsing or conversion bug surface at every layer that touches the value."
 
 [[option]]
-id = "domain-timestamps-are-anchored-to-utc-mappers-no"
+id = "domain-timestamps-are-anchored-to-utc"
 label = "Domain timestamps are anchored to UTC; mappers normalize at the persistence boundary"
 directive = "Timestamps in the domain layer use the language's UTC-anchored type, never an offset-bearing or naive type. The persistence boundary (the mapper between the storage representation and the domain type) is responsible for normalizing whatever the storage layer returns into UTC before the value reaches the domain. Locale and timezone presentation happen at the rendering boundary, never inside the domain."
+remediation = """
+Change the timestamp type in the domain layer to the language's UTC-anchored type, and add normalization inside the persistence-boundary mapper so whatever the storage layer returns is converted to UTC before it reaches the domain. Move any locale/timezone display formatting to the presentation layer, away from the domain type. Verify by confirming a value read from storage with a non-UTC offset arrives in the domain already normalized to UTC.
+"""
 why = "TIMESTAMPTZ and equivalent column types store UTC; the wire offset is session-determined noise."
 
 [[option]]

@@ -1,0 +1,37 @@
+# Corpus staleness watermark.
+# Design: docs/design/2026-10-20_corpus-staleness-check.md
+#
+# Each entry under [confirmed] is the date a rule DOMAIN was last CONFIRMED current against the
+# ecosystem, "YYYY-MM-DD". It is advanced ONLY by a human confirmation after reviewing a sweep's
+# findings - running a sweep NEVER advances it. Swept is not confirmed.
+#
+# STATE as of 2026-10-20: no formal sweep has run, so [confirmed] is deliberately EMPTY. Every
+# corpus rule was authored spring 2026 or later (the Supabase pack within months), so the corpus
+# is informally current, but nothing here is CLAIMED as confirmed until the first sweep is
+# reviewed. Until then `never_confirmed` reports every domain - that is correct, not a bug.
+#
+# The gated pre-first-client action (see the pending-actions memory) is a FULL sweep of every
+# domain, after which each domain gets its first confirmed date here and this comment is updated.
+
+# Default staleness window, in days (quarterly). A confirmed domain older than this is "overdue".
+warn_after_days = 90
+
+# How many days BEFORE a domain's window lapses it starts showing as "due soon", so the warning
+# arrives while there is still time to schedule a sweep. A confirmed domain with this many days
+# or fewer left (and not yet past its window) is "due soon"; past the window it is "overdue".
+# (Top-level keys must stay above the first [table] header below.)
+warn_lead_days = 14
+
+# Per-domain overrides for packs that move faster or slower than the default. Example:
+# [warn_after_days_overrides]
+# javascript = 30   # a fast-churning ecosystem; look again sooner
+# universal  = 365  # security/primitive rules age slowly
+[warn_after_days_overrides]
+
+# Per-domain overrides of the lead, like the window overrides above. Example:
+# [warn_lead_days_overrides]
+# universal = 60    # a one-year window deserves more than two weeks of notice
+[warn_lead_days_overrides]
+
+# domain = "YYYY-MM-DD"  -- populated by the confirm step after a reviewed sweep. Empty until then.
+[confirmed]

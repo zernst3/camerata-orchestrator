@@ -1,0 +1,40 @@
+id = "FIREBASE-RULES-TESTS-1"
+version = 2
+title = "The security rules have unit tests that run against the emulator"
+domain = "firebase"
+layer = "platform"
+enforcement = "structured"
+kind = "defect"
+inspectable = true
+max_severity = "low"
+default = true
+verification = "grounded"
+qualifies = "Advisory, absence based, at a low severity. One row per repository when at least one assessed rules file exists and no package.json lists @firebase/rules-unit-testing (or the deprecated @firebase/testing) in any dependency block. Rules tests written against the emulator from another language, or kept in a separate repository, are invisible to the scan, so the finding says how to close the gap. When no assessed rules file is confirmed as deployed (firebase.json does not name it, there is no firebase.json, or it sits under an examples, samples or docs folder) the row is held for review and says why. A repository with no rules files is silent. Withheld on a truncated scan, because the manifest it looks for may be in a dropped file."
+
+[[sources]]
+url = "https://firebase.google.com/docs/rules/unit-tests"
+title = "Build unit tests"
+
+[[sources]]
+url = "https://firebase.google.com/docs/rules/insecure-rules"
+title = "Avoid insecure rules"
+
+[decision]
+question = "Are the security rules covered by tests?"
+default = "security-rules-have-unit-tests"
+why = "Rules are code that decides who can read and write every document, and a small edit can open a collection without anything failing. Firebase provides a library to run rules against the emulator and assert what succeeds and what fails, and its guide to insecure rules ends by asking you to test your rules."
+
+[[option]]
+id = "security-rules-have-unit-tests"
+label = "Security rules have unit tests that run against the emulator"
+directive = "The project depends on the rules unit testing library and tests its rules against the emulator: each collection has a case an owner can do, a case a stranger cannot, and a case an unauthenticated caller cannot. The tests run in CI, so a rules change that opens access fails the build."
+remediation = "Add `@firebase/rules-unit-testing` as a dev dependency and write tests with `initializeTestEnvironment`, `assertSucceeds` and `assertFails` for each collection: one the owner can do, one a stranger cannot, one an unauthenticated caller cannot. Run them with `firebase emulators:exec` in CI so a rules change that opens access fails the build."
+effort = "medium"
+why = "A failing test is the first sign of a rules mistake, instead of a stranger reading the data."
+
+[[option]]
+id = "security-rules-are-untested"
+violates = true
+label = "Security rules are deployed without tests"
+directive = "Deploy security rules without tests that exercise them."
+why = "A change to the rules can open access to every collection without any check failing, so the first sign of a mistake is a stranger reading the data."

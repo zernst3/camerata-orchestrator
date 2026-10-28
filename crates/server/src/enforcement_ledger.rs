@@ -74,9 +74,9 @@ impl EnforcementLedger {
 /// Pure: operates only on the event slice. Unit-testable without I/O.
 pub fn revised_after(deny_seq: usize, target: &str, events: &[GateEvent]) -> bool {
     // A later allow on the same target = the agent revised after the deny.
-    events.iter().any(|e| {
-        e.seq > deny_seq && e.verdict == "allow" && e.detail.contains(target)
-    })
+    events
+        .iter()
+        .any(|e| e.seq > deny_seq && e.verdict == "allow" && e.detail.contains(target))
 }
 
 /// Extract one `EnforcementCatch` per deny event from a run's gate-event slice.
@@ -138,11 +138,16 @@ pub fn extract_run_catches(
 fn extract_path_from_detail(detail: &str) -> Option<String> {
     // Live format: "Write to <path> denied." or "Write to <path> allowed."
     let rest = detail.strip_prefix("Write to ")?;
-    let end = rest.find(" denied.")
+    let end = rest
+        .find(" denied.")
         .or_else(|| rest.find(" allowed."))
         .or_else(|| rest.find(' '))?;
     let path = &rest[..end];
-    if path.is_empty() { None } else { Some(path.to_string()) }
+    if path.is_empty() {
+        None
+    } else {
+        Some(path.to_string())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -169,9 +174,7 @@ pub async fn capture_run_finalization(
 
     for catch in catches {
         if let Err(e) = store.record_catch(catch).await {
-            eprintln!(
-                "enforcement ledger: failed to record run catch for run={run_id}: {e}"
-            );
+            eprintln!("enforcement ledger: failed to record run catch for run={run_id}: {e}");
             // fail-soft: swallow, do not propagate
         }
     }
@@ -188,10 +191,7 @@ pub async fn capture_run_finalization(
 /// raw snippet is never stored.
 ///
 /// Best-effort / fail-soft: errors are logged and swallowed.
-pub async fn capture_scan_findings(
-    ledger: &EnforcementLedger,
-    findings: &[Finding],
-) {
+pub async fn capture_scan_findings(ledger: &EnforcementLedger, findings: &[Finding]) {
     let Some(store) = ledger.0.as_ref() else {
         return; // no ledger; no-op (fail-soft)
     };
@@ -453,12 +453,16 @@ mod tests {
             layer: "layer-1".to_string(),
             verdict: "deny".to_string(),
             rule: Some("SEC-NO-PATH-ESCAPE-1".to_string()),
-            detail: "Frontend attempted a write outside workspace. SEC-NO-PATH-ESCAPE-1".to_string(),
+            detail: "Frontend attempted a write outside workspace. SEC-NO-PATH-ESCAPE-1"
+                .to_string(),
             content_hash: None, // scripted run has no hash
         }];
         let catches = extract_run_catches(&events, "run-scripted", "CAM-10", 0);
         assert_eq!(catches.len(), 1);
-        assert!(catches[0].content_hash.is_none(), "scripted runs have no content_hash");
+        assert!(
+            catches[0].content_hash.is_none(),
+            "scripted runs have no content_hash"
+        );
     }
 
     // ── fail-soft: failing/None ledger does not break callers ────────────────
@@ -482,7 +486,9 @@ mod tests {
     async fn capture_scan_findings_is_noop_with_none_ledger() {
         let ledger = EnforcementLedger::none();
         let findings = vec![crate::onboard::Finding {
+            could_be_intentional: false,
             repo: "owner/repo".to_string(),
+            kind: None,
             path: "src/db.py".to_string(),
             line: 42,
             rule_id: "SEC-NO-HARDCODED-SECRETS-1".to_string(),
@@ -499,6 +505,11 @@ mod tests {
             effort: None,
             category: None,
             located: true,
+            captures: Default::default(),
+            evaluated_option_id: None,
+            also_locations: Vec::new(),
+            fix_specific: None,
+            calibration_rationale: None,
         }];
         // Must not panic or error.
         capture_scan_findings(&ledger, &findings).await;
@@ -545,7 +556,9 @@ mod tests {
         let findings = vec![
             // Active floor finding → should be recorded (no panic).
             crate::onboard::Finding {
+                could_be_intentional: false,
                 repo: "owner/repo".to_string(),
+                kind: None,
                 path: "src/db.py".to_string(),
                 line: 42,
                 rule_id: "SEC-NO-HARDCODED-SECRETS-1".to_string(),
@@ -562,10 +575,17 @@ mod tests {
                 effort: None,
                 category: None,
                 located: true,
+                captures: Default::default(),
+                evaluated_option_id: None,
+                also_locations: Vec::new(),
+                fix_specific: None,
+                calibration_rationale: None,
             },
             // Suppressed finding → skipped silently (no panic).
             crate::onboard::Finding {
+                could_be_intentional: false,
                 repo: "owner/repo".to_string(),
+                kind: None,
                 path: "src/legacy.py".to_string(),
                 line: 7,
                 rule_id: "SEC-NO-HARDCODED-SECRETS-1".to_string(),
@@ -582,10 +602,17 @@ mod tests {
                 effort: None,
                 category: None,
                 located: true,
+                captures: Default::default(),
+                evaluated_option_id: None,
+                also_locations: Vec::new(),
+                fix_specific: None,
+                calibration_rationale: None,
             },
             // Non-floor rule → skipped silently (no panic).
             crate::onboard::Finding {
+                could_be_intentional: false,
                 repo: "owner/repo".to_string(),
+                kind: None,
                 path: "src/some.rs".to_string(),
                 line: 1,
                 rule_id: "ARCH-NO-GOD-STRUCT-1".to_string(),
@@ -602,6 +629,11 @@ mod tests {
                 effort: None,
                 category: None,
                 located: true,
+                captures: Default::default(),
+                evaluated_option_id: None,
+                also_locations: Vec::new(),
+                fix_specific: None,
+                calibration_rationale: None,
             },
         ];
 
@@ -631,7 +663,8 @@ mod tests {
 
     #[test]
     fn path_returns_none_for_non_write_detail() {
-        let detail = "Frontend attempted a write that climbs out of the workspace. SEC-NO-PATH-ESCAPE-1";
+        let detail =
+            "Frontend attempted a write that climbs out of the workspace. SEC-NO-PATH-ESCAPE-1";
         // Does not start with "Write to ", so path is None.
         assert_eq!(super::extract_path_from_detail(detail), None);
     }

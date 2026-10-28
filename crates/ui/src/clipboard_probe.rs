@@ -33,7 +33,9 @@ pub fn arm_if_requested() {
     #[cfg(target_os = "macos")]
     {
         use dioxus::prelude::{spawn, use_hook};
-        let armed = std::env::var("CAMERATA_CLIPBOARD_PROBE").map(|v| v == "1").unwrap_or(false);
+        let armed = std::env::var("CAMERATA_CLIPBOARD_PROBE")
+            .map(|v| v == "1")
+            .unwrap_or(false);
         use_hook(move || {
             if armed {
                 println!("[probe] CAMERATA_CLIPBOARD_PROBE=1 — probing the LIVE app in ~4s");
@@ -141,7 +143,10 @@ pub async fn drive(handler_input: Option<&str>) {
     tokio::time::sleep(Duration::from_millis(800)).await;
     let value = eval_json("return document.getElementById('probe').value;").await;
     let paste_ok = value.contains(PASTE_MARKER);
-    println!("[probe] PASTE: field value after Cmd-V = {value:?}  -> {}", verdict(paste_ok));
+    println!(
+        "[probe] PASTE: field value after Cmd-V = {value:?}  -> {}",
+        verdict(paste_ok)
+    );
     if !paste_ok {
         failures.push("paste");
     }
@@ -156,8 +161,10 @@ pub async fn drive(handler_input: Option<&str>) {
         .await;
         post_cmd_key("v", 9, false).await;
         tokio::time::sleep(Duration::from_millis(800)).await;
-        let value =
-            eval_json(&format!("return document.getElementById('{handler_id}').value;")).await;
+        let value = eval_json(&format!(
+            "return document.getElementById('{handler_id}').value;"
+        ))
+        .await;
         let ok = value.contains(PASTE_MARKER);
         println!(
             "[probe] PASTE-with-dioxus-onkeydown: field value after Cmd-V = {value:?}  -> {}",
@@ -208,7 +215,10 @@ pub async fn drive(handler_input: Option<&str>) {
     tokio::time::sleep(Duration::from_millis(800)).await;
     let clip = get_pasteboard();
     let copy_ok = clip == COPY_MARKER;
-    println!("[probe] COPY: pasteboard after Cmd-C = {clip:?}  -> {}", verdict(copy_ok));
+    println!(
+        "[probe] COPY: pasteboard after Cmd-C = {clip:?}  -> {}",
+        verdict(copy_ok)
+    );
     if !copy_ok {
         failures.push("copy");
     }
@@ -225,7 +235,10 @@ pub async fn drive(handler_input: Option<&str>) {
     let clip = get_pasteboard();
     let left = eval_json("return document.getElementById('probe').value;").await;
     let cut_ok = clip == CUT_MARKER && !left.contains(CUT_MARKER);
-    println!("[probe] CUT: pasteboard = {clip:?}, field left = {left:?}  -> {}", verdict(cut_ok));
+    println!(
+        "[probe] CUT: pasteboard = {clip:?}, field left = {left:?}  -> {}",
+        verdict(cut_ok)
+    );
     if !cut_ok {
         failures.push("cut");
     }
@@ -302,7 +315,10 @@ fn set_pasteboard(text: &str) {
 /// Read the system pasteboard.
 #[cfg(target_os = "macos")]
 fn get_pasteboard() -> String {
-    match std::process::Command::new("pbpaste").stdout(std::process::Stdio::piped()).output() {
+    match std::process::Command::new("pbpaste")
+        .stdout(std::process::Stdio::piped())
+        .output()
+    {
         Ok(out) => String::from_utf8_lossy(&out.stdout).to_string(),
         Err(e) => format!("<pbpaste error: {e}>"),
     }
@@ -366,8 +382,10 @@ async fn click_at_page_point(rect_json: &str) {
     let app = NSApplication::sharedApplication(mtm);
     let window_number = app.keyWindow().map(|w| w.windowNumber()).unwrap_or(0);
 
-    for (event_type, click_count) in [(NSEventType::LeftMouseDown, 1), (NSEventType::LeftMouseUp, 1)]
-    {
+    for (event_type, click_count) in [
+        (NSEventType::LeftMouseDown, 1),
+        (NSEventType::LeftMouseUp, 1),
+    ] {
         let event = NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
             event_type,
             point,
@@ -402,10 +420,13 @@ async fn post_cmd_key(key: &str, key_code: u16, shift: bool) {
         return;
     };
     let app = NSApplication::sharedApplication(mtm);
-    let window_number = app.keyWindow().map(|w| w.windowNumber()).unwrap_or_else(|| {
-        println!("[probe] WARNING: no key window; posting with windowNumber 0");
-        0
-    });
+    let window_number = app
+        .keyWindow()
+        .map(|w| w.windowNumber())
+        .unwrap_or_else(|| {
+            println!("[probe] WARNING: no key window; posting with windowNumber 0");
+            0
+        });
 
     let mut flags = NSEventModifierFlags::Command;
     if shift {

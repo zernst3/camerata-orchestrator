@@ -1,9 +1,11 @@
 id = "GO-GRPC-STREAMING-CLEANUP-1"
+version = 1
 title = "Streaming RPCs properly close send/receive loops and handle context cancellation; no resource leaks or dangling goroutines"
-tag = "stack"
 domain = "go:grpc"
 layer = "framework"
 enforcement = "prose"
+kind = "defect"
+inspectable = true
 default = true
 verification = "grounded"
 
@@ -24,16 +26,21 @@ why = "A streaming RPC (server-side stream, client-side stream, bidirectional) i
 id = "streaming-context-cleanup"
 label = "Streaming loops respect context cancellation; loops exit cleanly on context deadline or client close"
 directive = "Streaming RPC handlers read from the receive stream in a loop: for { msg, err := stream.Recv(); if err != nil { return } ... }. The Recv() call blocks until a message arrives or the context is cancelled; when the context is cancelled, Recv() returns an error, and the handler exits the loop. Similarly, before sending, the handler checks the context or lets the Send() call fail if the context is already cancelled. Handlers do not spawn goroutines that outlive the stream; if a handler starts a background goroutine, it is managed by the context or explicitly waited for before the handler returns."
+remediation = """
+Add a check for context cancellation (or rely on stream.Recv() returning an error on cancellation) inside the streaming loop so the handler exits promptly instead of looping indefinitely, and handle errors from stream.Send()/stream.Recv() explicitly. Verify by disconnecting the client mid-stream and confirming the server-side goroutine for that stream exits rather than continuing to run.
+"""
 why = "Context-aware streaming loops ensure goroutines are bounded by the request lifecycle; no leaks."
 
 [[option]]
 id = "streaming-ignore-context"
+violates = true
 label = "Streaming loops ignore context cancellation; may loop indefinitely"
 directive = "Handlers read from the stream without checking context.Done(); goroutines may continue running after the client disconnects or the context deadline is reached."
-why = "Simplifies the loop logic; high risk of goroutine leaks and resource exhaustion."
+why = "The send loop keeps running after the client disconnects or the request is cancelled, so the goroutine, its stream, and everything they hold are never released. Under ordinary client churn these accumulate until the process exhausts memory or connection limits."
 
 [[option]]
 id = "streaming-close-unchecked"
+violates = true
 label = "Streams are not explicitly checked for closure; no error handling on Send/Recv"
 directive = "Handlers call stream.Send() and stream.Recv() without error handling; failures and disconnects are not detected."
 why = "Can result in silent failures, incomplete data transfer, and undetected client disconnects."

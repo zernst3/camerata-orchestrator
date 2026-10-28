@@ -29,7 +29,6 @@ pub(crate) use chorale_dioxus::{use_table, RowCellRenderer, RowCellRenderers, Ro
 
 // ── Projects ───────────────────────────────────────────────────────────────────
 
-
 #[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize)]
 struct RuleSelectionView {
     rule_id: String,
@@ -115,6 +114,19 @@ struct ProjectView {
     /// the drag-and-drop builder. Absent → empty (the server seeds a default on the project side).
     #[serde(default)]
     hierarchy_schema: HierarchySchemaView,
+    /// The project's AI backend (`docs/design/2026-09-22_per-project-backend.md`): the source
+    /// of truth for EVERY project-scoped model call (the scan, the alternative-recommendation
+    /// pass, the disagreement rescan, and the governed dev loop). Replaces the old
+    /// `cli_active: bool` compliance flag. `Cli` (the shared type's `Default` AND serde
+    /// default) runs on the operator's Claude Code subscription, no key needed, the
+    /// zero-setup path a scan needs to "just work" out of the box. `Api` runs on the
+    /// Anthropic API and hard-blocks (never silently falls back to CLI) when no key is
+    /// configured, the compliant metered chain for client code. `#[serde(default)]` is what
+    /// migrates a project persisted with the old, now-absent `cli_active` field: it
+    /// deserializes with no `backend` key present at all, so it lands on the same `Cli`
+    /// default as a freshly-created project.
+    #[serde(default)]
+    backend: ProjectBackend,
 }
 
 /// One project-memory entry as the BFF reports it (mirrors the server's `MemoryEntry`). Enum-ish
@@ -176,13 +188,34 @@ struct HierarchySchemaView {
 /// The default palette the builder offers (the common Scrum/ADO types). A short explanation per type
 /// powers the `(i)` hover so people new to the terminology are not lost.
 const DEFAULT_TYPE_PALETTE: &[(&str, &str)] = &[
-    ("Initiative", "A large, cross-team goal spanning multiple epics; the top of the ladder."),
-    ("Epic", "A large body of work delivered over multiple sprints, decomposed into features/stories."),
-    ("Feature", "A shippable capability under an epic; groups the stories that build it."),
-    ("Story", "A user-facing increment of value, small enough to finish in a sprint."),
-    ("Defect", "A flaw in delivered work that must be corrected; tracked alongside stories."),
-    ("Task", "A unit of implementation work under a story; often a technical step."),
-    ("Bug", "A specific coding error to fix; the smallest defect-style item."),
+    (
+        "Initiative",
+        "A large, cross-team goal spanning multiple epics; the top of the ladder.",
+    ),
+    (
+        "Epic",
+        "A large body of work delivered over multiple sprints, decomposed into features/stories.",
+    ),
+    (
+        "Feature",
+        "A shippable capability under an epic; groups the stories that build it.",
+    ),
+    (
+        "Story",
+        "A user-facing increment of value, small enough to finish in a sprint.",
+    ),
+    (
+        "Defect",
+        "A flaw in delivered work that must be corrected; tracked alongside stories.",
+    ),
+    (
+        "Task",
+        "A unit of implementation work under a story; often a technical step.",
+    ),
+    (
+        "Bug",
+        "A specific coding error to fix; the smallest defect-style item.",
+    ),
 ];
 
 // ── Pure schema mutations (unit-tested; the component calls these on its working copy) ──────────
@@ -194,14 +227,20 @@ fn schema_add_type(schema: &mut HierarchySchemaView, name: &str, builtin: bool) 
     if name.is_empty() || schema.types.iter().any(|t| t.name == name) {
         return false;
     }
-    schema.types.push(WorkTypeView { name: name.to_string(), builtin, is_design_root: false });
+    schema.types.push(WorkTypeView {
+        name: name.to_string(),
+        builtin,
+        is_design_root: false,
+    });
     true
 }
 
 /// Remove a type AND every relation that references it (so no dangling edges remain).
 fn schema_remove_type(schema: &mut HierarchySchemaView, name: &str) {
     schema.types.retain(|t| t.name != name);
-    schema.relations.retain(|r| r.parent != name && r.child != name);
+    schema
+        .relations
+        .retain(|r| r.parent != name && r.child != name);
 }
 
 /// Toggle whether a type may be a design root (the top of a design tree).
@@ -242,28 +281,39 @@ fn schema_add_relation(
     if parent == child {
         return Err("a type cannot nest under itself");
     }
-    if schema.relations.iter().any(|r| r.parent == parent && r.child == child) {
+    if schema
+        .relations
+        .iter()
+        .any(|r| r.parent == parent && r.child == child)
+    {
         return Err("that nesting already exists");
     }
     if schema_would_cycle(schema, parent, child) {
         return Err("that would create a cycle");
     }
-    schema
-        .relations
-        .push(TypeRelationView { parent: parent.to_string(), child: child.to_string() });
+    schema.relations.push(TypeRelationView {
+        parent: parent.to_string(),
+        child: child.to_string(),
+    });
     Ok(())
 }
 
 /// Remove an allowed `parent → child` nesting.
 fn schema_remove_relation(schema: &mut HierarchySchemaView, parent: &str, child: &str) {
-    schema.relations.retain(|r| !(r.parent == parent && r.child == child));
+    schema
+        .relations
+        .retain(|r| !(r.parent == parent && r.child == child));
 }
 
 /// Save the project's work hierarchy schema (the whole graph) — the drag-and-drop builder's Save.
 /// POSTs the schema object directly (the server handler deserializes a `HierarchySchema` body).
 async fn set_hierarchy_schema(id: &str, schema: &HierarchySchemaView) -> bool {
     reqwest::Client::new()
-        .post(format!("{}/api/projects/{}/hierarchy", crate::bff_base(), id))
+        .post(format!(
+            "{}/api/projects/{}/hierarchy",
+            crate::bff_base(),
+            id
+        ))
         .json(schema)
         .send()
         .await
@@ -277,8 +327,10 @@ async fn set_hierarchy_schema(id: &str, schema: &HierarchySchemaView) -> bool {
 /// serializes, so defaults can never drift again). The `*View` names are kept so the many
 /// existing call sites read unchanged.
 use camerata_api_types::project::L3ReviewConfig as L3ReviewView;
+use camerata_api_types::project::ProjectBackend;
 use camerata_api_types::project::StallThresholds as StallThresholdsView;
 use camerata_api_types::project::StepModels as StepModelsView;
+use camerata_ui_core::backend::ProjectBackendExt;
 
 /// UI mirror of `camerata_fleet::tier::TierMap`. Three model-id slots, one per
 /// capability band. `fast` and `balanced` are ordered chains (Vec<String>); `strongest`
@@ -302,11 +354,11 @@ fn default_fast_chain_str() -> Vec<String> {
 }
 
 fn default_balanced_chain_str() -> Vec<String> {
-    vec!["claude-sonnet-4-6".to_string()]
+    vec!["claude-sonnet-5".to_string()]
 }
 
 fn default_strongest_model_str() -> String {
-    "claude-opus-4-8".to_string()
+    "claude-opus-5".to_string()
 }
 
 impl Default for TierMapView {
@@ -453,7 +505,11 @@ async fn set_active_project(id: &str) -> bool {
 /// all bands are always sent so a single round-trip sets the whole map.
 async fn set_project_tier_map(id: &str, map: &TierMapView) -> bool {
     reqwest::Client::new()
-        .post(format!("{}/api/projects/{}/tier-map", crate::bff_base(), id))
+        .post(format!(
+            "{}/api/projects/{}/tier-map",
+            crate::bff_base(),
+            id
+        ))
         .json(&serde_json::json!({
             "fast":     map.fast,
             "balanced": map.balanced,
@@ -470,12 +526,50 @@ async fn set_project_tier_map(id: &str, map: &TierMapView) -> bool {
 /// Uses `POST /api/projects/:id/vision-enabled {enabled: bool}`.
 pub(super) async fn set_project_vision_enabled(id: &str, enabled: bool) -> bool {
     reqwest::Client::new()
-        .post(format!("{}/api/projects/{}/vision-enabled", crate::bff_base(), id))
+        .post(format!(
+            "{}/api/projects/{}/vision-enabled",
+            crate::bff_base(),
+            id
+        ))
         .json(&serde_json::json!({ "enabled": enabled }))
         .send()
         .await
         .map(|r| r.status().is_success())
         .unwrap_or(false)
+}
+
+/// Set a project's AI backend (`docs/design/2026-09-22_per-project-backend.md`). This is the
+/// source of truth for EVERY project-scoped model call: the scan, the alternative-recommendation
+/// pass, the disagreement rescan, and the governed dev loop. `Cli` runs on the operator's Claude
+/// Code subscription (no key needed, the zero-setup default); `Api` runs on the Anthropic API
+/// and hard-blocks (never silently falls back to CLI) when no key is configured.
+///
+/// Uses `POST /api/projects/:id/backend { backend }`, mirroring `set_step_model`'s response
+/// shape exactly: `{ "ok": true, "project": {...} }` on success, `{ "ok": false, "message":
+/// "..." }` on failure — see `set_backend_handler` in `crates/server/src/lib.rs`. Unlike the
+/// sibling mutators above (which only check the HTTP status), this one PARSES the response and
+/// hands back the server's own echoed `backend`, not the value the caller asked for: this is a
+/// compliance-relevant setting, so the UI must reflect what the server actually persisted, never
+/// an optimistic guess that silently drifted from it. Returns `None` on any failure (network,
+/// non-2xx, unparseable body, unknown project, or an explicit `ok: false`).
+pub(super) async fn set_project_backend(
+    id: &str,
+    backend: ProjectBackend,
+) -> Option<ProjectBackend> {
+    let resp = reqwest::Client::new()
+        .post(format!("{}/api/projects/{}/backend", crate::bff_base(), id))
+        .json(&serde_json::json!({ "backend": backend.as_wire() }))
+        .send()
+        .await
+        .ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let body: serde_json::Value = resp.json().await.ok()?;
+    if body.get("ok").and_then(|v| v.as_bool()) != Some(true) {
+        return None;
+    }
+    serde_json::from_value(body.get("project")?.get("backend")?.clone()).ok()
 }
 
 /// Set the model for ONE non-fleet AI step on a project. Uses the
@@ -486,7 +580,11 @@ pub(super) async fn set_project_vision_enabled(id: &str, enabled: bool) -> bool 
 /// endpoint and keep Audit + Calibration bidirectionally synced.
 pub(super) async fn set_project_step_model(id: &str, step: &str, model: &str) -> bool {
     reqwest::Client::new()
-        .post(format!("{}/api/projects/{}/step-models", crate::bff_base(), id))
+        .post(format!(
+            "{}/api/projects/{}/step-models",
+            crate::bff_base(),
+            id
+        ))
         .json(&serde_json::json!({ "step": step, "model": model }))
         .send()
         .await
@@ -514,7 +612,11 @@ async fn set_max_iterations(id: &str, max_iterations: usize) -> bool {
 /// Save the project's free-text product brief (#112).
 async fn set_product_brief(id: &str, brief: &str) -> bool {
     reqwest::Client::new()
-        .post(format!("{}/api/projects/{}/product-brief", crate::bff_base(), id))
+        .post(format!(
+            "{}/api/projects/{}/product-brief",
+            crate::bff_base(),
+            id
+        ))
         .json(&serde_json::json!({ "product_brief": brief }))
         .send()
         .await
@@ -536,7 +638,12 @@ async fn add_memory_entry(id: &str, kind: &str, text: &str) -> bool {
 /// Patch a memory entry's status (`"approved"` | `"archived"` | `"proposed"`).
 async fn patch_memory_status(id: &str, eid: &str, status: &str) -> bool {
     reqwest::Client::new()
-        .post(format!("{}/api/projects/{}/memory/{}", crate::bff_base(), id, eid))
+        .post(format!(
+            "{}/api/projects/{}/memory/{}",
+            crate::bff_base(),
+            id,
+            eid
+        ))
         .json(&serde_json::json!({ "status": status }))
         .send()
         .await
@@ -547,7 +654,12 @@ async fn patch_memory_status(id: &str, eid: &str, status: &str) -> bool {
 /// Save an edit to a memory entry's text + kind (the view/edit modal).
 async fn save_memory_edit(id: &str, eid: &str, kind: &str, text: &str) -> bool {
     reqwest::Client::new()
-        .post(format!("{}/api/projects/{}/memory/{}", crate::bff_base(), id, eid))
+        .post(format!(
+            "{}/api/projects/{}/memory/{}",
+            crate::bff_base(),
+            id,
+            eid
+        ))
         .json(&serde_json::json!({ "kind": kind, "text": text }))
         .send()
         .await
@@ -558,7 +670,12 @@ async fn save_memory_edit(id: &str, eid: &str, kind: &str, text: &str) -> bool {
 /// Delete a memory entry (discard a proposal, or prune).
 async fn delete_memory_entry(id: &str, eid: &str) -> bool {
     reqwest::Client::new()
-        .delete(format!("{}/api/projects/{}/memory/{}", crate::bff_base(), id, eid))
+        .delete(format!(
+            "{}/api/projects/{}/memory/{}",
+            crate::bff_base(),
+            id,
+            eid
+        ))
         .send()
         .await
         .map(|r| r.status().is_success())
@@ -593,7 +710,11 @@ fn run_mem_action(
         if ok {
             refresh += 1;
         } else {
-            crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, "That memory action failed.");
+            crate::toast::push_toast(
+                toasts,
+                crate::toast::ToastKind::Error,
+                "That memory action failed.",
+            );
         }
     });
 }
@@ -1137,7 +1258,11 @@ fn MemoryEditor(project: ProjectView, refresh: Signal<u32>) -> Element {
 /// Uses the `POST /api/projects/:id/l3-review` endpoint (R7).
 async fn set_project_l3_review(id: &str, enabled: bool, model: &str) -> bool {
     reqwest::Client::new()
-        .post(format!("{}/api/projects/{}/l3-review", crate::bff_base(), id))
+        .post(format!(
+            "{}/api/projects/{}/l3-review",
+            crate::bff_base(),
+            id
+        ))
         .json(&serde_json::json!({ "enabled": enabled, "model": model }))
         .send()
         .await
@@ -1146,7 +1271,10 @@ async fn set_project_l3_review(id: &str, enabled: bool, model: &str) -> bool {
 }
 
 /// Fetch the proposed model assignments for a profile WITHOUT applying them.
-pub(super) async fn preview_model_profile(project_id: &str, profile: &str) -> Option<serde_json::Value> {
+pub(super) async fn preview_model_profile(
+    project_id: &str,
+    profile: &str,
+) -> Option<serde_json::Value> {
     reqwest::get(format!(
         "{}/api/projects/{}/model-profile/preview?profile={}",
         crate::bff_base(),
@@ -1161,9 +1289,16 @@ pub(super) async fn preview_model_profile(project_id: &str, profile: &str) -> Op
 }
 
 /// Apply a profile to a project (set profile + cascade + auto-save).
-pub(super) async fn apply_model_profile(project_id: &str, profile: &str) -> Option<serde_json::Value> {
+pub(super) async fn apply_model_profile(
+    project_id: &str,
+    profile: &str,
+) -> Option<serde_json::Value> {
     reqwest::Client::new()
-        .post(format!("{}/api/projects/{}/model-profile", crate::bff_base(), project_id))
+        .post(format!(
+            "{}/api/projects/{}/model-profile",
+            crate::bff_base(),
+            project_id
+        ))
         .json(&serde_json::json!({ "profile": profile }))
         .send()
         .await
@@ -1177,7 +1312,11 @@ pub(super) async fn apply_model_profile(project_id: &str, profile: &str) -> Opti
 /// Uses the `POST /api/projects/:id/stall-thresholds` endpoint.
 async fn set_project_stall_thresholds(id: &str, watched_secs: u64, routine_secs: u64) -> bool {
     reqwest::Client::new()
-        .post(format!("{}/api/projects/{}/stall-thresholds", crate::bff_base(), id))
+        .post(format!(
+            "{}/api/projects/{}/stall-thresholds",
+            crate::bff_base(),
+            id
+        ))
         .json(&serde_json::json!({ "watched_secs": watched_secs, "routine_secs": routine_secs }))
         .send()
         .await
@@ -1373,7 +1512,11 @@ async fn start_dev_run(
 ) -> StartRunOutcome {
     let body = dev_run_body(tier_map, skip_layer2);
     let resp = match reqwest::Client::new()
-        .post(format!("{}/api/stories/{}/run", crate::bff_base(), enc_seg(story_id)))
+        .post(format!(
+            "{}/api/stories/{}/run",
+            crate::bff_base(),
+            enc_seg(story_id)
+        ))
         .json(&body)
         .send()
         .await
@@ -1446,7 +1589,9 @@ async fn post_investigation_run(url: String, model: &str) -> BeginInvestigationO
             .await
             .ok()
             .and_then(|v| v.get("reason").and_then(|r| r.as_str().map(String::from)))
-            .unwrap_or_else(|| "The investigation could not begin from the current stage.".to_string());
+            .unwrap_or_else(|| {
+                "The investigation could not begin from the current stage.".to_string()
+            });
         return BeginInvestigationOutcome::Blocked(reason);
     }
     if !resp.status().is_success() {
@@ -1481,7 +1626,10 @@ async fn begin_investigation_run(story_id: &str, model: &str) -> BeginInvestigat
 /// repeat the Intake → Investigating transition (see `uow_rerun_investigation` server-side),
 /// so this is safe to call any time the UoW is in the Investigation & Refinement phase —
 /// including right after a run that produced no output, or one that failed.
-pub(crate) async fn rerun_investigation_run(story_id: &str, model: &str) -> BeginInvestigationOutcome {
+pub(crate) async fn rerun_investigation_run(
+    story_id: &str,
+    model: &str,
+) -> BeginInvestigationOutcome {
     post_investigation_run(
         format!(
             "{}/api/uow/{}/rerun-investigation",
@@ -1496,7 +1644,7 @@ pub(crate) async fn rerun_investigation_run(story_id: &str, model: &str) -> Begi
 /// Which view the enterprise cockpit is showing. Routines live INSIDE the cockpit
 /// (it's an architect tool), reached via the cockpit's own nav, not a top-level app.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum CockpitView {
+pub(crate) enum CockpitView {
     /// The control surface: the story spine + center stage + inspector.
     Stories,
     /// Onboard a repo into governance (brownfield: install rules into an
@@ -1614,7 +1762,8 @@ async fn export_project_json(id: &str, name: &str) -> ExportOutcome {
 #[derive(Clone, PartialEq)]
 enum ImportResult {
     /// The project was created or silently overwritten; the returned project is active.
-    Imported(ProjectView),
+    /// Boxed: `ProjectView` is far larger than every other variant.
+    Imported(Box<ProjectView>),
     /// A project with the same name already exists; the user must confirm before we overwrite.
     /// Holds the name for display and the raw JSON body to re-POST with `overwrite: true`.
     Conflict { name: String, payload: String },
@@ -1705,7 +1854,7 @@ async fn import_project_payload(payload: &str, overwrite: bool) -> ImportResult 
         }
     } else if v.get("ok").and_then(|b| b.as_bool()).unwrap_or(false) {
         match serde_json::from_value::<ProjectView>(v.get("project").cloned().unwrap_or_default()) {
-            Ok(p) => ImportResult::Imported(p),
+            Ok(p) => ImportResult::Imported(Box::new(p)),
             Err(_) => ImportResult::Failed,
         }
     } else {
@@ -2251,6 +2400,10 @@ fn UsageMeter() -> Element {
 }
 
 /// The `/api/gate-probe` result (#14): the end-to-end gate-loop go/no-go.
+// dead_code: the `GateSelfCheck` box was unmounted from the UoW view by the 3-phase redesign
+// (docs/plans/2026-06-25_uow-3phase-redesign.md section 10: "UI affordance only"); the
+// component, this view and the fetch are deliberately preserved (see `UowDevControls`).
+#[allow(dead_code)]
 #[derive(Clone, PartialEq, serde::Deserialize)]
 struct GateProbeView {
     #[serde(default)]
@@ -2267,6 +2420,8 @@ struct GateProbeView {
     layer2_clean: bool,
 }
 
+// dead_code: only caller is the unmounted `GateSelfCheck` (see `GateProbeView`).
+#[allow(dead_code)]
 async fn fetch_gate_probe() -> Option<GateProbeView> {
     reqwest::Client::new()
         .post(format!("{}/api/gate-probe", crate::bff_base()))
@@ -2426,7 +2581,7 @@ fn LoopGuardControl() -> Element {
                                 crate::toast::push_toast(
                                     toasts,
                                     crate::toast::ToastKind::Info,
-                                    &format!("Loop guard set to {n} iteration(s)."),
+                                    format!("Loop guard set to {n} iteration(s)."),
                                 );
                             } else {
                                 crate::toast::push_toast(
@@ -2520,6 +2675,17 @@ pub fn CockpitApp() -> Element {
         }
     });
     let readiness = readiness_res.read().clone().flatten();
+    // Which repos' source was deleted on purpose (client source lifecycle). The project stays
+    // READY (there is nothing to link), but every control that needs the source on disk reads
+    // this to disable itself and say why. Shared as a context so any surface can ask.
+    let scan_block_memo = use_memo(move || {
+        readiness_res
+            .read()
+            .clone()
+            .flatten()
+            .and_then(|r| crate::readiness_gate::scan_block(&r.repos))
+    });
+    use_context_provider(|| scan_block_memo);
     let active_pid = active_proj
         .read()
         .clone()
@@ -2540,13 +2706,11 @@ pub fn CockpitApp() -> Element {
         if modal_auto_inited() {
             return;
         }
-        if let Some(r) = &*readiness_res.read() {
-            if let Some(r) = r {
-                if crate::readiness_gate::action_gated(r.state) {
-                    modal_open.set(true);
-                }
-                modal_auto_inited.set(true);
+        if let Some(Some(r)) = &*readiness_res.read() {
+            if crate::readiness_gate::action_gated(r.state) {
+                modal_open.set(true);
             }
+            modal_auto_inited.set(true);
         }
     });
 
@@ -2697,13 +2861,6 @@ pub fn CockpitApp() -> Element {
     }
 }
 
-/// The consolidated Settings page.
-///
-/// Two explicit sections:
-///   1. "Cross-project" — credentials + Bombe. Tokens/keys span all projects.
-///   2. "This project"  — loop guard, model profile, tier map, step models,
-///                        stall thresholds, L3 review. All scoped to the
-///                        active project.
 /// The subset of `GET /api/settings` this control needs: the app-level chat model.
 #[derive(serde::Deserialize)]
 struct ChatModelSettingLite {
@@ -2809,6 +2966,12 @@ fn ChatModelSetting() -> Element {
     }
 }
 
+/// The consolidated Settings page.
+///
+/// Two explicit sections:
+///   1. "Cross-project" — credentials + Bombe. Tokens/keys span all projects.
+///   2. "This project" — loop guard, model profile, tier map, step models,
+///      stall thresholds, L3 review. All scoped to the active project.
 #[component]
 fn SettingsView(global_only: bool) -> Element {
     let refresh = use_signal(|| 0u32);
@@ -2857,6 +3020,13 @@ fn SettingsView(global_only: bool) -> Element {
                 Some(p) => {
                     let p_owned = p.clone();
                     rsx! {
+                        // ── Backend (per-project) ──────────────────────────────
+                        // Placed first: this is the setting that governs which chain (CLI
+                        // subscription vs. Anthropic API) every project-scoped AI call on this
+                        // project runs on. See docs/design/2026-09-22_per-project-backend.md.
+                        p { class: "section-label settings-label", "Backend" }
+                        rules::BackendEditor { project: p_owned.clone() }
+
                         // ── Loop guard ────────────────────────────────────────
                         LoopGuardControl {}
 
@@ -3036,61 +3206,77 @@ struct AppReleaseView {
 }
 
 /// Top-level `GET /api/updates/check` envelope. `app` is `null` when the GitHub
-/// release check fails (no token or network error).
-#[derive(serde::Deserialize)]
+/// release check fails (no token or network error). `corpus_freshness` is the
+/// operator-only corpus-freshness report, `null` when the server cannot tell.
+#[derive(Clone, serde::Deserialize)]
 struct UpdatesCheckView {
     #[serde(default)]
     app: Option<AppReleaseView>,
+    #[serde(default)]
+    corpus_freshness: Option<freshness::CorpusFreshnessView>,
 }
 
-async fn fetch_app_release() -> Option<AppReleaseView> {
+async fn fetch_updates_check() -> Option<UpdatesCheckView> {
     reqwest::get(format!("{}/api/updates/check", crate::bff_base()))
         .await
         .ok()?
         .json::<UpdatesCheckView>()
         .await
-        .ok()?
-        .app
+        .ok()
 }
 
-/// App-update banner. Shown across the top of every cockpit tab when the server
-/// reports a newer release. Dismissible within the session (not persisted).
+/// Update banner. Shown across the top of every cockpit tab: the app-update strip when the
+/// server reports a newer release, and the corpus-freshness line when any rule pack is overdue
+/// or due soon (or, quietly, never confirmed). Each is dismissible within the session (not
+/// persisted) and independent of the other.
 #[component]
 fn AppUpdateBanner() -> Element {
-    let release_res = use_resource(fetch_app_release);
+    let updates_res = use_resource(fetch_updates_check);
     let mut dismissed = use_signal(|| false);
 
-    let Some(rel) = release_res.read().clone().flatten() else {
+    let Some(updates) = updates_res.read().clone().flatten() else {
         return rsx! {};
     };
-    if !rel.update_available || dismissed() {
-        return rsx! {};
-    }
-    let latest = rel.latest_version.clone();
-    let current = rel.current_version.clone();
-    let release_url = if rel.release_url.is_empty() {
-        "https://github.com/zernst3/camerata-orchestrator/releases".to_string()
-    } else {
-        rel.release_url.clone()
-    };
-    rsx! {
-        div { class: "app-update-banner",
-            span { class: "app-update-icon", "\u{2B06}" }
-            span { class: "app-update-text",
-                "Camerata {latest} is available (you are running {current}). "
-            }
-            a {
-                class: "app-update-link",
-                href: "{release_url}",
-                target: "_blank",
-                "View release"
-            }
-            button {
-                class: "app-update-dismiss",
-                onclick: move |_| dismissed.set(true),
-                "\u{00D7}"
+    let freshness_line = updates.corpus_freshness.clone().map(|view| {
+        rsx! {
+            freshness::CorpusFreshnessLine { view }
+        }
+    });
+    let release = updates
+        .app
+        .clone()
+        .filter(|rel| rel.update_available && !dismissed());
+    let release_strip = release.map(|rel| {
+        let latest = rel.latest_version.clone();
+        let current = rel.current_version.clone();
+        let release_url = if rel.release_url.is_empty() {
+            "https://github.com/zernst3/camerata-orchestrator/releases".to_string()
+        } else {
+            rel.release_url.clone()
+        };
+        rsx! {
+            div { class: "app-update-banner",
+                span { class: "app-update-icon", "\u{2B06}" }
+                span { class: "app-update-text",
+                    "Camerata {latest} is available (you are running {current}). "
+                }
+                a {
+                    class: "app-update-link",
+                    href: "{release_url}",
+                    target: "_blank",
+                    "View release"
+                }
+                button {
+                    class: "app-update-dismiss",
+                    onclick: move |_| dismissed.set(true),
+                    "\u{00D7}"
+                }
             }
         }
+    });
+    rsx! {
+        {release_strip}
+        {freshness_line}
     }
 }
 
@@ -3136,11 +3322,17 @@ fn DocsView() -> Element {
     }
 }
 
+mod freshness;
 pub mod live_run;
+mod palette;
+mod pane_context;
+mod review;
 pub mod rules;
 pub mod scan;
+mod stack;
 pub mod table;
 pub mod uow;
+pub mod viewer;
 
 pub use live_run::*;
 pub use rules::*;
@@ -3148,12 +3340,12 @@ pub use scan::*;
 pub use table::*;
 pub use uow::*;
 
-
 #[cfg(test)]
 mod tests {
     use super::{
         dev_run_body, is_enforced_floor, run_is_cancellable, run_status_badge, FindingView,
-        JobStatusEnvelope, JobStateView, RunGateEvent, RunView, StallThresholdsView, TierMapView,
+        JobStateView, JobStatusEnvelope, ProjectBackend, RunGateEvent, RunView,
+        StallThresholdsView, TierMapView,
     };
 
     /// The job-state view deserializes the server's `deterministic` progress section
@@ -3182,7 +3374,10 @@ mod tests {
         let legacy: JobStateView =
             serde_json::from_str(r#"{"status":"running","done":1,"total":4,"findings":[]}"#)
                 .unwrap();
-        assert_eq!((legacy.deterministic.done, legacy.deterministic.total), (0, 0));
+        assert_eq!(
+            (legacy.deterministic.done, legacy.deterministic.total),
+            (0, 0)
+        );
         assert!(legacy.deterministic.tools.is_empty());
     }
 
@@ -3204,7 +3399,7 @@ mod tests {
         assert_eq!(fmt_tokens(1_500), "1.5k");
         assert_eq!(fmt_tokens(3_400), "3.4k");
         assert_eq!(fmt_tokens(999_999), "1000.0k"); // still below the 1M cutoff
-        // Millions: one decimal place + `M`.
+                                                    // Millions: one decimal place + `M`.
         assert_eq!(fmt_tokens(1_000_000), "1.0M");
         assert_eq!(fmt_tokens(1_200_000), "1.2M");
     }
@@ -3268,7 +3463,10 @@ mod tests {
 
         // ON: the flag is present and true; tier_map is unchanged.
         let on = dev_run_body(&tm, true);
-        assert_eq!(on.get("skip_layer2").unwrap(), &serde_json::Value::Bool(true));
+        assert_eq!(
+            on.get("skip_layer2").unwrap(),
+            &serde_json::Value::Bool(true)
+        );
         let tier = on.get("tier_map").expect("tier_map still present");
         assert_eq!(tier.get("strongest").unwrap(), "opus-x");
         // Exactly tier_map + skip_layer2.
@@ -3331,7 +3529,10 @@ mod tests {
         }];
         let tip = verif_sources_tooltip(&sources);
         assert!(tip.contains("Example rule"), "title absent: {tip}");
-        assert!(tip.contains("eslint: no-unused-vars"), "linter absent: {tip}");
+        assert!(
+            tip.contains("eslint: no-unused-vars"),
+            "linter absent: {tip}"
+        );
     }
 
     #[test]
@@ -3348,8 +3549,16 @@ mod tests {
     #[test]
     fn verif_sources_tooltip_multiple_sources_joined_with_separator() {
         let sources = vec![
-            RuleSourceView { url: "u1".to_string(), title: "Source A".to_string(), linter: None },
-            RuleSourceView { url: "u2".to_string(), title: "Source B".to_string(), linter: Some("tool: rule".to_string()) },
+            RuleSourceView {
+                url: "u1".to_string(),
+                title: "Source A".to_string(),
+                linter: None,
+            },
+            RuleSourceView {
+                url: "u2".to_string(),
+                title: "Source B".to_string(),
+                linter: Some("tool: rule".to_string()),
+            },
         ];
         let tip = verif_sources_tooltip(&sources);
         // Both titles must appear; the separator is " · " (middle dot).
@@ -3373,7 +3582,11 @@ mod tests {
 
     use super::{FeatureFlagMap, ProposedRuleView};
 
-    fn make_proposed_rule(recommended: bool, verification: &str, is_auto_recommended: bool) -> ProposedRuleView {
+    fn make_proposed_rule(
+        recommended: bool,
+        verification: &str,
+        is_auto_recommended: bool,
+    ) -> ProposedRuleView {
         ProposedRuleView {
             id: "TEST-1".to_string(),
             title: "Test rule".to_string(),
@@ -3399,7 +3612,10 @@ mod tests {
     #[test]
     fn effective_auto_recommended_server_true_pre_checks() {
         let r = make_proposed_rule(false, "draft", true);
-        assert!(r.effective_auto_recommended(), "server flag true must pre-check");
+        assert!(
+            r.effective_auto_recommended(),
+            "server flag true must pre-check"
+        );
     }
 
     /// Server sends `is_auto_recommended: false` → rule is NOT pre-checked,
@@ -3434,21 +3650,30 @@ mod tests {
     #[test]
     fn effective_auto_recommended_server_false_draft_not_pre_checked() {
         let r = make_proposed_rule(true, "draft", false);
-        assert!(!r.effective_auto_recommended(), "draft rules with server false must not be pre-checked");
+        assert!(
+            !r.effective_auto_recommended(),
+            "draft rules with server false must not be pre-checked"
+        );
     }
 
     /// `needs_recheck` with server false is not pre-checked.
     #[test]
     fn effective_auto_recommended_server_false_needs_recheck_not_pre_checked() {
         let r = make_proposed_rule(true, "needs_recheck", false);
-        assert!(!r.effective_auto_recommended(), "needs_recheck with server false must not be pre-checked");
+        assert!(
+            !r.effective_auto_recommended(),
+            "needs_recheck with server false must not be pre-checked"
+        );
     }
 
     /// Not recommended at all with server false: not pre-checked.
     #[test]
     fn effective_auto_recommended_server_false_not_recommended_not_pre_checked() {
         let r = make_proposed_rule(false, "grounded", false);
-        assert!(!r.effective_auto_recommended(), "grounded-but-not-recommended with server false must not be pre-checked");
+        assert!(
+            !r.effective_auto_recommended(),
+            "grounded-but-not-recommended with server false must not be pre-checked"
+        );
     }
 
     // ── pw/cockpit-ui: Feature 5 — FeatureFlagMap deserialization ─────────────
@@ -3482,7 +3707,11 @@ mod tests {
         let json = r#"{"soc2": true, "future_flag": true, "another": 42}"#;
         let m: FeatureFlagMap = serde_json::from_str(json).unwrap();
         assert!(m.soc2, "soc2 should still parse when extra keys present");
-        assert_eq!(m.extra.len(), 2, "extra keys should be absorbed into the extra map");
+        assert_eq!(
+            m.extra.len(),
+            2,
+            "extra keys should be absorbed into the extra map"
+        );
     }
 
     #[test]
@@ -3628,7 +3857,11 @@ mod tests {
         // max_depth = 2 → tiers = 2 → each row has 2 hierarchy cols (one per ancestor
         // tier; the item itself is the row, not an extra tier).
         for row in &rows {
-            assert_eq!(row.hierarchy_cols.len(), 2, "all rows have 2 cols at max_depth=2");
+            assert_eq!(
+                row.hierarchy_cols.len(),
+                2,
+                "all rows have 2 cols at max_depth=2"
+            );
         }
 
         // Root (number 1, depth 0, has children): own label in both tiers.
@@ -3688,13 +3921,25 @@ mod tests {
         let section = render_pulled_issues_for_chat(&items);
 
         // Root at depth 0: no indent.
-        assert!(section.contains("- #1 [open]: Issue 1\n"), "root at no indent");
+        assert!(
+            section.contains("- #1 [open]: Issue 1\n"),
+            "root at no indent"
+        );
         // Child at depth 1: 2-space indent.
-        assert!(section.contains("  - #2 [open]: Issue 2\n"), "child 2-space indent");
+        assert!(
+            section.contains("  - #2 [open]: Issue 2\n"),
+            "child 2-space indent"
+        );
         // Grandchild at depth 2: 4-space indent.
-        assert!(section.contains("    - #3 [open]: Issue 3\n"), "grandchild 4-space indent");
+        assert!(
+            section.contains("    - #3 [open]: Issue 3\n"),
+            "grandchild 4-space indent"
+        );
         // Standalone at depth 0: no indent.
-        assert!(section.contains("- #9 [open]: Issue 9\n"), "standalone no indent");
+        assert!(
+            section.contains("- #9 [open]: Issue 9\n"),
+            "standalone no indent"
+        );
         // No "Epic" wording in output.
         assert!(!section.contains("Epic"), "no Epic wording in chat output");
     }
@@ -3704,7 +3949,10 @@ mod tests {
         // Child whose parent (99) is not in the list: rendered at depth 0.
         let orphan = make_wi(5, Some(99));
         let section = render_pulled_issues_for_chat(&[orphan]);
-        assert!(section.contains("- #5 [open]: Issue 5\n"), "orphan at root level");
+        assert!(
+            section.contains("- #5 [open]: Issue 5\n"),
+            "orphan at root level"
+        );
     }
 
     #[test]
@@ -3724,7 +3972,10 @@ mod tests {
 
     #[test]
     fn create_or_open_label_dedup_logic() {
-        assert_eq!(create_or_open_label(false), "Create Unit of Work from this issue");
+        assert_eq!(
+            create_or_open_label(false),
+            "Create Unit of Work from this issue"
+        );
         assert_eq!(create_or_open_label(true), "Open Unit of Work");
     }
 
@@ -3779,11 +4030,17 @@ mod tests {
     #[test]
     fn apply_mention_selection_replaces_trailing_token() {
         // Completes the active partial with the chosen login + trailing space.
-        assert_eq!(apply_mention_selection("hey @oct", "octocat"), "hey @octocat ");
+        assert_eq!(
+            apply_mention_selection("hey @oct", "octocat"),
+            "hey @octocat "
+        );
         // A bare `@` completes to the full handle.
         assert_eq!(apply_mention_selection("hey @", "hubot"), "hey @hubot ");
         // No active token -> appends a mention (with a separating space).
-        assert_eq!(apply_mention_selection("hello", "octocat"), "hello @octocat ");
+        assert_eq!(
+            apply_mention_selection("hello", "octocat"),
+            "hello @octocat "
+        );
         // Appending onto empty input needs no leading space.
         assert_eq!(apply_mention_selection("", "octocat"), "@octocat ");
     }
@@ -3819,15 +4076,17 @@ mod tests {
         let item: WorkItem = serde_json::from_str(json).unwrap();
         assert_eq!(item.id, "github:acme/web#42");
         assert_eq!(item.number, 42);
-        assert_eq!(item.labels, vec!["enhancement".to_string(), "ui".to_string()]);
+        assert_eq!(
+            item.labels,
+            vec!["enhancement".to_string(), "ui".to_string()]
+        );
         assert_eq!(labels_summary(&item.labels), "enhancement, ui");
     }
 
     // ── CiRulesPanel helpers ───────────────────────────────────────────────────
 
     use super::{
-        ci_rule_items_from_proposed, ci_rule_items_from_selections, first_linter,
-        RuleSelectionView,
+        ci_rule_items_from_proposed, ci_rule_items_from_selections, first_linter, RuleSelectionView,
     };
 
     fn make_rule(id: &str, enforcement: &str, linter: Option<&str>) -> ProposedRuleView {
@@ -3849,11 +4108,13 @@ mod tests {
             is_auto_recommended: false,
             verification: "draft".to_string(),
             sources: linter
-                .map(|l| vec![RuleSourceView {
-                    url: "https://example.com".to_string(),
-                    title: "Source".to_string(),
-                    linter: Some(l.to_string()),
-                }])
+                .map(|l| {
+                    vec![RuleSourceView {
+                        url: "https://example.com".to_string(),
+                        title: "Source".to_string(),
+                        linter: Some(l.to_string()),
+                    }]
+                })
                 .unwrap_or_default(),
         }
     }
@@ -3868,7 +4129,11 @@ mod tests {
             make_rule("PROSE-1", "prose", None),
         ];
         let items = ci_rule_items_from_proposed(&rules);
-        assert_eq!(items.len(), 2, "only mechanical + architectural should pass");
+        assert_eq!(
+            items.len(),
+            2,
+            "only mechanical + architectural should pass"
+        );
         assert!(items.iter().any(|i| i.id == "MECH-1"));
         assert!(items.iter().any(|i| i.id == "ARCH-1"));
         assert!(!items.iter().any(|i| i.id == "STRUCT-1"));
@@ -3878,7 +4143,11 @@ mod tests {
     /// The linter is carried through from the first source with one.
     #[test]
     fn ci_rule_items_from_proposed_carries_linter_from_first_source() {
-        let rules = vec![make_rule("MECH-1", "mechanical", Some("eslint: no-unused-vars"))];
+        let rules = vec![make_rule(
+            "MECH-1",
+            "mechanical",
+            Some("eslint: no-unused-vars"),
+        )];
         let items = ci_rule_items_from_proposed(&rules);
         assert_eq!(items[0].linter.as_deref(), Some("eslint: no-unused-vars"));
     }
@@ -3906,9 +4175,21 @@ mod tests {
             make_rule("PROSE-1", "prose", None),
         ];
         let selections = vec![
-            RuleSelectionView { rule_id: "MECH-1".to_string(), chosen_option: None, repos: vec![] },
-            RuleSelectionView { rule_id: "ARCH-1".to_string(), chosen_option: None, repos: vec![] },
-            RuleSelectionView { rule_id: "PROSE-1".to_string(), chosen_option: None, repos: vec![] },
+            RuleSelectionView {
+                rule_id: "MECH-1".to_string(),
+                chosen_option: None,
+                repos: vec![],
+            },
+            RuleSelectionView {
+                rule_id: "ARCH-1".to_string(),
+                chosen_option: None,
+                repos: vec![],
+            },
+            RuleSelectionView {
+                rule_id: "PROSE-1".to_string(),
+                chosen_option: None,
+                repos: vec![],
+            },
         ];
         let items = ci_rule_items_from_selections(&selections, &corpus);
         assert_eq!(items.len(), 2, "prose should be excluded");
@@ -3921,8 +4202,16 @@ mod tests {
     fn ci_rule_items_from_selections_drops_unknown_rule_ids() {
         let corpus = vec![make_rule("MECH-1", "mechanical", None)];
         let selections = vec![
-            RuleSelectionView { rule_id: "MECH-1".to_string(), chosen_option: None, repos: vec![] },
-            RuleSelectionView { rule_id: "GHOST-99".to_string(), chosen_option: None, repos: vec![] },
+            RuleSelectionView {
+                rule_id: "MECH-1".to_string(),
+                chosen_option: None,
+                repos: vec![],
+            },
+            RuleSelectionView {
+                rule_id: "GHOST-99".to_string(),
+                chosen_option: None,
+                repos: vec![],
+            },
         ];
         let items = ci_rule_items_from_selections(&selections, &corpus);
         assert_eq!(items.len(), 1);
@@ -3934,8 +4223,16 @@ mod tests {
     fn first_linter_returns_first_nonempty_linter() {
         let rule = ProposedRuleView {
             sources: vec![
-                RuleSourceView { url: "u1".to_string(), title: "S1".to_string(), linter: None },
-                RuleSourceView { url: "u2".to_string(), title: "S2".to_string(), linter: Some("mypy".to_string()) },
+                RuleSourceView {
+                    url: "u1".to_string(),
+                    title: "S1".to_string(),
+                    linter: None,
+                },
+                RuleSourceView {
+                    url: "u2".to_string(),
+                    title: "S2".to_string(),
+                    linter: Some("mypy".to_string()),
+                },
             ],
             ..make_rule("R-1", "mechanical", None)
         };
@@ -3991,7 +4288,10 @@ mod tests {
                 "snippet":"x","detail":"d"}"#,
         )
         .unwrap();
-        assert!(!floor.preview, "absent preview field defaults to false (back-compat)");
+        assert!(
+            !floor.preview,
+            "absent preview field defaults to false (back-compat)"
+        );
         assert_eq!(authority_label(&floor), "enforced");
 
         // An AI-advisory finding (no preview, not a floor id) stays "advisory".
@@ -4003,7 +4303,7 @@ mod tests {
         assert_eq!(authority_label(&ai), "advisory");
     }
 
-    /// Pure: idle duration formatting from milliseconds.
+    // Pure: idle duration formatting from milliseconds.
     // (format_idle test moved to camerata-ui-core::run.)
 
     /// `RunView` deserializes with back-compat defaults when stall fields are absent.
@@ -4100,7 +4400,8 @@ mod tests {
     #[test]
     fn stall_thresholds_view_defaults() {
         // With both fields present.
-        let s: StallThresholdsView = serde_json::from_str(r#"{"watched_secs":60,"routine_secs":300}"#).unwrap();
+        let s: StallThresholdsView =
+            serde_json::from_str(r#"{"watched_secs":60,"routine_secs":300}"#).unwrap();
         assert_eq!(s.watched_secs, 60);
         assert_eq!(s.routine_secs, 300);
         // Back-compat: no fields → defaults. LIFECYCLE-6: the routine (autonomous) default is
@@ -4195,14 +4496,14 @@ mod tests {
     // with `.expect(1)` so the body is verified on server drop).
     //
     // CAMERATA_BFF_URL is process-global, and cargo runs tests on parallel
-    // threads, so EVERY test that sets it carries `#[serial_test::serial(bff_env)]`
+    // threads, so EVERY test that sets it carries `#[serial_test::serial(process_env)]`
     // (tokio outer, serial inner) to serialize them crate-wide. `set_var` +
     // `remove_var` around the call still bracket the override.
     // ══════════════════════════════════════════════════════════════════════════
 
     /// `fetch_usage` GETs /api/usage and parses the cumulative usage snapshot.
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn fetch_usage_parses_snapshot() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -4215,27 +4516,26 @@ mod tests {
                 "output_tokens": 500,
                 "total_cost_usd": 0.42,
                 "calls": 7,
-                "by_model": [ { "model": "claude-sonnet-4-6", "tokens": 1500, "cost": 0.42, "calls": 7 } ],
+                "by_model": [ { "model": "claude-sonnet-5", "tokens": 1500, "cost": 0.42, "calls": 7 } ],
                 "rate_limited": false
             })))
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let u = super::fetch_usage().await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         let u = u.expect("usage parses");
         assert_eq!(u.total_tokens(), 1500);
         assert_eq!(u.calls, 7);
         assert!(!u.rate_limited);
         assert_eq!(u.by_model.len(), 1);
-        assert_eq!(u.by_model[0].model, "claude-sonnet-4-6");
+        assert_eq!(u.by_model[0].model, "claude-sonnet-5");
     }
 
     /// `fetch_active_project` GETs /api/projects/active and flattens the `Option<ProjectView>`.
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn fetch_active_project_parses_and_flattens() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -4249,9 +4549,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let p = super::fetch_active_project().await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         let p = p.expect("active project parses");
         assert_eq!(p.id, "proj-9");
@@ -4261,7 +4560,7 @@ mod tests {
 
     /// `fetch_active_project` returns None when the server reports a `null` active project.
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn fetch_active_project_null_is_none() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -4273,16 +4572,15 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let p = super::fetch_active_project().await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         assert!(p.is_none(), "a null active project flattens to None");
     }
 
     /// `create_project` POSTs {name, repos} and reads back the nested `project`.
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn create_project_posts_name_and_repos() {
         use wiremock::matchers::{body_json, method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -4290,7 +4588,9 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/api/projects"))
-            .and(body_json(serde_json::json!({ "name": "New", "repos": ["acme/web"] })))
+            .and(body_json(
+                serde_json::json!({ "name": "New", "repos": ["acme/web"] }),
+            ))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "project": { "id": "p-new", "name": "New", "repos": ["acme/web"] }
             })))
@@ -4298,9 +4598,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let p = super::create_project("New", vec!["acme/web".to_string()]).await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         let p = p.expect("project parses from the nested key");
         assert_eq!(p.id, "p-new");
@@ -4309,7 +4608,7 @@ mod tests {
 
     /// `set_active_project` POSTs {id} and maps a 2xx to true.
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn set_active_project_posts_id() {
         use wiremock::matchers::{body_json, method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -4318,21 +4617,22 @@ mod tests {
         Mock::given(method("POST"))
             .and(path("/api/projects/active"))
             .and(body_json(serde_json::json!({ "id": "p-7" })))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": true })))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": true })),
+            )
             .expect(1)
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let ok = super::set_active_project("p-7").await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         assert!(ok, "2xx maps to true");
     }
 
     /// `set_project_tier_map` POSTs all four bands in one round-trip.
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn set_project_tier_map_posts_all_bands() {
         use wiremock::matchers::{body_json, method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -4357,16 +4657,15 @@ mod tests {
             fast: vec!["haiku-x".to_string()],
             vision: vec![],
         };
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let ok = super::set_project_tier_map("p-1", &tm).await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         assert!(ok);
     }
 
     /// `set_project_vision_enabled` POSTs {enabled} to the per-project endpoint.
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn set_project_vision_enabled_posts_flag() {
         use wiremock::matchers::{body_json, method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -4380,16 +4679,82 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let ok = super::set_project_vision_enabled("p-1", true).await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         assert!(ok);
     }
 
+    /// `set_project_backend` POSTs {backend} and, on `{ ok: true, project: {..., backend} }`,
+    /// hands back the server's ECHOED `backend` — not the value the caller asked for. This
+    /// locks that the control trusts what the server actually persisted rather than assuming
+    /// its own request succeeded verbatim.
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn set_project_backend_posts_backend_and_returns_echoed_value() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/projects/p-1/backend"))
+            .and(body_json(serde_json::json!({ "backend": "api" })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "project": { "id": "p-1", "name": "Acme", "backend": "api" }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
+        let result = super::set_project_backend("p-1", ProjectBackend::Api).await;
+
+        assert_eq!(result, Some(ProjectBackend::Api));
+    }
+
+    /// An `{ ok: false, message: "..." }` response (e.g. unknown project id) must NOT be read
+    /// as success just because the HTTP status is 200 — `set_project_backend` checks the
+    /// `ok` field, not only the status code.
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn set_project_backend_returns_none_on_ok_false() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/projects/does-not-exist/backend"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": false,
+                "message": "no such project"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
+        let result = super::set_project_backend("does-not-exist", ProjectBackend::Api).await;
+
+        assert_eq!(result, None);
+    }
+
+    /// A hard network/transport failure (no mock mounted, connection refused) must also come
+    /// back as `None`, not a panic.
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn set_project_backend_returns_none_on_network_failure() {
+        // Port 9 is the discard service; nothing answers HTTP there, so the request fails
+        // at the transport layer without needing a mock server at all.
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", "http://127.0.0.1:9");
+        let result = super::set_project_backend("p-1", ProjectBackend::Api).await;
+
+        assert_eq!(result, None);
+    }
+
     /// `set_project_step_model` POSTs {step, model} (patch semantics: one step per call).
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn set_project_step_model_posts_step_and_model() {
         use wiremock::matchers::{body_json, method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -4397,15 +4762,16 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/api/projects/p-1/step-models"))
-            .and(body_json(serde_json::json!({ "step": "audit", "model": "claude-opus-4-8" })))
+            .and(body_json(
+                serde_json::json!({ "step": "audit", "model": "claude-opus-5" }),
+            ))
             .respond_with(ResponseTemplate::new(200))
             .expect(1)
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
-        let ok = super::set_project_step_model("p-1", "audit", "claude-opus-4-8").await;
-        std::env::remove_var("CAMERATA_BFF_URL");
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
+        let ok = super::set_project_step_model("p-1", "audit", "claude-opus-5").await;
 
         assert!(ok);
     }
@@ -4415,7 +4781,7 @@ mod tests {
     /// decomposition) to lock that the step name is passed through verbatim in the body
     /// (a per-variant wiremock test would be redundant — same path, same shape).
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn set_project_step_model_passes_step_name_through_for_each_variant() {
         use wiremock::matchers::{body_json, method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -4424,17 +4790,21 @@ mod tests {
             let server = MockServer::start().await;
             Mock::given(method("POST"))
                 .and(path("/api/projects/p-9/step-models"))
-                .and(body_json(serde_json::json!({ "step": step, "model": "claude-sonnet-4-6" })))
+                .and(body_json(
+                    serde_json::json!({ "step": step, "model": "claude-sonnet-5" }),
+                ))
                 .respond_with(ResponseTemplate::new(200))
                 .expect(1)
                 .mount(&server)
                 .await;
 
-            std::env::set_var("CAMERATA_BFF_URL", server.uri());
-            let ok = super::set_project_step_model("p-9", step, "claude-sonnet-4-6").await;
-            std::env::remove_var("CAMERATA_BFF_URL");
+            let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
+            let ok = super::set_project_step_model("p-9", step, "claude-sonnet-5").await;
 
-            assert!(ok, "step variant `{step}` POSTs its name verbatim and maps 2xx to true");
+            assert!(
+                ok,
+                "step variant `{step}` POSTs its name verbatim and maps 2xx to true"
+            );
         }
     }
 
@@ -4442,7 +4812,7 @@ mod tests {
     /// list is decoded in order and the per-project serde defaults fill in (a bare
     /// {id, name} project is valid).
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn fetch_projects_parses_the_list() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -4457,9 +4827,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let projects = super::fetch_projects().await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         let projects = projects.expect("the projects list parses");
         assert_eq!(projects.len(), 2);
@@ -4475,7 +4844,7 @@ mod tests {
 
     /// `set_max_iterations` POSTs {max_iterations} to the loop-guard endpoint.
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn set_max_iterations_posts_value() {
         use wiremock::matchers::{body_json, method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -4489,16 +4858,15 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let ok = super::set_max_iterations("p-1", 5).await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         assert!(ok);
     }
 
     /// `set_product_brief` POSTs {product_brief}.
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn set_product_brief_posts_text() {
         use wiremock::matchers::{body_json, method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -4506,22 +4874,23 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/api/projects/p-1/product-brief"))
-            .and(body_json(serde_json::json!({ "product_brief": "We build X for Y." })))
+            .and(body_json(
+                serde_json::json!({ "product_brief": "We build X for Y." }),
+            ))
             .respond_with(ResponseTemplate::new(200))
             .expect(1)
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let ok = super::set_product_brief("p-1", "We build X for Y.").await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         assert!(ok);
     }
 
     /// `add_memory_entry` POSTs {kind, text} to the project memory endpoint.
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn add_memory_entry_posts_kind_and_text() {
         use wiremock::matchers::{body_json, method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -4529,22 +4898,23 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/api/projects/p-1/memory"))
-            .and(body_json(serde_json::json!({ "kind": "gotcha", "text": "Watch the FK index." })))
+            .and(body_json(
+                serde_json::json!({ "kind": "gotcha", "text": "Watch the FK index." }),
+            ))
             .respond_with(ResponseTemplate::new(200))
             .expect(1)
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let ok = super::add_memory_entry("p-1", "gotcha", "Watch the FK index.").await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         assert!(ok);
     }
 
     /// `patch_memory_status` POSTs {status} to the per-entry endpoint.
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn patch_memory_status_posts_status() {
         use wiremock::matchers::{body_json, method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -4558,16 +4928,15 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let ok = super::patch_memory_status("p-1", "e-9", "approved").await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         assert!(ok);
     }
 
     /// `save_memory_edit` POSTs {kind, text} to the per-entry endpoint.
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn save_memory_edit_posts_kind_and_text() {
         use wiremock::matchers::{body_json, method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -4575,22 +4944,23 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/api/projects/p-1/memory/e-9"))
-            .and(body_json(serde_json::json!({ "kind": "decision", "text": "Edited." })))
+            .and(body_json(
+                serde_json::json!({ "kind": "decision", "text": "Edited." }),
+            ))
             .respond_with(ResponseTemplate::new(200))
             .expect(1)
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let ok = super::save_memory_edit("p-1", "e-9", "decision", "Edited.").await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         assert!(ok);
     }
 
     /// `delete_memory_entry` DELETEs the per-entry endpoint.
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn delete_memory_entry_sends_delete() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -4603,16 +4973,15 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let ok = super::delete_memory_entry("p-1", "e-9").await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         assert!(ok);
     }
 
     /// `set_operating_principles` POSTs the full list under {operating_principles}.
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn set_operating_principles_posts_full_list() {
         use wiremock::matchers::{body_json, method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -4633,16 +5002,15 @@ mod tests {
             text: "Write tests.".to_string(),
             enabled: true,
         }];
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let ok = super::set_operating_principles("p-1", &principles).await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         assert!(ok);
     }
 
     /// `set_project_l3_review` POSTs {enabled, model}.
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn set_project_l3_review_posts_enabled_and_model() {
         use wiremock::matchers::{body_json, method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -4650,22 +5018,23 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/api/projects/p-1/l3-review"))
-            .and(body_json(serde_json::json!({ "enabled": true, "model": "claude-opus-4-8" })))
+            .and(body_json(
+                serde_json::json!({ "enabled": true, "model": "claude-opus-5" }),
+            ))
             .respond_with(ResponseTemplate::new(200))
             .expect(1)
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
-        let ok = super::set_project_l3_review("p-1", true, "claude-opus-4-8").await;
-        std::env::remove_var("CAMERATA_BFF_URL");
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
+        let ok = super::set_project_l3_review("p-1", true, "claude-opus-5").await;
 
         assert!(ok);
     }
 
     /// `set_project_stall_thresholds` POSTs {watched_secs, routine_secs}.
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn set_project_stall_thresholds_posts_both_secs() {
         use wiremock::matchers::{body_json, method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -4673,22 +5042,23 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/api/projects/p-1/stall-thresholds"))
-            .and(body_json(serde_json::json!({ "watched_secs": 90, "routine_secs": 450 })))
+            .and(body_json(
+                serde_json::json!({ "watched_secs": 90, "routine_secs": 450 }),
+            ))
             .respond_with(ResponseTemplate::new(200))
             .expect(1)
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let ok = super::set_project_stall_thresholds("p-1", 90, 450).await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         assert!(ok);
     }
 
     /// `delete_project` DELETEs /api/projects/:id.
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn delete_project_sends_delete() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -4701,16 +5071,15 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let ok = super::delete_project("p-9").await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         assert!(ok);
     }
 
     /// `fetch_provider` GETs /api/provider and parses the connection view.
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn fetch_provider_parses_connection() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -4724,9 +5093,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let p = super::fetch_provider().await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         let p = p.expect("provider parses");
         assert_eq!(p.provider, "github (token)");
@@ -4735,7 +5103,7 @@ mod tests {
 
     /// `fetch_gate_probe` POSTs /api/gate-probe and parses the go/no-go.
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn fetch_gate_probe_parses_verdict() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -4754,9 +5122,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let r = super::fetch_gate_probe().await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         let r = r.expect("gate probe parses");
         assert!(r.go);
@@ -4765,11 +5132,11 @@ mod tests {
         assert!(r.layer2_clean);
     }
 
-    /// `fetch_app_release` GETs /api/updates/check and parses the nested `app`
+    /// `fetch_updates_check` GETs /api/updates/check and parses the nested `app`
     /// update info, matching the real server envelope shape.
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
-    async fn fetch_app_release_parses_update_info() {
+    #[serial_test::serial(process_env)]
+    async fn fetch_updates_check_parses_update_info() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -4789,9 +5156,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
-        let rel = super::fetch_app_release().await;
-        std::env::remove_var("CAMERATA_BFF_URL");
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
+        let rel = super::fetch_updates_check().await.and_then(|u| u.app);
 
         let rel = rel.expect("release parses");
         assert_eq!(rel.current_version, "0.4.1");
@@ -4803,11 +5169,55 @@ mod tests {
         );
     }
 
+    /// `fetch_updates_check` carries the operator-only `corpus_freshness` object through; a
+    /// server that predates it (key absent) or cannot tell (`null`) yields `None`, never a
+    /// fabricated "all clear" or "all unconfirmed".
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn fetch_updates_check_parses_corpus_freshness_and_tolerates_its_absence() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/updates/check"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "app": serde_json::Value::Null,
+                "rule_drift": [],
+                "corpus_freshness": {
+                    "overdue": [{ "domain": "go", "days_since": 111, "threshold_days": 90 }],
+                    "due_soon": [{ "domain": "rust", "days_remaining": 3 }],
+                    "never_confirmed_count": 2
+                }
+            })))
+            .mount(&server)
+            .await;
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
+        let got = super::fetch_updates_check().await.expect("parses");
+        let cf = got.corpus_freshness.expect("corpus_freshness present");
+        assert_eq!(cf.overdue[0].domain, "go");
+        assert_eq!(cf.due_soon[0].days_remaining, 3);
+        assert_eq!(cf.never_confirmed_count, 2);
+
+        let older = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/updates/check"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true, "app": serde_json::Value::Null, "rule_drift": []
+            })))
+            .mount(&older)
+            .await;
+        let _env2 = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", older.uri());
+        let got = super::fetch_updates_check().await.expect("parses");
+        assert!(got.corpus_freshness.is_none());
+    }
+
     /// A failing GitHub check surfaces `app: null`; the fetcher yields `None`
     /// rather than a bogus update banner.
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
-    async fn fetch_app_release_none_when_app_null() {
+    #[serial_test::serial(process_env)]
+    async fn fetch_updates_check_app_none_when_app_null() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -4822,16 +5232,15 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
-        let rel = super::fetch_app_release().await;
-        std::env::remove_var("CAMERATA_BFF_URL");
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
+        let rel = super::fetch_updates_check().await.and_then(|u| u.app);
 
         assert!(rel.is_none());
     }
 
     /// `fetch_feature_flags` GETs /api/feature-flags and parses the flag map.
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn fetch_feature_flags_parses_map() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -4839,20 +5248,21 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/api/feature-flags"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "soc2": true })))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "soc2": true })),
+            )
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let flags = super::fetch_feature_flags().await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         assert!(flags.soc2, "soc2 flag parses from the server");
     }
 
     /// `fetch_feature_flags` degrades to an all-off default when the endpoint 500s.
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn fetch_feature_flags_defaults_on_error() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -4864,16 +5274,18 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let flags = super::fetch_feature_flags().await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
-        assert!(!flags.soc2, "an error degrades to all-off (the conservative default)");
+        assert!(
+            !flags.soc2,
+            "an error degrades to all-off (the conservative default)"
+        );
     }
 
     /// `fetch_app_chat_model` GETs /api/settings and returns the non-empty chat model.
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn fetch_app_chat_model_returns_non_empty() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -4882,21 +5294,20 @@ mod tests {
         Mock::given(method("GET"))
             .and(path("/api/settings"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "chat_model": "claude-opus-4-8"
+                "chat_model": "claude-opus-5"
             })))
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let m = super::fetch_app_chat_model().await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
-        assert_eq!(m.as_deref(), Some("claude-opus-4-8"));
+        assert_eq!(m.as_deref(), Some("claude-opus-5"));
     }
 
     /// `save_app_chat_model` POSTs {model} to /api/settings/chat-model.
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn save_app_chat_model_posts_model() {
         use wiremock::matchers::{body_json, method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -4904,22 +5315,21 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/api/settings/chat-model"))
-            .and(body_json(serde_json::json!({ "model": "claude-sonnet-4-6" })))
+            .and(body_json(serde_json::json!({ "model": "claude-sonnet-5" })))
             .respond_with(ResponseTemplate::new(200))
             .expect(1)
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
-        let ok = super::save_app_chat_model("claude-sonnet-4-6").await;
-        std::env::remove_var("CAMERATA_BFF_URL");
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
+        let ok = super::save_app_chat_model("claude-sonnet-5").await;
 
         assert!(ok);
     }
 
     /// `fetch_reconcile` GETs /api/projects/:id/reconcile and reads `applied` when `ok`.
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn fetch_reconcile_reads_applied_when_ok() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -4936,9 +5346,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let applied = super::fetch_reconcile("p-1").await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         let applied = applied.expect("applied list parses");
         assert_eq!(applied.len(), 1);
@@ -4948,7 +5357,7 @@ mod tests {
 
     /// `fetch_reconcile` returns None when the server reports `ok: false`.
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn fetch_reconcile_none_when_not_ok() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -4956,20 +5365,21 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/api/projects/p-1/reconcile"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": false })))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": false })),
+            )
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let applied = super::fetch_reconcile("p-1").await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         assert!(applied.is_none(), "ok:false yields None");
     }
 
     /// `apply_model_profile` POSTs {profile} and returns the JSON body.
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn apply_model_profile_posts_profile() {
         use wiremock::matchers::{body_json, method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -4978,14 +5388,15 @@ mod tests {
         Mock::given(method("POST"))
             .and(path("/api/projects/p-1/model-profile"))
             .and(body_json(serde_json::json!({ "profile": "max_quality" })))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": true })))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": true })),
+            )
             .expect(1)
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let v = super::apply_model_profile("p-1", "max_quality").await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         let v = v.expect("apply returns a JSON body");
         assert_eq!(v.get("ok").and_then(|b| b.as_bool()), Some(true));
@@ -4993,7 +5404,7 @@ mod tests {
 
     /// `preview_model_profile` GETs the preview endpoint with the profile query param.
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn preview_model_profile_gets_with_query() {
         use wiremock::matchers::{method, path, query_param};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -5002,13 +5413,14 @@ mod tests {
         Mock::given(method("GET"))
             .and(path("/api/projects/p-1/model-profile/preview"))
             .and(query_param("profile", "balanced"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "preview": true })))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "preview": true })),
+            )
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let v = super::preview_model_profile("p-1", "balanced").await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         let v = v.expect("preview returns a JSON body");
         assert_eq!(v.get("preview").and_then(|b| b.as_bool()), Some(true));
@@ -5018,7 +5430,7 @@ mod tests {
     /// Started with the run id. (Uses a plain story id; `enc_seg`'s percent-encoding
     /// is unit-tested separately so this test's path is unambiguous.)
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn start_dev_run_started_returns_run_id() {
         use super::StartRunOutcome;
         use wiremock::matchers::{method, path};
@@ -5027,15 +5439,16 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/api/stories/CAM-7/run"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "run_id": "run-7" })))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "run_id": "run-7" })),
+            )
             .expect(1)
             .mount(&server)
             .await;
 
         let tm = TierMapView::default();
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let outcome = super::start_dev_run("CAM-7", &tm, false).await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         match outcome {
             StartRunOutcome::Started(id) => assert_eq!(id, "run-7"),
@@ -5054,7 +5467,7 @@ mod tests {
 
     /// `start_dev_run` maps a 409 with a reason to Blocked(reason).
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn start_dev_run_409_is_blocked_with_reason() {
         use super::StartRunOutcome;
         use wiremock::matchers::{method, path};
@@ -5070,19 +5483,20 @@ mod tests {
             .await;
 
         let tm = TierMapView::default();
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let outcome = super::start_dev_run("s-1", &tm, false).await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         match outcome {
-            StartRunOutcome::Blocked(reason) => assert_eq!(reason, "Decisions are not all approved."),
+            StartRunOutcome::Blocked(reason) => {
+                assert_eq!(reason, "Decisions are not all approved.")
+            }
             _ => panic!("expected Blocked"),
         }
     }
 
     /// `begin_investigation_run` POSTs {model} and returns Started with the run id.
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn begin_investigation_run_started_posts_model() {
         use super::BeginInvestigationOutcome;
         use wiremock::matchers::{body_json, method, path};
@@ -5091,7 +5505,7 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/api/uow/s-1/begin-investigation"))
-            .and(body_json(serde_json::json!({ "model": "claude-opus-4-8" })))
+            .and(body_json(serde_json::json!({ "model": "claude-opus-5" })))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "run_id": "run-3", "story_id": "s-1"
             })))
@@ -5099,9 +5513,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
-        let outcome = super::begin_investigation_run("s-1", "claude-opus-4-8").await;
-        std::env::remove_var("CAMERATA_BFF_URL");
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
+        let outcome = super::begin_investigation_run("s-1", "claude-opus-5").await;
 
         match outcome {
             BeginInvestigationOutcome::Started(id) => assert_eq!(id, "run-3"),
@@ -5111,7 +5524,7 @@ mod tests {
 
     /// `begin_investigation_run` maps a 409 with a reason to Blocked(reason).
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn begin_investigation_run_409_is_blocked() {
         use super::BeginInvestigationOutcome;
         use wiremock::matchers::{method, path};
@@ -5126,9 +5539,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let outcome = super::begin_investigation_run("s-1", "m").await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         match outcome {
             BeginInvestigationOutcome::Blocked(reason) => assert_eq!(reason, "Not at intake."),
@@ -5138,7 +5550,7 @@ mod tests {
 
     /// `import_project_payload` merges the `overwrite` flag and parses an Imported result.
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn import_project_payload_imported() {
         use super::ImportResult;
         use wiremock::matchers::{body_json, method, path};
@@ -5148,7 +5560,9 @@ mod tests {
         // The helper parses the payload, inserts overwrite:true, and re-serialises.
         Mock::given(method("POST"))
             .and(path("/api/projects/import"))
-            .and(body_json(serde_json::json!({ "name": "Imp", "overwrite": true })))
+            .and(body_json(
+                serde_json::json!({ "name": "Imp", "overwrite": true }),
+            ))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "ok": true,
                 "project": { "id": "p-imp", "name": "Imp" }
@@ -5157,9 +5571,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let res = super::import_project_payload(r#"{"name":"Imp"}"#, true).await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         match res {
             ImportResult::Imported(p) => assert_eq!(p.id, "p-imp"),
@@ -5169,7 +5582,7 @@ mod tests {
 
     /// `import_project_payload` surfaces a name-collision Conflict (with name + payload).
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn import_project_payload_conflict() {
         use super::ImportResult;
         use wiremock::matchers::{method, path};
@@ -5184,9 +5597,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let res = super::import_project_payload(r#"{"name":"Existing"}"#, false).await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         match res {
             ImportResult::Conflict { name, payload } => {
@@ -5217,9 +5629,15 @@ mod tests {
         let mut vdom = VirtualDom::new(harness);
         vdom.rebuild_in_place();
         let html = dioxus_ssr::render(&vdom);
-        assert!(html.contains("cockpit-notice-title"), "the title class renders; html=\n{html}");
+        assert!(
+            html.contains("cockpit-notice-title"),
+            "the title class renders; html=\n{html}"
+        );
         // SSR escapes the apostrophe in "Can't" to &#39;, so assert on the apostrophe-free portion.
-        assert!(html.contains("reach the engine"), "the error title; html=\n{html}");
+        assert!(
+            html.contains("reach the engine"),
+            "the error title; html=\n{html}"
+        );
     }
 
     /// `CockpitNotice` "loading" kind renders the distinct "connecting" copy (a different
@@ -5235,15 +5653,24 @@ mod tests {
         let mut vdom = VirtualDom::new(harness);
         vdom.rebuild_in_place();
         let html = dioxus_ssr::render(&vdom);
-        assert!(html.contains("cockpit-notice-title"), "the title class renders; html=\n{html}");
+        assert!(
+            html.contains("cockpit-notice-title"),
+            "the title class renders; html=\n{html}"
+        );
         // The loading title is "Connecting to the engine…" — distinct from the error copy.
-        assert!(html.contains("Connecting to the engine"), "the loading title; html=\n{html}");
+        assert!(
+            html.contains("Connecting to the engine"),
+            "the loading title; html=\n{html}"
+        );
         assert!(
             html.contains("Reaching the local Camerata server"),
             "the loading body; html=\n{html}"
         );
         // It must NOT show the error-kind copy (proves the match picked the loading arm).
-        assert!(!html.contains("isn&#39;t responding"), "loading is not the error variant; html=\n{html}");
+        assert!(
+            !html.contains("isn&#39;t responding"),
+            "loading is not the error variant; html=\n{html}"
+        );
     }
 
     /// `CockpitNotice` with an unknown kind falls back to the empty-state copy.
@@ -5257,7 +5684,10 @@ mod tests {
         let mut vdom = VirtualDom::new(harness);
         vdom.rebuild_in_place();
         let html = dioxus_ssr::render(&vdom);
-        assert!(html.contains("No stories yet"), "the empty-state title; html=\n{html}");
+        assert!(
+            html.contains("No stories yet"),
+            "the empty-state title; html=\n{html}"
+        );
     }
 
     /// `GateSelfCheck` renders its title + the run button before any result is fetched
@@ -5272,9 +5702,15 @@ mod tests {
         let mut vdom = VirtualDom::new(harness);
         vdom.rebuild_in_place();
         let html = dioxus_ssr::render(&vdom);
-        assert!(html.contains("gate-selfcheck"), "the wrapper class; html=\n{html}");
+        assert!(
+            html.contains("gate-selfcheck"),
+            "the wrapper class; html=\n{html}"
+        );
         assert!(html.contains("Gate self-check"), "the title; html=\n{html}");
-        assert!(html.contains("Run gate self-check"), "the run button label; html=\n{html}");
+        assert!(
+            html.contains("Run gate self-check"),
+            "the run button label; html=\n{html}"
+        );
     }
 
     /// `HomeNav` renders the three project-independent tabs (a bound signal prop; no
@@ -5290,12 +5726,18 @@ mod tests {
         let mut vdom = VirtualDom::new(harness);
         vdom.rebuild_in_place();
         let html = dioxus_ssr::render(&vdom);
-        assert!(html.contains("cockpit-nav"), "the nav wrapper; html=\n{html}");
+        assert!(
+            html.contains("cockpit-nav"),
+            "the nav wrapper; html=\n{html}"
+        );
         assert!(html.contains("Projects"), "the Projects tab; html=\n{html}");
         assert!(html.contains("Docs"), "the Docs tab; html=\n{html}");
         assert!(html.contains("Settings"), "the Settings tab; html=\n{html}");
         // Projects is the active view → its button carries the `on` modifier.
-        assert!(html.contains("cockpit-nav-tab on"), "the active tab modifier; html=\n{html}");
+        assert!(
+            html.contains("cockpit-nav-tab on"),
+            "the active tab modifier; html=\n{html}"
+        );
     }
 
     /// `DocsView` renders its two doc tabs + the markdown body wrapper. The body uses
@@ -5311,10 +5753,22 @@ mod tests {
         let mut vdom = VirtualDom::new(harness);
         vdom.rebuild_in_place();
         let html = dioxus_ssr::render(&vdom);
-        assert!(html.contains("docs-view"), "the docs wrapper; html=\n{html}");
-        assert!(html.contains("User Guide"), "the user-guide tab; html=\n{html}");
-        assert!(html.contains("Technical"), "the technical tab; html=\n{html}");
-        assert!(html.contains("docs-body"), "the body wrapper (dangerous_inner_html); html=\n{html}");
+        assert!(
+            html.contains("docs-view"),
+            "the docs wrapper; html=\n{html}"
+        );
+        assert!(
+            html.contains("User Guide"),
+            "the user-guide tab; html=\n{html}"
+        );
+        assert!(
+            html.contains("Technical"),
+            "the technical tab; html=\n{html}"
+        );
+        assert!(
+            html.contains("docs-body"),
+            "the body wrapper (dangerous_inner_html); html=\n{html}"
+        );
     }
 
     /// `UsageMeter` renders its neutral placeholder before the first poll lands (the
@@ -5329,7 +5783,10 @@ mod tests {
         let mut vdom = VirtualDom::new(harness);
         vdom.rebuild_in_place();
         let html = dioxus_ssr::render(&vdom);
-        assert!(html.contains("usage-meter-loading"), "the loading placeholder class; html=\n{html}");
+        assert!(
+            html.contains("usage-meter-loading"),
+            "the loading placeholder class; html=\n{html}"
+        );
     }
 
     // Build a minimal ProjectView fixture from JSON (it has many serde-default
@@ -5337,6 +5794,44 @@ mod tests {
     fn project_fixture() -> super::ProjectView {
         serde_json::from_value(serde_json::json!({ "id": "p-1", "name": "Acme" }))
             .expect("valid ProjectView fixture")
+    }
+
+    /// `ProjectView.backend` (`docs/design/2026-09-22_per-project-backend.md`) round-trips
+    /// both wire values, and a project with no `backend` field at all (either a bare fixture
+    /// or one still carrying the dead `cli_active` key from before the migration) deserializes
+    /// to `Cli`, the same zero-setup default a freshly-created project gets.
+    #[test]
+    fn project_view_deserializes_backend_with_legacy_absent_default() {
+        assert_eq!(
+            project_fixture().backend,
+            ProjectBackend::Cli,
+            "bare fixture defaults to Cli"
+        );
+
+        let cli: super::ProjectView = serde_json::from_value(
+            serde_json::json!({ "id": "p-1", "name": "Acme", "backend": "cli" }),
+        )
+        .expect("valid ProjectView fixture");
+        assert_eq!(cli.backend, ProjectBackend::Cli);
+
+        let api: super::ProjectView = serde_json::from_value(
+            serde_json::json!({ "id": "p-1", "name": "Acme", "backend": "api" }),
+        )
+        .expect("valid ProjectView fixture");
+        assert_eq!(api.backend, ProjectBackend::Api);
+
+        // A project persisted before the migration carries the old `cli_active` key and no
+        // `backend` key at all; it's an unknown field now, ignored, and `backend` still
+        // lands on the Cli default.
+        let legacy: super::ProjectView = serde_json::from_value(serde_json::json!({
+            "id": "p-1", "name": "Acme", "cli_active": true,
+        }))
+        .expect("valid ProjectView fixture despite the dead cli_active field");
+        assert_eq!(
+            legacy.backend,
+            ProjectBackend::Cli,
+            "legacy cli_active project migrates to Cli"
+        );
     }
 
     /// `ProductBriefEditor` needs the toast context (use_context::<Signal<Vec<Toast>>>),
@@ -5353,10 +5848,19 @@ mod tests {
         let mut vdom = VirtualDom::new(harness);
         vdom.rebuild_in_place();
         let html = dioxus_ssr::render(&vdom);
-        assert!(html.contains("soft-ctx-card"), "the card wrapper; html=\n{html}");
+        assert!(
+            html.contains("soft-ctx-card"),
+            "the card wrapper; html=\n{html}"
+        );
         assert!(html.contains("Product brief"), "the title; html=\n{html}");
-        assert!(html.contains("soft-ctx-brief"), "the brief textarea; html=\n{html}");
-        assert!(html.contains("Save brief"), "the save button label; html=\n{html}");
+        assert!(
+            html.contains("soft-ctx-brief"),
+            "the brief textarea; html=\n{html}"
+        );
+        assert!(
+            html.contains("Save brief"),
+            "the save button label; html=\n{html}"
+        );
     }
 
     /// `OperatingPrinciplesEditor` (toast context provided) renders the card + add control.
@@ -5372,10 +5876,22 @@ mod tests {
         let mut vdom = VirtualDom::new(harness);
         vdom.rebuild_in_place();
         let html = dioxus_ssr::render(&vdom);
-        assert!(html.contains("soft-ctx-card"), "the card wrapper; html=\n{html}");
-        assert!(html.contains("Operating principles"), "the title; html=\n{html}");
-        assert!(html.contains("op-add"), "the add-principle row; html=\n{html}");
-        assert!(html.contains("Save principles"), "the save button; html=\n{html}");
+        assert!(
+            html.contains("soft-ctx-card"),
+            "the card wrapper; html=\n{html}"
+        );
+        assert!(
+            html.contains("Operating principles"),
+            "the title; html=\n{html}"
+        );
+        assert!(
+            html.contains("op-add"),
+            "the add-principle row; html=\n{html}"
+        );
+        assert!(
+            html.contains("Save principles"),
+            "the save button; html=\n{html}"
+        );
     }
 
     /// `MemoryEditor` (toast context provided) renders the card, the empty-state line
@@ -5392,10 +5908,19 @@ mod tests {
         let mut vdom = VirtualDom::new(harness);
         vdom.rebuild_in_place();
         let html = dioxus_ssr::render(&vdom);
-        assert!(html.contains("soft-ctx-card"), "the card wrapper; html=\n{html}");
+        assert!(
+            html.contains("soft-ctx-card"),
+            "the card wrapper; html=\n{html}"
+        );
         assert!(html.contains("Project memory"), "the title; html=\n{html}");
-        assert!(html.contains("mem-empty"), "the empty-state line (no memory in the fixture); html=\n{html}");
-        assert!(html.contains("mem-kind-select"), "the kind selector; html=\n{html}");
+        assert!(
+            html.contains("mem-empty"),
+            "the empty-state line (no memory in the fixture); html=\n{html}"
+        );
+        assert!(
+            html.contains("mem-kind-select"),
+            "the kind selector; html=\n{html}"
+        );
     }
 
     // ══════════════════════════════════════════════════════════════════════════
@@ -5437,12 +5962,30 @@ mod tests {
         vdom.rebuild_in_place();
         let html = dioxus_ssr::render(&vdom);
         assert!(html.contains("Work hierarchy"), "the title; html=\n{html}");
-        assert!(html.contains("hier-palette"), "the type palette; html=\n{html}");
-        assert!(html.contains("hier-type-card"), "a card per type; html=\n{html}");
-        assert!(html.contains("Epic"), "a schema type renders; html=\n{html}");
-        assert!(html.contains("hier-children"), "the children drop zone; html=\n{html}");
-        assert!(html.contains("hier-child-chip"), "an allowed-child chip renders; html=\n{html}");
-        assert!(html.contains("Save hierarchy"), "the save button; html=\n{html}");
+        assert!(
+            html.contains("hier-palette"),
+            "the type palette; html=\n{html}"
+        );
+        assert!(
+            html.contains("hier-type-card"),
+            "a card per type; html=\n{html}"
+        );
+        assert!(
+            html.contains("Epic"),
+            "a schema type renders; html=\n{html}"
+        );
+        assert!(
+            html.contains("hier-children"),
+            "the children drop zone; html=\n{html}"
+        );
+        assert!(
+            html.contains("hier-child-chip"),
+            "an allowed-child chip renders; html=\n{html}"
+        );
+        assert!(
+            html.contains("Save hierarchy"),
+            "the save button; html=\n{html}"
+        );
     }
 
     // ── Pure schema-mutation logic (the highest-ROI layer) ──────────────────────
@@ -5451,8 +5994,14 @@ mod tests {
     fn schema_add_type_dedups_and_ignores_blank() {
         let mut s = super::HierarchySchemaView::default();
         assert!(super::schema_add_type(&mut s, "Epic", true));
-        assert!(!super::schema_add_type(&mut s, "Epic", true), "no duplicate");
-        assert!(!super::schema_add_type(&mut s, "   ", false), "blank ignored");
+        assert!(
+            !super::schema_add_type(&mut s, "Epic", true),
+            "no duplicate"
+        );
+        assert!(
+            !super::schema_add_type(&mut s, "   ", false),
+            "blank ignored"
+        );
         assert_eq!(s.types.len(), 1);
     }
 
@@ -5464,7 +6013,10 @@ mod tests {
         super::schema_add_relation(&mut s, "Epic", "Feature").unwrap();
         super::schema_remove_type(&mut s, "Feature");
         assert!(s.types.iter().all(|t| t.name != "Feature"));
-        assert!(s.relations.is_empty(), "the relation referencing Feature is removed too");
+        assert!(
+            s.relations.is_empty(),
+            "the relation referencing Feature is removed too"
+        );
     }
 
     #[test]
@@ -5483,14 +6035,26 @@ mod tests {
         for t in ["A", "B", "C"] {
             super::schema_add_type(&mut s, t, false);
         }
-        assert!(super::schema_add_relation(&mut s, "A", "A").is_err(), "self-loop rejected");
+        assert!(
+            super::schema_add_relation(&mut s, "A", "A").is_err(),
+            "self-loop rejected"
+        );
         super::schema_add_relation(&mut s, "A", "B").unwrap();
         super::schema_add_relation(&mut s, "B", "C").unwrap();
-        assert!(super::schema_add_relation(&mut s, "A", "B").is_err(), "duplicate rejected");
+        assert!(
+            super::schema_add_relation(&mut s, "A", "B").is_err(),
+            "duplicate rejected"
+        );
         // C→A would close the cycle A→B→C→A.
-        assert!(super::schema_add_relation(&mut s, "C", "A").is_err(), "cycle rejected");
+        assert!(
+            super::schema_add_relation(&mut s, "C", "A").is_err(),
+            "cycle rejected"
+        );
         // A→C is fine: C may sit under BOTH A and B (a DAG with multiple parents, not a cycle).
-        assert!(super::schema_add_relation(&mut s, "A", "C").is_ok(), "multi-parent DAG edge allowed");
+        assert!(
+            super::schema_add_relation(&mut s, "A", "C").is_ok(),
+            "multi-parent DAG edge allowed"
+        );
     }
 
     #[test]
@@ -5509,7 +6073,7 @@ mod tests {
     /// Tier-2 network: the save helper POSTs the WHOLE schema graph to the hierarchy endpoint with
     /// the exact body the server expects.
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn set_hierarchy_schema_posts_the_whole_graph() {
         use wiremock::matchers::{body_json, method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -5521,7 +6085,9 @@ mod tests {
                 "types": [{ "name": "Epic", "builtin": true, "is_design_root": true }],
                 "relations": [{ "parent": "Epic", "child": "Feature" }]
             })))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": true })))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": true })),
+            )
             .expect(1)
             .mount(&server)
             .await;
@@ -5537,9 +6103,8 @@ mod tests {
                 child: "Feature".into(),
             }],
         };
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let ok = super::set_hierarchy_schema("p-9", &schema).await;
-        std::env::remove_var("CAMERATA_BFF_URL");
         assert!(ok, "the helper POSTs the schema graph and reports success");
     }
 }

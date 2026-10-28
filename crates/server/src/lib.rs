@@ -5,43 +5,67 @@
 //! runs locally behind the desktop shell today and in the cloud later. The UI
 //! stops calling the backend crates directly and calls this instead.
 //!
-//! Phase 1 (this module) exposes the cockpit's READ contracts:
-//!   - `GET /api/health`  -> liveness.
-//!   - `GET /api/rules`   -> the gate's enforced rules (the inspector's data).
-//!   - `GET /api/stories` -> the canonical story spine (the left rail).
+//! HISTORICAL NOTE, corrected 2026-10-11: this header used to describe a "Phase 1"
+//! read-only router (`GET /api/health` / `/api/rules` / `/api/stories`) and promise
+//! execution endpoints "in later phases". Those phases landed long ago. The crate is
+//! now the composition root for most of the backend, and the module list below is the
+//! accurate map. The subsystems a reader most often comes here for:
 //!
-//! Execution endpoints (run a governed fleet on a story) and a live-status stream
-//! land in later phases, behind the same router.
+//! - **The inspection pipeline.** [`onboard`] (deterministic floor, stack detection,
+//!   rule proposal, the `Finding` / `ScanReport` / `SealedReport` data model),
+//!   [`ai_audit`] (the semantic/LLM tier, the alternatives pass, the finding-kind
+//!   assignment passes), [`scan_tools`] (the external-tool preview tier),
+//!   [`dep_audit`], `mechanical_gate` (private) and [`suppression`].
+//! - **The client deliverable.** [`report_export`] builds the PDF's JSON and owns the
+//!   severity choke-point; [`xlsx_export`] builds the kind-partitioned workbook and
+//!   `findings.json`. Both take `&onboard::SealedReport`, never `&ScanReport`, so the
+//!   row set cannot be mutated after sealing. See `docs/TECHNICAL.md` section 6a.
+//! - **Self-measurement.** [`scan_ledger`] records what actually ran;
+//!   [`integrity_gate`] turns that into a verdict with an exit code. See
+//!   `docs/TECHNICAL.md` section 6b.
+//! - **The governed dev loop.** [`uow`], [`dev_implement_run`] (which owns the
+//!   cross-agent integration gate bundle), [`jobs`], [`test_tamper`],
+//!   [`enforcement_ledger`].
+//!
+//! Every UI-facing contract is still an HTTP endpoint registered in this module's
+//! router, which is the property the first paragraph above describes and which has
+//! not changed.
 
 pub mod ai_audit;
 pub mod api_agent_driver;
+pub mod app_dirs;
 pub mod arm;
 pub mod auto_fire;
-pub mod dep_audit;
+pub mod checkpoint;
 pub mod clarify;
 pub mod clarify_resume;
+pub mod client_provenance;
+pub mod client_source;
 pub mod connections;
+mod corpus_freshness;
 /// `POST /api/apps` (Part 2 of the Rust-fullstack scaffolder): drives
 /// `camerata-scaffold`, creates + pushes the GitHub repo, and registers the
 /// resulting Camerata project. See the module doc comment for the full flow.
 pub mod create_app;
 pub mod decompose;
+pub mod dep_audit;
 pub mod draft;
 pub mod enforcement_ledger;
-pub mod checkpoint;
 pub mod escalation;
 pub mod eval;
 pub mod evidence;
 pub mod feature_flags;
 pub mod fix;
-pub mod grounding;
 pub mod github_issues;
+pub mod grounding;
+pub mod inspections;
 pub mod investigation_run;
 pub mod jobs;
 // `lifecycle` (UowStage state machine + transitions) is now the framework-agnostic
 // `camerata_app_core::lifecycle` (RUST-HEADLESS-CORE-1); re-exported so `crate::lifecycle::*` call
 // sites (uow, lib) are unchanged.
 pub use camerata_app_core::lifecycle;
+pub mod dev_implement_run;
 pub mod live_fleet;
 pub mod llm;
 pub mod notify;
@@ -49,8 +73,8 @@ pub mod onboard;
 /// `POST /api/orchestrator/message` — the architect-orchestrator's first
 /// functional turn (real LLM + real governed execution seam). See the module doc.
 pub mod orchestrator_message;
+pub mod ownership;
 pub mod pr;
-pub mod dev_implement_run;
 pub mod pr_resolve_run;
 pub mod project;
 pub mod provider;
@@ -62,43 +86,62 @@ pub mod report_export;
 pub mod review_agent;
 pub mod routine;
 pub mod run;
+pub mod scan_cache;
+pub mod scan_routing;
+pub mod scan_tools;
+pub mod scope_registration;
+pub mod severity_bounds;
+pub mod stage_telemetry;
+pub mod stall_sweep;
 /// Excel workbook export (product-export, Pass C): `build_workbook`, the Excel sibling of
 /// `report_export::build_report_json`. See the module doc comment and
 /// `docs/design/2026-07-27_product-export.md`.
 pub mod xlsx_export;
-pub mod scope_registration;
-pub mod scan_cache;
-pub mod scan_routing;
-pub mod scan_tools;
-pub mod stall_sweep;
 // `schedule` (routine string parsing + is_due/next_fire) is now the framework-agnostic
 // `camerata_app_core::schedule` (RUST-HEADLESS-CORE-1); re-exported so `crate::schedule::*` call
 // sites (auto_fire, lib) are unchanged.
 pub use camerata_app_core::schedule;
-pub mod tool_provisioning;
-pub mod model_tier;
-pub mod settings;
-pub mod story_docs_gate;
-pub mod suppression;
-/// GAP-2: the shared commit / PR / branch chokepoint gate. Every server-side VCS action
-/// funnels through `vcs_choke` so a project's configured process rules are actually enforced
-/// (HARD-BLOCK on violation), not merely configurable via the bypass endpoint.
-pub mod vcs_choke;
-pub mod terminal;
-pub mod test_tamper;
 /// Layer-3 CI workflow generator — produces `.github/workflows/camerata-gates.yml`
 /// from the built-in language gate commands + manifest checks. See
 /// `docs/decisions/2026-06-22_check_manifest_single_source_of_truth.md`.
 pub mod credentials;
-pub mod model_registry;
-pub mod provider_policy;
+/// W6 / I2: the PRE-FLIGHT INTEGRITY GATE — turns the `scan_ledger` summary a human used to
+/// eyeball into a verdict with an exit code, so a silently degraded scan is caught before a
+/// graded run is paid for rather than after. See the module doc comment.
+pub mod integrity_gate;
+/// W1 item 4: corpus-level build gate — every rule declaring `enforcement = "mechanical"`
+/// must resolve to a real wired detector. See the module doc comment.
+mod mechanical_gate;
 pub mod model_profile_cascade;
+pub mod model_registry;
+pub mod model_tier;
+pub mod provider_policy;
 pub mod rate_limit;
-pub mod workflow_gen;
+pub mod release_gate;
+/// W1: the pipeline-integrity ledger — per-rule "did it actually run" tracking and
+/// per-stage row-accounting, so a rule that never ran can never be reported as
+/// "verified clean" and a row that vanishes between pipeline stages can never go
+/// unnoticed. See the module doc comment and `docs/plans/` for the defects this closes.
+pub mod scan_ledger;
+pub mod settings;
+pub mod story_docs_gate;
+pub mod suppression;
+pub mod terminal;
+/// Real-git fixtures shared by unit and integration tests; nothing in the product calls it.
+#[doc(hidden)]
+pub mod test_git;
+pub mod test_tamper;
+pub mod tool_provisioning;
 pub mod transcript;
 pub mod uow;
-pub mod usage_ledger;
 pub mod update_branch_run;
+pub mod usage_ledger;
+/// GAP-2: the shared commit / PR / branch chokepoint gate. Every server-side VCS action
+/// funnels through `vcs_choke` so a project's configured process rules are actually enforced
+/// (HARD-BLOCK on violation), not merely configurable via the bypass endpoint.
+pub mod vcs_choke;
+pub mod warm_schedule;
+pub mod workflow_gen;
 pub mod workitems;
 pub mod workspace;
 
@@ -137,7 +180,7 @@ pub struct AppState {
     /// endpoint consumes it to resume. Persisted alongside the clarify store so a pause
     /// point survives a restart.
     clarify_resume: crate::clarify_resume::ClarifyResumeStore,
-    provider: ProviderHandle,
+    provider: crate::provider::ProviderCell,
     decompositions: DecompositionStore,
     routines: RoutineStore,
     notifications: crate::notify::NotificationStore,
@@ -154,12 +197,32 @@ pub struct AppState {
     /// re-scan only pays the AI bill for files that changed. Best-effort; losing it just
     /// means the next scan is a full scan.
     scan_cache: crate::scan_cache::ScanCacheStore,
+    /// Persisted per-inspection entries (the sealed report plus its provenance), one file per
+    /// project. The durable twin of `last_scan`: written whenever a scan completes, read back
+    /// by [`AppState::get_last_scan`] when the in-memory map is empty (after a restart), and the
+    /// ONLY source the exports and the review screen have once client source is deleted.
+    inspections: crate::inspections::InspectionStore,
+    /// Machine-local deletion records (the proof handed to a client) and re-fetch records.
+    /// Not part of the project export. See [`crate::client_source`].
+    source_records: crate::client_source::records::SourceRecordStore,
+    /// Operations in flight on a repo's source (delete, re-fetch, rescan) and scans running in a
+    /// request: what the deletion guard's "scan in progress" refusal reads.
+    source_ops: crate::client_source::ops::SourceOps,
+    /// Where network git steps (re-fetch clone, probe, commit fetch) go. GitHub in production;
+    /// tests map a repo to a local bare repository so nothing touches the network.
+    git_remotes: crate::client_source::remote::GitRemotes,
+    /// The locations source deletion may touch besides the checkout. EMPTY by default so a
+    /// state built by `new()` can touch nothing outside a checkout; only `from_env()` installs
+    /// the real ones. See [`crate::client_source::storage`].
+    storage_roots: Arc<crate::client_source::storage::StorageRoots>,
     /// Per-project last completed scan report. Written the instant any scan handler finishes
     /// (both the synchronous `onboard_audit` path and the async job path). Read by
     /// `active_project_context` as the authoritative source for grounding, with the
     /// UI-round-tripped draft as a first-priority fallback. In-memory only (v1); does not
     /// survive a process restart (a v2 concern).
-    last_scan: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, crate::onboard::ScanReport>>>,
+    last_scan: std::sync::Arc<
+        std::sync::Mutex<std::collections::HashMap<String, crate::onboard::ScanReport>>,
+    >,
     /// Project-agnostic fallback: the single most-recently completed scan, regardless of which
     /// project was active at scan time.  Mirrors `last_scan` but keyed only on recency.
     ///
@@ -251,7 +314,7 @@ impl AppState {
             runs: RunStore::new(),
             clarifications: ClarificationStore::new(),
             clarify_resume: crate::clarify_resume::ClarifyResumeStore::new(),
-            provider: ProviderHandle::native(),
+            provider: crate::provider::ProviderCell::new(ProviderHandle::native()),
             decompositions: DecompositionStore::new(),
             routines: RoutineStore::new(),
             notifications: crate::notify::NotificationStore::new(),
@@ -264,6 +327,11 @@ impl AppState {
             escalations: crate::escalation::EscalationStore::new(),
             checkpoints: crate::checkpoint::CheckpointStore::new(),
             scan_cache: crate::scan_cache::ScanCacheStore::new(),
+            inspections: crate::inspections::InspectionStore::new(),
+            source_records: crate::client_source::records::SourceRecordStore::new(),
+            source_ops: crate::client_source::ops::SourceOps::new(),
+            git_remotes: crate::client_source::remote::GitRemotes::default(),
+            storage_roots: Arc::new(crate::client_source::storage::StorageRoots::default()),
             last_scan: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             recent_scan: std::sync::Arc::new(std::sync::Mutex::new(None)),
             artifacts: None,
@@ -289,12 +357,82 @@ impl AppState {
         }
     }
 
-    /// A clone of the shared `Llm` seam WITH the process-global usage ledger attached, so any
-    /// model call made through it is recorded into the cumulative cockpit meter. Every handler
-    /// that needs the LLM goes through this (instead of bare `Llm::from_env`) so the ledger
-    /// sees ALL call paths. Reads vendor/transport/model from the environment, same as before.
+    /// The keyless CLI-transport FLOOR `Llm` (kept for hermetic tests and label-only probes).
+    /// NO production model step uses it: project steps go through [`AppState::step_llm`] and
+    /// the chat through [`AppState::chat_llm`], so the backend a user selects is the backend
+    /// that runs. A clone of the shared `Llm` seam WITH the process-global usage ledger attached, so any
+    /// model call made through it is recorded into the cumulative cockpit meter. Reads
+    /// vendor/model from the environment; the TRANSPORT is fixed to `Backend::Cli`
+    /// (`Llm::from_env`'s default per `docs/design/2026-09-22_per-project-backend.md` — no
+    /// `CAMERATA_LLM_BACKEND` env read exists anymore). The `claude` CLI transport uses no
+    /// API key, so this carries none; anything that may run on the `api` backend builds its
+    /// `Llm` with `Llm::for_backend*` and a key from `credentials::anthropic_api_key`.
+    ///
+    /// This is the FLOOR constructor for call sites that have not (yet) been threaded with an
+    /// explicit per-project or chat backend — today: the non-fleet AI steps driven purely by
+    /// `state.projects.active()`'s per-step model (decomposition, clarification, story
+    /// authoring, escalation), the L3/integration-gate advisory calls inside the governed dev
+    /// loop, and misc content generation (PR title/body, HTML report rendering). The five
+    /// NAMED seams (brownfield scan, alternative recommendation, rescan, the gov-dev agent
+    /// driver, and the chat assistant) do NOT use this — they resolve `project.backend` /
+    /// `settings.chat_backend` explicitly and call `Llm::for_backend_and_ledger`
+    /// themselves.
     pub fn llm(&self) -> crate::llm::Llm {
         crate::llm::Llm::from_env_with_ledger(self.usage_ledger.clone())
+    }
+
+    /// The `Llm` for a model step, on the transport the SETTING says, with the key resolved RIGHT
+    /// NOW (`credentials::anthropic_api_key`: the key saved in the app first, env as fallback).
+    ///
+    /// - With a `project`, the project's own `backend` decides, exactly as the audit does.
+    /// - With no project, the global `settings.chat_backend` decides (the chat assistant, and any
+    ///   project-less step).
+    ///
+    /// `Api` calls the Anthropic Messages API with that key; `Cli` drives the logged-in Claude
+    /// Code CLI. `Api` with no key is `Err(message)`, never a silent downgrade to the CLI (the
+    /// same compliance-safety rule as every other seam).
+    pub fn llm_for_project(
+        &self,
+        project: Option<&crate::project::Project>,
+    ) -> Result<crate::llm::Llm, String> {
+        let key = crate::credentials::anthropic_api_key(self.credential_store.as_ref());
+        let setting = project
+            .map(|p| p.backend)
+            .unwrap_or_else(|| self.settings.chat_backend());
+        let backend = match crate::llm::resolve_backend(setting, key.is_some()) {
+            crate::llm::BackendResolution::Blocked { message } => return Err(message),
+            crate::llm::BackendResolution::Api => crate::llm::Backend::Api,
+            crate::llm::BackendResolution::Cli => crate::llm::Backend::Cli,
+        };
+        Ok(crate::llm::Llm::for_backend_and_ledger(
+            backend,
+            key,
+            self.usage_ledger.clone(),
+        ))
+    }
+
+    /// The `Llm` for the project-less CHAT assistant: [`AppState::llm_for_project`] with no
+    /// project, so `settings.chat_backend` decides.
+    pub fn chat_llm(&self) -> Result<crate::llm::Llm, String> {
+        self.llm_for_project(None)
+    }
+
+    /// The `Llm` for a NON-FLEET step of the ACTIVE project (decomposition, clarification,
+    /// story authoring, escalation translation, diagrams, mockups): the active project's
+    /// backend decides; with no active project, the chat backend setting does.
+    pub fn step_llm(&self) -> Result<crate::llm::Llm, String> {
+        self.llm_for_project(self.projects.active().as_ref())
+    }
+
+    /// [`AppState::step_llm`] as a port, for seams that cannot return an error to the caller
+    /// (the L3 review and integration advisories). A refused backend becomes an `LlmPort` that
+    /// fails every call with the refusal message, so the step reports it instead of running on
+    /// the wrong transport.
+    pub fn step_llm_port(&self) -> Arc<dyn crate::llm::LlmPort> {
+        match self.step_llm() {
+            Ok(llm) => Arc::new(llm),
+            Err(message) => Arc::new(crate::llm::RefusedLlm::new(message)),
+        }
     }
 
     /// Record one governance event to the audit trail (Phase H1 foundation).
@@ -364,7 +502,11 @@ impl AppState {
                 // human-gated before they execute (the dial can never override this —
                 // see the plan doc), so one showing up here at all is notable; every
                 // other class is routine.
-                let severity = if decision.class == "irreversible" { "warn" } else { "info" };
+                let severity = if decision.class == "irreversible" {
+                    "warn"
+                } else {
+                    "info"
+                };
                 let detail = serde_json::to_string(&decision).unwrap_or_default();
                 self.record_governance(
                     camerata_persistence::GovernanceEvent::new(
@@ -398,6 +540,18 @@ impl AppState {
         &self.projects
     }
 
+    /// The persisted inspection store. Out-of-crate test seam (mirrors [`Self::projects`]): the
+    /// end-to-end tests read the entry a scan wrote and the one a restart reloads.
+    pub fn inspections(&self) -> &crate::inspections::InspectionStore {
+        &self.inspections
+    }
+
+    /// The deletion and re-fetch record store. Out-of-crate test seam (mirrors
+    /// [`Self::projects`]).
+    pub fn source_records(&self) -> &crate::client_source::records::SourceRecordStore {
+        &self.source_records
+    }
+
     /// The app-level (cross-project) settings store. Out-of-crate test seam (mirrors
     /// [`Self::projects`]): tests set the app-level `chat_model` via this store and then assert
     /// the chat model resolves back. The field itself stays private (handlers use
@@ -418,14 +572,9 @@ impl AppState {
     /// `CAMERATA_GITHUB_TOKEN` environment variable as a back-compat fallback.
     /// Returns `None` when neither is set or non-empty.
     pub fn github_token(&self) -> Option<String> {
-        // Keychain first, then CAMERATA_GITHUB_TOKEN. `resolve` warns (not swallows) on a
-        // keychain read error before falling back to the env var.
-        crate::credentials::resolve(
-            self.credential_store.as_ref(),
-            crate::credentials::GITHUB_TOKEN,
-            "CAMERATA_GITHUB_TOKEN",
-        )
-        .filter(|v| !v.is_empty())
+        // Keychain first, then CAMERATA_GITHUB_TOKEN, via the one credential resolver (which
+        // warns, not swallows, on a keychain read error before falling back to env).
+        crate::credentials::github_token(self.credential_store.as_ref())
     }
 
     /// Resolve the AUTHENTICATED GitHub login for the configured token, memoized so the
@@ -434,14 +583,22 @@ impl AppState {
     /// cached, so a later call (after a token is configured) can still resolve it.
     pub async fn github_login(&self) -> Option<String> {
         // Fast path: already resolved.
-        if let Some(login) = self.github_login_cache.lock().unwrap().clone() {
+        if let Some(login) = self
+            .github_login_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+        {
             return Some(login);
         }
         // Not cached, so resolve via the token. No token, no identity.
         let token = self.github_token()?;
         match crate::github_issues::get_authenticated_login(&token).await {
             Ok(login) if !login.is_empty() => {
-                *self.github_login_cache.lock().unwrap() = Some(login.clone());
+                *self
+                    .github_login_cache
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(login.clone());
                 Some(login)
             }
             _ => None,
@@ -561,7 +718,11 @@ impl AppState {
             }
             soft.push('\n');
         }
-        let soft = if soft.trim().is_empty() { None } else { Some(soft) };
+        let soft = if soft.trim().is_empty() {
+            None
+        } else {
+            Some(soft)
+        };
 
         let base = crate::grounding::assemble(rule_section, &repo_digests, &unresolved);
         match (soft, base) {
@@ -650,29 +811,120 @@ impl AppState {
     ///
     /// Also updates [`Self::recent_scan`] so the project-agnostic fallback always reflects
     /// the most recently completed scan, regardless of which project was active.
+    ///
+    /// A REAL inspection (the report carries at least one audited repo and is neither the
+    /// connect-GitHub gate nor a compliance block) is also appended to the persisted
+    /// [`crate::inspections::InspectionStore`], so it survives a restart and outlives the
+    /// client's source on disk. A persistence failure is logged, never fatal: the in-memory
+    /// copy still serves this session.
     pub(crate) fn set_last_scan(&self, project_id: String, report: crate::onboard::ScanReport) {
-        let mut guard = self
-            .last_scan
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        self.record_inspection(
+            &project_id,
+            &report,
+            crate::inspections::InspectionKind::Full,
+        );
+        self.set_last_scan_in_memory(project_id, report);
+    }
+
+    /// Replace a project's in-memory last scan and the project-agnostic recent scan WITHOUT
+    /// creating an inspection entry. The part of [`Self::set_last_scan`] shared with callers
+    /// that persist the entry themselves (a delta retest stamps its own
+    /// [`crate::inspections::InspectionKind`]) or amend the existing one.
+    pub(crate) fn set_last_scan_in_memory(
+        &self,
+        project_id: String,
+        report: crate::onboard::ScanReport,
+    ) {
+        let mut guard = self.last_scan.lock().unwrap_or_else(|e| e.into_inner());
         guard.insert(project_id, report.clone());
         drop(guard); // release per-project lock before acquiring recent_scan lock
-        let mut recent = self
-            .recent_scan
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        self.set_recent_scan(report);
+    }
+
+    /// Replace the project-agnostic most-recent scan (see [`Self::recent_scan`]).
+    pub(crate) fn set_recent_scan(&self, report: crate::onboard::ScanReport) {
+        let mut recent = self.recent_scan.lock().unwrap_or_else(|e| e.into_inner());
         *recent = Some(report);
     }
 
+    /// Append `report` to the persisted inspection store when it is a real inspection.
+    /// See [`Self::set_last_scan`].
+    pub(crate) fn record_inspection(
+        &self,
+        project_id: &str,
+        report: &crate::onboard::ScanReport,
+        kind: crate::inspections::InspectionKind,
+    ) {
+        if report.gated || report.blocked || report.provenance.audited_refs.is_empty() {
+            return;
+        }
+        // The stored report is the sealed artifact every export is built from, so it carries
+        // only redacted text: sweep a CLONE (the caller's copy is left as handed in) before
+        // anything reaches the file.
+        let mut sealed = report.clone();
+        sealed.sweep_secrets_before_seal();
+        let entry = crate::inspections::InspectionEntry::from_report(project_id, sealed, kind);
+        if let Err(e) = self.inspections.append(entry) {
+            tracing::warn!(
+                project = project_id,
+                error = %e,
+                "could not persist the completed inspection; exports will not survive a restart"
+            );
+        }
+    }
+
+    /// Remember Claude Code sessions that model calls made AFTER the inspection finished (the
+    /// alternatives rescan) on the project's current inspection entry, so source deletion
+    /// removes their session files too. A no-op without sessions or without an entry.
+    pub(crate) fn record_model_sessions(
+        &self,
+        project_id: &str,
+        sessions: Vec<crate::llm::ModelSession>,
+    ) {
+        for session in sessions {
+            if let Err(e) = self.inspections.record_model_session(project_id, session) {
+                tracing::warn!(
+                    project = project_id,
+                    error = %e,
+                    "could not persist a recorded model session"
+                );
+            }
+        }
+    }
+
+    /// Merge a changed report into the project's CURRENT inspection instead of starting a new
+    /// one (the alternatives rescan re-evaluates a few rules of the same inspection). Updates
+    /// the in-memory copy and the latest persisted entry in place.
+    pub(crate) fn amend_last_scan(&self, project_id: String, report: crate::onboard::ScanReport) {
+        // Same sweep as `record_inspection`: the stored report carries only redacted text.
+        let mut sealed = report.clone();
+        sealed.sweep_secrets_before_seal();
+        match self.inspections.update_latest_report(&project_id, sealed) {
+            Ok(_) => {}
+            Err(e) => tracing::warn!(
+                project = project_id.as_str(),
+                error = %e,
+                "could not persist the amended inspection"
+            ),
+        }
+        self.set_last_scan_in_memory(project_id, report);
+    }
+
     /// Retrieve the last completed scan report for the given project, if any.
+    ///
+    /// The in-memory map answers first (it is the freshest within a session); when it has
+    /// nothing for the project (a restart emptied it) the latest persisted inspection entry
+    /// answers instead. That single fallback is what makes every export, the chat grounding and
+    /// the alternatives rescan keep working after a restart and after source deletion.
     /// Returns a clone so callers do not hold the lock across await points.
-    /// Fail-soft on lock poisoning: returns `None` rather than panicking.
+    /// Fail-soft on lock poisoning: recovers the inner value rather than panicking.
     pub(crate) fn get_last_scan(&self, project_id: &str) -> Option<crate::onboard::ScanReport> {
-        let guard = self
-            .last_scan
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        guard.get(project_id).cloned()
+        let guard = self.last_scan.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(report) = guard.get(project_id) {
+            return Some(report.clone());
+        }
+        drop(guard);
+        self.inspections.latest(project_id).map(|e| e.report)
     }
 
     /// Retrieve the most recently completed scan, regardless of which project it belonged to.
@@ -686,10 +938,7 @@ impl AppState {
     /// Fail-soft on lock poisoning: returns `None` rather than panicking.
     #[allow(dead_code)]
     pub(crate) fn get_recent_scan(&self) -> Option<crate::onboard::ScanReport> {
-        let guard = self
-            .recent_scan
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let guard = self.recent_scan.lock().unwrap_or_else(|e| e.into_inner());
         guard.clone()
     }
 
@@ -702,6 +951,95 @@ impl AppState {
         state
     }
 
+    /// A clean-slate state whose file-backed stores all live under `dir` (the `camerata`
+    /// directory itself, i.e. what `<data_dir>/camerata` is in production). Opens ONLY the JSON
+    /// stores, with an in-memory credential store and no SQLite logs, so it needs no async
+    /// runtime and never touches the keychain or the real per-user directory. This is the
+    /// "restart" seam for end-to-end tests: build a state on a temp dir, drop it, build another
+    /// on the same dir, and everything persisted is what the second one sees.
+    pub fn from_data_dir(dir: &std::path::Path) -> Self {
+        let mut state = Self::new(Arc::new(InMemoryStoryStore::new()));
+        state.open_json_stores(dir);
+        // Only the data dir is known: nothing outside it (no CLI cache dir, no Claude Code
+        // folder) can be touched unless the caller installs roots with `with_storage_roots`.
+        state.storage_roots = Arc::new(crate::client_source::storage::StorageRoots {
+            data_dir: Some(dir.to_path_buf()),
+            ..Default::default()
+        });
+        state
+    }
+
+    /// Replace where network git steps go. Test seam (see [`crate::client_source::remote`]).
+    #[must_use]
+    pub fn with_git_remotes(mut self, remotes: crate::client_source::remote::GitRemotes) -> Self {
+        self.git_remotes = remotes;
+        self
+    }
+
+    /// Replace the locations source deletion may touch besides the checkout. The test seam that
+    /// confines every deletion to a temp directory; production installs the real roots in
+    /// [`AppState::from_env`] and never calls this.
+    #[must_use]
+    pub fn with_storage_roots(
+        mut self,
+        roots: crate::client_source::storage::StorageRoots,
+    ) -> Self {
+        self.storage_roots = Arc::new(roots);
+        self
+    }
+
+    /// Open every JSON-file-backed store under `dir`. The single list of those stores: both
+    /// [`AppState::from_env`] and [`AppState::from_data_dir`] go through here, and the
+    /// purge-completeness test reads this function's source to prove every store it opens is
+    /// accounted for in `client_source::KNOWN_STORAGE_LOCATIONS`.
+    fn open_json_stores(&mut self, dir: &std::path::Path) {
+        self.projects = crate::project::ProjectStore::load_or_new(dir.join("projects.json"));
+        self.settings = crate::settings::SettingsStore::load_or_new(dir.join("settings.json"));
+        // Provider-safety session-scoped reset (Pass 2 §3): `safe_mode` must never
+        // survive a restart as OFF, even though it's otherwise persisted alongside the
+        // rest of `Settings`. See `SettingsStore::reset_provider_policy_to_safe_on_startup`
+        // for the full mechanism note — this is the one call site.
+        self.settings.reset_provider_policy_to_safe_on_startup();
+        // No backend env hydration anymore (`docs/design/2026-09-22_per-project-backend.md`):
+        // there is no `CAMERATA_LLM_BACKEND` env var to hydrate. Every project-scoped call
+        // resolves its `Llm` from `project.backend` and the chat path from
+        // `state.settings.chat_backend()`, both read directly at the call seam.
+        self.draft = crate::draft::DraftStore::at(dir.join("onboarding-draft.json"));
+        self.uow = crate::uow::UowStore::at(dir.join("uow.json"));
+        // Clarifications persist too: every open structured question is a resumable
+        // pause point, so the user can leave and come back to any unanswered question
+        // (and answered ones stay on the record). Survives restarts; safe to delete.
+        self.clarifications =
+            crate::clarify::ClarificationStore::at(dir.join("clarifications.json"));
+        // Phase 3b: resume contexts for runs paused on a clarification persist next to
+        // the clarify store, so a parked run can still resume after a restart.
+        self.clarify_resume =
+            crate::clarify_resume::ClarifyResumeStore::at(dir.join("clarify-resume.json"));
+        // The story spine must persist too: a UoW references its story by id, and
+        // /api/uows resolves the WorkItem from the spine. An in-memory spine meant
+        // restored UoWs rendered blank (and couldn't be run). Persist it alongside.
+        self.stories = Arc::new(InMemoryStoryStore::at(dir.join("stories.json")));
+        // Routines persist too, so a scheduled governed run an architect set up
+        // survives a restart instead of being lost on every launch.
+        self.routines = RoutineStore::at(dir.join("routines.json"));
+        // Open human-review escalations survive a restart so a blocked routine isn't
+        // silently un-blocked by quitting the app.
+        self.escalations = crate::escalation::EscalationStore::at(dir.join("escalations.json"));
+        self.checkpoints = crate::checkpoint::CheckpointStore::at(dir.join("checkpoints.json"));
+        // Incremental-scan cache: per-project file fingerprints + last AI findings, so a
+        // re-scan only re-audits changed files. Survives restarts; safe to delete.
+        self.scan_cache =
+            crate::scan_cache::ScanCacheStore::load_or_new(dir.join("scan-cache.json"));
+        // Completed inspections (sealed report + provenance), one file per project. Unlike the
+        // scan cache this is NOT disposable: it is what exports and the review screen are
+        // built from once the client's source has been deleted.
+        self.inspections = crate::inspections::InspectionStore::at(dir.join("inspections"));
+        // The proof of what source deletion removed, and when source was fetched back.
+        self.source_records = crate::client_source::records::SourceRecordStore::load_or_new(
+            dir.join("source-records.json"),
+        );
+    }
+
     /// The REAL runtime state: a CLEAN SLATE (no seeded stories, clarifications,
     /// or routines) plus the provider selected from the environment (GitHub when
     /// `CAMERATA_GITHUB_TOKEN` is set, native otherwise). This is what `serve`
@@ -710,43 +1048,18 @@ impl AppState {
     /// connection test. `seeded()` remains for tests and the canned demos.
     pub fn from_env() -> Self {
         let mut state = Self::new(Arc::new(InMemoryStoryStore::new()));
-        state.provider = ProviderHandle::from_env();
+        // The real credential store is installed FIRST so the provider is selected from the
+        // GitHub token saved in the app (env only as the fallback), not from env alone.
+        state.credential_store = Arc::new(crate::credentials::KeyringCredentialStore);
+        state.provider = crate::provider::ProviderCell::new(ProviderHandle::from_credentials(
+            state.credential_store.as_ref(),
+        ));
         // Projects (their configs + pointers, NOT repo contents) persist across
         // launches in the per-user data dir, so an architect's projects survive a
         // restart. Falls back to an in-memory store if the data dir can't be
         // resolved (the app still runs; it just won't persist that session).
-        if let Some(data) = dirs::data_dir() {
-            let dir = data.join("camerata");
-            state.projects = crate::project::ProjectStore::load_or_new(dir.join("projects.json"));
-            state.settings = crate::settings::SettingsStore::load_or_new(dir.join("settings.json"));
-            // Provider-safety session-scoped reset (Pass 2 §3): `safe_mode` must never
-            // survive a restart as OFF, even though it's otherwise persisted alongside the
-            // rest of `Settings`. See `SettingsStore::reset_provider_policy_to_safe_on_startup`
-            // for the full mechanism note — this is the one call site.
-            state.settings.reset_provider_policy_to_safe_on_startup();
-            // Hydrate the LLM-backend env var from the persisted setting so the existing
-            // env-driven selection sites (`Llm::from_env`, the agent driver's
-            // `anthropic_api_backend_key`) honor the stored choice unchanged. Making the
-            // stored setting authoritative on boot gives the precedence: setting > `.env` >
-            // default `cli`. Edition 2021, so `set_var` is safe (single-threaded startup).
-            if let Some(backend) = state.settings.llm_backend() {
-                std::env::set_var("CAMERATA_LLM_BACKEND", backend);
-            }
-            state.draft = crate::draft::DraftStore::at(dir.join("onboarding-draft.json"));
-            state.uow = crate::uow::UowStore::at(dir.join("uow.json"));
-            // Clarifications persist too: every open structured question is a resumable
-            // pause point, so the user can leave and come back to any unanswered question
-            // (and answered ones stay on the record). Survives restarts; safe to delete.
-            state.clarifications =
-                crate::clarify::ClarificationStore::at(dir.join("clarifications.json"));
-            // Phase 3b: resume contexts for runs paused on a clarification persist next to
-            // the clarify store, so a parked run can still resume after a restart.
-            state.clarify_resume =
-                crate::clarify_resume::ClarifyResumeStore::at(dir.join("clarify-resume.json"));
-            // The story spine must persist too: a UoW references its story by id, and
-            // /api/uows resolves the WorkItem from the spine. An in-memory spine meant
-            // restored UoWs rendered blank (and couldn't be run). Persist it alongside.
-            state.stories = Arc::new(InMemoryStoryStore::at(dir.join("stories.json")));
+        if let Some(dir) = crate::app_dirs::camerata_dir() {
+            state.open_json_stores(&dir);
             // Central artifact store (ROUTE-A): per-story decision records + investigation
             // notes are versioned here. Opened on the same data dir as the other stores.
             // Best-effort: if the store can't be opened (no runtime handle, or sqlx error),
@@ -767,9 +1080,9 @@ impl AppState {
                 // if it can't open, a no-op ledger is used and runs/scans are unaffected.
                 let ledger_path = dir.join("enforcement_catches.db");
                 state.enforcement_ledger = tokio::task::block_in_place(|| {
-                    handle.block_on(
-                        crate::enforcement_ledger::EnforcementLedger::open(&ledger_path),
-                    )
+                    handle.block_on(crate::enforcement_ledger::EnforcementLedger::open(
+                        &ledger_path,
+                    ))
                 });
 
                 // Governance-event audit trail (Phase H1 foundation): a READABLE SQLite
@@ -860,48 +1173,22 @@ impl AppState {
                     }
                 };
             }
-            // Routines persist too, so a scheduled governed run an architect set up
-            // survives a restart instead of being lost on every launch.
-            state.routines = RoutineStore::at(dir.join("routines.json"));
-            // Open human-review escalations survive a restart so a blocked routine isn't
-            // silently un-blocked by quitting the app.
-            state.escalations =
-                crate::escalation::EscalationStore::at(dir.join("escalations.json"));
-            state.checkpoints =
-                crate::checkpoint::CheckpointStore::at(dir.join("checkpoints.json"));
-            // Incremental-scan cache: per-project file fingerprints + last AI findings, so a
-            // re-scan only re-audits changed files. Survives restarts; safe to delete.
-            state.scan_cache =
-                crate::scan_cache::ScanCacheStore::load_or_new(dir.join("scan-cache.json"));
         }
         // Feature flags: load from .camerata/features.toml (CWD-relative) with env
         // overrides applied on top. Loaded last so the flags are available to every
         // handler via AppState from first request. Infallible: missing config = defaults.
         state.feature_flags = crate::feature_flags::FeatureFlags::load();
-        // Production path: use the OS keychain (macOS Keychain, Windows Credential
-        // Manager, Secret Service on Linux) so credentials survive restarts without
-        // living in any file on disk.
-        state.credential_store =
-            Arc::new(crate::credentials::KeyringCredentialStore);
-        // Hydrate the Anthropic API key from the keychain into the `ANTHROPIC_API_KEY`
-        // env var so the existing env-driven selection sites (the agent driver's
-        // `anthropic_api_backend_key`) honor a keychain-stored key. The keychain wins
-        // over any pre-existing env value (set_var runs after dotenv load), matching the
-        // backend-setting precedence above (keychain/setting > `.env` > default).
-        // Edition 2021, so `set_var` is safe (single-threaded startup).
-        match state
-            .credential_store
-            .get(crate::credentials::ANTHROPIC_API_KEY)
-        {
-            Ok(Some(key)) if !key.trim().is_empty() => {
-                std::env::set_var("ANTHROPIC_API_KEY", key);
-            }
-            Ok(_) => {}
-            // A read error here silently leaves the API path keyless with no trace.
-            Err(e) => eprintln!(
-                "[camerata-server] keychain read of ANTHROPIC_API_KEY failed during startup hydration: {e}"
-            ),
-        }
+        // The ONE place the real home, cache and Claude Code locations are installed: source
+        // deletion removes copies of client code from exactly these.
+        state.storage_roots =
+            Arc::new(crate::client_source::storage::StorageRoots::from_environment());
+        // (The production credential store, the OS keychain, was installed at the top of this
+        // function so the provider could be chosen from the GitHub token saved in the app.)
+        // NOTE: the Anthropic API key is deliberately NOT copied into process env here (or
+        // anywhere). Every model client reads it through `credentials::anthropic_api_key`
+        // (credential store first, `ANTHROPIC_API_KEY` env as the fallback) at the moment it
+        // is built, so a key saved in the app takes effect on the next call with no restart
+        // and no process-global env write.
         state
     }
 }
@@ -918,6 +1205,12 @@ pub struct RuleDto {
 /// Build the router for a given state. Separated from [`serve`] so it can be
 /// exercised in tests without binding a socket.
 pub fn router(state: AppState) -> Router {
+    // The operations that scan or write into a repo's source answer `409 source_deleted` when a
+    // repo in their scope had its source deleted, before any handler tries to read the folder.
+    let source_gate = axum::middleware::from_fn_with_state(
+        state.clone(),
+        crate::client_source::resolution::scope_gate,
+    );
     Router::new()
         .route("/api/health", get(health))
         .route("/api/rules", get(rules))
@@ -961,7 +1254,12 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/projects/:id/reconcile", get(reconcile_project))
         .route("/api/projects/:id/emit", post(emit_project))
-        .route("/api/projects/:id/emit-local", post(emit_project_local))
+        // Writes into every repo's local clone (and clones a missing one): turned away with
+        // `409 source_deleted` when any repo of the project had its source deleted.
+        .route(
+            "/api/projects/:id/emit-local",
+            post(emit_project_local).layer(source_gate.clone()),
+        )
         .route("/api/projects/:id/custom", post(add_custom_rule))
         .route("/api/projects/:id/custom/delete", post(delete_custom_rule))
         .route("/api/projects/:id/max-iterations", post(set_max_iterations))
@@ -981,8 +1279,24 @@ pub fn router(state: AppState) -> Router {
         )
         // Per-step model config: set the model for one NON-FLEET AI step on this project.
         .route("/api/projects/:id/step-models", post(set_step_model))
+        // Per-project backend (docs/design/2026-09-22_per-project-backend.md): Cli | Api.
+        .route("/api/projects/:id/backend", post(set_backend_handler))
         // Stall-detection thresholds: per-project idle timeout config.
-        .route("/api/projects/:id/stall-thresholds", post(set_stall_thresholds_handler))
+        .route(
+            "/api/projects/:id/stall-thresholds",
+            post(set_stall_thresholds_handler),
+        )
+        // Audit-integrated alternative recommendation (docs/design/2026-09-22_audit-
+        // integrated-alternatives.md): batched targeted rescan of operator-overridden
+        // multi-option rules, and persisting the current per-rule selection.
+        .route(
+            "/api/projects/:id/rescan-alternatives",
+            post(rescan_alternatives_handler).layer(source_gate.clone()),
+        )
+        .route(
+            "/api/projects/:id/accept-alternatives",
+            post(accept_alternatives_handler),
+        )
         // L3 agentic code-review gate: per-project opt-in (R7).
         .route("/api/projects/:id/l3-review", post(set_l3_review_handler))
         // Work hierarchy schema (design-page work-type graph): read (GET) + replace (POST).
@@ -991,17 +1305,17 @@ pub fn router(state: AppState) -> Router {
             get(get_hierarchy_handler).post(set_hierarchy_handler),
         )
         // Model Efficiency Profile: preview (GET) and apply (POST).
-        .route("/api/projects/:id/model-profile/preview", get(preview_model_profile))
+        .route(
+            "/api/projects/:id/model-profile/preview",
+            get(preview_model_profile),
+        )
         .route("/api/projects/:id/model-profile", post(apply_model_profile))
         // VCS-gate process-rule configuration + auditable bypass (issue #65).
         .route(
             "/api/projects/:id/process-rule-config",
             get(get_process_rule_config).post(set_process_rule_config_handler),
         )
-        .route(
-            "/api/projects/:id/vcs-gate/bypass",
-            post(vcs_gate_bypass),
-        )
+        .route("/api/projects/:id/vcs-gate/bypass", post(vcs_gate_bypass))
         .route("/api/provider", get(provider_info))
         .route("/api/connections", get(connections_status))
         .route("/api/notifications", get(notifications_feed))
@@ -1009,26 +1323,47 @@ pub fn router(state: AppState) -> Router {
         // GitHub Issue intake (#20): list a repo's open issues, then adopt one onto the spine.
         .route("/api/github/issues", get(github_issues_list))
         .route("/api/stories/adopt-issue", post(adopt_issue))
-        .route("/api/onboard/scan", post(onboard_scan))
-        .route("/api/onboard/audit", post(onboard_audit))
-        .route("/api/onboard/audit/start", post(onboard_audit_start))
+        .route(
+            "/api/onboard/scan",
+            post(onboard_scan).layer(source_gate.clone()),
+        )
+        .route(
+            "/api/onboard/audit",
+            post(onboard_audit).layer(source_gate.clone()),
+        )
+        .route(
+            "/api/onboard/audit/start",
+            post(onboard_audit_start).layer(source_gate.clone()),
+        )
         .route("/api/onboard/audit/job/:id", get(onboard_audit_job))
         .route("/api/onboard/audit/job/:id/cancel", post(cancel_audit_job))
+        .route("/api/onboard/finding-context", get(onboard_finding_context))
         .route(
-            "/api/onboard/finding-context",
-            get(onboard_finding_context),
+            "/api/onboard/finding-context/batch",
+            post(onboard_finding_context_batch),
         )
+        .route("/api/onboard/source-file", get(onboard_source_file))
+        .route("/api/onboard/symbol-refs", get(onboard_symbol_refs))
         .route("/api/onboard/finding-fix", get(onboard_finding_fix))
         .route("/api/git/detect-repo", post(detect_repo))
         .route("/api/gate-probe", post(gate_probe))
         .route("/api/onboard/ticket", post(onboard_ticket))
-        .route("/api/onboard/arm", post(onboard_arm))
-        .route("/api/onboard/apply", post(onboard_apply))
+        .route(
+            "/api/onboard/arm",
+            post(onboard_arm).layer(source_gate.clone()),
+        )
+        .route(
+            "/api/onboard/apply",
+            post(onboard_apply).layer(source_gate.clone()),
+        )
         .route(
             "/api/onboard/apply/preflight",
-            post(onboard_apply_preflight),
+            post(onboard_apply_preflight).layer(source_gate.clone()),
         )
-        .route("/api/onboard/open-pr", post(onboard_open_pr))
+        .route(
+            "/api/onboard/open-pr",
+            post(onboard_open_pr).layer(source_gate.clone()),
+        )
         .route(
             "/api/onboard/draft",
             get(onboard_draft_get).post(onboard_draft_save),
@@ -1054,7 +1389,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/stories/:id/children", get(list_children))
         .route("/api/routines", get(list_routines).post(create_routine))
         .route("/api/routines/templates", get(list_routine_templates))
-        .route("/api/routines/templates/:id/instantiate", post(instantiate_routine_from_template))
+        .route(
+            "/api/routines/templates/:id/instantiate",
+            post(instantiate_routine_from_template),
+        )
         .route("/api/routines/draft-prompt", post(draft_routine_prompt))
         .route(
             "/api/routines/:id",
@@ -1084,26 +1422,66 @@ pub fn router(state: AppState) -> Router {
         .route("/api/models", get(list_models))
         .route("/api/models/registry", get(get_model_registry))
         .route("/api/models/registry/refresh", post(refresh_model_registry))
+        // Feature A (live Anthropic `/v1/models`) manual refresh — the Anthropic sibling
+        // of the OpenRouter refresh route above. See `refresh_anthropic_registry`.
+        .route(
+            "/api/models/registry/refresh/anthropic",
+            post(refresh_anthropic_registry),
+        )
         // Pass 2 (provider-safety UI): the picker's data source — per-provider
         // pricing + data-policy for one model, lazily fetched on first request.
         .route("/api/models/providers", get(get_model_providers))
         .route("/api/settings", get(get_settings))
         .route("/api/settings/workspace", post(set_workspace_root))
         .route("/api/settings/chat-model", post(set_chat_model))
-        .route("/api/settings/llm-backend", post(set_llm_backend))
+        .route("/api/settings/chat-backend", post(set_chat_backend_handler))
         // Pass 2 (provider-safety UI): the settings-panel "Data safety" toggle + pin.
-        .route("/api/settings/provider-policy", post(set_provider_policy_handler))
+        .route(
+            "/api/settings/provider-policy",
+            post(set_provider_policy_handler),
+        )
         .route(
             "/api/projects/:id/checkout",
             get(checkout_status).post(checkout_project),
         )
         // Derived readiness gate + "link existing local clone" (readiness-gate ADR).
         .route("/api/projects/:id/readiness", get(project_readiness))
-        .route("/api/projects/:id/repos/:repo/link", post(link_repo))
+        // Client source lifecycle (delete / re-fetch): docs/design/2026-10-24_delete-and-refetch-
+        // client-source.md, section 3.
         .route(
-            "/api/projects/:id/reset-onboarding",
-            post(reset_onboarding),
+            "/api/projects/:id/source",
+            get(crate::client_source::handlers::get_source),
         )
+        .route(
+            "/api/projects/:id/source/records",
+            get(crate::client_source::handlers::get_records),
+        )
+        .route(
+            "/api/projects/:id/source/records/:record_id/text",
+            get(crate::client_source::handlers::get_record_text),
+        )
+        .route(
+            "/api/projects/:id/repos/:repo/source/remote",
+            get(crate::client_source::refetch::remote_probe),
+        )
+        .route(
+            "/api/projects/:id/repos/:repo/source/refetch",
+            post(crate::client_source::refetch::refetch),
+        )
+        .route(
+            "/api/projects/:id/repos/:repo/rescan-changes",
+            post(crate::client_source::rescan::rescan_changes_handler),
+        )
+        .route(
+            "/api/projects/:id/repos/:repo/source/delete-preview",
+            post(crate::client_source::delete::delete_preview),
+        )
+        .route(
+            "/api/projects/:id/repos/:repo/source/delete",
+            post(crate::client_source::delete::delete),
+        )
+        .route("/api/projects/:id/repos/:repo/link", post(link_repo))
+        .route("/api/projects/:id/reset-onboarding", post(reset_onboarding))
         .route("/api/projects/:id/branch", post(checkout_branch))
         .route("/api/projects/:id/ship", post(ship_repo))
         // ── Local git controls (issue #37) ───────────────────────────────────
@@ -1127,7 +1505,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/workitems/comments", post(workitems_comments))
         .route("/api/workitems/assignees", post(workitems_assignees))
         .route("/api/workitems/assign", post(workitems_assign))
-        .route("/api/workitems/updated-check", post(workitems_updated_check))
+        .route(
+            "/api/workitems/updated-check",
+            post(workitems_updated_check),
+        )
         .route("/api/workitems/set-parent", post(workitems_set_parent))
         .route("/api/me", get(me))
         .route("/api/uows", get(uows_list))
@@ -1136,23 +1517,37 @@ pub fn router(state: AppState) -> Router {
         .route("/api/uow/blank", post(uow_blank))
         .route("/api/uow/:story_id/author", post(uow_author))
         // ── UoW file attachments (2026-07-01) ─────────────────────────────────
-        .route("/api/uow/:story_id/attachments", get(uow_list_attachments).post(uow_add_attachment))
-        .route("/api/uow/:story_id/attachments/:name", get(uow_get_attachment).delete(uow_remove_attachment))
+        .route(
+            "/api/uow/:story_id/attachments",
+            get(uow_list_attachments).post(uow_add_attachment),
+        )
+        .route(
+            "/api/uow/:story_id/attachments/:name",
+            get(uow_get_attachment).delete(uow_remove_attachment),
+        )
         // ── UoW Mermaid diagram (2026-07-01) ──────────────────────────────────
-        .route("/api/uow/:story_id/diagram", get(uow_get_diagram).post(uow_generate_diagram).delete(uow_clear_diagram))
+        .route(
+            "/api/uow/:story_id/diagram",
+            get(uow_get_diagram)
+                .post(uow_generate_diagram)
+                .delete(uow_clear_diagram),
+        )
         // ── UoW mockup window (2026-07-01) ────────────────────────────────────
         .route("/api/uow/:story_id/mockup", post(uow_generate_mockup))
         // ── Design draft-tree (2026-07-01) ────────────────────────────────────
         .route("/api/designs/blank", post(design_blank))
         .route("/api/designs/:id/author", post(design_author))
-        .route("/api/designs/:id/nodes", get(design_list_nodes).post(design_materialize_nodes))
-        .route("/api/designs/:id/nodes/:node_id", axum::routing::delete(design_delete_node))
+        .route(
+            "/api/designs/:id/nodes",
+            get(design_list_nodes).post(design_materialize_nodes),
+        )
+        .route(
+            "/api/designs/:id/nodes/:node_id",
+            axum::routing::delete(design_delete_node),
+        )
         .route("/api/designs/:id/publish", post(design_publish))
         .route("/api/designs/:id/status", post(design_set_status))
-        .route(
-            "/api/designs/:id",
-            axum::routing::delete(design_delete),
-        )
+        .route("/api/designs/:id", axum::routing::delete(design_delete))
         .route("/api/projects/:id/designs", get(list_project_designs))
         .route(
             "/api/uow/:story_id/set-draft-parent",
@@ -1163,11 +1558,20 @@ pub fn router(state: AppState) -> Router {
         .route("/api/uow/:story_id", get(uow_get).delete(uow_delete))
         .route("/api/uow/:story_id/status", post(uow_set_status))
         .route("/api/uow/:story_id/branch", post(uow_set_branch))
-        .route("/api/uow/:story_id/publish-repos", post(uow_set_publish_repos))
+        .route(
+            "/api/uow/:story_id/publish-repos",
+            post(uow_set_publish_repos),
+        )
         .route("/api/uow/:story_id/history", post(uow_append_history))
         // ── 3-phase cockpit state (#104 / #105) ───────────────────────────────
-        .route("/api/uow/:story_id/intake/context", post(uow_set_intake_context))
-        .route("/api/uow/:story_id/intake/repos", post(uow_set_intake_repos))
+        .route(
+            "/api/uow/:story_id/intake/context",
+            post(uow_set_intake_context),
+        )
+        .route(
+            "/api/uow/:story_id/intake/repos",
+            post(uow_set_intake_repos),
+        )
         // Per-repo Ship (R3.f / R6): push + open PR for each in-scope repo's story branch.
         // This is the multi-repo generalisation of `POST /api/uow/:story_id/pr/open`.
         .route("/api/uow/:story_id/intake/ship", post(uow_intake_ship))
@@ -1250,9 +1654,13 @@ pub fn router(state: AppState) -> Router {
         .route("/api/projects/:id/product-export", post(export_product))
         // ── App-wide credential manager ───────────────────────────────────────
         // POST /api/credentials/:name  — store a credential (body: { "value": "…" })
+        // DELETE /api/credentials/:name — remove a saved credential
         // GET  /api/credentials        — list all known credentials with masked values
         .route("/api/credentials", get(list_credentials))
-        .route("/api/credentials/:name", post(set_credential))
+        .route(
+            "/api/credentials/:name",
+            post(set_credential).delete(delete_credential),
+        )
         .with_state(state)
 }
 
@@ -1280,7 +1688,9 @@ fn spawn_startup_openrouter_refresh(state: &AppState) {
     let model_registry = state.model_registry.clone();
     let credential_store = state.credential_store.clone();
     tokio::spawn(async move {
-        model_registry.try_refresh_from_store(credential_store.as_ref()).await;
+        model_registry
+            .try_refresh_from_store(credential_store.as_ref())
+            .await;
     });
 }
 
@@ -1308,7 +1718,64 @@ fn trigger_openrouter_refresh_if_needed(
     }
     let registry = model_registry.clone();
     tokio::spawn(async move {
-        registry.try_refresh_from_store(credential_store.as_ref()).await;
+        registry
+            .try_refresh_from_store(credential_store.as_ref())
+            .await;
+    });
+    true
+}
+
+// ── Live Anthropic model-registry refresh triggers (Feature A) ──────────────────
+//
+// Mirrors the OpenRouter trigger trio immediately above, one-for-one, for the live
+// Anthropic `/v1/models` catalog. See `docs/design/2026-08-27_backend-safety-and-live-
+// models.md`'s Feature A section.
+//   1. Startup — `spawn_startup_anthropic_refresh`, called from `serve()`.
+//   2. Credential save — `trigger_anthropic_refresh_if_needed`, called from
+//      `set_credential` below, gated on the saved credential being `anthropic_api_key`.
+//   3. Manual — `POST /api/models/registry/refresh/anthropic`
+//      (`refresh_anthropic_registry`), reachable from the "Refresh models" button beside
+//      the Anthropic key field in `crates/ui/src/credentials.rs`.
+
+/// Startup trigger (1 of 3). Fire-and-forget a best-effort live-Anthropic registry
+/// refresh at boot so a previously-saved key populates the picker without a manual POST.
+/// Spawned so it never blocks server start; graceful when no key is configured because
+/// `ModelRegistry::try_refresh_anthropic_from_store` itself no-ops (no HTTP call, no
+/// error) in that case.
+fn spawn_startup_anthropic_refresh(state: &AppState) {
+    let model_registry = state.model_registry.clone();
+    let credential_store = state.credential_store.clone();
+    tokio::spawn(async move {
+        model_registry
+            .try_refresh_anthropic_from_store(credential_store.as_ref())
+            .await;
+    });
+}
+
+/// True when saving credential `name` should trigger a live-Anthropic model-registry
+/// refresh. Mirrors [`is_openrouter_credential`].
+fn is_anthropic_credential(name: &str) -> bool {
+    name == crate::credentials::ANTHROPIC_API_KEY
+}
+
+/// Credential-save trigger (2 of 3). Call after a credential write succeeds in
+/// `set_credential`. When `name` is `anthropic_api_key`, fire-and-forget a live-Anthropic
+/// registry refresh so the picker's model list populates immediately without a restart;
+/// any other credential name is a no-op. Returns whether a refresh was scheduled, mirroring
+/// [`trigger_openrouter_refresh_if_needed`]'s synchronous-assert-friendly contract.
+fn trigger_anthropic_refresh_if_needed(
+    name: &str,
+    model_registry: &crate::model_registry::ModelRegistry,
+    credential_store: Arc<dyn crate::credentials::CredentialStore>,
+) -> bool {
+    if !is_anthropic_credential(name) {
+        return false;
+    }
+    let registry = model_registry.clone();
+    tokio::spawn(async move {
+        registry
+            .try_refresh_anthropic_from_store(credential_store.as_ref())
+            .await;
     });
     true
 }
@@ -1330,13 +1797,21 @@ pub async fn serve(addr: &str) -> anyhow::Result<()> {
     // in `crates/llm/src/model_registry.rs` for the direct, non-racy test of that contract.
     spawn_startup_openrouter_refresh(&state);
 
+    // Live Anthropic model-registry refresh (Feature A), trigger 1 of 3 (startup) — the
+    // one-for-one Anthropic sibling of the OpenRouter startup refresh directly above. See
+    // the block above `serve()` and `docs/design/2026-08-27_backend-safety-and-live-
+    // models.md`. Graceful when no Anthropic key is configured (no-op, no HTTP call).
+    spawn_startup_anthropic_refresh(&state);
+
+    // Corpus freshness: ONE non-fatal log line if any rule domain is overdue, due soon, or has
+    // never been confirmed by a sweep (design: docs/design/2026-10-20_corpus-staleness-check.md).
+    // Spawned so it never delays binding the port; operator-only, never on a scan/export path.
+    tokio::spawn(crate::corpus_freshness::log_at_startup());
+
     // Background event-ingest pollers (tracker events -> notification feed -> UI
     // toasts). Cadences are env-configurable; see crate::notify. Spawned here, not
     // in `router`, so unit tests that build the router don't start background work.
-    crate::notify::spawn_tracker_poller(
-        state.provider.provider.clone(),
-        state.notifications.clone(),
-    );
+    crate::notify::spawn_tracker_poller(state.provider.clone(), state.notifications.clone());
     crate::notify::spawn_deploy_poller(state.notifications.clone());
 
     // Auto-fire scheduler: runs provisioned + enabled routines when their schedule
@@ -1387,11 +1862,8 @@ pub async fn serve(addr: &str) -> anyhow::Result<()> {
             // no project repos to sweep. This is a REPO-ONLY sweep (not a single active
             // project's view): use `list_for_repos`, NOT `list_for_project`. Blank drafts
             // have no worktree and no resolvable repo, so they must be excluded here.
-            let project_repos: Vec<String> = projects
-                .list()
-                .into_iter()
-                .flat_map(|p| p.repos)
-                .collect();
+            let project_repos: Vec<String> =
+                projects.list().into_iter().flat_map(|p| p.repos).collect();
             let scoped_uows = if project_repos.is_empty() {
                 Vec::new()
             } else {
@@ -1448,7 +1920,9 @@ pub async fn serve(addr: &str) -> anyhow::Result<()> {
                         if mode != camerata_checks::janitor::JanitorMode::Off {
                             let dry_run = mode == camerata_checks::janitor::JanitorMode::DryRun;
                             let worktrees_root = clone.join(".camerata-worktrees");
-                            for orphan in camerata_checks::janitor::list_orphan_worktree_dirs(&clone) {
+                            for orphan in
+                                camerata_checks::janitor::list_orphan_worktree_dirs(&clone)
+                            {
                                 let outcome = camerata_checks::janitor::reclaim_dir(
                                     &orphan,
                                     &worktrees_root,
@@ -1464,8 +1938,10 @@ pub async fn serve(addr: &str) -> anyhow::Result<()> {
                                         );
                                     },
                                 );
-                                if let camerata_checks::janitor::ReclaimOutcome::Skipped { reason, .. } =
-                                    outcome
+                                if let camerata_checks::janitor::ReclaimOutcome::Skipped {
+                                    reason,
+                                    ..
+                                } = outcome
                                 {
                                     tracing::debug!(
                                         path = %orphan.display(),
@@ -1545,7 +2021,9 @@ async fn stories(State(state): State<AppState>) -> Result<Json<Vec<CanonicalStor
         return Ok(Json(Vec::new()));
     };
     let in_scope = |s: &CanonicalStory| -> bool {
-        s.targets.iter().any(|t| p.repos.iter().any(|r| r == &t.repo))
+        s.targets
+            .iter()
+            .any(|t| p.repos.iter().any(|r| r == &t.repo))
             || s.external_ref
                 .as_ref()
                 .and_then(|e| e.container.as_ref())
@@ -1674,8 +2152,8 @@ async fn start_run(
 /// underway. The forward drive is best-effort: a UoW already past these stages is left
 /// as-is, never moved backward.
 pub fn ensure_development_gate(state: &AppState, story_id: &str) -> Result<(), String> {
-    use camerata_worktracker::investigation::decisions_approved_for_development;
     use crate::lifecycle::UowStage;
+    use camerata_worktracker::investigation::decisions_approved_for_development;
 
     let uow = state.uow.get_or_create(story_id);
 
@@ -1807,7 +2285,9 @@ async fn resume_governed_run(
         Ok(Some(s)) => (s.title, s.description),
         _ => (story_id.clone(), String::new()),
     };
-    let run_id = state.runs.create(&story_id, mode, crate::run::RunKind::Watched);
+    let run_id = state
+        .runs
+        .create(&story_id, mode, crate::run::RunKind::Watched);
     state
         .record_governance(
             camerata_persistence::GovernanceEvent::info(run_id.clone(), "run_started", "system")
@@ -1933,7 +2413,12 @@ async fn spawn_brownfield_dev_run(
             let l3_model = proj.l3_model().to_string();
             let rules_prose = grounding.clone().unwrap_or_default();
             let story_text = format!("{title}\n\n{desc}");
-            let llm: Arc<dyn crate::llm::LlmPort> = Arc::new(state.llm());
+            // The L3 reviewer runs on THIS project's backend (a refused Api project reports the
+            // refusal from the review instead of running on the subscription).
+            let llm: Arc<dyn crate::llm::LlmPort> = match state.llm_for_project(Some(&proj)) {
+                Ok(l) => Arc::new(l),
+                Err(message) => Arc::new(crate::llm::RefusedLlm::new(message)),
+            };
             Some(crate::dev_implement_run::L3ReviewBundle {
                 story_text,
                 rules_prose,
@@ -1970,7 +2455,7 @@ async fn spawn_brownfield_dev_run(
         } else {
             // Pre-parse per-artifact `camerata:allow INTEGRATION-* -- reason` waivers
             // from the in-scope repo worktrees (intentional-public endpoints etc.).
-            let waivers = collect_integration_waivers(&state).await;
+            let waivers = collect_integration_waivers(state).await;
             let gate_model = match &tier_map {
                 Some(map) => map.balanced_primary().to_string(),
                 None => impl_model.clone(),
@@ -1978,7 +2463,7 @@ async fn spawn_brownfield_dev_run(
             // The model advisory only runs with a prose contract; otherwise llm=None
             // keeps the gate deterministic-only.
             let llm: Option<Arc<dyn crate::llm::LlmPort>> = if has_contract {
-                Some(Arc::new(state.llm()))
+                Some(state.step_llm_port())
             } else {
                 None
             };
@@ -2119,7 +2604,9 @@ async fn spawn_brownfield_dev_run(
         .await;
         runs_for_clear.clear_abort(&rid_for_clear);
     });
-    state.runs.register_abort(&rid_for_clear2, handle.abort_handle());
+    state
+        .runs
+        .register_abort(&rid_for_clear2, handle.abort_handle());
 }
 
 /// path has no layer-2 bounce, so the flag is a no-op there.
@@ -2142,7 +2629,9 @@ async fn start_governed_run(
         .record_governance(
             camerata_persistence::GovernanceEvent::info(run_id.clone(), "run_started", "system")
                 .with_story_id(story_id.to_string())
-                .with_reason(format!("governed run started (mode={mode}, kind={kind_label})")),
+                .with_reason(format!(
+                    "governed run started (mode={mode}, kind={kind_label})"
+                )),
         )
         .await;
     let store = state.runs.clone();
@@ -2159,8 +2648,8 @@ async fn start_governed_run(
         // Resolve the effective tier map for this run: caller-supplied map takes
         // precedence (explicit per-run override); fall back to the project's
         // persisted tier map so the project settings panel is authoritative.
-        let tier_map: Option<crate::model_tier::TierMap> = tier_map
-            .or_else(|| state.projects.active().map(|p| p.tier_map));
+        let tier_map: Option<crate::model_tier::TierMap> =
+            tier_map.or_else(|| state.projects.active().map(|p| p.tier_map));
 
         // The active project's Designer (vision) band toggle. Gates whether the
         // orchestrator's delegate-models map carries a `"vision"` tier at all; when
@@ -2206,27 +2695,25 @@ async fn start_governed_run(
 
         // Try to resolve the UoW's worktree from the active project's settings.
         // We require an active project to have a resolvable workspace root / repo override.
-        let worktree = if let (Some(branch), Some(_proj)) = (
-            uow_branch.as_deref(),
-            state.projects.active(),
-        ) {
-            // Derive repo from story_id (owner/repo#num → owner/repo).
-            let repo_from_story = story_id
-                .rsplit_once('#')
-                .map(|(r, _)| r)
-                .unwrap_or(story_id);
-            let override_path = state.settings.repo_path(repo_from_story);
-            let workspace_root = state.settings.workspace_root();
-            crate::workspace::resolve_uow_worktree(
-                override_path.as_deref(),
-                workspace_root.as_deref(),
-                repo_from_story,
-                branch,
-            )
-            .await
-        } else {
-            None
-        };
+        let worktree =
+            if let (Some(branch), Some(_proj)) = (uow_branch.as_deref(), state.projects.active()) {
+                // Derive repo from story_id (owner/repo#num → owner/repo).
+                let repo_from_story = story_id
+                    .rsplit_once('#')
+                    .map(|(r, _)| r)
+                    .unwrap_or(story_id);
+                let override_path = state.settings.repo_path(repo_from_story);
+                let workspace_root = state.settings.workspace_root();
+                crate::workspace::resolve_uow_worktree(
+                    override_path.as_deref(),
+                    workspace_root.as_deref(),
+                    repo_from_story,
+                    branch,
+                )
+                .await
+            } else {
+                None
+            };
 
         if crate::dev_implement_run::is_brownfield(worktree.as_deref()) {
             // Brownfield: implement in-place in the UoW's worktree.
@@ -2274,6 +2761,14 @@ async fn start_governed_run(
                     let live_policy = state.settings.provider_policy();
                     let live_creds = state.credential_store.clone();
                     let live_limiter = state.rate_limiter.clone();
+                    // The compliance-safety gate: the active project's backend setting,
+                    // threaded into the lead/child driver factory. No active project floors
+                    // to `ProjectBackend::Cli` (the same zero-setup default a fresh project gets).
+                    let live_backend = state
+                        .projects
+                        .active()
+                        .map(|p| p.backend)
+                        .unwrap_or_default();
                     // LIFECYCLE-1: register the abort handle so a Stop reaps the greenfield
                     // fleet's live agent subprocesses (kill_on_drop). Cleared on finish.
                     let runs_for_clear = state.runs.clone();
@@ -2293,11 +2788,14 @@ async fn start_governed_run(
                             live_policy,
                             live_creds,
                             live_limiter,
+                            live_backend,
                         )
                         .await;
                         runs_for_clear.clear_abort(&rid_for_clear);
                     });
-                    state.runs.register_abort(&rid_register, handle.abort_handle());
+                    state
+                        .runs
+                        .register_abort(&rid_register, handle.abort_handle());
                 }
                 // Single-model path (back-compat): one operator-wide model for every agent.
                 None => {
@@ -2318,7 +2816,9 @@ async fn start_governed_run(
                         .await;
                         runs_for_clear.clear_abort(&rid_for_clear);
                     });
-                    state.runs.register_abort(&rid_register, handle.abort_handle());
+                    state
+                        .runs
+                        .register_abort(&rid_register, handle.abort_handle());
                 }
             }
         }
@@ -2502,17 +3002,22 @@ fn assemble_evidence_for_run(
     prov: &crate::run::RunProvenance,
     story_id: &str,
 ) -> crate::evidence::UowEvidenceRecord {
-    use crate::evidence::{GateDecision, UowEvidenceRecord, scoped_audit};
+    use crate::evidence::{scoped_audit, GateDecision, UowEvidenceRecord};
 
     let now = chrono::Utc::now().to_rfc3339();
     let mut record = UowEvidenceRecord::new(story_id, &run.id, &now);
 
     // ── Governance event history ─────────────────────────────────────────────
     // Run started.
-    record.add_event(&now, "governed-fleet", "run", format!(
-        "Governed run {} completed (mode: {}, {} allowed, {} denied).",
-        run.id, run.mode, prov.allow_count, prov.deny_count,
-    ));
+    record.add_event(
+        &now,
+        "governed-fleet",
+        "run",
+        format!(
+            "Governed run {} completed (mode: {}, {} allowed, {} denied).",
+            run.id, run.mode, prov.allow_count, prov.deny_count,
+        ),
+    );
 
     // Gate events → evidence history + gate decisions.
     for event in &run.events {
@@ -2523,7 +3028,10 @@ fn assemble_evidence_for_run(
                 ts,
                 "gate-layer-1",
                 "gate_deny",
-                format!("Gate denied write to `{}`: rule {} fired — {}", event.detail, rule_id, event.detail),
+                format!(
+                    "Gate denied write to `{}`: rule {} fired — {}",
+                    event.detail, rule_id, event.detail
+                ),
             );
             record.record_gate_decision(GateDecision::deny(ts, &event.detail, rule_id));
         } else if event.verdict == "allow" {
@@ -2564,31 +3072,58 @@ fn assemble_evidence_for_run(
     // workspace root (not available in this pure-ish context). The empty-body approach is
     // correct for the scripted path and conservative (fewer false positives) for live runs.
     // TODO(live-scan): for the live path, resolve the workspace root and read actual content.
-    let allowed_paths: Vec<String> = run.events.iter()
+    let allowed_paths: Vec<String> = run
+        .events
+        .iter()
         .filter(|e| e.verdict == "allow")
         .map(|e| e.detail.clone())
         .collect();
     // Build a synthetic file list: allowed paths with empty content.
-    let all_files: Vec<(String, String)> = allowed_paths.iter()
+    let all_files: Vec<(String, String)> = allowed_paths
+        .iter()
         .map(|p| (p.clone(), String::new()))
         .collect();
-    let scan_result = scoped_audit(&format!("{story_id}/run/{}", run.id), &all_files, &allowed_paths);
+    let scan_result = scoped_audit(
+        &format!("{story_id}/run/{}", run.id),
+        &all_files,
+        &allowed_paths,
+    );
     // Add a critical_finding event to the history for each critical finding.
-    for finding in scan_result.summary.findings.iter().filter(|f| f.severity == "critical") {
+    for finding in scan_result
+        .summary
+        .findings
+        .iter()
+        .filter(|f| f.severity == "critical")
+    {
         record.add_event(
             &now,
             "scoped-audit",
             "critical_finding",
-            format!("CRITICAL: {} in {} (line {}): {}", finding.rule_id, finding.path, finding.line, finding.detail),
+            format!(
+                "CRITICAL: {} in {} (line {}): {}",
+                finding.rule_id, finding.path, finding.line, finding.detail
+            ),
         );
     }
     // Add security_finding events for non-critical findings.
-    for finding in scan_result.summary.findings.iter().filter(|f| f.severity != "critical") {
+    for finding in scan_result
+        .summary
+        .findings
+        .iter()
+        .filter(|f| f.severity != "critical")
+    {
         record.add_event(
             &now,
             "scoped-audit",
             "security_finding",
-            format!("{}: {} in {} (line {}): {}", finding.severity.to_uppercase(), finding.rule_id, finding.path, finding.line, finding.detail),
+            format!(
+                "{}: {} in {} (line {}): {}",
+                finding.severity.to_uppercase(),
+                finding.rule_id,
+                finding.path,
+                finding.line,
+                finding.detail
+            ),
         );
     }
     record.set_scoped_scan(scan_result.summary);
@@ -2645,9 +3180,8 @@ async fn get_run(
     // LIFECYCLE-7: a `done` run (success/failed/cancelled) or a PARKED run
     // (AwaitingReview / AwaitingClarification, waiting on a human) is NEVER stalled — it is
     // intentionally idle, not wedged. Only a live, in-flight run can stall.
-    let stalled = !run.done
-        && !run.status.is_parked()
-        && crate::run::is_stalled(idle, threshold_ms);
+    let stalled =
+        !run.done && !run.status.is_parked() && crate::run::is_stalled(idle, threshold_ms);
     let stall_policy = run.stall_policy.clone();
     let failure_reason = run.failure_reason.clone();
     Ok(Json(RunStatusResponse {
@@ -2662,10 +3196,7 @@ async fn get_run(
 
 /// `POST /api/runs/:id/cancel` — cancel a run immediately. Idempotent; a run that is
 /// already done or cancelled is unaffected. Always returns 204.
-async fn cancel_run(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-) -> impl IntoResponse {
+async fn cancel_run(State(state): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
     state.runs.cancel(&id);
     StatusCode::NO_CONTENT
 }
@@ -2706,10 +3237,7 @@ async fn get_run_events(
     let Some(log) = state.governance_log.as_ref() else {
         return Ok(Json(Vec::new()));
     };
-    let events = log
-        .by_run(&id)
-        .await
-        .map_err(|e| AppError(e.into()))?;
+    let events = log.by_run(&id).await.map_err(|e| AppError(e.into()))?;
     Ok(Json(events))
 }
 
@@ -2811,7 +3339,8 @@ async fn submit_feedback(
     // is either a URL path or a UI selector, not a place a raw secret realistically
     // lands, so only `console`/`stack` are scrubbed.
     if let Some(console) = report.context.console.take() {
-        report.context.console = Some(camerata_orchestrator_core::secrets::scrub(&console).scrubbed);
+        report.context.console =
+            Some(camerata_orchestrator_core::secrets::scrub(&console).scrubbed);
     }
     if let Some(stack) = report.context.stack.take() {
         report.context.stack = Some(camerata_orchestrator_core::secrets::scrub(&stack).scrubbed);
@@ -2830,7 +3359,10 @@ async fn submit_feedback(
         }));
     };
 
-    match store.bump_fingerprint(&report.project_id, &fingerprint).await {
+    match store
+        .bump_fingerprint(&report.project_id, &fingerprint)
+        .await
+    {
         Ok(Some(existing_id)) => {
             return Json(serde_json::json!({
                 "ok": true,
@@ -2896,7 +3428,10 @@ async fn project_feedback(
     let Some(store) = state.feedback_store.as_ref() else {
         return Ok(Json(Vec::new()));
     };
-    let reports = store.by_project(&id).await.map_err(|e| AppError(e.into()))?;
+    let reports = store
+        .by_project(&id)
+        .await
+        .map_err(|e| AppError(e.into()))?;
     Ok(Json(reports))
 }
 
@@ -3042,10 +3577,7 @@ async fn sign_off_run(
 
     // Build the effective note, folding in the waiver reason when present.
     let effective_note = {
-        let waive = req
-            .waive_reason
-            .as_deref()
-            .filter(|r| !r.trim().is_empty());
+        let waive = req.waive_reason.as_deref().filter(|r| !r.trim().is_empty());
         match (req.note.as_deref(), waive) {
             (Some(note), Some(reason)) => Some(format!("{note} [WAIVER: {reason}]")),
             (None, Some(reason)) => Some(format!("[WAIVER] {reason}")),
@@ -3092,15 +3624,10 @@ async fn sign_off_run(
 
         if let Some((owner, repo_name)) = pr_repo.split_once('/') {
             let token = state.github_token().unwrap_or_default();
-            let comment_url = crate::arm::post_pr_comment(
-                owner,
-                repo_name,
-                pr_number,
-                &markdown,
-                &token,
-            )
-            .await
-            .unwrap_or_default(); // graceful degradation: None on any failure
+            let comment_url =
+                crate::arm::post_pr_comment(owner, repo_name, pr_number, &markdown, &token)
+                    .await
+                    .unwrap_or_default(); // graceful degradation: None on any failure
 
             if let Some(url) = comment_url {
                 // Record the PR comment link in the UoW history (best-effort update).
@@ -3156,13 +3683,32 @@ async fn sign_off_run(
     Ok(Json(uow).into_response())
 }
 
+/// Non-destructively stamp `run_id` on each clarification from the resume-context store (a
+/// plain `.get()`, NOT `.take()` — this must never consume the pause point; only actually
+/// answering does that). Lets a list response tell the client which open clarifications paused
+/// a governed run, so it can re-attach the Bombe polling loop on answer (see `ClarifyQuestion`'s
+/// `run_id` field doc in the UI). A free-standing (non-run) clarification is left `None`.
+fn with_resume_run_ids(
+    resume: &crate::clarify_resume::ClarifyResumeStore,
+    clars: Vec<Clarification>,
+) -> Vec<Clarification> {
+    clars
+        .into_iter()
+        .map(|mut c| {
+            c.run_id = resume.get(&c.id).map(|ctx| ctx.run_id);
+            c
+        })
+        .collect()
+}
+
 /// OPEN clarifications for the active project's stories (the NEEDS YOU queue).
 /// No active project → empty queue.
 async fn list_open_clarifications(State(state): State<AppState>) -> Json<Vec<Clarification>> {
     let Some(p) = state.projects.active() else {
         return Json(vec![]);
     };
-    Json(state.clarifications.all_open_for_project(&p.repos))
+    let clars = state.clarifications.all_open_for_project(&p.repos);
+    Json(with_resume_run_ids(&state.clarify_resume, clars))
 }
 
 /// All clarifications on a story (open and answered).
@@ -3170,7 +3716,8 @@ async fn list_clarifications(
     State(state): State<AppState>,
     Path(story_id): Path<String>,
 ) -> Json<Vec<Clarification>> {
-    Json(state.clarifications.for_story(&story_id))
+    let clars = state.clarifications.for_story(&story_id);
+    Json(with_resume_run_ids(&state.clarify_resume, clars))
 }
 
 /// Post a clarifying question on a story, addressed to the chosen recipient. When a
@@ -3191,12 +3738,13 @@ async fn post_clarification(
         req.allow_free_text,
     );
 
-    if state.provider.live {
+    if state.provider.current().live {
         if let Ok(Some(story)) = state.stories.get(&story_id).await {
             if let Some(reference) = story.external_ref.as_ref() {
                 let questions = [req.question.clone()];
                 if let Err(e) = state
                     .provider
+                    .current()
                     .provider
                     .post_clarifying_questions(reference, &questions)
                     .await
@@ -3278,8 +3826,8 @@ async fn answer_clarification(
 /// Which work-tracker provider is active, and whether it is a live external tracker.
 async fn provider_info(State(state): State<AppState>) -> Json<serde_json::Value> {
     Json(serde_json::json!({
-        "provider": state.provider.label,
-        "live": state.provider.live,
+        "provider": state.provider.current().label,
+        "live": state.provider.current().live,
     }))
 }
 
@@ -3460,7 +4008,10 @@ struct ImportedRoutine {
     /// as a STRUCTURED object, while older exports carry a plain string; the
     /// shared [`camerata_app_core::routine::deserialize_scope`] accepts BOTH so a
     /// project export from either era imports with no data loss.
-    #[serde(default, deserialize_with = "camerata_app_core::routine::deserialize_scope")]
+    #[serde(
+        default,
+        deserialize_with = "camerata_app_core::routine::deserialize_scope"
+    )]
     scope: crate::routine::RoutineScope,
     /// The routine's model travels with it; blank/absent falls back to the server default.
     #[serde(default)]
@@ -3592,12 +4143,17 @@ async fn import_project_ruleset(
     Path(id): Path<String>,
     Json(incoming): Json<crate::project::ProjectRuleset>,
 ) -> Json<serde_json::Value> {
+    let corpus = load_corpus_for_baseline().await;
     let updated = state.projects.update(&id, |p| {
+        let known_before = selected_rule_ids(&p.ruleset);
         p.upsert_base_rules(
             incoming.selections.clone(),
             incoming.cross_repo.clone(),
             incoming.process.clone(),
         );
+        // Rules new to this project are baselined from the corpus; ones it already had keep
+        // their baseline (inherited by the upsert) or their absence of one.
+        baseline_new_to_project(&mut p.ruleset, &known_before, corpus.as_ref());
         // Merge imported custom rules by name (imported wins), never dropping
         // existing ones that aren't in the import.
         p.merge_custom(&incoming.custom);
@@ -3638,7 +4194,10 @@ async fn add_custom_rule(
         domain: if req.repos.is_empty() {
             "*".to_string()
         } else if req.domain.trim().is_empty() {
-            req.repos.first().cloned().unwrap_or_else(|| "*".to_string())
+            req.repos
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "*".to_string())
         } else {
             req.domain.trim().to_string()
         },
@@ -3962,7 +4521,7 @@ struct SetStepModelReq {
     /// The step key: `audit` | `calibration` | `research_chat` | `story_authoring` |
     /// `decomposition` | `escalation` | `clarification`.
     step: String,
-    /// The model id to bind (e.g. `claude-opus-4-8`).
+    /// The model id to bind (e.g. `claude-opus-5`).
     model: String,
 }
 
@@ -3970,7 +4529,12 @@ struct SetStepModelReq {
 /// separators (e.g. `research-chat`). Returns `None` for an unknown key.
 fn parse_step_kind(s: &str) -> Option<crate::project::StepKind> {
     use crate::project::StepKind;
-    match s.trim().to_ascii_lowercase().replace([' ', '-'], "_").as_str() {
+    match s
+        .trim()
+        .to_ascii_lowercase()
+        .replace([' ', '-'], "_")
+        .as_str()
+    {
         "audit" => Some(StepKind::Audit),
         "calibration" => Some(StepKind::Calibration),
         "research_chat" => Some(StepKind::ResearchChat),
@@ -4004,6 +4568,42 @@ async fn set_step_model(
     }
 }
 
+/// Body for `POST /api/projects/:id/backend`: the project's new backend setting
+/// (`docs/design/2026-09-22_per-project-backend.md`). `backend` must be `"cli"` or `"api"`
+/// (case-insensitive, trimmed); anything else is rejected with `{ ok: false, message }`.
+#[derive(serde::Deserialize)]
+struct SetProjectBackendReq {
+    backend: String,
+}
+
+/// `POST /api/projects/:id/backend` — set the project's AI backend. `Cli` (the default) runs
+/// on the Claude Code subscription (no key needed); `Api` runs on the Anthropic API and
+/// hard-blocks — never silently falls back to the CLI — when no key is configured. This is
+/// the source of truth for EVERY project-scoped model call (scan, alternative
+/// recommendation, rescan, governed dev loop). Mirrors `set_step_model`'s shape exactly:
+/// same `State`/`Path`/`Json` extraction, same `{ ok, project }` / `{ ok: false, message }`
+/// response shape, no HTTP-status signaling — the UI reads `ok` + `message`.
+async fn set_backend_handler(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<SetProjectBackendReq>,
+) -> Json<serde_json::Value> {
+    let backend = match req.backend.trim().to_ascii_lowercase().as_str() {
+        "cli" => crate::project::ProjectBackend::Cli,
+        "api" => crate::project::ProjectBackend::Api,
+        _ => {
+            return Json(serde_json::json!({
+                "ok": false,
+                "message": format!("invalid backend: {:?} (expected \"cli\" or \"api\")", req.backend)
+            }));
+        }
+    };
+    match state.projects.set_backend(&id, backend) {
+        Some(p) => Json(serde_json::json!({ "ok": true, "project": p })),
+        None => Json(serde_json::json!({ "ok": false, "message": "no such project" })),
+    }
+}
+
 /// Body for `POST /api/projects/:id/stall-thresholds`.
 #[derive(serde::Deserialize)]
 struct SetStallThresholdsReq {
@@ -4027,6 +4627,374 @@ async fn set_stall_thresholds_handler(
     };
     match state.projects.set_stall_thresholds(&id, thresholds) {
         Some(p) => Json(serde_json::json!({ "ok": true, "project": p })),
+        None => Json(serde_json::json!({ "ok": false, "message": "no such project" })),
+    }
+}
+
+// ── Audit-integrated alternative recommendation ───────────────────────────────
+// (docs/design/2026-09-22_audit-integrated-alternatives.md)
+
+/// One rule the operator wants forced to a specific option for a targeted rescan.
+#[derive(serde::Deserialize)]
+struct AlternativeOverride {
+    rule_id: String,
+    chosen_option_id: String,
+}
+
+/// Body for `POST /api/projects/:id/rescan-alternatives`.
+#[derive(serde::Deserialize)]
+struct RescanAlternativesReq {
+    #[serde(default)]
+    overrides: Vec<AlternativeOverride>,
+}
+
+/// `POST /api/projects/:id/rescan-alternatives` — re-run the AI audit for ONLY the given
+/// rules, FORCED to the operator's chosen option each (never asking the model to re-pick —
+/// the operator already decided). Returns the updated findings for exactly those rules,
+/// tagged `evaluated_option_id = chosen_option_id`, so the caller can merge them in place
+/// over the existing findings table.
+///
+/// Validates every `rule_id` resolves to a real multi-option semantic rule in the corpus and
+/// every `chosen_option_id` is a real option on it BEFORE any model call — an invalid
+/// override is reported in `message` and simply excluded from the batch (the valid ones still
+/// run). Routes through the SAME compliance-safety gate as the main audit
+/// (`resolve_backend_for_project` -> `Blocked` refuses with the message; `Api`/`Cli` build the
+/// `Llm` on that EXACT resolved transport) and builds its `Llm` via
+/// `onboard::build_llm` (with the key from `credentials::anthropic_api_key`), so this endpoint's spend folds into the same cumulative
+/// ledger as every other model call.
+///
+/// Also updates this project's stored `last_scan` in place: the rescanned rules' findings
+/// replace their previous entries and `recommendations` is updated for those rule ids
+/// (marked `operator_chosen: true`) — so an immediate `accept-alternatives` call sees the
+/// operator's override without requiring the caller to round-trip anything back to the server.
+async fn rescan_alternatives_handler(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<RescanAlternativesReq>,
+) -> Json<serde_json::Value> {
+    let Some(project) = state.projects.get(&id) else {
+        return Json(serde_json::json!({ "ok": false, "message": "no such project" }));
+    };
+    // Re-reads the project's source and calls the model, all inside this request: while it
+    // does, deleting that source is refused rather than raced.
+    let _scan_claim = state.source_ops.begin_scan(&project.id);
+
+    // Dedup by rule id (uppercased) — last override for a given rule wins. Blank ids/options
+    // are dropped rather than causing a hard error (defensive against a malformed request).
+    let mut forced: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    for o in &req.overrides {
+        let rid = o.rule_id.trim();
+        let opt = o.chosen_option_id.trim();
+        if rid.is_empty() || opt.is_empty() {
+            continue;
+        }
+        forced.insert(rid.to_ascii_uppercase(), opt.to_string());
+    }
+    if forced.is_empty() {
+        return Json(serde_json::json!({
+            "ok": false,
+            "message": "No valid overrides supplied — each entry needs a non-empty rule_id and chosen_option_id."
+        }));
+    }
+
+    let corpus_path = camerata_rules::corpus_path();
+    if !corpus_path.exists() {
+        return Json(serde_json::json!({ "ok": false, "message": "Rule corpus unavailable." }));
+    }
+    let (corpus, _errs) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+
+    // Validate every override AGAINST the corpus before any model call. A rule id that isn't a
+    // real multi-option semantic rule, or an option id that isn't real on that rule, is
+    // reported and excluded — the remaining valid overrides still run.
+    let chosen_options = project_chosen_options(&project);
+    let mut alternatives_by_rule: std::collections::HashMap<
+        String,
+        crate::ai_audit::RuleAlternatives,
+    > = std::collections::HashMap::new();
+    let mut invalid: Vec<String> = Vec::new();
+    for (rid, opt_id) in &forced {
+        match corpus.get_by_id(rid) {
+            Some(rule) if crate::onboard::is_semantic_multi_option_rule(rule) => {
+                let options: Vec<crate::onboard::RuleOptionView> = rule
+                    .options
+                    .iter()
+                    .map(|o| crate::onboard::RuleOptionView {
+                        id: o.id.clone(),
+                        label: o.label.clone(),
+                        directive: o.directive.clone(),
+                        why: o.why.clone(),
+                        violates: o.violates,
+                    })
+                    .collect();
+                if !options.iter().any(|o| &o.id == opt_id) {
+                    invalid.push(format!(
+                        "{rid}: \"{opt_id}\" is not a real option on this rule"
+                    ));
+                    continue;
+                }
+                let selected_option_id = chosen_options
+                    .get(rid)
+                    .cloned()
+                    .or_else(|| rule.default_option.clone());
+                alternatives_by_rule.insert(
+                    rid.clone(),
+                    crate::ai_audit::RuleAlternatives {
+                        rule_id: rid.clone(),
+                        options,
+                        selected_option_id,
+                        // A5.3: same corpus-kind threading as build_rule_alternatives.
+                        kind: rule.kind(),
+                    },
+                );
+            }
+            Some(_) => invalid.push(format!("{rid}: not a multi-option semantic rule")),
+            None => invalid.push(format!("{rid}: unknown rule id")),
+        }
+    }
+    if alternatives_by_rule.is_empty() {
+        return Json(serde_json::json!({
+            "ok": false,
+            "message": format!("No valid rule overrides: {}", invalid.join("; "))
+        }));
+    }
+    // Only the validated subset of `forced` drives the audit (an invalid override must never
+    // reach `audit_repo`, which would otherwise fall back silently — reject it here instead).
+    let forced: std::collections::HashMap<String, String> = forced
+        .into_iter()
+        .filter(|(rid, _)| alternatives_by_rule.contains_key(rid))
+        .collect();
+
+    // The SAME compliance-safety gate the main audit uses.
+    let backend_resolution = resolve_backend_for_project(&state, Some(&project));
+    let llm_backend = match &backend_resolution {
+        crate::llm::BackendResolution::Blocked { message } => {
+            return Json(serde_json::json!({ "ok": false, "message": message }));
+        }
+        crate::llm::BackendResolution::Api => crate::llm::Backend::Api,
+        crate::llm::BackendResolution::Cli => crate::llm::Backend::Cli,
+    };
+    let mut run_notes: Vec<String> = invalid
+        .iter()
+        .map(|m| format!("skipped invalid override — {m}"))
+        .collect();
+
+    // Same session bookkeeping as `audit_repos`: this rescan re-reads client source into model
+    // prompts, so the Claude Code sessions it spawns belong on the inspection entry too.
+    let model_sessions = crate::llm::SessionSink::new();
+    let llm = crate::onboard::build_llm(
+        state.credential_store.as_ref(),
+        llm_backend,
+        Some(state.usage_ledger.clone()),
+    )
+    .with_session_sink(model_sessions.clone());
+    let (sources, source_notes) = resolve_local_sources(&state, &project.repos);
+    run_notes.extend(source_notes);
+
+    let audit_model = Some(step_model_or(&state, crate::project::StepKind::Audit, None));
+    let calibration_model = Some(step_model_or(
+        &state,
+        crate::project::StepKind::Calibration,
+        None,
+    ));
+
+    // Which rule ids apply to a given repo, per the project's own per-rule `repos` binding
+    // (empty `repos` on a `RuleSelection` = project-level = applies to every repo).
+    let applies_to_repo = |rid: &str, repo: &str| -> bool {
+        [
+            &project.ruleset.selections,
+            &project.ruleset.cross_repo,
+            &project.ruleset.process,
+        ]
+        .iter()
+        .flat_map(|list| list.iter())
+        .find(|s| s.rule_id.trim().to_ascii_uppercase() == *rid)
+        .map(|s| s.repos.is_empty() || s.repos.iter().any(|r| r == repo))
+        // A rule not found in the ruleset at all (shouldn't happen — it was already
+        // audited once to have surfaced as an override candidate) defaults to
+        // project-level so a rescan is never silently dropped.
+        .unwrap_or(true)
+    };
+
+    let mut all_findings: Vec<crate::onboard::Finding> = Vec::new();
+    let mut all_recs: std::collections::HashMap<String, crate::ai_audit::RuleRecommendation> =
+        std::collections::HashMap::new();
+    // W6: a sub-pass (e.g. a nested alternative-recommendation call) failing here must never
+    // be silent either — surfaced in `run_notes` below and merged into the stored report.
+    let mut all_failed_passes: Vec<crate::ai_audit::FailedPass> = Vec::new();
+    for (spec, dir) in &sources {
+        let applicable_ids: Vec<String> = alternatives_by_rule
+            .keys()
+            .filter(|rid| applies_to_repo(rid, spec))
+            .cloned()
+            .collect();
+        if applicable_ids.is_empty() {
+            continue;
+        }
+        let dir = dir.clone();
+        let files =
+            match tokio::task::spawn_blocking(move || crate::onboard::read_local_repo_files(&dir))
+                .await
+            {
+                Ok(Ok(extracted)) => extracted.files,
+                Ok(Err(e)) => {
+                    run_notes.push(format!("{spec}: {e}"));
+                    continue;
+                }
+                Err(e) => {
+                    run_notes.push(format!("{spec}: rescan task failed ({e})"));
+                    continue;
+                }
+            };
+        let alt_slice: Vec<crate::ai_audit::RuleAlternatives> = applicable_ids
+            .iter()
+            .filter_map(|rid| alternatives_by_rule.get(rid).cloned())
+            .collect();
+        let selected_pairs: Vec<(String, String)> = alt_slice
+            .iter()
+            .map(|a| {
+                let forced_id = forced.get(&a.rule_id).cloned().unwrap_or_default();
+                let directive = a
+                    .options
+                    .iter()
+                    .find(|o| o.id == forced_id)
+                    .map(|o| o.directive.clone())
+                    .unwrap_or_default();
+                (a.rule_id.clone(), directive)
+            })
+            .collect();
+        match crate::ai_audit::audit_repo(
+            &llm,
+            spec,
+            &files,
+            &selected_pairs,
+            &alt_slice,
+            &forced,
+            audit_model.as_deref(),
+            calibration_model.as_deref(),
+            crate::ai_audit::ScanMode::Parallel,
+            false,
+            Some((&state.transcripts, SCAN_AUDIT_KEY)),
+            None,
+            None,
+            None,
+        )
+        .await
+        {
+            Ok((findings, _proposed, recs, failed, _stage_samples)) => {
+                all_findings.extend(findings);
+                for r in recs {
+                    all_recs.insert(r.rule_id.clone(), r);
+                }
+                for f in &failed {
+                    run_notes.push(format!("{spec}: {} not computed ({})", f.pass, f.reason));
+                }
+                all_failed_passes.extend(failed);
+            }
+            Err(e) => run_notes.push(format!("{spec}: rescan failed ({e})")),
+        }
+    }
+
+    state.record_model_sessions(&id, model_sessions.snapshot());
+
+    // A rescan builds Findings without going through `audit_repos`, so it must apply the
+    // corpus-authored severity bounds itself: the findings returned below AND the ones folded
+    // into the stored scan are what the triage view shows, and they must carry the same
+    // severity the PDF/xlsx will bill. See `severity_bounds`.
+    crate::severity_bounds::apply_corpus_severity_bounds(&mut all_findings, &corpus);
+
+    // Merge into the project's stored last_scan so an immediate accept-alternatives call
+    // (or a UI reload) sees the operator's override without any client round-trip.
+    if let Some(mut report) = state.get_last_scan(&id) {
+        let rescanned_ids: std::collections::HashSet<String> =
+            alternatives_by_rule.keys().cloned().collect();
+        report
+            .findings
+            .retain(|f| !rescanned_ids.contains(&f.rule_id.to_ascii_uppercase()));
+        report.findings.extend(all_findings.clone());
+        for (rid, rec) in &all_recs {
+            report.recommendations.insert(rid.clone(), rec.clone());
+        }
+        // W6: fold any freshly-failed pass into the stored report so a LATER export still
+        // discloses it — never let a rescan's failure disappear once this handler returns.
+        report.failed_passes.extend(all_failed_passes.clone());
+        // Same inspection, a few rules re-evaluated: amend the current persisted entry rather
+        // than appending a second one.
+        state.amend_last_scan(id.clone(), report);
+    }
+
+    Json(serde_json::json!({
+        "ok": true,
+        "message": (!run_notes.is_empty()).then(|| run_notes.join(" · ")),
+        "findings": all_findings,
+        "recommendations": all_recs,
+    }))
+}
+
+/// Body for `POST /api/projects/:id/accept-alternatives`. Empty `rule_ids` (or an absent
+/// field, `{}`) means "accept all" — every rule in the last scan's `recommendations` map.
+#[derive(serde::Deserialize, Default)]
+struct AcceptAlternativesReq {
+    #[serde(default)]
+    rule_ids: Vec<String>,
+}
+
+/// `POST /api/projects/:id/accept-alternatives` — persist the CURRENT per-rule selection (the
+/// AI's recommendation where the operator never overrode it, the operator's forced choice
+/// where a `rescan-alternatives` call already updated it) into `RuleSelection.chosen_option`,
+/// via the existing `ProjectStore` mutator path. Body `{}` accepts every rule in the last
+/// scan's `recommendations` map; `{ "rule_ids": [...] }` accepts only the named subset.
+/// Returns the updated ruleset. 404s (via `ok: false`, no HTTP-status signaling — matching
+/// every other per-project mutator in this file) when the project has no completed scan to
+/// read recommendations from.
+async fn accept_alternatives_handler(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<AcceptAlternativesReq>,
+) -> Json<serde_json::Value> {
+    if state.projects.get(&id).is_none() {
+        return Json(serde_json::json!({ "ok": false, "message": "no such project" }));
+    }
+    let Some(report) = state.get_last_scan(&id) else {
+        return Json(serde_json::json!({
+            "ok": false,
+            "message": "No scan results available for this project. Run an audit first."
+        }));
+    };
+    let target_ids: Option<std::collections::HashSet<String>> =
+        (!req.rule_ids.is_empty()).then(|| {
+            req.rule_ids
+                .iter()
+                .map(|s| s.trim().to_ascii_uppercase())
+                .collect()
+        });
+
+    let mut accepted = 0usize;
+    let mut skipped: Vec<String> = Vec::new();
+    for (rid, rec) in &report.recommendations {
+        if let Some(ids) = &target_ids {
+            if !ids.contains(rid) {
+                continue;
+            }
+        }
+        match state
+            .projects
+            .set_rule_chosen_option(&id, rid, &rec.recommended_option_id)
+        {
+            Some(true) => accepted += 1,
+            Some(false) => skipped.push(rid.clone()),
+            None => {
+                return Json(serde_json::json!({ "ok": false, "message": "no such project" }));
+            }
+        }
+    }
+
+    match state.projects.get(&id) {
+        Some(p) => Json(serde_json::json!({
+            "ok": true,
+            "accepted": accepted,
+            "skipped": skipped,
+            "ruleset": p.ruleset,
+        })),
         None => Json(serde_json::json!({ "ok": false, "message": "no such project" })),
     }
 }
@@ -4130,7 +5098,8 @@ async fn preview_model_profile(
     if state.projects.get(&id).is_none() {
         return Json(serde_json::json!({ "ok": false, "message": "no such project" }));
     }
-    let assignments = crate::model_profile_cascade::compute_profile_cascade(profile, &state.model_registry);
+    let assignments =
+        crate::model_profile_cascade::compute_profile_cascade(profile, &state.model_registry);
     match assignments {
         None => Json(serde_json::json!({
             "ok": true,
@@ -4174,7 +5143,8 @@ async fn apply_model_profile(
         _ => return Json(serde_json::json!({ "ok": false, "message": "unknown profile" })),
     };
 
-    let assignments = crate::model_profile_cascade::compute_profile_cascade(profile, &state.model_registry);
+    let assignments =
+        crate::model_profile_cascade::compute_profile_cascade(profile, &state.model_registry);
 
     let updated = state.projects.update(&id, |p| {
         p.model_profile = profile;
@@ -4255,9 +5225,11 @@ async fn vcs_gate_bypass(
     Path(id): Path<String>,
     Json(req): Json<VcsGateBypassReq>,
 ) -> Response {
-    use camerata_checks::vcs_action::{build_rules, gate_or_bypass, BypassRequest, GateOrBypassResult, VcsAction};
     use axum::http::StatusCode;
     use axum::response::IntoResponse;
+    use camerata_checks::vcs_action::{
+        build_rules, gate_or_bypass, BypassRequest, GateOrBypassResult, VcsAction,
+    };
 
     // Reason-less bypass is rejected immediately (mirrors the suppression-waiver
     // invariant; a bypass must be auditable or it is not a bypass at all).
@@ -4392,8 +5364,10 @@ async fn reconcile_project(
 /// GitHub reachability when a token is set so a 401/403/5xx surfaces as a real
 /// error; integrations being absent is reported as "not configured" (a warning,
 /// not an error, in the UI).
-async fn connections_status() -> Json<crate::connections::ConnectionsReport> {
-    Json(crate::connections::probe().await)
+async fn connections_status(
+    State(state): State<AppState>,
+) -> Json<crate::connections::ConnectionsReport> {
+    Json(crate::connections::probe(state.credential_store.as_ref()).await)
 }
 
 /// Request to scan repo(s) for the brownfield audit. Accepts a SET of repos (a
@@ -4467,6 +5441,11 @@ async fn onboard_scan(
     }
 
     // Local-first: scan reads the repos' local working trees, not GitHub. No token needed.
+    // While it reads them, deleting that source is refused rather than raced (see `onboard_audit`).
+    let _scan_claim = state
+        .projects
+        .active()
+        .map(|p| state.source_ops.begin_scan(&p.id));
     let (sources, notes) = resolve_local_sources(&state, &repos);
     let report = crate::onboard::scan_repos(&sources, notes).await;
     // Populate the per-project last-scan store so the chat assistant sees deterministic
@@ -4503,7 +5482,7 @@ struct AuditReq {
     #[serde(default)]
     rules: Vec<AuditRuleReq>,
     /// The model the USER picked for this audit (company-agnostic id, e.g.
-    /// `claude-sonnet-4-6`). None / empty → the server default. The user owns the
+    /// `claude-sonnet-5`). None / empty → the server default. The user owns the
     /// thoroughness-vs-speed trade-off by choosing here.
     #[serde(default)]
     model: Option<String>,
@@ -4576,61 +5555,305 @@ const SCAN_AUDIT_KEY: &str = "scan-audit";
 /// plus the AI audit parameterized by the chosen rules). Returns the findings report. The
 /// AI activity (prompts and output) registers into the transcript store so the UI can
 /// show, live, that the model is actually working.
-/// Partition selected audit rules into the ones the code-only AI scan should check
-/// (prose / structured) and the CI-tier ones it should NOT (mechanical / architectural).
-/// CI-tier rules are enforced in CI from build/runtime/DB context (query-plan, migration audit,
-/// AST static analysis), so scanning them from a static code digest only yields weak,
-/// low-confidence findings (e.g. "an index probably exists in a migration somewhere"). The
-/// corpus is the source of each rule's tier; a rule absent from the corpus (e.g. a custom rule)
-/// defaults to scannable.
-/// Returns `(scannable, excluded_ci_tier_ids, preview_rules, corpus)`.
 ///
-/// `preview_rules` are the SUBSET of the excluded (CI-tier mechanical) rules that
-/// the SCAN-TIME deterministic preview pass ([`crate::scan_tools::run_scan_tools`])
-/// can run locally: mechanical, and NOT `layer3_only` (CodeQL / paid tiers never
-/// preview). The loaded `corpus` is returned so the caller can resolve each rule's
-/// linter source without re-loading it.
-async fn split_scannable_rules(
+/// W4 (root-cause fix): this used to PARTITION selected audit rules into the ones the code-only
+/// AI scan should check (prose / structured) and the CI-tier ones it should NOT (mechanical /
+/// architectural), on the theory that a CI-tier declaration meant a deterministic CI gate
+/// already covered the rule, so a static-code LLM pass would be redundant at best. That theory
+/// was wrong: "mechanical" means "deterministically checkable IN PRINCIPLE, once someone builds
+/// a repo-specific CI gate", not "actually checked, on THIS unseen repo, right now" — a rule
+/// like strict layering depends on a repo-specific layer map no generic detector ships with the
+/// product, so on a repo Camerata has never scanned before, no gate exists for it yet. Excluding
+/// such a rule from the model AND shipping no detector for it meant NOTHING ever evaluated it,
+/// while the report still called it clean — the defect this function's rename-in-place fixes.
+///
+/// Every selected rule is now AI-scannable (`scannable` == `selected`, unchanged); `excluded` is
+/// kept, ALWAYS EMPTY, purely for tuple-shape/JSON back-compat with existing callers — nothing
+/// is excluded from the semantic pass on CI-tier grounds anymore. `preview_rules` is UNRELATED
+/// to AI-scannability and keeps its original, narrower meaning: the subset of CI-tier mechanical
+/// rules the SCAN-TIME deterministic linter preview pass ([`crate::scan_tools::run_scan_tools`])
+/// can additionally run locally (mechanical, and NOT `layer3_only` — CodeQL / paid tiers never
+/// preview). The loaded `corpus` is returned so the caller can resolve each rule's linter source
+/// without re-loading it.
+///
+/// Returns `(scannable, excluded_ci_tier_ids, preview_rules, corpus, corpus_load_failures)`.
+/// `excluded_ci_tier_ids` is now always `Vec::new()`.
+///
+/// # W13: the fifth element is NOT optional to consume
+///
+/// This used to be a 4-tuple that dropped `load_corpus_lenient`'s error list on the floor
+/// (`load_corpus_lenient(&corpus_path).await.0`). A rule file with a typo'd enum value failed to
+/// parse, left the corpus, and nothing reported it — not the ledger, not the coverage sheet, not
+/// `camerata integrity-gate`, not a log line. Every caller that goes on to run a SCAN must pass
+/// the fifth element to [`record_corpus_load_failures`] once its `ScanReport` exists; see that
+/// function's doc comment for where the information then goes.
+///
+/// `pub`: also called directly by `camerata inspect` (the headless CLI, mirroring
+/// `onboard_audit`'s own pipeline so the two never drift — see
+/// `crates/cli/src/inspect_cmd.rs`).
+pub async fn split_scannable_rules(
     selected: Vec<crate::onboard::SelectedRule>,
 ) -> (
     Vec<crate::onboard::SelectedRule>,
     Vec<String>,
     Vec<crate::onboard::SelectedRule>,
     Option<camerata_rules::RuleSet>,
+    Vec<CorpusLoadFailure>,
 ) {
-    let corpus_path = camerata_rules::corpus_path();
-    let set = if corpus_path.exists() {
-        Some(camerata_rules::load_corpus_lenient(&corpus_path).await.0)
-    } else {
-        None
-    };
-    let is_ci_tier = |id: &str| -> bool {
-        set.as_ref()
-            .and_then(|s| s.get_by_id(id))
-            .map(|r| r.enforcement.is_ci_enforced())
-            .unwrap_or(false)
-    };
-    // A CI-tier mechanical rule is PREVIEW-runnable unless it is layer3_only.
+    split_scannable_rules_from(&camerata_rules::corpus_path(), selected).await
+}
+
+/// [`split_scannable_rules`] against an EXPLICIT corpus directory.
+///
+/// The seam exists for one reason: `camerata_rules::corpus_path()` reads the process-global
+/// `CAMERATA_CORPUS_PATH` env var, so a test that wanted to drive this function over a
+/// deliberately-malformed synthetic corpus could only do it by mutating process state and
+/// racing every other test in the binary. With the path as a parameter, the W13 tests point at
+/// a `tempfile` corpus directly and nothing global moves.
+pub async fn split_scannable_rules_from(
+    corpus_dir: &std::path::Path,
+    selected: Vec<crate::onboard::SelectedRule>,
+) -> (
+    Vec<crate::onboard::SelectedRule>,
+    Vec<String>,
+    Vec<crate::onboard::SelectedRule>,
+    Option<camerata_rules::RuleSet>,
+    Vec<CorpusLoadFailure>,
+) {
+    let (set, load_failures) = load_corpus_for_scan(corpus_dir).await;
+    // A CI-tier mechanical rule is PREVIEW-runnable unless it is layer3_only. This is the ONLY
+    // thing this function still partitions on — see the doc comment above for why AI-scannability
+    // no longer depends on CI-tier at all.
     let is_preview_runnable = |id: &str| -> bool {
         set.as_ref()
             .and_then(|s| s.get_by_id(id))
             .map(|r| r.enforcement.is_ci_enforced() && !r.is_layer3_only())
             .unwrap_or(false)
     };
-    let mut scannable = Vec::new();
-    let mut excluded = Vec::new();
-    let mut preview = Vec::new();
-    for r in selected {
-        if is_ci_tier(&r.id) {
-            if is_preview_runnable(&r.id) {
-                preview.push(r.clone());
-            }
-            excluded.push(r.id);
-        } else {
-            scannable.push(r);
-        }
+    let preview: Vec<crate::onboard::SelectedRule> = selected
+        .iter()
+        .filter(|r| is_preview_runnable(&r.id))
+        .cloned()
+        .collect();
+    // Every selected rule reaches the semantic pass now — no CI-tier exclusion.
+    let scannable = selected;
+    let excluded: Vec<String> = Vec::new();
+    (scannable, excluded, preview, set, load_failures)
+}
+
+/// W13 — ONE rule file the corpus loader could not parse, kept rather than discarded.
+///
+/// The three fields are deliberately split by AUDIENCE, because conflating them is how this
+/// defect's sibling (W6's `run_capture_stdout` dropping stderr) wasted an operator's time:
+///
+/// - [`Self::rule_id`] is the only CLIENT-SAFE field. It is a plain rule id, which a client
+///   already sees throughout the deliverable.
+/// - [`Self::path`] and [`Self::error`] are OPERATOR-ONLY. The path names the reviewer's own
+///   filesystem layout and the error names TOML internals; neither belongs in a client
+///   artifact, and [`record_corpus_load_failures`] keeps both out of one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CorpusLoadFailure {
+    /// The rule id, derived from the file STEM by [`rule_id_from_corpus_path`] — the id
+    /// declared INSIDE the file is unreadable by definition here.
+    pub rule_id: String,
+    /// Full path to the offending file. Operator-only; never exported.
+    pub path: std::path::PathBuf,
+    /// The loader's own message (`RulesError`'s `Display`), naming the TOML problem.
+    /// Operator-only; never exported.
+    pub error: String,
+}
+
+/// Derive the rule id for an unparseable corpus file from its FILE STEM, uppercased.
+///
+/// In this corpus the stem IS the lowercased rule id for every single file
+/// (`principles/api-layer/arch-handler-no-db-1.toml` declares `id = "ARCH-HANDLER-NO-DB-1"`),
+/// so the stem is the most faithful handle available — and the id inside the file cannot be
+/// read, because failing to read the file is the whole problem.
+///
+/// `load_corpus_lenient` has one error shape that is NOT a per-file parse failure: when the
+/// recursive walk itself fails it returns `(corpus_dir, err)`, i.e. a DIRECTORY. A directory's
+/// stem is not a rule id, so that case gets the explicit sentinel `RULE-CORPUS` rather than a
+/// plausible-looking lie (a line reading `API-LAYER: rule file could not be loaded` would send
+/// a reader hunting for a rule that does not exist).
+pub fn rule_id_from_corpus_path(path: &std::path::Path) -> String {
+    let is_toml_file = path
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("toml"));
+    if !is_toml_file {
+        return "RULE-CORPUS".to_string();
     }
-    (scannable, excluded, preview, set)
+    path.file_stem()
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_ascii_uppercase())
+        .unwrap_or_else(|| "RULE-CORPUS".to_string())
+}
+
+/// W13 — load the rule corpus for a scan: the rules that parsed, PLUS an honest record of
+/// every file that did not.
+///
+/// This is the replacement for the `load_corpus_lenient(&p).await.0` idiom on the scan path.
+/// `None` for the corpus means the directory does not exist at all (the pre-existing
+/// degrade-soft contract every corpus-optional join in this codebase already has); an EMPTY
+/// failure list means every `.toml` under it parsed.
+///
+/// Deliberately NOT `camerata_rules::load_corpus` (the strict, `Result`-returning loader). It
+/// exists, but switching production to it would mean one malformed rule file fails an entire
+/// client scan — trading an invisible failure for a brittle one. The corpus still loads
+/// leniently; what changes is that the errors now go somewhere.
+pub async fn load_corpus_for_scan(
+    corpus_dir: &std::path::Path,
+) -> (Option<camerata_rules::RuleSet>, Vec<CorpusLoadFailure>) {
+    if !corpus_dir.exists() {
+        return (None, Vec::new());
+    }
+    let (set, errors) = camerata_rules::load_corpus_lenient(corpus_dir).await;
+    let failures = errors
+        .into_iter()
+        .map(|(path, error)| CorpusLoadFailure {
+            rule_id: rule_id_from_corpus_path(&path),
+            path,
+            error: error.to_string(),
+        })
+        .collect();
+    (Some(set), failures)
+}
+
+/// The [`crate::onboard::CoverageNote::tool`] value W13's corpus-load failures register under.
+///
+/// Not a real tool name, exactly like the pre-existing `"unrouted"` sentinel — it is the key
+/// `report_export::tool_coverage_disclosures` matches to render the one concise client-facing
+/// line. Kept here next to its only producer, and read by `report_export` through this
+/// constant rather than a retyped literal so the two cannot drift.
+pub const RULE_CORPUS_COVERAGE_TOOL: &str = "rule-corpus";
+
+/// The [`crate::onboard::CoverageNote::tool`] value for the Firebase scope statement. Like
+/// [`RULE_CORPUS_COVERAGE_TOOL`] it is not a tool name: it keys the one written client sentence
+/// `report_export::tool_coverage_disclosures` renders for a repository whose stack includes
+/// Firebase.
+pub const FIREBASE_SCOPE_COVERAGE_TOOL: &str = "firebase-scope";
+
+/// What "Firebase coverage" means in a report (client voice, no dashes): the honest scope of the
+/// Firebase rules, so a reader never mistakes a clean Firebase section for coverage of Dart client
+/// logic or of rules that live only in the console.
+pub const FIREBASE_SCOPE_SENTENCE: &str = "Firebase coverage in this inspection is the security rules files in the repository (Cloud Firestore, Cloud Storage and Realtime Database), the Firebase project configuration, and Cloud Functions written in JavaScript or TypeScript. Dart and Flutter client code was read for committed secrets and by the advisory review, but it was not parsed structurally and no Flutter specific rule was applied. Rules and settings that exist only in the Firebase console are not visible to a repository inspection.";
+
+/// W13 — route a scan's corpus-load failures to the four places built for exactly this, so a
+/// rule that never parsed can no longer disappear.
+///
+/// Called by every scan entry point (`onboard_audit`, `onboard_audit_start`, and `camerata
+/// inspect`) right after `onboard::audit_repos` returns, i.e. as soon as a `ScanReport` with a
+/// `ScanLedger` exists to record into.
+///
+/// Each failure lands in all four, split strictly by audience:
+///
+/// 1. **The ledger** — `ran = false` with [`crate::scan_ledger::CORPUS_LOAD_FAILED_REASON`].
+///    From there `excluded_rules()` carries it into the report JSON's `rules_not_run` and the
+///    workbook's "Rules not run this scan" sheet, and `healthy_rule_ids()` can never call it
+///    verified-clean.
+/// 2. **`camerata integrity-gate`** — the ledger entry classifies as
+///    [`crate::integrity_gate::SkipClass::CorpusLoadFailed`], which is never justified under
+///    any profile and fails the gate with its own `corpus_load_failure` code.
+/// 3. **The client, concisely (G3)** — ONE [`crate::onboard::CoverageNote`] per failure under
+///    [`RULE_CORPUS_COVERAGE_TOOL`], which `report_export::tool_coverage_disclosures` collapses
+///    into a single sentence for the PDF/JSON `failed_passes` and the workbook's Coverage
+///    sheet. The note's own `message` carries the operator detail and is NEVER exported: only
+///    `osv-scanner` notes have their raw message exported (see `build_report_json`'s
+///    `dep_coverage_notes`), and every other tool's note is replaced by that one written line.
+/// 4. **The operator log** — `tracing::error!` with the full path and the parser's own message.
+///    `error!`, not `warn!`: a rule silently leaving the corpus degrades the engine a client is
+///    paying to have run.
+pub fn record_corpus_load_failures(
+    report: &mut crate::onboard::ScanReport,
+    failures: &[CorpusLoadFailure],
+) {
+    for failure in failures {
+        tracing::error!(
+            rule_id = %failure.rule_id,
+            path = %failure.path.display(),
+            error = %failure.error,
+            "a rule corpus file failed to load; the rule did not run this scan and is \
+             disclosed as not-run in the report, the ledger and the integrity gate",
+        );
+        report.ledger.record_corpus_load_failure(&failure.rule_id);
+        report.coverage_notes.push(crate::onboard::CoverageNote {
+            tool: RULE_CORPUS_COVERAGE_TOOL.to_string(),
+            // Operator-facing detail. See this function's doc comment, point 3, for why this
+            // text reaches the UI and the ledger but never a client artifact.
+            message: format!(
+                "{} did not parse, so rule {} was not loaded and did not run: {}",
+                failure.path.display(),
+                failure.rule_id,
+                failure.error,
+            ),
+        });
+    }
+}
+
+/// Extract a human-readable message from a caught panic payload (`std::panic::catch_unwind`
+/// / `futures::FutureExt::catch_unwind`'s `Err` side). A panic conventionally carries either
+/// a `&'static str` (a string-literal `panic!("...")`) or an owned `String` (a formatted
+/// `panic!("{x}")`); anything else (a custom payload type) falls back to a generic label so
+/// this ALWAYS produces a usable message rather than failing to report one at all — the
+/// whole point of catching the panic here is to surface it, never to trade one silent
+/// failure for another.
+///
+/// Takes the `Box<dyn Any + Send>` BY REFERENCE, deliberately — not `&(dyn Any + Send)`.
+/// `Box<dyn Any + Send>` itself satisfies `Any`'s blanket impl, so a caller passing
+/// `&payload` where `payload: Box<dyn Any + Send>` to a `&(dyn Any + Send)` parameter
+/// would coerce via UNSIZING the box itself (treating "the Box IS the Any") rather than
+/// DEREFING into its contents, and `downcast_ref` would then always miss — silently
+/// reporting every real panic as "no panic message available". Taking `&Box<...>` here
+/// means `payload.downcast_ref()` resolves through Rust's method-call auto-deref (which
+/// unlike argument coercion, derefs through the `Box` to the `dyn Any` it targets first),
+/// so the natural call `panic_message(&panic)` is simply correct at every call site.
+fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "no panic message available".to_string()
+    }
+}
+
+/// Run one job's background audit `body` to completion, guaranteeing `jid` lands in a
+/// TERMINAL job state (`done` or `failed`) no matter how `body` exits.
+///
+/// This is the panic guard for the class of "the scan silently dies with no error" bugs:
+/// `body` is expected to end by calling `jobs.finish(jid, ...)` or `jobs.fail(jid, ...)`
+/// itself on every path it knows about (empty sources, a clean completion, ...). What it
+/// canNOT protect against on its own is a PANIC partway through — a stuck subprocess
+/// turning into an unwrap, an indexing bug, anything — which would otherwise unwind
+/// straight out of the spawned task with nobody ever calling `fail`/`finish`, leaving the
+/// job stuck at `running` forever and the UI watching nothing happen. Wrapping `body` in
+/// `catch_unwind` here means that no matter what it does internally, EITHER it reaches its
+/// own terminal call, OR this function reaches one on its behalf.
+///
+/// `AssertUnwindSafe` is required because `body` is expected to close over `&mut` locals
+/// (an accumulating report, loop counters) that aren't automatically `UnwindSafe`. That is
+/// sound here: every value that must survive a panic (the job store, scan cache, and
+/// friends) is behind `Arc<Mutex<_>>`, which IS unwind-safe via mutex poisoning; everything
+/// else is plain owned data that is simply dropped, unobserved, when `body` panics.
+///
+/// Calling `jobs.fail` after `body` already called `jobs.finish` (or `fail`) would be a
+/// bug, but it can't happen: `catch_unwind` only returns `Err` when `body` panicked, and a
+/// panic can only occur BEFORE `body`'s own terminal call runs (it's always the last thing
+/// on every path) — never after, since there is no code left to panic in.
+async fn run_job_body_with_panic_guard<F>(jobs: &crate::jobs::JobStore, jid: &str, body: F)
+where
+    F: std::future::Future<Output = ()>,
+{
+    use futures::FutureExt;
+    if let Err(panic) = std::panic::AssertUnwindSafe(body).catch_unwind().await {
+        let msg = panic_message(&panic);
+        jobs.fail(
+            jid,
+            format!(
+                "The scan crashed unexpectedly: {msg}. Please retry; if it keeps happening, \
+                 this is a bug worth reporting."
+            ),
+        );
+    }
 }
 
 async fn onboard_audit(
@@ -4660,11 +5883,17 @@ async fn onboard_audit(
             repos: r.repos,
         })
         .collect();
-    // Mechanical rules are enforced in CI, not by the static code scan — drop them here.
-    // The scan-runnable subset (mechanical, non-layer3_only) feeds the SCAN-TIME PREVIEW
-    // pass below, which runs the rule's deterministic tool itself and folds in preview findings.
-    let (selected, excluded_mechanical, preview_rules, corpus) =
-        split_scannable_rules(selected).await;
+    // W4: `split_scannable_rules` no longer excludes anything on CI-tier grounds (see its doc
+    // comment) — `excluded_mechanical` is always empty now. It still derives `preview_rules`
+    // (the scan-runnable mechanical subset that feeds the SCAN-TIME PREVIEW pass below) and
+    // loads `corpus` for reuse. `audit_repos` gets the FULL curated `selected` (unchanged from
+    // before) — it needs every id, CI-tier included, both to arm the deterministic
+    // architectural engine (`repo_selected_ids`) and, as of W4, to build its own semantic/AI
+    // prompt (every selected, code-auditable rule now reaches the model).
+    // W13: `corpus_load_failures` is the fifth element and MUST be consumed — see
+    // `record_corpus_load_failures`'s call below and `split_scannable_rules`'s doc comment.
+    let (_ai_scannable_only, excluded_mechanical, preview_rules, corpus, corpus_load_failures) =
+        split_scannable_rules(selected.clone()).await;
     // Audit + calibration are UI-PICKED non-fleet steps: an explicit request model wins;
     // otherwise the active project's per-step default applies (DEFAULT_MODEL floor only with
     // no active project). Each is resolved to a concrete id (never `None`) so there is no
@@ -4686,7 +5915,13 @@ async fn onboard_audit(
     // Fresh transcript for this audit run so the live feedback panel starts clean.
     state.transcripts.clear(SCAN_AUDIT_KEY);
     // Incremental scan: load this project's prior manifest unless the user forced a full scan.
-    let project_id = state.projects.active().map(|p| p.id);
+    let active_project = state.projects.active();
+    let project_id = active_project.as_ref().map(|p| p.id.clone());
+    // This request holds the checkout open for as long as it runs. Register it, so deleting the
+    // source is refused (not raced) until it returns; released when the handler does.
+    let _scan_claim = project_id
+        .as_deref()
+        .map(|id| state.source_ops.begin_scan(id));
     let prior = if req.incremental {
         project_id
             .as_deref()
@@ -4694,114 +5929,204 @@ async fn onboard_audit(
     } else {
         None
     };
-    let (mut report, manifest) = crate::onboard::audit_repos(
-        &sources,
-        &selected,
-        notes,
-        model.as_deref(),
-        calibration_model.as_deref(),
-        mode,
-        req.thorough,
-        Some((&state.transcripts, SCAN_AUDIT_KEY)),
-        None,
-        prior.as_ref(),
-        req.deep,
-        state.feature_flags.soc2,
-        run_ai_review,
-        run_deterministic,
-        Some(state.usage_ledger.clone()),
-    )
-    .await;
-    // Persist the fresh manifest (even after a forced full scan) so the NEXT scan can be
-    // incremental. Only when there's an active project to key it to.
-    if let Some(id) = &project_id {
-        state.scan_cache.put(id, manifest);
-    }
-    report.excluded_mechanical_rules = excluded_mechanical;
-    // SCAN-TIME deterministic PREVIEW pass: run the selected mechanical rules' own tools
-    // and fold their findings into triage as preview findings (advisory, not enforced).
-    // Gated on the deterministic selection — deselecting deterministic scans skips it too.
-    // (No job here, so no live deterministic progress on the synchronous path.)
-    if run_deterministic {
-        merge_scan_preview(&mut report, &sources, &preview_rules, corpus.as_ref(), None).await;
-    }
+    // The compliance-safety gate: resolve BEFORE the scan runs, from this project's own
+    // `backend` setting and whether an Anthropic key is present. See
+    // `resolve_backend_for_project`'s doc comment.
+    let backend_resolution = resolve_backend_for_project(&state, active_project.as_ref());
 
-    // ── Always-on dep-audit (osv-scanner) — runs LAST, hard-bounded ──────────────────
-    // Runs after preview linters so a slow osv-scanner never blocks them.
-    // Hard 60-second total timeout (provisioning + scan); fail-soft on timeout.
-    // Gated on run_deterministic; CAMERATA_DISABLE_DEP_AUDIT bypasses for test isolation.
-    if run_deterministic {
-        use tokio::time::{timeout, Duration};
-        let dep_audit_timeout = Duration::from_secs(60);
-        for (spec, dir) in &sources {
-            let spec = spec.as_str();
-            let run = crate::dep_audit::run_dep_audit(spec, dir);
-            let (dep_findings, dep_note) = match timeout(dep_audit_timeout, run).await {
-                Ok(result) => result,
-                Err(_elapsed) => (
-                    Vec::new(),
-                    Some(crate::onboard::CoverageNote {
-                        tool: "osv-scanner".to_string(),
-                        message: format!(
-                            "dependency audit (osv-scanner) timed out after 60 s for {spec}"
-                        ),
-                    }),
-                ),
-            };
-            if !dep_findings.is_empty() {
-                report.findings.extend(dep_findings);
-            }
-            if let Some(note) = dep_note {
-                report.coverage_notes.push(note);
-            }
+    // PANIC GUARD: this handler has no background job to fail into (unlike
+    // `onboard_audit_start`'s spawned task) — a bare panic anywhere in the pipeline below
+    // would otherwise unwind straight through the handler, dropping the connection and
+    // leaving the caller with an opaque network error instead of an explained failure.
+    // `catch_unwind` turns that into a normal JSON response carrying `ai_error`, so the
+    // SAME banner the UI already renders for an AI-review failure covers a crash too —
+    // never a silent, blank result. `AssertUnwindSafe` is required because the block
+    // below captures locals (accumulating `report`, loop state) that aren't automatically
+    // UnwindSafe; nothing here is observed again after a panic except through `report`,
+    // which this function constructs fresh either way (real or synthesized), so there is
+    // no stale/partially-mutated state a caller could see.
+    use futures::FutureExt;
+    let outcome = std::panic::AssertUnwindSafe(async move {
+        let (mut report, manifest) = crate::onboard::audit_repos(
+            state.credential_store.as_ref(),
+            &sources,
+            &selected,
+            notes,
+            model.as_deref(),
+            calibration_model.as_deref(),
+            mode,
+            req.thorough,
+            Some((&state.transcripts, SCAN_AUDIT_KEY)),
+            None,
+            prior.as_ref(),
+            req.deep,
+            state.feature_flags.soc2,
+            run_ai_review,
+            run_deterministic,
+            Some(state.usage_ledger.clone()),
+            backend_resolution,
+            corpus.as_ref(),
+            &active_project
+                .as_ref()
+                .map(project_chosen_options)
+                .unwrap_or_default(),
+        )
+        .await;
+        // Persist the fresh manifest (even after a forced full scan) so the NEXT scan can be
+        // incremental. Only when there's an active project to key it to.
+        if let Some(id) = &project_id {
+            state.scan_cache.put(id, manifest);
         }
-    }
+        report.excluded_mechanical_rules = excluded_mechanical;
+        // W13: as soon as a ScanReport (and therefore a ScanLedger) exists, disclose every
+        // corpus file that would not parse — into the ledger, the integrity gate, one concise
+        // client line and the operator log. Before this, those errors were discarded at the
+        // load site and a rule with a typo'd enum value vanished from the scan silently.
+        record_corpus_load_failures(&mut report, &corpus_load_failures);
+        // SCAN-TIME deterministic PREVIEW pass: run the selected mechanical rules' own tools
+        // and fold their findings into triage as preview findings (advisory, not enforced).
+        // Gated on the deterministic selection — deselecting deterministic scans skips it too.
+        // (No job here, so no live deterministic progress on the synchronous path.)
+        if run_deterministic {
+            merge_scan_preview(&mut report, &sources, &preview_rules, corpus.as_ref(), None).await;
+        }
 
-    // ── Enforcement-catch ledger capture (terminal point 2: scan completion) ──────────
-    // After a scan completes, write one floor/catch record for each ACTIVE floor finding
-    // to the enforcement ledger. Best-effort / fail-soft: runs in a background task so
-    // the response is never delayed by ledger writes. Errors inside are logged and swallowed.
-    {
-        let ledger = state.enforcement_ledger.clone();
-        let all_findings = report.findings.clone();
-        tokio::spawn(async move {
-            crate::enforcement_ledger::capture_scan_findings(&ledger, &all_findings).await;
-        });
-    }
+        // ── Always-on dep-audit (osv-scanner) — runs LAST, hard-bounded ──────────────
+        // Runs after preview linters so a slow osv-scanner never blocks them.
+        // Hard 60-second total timeout (provisioning + scan); fail-soft on timeout.
+        // Gated on run_deterministic; CAMERATA_DISABLE_DEP_AUDIT bypasses for test isolation.
+        if run_deterministic {
+            use tokio::time::{timeout, Duration};
+            let dep_audit_timeout = Duration::from_secs(60);
+            // Pass-1 W1 seal fix: snapshotted so the whole loop's net additions get ONE ledger
+            // stage entry (a no-op when every repo's dep-audit found nothing new) — see
+            // `crate::scan_ledger::record_addition_stage`'s doc comment.
+            let dep_audit_rows_in = report.findings.len();
+            for (spec, dir) in &sources {
+                let spec = spec.as_str();
+                let run = crate::dep_audit::run_dep_audit(spec, dir);
+                let (dep_findings, dep_note) = match timeout(dep_audit_timeout, run).await {
+                    Ok(result) => result,
+                    Err(_elapsed) => (
+                        Vec::new(),
+                        Some(crate::onboard::CoverageNote {
+                            tool: "osv-scanner".to_string(),
+                            message: format!(
+                                "dependency audit (osv-scanner) timed out after 60 s for {spec}"
+                            ),
+                        }),
+                    ),
+                };
+                if !dep_findings.is_empty() {
+                    report.findings.extend(dep_findings);
+                }
+                if let Some(note) = dep_note {
+                    report.coverage_notes.push(note);
+                }
+            }
+            crate::scan_ledger::record_addition_stage(
+                &mut report.ledger,
+                "dependency-audit-merge",
+                dep_audit_rows_in,
+                report.findings.len(),
+                "dep_audit_findings",
+            );
+        }
 
-    // ── Write last_scan (synchronous path) ───────────────────────────────────────────
-    // Store the completed report immediately so chat grounding can read it regardless of
-    // whether the UI has round-tripped the draft back yet (timing race fixed).
-    if let Some(id) = &project_id {
-        state.set_last_scan(id.clone(), report.clone());
-    }
+        // ── Pass-1 W1 seal fix: evidence-of-violation gate — LAST row-adding pass ────
+        // Runs strictly after every other pass above (the floor/AI/architectural merges
+        // inside `audit_repos`, the preview-linter merge, the dependency audit) and strictly
+        // before `report` is persisted into `last_scan`/`scan_cache` or returned to the
+        // caller — this IS the "row set is final" point for this scan. See
+        // `report_export::apply_evidence_gate`'s doc comment.
+        crate::report_export::apply_evidence_gate(&mut report);
+        // Corpus severity bounds over the FINAL row set — see the block comment on the async
+        // path below and `severity_bounds`.
+        crate::severity_bounds::apply_scan_severity_bounds(&mut report.findings, corpus.as_ref());
+
+        // ── Enforcement-catch ledger capture (terminal point 2: scan completion) ─────
+        // After a scan completes, write one floor/catch record for each ACTIVE floor
+        // finding to the enforcement ledger. Best-effort / fail-soft: runs in a
+        // background task so the response is never delayed by ledger writes. Errors
+        // inside are logged and swallowed.
+        {
+            let ledger = state.enforcement_ledger.clone();
+            let all_findings = report.findings.clone();
+            tokio::spawn(async move {
+                crate::enforcement_ledger::capture_scan_findings(&ledger, &all_findings).await;
+            });
+        }
+
+        // ── Write last_scan (synchronous path) ───────────────────────────────────────
+        // Store the completed report immediately so chat grounding can read it regardless
+        // of whether the UI has round-tripped the draft back yet (timing race fixed).
+        if let Some(id) = &project_id {
+            state.set_last_scan(id.clone(), report.clone());
+        }
+
+        report
+    })
+    .catch_unwind()
+    .await;
+
+    let report = match outcome {
+        Ok(report) => report,
+        Err(panic) => {
+            let msg = panic_message(&panic);
+            crate::onboard::ScanReport::crashed(
+                &repos,
+                format!(
+                    "The scan crashed unexpectedly: {msg}. Please retry; if it keeps \
+                     happening, this is a bug worth reporting."
+                ),
+            )
+        }
+    };
 
     Json(report)
 }
 
-/// Map a semgrep rule id to the FLOOR rule id whose security category it overlaps,
-/// or `None` when the semgrep rule has no floor twin (net-new coverage that must pass
-/// through untouched).
+/// Map an external-tool (semgrep) rule id to the CORPUS rule id it is evidence for, or
+/// `None` when the tool rule has no corpus-grounded twin (net-new coverage that must
+/// pass through untouched, or a rule we haven't grounded yet).
 ///
-/// The floor (`crate::onboard::AUDIT_RULES`) runs at the Layer-1 gate AND at scan
-/// preview. Semgrep runs at scan preview AND CI (Layer-2 / Layer-3). Semgrep rules
-/// that overlap the floor on the same (repo, path, line) axis:
+/// Originally scoped to just the FLOOR (`crate::onboard::AUDIT_RULES`) overlap case
+/// (hence the name): the floor runs at the Layer-1 gate AND at scan preview, semgrep
+/// runs at scan preview AND CI (Layer-2 / Layer-3), and several semgrep rules duplicate
+/// a floor rule on the same (repo, path, line) axis. W3 (the commodity-class taint
+/// layer) generalizes this table's ACTUAL use beyond that original scope: it is also
+/// the GROUNDING map `crate::report_export::corpus_rule_for` joins against so a preview
+/// finding's citation, severity calibration, authored remediation, and effort estimate
+/// come from OUR corpus rule rather than a generic "found by this tool" label — and it
+/// is the signal `mechanical_gate::semgrep_covered_rule_ids` uses to recognize a
+/// `mechanical` corpus rule as genuinely detector-backed (channel 3). Every mapped
+/// corpus rule id below therefore means "a semgrep rule answers for this corpus rule,"
+/// which is a superset of "...and ALSO has a floor twin" — the table comment marks
+/// which rows are floor overlaps (dedup-relevant) vs. grounding-only (no floor twin, no
+/// dedup collapse, just citation/remediation attachment).
 ///
-/// | Semgrep rule id                                  | Floor rule id                    |
-/// |--------------------------------------------------|----------------------------------|
-/// | `camerata.security.hardcoded-secret`             | `SEC-NO-HARDCODED-SECRETS-1`     |
-/// | `camerata.security.hardcoded-secret-dquote`      | `SEC-NO-HARDCODED-SECRETS-1`     |
-/// | `camerata.security.sql-string-concat-python`     | `SEC-NO-RAW-SQL-CONCAT-1`        |
-/// | `camerata.security.sql-string-concat-js`         | `SEC-NO-RAW-SQL-CONCAT-1`        |
-/// | `camerata.security.sql-string-concat-rust`       | `SEC-NO-RAW-SQL-CONCAT-1`        |
-/// | `camerata.security.sql-string-concat-csharp`     | `SEC-NO-RAW-SQL-CONCAT-1`        |
-/// | `camerata.security.disabled-tls-rust`            | `SEC-NO-DISABLED-TLS-1`          |
-/// | `camerata.security.disabled-tls-csharp`          | `SEC-NO-DISABLED-TLS-1`          |
-/// | `camerata.security.yaml-unsafe-load`             | `SEC-NO-UNSAFE-DESERIALIZATION-1` |
+/// | Semgrep rule id                                       | Corpus rule id                  | Floor twin? |
+/// |--------------------------------------------------------|----------------------------------|-------------|
+/// | `camerata.security.hardcoded-secret`                   | `SEC-NO-HARDCODED-SECRETS-1`     | yes |
+/// | `camerata.security.hardcoded-secret-dquote`            | `SEC-NO-HARDCODED-SECRETS-1`     | yes |
+/// | `camerata.security.sql-string-concat-python`           | `SEC-NO-RAW-SQL-CONCAT-1`        | yes |
+/// | `camerata.security.sql-string-concat-js`               | `SEC-NO-RAW-SQL-CONCAT-1`        | yes |
+/// | `camerata.security.sql-string-concat-rust`             | `SEC-NO-RAW-SQL-CONCAT-1`        | yes |
+/// | `camerata.security.sql-string-concat-csharp`           | `SEC-NO-RAW-SQL-CONCAT-1`        | yes |
+/// | `camerata.security.taint-sql-injection-{python,js,rust,csharp,go,ruby,java}` | `SEC-NO-RAW-SQL-CONCAT-1` | yes |
+/// | `camerata.security.disabled-tls-rust`                  | `SEC-NO-DISABLED-TLS-1`          | yes |
+/// | `camerata.security.disabled-tls-csharp`                | `SEC-NO-DISABLED-TLS-1`          | yes |
+/// | `camerata.security.yaml-unsafe-load`                   | `SEC-NO-UNSAFE-DESERIALIZATION-1`| yes |
+/// | `camerata.security.taint-xss-{python,js,csharp,go,ruby,java}` | `SEC-NO-UNSAFE-HTML-SINK-1` | no (grounding-only) |
+/// | `camerata.security.taint-open-redirect-{python,js,csharp,go,ruby,java}` | `SEC-NO-OPEN-REDIRECT-1` | no (grounding-only) |
+/// | `camerata.security.exec-injection` / `-js`             | `SEC-NO-COMMAND-INJECTION-1`     | no (grounding-only) |
+/// | `camerata.security.taint-command-injection-{python,js,rust,csharp,go,ruby,java}` | `SEC-NO-COMMAND-INJECTION-1` | no (grounding-only) |
+/// | `camerata.security.taint-ruby-eval-send`               | `RUBY-AVOID-EVAL-SEND-1`         | no (grounding-only; closes a pre-existing phantom detector) |
+/// | `camerata.security.taint-log-secret-{python,js,rust,csharp,go,ruby,java}` | `SEC-NO-SENSITIVE-DATA-IN-LOGS-1` | no (grounding-only; `severity: ERROR` -> "high") |
+/// | `camerata.security.taint-log-pii-{python,js,rust,csharp,go,ruby,java}` | `SEC-NO-SENSITIVE-DATA-IN-LOGS-1` | no (grounding-only; `severity: WARNING` -> "medium") |
 ///
-/// The remaining semgrep rules (`exec-injection`, `exec-injection-js`,
-/// `weak-hash-*`, `path-traversal-python`, `subprocess-shell-true`) have no
-/// floor twin and map to `None`.
+/// The remaining semgrep rules (`weak-hash-*`, `path-traversal-python`,
+/// `subprocess-shell-true`) have no corpus-grounded twin yet and map to `None`.
 ///
 /// NOTE: rule ids here must be the NORMALIZED (clean) form — `normalize_semgrep_rule_id`
 /// in `scan_tools` strips any absolute-path prefix before findings reach this function.
@@ -4810,20 +6135,208 @@ async fn onboard_audit(
 /// at Layer 1 (gate); semgrep enforces at Layers 2-3 (CI). Trimming semgrep would punch
 /// a hole in CI coverage. The fix is presentation-time dedup at scan preview only (see
 /// `dedup_scan_previews`). Decision: docs/decisions/2026-06-22_scan_floor_semgrep_dedup.md
-#[cfg_attr(not(test), allow(dead_code))]
-fn semgrep_floor_category(semgrep_rule_id: &str) -> Option<&'static str> {
+/// and docs/decisions/2026-10-06_w3_commodity_taint_layer.md
+pub(crate) fn semgrep_floor_category(semgrep_rule_id: &str) -> Option<&'static str> {
     match semgrep_rule_id {
-        "camerata.security.hardcoded-secret"
-        | "camerata.security.hardcoded-secret-dquote" => Some("SEC-NO-HARDCODED-SECRETS-1"),
+        "camerata.security.hardcoded-secret" | "camerata.security.hardcoded-secret-dquote" => {
+            Some("SEC-NO-HARDCODED-SECRETS-1")
+        }
         "camerata.security.sql-string-concat-python"
         | "camerata.security.sql-string-concat-js"
         | "camerata.security.sql-string-concat-rust"
-        | "camerata.security.sql-string-concat-csharp" => Some("SEC-NO-RAW-SQL-CONCAT-1"),
-        "camerata.security.disabled-tls-rust"
-        | "camerata.security.disabled-tls-csharp" => Some("SEC-NO-DISABLED-TLS-1"),
+        | "camerata.security.sql-string-concat-csharp"
+        | "camerata.security.taint-sql-injection-python"
+        | "camerata.security.taint-sql-injection-js"
+        | "camerata.security.taint-sql-injection-rust"
+        | "camerata.security.taint-sql-injection-csharp"
+        | "camerata.security.taint-sql-injection-go"
+        | "camerata.security.taint-sql-injection-ruby"
+        | "camerata.security.taint-sql-injection-java" => Some("SEC-NO-RAW-SQL-CONCAT-1"),
+        "camerata.security.disabled-tls-rust" | "camerata.security.disabled-tls-csharp" => {
+            Some("SEC-NO-DISABLED-TLS-1")
+        }
         "camerata.security.yaml-unsafe-load" => Some("SEC-NO-UNSAFE-DESERIALIZATION-1"),
+        "camerata.security.taint-xss-python"
+        | "camerata.security.taint-xss-js"
+        | "camerata.security.taint-xss-csharp"
+        | "camerata.security.taint-xss-go"
+        | "camerata.security.taint-xss-ruby"
+        | "camerata.security.taint-xss-java" => Some("SEC-NO-UNSAFE-HTML-SINK-1"),
+        "camerata.security.taint-open-redirect-python"
+        | "camerata.security.taint-open-redirect-js"
+        | "camerata.security.taint-open-redirect-csharp"
+        | "camerata.security.taint-open-redirect-go"
+        | "camerata.security.taint-open-redirect-ruby"
+        | "camerata.security.taint-open-redirect-java" => Some("SEC-NO-OPEN-REDIRECT-1"),
+        "camerata.security.exec-injection"
+        | "camerata.security.exec-injection-js"
+        | "camerata.security.taint-command-injection-python"
+        | "camerata.security.taint-command-injection-js"
+        | "camerata.security.taint-command-injection-rust"
+        | "camerata.security.taint-command-injection-csharp"
+        | "camerata.security.taint-command-injection-go"
+        | "camerata.security.taint-command-injection-ruby"
+        | "camerata.security.taint-command-injection-java" => Some("SEC-NO-COMMAND-INJECTION-1"),
+        // Grounded to the Ruby-specific corpus rule (not SEC-NO-COMMAND-INJECTION-1): this
+        // closes RUBY-AVOID-EVAL-SEND-1's pre-existing phantom-detector gap (it declared a
+        // Brakeman integration Camerata never ran) with a real taint-mode detector for the
+        // exact defect the corpus TOML already describes.
+        "camerata.security.taint-ruby-eval-send" => Some("RUBY-AVOID-EVAL-SEND-1"),
+        // Sensitive-data-in-logs taint class (new): both the secret/credential (ERROR ->
+        // "high") and PII (WARNING -> "medium") rule families ground to the SAME corpus rule
+        // — SEC-NO-SENSITIVE-DATA-IN-LOGS-1's own `[decision].why` is what documents the two
+        // severities, not two separate corpus rules. See
+        // `crates/server/assets/semgrep-rules/taint-security.yml`'s "Sensitive data reaching
+        // a log sink" section for the full rationale. CWE-532.
+        "camerata.security.taint-log-secret-python"
+        | "camerata.security.taint-log-secret-js"
+        | "camerata.security.taint-log-secret-rust"
+        | "camerata.security.taint-log-secret-csharp"
+        | "camerata.security.taint-log-secret-go"
+        | "camerata.security.taint-log-secret-ruby"
+        | "camerata.security.taint-log-secret-java"
+        | "camerata.security.taint-log-pii-python"
+        | "camerata.security.taint-log-pii-js"
+        | "camerata.security.taint-log-pii-rust"
+        | "camerata.security.taint-log-pii-csharp"
+        | "camerata.security.taint-log-pii-go"
+        | "camerata.security.taint-log-pii-ruby"
+        | "camerata.security.taint-log-pii-java" => Some("SEC-NO-SENSITIVE-DATA-IN-LOGS-1"),
         _ => None,
     }
+}
+
+/// Map an external-tool (ESLint) rule id to the CORPUS rule id it is evidence for —
+/// the ESLint-backed counterpart to [`semgrep_floor_category`] above, doing the SAME two
+/// jobs for the ESLint-routed subset of the corpus: (1) the grounding map
+/// `crate::report_export::corpus_rule_for` joins against so a preview finding's citation,
+/// severity calibration, authored remediation, and effort estimate come from OUR corpus
+/// rule rather than a generic "found by this tool" label, and (2) a signal
+/// [`finding_grounds_to`] uses to recognize that a raw ESLint SARIF `ruleId` (e.g.
+/// `react-hooks/exhaustive-deps`) is evidence a specific corpus rule actually fired —
+/// needed for [`reconcile_external_tool_ledger`]'s emitted-count correction, exactly as
+/// `semgrep_floor_category` is needed there for Semgrep.
+///
+/// Every id on the left is ALSO present in some corpus rule's own
+/// `[[sources]].linter` annotation (`crates/rules/principles/javascript/**`) — this
+/// table exists only to join a raw tool-native rule id back to the corpus id that
+/// authored it, mirroring `semgrep_floor_category`'s hand-maintained style rather than
+/// deriving it from a scan (ESLint rule ids, unlike Semgrep's, are stable well-known
+/// plugin-namespaced strings; there is no bundled ruleset to derive the reverse map
+/// from the way `mechanical_gate::semgrep_covered_rule_ids` does).
+///
+/// `JAVASCRIPT-REACT-EXHAUSTIVE-DEPS-1` and `JAVASCRIPT-REACT-RULES-OF-HOOKS-1` are the
+/// motivating fix: both declare `enforcement = "mechanical"` with a `react-hooks:`
+/// linter source, but before `scan_tools::tool_for_linter` recognized that token at all,
+/// neither corpus id resolved to ANY detector channel (see `mechanical_gate::
+/// detector_channel`) — they relied entirely on the semantic/AI pass, which is exactly
+/// the class of gap a benchmark scoring near-zero on planted mechanical defects exposed.
+///
+/// One ambiguity: `jest/no-conditional-expect` is cited by TWO corpus rules
+/// (`JAVASCRIPT-TESTING-AAA-STRUCTURE-1` and `JAVASCRIPT-TESTING-DETERMINISTIC-1`). This
+/// table grounds that one raw id to `JAVASCRIPT-TESTING-DETERMINISTIC-1` only — its
+/// authored rationale is specifically about a conditional assert undermining a test's
+/// deterministic pass/fail behavior, the tighter semantic fit — rather than crediting
+/// both (which would double-count a single tool finding across two ledger rows).
+/// `JAVASCRIPT-TESTING-AAA-STRUCTURE-1` is NOT "no detector" as a result: `tool_for_linter`
+/// still recognizes its `jest: no-conditional-expect` source and routes it to Eslint for
+/// the scan-preview pass and the `detector_channel`/ledger "has a detector" check; this
+/// table just isn't the one that credits ITS corpus id when the raw finding arrives.
+pub(crate) fn eslint_floor_category(eslint_rule_id: &str) -> Option<&'static str> {
+    match eslint_rule_id {
+        "react-hooks/exhaustive-deps" => Some("JAVASCRIPT-REACT-EXHAUSTIVE-DEPS-1"),
+        "react-hooks/rules-of-hooks" => Some("JAVASCRIPT-REACT-RULES-OF-HOOKS-1"),
+        "eqeqeq" => Some("JAVASCRIPT-STRICT-EQUALITY-1"),
+        "no-var" => Some("JAVASCRIPT-NO-VAR-1"),
+        "prefer-const" => Some("JAVASCRIPT-CONST-DEFAULT-1"),
+        "no-restricted-imports" => Some("JAVASCRIPT-NEXT-DUAL-API-1"),
+        "@typescript-eslint/no-explicit-any" => Some("JAVASCRIPT-TYPESCRIPT-NO-EXPLICIT-ANY-1"),
+        "@typescript-eslint/no-floating-promises" => {
+            Some("JAVASCRIPT-TYPESCRIPT-NO-FLOATING-PROMISES-1")
+        }
+        "@typescript-eslint/no-non-null-assertion" => {
+            Some("JAVASCRIPT-TYPESCRIPT-NO-NON-NULL-ASSERTION-1")
+        }
+        "jest/no-conditional-expect" | "jest/expect-expect" | "jest/no-done-callback" => {
+            Some("JAVASCRIPT-TESTING-DETERMINISTIC-1")
+        }
+        "jest/prefer-spy-on" => Some("JAVASCRIPT-TESTING-MOCK-AT-BOUNDARIES-1"),
+        "jest/no-identical-title" | "jest/valid-title" => Some("JAVASCRIPT-TESTING-NAMING-1"),
+        "jest/no-disabled-tests" | "jest/no-focused-tests" => {
+            Some("JAVASCRIPT-TESTING-NO-DISABLED-TESTS-1")
+        }
+        _ => None,
+    }
+}
+
+/// Dispatch a tool-native rule id to WHICHEVER external-tool grounding table (Semgrep's
+/// or ESLint's) claims it, or `None` when neither does. The single place every grounding
+/// consumer ([`finding_grounds_to`], `report_export::corpus_rule_for`, and the
+/// newly-discovered-row pass in [`reconcile_external_tool_ledger`]) should call instead
+/// of hand-chaining `semgrep_floor_category`/`eslint_floor_category` themselves, so a
+/// THIRD external tool's grounding table (were one added later) only needs wiring here
+/// once rather than at every call site.
+pub(crate) fn external_tool_floor_category(tool_rule_id: &str) -> Option<&'static str> {
+    semgrep_floor_category(tool_rule_id).or_else(|| eslint_floor_category(tool_rule_id))
+}
+
+/// Rule-id prefix for the OBSERVABILITY/under-logging convention class (a swallowed error
+/// logged nowhere, inconsistent unstructured logging alongside an adopted structured
+/// logger, missing correlation/request id propagation — the three corpus rules under
+/// `crates/rules/principles/universal/arch-observability-*.toml`). Every rule in this
+/// class shares this prefix BY CONVENTION — deliberately a prefix check rather than a
+/// hand-maintained id list (the shape `semgrep_floor_category`/`eslint_floor_category`
+/// use for EXTERNAL tool ids, which we do not control and so must enumerate): these are
+/// OUR OWN authored corpus ids, so a shared naming convention we commit to at authoring
+/// time is sufficient, scales to a future fourth rule in the same class with zero code
+/// changes here, and is exercised directly by `observability_convention_class_matches_
+/// only_its_own_prefix` in this module's test suite below.
+pub(crate) const OBSERVABILITY_CONVENTION_RULE_PREFIX: &str = "ARCH-OBSERVABILITY-";
+
+/// Whether `rule_id` belongs to the owner-mandated, SEVERITY-CAPPED-AT-LOW observability
+/// convention class — the single source of truth both halves of that structural cap read
+/// from:
+///   - `ai_audit`'s D8 severity-ceiling pass forces the EXPORTED SEVERITY STRING to exactly
+///     `"low"` for a matching finding, regardless of what any other calibration pass
+///     proposed.
+///   - `report_export::is_informational` checks this FIRST (ahead of its own hard
+///     "critical/high is never informational" invariant) so a matching finding routes to
+///     the `informational` appendix — never an action bucket (do_now/do_next/plan) —
+///     EVEN IF some caller fed a raw high/critical severity straight in without the D8
+///     ceiling pass having run first. Both halves exist because capping the severity STRING
+///     alone is not sufficient: `report_export::matrix_bucket` routes a bare "low" severity
+///     to `"plan"` (an action bucket) by default, same as "medium" — only an explicit
+///     bucket-routing override (the `is_informational` check) actually keeps this class out
+///     of every action tier.
+///
+/// See `docs/RULE_AUTHORING.md`'s channel guidance: this is NOT a mechanical gate/check
+/// (channel B) — there is no detector that blocks a write. It is a calibration-pipeline
+/// classification that decides how a SEMANTIC finding's severity and bucket get rendered
+/// once the model (or the deterministic floor, in principle) has already produced one.
+pub(crate) fn is_observability_convention_class(rule_id: &str) -> bool {
+    rule_id.starts_with(OBSERVABILITY_CONVENTION_RULE_PREFIX)
+}
+
+/// W24 — rules about TEST COVERAGE, identified by rule id rather than by prose.
+///
+/// A missing or weak test is real work and belongs in the report. It is not a CRITICAL,
+/// which in this report means an unauthenticated exposure or a full compromise: no test was
+/// ever the thing an attacker exploited. Shipping one at Critical alongside "anyone can read
+/// every row" spends the client's alarm on the wrong row and devalues the findings next to
+/// it, which is the whole reason severity anchors exist.
+///
+/// Matched on the rule ID, not on the finding's text. The corpus has 56 rules with `TESTING`
+/// in the id across every language pack, and the id is authored while the text is generated
+/// — so this cannot drift with a reworded detail, and it cannot misfire on a security finding
+/// that merely MENTIONS tests. That distinction is not theoretical here: the D5 severity
+/// floor matched substrings and raised anything containing "urls" because it also contains
+/// "rls".
+pub(crate) fn is_test_coverage_class(rule_id: &str) -> bool {
+    // Segment-anchored, so `TESTING-` matches as a word and a hypothetical
+    // `SEC-NO-ATTESTING-TOKEN-1` does not.
+    rule_id
+        .split('-')
+        .any(|seg| seg.eq_ignore_ascii_case("TESTING"))
 }
 
 /// Map ANY finding's rule id (floor OR any preview tool) to a normalized security
@@ -4840,17 +6353,23 @@ fn semgrep_floor_category(semgrep_rule_id: &str) -> Option<&'static str> {
 /// - `"path"`   — path traversal
 /// - `"shell"`  — subprocess with shell=True
 /// - `"deser"`  — unsafe deserialization (yaml.load w/o SafeLoader, pickle, unserialize,
-///                Marshal.load, BinaryFormatter, …). Replaces the old `"yaml"` category so
-///                the floor rule SEC-NO-UNSAFE-DESERIALIZATION-1 and the semgrep rule
-///                camerata.security.yaml-unsafe-load share one category and collapse
-///                correctly when they fire on the same (repo, path, line).
+///   Marshal.load, BinaryFormatter, …). Replaces the old `"yaml"` category so
+///   the floor rule SEC-NO-UNSAFE-DESERIALIZATION-1 and the semgrep rule
+///   camerata.security.yaml-unsafe-load share one category and collapse
+///   correctly when they fire on the same (repo, path, line).
 /// - `"tls"`    — disabled TLS / cert verification
+/// - `"xss"`    — cross-site scripting via a raw-HTML sink (W3)
+/// - `"redirect"` — open redirect via an unvalidated redirect target (W3)
+/// - `"log-sensitive"` — a secret/credential or regulated-PII value reaching a logging sink
 ///
-/// Decision: docs/decisions/2026-06-23_stack_gating_and_crosstool_dedup.md
+/// Decision: docs/decisions/2026-06-23_stack_gating_and_crosstool_dedup.md and
+/// docs/decisions/2026-10-06_w3_commodity_taint_layer.md
 pub(crate) fn finding_security_category(rule_id: &str) -> Option<&'static str> {
     match rule_id {
         // Floor rules (SEC-* ids from AUDIT_RULES)
-        "SEC-NO-HARDCODED-SECRETS-1" | "SEC-NO-PRIVATE-KEY-1" | "SEC-NO-VENDOR-TOKEN-1" => Some("secret"),
+        "SEC-NO-HARDCODED-SECRETS-1" | "SEC-NO-PRIVATE-KEY-1" | "SEC-NO-VENDOR-TOKEN-1" => {
+            Some("secret")
+        }
         "SEC-NO-RAW-SQL-CONCAT-1" => Some("sql"),
         "SEC-NO-DISABLED-TLS-1" => Some("tls"),
         // SEC-NO-UNSAFE-DESERIALIZATION-1: the floor rule for the deser category.
@@ -4859,31 +6378,85 @@ pub(crate) fn finding_security_category(rule_id: &str) -> Option<&'static str> {
         // one row, floor canonical. The old "yaml" category string is retired; both sides
         // now use "deser" (broader: covers pickle, unserialize, Marshal.load, BinaryFormatter).
         "SEC-NO-UNSAFE-DESERIALIZATION-1" => Some("deser"),
+        // W3: corpus rules with no floor twin — categorized so two EXTERNAL-TOOL findings
+        // (e.g. a taint rule and a future second tool) can still collapse on the same line;
+        // never collapses against a floor row since no floor row carries these ids.
+        "SEC-NO-UNSAFE-HTML-SINK-1" => Some("xss"),
+        "SEC-NO-OPEN-REDIRECT-1" => Some("redirect"),
+        "SEC-NO-COMMAND-INJECTION-1" => Some("exec"),
+        "RUBY-AVOID-EVAL-SEND-1" => Some("exec"),
         // Semgrep rules (camerata.security.*)
         // NOTE: keep these in sync with the rule ids in
-        // crates/server/assets/semgrep-rules/security.yml. A semgrep rule whose id is
-        // missing here returns None, so the deduper cannot categorize it and it will
-        // NEVER collapse against an overlapping floor finding (the 2026-06-23 dedup gap:
-        // the -rust/-csharp/-dquote ids were added to the corpus but not registered here).
-        "camerata.security.hardcoded-secret"
-        | "camerata.security.hardcoded-secret-dquote" => Some("secret"),
+        // crates/server/assets/semgrep-rules/security.yml and taint-security.yml. A semgrep
+        // rule whose id is missing here returns None, so the deduper cannot categorize it and
+        // it will NEVER collapse against an overlapping floor finding (the 2026-06-23 dedup
+        // gap: the -rust/-csharp/-dquote ids were added to the corpus but not registered here).
+        "camerata.security.hardcoded-secret" | "camerata.security.hardcoded-secret-dquote" => {
+            Some("secret")
+        }
         "camerata.security.sql-string-concat-python"
         | "camerata.security.sql-string-concat-js"
         | "camerata.security.sql-string-concat-rust"
-        | "camerata.security.sql-string-concat-csharp" => Some("sql"),
+        | "camerata.security.sql-string-concat-csharp"
+        | "camerata.security.taint-sql-injection-python"
+        | "camerata.security.taint-sql-injection-js"
+        | "camerata.security.taint-sql-injection-rust"
+        | "camerata.security.taint-sql-injection-csharp"
+        | "camerata.security.taint-sql-injection-go"
+        | "camerata.security.taint-sql-injection-ruby"
+        | "camerata.security.taint-sql-injection-java" => Some("sql"),
         "camerata.security.exec-injection"
-        | "camerata.security.exec-injection-js" => Some("exec"),
+        | "camerata.security.exec-injection-js"
+        | "camerata.security.taint-command-injection-python"
+        | "camerata.security.taint-command-injection-js"
+        | "camerata.security.taint-command-injection-rust"
+        | "camerata.security.taint-command-injection-csharp"
+        | "camerata.security.taint-command-injection-go"
+        | "camerata.security.taint-command-injection-ruby"
+        | "camerata.security.taint-command-injection-java"
+        | "camerata.security.taint-ruby-eval-send" => Some("exec"),
         "camerata.security.weak-hash-python"
         | "camerata.security.weak-hash-js"
         | "camerata.security.weak-hash-rust"
         | "camerata.security.weak-hash-csharp" => Some("hash"),
-        "camerata.security.disabled-tls-rust"
-        | "camerata.security.disabled-tls-csharp" => Some("tls"),
+        "camerata.security.disabled-tls-rust" | "camerata.security.disabled-tls-csharp" => {
+            Some("tls")
+        }
         "camerata.security.path-traversal-python" => Some("path"),
         "camerata.security.subprocess-shell-true" => Some("shell"),
         // yaml-unsafe-load maps to "deser" (not "yaml") so it collapses with the
         // floor rule SEC-NO-UNSAFE-DESERIALIZATION-1 when both fire on the same line.
         "camerata.security.yaml-unsafe-load" => Some("deser"),
+        "camerata.security.taint-xss-python"
+        | "camerata.security.taint-xss-js"
+        | "camerata.security.taint-xss-csharp"
+        | "camerata.security.taint-xss-go"
+        | "camerata.security.taint-xss-ruby"
+        | "camerata.security.taint-xss-java" => Some("xss"),
+        "camerata.security.taint-open-redirect-python"
+        | "camerata.security.taint-open-redirect-js"
+        | "camerata.security.taint-open-redirect-csharp"
+        | "camerata.security.taint-open-redirect-go"
+        | "camerata.security.taint-open-redirect-ruby"
+        | "camerata.security.taint-open-redirect-java" => Some("redirect"),
+        // Sensitive-data-in-logs taint class: secret and PII sources share one category —
+        // no floor twin either way, so this only matters for collapsing the two SEVERITY
+        // tiers against each other if both ever fired on the identical (repo, path, line),
+        // which keeps the stronger (secret/"high") row canonical per `finding_dedup_rank`.
+        "camerata.security.taint-log-secret-python"
+        | "camerata.security.taint-log-secret-js"
+        | "camerata.security.taint-log-secret-rust"
+        | "camerata.security.taint-log-secret-csharp"
+        | "camerata.security.taint-log-secret-go"
+        | "camerata.security.taint-log-secret-ruby"
+        | "camerata.security.taint-log-secret-java"
+        | "camerata.security.taint-log-pii-python"
+        | "camerata.security.taint-log-pii-js"
+        | "camerata.security.taint-log-pii-rust"
+        | "camerata.security.taint-log-pii-csharp"
+        | "camerata.security.taint-log-pii-go"
+        | "camerata.security.taint-log-pii-ruby"
+        | "camerata.security.taint-log-pii-java" => Some("log-sensitive"),
         // Ruff / ESLint lints that overlap with floor or semgrep in the same category.
         // S608 = possible SQL injection (Ruff/flake8-bandit) — same category as the floor SQL rule.
         "S608" => Some("sql"),
@@ -4934,7 +6507,7 @@ fn finding_dedup_rank(f: &crate::onboard::Finding) -> u8 {
 ///
 /// Decision: docs/decisions/2026-06-23_stack_gating_and_crosstool_dedup.md
 pub(crate) fn dedup_scan_previews(
-    existing: &mut Vec<crate::onboard::Finding>,
+    existing: &mut [crate::onboard::Finding],
     previews: Vec<crate::onboard::Finding>,
 ) -> Vec<crate::onboard::Finding> {
     let mut out: Vec<crate::onboard::Finding> = Vec::with_capacity(previews.len());
@@ -4967,7 +6540,9 @@ pub(crate) fn dedup_scan_previews(
                 // Preview has higher precedence: promote it to canonical, demote existing.
                 let old_rule_id = existing[idx].rule_id.clone();
                 let mut new_canonical = preview;
-                new_canonical.also_matches.extend(existing[idx].also_matches.drain(..));
+                new_canonical
+                    .also_matches
+                    .append(&mut existing[idx].also_matches);
                 new_canonical.also_matches.push(old_rule_id);
                 existing[idx] = new_canonical;
                 // promoted to existing; don't push to out
@@ -4986,7 +6561,7 @@ pub(crate) fn dedup_scan_previews(
 /// continues to pass without modification. Delegates directly to `dedup_scan_previews`.
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn dedup_preview_against_floor(
-    existing: &mut Vec<crate::onboard::Finding>,
+    existing: &mut [crate::onboard::Finding],
     previews: Vec<crate::onboard::Finding>,
 ) -> Vec<crate::onboard::Finding> {
     dedup_scan_previews(existing, previews)
@@ -5001,7 +6576,16 @@ pub(crate) fn dedup_preview_against_floor(
 /// Stack-gating: for each repo the set of languages present (from its file extensions)
 /// is derived and passed to `run_scan_tools` so tools whose required language is absent
 /// are omitted entirely — they never appear as a passing "✓ 0".
-async fn merge_scan_preview(
+/// Scan-time deterministic PREVIEW pass: run every CI-tier mechanical rule's own tool
+/// (`crate::scan_tools::run_scan_tools`) that is locally previewable ([`split_scannable_rules`]'s
+/// `preview_rules`) and fold its (deduped) findings into `report` as advisory preview
+/// findings — never enforced, just surfaced early. A no-op when `preview_rules` is empty or
+/// no corpus loaded.
+///
+/// `pub`: also called directly by `camerata inspect` (the headless CLI), so the SAME
+/// preview-linter pass the interactive `onboard_audit` handler runs also runs headlessly —
+/// see `crates/cli/src/inspect_cmd.rs`.
+pub async fn merge_scan_preview(
     report: &mut crate::onboard::ScanReport,
     sources: &[(String, std::path::PathBuf)],
     preview_rules: &[crate::onboard::SelectedRule],
@@ -5011,42 +6595,322 @@ async fn merge_scan_preview(
     // with its findings count, mirroring the floor's progress.
     job: Option<(&crate::jobs::JobStore, &str)>,
 ) {
-    if preview_rules.is_empty() {
-        return;
+    // Every tool NAME this call actually attempted to invoke, across every repo in `sources`
+    // (regardless of whether each attempt then succeeded or failed) — fed to
+    // `reconcile_external_tool_ledger` so it can tell "the tool ran and found nothing" apart
+    // from "the tool was never invoked this scan at all" (empty `preview_rules`/no corpus, or
+    // no selected rule this scan routed to it). See `scan_tools::run_scan_tools`'s doc comment.
+    let mut tools_attempted: std::collections::HashSet<&'static str> =
+        std::collections::HashSet::new();
+    // Pass-1 W1 seal fix: this pass runs AFTER `onboard::audit_repos`'s own merge stages and
+    // strictly APPENDS findings — the exact "row-adding pass that ran outside the ledger's
+    // view" shape this fixes (see `crate::scan_ledger::StageAccounting::added`'s doc comment).
+    // `rows_in` is snapshotted now, before the per-repo loop below mutates `report.findings`;
+    // `rows_out`/the ledger stage are recorded at the very end of this function, alongside
+    // `reconcile_external_tool_ledger` (the other end-of-pass reconciliation this function
+    // already does).
+    let rows_in = report.findings.len();
+    if !preview_rules.is_empty() {
+        if let Some(set) = corpus {
+            let lookup = |id: &str| set.get_by_id(id);
+            for (spec, dir) in sources {
+                // Only the rules bound to this repo (or project-level) preview against it.
+                let for_repo: Vec<crate::onboard::SelectedRule> = preview_rules
+                    .iter()
+                    .filter(|r| r.applies_to(spec))
+                    .cloned()
+                    .collect();
+                if for_repo.is_empty() {
+                    continue;
+                }
+                // Derive the language set present in this repo so stack-gating can omit
+                // tools whose language is absent (e.g. no eslint on a Rust-only repo).
+                let dir_clone = dir.clone();
+                let present_languages = tokio::task::spawn_blocking(move || {
+                    crate::onboard::files::read_local_repo_files(&dir_clone)
+                        .map(|ex| crate::scan_tools::languages_from_files(&ex.files))
+                        .unwrap_or_default()
+                })
+                .await
+                .unwrap_or_default();
+                let (previews, mut notes, attempted) = crate::scan_tools::run_scan_tools(
+                    spec,
+                    dir,
+                    &for_repo,
+                    &lookup,
+                    Some(&present_languages),
+                    job,
+                )
+                .await;
+                tools_attempted.extend(attempted);
+                // Dedup preview findings that overlap the deterministic floor or other preview
+                // tools BEFORE appending. When two tools flag the same (repo, path, line) for a
+                // compatible security category, the higher-precedence finding is kept canonical
+                // and the other tool's id is folded into `also_matches`. See `dedup_scan_previews`.
+                let deduped = dedup_scan_previews(&mut report.findings, previews);
+                report.findings.extend(deduped);
+                report.coverage_notes.append(&mut notes);
+            }
+        }
     }
-    let Some(set) = corpus else { return };
-    let lookup = |id: &str| set.get_by_id(id);
-    for (spec, dir) in sources {
-        // Only the rules bound to this repo (or project-level) preview against it.
-        let for_repo: Vec<crate::onboard::SelectedRule> = preview_rules
+    // Pass-1 W1 seal fix: one ledger stage entry for every row this pass ADDED (net of its own
+    // internal `dedup_scan_previews` collapsing), a no-op when nothing was added this run. See
+    // the `rows_in` snapshot at the top of this function and
+    // `crate::scan_ledger::record_addition_stage`'s doc comment.
+    let rows_out = report.findings.len();
+    crate::scan_ledger::record_addition_stage(
+        &mut report.ledger,
+        "external-tool-preview-merge",
+        rows_in,
+        rows_out,
+        "external_tool_preview_findings",
+    );
+    // W3: reconcile the ledger's ExternalTool-tier entries against what ACTUALLY happened in
+    // the pass above — unconditionally, even when the pass above never ran at all (empty
+    // `preview_rules` / no corpus), because `onboard::audit_repos`'s CI-tier rule loop may have
+    // already speculatively recorded such an entry as `ran = true, findings_emitted = 0` purely
+    // on the strength of "a semgrep rule maps to this corpus rule" — BEFORE this pass (the one
+    // that actually runs the tool) executed at all. See `reconcile_external_tool_ledger`'s doc
+    // comment for why this correction can't happen earlier.
+    reconcile_external_tool_ledger(report, &tools_attempted, corpus);
+}
+
+/// Corrects the ledger's `RuleTier::ExternalTool` entries to reflect what the scan-time
+/// external-tool pass (the loop in [`merge_scan_preview`] above) ACTUALLY produced, instead of
+/// the speculative `ran = true, findings_emitted = 0` placeholder `onboard::audit_repos`'s
+/// CI-tier rule loop records before this pass runs (that loop only knows "a semgrep rule maps
+/// to this corpus rule id" — it cannot know whether semgrep is installed, provisions
+/// successfully, or actually executes for THIS scan, because the two loops run in different,
+/// decoupled pipeline stages).
+///
+/// Three outcomes, decided per rule id:
+///
+/// 1. **The tool ran (or wasn't needed) for every repo this scan touched** — no hard-failure
+///    `CoverageNote` names it. The entry is corrected to `ran = true` with the REAL emitted
+///    count (from `report.findings`, post-dedup, via [`finding_grounds_to`]) — never the
+///    hardcoded `0` the pre-pass loop guessed. A genuinely clean pass (tool ran, zero findings)
+///    is still honestly `verified_clean()` here.
+/// 2. **The tool is absent or failed for every repo this scan touched** (a `CoverageNote` whose
+///    `tool` matches names a hard failure, not merely "unrouted"). The entry is corrected to
+///    `ran = false` with a disclosed reason ("commodity taint pass did not run: <reason>"), and
+///    a matching [`crate::ai_audit::FailedPass`] is pushed onto `report.failed_passes` — the
+///    SAME disclosure mechanism every other degraded pass in this codebase uses. Never a
+///    silent "verified clean", never a refused export (`report.findings`/`report.ledger`'s
+///    OTHER entries are completely untouched).
+/// 3. **The tool was never even INVOKED this scan at all** — `tools_attempted` (from
+///    [`merge_scan_preview`], ultimately [`crate::scan_tools::run_scan_tools`]'s own
+///    `attempted` return value) doesn't contain `"semgrep"`. This happens when the whole
+///    preview loop never ran (`preview_rules` empty or no corpus), or every repo's selected
+///    rules happened to route away from Semgrep, or the language gate omitted it everywhere —
+///    none of which produce a `CoverageNote` (a tool nothing ever tried to invoke fails
+///    silently, by construction). Without this check, such a scan would fall through to
+///    outcome 1 purely because `emitted == 0 && failed_tools` is empty — exactly the silent
+///    "verified clean, except nothing ever ran" class this whole ledger exists to prevent. The
+///    entry is corrected to `ran = false` with a disclosed reason and a `FailedPass`, the same
+///    as outcome 2 — the pass-level outcome is what's authoritative here, not the absence of a
+///    per-finding failure note.
+///
+/// A tool that failed for SOME repos but produced real findings for others is treated as
+/// outcome 1 (a nonzero `emitted` count wins) — the honest statement in that case is "ran, N
+/// findings", not "did not run", and the per-repo failure is still visible in
+/// `report.coverage_notes` either way (this function never removes a `CoverageNote`).
+/// Which external tool backs `rule_id`'s detector, for [`reconcile_external_tool_ledger`]'s
+/// per-rule disclosure text. Reuses `scan_tools::tool_for_rule` verbatim (the SAME function
+/// `group_by_tool`/`run_scan_tools` use to decide which tool actually drives a rule at scan
+/// time) against `corpus`, so this can never answer a different question than what really
+/// ran. Falls back to `"semgrep"` when `corpus` is absent or the rule id has no corpus
+/// record — this is the ONLY tool `reconcile_external_tool_ledger` ever had to reason about
+/// before ESLint-backed corpus rules existed, so every pre-existing caller that doesn't pass
+/// a corpus (every test written before this function learned about ESLint) keeps its exact
+/// original "semgrep" behavior.
+fn external_tool_name_for_ledger_rule(
+    rule_id: &str,
+    corpus: Option<&camerata_rules::RuleSet>,
+) -> &'static str {
+    corpus
+        .and_then(|c| c.get_by_id(rule_id))
+        .and_then(crate::scan_tools::tool_for_rule)
+        .map(|t| t.name())
+        .unwrap_or("semgrep")
+}
+
+/// Human-readable pass label for a tool name, used in disclosure text
+/// (`report.failed_passes` / the ledger's `skip_reason`). Semgrep keeps its original,
+/// already-tested "commodity taint pass" label verbatim; every other tool gets an honest
+/// "the `<tool>` preview pass" label naming itself.
+fn pass_label_for_tool(tool_name: &str) -> String {
+    if tool_name == "semgrep" {
+        "commodity taint pass".to_string()
+    } else {
+        format!("the {tool_name} preview pass")
+    }
+}
+
+pub(crate) fn reconcile_external_tool_ledger(
+    report: &mut crate::onboard::ScanReport,
+    tools_attempted: &std::collections::HashSet<&str>,
+    corpus: Option<&camerata_rules::RuleSet>,
+) {
+    // "unrouted" is a ROUTING gap (a selected rule with no tool to drive it at all), not a
+    // tool-execution failure — never treated as evidence the tool itself didn't run.
+    let failed_tools: std::collections::HashSet<&str> = report
+        .coverage_notes
+        .iter()
+        .filter(|n| n.tool != "unrouted")
+        .map(|n| n.tool.as_str())
+        .collect();
+
+    let external_tool_rule_ids: Vec<String> = report
+        .ledger
+        .rules()
+        .filter(|r| r.tier == crate::scan_ledger::RuleTier::ExternalTool)
+        .map(|r| r.rule_id.clone())
+        .collect();
+
+    for rule_id in external_tool_rule_ids {
+        let emitted = report
+            .findings
             .iter()
-            .filter(|r| r.applies_to(spec))
-            .cloned()
-            .collect();
-        if for_repo.is_empty() {
+            .filter(|f| finding_grounds_to(f, &rule_id))
+            .count();
+
+        if emitted > 0 {
+            report
+                .ledger
+                .correct_rule_after_external_pass(rule_id, true, None, emitted);
             continue;
         }
-        // Derive the language set present in this repo so stack-gating can omit
-        // tools whose language is absent (e.g. no eslint on a Rust-only repo).
-        let dir_clone = dir.clone();
-        let present_languages =
-            tokio::task::spawn_blocking(move || {
-                crate::onboard::files::read_local_repo_files(&dir_clone)
-                    .map(|ex| crate::scan_tools::languages_from_files(&ex.files))
-                    .unwrap_or_default()
-            })
-            .await
-            .unwrap_or_default();
-        let (previews, mut notes) =
-            crate::scan_tools::run_scan_tools(spec, dir, &for_repo, &lookup, Some(&present_languages), job).await;
-        // Dedup preview findings that overlap the deterministic floor or other preview
-        // tools BEFORE appending. When two tools flag the same (repo, path, line) for a
-        // compatible security category, the higher-precedence finding is kept canonical and
-        // the other tool's id is folded into `also_matches`. See `dedup_scan_previews`.
-        let deduped = dedup_scan_previews(&mut report.findings, previews);
-        report.findings.extend(deduped);
-        report.coverage_notes.append(&mut notes);
+
+        // Which tool backs THIS rule id — "semgrep" unless the corpus says otherwise (see
+        // `external_tool_name_for_ledger_rule`'s doc comment for why that default is safe).
+        let tool_name = external_tool_name_for_ledger_rule(&rule_id, corpus);
+        let pass_label = pass_label_for_tool(tool_name);
+
+        if failed_tools.contains(tool_name) {
+            let reason = report
+                .coverage_notes
+                .iter()
+                .find(|n| n.tool == tool_name)
+                .map(|n| n.message.clone())
+                .unwrap_or_else(|| format!("{tool_name} did not run this scan"));
+            report.ledger.correct_rule_after_external_pass(
+                rule_id.clone(),
+                false,
+                Some(format!("{pass_label} did not run: {reason}")),
+                0,
+            );
+            report.failed_passes.push(crate::ai_audit::FailedPass {
+                repo: report.repos.join(", "),
+                pass: pass_label.clone(),
+                reason: format!("{rule_id}: {pass_label} did not run: {reason}"),
+            });
+            continue;
+        }
+
+        if !tools_attempted.contains(tool_name) {
+            // Outcome 3: a pass-level skip with no per-finding failure note to key off of.
+            let reason = format!(
+                "{tool_name} was never invoked for any scanned repo this scan (no selected \
+                 rule routed to it, no supported language was present, or the preview pass \
+                 did not run at all)"
+            );
+            report.ledger.correct_rule_after_external_pass(
+                rule_id.clone(),
+                false,
+                Some(format!("{pass_label} did not run: {reason}")),
+                0,
+            );
+            report.failed_passes.push(crate::ai_audit::FailedPass {
+                repo: report.repos.join(", "),
+                pass: pass_label.clone(),
+                reason: format!("{rule_id}: {pass_label} did not run: {reason}"),
+            });
+            continue;
+        }
+
+        // Attempted, no hard failure, genuinely zero findings — a real clean result.
+        report
+            .ledger
+            .correct_rule_after_external_pass(rule_id, true, None, 0);
     }
+
+    // Grading-cycle fix (2026-10-07): the loop above only CORRECTS rule ids `onboard::
+    // audit_repos`'s speculative pre-pass already registered — which only ever covers
+    // corpus rules the user actually SELECTED this run. But once Semgrep runs at all, it
+    // runs its WHOLE bundled commodity-taint ruleset (`taint-security.yml`/`security.yml`
+    // — see `scan_tools`'s module doc comment), which can produce real, exported findings
+    // for a grounded corpus rule id (e.g. `SEC-NO-COMMAND-INJECTION-1`) the user never
+    // selected at all, and so was NEVER pre-registered as `RuleTier::ExternalTool` in the
+    // first place. Before this fix, such a finding shipped in the export while contributing
+    // ZERO to every ledger total (`render_ledger_summary`'s per-family `findings_emitted`
+    // sum only ever iterates `ledger.rules()`, which never contained that id) — the exact
+    // "family reports findings=0 while preview rows ARE present in the export" defect.
+    // This second pass discovers any such row and records it fresh, so the ledger's
+    // per-family counts always equal the rows actually exported, never a strict subset of
+    // them keyed off selection alone.
+    // Discovery is deliberately scoped to the GROUNDING MAPS only (`external_tool_floor_category`
+    // — Semgrep's `semgrep_floor_category` plus ESLint's `eslint_floor_category`, each a
+    // closed, well-known set) rather than trusting an untracked `f.rule_id`/`also_matches`
+    // member verbatim as if it were itself a corpus id — a tool-native id with no grounding
+    // mapping has no corpus rule to credit, and inventing a ledger row keyed on a raw
+    // `camerata.security.*`/eslint-plugin string would just add noise with no real rule
+    // behind it. ESLint's bundled base config (`assets/eslint/camerata.config.mjs`) runs a
+    // handful of core rules at "warn" UNCONDITIONALLY (not gated on selection) — `eqeqeq`,
+    // `no-var`, `prefer-const` among them — so exactly the same "the tool ran its whole
+    // baseline, not just the selected subset" shape Semgrep's whole-ruleset behavior already
+    // required this discovery pass for applies to ESLint too.
+    let already_tracked: std::collections::HashSet<String> =
+        report.ledger.rules().map(|r| r.rule_id.clone()).collect();
+    let mut newly_discovered: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    for f in &report.findings {
+        if !f.preview {
+            continue;
+        }
+        // The primary's own id, plus every absorbed sibling (`also_matches` — a merge can
+        // fold in MORE THAN ONE distinct tool rule id onto one primary row), each grounded
+        // independently; `also_matches` already-tracked members are the correction loop
+        // above's job, not this discovery pass's.
+        let candidates =
+            std::iter::once(f.rule_id.as_str()).chain(f.also_matches.iter().map(String::as_str));
+        for candidate in candidates {
+            if let Some(grounded) = external_tool_floor_category(candidate) {
+                if !already_tracked.contains(grounded) {
+                    *newly_discovered.entry(grounded.to_string()).or_insert(0) += 1;
+                }
+            }
+        }
+    }
+    for (rule_id, emitted) in newly_discovered {
+        report.ledger.record_rule(
+            rule_id,
+            crate::scan_ledger::RuleTier::ExternalTool,
+            true,
+            None,
+            0,
+            emitted,
+        );
+    }
+}
+
+/// Whether finding `f` is evidence that the corpus rule `rule_id` was evaluated — either `f`
+/// IS that rule (a floor row, or a preview row whose own id already equals the corpus id), OR
+/// `f`'s own rule id GROUNDS to `rule_id` via [`external_tool_floor_category`] (a standalone
+/// preview row for a tool rule that hasn't been deduped into anything else — Semgrep OR
+/// ESLint), OR one of `f.also_matches` does (the tool's rule id was folded into a
+/// floor/higher-precedence row by [`dedup_scan_previews`] — the defect is still real and
+/// still counted, just not as its own top-level row). Mirrors `ScanLedger::fired_rule_ids`'s
+/// own "a merged-away rule still counts" principle at the cross-tool-grounding layer.
+pub(crate) fn finding_grounds_to(f: &crate::onboard::Finding, rule_id: &str) -> bool {
+    if f.rule_id == rule_id {
+        return true;
+    }
+    if external_tool_floor_category(&f.rule_id) == Some(rule_id) {
+        return true;
+    }
+    f.also_matches
+        .iter()
+        .any(|m| m == rule_id || external_tool_floor_category(m) == Some(rule_id))
 }
 
 /// Mode 3 — START an async audit JOB. Spawns the same audit in the background and returns a
@@ -5057,6 +6921,44 @@ async fn onboard_audit_start(
     State(state): State<AppState>,
     Json(req): Json<AuditReq>,
 ) -> Json<serde_json::Value> {
+    let job_id = start_audit_job(&state, req, AuditJobOptions::default()).await;
+    Json(serde_json::json!({ "job_id": job_id }))
+}
+
+/// How a started audit job differs from the plain "scan" the UI's scan button starts. Every
+/// field defaults to the plain scan, so [`onboard_audit_start`] passes `default()`.
+#[derive(Default)]
+pub(crate) struct AuditJobOptions {
+    /// The project the job belongs to. `None` = the active project (the plain scan).
+    pub project_id: Option<String>,
+    /// A prior scan manifest to use instead of the project's persisted incremental cache. The
+    /// delta rescan builds one from `git diff` so only the files changed since the inspected
+    /// commit are re-audited.
+    pub prior_override: Option<crate::scan_cache::ScanManifest>,
+    /// Notes to show with the result (for example "the inspection ran on a dirty tree").
+    pub extra_notes: Vec<String>,
+    /// Set for a delta retest: the finished report is recorded as a `DeltaRetest` inspection
+    /// entry instead of a full one.
+    pub delta: Option<DeltaRetest>,
+}
+
+/// The commits a delta retest ran between.
+#[derive(Clone)]
+pub(crate) struct DeltaRetest {
+    pub base_inspection_id: String,
+    pub from_sha: String,
+    pub to_sha: String,
+}
+
+/// Start the audit job for `req` and return its id. The asynchronous body of
+/// [`onboard_audit_start`], shared with the delta rescan (`client_source::rescan`) so there is
+/// ONE implementation of "run an audit as a job". See [`AuditJobOptions`].
+pub(crate) async fn start_audit_job(
+    state: &AppState,
+    req: AuditReq,
+    options: AuditJobOptions,
+) -> String {
+    let state = state.clone();
     let repos: Vec<String> = req
         .repos
         .into_iter()
@@ -5072,10 +6974,16 @@ async fn onboard_audit_start(
             repos: r.repos,
         })
         .collect();
-    // Mechanical rules are enforced in CI, not by the static code scan — drop them here.
-    // The scan-runnable subset (mechanical, non-layer3_only) feeds the SCAN-TIME PREVIEW.
-    let (selected, excluded_mechanical, preview_rules, corpus) =
-        split_scannable_rules(selected).await;
+    // W4: see the sync `onboard_audit` handler's identical comment (a few hundred lines up) —
+    // `excluded_mechanical` is always empty now (nothing is excluded on CI-tier grounds);
+    // `preview_rules` keeps its original, narrower meaning (the scan-runnable mechanical
+    // subset for the SCAN-TIME PREVIEW below). `audit_repos` gets the FULL `selected` — it
+    // needs every id both to arm the deterministic architectural engine and to build its own
+    // semantic/AI prompt, which now includes every selected, code-auditable rule.
+    // W13: `corpus_load_failures` is the fifth element and MUST be consumed — see
+    // `record_corpus_load_failures`'s call below and `split_scannable_rules`'s doc comment.
+    let (_ai_scannable_only, excluded_mechanical, preview_rules, corpus, corpus_load_failures) =
+        split_scannable_rules(selected.clone()).await;
     // Audit + calibration are UI-PICKED non-fleet steps: an explicit request model wins;
     // otherwise the active project's per-step default applies (DEFAULT_MODEL floor only with
     // no active project). Each is resolved to a concrete id (never `None`) so there is no
@@ -5097,192 +7005,276 @@ async fn onboard_audit_start(
     let (run_ai_review, run_deterministic, _coerced) =
         effective_scan_modes(req.run_ai_review, req.run_deterministic);
     // Local-first: resolve each repo's local working tree up front (the spawned job owns them).
-    let (sources, notes) = resolve_local_sources(&state, &repos);
+    let (sources, mut notes) = resolve_local_sources(&state, &repos);
+    notes.extend(options.extra_notes);
+    let delta = options.delta;
 
-    // Capture the active project up front: the job is stamped with it (ROUTES-5, so a
-    // project's deep-report export finds ITS OWN latest deep report) AND it seeds the
-    // incremental-scan manifest lookup below.
-    let project_id = state.projects.active().map(|p| p.id);
+    // Capture the project up front (the named one, else the active one): the job is stamped
+    // with it (ROUTES-5, so a project's deep-report export finds ITS OWN latest deep report)
+    // AND it seeds the incremental-scan manifest lookup below.
+    let active_project = options
+        .project_id
+        .as_deref()
+        .and_then(|id| state.projects.get(id))
+        .or_else(|| state.projects.active());
+    let project_id = active_project.as_ref().map(|p| p.id.clone());
     let job_id = state.jobs.create("audit", project_id.clone());
     state.transcripts.clear(SCAN_AUDIT_KEY);
+    // The compliance-safety gate: resolved up front (same as the synchronous `onboard_audit`
+    // handler) from this project's `backend` setting and key presence, then moved into the
+    // spawned task below.
+    let backend_resolution = resolve_backend_for_project(&state, active_project.as_ref());
+    // Audit-integrated alternative recommendation: this project's persisted chosen options,
+    // computed up front (like `backend_resolution`) and moved into the spawned task below.
+    let chosen_options = active_project
+        .as_ref()
+        .map(project_chosen_options)
+        .unwrap_or_default();
 
     let jobs = state.jobs.clone();
     let transcripts = state.transcripts.clone();
     let jid = job_id.clone();
-    let prior = if req.incremental {
-        project_id
-            .as_deref()
-            .and_then(|id| state.scan_cache.get(id))
-    } else {
-        None
-    };
+    let prior = options.prior_override.or_else(|| {
+        if req.incremental {
+            project_id
+                .as_deref()
+                .and_then(|id| state.scan_cache.get(id))
+        } else {
+            None
+        }
+    });
     let scan_cache = state.scan_cache.clone();
     let soc2_enabled = state.feature_flags.soc2;
     // Captured for the spawned task so the async audit's model calls feed the cumulative meter.
     let usage_ledger = state.usage_ledger.clone();
-    // Captured so the async path can write to last_scan the instant the report is final.
-    let last_scan = state.last_scan.clone();
-    // Also capture recent_scan so the project-agnostic fallback is kept in sync.
-    let recent_scan = state.recent_scan.clone();
+    // Captured so the async path records the finished inspection (in-memory last_scan, the
+    // project-agnostic recent_scan fallback, and the persisted inspection entry) through the
+    // ONE shared writer, `AppState::set_last_scan`, the instant the report is final.
+    let scan_state = state.clone();
     tokio::spawn(async move {
-        if sources.is_empty() {
-            jobs.fail(
-                &jid,
-                "No local repos to audit — browse to each repo's local folder first.",
-            );
-            return;
-        }
+        // PANIC GUARD (see `run_job_body_with_panic_guard`'s doc comment for the full
+        // rationale): everything below runs the entire AI + deterministic pipeline in this
+        // detached background task. `body_jobs` / `body_jid` are clones moved into the
+        // body itself so it can report progress and its own terminal state; the outer
+        // `jobs` / `jid` stay behind for the guard to fail the job on a panic the body
+        // never got to handle.
+        let body_jobs = jobs.clone();
+        let body_jid = jid.clone();
+        run_job_body_with_panic_guard(&jobs, &jid, async move {
+            if sources.is_empty() {
+                body_jobs.fail(
+                    &body_jid,
+                    "No local repos to audit. Browse to each repo's local folder first.",
+                );
+                return;
+            }
 
-        // ── Pre-declare the FULL deterministic tool pipeline before any tool runs ──
-        //
-        // The progress box shows "X / N tools"; N must reflect the complete pipeline
-        // from the first poll, not grow one tool at a time.  We compute the complete
-        // tool set now — before audit_repos starts — and seed the job with all of them
-        // at `starting` status.
-        //
-        // Pipeline:
-        //   1. floor      (always, when run_deterministic)
-        //   2. preview linters (clippy / ruff / eslint / semgrep / unrouted — derived
-        //      from the selected mechanical rules via the corpus, when run_deterministic;
-        //      STACK-GATED: a tool whose language is absent from all repos is omitted)
-        //   3. dep-audit  (always-on unless CAMERATA_DISABLE_DEP_AUDIT is set)
-        //
-        // The UI will see, e.g. "0/4 tools" and then watch them fill in, rather than
-        // "1/2 tools" while the other two are still invisible.
-        if run_deterministic {
-            let lookup = |id: &str| corpus.as_ref().and_then(|s| s.get_by_id(id));
-            // Derive the UNION of all languages present across every source repo.
-            // Stack-gating uses this union so the pre-declared tool count matches the
-            // tools that `merge_scan_preview` will actually run (which gates per-repo
-            // but adds to the same job). Using the union is conservative: a tool
-            // present in ANY repo stays in the denominator.
-            let mut union_languages = std::collections::HashSet::<String>::new();
-            for (_, dir) in &sources {
-                let dir_clone = dir.clone();
-                if let Ok(Ok(extracted)) =
-                    tokio::task::spawn_blocking(move || crate::onboard::files::read_local_repo_files(&dir_clone)).await
-                {
-                    union_languages.extend(
-                        crate::scan_tools::languages_from_files(&extracted.files)
-                    );
+            // ── Pre-declare the FULL deterministic tool pipeline before any tool runs ──
+            //
+            // The progress box shows "X / N tools"; N must reflect the complete pipeline
+            // from the first poll, not grow one tool at a time.  We compute the complete
+            // tool set now — before audit_repos starts — and seed the job with all of them
+            // at `starting` status.
+            //
+            // Pipeline:
+            //   1. floor      (always, when run_deterministic)
+            //   2. preview linters (clippy / ruff / eslint / semgrep / unrouted — derived
+            //      from the selected mechanical rules via the corpus, when run_deterministic;
+            //      STACK-GATED: a tool whose language is absent from all repos is omitted)
+            //   3. dep-audit  (always-on unless CAMERATA_DISABLE_DEP_AUDIT is set)
+            //
+            // The UI will see, e.g. "0/4 tools" and then watch them fill in, rather than
+            // "1/2 tools" while the other two are still invisible.
+            if run_deterministic {
+                let lookup = |id: &str| corpus.as_ref().and_then(|s| s.get_by_id(id));
+                // Derive the UNION of all languages present across every source repo.
+                // Stack-gating uses this union so the pre-declared tool count matches the
+                // tools that `merge_scan_preview` will actually run (which gates per-repo
+                // but adds to the same job). Using the union is conservative: a tool
+                // present in ANY repo stays in the denominator.
+                let mut union_languages = std::collections::HashSet::<String>::new();
+                for (_, dir) in &sources {
+                    let dir_clone = dir.clone();
+                    if let Ok(Ok(extracted)) = tokio::task::spawn_blocking(move || {
+                        crate::onboard::files::read_local_repo_files(&dir_clone)
+                    })
+                    .await
+                    {
+                        union_languages
+                            .extend(crate::scan_tools::languages_from_files(&extracted.files));
+                    }
                 }
+                let lang_gate = if union_languages.is_empty() {
+                    None
+                } else {
+                    Some(&union_languages)
+                };
+                let mut tool_ids: Vec<String> = vec!["floor".to_string()];
+                let preview_ids = crate::scan_tools::preview_tool_ids_for_rules(
+                    &preview_rules,
+                    &lookup,
+                    lang_gate,
+                );
+                tool_ids.extend(preview_ids);
+                let dep_audit_disabled = std::env::var(crate::dep_audit::DISABLE_ENV_VAR)
+                    .map(|v| !v.is_empty())
+                    .unwrap_or(false);
+                if !dep_audit_disabled {
+                    tool_ids.push("dep-audit".to_string());
+                }
+                let id_refs: Vec<&str> = tool_ids.iter().map(String::as_str).collect();
+                body_jobs.declare_tools(&body_jid, &id_refs);
             }
-            let lang_gate = if union_languages.is_empty() { None } else { Some(&union_languages) };
-            let mut tool_ids: Vec<String> = vec!["floor".to_string()];
-            let preview_ids =
-                crate::scan_tools::preview_tool_ids_for_rules(&preview_rules, &lookup, lang_gate);
-            tool_ids.extend(preview_ids);
-            let dep_audit_disabled = std::env::var(crate::dep_audit::DISABLE_ENV_VAR)
-                .map(|v| !v.is_empty())
-                .unwrap_or(false);
-            if !dep_audit_disabled {
-                tool_ids.push("dep-audit".to_string());
-            }
-            let id_refs: Vec<&str> = tool_ids.iter().map(String::as_str).collect();
-            jobs.declare_tools(&jid, &id_refs);
-        }
 
-        let (mut report, manifest) = crate::onboard::audit_repos(
-            &sources,
-            &selected,
-            notes,
-            model.as_deref(),
-            calibration_model.as_deref(),
-            mode,
-            thorough,
-            Some((&transcripts, SCAN_AUDIT_KEY)),
-            Some((&jobs, &jid)),
-            prior.as_ref(),
-            deep,
-            soc2_enabled,
-            run_ai_review,
-            run_deterministic,
-            Some(usage_ledger.clone()),
-        )
-        .await;
-        // Persist the fresh manifest so the next scan can be incremental.
-        if let Some(id) = &project_id {
-            scan_cache.put(id, manifest);
-        }
-        report.excluded_mechanical_rules = excluded_mechanical;
-        // SCAN-TIME deterministic PREVIEW pass (advisory; not enforced until wired). Gated on
-        // the deterministic selection; reports per-tool progress into the job so the cockpit's
-        // deterministic progress view shows each preview tool start/run/done live.
-        if run_deterministic {
-            merge_scan_preview(
-                &mut report,
+            let (mut report, manifest) = crate::onboard::audit_repos(
+                state.credential_store.as_ref(),
                 &sources,
-                &preview_rules,
+                &selected,
+                notes,
+                model.as_deref(),
+                calibration_model.as_deref(),
+                mode,
+                thorough,
+                Some((&transcripts, SCAN_AUDIT_KEY)),
+                Some((&body_jobs, &body_jid)),
+                prior.as_ref(),
+                deep,
+                soc2_enabled,
+                run_ai_review,
+                run_deterministic,
+                Some(usage_ledger.clone()),
+                backend_resolution,
                 corpus.as_ref(),
-                Some((&jobs, &jid)),
+                &chosen_options,
             )
             .await;
-        }
-
-        // ── Always-on dep-audit (osv-scanner) — runs LAST, hard-bounded ──────────
-        //
-        // dep-audit runs AFTER the floor AND the preview linters so a slow osv-scanner
-        // provisioning or scan never blocks them.  A single 60-second hard
-        // tokio::time::timeout wraps the ENTIRE call (provisioning + scan); on timeout
-        // the step fails soft and the scan completes without dep-audit findings.
-        //
-        // Gated on `run_deterministic` (dep-audit is part of the deterministic floor);
-        // CAMERATA_DISABLE_DEP_AUDIT bypasses it entirely for test isolation.
-        if run_deterministic {
-            use tokio::time::{timeout, Duration};
-            let dep_audit_timeout = Duration::from_secs(60);
-            for (spec, dir) in &sources {
-                let spec = spec.as_str();
-                let run = crate::dep_audit::run_dep_audit(spec, dir);
-                let (dep_findings, dep_note) = match timeout(dep_audit_timeout, run).await {
-                    Ok(result) => result,
-                    Err(_elapsed) => (
-                        Vec::new(),
-                        Some(crate::onboard::CoverageNote {
-                            tool: "osv-scanner".to_string(),
-                            message: format!(
-                                "dependency audit (osv-scanner) timed out after 60 s for {spec}"
-                            ),
-                        }),
-                    ),
-                };
-                let dep_count = dep_findings.len();
-                jobs.det_tool_running(&jid, "dep-audit");
-                jobs.det_tool_done(&jid, "dep-audit", dep_count);
-                if !dep_findings.is_empty() {
-                    jobs.add_findings(&jid, dep_findings.clone());
-                    report.findings.extend(dep_findings);
-                }
-                if let Some(note) = dep_note {
-                    report.coverage_notes.push(note);
-                }
+            // Persist the fresh manifest so the next scan can be incremental.
+            if let Some(id) = &project_id {
+                scan_cache.put(id, manifest);
             }
-        }
+            report.excluded_mechanical_rules = excluded_mechanical;
+            // W13: see the sync `onboard_audit` handler's identical call — disclose every
+            // corpus file that would not parse into the ledger, the integrity gate, one
+            // concise client line and the operator log.
+            record_corpus_load_failures(&mut report, &corpus_load_failures);
+            // SCAN-TIME deterministic PREVIEW pass (advisory; not enforced until wired). Gated on
+            // the deterministic selection; reports per-tool progress into the job so the cockpit's
+            // deterministic progress view shows each preview tool start/run/done live.
+            if run_deterministic {
+                merge_scan_preview(
+                    &mut report,
+                    &sources,
+                    &preview_rules,
+                    corpus.as_ref(),
+                    Some((&body_jobs, &body_jid)),
+                )
+                .await;
+            }
 
-        // ── Enforcement-ledger scan-capture is done by the synchronous audit handler ──
-        // (The job path is async; ledger capture lives in the synchronous `onboard_audit`
-        // handler. If you add ledger capture here in the future, follow the same
-        // background-spawn pattern used there.)
+            // ── Always-on dep-audit (osv-scanner) — runs LAST, hard-bounded ──────────
+            //
+            // dep-audit runs AFTER the floor AND the preview linters so a slow osv-scanner
+            // provisioning or scan never blocks them.  A single 60-second hard
+            // tokio::time::timeout wraps the ENTIRE call (provisioning + scan); on timeout
+            // the step fails soft and the scan completes without dep-audit findings.
+            //
+            // Gated on `run_deterministic` (dep-audit is part of the deterministic floor);
+            // CAMERATA_DISABLE_DEP_AUDIT bypasses it entirely for test isolation.
+            if run_deterministic {
+                use tokio::time::{timeout, Duration};
+                let dep_audit_timeout = Duration::from_secs(60);
+                // Pass-1 W1 seal fix: see the identical comment in `onboard_audit`'s synchronous
+                // path — one ledger stage entry for the whole loop's net additions.
+                let dep_audit_rows_in = report.findings.len();
+                for (spec, dir) in &sources {
+                    let spec = spec.as_str();
+                    let run = crate::dep_audit::run_dep_audit(spec, dir);
+                    let (dep_findings, dep_note) = match timeout(dep_audit_timeout, run).await {
+                        Ok(result) => result,
+                        Err(_elapsed) => (
+                            Vec::new(),
+                            Some(crate::onboard::CoverageNote {
+                                tool: "osv-scanner".to_string(),
+                                message: format!(
+                                    "dependency audit (osv-scanner) timed out after 60 s for {spec}"
+                                ),
+                            }),
+                        ),
+                    };
+                    let dep_count = dep_findings.len();
+                    body_jobs.det_tool_running(&body_jid, "dep-audit");
+                    body_jobs.det_tool_done(&body_jid, "dep-audit", dep_count);
+                    if !dep_findings.is_empty() {
+                        body_jobs.add_findings(&body_jid, dep_findings.clone());
+                        report.findings.extend(dep_findings);
+                    }
+                    if let Some(note) = dep_note {
+                        report.coverage_notes.push(note);
+                    }
+                }
+                crate::scan_ledger::record_addition_stage(
+                    &mut report.ledger,
+                    "dependency-audit-merge",
+                    dep_audit_rows_in,
+                    report.findings.len(),
+                    "dep_audit_findings",
+                );
+            }
 
-        // ── Write last_scan + recent_scan (async job path) ──────────────────────────
-        // Store the completed report before finishing the job so any concurrent chat
-        // request landing immediately after sees the full results. Fail-soft.
-        // Also update the project-agnostic `recent_scan` fallback so the active-project
-        // context can surface this scan even if the active project changed since the
-        // scan was submitted (or no project was active at submission time).
-        if let Some(id) = &project_id {
-            let mut guard = last_scan.lock().unwrap_or_else(|e| e.into_inner());
-            guard.insert(id.clone(), report.clone());
-        }
-        {
-            let mut recent = recent_scan.lock().unwrap_or_else(|e| e.into_inner());
-            *recent = Some(report.clone());
-        }
+            // ── Pass-1 W1 seal fix: evidence-of-violation gate — LAST row-adding pass ────
+            // Mirrors the synchronous `onboard_audit` handler's own call site exactly — see
+            // `report_export::apply_evidence_gate`'s doc comment. Must run before `report` is
+            // written into `last_scan`/`recent_scan` or handed to `body_jobs.finish` below.
+            crate::report_export::apply_evidence_gate(&mut report);
+            // Corpus-authored severity bounds (`min_severity` floor, `max_severity` ceiling,
+            // `deviation_ceiling`) over the FINAL row set. `audit_repos` already bounded the
+            // floor/architectural/AI rows, but the preview-linter merge, the dependency audit
+            // and the evidence gate all append rows AFTER it; without this the cockpit would
+            // show those at the producer's raw severity while the PDF/xlsx bound them. The
+            // call is idempotent, so the rows `audit_repos` already bounded are unchanged.
+            crate::severity_bounds::apply_scan_severity_bounds(
+                &mut report.findings,
+                corpus.as_ref(),
+            );
 
-        jobs.finish(&jid, report);
+            // ── Enforcement-ledger scan-capture is done by the synchronous audit handler ──
+            // (The job path is async; ledger capture lives in the synchronous `onboard_audit`
+            // handler. If you add ledger capture here in the future, follow the same
+            // background-spawn pattern used there.)
+
+            // ── Write last_scan + recent_scan (async job path) ──────────────────────────
+            // Store the completed report before finishing the job so any concurrent chat
+            // request landing immediately after sees the full results. Fail-soft.
+            // Also update the project-agnostic `recent_scan` fallback so the active-project
+            // context can surface this scan even if the active project changed since the
+            // scan was submitted (or no project was active at submission time).
+            match (&project_id, &delta) {
+                // A delta retest is recorded as its own kind of inspection, naming the
+                // inspection it was computed from and the two commits between.
+                (Some(id), Some(d)) => {
+                    scan_state.record_inspection(
+                        id,
+                        &report,
+                        crate::inspections::InspectionKind::DeltaRetest {
+                            base_inspection_id: d.base_inspection_id.clone(),
+                            from_sha: d.from_sha.clone(),
+                            to_sha: d.to_sha.clone(),
+                        },
+                    );
+                    scan_state.set_last_scan_in_memory(id.clone(), report.clone());
+                }
+                (Some(id), None) => scan_state.set_last_scan(id.clone(), report.clone()),
+                // No project: only the project-agnostic fallback can hold it, and there is no
+                // project to key a persisted inspection to.
+                (None, _) => scan_state.set_recent_scan(report.clone()),
+            }
+
+            body_jobs.finish(&body_jid, report);
+        })
+        .await;
     });
 
-    Json(serde_json::json!({ "job_id": job_id }))
+    job_id
 }
 
 /// Poll an async audit job: status, progress (done/total passes), incremental findings, and
@@ -5307,7 +7299,12 @@ async fn onboard_audit_job(
         Some(job) => {
             let idle_ms = state.jobs.idle_ms(&id, now_ms);
             let cancel_requested = state.jobs.is_cancel_requested(&id);
-            Json(Some(JobStatusResponse { job, idle_ms, cancel_requested })).into_response()
+            Json(Some(JobStatusResponse {
+                job,
+                idle_ms,
+                cancel_requested,
+            }))
+            .into_response()
         }
         None => Json::<Option<JobStatusResponse>>(None).into_response(),
     }
@@ -5322,67 +7319,62 @@ async fn cancel_audit_job(
     StatusCode::NO_CONTENT
 }
 
-/// Query parameters for `GET /api/onboard/finding-context`.
-#[derive(serde::Deserialize)]
-struct FindingContextQuery {
-    /// `owner/repo` — resolved to a local checkout via `settings.repo_path` /
-    /// `settings.workspace_root`, same as the git-status endpoints.
-    repo: String,
-    /// Repo-relative file path (as stored on `FindingView::path`).
-    path: String,
-    /// 1-based violation line (as stored on `FindingView::line`).
-    line: usize,
-    /// Optional first line of the scan-time stored `snippet`, for a cheap staleness check
-    /// (`matches_snippet` in the response). Absent = no comparison, never flagged stale.
-    #[serde(default)]
-    expect: Option<String>,
-}
-
 /// `GET /api/onboard/finding-context` — the enclosing-code-block lookup for the scan-review
 /// finding modal (`docs/design/2026-07-27_finding-code-context.md`). ON-DEMAND, not scan-time
 /// cached (see `onboard::finding_context` module docs for why): a handful of reads per triage
-/// session, always reflects the file as it exists now, zero LLM tokens (a pure local file
-/// read + deterministic parse).
+/// session, zero LLM tokens (a local read + deterministic parse).
 ///
-/// Resolves the repo dir exactly like the git-status endpoints (`resolve_git_dir`'s sibling
-/// here, inlined so the "unlinked repo" case maps to `file_missing` rather than a distinct
-/// error shape); an unresolved repo is indistinguishable from "file missing" to the UI, which
-/// is the correct degradation per the design's table. All other failure modes (missing file,
-/// non-UTF8, oversized, the line no longer existing, or a path-traversal refusal) are computed
-/// by `onboard::finding_context::lookup` and returned as `{ "status": "...", "reason": "..." }`
-/// — see that module for the floor guarantee. Path traversal is the only case that gets a
-/// non-200: everything else is 200 with a `status` field, exactly like every other onboard
-/// endpoint, so the UI's normal JSON-parsing path handles every case uniformly.
+/// The code is read from the INSPECTED COMMIT through git objects (so old findings stay accurate
+/// while the checkout sits at the latest commit), from the working tree only when the scan had
+/// no commit, and not at all when the repo's source was deleted (`status: "source_deleted"`).
+/// Where it may be read from is decided by `client_source::read::source_for_read`, the one
+/// resolver the code viewer will share. Every failure degrades to a `status` + `reason` the UI
+/// shows beside the stored snippet; path traversal is the only non-200. The response is never
+/// cached by the webview (`Cache-Control: no-store`).
 async fn onboard_finding_context(
     State(state): State<AppState>,
-    axum::extract::Query(q): axum::extract::Query<FindingContextQuery>,
-) -> impl IntoResponse {
-    let override_path = state.settings.repo_path(&q.repo);
-    let workspace_root = state.settings.workspace_root();
-    let Some(repo_dir) = crate::workspace::resolve_repo_dir(
-        override_path.as_deref(),
-        workspace_root.as_deref(),
-        &q.repo,
-    ) else {
-        // Unlinked project / repo path unresolved — treated as file_missing (design §5).
-        return (
-            StatusCode::OK,
-            Json(crate::onboard::finding_context::FindingContextOutcome::FileMissing.to_json()),
-        );
-    };
+    axum::extract::Query(q): axum::extract::Query<crate::client_source::read::FindingContextParams>,
+) -> Response {
+    crate::client_source::read::finding_context(&state, q).await
+}
 
-    let outcome =
-        crate::onboard::finding_context::lookup(&repo_dir, &q.path, q.line, q.expect.as_deref())
-            .await;
-    let status = if matches!(
-        outcome,
-        crate::onboard::finding_context::FindingContextOutcome::PathTraversal
-    ) {
-        StatusCode::BAD_REQUEST
-    } else {
-        StatusCode::OK
-    };
-    (status, Json(outcome.to_json()))
+/// `POST /api/onboard/finding-context/batch` — the stored line plus three lines either side for up
+/// to 200 `(repo, path, line, sha)` tuples (`WORK_ORDER_REVIEW_SPEED.md` B.2 "Data" and B.3).
+/// A POST only because the tuples do not fit a query string: it reads and writes nothing else.
+/// Shares the single-finding resolver (`client_source::read::source_for_read`), path jail, git
+/// read gate, redactor and status vocabulary; a deleted source answers `source_deleted` per item
+/// and reads nothing. Never cached by the webview. Shape: `onboard::finding_context_batch`.
+async fn onboard_finding_context_batch(
+    State(state): State<AppState>,
+    Json(body): Json<crate::onboard::finding_context_batch::BatchParams>,
+) -> Response {
+    crate::onboard::finding_context_batch::finding_context_batch(&state, body).await
+}
+
+/// `GET /api/onboard/source-file` — the whole file (or an 800-line window) behind the in-app code
+/// viewer, read from the inspected commit through git objects, redacted line by line and
+/// highlighted server-side (`WORK_ORDER_REVIEW_SPEED.md` A.2 / A.3). Shares the finding-context
+/// resolver (`client_source::read::source_for_read`), path jail and redactor; a deleted source
+/// answers `status: "source_deleted"` with the date and reads nothing. Read-only; the response
+/// is never cached by the webview. Shape and statuses: `onboard::source_file` module docs.
+async fn onboard_source_file(
+    State(state): State<AppState>,
+    axum::extract::Query(q): axum::extract::Query<crate::onboard::source_file::SourceFileParams>,
+) -> Response {
+    crate::onboard::source_file::source_file(&state, q).await
+}
+
+/// `GET /api/onboard/symbol-refs`: where a symbol is used: one read-only whole-word search at
+/// the inspected commit, noise paths dropped, every hit line redacted, at most 200 hits with a
+/// `more` flag (`WORK_ORDER_REVIEW_SPEED.md` A.6). Shares the source-file resolver
+/// (`client_source::read::source_for_read`), so a deleted source answers `status:
+/// "source_deleted"` and runs nothing. Read-only; never cached by the webview. Shape and
+/// statuses: `onboard::symbol_refs` module docs.
+async fn onboard_symbol_refs(
+    State(state): State<AppState>,
+    axum::extract::Query(q): axum::extract::Query<crate::onboard::symbol_refs::SymbolRefsParams>,
+) -> Response {
+    crate::onboard::symbol_refs::symbol_refs(&state, q).await
 }
 
 /// Query parameters for `GET /api/onboard/finding-fix`.
@@ -5399,11 +7391,16 @@ struct FindingFixQuery {
 /// byte-identical output across all three surfaces: one function, three callers, never a
 /// second divergent computation.
 ///
-/// Always 200; body is `{ "fix": "..." }`, empty (never fabricated) when the corpus is
-/// absent, the rule id has no corpus entry, or the rule has no adopted default option/
-/// directive — same degrade-soft contract as `resolve_fix` itself. No project/repo
-/// resolution needed (the corpus is global, not per-project), so unlike
-/// `onboard_finding_context` this handler takes no `State`.
+/// Always 200; body is `{ "fix": "..." }` or `{ "fix": null }` — `null` (never a fabricated
+/// sentence, and never the rule's `directive`) when the corpus is absent, the rule id has no
+/// corpus entry, or the rule has no adopted default option/authored `remediation` — same
+/// degrade-soft contract as `resolve_fix` itself. No project/repo resolution needed (the corpus
+/// is global, not per-project), so unlike `onboard_finding_context` this handler takes no
+/// `State`. This is a RULE-level lookup (this modal has only a `rule_id`, no specific finding),
+/// so it resolves `resolve_fix` against `Finding::default()` — an authored remediation's
+/// placeholder tokens render with their readable generic filler (e.g. "the affected table")
+/// rather than naming a real object, exactly like any other finding whose detector didn't
+/// capture one.
 async fn onboard_finding_fix(
     axum::extract::Query(q): axum::extract::Query<FindingFixQuery>,
 ) -> impl IntoResponse {
@@ -5413,7 +7410,12 @@ async fn onboard_finding_fix(
     } else {
         None
     };
-    let fix = crate::report_export::resolve_fix(&q.rule_id, corpus.as_ref());
+    let fix = crate::report_export::resolve_fix(
+        &q.rule_id,
+        corpus.as_ref(),
+        &crate::onboard::Finding::default(),
+        None,
+    );
     Json(serde_json::json!({ "fix": fix }))
 }
 
@@ -5432,13 +7434,15 @@ async fn gate_probe() -> Json<serde_json::Value> {
             let checks: Vec<serde_json::Value> = r
                 .layer1
                 .iter()
-                .map(|c| serde_json::json!({
-                    "rule": c.rule,
-                    "label": c.label,
-                    "denied": c.denied,
-                    "isolated_denied": c.isolated_denied,
-                    "detail": c.detail,
-                }))
+                .map(|c| {
+                    serde_json::json!({
+                        "rule": c.rule,
+                        "label": c.label,
+                        "denied": c.denied,
+                        "isolated_denied": c.isolated_denied,
+                        "detail": c.detail,
+                    })
+                })
                 .collect();
             Json(serde_json::json!({
                 "ok": true,
@@ -5628,10 +7632,8 @@ fn apply_files_per_repo(
             .copied()
             .filter(|r| r.repos.iter().any(|x| x == repo))
             .collect();
-        let repo_custom: Vec<&crate::project::CustomRule> = custom
-            .iter()
-            .filter(|c| c.applies_to_repo(repo))
-            .collect();
+        let repo_custom: Vec<&crate::project::CustomRule> =
+            custom.iter().filter(|c| c.applies_to_repo(repo)).collect();
         if repo_rules.is_empty() && repo_custom.is_empty() {
             continue;
         }
@@ -5706,19 +7708,17 @@ async fn onboard_arm(
     };
 
     // Save the armed ruleset to the active project (create one if none) so the
-    // project is the source of truth and re-emit works.
-    save_armed_to_project(&state, &req.rules, &req.custom);
+    // project is the source of truth and re-emit works. Baselines the rules against the
+    // corpus they are about to be emitted from, so drift detection starts at apply time.
+    let corpus = load_corpus_for_baseline().await;
+    save_armed_to_project(&state, &req.rules, &req.custom, corpus.as_ref());
 
     // Only repo-local rules emit into repo files; cross-repo + process rules are
     // project-level (the gates read them from the project store). Defensively normalize the
     // leaked single-repo sentinel out of the incoming rules' repos (mapping it to the active
     // project's real repos) BEFORE the clone loop — shared helper, so no drift with
     // `resolve_project_arm_rules` / `onboard_apply`.
-    let project_repos = state
-        .projects
-        .active()
-        .map(|p| p.repos)
-        .unwrap_or_default();
+    let project_repos = state.projects.active().map(|p| p.repos).unwrap_or_default();
     let repo_local: Vec<crate::arm::ArmRule> = req
         .rules
         .iter()
@@ -5755,12 +7755,8 @@ async fn onboard_apply(
     State(state): State<AppState>,
     Json(req): Json<ArmReq>,
 ) -> Json<serde_json::Value> {
-    if req.rules.is_empty() {
-        if req.custom.is_empty() {
-            return Json(
-                serde_json::json!({ "ok": false, "message": "No rules selected to apply." }),
-            );
-        }
+    if req.rules.is_empty() && req.custom.is_empty() {
+        return Json(serde_json::json!({ "ok": false, "message": "No rules selected to apply." }));
     }
     let token = state.github_token();
     let Some(token) = token else {
@@ -5774,18 +7770,16 @@ async fn onboard_apply(
     // whose repos all have explicit local folders can apply without one.
     let workspace_root = state.settings.workspace_root();
 
-    // Source of truth: save the armed ruleset to the active project (create one if none).
-    save_armed_to_project(&state, &req.rules, &req.custom);
+    // Source of truth: save the armed ruleset to the active project (create one if none),
+    // baselining each rule against the corpus it is emitted from (apply-time drift baseline).
+    let corpus = load_corpus_for_baseline().await;
+    save_armed_to_project(&state, &req.rules, &req.custom, corpus.as_ref());
 
     // Defensively normalize the leaked single-repo sentinel out of the INCOMING rules'
     // repos (the UI can POST it directly) BEFORE any clone loop, mapping it to the active
     // project's real repos. Uses the same helper as `resolve_project_arm_rules` so the two
     // paths can't drift.
-    let project_repos = state
-        .projects
-        .active()
-        .map(|p| p.repos)
-        .unwrap_or_default();
+    let project_repos = state.projects.active().map(|p| p.repos).unwrap_or_default();
     let repo_local: Vec<crate::arm::ArmRule> = req
         .rules
         .iter()
@@ -5826,10 +7820,8 @@ async fn onboard_apply(
             .iter()
             .filter(|r| r.repos.iter().any(|x| x == repo))
             .collect();
-        let repo_custom: Vec<&crate::project::CustomRule> = custom
-            .iter()
-            .filter(|c| c.applies_to_repo(repo))
-            .collect();
+        let repo_custom: Vec<&crate::project::CustomRule> =
+            custom.iter().filter(|c| c.applies_to_repo(repo)).collect();
         if repo_rules.is_empty() && repo_custom.is_empty() {
             continue;
         }
@@ -5851,15 +7843,21 @@ async fn onboard_apply(
             continue;
         };
         // Clone into the workspace root only when there's no explicit override (never clone
-        // over a folder the architect chose by hand).
-        let clone_root = if override_path
-            .as_deref()
-            .map(|p| !p.trim().is_empty())
-            .unwrap_or(false)
-        {
-            None
-        } else {
-            workspace_root.as_deref().map(std::path::Path::new)
+        // over a folder the architect chose by hand), and never for a repo whose source was
+        // deleted on purpose: that stays deleted until "Re-fetch source".
+        let clone_root = match crate::client_source::resolution::clone_root_for(
+            &state,
+            repo,
+            override_path.as_deref(),
+            workspace_root.as_deref(),
+        ) {
+            Ok(root) => root,
+            Err(refusal) => {
+                results.push(serde_json::json!({
+                    "repo": repo, "ok": false, "code": refusal.code, "message": refusal.message
+                }));
+                continue;
+            }
         };
         let msg = format!("chore(governance): apply Camerata ruleset to {repo}");
         match crate::workspace::apply_local_and_push(
@@ -5910,18 +7908,7 @@ async fn project_repo_health(
     let Some(project) = state.projects.get(&id) else {
         return Json(serde_json::json!({ "ok": false, "message": "unknown project", "repos": [] }));
     };
-    let workspace_root = state.settings.workspace_root();
-    let mut out = Vec::new();
-    for repo in &project.repos {
-        let override_path = state.settings.repo_path(repo);
-        let res = crate::workspace::repo_resolution(
-            override_path.as_deref(),
-            workspace_root.as_deref(),
-            repo,
-        )
-        .await;
-        out.push(res);
-    }
+    let out = crate::client_source::resolution::resolve_all(&state, &project).await;
     Json(serde_json::json!({ "ok": true, "repos": out }))
 }
 
@@ -5987,21 +7974,12 @@ async fn project_readiness(
             "repos": [],
         }));
     };
-    let workspace_root = state.settings.workspace_root();
-    let mut resolutions = Vec::with_capacity(project.repos.len());
-    let mut resolved_flags = Vec::with_capacity(project.repos.len());
-    for repo in &project.repos {
-        let override_path = state.settings.repo_path(repo);
-        let res = crate::workspace::repo_resolution(
-            override_path.as_deref(),
-            workspace_root.as_deref(),
-            repo,
-        )
-        .await;
-        resolved_flags.push(res.resolved);
-        resolutions.push(res);
-    }
-    let readiness = camerata_app_core::readiness::classify_readiness(&resolved_flags);
+    let resolutions = crate::client_source::resolution::resolve_all(&state, &project).await;
+    let links: Vec<camerata_app_core::readiness::RepoLink> = resolutions
+        .iter()
+        .map(crate::client_source::resolution::link_of)
+        .collect();
+    let readiness = camerata_app_core::readiness::classify_links(&links);
     Json(serde_json::json!({
         "ok": true,
         "readiness": readiness,
@@ -6017,19 +7995,13 @@ async fn derive_project_readiness(
     id: &str,
 ) -> Option<camerata_app_core::readiness::ProjectReadiness> {
     let project = state.projects.get(id)?;
-    let workspace_root = state.settings.workspace_root();
-    let mut flags = Vec::with_capacity(project.repos.len());
-    for repo in &project.repos {
-        let override_path = state.settings.repo_path(repo);
-        let res = crate::workspace::repo_resolution(
-            override_path.as_deref(),
-            workspace_root.as_deref(),
-            repo,
-        )
-        .await;
-        flags.push(res.resolved);
-    }
-    Some(camerata_app_core::readiness::classify_readiness(&flags))
+    let links: Vec<camerata_app_core::readiness::RepoLink> =
+        crate::client_source::resolution::resolve_all(state, &project)
+            .await
+            .iter()
+            .map(crate::client_source::resolution::link_of)
+            .collect();
+    Some(camerata_app_core::readiness::classify_links(&links))
 }
 
 #[derive(serde::Deserialize)]
@@ -6209,7 +8181,9 @@ async fn onboard_open_pr(
     ) {
         Ok(_) => {}
         Err(e) => {
-            return Json(serde_json::json!({ "ok": false, "blocked": true, "message": format!("{e}") }));
+            return Json(
+                serde_json::json!({ "ok": false, "blocked": true, "message": format!("{e}") }),
+            );
         }
     }
     let mut results = Vec::new();
@@ -6331,20 +8305,38 @@ async fn onboard_ignore(
 async fn project_suppressions(
     State(state): State<AppState>,
     Path(id): Path<String>,
-) -> Result<Json<Vec<crate::suppression::SuppressionRecord>>, AppError> {
+) -> Result<Json<serde_json::Value>, AppError> {
     let project = state
         .projects
         .get(&id)
         .ok_or_else(|| AppError::not_found(anyhow::anyhow!("project not found: {id}")))?;
+    // A repo whose source was deleted has no tree to read: say so (with the date) instead of
+    // silently listing nothing for it. The other repos are still read.
+    let deleted: Vec<(String, String)> = project
+        .repos
+        .iter()
+        .filter_map(|repo| {
+            crate::client_source::status::deleted_record(&state, &project.id, repo)
+                .map(|r| (repo.clone(), r.completed_at))
+        })
+        .collect();
     // Local-first: the waiver registry reads each repo's local working tree, not GitHub.
     let (sources, _notes) = resolve_local_sources(&state, &project.repos);
-    // Refresh = best-effort fast-forward pull of each local repo so the listing reflects the
-    // latest remote state, THEN read. A pull failure (diverged/offline/dirty) is non-fatal: we
-    // still read whatever is on disk. This endpoint is informational and read-only.
-    for (_spec, dir) in &sources {
-        let _ = crate::workspace::pull_local_ff(dir).await;
-    }
-    Ok(Json(crate::onboard::suppression_registry(&sources).await))
+    // Read-only, as a GET must be: this used to fast-forward `git pull` every repo first, which
+    // moved a checkout past the inspected commit just by opening a screen (and cannot work on a
+    // detached HEAD, where a re-fetch at the inspected commit leaves the tree). The Workspace
+    // tab's "Clone / update all repos" is the deliberate way to refresh.
+    let entries = crate::onboard::suppression_registry(&sources).await;
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "source_deleted": !deleted.is_empty(),
+        "deleted_at": deleted.first().map(|(_, at)| at.as_str()),
+        "deleted_repos": deleted
+            .iter()
+            .map(|(repo, at)| serde_json::json!({ "repo": repo, "deleted_at": at }))
+            .collect::<Vec<_>>(),
+        "entries": entries,
+    })))
 }
 
 /// One CI-tier rule sent by the UI for story generation. Carries the rule id and title
@@ -6456,12 +8448,20 @@ async fn onboard_complete(State(state): State<AppState>) -> Json<serde_json::Val
     };
 
     let has_rules = !selections.is_empty() || !cross_repo.is_empty() || !process.is_empty();
+    let corpus = if has_rules {
+        load_corpus_for_baseline().await
+    } else {
+        None
+    };
     state.projects.update(&pid, |p| {
         if has_rules {
-            // Replace the base rules from onboarding; custom rules are preserved.
-            p.ruleset.selections = selections.clone();
-            p.ruleset.cross_repo = cross_repo.clone();
-            p.ruleset.process = process.clone();
+            // Replace the base rules from onboarding; custom rules are preserved. Goes
+            // through `upsert_base_rules` so a baseline written by an earlier Apply is
+            // carried across this rebuild-from-draft instead of erased; rules new to the
+            // project are baselined from the corpus.
+            let known_before = selected_rule_ids(&p.ruleset);
+            p.upsert_base_rules(selections.clone(), cross_repo.clone(), process.clone());
+            baseline_new_to_project(&mut p.ruleset, &known_before, corpus.as_ref());
         }
         // Upsert the draft's custom rules (#49) by name (preserve any pre-existing).
         for c in &custom {
@@ -6607,9 +8607,8 @@ fn ci_story_body_mechanical(repo: &str, rules: &[CiStoryRule]) -> String {
     // to choose and implement a cadence (weekly cron, per-PR, in-loop, or manual).
     // Camerata does NOT build a scheduling engine — the cadence is a project decision
     // carried here as concrete implementation guidance.
-    let dep_audit_cadence_section =
-        if rules.iter().any(|r| r.id == "CICD-DEPENDENCY-AUDIT-1") {
-            "\n---\n\n\
+    let dep_audit_cadence_section = if rules.iter().any(|r| r.id == "CICD-DEPENDENCY-AUDIT-1") {
+        "\n---\n\n\
              ## Dependency vulnerability scanning — cadence (CICD-DEPENDENCY-AUDIT-1)\n\n\
              **Camerata does not build a scheduling engine.** The cadence for dependency \
              scanning is a project decision you make on the rule, and the developer \
@@ -6688,9 +8687,9 @@ fn ci_story_body_mechanical(repo: &str, rules: &[CiStoryRule]) -> String {
              - [ ] Regenerate `.github/workflows/camerata-gates.yml` via Camerata.\n\
              - [ ] Verify the scan fires at the chosen cadence and fails on a known \
              vulnerable lockfile (e.g. introduce a known-CVE package, confirm exit non-zero).\n"
-        } else {
-            ""
-        };
+    } else {
+        ""
+    };
 
     let preamble = ci_story_ssot_preamble();
     format!(
@@ -7049,7 +9048,10 @@ async fn onboard_ci_rules(
 
     let (title, body) = match req.tier.as_str() {
         "mechanical" => {
-            let t = format!("Wire mechanical (off-the-shelf linter) rules into CI — {}", req.repo);
+            let t = format!(
+                "Wire mechanical (off-the-shelf linter) rules into CI — {}",
+                req.repo
+            );
             let b = ci_story_body_mechanical(repo, &req.rules);
             (t, b)
         }
@@ -7102,14 +9104,26 @@ struct GenerateCiWorkflowReq {
 ///
 /// A missing manifest is NOT an error — it generates a workflow with only the
 /// built-in language steps. The caller can store the YAML in the repo.
-async fn generate_ci_workflow(
-    Json(req): Json<GenerateCiWorkflowReq>,
-) -> Json<serde_json::Value> {
+async fn generate_ci_workflow(Json(req): Json<GenerateCiWorkflowReq>) -> axum::response::Response {
     use crate::workflow_gen::generate_gates_workflow;
+    use axum::response::IntoResponse;
     use camerata_checks::manifest::load_manifest;
     use std::path::Path;
 
     let root = Path::new(&req.repo_root);
+    // Only ever write into an existing git checkout. Without this the route created
+    // `<repo_root>/.github/workflows/` (and every missing parent) for ANY path, which brought
+    // back the folder of a repo whose source was deleted on purpose and then blocked re-fetch.
+    if !crate::workspace::is_git_repo(root) {
+        return crate::client_source::Refusal::conflict(
+            "not_a_git_repo",
+            format!(
+                "{} is not a git checkout, so no workflow was written.",
+                root.display()
+            ),
+        )
+        .into_response();
+    }
 
     // Load manifest (best-effort: absent/invalid → empty).
     let manifest = match load_manifest(root) {
@@ -7138,7 +9152,8 @@ async fn generate_ci_workflow(
             return Json(serde_json::json!({
                 "ok": false,
                 "message": format!("failed to create workflow dir: {e}")
-            }));
+            }))
+            .into_response();
         }
     }
 
@@ -7146,7 +9161,8 @@ async fn generate_ci_workflow(
         return Json(serde_json::json!({
             "ok": false,
             "message": format!("failed to write workflow file: {e}")
-        }));
+        }))
+        .into_response();
     }
 
     Json(serde_json::json!({
@@ -7154,6 +9170,7 @@ async fn generate_ci_workflow(
         "path": workflow_path.display().to_string(),
         "yaml": yaml
     }))
+    .into_response()
 }
 
 // ── Greenfield scaffold handler ───────────────────────────────────────────────
@@ -7205,7 +9222,9 @@ async fn onboard_greenfield(
     }
     let path_str = req.path.trim().to_string();
     if path_str.is_empty() {
-        return Json(serde_json::json!({ "ok": false, "message": "Choose a directory for the new repo." }));
+        return Json(
+            serde_json::json!({ "ok": false, "message": "Choose a directory for the new repo." }),
+        );
     }
     let dest = std::path::PathBuf::from(&path_str);
 
@@ -7235,7 +9254,9 @@ async fn onboard_greenfield(
             return Json(serde_json::json!({ "ok": false, "message": format!("{e}") }));
         }
         Err(e) => {
-            return Json(serde_json::json!({ "ok": false, "message": format!("scaffold task: {e}") }));
+            return Json(
+                serde_json::json!({ "ok": false, "message": format!("scaffold task: {e}") }),
+            );
         }
     };
 
@@ -7259,7 +9280,7 @@ async fn onboard_greenfield(
         },
     };
     state.projects.update(&pid, |p| {
-        p.mark_onboarded(&[repo_label.clone()]);
+        p.mark_onboarded(std::slice::from_ref(&repo_label));
     });
 
     // Record the scaffolded dir as the repo's local path override so subsequent
@@ -7280,10 +9301,16 @@ async fn onboard_greenfield(
 /// one from the rules' repos if none exists). This is the upsert: it replaces the
 /// project's BASE rules (selections / cross-repo / process) and leaves custom rules
 /// untouched.
+///
+/// This is an APPLY: the rules are about to be emitted at their current corpus text, so each
+/// selection is (re)baselined against `corpus` ([`rebaseline_selections`]) and drift detection
+/// covers it from this moment. Without a corpus (or for a rule it lacks) nothing is invented,
+/// and `upsert_base_rules` carries the project's existing baseline across the replace.
 fn save_armed_to_project(
     state: &AppState,
     rules: &[crate::arm::ArmRule],
     custom: &[crate::project::CustomRule],
+    corpus: Option<&camerata_rules::RuleSet>,
 ) {
     use crate::project::RuleSelection;
     // First pass: gather the REAL repos this arm touches, skipping the UI-internal
@@ -7325,6 +9352,9 @@ fn save_armed_to_project(
             _ => selections.push(s),
         }
     }
+    rebaseline_selections(&mut selections, corpus);
+    rebaseline_selections(&mut cross, corpus);
+    rebaseline_selections(&mut process, corpus);
     let pid = match state.projects.active() {
         Some(p) => p.id,
         None => match state
@@ -7375,10 +9405,8 @@ async fn emit_to_repos(
             .iter()
             .filter(|r| r.repos.iter().any(|x| x == repo))
             .collect();
-        let repo_custom: Vec<&crate::project::CustomRule> = custom
-            .iter()
-            .filter(|c| c.applies_to_repo(repo))
-            .collect();
+        let repo_custom: Vec<&crate::project::CustomRule> =
+            custom.iter().filter(|c| c.applies_to_repo(repo)).collect();
         if repo_rules.is_empty() && repo_custom.is_empty() {
             continue;
         }
@@ -7434,6 +9462,20 @@ fn normalize_repos(repos: &[String], project_repos: &[String]) -> Vec<String> {
 /// rule's description. The rule-bank is the source; the project stores only the
 /// selection (id + chosen option + repos).
 async fn resolve_project_arm_rules(project: &crate::project::Project) -> Vec<crate::arm::ArmRule> {
+    let mut out = resolve_project_selection_rules(project).await;
+    // Drop any rule whose repos normalized to empty (a leaked sentinel on a project with
+    // no real repos): it has nowhere to emit and would only be dead weight downstream.
+    out.retain(|r| !r.repos.is_empty());
+    out
+}
+
+/// Every base selection of the project resolved to a rule (directive, enforcement, placement),
+/// INCLUDING project-level selections whose placement is empty. [`resolve_project_arm_rules`] is
+/// this minus the rules with nowhere to emit; a SCAN, which audits project-level rules too, uses
+/// this directly.
+pub(crate) async fn resolve_project_selection_rules(
+    project: &crate::project::Project,
+) -> Vec<crate::arm::ArmRule> {
     let corpus_path = camerata_rules::corpus_path();
     let set = if corpus_path.exists() {
         Some(camerata_rules::load_corpus_lenient(&corpus_path).await.0)
@@ -7486,9 +9528,6 @@ async fn resolve_project_arm_rules(project: &crate::project::Project) -> Vec<cra
             repos: normalize_repos(&sel.repos, &project.repos),
         });
     }
-    // Drop any rule whose repos normalized to empty (a leaked sentinel on a project with
-    // no real repos): it has nowhere to emit and would only be dead weight downstream.
-    out.retain(|r| !r.repos.is_empty());
     out
 }
 
@@ -7578,7 +9617,9 @@ async fn emit_project_local(
     };
     let token = state.github_token().unwrap_or_default();
     if want_push && token.is_empty() {
-        return Json(serde_json::json!({ "ok": false, "message": "A GitHub token is required to push or open a PR (set CAMERATA_GITHUB_TOKEN). Emit locally without push, or connect GitHub." }));
+        return Json(
+            serde_json::json!({ "ok": false, "message": "A GitHub token is required to push or open a PR (set CAMERATA_GITHUB_TOKEN). Emit locally without push, or connect GitHub." }),
+        );
     }
 
     let rules = resolve_project_arm_rules(&project).await;
@@ -7617,10 +9658,8 @@ async fn emit_project_local(
             .iter()
             .filter(|r| r.repos.iter().any(|x| x == repo))
             .collect();
-        let repo_custom: Vec<&crate::project::CustomRule> = custom
-            .iter()
-            .filter(|c| c.applies_to_repo(repo))
-            .collect();
+        let repo_custom: Vec<&crate::project::CustomRule> =
+            custom.iter().filter(|c| c.applies_to_repo(repo)).collect();
         if repo_rules.is_empty() && repo_custom.is_empty() {
             continue;
         }
@@ -7642,14 +9681,19 @@ async fn emit_project_local(
             }));
             continue;
         };
-        let clone_root = if override_path
-            .as_deref()
-            .map(|p| !p.trim().is_empty())
-            .unwrap_or(false)
-        {
-            None
-        } else {
-            workspace_root.as_deref().map(std::path::Path::new)
+        let clone_root = match crate::client_source::resolution::clone_root_for(
+            &state,
+            repo,
+            override_path.as_deref(),
+            workspace_root.as_deref(),
+        ) {
+            Ok(root) => root,
+            Err(refusal) => {
+                results.push(serde_json::json!({
+                    "repo": repo, "ok": false, "code": refusal.code, "message": refusal.message
+                }));
+                continue;
+            }
         };
         let msg = format!("chore(governance): re-emit Camerata ruleset to {repo}");
         match crate::workspace::apply_local(
@@ -7676,8 +9720,7 @@ async fn emit_project_local(
                     // GAP-2 chokepoint: gate the governance PR's metadata (auditable bypass —
                     // machine-generated title/body). A HARD-BLOCK here would strand the
                     // already-emitted + pushed branch, so we record a bypass rather than block.
-                    let vcs_config =
-                        process_rule_config_for(&state, &active_project_id(&state));
+                    let vcs_config = process_rule_config_for(&state, &active_project_id(&state));
                     if let Ok(Some(record)) = crate::vcs_choke::gated_pr_or_bypass(
                         &vcs_config,
                         &title,
@@ -7775,7 +9818,7 @@ async fn adopt_story(
     Json(req): Json<AdoptReq>,
 ) -> Result<Json<CanonicalStory>, AppError> {
     let reference = ExternalRef {
-        provider: state.provider.provider.kind(),
+        provider: state.provider.current().provider.kind(),
         external_id: req.external_id.clone(),
         container: req.container.clone(),
         url: String::new(),
@@ -7783,6 +9826,7 @@ async fn adopt_story(
     };
     let story = state
         .provider
+        .current()
         .provider
         .ingest_story(&reference)
         .await
@@ -7894,7 +9938,7 @@ async fn decompose_propose(
         .map_err(AppError)?
         .ok_or_else(|| AppError::not_found(anyhow::anyhow!("story not found: {story_id}")))?;
     // AI decomposition (grounded children), with the deterministic propose as fallback.
-    let llm = state.llm();
+    let llm = state.step_llm().map_err(backend_refused)?;
     // Decomposition is a NON-FLEET step: model from the active project's per-step config.
     let model = step_model(&state, crate::project::StepKind::Decomposition);
     let grounding = state.project_grounding().await;
@@ -7933,7 +9977,7 @@ async fn suggest_clarifications(
         "Story: {}\n\nDescription: {}",
         story.title, story.description
     );
-    let llm = state.llm();
+    let llm = state.step_llm().map_err(backend_refused)?;
     // Clarification authoring is a NON-FLEET step: model from the active project's per-step
     // config (DEFAULT_MODEL floor only when there is no active project).
     let model = step_model(&state, crate::project::StepKind::Clarification);
@@ -8072,15 +10116,31 @@ async fn draft_routine_prompt(
         "Permission scope: {}\n\nWhat the user wants:\n{}",
         req.scope, req.intent
     );
+    let scaffold = || {
+        Json(crate::routine::DraftPromptResp {
+            prompt: crate::routine::scaffold_prompt(
+                &req.intent,
+                &crate::routine::RoutineScope::from_legacy_string(&req.scope),
+            ),
+            authored_by: "scaffold".to_string(),
+        })
+    };
+    // The step runs on the active project's backend. An `Api` project with no key is REFUSED
+    // (never run on the subscription); the form still gets the deterministic scaffold, which
+    // is labelled `authored_by: scaffold` so it is never mistaken for a model draft.
+    let Ok(llm) = state.step_llm() else {
+        return scaffold();
+    };
+    let llm = std::sync::Arc::new(llm);
     let completer = crate::llm::build_completer(
         &req.model,
         &state.model_registry,
         state.credential_store.as_ref(),
-        std::sync::Arc::new(state.llm()),
+        llm.clone(),
         state.rate_limiter.clone(),
         &state.settings.provider_policy(),
     )
-    .unwrap_or_else(|_| std::sync::Arc::new(state.llm()));
+    .unwrap_or(llm);
     match completer
         .complete(
             crate::llm::LlmRequest::new(user)
@@ -8093,13 +10153,7 @@ async fn draft_routine_prompt(
             prompt: resp.text,
             authored_by: "claude".to_string(),
         }),
-        _ => Json(crate::routine::DraftPromptResp {
-            prompt: crate::routine::scaffold_prompt(
-                &req.intent,
-                &crate::routine::RoutineScope::from_legacy_string(&req.scope),
-            ),
-            authored_by: "scaffold".to_string(),
-        }),
+        _ => scaffold(),
     }
 }
 
@@ -8211,7 +10265,9 @@ async fn raise_escalation(
         .into_iter()
         .find(|r| r.id == req.routine_id)
         .map(|r| r.name)
-        .ok_or_else(|| AppError::not_found(anyhow::anyhow!("routine not found: {}", req.routine_id)))?;
+        .ok_or_else(|| {
+            AppError::not_found(anyhow::anyhow!("routine not found: {}", req.routine_id))
+        })?;
     Ok(Json(state.escalations.raise_deduped(req, &name)))
 }
 
@@ -8246,15 +10302,19 @@ async fn chat_escalation(
         None => crate::escalation::chat_system_prompt(&esc),
     };
     let user = crate::escalation::chat_user_prompt(&esc, &req.message);
+    // The review chat is grounded in the active project, so it runs on THAT project's backend
+    // (the chat setting when there is none), not on the keyless CLI floor; `Api` with no key
+    // refuses rather than downgrading.
+    let chat_llm = state.step_llm().map_err(backend_refused)?;
     let completer = crate::llm::build_completer(
         &req.model,
         &state.model_registry,
         state.credential_store.as_ref(),
-        std::sync::Arc::new(state.llm()),
+        std::sync::Arc::new(chat_llm.clone()),
         state.rate_limiter.clone(),
         &state.settings.provider_policy(),
     )
-    .unwrap_or_else(|_| std::sync::Arc::new(state.llm()));
+    .unwrap_or_else(|_| std::sync::Arc::new(chat_llm));
     let reply = match completer
         .complete(
             crate::llm::LlmRequest::new(user)
@@ -8301,7 +10361,7 @@ async fn answer_escalation(
     // Translate the human answer into a structured resume payload via the real LLM seam
     // (model-selectable, with a deterministic fallback inside translate_answer_ai).
     let driver = crate::escalation::LlmTranslator {
-        llm: state.llm(),
+        llm: state.step_llm().map_err(backend_refused)?,
         // MULTI-REPO READ: let the translator read across ALL the active project's repo clones.
         repo_dirs: state.active_repo_dirs(),
     };
@@ -8398,7 +10458,9 @@ async fn answer_escalation(
                             Err(reason) => {
                                 return Err(AppError::with_status(
                                     StatusCode::CONFLICT,
-                                    anyhow::anyhow!("could not resume run from checkpoint: {reason}"),
+                                    anyhow::anyhow!(
+                                        "could not resume run from checkpoint: {reason}"
+                                    ),
                                 ));
                             }
                         }
@@ -8438,15 +10500,36 @@ async fn delete_routine(
     if state.routines.delete(&id) {
         Ok(Json(serde_json::json!({ "deleted": id })))
     } else {
-        Err(AppError::not_found(anyhow::anyhow!("routine not found: {id}")))
+        Err(AppError::not_found(anyhow::anyhow!(
+            "routine not found: {id}"
+        )))
     }
 }
 
 // ── AI: model provider ────────────────────────────────────────────────────────
 
+/// The label (`anthropic/cli` or `anthropic/api`) for the backend the CHAT actually runs on, from
+/// the same selection the chat uses ([`AppState::chat_llm`]), plus the refusal reason when the
+/// setting is `Api` but no key is configured (the label then still names the SETTING, so it is
+/// never claiming a transport the chat will not use).
+fn chat_backend_label(state: &AppState) -> (String, Option<String>) {
+    match state.chat_llm() {
+        Ok(llm) => (llm.backend_label(), None),
+        Err(reason) => {
+            // `Blocked` only arises for the Api setting with no key: name the setting.
+            let transport = match state.settings.chat_backend() {
+                crate::llm::ProjectBackend::Api => "api",
+                crate::llm::ProjectBackend::Cli => "cli",
+            };
+            (format!("anthropic/{transport}"), Some(reason))
+        }
+    }
+}
+
 /// The models the UI offers in its selector.
-async fn list_models() -> Json<serde_json::Value> {
-    let models: Vec<_> = crate::llm::MODELS
+async fn list_models(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let (backend, backend_error) = chat_backend_label(&state);
+    let models: Vec<_> = crate::llm::models()
         .iter()
         .map(|m| {
             serde_json::json!({
@@ -8461,21 +10544,30 @@ async fn list_models() -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "models": models,
         "default": crate::llm::DEFAULT_MODEL,
-        "backend": crate::llm::Llm::from_env().backend_label(),
+        "backend": backend,
+        "backend_error": backend_error,
     }))
 }
 
-/// `GET /api/models/registry` — return the full model registry (Claude static + cached
-/// OpenRouter entries). The response carries an `openrouter_fetched` flag; when `false`
-/// the client can prompt the user to add an OpenRouter key and call the refresh endpoint.
+/// `GET /api/models/registry` — return the full model registry: OpenRouter cached
+/// entries plus a Claude portion that is BACKEND-AWARE (Feature A, see
+/// `docs/design/2026-08-27_backend-safety-and-live-models.md`) — the live Anthropic
+/// `/v1/models` list when the API backend is active with a key and that fetch has
+/// succeeded, else the hardcoded `CLAUDE_REGISTRY_MODELS` catalog (which is also what the
+/// CLI backend always gets, since the CLI/subscription model set is not the API's).
+/// `openrouter_fetched`/`anthropic_fetched` flags let the client prompt for a key + call
+/// the matching refresh endpoint when a portion has never been populated.
 async fn get_model_registry(
     State(state): State<AppState>,
 ) -> Json<crate::model_registry::RegistryResp> {
-    let models = state.model_registry.all_entries();
+    let use_live_anthropic = use_live_anthropic_models(&state);
+    let models = state.model_registry.entries_for_backend(use_live_anthropic);
     let openrouter_fetched = state.model_registry.openrouter_fetched();
+    let anthropic_fetched = state.model_registry.anthropic_fetched();
     Json(crate::model_registry::RegistryResp {
         models,
         openrouter_fetched,
+        anthropic_fetched,
     })
 }
 
@@ -8490,10 +10582,40 @@ async fn refresh_model_registry(
         .model_registry
         .try_refresh_from_store(state.credential_store.as_ref())
         .await;
-    let models = state.model_registry.all_entries();
+    let use_live_anthropic = use_live_anthropic_models(&state);
+    let models = state.model_registry.entries_for_backend(use_live_anthropic);
     let openrouter_count = models.iter().filter(|e| e.provider == "openrouter").count();
     Json(crate::model_registry::RefreshResp {
         openrouter_count,
+        attempted,
+        models,
+    })
+}
+
+/// `POST /api/models/registry/refresh/anthropic` — (re-)fetch the LIVE Anthropic
+/// `/v1/models` catalog using the Anthropic key stored in the OS keychain (or its
+/// `ANTHROPIC_API_KEY` env fallback, both via `credentials::anthropic_api_key` — see
+/// `try_refresh_anthropic_from_store`). Feature A's manual refresh trigger, mirroring
+/// [`refresh_model_registry`] for OpenRouter. Returns `{ attempted: false,
+/// anthropic_count: 0 }` when no Anthropic key is present; on any fetch error the cache is
+/// set to empty (fail-soft) and the returned registry falls back to the hardcoded
+/// catalog — this endpoint never returns a 5xx for an upstream Anthropic failure.
+async fn refresh_anthropic_registry(
+    State(state): State<AppState>,
+) -> Json<crate::model_registry::AnthropicRefreshResp> {
+    let attempted = state
+        .model_registry
+        .try_refresh_anthropic_from_store(state.credential_store.as_ref())
+        .await;
+    let use_live_anthropic = use_live_anthropic_models(&state);
+    let models = state.model_registry.entries_for_backend(use_live_anthropic);
+    // Count the Claude portion actually being served post-refresh (live if the backend
+    // picked it up, else the hardcoded fallback count) — mirrors how
+    // `refresh_model_registry`'s `openrouter_count` reflects the post-refresh state, not
+    // just the raw fetch size.
+    let anthropic_count = models.iter().filter(|e| e.provider == "claude").count();
+    Json(crate::model_registry::AnthropicRefreshResp {
+        anthropic_count,
         attempted,
         models,
     })
@@ -8551,12 +10673,7 @@ async fn get_model_providers(
     State(state): State<AppState>,
     axum::extract::Query(q): axum::extract::Query<ModelProvidersQuery>,
 ) -> Json<ModelProvidersResp> {
-    let api_key = state
-        .credential_store
-        .get(crate::credentials::OPENROUTER_API_KEY)
-        .ok()
-        .flatten()
-        .filter(|k| !k.trim().is_empty());
+    let api_key = crate::credentials::openrouter_api_key(state.credential_store.as_ref());
     state
         .model_registry
         .ensure_safe_providers_loaded(api_key.as_deref(), &q.model_id)
@@ -8607,10 +10724,13 @@ async fn set_provider_policy_handler(
     Json(req): Json<ProviderPolicyReq>,
 ) -> Json<ProviderPolicyResp> {
     let pinned_provider = req.pinned_provider.filter(|p| !p.trim().is_empty());
-    let updated = state.settings.set_provider_policy(camerata_llm::provider_policy::ProviderPolicy {
-        safe_mode: req.safe_mode,
-        pinned_provider,
-    });
+    let updated =
+        state
+            .settings
+            .set_provider_policy(camerata_llm::provider_policy::ProviderPolicy {
+                safe_mode: req.safe_mode,
+                pinned_provider,
+            });
     Json(ProviderPolicyResp {
         safe_mode: updated.provider_policy.safe_mode,
         pinned_provider: updated.provider_policy.pinned_provider,
@@ -8703,7 +10823,11 @@ pub(crate) fn render_chat_prompt(history: &[ChatTurn], prompt: &str) -> String {
 /// cleared selector or a cleared setting falls through to the next tier. Pure (no I/O) so the
 /// precedence is unit-testable.
 pub fn resolve_chat_model(req_model: Option<&str>, app_chat_model: Option<&str>) -> String {
-    let pick = |m: Option<&str>| m.map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
+    let pick = |m: Option<&str>| {
+        m.map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    };
     pick(req_model)
         .or_else(|| pick(app_chat_model))
         .unwrap_or_else(|| crate::llm::DEFAULT_MODEL.to_string())
@@ -8727,11 +10851,14 @@ async fn chat(
     let model = resolve_chat_model(Some(&req.model), state.settings.get().chat_model.as_deref());
     // Route to the right LlmPort: OpenRouter for openrouter-provider models, Anthropic for all
     // others. Returns an error when the model is OpenRouter-provider but no key is set.
+    // The Anthropic side runs on the transport chosen in Settings (Chat backend), with the key
+    // resolved now; `Api` with no key refuses rather than silently downgrading to the CLI.
+    let chat_llm = state.chat_llm().map_err(backend_refused)?;
     let completer = crate::llm::build_completer(
         &model,
         &state.model_registry,
         state.credential_store.as_ref(),
-        std::sync::Arc::new(state.llm()),
+        std::sync::Arc::new(chat_llm),
         state.rate_limiter.clone(),
         &state.settings.provider_policy(),
     )
@@ -8756,54 +10883,88 @@ async fn usage(State(state): State<AppState>) -> Json<crate::usage_ledger::Usage
 
 // ── local workspace (checkouts) ───────────────────────────────────────────────
 
-/// Whether an Anthropic API key is available for the `api` backend. The key can live in
-/// EITHER the keychain (the `anthropic_api_key` credential) OR the `ANTHROPIC_API_KEY`
-/// env var. Startup + on-save hydration mirrors the keychain into the env var, so the env
-/// check usually suffices; the keychain is checked too so this is correct even before any
-/// hydration has run.
-fn anthropic_api_key_present(store: &dyn crate::credentials::CredentialStore) -> bool {
-    // Keychain-stored key.
-    if let Ok(Some(k)) = store.get(crate::credentials::ANTHROPIC_API_KEY) {
-        if !k.trim().is_empty() {
-            return true;
-        }
-    }
-    // Env var (back-compat: existing dotenv/CI setups keep working).
-    std::env::var("ANTHROPIC_API_KEY")
-        .ok()
-        .map(|k| !k.trim().is_empty())
-        .unwrap_or(false)
+/// Whether an Anthropic API key is available for the `api` backend: exactly whether
+/// [`crate::credentials::anthropic_api_key`] (the one resolver every model client uses: the key
+/// saved in the app first, the `ANTHROPIC_API_KEY` env var as the fallback) finds one. The gate
+/// and the clients share that function, so "the UI says the key is present" and "the call has
+/// the key" cannot disagree.
+pub(crate) fn anthropic_api_key_present(store: &dyn crate::credentials::CredentialStore) -> bool {
+    crate::credentials::anthropic_api_key(store).is_some()
 }
 
-/// The effective LLM backend the app will use: the stored setting if present, else the
-/// current `CAMERATA_LLM_BACKEND` env var, else the `"cli"` default. Mirrors the precedence
-/// the boot-time hydration establishes (setting > `.env` > default).
-fn effective_llm_backend(settings: &crate::settings::SettingsStore) -> String {
-    settings
-        .llm_backend()
-        .or_else(|| {
-            std::env::var("CAMERATA_LLM_BACKEND")
-                .ok()
-                .filter(|b| !b.trim().is_empty())
+/// Whether the model-registry picker should be served the LIVE Anthropic `/v1/models`
+/// list rather than the hardcoded `CLAUDE_REGISTRY_MODELS` catalog. `true` exactly when the
+/// global CHAT backend (`settings.chat_backend` — see
+/// `docs/design/2026-09-22_per-project-backend.md`) is `Api` AND an Anthropic key is
+/// present — the CLI backend always gets the hardcoded list regardless of this check (the
+/// CLI/subscription model set is not the API `/v1/models` set), and
+/// `ModelRegistry::claude_entries_for_backend` separately fails soft to hardcoded even when
+/// this returns `true`, if the live cache hasn't been populated yet or the last fetch
+/// failed. This is deliberately keyed off the CHAT setting, not any project's: the model
+/// picker this feeds is a cross-project/app-level surface, so it mirrors the one other
+/// app-level backend setting rather than an arbitrary project's.
+fn use_live_anthropic_models(state: &AppState) -> bool {
+    state.settings.chat_backend() == crate::llm::ProjectBackend::Api
+        && anthropic_api_key_present(state.credential_store.as_ref())
+}
+
+/// Resolve the compliance-safety backend decision (see
+/// `docs/design/2026-09-22_per-project-backend.md`) for `project`. Centralizes the
+/// two-input gather — the PROJECT's own `backend` setting and `anthropic_api_key_present`
+/// (keychain or env) — so every enforcement seam (the audit, the gov-dev agent driver)
+/// assembles the resolution identically and can't drift. `project = None` (no active/target
+/// project) is treated as `ProjectBackend::Cli` — the same zero-setup default a
+/// freshly-created project gets, so a project-less call is never MORE restrictive than a
+/// real one either.
+fn resolve_backend_for_project(
+    state: &AppState,
+    project: Option<&crate::project::Project>,
+) -> crate::llm::BackendResolution {
+    let has_api_key = anthropic_api_key_present(state.credential_store.as_ref());
+    let backend = project.map(|p| p.backend).unwrap_or_default();
+    crate::llm::resolve_backend(backend, has_api_key)
+}
+
+/// Every rule's PROJECT-level chosen alternative option, keyed by uppercased rule id —
+/// gathered across `project.ruleset`'s three rule lists (repo-local `selections`, the
+/// `cross_repo` set, and `process`). Feeds the audit-integrated alternative-recommendation
+/// feature (`onboard::build_rule_alternatives`, `resolve_fix`'s chosen-option fallback) so
+/// the "currently selected" marker and the Fix-text join both read the SAME source of truth
+/// as everything else that resolves a rule's directive (`Rule::resolved_option`). A rule with
+/// no persisted `chosen_option` is simply absent from the map — callers fall back to the
+/// corpus rule's own `default_option` from there.
+fn project_chosen_options(
+    project: &crate::project::Project,
+) -> std::collections::HashMap<String, String> {
+    project
+        .ruleset
+        .selections
+        .iter()
+        .chain(&project.ruleset.cross_repo)
+        .chain(&project.ruleset.process)
+        .filter_map(|s| {
+            s.chosen_option
+                .as_ref()
+                .map(|opt| (s.rule_id.trim().to_ascii_uppercase(), opt.clone()))
         })
-        .unwrap_or_else(|| "cli".to_string())
+        .collect()
 }
 
 /// The `GET /api/settings` response: the persisted [`crate::settings::Settings`] fields, plus
-/// two derived fields the settings UI needs — the EFFECTIVE `llm_backend` (stored, else env,
-/// else `cli`) and whether an Anthropic API key is present (for the api-backend warning).
+/// whether an Anthropic API key is present (for the api-backend warning).
 ///
-/// The settings fields are listed explicitly (not `#[serde(flatten)]`) so the top-level
-/// `llm_backend` — the EFFECTIVE value — is the single authoritative one, with no duplicate
-/// JSON key from the stored `Settings::llm_backend`.
+/// `chat_backend` (`docs/design/2026-09-22_per-project-backend.md`) is the GLOBAL backend
+/// used ONLY by the project-less chat assistant — it has no bearing on any project's own
+/// scan/dev-loop backend, which lives on `Project.backend` instead (see
+/// `GET`/the per-project `backend` field on each project response).
 #[derive(serde::Serialize)]
 struct SettingsResp {
     workspace_root: Option<String>,
     repo_paths: std::collections::HashMap<String, String>,
     chat_model: Option<String>,
-    /// The effective backend (`"cli"` | `"api"`) after applying precedence
-    /// (stored setting > env > default). This is the value the UI reads and toggles.
-    llm_backend: String,
+    /// The global chat assistant's backend (`"cli"` | `"api"`). This is the value the
+    /// Settings UI reads and toggles; it affects ONLY the chatbox, never a project.
+    chat_backend: crate::llm::ProjectBackend,
     /// Whether an Anthropic API key is available — in the keychain (the
     /// `anthropic_api_key` credential) or the `ANTHROPIC_API_KEY` env var. See
     /// [`anthropic_api_key_present`].
@@ -8815,16 +10976,15 @@ struct SettingsResp {
     pinned_provider: Option<String>,
 }
 
-/// The current app settings (incl. the workspace root), plus the effective LLM backend and
+/// The current app settings (incl. the workspace root), the global chat backend, and
 /// whether an Anthropic API key is present.
 async fn get_settings(State(state): State<AppState>) -> Json<SettingsResp> {
     let settings = state.settings.get();
-    let llm_backend = effective_llm_backend(&state.settings);
     Json(SettingsResp {
         workspace_root: settings.workspace_root,
         repo_paths: settings.repo_paths,
         chat_model: settings.chat_model,
-        llm_backend,
+        chat_backend: settings.chat_backend,
         api_key_present: anthropic_api_key_present(state.credential_store.as_ref()),
         safe_mode: settings.provider_policy.safe_mode,
         pinned_provider: settings.provider_policy.pinned_provider,
@@ -8859,38 +11019,38 @@ async fn set_chat_model(
 }
 
 #[derive(serde::Deserialize)]
-struct LlmBackendReq {
+struct ChatBackendReq {
     backend: String,
 }
 
-/// Set the APP-LEVEL LLM backend (`"cli"` | `"api"`). Persists the choice to the settings
-/// store, which is the single source of truth the driver-selection path reads at run-build
-/// time (via [`AppState::settings`]). Rejects any value other than `"cli"`/`"api"` with 400.
-/// Returns the stored backend plus `api_key_present` so the UI can immediately warn when
-/// `api` is selected with no Anthropic key.
+/// `POST /api/settings/chat-backend` — set the GLOBAL CHAT backend (`"cli"` | `"api"`), used
+/// ONLY by the project-less chatbox assistant (`docs/design/2026-09-22_per-project-backend.md`).
+/// Persists the choice to the settings store, which is the single source of truth the chat
+/// path reads at call time (via [`AppState::settings`]). Rejects any value other than
+/// `"cli"`/`"api"` with 400. Returns the stored backend plus `api_key_present` so the UI can
+/// immediately warn when `api` is selected with no Anthropic key.
 ///
-/// ROUTES-9: this handler used to `std::env::set_var("CAMERATA_LLM_BACKEND", ...)` so a
-/// runtime backend switch took effect without a restart. That mutated process-global env
-/// from a request-handler thread while worker threads called `getenv` on the same var —
-/// undefined behaviour on POSIX, and the concurrent writer made the credential env-fallback
-/// test flaky. The env write is gone: the effective backend is now read from the persisted
-/// settings store (see `effective_backend_from`), so a runtime switch still takes effect
-/// without a restart AND without touching process env.
-async fn set_llm_backend(
+/// Never touches process env: the effective backend is read straight from the persisted
+/// settings store, so a runtime switch takes effect immediately without a restart AND
+/// without the POSIX `set_var`/`getenv` race a prior env-hydrated design had.
+async fn set_chat_backend_handler(
     State(state): State<AppState>,
-    Json(req): Json<LlmBackendReq>,
+    Json(req): Json<ChatBackendReq>,
 ) -> impl IntoResponse {
-    let backend = req.backend.trim().to_ascii_lowercase();
-    if backend != "cli" && backend != "api" {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({
-                "ok": false,
-                "message": format!("invalid backend: {:?} (expected \"cli\" or \"api\")", req.backend)
-            })),
-        );
-    }
-    state.settings.set_llm_backend(Some(backend.clone()));
+    let backend = match req.backend.trim().to_ascii_lowercase().as_str() {
+        "cli" => crate::llm::ProjectBackend::Cli,
+        "api" => crate::llm::ProjectBackend::Api,
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "ok": false,
+                    "message": format!("invalid backend: {:?} (expected \"cli\" or \"api\")", req.backend)
+                })),
+            );
+        }
+    };
+    state.settings.set_chat_backend(backend);
     (
         StatusCode::OK,
         Json(serde_json::json!({
@@ -8942,7 +11102,9 @@ async fn set_credential(
             })),
         );
     }
-    if req.value.is_empty() {
+    // Whitespace-only counts as empty: the resolver treats a blank value as absent, so saving
+    // one would show "set" in the UI while no model call could ever use it.
+    if req.value.trim().is_empty() {
         return (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({
@@ -8963,15 +11125,32 @@ async fn set_credential(
     // OpenRouter refresh trigger 2 of 3 (see the block above `serve()`): a freshly-saved
     // OpenRouter key should populate the model picker immediately, not after a restart or
     // a manual refresh-endpoint POST. No-op for every other credential name.
-    trigger_openrouter_refresh_if_needed(&name, &state.model_registry, state.credential_store.clone());
+    trigger_openrouter_refresh_if_needed(
+        &name,
+        &state.model_registry,
+        state.credential_store.clone(),
+    );
+    // Live Anthropic model-registry refresh (Feature A), trigger 2 of 3 (credential-save):
+    // a freshly-saved Anthropic key should populate the LIVE `/v1/models` picker list
+    // immediately, not after a restart or a manual refresh-endpoint POST. No-op for every
+    // other credential name.
+    trigger_anthropic_refresh_if_needed(
+        &name,
+        &state.model_registry,
+        state.credential_store.clone(),
+    );
+    // The GitHub provider carries its token: re-select it so a token saved now is used now.
+    reselect_provider_if_github(&name, &state);
     // ROUTES-9: this handler used to `std::env::set_var("ANTHROPIC_API_KEY", ...)` so a
     // freshly-saved key took effect for the `api` backend without a restart. That mutated
     // process-global env from a request-handler thread while worker threads read the same var
     // via `getenv` — undefined behaviour on POSIX, and the concurrent writer made the
-    // credential env-fallback test flaky. The env write is gone: the driver-selection path
-    // now reads the Anthropic key from the credential store (this same store) with an env
-    // fallback for back-compat, so a freshly-saved key takes effect without a restart AND
-    // without touching process env. See `anthropic_api_backend_key`.
+    // credential env-fallback test flaky. The env write is gone, and nothing needs it:
+    // EVERY model client (audit/rescan `Llm`, chat and fleet agent drivers, the live model
+    // list, the gate) reads the key from this same store through
+    // `credentials::anthropic_api_key` when it is built (env only as the fallback), so a
+    // freshly-saved or replaced key takes effect on the next call without a restart AND
+    // without touching process env.
     // Return the masked form so the UI can confirm what was stored.
     let masked = state
         .credential_store
@@ -8983,6 +11162,52 @@ async fn set_credential(
         StatusCode::OK,
         Json(serde_json::json!({ "ok": true, "masked": masked })),
     )
+}
+
+/// The refusal for a model step whose backend setting is `Api` with no key configured: a 409
+/// that carries the reason, never a silent fallback to the CLI.
+fn backend_refused(message: String) -> AppError {
+    AppError::with_status(StatusCode::CONFLICT, anyhow::anyhow!(message))
+}
+
+/// Re-select the work-tracker provider when the `github_token` credential changed (saved or
+/// removed), so the running app uses the new token with no restart. No-op for every other name.
+fn reselect_provider_if_github(name: &str, state: &AppState) {
+    if name == crate::credentials::GITHUB_TOKEN {
+        state.provider.reselect(state.credential_store.as_ref());
+    }
+}
+
+/// `DELETE /api/credentials/:name` — remove a saved credential from the OS keychain.
+///
+/// A credential saved in the app takes precedence over its env var, so this is the way to hand
+/// a credential back to the env fallback (or to remove it entirely). Removing one that is not
+/// set succeeds. Response: `{ "ok": true }`.
+async fn delete_credential(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> impl IntoResponse {
+    use crate::credentials::ALL_CREDENTIALS;
+    if !ALL_CREDENTIALS.contains(&name.as_str()) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "ok": false,
+                "message": format!("unknown credential name: {name}")
+            })),
+        );
+    }
+    if let Err(e) = state.credential_store.delete(&name) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "ok": false,
+                "message": format!("failed to remove credential: {e}")
+            })),
+        );
+    }
+    reselect_provider_if_github(&name, &state);
+    (StatusCode::OK, Json(serde_json::json!({ "ok": true })))
 }
 
 /// `GET /api/credentials` — list all known credentials with their set-status and
@@ -9010,7 +11235,7 @@ async fn list_credentials(State(state): State<AppState>) -> Json<Vec<CredentialS
 async fn checkout_status(
     State(state): State<AppState>,
     Path(id): Path<String>,
-) -> Result<Json<Vec<crate::workspace::RepoCheckout>>, AppError> {
+) -> Result<Json<Vec<crate::client_source::resolution::RepoCheckoutView>>, AppError> {
     let project = state
         .projects
         .get(&id)
@@ -9018,21 +11243,11 @@ async fn checkout_status(
     // Override-aware (issue #33/#38): resolve each repo via its per-repo path override first,
     // falling back to `<workspace_root>/<owner>/<repo>`. A repo can resolve via an override even
     // when no workspace root is set, so we do NOT hard-fail on a missing workspace root — repos
-    // that resolve via neither report not-cloned with a helpful reason instead.
-    let workspace_root = state.settings.workspace_root();
-    let mut out = Vec::with_capacity(project.repos.len());
-    for repo in &project.repos {
-        let override_path = state.settings.repo_path(repo);
-        out.push(
-            crate::workspace::checkout_status_resolved(
-                override_path.as_deref(),
-                workspace_root.as_deref(),
-                repo,
-            )
-            .await,
-        );
-    }
-    Ok(Json(out))
+    // that resolve via neither report not-cloned with a helpful reason instead. Each repo also
+    // carries its source status (present / deleted / unresolved / mismatch).
+    Ok(Json(
+        crate::client_source::resolution::checkout_views(&state, &project).await,
+    ))
 }
 
 /// The effective workspace root (fix for the "no workspace folder chosen yet" dead end): the
@@ -9058,7 +11273,7 @@ fn effective_workspace_root(state: &AppState, project: &crate::project::Project)
 async fn checkout_project(
     State(state): State<AppState>,
     Path(id): Path<String>,
-) -> Result<Json<Vec<crate::workspace::RepoCheckout>>, AppError> {
+) -> Result<Json<Vec<crate::client_source::resolution::RepoCheckoutView>>, AppError> {
     let project = state
         .projects
         .get(&id)
@@ -9078,6 +11293,26 @@ async fn checkout_project(
     let root = std::path::PathBuf::from(&root);
     let mut out = Vec::with_capacity(project.repos.len());
     for repo in &project.repos {
+        // A repo whose source the operator DELETED stays deleted: updating the others must not
+        // quietly re-clone it as a side effect. "Re-fetch source" is the deliberate way back.
+        if let Some(record) =
+            crate::client_source::status::deleted_record(&state, &project.id, repo)
+        {
+            let status =
+                crate::client_source::status::source_status(&state, &project.id, repo).await;
+            out.push(crate::client_source::resolution::RepoCheckoutView::new(
+                crate::workspace::RepoCheckout {
+                    repo: repo.clone(),
+                    cloned: false,
+                    path: record.path.clone(),
+                    branch: None,
+                    dirty: false,
+                    detail: String::new(),
+                },
+                status,
+            ));
+            continue;
+        }
         // If the repo ALREADY resolves (override-aware git checkout with a matching origin),
         // REFRESH it (pull/fetch its current branch) instead of just re-reporting stale status —
         // "Clone / update all repos" must actually update repos that are already linked/cloned, not
@@ -9090,15 +11325,19 @@ async fn checkout_project(
             repo,
         )
         .await;
-        if resolution.resolved {
+        let checkout = if resolution.resolved {
             let dir = resolution
                 .path
                 .map(std::path::PathBuf::from)
                 .unwrap_or_else(|| crate::workspace::repo_dir(&root, repo));
-            out.push(crate::workspace::refresh_resolved(&dir, repo, &token).await);
-            continue;
-        }
-        out.push(crate::workspace::clone_or_pull(&root, repo, &token).await);
+            crate::workspace::refresh_resolved(&dir, repo, &token).await
+        } else {
+            crate::workspace::clone_or_pull(&root, repo, &token).await
+        };
+        let source = crate::client_source::status::source_status(&state, &project.id, repo).await;
+        out.push(crate::client_source::resolution::RepoCheckoutView::new(
+            checkout, source,
+        ));
     }
     Ok(Json(out))
 }
@@ -9526,7 +11765,8 @@ async fn workitems_pull(State(state): State<AppState>) -> Json<serde_json::Value
         // issues-list response omits (root cause of every issue showing "(no parent)").
         // FALL BACK to the parent-less REST list on any GraphQL failure (auth scope, API
         // error, network) so the pull still works — just without parent grouping.
-        let fetched = match crate::github_issues::list_open_issues_with_parents(repo, &token).await {
+        let fetched = match crate::github_issues::list_open_issues_with_parents(repo, &token).await
+        {
             Ok(issues) => Ok(issues),
             Err(_) => crate::github_issues::list_open_issues(repo, &token).await,
         };
@@ -9573,9 +11813,11 @@ async fn workitems_refresh(
     State(state): State<AppState>,
     Json(req): Json<WorkItemRefreshReq>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let token = state
-        .github_token()
-        .ok_or_else(|| AppError(anyhow::anyhow!("no GitHub token — set CAMERATA_GITHUB_TOKEN")))?;
+    let token = state.github_token().ok_or_else(|| {
+        AppError(anyhow::anyhow!(
+            "no GitHub token — set CAMERATA_GITHUB_TOKEN"
+        ))
+    })?;
     let (repo, number) = parse_github_work_item_id(&req.work_item_id)?;
     let detail = crate::github_issues::get_issue_detail(&repo, number, &token)
         .await
@@ -9597,11 +11839,15 @@ async fn workitems_comment(
     State(state): State<AppState>,
     Json(req): Json<WorkItemCommentReq>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let token = state
-        .github_token()
-        .ok_or_else(|| AppError(anyhow::anyhow!("no GitHub token — set CAMERATA_GITHUB_TOKEN")))?;
+    let token = state.github_token().ok_or_else(|| {
+        AppError(anyhow::anyhow!(
+            "no GitHub token — set CAMERATA_GITHUB_TOKEN"
+        ))
+    })?;
     if req.body.trim().is_empty() {
-        return Err(AppError::bad_request(anyhow::anyhow!("comment body must not be empty")));
+        return Err(AppError::bad_request(anyhow::anyhow!(
+            "comment body must not be empty"
+        )));
     }
     let (repo, number) = parse_github_work_item_id(&req.work_item_id)?;
     let url = crate::github_issues::comment_on_issue(&repo, number, &req.body, &token)
@@ -9687,9 +11933,11 @@ async fn workitems_assign(
     State(state): State<AppState>,
     Json(req): Json<WorkItemAssignReq>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let token = state
-        .github_token()
-        .ok_or_else(|| AppError(anyhow::anyhow!("no GitHub token — set CAMERATA_GITHUB_TOKEN")))?;
+    let token = state.github_token().ok_or_else(|| {
+        AppError(anyhow::anyhow!(
+            "no GitHub token — set CAMERATA_GITHUB_TOKEN"
+        ))
+    })?;
     if req.assignee.trim().is_empty() {
         return Err(AppError(anyhow::anyhow!("assignee must not be empty")));
     }
@@ -9918,9 +12166,9 @@ fn parse_github_work_item_id(work_item_id: &str) -> Result<(String, u64), AppErr
             "work_item_id repo is not `owner/repo`: `{repo}`"
         )));
     }
-    let number: u64 = num
-        .parse()
-        .map_err(|_| AppError::bad_request(anyhow::anyhow!("work_item_id number is not a u64: `{num}`")))?;
+    let number: u64 = num.parse().map_err(|_| {
+        AppError::bad_request(anyhow::anyhow!("work_item_id number is not a u64: `{num}`"))
+    })?;
     Ok((repo.to_string(), number))
 }
 
@@ -10141,7 +12389,9 @@ fences.";
 /// for a JSON object; if it deviates (e.g. wraps in fences or returns prose), we degrade
 /// gracefully: strip a fenced block if present, else treat the whole text as the reply and
 /// leave the draft unchanged signals (empty strings).
-fn parse_author_response(raw: &str) -> (String, String, String, Vec<crate::clarify::ClarifyOption>) {
+fn parse_author_response(
+    raw: &str,
+) -> (String, String, String, Vec<crate::clarify::ClarifyOption>) {
     let trimmed = raw.trim();
     // Strip a leading/trailing ```json … ``` fence if the model added one.
     let inner = trimmed
@@ -10152,8 +12402,16 @@ fn parse_author_response(raw: &str) -> (String, String, String, Vec<crate::clari
         .map(|s| s.trim())
         .unwrap_or(trimmed);
     if let Ok(v) = serde_json::from_str::<serde_json::Value>(inner) {
-        let title = v.get("title").and_then(|x| x.as_str()).unwrap_or("").to_string();
-        let body = v.get("body").and_then(|x| x.as_str()).unwrap_or("").to_string();
+        let title = v
+            .get("title")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string();
+        let body = v
+            .get("body")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string();
         let reply = v
             .get("reply")
             .and_then(|x| x.as_str())
@@ -10185,7 +12443,12 @@ fn parse_author_response(raw: &str) -> (String, String, String, Vec<crate::clari
         return (title, body, reply, options);
     }
     // Not JSON: keep the raw text as the conversational reply; leave the draft untouched.
-    (String::new(), String::new(), trimmed.to_string(), Vec::new())
+    (
+        String::new(),
+        String::new(),
+        trimmed.to_string(),
+        Vec::new(),
+    )
 }
 
 /// Build the user prompt for the authoring LLM from the prior chat plus the new message.
@@ -10197,7 +12460,11 @@ fn build_author_prompt(chat: &[crate::uow::AuthorChatMessage], new_message: &str
     } else {
         p.push_str("Conversation so far:\n");
         for m in chat {
-            let who = if m.role == "ai" { "Assistant" } else { "Author" };
+            let who = if m.role == "ai" {
+                "Assistant"
+            } else {
+                "Author"
+            };
             p.push_str(&format!("{who}: {}\n", m.text));
         }
         p.push_str("\nNew message from the author:\n");
@@ -10222,14 +12489,16 @@ async fn uow_author(
 ) -> Result<Json<crate::uow::UnitOfWork>, AppError> {
     let message = req.message.trim().to_string();
     if message.is_empty() {
-        return Err(AppError::bad_request(anyhow::anyhow!("message must not be empty")));
+        return Err(AppError::bad_request(anyhow::anyhow!(
+            "message must not be empty"
+        )));
     }
     // Snapshot the prior chat + draft so we can preserve the draft if the LLM is off/fails.
     let before = state.uow.get_or_create(&story_id);
     let prior = before.authoring.unwrap_or_default();
     let prompt = build_author_prompt(&prior.chat, &message);
 
-    let llm = state.llm();
+    let llm = state.step_llm().map_err(backend_refused)?;
     // Story authoring is a NON-FLEET step: its model comes from the active project's
     // per-step config (no env/const fallback once a project exists). The project-less edge
     // (no active project) is the only place the DEFAULT_MODEL floor applies. An explicit
@@ -10267,8 +12536,16 @@ async fn uow_author(
         Ok(resp) => {
             let (t, b, r, opts) = parse_author_response(&resp.text);
             // Keep the existing draft when the model returned no usable title/body.
-            let title = if t.is_empty() { prior.draft_title.clone() } else { t };
-            let body = if b.is_empty() { prior.draft_body.clone() } else { b };
+            let title = if t.is_empty() {
+                prior.draft_title.clone()
+            } else {
+                t
+            };
+            let body = if b.is_empty() {
+                prior.draft_body.clone()
+            } else {
+                b
+            };
             let reply = if r.is_empty() {
                 "Updated the draft.".to_string()
             } else {
@@ -10280,7 +12557,8 @@ async fn uow_author(
             // Token-less / LLM-off: don't crash; record a clear note and keep the draft.
             let note = format!(
                 "AI drafting is unavailable right now ({}). Your message was saved; configure \
-                 a model (CLI or ANTHROPIC_API_KEY) and try again.",
+                 a model (the Claude Code CLI, or an Anthropic API key added in the app under \
+                 Settings, Chat backend, API, or set as ANTHROPIC_API_KEY) and try again.",
                 e
             );
             (
@@ -10300,14 +12578,9 @@ async fn uow_author(
     // chat reply only (back-compat), posting nothing structured. Story authoring is an
     // LLM text-generation assist (no gate involved).
     if !options.is_empty() {
-        state.clarifications.post_structured(
-            &story_id,
-            &reply,
-            "you",
-            options,
-            false,
-            true,
-        );
+        state
+            .clarifications
+            .post_structured(&story_id, &reply, "you", options, false, true);
     }
 
     let updated = state
@@ -10397,9 +12670,7 @@ async fn uow_publish(
 
     // Link the draft UoW to the work item WITHOUT re-keying it (the work-item ref carries
     // the real owner/repo#num).
-    state
-        .uow
-        .link_work_item(&story_id, &work_item_story_id);
+    state.uow.link_work_item(&story_id, &work_item_story_id);
 
     // ── Optional: create a native GitHub sub-issue link (FAIL SOFT) ───────────────
     //
@@ -10497,7 +12768,9 @@ async fn uow_add_attachment(
     Json(req): Json<AddAttachmentReq>,
 ) -> Result<Json<crate::uow::UnitOfWork>, AppError> {
     if req.name.trim().is_empty() {
-        return Err(AppError::bad_request(anyhow::anyhow!("attachment name must not be empty")));
+        return Err(AppError::bad_request(anyhow::anyhow!(
+            "attachment name must not be empty"
+        )));
     }
     let attachment = crate::uow::UowAttachment {
         name: req.name.trim().to_string(),
@@ -10521,7 +12794,9 @@ async fn uow_get_attachment(
         Some(a) => Json(serde_json::json!({
             "attachment": { "name": a.name, "mime": a.mime, "content": a.content }
         })),
-        None => Json(serde_json::json!({ "ok": false, "error": format!("attachment `{name}` not found") })),
+        None => Json(
+            serde_json::json!({ "ok": false, "error": format!("attachment `{name}` not found") }),
+        ),
     }
 }
 
@@ -10655,7 +12930,8 @@ async fn uow_generate_diagram(
         .with_system(system);
 
     let diagram_text = state
-        .llm()
+        .step_llm()
+        .map_err(backend_refused)?
         .complete(request)
         .await
         .map_err(AppError)?
@@ -10747,10 +13023,16 @@ fn build_mockup_prompt(
         }
     }
     if !authoring.draft_title.trim().is_empty() {
-        p.push_str(&format!("Work item title: {}\n\n", authoring.draft_title.trim()));
+        p.push_str(&format!(
+            "Work item title: {}\n\n",
+            authoring.draft_title.trim()
+        ));
     }
     if !authoring.draft_body.trim().is_empty() {
-        p.push_str(&format!("Work item body:\n{}\n\n", authoring.draft_body.trim()));
+        p.push_str(&format!(
+            "Work item body:\n{}\n\n",
+            authoring.draft_body.trim()
+        ));
     }
     if !authoring.requirements_prompt.trim().is_empty() {
         p.push_str(&format!(
@@ -10829,7 +13111,13 @@ async fn uow_generate_mockup(
         .with_model(model)
         .with_system(system);
 
-    let html = state.llm().complete(request).await.map_err(AppError)?.text;
+    let html = state
+        .step_llm()
+        .map_err(backend_refused)?
+        .complete(request)
+        .await
+        .map_err(AppError)?
+        .text;
 
     // Save as the `mockup.html` attachment (last-writer-wins).
     let updated = state.uow.add_attachment(
@@ -10887,17 +13175,32 @@ fn parse_design_author_response(
         .map(|s| s.trim())
         .unwrap_or(trimmed);
     if let Ok(v) = serde_json::from_str::<serde_json::Value>(inner) {
-        let title = v.get("title").and_then(|x| x.as_str()).unwrap_or("").to_string();
-        let body = v.get("body").and_then(|x| x.as_str()).unwrap_or("").to_string();
-        let reply = v.get("reply").and_then(|x| x.as_str()).unwrap_or("").to_string();
+        let title = v
+            .get("title")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string();
+        let body = v
+            .get("body")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string();
+        let reply = v
+            .get("reply")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string();
         let children = v
             .get("proposed_children")
             .and_then(|x| x.as_array())
             .map(|arr| {
                 arr.iter()
                     .filter_map(|o| {
-                        let node_type =
-                            o.get("node_type").and_then(|x| x.as_str())?.trim().to_string();
+                        let node_type = o
+                            .get("node_type")
+                            .and_then(|x| x.as_str())?
+                            .trim()
+                            .to_string();
                         if node_type.is_empty() {
                             return None;
                         }
@@ -10920,7 +13223,12 @@ fn parse_design_author_response(
             .unwrap_or_default();
         return (title, body, reply, children);
     }
-    (String::new(), String::new(), trimmed.to_string(), Vec::new())
+    (
+        String::new(),
+        String::new(),
+        trimmed.to_string(),
+        Vec::new(),
+    )
 }
 
 /// Validate that `child_type` is an allowed child of `parent_type` in `schema`.
@@ -10976,7 +13284,9 @@ async fn design_blank(
         .map(|Json(r)| (r.root_type, r.draft_parent_id))
         .unwrap_or((None, None));
     let project_id = state.projects.active().map(|p| p.id);
-    let root = state.uow.create_blank_design(root_type, draft_parent_id, project_id);
+    let root = state
+        .uow
+        .create_blank_design(root_type, draft_parent_id, project_id);
     Ok(Json(serde_json::json!({ "design_id": root.story_id })))
 }
 
@@ -11010,7 +13320,9 @@ async fn design_author(
 ) -> Result<Json<crate::uow::UnitOfWork>, AppError> {
     let message = req.message.trim().to_string();
     if message.is_empty() {
-        return Err(AppError::bad_request(anyhow::anyhow!("message must not be empty")));
+        return Err(AppError::bad_request(anyhow::anyhow!(
+            "message must not be empty"
+        )));
     }
     let before = state.uow.get_or_create(&id);
     let prior = before.authoring.clone().unwrap_or_default();
@@ -11057,21 +13369,40 @@ async fn design_author(
     if !repo_dirs.is_empty() {
         request = request.with_repo_read_dirs(repo_dirs);
     }
-    let (title, body, reply, mut proposed) = match state.llm().complete(request).await {
+    let design_llm = state.step_llm().map_err(backend_refused)?;
+    let (title, body, reply, mut proposed) = match design_llm.complete(request).await {
         Ok(resp) => {
             let (t, b, r, children) = parse_design_author_response(&resp.text);
-            let title = if t.is_empty() { prior.draft_title.clone() } else { t };
-            let body = if b.is_empty() { prior.draft_body.clone() } else { b };
-            let reply = if r.is_empty() { "Updated the draft.".to_string() } else { r };
+            let title = if t.is_empty() {
+                prior.draft_title.clone()
+            } else {
+                t
+            };
+            let body = if b.is_empty() {
+                prior.draft_body.clone()
+            } else {
+                b
+            };
+            let reply = if r.is_empty() {
+                "Updated the draft.".to_string()
+            } else {
+                r
+            };
             (title, body, reply, children)
         }
         Err(e) => {
             let note = format!(
                 "AI drafting is unavailable right now ({}). Your message was saved; \
-                 configure a model (CLI or ANTHROPIC_API_KEY) and try again.",
+                 configure a model (the Claude Code CLI, or an Anthropic API key added in the app \
+                 under Settings, Chat backend, API, or set as ANTHROPIC_API_KEY) and try again.",
                 e
             );
-            (prior.draft_title.clone(), prior.draft_body.clone(), note, Vec::new())
+            (
+                prior.draft_title.clone(),
+                prior.draft_body.clone(),
+                note,
+                Vec::new(),
+            )
         }
     };
 
@@ -11090,7 +13421,9 @@ async fn design_author(
         dropped
     };
 
-    state.uow.append_authoring_turn(&id, &message, &reply, &title, &body);
+    state
+        .uow
+        .append_authoring_turn(&id, &message, &reply, &title, &body);
     let updated = state
         .uow
         .set_proposed_and_dropped_children(&id, proposed, dropped);
@@ -11163,7 +13496,9 @@ async fn design_materialize_nodes(
     }
 
     // Clear the proposed_children on the parent after materialization.
-    state.uow.set_proposed_children(&req.parent_draft_id, vec![]);
+    state
+        .uow
+        .set_proposed_children(&req.parent_draft_id, vec![]);
 
     Ok(Json(serde_json::json!({ "node_ids": node_ids })))
 }
@@ -11452,7 +13787,9 @@ async fn design_publish(
             ));
         } else if linked.insert(node.story_id.clone()) {
             // Link the work item onto the UoW once (first successful action for this node).
-            state.uow.link_work_item(&node.story_id, &work_item_story_id);
+            state
+                .uow
+                .link_work_item(&node.story_id, &work_item_story_id);
         }
 
         published.insert((action.repo.clone(), node.story_id.clone()), number);
@@ -11512,8 +13849,7 @@ async fn list_project_designs(
     let mut roots = state.uow.list_design_roots_for_project(&project_id);
     // Newest-first by the root's `updated` timestamp (RFC 3339 strings sort chronologically).
     roots.sort_by(|a, b| b.updated.cmp(&a.updated));
-    let designs: Vec<serde_json::Value> =
-        roots.iter().map(|r| design_summary(&state, r)).collect();
+    let designs: Vec<serde_json::Value> = roots.iter().map(|r| design_summary(&state, r)).collect();
     Json(serde_json::json!({ "designs": designs }))
 }
 
@@ -11560,10 +13896,7 @@ async fn design_set_status(
 /// `DELETE /api/designs/:id` -- delete an ENTIRE design (root + all descendants).
 /// 404 when `:id` is not a design root (a child node is deleted via the
 /// `DELETE /api/designs/:id/nodes/:node_id` route instead). Returns `{ "ok": true }`.
-async fn design_delete(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-) -> Response {
+async fn design_delete(State(state): State<AppState>, Path(id): Path<String>) -> Response {
     if state.uow.get_design_root(&id).is_none() {
         return (
             StatusCode::NOT_FOUND,
@@ -11736,14 +14069,20 @@ async fn uow_intake_ship(
     req: Option<Json<UowIntakeShipReq>>,
 ) -> Response {
     let bad = |msg: String| {
-        (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": msg }))).into_response()
+        (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": msg })),
+        )
+            .into_response()
     };
 
     let Some(token) = state.github_token() else {
         return bad("no GitHub token — set CAMERATA_GITHUB_TOKEN to open a PR".to_string());
     };
 
-    let base_branch = req.and_then(|Json(r)| r.base_branch).filter(|b| !b.trim().is_empty());
+    let base_branch = req
+        .and_then(|Json(r)| r.base_branch)
+        .filter(|b| !b.trim().is_empty());
     let uow = state.uow.get_or_create(&story_id);
     let workspace_root = state.settings.workspace_root();
 
@@ -11788,7 +14127,9 @@ async fn uow_intake_ship(
             };
 
             // Push the branch from its worktree.
-            if let Err(e) = crate::workspace::push_branch(&dir, &scope.repo, &scope_branch, &token).await {
+            if let Err(e) =
+                crate::workspace::push_branch(&dir, &scope.repo, &scope_branch, &token).await
+            {
                 results.push(RepoShipResult {
                     repo: scope.repo.clone(),
                     branch: scope_branch.clone(),
@@ -11804,7 +14145,10 @@ async fn uow_intake_ship(
             let (title, body) = crate::vcs_choke::compliant_machine_pr(
                 &vcs_config,
                 &format!("Camerata: {story_id} ({})", scope.repo),
-                &format!("Opened by Camerata for story `{story_id}` in repo `{}`.", scope.repo),
+                &format!(
+                    "Opened by Camerata for story `{story_id}` in repo `{}`.",
+                    scope.repo
+                ),
                 &numeric_id,
             );
             if let Err(e) = crate::vcs_choke::gated_pr(&vcs_config, &title, &body) {
@@ -11860,7 +14204,11 @@ async fn uow_intake_ship(
         }
 
         let all_ok = results.iter().all(|r| r.ok);
-        return Json(UowIntakeShipResponse { repos: results, all_ok }).into_response();
+        return Json(UowIntakeShipResponse {
+            repos: results,
+            all_ok,
+        })
+        .into_response();
     }
 
     // ── Single-repo fallback: no intake.repos — use the UoW's primary branch ──
@@ -11873,7 +14221,9 @@ async fn uow_intake_ship(
         );
     };
     let Some(repo) = repo_from_story_id(&story_id) else {
-        return bad(format!("could not derive owner/repo from story id `{story_id}`"));
+        return bad(format!(
+            "could not derive owner/repo from story id `{story_id}`"
+        ));
     };
     let override_path = state.settings.repo_path(&repo);
     let Some(dir) = crate::workspace::resolve_uow_worktree(
@@ -11903,13 +14253,27 @@ async fn uow_intake_ship(
     if let Err(e) = crate::vcs_choke::gated_pr(&vcs_config, &title, &body) {
         return bad(format!("VCS-action gate blocked the machine PR: {e}"));
     }
-    match crate::workspace::open_pr_with_base(&repo, &branch, base_branch.as_deref(), &title, &body, &token).await {
+    match crate::workspace::open_pr_with_base(
+        &repo,
+        &branch,
+        base_branch.as_deref(),
+        &title,
+        &body,
+        &token,
+    )
+    .await
+    {
         Ok(opened) => {
-            state.uow.set_pr(&story_id, Some(opened.number), Some(opened.url.clone()));
+            state
+                .uow
+                .set_pr(&story_id, Some(opened.number), Some(opened.url.clone()));
             state.uow.append_history(
                 &story_id,
                 "intake_ship",
-                &format!("Opened PR #{} for `{branch}`: {}", opened.number, opened.url),
+                &format!(
+                    "Opened PR #{} for `{branch}`: {}",
+                    opened.number, opened.url
+                ),
             );
             let results = vec![RepoShipResult {
                 repo: repo.clone(),
@@ -11919,7 +14283,11 @@ async fn uow_intake_ship(
                 pr_number: Some(opened.number),
                 error: None,
             }];
-            Json(UowIntakeShipResponse { repos: results, all_ok: true }).into_response()
+            Json(UowIntakeShipResponse {
+                repos: results,
+                all_ok: true,
+            })
+            .into_response()
         }
         Err(e) => bad(format!("could not open the PR: {e}")),
     }
@@ -12083,6 +14451,10 @@ pub struct ProjectContextResponse {
     /// The raw onboarding draft (pre-onboard: the architect's in-progress session).
     /// This is the UI-owned JSON blob; it is surfaced as-is for the chat to reference.
     /// Only populated in the PreOnboard phase so the Post-onboard prompt is not cluttered.
+    ///
+    /// INTERNAL REVIEW TIMING NEVER GOES TO A MODEL: the draft carries the reviewer's timer and
+    /// per-row reviewed record (`review_log`, internal only), so this value is built by
+    /// [`without_internal_review_data`], which removes it. Keep it that way for any new use.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub draft_json: Option<serde_json::Value>,
     /// A compact, queryable summary of the active scan results — severity/status totals,
@@ -12173,9 +14545,7 @@ pub(crate) fn render_scan_results_for_chat(
     let mut preview_count: usize = 0;
 
     for f in findings {
-        *by_severity
-            .entry(f.severity.as_str())
-            .or_insert(0) += 1;
+        *by_severity.entry(f.severity.as_str()).or_insert(0) += 1;
         if f.status == "active" {
             active_count += 1;
         } else if f.status.starts_with("suppressed") {
@@ -12277,6 +14647,15 @@ pub(crate) fn render_scan_results_for_chat(
 /// deserializes them as `Vec<Finding>` (the struct that owns the canonical field names),
 /// and delegates to `render_scan_results_for_chat`. Returns `None` when no findings section
 /// is found, when deserialization fails, or when the findings list is empty.
+/// The draft as the project chat may see it: without the review timer's log, which is internal
+/// only (`camerata_api_types::review_timing`) and must never reach a model prompt.
+fn without_internal_review_data(mut draft: serde_json::Value) -> serde_json::Value {
+    if let Some(object) = draft.as_object_mut() {
+        object.remove(camerata_api_types::review_timing::REVIEW_LOG_KEY);
+    }
+    draft
+}
+
 fn extract_scan_results_from_draft(draft: &serde_json::Value) -> Option<String> {
     // Prefer the scan section (which contains the deterministic floor + Phase-1 findings)
     // but fall back to the audit section (Phase-2 AI findings live there in some draft shapes).
@@ -12310,9 +14689,7 @@ fn extract_scan_results_from_draft(draft: &serde_json::Value) -> Option<String> 
 /// Extract a compact findings summary from a draft JSON blob (the UI-owned onboarding draft).
 /// Looks for the `findings` array inside the audit section; returns a one-line-per-finding
 /// compact listing, capped at 50 findings to keep the prompt manageable.
-fn extract_findings_from_draft(
-    draft: &serde_json::Value,
-) -> Option<(usize, String)> {
+fn extract_findings_from_draft(draft: &serde_json::Value) -> Option<(usize, String)> {
     // The draft shape is UI-owned; we look for `audit.findings` or `scan.findings`
     // (the audit section, which contains the Phase-2 AI audit findings).
     let findings = draft
@@ -12379,7 +14756,10 @@ pub(crate) fn render_selected_rules_for_chat(draft: &serde_json::Value) -> Optio
         std::collections::BTreeMap::new();
     for (repo_key, rule_ids) in &repo_selection {
         for rid in rule_ids {
-            by_rule.entry(rid.clone()).or_default().push(repo_key.clone());
+            by_rule
+                .entry(rid.clone())
+                .or_default()
+                .push(repo_key.clone());
         }
     }
 
@@ -12428,9 +14808,8 @@ pub(crate) fn render_selected_rules_for_chat(draft: &serde_json::Value) -> Optio
     let repo_display_count = distinct_repos.len().max(1);
 
     let total = by_rule.len();
-    let mut out = format!(
-        "Total selected: {total} rule(s) across {repo_display_count} repo(s)\nRules:\n"
-    );
+    let mut out =
+        format!("Total selected: {total} rule(s) across {repo_display_count} repo(s)\nRules:\n");
 
     for (rule_id, mut repos) in by_rule {
         repos.sort();
@@ -12442,9 +14821,7 @@ pub(crate) fn render_selected_rules_for_chat(draft: &serde_json::Value) -> Optio
             .map(String::as_str)
             .filter(|k| !k.starts_with("__"))
             .collect();
-        let scope_note = if visible_repos.is_empty() {
-            "all repos".to_string()
-        } else if visible_repos.len() == repo_display_count {
+        let scope_note = if visible_repos.is_empty() || visible_repos.len() == repo_display_count {
             "all repos".to_string()
         } else {
             visible_repos.join(", ")
@@ -12495,9 +14872,7 @@ pub(crate) fn render_selected_rules_for_chat(draft: &serde_json::Value) -> Optio
 ///
 /// The UI injects the returned fields into the system prompt it sends to `POST /api/chat`.
 /// This keeps the AI call on the existing chat handler and this endpoint purely informational.
-async fn active_project_context(
-    State(state): State<AppState>,
-) -> Json<ProjectContextResponse> {
+async fn active_project_context(State(state): State<AppState>) -> Json<ProjectContextResponse> {
     let Some(project) = state.projects.active() else {
         return Json(ProjectContextResponse {
             ok: false,
@@ -12512,9 +14887,7 @@ async fn active_project_context(
             scan_results_section: None,
             selected_rules_section: None,
             draft_json: None,
-            message: Some(
-                "No active project — create one to use project-aware chat.".to_string(),
-            ),
+            message: Some("No active project — create one to use project-aware chat.".to_string()),
         });
     };
 
@@ -12531,12 +14904,12 @@ async fn active_project_context(
         };
         let (finding_count, findings_summary) = draft
             .as_ref()
-            .and_then(|d| extract_findings_from_draft(d))
+            .and_then(extract_findings_from_draft)
             .map(|(n, s)| (Some(n), Some(s)))
             .unwrap_or((None, None));
         let scan_results_section = draft
             .as_ref()
-            .and_then(|d| extract_scan_results_from_draft(d))
+            .and_then(extract_scan_results_from_draft)
             .or_else(|| {
                 state
                     .get_last_scan(&project.id)
@@ -12564,12 +14937,12 @@ async fn active_project_context(
         // as-is so the chat can help interpret the in-progress onboarding state.
         let (finding_count, findings_summary) = draft
             .as_ref()
-            .and_then(|d| extract_findings_from_draft(d))
+            .and_then(extract_findings_from_draft)
             .map(|(n, s)| (Some(n), Some(s)))
             .unwrap_or((None, None));
         let scan_results_section = draft
             .as_ref()
-            .and_then(|d| extract_scan_results_from_draft(d))
+            .and_then(extract_scan_results_from_draft)
             .or_else(|| {
                 state
                     .get_last_scan(&project.id)
@@ -12589,7 +14962,7 @@ async fn active_project_context(
             findings_summary,
             scan_results_section,
             selected_rules_section,
-            draft_json: draft,
+            draft_json: draft.map(without_internal_review_data),
             message: Some(format!(
                 "Project '{}' has an in-progress onboarding (scan/audit) that has not been applied yet.",
                 project.name
@@ -12811,7 +15184,9 @@ async fn spawn_investigation_agent_run(
     let read_dirs = state.active_repo_dirs();
 
     // Create a run the UI can poll, then kick the single gated investigation agent.
-    let run_id = state.runs.create(story_id, "investigation", crate::run::RunKind::Watched);
+    let run_id = state
+        .runs
+        .create(story_id, "investigation", crate::run::RunKind::Watched);
     {
         let runs = state.runs.clone();
         let uow = state.uow.clone();
@@ -12912,15 +15287,18 @@ async fn uow_rerun_investigation(
         Some(uow)
             if !matches!(
                 uow.stage,
-                crate::lifecycle::UowStage::Investigating | crate::lifecycle::UowStage::DecisionsApproved
+                crate::lifecycle::UowStage::Investigating
+                    | crate::lifecycle::UowStage::DecisionsApproved
             ) =>
         {
             let reason = match uow.stage {
                 crate::lifecycle::UowStage::Intake => {
                     "Investigation has not started yet — use \"Begin investigation\" instead."
                 }
-                _ => "Investigation can only be re-run while the UoW is in the Investigation & \
-                      Refinement phase.",
+                _ => {
+                    "Investigation can only be re-run while the UoW is in the Investigation & \
+                      Refinement phase."
+                }
             };
             let body = Json(serde_json::json!({
                 "error": "lifecycle transition blocked",
@@ -12977,9 +15355,7 @@ pub(crate) fn repo_from_story_id(story_id: &str) -> Option<String> {
 /// Best-effort: unreadable files are skipped. A reason-less waiver is carried through
 /// with `reason = None` so the gate treats it as invalid (does not suppress), mirroring
 /// the per-agent invariant.
-async fn collect_integration_waivers(
-    state: &AppState,
-) -> Vec<camerata_checks::GateWaiver> {
+async fn collect_integration_waivers(state: &AppState) -> Vec<camerata_checks::GateWaiver> {
     let dirs = state.active_repo_dirs();
     tokio::task::spawn_blocking(move || {
         let mut out: Vec<camerata_checks::GateWaiver> = Vec::new();
@@ -13022,8 +15398,15 @@ async fn collect_integration_waivers(
 /// vendored/build dirs). Small, dependency-free mirror used only for waiver parsing.
 fn walk_source_files(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
     const PRUNE: &[&str] = &[
-        "node_modules", "target", ".git", ".camerata-venv", "vendor", "dist", "build",
-        "__pycache__", ".next",
+        "node_modules",
+        "target",
+        ".git",
+        ".camerata-venv",
+        "vendor",
+        "dist",
+        "build",
+        "__pycache__",
+        ".next",
     ];
     const EXTS: &[&str] = &[
         "rs", "ts", "tsx", "js", "jsx", "mjs", "cjs", "py", "go", "rb", "java", "cs",
@@ -13130,8 +15513,12 @@ async fn uow_update_branch(
             .into_response()
     };
 
-    let Some(source_kind) = crate::update_branch_run::MergeSourceKind::from_wire(&req.source) else {
-        return bad(format!("`source` must be `local` or `origin`, got `{}`", req.source));
+    let Some(source_kind) = crate::update_branch_run::MergeSourceKind::from_wire(&req.source)
+    else {
+        return bad(format!(
+            "`source` must be `local` or `origin`, got `{}`",
+            req.source
+        ));
     };
     if req.source_branch.trim().is_empty() {
         return bad("`source_branch` must not be empty".to_string());
@@ -13186,7 +15573,9 @@ async fn uow_update_branch(
                 .unwrap_or_else(crate::model_tier::default_strongest_model)
         });
 
-    let run_id = state.runs.create(&story_id, "update-branch", crate::run::RunKind::Watched);
+    let run_id = state
+        .runs
+        .create(&story_id, "update-branch", crate::run::RunKind::Watched);
     {
         let runs = state.runs.clone();
         let uow_store = state.uow.clone();
@@ -13258,7 +15647,11 @@ async fn uow_pr_open(
     Json(req): Json<PrOpenReq>,
 ) -> Response {
     let bad = |msg: String| {
-        (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": msg }))).into_response()
+        (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": msg })),
+        )
+            .into_response()
     };
     let Some(token) = state.github_token() else {
         return bad("no GitHub token — set CAMERATA_GITHUB_TOKEN to open a PR".to_string());
@@ -13271,7 +15664,9 @@ async fn uow_pr_open(
         );
     };
     let Some(repo) = repo_from_story_id(&story_id) else {
-        return bad(format!("could not derive owner/repo from story id `{story_id}`"));
+        return bad(format!(
+            "could not derive owner/repo from story id `{story_id}`"
+        ));
     };
     let override_path = state.settings.repo_path(&repo);
     let workspace_root = state.settings.workspace_root();
@@ -13318,11 +15713,16 @@ async fn uow_pr_open(
     let base = req.base_branch.as_deref();
     match crate::workspace::open_pr_with_base(&repo, &branch, base, &title, &body, &token).await {
         Ok(opened) => {
-            state.uow.set_pr(&story_id, Some(opened.number), Some(opened.url.clone()));
+            state
+                .uow
+                .set_pr(&story_id, Some(opened.number), Some(opened.url.clone()));
             state.uow.append_history(
                 &story_id,
                 "pr_open",
-                &format!("Opened PR #{} for `{branch}`: {}", opened.number, opened.url),
+                &format!(
+                    "Opened PR #{} for `{branch}`: {}",
+                    opened.number, opened.url
+                ),
             );
             Json(serde_json::json!({
                 "ok": true,
@@ -13346,11 +15746,11 @@ async fn uow_pr_get(
     State(state): State<AppState>,
     Path(story_id): Path<String>,
 ) -> Json<serde_json::Value> {
-    let empty = |msg: &str| {
-        serde_json::json!({ "ok": false, "pr": null, "comments": [], "checks": null, "message": msg })
-    };
+    let empty = |msg: &str| serde_json::json!({ "ok": false, "pr": null, "comments": [], "checks": null, "message": msg });
     let Some(token) = state.github_token() else {
-        return Json(empty("Connect GitHub (set CAMERATA_GITHUB_TOKEN) to pull PR info."));
+        return Json(empty(
+            "Connect GitHub (set CAMERATA_GITHUB_TOKEN) to pull PR info.",
+        ));
     };
     let Some(repo) = repo_from_story_id(&story_id) else {
         return Json(empty("Could not derive owner/repo from the story id."));
@@ -13358,7 +15758,8 @@ async fn uow_pr_get(
     // ROUTES-8: READ — must not create. An unknown id resolves to a default UoW (no PR ref),
     // so the "No PR" path fires without persisting a junk UoW.
     let uow = state.uow.get_or_default(&story_id);
-    let Some(info) = crate::pr::resolve_pr_for_uow(&state.uow, &story_id, &uow, &repo, &token).await
+    let Some(info) =
+        crate::pr::resolve_pr_for_uow(&state.uow, &story_id, &uow, &repo, &token).await
     else {
         return Json(empty("No PR for this UoW yet."));
     };
@@ -13391,7 +15792,11 @@ async fn uow_pr_comment(
     Json(req): Json<PrCommentReq>,
 ) -> Response {
     let bad = |msg: String| {
-        (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": msg }))).into_response()
+        (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": msg })),
+        )
+            .into_response()
     };
     let Some(token) = state.github_token() else {
         return bad("no GitHub token — set CAMERATA_GITHUB_TOKEN to comment".to_string());
@@ -13400,10 +15805,13 @@ async fn uow_pr_comment(
         return bad("comment body must not be empty".to_string());
     }
     let Some(repo) = repo_from_story_id(&story_id) else {
-        return bad(format!("could not derive owner/repo from story id `{story_id}`"));
+        return bad(format!(
+            "could not derive owner/repo from story id `{story_id}`"
+        ));
     };
     let uow = state.uow.get_or_create(&story_id);
-    let Some(info) = crate::pr::resolve_pr_for_uow(&state.uow, &story_id, &uow, &repo, &token).await
+    let Some(info) =
+        crate::pr::resolve_pr_for_uow(&state.uow, &story_id, &uow, &repo, &token).await
     else {
         return bad("no PR for this UoW yet — open one first".to_string());
     };
@@ -13433,20 +15841,29 @@ async fn uow_pr_resolve(
     Json(req): Json<PrResolveReq>,
 ) -> Response {
     let bad = |msg: String| {
-        (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": msg }))).into_response()
+        (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": msg })),
+        )
+            .into_response()
     };
     let Some(token) = state.github_token() else {
-        return bad("no GitHub token — set CAMERATA_GITHUB_TOKEN to resolve PR feedback".to_string());
+        return bad(
+            "no GitHub token — set CAMERATA_GITHUB_TOKEN to resolve PR feedback".to_string(),
+        );
     };
     let uow = state.uow.get_or_create(&story_id);
     let Some(target_branch) = uow.branch.clone().filter(|b| !b.trim().is_empty()) else {
         return bad("this UoW has no branch yet — nothing to resolve".to_string());
     };
     let Some(repo) = repo_from_story_id(&story_id) else {
-        return bad(format!("could not derive owner/repo from story id `{story_id}`"));
+        return bad(format!(
+            "could not derive owner/repo from story id `{story_id}`"
+        ));
     };
     // Resolve the PR (stored → else head-search + store) so we have the feedback to feed.
-    let Some(info) = crate::pr::resolve_pr_for_uow(&state.uow, &story_id, &uow, &repo, &token).await
+    let Some(info) =
+        crate::pr::resolve_pr_for_uow(&state.uow, &story_id, &uow, &repo, &token).await
     else {
         return bad("no PR for this UoW yet — open one first".to_string());
     };
@@ -13480,15 +15897,20 @@ async fn uow_pr_resolve(
         );
     };
 
-    let model = req.model.filter(|m| !m.trim().is_empty()).unwrap_or_else(|| {
-        state
-            .projects
-            .active()
-            .map(|p| p.tier_map.strongest)
-            .unwrap_or_else(crate::model_tier::default_strongest_model)
-    });
+    let model = req
+        .model
+        .filter(|m| !m.trim().is_empty())
+        .unwrap_or_else(|| {
+            state
+                .projects
+                .active()
+                .map(|p| p.tier_map.strongest)
+                .unwrap_or_else(crate::model_tier::default_strongest_model)
+        });
 
-    let run_id = state.runs.create(&story_id, "pr-resolve", crate::run::RunKind::Watched);
+    let run_id = state
+        .runs
+        .create(&story_id, "pr-resolve", crate::run::RunKind::Watched);
     {
         let runs = state.runs.clone();
         let uow_store = state.uow.clone();
@@ -13648,7 +16070,8 @@ async fn development_context(State(state): State<AppState>) -> Json<serde_json::
                     crate::uow::DevStatus::New => "new",
                     crate::uow::DevStatus::InProgress => "in_progress",
                     crate::uow::DevStatus::Done => "done",
-                }.to_string(),
+                }
+                .to_string(),
                 branch: uow.branch.clone(),
                 decisions_approved,
                 decision_count: uow.decisions.len(),
@@ -13684,66 +16107,88 @@ async fn development_context(State(state): State<AppState>) -> Json<serde_json::
 ///     {
 ///       "rule_id": "RUST-DOMAIN-1",
 ///       "project_id": "proj-abc",
-///       "content_hash_applied": "abc123",
-///       "content_hash_current": "def456",
-///       "changed": true
+///       "title": "Newtype IDs",
+///       "applied_directive": "…",
+///       "corpus_directive": "…",
+///       "repos": ["me/api"],
+///       "changed": true,
+///       "legacy_baseline": false,
+///       "applied_version": 2,
+///       "current_version": 4
 ///     }
-///   ]
+///   ],
+///   "corpus_freshness": {
+///     "overdue":  [{ "domain": "go", "last_confirmed": "2026-01-01", "days_since": 111, "threshold_days": 90 }],
+///     "due_soon": [{ "domain": "rust", "last_confirmed": "2026-07-25", "days_since": 87, "threshold_days": 90, "days_remaining": 3 }],
+///     "never_confirmed_count": 4
+///   }
 /// }
 /// ```
 ///
+/// `corpus_freshness` is operator-only (it never reaches a client artifact) and is `null` when
+/// freshness is unknown: no corpus loaded, or the watermark file absent or unparseable. See
+/// [`crate::corpus_freshness`].
+///
 /// `app` is `null` when the GitHub release check fails (no token or network
-/// error). `rule_drift` lists only rules whose applied hash diverged from the
-/// current corpus hash.
+/// error). `rule_drift` lists the rules whose baseline no longer matches the
+/// corpus: `changed: true` when the rule's content hash diverged (or the rule was
+/// removed), and `changed: null` + `legacy_baseline: true` when the stored
+/// baseline predates the current hash format and so cannot be compared (see
+/// [`drift_verdict`]). `applied_version` / `current_version` are the rule's
+/// `version` when the selection was baselined and now, `null` when unknown.
 ///
 /// # Applied-rule hash
 ///
-/// A per-rule content hash is computed as `sha256(rule_id || "\n" || title ||
-/// "\n" || summary || "\n" || enforcement)`. An applied rule stores the hash at
-/// apply time; the drift check compares it to the current corpus.
+/// The baseline is [`camerata_rules::Rule::content_hash`]: `sha256:<hex>` over the
+/// canonical serialization of the whole rule. [`accept_rule_drift`] stores it (and the
+/// rule's `version`) on the selection; the drift check compares it to the corpus.
 async fn updates_check(State(state): State<AppState>) -> Json<serde_json::Value> {
-    // ── App-version check ─────────────────────────────────────────────────────
-    let app_update = check_github_release().await;
+    // ── App-version check (the only part that touches the network) ────────────
+    let app_update = check_github_release(state.credential_store.as_ref()).await;
+    Json(updates_payload(&state, app_update.unwrap_or(serde_json::Value::Null)).await)
+}
+
+/// The `GET /api/updates/check` body for an already-resolved `app` value. Split from the handler
+/// so everything except the GitHub call is testable offline. The corpus is loaded ONCE and
+/// shared by the drift check and the freshness report.
+async fn updates_payload(state: &AppState, app_update: serde_json::Value) -> serde_json::Value {
+    let corpus_path = camerata_rules::corpus_path();
+    let corpus = if corpus_path.exists() {
+        Some(camerata_rules::load_corpus_lenient(&corpus_path).await.0)
+    } else {
+        None
+    };
 
     // ── Applied-rule drift (global: all projects) ─────────────────────────────
-    let drift = compute_rule_drift(&state, None).await;
+    let drift = match &corpus {
+        Some(c) => drift_for_projects(&state.projects.list(), None, c),
+        None => Vec::new(),
+    };
 
-    Json(serde_json::json!({
+    // ── Corpus freshness (operator-only; `null` when unknown) ─────────────────
+    let corpus_freshness = crate::corpus_freshness::updates_value(
+        corpus.as_ref(),
+        &camerata_rules::corpus_freshness_path(),
+        crate::corpus_freshness::today_utc(),
+    );
+
+    serde_json::json!({
         "ok": true,
         "app": app_update,
         "rule_drift": drift,
-    }))
-}
-
-/// Compute a content hash for a corpus rule — the fingerprint stored at apply
-/// time and compared against the current corpus to detect upstream drift.
-///
-/// Hash input: `rule_id + "\n" + title + "\n" + summary + "\n" + enforcement`.
-/// Uses SHA-256 truncated to the first 16 hex chars for a compact wire value.
-fn rule_content_hash(rule: &camerata_rules::Rule) -> String {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-
-    // Use a stable, fast hash (not cryptographic, but deterministic across runs
-    // within the same binary). A proper SHA-256 would require a dep add; this is
-    // sufficient for drift detection.
-    let mut h = DefaultHasher::new();
-    rule.id.0.hash(&mut h);
-    rule.title.hash(&mut h);
-    rule.summary.hash(&mut h);
-    rule.enforcement.as_str().hash(&mut h);
-    format!("{:016x}", h.finish())
+        "corpus_freshness": corpus_freshness,
+    })
 }
 
 /// Check the latest Camerata release on GitHub and return a JSON object with
 /// the version comparison. Returns `None` on network / auth failure.
-async fn check_github_release() -> Option<serde_json::Value> {
+async fn check_github_release(
+    creds: &dyn crate::credentials::CredentialStore,
+) -> Option<serde_json::Value> {
     let current = env!("CARGO_PKG_VERSION");
     // The GitHub releases API for the camerata-orchestrator repo.
     let url = "https://api.github.com/repos/zernst3/camerata-orchestrator/releases/latest";
-    let token = std::env::var("CAMERATA_GITHUB_TOKEN")
-        .ok()
-        .filter(|v| !v.is_empty());
+    let token = crate::credentials::github_token(creds);
 
     let client = reqwest::Client::builder()
         .user_agent("camerata-server/1.0")
@@ -13783,19 +16228,116 @@ fn resolved_directive(rule: &camerata_rules::Rule, chosen_option: Option<&str>) 
         .unwrap_or_else(|| rule.summary.clone())
 }
 
-/// Compute applied-rule drift: for each selected rule that has been BASELINED
-/// (`applied_hash` is `Some`), compare the baselined corpus hash against the
-/// current corpus hash and report the rule when they differ (or the rule was
-/// removed from the corpus). Selections that were never baselined (`applied_hash`
-/// is `None`) are treated as in-sync and are not reported — a freshly selected
-/// rule does not drift until it is accepted.
+/// How one baselined selection compares to the current corpus.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DriftVerdict {
+    /// The stored baseline equals the rule's current content hash: nothing to report.
+    InSync,
+    /// The stored baseline is a current-format hash that differs from the rule's: the rule
+    /// changed since it was accepted.
+    Changed,
+    /// The stored baseline is not a `sha256:` hash. It was written by an older build (the
+    /// `DefaultHasher` fingerprint over id/title/summary/enforcement only), is not comparable
+    /// to a current hash, and says NOTHING about whether the rule changed. Reporting it as
+    /// "changed" would raise a false alarm on every rule baselined before the upgrade;
+    /// reporting it as in sync would hide real drift. It is surfaced as unknown, and the next
+    /// accept re-baselines it.
+    Legacy,
+    /// The rule is no longer in the corpus.
+    Removed,
+}
+
+/// Classify a selection's stored `applied_hash` against the current corpus `rule` (`None` when
+/// the rule was removed). Pure. A removed rule is [`DriftVerdict::Removed`] whatever the hash
+/// looks like; otherwise a hash without [`camerata_rules::RULE_HASH_PREFIX`] is
+/// [`DriftVerdict::Legacy`] before any comparison is attempted.
+fn drift_verdict(applied_hash: &str, rule: Option<&camerata_rules::Rule>) -> DriftVerdict {
+    let Some(rule) = rule else {
+        return DriftVerdict::Removed;
+    };
+    if !applied_hash.starts_with(camerata_rules::RULE_HASH_PREFIX) {
+        return DriftVerdict::Legacy;
+    }
+    if rule.content_hash() == applied_hash {
+        DriftVerdict::InSync
+    } else {
+        DriftVerdict::Changed
+    }
+}
+
+/// Build one `rule_drift` entry. Matches the UI's `RuleDriftEntry` contract; see
+/// [`updates_check`] for the shape. `changed` is `true`, or `null` for a legacy baseline (never
+/// `false`: an in-sync rule is not reported at all).
+fn drift_entry(
+    project_id: &str,
+    selection: &crate::project::RuleSelection,
+    rule: Option<&camerata_rules::Rule>,
+    verdict: DriftVerdict,
+) -> serde_json::Value {
+    let changed = match verdict {
+        DriftVerdict::Legacy => serde_json::Value::Null,
+        _ => serde_json::Value::Bool(true),
+    };
+    let mut entry = serde_json::json!({
+        "rule_id": selection.rule_id,
+        "project_id": project_id,
+        "title": rule.map(|r| r.title.as_str()).unwrap_or(""),
+        "applied_directive": selection.applied_directive.clone().unwrap_or_default(),
+        "corpus_directive": match rule {
+            Some(r) => resolved_directive(r, selection.chosen_option.as_deref()),
+            None => "(removed from corpus)".to_string(),
+        },
+        "repos": selection.repos,
+        "changed": changed,
+        "legacy_baseline": verdict == DriftVerdict::Legacy,
+        "applied_version": selection.applied_version,
+        "current_version": rule.and_then(|r| r.version),
+    });
+    if let Some(r) = rule {
+        entry["verification"] = serde_json::json!(r.verification().as_str());
+    }
+    entry
+}
+
+/// Applied-rule drift across `projects` against `corpus`: for each selected rule that has been
+/// BASELINED (`applied_hash` is `Some`), report it unless it is in sync (see [`DriftVerdict`]).
+/// Selections that were never baselined (`applied_hash` is `None`) are treated as in-sync and
+/// are not reported. Pure; [`compute_rule_drift`] is the I/O wrapper.
 ///
-/// When `project_filter` is `Some(id)`, only that project's selections are scanned
-/// (the project-scoped `GET /api/projects/:id/rule-drift` route); when `None`, all
-/// projects are scanned (the global `GET /api/updates/check` route).
-///
-/// Each returned entry matches the UI's `RuleDriftEntry` contract:
-/// `{ rule_id, project_id, title, applied_directive, corpus_directive, repos, changed }`.
+/// When `project_filter` is `Some(id)`, only that project's selections are scanned.
+fn drift_for_projects(
+    projects: &[crate::project::Project],
+    project_filter: Option<&str>,
+    corpus: &camerata_rules::RuleSet,
+) -> Vec<serde_json::Value> {
+    let mut drift = Vec::new();
+    for project in projects {
+        if let Some(pid) = project_filter {
+            if project.id != pid {
+                continue;
+            }
+        }
+        for selection in &project.ruleset.selections {
+            // Only baselined selections can drift. A `None` baseline means the rule
+            // has never been accepted, so there is nothing to compare against.
+            let Some(applied_hash) = selection.applied_hash.as_deref() else {
+                continue;
+            };
+            let rule = corpus.get_by_id(&selection.rule_id);
+            let verdict = drift_verdict(applied_hash, rule);
+            if verdict == DriftVerdict::InSync {
+                continue;
+            }
+            drift.push(drift_entry(&project.id, selection, rule, verdict));
+        }
+    }
+    drift
+}
+
+/// Compute applied-rule drift for the live projects against the on-disk corpus. When
+/// `project_filter` is `Some(id)`, only that project's selections are scanned (the
+/// project-scoped `GET /api/projects/:id/rule-drift` route); when `None`, all projects are
+/// scanned (the global `GET /api/updates/check` route). See [`drift_for_projects`].
 async fn compute_rule_drift(
     state: &AppState,
     project_filter: Option<&str>,
@@ -13805,52 +16347,7 @@ async fn compute_rule_drift(
         return Vec::new();
     }
     let (corpus, _errs) = camerata_rules::load_corpus_lenient(&corpus_path).await;
-
-    let mut drift = Vec::new();
-    for project in state.projects.list() {
-        if let Some(pid) = project_filter {
-            if project.id != pid {
-                continue;
-            }
-        }
-        for selection in &project.ruleset.selections {
-            let rule_id = &selection.rule_id;
-            // Only baselined selections can drift. A `None` baseline means the rule
-            // has never been accepted, so there is nothing to compare against.
-            let Some(applied_hash) = selection.applied_hash.as_deref() else {
-                continue;
-            };
-            let Some(rule) = corpus.get_by_id(rule_id) else {
-                // Rule removed from corpus — report as drifted.
-                drift.push(serde_json::json!({
-                    "rule_id": rule_id,
-                    "project_id": project.id,
-                    "title": "",
-                    "applied_directive": selection.applied_directive.clone().unwrap_or_default(),
-                    "corpus_directive": "(removed from corpus)",
-                    "repos": selection.repos,
-                    "changed": true,
-                }));
-                continue;
-            };
-            let current_hash = rule_content_hash(rule);
-            if current_hash == applied_hash {
-                // In sync — the baselined hash matches the current corpus.
-                continue;
-            }
-            drift.push(serde_json::json!({
-                "rule_id": rule_id,
-                "project_id": project.id,
-                "title": rule.title,
-                "applied_directive": selection.applied_directive.clone().unwrap_or_default(),
-                "corpus_directive": resolved_directive(rule, selection.chosen_option.as_deref()),
-                "repos": selection.repos,
-                "verification": rule.verification().as_str(),
-                "changed": true,
-            }));
-        }
-    }
-    drift
+    drift_for_projects(&state.projects.list(), project_filter, &corpus)
 }
 
 /// `GET /api/projects/:id/rule-drift` — project-scoped applied-rule drift.
@@ -13870,14 +16367,110 @@ async fn project_rule_drift(
     }))
 }
 
+/// Record `rule` as the baseline `sel` was accepted against: the rule's content hash (the
+/// drift comparison), its `version` (so the drift notice can say "v2 to v4"), and the resolved
+/// directive text (the before side of the diff). This is the ONLY place a baseline is written,
+/// so a legacy (`DefaultHasher`) hash is re-baselined to the current format here and nowhere
+/// else. `applied_version` is cleared, not left stale, when the rule carries no version.
+fn baseline_selection(sel: &mut crate::project::RuleSelection, rule: &camerata_rules::Rule) {
+    sel.applied_directive = Some(resolved_directive(rule, sel.chosen_option.as_deref()));
+    sel.applied_hash = Some(rule.content_hash());
+    sel.applied_version = rule.version;
+}
+
+/// Load the on-disk corpus so a save can baseline the rules it writes. `None` when the corpus
+/// directory is missing: the caller then writes no new baselines (it never invents one) and
+/// existing baselines survive via `Project::upsert_base_rules`. Parse failures of individual
+/// rule files are tolerated (lenient load), so a rule that failed to parse is simply "not in
+/// the corpus" here and stays unbaselined.
+async fn load_corpus_for_baseline() -> Option<camerata_rules::RuleSet> {
+    let corpus_path = camerata_rules::corpus_path();
+    if !corpus_path.exists() {
+        return None;
+    }
+    let (corpus, _errs) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+    Some(corpus)
+}
+
+/// APPLY semantics: (re)baseline every selection whose rule is in `corpus`, overwriting any
+/// existing baseline. Applying a rule emits the CURRENT corpus directive into the repos, so
+/// the baseline must be "the corpus as it stands now" (the same acceptance
+/// [`accept_rule_drift`] records); keeping an older baseline would report drift against a
+/// directive that was just applied. Rules the corpus does not carry (or no corpus at all)
+/// are left untouched.
+fn rebaseline_selections(
+    selections: &mut [crate::project::RuleSelection],
+    corpus: Option<&camerata_rules::RuleSet>,
+) {
+    let Some(corpus) = corpus else { return };
+    for sel in selections {
+        if let Some(rule) = corpus.get_by_id(&sel.rule_id) {
+            baseline_selection(sel, rule);
+        }
+    }
+}
+
+/// SAVE (non-apply) semantics: baseline only the selections that have none, from `corpus`.
+/// An existing baseline, legacy hash included, is never overwritten: a save that is not an
+/// apply has not re-emitted anything, so it accepts nothing new.
+fn baseline_missing(
+    selections: &mut [crate::project::RuleSelection],
+    corpus: Option<&camerata_rules::RuleSet>,
+) {
+    let Some(corpus) = corpus else { return };
+    for sel in selections.iter_mut().filter(|s| !s.is_baselined()) {
+        if let Some(rule) = corpus.get_by_id(&sel.rule_id) {
+            baseline_selection(sel, rule);
+        }
+    }
+}
+
+/// Every rule id the ruleset currently selects, across all three lists.
+fn selected_rule_ids(
+    ruleset: &crate::project::ProjectRuleset,
+) -> std::collections::BTreeSet<String> {
+    ruleset
+        .selections
+        .iter()
+        .chain(&ruleset.cross_repo)
+        .chain(&ruleset.process)
+        .map(|s| s.rule_id.clone())
+        .collect()
+}
+
+/// After a non-apply replace of the base rules (an import, the onboarding "complete"):
+/// baseline the selections of rules that are NEW to the project (not in `known_before`),
+/// from `corpus`. A rule the project already selected keeps exactly what it had (its baseline
+/// via `upsert_base_rules`, or none if it was never baselined, as before), so saving an
+/// unrelated change never rewrites or invents a baseline for an existing selection.
+fn baseline_new_to_project(
+    ruleset: &mut crate::project::ProjectRuleset,
+    known_before: &std::collections::BTreeSet<String>,
+    corpus: Option<&camerata_rules::RuleSet>,
+) {
+    let Some(corpus) = corpus else { return };
+    for sel in ruleset
+        .selections
+        .iter_mut()
+        .chain(ruleset.cross_repo.iter_mut())
+        .chain(ruleset.process.iter_mut())
+        .filter(|s| !s.is_baselined() && !known_before.contains(&s.rule_id))
+    {
+        if let Some(rule) = corpus.get_by_id(&sel.rule_id) {
+            baseline_selection(sel, rule);
+        }
+    }
+}
+
 /// `POST /api/projects/:id/rule-drift/:rule_id/accept` — accept the corpus update
 /// for a drifted rule.
 ///
-/// Baselines the project's selection(s) for `rule_id`: sets `applied_hash` to the
-/// current corpus content hash and `applied_directive` to the current resolved
-/// directive text, so a subsequent [`compute_rule_drift`] no longer reports the
-/// rule as drifted. Persists via [`ProjectStore::update`]. Returns `{ ok: true }`
-/// on success (the client reads HTTP status for its bool check).
+/// Baselines the project's selection(s) for `rule_id` via [`baseline_selection`]: sets
+/// `applied_hash` to the current corpus content hash, `applied_version` to the rule's
+/// version and `applied_directive` to the current resolved directive text, so a subsequent
+/// [`compute_rule_drift`] no longer reports the rule as drifted. Persists via
+/// [`ProjectStore::update`]. Returns `{ ok: true }` on success (the client reads HTTP status
+/// for its bool check).
 async fn accept_rule_drift(
     State(state): State<AppState>,
     Path((id, rule_id)): Path<(String, String)>,
@@ -13892,7 +16485,6 @@ async fn accept_rule_drift(
     let Some(rule) = corpus.get_by_id(&rule_id) else {
         return Json(serde_json::json!({ "ok": false, "message": "rule not in corpus" }));
     };
-    let current_hash = rule_content_hash(rule);
 
     let updated = state.projects.update(&id, |p| {
         // Baseline every selection for this rule (project-level and any repo-scoped),
@@ -13903,8 +16495,7 @@ async fn accept_rule_drift(
             .iter_mut()
             .filter(|s| s.rule_id == rule_id)
         {
-            sel.applied_directive = Some(resolved_directive(rule, sel.chosen_option.as_deref()));
-            sel.applied_hash = Some(current_hash.clone());
+            baseline_selection(sel, rule);
         }
     });
     match updated {
@@ -13978,9 +16569,15 @@ async fn set_rule_override(
     Path((id, rule_id)): Path<(String, String)>,
     Json(req): Json<SetRuleOverrideReq>,
 ) -> Json<serde_json::Value> {
+    let corpus = load_corpus_for_baseline().await;
     let updated = state.projects.update(&id, |p| {
         // Find or create the selection for this rule.
-        if let Some(sel) = p.ruleset.selections.iter_mut().find(|s| s.rule_id == rule_id) {
+        if let Some(sel) = p
+            .ruleset
+            .selections
+            .iter_mut()
+            .find(|s| s.rule_id == rule_id)
+        {
             if let Some(opt) = req.chosen_option.filter(|s| !s.trim().is_empty()) {
                 sel.chosen_option = Some(opt);
             }
@@ -13997,6 +16594,10 @@ async fn set_rule_override(
                 repos: Vec::new(),
                 ..Default::default()
             });
+            // A rule newly selected into the project is baselined at the corpus as it stands.
+            if let Some(created) = p.ruleset.selections.last_mut() {
+                baseline_missing(std::slice::from_mut(created), corpus.as_ref());
+            }
         }
     });
     match updated {
@@ -14026,9 +16627,11 @@ async fn get_repo_rule_override(
         return Json(serde_json::json!({ "ok": false, "message": "no such project" }));
     };
     // Repo-level override: a selection scoped to this repo only.
-    let selection = project.ruleset.selections.iter().find(|s| {
-        s.rule_id == rule_id && s.repos.iter().any(|r| r == &repo)
-    });
+    let selection = project
+        .ruleset
+        .selections
+        .iter()
+        .find(|s| s.rule_id == rule_id && s.repos.iter().any(|r| r == &repo));
     Json(serde_json::json!({
         "ok": true,
         "rule_id": rule_id,
@@ -14045,11 +16648,15 @@ async fn set_repo_rule_override(
     Path((id, repo, rule_id)): Path<(String, String, String)>,
     Json(req): Json<SetRepoRuleOverrideReq>,
 ) -> Json<serde_json::Value> {
+    let corpus = load_corpus_for_baseline().await;
     let updated = state.projects.update(&id, |p| {
         // Find or create a REPO-SCOPED selection for this rule.
-        if let Some(sel) = p.ruleset.selections.iter_mut().find(|s| {
-            s.rule_id == rule_id && s.repos.iter().any(|r| r == &repo)
-        }) {
+        if let Some(sel) = p
+            .ruleset
+            .selections
+            .iter_mut()
+            .find(|s| s.rule_id == rule_id && s.repos.iter().any(|r| r == &repo))
+        {
             if let Some(opt) = req.chosen_option.filter(|s| !s.trim().is_empty()) {
                 sel.chosen_option = Some(opt);
             }
@@ -14062,6 +16669,10 @@ async fn set_repo_rule_override(
                 repos: vec![repo.clone()],
                 ..Default::default()
             });
+            // A rule newly selected into the project is baselined at the corpus as it stands.
+            if let Some(created) = p.ruleset.selections.last_mut() {
+                baseline_missing(std::slice::from_mut(created), corpus.as_ref());
+            }
         }
     });
     match updated {
@@ -14090,10 +16701,7 @@ const DEEP_REPORT_ADVISORY: &str =
 /// This endpoint reads the last deep report from the job store (the most recent
 /// async audit job that ran with `deep=true`). When no deep report is available
 /// yet, returns a 404 JSON error.
-async fn export_deep_report(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-) -> Response {
+async fn export_deep_report(State(state): State<AppState>, Path(id): Path<String>) -> Response {
     use axum::http::{header, StatusCode};
     use axum::response::IntoResponse;
 
@@ -14121,13 +16729,20 @@ async fn export_deep_report(
             .into_response();
     };
 
-    let markdown = render_deep_report_markdown(&deep, state.feature_flags.soc2);
+    let markdown = deep_report_markdown(deep, state.feature_flags.soc2);
     (
         StatusCode::OK,
         [(header::CONTENT_TYPE, "text/markdown; charset=utf-8")],
         markdown,
     )
         .into_response()
+}
+
+/// The deep report as the Markdown a client receives: the lens prose is model-written text read
+/// back from the job store, so it is redacted here, at the export, whatever path stored it.
+fn deep_report_markdown(mut deep: crate::ai_audit::DeepReport, soc2_enabled: bool) -> String {
+    crate::onboard::redact::redact_deep_report(&mut deep);
+    render_deep_report_markdown(&deep, soc2_enabled)
 }
 
 /// Render a [`crate::ai_audit::DeepReport`] as Markdown, including only the
@@ -14199,18 +16814,18 @@ struct AuditReportReq {
 async fn export_audit_report(
     State(state): State<AppState>,
     Path(id): Path<String>,
-    Json(req): Json<AuditReportReq>,
+    Json(mut req): Json<AuditReportReq>,
 ) -> Response {
     use axum::http::{header, StatusCode};
     use axum::response::IntoResponse;
 
-    if state.projects.get(&id).is_none() {
+    let Some(project) = state.projects.get(&id) else {
         return (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({ "ok": false, "message": "no such project" })),
         )
             .into_response();
-    }
+    };
 
     let Some(report) = state.get_last_scan(&id) else {
         return (
@@ -14222,6 +16837,13 @@ async fn export_audit_report(
         )
             .into_response();
     };
+    // Pass-1 W1 seal fix: `last_scan` is written only AFTER the scan pipeline's own row-adding
+    // passes (the external-tool preview merge, the dependency audit, the evidence-of-violation
+    // gate) have all already run — see `onboard_audit_start`'s doc comments at its own
+    // `apply_evidence_gate` call site. Sealing it here, immediately on retrieval and before any
+    // further processing, is therefore the correct "row set is final" point for this handler:
+    // every exporter below reads the identical sealed set.
+    let report = report.seal();
 
     // Best-effort corpus load for the citation join (§4.4) — mirrors `split_scannable_rules`'
     // own fallback: a missing/unreadable corpus degrades every citation to "AI-advisory,
@@ -14233,6 +16855,14 @@ async fn export_audit_report(
         None
     };
 
+    // Branding (2026-09-13 review): fold CAMERATA_REPORT_BRAND/CAMERATA_REPORT_PREPARED_BY into
+    // any blank fields the export dialog didn't POST, BEFORE build_report_json — which stays
+    // pure/no-I/O itself (see `ReportOptions::apply_env_defaults`'s doc comment).
+    req.options.apply_env_defaults();
+    // `resolve_fix`'s chosen-option fallback (audit-integrated alternatives) — server-
+    // populated, never client-supplied (see `ReportOptions::chosen_options`'s doc comment).
+    req.options.chosen_options = project_chosen_options(&project);
+
     let json = crate::report_export::build_report_json(
         &report,
         &req.dispositions,
@@ -14240,7 +16870,23 @@ async fn export_audit_report(
         &req.options,
     );
 
-    let pdf_bytes = match crate::report_export::compile_pdf(&json).await {
+    let data_json = match crate::report_export::render_data_json(&json) {
+        Ok(data_json) => data_json,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "ok": false, "message": e.to_string() })),
+            )
+                .into_response();
+        }
+    };
+    // The release gate's secrets check over the PDF's data, BEFORE it is compiled: this route
+    // ships a PDF outside any zip, and `data.json` is the only data the template reads.
+    let stem = report_filename_stem(&report);
+    if let Err(failure) = crate::release_gate::check_pdf_data(&stem, &data_json) {
+        return release_blocked_response(&failure);
+    }
+    let pdf_bytes = match crate::report_export::compile_pdf_from_data(&data_json).await {
         Ok(bytes) => bytes,
         Err(e) => {
             return (
@@ -14251,7 +16897,7 @@ async fn export_audit_report(
         }
     };
 
-    let filename = format!("{}.pdf", report_filename_stem(&report));
+    let filename = format!("{stem}.pdf");
 
     (
         StatusCode::OK,
@@ -14267,12 +16913,18 @@ async fn export_audit_report(
         .into_response()
 }
 
-/// `camerata-audit-{repo-slug}-{short-sha}` (no extension) — the shared filename stem for
-/// EVERY audit-export artifact (the standalone PDF, and the product-export ZIP; the
+/// `camerata-inspection-{repo-slug}-{short-sha}` (no extension) — the shared filename stem for
+/// EVERY inspection-export artifact (the standalone PDF, and the product-export ZIP; the
 /// workbook inside the zip gets its own `-findings` infix, see [`export_product`]). Kept as
 /// ONE function so the PDF route and the product-export route can never derive two
-/// different names for what is, underneath, the exact same scan.
-fn report_filename_stem(report: &crate::onboard::ScanReport) -> String {
+/// different names for what is, underneath, the exact same scan. P6 (2026-09-29): renamed from
+/// `camerata-audit-*` — the product is "Codebase Inspection" and this stem is client-visible
+/// (the actual downloaded filename), not an internal-only identifier.
+///
+/// `pub`: also called directly by `camerata inspect` (the headless CLI export path,
+/// `camerata-cli/src/inspect_cmd.rs`) so its zip's filename stem can never drift from this
+/// HTTP handler's — same function, not a re-derived copy.
+pub fn report_filename_stem(report: &crate::onboard::ScanReport) -> String {
     let repo_slug = report
         .repos
         .first()
@@ -14286,7 +16938,7 @@ fn report_filename_stem(report: &crate::onboard::ScanReport) -> String {
         .and_then(|r| r.sha.as_deref())
         .map(|s| s.chars().take(7).collect::<String>())
         .unwrap_or_else(|| "nosha".to_string());
-    format!("camerata-audit-{repo_slug}-{short_sha}")
+    format!("camerata-inspection-{repo_slug}-{short_sha}")
 }
 
 /// `POST /api/projects/:id/product-export` — the primary export button's target: a ZIP
@@ -14303,18 +16955,18 @@ fn report_filename_stem(report: &crate::onboard::ScanReport) -> String {
 async fn export_product(
     State(state): State<AppState>,
     Path(id): Path<String>,
-    Json(req): Json<AuditReportReq>,
+    Json(mut req): Json<AuditReportReq>,
 ) -> Response {
     use axum::http::{header, StatusCode};
     use axum::response::IntoResponse;
 
-    if state.projects.get(&id).is_none() {
+    let Some(project) = state.projects.get(&id) else {
         return (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({ "ok": false, "message": "no such project" })),
         )
             .into_response();
-    }
+    };
 
     let Some(report) = state.get_last_scan(&id) else {
         return (
@@ -14326,6 +16978,10 @@ async fn export_product(
         )
             .into_response();
     };
+    // Pass-1 W1 seal fix: see the identical comment in `export_audit_report` — this is the
+    // "row set is final" point for every artifact this handler builds (PDF, xlsx,
+    // findings.json), all three now reading the SAME sealed set.
+    let report = report.seal();
 
     let corpus_path = camerata_rules::corpus_path();
     let corpus = if corpus_path.exists() {
@@ -14334,15 +16990,47 @@ async fn export_product(
         None
     };
 
-    let json = crate::report_export::build_report_json(
+    // Branding (2026-09-13 review): same env-default fold as `export_audit_report` — the
+    // xlsx/findings.json siblings this handler also builds read `opts.prepared_by` directly
+    // (`xlsx_export.rs`), so resolving it here once covers all three artifacts.
+    req.options.apply_env_defaults();
+    // `resolve_fix`'s chosen-option fallback (audit-integrated alternatives) — server-
+    // populated, never client-supplied. Covers all three artifacts built below.
+    req.options.chosen_options = project_chosen_options(&project);
+    // The backend the project's scans ran on, recorded in the manifest and README. Server-
+    // populated, never client-supplied.
+    req.options.model = Some(ModelRecord::anthropic(project.backend));
+
+    // ONE assembly (`release_gate::build_product_package`) and ONE path to zip bytes
+    // (`release_gate::release`), shared by this handler, `camerata inspect --export` and the
+    // sample generator.
+    let package = match crate::release_gate::build_product_package(
         &report,
         &req.dispositions,
         corpus.as_ref(),
         &req.options,
-    );
-
-    let pdf_bytes = match crate::report_export::compile_pdf(&json).await {
-        Ok(bytes) => bytes,
+    )
+    .await
+    {
+        Ok(package) => package,
+        Err(e) => {
+            // The assembly checks the PDF's data before it compiles it; a refusal there is the
+            // same blocked response as one from `release`.
+            if let Some(failure) = crate::release_gate::gate_failure_of(&e) {
+                return release_blocked_response(failure);
+            }
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "ok": false, "message": e.to_string() })),
+            )
+                .into_response();
+        }
+    };
+    let released = match crate::release_gate::release(package) {
+        Ok(released) => released,
+        Err(crate::release_gate::ReleaseError::Blocked(failure)) => {
+            return release_blocked_response(&failure);
+        }
         Err(e) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -14351,70 +17039,18 @@ async fn export_product(
                 .into_response();
         }
     };
-
-    let xlsx_bytes = match crate::xlsx_export::build_workbook(
-        &report,
-        &req.dispositions,
-        corpus.as_ref(),
-        &req.options,
-    ) {
-        Ok(bytes) => bytes,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({ "ok": false, "message": e.to_string() })),
-            )
-                .into_response();
-        }
-    };
-
-    // `findings.json`: the machine-readable sibling of the workbook's "All Findings" sheet.
-    // Built from the SAME `report`/`dispositions`/`corpus` pass as `xlsx_bytes` above (and
-    // reuses `json`'s already-computed cover/executive-summary for provenance/summary), so
-    // the JSON can never disagree with either the PDF or the xlsx — see
-    // `xlsx_export::build_findings_export`'s doc comment.
-    let findings_export = crate::xlsx_export::build_findings_export(
-        &report,
-        &req.dispositions,
-        corpus.as_ref(),
-        &json,
-    );
-    let findings_json_bytes = match serde_json::to_vec_pretty(&findings_export) {
-        Ok(bytes) => bytes,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({
-                    "ok": false,
-                    "message": format!("could not serialize findings.json: {e}")
-                })),
-            )
-                .into_response();
-        }
-    };
-
-    let stem = report_filename_stem(&report);
-    let readme = product_export_readme(&stem, &json);
-
-    let zip_bytes = match build_product_zip(
-        &stem,
-        &pdf_bytes,
-        &xlsx_bytes,
-        &findings_json_bytes,
-        &readme,
-    ) {
-        Ok(bytes) => bytes,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({
-                    "ok": false,
-                    "message": format!("could not assemble the product export zip: {e}")
-                })),
-            )
-                .into_response();
-        }
-    };
+    // Proof the gate ran, visible to the cockpit without reading the zip.
+    let release_checks = released.report.check_names().join(", ");
+    // Remember what was delivered on the inspection it came from (hash and manifest). A failure
+    // to save never blocks the export the operator asked for.
+    if let Err(e) = state
+        .inspections
+        .set_package(&id, released.package_record())
+    {
+        tracing::warn!(project = %id, "could not record the delivered package: {e}");
+    }
+    let stem = released.stem;
+    let zip_bytes = released.bytes;
 
     let filename = format!("{stem}.zip");
 
@@ -14426,22 +17062,55 @@ async fn export_product(
                 header::CONTENT_DISPOSITION,
                 format!("attachment; filename=\"{filename}\""),
             ),
+            (
+                header::HeaderName::from_static("x-camerata-release-checks"),
+                release_checks,
+            ),
         ],
         zip_bytes,
     )
         .into_response()
 }
 
+/// The 422 the export routes return when the release gate refuses: `{ ok: false, gate:
+/// "release", stem, message, problems: [{check, file, location, message, evidence}] }`. The
+/// message is the gate's own fail-loud block and every field is already redacted, so the body
+/// can be shown verbatim (and copied by the operator) without ever carrying a secret value.
+fn release_blocked_response(failure: &crate::release_gate::GateFailure) -> Response {
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+    (
+        StatusCode::UNPROCESSABLE_ENTITY,
+        Json(serde_json::json!({
+            "ok": false,
+            "gate": "release",
+            "stem": failure.stem_for_display(),
+            "message": failure.to_string(),
+            "problems": failure.report.problems_json(),
+        })),
+    )
+        .into_response()
+}
+
 /// The README.txt manifest bundled inside the product-export zip: what each file is, who
-/// it's for, the repo(s)/SHA/generated-at, and the advisory disclaimer (verbatim, reused
-/// from `report_export::AUDIT_REPORT_DISCLAIMER` — never a second, drifting copy of that
+/// it's for, the provenance lines, and the advisory disclaimer (verbatim, reused from
+/// `report_export::AUDIT_REPORT_DISCLAIMER` — never a second, drifting copy of that
 /// paragraph).
-fn product_export_readme(stem: &str, json: &crate::report_export::AuditReportJson) -> String {
+///
+/// The provenance lines (repos, generated-at, commit, engine version, corpus version, rules
+/// last reviewed) come from [`ManifestProvenance::readme_lines`], the human rendering of the
+/// SAME struct `manifest.json`'s `inspection` block is rendered from
+/// ([`ManifestProvenance::inspection_json`]), so the two cannot drift. Pass the same value to
+/// [`build_product_zip`].
+///
+/// `pub`: reused verbatim by `camerata inspect` (see [`report_filename_stem`]'s doc comment)
+/// so the headless export's README text can never diverge from the HTTP product-export's.
+pub fn product_export_readme(stem: &str, provenance: &ManifestProvenance) -> String {
     format!(
-        "Camerata Audit — Product Export\n\
-         ================================\n\
+        "Codebase Inspection - Product Export\n\
+         =====================================\n\
          \n\
-         This ZIP contains three artifacts derived from the SAME audit scan:\n\
+         This ZIP contains three artifacts derived from the SAME inspection scan:\n\
          \n\
          {stem}.pdf\n\
          \x20 The curated NARRATIVE report: cover, executive summary, category scorecard,\n\
@@ -14453,8 +17122,8 @@ fn product_export_readme(stem: &str, json: &crate::report_export::AuditReportJso
          {stem}-findings.xlsx\n\
          \x20 The COMPLETE working dataset: every finding as its own row, sortable and\n\
          \x20 filterable, with a per-category sheet, a Dependencies sheet, a Coverage sheet\n\
-         \x20 (every rule audited this run, found or not), and a False Positives sheet\n\
-         \x20 (with the auditor's exclusion reasons — nothing is silently dropped). Intended\n\
+         \x20 (every rule inspected this run, found or not), and a False Positives sheet\n\
+         \x20 (with the reviewer's exclusion reasons, nothing is silently dropped). Intended\n\
          \x20 for the engineers doing remediation.\n\
          \n\
          findings.json\n\
@@ -14462,36 +17131,338 @@ fn product_export_readme(stem: &str, json: &crate::report_export::AuditReportJso
          \x20 rows (severity, category, repo/path/line, snippet, detail, recommended fix,\n\
          \x20 disposition, effort, confidence, citation, ...), wrapped with the report's\n\
          \x20 provenance and summary counts. Intended for scripting / CI ingestion / a\n\
-         \x20 client's own tooling — never disagrees with the xlsx, since both are built\n\
+         \x20 client's own tooling. Never disagrees with the xlsx, since both are built\n\
          \x20 from the same pass over the scan.\n\
          \n\
-         Repos audited: {}\n\
-         Generated: {}\n\
+         {}\
          \n\
          {}\n",
-        json.cover.repos.join(", "),
-        json.cover.generated_at,
+        provenance.readme_lines(),
         crate::report_export::AUDIT_REPORT_DISCLAIMER,
     )
+}
+
+/// The current wall-clock time as a `zip::DateTime`, for stamping every entry's
+/// last-modified field with the actual build time.
+///
+/// The `zip` crate's `SimpleFileOptions::default()` leaves `last_modified_time` at its own
+/// `Default` — the DOS epoch, 1980-01-01 — unless a caller sets one explicitly. `zip`'s own
+/// `DateTime::default_for_write()` helper would paper over this, but only when the crate's
+/// `time` (or `chrono`) cargo feature is enabled; this workspace builds `zip` with
+/// `default-features = false, features = ["deflate"]`, so that helper silently falls back to
+/// the same 1980 default. Building the `DateTime` by hand from `chrono` (already a
+/// `camerata-server` dependency, independent of `zip`'s own optional features) avoids adding
+/// a cargo feature just for this. Falls back to the DOS epoch only if the current date is
+/// somehow outside the format's representable range (year 1980..=2107) — never panics.
+fn zip_now() -> zip::DateTime {
+    use chrono::{Datelike, Timelike};
+    let now = chrono::Utc::now();
+    zip::DateTime::from_date_and_time(
+        now.year() as u16,
+        now.month() as u8,
+        now.day() as u8,
+        now.hour() as u8,
+        now.minute() as u8,
+        now.second() as u8,
+    )
+    .unwrap_or_default()
+}
+
+/// One inspected repository in the manifest's `inspection.repos`: its name and the exact commit
+/// the scan read, so a recipient can tie the findings to a state of the code.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProvenanceRepo {
+    /// `owner/repo`, as on the report cover.
+    pub name: String,
+    /// Full commit SHA (`git rev-parse HEAD`) the scan recorded for this repo. `None` when the
+    /// source dir was not a git repo or the scan could not read it: an honest absence, never a
+    /// guess.
+    pub commit: Option<String>,
+    /// True when the working tree had uncommitted changes at scan time, so `commit` is the base
+    /// the scanned code was modified from, not an exact description of it. Always `false` while
+    /// `commit` is `None` (there is nothing to be dirty relative to).
+    pub dirty: bool,
+}
+
+/// Which model backend and provider produced an inspection, recorded in the export so a client
+/// can see the chain their code went through (`api` / `anthropic` for a client inspection).
+///
+/// `provider` is an open string, not an enum: a future Bedrock-served run is recorded by
+/// constructing `ModelRecord::new(backend, "bedrock")`, with no change to the manifest, the
+/// README or the release gate's agreement check.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelRecord {
+    /// `ProjectBackend::provenance_name()`: `api` or `cli`.
+    pub backend: String,
+    /// The model provider, e.g. [`ModelRecord::ANTHROPIC`].
+    pub provider: String,
+}
+
+impl ModelRecord {
+    /// The Anthropic provider (the Messages API, and Claude Code, which is Anthropic's too).
+    pub const ANTHROPIC: &'static str = "anthropic";
+
+    pub fn new(backend: crate::llm::ProjectBackend, provider: &str) -> Self {
+        Self {
+            backend: backend.provenance_name().to_string(),
+            provider: provider.to_string(),
+        }
+    }
+
+    /// `backend` served by Anthropic: today's only provider.
+    pub fn anthropic(backend: crate::llm::ProjectBackend) -> Self {
+        Self::new(backend, Self::ANTHROPIC)
+    }
+}
+
+/// Provenance for the product ZIP's `manifest.json` `inspection` block (design:
+/// `docs/design/2026-10-20_machine-readable-exports.md`). The hard fields are `Option` so the
+/// manifest's SHAPE is always complete even when a value was not recorded. `engine_version` is
+/// not here: the manifest fills it from the server crate's own `CARGO_PKG_VERSION`, so it can
+/// never drift from the binary that produced the package.
+///
+/// Both export entry points (`export_product`, `camerata inspect --export`) build this through
+/// [`crate::client_provenance::export_provenance`], the one place that fills every field.
+#[derive(Debug, Clone, Default)]
+pub struct ManifestProvenance {
+    /// Repositories inspected, each with the commit the scan recorded for it.
+    pub repos: Vec<ProvenanceRepo>,
+    /// ISO/human generated-at, from the report cover.
+    pub generated_at: String,
+    /// A deterministic content digest of the rule corpus, when computed
+    /// ([`camerata_rules::corpus_version`]).
+    pub corpus_version: Option<String>,
+    /// The client-visible staleness date ("rules last reviewed on …"): the oldest effective
+    /// review date across the rules the scan used
+    /// (assembled in [`crate::client_provenance`]). `None` while any used rule has never
+    /// been reviewed: an honest absence, never a fabricated date.
+    pub rules_last_reviewed: Option<String>,
+    /// The model backend and provider that ran the inspection. `None` when the caller did not
+    /// record one (an honest absence: `null` in the manifest, no README line).
+    pub model: Option<ModelRecord>,
+}
+
+impl ManifestProvenance {
+    /// The report cover's repos and generated-at, with each repo's commit taken from the cover's
+    /// `audited_refs` (the git identity the scan recorded), and `corpus_version` and
+    /// `rules_last_reviewed` absent. Callers that have the corpus fill those two through
+    /// [`crate::client_provenance::export_provenance`].
+    pub fn from_cover(cover: &crate::report_export::CoverJson) -> Self {
+        let repos = cover
+            .repos
+            .iter()
+            .map(|name| {
+                // The first ref for this repo that actually recorded a commit.
+                let recorded = cover
+                    .audited_refs
+                    .iter()
+                    .find(|r| r.repo == *name && r.sha.is_some());
+                ProvenanceRepo {
+                    name: name.clone(),
+                    commit: recorded.and_then(|r| r.sha.clone()),
+                    dirty: recorded.is_some_and(|r| r.dirty),
+                }
+            })
+            .collect();
+        Self {
+            repos,
+            generated_at: cover.generated_at.clone(),
+            ..Self::default()
+        }
+    }
+
+    /// Camerata's own version as the manifest and README both state it, so a finding can always
+    /// be traced to the engine that produced it. Derived from this crate's `CARGO_PKG_VERSION`,
+    /// never supplied by a caller, so it cannot drift from the binary that built the package.
+    pub fn engine_version(&self) -> String {
+        format!("camerata {}", env!("CARGO_PKG_VERSION"))
+    }
+
+    /// The `manifest.json` `inspection` block. An absent optional value is an explicit JSON
+    /// `null` (the field always exists, so a consumer can tell "not recorded" from "not
+    /// supported"). Rendered from the same fields as [`Self::readme_lines`].
+    pub fn inspection_json(&self) -> serde_json::Value {
+        let repos: Vec<serde_json::Value> = self
+            .repos
+            .iter()
+            .map(|r| {
+                serde_json::json!({
+                    "name": r.name,
+                    "commit": r.commit,
+                    "dirty": r.dirty,
+                })
+            })
+            .collect();
+        serde_json::json!({
+            "repos": repos,
+            "engine_version": self.engine_version(),
+            "corpus_version": self.corpus_version,
+            "rules_last_reviewed": self.rules_last_reviewed,
+            "model_backend": self.model.as_ref().map(|m| &m.backend),
+            "model_provider": self.model.as_ref().map(|m| &m.provider),
+            "release_checks": Self::release_checks(),
+        })
+    }
+
+    /// The release gate's check names, in run order. The README line and the manifest's
+    /// `inspection.release_checks` both render this one list (a package only exists if every
+    /// one of these passed, because `release_gate::release` returns no bytes otherwise).
+    pub fn release_checks() -> Vec<&'static str> {
+        crate::release_gate::CheckId::ALL
+            .iter()
+            .map(|c| c.label())
+            .collect()
+    }
+
+    /// The README's provenance block: the human rendering of [`Self::inspection_json`] plus
+    /// `generated_at`. Every line ends with a newline. A value that is not recorded is OMITTED,
+    /// never printed as a placeholder: a fabricated review date or an empty commit is worse
+    /// than no line. Gate 7 (`tests/product_export_manifest_gates.rs`) holds this equal to the
+    /// manifest.
+    pub fn readme_lines(&self) -> String {
+        let names: Vec<&str> = self.repos.iter().map(|r| r.name.as_str()).collect();
+        let mut out = format!(
+            "Repos inspected: {}\nGenerated: {}\n",
+            names.join(", "),
+            self.generated_at
+        );
+        for repo in &self.repos {
+            if let Some(commit) = &repo.commit {
+                let note = if repo.dirty {
+                    " (the working tree had uncommitted changes)"
+                } else {
+                    ""
+                };
+                out.push_str(&format!("Commit ({}): {commit}{note}\n", repo.name));
+            }
+        }
+        out.push_str(&format!("Engine version: {}\n", self.engine_version()));
+        if let Some(corpus) = &self.corpus_version {
+            out.push_str(&format!("Corpus version: {corpus}\n"));
+        }
+        if let Some(reviewed) = &self.rules_last_reviewed {
+            out.push_str(&format!("Rules last reviewed on {reviewed}\n"));
+        }
+        if let Some(model) = &self.model {
+            out.push_str(&format!("Model backend: {}\n", model.backend));
+            out.push_str(&format!("Model provider: {}\n", model.provider));
+        }
+        out.push_str(&format!(
+            "Release checks: {} (all passed)\n",
+            Self::release_checks().join(", ")
+        ));
+        out
+    }
+}
+
+/// The one-sentence purpose + per-contract `schema_version` for a file in the product ZIP, keyed
+/// by its archive path. `None` schema for formats with no data contract (PDF, xlsx, README).
+fn manifest_file_facts(path: &str) -> (String, Option<String>) {
+    let base = path.rsplit('/').next().unwrap_or(path);
+    let purpose = if path.ends_with(".pdf") {
+        "Curated narrative report for a decision-maker."
+    } else if path.ends_with(".xlsx") {
+        "Complete working dataset across sheets, for engineers."
+    } else if path == "findings.json" {
+        "All-Findings rows wrapped with provenance and summary counts, for tooling."
+    } else if path == "README.txt" {
+        "Plain-text manifest of what each file is."
+    } else if path.starts_with("csv/") {
+        "One xlsx data table as RFC 4180 CSV, for tooling that does not read Excel."
+    } else if path.starts_with("json/") {
+        "One xlsx data table as a flat JSON array, for structured ingestion."
+    } else {
+        "Product-export artifact."
+    };
+    // A data-contract schema id for the machine files; versioned per dataset, bumped on a
+    // breaking column/key change.
+    let schema = if path.starts_with("csv/") || path.starts_with("json/") || path == "findings.json"
+    {
+        let dataset = base.trim_end_matches(".csv").trim_end_matches(".json");
+        Some(format!("{dataset}/1.0"))
+    } else {
+        None
+    };
+    (purpose.to_string(), schema)
+}
+
+/// Build `manifest.json`: the package index (every file's purpose + sha256 + schema version)
+/// plus the `inspection` provenance block. Built LAST, over the FINAL bytes of every other file,
+/// and never lists itself (a file cannot hash itself). Pure.
+pub fn build_manifest(
+    stem: &str,
+    pdf_bytes: &[u8],
+    xlsx_bytes: &[u8],
+    findings_json_bytes: &[u8],
+    readme: &str,
+    extra_files: &[(String, Vec<u8>)],
+    provenance: &ManifestProvenance,
+) -> Vec<u8> {
+    use sha2::{Digest, Sha256};
+    let sha = |bytes: &[u8]| -> String {
+        let digest = Sha256::digest(bytes);
+        digest
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>()
+    };
+    let entry = |path: String, bytes: &[u8]| {
+        let (purpose, schema_version) = manifest_file_facts(&path);
+        serde_json::json!({
+            "path": path,
+            "purpose": purpose,
+            "sha256": sha(bytes),
+            "schema_version": schema_version,
+        })
+    };
+    let mut files = vec![
+        entry(format!("{stem}.pdf"), pdf_bytes),
+        entry(format!("{stem}-findings.xlsx"), xlsx_bytes),
+        entry("findings.json".to_string(), findings_json_bytes),
+        entry("README.txt".to_string(), readme.as_bytes()),
+    ];
+    for (path, bytes) in extra_files {
+        files.push(entry(path.clone(), bytes));
+    }
+
+    let manifest = serde_json::json!({
+        "manifest_schema_version": "1.0",
+        "generated_at": provenance.generated_at,
+        "inspection": provenance.inspection_json(),
+        "files": files,
+    });
+    let mut bytes = serde_json::to_vec_pretty(&manifest).unwrap_or_default();
+    bytes.push(b'\n');
+    bytes
 }
 
 /// Zip the PDF + xlsx + `findings.json` + README.txt into one in-memory archive (Deflate
 /// compression) for the product-export response body. The ONLY I/O here is the in-memory
 /// `Cursor<Vec<u8>>` — no temp files, matching `report_export`'s own "tiny, no persistence"
 /// contract.
-fn build_product_zip(
+///
+/// `pub(crate)`: this is the ONE zip-assembly function, and `release_gate::release` is its ONLY
+/// production caller (a source-grep test pins that), so no exporter can obtain zip bytes that
+/// did not pass the release gate. Integration tests that need an archive to tamper with go
+/// through [`assemble_unreleased_zip`].
+pub(crate) fn build_product_zip(
     stem: &str,
     pdf_bytes: &[u8],
     xlsx_bytes: &[u8],
     findings_json_bytes: &[u8],
     readme: &str,
+    extra_files: &[(String, Vec<u8>)],
+    provenance: &ManifestProvenance,
 ) -> zip::result::ZipResult<Vec<u8>> {
     use std::io::Write;
 
     let buf = std::io::Cursor::new(Vec::new());
     let mut writer = zip::ZipWriter::new(buf);
+    // Real timestamps (the build time), not the zip crate's 1980-01-01 default — see
+    // `zip_now`'s doc comment.
     let options = zip::write::SimpleFileOptions::default()
-        .compression_method(zip::CompressionMethod::Deflated);
+        .compression_method(zip::CompressionMethod::Deflated)
+        .last_modified_time(zip_now());
 
     writer.start_file(format!("{stem}.pdf"), options)?;
     writer.write_all(pdf_bytes)?;
@@ -14505,8 +17476,52 @@ fn build_product_zip(
     writer.start_file("README.txt", options)?;
     writer.write_all(readme.as_bytes())?;
 
+    // The per-dataset CSV/JSON tables (csv/*, json/*), written under their folders.
+    for (path, bytes) in extra_files {
+        writer.start_file(path.clone(), options)?;
+        writer.write_all(bytes)?;
+    }
+
+    // manifest.json LAST: it hashes every other file above, so it is built over their final
+    // bytes and never lists itself.
+    let manifest = build_manifest(
+        stem,
+        pdf_bytes,
+        xlsx_bytes,
+        findings_json_bytes,
+        readme,
+        extra_files,
+        provenance,
+    );
+    writer.start_file("manifest.json", options)?;
+    writer.write_all(&manifest)?;
+
     let cursor = writer.finish()?;
     Ok(cursor.into_inner())
+}
+
+/// [`build_product_zip`] for TESTS: an archive that did NOT pass the release gate, so the gate's
+/// own corruption tests (manifest hashes, provenance) can build a tampered one. Production code
+/// must never call this; a source-grep test fails the build if it does.
+#[doc(hidden)]
+pub fn assemble_unreleased_zip(
+    stem: &str,
+    pdf_bytes: &[u8],
+    xlsx_bytes: &[u8],
+    findings_json_bytes: &[u8],
+    readme: &str,
+    extra_files: &[(String, Vec<u8>)],
+    provenance: &ManifestProvenance,
+) -> zip::result::ZipResult<Vec<u8>> {
+    build_product_zip(
+        stem,
+        pdf_bytes,
+        xlsx_bytes,
+        findings_json_bytes,
+        readme,
+        extra_files,
+        provenance,
+    )
 }
 
 // ── error type ──────────────────────────────────────────────────────────────
@@ -14544,13 +17559,19 @@ impl AppError {
 
     /// ROUTES-7: a 404 for a missing resource (the message becomes the `{error}` body).
     fn not_found(err: anyhow::Error) -> Self {
-        AppError { status: StatusCode::NOT_FOUND, err }
+        AppError {
+            status: StatusCode::NOT_FOUND,
+            err,
+        }
     }
 
     /// ROUTES-7: a 400 for invalid input / a request the server understood but can't act on
     /// as posed (the message becomes the `{error}` body).
     fn bad_request(err: anyhow::Error) -> Self {
-        AppError { status: StatusCode::BAD_REQUEST, err }
+        AppError {
+            status: StatusCode::BAD_REQUEST,
+            err,
+        }
     }
 }
 
@@ -14592,20 +17613,14 @@ mod tests {
             "req-model"
         );
         // 2. No (or blank) request model -> app-level chat model.
-        assert_eq!(
-            resolve_chat_model(None, Some("app-model")),
-            "app-model"
-        );
+        assert_eq!(resolve_chat_model(None, Some("app-model")), "app-model");
         assert_eq!(
             resolve_chat_model(Some("   "), Some("app-model")),
             "app-model",
             "blank request model is ignored"
         );
         // 3. Neither set -> DEFAULT_MODEL floor.
-        assert_eq!(
-            resolve_chat_model(None, None),
-            crate::llm::DEFAULT_MODEL
-        );
+        assert_eq!(resolve_chat_model(None, None), crate::llm::DEFAULT_MODEL);
         assert_eq!(
             resolve_chat_model(Some("  "), Some("   ")),
             crate::llm::DEFAULT_MODEL,
@@ -14655,15 +17670,16 @@ mod tests {
         }
     }
 
-    /// `GET /api/settings` includes the effective `llm_backend` and `api_key_present`.
-    /// A stored backend takes precedence over any ambient env, so this is deterministic
-    /// regardless of the process env var.
+    /// `GET /api/settings` includes the global `chat_backend` and `api_key_present`. The
+    /// stored value is the ENTIRE input — no env fallback of any kind
+    /// (`docs/design/2026-09-22_per-project-backend.md`).
     #[tokio::test]
-    async fn get_settings_includes_llm_backend_and_api_key_present() {
+    #[serial_test::serial(process_env)]
+    async fn get_settings_includes_chat_backend_and_api_key_present() {
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
-        // Store an explicit backend; it should surface as the effective value (precedence
-        // setting > env > default), independent of the ambient CAMERATA_LLM_BACKEND.
-        state.settings.set_llm_backend(Some("api".to_string()));
+        state
+            .settings
+            .set_chat_backend(crate::llm::ProjectBackend::Api);
         let app = router(state);
 
         let resp = app
@@ -14677,17 +17693,21 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let json = body_json(resp).await;
-        assert_eq!(json["llm_backend"], "api", "stored backend surfaces as effective");
+        assert_eq!(
+            json["chat_backend"], "api",
+            "stored chat backend surfaces verbatim"
+        );
         assert!(
             json["api_key_present"].is_boolean(),
             "api_key_present is present and boolean"
         );
     }
 
-    /// `POST /api/settings/llm-backend` persists a valid backend and echoes it plus
+    /// `POST /api/settings/chat-backend` persists a valid backend and echoes it plus
     /// `api_key_present`; the stored setting reflects the new value.
     #[tokio::test]
-    async fn post_llm_backend_persists_valid_value() {
+    #[serial_test::serial(process_env)]
+    async fn post_chat_backend_persists_valid_value() {
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
         let app = router(state.clone());
 
@@ -14695,7 +17715,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/api/settings/llm-backend")
+                    .uri("/api/settings/chat-backend")
                     .header("content-type", "application/json")
                     .body(Body::from(r#"{"backend":"api"}"#))
                     .unwrap(),
@@ -14707,17 +17727,19 @@ mod tests {
         assert_eq!(json["backend"], "api");
         assert!(json["api_key_present"].is_boolean());
         // Persisted on the settings store.
-        assert_eq!(state.settings.llm_backend().as_deref(), Some("api"));
+        assert_eq!(
+            state.settings.chat_backend(),
+            crate::llm::ProjectBackend::Api
+        );
     }
 
-    /// ROUTES-9: `POST /api/settings/llm-backend` persists to the settings store WITHOUT
-    /// mutating the `CAMERATA_LLM_BACKEND` process-env var. The previous implementation did a
-    /// `std::env::set_var` from the request thread, racing worker-thread `getenv` (POSIX UB)
-    /// and making the credential env-fallback test flaky. The store is now the source of truth.
+    /// `POST /api/settings/chat-backend` persists to the settings store WITHOUT touching
+    /// process env at all — there is no `CAMERATA_LLM_BACKEND` env var to mutate anymore.
     #[tokio::test]
-    async fn post_llm_backend_does_not_mutate_process_env() {
-        // Sentinel value the handler must NOT overwrite.
-        std::env::set_var("CAMERATA_LLM_BACKEND", "sentinel-untouched");
+    #[serial_test::serial(process_env)]
+    async fn post_chat_backend_does_not_mutate_process_env() {
+        // Sentinel value the handler must NOT touch (proving no env write happens at all).
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_LLM_BACKEND", "sentinel-untouched");
 
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
         let app = router(state.clone());
@@ -14725,7 +17747,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/api/settings/llm-backend")
+                    .uri("/api/settings/chat-backend")
                     .header("content-type", "application/json")
                     .body(Body::from(r#"{"backend":"api"}"#))
                     .unwrap(),
@@ -14735,14 +17757,16 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
 
         // The setting is persisted to the store...
-        assert_eq!(state.settings.llm_backend().as_deref(), Some("api"));
+        assert_eq!(
+            state.settings.chat_backend(),
+            crate::llm::ProjectBackend::Api
+        );
         // ...but the process env was left exactly as it was (no per-request set_var).
         assert_eq!(
             std::env::var("CAMERATA_LLM_BACKEND").as_deref(),
             Ok("sentinel-untouched"),
             "the handler must not mutate CAMERATA_LLM_BACKEND"
         );
-        std::env::remove_var("CAMERATA_LLM_BACKEND");
     }
 
     // ── Pass 2 (provider-safety UI): settings routes + the picker's data route ──────
@@ -14751,6 +17775,7 @@ mod tests {
     /// no pin) when nothing has ever been set — the same fail-safe guarantee
     /// `SettingsStore::provider_policy` gives at the store layer, now visible over HTTP.
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn get_settings_includes_default_safe_mode_and_no_pin() {
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
         let app = router(state);
@@ -14799,7 +17824,7 @@ mod tests {
     }
 
     /// A blank/whitespace `pinned_provider` collapses to `None` — same convention as
-    /// `set_chat_model` / `set_llm_backend` elsewhere in this file.
+    /// `set_chat_model` elsewhere in this file.
     #[tokio::test]
     async fn post_provider_policy_blank_pin_collapses_to_none() {
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
@@ -14897,7 +17922,9 @@ mod tests {
     #[test]
     fn effective_workspace_root_prefers_explicit_setting() {
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
-        state.settings.set_workspace_root(Some("/explicit/root".to_string()));
+        state
+            .settings
+            .set_workspace_root(Some("/explicit/root".to_string()));
         state
             .settings
             .set_repo_path("me/api", Some("/other/place/me-api".to_string()));
@@ -14958,10 +17985,10 @@ mod tests {
         assert!(effective_workspace_root(&state, &project).is_none());
     }
 
-    /// `POST /api/settings/llm-backend` rejects a bogus backend with 400 and does not
+    /// `POST /api/settings/chat-backend` rejects a bogus backend with 400 and does not
     /// mutate the stored setting.
     #[tokio::test]
-    async fn post_llm_backend_rejects_bogus_value() {
+    async fn post_chat_backend_rejects_bogus_value() {
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
         let app = router(state.clone());
 
@@ -14969,7 +17996,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/api/settings/llm-backend")
+                    .uri("/api/settings/chat-backend")
                     .header("content-type", "application/json")
                     .body(Body::from(r#"{"backend":"gemini"}"#))
                     .unwrap(),
@@ -14977,8 +18004,486 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-        // The store was left untouched (still None).
-        assert!(state.settings.llm_backend().is_none());
+        // The store was left untouched (still the Cli default).
+        assert_eq!(
+            state.settings.chat_backend(),
+            crate::llm::ProjectBackend::Cli
+        );
+    }
+
+    /// `POST /api/projects/:id/backend` — the per-project backend setting
+    /// (`docs/design/2026-09-22_per-project-backend.md`). A fresh project defaults to `Cli`;
+    /// the endpoint switches it and echoes the updated project. Mirrors
+    /// `post_chat_backend_persists_valid_value`'s shape.
+    #[tokio::test]
+    async fn post_project_backend_persists_valid_value() {
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        let p = state.projects.create("Compliance", vec![]).unwrap();
+        assert_eq!(
+            p.backend,
+            crate::project::ProjectBackend::Api,
+            "fresh project defaults to Api"
+        );
+        let app = router(state.clone());
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/projects/{}/backend", p.id))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"backend":"cli"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["ok"], true);
+        assert_eq!(json["project"]["backend"], "cli");
+        // Persisted on the store.
+        assert_eq!(
+            state.projects.get(&p.id).unwrap().backend,
+            crate::project::ProjectBackend::Cli
+        );
+
+        // Switching it back to api round-trips too.
+        let resp2 = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/projects/{}/backend", p.id))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"backend":"api"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp2.status(), StatusCode::OK);
+        let json2 = body_json(resp2).await;
+        assert_eq!(json2["project"]["backend"], "api");
+    }
+
+    /// `POST /api/projects/:id/backend` rejects a bogus backend with `ok: false` (no
+    /// HTTP-status signaling, mirrors `set_step_model`'s shape) and does not mutate the
+    /// project.
+    #[tokio::test]
+    async fn post_project_backend_rejects_bogus_value() {
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        let p = state.projects.create("Compliance", vec![]).unwrap();
+        let app = router(state.clone());
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/projects/{}/backend", p.id))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"backend":"gemini"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["ok"], false);
+        assert_eq!(
+            state.projects.get(&p.id).unwrap().backend,
+            crate::project::ProjectBackend::Api
+        );
+    }
+
+    /// `POST /api/projects/:id/backend` against an unknown project id: no HTTP-status
+    /// signaling (mirrors `set_step_model`'s shape) — a 200 response with `ok: false` and a
+    /// human-readable `message` the UI can display.
+    #[tokio::test]
+    async fn post_project_backend_reports_error_for_unknown_project() {
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        let app = router(state);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/projects/does-not-exist/backend")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"backend":"api"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["ok"], false);
+        assert!(
+            json["message"].as_str().is_some(),
+            "message field present for the UI"
+        );
+    }
+
+    // ── Audit-integrated alternative recommendation endpoints ─────────────────────────
+    // (docs/design/2026-09-22_audit-integrated-alternatives.md)
+
+    /// `rescan-alternatives` validates every override AGAINST the corpus BEFORE any model
+    /// call (and before the compliance gate — validation is cheaper and more specific than
+    /// the gate, so it runs first): an unknown rule id and a real rule with a bogus option id
+    /// are both rejected, and since NEITHER override is valid, the whole request is refused
+    /// with `ok: false` naming both problems. This assertion holds regardless of the test
+    /// environment's key/backend state, since validation never reaches that far.
+    #[tokio::test]
+    async fn rescan_alternatives_rejects_invalid_overrides_before_any_model_call() {
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        let p = state
+            .projects
+            .create("Acme", vec!["me/api".to_string()])
+            .unwrap();
+        let app = router(state);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/projects/{}/rescan-alternatives", p.id))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"overrides":[
+                            {"rule_id":"NO-SUCH-RULE-EVER-1","chosen_option_id":"whatever"},
+                            {"rule_id":"RUST-DOMAIN-7","chosen_option_id":"not-a-real-option-id"}
+                        ]}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["ok"], false);
+        let message = json["message"].as_str().unwrap_or_default();
+        assert!(
+            message.contains("NO-SUCH-RULE-EVER-1"),
+            "message: {message}"
+        );
+        assert!(message.contains("RUST-DOMAIN-7"), "message: {message}");
+    }
+
+    /// A rescan request with at least one VALID override reaches the compliance-safety gate,
+    /// and a `Blocked` resolution (this project is explicitly switched to `Api`, and this
+    /// test guarantees no Anthropic key is present) refuses the whole batch with the gate's
+    /// own message — no model call, no findings. Mirrors the main audit's
+    /// `blocked_resolution_aborts_the_whole_scan_before_any_work` guard, at the endpoint layer.
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn rescan_alternatives_blocked_when_project_is_api_backend_with_no_key() {
+        // Defensive against the known cross-test env-var race (see
+        // `resolve_backend_for_project_gathers_the_three_inputs_correctly`'s doc comment).
+        let _env = camerata_test_env::EnvGuard::remove("ANTHROPIC_API_KEY");
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        let p = state
+            .projects
+            .create("Acme", vec!["me/api".to_string()])
+            .unwrap();
+        assert_eq!(
+            p.backend,
+            crate::project::ProjectBackend::Api,
+            "fresh project defaults to Api"
+        );
+        state
+            .projects
+            .set_backend(&p.id, crate::project::ProjectBackend::Api);
+        let app = router(state);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/projects/{}/rescan-alternatives", p.id))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"overrides":[{"rule_id":"RUST-DOMAIN-7","chosen_option_id":"explicit-unitofwork-parameter-on-transactional-repository-methods"}]}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["ok"], false);
+        assert!(
+            json["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("Anthropic API"),
+            "message: {:?}",
+            json["message"]
+        );
+    }
+
+    /// A `Cli`-backend project's rescan is never blocked, regardless of key presence — no
+    /// silent downgrade path exists anymore (the removed `CliFallbackWarn`), just a plain
+    /// `Cli` resolution that proceeds straight to the (in this test env, failing) model call.
+    /// Asserts the gate itself never refuses the request; it does not assert findings content
+    /// (no live model runs in this test suite).
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn rescan_alternatives_proceeds_on_cli_backend_project() {
+        let _env = camerata_test_env::EnvGuard::remove("ANTHROPIC_API_KEY");
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        let p = state
+            .projects
+            .create("Acme", vec!["me/api".to_string()])
+            .unwrap();
+        state
+            .projects
+            .set_backend(&p.id, crate::project::ProjectBackend::Cli);
+        let app = router(state);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/projects/{}/rescan-alternatives", p.id))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"overrides":[{"rule_id":"RUST-DOMAIN-7","chosen_option_id":"explicit-unitofwork-parameter-on-transactional-repository-methods"}]}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        // Not Blocked: the request proceeds (ok: true) rather than being refused outright.
+        assert_eq!(
+            json["ok"], true,
+            "a Cli-backend project must never be blocked: {json:?}"
+        );
+    }
+
+    /// `rescan-alternatives` against an unknown project id reports the same `{ ok: false,
+    /// message }` shape as every other per-project mutator (no HTTP-status signaling).
+    #[tokio::test]
+    async fn rescan_alternatives_reports_error_for_unknown_project() {
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/projects/does-not-exist/rescan-alternatives")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"overrides":[{"rule_id":"RUST-DOMAIN-7","chosen_option_id":"x"}]}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["ok"], false);
+    }
+
+    fn seeded_scan_report_with_recommendations(
+        repo: &str,
+        recs: Vec<(&str, &str)>,
+    ) -> crate::onboard::ScanReport {
+        let mut report = crate::onboard::ScanReport::gated(&[repo.to_string()]);
+        report.gated = false;
+        report.recommendations = recs
+            .into_iter()
+            .map(|(rule_id, option_id)| {
+                (
+                    rule_id.to_string(),
+                    crate::ai_audit::RuleRecommendation {
+                        rule_id: rule_id.to_string(),
+                        recommended_option_id: option_id.to_string(),
+                        recommendation_reasoning: "test reasoning".to_string(),
+                        hallucinated: false,
+                        operator_chosen: false,
+                        evidence: Some("src/lib.rs:1 — test evidence".to_string()),
+                        applicable: true,
+                        ..Default::default()
+                    },
+                )
+            })
+            .collect();
+        report
+    }
+
+    /// `accept-alternatives` with no scan on record refuses (never fabricates a ruleset).
+    #[tokio::test]
+    async fn accept_alternatives_reports_error_without_a_scan() {
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        let p = state
+            .projects
+            .create("Acme", vec!["me/api".to_string()])
+            .unwrap();
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/projects/{}/accept-alternatives", p.id))
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["ok"], false);
+    }
+
+    /// `accept-alternatives` with an empty body (`{}`) accepts EVERY rule in the last scan's
+    /// `recommendations` map, writing each `recommended_option_id` into that rule's
+    /// `RuleSelection.chosen_option`.
+    #[tokio::test]
+    async fn accept_alternatives_persists_every_recommendation_by_default() {
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        let p = state
+            .projects
+            .create("Acme", vec!["me/api".to_string()])
+            .unwrap();
+        state.projects.update(&p.id, |proj| {
+            proj.ruleset.selections.push(crate::project::RuleSelection {
+                rule_id: "TESTING-PYRAMID-1".to_string(),
+                ..Default::default()
+            });
+            proj.ruleset.selections.push(crate::project::RuleSelection {
+                rule_id: "RUST-DOMAIN-7".to_string(),
+                ..Default::default()
+            });
+        });
+        state.set_last_scan(
+            p.id.clone(),
+            seeded_scan_report_with_recommendations(
+                "me/api",
+                vec![
+                    (
+                        "TESTING-PYRAMID-1",
+                        "pyramid-many-unit-fewer-integration-few-e2e",
+                    ),
+                    (
+                        "RUST-DOMAIN-7",
+                        "explicit-unitofwork-parameter-on-transactional-repository-methods",
+                    ),
+                ],
+            ),
+        );
+        let app = router(state.clone());
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/projects/{}/accept-alternatives", p.id))
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["ok"], true);
+        assert_eq!(json["accepted"], 2);
+
+        let updated = state.projects.get(&p.id).unwrap();
+        let sel = |rid: &str| {
+            updated
+                .ruleset
+                .selections
+                .iter()
+                .find(|s| s.rule_id == rid)
+                .unwrap()
+                .chosen_option
+                .clone()
+        };
+        assert_eq!(
+            sel("TESTING-PYRAMID-1"),
+            Some("pyramid-many-unit-fewer-integration-few-e2e".to_string())
+        );
+        assert_eq!(
+            sel("RUST-DOMAIN-7"),
+            Some("explicit-unitofwork-parameter-on-transactional-repository-methods".to_string())
+        );
+    }
+
+    /// `accept-alternatives` with `{ "rule_ids": [...] }` accepts ONLY the named subset,
+    /// leaving every other rule's recommendation un-persisted.
+    #[tokio::test]
+    async fn accept_alternatives_scopes_to_the_requested_rule_ids() {
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        let p = state
+            .projects
+            .create("Acme", vec!["me/api".to_string()])
+            .unwrap();
+        state.projects.update(&p.id, |proj| {
+            proj.ruleset.selections.push(crate::project::RuleSelection {
+                rule_id: "TESTING-PYRAMID-1".to_string(),
+                ..Default::default()
+            });
+            proj.ruleset.selections.push(crate::project::RuleSelection {
+                rule_id: "RUST-DOMAIN-7".to_string(),
+                ..Default::default()
+            });
+        });
+        state.set_last_scan(
+            p.id.clone(),
+            seeded_scan_report_with_recommendations(
+                "me/api",
+                vec![
+                    (
+                        "TESTING-PYRAMID-1",
+                        "pyramid-many-unit-fewer-integration-few-e2e",
+                    ),
+                    (
+                        "RUST-DOMAIN-7",
+                        "explicit-unitofwork-parameter-on-transactional-repository-methods",
+                    ),
+                ],
+            ),
+        );
+        let app = router(state.clone());
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/projects/{}/accept-alternatives", p.id))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"rule_ids":["TESTING-PYRAMID-1"]}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["ok"], true);
+        assert_eq!(json["accepted"], 1);
+
+        let updated = state.projects.get(&p.id).unwrap();
+        let sel = |rid: &str| {
+            updated
+                .ruleset
+                .selections
+                .iter()
+                .find(|s| s.rule_id == rid)
+                .unwrap()
+                .chosen_option
+                .clone()
+        };
+        assert_eq!(
+            sel("TESTING-PYRAMID-1"),
+            Some("pyramid-many-unit-fewer-integration-few-e2e".to_string())
+        );
+        assert_eq!(
+            sel("RUST-DOMAIN-7"),
+            None,
+            "un-requested rule must be left untouched"
+        );
     }
 
     /// GAP-2: the git-commit chokepoint HARD-BLOCKS a commit whose message violates the
@@ -14987,7 +18492,10 @@ mod tests {
     #[tokio::test]
     async fn git_commit_chokepoint_blocks_a_message_violating_process_rules() {
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
-        let p = state.projects.create("Gate", vec!["me/api".to_string()]).unwrap();
+        let p = state
+            .projects
+            .create("Gate", vec!["me/api".to_string()])
+            .unwrap();
         let app = router(state);
 
         // "just some junk" is not a conventional-commit subject and has no doc body/story-id.
@@ -14997,16 +18505,27 @@ mod tests {
                     .method("POST")
                     .uri(format!("/api/projects/{}/git/commit", p.id))
                     .header("content-type", "application/json")
-                    .body(Body::from(r#"{"repo":"me/api","message":"just some junk"}"#))
+                    .body(Body::from(
+                        r#"{"repo":"me/api","message":"just some junk"}"#,
+                    ))
                     .unwrap(),
             )
             .await
             .unwrap();
         let json = body_json(resp).await;
-        assert_eq!(json["ok"], false, "violating commit must be refused: {json}");
-        assert_eq!(json["blocked"], true, "the response must mark it as gate-blocked: {json}");
+        assert_eq!(
+            json["ok"], false,
+            "violating commit must be refused: {json}"
+        );
+        assert_eq!(
+            json["blocked"], true,
+            "the response must mark it as gate-blocked: {json}"
+        );
         assert!(
-            json["message"].as_str().unwrap_or_default().contains("VCS-action gate"),
+            json["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("VCS-action gate"),
             "the block message must name the VCS-action gate: {json}"
         );
     }
@@ -15041,7 +18560,10 @@ mod tests {
         let active = state.runs.create("CAM-live", "live", RunKind::Watched);
         state.runs.set_status(&active, RunStatus::Executing, false);
         state.runs.touch_activity(&active, None);
-        assert!(!stalled_flag(&state, &active).await, "fresh active run not stalled");
+        assert!(
+            !stalled_flag(&state, &active).await,
+            "fresh active run not stalled"
+        );
 
         // A DONE run is never stalled (even though it will sit idle forever).
         let done = state.runs.create("CAM-done", "live", RunKind::Watched);
@@ -15050,8 +18572,13 @@ mod tests {
 
         // A run PARKED on human review is never stalled.
         let parked = state.runs.create("CAM-parked", "live", RunKind::Watched);
-        state.runs.set_status(&parked, RunStatus::AwaitingReview, false);
-        assert!(!stalled_flag(&state, &parked).await, "parked run never stalled");
+        state
+            .runs
+            .set_status(&parked, RunStatus::AwaitingReview, false);
+        assert!(
+            !stalled_flag(&state, &parked).await,
+            "parked run never stalled"
+        );
     }
 
     #[test]
@@ -15071,15 +18598,15 @@ mod tests {
         let p = state.projects.create("Routing", vec![]).unwrap();
         state
             .projects
-            .set_step_model(&p.id, StepKind::StoryAuthoring, "claude-opus-4-8".to_string())
+            .set_step_model(&p.id, StepKind::StoryAuthoring, "claude-opus-5".to_string())
             .unwrap();
 
         // The fallback-step resolver now returns the project's configured model (no env floor).
         let model = step_model(&state, StepKind::StoryAuthoring);
-        assert_eq!(model, "claude-opus-4-8");
+        assert_eq!(model, "claude-opus-5");
         // And it is exactly what a fallback-step call site puts on the LlmRequest.
         let req = crate::llm::LlmRequest::new("draft").with_model(model);
-        assert_eq!(req.model, "claude-opus-4-8");
+        assert_eq!(req.model, "claude-opus-5");
 
         // A different step on the same project is still the default (per-step isolation).
         assert_eq!(
@@ -15097,22 +18624,22 @@ mod tests {
         let p = state.projects.create("UiPick", vec![]).unwrap();
         state
             .projects
-            .set_step_model(&p.id, StepKind::Audit, "claude-sonnet-4-6".to_string())
+            .set_step_model(&p.id, StepKind::Audit, "claude-sonnet-5".to_string())
             .unwrap();
 
         // Explicit pick overrides the project default.
         assert_eq!(
-            step_model_or(&state, StepKind::Audit, Some("claude-opus-4-8")),
-            "claude-opus-4-8"
+            step_model_or(&state, StepKind::Audit, Some("claude-opus-5")),
+            "claude-opus-5"
         );
         // Blank / None falls back to the project's per-step model.
         assert_eq!(
             step_model_or(&state, StepKind::Audit, Some("   ")),
-            "claude-sonnet-4-6"
+            "claude-sonnet-5"
         );
         assert_eq!(
             step_model_or(&state, StepKind::Audit, None),
-            "claude-sonnet-4-6"
+            "claude-sonnet-5"
         );
     }
 
@@ -15120,10 +18647,19 @@ mod tests {
     fn parse_step_kind_accepts_known_keys_and_separators() {
         use crate::project::StepKind;
         assert_eq!(parse_step_kind("audit"), Some(StepKind::Audit));
-        assert_eq!(parse_step_kind("research_chat"), Some(StepKind::ResearchChat));
+        assert_eq!(
+            parse_step_kind("research_chat"),
+            Some(StepKind::ResearchChat)
+        );
         // Tolerant of dashes/spaces/case.
-        assert_eq!(parse_step_kind("Research-Chat"), Some(StepKind::ResearchChat));
-        assert_eq!(parse_step_kind("story authoring"), Some(StepKind::StoryAuthoring));
+        assert_eq!(
+            parse_step_kind("Research-Chat"),
+            Some(StepKind::ResearchChat)
+        );
+        assert_eq!(
+            parse_step_kind("story authoring"),
+            Some(StepKind::StoryAuthoring)
+        );
         assert_eq!(parse_step_kind("nope"), None);
     }
 
@@ -15139,6 +18675,7 @@ mod tests {
                 arm_rule("PROC-1", "process", &["me/api"]),
             ],
             &[],
+            None,
         );
         let p = state.projects.active().expect("a project was created");
         assert_eq!(p.ruleset.selections.len(), 1, "repo-local -> selections");
@@ -15164,6 +18701,7 @@ mod tests {
                 arm_rule("XREPO-1", "cross-repo", &[&sentinel]),
             ],
             &[],
+            None,
         );
         let p = state.projects.active().expect("a project was created");
         assert!(
@@ -15215,6 +18753,7 @@ mod tests {
             &state,
             &[arm_rule("REPO-1", "repo-local", &["me/api"])],
             &[],
+            None,
         );
         let after = state.projects.get(&p.id).unwrap();
         assert_eq!(after.ruleset.selections.len(), 1);
@@ -15242,7 +18781,10 @@ mod tests {
     #[tokio::test]
     async fn project_grounding_includes_brief_and_enabled_principles() {
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
-        let p = state.projects.create("Acme", vec![]).expect("project created");
+        let p = state
+            .projects
+            .create("Acme", vec![])
+            .expect("project created");
         state.projects.update(&p.id, |pr| {
             pr.product_brief = "Acme builds X for Y; never ship without tests.".to_string();
             pr.operating_principles = vec![
@@ -15261,7 +18803,10 @@ mod tests {
         let g = state.project_grounding().await.expect("grounding present");
         assert!(g.contains("## Product context"), "brief heading present");
         assert!(g.contains("Acme builds X for Y"), "brief body present");
-        assert!(g.contains("## How to work here"), "principles heading present");
+        assert!(
+            g.contains("## How to work here"),
+            "principles heading present"
+        );
         assert!(g.contains("Be explicit."), "enabled principle present");
         assert!(
             !g.contains("SECRET-DISABLED-PRINCIPLE"),
@@ -15272,7 +18817,10 @@ mod tests {
     #[tokio::test]
     async fn project_grounding_includes_approved_memory_only() {
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
-        let p = state.projects.create("Acme", vec![]).expect("project created");
+        let p = state
+            .projects
+            .create("Acme", vec![])
+            .expect("project created");
         state.projects.update(&p.id, |pr| {
             pr.memory = vec![
                 crate::project::MemoryEntry {
@@ -15306,7 +18854,10 @@ mod tests {
     #[tokio::test]
     async fn memory_add_patch_delete_curation_flow() {
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
-        let p = state.projects.create("Acme", vec![]).expect("project created");
+        let p = state
+            .projects
+            .create("Acme", vec![])
+            .expect("project created");
         // Human add → an Approved entry with a fresh id.
         let r = add_memory(
             axum::extract::State(state.clone()),
@@ -15321,8 +18872,14 @@ mod tests {
         assert_eq!(r["ok"], true);
         let proj = state.projects.active().unwrap();
         assert_eq!(proj.memory.len(), 1);
-        assert_eq!(proj.memory[0].status, crate::project::MemoryStatus::Approved);
-        assert_eq!(proj.memory[0].text, "Use the repository pattern for data access.");
+        assert_eq!(
+            proj.memory[0].status,
+            crate::project::MemoryStatus::Approved
+        );
+        assert_eq!(
+            proj.memory[0].text,
+            "Use the repository pattern for data access."
+        );
         let eid = proj.memory[0].id.clone();
         // Patch → archive it.
         let _ = patch_memory(
@@ -15371,7 +18928,9 @@ mod tests {
                 }]);
             })
             .expect("project updated");
-        state.draft.save(&p.id, serde_json::json!({"scan": "in-progress"}));
+        state
+            .draft
+            .save(&p.id, serde_json::json!({"scan": "in-progress"}));
         assert!(!state.projects.get(&p.id).unwrap().onboarded.is_empty());
         assert!(state.draft.load(&p.id).is_some());
 
@@ -15431,7 +18990,10 @@ mod tests {
     #[tokio::test]
     async fn hierarchy_get_default_then_post_replaces() {
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
-        let p = state.projects.create("Acme", vec![]).expect("project created");
+        let p = state
+            .projects
+            .create("Acme", vec![])
+            .expect("project created");
 
         // GET → the seeded default ladder (includes Epic).
         let got = get_hierarchy_handler(
@@ -15482,7 +19044,10 @@ mod tests {
     #[tokio::test]
     async fn chat_add_to_learnings_server_path_resolves_active_then_adds() {
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
-        let p = state.projects.create("Acme", vec![]).expect("project created");
+        let p = state
+            .projects
+            .create("Acme", vec![])
+            .expect("project created");
         let app = router(state.clone());
 
         // GET active -> the active project's id (what the chat resolves first).
@@ -15538,13 +19103,14 @@ mod tests {
     #[tokio::test]
     async fn development_context_emits_client_expected_field_names() {
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
-        let p = state.projects.create("Acme", vec![]).expect("project created");
+        let p = state
+            .projects
+            .create("Acme", vec![])
+            .expect("project created");
 
         // A UoW scoped to the active project (project_id match), with a recorded gate
         // provenance and a sign-off so all three client-expected fields are populated.
-        let uow = state
-            .uow
-            .create_blank_with_parent(None, Some(p.id.clone()));
+        let uow = state.uow.create_blank_with_parent(None, Some(p.id.clone()));
         let story_id = uow.story_id.clone();
         state.uow.record_gate_provenance(
             &story_id,
@@ -15575,7 +19141,9 @@ mod tests {
         let body = body_json(resp).await;
 
         assert_eq!(body["ok"], true);
-        let items = body["units_of_work"].as_array().expect("units_of_work array");
+        let items = body["units_of_work"]
+            .as_array()
+            .expect("units_of_work array");
         let item = items
             .iter()
             .find(|u| u["story_id"] == serde_json::json!(story_id))
@@ -15625,7 +19193,10 @@ mod tests {
     #[tokio::test]
     async fn hierarchy_schema_http_round_trip_and_export() {
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
-        let p = state.projects.create("Acme", vec![]).expect("project created");
+        let p = state
+            .projects
+            .create("Acme", vec![])
+            .expect("project created");
         let app = router(state.clone());
         let id = p.id.clone();
 
@@ -15649,7 +19220,10 @@ mod tests {
             .iter()
             .map(|t| t["name"].as_str().unwrap())
             .collect();
-        assert!(names.contains(&"Epic"), "seeded default includes Epic; got {names:?}");
+        assert!(
+            names.contains(&"Epic"),
+            "seeded default includes Epic; got {names:?}"
+        );
 
         // POST → replace with a custom graph.
         let post = app
@@ -15711,14 +19285,15 @@ mod tests {
     /// proposal, and made materialize reject every child.
     #[test]
     fn effective_hierarchy_schema_falls_back_to_default_ladder() {
-        let allowed_children = |schema: &crate::project::HierarchySchema, parent: &str| -> Vec<String> {
-            schema
-                .relations
-                .iter()
-                .filter(|r| r.parent == parent)
-                .map(|r| r.child.clone())
-                .collect::<Vec<_>>()
-        };
+        let allowed_children =
+            |schema: &crate::project::HierarchySchema, parent: &str| -> Vec<String> {
+                schema
+                    .relations
+                    .iter()
+                    .filter(|r| r.parent == parent)
+                    .map(|r| r.child.clone())
+                    .collect::<Vec<_>>()
+            };
 
         // (a) No active project → default ladder.
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
@@ -15732,13 +19307,22 @@ mod tests {
         );
 
         // (b) Active project with an EMPTY stored schema (bare-import shape) → default ladder.
-        let p = state.projects.create("Acme", vec![]).expect("project created");
+        let p = state
+            .projects
+            .create("Acme", vec![])
+            .expect("project created");
         state
             .projects
             .set_hierarchy_schema(&p.id, crate::project::HierarchySchema::default())
             .expect("schema set");
         assert!(
-            state.projects.active().unwrap().hierarchy_schema.types.is_empty(),
+            state
+                .projects
+                .active()
+                .unwrap()
+                .hierarchy_schema
+                .types
+                .is_empty(),
             "stored schema is empty",
         );
         let schema = state.effective_hierarchy_schema();
@@ -15782,8 +19366,11 @@ mod tests {
     #[tokio::test]
     async fn memory_edit_modal_patches_text_and_kind() {
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
-        let p = state.projects.create("Acme", vec![]).expect("project created");
-        add_memory(
+        let p = state
+            .projects
+            .create("Acme", vec![])
+            .expect("project created");
+        let added = add_memory(
             axum::extract::State(state.clone()),
             axum::extract::Path(p.id.clone()),
             axum::Json(AddMemoryReq {
@@ -15792,9 +19379,14 @@ mod tests {
             }),
         )
         .await;
+        assert_eq!(
+            added.0["ok"], true,
+            "add_memory reports success: {}",
+            added.0
+        );
         let eid = state.projects.active().unwrap().memory[0].id.clone();
         // Edit text + kind (what the modal Save does).
-        patch_memory(
+        let patched = patch_memory(
             axum::extract::State(state.clone()),
             axum::extract::Path((p.id.clone(), eid)),
             axum::Json(PatchMemoryReq {
@@ -15804,6 +19396,11 @@ mod tests {
             }),
         )
         .await;
+        assert_eq!(
+            patched.0["ok"], true,
+            "patch_memory reports success: {}",
+            patched.0
+        );
         let m = state.projects.active().unwrap().memory[0].clone();
         assert_eq!(m.text, "edited learning", "text edited + trimmed");
         assert_eq!(m.kind, crate::project::MemoryKind::Gotcha, "kind edited");
@@ -15896,7 +19493,7 @@ mod tests {
             base_commit: "abc123".to_string(),
             iteration: 0,
             max_iterations: 1,
-            model: "claude-opus-4-8".to_string(),
+            model: "claude-opus-5".to_string(),
             project_id: None,
         });
         state.escalations.set_checkpoint(&esc.id, &ckpt.id);
@@ -15907,11 +19504,16 @@ mod tests {
     /// escalation, resolved with Approve, RESUMES from its checkpoint (consuming it once-only) and
     /// records the decision on the UoW trail. Drives the real `answer_escalation` handler.
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn uow_escalation_approve_resumes_and_consumes_checkpoint() {
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
         let (esc_id, ckpt_id) = seed_paused_uow_run(&state, "me/api#7");
         // The UoW review is discoverable in the NEEDS YOU surface before resolution.
-        assert_eq!(state.escalations.list_open_uow().len(), 1, "open UoW review -> NEEDS YOU");
+        assert_eq!(
+            state.escalations.list_open_uow().len(),
+            1,
+            "open UoW review -> NEEDS YOU"
+        );
 
         let resolved = answer_escalation(
             axum::extract::State(state.clone()),
@@ -15927,7 +19529,9 @@ mod tests {
         assert_eq!(resolved["status"], "resolved");
         // A successful resume surfaces the NEW run id so the client can follow it.
         assert!(
-            resolved["resume_run_id"].as_str().is_some_and(|s| !s.is_empty()),
+            resolved["resume_run_id"]
+                .as_str()
+                .is_some_and(|s| !s.is_empty()),
             "approve returns the resumed run id: {resolved}"
         );
         // Approve RESUMES: the checkpoint is consumed (enforcing once-only resume) and no longer
@@ -15936,13 +19540,19 @@ mod tests {
             state.checkpoints.get(&ckpt_id).unwrap().resumed.is_some(),
             "approve resumes -> checkpoint consumed"
         );
-        assert_eq!(state.escalations.list_open_uow().len(), 0, "resolved -> off NEEDS YOU");
+        assert_eq!(
+            state.escalations.list_open_uow().len(),
+            0,
+            "resolved -> off NEEDS YOU"
+        );
         // The decision is recorded on the UoW's durable history. Without a live agent the resume
         // REFUSES honestly (it never fabricates a continued cycle), so the trail records the
         // refusal rather than a fake success.
         let uow = state.uow.get_or_create("me/api#7");
         assert!(
-            uow.history.iter().any(|h| h.text.contains("Resume refused")),
+            uow.history
+                .iter()
+                .any(|h| h.text.contains("Resume refused")),
             "approve records the honest resume refusal on the UoW trail"
         );
     }
@@ -15951,6 +19561,7 @@ mod tests {
     /// checkpoint (so the run can't be re-spawned) and records the abandonment. Drives the real
     /// `answer_escalation` handler.
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn uow_escalation_reject_stops_and_consumes_checkpoint() {
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
         let (esc_id, ckpt_id) = seed_paused_uow_run(&state, "me/api#8");
@@ -15959,8 +19570,9 @@ mod tests {
             axum::extract::State(state.clone()),
             axum::extract::Path(esc_id.clone()),
             axum::Json(crate::escalation::AnswerEscalationReq {
-                answer: "Reject: the agent weakened a real assertion to make it pass. Fix the code."
-                    .to_string(),
+                answer:
+                    "Reject: the agent weakened a real assertion to make it pass. Fix the code."
+                        .to_string(),
                 action: crate::escalation::EscalationAction::Reject,
             }),
         )
@@ -15986,6 +19598,111 @@ mod tests {
         );
     }
 
+    // ── `run_id` stamped onto open clarifications (the client's other Bombe-blind-spot fix) ──
+    //
+    // A clarification that paused a governed investigation run is resumed via a DETACHED
+    // `tokio::spawn` (see `answer_clarification`) — the client never learns the resumed run's id
+    // from the answer response itself, because it's the SAME id the run always had. So the list
+    // endpoints stamp `run_id` onto each OPEN clarification up front (non-destructively, via
+    // `with_resume_run_ids`) so the UI already knows it before the human even answers, and can
+    // re-attach `poll_run_to_done` on it — keeping the Bombe animating through the resume even
+    // when answered from the app-wide NEEDS YOU queue, where no page was already polling it.
+
+    #[test]
+    fn with_resume_run_ids_stamps_only_the_paused_clarification() {
+        let resume = crate::clarify_resume::ClarifyResumeStore::new();
+        resume.put(
+            "clar-1",
+            crate::clarify_resume::ClarifyResumeContext {
+                run_id: "run-9".to_string(),
+                story_id: "me/api#3".to_string(),
+                story_title: "Add export".to_string(),
+                story_desc: "desc".to_string(),
+                model: "claude-opus-5".to_string(),
+                phase: crate::clarify_resume::PausedPhase::Investigation,
+                original_task: "Analyze the story.".to_string(),
+                asked_question: "Include archived rows?".to_string(),
+            },
+        );
+        let mk = |id: &str, story_id: &str| Clarification {
+            id: id.to_string(),
+            story_id: story_id.to_string(),
+            question: "Q".to_string(),
+            addressee: "you".to_string(),
+            options: vec![],
+            multi_select: false,
+            allow_free_text: true,
+            answer: None,
+            answer_selection: None,
+            answered_by: None,
+            state: crate::clarify::ClarifyState::Asked,
+            run_id: None,
+        };
+        let clars = vec![mk("clar-1", "me/api#3"), mk("clar-2", "me/api#4")];
+
+        let stamped = with_resume_run_ids(&resume, clars);
+
+        assert_eq!(
+            stamped
+                .iter()
+                .find(|c| c.id == "clar-1")
+                .unwrap()
+                .run_id
+                .as_deref(),
+            Some("run-9"),
+            "the clarification with a parked resume context gets its run_id"
+        );
+        assert!(
+            stamped
+                .iter()
+                .find(|c| c.id == "clar-2")
+                .unwrap()
+                .run_id
+                .is_none(),
+            "a free-standing clarification (no parked run) stays None"
+        );
+        // Non-destructive: a SECOND stamp still finds it (list endpoints must never consume the
+        // pause point — only actually answering does, via `ClarifyResumeStore::take`).
+        assert!(
+            resume.get("clar-1").is_some(),
+            "with_resume_run_ids used .get, not .take"
+        );
+    }
+
+    #[tokio::test]
+    async fn list_clarifications_handler_stamps_run_id_for_a_paused_investigation() {
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        let posted = state.clarifications.post("me/api#5", "Which flag?", "you");
+        state.clarify_resume.put(
+            &posted.id,
+            crate::clarify_resume::ClarifyResumeContext {
+                run_id: "run-55".to_string(),
+                story_id: "me/api#5".to_string(),
+                story_title: "T".to_string(),
+                story_desc: "D".to_string(),
+                model: "claude-opus-5".to_string(),
+                phase: crate::clarify_resume::PausedPhase::Investigation,
+                original_task: "task".to_string(),
+                asked_question: "Which flag?".to_string(),
+            },
+        );
+
+        let Json(out) = list_clarifications(
+            axum::extract::State(state.clone()),
+            axum::extract::Path("me/api#5".to_string()),
+        )
+        .await;
+
+        assert_eq!(out.len(), 1);
+        assert_eq!(
+            out[0].run_id.as_deref(),
+            Some("run-55"),
+            "the handler stamps run_id from the resume-context store onto the list response"
+        );
+        // Still non-destructive at the HTTP layer too: answering later can still consume it.
+        assert!(state.clarify_resume.get(&posted.id).is_some());
+    }
+
     /// Regression test for issue #106: `POST /api/projects/:id/emit-local` must run
     /// unconditionally for an already-onboarded project (no onboarding-state gate).
     ///
@@ -15999,6 +19716,7 @@ mod tests {
     /// layer (arm_files_for_repo always produces current content) is covered by the
     /// `re_emit_for_onboarded_project_always_writes_current_content` test in arm.rs.
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn emit_project_local_route_runs_for_onboarded_project_no_workspace_guard() {
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
 
@@ -16082,10 +19800,10 @@ mod tests {
         let state = AppState::seeded();
         // Anthropic-shaped: cost reported directly.
         state.usage_ledger.record(
-            "claude-opus-4-8",
+            "claude-opus-5",
             &crate::llm::LlmResponse {
                 text: String::new(),
-                model: "claude-opus-4-8".to_string(),
+                model: "claude-opus-5".to_string(),
                 backend: "cli".to_string(),
                 cost_usd: Some(0.05),
                 input_tokens: Some(1000),
@@ -16093,14 +19811,15 @@ mod tests {
                 cache_read_input_tokens: 10,
                 cache_creation_input_tokens: 20,
                 or_cache_discount: None,
+                truncated: false,
             },
         );
         // Gemini-shaped: no cost field, known model id -> derived cost (sonnet 3/15 per Mtok).
         state.usage_ledger.record(
-            "claude-sonnet-4-6",
+            "claude-sonnet-5",
             &crate::llm::LlmResponse {
                 text: String::new(),
-                model: "claude-sonnet-4-6".to_string(),
+                model: "claude-sonnet-5".to_string(),
                 backend: "api".to_string(),
                 cost_usd: None,
                 input_tokens: Some(1_000_000),
@@ -16108,6 +19827,7 @@ mod tests {
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
                 or_cache_discount: None,
+                truncated: false,
             },
         );
 
@@ -16137,7 +19857,7 @@ mod tests {
         // by_model array of {model,tokens,cost,calls}, sorted by descending cost (sonnet first).
         let by_model = json["by_model"].as_array().unwrap();
         assert_eq!(by_model.len(), 2);
-        assert_eq!(by_model[0]["model"], "claude-sonnet-4-6");
+        assert_eq!(by_model[0]["model"], "claude-sonnet-5");
         assert_eq!(by_model[0]["calls"], 1);
         assert_eq!(by_model[0]["tokens"], 2_000_000);
     }
@@ -16295,7 +20015,10 @@ mod tests {
         assert_eq!(uow.development.chat.len(), 1);
         assert_eq!(uow.meta.viewed_phase, crate::uow::PhaseTab::Development);
         assert!(uow.meta.intake_finished);
-        assert!(!uow.meta.investigation_finished, "unpatched field unchanged");
+        assert!(
+            !uow.meta.investigation_finished,
+            "unpatched field unchanged"
+        );
     }
 
     #[tokio::test]
@@ -16351,7 +20074,11 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let json = body_json(resp).await;
         let arr = json.as_array().unwrap();
-        assert_eq!(arr.len(), 2, "only the active project's stories, got: {json:?}");
+        assert_eq!(
+            arr.len(),
+            2,
+            "only the active project's stories, got: {json:?}"
+        );
         let ids: Vec<&str> = arr.iter().map(|s| s["id"].as_str().unwrap()).collect();
         assert!(ids.contains(&"CAM-1") && ids.contains(&"CAM-2"));
         assert!(
@@ -16439,7 +20166,9 @@ mod tests {
     /// unchanged `{error}` body shape the UI parses.
     #[tokio::test]
     async fn get_run_missing_returns_404_not_500() {
-        let app = router(AppState::new(std::sync::Arc::new(InMemoryStoryStore::new())));
+        let app = router(AppState::new(
+            std::sync::Arc::new(InMemoryStoryStore::new()),
+        ));
         let resp = app
             .oneshot(
                 Request::builder()
@@ -16460,7 +20189,9 @@ mod tests {
     /// (see `AppState::record_governance`) must extend to the read path.
     #[tokio::test]
     async fn get_run_events_returns_empty_array_when_no_governance_log() {
-        let app = router(AppState::new(std::sync::Arc::new(InMemoryStoryStore::new())));
+        let app = router(AppState::new(
+            std::sync::Arc::new(InMemoryStoryStore::new()),
+        ));
         let resp = app
             .oneshot(
                 Request::builder()
@@ -16480,7 +20211,9 @@ mod tests {
     /// governance log open, same fail-soft contract as the per-run route.
     #[tokio::test]
     async fn recent_governance_events_returns_empty_array_when_no_governance_log() {
-        let app = router(AppState::new(std::sync::Arc::new(InMemoryStoryStore::new())));
+        let app = router(AppState::new(
+            std::sync::Arc::new(InMemoryStoryStore::new()),
+        ));
         let resp = app
             .oneshot(
                 Request::builder()
@@ -16567,7 +20300,9 @@ mod tests {
     /// an error, when no feedback store is open this session.
     #[tokio::test]
     async fn project_feedback_returns_empty_array_when_no_feedback_store() {
-        let app = router(AppState::new(std::sync::Arc::new(InMemoryStoryStore::new())));
+        let app = router(AppState::new(
+            std::sync::Arc::new(InMemoryStoryStore::new()),
+        ));
         let resp = app
             .oneshot(
                 Request::builder()
@@ -16587,7 +20322,9 @@ mod tests {
     /// feedback store open, same contract as the per-project route.
     #[tokio::test]
     async fn recent_feedback_returns_empty_array_when_no_feedback_store() {
-        let app = router(AppState::new(std::sync::Arc::new(InMemoryStoryStore::new())));
+        let app = router(AppState::new(
+            std::sync::Arc::new(InMemoryStoryStore::new()),
+        ));
         let resp = app
             .oneshot(
                 Request::builder()
@@ -16607,7 +20344,9 @@ mod tests {
     /// 500) when no feedback store is open this session.
     #[tokio::test]
     async fn submit_feedback_reports_ok_false_when_no_feedback_store() {
-        let app = router(AppState::new(std::sync::Arc::new(InMemoryStoryStore::new())));
+        let app = router(AppState::new(
+            std::sync::Arc::new(InMemoryStoryStore::new()),
+        ));
         let resp = app
             .oneshot(
                 Request::builder()
@@ -16700,8 +20439,14 @@ mod tests {
         assert_eq!(json[0]["id"], id);
         let console = json[0]["context"]["console"].as_str().unwrap();
         let stack = json[0]["context"]["stack"].as_str().unwrap();
-        assert!(!console.contains(leaked_key), "console still carries the raw key: {console}");
-        assert!(!stack.contains(leaked_key), "stack still carries the raw key: {stack}");
+        assert!(
+            !console.contains(leaked_key),
+            "console still carries the raw key: {console}"
+        );
+        assert!(
+            !stack.contains(leaked_key),
+            "stack still carries the raw key: {stack}"
+        );
         assert!(console.contains("{{SECRET:stripe_key_1}}"));
         assert!(stack.contains("{{SECRET:stripe_key_1}}"));
         // Untouched context fields (route) still come through unscrubbed.
@@ -16724,7 +20469,10 @@ mod tests {
         let json = body_json(resp).await;
         assert_eq!(json.as_array().unwrap().len(), 1);
         let detail = json[0]["detail"].as_str().expect("detail must be a string");
-        assert!(!detail.contains(leaked_key), "governance detail still carries the raw key: {detail}");
+        assert!(
+            !detail.contains(leaked_key),
+            "governance detail still carries the raw key: {detail}"
+        );
         assert!(detail.contains("{{SECRET:stripe_key_1}}"));
     }
 
@@ -16823,7 +20571,10 @@ mod tests {
         assert_eq!(json.as_array().unwrap().len(), 1);
         assert_eq!(json[0]["id"], id);
         assert_eq!(json[0]["title"], "TypeError: x is undefined");
-        assert_eq!(json[0]["status"], "open", "server stamps status Open regardless of client input");
+        assert_eq!(
+            json[0]["status"], "open",
+            "server stamps status Open regardless of client input"
+        );
         assert_eq!(json[0]["context"]["route"], "/dashboard");
 
         // Cross-project recent: both reports, newest (proj-b) first.
@@ -16988,7 +20739,11 @@ mod tests {
             .unwrap();
         let json = body_json(resp).await;
         let reports = json.as_array().unwrap();
-        assert_eq!(reports.len(), 1, "the second occurrence must NOT insert a new row");
+        assert_eq!(
+            reports.len(),
+            1,
+            "the second occurrence must NOT insert a new row"
+        );
         assert_eq!(reports[0]["id"], id);
         assert_eq!(reports[0]["count"], 2);
 
@@ -17117,7 +20872,11 @@ mod tests {
             .unwrap();
         let json = body_json(resp).await;
         let reports = json.as_array().unwrap();
-        assert_eq!(reports.len(), 1, "client-provided fingerprint must dedupe too");
+        assert_eq!(
+            reports.len(),
+            1,
+            "client-provided fingerprint must dedupe too"
+        );
         assert_eq!(reports[0]["fingerprint"], "client-computed-fp");
         assert_eq!(reports[0]["count"], 2);
     }
@@ -17227,8 +20986,12 @@ mod tests {
         let mut state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
         state.governance_log = Some(std::sync::Arc::new(governance));
 
-        let decision =
-            camerata_persistence::OrchestratorDecision::new("run-3", "preview_reversible", "high", "x");
+        let decision = camerata_persistence::OrchestratorDecision::new(
+            "run-3",
+            "preview_reversible",
+            "high",
+            "x",
+        );
         let result = state.record_orchestrator_decision(decision).await;
         assert!(result.is_none());
 
@@ -17246,7 +21009,9 @@ mod tests {
     /// (200, never a 500) when no feedback store is open this session.
     #[tokio::test]
     async fn update_feedback_status_reports_ok_false_when_no_feedback_store() {
-        let app = router(AppState::new(std::sync::Arc::new(InMemoryStoryStore::new())));
+        let app = router(AppState::new(
+            std::sync::Arc::new(InMemoryStoryStore::new()),
+        ));
         let resp = app
             .oneshot(
                 Request::builder()
@@ -17272,9 +21037,18 @@ mod tests {
     async fn app_error_status_codes_map_correctly() {
         use axum::response::IntoResponse;
         let cases = [
-            (AppError(anyhow::anyhow!("boom")), StatusCode::INTERNAL_SERVER_ERROR),
-            (AppError::not_found(anyhow::anyhow!("gone")), StatusCode::NOT_FOUND),
-            (AppError::bad_request(anyhow::anyhow!("nope")), StatusCode::BAD_REQUEST),
+            (
+                AppError(anyhow::anyhow!("boom")),
+                StatusCode::INTERNAL_SERVER_ERROR,
+            ),
+            (
+                AppError::not_found(anyhow::anyhow!("gone")),
+                StatusCode::NOT_FOUND,
+            ),
+            (
+                AppError::bad_request(anyhow::anyhow!("nope")),
+                StatusCode::BAD_REQUEST,
+            ),
         ];
         for (err, expected) in cases {
             let resp = err.into_response();
@@ -17285,9 +21059,10 @@ mod tests {
     /// #20: with no GitHub token the list endpoint degrades gracefully — `ok:false`,
     /// an empty list, and a hint — instead of erroring or panicking.
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn github_issues_list_is_token_optional_and_never_panics() {
         // Ensure no token is visible to this test process.
-        std::env::remove_var("CAMERATA_GITHUB_TOKEN");
+        let _env = camerata_test_env::EnvGuard::remove("CAMERATA_GITHUB_TOKEN");
         let app = router(AppState::new(
             std::sync::Arc::new(InMemoryStoryStore::new()),
         ));
@@ -17346,10 +21121,14 @@ mod tests {
         assert!(json["reason"].as_str().unwrap().contains("No decisions"));
 
         // The UoW stage did NOT advance (still Intake — no code was let through).
-        assert_eq!(state.uow.get_or_create(story).stage, lifecycle::UowStage::Intake);
+        assert_eq!(
+            state.uow.get_or_create(story).stage,
+            lifecycle::UowStage::Intake
+        );
     }
 
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn start_run_proceeds_once_decisions_are_approved() {
         let state = AppState::seeded();
         let story = "GATE-2";
@@ -17397,8 +21176,9 @@ mod tests {
     /// attached. A user must never be able to click "Run" and watch a fabricated dev cycle
     /// complete with real-looking compliance evidence while zero code was written.
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn start_run_without_live_fails_and_does_not_advance_or_attach() {
-        std::env::remove_var("CAMERATA_LIVE_BUILD"); // ensure live mode is OFF
+        let _env = camerata_test_env::EnvGuard::remove("CAMERATA_LIVE_BUILD"); // ensure live mode is OFF
         let state = AppState::seeded();
         let story = "HONEST-1";
 
@@ -17471,7 +21251,9 @@ mod tests {
         seed_approved_decision(&state, story);
         // Seed an ACTIVE (Planned, not done) run on the story — simulating a run already
         // in flight.
-        let active = state.runs.create(story, "scripted", crate::run::RunKind::Watched);
+        let active = state
+            .runs
+            .create(story, "scripted", crate::run::RunKind::Watched);
 
         let app = router(state.clone());
         let resp = app
@@ -17491,20 +21273,20 @@ mod tests {
         );
         let json = body_json(resp).await;
         assert_eq!(json["active_run_id"], active);
-        assert!(json["reason"]
-            .as_str()
-            .unwrap()
-            .contains("Only one"));
+        assert!(json["reason"].as_str().unwrap().contains("Only one"));
     }
 
     /// Once the active run is done, a fresh start proceeds (the guard only blocks LIVE runs).
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn lifecycle9_start_proceeds_once_prior_run_is_done() {
         let state = AppState::seeded();
         let story = "SF-2";
         seed_approved_decision(&state, story);
         // A prior run that has completed (done) must NOT block a new start.
-        let prior = state.runs.create(story, "scripted", crate::run::RunKind::Watched);
+        let prior = state
+            .runs
+            .create(story, "scripted", crate::run::RunKind::Watched);
         state.runs.mark_done(&prior);
 
         let app = router(state.clone());
@@ -17533,9 +21315,13 @@ mod tests {
         let state = AppState::seeded();
         let story = "SF-3";
         // A UoW branch so the teardown path would otherwise be reached.
-        state.uow.set_branch(story, Some("camerata/sf-3".to_string()));
+        state
+            .uow
+            .set_branch(story, Some("camerata/sf-3".to_string()));
         // A LIVE run (Planned, not done).
-        let run_id = state.runs.create(story, "live", crate::run::RunKind::Watched);
+        let run_id = state
+            .runs
+            .create(story, "live", crate::run::RunKind::Watched);
 
         let app = router(state.clone());
         let resp = app
@@ -17549,7 +21335,11 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK, "sign-off itself still succeeds");
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "sign-off itself still succeeds"
+        );
 
         // A deferral history entry was recorded (teardown withheld while live).
         let uow = state.uow.get_or_create(story);
@@ -17566,8 +21356,12 @@ mod tests {
     async fn lifecycle9_signoff_tears_down_when_run_is_done() {
         let state = AppState::seeded();
         let story = "SF-4";
-        state.uow.set_branch(story, Some("camerata/sf-4".to_string()));
-        let run_id = state.runs.create(story, "live", crate::run::RunKind::Watched);
+        state
+            .uow
+            .set_branch(story, Some("camerata/sf-4".to_string()));
+        let run_id = state
+            .runs
+            .create(story, "live", crate::run::RunKind::Watched);
         state
             .runs
             .set_status(&run_id, crate::run::RunStatus::AwaitingQa, true);
@@ -17673,8 +21467,14 @@ mod tests {
             "the per-iteration snapshot commits must be gone after Reject: {log}"
         );
         // The agent's committed file and untracked file are both gone.
-        assert!(!dir.join("work.rs").exists(), "committed work file must be reverted");
-        assert!(!dir.join("untracked.rs").exists(), "untracked file must be cleaned");
+        assert!(
+            !dir.join("work.rs").exists(),
+            "committed work file must be reverted"
+        );
+        assert!(
+            !dir.join("untracked.rs").exists(),
+            "untracked file must be cleaned"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -17707,8 +21507,14 @@ mod tests {
             head_with_commit,
             "without a base_commit, committed work is not reset (documented fallback)"
         );
-        assert!(dir.join("committed.rs").exists(), "committed file survives the fallback");
-        assert!(!dir.join("dirty.rs").exists(), "uncommitted file is cleaned");
+        assert!(
+            dir.join("committed.rs").exists(),
+            "committed file survives the fallback"
+        );
+        assert!(
+            !dir.join("dirty.rs").exists(),
+            "uncommitted file is cleaned"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -17744,7 +21550,10 @@ mod tests {
         // Set crosses_boundary=true with an EMPTY contract.
         state.uow.set_contract(story, "", true);
         let result = ensure_development_gate(&state, story);
-        assert!(result.is_err(), "gate must refuse when crosses_boundary=true and contract is empty");
+        assert!(
+            result.is_err(),
+            "gate must refuse when crosses_boundary=true and contract is empty"
+        );
         let reason = result.unwrap_err();
         assert!(
             reason.contains("crosses a contract boundary"),
@@ -17763,7 +21572,9 @@ mod tests {
         let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
         let story = "R3G-2";
         seed_approved_decision(&state, story);
-        state.uow.set_contract(story, "GET /api/users returns [{id, name}]", true);
+        state
+            .uow
+            .set_contract(story, "GET /api/users returns [{id, name}]", true);
         let result = ensure_development_gate(&state, story);
         assert!(
             result.is_ok(),
@@ -17847,6 +21658,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    #[serial_test::serial(process_env)]
     async fn get_investigation_reports_note_present_and_decisions() {
         let state = seeded_with_artifacts().await;
         let story = "REVIEW-1";
@@ -17997,8 +21809,8 @@ mod tests {
     fn start_run_req_tier_map_absent_is_back_compat_single_model() {
         // No tier_map, just a model → single-model path (back-compat).
         let req: StartRunReq =
-            serde_json::from_value(serde_json::json!({ "model": "claude-opus-4-8" })).unwrap();
-        assert_eq!(req.model.as_deref(), Some("claude-opus-4-8"));
+            serde_json::from_value(serde_json::json!({ "model": "claude-opus-5" })).unwrap();
+        assert_eq!(req.model.as_deref(), Some("claude-opus-5"));
         assert!(req.tier_map.is_none());
 
         // Entirely empty body also parses (no-body callers stay compatible).
@@ -18066,6 +21878,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn dev_run_tiered_path_starts_once_decisions_are_approved() {
         let state = AppState::seeded();
         let story = "TIER-GATE-2";
@@ -18125,7 +21938,7 @@ mod tests {
                     .uri(format!("/api/uow/{story}/begin-investigation"))
                     .header("content-type", "application/json")
                     .body(Body::from(
-                        serde_json::json!({ "model": "claude-opus-4-8" }).to_string(),
+                        serde_json::json!({ "model": "claude-opus-5" }).to_string(),
                     ))
                     .unwrap(),
             )
@@ -18197,9 +22010,9 @@ mod tests {
     /// same "live mode is off" placeholder note again, which isn't useful, so this must be
     /// a real refusal, not a silent no-op success.
     #[tokio::test]
-    #[serial_test::serial(camerata_live_build)]
+    #[serial_test::serial(process_env)]
     async fn rerun_investigation_refuses_honestly_when_live_mode_off() {
-        std::env::remove_var("CAMERATA_LIVE_BUILD");
+        let _env = camerata_test_env::EnvGuard::remove("CAMERATA_LIVE_BUILD");
         let state = AppState::seeded();
         let story = "INV-RERUN-1";
         state.uow.begin_investigation(story).unwrap(); // now Investigating
@@ -18236,9 +22049,9 @@ mod tests {
     /// `rerun-investigation` 409s when the story is still at Intake — investigation has not
     /// started, so `begin-investigation` is the right endpoint there, not a re-run.
     #[tokio::test]
-    #[serial_test::serial(camerata_live_build)]
+    #[serial_test::serial(process_env)]
     async fn rerun_investigation_409s_when_still_at_intake() {
-        std::env::set_var("CAMERATA_LIVE_BUILD", "1");
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_LIVE_BUILD", "1");
         let state = AppState::seeded();
         let story = "INV-RERUN-2";
         state.uow.get_or_create(story); // stays at Intake
@@ -18254,7 +22067,6 @@ mod tests {
             )
             .await
             .unwrap();
-        std::env::remove_var("CAMERATA_LIVE_BUILD");
         assert_eq!(resp.status(), StatusCode::CONFLICT);
         let json = body_json(resp).await;
         assert!(json["reason"]
@@ -18268,9 +22080,9 @@ mod tests {
     /// Intake on the first begin); `rerun-investigation` spawns a fresh pass instead,
     /// WITHOUT repeating that transition.
     #[tokio::test]
-    #[serial_test::serial(camerata_live_build)]
+    #[serial_test::serial(process_env)]
     async fn rerun_investigation_spawns_run_for_investigating_story_without_409() {
-        std::env::set_var("CAMERATA_LIVE_BUILD", "1");
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_LIVE_BUILD", "1");
         let state = AppState::seeded();
         let story = "INV-RERUN-3";
         state.uow.begin_investigation(story).unwrap(); // now Investigating
@@ -18297,7 +22109,6 @@ mod tests {
             "returns a pollable run id"
         );
         assert_eq!(json["story_id"], story);
-        std::env::remove_var("CAMERATA_LIVE_BUILD");
 
         // The stage is STILL Investigating IMMEDIATELY after the response — the endpoint
         // itself must not repeat the Intake → Investigating transition (that repetition is
@@ -18405,11 +22216,16 @@ mod tests {
         // Stage advanced.
         assert_eq!(stamped.stage, lifecycle::UowStage::AwaitingQa);
         // Provenance frozen with the honest tallies.
-        let prov = stamped.gate_provenance.expect("provenance frozen on success");
+        let prov = stamped
+            .gate_provenance
+            .expect("provenance frozen on success");
         assert_eq!(prov.deny_count, 2);
         assert_eq!(prov.allow_count, 1);
         // QA evidence attached.
-        assert!(stamped.evidence.is_some(), "QA evidence attached on success");
+        assert!(
+            stamped.evidence.is_some(),
+            "QA evidence attached on success"
+        );
     }
 
     /// LIFECYCLE-2 (failure): a FAILED run (e.g. gateway binary missing) does NOT advance
@@ -18486,7 +22302,10 @@ mod tests {
 
         let stamped = uow.get_or_create(story);
         assert_eq!(stamped.stage, lifecycle::UowStage::Development);
-        assert!(stamped.gate_provenance.is_none(), "cancel freezes no provenance");
+        assert!(
+            stamped.gate_provenance.is_none(),
+            "cancel freezes no provenance"
+        );
         assert!(stamped.evidence.is_none(), "cancel attaches no evidence");
     }
 
@@ -18555,6 +22374,7 @@ mod tests {
     /// success-branch of the watcher is covered separately by
     /// `stamp_on_success_advances_stage_and_attaches_evidence`.
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn resumed_run_without_live_refuses_and_freezes_provenance_without_advancing() {
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
         let story = "me/api#7";
@@ -18584,7 +22404,7 @@ mod tests {
             base_commit: "abc123".to_string(),
             iteration: 0,
             max_iterations: 1,
-            model: "claude-opus-4-8".to_string(),
+            model: "claude-opus-5".to_string(),
             project_id: None,
         });
 
@@ -18610,7 +22430,10 @@ mod tests {
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
-        assert!(frozen, "LIFECYCLE-4: resumed run's watcher froze provenance");
+        assert!(
+            frozen,
+            "LIFECYCLE-4: resumed run's watcher froze provenance"
+        );
         // Honesty: the stage did NOT advance — the work never continued.
         assert_eq!(
             state.uow.get_or_create(story).stage,
@@ -18638,27 +22461,50 @@ mod tests {
         assert_eq!(record.run_id, run_id);
 
         // History: at least one "run" event and one per gate event.
-        assert!(record.history.iter().any(|e| e.kind == "run"),
-            "evidence must have a 'run' event");
-        assert!(record.history.iter().any(|e| e.kind == "gate_deny"),
-            "evidence must have gate_deny events");
-        assert!(record.history.iter().any(|e| e.kind == "gate_allow"),
-            "evidence must have gate_allow events");
+        assert!(
+            record.history.iter().any(|e| e.kind == "run"),
+            "evidence must have a 'run' event"
+        );
+        assert!(
+            record.history.iter().any(|e| e.kind == "gate_deny"),
+            "evidence must have gate_deny events"
+        );
+        assert!(
+            record.history.iter().any(|e| e.kind == "gate_allow"),
+            "evidence must have gate_allow events"
+        );
 
         // Gate decisions recorded.
-        let allows: usize = record.gate_decisions.iter().filter(|d| d.verdict == "allow").count();
-        let denies: usize = record.gate_decisions.iter().filter(|d| d.verdict == "deny").count();
+        let allows: usize = record
+            .gate_decisions
+            .iter()
+            .filter(|d| d.verdict == "allow")
+            .count();
+        let denies: usize = record
+            .gate_decisions
+            .iter()
+            .filter(|d| d.verdict == "deny")
+            .count();
         assert_eq!(allows, 1, "one allow gate decision");
         assert_eq!(denies, 2, "two deny gate decisions");
 
         // Rules enforced from the enforced set.
-        assert!(!record.rules_enforced.is_empty(), "rules_enforced must be populated");
+        assert!(
+            !record.rules_enforced.is_empty(),
+            "rules_enforced must be populated"
+        );
 
         // Scoped scan populated.
-        assert!(record.scoped_scan.is_some(), "scoped_scan must be populated");
+        assert!(
+            record.scoped_scan.is_some(),
+            "scoped_scan must be populated"
+        );
 
         // Content hash is set.
-        assert!(!record.content_hash.is_empty(), "content_hash must be computed");
+        assert!(
+            !record.content_hash.is_empty(),
+            "content_hash must be computed"
+        );
         assert!(record.verify_hash(), "hash must verify after assembly");
     }
 
@@ -18674,19 +22520,27 @@ mod tests {
 
         // A run with no real-file writes (fictional clean paths) must not trigger
         // the critical-finding blocker.
-        assert!(!record.is_sign_off_blocked(),
-            "clean scripted run must not block sign-off");
+        assert!(
+            !record.is_sign_off_blocked(),
+            "clean scripted run must not block sign-off"
+        );
     }
 
     #[test]
     fn assemble_evidence_info_events_recorded_as_notes() {
         let run_store = RunStore::new();
         let id = run_store.create("CAM-ev-3", "live", crate::run::RunKind::Watched);
-        run_store.push_event(&id, crate::run::GateEvent {
-            seq: 1, layer: "fleet".to_string(), verdict: "info".to_string(),
-            rule: None, detail: "Scaffolding the worktree.".to_string(),
-            content_hash: None,
-        });
+        run_store.push_event(
+            &id,
+            crate::run::GateEvent {
+                seq: 1,
+                layer: "fleet".to_string(),
+                verdict: "info".to_string(),
+                rule: None,
+                detail: "Scaffolding the worktree.".to_string(),
+                content_hash: None,
+            },
+        );
         run_store.set_status(&id, crate::run::RunStatus::AwaitingQa, true);
         let run = run_store.get(&id).unwrap();
         let rules = camerata_gateway::enforced_gate_rules();
@@ -18694,8 +22548,10 @@ mod tests {
 
         let record = assemble_evidence_for_run(&run, &prov, "CAM-ev-3");
         // Info events are recorded as "note" in the history.
-        assert!(record.history.iter().any(|e| e.kind == "note"),
-            "info fleet events must be recorded as 'note'");
+        assert!(
+            record.history.iter().any(|e| e.kind == "note"),
+            "info fleet events must be recorded as 'note'"
+        );
     }
 
     // ── Sign-off gate: critical-finding block (issue #53) ─────────────────────
@@ -18704,13 +22560,21 @@ mod tests {
     async fn sign_off_blocked_by_critical_finding_without_waiver() {
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
         // Seed a run at AwaitingQa.
-        let run_id = state.runs.create("S-gate-1", "scripted", crate::run::RunKind::Watched);
-        state.runs.set_status(&run_id, crate::run::RunStatus::AwaitingQa, true);
+        let run_id = state
+            .runs
+            .create("S-gate-1", "scripted", crate::run::RunKind::Watched);
+        state
+            .runs
+            .set_status(&run_id, crate::run::RunStatus::AwaitingQa, true);
 
         // Attach an evidence record with a critical finding.
-        let mut ev = crate::evidence::UowEvidenceRecord::new("S-gate-1", &run_id, "2026-06-20T00:00:00Z");
+        let mut ev =
+            crate::evidence::UowEvidenceRecord::new("S-gate-1", &run_id, "2026-06-20T00:00:00Z");
         ev.set_scoped_scan(crate::evidence::ScopedScanSummary {
-            files_scanned: 1, total_findings: 1, has_critical: true, findings: Vec::new(),
+            files_scanned: 1,
+            total_findings: 1,
+            has_critical: true,
+            findings: Vec::new(),
         });
         ev.compute_hash();
         state.uow.attach_evidence("S-gate-1", ev);
@@ -18729,8 +22593,11 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::CONFLICT,
-            "critical finding without waiver must return 409");
+        assert_eq!(
+            resp.status(),
+            StatusCode::CONFLICT,
+            "critical finding without waiver must return 409"
+        );
         let json = body_json(resp).await;
         assert_eq!(json["blocked"], true);
     }
@@ -18738,13 +22605,21 @@ mod tests {
     #[tokio::test]
     async fn sign_off_unblocked_by_waive_with_reason() {
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
-        let run_id = state.runs.create("S-gate-2", "scripted", crate::run::RunKind::Watched);
-        state.runs.set_status(&run_id, crate::run::RunStatus::AwaitingQa, true);
+        let run_id = state
+            .runs
+            .create("S-gate-2", "scripted", crate::run::RunKind::Watched);
+        state
+            .runs
+            .set_status(&run_id, crate::run::RunStatus::AwaitingQa, true);
 
         // Attach critical evidence.
-        let mut ev = crate::evidence::UowEvidenceRecord::new("S-gate-2", &run_id, "2026-06-20T00:00:00Z");
+        let mut ev =
+            crate::evidence::UowEvidenceRecord::new("S-gate-2", &run_id, "2026-06-20T00:00:00Z");
         ev.set_scoped_scan(crate::evidence::ScopedScanSummary {
-            files_scanned: 1, total_findings: 1, has_critical: true, findings: Vec::new(),
+            files_scanned: 1,
+            total_findings: 1,
+            has_critical: true,
+            findings: Vec::new(),
         });
         ev.compute_hash();
         state.uow.attach_evidence("S-gate-2", ev);
@@ -18767,21 +22642,34 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK,
-            "waived critical finding must return 200");
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "waived critical finding must return 200"
+        );
         let json = body_json(resp).await;
         // The sign-off is recorded on the UoW.
-        assert!(json["sign_off"].is_object(), "sign_off field must be present");
+        assert!(
+            json["sign_off"].is_object(),
+            "sign_off field must be present"
+        );
         // The waiver reason is folded into the note.
         let note = json["sign_off"]["note"].as_str().unwrap_or("");
-        assert!(note.contains("WAIVER"), "waiver reason must appear in the sign-off note");
+        assert!(
+            note.contains("WAIVER"),
+            "waiver reason must appear in the sign-off note"
+        );
     }
 
     #[tokio::test]
     async fn sign_off_not_blocked_when_no_evidence_attached() {
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
-        let run_id = state.runs.create("S-gate-3", "scripted", crate::run::RunKind::Watched);
-        state.runs.set_status(&run_id, crate::run::RunStatus::AwaitingQa, true);
+        let run_id = state
+            .runs
+            .create("S-gate-3", "scripted", crate::run::RunKind::Watched);
+        state
+            .runs
+            .set_status(&run_id, crate::run::RunStatus::AwaitingQa, true);
         // No evidence attached: sign-off must succeed without a waiver.
 
         let app = router(state);
@@ -18797,20 +22685,31 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK,
-            "no evidence: sign-off must not be blocked");
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "no evidence: sign-off must not be blocked"
+        );
     }
 
     #[tokio::test]
     async fn sign_off_non_critical_evidence_not_blocked() {
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
-        let run_id = state.runs.create("S-gate-4", "scripted", crate::run::RunKind::Watched);
-        state.runs.set_status(&run_id, crate::run::RunStatus::AwaitingQa, true);
+        let run_id = state
+            .runs
+            .create("S-gate-4", "scripted", crate::run::RunKind::Watched);
+        state
+            .runs
+            .set_status(&run_id, crate::run::RunStatus::AwaitingQa, true);
 
         // Attach evidence WITHOUT a critical finding.
-        let mut ev = crate::evidence::UowEvidenceRecord::new("S-gate-4", &run_id, "2026-06-20T00:00:00Z");
+        let mut ev =
+            crate::evidence::UowEvidenceRecord::new("S-gate-4", &run_id, "2026-06-20T00:00:00Z");
         ev.set_scoped_scan(crate::evidence::ScopedScanSummary {
-            files_scanned: 1, total_findings: 1, has_critical: false, findings: Vec::new(),
+            files_scanned: 1,
+            total_findings: 1,
+            has_critical: false,
+            findings: Vec::new(),
         });
         ev.compute_hash();
         state.uow.attach_evidence("S-gate-4", ev);
@@ -18828,8 +22727,11 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK,
-            "non-critical evidence must not block sign-off");
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "non-critical evidence must not block sign-off"
+        );
     }
 
     // ── PR comment posting: post_pr_comment (issue #53) ──────────────────────
@@ -18839,12 +22741,12 @@ mod tests {
     #[tokio::test]
     async fn post_pr_comment_gracefully_degrades_without_token() {
         // An empty token must not panic or return Err — it returns Ok(None).
-        let result = crate::arm::post_pr_comment(
-            "owner", "repo", 42, "# Test\nno token", "",
-        )
-        .await;
+        let result = crate::arm::post_pr_comment("owner", "repo", 42, "# Test\nno token", "").await;
         assert!(result.is_ok(), "must not error without a token");
-        assert!(result.unwrap().is_none(), "must return None without a token");
+        assert!(
+            result.unwrap().is_none(),
+            "must return None without a token"
+        );
     }
 
     // ── WorkItem + UoW layer (governed-dev surface) ──────────────────────────
@@ -18852,9 +22754,12 @@ mod tests {
     /// POST /api/workitems/pull degrades gracefully with no token: it returns an
     /// empty item list plus a hint, never an error.
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn workitems_pull_no_token_returns_empty_with_message() {
-        std::env::remove_var("CAMERATA_GITHUB_TOKEN");
-        let app = router(AppState::new(std::sync::Arc::new(InMemoryStoryStore::new())));
+        let _env = camerata_test_env::EnvGuard::remove("CAMERATA_GITHUB_TOKEN");
+        let app = router(AppState::new(
+            std::sync::Arc::new(InMemoryStoryStore::new()),
+        ));
         let resp = app
             .oneshot(
                 Request::builder()
@@ -18875,9 +22780,12 @@ mod tests {
     /// POST /api/workitems/comments degrades gracefully with no token: it returns an
     /// empty comment list (never an error) so the modal renders "No comments."
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn workitems_comments_no_token_returns_empty() {
-        std::env::remove_var("CAMERATA_GITHUB_TOKEN");
-        let app = router(AppState::new(std::sync::Arc::new(InMemoryStoryStore::new())));
+        let _env = camerata_test_env::EnvGuard::remove("CAMERATA_GITHUB_TOKEN");
+        let app = router(AppState::new(
+            std::sync::Arc::new(InMemoryStoryStore::new()),
+        ));
         let body = serde_json::json!({ "work_item_id": "github:o/r#20" }).to_string();
         let resp = app
             .oneshot(
@@ -18898,9 +22806,12 @@ mod tests {
     /// POST /api/workitems/assignees degrades gracefully with no token: it returns an
     /// empty user list so the @-autocomplete simply shows no suggestions.
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn workitems_assignees_no_token_returns_empty() {
-        std::env::remove_var("CAMERATA_GITHUB_TOKEN");
-        let app = router(AppState::new(std::sync::Arc::new(InMemoryStoryStore::new())));
+        let _env = camerata_test_env::EnvGuard::remove("CAMERATA_GITHUB_TOKEN");
+        let app = router(AppState::new(
+            std::sync::Arc::new(InMemoryStoryStore::new()),
+        ));
         let body = serde_json::json!({ "work_item_id": "github:o/r#20" }).to_string();
         let resp = app
             .oneshot(
@@ -18920,9 +22831,12 @@ mod tests {
 
     /// GET /api/me returns `{ login: null }` with no token (the UI hides "Assign to me").
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn me_no_token_returns_null_login() {
-        std::env::remove_var("CAMERATA_GITHUB_TOKEN");
-        let app = router(AppState::new(std::sync::Arc::new(InMemoryStoryStore::new())));
+        let _env = camerata_test_env::EnvGuard::remove("CAMERATA_GITHUB_TOKEN");
+        let app = router(AppState::new(
+            std::sync::Arc::new(InMemoryStoryStore::new()),
+        ));
         let resp = app
             .oneshot(
                 Request::builder()
@@ -18935,16 +22849,22 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let json = body_json(resp).await;
-        assert!(json.get("login").is_some(), "the `login` key is always present");
+        assert!(
+            json.get("login").is_some(),
+            "the `login` key is always present"
+        );
         assert!(json["login"].is_null(), "no token → login is null");
     }
 
     /// POST /api/workitems/assign errors without a token (there is nothing to assign
     /// against), and rejects an empty assignee.
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn workitems_assign_requires_token_and_nonempty_assignee() {
-        std::env::remove_var("CAMERATA_GITHUB_TOKEN");
-        let app = router(AppState::new(std::sync::Arc::new(InMemoryStoryStore::new())));
+        let _env = camerata_test_env::EnvGuard::remove("CAMERATA_GITHUB_TOKEN");
+        let app = router(AppState::new(
+            std::sync::Arc::new(InMemoryStoryStore::new()),
+        ));
         // No token → error status (not a silent success).
         let body = serde_json::json!({ "work_item_id": "github:o/r#20", "assignee": "octocat" })
             .to_string();
@@ -18970,9 +22890,12 @@ mod tests {
     /// POST /api/workitems/updated-check degrades gracefully with no token: it returns an
     /// empty updates list (never an error) so a background poll is silent.
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn workitems_updated_check_no_token_returns_empty() {
-        std::env::remove_var("CAMERATA_GITHUB_TOKEN");
-        let app = router(AppState::new(std::sync::Arc::new(InMemoryStoryStore::new())));
+        let _env = camerata_test_env::EnvGuard::remove("CAMERATA_GITHUB_TOKEN");
+        let app = router(AppState::new(
+            std::sync::Arc::new(InMemoryStoryStore::new()),
+        ));
         let body = serde_json::json!({
             "items": [{ "work_item_id": "github:o/r#20", "repo": "o/r", "number": 20 }]
         })
@@ -18997,8 +22920,9 @@ mod tests {
     /// second (created=false, same uow_id, no duplicate). Token-free: the spine row is
     /// seeded from the id alone, so this is hermetic.
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn uow_from_workitem_dedups_by_external_ref() {
-        std::env::remove_var("CAMERATA_GITHUB_TOKEN");
+        let _env = camerata_test_env::EnvGuard::remove("CAMERATA_GITHUB_TOKEN");
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
         // ISOLATION: the dedup + listing are now project-scoped; activate a project whose
         // repos cover the work item's repo (`o/r`).
@@ -19038,8 +22962,9 @@ mod tests {
     /// GET /api/uows returns each UoW with the WorkItem it references (resolved from
     /// the spine, repo set) and its lifecycle stage.
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn uows_list_carries_workitem_and_stage() {
-        std::env::remove_var("CAMERATA_GITHUB_TOKEN");
+        let _env = camerata_test_env::EnvGuard::remove("CAMERATA_GITHUB_TOKEN");
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
         // ISOLATION: /api/uows is project-scoped; activate a project covering `o/r`.
         state.projects.create("P", vec!["o/r".to_string()]).unwrap();
@@ -19075,7 +23000,10 @@ mod tests {
         assert_eq!(uows[0]["id"], "o/r#20");
         assert_eq!(uows[0]["stage"], "intake");
         assert_eq!(uows[0]["work_item"]["id"], "github:o/r#20");
-        assert_eq!(uows[0]["work_item"]["repo"], "o/r", "repo set on the work item");
+        assert_eq!(
+            uows[0]["work_item"]["repo"], "o/r",
+            "repo set on the work item"
+        );
         assert_eq!(uows[0]["work_item"]["number"], 20);
     }
 
@@ -19089,8 +23017,12 @@ mod tests {
         // `cargo test --workspace` (a shared-process-env flake). Per-instance store =
         // deterministic regardless of what any concurrent test does to the env.
         let creds = crate::credentials::MemoryCredentialStore::new();
-        crate::credentials::CredentialStore::set(&creds, crate::credentials::GITHUB_TOKEN, "ghp_test")
-            .unwrap();
+        crate::credentials::CredentialStore::set(
+            &creds,
+            crate::credentials::GITHUB_TOKEN,
+            "ghp_test",
+        )
+        .unwrap();
         let mut state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
         state.credential_store = std::sync::Arc::new(creds);
         let app = router(state);
@@ -19110,7 +23042,6 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-        std::env::remove_var("CAMERATA_GITHUB_TOKEN");
     }
 
     /// The work-item id parser produces the (repo, number) the comment/refresh paths
@@ -19118,12 +23049,11 @@ mod tests {
     /// addressing (repo + number) the GitHub comment call uses.
     #[test]
     fn parse_github_work_item_id_extracts_repo_and_number() {
-        let (repo, number) = match parse_github_work_item_id(
-            "github:zernst3/camerata-orchestrator#42",
-        ) {
-            Ok(v) => v,
-            Err(e) => panic!("valid id should parse: {}", e.err),
-        };
+        let (repo, number) =
+            match parse_github_work_item_id("github:zernst3/camerata-orchestrator#42") {
+                Ok(v) => v,
+                Err(e) => panic!("valid id should parse: {}", e.err),
+            };
         assert_eq!(repo, "zernst3/camerata-orchestrator");
         assert_eq!(number, 42);
 
@@ -19190,10 +23120,7 @@ mod tests {
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
         // P is created (and made active). Q exists too, for the isolation check.
         let proj_p = state.projects.create("P", vec!["o/r".to_string()]).unwrap();
-        state
-            .projects
-            .create("Q", vec!["x/y".to_string()])
-            .unwrap();
+        state.projects.create("Q", vec!["x/y".to_string()]).unwrap();
         // Make P the active project again (create made Q active last).
         state.projects.set_active(&proj_p.id);
         let app = router(state.clone());
@@ -19231,7 +23158,9 @@ mod tests {
         let found = uows
             .iter()
             .find(|u| u["id"] == serde_json::json!(uow_id))
-            .unwrap_or_else(|| panic!("draft must appear in its own project's /api/uows, got: {json:?}"));
+            .unwrap_or_else(|| {
+                panic!("draft must appear in its own project's /api/uows, got: {json:?}")
+            });
         assert_eq!(
             found["authoring"],
             serde_json::json!(true),
@@ -19269,10 +23198,11 @@ mod tests {
     /// even when the LLM is unavailable (token-free): the endpoint degrades gracefully
     /// with a clear note rather than crashing, and the user message is recorded.
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn author_endpoint_appends_chat_without_token() {
         // Ensure no API key is set so the LLM path returns the graceful note (the CLI may
         // or may not exist on CI; either way the user turn is appended and we get a 200).
-        std::env::remove_var("ANTHROPIC_API_KEY");
+        let _env = camerata_test_env::EnvGuard::remove("ANTHROPIC_API_KEY");
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
         let uow_store = state.uow.clone();
         let app = router(state);
@@ -19286,7 +23216,9 @@ mod tests {
                     .method("POST")
                     .uri(format!("/api/uow/{}/author", id))
                     .header("content-type", "application/json")
-                    .body(Body::from(r#"{"message":"Add a CSV export to the report"}"#))
+                    .body(Body::from(
+                        r#"{"message":"Add a CSV export to the report"}"#,
+                    ))
                     .unwrap(),
             )
             .await
@@ -19309,8 +23241,9 @@ mod tests {
     /// `POST /api/uow/:id/publish` rejects (non-2xx) with a clear reason when no GitHub
     /// token is configured.
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn publish_without_token_is_rejected_with_reason() {
-        std::env::remove_var("CAMERATA_GITHUB_TOKEN");
+        let _env = camerata_test_env::EnvGuard::remove("CAMERATA_GITHUB_TOKEN");
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
         let uow_store = state.uow.clone();
         let app = router(state);
@@ -19349,7 +23282,10 @@ mod tests {
         // ISOLATION: /api/uows is project-scoped and resolves a LINKED draft's repo from its
         // work_item (`me/api#7`). Activate a project covering `me/api` so the linked draft is
         // visible (an UNLINKED draft would remain excluded — no resolvable repo).
-        state.projects.create("P", vec!["me/api".to_string()]).unwrap();
+        state
+            .projects
+            .create("P", vec!["me/api".to_string()])
+            .unwrap();
         let uow_store = state.uow.clone();
         let stories = state.stories.clone();
         let app = router(state);
@@ -19360,8 +23296,7 @@ mod tests {
 
         // Simulate create_issue having returned issue #7 in me/api: upsert the spine story
         // and link the draft (the two writes uow_publish performs after the HTTP call).
-        let story =
-            crate::github_issues::issue_to_story("me/api", 7, "Authored title", "Body");
+        let story = crate::github_issues::issue_to_story("me/api", 7, "Authored title", "Body");
         let wi_story_id = story.id.clone();
         stories.upsert(story).await.unwrap();
         let linked = uow_store.link_work_item(&draft_id, &wi_story_id);
@@ -19387,7 +23322,10 @@ mod tests {
             .iter()
             .find(|u| u["id"] == draft_id)
             .expect("linked draft still listed under its draft id");
-        assert_eq!(entry["authoring"], false, "linked draft is no longer authoring");
+        assert_eq!(
+            entry["authoring"], false,
+            "linked draft is no longer authoring"
+        );
         assert_eq!(entry["work_item"]["number"], 7);
         assert_eq!(entry["work_item"]["repo"], "me/api");
     }
@@ -19421,7 +23359,10 @@ mod tests {
     #[test]
     fn render_chat_prompt_empty_history_empty_prompt_returns_empty() {
         let result = render_chat_prompt(&[], "");
-        assert_eq!(result, "", "empty history + empty prompt returns empty string");
+        assert_eq!(
+            result, "",
+            "empty history + empty prompt returns empty string"
+        );
     }
 
     /// (a) History present: rendered prompt contains the prior user turn.
@@ -19497,8 +23438,14 @@ mod tests {
             make_turn("assistant", "a-content"),
         ];
         let result = render_chat_prompt(&history, "new");
-        assert!(result.contains("User: u-content"), "user role must render as 'User'");
-        assert!(result.contains("Assistant: a-content"), "assistant role must render as 'Assistant'");
+        assert!(
+            result.contains("User: u-content"),
+            "user role must render as 'User'"
+        );
+        assert!(
+            result.contains("Assistant: a-content"),
+            "assistant role must render as 'Assistant'"
+        );
     }
 
     /// (d) Any non-"user" role (including "assistant") maps to "Assistant".
@@ -19542,7 +23489,10 @@ mod tests {
             "turn {first_kept} should survive the cap"
         );
         // The new prompt is still present.
-        assert!(result.contains("new-prompt"), "new prompt must appear after capped history");
+        assert!(
+            result.contains("new-prompt"),
+            "new prompt must appear after capped history"
+        );
     }
 
     /// (c) Cap: when history is exactly at the cap limit, no turns are dropped.
@@ -19638,7 +23588,10 @@ mod tests {
         // The floor finding is still there and now carries the semgrep rule in also_matches.
         assert_eq!(existing.len(), 1);
         let floor = &existing[0];
-        assert_eq!(floor.rule_id, "SEC-NO-HARDCODED-SECRETS-1", "floor rule_id is canonical");
+        assert_eq!(
+            floor.rule_id, "SEC-NO-HARDCODED-SECRETS-1",
+            "floor rule_id is canonical"
+        );
         assert_eq!(
             floor.also_matches,
             vec!["camerata.security.hardcoded-secret"],
@@ -19665,7 +23618,10 @@ mod tests {
 
         let out = dedup_preview_against_floor(&mut existing, previews);
 
-        assert!(out.is_empty(), "SQL-concat python semgrep finding must be deduped: {out:?}");
+        assert!(
+            out.is_empty(),
+            "SQL-concat python semgrep finding must be deduped: {out:?}"
+        );
         assert_eq!(
             existing[0].also_matches,
             vec!["camerata.security.sql-string-concat-python"],
@@ -19690,7 +23646,10 @@ mod tests {
 
         let out = dedup_preview_against_floor(&mut existing, previews);
 
-        assert!(out.is_empty(), "SQL-concat JS semgrep finding must be deduped: {out:?}");
+        assert!(
+            out.is_empty(),
+            "SQL-concat JS semgrep finding must be deduped: {out:?}"
+        );
         assert_eq!(
             existing[0].also_matches,
             vec!["camerata.security.sql-string-concat-js"],
@@ -19717,11 +23676,18 @@ mod tests {
 
         let out = dedup_preview_against_floor(&mut existing, previews);
 
-        assert_eq!(out.len(), 1, "net-new semgrep finding (different line) must be kept");
+        assert_eq!(
+            out.len(),
+            1,
+            "net-new semgrep finding (different line) must be kept"
+        );
         assert_eq!(out[0].line, 12);
         assert_eq!(out[0].rule_id, "camerata.security.hardcoded-secret");
         // The existing floor finding must NOT have been mutated.
-        assert!(existing[0].also_matches.is_empty(), "floor finding must not be touched");
+        assert!(
+            existing[0].also_matches.is_empty(),
+            "floor finding must not be touched"
+        );
     }
 
     /// (c) The non-overlapping semgrep rules (exec-injection, weak-hash, path-traversal,
@@ -19743,7 +23709,12 @@ mod tests {
 
         for rule_id in non_overlapping {
             // Put a floor finding at the same coordinate just to prove it doesn't cross-dedup.
-            let mut existing = vec![floor_finding("me/api", "src/app.py", 5, "SEC-NO-HARDCODED-SECRETS-1")];
+            let mut existing = vec![floor_finding(
+                "me/api",
+                "src/app.py",
+                5,
+                "SEC-NO-HARDCODED-SECRETS-1",
+            )];
             let previews = vec![semgrep_finding("me/api", "src/app.py", 5, rule_id)];
 
             let out = dedup_preview_against_floor(&mut existing, previews);
@@ -19815,15 +23786,42 @@ mod tests {
     fn semgrep_floor_category_returns_correct_mapping() {
         // Overlapping rules: must return the floor rule id they duplicate.
         let overlapping: &[(&str, &str)] = &[
-            ("camerata.security.hardcoded-secret", "SEC-NO-HARDCODED-SECRETS-1"),
-            ("camerata.security.hardcoded-secret-dquote", "SEC-NO-HARDCODED-SECRETS-1"),
-            ("camerata.security.sql-string-concat-python", "SEC-NO-RAW-SQL-CONCAT-1"),
-            ("camerata.security.sql-string-concat-js", "SEC-NO-RAW-SQL-CONCAT-1"),
-            ("camerata.security.sql-string-concat-rust", "SEC-NO-RAW-SQL-CONCAT-1"),
-            ("camerata.security.sql-string-concat-csharp", "SEC-NO-RAW-SQL-CONCAT-1"),
-            ("camerata.security.disabled-tls-rust", "SEC-NO-DISABLED-TLS-1"),
-            ("camerata.security.disabled-tls-csharp", "SEC-NO-DISABLED-TLS-1"),
-            ("camerata.security.yaml-unsafe-load", "SEC-NO-UNSAFE-DESERIALIZATION-1"),
+            (
+                "camerata.security.hardcoded-secret",
+                "SEC-NO-HARDCODED-SECRETS-1",
+            ),
+            (
+                "camerata.security.hardcoded-secret-dquote",
+                "SEC-NO-HARDCODED-SECRETS-1",
+            ),
+            (
+                "camerata.security.sql-string-concat-python",
+                "SEC-NO-RAW-SQL-CONCAT-1",
+            ),
+            (
+                "camerata.security.sql-string-concat-js",
+                "SEC-NO-RAW-SQL-CONCAT-1",
+            ),
+            (
+                "camerata.security.sql-string-concat-rust",
+                "SEC-NO-RAW-SQL-CONCAT-1",
+            ),
+            (
+                "camerata.security.sql-string-concat-csharp",
+                "SEC-NO-RAW-SQL-CONCAT-1",
+            ),
+            (
+                "camerata.security.disabled-tls-rust",
+                "SEC-NO-DISABLED-TLS-1",
+            ),
+            (
+                "camerata.security.disabled-tls-csharp",
+                "SEC-NO-DISABLED-TLS-1",
+            ),
+            (
+                "camerata.security.yaml-unsafe-load",
+                "SEC-NO-UNSAFE-DESERIALIZATION-1",
+            ),
         ];
         for (rule, expected_floor) in overlapping {
             assert_eq!(
@@ -19832,10 +23830,8 @@ mod tests {
                 "overlapping rule '{rule}' must map to floor '{expected_floor}'"
             );
         }
-        // Non-overlapping rules: no floor twin, return None.
+        // Non-overlapping rules: no corpus-grounded twin at all, return None.
         for rule in &[
-            "camerata.security.exec-injection",
-            "camerata.security.exec-injection-js",
             "camerata.security.weak-hash-python",
             "camerata.security.weak-hash-js",
             "camerata.security.weak-hash-rust",
@@ -19846,7 +23842,147 @@ mod tests {
             assert_eq!(
                 semgrep_floor_category(rule),
                 None,
-                "rule '{rule}' must map to None (no floor twin)"
+                "rule '{rule}' must map to None (no corpus-grounded twin)"
+            );
+        }
+    }
+
+    /// W3: the commodity-class taint rules each ground to the right corpus rule id —
+    /// SQLi taint rules (all 7 languages) ground to the SAME corpus rule as the
+    /// pre-existing pattern-based sql-string-concat-* ids (a floor twin); XSS/open-redirect
+    /// taint rules ground to their corpus rule with NO floor twin (grounding-only, never
+    /// collapsed against a floor row); command-injection taint rules (plus the pre-existing
+    /// exec-injection pattern ids) ground to the new SEC-NO-COMMAND-INJECTION-1 rule.
+    #[test]
+    fn w3_taint_rules_ground_to_the_right_corpus_rule() {
+        let sqli_taint = [
+            "camerata.security.taint-sql-injection-python",
+            "camerata.security.taint-sql-injection-js",
+            "camerata.security.taint-sql-injection-rust",
+            "camerata.security.taint-sql-injection-csharp",
+            "camerata.security.taint-sql-injection-go",
+            "camerata.security.taint-sql-injection-ruby",
+            "camerata.security.taint-sql-injection-java",
+        ];
+        for id in sqli_taint {
+            assert_eq!(
+                semgrep_floor_category(id),
+                Some("SEC-NO-RAW-SQL-CONCAT-1"),
+                "{id} must ground to SEC-NO-RAW-SQL-CONCAT-1"
+            );
+        }
+
+        let xss_taint = [
+            "camerata.security.taint-xss-python",
+            "camerata.security.taint-xss-js",
+            "camerata.security.taint-xss-csharp",
+            "camerata.security.taint-xss-go",
+            "camerata.security.taint-xss-ruby",
+            "camerata.security.taint-xss-java",
+        ];
+        for id in xss_taint {
+            assert_eq!(
+                semgrep_floor_category(id),
+                Some("SEC-NO-UNSAFE-HTML-SINK-1"),
+                "{id} must ground to SEC-NO-UNSAFE-HTML-SINK-1"
+            );
+        }
+
+        let redirect_taint = [
+            "camerata.security.taint-open-redirect-python",
+            "camerata.security.taint-open-redirect-js",
+            "camerata.security.taint-open-redirect-csharp",
+            "camerata.security.taint-open-redirect-go",
+            "camerata.security.taint-open-redirect-ruby",
+            "camerata.security.taint-open-redirect-java",
+        ];
+        for id in redirect_taint {
+            assert_eq!(
+                semgrep_floor_category(id),
+                Some("SEC-NO-OPEN-REDIRECT-1"),
+                "{id} must ground to SEC-NO-OPEN-REDIRECT-1"
+            );
+        }
+
+        let cmdi_taint = [
+            "camerata.security.exec-injection",
+            "camerata.security.exec-injection-js",
+            "camerata.security.taint-command-injection-python",
+            "camerata.security.taint-command-injection-js",
+            "camerata.security.taint-command-injection-rust",
+            "camerata.security.taint-command-injection-csharp",
+            "camerata.security.taint-command-injection-go",
+            "camerata.security.taint-command-injection-ruby",
+            "camerata.security.taint-command-injection-java",
+        ];
+        for id in cmdi_taint {
+            assert_eq!(
+                semgrep_floor_category(id),
+                Some("SEC-NO-COMMAND-INJECTION-1"),
+                "{id} must ground to SEC-NO-COMMAND-INJECTION-1"
+            );
+        }
+
+        // Ruby eval/send grounds to its OWN pre-existing corpus rule, not the generic
+        // command-injection one — closing RUBY-AVOID-EVAL-SEND-1's phantom-detector gap.
+        assert_eq!(
+            semgrep_floor_category("camerata.security.taint-ruby-eval-send"),
+            Some("RUBY-AVOID-EVAL-SEND-1")
+        );
+
+        // Sensitive-data-in-logs taint class: BOTH the secret/credential and PII rule
+        // families ground to the SAME corpus rule (severity differs at the SARIF level, not
+        // the grounding map — see that rule's own doc comment).
+        let log_sink_taint = [
+            "camerata.security.taint-log-secret-python",
+            "camerata.security.taint-log-secret-js",
+            "camerata.security.taint-log-secret-rust",
+            "camerata.security.taint-log-secret-csharp",
+            "camerata.security.taint-log-secret-go",
+            "camerata.security.taint-log-secret-ruby",
+            "camerata.security.taint-log-secret-java",
+            "camerata.security.taint-log-pii-python",
+            "camerata.security.taint-log-pii-js",
+            "camerata.security.taint-log-pii-rust",
+            "camerata.security.taint-log-pii-csharp",
+            "camerata.security.taint-log-pii-go",
+            "camerata.security.taint-log-pii-ruby",
+            "camerata.security.taint-log-pii-java",
+        ];
+        for id in log_sink_taint {
+            assert_eq!(
+                semgrep_floor_category(id),
+                Some("SEC-NO-SENSITIVE-DATA-IN-LOGS-1"),
+                "{id} must ground to SEC-NO-SENSITIVE-DATA-IN-LOGS-1"
+            );
+        }
+    }
+
+    /// `is_observability_convention_class` matches ONLY the `ARCH-OBSERVABILITY-` prefix —
+    /// the three real corpus ids match, a near-miss (different prefix, or the prefix as a
+    /// SUBSTRING rather than a true prefix) does not, and an empty string does not panic.
+    #[test]
+    fn observability_convention_class_matches_only_its_own_prefix() {
+        for id in [
+            "ARCH-OBSERVABILITY-SILENT-FAILURE-1",
+            "ARCH-OBSERVABILITY-LOG-CONSISTENCY-1",
+            "ARCH-OBSERVABILITY-CORRELATION-ID-1",
+        ] {
+            assert!(
+                is_observability_convention_class(id),
+                "{id} must match its own class"
+            );
+        }
+        for id in [
+            "ARCH-NO-PAN-STORAGE-1",
+            "SEC-NO-SENSITIVE-DATA-IN-LOGS-1",
+            "GO-LOGGING-STRUCTURED-1",
+            "SOME-ARCH-OBSERVABILITY-LOOKALIKE-1", // prefix as a substring, not a true prefix
+            "",
+        ] {
+            assert!(
+                !is_observability_convention_class(id),
+                "{id} must NOT match the observability convention class"
             );
         }
     }
@@ -19878,12 +24014,7 @@ mod tests {
     }
 
     /// Build a ruff preview finding.
-    fn ruff_finding(
-        repo: &str,
-        path: &str,
-        line: usize,
-        rule_id: &str,
-    ) -> crate::onboard::Finding {
+    fn ruff_finding(repo: &str, path: &str, line: usize, rule_id: &str) -> crate::onboard::Finding {
         crate::onboard::Finding {
             repo: repo.to_string(),
             path: path.to_string(),
@@ -19923,35 +24054,104 @@ mod tests {
     #[test]
     fn finding_security_category_maps_correctly() {
         // Floor rules
-        assert_eq!(finding_security_category("SEC-NO-HARDCODED-SECRETS-1"), Some("secret"));
-        assert_eq!(finding_security_category("SEC-NO-PRIVATE-KEY-1"), Some("secret"));
-        assert_eq!(finding_security_category("SEC-NO-VENDOR-TOKEN-1"), Some("secret"));
-        assert_eq!(finding_security_category("SEC-NO-RAW-SQL-CONCAT-1"), Some("sql"));
-        assert_eq!(finding_security_category("SEC-NO-DISABLED-TLS-1"), Some("tls"));
+        assert_eq!(
+            finding_security_category("SEC-NO-HARDCODED-SECRETS-1"),
+            Some("secret")
+        );
+        assert_eq!(
+            finding_security_category("SEC-NO-PRIVATE-KEY-1"),
+            Some("secret")
+        );
+        assert_eq!(
+            finding_security_category("SEC-NO-VENDOR-TOKEN-1"),
+            Some("secret")
+        );
+        assert_eq!(
+            finding_security_category("SEC-NO-RAW-SQL-CONCAT-1"),
+            Some("sql")
+        );
+        assert_eq!(
+            finding_security_category("SEC-NO-DISABLED-TLS-1"),
+            Some("tls")
+        );
         // Semgrep rules
-        assert_eq!(finding_security_category("camerata.security.hardcoded-secret"), Some("secret"));
-        assert_eq!(finding_security_category("camerata.security.sql-string-concat-python"), Some("sql"));
-        assert_eq!(finding_security_category("camerata.security.sql-string-concat-js"), Some("sql"));
-        assert_eq!(finding_security_category("camerata.security.exec-injection"), Some("exec"));
-        assert_eq!(finding_security_category("camerata.security.exec-injection-js"), Some("exec"));
-        assert_eq!(finding_security_category("camerata.security.weak-hash-python"), Some("hash"));
-        assert_eq!(finding_security_category("camerata.security.weak-hash-js"), Some("hash"));
+        assert_eq!(
+            finding_security_category("camerata.security.hardcoded-secret"),
+            Some("secret")
+        );
+        assert_eq!(
+            finding_security_category("camerata.security.sql-string-concat-python"),
+            Some("sql")
+        );
+        assert_eq!(
+            finding_security_category("camerata.security.sql-string-concat-js"),
+            Some("sql")
+        );
+        assert_eq!(
+            finding_security_category("camerata.security.exec-injection"),
+            Some("exec")
+        );
+        assert_eq!(
+            finding_security_category("camerata.security.exec-injection-js"),
+            Some("exec")
+        );
+        assert_eq!(
+            finding_security_category("camerata.security.weak-hash-python"),
+            Some("hash")
+        );
+        assert_eq!(
+            finding_security_category("camerata.security.weak-hash-js"),
+            Some("hash")
+        );
         // Rust + C# semgrep ids (the 2026-06-23 dedup-gap fix): must be categorized so they
         // can collapse against an overlapping floor finding at the same (repo, path, line).
-        assert_eq!(finding_security_category("camerata.security.hardcoded-secret-dquote"), Some("secret"));
-        assert_eq!(finding_security_category("camerata.security.sql-string-concat-rust"), Some("sql"));
-        assert_eq!(finding_security_category("camerata.security.sql-string-concat-csharp"), Some("sql"));
-        assert_eq!(finding_security_category("camerata.security.weak-hash-rust"), Some("hash"));
-        assert_eq!(finding_security_category("camerata.security.weak-hash-csharp"), Some("hash"));
-        assert_eq!(finding_security_category("camerata.security.disabled-tls-rust"), Some("tls"));
-        assert_eq!(finding_security_category("camerata.security.disabled-tls-csharp"), Some("tls"));
-        assert_eq!(finding_security_category("camerata.security.path-traversal-python"), Some("path"));
-        assert_eq!(finding_security_category("camerata.security.subprocess-shell-true"), Some("shell"));
+        assert_eq!(
+            finding_security_category("camerata.security.hardcoded-secret-dquote"),
+            Some("secret")
+        );
+        assert_eq!(
+            finding_security_category("camerata.security.sql-string-concat-rust"),
+            Some("sql")
+        );
+        assert_eq!(
+            finding_security_category("camerata.security.sql-string-concat-csharp"),
+            Some("sql")
+        );
+        assert_eq!(
+            finding_security_category("camerata.security.weak-hash-rust"),
+            Some("hash")
+        );
+        assert_eq!(
+            finding_security_category("camerata.security.weak-hash-csharp"),
+            Some("hash")
+        );
+        assert_eq!(
+            finding_security_category("camerata.security.disabled-tls-rust"),
+            Some("tls")
+        );
+        assert_eq!(
+            finding_security_category("camerata.security.disabled-tls-csharp"),
+            Some("tls")
+        );
+        assert_eq!(
+            finding_security_category("camerata.security.path-traversal-python"),
+            Some("path")
+        );
+        assert_eq!(
+            finding_security_category("camerata.security.subprocess-shell-true"),
+            Some("shell")
+        );
         // yaml-unsafe-load now maps to "deser" (not "yaml") so it collapses with the
         // floor rule SEC-NO-UNSAFE-DESERIALIZATION-1 at the same (repo, path, line).
-        assert_eq!(finding_security_category("camerata.security.yaml-unsafe-load"), Some("deser"));
+        assert_eq!(
+            finding_security_category("camerata.security.yaml-unsafe-load"),
+            Some("deser")
+        );
         // New floor rule (Step 3 of unsafe-deser port): same "deser" category.
-        assert_eq!(finding_security_category("SEC-NO-UNSAFE-DESERIALIZATION-1"), Some("deser"));
+        assert_eq!(
+            finding_security_category("SEC-NO-UNSAFE-DESERIALIZATION-1"),
+            Some("deser")
+        );
         // Ruff bandit code
         assert_eq!(finding_security_category("S608"), Some("sql"));
         // Unknown rule: no category (pass-through, no dedup)
@@ -19959,12 +24159,95 @@ mod tests {
         assert_eq!(finding_security_category("some-unknown-linter-rule"), None);
     }
 
+    /// W3: the new taint rule ids and their grounding-only corpus rules categorize
+    /// correctly, including the two brand-new categories ("xss", "redirect").
+    #[test]
+    fn finding_security_category_covers_w3_taint_rules() {
+        assert_eq!(
+            finding_security_category("SEC-NO-UNSAFE-HTML-SINK-1"),
+            Some("xss")
+        );
+        assert_eq!(
+            finding_security_category("SEC-NO-OPEN-REDIRECT-1"),
+            Some("redirect")
+        );
+        assert_eq!(
+            finding_security_category("SEC-NO-COMMAND-INJECTION-1"),
+            Some("exec")
+        );
+        for id in [
+            "camerata.security.taint-sql-injection-python",
+            "camerata.security.taint-sql-injection-js",
+            "camerata.security.taint-sql-injection-rust",
+            "camerata.security.taint-sql-injection-csharp",
+            "camerata.security.taint-sql-injection-go",
+            "camerata.security.taint-sql-injection-ruby",
+            "camerata.security.taint-sql-injection-java",
+        ] {
+            assert_eq!(finding_security_category(id), Some("sql"), "{id}");
+        }
+        for id in [
+            "camerata.security.taint-xss-python",
+            "camerata.security.taint-xss-js",
+            "camerata.security.taint-xss-csharp",
+            "camerata.security.taint-xss-go",
+            "camerata.security.taint-xss-ruby",
+            "camerata.security.taint-xss-java",
+        ] {
+            assert_eq!(finding_security_category(id), Some("xss"), "{id}");
+        }
+        for id in [
+            "camerata.security.taint-open-redirect-python",
+            "camerata.security.taint-open-redirect-js",
+            "camerata.security.taint-open-redirect-csharp",
+            "camerata.security.taint-open-redirect-go",
+            "camerata.security.taint-open-redirect-ruby",
+            "camerata.security.taint-open-redirect-java",
+        ] {
+            assert_eq!(finding_security_category(id), Some("redirect"), "{id}");
+        }
+        for id in [
+            "camerata.security.taint-command-injection-python",
+            "camerata.security.taint-command-injection-js",
+            "camerata.security.taint-command-injection-rust",
+            "camerata.security.taint-command-injection-csharp",
+            "camerata.security.taint-command-injection-go",
+            "camerata.security.taint-command-injection-ruby",
+            "camerata.security.taint-command-injection-java",
+        ] {
+            assert_eq!(finding_security_category(id), Some("exec"), "{id}");
+        }
+        for id in [
+            "camerata.security.taint-log-secret-python",
+            "camerata.security.taint-log-secret-js",
+            "camerata.security.taint-log-secret-rust",
+            "camerata.security.taint-log-secret-csharp",
+            "camerata.security.taint-log-secret-go",
+            "camerata.security.taint-log-secret-ruby",
+            "camerata.security.taint-log-secret-java",
+            "camerata.security.taint-log-pii-python",
+            "camerata.security.taint-log-pii-js",
+            "camerata.security.taint-log-pii-rust",
+            "camerata.security.taint-log-pii-csharp",
+            "camerata.security.taint-log-pii-go",
+            "camerata.security.taint-log-pii-ruby",
+            "camerata.security.taint-log-pii-java",
+        ] {
+            assert_eq!(finding_security_category(id), Some("log-sensitive"), "{id}");
+        }
+    }
+
     /// Regression for the 2026-06-23 dedup gap: a floor SQL finding and a semgrep
     /// `sql-string-concat-rust` finding on the SAME file:line MUST collapse (floor canonical),
     /// not double-report. Before the fix, the -rust id had no category so it skipped dedup.
     #[test]
     fn crosstool_dedup_floor_and_semgrep_rust_sql_same_location_collapses() {
-        let mut existing = vec![floor_finding("me/svc", "src/db.rs", 1444, "SEC-NO-RAW-SQL-CONCAT-1")];
+        let mut existing = vec![floor_finding(
+            "me/svc",
+            "src/db.rs",
+            1444,
+            "SEC-NO-RAW-SQL-CONCAT-1",
+        )];
         let previews = vec![semgrep_finding(
             "me/svc",
             "src/db.rs",
@@ -19973,13 +24256,91 @@ mod tests {
         )];
         let leftover = dedup_scan_previews(&mut existing, previews);
         // Semgrep finding folded in, not surfaced as its own row.
-        assert!(leftover.is_empty(), "semgrep-rust SQL should collapse into the floor row");
+        assert!(
+            leftover.is_empty(),
+            "semgrep-rust SQL should collapse into the floor row"
+        );
         assert_eq!(existing.len(), 1);
-        assert_eq!(existing[0].rule_id, "SEC-NO-RAW-SQL-CONCAT-1", "floor stays canonical");
+        assert_eq!(
+            existing[0].rule_id, "SEC-NO-RAW-SQL-CONCAT-1",
+            "floor stays canonical"
+        );
         assert!(existing[0]
             .also_matches
             .iter()
             .any(|m| m == "camerata.security.sql-string-concat-rust"));
+    }
+
+    /// W3 (commodity-class taint layer): a floor SEC-NO-RAW-SQL-CONCAT-1 finding and a semgrep
+    /// TAINT-mode SQLi finding (a shape the old pattern-based rule could never have caught —
+    /// here a Go `fmt.Sprintf`-built query) on the SAME (repo, path, line) must still collapse
+    /// to ONE row, OUR deterministic row primary, the tool's rule id preserved in
+    /// `also_matches`, and the cover count not inflated — exactly the pre-existing C5-1 merge
+    /// contract, now exercised with a taint rule id instead of a pattern rule id.
+    #[test]
+    fn crosstool_dedup_floor_and_taint_sqli_go_same_location_collapses() {
+        let mut existing = vec![floor_finding(
+            "me/svc",
+            "internal/db.go",
+            88,
+            "SEC-NO-RAW-SQL-CONCAT-1",
+        )];
+        let previews = vec![semgrep_finding(
+            "me/svc",
+            "internal/db.go",
+            88,
+            "camerata.security.taint-sql-injection-go",
+        )];
+        let leftover = dedup_scan_previews(&mut existing, previews);
+        assert!(
+            leftover.is_empty(),
+            "taint SQLi (go) should collapse into the floor row"
+        );
+        assert_eq!(
+            existing.len(),
+            1,
+            "cover count must not be inflated by the extra tool finding"
+        );
+        assert_eq!(
+            existing[0].rule_id, "SEC-NO-RAW-SQL-CONCAT-1",
+            "OUR deterministic row stays primary"
+        );
+        assert!(
+            existing[0]
+                .also_matches
+                .iter()
+                .any(|m| m == "camerata.security.taint-sql-injection-go"),
+            "the external tool's rule id must be preserved in also_matches: {:?}",
+            existing[0].also_matches
+        );
+    }
+
+    /// W3: when the floor does NOT fire on a line (the regex's double-quote-only heuristic
+    /// misses a single-quoted/backtick/go-sprintf shape) but the taint rule DOES, the taint
+    /// finding must stand on its own as a NEW top-level preview row — never silently dropped
+    /// just because an unrelated category already has a row nearby. This is the actual
+    /// coverage-expansion case W3 exists for.
+    #[test]
+    fn taint_sqli_finding_with_no_floor_twin_on_that_line_stands_alone() {
+        let mut existing: Vec<crate::onboard::Finding> = Vec::new();
+        let previews = vec![semgrep_finding(
+            "me/svc",
+            "internal/db.go",
+            99,
+            "camerata.security.taint-sql-injection-go",
+        )];
+        let leftover = dedup_scan_previews(&mut existing, previews);
+        assert_eq!(
+            leftover.len(),
+            1,
+            "no floor twin on this line -> the finding must survive"
+        );
+        assert_eq!(
+            leftover[0].rule_id,
+            "camerata.security.taint-sql-injection-go"
+        );
+        assert!(leftover[0].preview);
+        assert_eq!(leftover[0].preview_tool.as_deref(), Some("semgrep"));
     }
 
     /// Regression for the unsafe-deser floor port: a floor SEC-NO-UNSAFE-DESERIALIZATION-1
@@ -20009,8 +24370,7 @@ mod tests {
         );
         assert_eq!(existing.len(), 1);
         assert_eq!(
-            existing[0].rule_id,
-            "SEC-NO-UNSAFE-DESERIALIZATION-1",
+            existing[0].rule_id, "SEC-NO-UNSAFE-DESERIALIZATION-1",
             "floor rule_id must remain canonical"
         );
         assert!(
@@ -20048,9 +24408,15 @@ mod tests {
         );
         // The ruff finding is kept canonical and records the semgrep rule.
         assert_eq!(existing.len(), 1);
-        assert_eq!(existing[0].preview_tool.as_deref(), Some("ruff"), "ruff is canonical");
+        assert_eq!(
+            existing[0].preview_tool.as_deref(),
+            Some("ruff"),
+            "ruff is canonical"
+        );
         assert!(
-            existing[0].also_matches.contains(&"camerata.security.sql-string-concat-python".to_string()),
+            existing[0]
+                .also_matches
+                .contains(&"camerata.security.sql-string-concat-python".to_string()),
             "semgrep rule must be in also_matches: {:?}",
             existing[0].also_matches
         );
@@ -20071,7 +24437,10 @@ mod tests {
             out.is_empty(),
             "ruff duplicate of floor must be collapsed: {out:?}"
         );
-        assert_eq!(existing[0].rule_id, "SEC-NO-RAW-SQL-CONCAT-1", "floor rule_id is canonical");
+        assert_eq!(
+            existing[0].rule_id, "SEC-NO-RAW-SQL-CONCAT-1",
+            "floor rule_id is canonical"
+        );
         assert!(
             existing[0].also_matches.contains(&"S608".to_string()),
             "ruff rule must be in also_matches: {:?}",
@@ -20104,7 +24473,10 @@ mod tests {
         );
         assert_eq!(out[0].rule_id, "camerata.security.exec-injection-js");
         // The eslint finding must not have been mutated.
-        assert!(existing[0].also_matches.is_empty(), "eslint must not be touched");
+        assert!(
+            existing[0].also_matches.is_empty(),
+            "eslint must not be touched"
+        );
     }
 
     /// FIX 2 (d): floor↔semgrep dedup still works as before (backward-compat regression test).
@@ -20139,13 +24511,85 @@ mod tests {
         let clip = clippy_finding("me/api", "src/lib.rs", 3, "clippy::unknown-lint");
         let mut existing = vec![clip];
         // An eslint rule with no recognized category on the same line.
-        let previews = vec![eslint_finding("me/api", "src/lib.rs", 3, "some-custom-eslint-rule")];
+        let previews = vec![eslint_finding(
+            "me/api",
+            "src/lib.rs",
+            3,
+            "some-custom-eslint-rule",
+        )];
 
         let out = dedup_scan_previews(&mut existing, previews);
 
         // Both must be kept since neither has a recognized security category.
-        assert_eq!(out.len(), 1, "unrecognized-category findings must not be collapsed");
+        assert_eq!(
+            out.len(),
+            1,
+            "unrecognized-category findings must not be collapsed"
+        );
         assert!(existing[0].also_matches.is_empty());
+    }
+
+    /// `finding_dedup_rank` treats an eslint preview row IDENTICALLY to clippy/ruff — rank
+    /// one, strictly below a floor row (rank zero) and strictly above semgrep (rank two).
+    /// This is the precedence table the ledger/merge-primacy guarantee ("our own
+    /// deterministic row wins, a preview row never outranks it") rests on; pinned directly
+    /// so a future edit to the match arms can't silently invert it for eslint specifically.
+    #[test]
+    fn finding_dedup_rank_treats_eslint_like_clippy_and_ruff() {
+        let floor = floor_finding("me/web", "src/x.ts", 1, "SOME-FLOOR-RULE-1");
+        let eslint = eslint_finding("me/web", "src/x.ts", 1, "react-hooks/exhaustive-deps");
+        let semgrep = semgrep_finding("me/web", "src/x.ts", 1, "camerata.security.whatever");
+        assert_eq!(finding_dedup_rank(&floor), 0);
+        assert_eq!(finding_dedup_rank(&eslint), 1);
+        assert_eq!(
+            finding_dedup_rank(&clippy_finding("me/web", "src/x.rs", 1, "clippy::x")),
+            1
+        );
+        assert_eq!(
+            finding_dedup_rank(&ruff_finding("me/web", "src/x.py", 1, "S608")),
+            1
+        );
+        assert_eq!(finding_dedup_rank(&semgrep), 2);
+    }
+
+    /// Merge primacy, ESLint edition: when our OWN deterministic row and an eslint preview
+    /// row land at the same (repo, path, line) for the SAME security-grounded category, the
+    /// deterministic row wins — it stays canonical, the eslint rule id is folded into
+    /// `also_matches`, and exactly ONE row survives. Mirrors
+    /// `crosstool_dedup_floor_semgrep_regression_unchanged` above, but tags the preview row
+    /// `preview_tool = "eslint"` specifically — before this task, no existing test exercised
+    /// an eslint-tagged row colliding with a floor row in the SAME category (only
+    /// "different categories" and "unrecognized category" were covered for eslint), so this
+    /// closes that gap in proving the general tool-agnostic merge mechanism — unchanged by
+    /// this task — already does the right thing for eslint rows, not just semgrep/ruff/clippy.
+    #[test]
+    fn crosstool_dedup_eslint_never_outranks_our_own_floor_row() {
+        let mut existing = vec![floor_finding(
+            "me/web",
+            "src/queries.py",
+            5,
+            "SEC-NO-RAW-SQL-CONCAT-1",
+        )];
+        // "S608" is already a recognized "sql"-category id (Ruff/flake8-bandit); tagging it
+        // `preview_tool = "eslint"` here exercises the eslint branch of `finding_dedup_rank`
+        // specifically, without needing a brand-new security-category mapping.
+        let previews = vec![eslint_finding("me/web", "src/queries.py", 5, "S608")];
+
+        let out = dedup_scan_previews(&mut existing, previews);
+
+        assert!(
+            out.is_empty(),
+            "an eslint duplicate of our own floor row must be collapsed: {out:?}"
+        );
+        assert_eq!(
+            existing[0].rule_id, "SEC-NO-RAW-SQL-CONCAT-1",
+            "the floor's own rule_id stays canonical — ours wins merge primacy"
+        );
+        assert!(
+            existing[0].also_matches.contains(&"S608".to_string()),
+            "the eslint rule id must be folded into also_matches, not dropped: {:?}",
+            existing[0].also_matches
+        );
     }
 
     // ── ci_story_body helpers ─────────────────────────────────────────────────
@@ -20720,7 +25164,11 @@ mod tests {
         assert_eq!(normalize_parent_number(""), None, "empty -> None");
         assert_eq!(normalize_parent_number("#"), None, "bare # -> None");
         assert_eq!(normalize_parent_number("abc"), None, "non-numeric -> None");
-        assert_eq!(normalize_parent_number("#abc"), None, "non-numeric after # -> None");
+        assert_eq!(
+            normalize_parent_number("#abc"),
+            None,
+            "non-numeric after # -> None"
+        );
     }
 
     /// When the draft has a `parent_id` but the GitHub sub-issue link call would fail
@@ -20786,6 +25234,8 @@ mod tests {
 
     // ── render_scan_results_for_chat ─────────────────────────────────────────
 
+    // too_many_arguments: a test fixture builder; positional fields keep call sites terse.
+    #[allow(clippy::too_many_arguments)]
     fn make_finding(
         severity: &str,
         rule_id: &str,
@@ -20825,15 +25275,35 @@ mod tests {
     #[test]
     fn render_scan_results_counts_by_severity() {
         let findings = vec![
-            make_finding("critical", "SEC-1", "o/r", "a.rs", 1, "active", false, "", ""),
-            make_finding("critical", "SEC-1", "o/r", "b.rs", 2, "active", false, "", ""),
+            make_finding(
+                "critical", "SEC-1", "o/r", "a.rs", 1, "active", false, "", "",
+            ),
+            make_finding(
+                "critical", "SEC-1", "o/r", "b.rs", 2, "active", false, "", "",
+            ),
             make_finding("high", "ARCH-1", "o/r", "c.rs", 3, "active", false, "", ""),
-            make_finding("medium", "ARCH-2", "o/r", "d.rs", 4, "suppressed-baseline", false, "", ""),
+            make_finding(
+                "medium",
+                "ARCH-2",
+                "o/r",
+                "d.rs",
+                4,
+                "suppressed-baseline",
+                false,
+                "",
+                "",
+            ),
             make_finding("low", "STYLE-1", "o/r", "e.rs", 5, "active", false, "", ""),
         ];
         let out = render_scan_results_for_chat(&findings, &[]);
-        assert!(out.contains("Total findings: 5"), "must report total, got: {out}");
-        assert!(out.contains("critical: 2"), "must count critical, got: {out}");
+        assert!(
+            out.contains("Total findings: 5"),
+            "must report total, got: {out}"
+        );
+        assert!(
+            out.contains("critical: 2"),
+            "must count critical, got: {out}"
+        );
         assert!(out.contains("high: 1"), "must count high, got: {out}");
         assert!(out.contains("medium: 1"), "must count medium, got: {out}");
         assert!(out.contains("low: 1"), "must count low, got: {out}");
@@ -20845,12 +25315,35 @@ mod tests {
         let findings = vec![
             make_finding("high", "R1", "o/r", "f1.rs", 1, "active", false, "", ""),
             make_finding("high", "R1", "o/r", "f2.rs", 2, "active", false, "", ""),
-            make_finding("medium", "R2", "o/r", "f3.rs", 3, "suppressed-baseline", false, "", ""),
-            make_finding("low", "R3", "o/r", "f4.rs", 4, "suppressed-inline", false, "", ""),
+            make_finding(
+                "medium",
+                "R2",
+                "o/r",
+                "f3.rs",
+                3,
+                "suppressed-baseline",
+                false,
+                "",
+                "",
+            ),
+            make_finding(
+                "low",
+                "R3",
+                "o/r",
+                "f4.rs",
+                4,
+                "suppressed-inline",
+                false,
+                "",
+                "",
+            ),
         ];
         let out = render_scan_results_for_chat(&findings, &[]);
         assert!(out.contains("2 active"), "must report 2 active, got: {out}");
-        assert!(out.contains("2 suppressed"), "must report 2 suppressed, got: {out}");
+        assert!(
+            out.contains("2 suppressed"),
+            "must report 2 suppressed, got: {out}"
+        );
     }
 
     /// Preview vs floor counts appear.
@@ -20878,20 +25371,40 @@ mod tests {
         let findings = vec![
             make_finding("high", "RULE-A", "o/r", "a.rs", 1, "active", false, "", ""),
             make_finding("high", "RULE-A", "o/r", "b.rs", 2, "active", false, "", ""),
-            make_finding("medium", "RULE-A", "o/r", "c.rs", 3, "active", false, "", ""),
+            make_finding(
+                "medium", "RULE-A", "o/r", "c.rs", 3, "active", false, "", "",
+            ),
             make_finding("low", "RULE-B", "o/r", "d.rs", 4, "active", false, "", ""),
         ];
         let out = render_scan_results_for_chat(&findings, &[]);
         // RULE-A should appear with count 3 (highest); RULE-B with 1.
-        assert!(out.contains("RULE-A: 3"), "must show RULE-A count 3, got: {out}");
-        assert!(out.contains("RULE-B: 1"), "must show RULE-B count 1, got: {out}");
+        assert!(
+            out.contains("RULE-A: 3"),
+            "must show RULE-A count 3, got: {out}"
+        );
+        assert!(
+            out.contains("RULE-B: 1"),
+            "must show RULE-B count 1, got: {out}"
+        );
     }
 
     /// The top-N finding list is capped at 40 (CAP).
     #[test]
     fn render_scan_results_capped_at_40() {
         let findings: Vec<_> = (0..60)
-            .map(|i| make_finding("high", "R1", "o/r", &format!("f{i}.rs"), i, "active", false, "", ""))
+            .map(|i| {
+                make_finding(
+                    "high",
+                    "R1",
+                    "o/r",
+                    &format!("f{i}.rs"),
+                    i,
+                    "active",
+                    false,
+                    "",
+                    "",
+                )
+            })
             .collect();
         let out = render_scan_results_for_chat(&findings, &[]);
         // Must say "Top 40 of 60"
@@ -20916,7 +25429,7 @@ mod tests {
             42,
             "active",
             false,
-            fake_secret,   // snippet — must NOT appear in output
+            fake_secret,             // snippet — must NOT appear in output
             "hardcoded token found", // detail — may appear
         )];
         let out = render_scan_results_for_chat(&findings, &[]);
@@ -20941,12 +25454,10 @@ mod tests {
     /// Coverage notes appear in the output.
     #[test]
     fn render_scan_results_includes_coverage_notes() {
-        let notes = vec![
-            crate::onboard::CoverageNote {
-                tool: "ruff".to_string(),
-                message: "ruff not installed; Python rules skipped".to_string(),
-            },
-        ];
+        let notes = vec![crate::onboard::CoverageNote {
+            tool: "ruff".to_string(),
+            message: "ruff not installed; Python rules skipped".to_string(),
+        }];
         let out = render_scan_results_for_chat(&[], &notes);
         // Even with empty findings, coverage notes are surfaced.
         assert!(
@@ -21037,11 +25548,694 @@ mod tests {
         let result = extract_scan_results_from_draft(&draft);
         assert!(result.is_some(), "audit.findings fallback must work");
         let out = result.unwrap();
-        assert!(out.contains("DI-1"), "must contain rule_id from audit section");
-        assert!(!out.contains("secret-value-here"), "snippet must not leak via audit path");
+        assert!(
+            out.contains("DI-1"),
+            "must contain rule_id from audit section"
+        );
+        assert!(
+            !out.contains("secret-value-here"),
+            "snippet must not leak via audit path"
+        );
     }
 
     // ── last_scan store tests ─────────────────────────────────────────────────────────
+
+    // ── W3: finding_grounds_to / reconcile_external_tool_ledger ─────────────────────────
+
+    /// Helper: build a minimal preview `Finding` for the W3 ledger-reconciliation tests.
+    fn preview_finding_for_test(
+        rule_id: &str,
+        tool: &str,
+        also_matches: &[&str],
+    ) -> crate::onboard::Finding {
+        crate::onboard::Finding {
+            repo: "owner/repo".to_string(),
+            path: "src/db.py".to_string(),
+            line: 10,
+            rule_id: rule_id.to_string(),
+            severity: "high".to_string(),
+            preview: true,
+            preview_tool: Some(tool.to_string()),
+            also_matches: also_matches.iter().map(|s| s.to_string()).collect(),
+            ..crate::onboard::Finding::default()
+        }
+    }
+
+    #[test]
+    fn finding_grounds_to_matches_own_rule_id() {
+        let f = preview_finding_for_test("SEC-NO-RAW-SQL-CONCAT-1", "semgrep", &[]);
+        assert!(finding_grounds_to(&f, "SEC-NO-RAW-SQL-CONCAT-1"));
+    }
+
+    #[test]
+    fn finding_grounds_to_matches_via_semgrep_floor_category() {
+        // A standalone preview row (never deduped against anything) whose OWN rule id is the
+        // tool's id grounds to the corpus rule via `semgrep_floor_category`.
+        let f =
+            preview_finding_for_test("camerata.security.taint-sql-injection-go", "semgrep", &[]);
+        assert!(finding_grounds_to(&f, "SEC-NO-RAW-SQL-CONCAT-1"));
+        assert!(!finding_grounds_to(&f, "SEC-NO-OPEN-REDIRECT-1"));
+    }
+
+    #[test]
+    fn finding_grounds_to_matches_via_also_matches() {
+        // A floor-canonical row that absorbed the semgrep rule id into `also_matches` during
+        // dedup — the defect is still real and still counts as evidence the corpus rule fired.
+        let f = preview_finding_for_test(
+            "SEC-NO-RAW-SQL-CONCAT-1",
+            "semgrep",
+            &["camerata.security.taint-sql-injection-python"],
+        );
+        // Build a SEPARATE finding whose OWN id is NOT the corpus id, but is folded into another.
+        let folded = crate::onboard::Finding {
+            rule_id: "unrelated-id".to_string(),
+            also_matches: vec!["camerata.security.taint-sql-injection-python".to_string()],
+            ..preview_finding_for_test("unrelated-id", "semgrep", &[])
+        };
+        assert!(finding_grounds_to(&f, "SEC-NO-RAW-SQL-CONCAT-1"));
+        assert!(finding_grounds_to(&folded, "SEC-NO-RAW-SQL-CONCAT-1"));
+    }
+
+    #[test]
+    fn finding_grounds_to_false_for_unrelated_rule() {
+        let f = preview_finding_for_test("camerata.security.weak-hash-python", "semgrep", &[]);
+        assert!(!finding_grounds_to(&f, "SEC-NO-RAW-SQL-CONCAT-1"));
+    }
+
+    // ── ESLint grounding (`eslint_floor_category` / `external_tool_floor_category`) ────
+
+    #[test]
+    fn eslint_floor_category_grounds_react_hooks_rules() {
+        assert_eq!(
+            eslint_floor_category("react-hooks/exhaustive-deps"),
+            Some("JAVASCRIPT-REACT-EXHAUSTIVE-DEPS-1")
+        );
+        assert_eq!(
+            eslint_floor_category("react-hooks/rules-of-hooks"),
+            Some("JAVASCRIPT-REACT-RULES-OF-HOOKS-1")
+        );
+        // Unrelated / unmapped ids never ground to anything.
+        assert_eq!(eslint_floor_category("no-console"), None);
+        assert_eq!(eslint_floor_category("react-hooks/unknown-rule"), None);
+    }
+
+    /// A standalone ESLint preview row (never deduped) whose own rule id is the tool's
+    /// native id grounds to the corpus rule via `eslint_floor_category`, exactly mirroring
+    /// `finding_grounds_to_matches_via_semgrep_floor_category` for Semgrep above.
+    #[test]
+    fn finding_grounds_to_matches_via_eslint_floor_category() {
+        let f = preview_finding_for_test("react-hooks/exhaustive-deps", "eslint", &[]);
+        assert!(finding_grounds_to(&f, "JAVASCRIPT-REACT-EXHAUSTIVE-DEPS-1"));
+        assert!(!finding_grounds_to(&f, "JAVASCRIPT-REACT-RULES-OF-HOOKS-1"));
+    }
+
+    /// `external_tool_floor_category` dispatches to whichever table (Semgrep or ESLint)
+    /// actually claims the id, and to neither when nothing does.
+    #[test]
+    fn external_tool_floor_category_dispatches_across_tools() {
+        assert_eq!(
+            external_tool_floor_category("camerata.security.hardcoded-secret"),
+            Some("SEC-NO-HARDCODED-SECRETS-1")
+        );
+        assert_eq!(
+            external_tool_floor_category("react-hooks/rules-of-hooks"),
+            Some("JAVASCRIPT-REACT-RULES-OF-HOOKS-1")
+        );
+        assert_eq!(external_tool_floor_category("no-such-rule-anywhere"), None);
+    }
+
+    /// Helper: a minimal ScanReport (via the existing `gated` constructor, whose fields are
+    /// all `pub`) with its `findings`/`ledger`/`coverage_notes` overwritten for the test.
+    fn report_for_ledger_test() -> crate::onboard::ScanReport {
+        crate::onboard::ScanReport::gated(&["owner/repo".to_string()])
+    }
+
+    /// The tool genuinely ran and found something: the pre-pass speculative
+    /// `ran=true, findings_emitted=0` entry is corrected to the REAL count, stays `ran=true`,
+    /// and no disclosure is raised.
+    #[test]
+    fn reconcile_marks_rule_ran_with_real_count_when_tool_succeeded() {
+        let mut report = report_for_ledger_test();
+        report.ledger.record_rule(
+            "SEC-NO-RAW-SQL-CONCAT-1",
+            crate::scan_ledger::RuleTier::ExternalTool,
+            true,
+            None,
+            3,
+            0, // the pre-pass speculative (hardcoded) count
+        );
+        report.findings = vec![preview_finding_for_test(
+            "camerata.security.taint-sql-injection-python",
+            "semgrep",
+            &[],
+        )];
+        let attempted: std::collections::HashSet<&str> = ["semgrep"].into_iter().collect();
+        reconcile_external_tool_ledger(&mut report, &attempted, None);
+        let entry = report.ledger.rule("SEC-NO-RAW-SQL-CONCAT-1").unwrap();
+        assert!(entry.ran);
+        assert_eq!(
+            entry.findings_emitted, 1,
+            "must reflect the REAL count, not the pre-pass 0"
+        );
+        assert!(
+            report.failed_passes.is_empty(),
+            "a successful pass must not disclose a failure"
+        );
+    }
+
+    /// The tool is absent/failed for every repo this scan touched (a hard-failure
+    /// `CoverageNote` names it): the entry is corrected to NOT RUN with a disclosed reason, and
+    /// a `FailedPass` is pushed — never a silent "verified clean".
+    #[test]
+    fn reconcile_marks_rule_not_run_and_discloses_when_tool_absent() {
+        let mut report = report_for_ledger_test();
+        report.ledger.record_rule(
+            "SEC-NO-RAW-SQL-CONCAT-1",
+            crate::scan_ledger::RuleTier::ExternalTool,
+            true,
+            None,
+            3,
+            0,
+        );
+        report.coverage_notes = vec![crate::onboard::CoverageNote {
+            tool: "semgrep".to_string(),
+            message:
+                "could not preview 1 rule(s) with semgrep: base interpreter not available: python3"
+                    .to_string(),
+        }];
+        // No findings at all — the tool never ran. It WAS attempted (routed, then failed) —
+        // the hard-failure CoverageNote takes precedence over `tools_attempted` either way.
+        let attempted: std::collections::HashSet<&str> = ["semgrep"].into_iter().collect();
+        reconcile_external_tool_ledger(&mut report, &attempted, None);
+        let entry = report.ledger.rule("SEC-NO-RAW-SQL-CONCAT-1").unwrap();
+        assert!(
+            !entry.ran,
+            "a tool that never ran must never be recorded as ran=true"
+        );
+        assert!(!entry.verified_clean(), "must never read as verified clean");
+        let reason = entry.skip_reason.as_deref().unwrap_or("");
+        assert!(
+            reason.starts_with("commodity taint pass did not run:"),
+            "got: {reason}"
+        );
+        assert_eq!(report.failed_passes.len(), 1);
+        assert_eq!(report.failed_passes[0].pass, "commodity taint pass");
+        assert!(report.failed_passes[0]
+            .reason
+            .contains("SEC-NO-RAW-SQL-CONCAT-1"));
+    }
+
+    /// Defect 3 (2026-10-07 grading pass): Semgrep, once invoked at all, runs its WHOLE
+    /// bundled commodity-taint ruleset — it can produce a real, exported finding for a
+    /// corpus rule id the user never selected this run, so `onboard::audit_repos`'s
+    /// speculative pre-pass never pre-registered a `RuleTier::ExternalTool` ledger entry for
+    /// it at all. Before this fix, such a finding shipped in `report.findings` while
+    /// contributing ZERO to every ledger total — this is the "family reports findings=0 while
+    /// preview rows ARE present in the export" shape. The second discovery pass in
+    /// `reconcile_external_tool_ledger` must register it fresh.
+    #[test]
+    fn reconcile_discovers_a_grounded_rule_the_pre_pass_never_registered() {
+        let mut report = report_for_ledger_test();
+        // NOTE: deliberately NO pre-registered ledger entry for SEC-NO-COMMAND-INJECTION-1 —
+        // the user never selected it this run.
+        report.findings = vec![preview_finding_for_test(
+            "camerata.security.taint-command-injection-go",
+            "semgrep",
+            &[],
+        )];
+        let attempted: std::collections::HashSet<&str> = ["semgrep"].into_iter().collect();
+        reconcile_external_tool_ledger(&mut report, &attempted, None);
+        let entry = report
+            .ledger
+            .rule("SEC-NO-COMMAND-INJECTION-1")
+            .expect("the discovery pass must register a fresh entry for the grounded id");
+        assert!(
+            entry.ran,
+            "a real exported finding must never read as not-run"
+        );
+        assert_eq!(
+            entry.findings_emitted, 1,
+            "the ledger's count must equal the rows actually exported"
+        );
+        assert_eq!(entry.tier, crate::scan_ledger::RuleTier::ExternalTool);
+    }
+
+    /// The discovery pass must never DOUBLE-count a rule id the correction loop already
+    /// handled (pre-registered AND corrected) just because a finding also carries it.
+    #[test]
+    fn reconcile_discovery_pass_never_double_counts_an_already_tracked_rule() {
+        let mut report = report_for_ledger_test();
+        report.ledger.record_rule(
+            "SEC-NO-RAW-SQL-CONCAT-1",
+            crate::scan_ledger::RuleTier::ExternalTool,
+            true,
+            None,
+            3,
+            0,
+        );
+        report.findings = vec![preview_finding_for_test(
+            "camerata.security.taint-sql-injection-python",
+            "semgrep",
+            &[],
+        )];
+        let attempted: std::collections::HashSet<&str> = ["semgrep"].into_iter().collect();
+        reconcile_external_tool_ledger(&mut report, &attempted, None);
+        let entry = report.ledger.rule("SEC-NO-RAW-SQL-CONCAT-1").unwrap();
+        assert_eq!(
+            entry.findings_emitted, 1,
+            "the correction loop already counted this finding once; the discovery pass must \
+             not add a second count for the same already-tracked id"
+        );
+    }
+
+    /// A finding grounded ONLY via an absorbed `also_matches` member (never its own primary
+    /// id) must still be discovered — the merge-absorption case, mirrored from
+    /// `finding_grounds_to_matches_via_also_matches` above.
+    #[test]
+    fn reconcile_discovery_pass_credits_a_grounded_also_matches_member() {
+        let mut report = report_for_ledger_test();
+        let folded = crate::onboard::Finding {
+            rule_id: "unrelated-id".to_string(),
+            also_matches: vec!["camerata.security.taint-command-injection-go".to_string()],
+            ..preview_finding_for_test("unrelated-id", "semgrep", &[])
+        };
+        report.findings = vec![folded];
+        let attempted: std::collections::HashSet<&str> = ["semgrep"].into_iter().collect();
+        reconcile_external_tool_ledger(&mut report, &attempted, None);
+        let entry = report
+            .ledger
+            .rule("SEC-NO-COMMAND-INJECTION-1")
+            .expect("an also_matches member grounding to a new id must still be discovered");
+        assert_eq!(entry.findings_emitted, 1);
+    }
+
+    /// Outcome 3 (pass-level skip): the external-tool pass never invoked semgrep AT ALL this
+    /// scan — no coverage note names it (a tool nothing ever tried to run fails silently, by
+    /// construction) — so `tools_attempted` is the ONLY signal that it didn't run. Before this
+    /// branch existed, this exact state (emitted == 0, no coverage note) fell through to
+    /// "genuinely clean", silently keeping the pre-pass speculative `ran=true` — the precise
+    /// silent-knowledge-loss class this ledger exists to prevent.
+    #[test]
+    fn reconcile_marks_rule_not_run_when_tool_never_attempted_this_scan() {
+        let mut report = report_for_ledger_test();
+        report.ledger.record_rule(
+            "SEC-NO-RAW-SQL-CONCAT-1",
+            crate::scan_ledger::RuleTier::ExternalTool,
+            true,
+            None,
+            3,
+            0,
+        );
+        // No coverage notes, no findings — the pass genuinely never touched this id.
+        let attempted: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        reconcile_external_tool_ledger(&mut report, &attempted, None);
+        let entry = report.ledger.rule("SEC-NO-RAW-SQL-CONCAT-1").unwrap();
+        assert!(
+            !entry.ran,
+            "a tool never invoked this scan must never be recorded as ran=true"
+        );
+        assert!(!entry.verified_clean(), "must never read as verified clean");
+        let reason = entry.skip_reason.as_deref().unwrap_or("");
+        assert!(
+            reason.starts_with("commodity taint pass did not run:"),
+            "got: {reason}"
+        );
+        assert_eq!(report.failed_passes.len(), 1);
+        assert_eq!(report.failed_passes[0].pass, "commodity taint pass");
+        assert!(report.failed_passes[0]
+            .reason
+            .contains("SEC-NO-RAW-SQL-CONCAT-1"));
+    }
+
+    /// W3 wiring-gap fix, full pipeline: over a REAL synthetic repo, with the REAL loaded
+    /// corpus, through `audit_repos` -> `merge_scan_preview` -> `report_export::build_report_json`
+    /// (the exact sequence both `onboard_audit` and `camerata inspect` run), with
+    /// `CAMERATA_DISABLE_SEMGREP` forcing a deterministic "tool unavailable" outcome:
+    /// `SEC-NO-COMMAND-INJECTION-1` must NEVER appear in `whats_healthy.rules` (the report's
+    /// literal "verified clean" list), MUST appear in `rules_not_run` ("excluded from this
+    /// audit") with the disclosed reason, and the disclosure MUST ride into both
+    /// `executive_summary.failed_passes` and `methodology.failed_passes` — proving the fix
+    /// holds all the way through the exact function the PDF/xlsx/findings.json export is built
+    /// from, not just the ledger in isolation.
+    ///
+    /// `SEC-NO-COMMAND-INJECTION-1` (not `SEC-NO-RAW-SQL-CONCAT-1`) is the right id for this
+    /// test: it has NO `camerata_gateway::lookup_arm` and is NOT in `onboard::AUDIT_RULES` (the
+    /// content floor's always-on regex set), so its ONLY detector is the commodity taint pass —
+    /// `SEC-NO-RAW-SQL-CONCAT-1` genuinely has a SECOND, independent, always-on gateway-regex
+    /// detector (the floor's `AUDIT_RULES` loop), so it legitimately stays `ran=true` via that
+    /// channel even when semgrep doesn't run — correct, not a gap, since it really was checked
+    /// by something. The silent-knowledge-loss class this fix closes is specifically "the
+    /// pass-claimed-to-cover-it tool never ran AND nothing else ever checked it either".
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn semgrep_covered_rule_never_reads_verified_clean_when_the_pass_does_not_run() {
+        let _env =
+            camerata_test_env::EnvGuard::set(crate::scan_tools::DISABLE_SEMGREP_ENV_VAR, "1");
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("app.py"),
+            "def handler(request):\n    return {\"ok\": True}\n",
+        )
+        .unwrap();
+        let sources = vec![("me/svc".to_string(), dir.path().to_path_buf())];
+
+        let selected = vec![crate::onboard::SelectedRule {
+            id: "SEC-NO-COMMAND-INJECTION-1".to_string(),
+            directive: "no shell-interpreted invocation of externally-influenced values"
+                .to_string(),
+            repos: Vec::new(),
+        }];
+        let (corpus, _errs) =
+            camerata_rules::load_corpus_lenient(&camerata_rules::corpus_path()).await;
+        assert!(
+            corpus.get_by_id("SEC-NO-COMMAND-INJECTION-1").is_some(),
+            "precondition: the real corpus must carry this id"
+        );
+        assert!(
+            camerata_gateway::lookup_arm("SEC-NO-COMMAND-INJECTION-1").is_none(),
+            "precondition: this id must have NO gateway-regex backstop"
+        );
+        assert!(
+            !crate::onboard::AUDIT_RULES.contains(&"SEC-NO-COMMAND-INJECTION-1"),
+            "precondition: this id must have NO always-on content-floor detector either"
+        );
+        // W13 added `split_scannable_rules`'s fifth element (the corpus-load failures the
+        // function used to discard). This test asserts nothing about it — the real corpus
+        // loads cleanly — so it is destructured away explicitly.
+        let (_scannable, excluded_mechanical, preview_rules, _set, _corpus_load_failures) =
+            split_scannable_rules(selected.clone()).await;
+        assert!(
+            preview_rules
+                .iter()
+                .any(|r| r.id == "SEC-NO-COMMAND-INJECTION-1"),
+            "precondition: this id must be CI-tier + preview-runnable"
+        );
+
+        let (mut report, _manifest) = crate::onboard::audit_repos(
+            &crate::credentials::MemoryCredentialStore::new(),
+            &sources,
+            &selected,
+            Vec::new(),
+            None,
+            None,
+            crate::ai_audit::ScanMode::Parallel,
+            false,
+            None,
+            None,
+            None,
+            false,
+            true,
+            false, // run_ai_review off — token-free, this test is about the deterministic tier
+            true,  // run_deterministic on
+            None,
+            crate::llm::BackendResolution::Cli,
+            Some(&corpus),
+            &std::collections::HashMap::new(),
+        )
+        .await;
+        report.excluded_mechanical_rules = excluded_mechanical;
+        merge_scan_preview(&mut report, &sources, &preview_rules, Some(&corpus), None).await;
+
+        let entry = report
+            .ledger
+            .rule("SEC-NO-COMMAND-INJECTION-1")
+            .expect("the ledger must carry this rule's outcome");
+        assert!(
+            !entry.ran,
+            "the tool never ran, so this must never be ran=true"
+        );
+        assert!(!entry.verified_clean());
+
+        let options = crate::report_export::ReportOptions::default();
+        let json = crate::report_export::build_report_json(
+            &report.clone().seal(),
+            &std::collections::HashMap::new(),
+            Some(&corpus),
+            &options,
+        );
+
+        assert!(
+            !json
+                .whats_healthy
+                .rules
+                .iter()
+                .any(|r| r.rule_id == "SEC-NO-COMMAND-INJECTION-1"),
+            "a rule the commodity taint pass never ran for must NEVER appear in the report's \
+             'verified clean' section: {:?}",
+            json.whats_healthy.rules
+        );
+        let excluded = json
+            .rules_not_run
+            .iter()
+            .find(|r| r.rule_id == "SEC-NO-COMMAND-INJECTION-1");
+        assert!(
+            excluded.is_some_and(|r| r.reason.starts_with("commodity taint pass did not run:")),
+            "must appear in 'excluded from this audit' with the real reason: {:?}",
+            json.rules_not_run
+        );
+        assert!(
+            json.executive_summary
+                .failed_passes
+                .iter()
+                .any(|s| s.contains("SEC-NO-COMMAND-INJECTION-1") && s.contains("commodity taint")),
+            "{:?}",
+            json.executive_summary.failed_passes
+        );
+        assert!(
+            json.methodology
+                .failed_passes
+                .iter()
+                .any(|s| s.contains("SEC-NO-COMMAND-INJECTION-1") && s.contains("commodity taint")),
+            "{:?}",
+            json.methodology.failed_passes
+        );
+    }
+
+    /// An "unrouted" coverage note (a routing gap — a selected rule with no tool to drive it)
+    /// must NOT be mistaken for a tool-execution failure.
+    #[test]
+    fn reconcile_does_not_treat_unrouted_note_as_tool_failure() {
+        let mut report = report_for_ledger_test();
+        report.ledger.record_rule(
+            "SEC-NO-RAW-SQL-CONCAT-1",
+            crate::scan_ledger::RuleTier::ExternalTool,
+            true,
+            None,
+            3,
+            0,
+        );
+        report.coverage_notes = vec![crate::onboard::CoverageNote {
+            tool: "unrouted".to_string(),
+            message: "could not preview SOME-OTHER-RULE-1 — no scan-runnable tool wired"
+                .to_string(),
+        }];
+        // Semgrep itself WAS attempted (routed + run) for this id — the unrouted note is about
+        // a different, unrelated rule entirely.
+        let attempted: std::collections::HashSet<&str> = ["semgrep"].into_iter().collect();
+        reconcile_external_tool_ledger(&mut report, &attempted, None);
+        let entry = report.ledger.rule("SEC-NO-RAW-SQL-CONCAT-1").unwrap();
+        assert!(
+            entry.ran,
+            "an unrelated routing gap must not flip an unrelated rule to not-run"
+        );
+        assert_eq!(
+            entry.findings_emitted, 0,
+            "genuinely zero findings is a real clean result here"
+        );
+        assert!(report.failed_passes.is_empty());
+    }
+
+    /// Non-ExternalTool ledger entries (the floor, arch_checker, …) are untouched by
+    /// reconciliation — it only ever corrects the tier it exists for.
+    #[test]
+    fn reconcile_leaves_non_external_tool_entries_untouched() {
+        let mut report = report_for_ledger_test();
+        report.ledger.record_rule(
+            "SEC-NO-HARDCODED-SECRETS-1",
+            crate::scan_ledger::RuleTier::Deterministic,
+            true,
+            None,
+            5,
+            2,
+        );
+        reconcile_external_tool_ledger(&mut report, &std::collections::HashSet::new(), None);
+        let entry = report.ledger.rule("SEC-NO-HARDCODED-SECRETS-1").unwrap();
+        assert!(entry.ran);
+        assert_eq!(
+            entry.findings_emitted, 2,
+            "must be untouched by the external-tool correction"
+        );
+    }
+
+    // ── reconcile_external_tool_ledger, generalized to ESLint ─────────────────────────
+    //
+    // Everything above this block only ever exercised Semgrep (the only external tool
+    // that existed when this ledger was built). These tests prove the SAME three outcomes
+    // hold for an ESLint-backed corpus rule once a `corpus` is threaded through — using
+    // the REAL loaded corpus so `external_tool_name_for_ledger_rule`'s
+    // `scan_tools::tool_for_rule` lookup resolves `JAVASCRIPT-REACT-EXHAUSTIVE-DEPS-1` to
+    // `ScanTool::Eslint` exactly as the live pipeline would, never a hand-built stand-in
+    // that could silently drift from the real routing.
+
+    /// Outcome 1: ESLint genuinely ran and found the hooks violation — the pre-pass
+    /// speculative `ran=true, findings_emitted=0` entry is corrected to the REAL count.
+    #[tokio::test]
+    async fn reconcile_marks_eslint_rule_ran_with_real_count_when_tool_succeeded() {
+        let (corpus, _errs) =
+            camerata_rules::load_corpus_lenient(&camerata_rules::corpus_path()).await;
+        assert!(
+            corpus
+                .get_by_id("JAVASCRIPT-REACT-EXHAUSTIVE-DEPS-1")
+                .is_some(),
+            "precondition: the real corpus must carry this id"
+        );
+
+        let mut report = report_for_ledger_test();
+        report.ledger.record_rule(
+            "JAVASCRIPT-REACT-EXHAUSTIVE-DEPS-1",
+            crate::scan_ledger::RuleTier::ExternalTool,
+            true,
+            None,
+            3,
+            0, // the pre-pass speculative (hardcoded) count
+        );
+        report.findings = vec![preview_finding_for_test(
+            "react-hooks/exhaustive-deps",
+            "eslint",
+            &[],
+        )];
+        let attempted: std::collections::HashSet<&str> = ["eslint"].into_iter().collect();
+        reconcile_external_tool_ledger(&mut report, &attempted, Some(&corpus));
+
+        let entry = report
+            .ledger
+            .rule("JAVASCRIPT-REACT-EXHAUSTIVE-DEPS-1")
+            .unwrap();
+        assert!(entry.ran);
+        assert_eq!(
+            entry.findings_emitted, 1,
+            "must reflect the REAL eslint count, not the pre-pass 0"
+        );
+        assert!(
+            report.failed_passes.is_empty(),
+            "a successful pass must not disclose a failure"
+        );
+    }
+
+    /// Outcome 2: ESLint is absent/failed for every repo this scan touched — the entry is
+    /// corrected to NOT RUN with a disclosed reason naming ESLINT (not "commodity taint
+    /// pass", which is Semgrep's label) and a `FailedPass` is pushed. Never a silent
+    /// "verified clean".
+    #[tokio::test]
+    async fn reconcile_marks_eslint_rule_not_run_and_discloses_when_tool_absent() {
+        let (corpus, _errs) =
+            camerata_rules::load_corpus_lenient(&camerata_rules::corpus_path()).await;
+
+        let mut report = report_for_ledger_test();
+        report.ledger.record_rule(
+            "JAVASCRIPT-REACT-RULES-OF-HOOKS-1",
+            crate::scan_ledger::RuleTier::ExternalTool,
+            true,
+            None,
+            3,
+            0,
+        );
+        report.coverage_notes = vec![crate::onboard::CoverageNote {
+            tool: "eslint".to_string(),
+            message: "could not preview 1 rule(s) with eslint: base interpreter not available: \
+                      npm"
+            .to_string(),
+        }];
+        let attempted: std::collections::HashSet<&str> = ["eslint"].into_iter().collect();
+        reconcile_external_tool_ledger(&mut report, &attempted, Some(&corpus));
+
+        let entry = report
+            .ledger
+            .rule("JAVASCRIPT-REACT-RULES-OF-HOOKS-1")
+            .unwrap();
+        assert!(
+            !entry.ran,
+            "a tool that never ran must never be recorded as ran=true"
+        );
+        assert!(!entry.verified_clean(), "must never read as verified clean");
+        let reason = entry.skip_reason.as_deref().unwrap_or("");
+        assert!(
+            reason.starts_with("the eslint preview pass did not run:"),
+            "got: {reason}"
+        );
+        assert_eq!(report.failed_passes.len(), 1);
+        assert_eq!(report.failed_passes[0].pass, "the eslint preview pass");
+        assert!(report.failed_passes[0]
+            .reason
+            .contains("JAVASCRIPT-REACT-RULES-OF-HOOKS-1"));
+    }
+
+    /// Outcome 3: ESLint was never even INVOKED this scan (no selected rule routed to it,
+    /// no JS/TS language present, or the preview pass never ran at all) — same disclosure
+    /// shape as outcome 2, keyed off `tools_attempted` instead of a `CoverageNote`.
+    #[tokio::test]
+    async fn reconcile_marks_eslint_rule_not_run_when_tool_never_attempted_this_scan() {
+        let (corpus, _errs) =
+            camerata_rules::load_corpus_lenient(&camerata_rules::corpus_path()).await;
+
+        let mut report = report_for_ledger_test();
+        report.ledger.record_rule(
+            "JAVASCRIPT-REACT-EXHAUSTIVE-DEPS-1",
+            crate::scan_ledger::RuleTier::ExternalTool,
+            true,
+            None,
+            3,
+            0,
+        );
+        // No coverage notes, no findings, and eslint is NOT in `tools_attempted`.
+        let attempted: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        reconcile_external_tool_ledger(&mut report, &attempted, Some(&corpus));
+
+        let entry = report
+            .ledger
+            .rule("JAVASCRIPT-REACT-EXHAUSTIVE-DEPS-1")
+            .unwrap();
+        assert!(
+            !entry.ran,
+            "a tool never invoked this scan must never be recorded as ran=true"
+        );
+        assert!(!entry.verified_clean(), "must never read as verified clean");
+        let reason = entry.skip_reason.as_deref().unwrap_or("");
+        assert!(
+            reason.starts_with("the eslint preview pass did not run:"),
+            "got: {reason}"
+        );
+        assert!(reason.contains("eslint was never invoked"), "got: {reason}");
+        assert_eq!(report.failed_passes.len(), 1);
+        assert_eq!(report.failed_passes[0].pass, "the eslint preview pass");
+    }
+
+    /// Passing `corpus = None` (every pre-existing caller) must leave Semgrep's exact
+    /// original behavior and disclosure text untouched — the default-to-"semgrep" fallback
+    /// in `external_tool_name_for_ledger_rule` is a true backward-compatibility guarantee,
+    /// not just "probably fine".
+    #[test]
+    fn reconcile_without_corpus_keeps_original_semgrep_wording() {
+        let mut report = report_for_ledger_test();
+        report.ledger.record_rule(
+            "SEC-NO-RAW-SQL-CONCAT-1",
+            crate::scan_ledger::RuleTier::ExternalTool,
+            true,
+            None,
+            3,
+            0,
+        );
+        let attempted: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        reconcile_external_tool_ledger(&mut report, &attempted, None);
+        let entry = report.ledger.rule("SEC-NO-RAW-SQL-CONCAT-1").unwrap();
+        let reason = entry.skip_reason.as_deref().unwrap_or("");
+        assert!(
+            reason.starts_with("commodity taint pass did not run:"),
+            "got: {reason}"
+        );
+        assert_eq!(report.failed_passes[0].pass, "commodity taint pass");
+    }
 
     /// Helper: build a minimal ScanReport with one active finding.
     fn make_scan_report(rule_id: &str) -> crate::onboard::ScanReport {
@@ -21052,9 +26246,13 @@ mod tests {
             test_file_count: 0,
             files_excluded: 0,
             code_chars: 100,
+            code_lines: 10,
+            code_lines_by_language: Vec::new(),
             excluded_mechanical_rules: Vec::new(),
             findings: vec![crate::onboard::Finding {
+                could_be_intentional: false,
                 repo: "owner/repo".to_string(),
+                kind: None,
                 path: "src/main.rs".to_string(),
                 line: 42,
                 rule_id: rule_id.to_string(),
@@ -21071,14 +26269,25 @@ mod tests {
                 effort: None,
                 category: None,
                 located: true,
+                captures: Default::default(),
+                evaluated_option_id: None,
+                also_locations: Vec::new(),
+                fix_specific: None,
+                calibration_rationale: None,
             }],
             proposed_rules: Vec::new(),
             gated: false,
+            blocked: false,
+            ai_blocked_reason: None,
+            ai_error: None,
             message: None,
             actual_usage: None,
             deep: None,
             coverage_notes: Vec::new(),
             provenance: crate::onboard::ScanProvenance::default(),
+            recommendations: std::collections::HashMap::new(),
+            failed_passes: Vec::new(),
+            ledger: crate::scan_ledger::ScanLedger::new(),
         }
     }
 
@@ -21101,8 +26310,7 @@ mod tests {
         let got = got.unwrap();
         assert_eq!(got.findings.len(), 1, "findings must be preserved");
         assert_eq!(
-            got.findings[0].rule_id,
-            "SEC-NO-HARDCODED-SECRETS-1",
+            got.findings[0].rule_id, "SEC-NO-HARDCODED-SECRETS-1",
             "rule_id must round-trip"
         );
     }
@@ -21153,7 +26361,10 @@ mod tests {
     #[tokio::test]
     async fn product_export_404s_when_no_scan_available() {
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
-        let project = state.projects.create("Acme", vec![]).expect("project created");
+        let project = state
+            .projects
+            .create("Acme", vec![])
+            .expect("project created");
         let resp = export_product(
             axum::extract::State(state),
             axum::extract::Path(project.id),
@@ -21175,6 +26386,7 @@ mod tests {
     /// `typst` being on PATH (the PDF half needs it); the workbook half runs unconditionally
     /// via the other degenerate-input tests in `xlsx_export`.
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn product_export_zip_contains_a_real_pdf_xlsx_and_readme() {
         if !typst_on_path() {
             eprintln!(
@@ -21188,7 +26400,10 @@ mod tests {
             .projects
             .create("Acme", vec!["owner/repo".to_string()])
             .expect("project created");
-        state.set_last_scan(project.id.clone(), make_scan_report("SEC-NO-HARDCODED-SECRETS-1"));
+        state.set_last_scan(
+            project.id.clone(),
+            make_scan_report("SEC-NO-HARDCODED-SECRETS-1"),
+        );
 
         let resp = export_product(
             axum::extract::State(state),
@@ -21201,7 +26416,9 @@ mod tests {
         .await;
         assert_eq!(resp.status(), StatusCode::OK);
         assert_eq!(
-            resp.headers().get(axum::http::header::CONTENT_TYPE).unwrap(),
+            resp.headers()
+                .get(axum::http::header::CONTENT_TYPE)
+                .unwrap(),
             "application/zip"
         );
         let content_disposition = resp
@@ -21211,10 +26428,17 @@ mod tests {
             .to_str()
             .unwrap()
             .to_string();
-        assert!(content_disposition.contains(".zip"), "{content_disposition}");
+        assert!(
+            content_disposition.contains(".zip"),
+            "{content_disposition}"
+        );
 
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        assert_eq!(&bytes[0..2], b"PK", "the product export itself must be a valid zip");
+        assert_eq!(
+            &bytes[0..2],
+            b"PK",
+            "the product export itself must be a valid zip"
+        );
 
         use std::io::Read;
         let mut archive =
@@ -21224,18 +26448,32 @@ mod tests {
             .collect();
         names.sort();
         assert!(names.iter().any(|n| n.ends_with(".pdf")), "{names:?}");
-        assert!(names.iter().any(|n| n.ends_with("-findings.xlsx")), "{names:?}");
+        assert!(
+            names.iter().any(|n| n.ends_with("-findings.xlsx")),
+            "{names:?}"
+        );
         assert!(names.contains(&"findings.json".to_string()), "{names:?}");
         assert!(names.contains(&"README.txt".to_string()), "{names:?}");
 
         let pdf_name = names.iter().find(|n| n.ends_with(".pdf")).unwrap().clone();
         let mut pdf_bytes = Vec::new();
-        archive.by_name(&pdf_name).unwrap().read_to_end(&mut pdf_bytes).unwrap();
-        assert!(pdf_bytes.starts_with(b"%PDF"), "the zipped PDF must carry the PDF magic bytes");
+        archive
+            .by_name(&pdf_name)
+            .unwrap()
+            .read_to_end(&mut pdf_bytes)
+            .unwrap();
+        assert!(
+            pdf_bytes.starts_with(b"%PDF"),
+            "the zipped PDF must carry the PDF magic bytes"
+        );
 
         let xlsx_name = names.iter().find(|n| n.ends_with(".xlsx")).unwrap().clone();
         let mut xlsx_bytes = Vec::new();
-        archive.by_name(&xlsx_name).unwrap().read_to_end(&mut xlsx_bytes).unwrap();
+        archive
+            .by_name(&xlsx_name)
+            .unwrap()
+            .read_to_end(&mut xlsx_bytes)
+            .unwrap();
         assert_eq!(
             &xlsx_bytes[0..2],
             b"PK",
@@ -21250,8 +26488,14 @@ mod tests {
             .unwrap();
         let findings_json: serde_json::Value =
             serde_json::from_str(&findings_json_str).expect("findings.json must be valid JSON");
-        assert!(findings_json.get("provenance").is_some(), "{findings_json_str}");
-        assert!(findings_json.get("summary").is_some(), "{findings_json_str}");
+        assert!(
+            findings_json.get("provenance").is_some(),
+            "{findings_json_str}"
+        );
+        assert!(
+            findings_json.get("summary").is_some(),
+            "{findings_json_str}"
+        );
         let findings_arr = findings_json
             .get("findings")
             .and_then(|f| f.as_array())
@@ -21263,10 +26507,592 @@ mod tests {
         );
 
         let mut readme = String::new();
-        archive.by_name("README.txt").unwrap().read_to_string(&mut readme).unwrap();
+        archive
+            .by_name("README.txt")
+            .unwrap()
+            .read_to_string(&mut readme)
+            .unwrap();
         assert!(readme.contains(&pdf_name), "{readme}");
         assert!(readme.contains(&xlsx_name), "{readme}");
         assert!(readme.contains("findings.json"), "{readme}");
+        // P6 (2026-09-29): the product is "Codebase Inspection" — the README names it and
+        // never says "audit"/"Audit" (the disclaimer paragraph it embeds verbatim is itself
+        // audit-free per `report_export`'s own contract test).
+        assert!(readme.contains("Codebase Inspection"), "{readme}");
+        assert!(readme.contains("Repos inspected:"), "{readme}");
+        assert!(
+            !readme.to_lowercase().contains("audit"),
+            "README.txt still says audit: {readme}"
+        );
+    }
+
+    /// Pure unit test for `product_export_readme` — doesn't need `typst` on PATH (unlike the
+    /// full-zip e2e test above), so it always runs. P6 (2026-09-29): product name + no "audit".
+    #[test]
+    fn product_export_readme_names_the_product_and_never_says_audit() {
+        let report = make_scan_report("SEC-NO-HARDCODED-SECRETS-1");
+        let json = crate::report_export::build_report_json(
+            &report.clone().seal(),
+            &std::collections::HashMap::new(),
+            None,
+            &crate::report_export::ReportOptions::default(),
+        );
+        let readme = product_export_readme(
+            "acme-inspection",
+            &ManifestProvenance::from_cover(&json.cover),
+        );
+        assert!(readme.contains("Codebase Inspection"), "{readme}");
+        assert!(readme.contains("Repos inspected:"), "{readme}");
+        assert!(readme.contains("acme-inspection.pdf"), "{readme}");
+        assert!(
+            !readme.to_lowercase().contains("audit"),
+            "README.txt still says audit: {readme}"
+        );
+    }
+
+    // ── Corpus freshness is operator-only (design amendment 2026-10-21, part 4) ──
+    //
+    // The corpus-freshness nag, banner and `corpus_freshness` JSON are for the operator who
+    // maintains the corpus. They must never reach a client artifact: a paying client's report
+    // saying "javascript pack OVERDUE for a staleness sweep" would be both a leak of our
+    // maintenance state and, worse, an unprompted claim about the quality of the guidance in
+    // their deliverable. The client-visible `rules_last_reviewed` manifest date is a separate,
+    // deliberate field and is NOT in the marker list.
+
+    /// Operator-only markers present in `text` (empty means clean).
+    fn operator_markers_in(text: &str) -> Vec<&'static str> {
+        camerata_rules::OPERATOR_ONLY_MARKERS
+            .iter()
+            .copied()
+            .filter(|m| text.contains(m))
+            .collect()
+    }
+
+    /// The corpus-freshness code an artifact builder must never reference: the maintenance
+    /// types, the nag formatter, the marker list, the watermark file, and the one sanctioned
+    /// client-date function (which only the provenance bridge may name).
+    const FRESHNESS_IDENTIFIERS: &[&str] = &[
+        "CorpusFreshness",
+        "FreshnessReport",
+        "format_staleness_nag",
+        "OPERATOR_ONLY_MARKERS",
+        "corpus_freshness",
+        "CORPUS_FRESHNESS",
+        "due_soon",
+        "client_rules_last_reviewed",
+    ];
+
+    /// EXACTLY what `client_provenance.rs` may name: the watermark type and its path (to read
+    /// the file), and the sanctioned function that turns it into the one client-visible date.
+    /// Everything else in [`FRESHNESS_IDENTIFIERS`] (the nag, the report types, the markers, the
+    /// due-soon logic) stays forbidden there too. Widening this list is widening what a client
+    /// artifact can be told about maintenance state; it needs a design decision, not a test edit.
+    const SANCTIONED_BRIDGE_IDENTIFIERS: &[&str] = &[
+        "CorpusFreshness",
+        "corpus_freshness_path",
+        "client_rules_last_reviewed",
+    ];
+
+    /// The [`FRESHNESS_IDENTIFIERS`] that appear in `src`, after setting aside the identifiers
+    /// in `sanctioned`. A source that names only sanctioned identifiers returns empty. Longer
+    /// sanctioned names are removed first so one never leaves a fragment of another behind.
+    fn freshness_identifiers_in(src: &str, sanctioned: &[&str]) -> Vec<&'static str> {
+        let mut sanctioned: Vec<&str> = sanctioned.to_vec();
+        sanctioned.sort_by_key(|s| std::cmp::Reverse(s.len()));
+        let mut remaining = src.to_string();
+        for id in sanctioned {
+            remaining = remaining.replace(id, "");
+        }
+        FRESHNESS_IDENTIFIERS
+            .iter()
+            .copied()
+            .filter(|id| remaining.contains(id))
+            .collect()
+    }
+
+    /// Every file in a zip as `(path, lossy text)`, recursing into nested zip containers (the
+    /// xlsx inside the product zip is itself a zip of XML parts, and its strings live in there).
+    fn artifact_texts(zip_bytes: &[u8], prefix: &str, out: &mut Vec<(String, String)>) {
+        use std::io::Read;
+        let Ok(mut archive) = zip::ZipArchive::new(std::io::Cursor::new(zip_bytes.to_vec())) else {
+            return;
+        };
+        for i in 0..archive.len() {
+            let mut entry = archive.by_index(i).expect("zip entry");
+            let path = format!("{prefix}{}", entry.name());
+            let mut bytes = Vec::new();
+            entry.read_to_end(&mut bytes).expect("read entry");
+            if bytes.starts_with(b"PK") {
+                artifact_texts(&bytes, &format!("{path}!"), out);
+            }
+            out.push((path, String::from_utf8_lossy(&bytes).into_owned()));
+        }
+    }
+
+    /// The scanner is only worth anything if it can fail: plant a marker in a README and in a
+    /// nested container and prove both are caught.
+    #[test]
+    fn the_freshness_scanner_catches_a_planted_marker_at_any_depth() {
+        use std::io::Write;
+        let mut inner = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let opts = zip::write::SimpleFileOptions::default();
+        inner.start_file("xl/sharedStrings.xml", opts).unwrap();
+        inner.write_all(b"<si>DUE SOON: javascript</si>").unwrap();
+        let inner_bytes = inner.finish().unwrap().into_inner();
+
+        let zip_bytes = build_product_zip(
+            "acme",
+            b"%PDF",
+            &inner_bytes,
+            b"{}",
+            "CORPUS STALENESS: go is overdue",
+            &[],
+            &ManifestProvenance::default(),
+        )
+        .expect("zip assembles");
+
+        let mut texts = Vec::new();
+        artifact_texts(&zip_bytes, "", &mut texts);
+        let flagged: Vec<&str> = texts
+            .iter()
+            .filter(|(_, t)| !operator_markers_in(t).is_empty())
+            .map(|(p, _)| p.as_str())
+            .collect();
+        assert!(flagged.contains(&"README.txt"), "{flagged:?}");
+        assert!(
+            flagged.contains(&"acme-findings.xlsx!xl/sharedStrings.xml"),
+            "nested container scanned: {flagged:?}"
+        );
+    }
+
+    /// THE GATE. Builds every client artifact through the same builders the product export
+    /// uses (PDF input data, xlsx, findings.json, csv/*, json/*, README, manifest, the zip
+    /// itself) and asserts none contains operator-only freshness text. Also scans the SOURCE of
+    /// the export builders for freshness identifiers, so a future wiring is caught at the
+    /// import, before it ever produces output.
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn no_corpus_freshness_text_reaches_any_client_artifact() {
+        // ── Anti-vacuity: the operator surfaces really do carry the markers ──────────────
+        let operator_json = updates_payload(
+            &AppState::new(std::sync::Arc::new(InMemoryStoryStore::new())),
+            serde_json::Value::Null,
+        )
+        .await
+        .to_string();
+        assert!(
+            operator_json.contains("corpus_freshness"),
+            "the operator payload names the field the gate looks for: {operator_json}"
+        );
+
+        // ── Build every artifact from one sealed fixture report ──────────────────────────
+        let report = make_scan_report("SEC-NO-HARDCODED-SECRETS-1").seal();
+        let dispositions = std::collections::HashMap::new();
+        let options = crate::report_export::ReportOptions::default();
+        let chosen = std::collections::HashMap::new();
+        let corpus_path = camerata_rules::corpus_path();
+        let corpus = if corpus_path.exists() {
+            Some(camerata_rules::load_corpus_lenient(&corpus_path).await.0)
+        } else {
+            None
+        };
+
+        let json = crate::report_export::build_report_json(
+            &report,
+            &dispositions,
+            corpus.as_ref(),
+            &options,
+        );
+        // The PDF is rendered from exactly this data (plus a static template).
+        let pdf_input = serde_json::to_string(&json).expect("report json serializes");
+
+        let xlsx =
+            crate::xlsx_export::build_workbook(&report, &dispositions, corpus.as_ref(), &options)
+                .expect("workbook builds");
+        let findings = crate::xlsx_export::build_findings_export(
+            &report,
+            &dispositions,
+            corpus.as_ref(),
+            &json,
+            &chosen,
+        );
+        let findings_bytes = serde_json::to_vec_pretty(&findings).expect("findings serialize");
+        let mut extra: Vec<(String, Vec<u8>)> = Vec::new();
+        extra.extend(
+            crate::xlsx_export::build_csv_exports(
+                &report,
+                &dispositions,
+                corpus.as_ref(),
+                &options,
+            )
+            .expect("csv builds"),
+        );
+        extra.extend(
+            crate::xlsx_export::build_json_exports(
+                &report,
+                &dispositions,
+                corpus.as_ref(),
+                &options,
+            )
+            .expect("json builds"),
+        );
+        let stem = report_filename_stem(&report);
+        // The package's provenance comes through the one sanctioned bridge, against a watermark
+        // whose domain is OVERDUE (the case the operator nag is written for). The manifest and
+        // README then carry the one client-visible date, and the scan below proves nothing else
+        // about maintenance state came with it.
+        let mut audited = report.as_scan_report().clone();
+        audited.provenance.audited_rule_ids = vec!["SEC-NO-HARDCODED-SECRETS-1".to_string()];
+        let mut watermarked_corpus = camerata_rules::RuleSet::default();
+        watermarked_corpus.push(camerata_rules::bare_rule(
+            "SEC-NO-HARDCODED-SECRETS-1",
+            "sec",
+        ));
+        let overdue = camerata_rules::CorpusFreshness::parse(
+            "warn_after_days = 1\n[confirmed]\nsec = \"2020-01-01\"\n",
+        )
+        .expect("watermark parses");
+        let provenance = crate::client_provenance::export_provenance_with(
+            &audited,
+            &json.cover,
+            Some(&watermarked_corpus),
+            Some(&overdue),
+        );
+        assert_eq!(
+            provenance.rules_last_reviewed.as_deref(),
+            Some("2020-01-01"),
+            "anti-vacuity: the sanctioned date is in the package under test"
+        );
+        let readme = product_export_readme(&stem, &provenance);
+        let zip_bytes = build_product_zip(
+            &stem,
+            b"%PDF-1.7 stand-in",
+            &xlsx,
+            &findings_bytes,
+            &readme,
+            &extra,
+            &provenance,
+        )
+        .expect("zip assembles");
+
+        let mut texts: Vec<(String, String)> = vec![("<pdf input json>".to_string(), pdf_input)];
+        artifact_texts(&zip_bytes, "", &mut texts);
+        assert!(
+            texts.len() > 8,
+            "the scan covered the pdf input, readme, findings, csv/json tables, xlsx parts and \
+             manifest: {:?}",
+            texts.iter().map(|(p, _)| p).collect::<Vec<_>>()
+        );
+
+        // When typst is installed, also run the REAL handler end to end and scan its zip.
+        if typst_on_path() {
+            let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+            let project = state
+                .projects
+                .create("Acme", vec!["owner/repo".to_string()])
+                .expect("project created");
+            state.set_last_scan(
+                project.id.clone(),
+                make_scan_report("SEC-NO-HARDCODED-SECRETS-1"),
+            );
+            let resp = export_product(
+                axum::extract::State(state),
+                axum::extract::Path(project.id.clone()),
+                axum::Json(AuditReportReq {
+                    dispositions: std::collections::HashMap::new(),
+                    options: crate::report_export::ReportOptions::default(),
+                }),
+            )
+            .await;
+            assert_eq!(resp.status(), StatusCode::OK);
+            let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+            artifact_texts(&bytes, "handler:", &mut texts);
+        }
+
+        let leaks: Vec<String> = texts
+            .iter()
+            .filter_map(|(path, text)| {
+                let found = operator_markers_in(text);
+                (!found.is_empty()).then(|| format!("{path}: {found:?}"))
+            })
+            .collect();
+        assert!(
+            leaks.is_empty(),
+            "operator-only corpus-freshness text reached a client artifact:\n  {}",
+            leaks.join("\n  ")
+        );
+
+        // ── Source-level: the export builders do not even reference the freshness code ────
+        //
+        // Exactly one file may touch it: `client_provenance.rs`, the bridge that produces the
+        // single client-visible review date, and only through `SANCTIONED_BRIDGE_IDENTIFIERS`.
+        // Every artifact builder, and both export callers, name none of it.
+        let lib_src = include_str!("lib.rs");
+        let start = lib_src
+            .find("async fn export_product(")
+            .expect("export_product exists");
+        let end = lib_src[start..]
+            .find("// ── error type")
+            .map(|i| start + i)
+            .expect("end of the export section");
+        let export_section = &lib_src[start..end];
+        for (name, src) in [
+            ("report_export.rs", include_str!("report_export.rs")),
+            ("xlsx_export.rs", include_str!("xlsx_export.rs")),
+            (
+                "lib.rs (export_product .. build_product_zip)",
+                export_section,
+            ),
+            (
+                "cli inspect_cmd.rs (the headless export caller)",
+                include_str!("../../cli/src/inspect_cmd.rs"),
+            ),
+        ] {
+            let found = freshness_identifiers_in(src, &[]);
+            assert!(
+                found.is_empty(),
+                "{name} references corpus-freshness code {found:?}; freshness is operator-only \
+                 and must not be wired into a client-artifact builder or an export caller. The \
+                 only sanctioned path is client_provenance::export_provenance"
+            );
+        }
+        let bridge = include_str!("client_provenance.rs");
+        let found = freshness_identifiers_in(bridge, SANCTIONED_BRIDGE_IDENTIFIERS);
+        assert!(
+            found.is_empty(),
+            "client_provenance.rs references operator-only freshness code {found:?}; it may \
+             name only {SANCTIONED_BRIDGE_IDENTIFIERS:?}"
+        );
+        // Anti-vacuity: the bridge really does use every sanctioned identifier, so the
+        // allowance above is a description of the code and not a blanket pass.
+        for id in SANCTIONED_BRIDGE_IDENTIFIERS {
+            assert!(
+                bridge.contains(id),
+                "client_provenance.rs no longer uses {id}; drop it from the allowance"
+            );
+        }
+    }
+
+    /// The gate's scanner has to be able to FAIL. These pin its behavior on fixture sources:
+    /// the sanctioned date path passes in the bridge, and nothing else does, in the bridge or
+    /// anywhere. Without this, loosening the allowance for the one date would also silently
+    /// loosen the gate for the nag text it exists to keep out.
+    #[test]
+    fn freshness_gate_allows_only_the_sanctioned_date_path() {
+        // Exactly the sanctioned names, no more: pinned so a widened allowance shows in review.
+        assert_eq!(
+            SANCTIONED_BRIDGE_IDENTIFIERS,
+            &[
+                "CorpusFreshness",
+                "corpus_freshness_path",
+                "client_rules_last_reviewed"
+            ]
+        );
+        // Every sanctioned name is itself in the forbidden-in-builders list.
+        for id in SANCTIONED_BRIDGE_IDENTIFIERS {
+            assert!(
+                freshness_identifiers_in(id, &[]).len() == 1,
+                "{id} must be forbidden outside the bridge"
+            );
+        }
+
+        // The sanctioned path, as the bridge writes it, is clean in the bridge...
+        let sanctioned_only =
+            "let w = CorpusFreshness::load(&camerata_rules::corpus_freshness_path());\n\
+                               client_rules_last_reviewed(&w, &used)";
+        assert_eq!(
+            freshness_identifiers_in(sanctioned_only, SANCTIONED_BRIDGE_IDENTIFIERS),
+            Vec::<&str>::new()
+        );
+        // ...and is a violation anywhere else.
+        assert_eq!(
+            freshness_identifiers_in(sanctioned_only, &[]),
+            vec![
+                "CorpusFreshness",
+                "corpus_freshness",
+                "client_rules_last_reviewed"
+            ]
+        );
+
+        // The nag, banner and report vocabulary stays forbidden even in the bridge: each of
+        // these, appended to an otherwise sanctioned source, is caught.
+        for operator_only in [
+            "format_staleness_nag(&report)",
+            "FreshnessReport",
+            "OPERATOR_ONLY_MARKERS",
+            "CORPUS_FRESHNESS.toml",
+            "w.due_soon(today)",
+            "payload[\"corpus_freshness\"]",
+        ] {
+            let src = format!("{sanctioned_only}\n{operator_only}");
+            assert!(
+                !freshness_identifiers_in(&src, SANCTIONED_BRIDGE_IDENTIFIERS).is_empty(),
+                "the bridge scan must catch {operator_only:?}"
+            );
+        }
+
+        // A sanctioned name does not shield an operator one it merely sits next to.
+        assert_eq!(
+            freshness_identifiers_in(
+                "CorpusFreshness::load(p); let r: FreshnessReport = w.report();",
+                SANCTIONED_BRIDGE_IDENTIFIERS
+            ),
+            vec!["FreshnessReport"]
+        );
+    }
+
+    /// Gate 6 (coverage clause) of `docs/design/2026-10-20_machine-readable-exports.md`: the
+    /// manifest lists every ZIP member except itself, and each listed sha256 equals the actual
+    /// hash of that member. The corruption clause (that a flipped byte is caught) lives in
+    /// `tests/product_export_manifest_gates.rs`.
+    #[test]
+    fn manifest_lists_and_hashes_every_file_except_itself() {
+        use sha2::{Digest, Sha256};
+        let extra = vec![
+            ("csv/all-findings.csv".to_string(), b"a,b\n1,2\n".to_vec()),
+            ("json/all-findings.json".to_string(), b"[]".to_vec()),
+        ];
+        let prov = ManifestProvenance {
+            repos: vec![ProvenanceRepo {
+                name: "acme-portal".to_string(),
+                commit: Some("0123456789abcdef0123456789abcdef01234567".to_string()),
+                dirty: false,
+            }],
+            generated_at: "2026-10-21T00:00:00Z".to_string(),
+            ..Default::default()
+        };
+        let zip_bytes = build_product_zip(
+            "acme-audit",
+            b"%PDF-fake",
+            b"PK-fake-xlsx",
+            b"{}",
+            "readme text",
+            &extra,
+            &prov,
+        )
+        .expect("zip assembles");
+
+        // Pull manifest.json out of the archive.
+        let mut archive =
+            zip::ZipArchive::new(std::io::Cursor::new(zip_bytes.clone())).expect("valid zip");
+        let mut manifest_str = String::new();
+        {
+            use std::io::Read;
+            archive
+                .by_name("manifest.json")
+                .expect("manifest.json present")
+                .read_to_string(&mut manifest_str)
+                .unwrap();
+        }
+        let manifest: serde_json::Value = serde_json::from_str(&manifest_str).unwrap();
+
+        // Provenance block present and populated from the caller.
+        assert_eq!(manifest["inspection"]["repos"][0]["name"], "acme-portal");
+        assert_eq!(
+            manifest["inspection"]["repos"][0]["commit"],
+            "0123456789abcdef0123456789abcdef01234567"
+        );
+        assert!(manifest["inspection"]["engine_version"]
+            .as_str()
+            .unwrap()
+            .starts_with("camerata "));
+        // rules_last_reviewed is present (null until a confirmed sweep) — the field always exists.
+        assert!(manifest["inspection"].get("rules_last_reviewed").is_some());
+
+        let files = manifest["files"].as_array().unwrap();
+        let listed: Vec<&str> = files.iter().map(|f| f["path"].as_str().unwrap()).collect();
+        // Every non-manifest file is listed; manifest.json never lists itself.
+        for expected in [
+            "acme-audit.pdf",
+            "acme-audit-findings.xlsx",
+            "findings.json",
+            "README.txt",
+            "csv/all-findings.csv",
+            "json/all-findings.json",
+        ] {
+            assert!(
+                listed.contains(&expected),
+                "manifest missing {expected}: {listed:?}"
+            );
+        }
+        assert!(
+            !listed.contains(&"manifest.json"),
+            "manifest must not list itself"
+        );
+
+        // Each listed sha256 equals the actual hash of that entry in the zip.
+        for f in files {
+            let path = f["path"].as_str().unwrap();
+            let claimed = f["sha256"].as_str().unwrap();
+            let mut bytes = Vec::new();
+            {
+                use std::io::Read;
+                archive
+                    .by_name(path)
+                    .unwrap()
+                    .read_to_end(&mut bytes)
+                    .unwrap();
+            }
+            let actual: String = Sha256::digest(&bytes)
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect();
+            assert_eq!(claimed, actual, "sha256 mismatch for {path}");
+        }
+    }
+
+    /// Regression for the zip-crate-default-timestamp bug: with `SimpleFileOptions::default()`
+    /// left alone, every entry's `last_modified()` reads 1980-01-01 00:00:00 (the DOS/zip
+    /// epoch `zip` falls back to when no timestamp is set, since this workspace doesn't enable
+    /// the crate's `time`/`chrono` cargo features). `build_product_zip` now stamps every entry
+    /// with `zip_now()` (the actual build time) instead. Exercises `build_product_zip`
+    /// directly with dummy bytes — no `typst` dependency, so it always runs.
+    #[test]
+    fn product_zip_entries_carry_a_real_build_timestamp_not_the_1980_epoch() {
+        let zip_bytes = build_product_zip(
+            "acme-audit",
+            b"%PDF-fake",
+            b"PK-fake-xlsx",
+            b"{}",
+            "readme text",
+            &[],
+            &ManifestProvenance::default(),
+        )
+        .expect("zip assembles");
+
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(zip_bytes)).expect("valid zip");
+        assert!(
+            archive.len() >= 4,
+            "expects pdf + xlsx + json + readme entries"
+        );
+        for i in 0..archive.len() {
+            let entry = archive.by_index(i).unwrap();
+            let mtime = entry
+                .last_modified()
+                .expect("a timestamp was set on every entry");
+            assert_ne!(
+                (mtime.year(), mtime.month(), mtime.day()),
+                (1980, 1, 1),
+                "entry {:?} still carries the zip crate's 1980-01-01 default — \
+                 last_modified_time() was not applied",
+                entry.name()
+            );
+        }
+    }
+
+    /// `zip_now` must resolve to the current calendar year (sanity check that it's actually
+    /// reading the clock, not silently falling back to `DateTime::default()` — which would
+    /// pass unnoticed since `unwrap_or_default()` never panics).
+    #[test]
+    fn zip_now_reflects_the_current_year() {
+        use chrono::Datelike;
+        let now = zip_now();
+        let current_year = chrono::Utc::now().year() as u16;
+        assert_eq!(
+            now.year(),
+            current_year,
+            "zip_now must not fall back to the 1980 default"
+        );
     }
 
     /// active_project_context returns scan_results_section from last_scan when no draft.
@@ -21274,7 +27100,10 @@ mod tests {
     async fn active_project_context_uses_last_scan_when_no_draft() {
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
         // Create a project (automatically becomes active).
-        let project = state.projects.create("TestProj", vec!["owner/repo".to_string()]).unwrap();
+        let project = state
+            .projects
+            .create("TestProj", vec!["owner/repo".to_string()])
+            .unwrap();
 
         // No draft has been saved, but we store a completed scan report.
         let report = make_scan_report("SEC-NO-HARDCODED-SECRETS-1");
@@ -21301,11 +27130,62 @@ mod tests {
         );
     }
 
+    /// The chat context returns the in-progress draft, and the draft carries the reviewer's
+    /// timer log (internal only). The log must not be in what the chat gets, and everything else
+    /// in the draft still is.
+    #[tokio::test]
+    async fn active_project_context_leaves_the_internal_review_log_out_of_the_draft() {
+        use camerata_api_types::review_timing::{INTERNAL_ONLY_KEYS, REVIEW_LOG_KEY};
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        let project = state
+            .projects
+            .create("TestProj", vec!["owner/repo".to_string()])
+            .unwrap();
+        state.draft.save(
+            &project.id,
+            serde_json::json!({
+                "scan": { "findings": [], "coverage_notes": [] },
+                "viewed_repo": "owner/repo",
+                REVIEW_LOG_KEY: {
+                    "review_groups": { "g": { "opened_at_ms": 1, "active_ms": 72_000_000, "group_reviewed": true } },
+                    "review_rows": { "r": { "reviewed_by": "operator", "reviewed_at_ms": 2, "review_decision_ms": 3 } },
+                    "review_samples": [4],
+                    "review_unreadable": { "kept": true },
+                },
+            }),
+        );
+        let resp = router(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/api/projects/active/context")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let body = body_json(resp).await;
+        let text = body.to_string();
+        for key in INTERNAL_ONLY_KEYS {
+            assert!(
+                !text.contains(key),
+                "{key} reached the chat context: {text}"
+            );
+        }
+        assert_eq!(
+            body["draft_json"]["viewed_repo"], "owner/repo",
+            "the rest of the draft is still there: {text}"
+        );
+    }
+
     /// Draft takes precedence over last_scan when the draft has findings.
     #[tokio::test]
     async fn active_project_context_draft_takes_precedence_over_last_scan() {
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
-        let project = state.projects.create("TestProj", vec!["owner/repo".to_string()]).unwrap();
+        let project = state
+            .projects
+            .create("TestProj", vec!["owner/repo".to_string()])
+            .unwrap();
 
         // Store a last_scan report with one rule id.
         let report = make_scan_report("LAST-SCAN-RULE");
@@ -21369,7 +27249,10 @@ mod tests {
         state.set_last_scan("proj-1".to_string(), make_scan_report("RULE-X"));
 
         let recent = state.get_recent_scan();
-        assert!(recent.is_some(), "get_recent_scan must be Some after set_last_scan");
+        assert!(
+            recent.is_some(),
+            "get_recent_scan must be Some after set_last_scan"
+        );
         assert_eq!(
             recent.unwrap().findings[0].rule_id,
             "RULE-X",
@@ -21386,8 +27269,7 @@ mod tests {
 
         let recent = state.get_recent_scan().unwrap();
         assert_eq!(
-            recent.findings[0].rule_id,
-            "RULE-SECOND",
+            recent.findings[0].rule_id, "RULE-SECOND",
             "recent_scan must track the most recent set_last_scan call"
         );
 
@@ -21407,11 +27289,17 @@ mod tests {
         // a different project's id must NEVER surface in the active project's chat grounding.
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
         // Create and activate a project.
-        let project = state.projects.create("ActiveProj", vec!["owner/repo".to_string()]).unwrap();
+        let project = state
+            .projects
+            .create("ActiveProj", vec!["owner/repo".to_string()])
+            .unwrap();
 
         // Simulate a scan stored under a DIFFERENT project id (the project that was active at
         // scan submission time) — NOT under `project.id`. This also populates recent_scan.
-        state.set_last_scan("other-project-id".to_string(), make_scan_report("RECENT-RULE"));
+        state.set_last_scan(
+            "other-project-id".to_string(),
+            make_scan_report("RECENT-RULE"),
+        );
 
         // Confirm: per-project lookup for the ACTIVE project is empty.
         assert!(
@@ -21449,10 +27337,16 @@ mod tests {
     #[tokio::test]
     async fn per_project_last_scan_wins_over_recent_scan() {
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
-        let project = state.projects.create("ActiveProj", vec!["owner/repo".to_string()]).unwrap();
+        let project = state
+            .projects
+            .create("ActiveProj", vec!["owner/repo".to_string()])
+            .unwrap();
 
         // Store a recent_scan for a DIFFERENT project (written second, so it is "more recent").
-        state.set_last_scan("other-project-id".to_string(), make_scan_report("RECENT-RULE"));
+        state.set_last_scan(
+            "other-project-id".to_string(),
+            make_scan_report("RECENT-RULE"),
+        );
 
         // Now store a per-project entry for the ACTIVE project.  Even though recent_scan
         // was written after this, the per-project entry must win.
@@ -21518,8 +27412,8 @@ mod tests {
             "chosen": {},
             "scan": { "proposed_rules": [] }
         });
-        let out = render_selected_rules_for_chat(&draft)
-            .expect("non-empty selection must return Some");
+        let out =
+            render_selected_rules_for_chat(&draft).expect("non-empty selection must return Some");
         assert!(
             out.contains("SEC-1"),
             "SEC-1 must appear in selected rules output"
@@ -21563,8 +27457,8 @@ mod tests {
                 ]
             }
         });
-        let out = render_selected_rules_for_chat(&draft)
-            .expect("must return Some when rules selected");
+        let out =
+            render_selected_rules_for_chat(&draft).expect("must return Some when rules selected");
         assert!(
             out.contains("chosen: Strict mode"),
             "chosen option label must appear in output, got: {out}"
@@ -21596,8 +27490,8 @@ mod tests {
                 ]
             }
         });
-        let out = render_selected_rules_for_chat(&draft)
-            .expect("must return Some when rules selected");
+        let out =
+            render_selected_rules_for_chat(&draft).expect("must return Some when rules selected");
         assert!(
             out.contains("[default option]"),
             "default option must be annotated when no override chosen, got: {out}"
@@ -21692,8 +27586,7 @@ mod tests {
         let body = body_json(resp).await;
         // selected_rules_section must be absent (None / null) when nothing is selected.
         let section = body.get("selected_rules_section");
-        let is_absent = section.is_none()
-            || section == Some(&serde_json::Value::Null);
+        let is_absent = section.is_none() || section == Some(&serde_json::Value::Null);
         assert!(
             is_absent,
             "selected_rules_section must be absent when repo_selection is empty, got: {body:?}"
@@ -21708,7 +27601,10 @@ mod tests {
         let mode = crate::uow::BranchMode::Existing {
             branch_name: "feature/my-branch".to_string(),
         };
-        assert_eq!(derive_scope_branch(&mode, "acme/api#42"), "feature/my-branch");
+        assert_eq!(
+            derive_scope_branch(&mode, "acme/api#42"),
+            "feature/my-branch"
+        );
     }
 
     /// `BranchMode::Existing { branch_name: "" }` (empty) → fallback to `camerata/<story_id>`.
@@ -21768,9 +27664,10 @@ mod tests {
 
     /// When the GitHub token is absent, `POST /api/uow/:story_id/intake/ship` returns 400.
     #[tokio::test(flavor = "multi_thread")]
+    #[serial_test::serial(process_env)]
     async fn intake_ship_returns_bad_request_when_no_github_token() {
         // Remove the token from the test env so the handler detects its absence.
-        std::env::remove_var("CAMERATA_GITHUB_TOKEN");
+        let _env = camerata_test_env::EnvGuard::remove("CAMERATA_GITHUB_TOKEN");
 
         let state = AppState::seeded();
         let app = router(state);
@@ -21808,8 +27705,9 @@ mod tests {
     /// — never a scaffold, never a GitHub call, even with no workspace root or token
     /// configured at all.
     #[tokio::test(flavor = "multi_thread")]
+    #[serial_test::serial(process_env)]
     async fn create_app_from_scratch_target_returns_reason_without_scaffolding() {
-        std::env::remove_var("CAMERATA_GITHUB_TOKEN");
+        let _env = camerata_test_env::EnvGuard::remove("CAMERATA_GITHUB_TOKEN");
         let state = AppState::seeded();
         let app = router(state);
         let req = Request::builder()
@@ -21836,18 +27734,25 @@ mod tests {
     /// A `Skeleton` (default target) request with no workspace root configured fails
     /// soft: `ok:false` with a message naming the workspace, never a 500.
     #[tokio::test(flavor = "multi_thread")]
+    #[serial_test::serial(process_env)]
     async fn create_app_skeleton_without_workspace_root_fails_soft() {
-        std::env::remove_var("CAMERATA_GITHUB_TOKEN");
+        let _env = camerata_test_env::EnvGuard::remove("CAMERATA_GITHUB_TOKEN");
         let state = AppState::seeded();
         let app = router(state);
         let req = Request::builder()
             .method("POST")
             .uri("/api/apps")
             .header("content-type", "application/json")
-            .body(Body::from(serde_json::json!({ "name": "Trip Planner", "description": "" }).to_string()))
+            .body(Body::from(
+                serde_json::json!({ "name": "Trip Planner", "description": "" }).to_string(),
+            ))
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), axum::http::StatusCode::OK, "fail-soft: never a 500");
+        assert_eq!(
+            resp.status(),
+            axum::http::StatusCode::OK,
+            "fail-soft: never a 500"
+        );
         let body = body_json(resp).await;
         assert_eq!(body["ok"], false);
         assert!(
@@ -21859,8 +27764,9 @@ mod tests {
     /// A `Skeleton` request with a workspace root but no GitHub token fails soft:
     /// `ok:false` with a message naming the missing token.
     #[tokio::test(flavor = "multi_thread")]
+    #[serial_test::serial(process_env)]
     async fn create_app_skeleton_without_github_token_fails_soft() {
-        std::env::remove_var("CAMERATA_GITHUB_TOKEN");
+        let _env = camerata_test_env::EnvGuard::remove("CAMERATA_GITHUB_TOKEN");
         let state = AppState::seeded();
         let tmp = tempfile::tempdir().expect("tempdir");
         state
@@ -21871,14 +27777,23 @@ mod tests {
             .method("POST")
             .uri("/api/apps")
             .header("content-type", "application/json")
-            .body(Body::from(serde_json::json!({ "name": "Trip Planner", "description": "" }).to_string()))
+            .body(Body::from(
+                serde_json::json!({ "name": "Trip Planner", "description": "" }).to_string(),
+            ))
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), axum::http::StatusCode::OK, "fail-soft: never a 500");
+        assert_eq!(
+            resp.status(),
+            axum::http::StatusCode::OK,
+            "fail-soft: never a 500"
+        );
         let body = body_json(resp).await;
         assert_eq!(body["ok"], false);
         assert!(
-            body["message"].as_str().unwrap_or("").contains("GitHub token"),
+            body["message"]
+                .as_str()
+                .unwrap_or("")
+                .contains("GitHub token"),
             "message must name the missing GitHub token, got: {body:?}"
         );
     }
@@ -21929,7 +27844,7 @@ mod tests {
             empty.len() <= 1,
             "zero intake repos → single-repo path (repo_worktrees = [])"
         );
-        let single = vec![crate::uow::RepoScope {
+        let single = [crate::uow::RepoScope {
             repo: "acme/api".to_string(),
             branch: crate::uow::BranchMode::default(),
         }];
@@ -21937,7 +27852,7 @@ mod tests {
             single.len() <= 1,
             "one intake repo → single-repo path (repo_worktrees = [])"
         );
-        let multi = vec![
+        let multi = [
             crate::uow::RepoScope {
                 repo: "acme/api".to_string(),
                 branch: crate::uow::BranchMode::default(),
@@ -21977,10 +27892,22 @@ mod tests {
         let json = body_json(resp).await;
         let arr = json.as_array().expect("must be an array");
         // Both known credentials must be present.
-        let github = arr.iter().find(|c| c["name"] == "github_token").expect("must include github_token");
-        let or_key = arr.iter().find(|c| c["name"] == "openrouter_api_key").expect("must include openrouter_api_key");
-        assert!(!github["is_set"].as_bool().unwrap_or(true), "initially not set");
-        assert!(!or_key["is_set"].as_bool().unwrap_or(true), "initially not set");
+        let github = arr
+            .iter()
+            .find(|c| c["name"] == "github_token")
+            .expect("must include github_token");
+        let or_key = arr
+            .iter()
+            .find(|c| c["name"] == "openrouter_api_key")
+            .expect("must include openrouter_api_key");
+        assert!(
+            !github["is_set"].as_bool().unwrap_or(true),
+            "initially not set"
+        );
+        assert!(
+            !or_key["is_set"].as_bool().unwrap_or(true),
+            "initially not set"
+        );
 
         // Store a GitHub token.
         state
@@ -22001,13 +27928,25 @@ mod tests {
             .unwrap();
         let json2 = body_json(resp2).await;
         let arr2 = json2.as_array().expect("must be an array");
-        let github2 = arr2.iter().find(|c| c["name"] == "github_token").expect("github_token present");
-        assert!(github2["is_set"].as_bool().unwrap_or(false), "now is_set=true");
+        let github2 = arr2
+            .iter()
+            .find(|c| c["name"] == "github_token")
+            .expect("github_token present");
+        assert!(
+            github2["is_set"].as_bool().unwrap_or(false),
+            "now is_set=true"
+        );
         let masked = github2["masked"].as_str().expect("masked must be present");
         // Masked value must not contain the full token.
-        assert!(!masked.contains("ghp_test_value"), "masked must not reveal full token");
+        assert!(
+            !masked.contains("ghp_test_value"),
+            "masked must not reveal full token"
+        );
         // Must start with the first 4 chars.
-        assert!(masked.starts_with("ghp_"), "masked must start with first 4 chars");
+        assert!(
+            masked.starts_with("ghp_"),
+            "masked must start with first 4 chars"
+        );
     }
 
     /// POST /api/credentials/:name rejects unknown credential names.
@@ -22070,14 +28009,19 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let json = body_json(resp).await;
         assert_eq!(json["ok"], true);
-        let masked = json["masked"].as_str().expect("masked field must be present");
+        let masked = json["masked"]
+            .as_str()
+            .expect("masked field must be present");
         // Full token must NEVER appear in the response.
         assert!(
             !masked.contains("ghp_supersecrettoken"),
             "response must never contain the full token: {masked}"
         );
         // The prefix appears.
-        assert!(masked.starts_with("ghp_"), "masked starts with first 4 chars");
+        assert!(
+            masked.starts_with("ghp_"),
+            "masked starts with first 4 chars"
+        );
     }
 
     // ── OpenRouter registry-refresh triggers ────────────────────────────────────
@@ -22092,7 +28036,9 @@ mod tests {
     /// Pure name-matching predicate: only the OpenRouter credential name matches.
     #[test]
     fn is_openrouter_credential_matches_only_the_openrouter_key_name() {
-        assert!(is_openrouter_credential(crate::credentials::OPENROUTER_API_KEY));
+        assert!(is_openrouter_credential(
+            crate::credentials::OPENROUTER_API_KEY
+        ));
         assert!(!is_openrouter_credential(crate::credentials::GITHUB_TOKEN));
         assert!(!is_openrouter_credential("anthropic_api_key"));
         assert!(!is_openrouter_credential(""));
@@ -22112,7 +28058,10 @@ mod tests {
             &model_registry,
             credential_store,
         );
-        assert!(scheduled, "saving the OpenRouter key must schedule a refresh");
+        assert!(
+            scheduled,
+            "saving the OpenRouter key must schedule a refresh"
+        );
     }
 
     /// Saving any OTHER credential must NOT schedule a refresh.
@@ -22126,7 +28075,10 @@ mod tests {
             &model_registry,
             credential_store,
         );
-        assert!(!scheduled, "saving a non-OpenRouter credential must not schedule a refresh");
+        assert!(
+            !scheduled,
+            "saving a non-OpenRouter credential must not schedule a refresh"
+        );
     }
 
     /// End-to-end through the real HTTP handler: saving a DIFFERENT credential (github_token)
@@ -22157,6 +28109,305 @@ mod tests {
         );
     }
 
+    // ── Live Anthropic model-registry refresh triggers (Feature A) ─────────────────
+    //
+    // Mirrors the OpenRouter registry-refresh trigger tests immediately above, one for
+    // one. See `docs/design/2026-08-27_backend-safety-and-live-models.md`'s Feature A
+    // section and the doc comments on `is_anthropic_credential` /
+    // `trigger_anthropic_refresh_if_needed` above `serve()`.
+
+    /// Pure name-matching predicate: only the Anthropic credential name matches.
+    #[test]
+    fn is_anthropic_credential_matches_only_the_anthropic_key_name() {
+        assert!(is_anthropic_credential(
+            crate::credentials::ANTHROPIC_API_KEY
+        ));
+        assert!(!is_anthropic_credential(crate::credentials::GITHUB_TOKEN));
+        assert!(!is_anthropic_credential(
+            crate::credentials::OPENROUTER_API_KEY
+        ));
+        assert!(!is_anthropic_credential(""));
+    }
+
+    /// Saving the Anthropic credential schedules a refresh (return value `true`). The
+    /// credential store passed in has NO key set, so even if the spawned task happens to
+    /// be polled before this test function returns, `try_refresh_anthropic_from_store`'s
+    /// own guard no-ops immediately — this test can never make a live HTTP call, by
+    /// construction (mirrors `trigger_openrouter_refresh_if_needed_schedules_for_the_
+    /// openrouter_key`'s exact same discipline).
+    #[tokio::test]
+    async fn trigger_anthropic_refresh_if_needed_schedules_for_the_anthropic_key() {
+        let model_registry = crate::model_registry::ModelRegistry::new();
+        let credential_store: Arc<dyn crate::credentials::CredentialStore> =
+            Arc::new(crate::credentials::MemoryCredentialStore::new());
+        let scheduled = trigger_anthropic_refresh_if_needed(
+            crate::credentials::ANTHROPIC_API_KEY,
+            &model_registry,
+            credential_store,
+        );
+        assert!(
+            scheduled,
+            "saving the Anthropic key must schedule a refresh"
+        );
+    }
+
+    /// Saving any OTHER credential must NOT schedule a refresh.
+    #[tokio::test]
+    async fn trigger_anthropic_refresh_if_needed_ignores_other_credentials() {
+        let model_registry = crate::model_registry::ModelRegistry::new();
+        let credential_store: Arc<dyn crate::credentials::CredentialStore> =
+            Arc::new(crate::credentials::MemoryCredentialStore::new());
+        let scheduled = trigger_anthropic_refresh_if_needed(
+            crate::credentials::GITHUB_TOKEN,
+            &model_registry,
+            credential_store,
+        );
+        assert!(
+            !scheduled,
+            "saving a non-Anthropic credential must not schedule a refresh"
+        );
+    }
+
+    /// End-to-end through the real HTTP handler: saving a DIFFERENT credential
+    /// (github_token) must leave the Anthropic live-registry cache untouched
+    /// (`anthropic_fetched` stays false). Mirrors
+    /// `set_credential_for_non_openrouter_name_does_not_touch_the_registry_cache`; the
+    /// anthropic_api_key case itself is covered at the function level above instead of
+    /// here, to avoid any chance of the request handler's spawned task making a live call
+    /// to api.anthropic.com mid-test.
+    #[tokio::test]
+    async fn set_credential_for_non_anthropic_name_does_not_touch_the_anthropic_cache() {
+        let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
+        assert!(!state.model_registry.anthropic_fetched());
+        let app = router(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/credentials/github_token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"value":"ghp_unrelated_token"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(
+            !state.model_registry.anthropic_fetched(),
+            "a non-Anthropic credential save must never trigger a live-Anthropic refresh"
+        );
+    }
+
+    // ── GET /api/models/registry — backend-aware Claude portion (Feature A) ────────
+
+    /// `use_live_anthropic_models`: the pure decision `get_model_registry` /
+    /// `refresh_model_registry` / `refresh_anthropic_registry` all consult. False on a
+    /// fresh CLI-default install (no backend setting, no key).
+    #[test]
+    fn use_live_anthropic_models_false_by_default() {
+        let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
+        assert!(!use_live_anthropic_models(&state));
+    }
+
+    /// True only once BOTH conditions hold: effective backend is `api` AND a key is
+    /// present. Neither alone is enough — this is the exact two-input gate the design doc
+    /// describes for Feature A ("the picker's available Claude models become a function
+    /// of the active backend").
+    #[test]
+    #[serial_test::serial(process_env)]
+    fn use_live_anthropic_models_requires_both_api_backend_and_key() {
+        let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
+        // API backend selected, but no key yet.
+        state
+            .settings
+            .set_chat_backend(crate::llm::ProjectBackend::Api);
+        assert!(
+            !use_live_anthropic_models(&state),
+            "api backend alone, no key, must stay false"
+        );
+
+        // Key present, but backend still `api` — now both hold.
+        state
+            .credential_store
+            .set(crate::credentials::ANTHROPIC_API_KEY, "sk-ant-test-key")
+            .unwrap();
+        assert!(
+            use_live_anthropic_models(&state),
+            "api backend + key present must be true"
+        );
+
+        // Flip back to CLI: even with the key present, must be false.
+        state
+            .settings
+            .set_chat_backend(crate::llm::ProjectBackend::Cli);
+        assert!(
+            !use_live_anthropic_models(&state),
+            "cli backend must stay false even with a key"
+        );
+    }
+
+    /// `GET /api/models/registry` on the CLI backend (the default) serves the hardcoded
+    /// Claude catalog, even when a live Anthropic cache happens to be populated (e.g. left
+    /// over from a prior API-backend session) — the CLI backend must never see the live
+    /// list.
+    #[tokio::test]
+    async fn get_model_registry_serves_hardcoded_claude_on_cli_backend() {
+        let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
+        state
+            .model_registry
+            .seed_anthropic_entries(vec![crate::model_registry::RegistryEntry {
+                provider: "claude".to_string(),
+                display: "Live-Only Model".to_string(),
+                id: "claude-live-only".to_string(),
+                free: false,
+                tool_use: true,
+                context: 0,
+                coding: 1.0,
+                price_in: 0.0,
+                price_out: 0.0,
+                weight: 0,
+                caching: true,
+                vision: true,
+                price_known: false,
+            }]);
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/models/registry")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let models = json["models"].as_array().expect("models array");
+        assert!(
+            models.iter().any(|m| m["id"] == "claude-opus-5"),
+            "CLI backend must serve the hardcoded catalog: {models:?}"
+        );
+        assert!(
+            !models.iter().any(|m| m["id"] == "claude-live-only"),
+            "CLI backend must NOT leak the live cache even when populated: {models:?}"
+        );
+    }
+
+    /// `GET /api/models/registry` on the API backend with a key present AND a populated
+    /// live cache serves the LIVE list instead of the hardcoded catalog — this is Feature
+    /// A's whole point (a model like `claude-fable-5` shows up in the picker iff the
+    /// account is actually served it, which the live fetch — not the hardcoded list —
+    /// determines).
+    #[tokio::test]
+    async fn get_model_registry_serves_live_list_on_api_backend_with_key_and_cache() {
+        let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
+        state
+            .settings
+            .set_chat_backend(crate::llm::ProjectBackend::Api);
+        state
+            .credential_store
+            .set(crate::credentials::ANTHROPIC_API_KEY, "sk-ant-test-key")
+            .unwrap();
+        state
+            .model_registry
+            .seed_anthropic_entries(vec![crate::model_registry::RegistryEntry {
+                provider: "claude".to_string(),
+                display: "Live-Only Model".to_string(),
+                id: "claude-live-only".to_string(),
+                free: false,
+                tool_use: true,
+                context: 0,
+                coding: 1.0,
+                price_in: 0.0,
+                price_out: 0.0,
+                weight: 0,
+                caching: true,
+                vision: true,
+                price_known: false,
+            }]);
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/models/registry")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let models = json["models"].as_array().expect("models array");
+        assert!(
+            models.iter().any(|m| m["id"] == "claude-live-only"),
+            "API backend with key + populated cache must serve the LIVE list: {models:?}"
+        );
+        assert!(
+            !models.iter().any(|m| m["id"] == "claude-opus-5"),
+            "the live list REPLACES the hardcoded catalog, it doesn't union with it: {models:?}"
+        );
+        assert!(json["anthropic_fetched"].as_bool().unwrap_or(false));
+    }
+
+    /// `GET /api/models/registry` on the API backend WITH a key but a cache that was never
+    /// populated (fresh install, or the live fetch failed) must still serve the hardcoded
+    /// catalog — the fail-soft floor from `ModelRegistry::claude_entries_for_backend`
+    /// surfaced all the way through the HTTP handler.
+    #[tokio::test]
+    async fn get_model_registry_falls_back_to_hardcoded_when_api_backend_but_no_live_cache() {
+        let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
+        state
+            .settings
+            .set_chat_backend(crate::llm::ProjectBackend::Api);
+        state
+            .credential_store
+            .set(crate::credentials::ANTHROPIC_API_KEY, "sk-ant-test-key")
+            .unwrap();
+        // No seed_anthropic_entries call: cache stays unpopulated.
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/models/registry")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let models = json["models"].as_array().expect("models array");
+        assert!(
+            models.iter().any(|m| m["id"] == "claude-opus-5"),
+            "no live cache yet: must fall back to the hardcoded catalog: {models:?}"
+        );
+        assert!(!json["anthropic_fetched"].as_bool().unwrap_or(true));
+    }
+
+    /// `POST /api/models/registry/refresh/anthropic` with no Anthropic key present
+    /// returns 200 with `attempted: false` (never a 5xx for a missing key) and the
+    /// registry it echoes back still serves the hardcoded catalog.
+    #[tokio::test]
+    async fn refresh_anthropic_registry_endpoint_no_key_is_a_graceful_noop() {
+        let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/models/registry/refresh/anthropic")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["attempted"], false);
+        let models = json["models"].as_array().expect("models array");
+        assert!(models.iter().any(|m| m["id"] == "claude-opus-5"));
+    }
+
     /// ROUTES-9: saving the Anthropic key via `POST /api/credentials/anthropic_api_key`
     /// stores it in the credential store WITHOUT mutating the `ANTHROPIC_API_KEY` process-env
     /// var. The old handler mirrored the value into env via `std::env::set_var` from the
@@ -22164,9 +28415,10 @@ mod tests {
     /// the credential env-fallback test flaky. The driver path now reads the key store-first, so
     /// no env mutation is needed for a freshly-saved key to take effect.
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn set_anthropic_credential_does_not_mutate_process_env() {
         // Sentinel value the handler must NOT overwrite.
-        std::env::set_var("ANTHROPIC_API_KEY", "sk-ant-sentinel");
+        let _env = camerata_test_env::EnvGuard::set("ANTHROPIC_API_KEY", "sk-ant-sentinel");
 
         let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
         let app = router(state.clone());
@@ -22198,11 +28450,407 @@ mod tests {
             Ok("sk-ant-sentinel"),
             "the handler must not mutate ANTHROPIC_API_KEY"
         );
-        std::env::remove_var("ANTHROPIC_API_KEY");
+    }
+
+    /// The defect this guards: a key saved in the running app passed the gate but the audit /
+    /// rescan `Llm` (which read ONLY env) failed with "key unset" until a restart. Saving through
+    /// the real endpoint, with env unset, must make the gate say present AND the very next `Llm`
+    /// the server builds carry that key; replacing the key must change the next `Llm` too.
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn key_saved_through_the_endpoint_reaches_the_gate_and_the_next_llm() {
+        let _env = camerata_test_env::EnvGuard::remove("ANTHROPIC_API_KEY");
+        let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
+        let llm_key = |state: &AppState| {
+            crate::onboard::build_llm(
+                state.credential_store.as_ref(),
+                crate::llm::Backend::Api,
+                Some(state.usage_ledger.clone()),
+            )
+            .api_key()
+            .map(str::to_string)
+        };
+        assert!(!anthropic_api_key_present(state.credential_store.as_ref()));
+        assert_eq!(llm_key(&state), None);
+
+        for key in ["sk-ant-first", "sk-ant-replacement"] {
+            let resp = router(state.clone())
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/credentials/anthropic_api_key")
+                        .header("content-type", "application/json")
+                        .body(Body::from(format!(r#"{{"value":"{key}"}}"#)))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            assert!(anthropic_api_key_present(state.credential_store.as_ref()));
+            assert_eq!(llm_key(&state).as_deref(), Some(key));
+        }
+    }
+
+    /// Send one credentials request through the real router and return (status, body).
+    async fn credential_request(
+        state: &AppState,
+        method: &str,
+        name: &str,
+        body: Option<&str>,
+    ) -> (StatusCode, serde_json::Value) {
+        let mut b = Request::builder()
+            .method(method)
+            .uri(format!("/api/credentials/{name}"));
+        if body.is_some() {
+            b = b.header("content-type", "application/json");
+        }
+        let resp = router(state.clone())
+            .oneshot(b.body(Body::from(body.unwrap_or("").to_string())).unwrap())
+            .await
+            .unwrap();
+        let status = resp.status();
+        (status, body_json(resp).await)
+    }
+
+    /// A key saved in the app beats the env var, so there must be a way to REMOVE it: DELETE
+    /// clears the store and the env fallback takes over again; deleting what is not set is fine.
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn delete_credential_removes_the_saved_key_and_hands_back_to_env() {
+        let _env = camerata_test_env::EnvGuard::set("ANTHROPIC_API_KEY", "sk-ant-env");
+        let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
+        let (status, _) = credential_request(
+            &state,
+            "POST",
+            "anthropic_api_key",
+            Some(r#"{"value":"sk-ant-saved"}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            crate::credentials::anthropic_api_key(state.credential_store.as_ref()).as_deref(),
+            Some("sk-ant-saved")
+        );
+
+        let (status, json) = credential_request(&state, "DELETE", "anthropic_api_key", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["ok"], true);
+        assert!(!state.credential_store.is_set("anthropic_api_key").unwrap());
+        assert_eq!(
+            crate::credentials::anthropic_api_key(state.credential_store.as_ref()).as_deref(),
+            Some("sk-ant-env"),
+            "with the saved key removed the env fallback applies again"
+        );
+
+        // Removing a credential that is not set succeeds; an unknown name is refused.
+        let (status, _) = credential_request(&state, "DELETE", "anthropic_api_key", None).await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, json) = credential_request(&state, "DELETE", "not_a_credential", None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(json["ok"], false);
+    }
+
+    /// A whitespace-only value is not a credential: the resolver would treat it as absent, so
+    /// saving one must be refused instead of showing "set" in the UI.
+    #[tokio::test]
+    async fn set_credential_rejects_whitespace_only_values() {
+        let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
+        for body in [r#"{"value":"   "}"#, "{\"value\":\"\\n\\t \"}"] {
+            let (status, json) =
+                credential_request(&state, "POST", "anthropic_api_key", Some(body)).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+            assert_eq!(json["ok"], false);
+        }
+        assert!(!state.credential_store.is_set("anthropic_api_key").unwrap());
+    }
+
+    /// The same defect class as the Anthropic key: the work-tracker provider carries the GitHub
+    /// token, so a token saved (or removed) in the app must re-select it with no restart.
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn saving_or_removing_the_github_token_reselects_the_provider_without_a_restart() {
+        let _t = camerata_test_env::EnvGuard::remove("CAMERATA_GITHUB_TOKEN");
+        let _r = camerata_test_env::EnvGuard::remove("CAMERATA_GITHUB_REPO");
+        let _o = camerata_test_env::EnvGuard::remove("CAMERATA_GITHUB_OWNER");
+        let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
+        assert!(!state.provider.current().live, "no token: native provider");
+
+        let (status, _) = credential_request(
+            &state,
+            "POST",
+            "github_token",
+            Some(r#"{"value":"ghp_saved_after_launch"}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let live = state.provider.current();
+        assert!(
+            live.live,
+            "a token saved now must wire the GitHub provider now"
+        );
+        assert!(live.label.contains("github"), "{}", live.label);
+
+        let (status, _) = credential_request(&state, "DELETE", "github_token", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            !state.provider.current().live,
+            "removing the token (no env fallback) goes back to the native provider"
+        );
+
+        // A credential that is not the GitHub token never touches the provider.
+        let before = state.provider.current().label;
+        credential_request(
+            &state,
+            "POST",
+            "openrouter_api_key",
+            Some(r#"{"value":"sk-or-x"}"#),
+        )
+        .await;
+        assert_eq!(state.provider.current().label, before);
+    }
+
+    /// A project whose backend is `backend`, made active.
+    fn state_with_active_project(backend: crate::project::ProjectBackend) -> AppState {
+        let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
+        let p = state.projects.create("StepLlm", vec![]).unwrap();
+        state.projects.set_backend(&p.id, backend).unwrap();
+        state
+    }
+
+    /// The model steps of a project (decompose, clarify, authoring, escalation, diagrams, L3 ...)
+    /// run on THAT project's backend, the way the audit does: Cli by default, Api with the key
+    /// resolved now, and Api with no key REFUSED, never run on the subscription.
+    #[test]
+    #[serial_test::serial(process_env)]
+    fn step_llm_follows_the_active_projects_backend() {
+        use crate::project::ProjectBackend;
+        let _env = camerata_test_env::EnvGuard::remove("ANTHROPIC_API_KEY");
+
+        // Cli project: a Cli Llm, no key needed.
+        let state = state_with_active_project(ProjectBackend::Cli);
+        assert_eq!(state.step_llm().unwrap().backend_label(), "anthropic/cli");
+
+        // Api project, no key anywhere: refused (and the port form reports the same refusal).
+        let state = state_with_active_project(ProjectBackend::Api);
+        let refusal = state
+            .step_llm()
+            .expect_err("api with no key must be refused");
+        assert!(refusal.contains("no API key"), "{refusal}");
+        let port = state.step_llm_port();
+        let err = futures::executor::block_on(port.complete(crate::llm::LlmRequest::new("x")))
+            .expect_err("the refused port fails every call");
+        assert_eq!(err.to_string(), refusal);
+
+        // Key saved after startup: the next step Llm is Api and carries exactly that key.
+        state
+            .credential_store
+            .set(crate::credentials::ANTHROPIC_API_KEY, "sk-ant-step")
+            .unwrap();
+        let llm = state.step_llm().unwrap();
+        assert_eq!(llm.backend_label(), "anthropic/api");
+        assert_eq!(llm.api_key(), Some("sk-ant-step"));
+
+        // Switching the PROJECT to Cli switches the step, whatever the chat setting says.
+        let id = state.projects.active().unwrap().id;
+        state
+            .projects
+            .set_backend(&id, ProjectBackend::Cli)
+            .unwrap();
+        state
+            .settings
+            .set_chat_backend(crate::llm::ProjectBackend::Api);
+        assert_eq!(state.step_llm().unwrap().backend_label(), "anthropic/cli");
+    }
+
+    /// With no project at all, the global chat backend setting decides (like the chat).
+    #[test]
+    #[serial_test::serial(process_env)]
+    fn step_llm_without_a_project_uses_the_chat_backend_setting() {
+        let _env = camerata_test_env::EnvGuard::remove("ANTHROPIC_API_KEY");
+        let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
+        assert!(state.projects.active().is_none());
+        assert_eq!(state.step_llm().unwrap().backend_label(), "anthropic/cli");
+        state
+            .settings
+            .set_chat_backend(crate::llm::ProjectBackend::Api);
+        assert!(state.step_llm().is_err(), "api chat setting + no key");
+        state
+            .credential_store
+            .set(crate::credentials::ANTHROPIC_API_KEY, "sk-ant-nop")
+            .unwrap();
+        let llm = state.step_llm().unwrap();
+        assert_eq!(llm.backend_label(), "anthropic/api");
+        assert_eq!(llm.api_key(), Some("sk-ant-nop"));
+    }
+
+    /// Every step endpoint refuses (409, with the reason) when the active project is Api with no
+    /// key, instead of quietly running on the subscription CLI.
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn every_project_step_endpoint_refuses_an_api_project_with_no_key() {
+        use crate::project::ProjectBackend;
+        let _env = camerata_test_env::EnvGuard::remove("ANTHROPIC_API_KEY");
+        let state = state_with_active_project(ProjectBackend::Api);
+        let app = router(state.clone());
+        // A UoW (blank) and an escalation to address; a story for the story-keyed steps.
+        let blank = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/uow/blank")
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let uow_id = body_json(blank).await["uow_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let esc = state.escalations.raise(
+            crate::escalation::RaiseEscalationReq {
+                subject_kind: crate::escalation::SubjectKind::Uow,
+                checkpoint_id: None,
+                routine_id: uow_id.clone(),
+                reason: "r".to_string(),
+                stopped_for: "s".to_string(),
+                suggestions: vec![],
+                raw_context: String::new(),
+            },
+            "Add login",
+        );
+        let story = camerata_worktracker::InMemoryStoryStore::seeded()
+            .list()
+            .await
+            .unwrap()
+            .remove(0);
+        let story_id = story.id.clone();
+        state.stories.upsert(story).await.unwrap();
+
+        let cases: Vec<(String, &str)> = vec![
+            (format!("/api/stories/{story_id}/decompose"), "{}"),
+            (format!("/api/stories/{story_id}/clarify/suggest"), "{}"),
+            (format!("/api/uow/{uow_id}/author"), r#"{"message":"hi"}"#),
+            (format!("/api/uow/{uow_id}/diagram"), "{}"),
+            (
+                format!("/api/escalations/{}/chat", esc.id),
+                r#"{"message":"hi"}"#,
+            ),
+        ];
+        for (uri, body) in cases {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(&uri)
+                        .header("content-type", "application/json")
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::CONFLICT, "{uri}");
+        }
+    }
+
+    /// `GET /api/models` reports the backend the chat will actually use (the chat setting and
+    /// the resolved key), not a hard-coded CLI label.
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn models_endpoint_backend_label_follows_the_chat_setting() {
+        let _env = camerata_test_env::EnvGuard::remove("ANTHROPIC_API_KEY");
+        let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
+        let fetch = |state: AppState| async move {
+            let resp = router(state)
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/models")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            body_json(resp).await
+        };
+
+        // Default Cli setting: says cli.
+        let json = fetch(state.clone()).await;
+        assert_eq!(json["backend"], "anthropic/cli");
+        assert!(json["backend_error"].is_null());
+
+        // Api setting with a key: says api.
+        state
+            .settings
+            .set_chat_backend(crate::llm::ProjectBackend::Api);
+        state
+            .credential_store
+            .set(crate::credentials::ANTHROPIC_API_KEY, "sk-ant-label")
+            .unwrap();
+        let json = fetch(state.clone()).await;
+        assert_eq!(json["backend"], "anthropic/api");
+        assert!(json["backend_error"].is_null());
+
+        // Api setting, key removed: still names the setting, and says why it cannot run.
+        state
+            .credential_store
+            .delete(crate::credentials::ANTHROPIC_API_KEY)
+            .unwrap();
+        let json = fetch(state).await;
+        assert_eq!(json["backend"], "anthropic/api");
+        assert!(json["backend_error"]
+            .as_str()
+            .unwrap()
+            .contains("no API key"));
+    }
+
+    /// The Chat backend setting must DO what the UI says: `api` builds an Api `Llm` carrying the
+    /// key resolved now (store first); `cli` builds a Cli `Llm`; `api` with no key refuses
+    /// instead of silently downgrading to the CLI.
+    #[test]
+    #[serial_test::serial(process_env)]
+    fn chat_llm_follows_the_chat_backend_setting_and_the_stored_key() {
+        let _env = camerata_test_env::EnvGuard::remove("ANTHROPIC_API_KEY");
+        let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
+
+        // Default (Cli): a Cli Llm, no key needed.
+        let llm = state.chat_llm().expect("cli chat needs no key");
+        assert_eq!(llm.backend_label(), "anthropic/cli");
+
+        // Api with no key anywhere: refused, not downgraded.
+        state
+            .settings
+            .set_chat_backend(crate::llm::ProjectBackend::Api);
+        assert!(state.chat_llm().is_err());
+
+        // Key saved after startup: the next chat Llm is Api and carries exactly that key.
+        state
+            .credential_store
+            .set(crate::credentials::ANTHROPIC_API_KEY, "sk-ant-chat")
+            .unwrap();
+        let llm = state.chat_llm().expect("api chat with a stored key");
+        assert_eq!(llm.backend_label(), "anthropic/api");
+        assert_eq!(llm.api_key(), Some("sk-ant-chat"));
+
+        // Replaced key: the next one carries the new key.
+        state
+            .credential_store
+            .set(crate::credentials::ANTHROPIC_API_KEY, "sk-ant-chat-2")
+            .unwrap();
+        assert_eq!(state.chat_llm().unwrap().api_key(), Some("sk-ant-chat-2"));
+
+        // Back to Cli: a Cli Llm again (the CLI transport carries the key but never uses it).
+        state
+            .settings
+            .set_chat_backend(crate::llm::ProjectBackend::Cli);
+        assert_eq!(state.chat_llm().unwrap().backend_label(), "anthropic/cli");
     }
 
     /// `AppState::github_token()` prefers the credential store over the env var.
     #[test]
+    #[serial_test::serial(process_env)]
     fn github_token_method_prefers_store_over_env() {
         // Set a value in the store.
         let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
@@ -22212,7 +28860,7 @@ mod tests {
             .expect("set must succeed");
 
         // Ensure the env var is NOT set so we are testing the store path.
-        std::env::remove_var("CAMERATA_GITHUB_TOKEN");
+        let _env = camerata_test_env::EnvGuard::remove("CAMERATA_GITHUB_TOKEN");
 
         let resolved = state.github_token();
         assert_eq!(
@@ -22224,13 +28872,13 @@ mod tests {
 
     /// `AppState::github_token()` falls back to env var when store is empty.
     #[test]
+    #[serial_test::serial(process_env)]
     fn github_token_method_falls_back_to_env_when_store_empty() {
         let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
         // Store is empty (MemoryCredentialStore starts empty).
 
-        std::env::set_var("CAMERATA_GITHUB_TOKEN", "env_token");
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_GITHUB_TOKEN", "env_token");
         let resolved = state.github_token();
-        std::env::remove_var("CAMERATA_GITHUB_TOKEN");
 
         assert_eq!(
             resolved.as_deref(),
@@ -22257,16 +28905,89 @@ mod tests {
     /// `anthropic_api_key_present` returns true when only the env var is set (empty
     /// keychain), and false when neither source has a key.
     #[test]
+    #[serial_test::serial(process_env)]
     fn anthropic_api_key_present_reflects_env_when_keychain_empty() {
         let store = crate::credentials::MemoryCredentialStore::new();
         // Neither source set → false.
-        std::env::remove_var("ANTHROPIC_API_KEY");
+        let _env = camerata_test_env::EnvGuard::remove("ANTHROPIC_API_KEY");
         assert!(!anthropic_api_key_present(&store));
         // Env-only → true.
-        std::env::set_var("ANTHROPIC_API_KEY", "sk-ant-env");
+        let _env2 = camerata_test_env::EnvGuard::set("ANTHROPIC_API_KEY", "sk-ant-env");
         let present = anthropic_api_key_present(&store);
-        std::env::remove_var("ANTHROPIC_API_KEY");
         assert!(present, "env var alone makes the key present");
+    }
+
+    /// `resolve_backend_for_project` — the per-seam glue
+    /// (`docs/design/2026-09-22_per-project-backend.md`) — must gather `anthropic_api_key_present`
+    /// and the PROJECT's OWN `backend` setting (never a global/env preference) into one
+    /// resolution. Exercises the "no project" floor plus both concrete `backend` values,
+    /// using the keychain path for the key (not the env var) so this test can't race the
+    /// env-var-based tests around it.
+    #[test]
+    #[serial_test::serial(process_env)]
+    fn resolve_backend_for_project_gathers_the_two_inputs_correctly() {
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+
+        // No project at all, no key -> Cli, never Blocked. The project-less floor must be
+        // exactly as permissive as a freshly-created project's default (backend=Cli), never
+        // more restrictive. Defensively clears the env var too, so this assertion can't be
+        // poisoned by another test's ANTHROPIC_API_KEY mutation running concurrently (the
+        // known env-var race noted on
+        // `credentials::tests::resolve_falls_back_to_env_when_store_empty`).
+        let _env = camerata_test_env::EnvGuard::remove("ANTHROPIC_API_KEY");
+        assert_eq!(
+            resolve_backend_for_project(&state, None),
+            crate::llm::BackendResolution::Cli
+        );
+
+        // A project explicitly switched to `Api`, no key anywhere -> Blocked.
+        let api_project = state.projects.create("ApiOnly", vec![]).unwrap();
+        assert_eq!(
+            api_project.backend,
+            crate::project::ProjectBackend::Api,
+            "fresh project defaults to Api"
+        );
+        // A NEW project (default Api) with no key is blocked outright: no CLI fallback.
+        assert!(matches!(
+            resolve_backend_for_project(&state, Some(&api_project)),
+            crate::llm::BackendResolution::Blocked { .. }
+        ));
+        let api_project = state
+            .projects
+            .set_backend(&api_project.id, crate::project::ProjectBackend::Api)
+            .unwrap();
+        assert_eq!(
+            resolve_backend_for_project(&state, Some(&api_project)),
+            crate::llm::BackendResolution::Blocked {
+                message: "This project is set to the Anthropic API backend, but no API key is \
+                          configured. Add an Anthropic API key (or switch the backend to Cli) to run."
+                    .to_string(),
+            }
+        );
+
+        // A key in the credential store (keychain path) + backend=Api -> Api.
+        crate::credentials::CredentialStore::set(
+            state.credential_store.as_ref(),
+            crate::credentials::ANTHROPIC_API_KEY,
+            "sk-ant-test",
+        )
+        .expect("set must succeed");
+        assert_eq!(
+            resolve_backend_for_project(&state, Some(&api_project)),
+            crate::llm::BackendResolution::Api
+        );
+
+        // backend=Cli (explicitly chosen) -> quiet Cli, regardless of the key already
+        // present from the step above.
+        let personal_project = state.projects.create("Personal", vec![]).unwrap();
+        let personal_project = state
+            .projects
+            .set_backend(&personal_project.id, crate::project::ProjectBackend::Cli)
+            .unwrap();
+        assert_eq!(
+            resolve_backend_for_project(&state, Some(&personal_project)),
+            crate::llm::BackendResolution::Cli
+        );
     }
 
     // ── Attachment tests ──────────────────────────────────────────────────────
@@ -22299,7 +29020,10 @@ mod tests {
             content: "graph LR; A-->B".to_string(),
         };
         let result = embed_attachments("Body", &[att]);
-        assert!(result.contains("```mermaid"), "mermaid fence for .mmd extension");
+        assert!(
+            result.contains("```mermaid"),
+            "mermaid fence for .mmd extension"
+        );
     }
 
     /// End-to-end router test for UoW file attachments: add, list, get, remove.
@@ -22365,7 +29089,10 @@ mod tests {
         let attachments = list_body["attachments"].as_array().unwrap();
         assert_eq!(attachments.len(), 1);
         assert_eq!(attachments[0]["name"].as_str().unwrap(), "mockup.html");
-        assert!(attachments[0].get("content").is_none(), "content omitted from list");
+        assert!(
+            attachments[0].get("content").is_none(),
+            "content omitted from list"
+        );
 
         // GET /api/uow/:id/attachments/:name -- fetch content.
         let get_resp = app
@@ -22448,7 +29175,10 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_json(resp).await;
-        assert_eq!(body["story_id"], "draft-does-not-exist", "returns a UoW-shaped body");
+        assert_eq!(
+            body["story_id"], "draft-does-not-exist",
+            "returns a UoW-shaped body"
+        );
 
         // The store must not have materialized it — neither the direct getter nor the raw
         // list sees any record after a read of an unknown id.
@@ -22547,10 +29277,7 @@ mod tests {
             .await
             .unwrap();
         let get2_body = body_json(get2).await;
-        assert_eq!(
-            get2_body["diagram"].as_str().unwrap(),
-            "graph TD\n  A-->B"
-        );
+        assert_eq!(get2_body["diagram"].as_str().unwrap(), "graph TD\n  A-->B");
 
         // DELETE -- clears it.
         let del = app
@@ -22620,7 +29347,10 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
         let body = body_json(resp).await;
         assert!(
-            body["error"].as_str().unwrap_or("").contains("must not be empty"),
+            body["error"]
+                .as_str()
+                .unwrap_or("")
+                .contains("must not be empty"),
             "error message explains why an empty message with no context is rejected"
         );
     }
@@ -22640,9 +29370,15 @@ mod tests {
             draft_body: "Email + password fields, submit button.".to_string(),
         };
         let prompt = build_mockup_prompt(&authoring, Some("Story"), None, "");
-        assert!(prompt.contains("Work item title: Login screen"), "node title present");
+        assert!(
+            prompt.contains("Work item title: Login screen"),
+            "node title present"
+        );
         assert!(prompt.contains("Email + password"), "node body present");
-        assert!(prompt.contains("Work item type: Story"), "node type present");
+        assert!(
+            prompt.contains("Work item type: Story"),
+            "node type present"
+        );
         assert!(
             prompt.contains("best represents this work item"),
             "empty message -> synthesized instruction, not a rejection"
@@ -22670,15 +29406,23 @@ mod tests {
             draft_title: "Payment step".to_string(),
             draft_body: "Card entry form.".to_string(),
         };
-        let prompt =
-            build_mockup_prompt(&child_authoring, Some("Story"), Some(&parent), "");
+        let prompt = build_mockup_prompt(&child_authoring, Some("Story"), Some(&parent), "");
 
         // Parent context is present and comes BEFORE the node's own title.
-        assert!(prompt.contains("Parent Epic: Checkout revamp"), "parent title present");
-        assert!(prompt.contains("Overhaul the checkout flow"), "parent body present");
+        assert!(
+            prompt.contains("Parent Epic: Checkout revamp"),
+            "parent title present"
+        );
+        assert!(
+            prompt.contains("Overhaul the checkout flow"),
+            "parent body present"
+        );
         let parent_idx = prompt.find("Parent Epic").expect("parent header");
         let node_idx = prompt.find("Work item title:").expect("node title header");
-        assert!(parent_idx < node_idx, "parent context precedes node context");
+        assert!(
+            parent_idx < node_idx,
+            "parent context precedes node context"
+        );
 
         // The original requirements prompt is also folded in.
         assert!(
@@ -22695,8 +29439,7 @@ mod tests {
             draft_title: "Dashboard".to_string(),
             ..Default::default()
         };
-        let prompt =
-            build_mockup_prompt(&authoring, None, None, "make it a dark grid of cards");
+        let prompt = build_mockup_prompt(&authoring, None, None, "make it a dark grid of cards");
         assert!(
             prompt.contains("Instruction: make it a dark grid of cards"),
             "user instruction preserved verbatim"
@@ -22722,9 +29465,7 @@ mod tests {
 
     /// The effective-repos closure the handler uses: the node's own `publish_repos`, or
     /// the given project fallback when the node's list is empty.
-    fn eff_with_fallback(
-        fallback: Vec<String>,
-    ) -> impl Fn(&crate::uow::UnitOfWork) -> Vec<String> {
+    fn eff_with_fallback(fallback: Vec<String>) -> impl Fn(&crate::uow::UnitOfWork) -> Vec<String> {
         move |n: &crate::uow::UnitOfWork| {
             if n.publish_repos.is_empty() {
                 fallback.clone()
@@ -22762,9 +29503,18 @@ mod tests {
         );
 
         // Parent precedes child within A (BFS order preserved).
-        let idx_epic = actions.iter().position(|x| x.repo == "A" && x.node_story_id == "epic").unwrap();
-        let idx_child = actions.iter().position(|x| x.repo == "A" && x.node_story_id == "childUI").unwrap();
-        assert!(idx_epic < idx_child, "parent action precedes child within a repo");
+        let idx_epic = actions
+            .iter()
+            .position(|x| x.repo == "A" && x.node_story_id == "epic")
+            .unwrap();
+        let idx_child = actions
+            .iter()
+            .position(|x| x.repo == "A" && x.node_story_id == "childUI")
+            .unwrap();
+        assert!(
+            idx_epic < idx_child,
+            "parent action precedes child within a repo"
+        );
     }
 
     #[test]
@@ -22774,8 +29524,7 @@ mod tests {
             plan_node("epic", None, &[]),
             plan_node("child", Some("epic"), &[]),
         ];
-        let actions =
-            plan_design_publish(&tree, eff_with_fallback(vec!["P1".into(), "P2".into()]));
+        let actions = plan_design_publish(&tree, eff_with_fallback(vec!["P1".into(), "P2".into()]));
 
         // Both nodes published into both fallback repos.
         for repo in ["P1", "P2"] {
@@ -22783,7 +29532,10 @@ mod tests {
             assert_eq!(r.len(), 2, "{repo} gets both nodes");
             assert_eq!(r[0].node_story_id, "epic");
             assert_eq!(r[1].node_story_id, "child");
-            assert!(r[1].link_to_parent, "child links to epic in {repo} (both present)");
+            assert!(
+                r[1].link_to_parent,
+                "child links to epic in {repo} (both present)"
+            );
         }
         assert_eq!(actions.len(), 4, "2 nodes x 2 fallback repos");
     }
@@ -22802,7 +29554,10 @@ mod tests {
             .iter()
             .find(|x| x.repo == "A" && x.node_story_id == "child")
             .unwrap();
-        assert!(child_a.link_to_parent, "child links to epic in A (parent present)");
+        assert!(
+            child_a.link_to_parent,
+            "child links to epic in A (parent present)"
+        );
 
         let child_b = actions
             .iter()
@@ -22885,7 +29640,10 @@ mod tests {
         // Epic -> Story is NOT in the schema.
         let err = validate_design_type_relation(&schema, "Epic", "Story");
         assert!(err.is_err(), "Epic -> Story must be rejected");
-        assert!(err.unwrap_err().contains("Story"), "error names the invalid type");
+        assert!(
+            err.unwrap_err().contains("Story"),
+            "error names the invalid type"
+        );
         // Unknown types.
         assert!(validate_design_type_relation(&schema, "Epic", "Bug").is_err());
     }
@@ -22894,9 +29652,13 @@ mod tests {
     /// Exercises schema enforcement, node materialization, tree listing, node deletion,
     /// and publish (no-token error path). Mirrors `hierarchy_schema_http_round_trip_and_export`.
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn design_draft_tree_http_round_trip() {
         let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
-        let p = state.projects.create("Acme", vec![]).expect("project created");
+        let p = state
+            .projects
+            .create("Acme", vec![])
+            .expect("project created");
         let app = router(state.clone());
         let id = p.id.clone();
 
@@ -22938,7 +29700,10 @@ mod tests {
             .unwrap();
         assert_eq!(blank_resp.status(), StatusCode::OK);
         let blank_body = body_json(blank_resp).await;
-        let design_id = blank_body["design_id"].as_str().expect("design_id").to_string();
+        let design_id = blank_body["design_id"]
+            .as_str()
+            .expect("design_id")
+            .to_string();
         assert!(design_id.starts_with("draft-"), "design_id is a draft id");
 
         // Verify the root node has node_type=Epic in the store.
@@ -23038,7 +29803,11 @@ mod tests {
             .filter_map(|n| n["node_type"].as_str())
             .collect();
         assert!(types.contains(&"Epic"), "Epic in tree");
-        assert_eq!(types.iter().filter(|&&t| t == "Feature").count(), 2, "two Features");
+        assert_eq!(
+            types.iter().filter(|&&t| t == "Feature").count(),
+            2,
+            "two Features"
+        );
         assert!(types.contains(&"Story"), "Story in tree");
 
         // DELETE /api/designs/:id/nodes/:node_id -- delete the story node only.
@@ -23114,15 +29883,17 @@ mod tests {
     #[tokio::test]
     async fn designs_list_status_delete_http_round_trip() {
         let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
-        let p = state.projects.create("Acme", vec![]).expect("project created");
+        let p = state
+            .projects
+            .create("Acme", vec![])
+            .expect("project created");
         let app = router(state.clone());
         let id = p.id.clone();
 
         // Create a design root (Epic) with a title, plus one child node.
-        let root =
-            state
-                .uow
-                .create_blank_design(Some("Epic".to_string()), None, Some(id.clone()));
+        let root = state
+            .uow
+            .create_blank_design(Some("Epic".to_string()), None, Some(id.clone()));
         state.uow.append_authoring_turn(
             &root.story_id,
             "(seed)",
@@ -23265,7 +30036,10 @@ mod tests {
             0,
             "design removed from the list"
         );
-        assert!(state.uow.list_design_tree(&design_id).is_empty(), "tree gone");
+        assert!(
+            state.uow.list_design_tree(&design_id).is_empty(),
+            "tree gone"
+        );
     }
 
     /// `design_publish` sets the design root's status to `published` on success.
@@ -23274,8 +30048,7 @@ mod tests {
     #[test]
     fn publish_sets_design_root_status_to_published() {
         let store = crate::uow::UowStore::new();
-        let root =
-            store.create_blank_design(Some("Epic".to_string()), None, Some("p".to_string()));
+        let root = store.create_blank_design(Some("Epic".to_string()), None, Some("p".to_string()));
         assert_eq!(root.design_status.as_deref(), Some("draft"));
         let updated = store.set_design_status(&root.story_id, "published");
         assert_eq!(updated.unwrap().design_status.as_deref(), Some("published"));
@@ -23293,7 +30066,7 @@ mod tests {
         }
         let (corpus, _errs) = camerata_rules::load_corpus_lenient(&path).await;
         let rule = corpus.iter().next()?;
-        Some((rule.id.0.clone(), rule_content_hash(rule)))
+        Some((rule.id.0.clone(), rule.content_hash()))
     }
 
     /// BUG A: `GET /api/projects/:id/rule-drift` returns `{ ok:true, drift:[...] }`
@@ -23302,19 +30075,25 @@ mod tests {
     #[tokio::test]
     async fn project_rule_drift_route_reports_baselined_mismatch() {
         let Some((rule_id, _current_hash)) = any_corpus_rule().await else {
-            eprintln!("corpus unavailable; skipping project_rule_drift_route_reports_baselined_mismatch");
+            eprintln!(
+                "corpus unavailable; skipping project_rule_drift_route_reports_baselined_mismatch"
+            );
             return;
         };
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
-        let p = state.projects.create("Drift", vec!["me/api".to_string()]).unwrap();
-        // Seed a selection baselined to a STALE hash (guaranteed != current).
+        let p = state
+            .projects
+            .create("Drift", vec!["me/api".to_string()])
+            .unwrap();
+        // Seed a selection baselined to a STALE current-format hash (guaranteed != current).
         state.projects.update(&p.id, |proj| {
             proj.ruleset.selections.push(crate::project::RuleSelection {
                 rule_id: rule_id.clone(),
                 chosen_option: None,
                 repos: vec!["me/api".to_string()],
-                applied_hash: Some("stale-baseline-hash".to_string()),
+                applied_hash: Some(format!("sha256:{}", "0".repeat(64))),
                 applied_directive: Some("old directive text".to_string()),
+                applied_version: Some(1),
             });
         });
         let app = router(state.clone());
@@ -23332,18 +30111,35 @@ mod tests {
         let json = body_json(resp).await;
         assert_eq!(json["ok"], true);
         let drift = json["drift"].as_array().expect("drift is an array");
-        assert_eq!(drift.len(), 1, "the single baselined-mismatch rule is reported");
+        assert_eq!(
+            drift.len(),
+            1,
+            "the single baselined-mismatch rule is reported"
+        );
         let entry = &drift[0];
         // The exact keys the UI's RuleDriftEntry reads.
         assert_eq!(entry["rule_id"], rule_id);
         assert!(entry["title"].is_string(), "title present");
         assert_eq!(entry["applied_directive"], "old directive text");
-        assert!(entry["corpus_directive"].is_string(), "corpus_directive present");
+        assert!(
+            entry["corpus_directive"].is_string(),
+            "corpus_directive present"
+        );
         assert_eq!(entry["repos"][0], "me/api");
+        // A current-format hash that differs is a real change, not an unknown.
+        assert_eq!(entry["changed"], true);
+        assert_eq!(entry["legacy_baseline"], false);
+        assert_eq!(entry["applied_version"], 1);
+        assert!(
+            entry["current_version"].is_number(),
+            "the corpus rule carries a version: {entry}"
+        );
     }
 
     /// BUG B: `POST /api/projects/:id/rule-drift/:rule_id/accept` baselines the rule
     /// to the current corpus hash so a subsequent drift check no longer reports it.
+    /// The seeded baseline is a LEGACY (unprefixed) hash, so this also proves accept
+    /// re-baselines it to the current format.
     #[tokio::test]
     async fn accept_rule_drift_clears_the_drift() {
         let Some((rule_id, current_hash)) = any_corpus_rule().await else {
@@ -23351,7 +30147,10 @@ mod tests {
             return;
         };
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
-        let p = state.projects.create("Drift", vec!["me/api".to_string()]).unwrap();
+        let p = state
+            .projects
+            .create("Drift", vec!["me/api".to_string()])
+            .unwrap();
         state.projects.update(&p.id, |proj| {
             proj.ruleset.selections.push(crate::project::RuleSelection {
                 rule_id: rule_id.clone(),
@@ -23359,20 +30158,25 @@ mod tests {
                 repos: vec!["me/api".to_string()],
                 applied_hash: Some("stale-baseline-hash".to_string()),
                 applied_directive: Some("old".to_string()),
+                applied_version: None,
             });
         });
         let app = router(state.clone());
 
-        // Pre-condition: the rule is drifted.
+        // Pre-condition: the legacy baseline is reported (as unknown), not as in sync.
         let pre = compute_rule_drift(&state, Some(&p.id)).await;
-        assert_eq!(pre.len(), 1, "drifted before accept");
+        assert_eq!(pre.len(), 1, "reported before accept");
+        assert!(pre[0]["changed"].is_null(), "legacy is unknown: {pre:?}");
 
         // Accept the update.
         let resp = app
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri(format!("/api/projects/{}/rule-drift/{}/accept", p.id, rule_id))
+                    .uri(format!(
+                        "/api/projects/{}/rule-drift/{}/accept",
+                        p.id, rule_id
+                    ))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -23391,10 +30195,558 @@ mod tests {
             .find(|s| s.rule_id == rule_id)
             .expect("selection persisted");
         assert_eq!(sel.applied_hash.as_deref(), Some(current_hash.as_str()));
+        assert!(
+            current_hash.starts_with(camerata_rules::RULE_HASH_PREFIX),
+            "re-baselined to the current format: {current_hash}"
+        );
+        assert!(
+            sel.applied_version.is_some(),
+            "accept stores the rule's version beside the hash"
+        );
 
         // Post-condition: a fresh drift computation no longer reports the rule.
         let post = compute_rule_drift(&state, Some(&p.id)).await;
         assert!(post.is_empty(), "accept cleared the drift; got {post:?}");
+    }
+
+    // ── /api/updates/check payload (the network-free part of the handler) ────────
+
+    #[tokio::test]
+    async fn updates_payload_carries_app_rule_drift_and_corpus_freshness() {
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        let payload =
+            updates_payload(&state, serde_json::json!({ "update_available": false })).await;
+
+        assert_eq!(payload["ok"], true);
+        assert_eq!(payload["app"]["update_available"], false);
+        assert!(payload["rule_drift"].is_array(), "{payload}");
+        // The bundled corpus + watermark are present in a checkout, so freshness is reported;
+        // when they are not (a packaged binary), it must be an explicit null, never absent.
+        assert!(
+            payload.get("corpus_freshness").is_some(),
+            "the key is always present: {payload}"
+        );
+        let cf = &payload["corpus_freshness"];
+        if !cf.is_null() {
+            assert!(cf["overdue"].is_array(), "{cf}");
+            assert!(cf["due_soon"].is_array(), "{cf}");
+            assert!(cf["never_confirmed_count"].is_number(), "{cf}");
+        }
+    }
+
+    // ── Drift detection: content hash, legacy baselines, versions ────────────────
+
+    /// A one-rule synthetic corpus whose single option carries `directive`, so a test can
+    /// change ONLY an option and keep id/title/summary/enforcement identical: exactly the
+    /// change the old id/title/summary/enforcement fingerprint could not see.
+    fn drift_corpus(directive: &str, version: Option<u32>) -> camerata_rules::RuleSet {
+        let mut rule = camerata_rules::bare_rule("DRIFT-FIX-1", "universal");
+        rule.title = "Drift fixture".to_string();
+        rule.version = version;
+        rule.default_option = Some("only".to_string());
+        rule.options = vec![camerata_rules::RuleOption {
+            id: "only".to_string(),
+            label: "The only option".to_string(),
+            directive: directive.to_string(),
+            why: "Fixture.".to_string(),
+            remediation: None,
+            finding_headline: None,
+            finding_detail: None,
+            escalation: None,
+            effort: None,
+            violates: false,
+        }];
+        let mut set = camerata_rules::RuleSet::default();
+        set.push(rule);
+        set
+    }
+
+    fn corpus_rule(set: &camerata_rules::RuleSet) -> &camerata_rules::Rule {
+        set.get_by_id("DRIFT-FIX-1").expect("fixture rule")
+    }
+
+    /// A project holding one selection of `DRIFT-FIX-1` with the given baseline.
+    fn project_with_baseline(
+        hash: Option<&str>,
+        applied_version: Option<u32>,
+    ) -> crate::project::Project {
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        let p = state
+            .projects
+            .create("Drift", vec!["me/api".to_string()])
+            .unwrap();
+        state
+            .projects
+            .update(&p.id, |proj| {
+                proj.ruleset.selections.push(crate::project::RuleSelection {
+                    rule_id: "DRIFT-FIX-1".to_string(),
+                    chosen_option: None,
+                    repos: vec!["me/api".to_string()],
+                    applied_hash: hash.map(str::to_string),
+                    applied_directive: Some("the directive as baselined".to_string()),
+                    applied_version,
+                });
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn drift_verdict_classifies_in_sync_changed_legacy_and_removed() {
+        let set = drift_corpus("Do the thing.", Some(1));
+        let rule = corpus_rule(&set);
+        let current = rule.content_hash();
+
+        assert_eq!(
+            drift_verdict(&current, Some(rule)),
+            DriftVerdict::InSync,
+            "a baseline equal to the current hash is in sync"
+        );
+        assert_eq!(
+            drift_verdict(&format!("sha256:{}", "0".repeat(64)), Some(rule)),
+            DriftVerdict::Changed
+        );
+        // The old fingerprint: 16 hex chars, no prefix. NOT comparable, so NOT "changed".
+        assert_eq!(
+            drift_verdict("00ff00ff00ff00ff", Some(rule)),
+            DriftVerdict::Legacy
+        );
+        assert_eq!(
+            drift_verdict("stale-baseline-hash", Some(rule)),
+            DriftVerdict::Legacy
+        );
+        assert_eq!(drift_verdict("", Some(rule)), DriftVerdict::Legacy);
+        // A removed rule is removed whatever its stored hash looks like.
+        assert_eq!(drift_verdict(&current, None), DriftVerdict::Removed);
+        assert_eq!(
+            drift_verdict("00ff00ff00ff00ff", None),
+            DriftVerdict::Removed
+        );
+    }
+
+    /// The first defect: the old hash covered id/title/summary/enforcement only, so a changed
+    /// option or directive never showed as drift.
+    #[test]
+    fn a_changed_option_directive_is_reported_as_drift() {
+        let before = drift_corpus("Do the thing the old way.", Some(1));
+        let baseline = corpus_rule(&before).content_hash();
+        let project = project_with_baseline(Some(&baseline), Some(1));
+
+        // Same rule, same title/summary/enforcement; ONLY the option's directive moved.
+        let after = drift_corpus("Do the thing the new way.", Some(2));
+        let drift = drift_for_projects(std::slice::from_ref(&project), None, &after);
+
+        assert_eq!(drift.len(), 1, "the changed directive must be reported");
+        assert_eq!(drift[0]["changed"], true);
+        assert_eq!(drift[0]["legacy_baseline"], false);
+        assert_eq!(drift[0]["corpus_directive"], "Do the thing the new way.");
+        assert_eq!(drift[0]["applied_directive"], "the directive as baselined");
+
+        // And a baseline that matches the corpus reports nothing.
+        let in_sync = drift_for_projects(&[project], None, &before);
+        assert!(in_sync.is_empty(), "{in_sync:?}");
+    }
+
+    /// The second defect: an upgrade must not report every applied rule as changed.
+    #[test]
+    fn a_legacy_baseline_is_reported_as_unknown_never_as_changed() {
+        let set = drift_corpus("Do the thing.", Some(3));
+        let project = project_with_baseline(Some("00ff00ff00ff00ff"), None);
+        let drift = drift_for_projects(&[project], None, &set);
+
+        assert_eq!(drift.len(), 1, "the legacy baseline is surfaced: {drift:?}");
+        let entry = &drift[0];
+        assert!(
+            entry["changed"].is_null(),
+            "legacy must be `changed: null`, never true or false: {entry}"
+        );
+        assert_eq!(entry["legacy_baseline"], true);
+        assert!(entry["applied_version"].is_null());
+        assert_eq!(entry["current_version"], 3);
+        assert_eq!(entry["corpus_directive"], "Do the thing.");
+    }
+
+    #[test]
+    fn drift_entries_carry_applied_and_current_version() {
+        let before = drift_corpus("Old.", Some(2));
+        let baseline = corpus_rule(&before).content_hash();
+        let project = project_with_baseline(Some(&baseline), Some(2));
+        let after = drift_corpus("New.", Some(4));
+
+        let drift = drift_for_projects(&[project], None, &after);
+        assert_eq!(drift[0]["applied_version"], 2);
+        assert_eq!(drift[0]["current_version"], 4);
+    }
+
+    #[test]
+    fn drift_versions_are_null_when_unknown() {
+        let before = drift_corpus("Old.", None);
+        let baseline = corpus_rule(&before).content_hash();
+        // Baselined before versions existed (`None`), against a rule that is still unversioned.
+        let project = project_with_baseline(Some(&baseline), None);
+        let after = drift_corpus("New.", None);
+
+        let drift = drift_for_projects(&[project], None, &after);
+        assert!(drift[0]["applied_version"].is_null());
+        assert!(drift[0]["current_version"].is_null());
+    }
+
+    #[test]
+    fn a_removed_rule_is_reported_changed_even_with_a_legacy_hash() {
+        let empty = camerata_rules::RuleSet::default();
+        let project = project_with_baseline(Some("00ff00ff00ff00ff"), Some(1));
+        let drift = drift_for_projects(&[project], None, &empty);
+
+        assert_eq!(drift.len(), 1);
+        assert_eq!(drift[0]["changed"], true, "removal is a definite change");
+        assert_eq!(drift[0]["legacy_baseline"], false);
+        assert_eq!(drift[0]["corpus_directive"], "(removed from corpus)");
+        assert!(drift[0]["current_version"].is_null());
+        assert_eq!(drift[0]["applied_version"], 1);
+    }
+
+    #[test]
+    fn a_selection_that_was_never_baselined_is_not_reported() {
+        let set = drift_corpus("Do the thing.", Some(1));
+        let project = project_with_baseline(None, None);
+        assert!(drift_for_projects(&[project], None, &set).is_empty());
+    }
+
+    #[test]
+    fn the_project_filter_scopes_drift_to_one_project() {
+        let set = drift_corpus("Do the thing.", Some(1));
+        let a = project_with_baseline(Some("00ff00ff00ff00ff"), None);
+        // Each helper call builds its own store, so both projects get the same first id.
+        let mut b = project_with_baseline(Some("00ff00ff00ff00ff"), None);
+        b.id = "proj-other".to_string();
+        assert_ne!(a.id, b.id);
+        let only_a = drift_for_projects(&[a.clone(), b.clone()], Some(&a.id), &set);
+        assert_eq!(only_a.len(), 1);
+        assert_eq!(only_a[0]["project_id"], a.id.as_str());
+        assert_eq!(
+            drift_for_projects(&[a, b], None, &set).len(),
+            2,
+            "no filter scans every project"
+        );
+    }
+
+    // ── Drift baseline at APPLY time ──────────────────────────────────────────────
+    //
+    // Defect: the baseline (`applied_hash` / `applied_version` / `applied_directive`) was only
+    // ever written by `accept_rule_drift`, so a freshly applied rule had NONE and could never
+    // report drift; and `upsert_base_rules` replaced the lists wholesale, erasing any baseline
+    // on re-apply. Semantics fixed here: APPLYING a rule means accepting the corpus as it
+    // stands (the apply emits the current directive into the repos), so every apply
+    // (re)baselines against the current corpus; any save that is NOT an apply (an import, an
+    // override edit, the onboarding "complete") keeps an existing baseline and only fills a
+    // missing one.
+
+    /// The active project of `state`, after a `save_armed_to_project` call.
+    fn applied_project(state: &AppState) -> crate::project::Project {
+        state.projects.active().expect("a project exists")
+    }
+
+    #[test]
+    fn a_freshly_applied_rule_shows_drift_after_an_upstream_change() {
+        let before = drift_corpus("Do the thing the old way.", Some(1));
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        save_armed_to_project(
+            &state,
+            &[arm_rule("DRIFT-FIX-1", "repo-local", &["me/api"])],
+            &[],
+            Some(&before),
+        );
+
+        let sel = &applied_project(&state).ruleset.selections[0];
+        let rule = corpus_rule(&before);
+        assert_eq!(
+            sel.applied_hash.as_deref(),
+            Some(rule.content_hash().as_str())
+        );
+        assert_eq!(sel.applied_version, Some(1));
+        assert_eq!(
+            sel.applied_directive.as_deref(),
+            Some("Do the thing the old way.")
+        );
+
+        // Nothing changed upstream yet: in sync.
+        let projects = state.projects.list();
+        assert!(drift_for_projects(&projects, None, &before).is_empty());
+
+        // The corpus moves: the applied rule now reports drift (this was silently empty).
+        let after = drift_corpus("Do the thing the new way.", Some(2));
+        let drift = drift_for_projects(&projects, None, &after);
+        assert_eq!(drift.len(), 1, "{drift:?}");
+        assert_eq!(drift[0]["changed"], true);
+        assert_eq!(drift[0]["applied_version"], 1);
+        assert_eq!(drift[0]["current_version"], 2);
+    }
+
+    #[test]
+    fn apply_baselines_cross_repo_and_process_selections_too() {
+        let set = drift_corpus("Do the thing.", Some(4));
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        save_armed_to_project(
+            &state,
+            &[
+                arm_rule("DRIFT-FIX-1", "cross-repo", &["me/api", "me/web"]),
+                arm_rule("DRIFT-FIX-1", "process", &["me/api"]),
+            ],
+            &[],
+            Some(&set),
+        );
+        let p = applied_project(&state);
+        let hash = corpus_rule(&set).content_hash();
+        assert_eq!(
+            p.ruleset.cross_repo[0].applied_hash.as_deref(),
+            Some(hash.as_str())
+        );
+        assert_eq!(
+            p.ruleset.process[0].applied_hash.as_deref(),
+            Some(hash.as_str())
+        );
+        assert_eq!(p.ruleset.process[0].applied_version, Some(4));
+    }
+
+    #[test]
+    fn a_rule_the_corpus_does_not_know_is_left_unbaselined() {
+        let set = drift_corpus("Do the thing.", Some(1));
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        save_armed_to_project(
+            &state,
+            &[arm_rule("GATE-ONLY-1", "repo-local", &["me/api"])],
+            &[],
+            Some(&set),
+        );
+        let sel = &applied_project(&state).ruleset.selections[0];
+        assert!(sel.applied_hash.is_none() && sel.applied_version.is_none());
+    }
+
+    #[test]
+    fn re_applying_re_baselines_to_the_current_corpus() {
+        let before = drift_corpus("Old.", Some(1));
+        let after = drift_corpus("New.", Some(2));
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        let rules = [arm_rule("DRIFT-FIX-1", "repo-local", &["me/api"])];
+
+        save_armed_to_project(&state, &rules, &[], Some(&before));
+        assert_eq!(
+            drift_for_projects(&state.projects.list(), None, &after).len(),
+            1,
+            "drifted after the upstream change"
+        );
+
+        // Re-apply against the new corpus: the emitted directive is now v2, so the baseline
+        // follows it and the drift is cleared (exactly what accept_rule_drift would do).
+        save_armed_to_project(&state, &rules, &[], Some(&after));
+        let sel = &applied_project(&state).ruleset.selections[0];
+        assert_eq!(sel.applied_version, Some(2));
+        assert_eq!(sel.applied_directive.as_deref(), Some("New."));
+        assert!(drift_for_projects(&state.projects.list(), None, &after).is_empty());
+    }
+
+    #[test]
+    fn re_applying_without_a_corpus_keeps_the_existing_baseline() {
+        let before = drift_corpus("Old.", Some(1));
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        let rules = [arm_rule("DRIFT-FIX-1", "repo-local", &["me/api"])];
+        save_armed_to_project(&state, &rules, &[], Some(&before));
+        let baselined = applied_project(&state).ruleset.selections[0].clone();
+
+        // Corpus unavailable at re-apply time: the baseline must survive, not be erased.
+        save_armed_to_project(&state, &rules, &[], None);
+        assert_eq!(applied_project(&state).ruleset.selections[0], baselined);
+    }
+
+    #[test]
+    fn saving_other_selections_keeps_an_untouched_selections_baseline() {
+        let before = drift_corpus("Old.", Some(1));
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        save_armed_to_project(
+            &state,
+            &[arm_rule("DRIFT-FIX-1", "repo-local", &["me/api"])],
+            &[],
+            Some(&before),
+        );
+        let baselined = applied_project(&state).ruleset.selections[0].clone();
+        let pid = applied_project(&state).id;
+
+        // An unrelated edit that resends the selections WITHOUT their baseline fields (an
+        // import / a client that does not round-trip them) plus a brand-new rule.
+        state.projects.update(&pid, |p| {
+            p.upsert_base_rules(
+                vec![
+                    crate::project::RuleSelection {
+                        rule_id: "DRIFT-FIX-1".to_string(),
+                        chosen_option: None,
+                        repos: vec!["me/api".to_string()],
+                        ..Default::default()
+                    },
+                    crate::project::RuleSelection {
+                        rule_id: "OTHER-1".to_string(),
+                        repos: vec!["me/api".to_string()],
+                        ..Default::default()
+                    },
+                ],
+                Vec::new(),
+                Vec::new(),
+            );
+        });
+        let p = applied_project(&state);
+        assert_eq!(p.ruleset.selections[0], baselined, "baseline carried over");
+        assert!(
+            p.ruleset.selections[1].applied_hash.is_none(),
+            "the new, never-applied rule is not given a baseline by an upsert"
+        );
+
+        // ...and the preserved baseline still detects upstream drift.
+        let after = drift_corpus("New.", Some(2));
+        assert_eq!(drift_for_projects(&[p], None, &after).len(), 1);
+    }
+
+    #[test]
+    fn a_changed_chosen_option_is_a_new_decision_and_does_not_inherit_the_old_baseline() {
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        let p = state
+            .projects
+            .create("P", vec!["me/api".to_string()])
+            .unwrap();
+        state.projects.update(&p.id, |proj| {
+            proj.ruleset.selections.push(crate::project::RuleSelection {
+                rule_id: "DRIFT-FIX-1".to_string(),
+                chosen_option: Some("a".to_string()),
+                repos: vec!["me/api".to_string()],
+                applied_hash: Some("sha256:abc".to_string()),
+                applied_directive: Some("A".to_string()),
+                applied_version: Some(1),
+            });
+            proj.upsert_base_rules(
+                vec![crate::project::RuleSelection {
+                    rule_id: "DRIFT-FIX-1".to_string(),
+                    chosen_option: Some("b".to_string()),
+                    repos: vec!["me/api".to_string()],
+                    ..Default::default()
+                }],
+                Vec::new(),
+                Vec::new(),
+            );
+        });
+        let sel = &state.projects.get(&p.id).unwrap().ruleset.selections[0];
+        assert!(sel.applied_hash.is_none() && sel.applied_directive.is_none());
+    }
+
+    #[test]
+    fn legacy_and_unbaselined_selections_still_report_as_before() {
+        let set = drift_corpus("Do the thing.", Some(3));
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        let p = state
+            .projects
+            .create("P", vec!["me/api".to_string()])
+            .unwrap();
+        // One legacy-hash selection, one never-baselined selection.
+        state.projects.update(&p.id, |proj| {
+            proj.ruleset.selections = vec![
+                crate::project::RuleSelection {
+                    rule_id: "DRIFT-FIX-1".to_string(),
+                    repos: vec!["me/api".to_string()],
+                    applied_hash: Some("00ff00ff00ff00ff".to_string()),
+                    ..Default::default()
+                },
+                crate::project::RuleSelection {
+                    rule_id: "UNBASELINED-1".to_string(),
+                    repos: vec!["me/api".to_string()],
+                    ..Default::default()
+                },
+            ];
+        });
+        let before_save = drift_for_projects(&state.projects.list(), None, &set);
+        assert_eq!(before_save.len(), 1, "legacy surfaced, unbaselined silent");
+        assert_eq!(before_save[0]["legacy_baseline"], true);
+
+        // A non-apply save (resending the same selections) must not rewrite the legacy
+        // baseline or conjure one for the unbaselined rule that the corpus does not know.
+        state.projects.update(&p.id, |proj| {
+            let same = proj.ruleset.selections.clone();
+            proj.upsert_base_rules(same, Vec::new(), Vec::new());
+        });
+        let after_save = drift_for_projects(&state.projects.list(), None, &set);
+        assert_eq!(after_save, before_save);
+        let sels = state.projects.get(&p.id).unwrap().ruleset.selections;
+        assert_eq!(sels[0].applied_hash.as_deref(), Some("00ff00ff00ff00ff"));
+        assert!(sels[1].applied_hash.is_none());
+    }
+
+    #[test]
+    fn baseline_missing_fills_only_unbaselined_selections_from_the_corpus() {
+        let set = drift_corpus("Do the thing.", Some(2));
+        let mut sels = vec![
+            crate::project::RuleSelection {
+                rule_id: "DRIFT-FIX-1".to_string(),
+                ..Default::default()
+            },
+            crate::project::RuleSelection {
+                rule_id: "DRIFT-FIX-1".to_string(),
+                applied_hash: Some("00ff00ff00ff00ff".to_string()),
+                ..Default::default()
+            },
+            crate::project::RuleSelection {
+                rule_id: "NOT-IN-CORPUS-1".to_string(),
+                ..Default::default()
+            },
+        ];
+        baseline_missing(&mut sels, Some(&set));
+        assert_eq!(
+            sels[0].applied_hash.as_deref(),
+            Some(corpus_rule(&set).content_hash().as_str())
+        );
+        assert_eq!(
+            sels[1].applied_hash.as_deref(),
+            Some("00ff00ff00ff00ff"),
+            "an existing (even legacy) baseline is never overwritten by a non-apply save"
+        );
+        assert!(sels[2].applied_hash.is_none());
+        baseline_missing(&mut sels, None); // no corpus: a no-op, never a panic
+    }
+
+    #[test]
+    fn baselining_stores_hash_version_and_directive_and_clears_a_legacy_baseline() {
+        let set = drift_corpus("Do the thing.", Some(5));
+        let rule = corpus_rule(&set);
+        let mut sel = crate::project::RuleSelection {
+            rule_id: "DRIFT-FIX-1".to_string(),
+            applied_hash: Some("00ff00ff00ff00ff".to_string()), // legacy
+            applied_directive: Some("stale".to_string()),
+            applied_version: Some(1),
+            ..Default::default()
+        };
+
+        baseline_selection(&mut sel, rule);
+
+        assert_eq!(
+            sel.applied_hash.as_deref(),
+            Some(rule.content_hash().as_str())
+        );
+        assert_eq!(sel.applied_version, Some(5));
+        assert_eq!(sel.applied_directive.as_deref(), Some("Do the thing."));
+        assert_eq!(
+            drift_verdict(sel.applied_hash.as_deref().unwrap(), Some(rule)),
+            DriftVerdict::InSync,
+            "a freshly baselined selection is in sync"
+        );
+    }
+
+    #[test]
+    fn baselining_an_unversioned_rule_clears_a_stale_applied_version() {
+        let set = drift_corpus("Do the thing.", None);
+        let mut sel = crate::project::RuleSelection {
+            rule_id: "DRIFT-FIX-1".to_string(),
+            applied_version: Some(9),
+            ..Default::default()
+        };
+        baseline_selection(&mut sel, corpus_rule(&set));
+        assert_eq!(
+            sel.applied_version, None,
+            "a version recorded for a rule that no longer has one would be a lie"
+        );
     }
 
     /// BUG C: `set_repo_rule_override` (the repo-level route the fixed client now
@@ -23402,7 +30754,10 @@ mod tests {
     #[tokio::test]
     async fn set_repo_rule_override_reads_chosen_option_and_scopes_to_repo() {
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
-        let p = state.projects.create("RepoOverride", vec!["me/api".to_string()]).unwrap();
+        let p = state
+            .projects
+            .create("RepoOverride", vec!["me/api".to_string()])
+            .unwrap();
         let app = router(state.clone());
 
         let resp = app
@@ -23411,7 +30766,10 @@ mod tests {
                     .method("POST")
                     // `owner/repo` is percent-encoded into one path segment; axum's
                     // Path extractor decodes `%2F` back to `/` (see the UoW-id test).
-                    .uri(format!("/api/projects/{}/repos/me%2Fapi/rules/RUST-FMT-1", p.id))
+                    .uri(format!(
+                        "/api/projects/{}/repos/me%2Fapi/rules/RUST-FMT-1",
+                        p.id
+                    ))
                     .header("content-type", "application/json")
                     .body(Body::from(r#"{"chosen_option":"b"}"#))
                     .unwrap(),
@@ -23446,7 +30804,7 @@ mod tests {
 
         // Pure sentinel → the project's single repo.
         assert_eq!(
-            normalize_repos(&[sentinel.clone()], &project_repos),
+            normalize_repos(std::slice::from_ref(&sentinel), &project_repos),
             vec!["me/api".to_string()]
         );
 
@@ -23459,7 +30817,7 @@ mod tests {
         // Multi-repo project: the sentinel expands to ALL of the project's repos.
         let multi = vec!["me/api".to_string(), "me/web".to_string()];
         assert_eq!(
-            normalize_repos(&[sentinel.clone()], &multi),
+            normalize_repos(std::slice::from_ref(&sentinel), &multi),
             vec!["me/api".to_string(), "me/web".to_string()]
         );
 
@@ -23546,7 +30904,11 @@ mod tests {
 
     // ── `GET /api/onboard/finding-context` (finding-code-context feature) ──────────
 
-    fn finding_context_state_with_fixture(repo: &str, rel_path: &str, content: &str) -> (AppState, tempfile::TempDir) {
+    fn finding_context_state_with_fixture(
+        repo: &str,
+        rel_path: &str,
+        content: &str,
+    ) -> (AppState, tempfile::TempDir) {
         let tmp = tempfile::tempdir().unwrap();
         let full = tmp.path().join(rel_path);
         std::fs::create_dir_all(full.parent().unwrap()).unwrap();
@@ -23555,6 +30917,11 @@ mod tests {
         state
             .settings
             .set_repo_path(repo, Some(tmp.path().to_string_lossy().into_owned()));
+        // The shared code resolver only reads repos a project owns.
+        state
+            .projects
+            .create("Finding context fixture", vec![repo.to_string()])
+            .expect("project");
         (state, tmp)
     }
 
@@ -23591,7 +30958,8 @@ mod tests {
     /// A `../../etc/passwd`-style traversal in `path` is refused with 400, never a read.
     #[tokio::test]
     async fn finding_context_refuses_path_traversal() {
-        let (state, _tmp) = finding_context_state_with_fixture("me/api", "src/lib.rs", "fn f() {}\n");
+        let (state, _tmp) =
+            finding_context_state_with_fixture("me/api", "src/lib.rs", "fn f() {}\n");
         let app = router(state);
         let resp = app
             .oneshot(
@@ -23674,9 +31042,11 @@ mod tests {
 
     // ── `GET /api/onboard/finding-fix` (recommended-fix-in-modal feature) ──────────
 
-    /// A rule with a real corpus entry + adopted default option's directive returns that
-    /// directive verbatim — the SAME string `resolve_fix` (and therefore the PDF's "Fix:"
-    /// line and the xlsx "Recommended Fix" column) would produce for the same rule id.
+    /// A rule with a real corpus entry + adopted default option's AUTHORED `remediation`
+    /// returns that text (placeholder tokens filled with the readable generic, since this
+    /// endpoint has no specific finding to substitute from) — the SAME string `resolve_fix`
+    /// (and therefore the PDF's "Fix:" line and the xlsx "Recommended Fix" column) would
+    /// produce for the same rule id + a default `Finding`.
     #[tokio::test]
     async fn finding_fix_returns_resolve_fix_output_for_a_known_rule() {
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
@@ -23684,7 +31054,7 @@ mod tests {
         let resp = app
             .oneshot(
                 Request::builder()
-                    .uri("/api/onboard/finding-fix?rule_id=SEC-NO-UNSAFE-DESERIALIZATION-1")
+                    .uri("/api/onboard/finding-fix?rule_id=SUPABASE-RLS-ENABLED-1")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -23695,16 +31065,21 @@ mod tests {
         let corpus_path = camerata_rules::corpus_path();
         let (corpus, _errs) = camerata_rules::load_corpus_lenient(&corpus_path).await;
         let expected = crate::report_export::resolve_fix(
-            "SEC-NO-UNSAFE-DESERIALIZATION-1",
+            "SUPABASE-RLS-ENABLED-1",
             Some(&corpus),
+            &crate::onboard::Finding::default(),
+            None,
         );
-        assert!(!expected.is_empty(), "fixture rule must have a real corpus directive");
-        assert_eq!(json["fix"], expected);
+        assert!(
+            expected.is_some(),
+            "fixture rule must have authored remediation"
+        );
+        assert_eq!(json["fix"], expected.unwrap());
     }
 
-    /// A rule id absent from the corpus returns an EMPTY fix — never a fabricated sentence.
+    /// A rule id absent from the corpus returns a NULL fix — never a fabricated sentence.
     #[tokio::test]
-    async fn finding_fix_is_empty_for_an_unknown_rule() {
+    async fn finding_fix_is_null_for_an_unknown_rule() {
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
         let app = router(state);
         let resp = app
@@ -23718,6 +31093,390 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let json = body_json(resp).await;
-        assert_eq!(json["fix"], "");
+        assert_eq!(json["fix"], serde_json::Value::Null);
+    }
+
+    /// A rule id WITH a real corpus entry but no authored `remediation` also returns a NULL
+    /// fix — never falls back to the rule's `directive` (the detection-recipe leak Fix 1
+    /// closed). Pins the fail-safe at the API layer, not just in `resolve_fix` directly.
+    ///
+    /// `onboard_finding_fix` always resolves against the REAL on-disk bundled corpus (via
+    /// `camerata_rules::corpus_path()` / `load_corpus_lenient`) — it has no seam to inject a
+    /// test corpus, and every real corpus rule's default option now has authored `remediation`
+    /// (the corpus-wide authoring passes closed that gap), so no real rule id can demonstrate
+    /// the unauthored path through the live route anymore. Rather than mutate the
+    /// process-global `CAMERATA_CORPUS_PATH` env var here (which would race every other test in
+    /// this binary that expects the real bundled corpus, since Rust runs unit tests in parallel
+    /// threads within one process) or teach the handler to accept an injected `RuleSet` (out of
+    /// scope for this fix), this test exercises the EXACT contract the handler implements —
+    /// `Json(json!({ "fix": resolve_fix(...) }))` — directly, against the synthetic
+    /// `ruleset_with_unauthored_rule` corpus. That keeps the assertion (JSON `null`, never the
+    /// directive text) permanently decoupled from corpus authoring state.
+    #[test]
+    fn finding_fix_is_null_when_remediation_is_unauthored() {
+        let corpus = camerata_rules::ruleset_with_unauthored_rule("SEC-TEST-UNAUTHORED-1");
+        let fix = crate::report_export::resolve_fix(
+            "SEC-TEST-UNAUTHORED-1",
+            Some(&corpus),
+            &crate::onboard::Finding::default(),
+            None,
+        );
+        let json = serde_json::json!({ "fix": fix });
+        assert_eq!(json["fix"], serde_json::Value::Null);
+    }
+
+    // ── Silent-death-class fix: the background job panic/failure guard ─────────────
+
+    #[tokio::test]
+    async fn panic_guard_fails_the_job_when_the_body_panics() {
+        // Stand in for the audit body panicking (a hung subprocess turning into an
+        // unwrap, an indexing bug, whatever) BEFORE it reaches its own `jobs.fail` /
+        // `jobs.finish` call. Without the guard, this job would stay `running` forever.
+        let jobs = crate::jobs::JobStore::new();
+        let jid = jobs.create("audit", None);
+        run_job_body_with_panic_guard(&jobs, &jid, async {
+            panic!("boom: simulated AI pipeline crash");
+        })
+        .await;
+        let job = jobs.get(&jid).expect("job exists");
+        assert_eq!(
+            job.status, "failed",
+            "a panicking body must not leave the job running"
+        );
+        let msg = job.message.expect("a failure message must be set");
+        assert!(msg.contains("crashed unexpectedly"), "message: {msg}");
+        assert!(
+            msg.contains("boom: simulated AI pipeline crash"),
+            "message: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn panic_guard_does_not_clobber_a_clean_finish() {
+        // When the body reaches its own `jobs.finish` normally, the guard must be a
+        // total no-op — it must never overwrite a successful result.
+        let jobs = crate::jobs::JobStore::new();
+        let jid = jobs.create("audit", None);
+        let (body_jobs, body_jid) = (jobs.clone(), jid.clone());
+        run_job_body_with_panic_guard(&jobs, &jid, async move {
+            body_jobs.finish(&body_jid, crate::onboard::ScanReport::gated(&[]));
+        })
+        .await;
+        let job = jobs.get(&jid).expect("job exists");
+        assert_eq!(
+            job.status, "done",
+            "the guard must not touch a job the body already finished"
+        );
+    }
+
+    #[tokio::test]
+    async fn panic_guard_does_not_clobber_a_bodys_own_fail_message() {
+        // When the body reaches its own `jobs.fail` (e.g. "no repos to audit") normally,
+        // the guard must not overwrite that specific message with its generic one.
+        let jobs = crate::jobs::JobStore::new();
+        let jid = jobs.create("audit", None);
+        let (body_jobs, body_jid) = (jobs.clone(), jid.clone());
+        run_job_body_with_panic_guard(&jobs, &jid, async move {
+            body_jobs.fail(&body_jid, "No local repos to audit.");
+        })
+        .await;
+        let job = jobs.get(&jid).expect("job exists");
+        assert_eq!(job.status, "failed");
+        assert_eq!(job.message.as_deref(), Some("No local repos to audit."));
+    }
+
+    #[test]
+    fn panic_message_extracts_str_and_string_payloads_with_generic_fallback() {
+        let payload: Box<dyn std::any::Any + Send> = Box::new("literal panic message");
+        assert_eq!(panic_message(&payload), "literal panic message");
+        let payload: Box<dyn std::any::Any + Send> = Box::new(String::from("owned panic message"));
+        assert_eq!(panic_message(&payload), "owned panic message");
+        // A non-string payload (a custom panic type) still produces a usable message
+        // rather than failing to report one at all.
+        let payload: Box<dyn std::any::Any + Send> = Box::new(42i32);
+        assert_eq!(panic_message(&payload), "no panic message available");
+    }
+
+    /// Regression guard for the exact footgun `panic_message`'s signature was designed to
+    /// avoid: a caught panic's payload MUST downcast successfully through this function
+    /// when called the natural way (`panic_message(&caught)`), not just when manually
+    /// dereferenced first. A prior version of this function took `&(dyn Any + Send)` and
+    /// looked correct, compiled, and ran without erroring — but silently reported EVERY
+    /// panic as "no panic message available", because `Box<dyn Any + Send>` itself
+    /// satisfies `Any`'s blanket impl: `&caught` coerced by unsizing the Box (as if the Box
+    /// were the payload) rather than dereferencing into it. This test exercises the actual
+    /// `catch_unwind` path (not a hand-built `Box::new(...)`) so a regression back to that
+    /// signature would be caught here even though it type-checks.
+    #[tokio::test]
+    async fn panic_message_recovers_the_real_text_from_an_actual_caught_panic() {
+        use futures::FutureExt;
+        let caught = std::panic::AssertUnwindSafe(async {
+            panic!("this exact text must survive catch_unwind intact");
+        })
+        .catch_unwind()
+        .await
+        .expect_err("the async block panics");
+        assert_eq!(
+            panic_message(&caught),
+            "this exact text must survive catch_unwind intact"
+        );
+    }
+
+    /// A background scan whose pipeline crashes must never present as a silent, blank,
+    /// zero-findings result — it renders through the same `ai_error` banner path as any
+    /// other AI-review failure (see `ScanReport::crashed`'s doc comment).
+    #[test]
+    fn scan_report_crashed_is_shaped_like_an_ai_error_never_a_clean_empty_scan() {
+        let repos = vec!["me/api".to_string()];
+        let report = crate::onboard::ScanReport::crashed(&repos, "boom".to_string());
+        assert_eq!(report.repos, repos);
+        assert!(
+            !report.gated,
+            "must not be mistaken for the GitHub-connect gate"
+        );
+        assert!(
+            !report.blocked,
+            "must not be mistaken for the compliance block"
+        );
+        assert_eq!(report.ai_error.as_deref(), Some("boom"));
+        assert_eq!(report.message.as_deref(), Some("boom"));
+        assert!(report.findings.is_empty());
+    }
+
+    // ── req_w13: the corpus-load failures production used to throw away ──────────────────
+    //
+    // Every production corpus load was `let (corpus, _errs) = load_corpus_lenient(..)` or
+    // `.await.0`. A rule file with a typo'd enum value failed to parse, left the corpus, and
+    // nothing reported it: not the ledger, not the coverage sheet, not `camerata
+    // integrity-gate`, not a log line. These tests cover the PLUMBING half (the loader keeps
+    // the errors and the recording helper routes them); the end-to-end proof over a real scan
+    // is `tests/corpus_load_failure_e2e.rs`, and the gate/ledger halves live in
+    // `integrity_gate.rs` / `scan_ledger.rs`.
+
+    /// A synthetic corpus directory: `good` real rule files copied verbatim out of the bundled
+    /// corpus, plus one real rule file whose `enforcement` value has been TYPO'D so it no
+    /// longer parses. Returns the temp dir (keep it alive) — nothing global is mutated, because
+    /// `split_scannable_rules_from` / `load_corpus_for_scan` take the path as a parameter.
+    ///
+    /// Copied rather than hand-written on purpose: a hand-written "rule" proves the loader
+    /// rejects a file the real corpus never contains. Taking a REAL file and breaking ONE
+    /// character reproduces the actual reported shape.
+    fn synthetic_corpus_with_one_malformed_rule(
+        good: &[&str],
+        malformed: &str,
+    ) -> Option<tempfile::TempDir> {
+        let real = camerata_rules::corpus_path();
+        if !real.exists() {
+            return None;
+        }
+        let find = |rule_id: &str| -> Option<(String, String)> {
+            let mut stack = vec![real.clone()];
+            while let Some(dir) = stack.pop() {
+                for entry in std::fs::read_dir(&dir).ok()?.flatten() {
+                    let p = entry.path();
+                    if p.is_dir() {
+                        stack.push(p);
+                    } else if p.extension().is_some_and(|e| e == "toml") {
+                        let body = std::fs::read_to_string(&p).ok()?;
+                        if body.contains(&format!("id = \"{rule_id}\"")) {
+                            let name = p.file_name()?.to_str()?.to_string();
+                            return Some((name, body));
+                        }
+                    }
+                }
+            }
+            None
+        };
+
+        let dir = tempfile::TempDir::new().ok()?;
+        for id in good {
+            let (name, body) = find(id)?;
+            std::fs::write(dir.path().join(name), body).ok()?;
+        }
+        let (name, body) = find(malformed)?;
+        // THE PLANTED DEFECT: a typo'd enum value, exactly the reported shape. `enforcement`
+        // deserializes into an enum, so an unknown variant is a TOML deserialize error and the
+        // whole file is skipped by `load_corpus_lenient`.
+        let broken = body
+            .replacen(
+                "enforcement = \"architectural\"",
+                "enforcement = \"architectual\"",
+                1,
+            )
+            .replacen(
+                "enforcement = \"mechanical\"",
+                "enforcement = \"mechanicle\"",
+                1,
+            )
+            .replacen("enforcement = \"prose\"", "enforcement = \"proze\"", 1)
+            .replacen(
+                "enforcement = \"structured\"",
+                "enforcement = \"structered\"",
+                1,
+            );
+        assert_ne!(
+            broken, body,
+            "the fixture builder must actually have broken something — a malformed-corpus test \
+             over an intact file would pass vacuously"
+        );
+        std::fs::write(dir.path().join(name), broken).ok()?;
+        Some(dir)
+    }
+
+    /// req_w13: `load_corpus_for_scan` keeps what `load_corpus_lenient`'s callers discarded.
+    /// The good rules still load (so one bad file does NOT fail a whole client scan — the
+    /// explicit non-goal: we are not switching production to the strict loader), and the bad
+    /// one comes back as a named failure instead of vanishing.
+    #[tokio::test]
+    async fn req_w13_the_scan_corpus_loader_keeps_the_errors_instead_of_discarding_them() {
+        let Some(dir) = synthetic_corpus_with_one_malformed_rule(
+            &["SEC-NO-RAW-SQL-CONCAT-1", "SEC-NO-HARDCODED-SECRETS-1"],
+            "SUPABASE-RLS-ENABLED-1",
+        ) else {
+            eprintln!("corpus unavailable; skipping req_w13 corpus-loader test");
+            return;
+        };
+
+        let (corpus, failures) = load_corpus_for_scan(dir.path()).await;
+        let corpus = corpus.expect("the directory exists, so a RuleSet must come back");
+
+        // Lenient, still: the two intact rules loaded.
+        assert!(corpus.get_by_id("SEC-NO-RAW-SQL-CONCAT-1").is_some());
+        assert!(corpus.get_by_id("SEC-NO-HARDCODED-SECRETS-1").is_some());
+        // THE DEFECT: the malformed rule is gone from the corpus.
+        assert!(
+            corpus.get_by_id("SUPABASE-RLS-ENABLED-1").is_none(),
+            "precondition: a file that does not parse really does leave the corpus"
+        );
+        // THE FIX: and it is now REPORTED rather than silently absent.
+        assert_eq!(failures.len(), 1, "{failures:#?}");
+        assert_eq!(failures[0].rule_id, "SUPABASE-RLS-ENABLED-1");
+        assert!(
+            failures[0].path.ends_with("supabase-rls-enabled-1.toml"),
+            "the operator-facing path must name the actual file: {:?}",
+            failures[0].path
+        );
+        assert!(
+            !failures[0].error.is_empty(),
+            "the parser's own message must survive, for the operator log"
+        );
+    }
+
+    /// req_w13: the same thing through the function the SCAN path actually calls. Before the
+    /// fix `split_scannable_rules` returned a 4-tuple whose corpus came from
+    /// `load_corpus_lenient(..).await.0`, so this information had no channel at all.
+    #[tokio::test]
+    async fn req_w13_the_scan_rule_split_reports_corpus_load_failures_to_its_caller() {
+        let Some(dir) = synthetic_corpus_with_one_malformed_rule(
+            &["SEC-NO-RAW-SQL-CONCAT-1"],
+            "SUPABASE-RLS-ENABLED-1",
+        ) else {
+            eprintln!("corpus unavailable; skipping req_w13 rule-split test");
+            return;
+        };
+        let selected = vec![crate::onboard::SelectedRule {
+            id: "SEC-NO-RAW-SQL-CONCAT-1".to_string(),
+            directive: "no raw SQL built by string concatenation".to_string(),
+            repos: Vec::new(),
+        }];
+
+        let (_scannable, _excluded, _preview, corpus, load_failures) =
+            split_scannable_rules_from(dir.path(), selected).await;
+
+        assert!(corpus.is_some(), "the partition still gets its corpus");
+        assert_eq!(
+            load_failures
+                .iter()
+                .map(|f| f.rule_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["SUPABASE-RLS-ENABLED-1"],
+            "the scan path's own loader must hand the failures to its caller"
+        );
+    }
+
+    /// req_w13: `record_corpus_load_failures` routes each failure to all four destinations, and
+    /// keeps the operator detail (path, parser message) OUT of the ledger's client-facing
+    /// `skip_reason` while keeping it available on the internal coverage note.
+    #[test]
+    fn req_w13_recording_a_failure_discloses_it_without_leaking_operator_detail_to_the_client() {
+        // `ScanReport` has no public `Default`/`empty`; `gated` is simply the cheapest
+        // constructor that yields a report with a fresh `ScanLedger` and empty
+        // `coverage_notes`, which is all this test reads. Nothing here asserts over the
+        // gated-ness itself.
+        let mut report = crate::onboard::ScanReport::gated(&["me/api".to_string()]);
+        let failures = vec![CorpusLoadFailure {
+            rule_id: "SUPABASE-RLS-ENABLED-1".to_string(),
+            path: std::path::PathBuf::from("/Users/someone/corpus/supabase/rls/x.toml"),
+            error: "TOML parse error in x.toml: unknown variant `architectual`".to_string(),
+        }];
+
+        record_corpus_load_failures(&mut report, &failures);
+
+        // 1. the ledger
+        let entry = report
+            .ledger
+            .rule("SUPABASE-RLS-ENABLED-1")
+            .expect("the ledger must record it");
+        assert!(!entry.ran);
+        assert_eq!(
+            entry.skip_reason.as_deref(),
+            Some(crate::scan_ledger::CORPUS_LOAD_FAILED_REASON)
+        );
+
+        // 2. the gate
+        let verdict = crate::integrity_gate::evaluate(
+            &report.ledger,
+            &crate::integrity_gate::IntegrityGateOptions::smoke(),
+        );
+        assert!(
+            verdict
+                .failures
+                .iter()
+                .any(|f| f.code == "corpus_load_failure"),
+            "{:#?}",
+            verdict.failures
+        );
+
+        // 3. the client line, via the coverage-note channel
+        assert_eq!(report.coverage_notes.len(), 1);
+        assert_eq!(report.coverage_notes[0].tool, RULE_CORPUS_COVERAGE_TOOL);
+
+        // 4. the operator detail: on the note (UI + ledger), never in the ledger's reason.
+        let note = &report.coverage_notes[0].message;
+        assert!(
+            note.contains("/Users/someone/corpus/supabase/rls/x.toml")
+                && note.contains("architectual"),
+            "the operator must be able to find the file and the parse error: {note}"
+        );
+        let reason = entry.skip_reason.clone().unwrap_or_default();
+        assert!(
+            !reason.contains("/Users/someone") && !reason.contains("architectual"),
+            "the client-facing reason must carry NEITHER the path nor the parser text: {reason}"
+        );
+    }
+
+    /// req_w13: the rule id for an unparseable file comes from its STEM, because the id
+    /// declared inside the file is unreadable by definition. The one error shape that is not a
+    /// per-file parse failure (the recursive walk itself failing, which reports the corpus
+    /// DIRECTORY) gets an explicit sentinel rather than a directory name dressed up as a rule.
+    #[test]
+    fn req_w13_the_rule_id_for_an_unparseable_file_comes_from_its_stem() {
+        use std::path::Path;
+        assert_eq!(
+            rule_id_from_corpus_path(Path::new("/c/supabase/rls/supabase-rls-enabled-1.toml")),
+            "SUPABASE-RLS-ENABLED-1"
+        );
+        assert_eq!(
+            rule_id_from_corpus_path(Path::new("/c/universal/SEC-NO-RAW-SQL-CONCAT-1.TOML")),
+            "SEC-NO-RAW-SQL-CONCAT-1",
+            "the extension check is case-insensitive"
+        );
+        for not_a_rule_file in ["/c/principles", "/c/principles/api-layer", "/c/notes.md"] {
+            assert_eq!(
+                rule_id_from_corpus_path(Path::new(not_a_rule_file)),
+                "RULE-CORPUS",
+                "a non-`.toml` path must not be dressed up as a rule id ({not_a_rule_file})"
+            );
+        }
     }
 }

@@ -388,9 +388,9 @@ async fn insert_pasteboard_text() {
 /// verbatim rather than interpreted as script.  Pure, so it is unit-testable.
 #[cfg(any(target_os = "macos", test))]
 fn js_insert_text_stmt(text: &str) -> Option<String> {
-    serde_json::to_string(text)
-        .ok()
-        .map(|literal| format!("document.execCommand('insertText', false, {literal}); return true;"))
+    serde_json::to_string(text).ok().map(|literal| {
+        format!("document.execCommand('insertText', false, {literal}); return true;")
+    })
 }
 
 #[cfg(test)]
@@ -402,7 +402,10 @@ mod tests {
         let stmt = js_insert_text_stmt("line1\n\"quoted\" 'single'").expect("encodes");
         // The JSON literal keeps the newline escaped and the double quotes
         // backslash-escaped, so the statement stays a single valid JS string.
-        assert!(stmt.contains(r#""line1\n\"quoted\" 'single'""#), "stmt = {stmt}");
+        assert!(
+            stmt.contains(r#""line1\n\"quoted\" 'single'""#),
+            "stmt = {stmt}"
+        );
         assert!(stmt.starts_with("document.execCommand('insertText', false, "));
     }
 
@@ -434,6 +437,7 @@ mod tests {
     fn bridge_only_reacts_to_plain_cmd() {
         // Cmd+Shift-V / Cmd+Alt-anything are OTHER shortcuts; the bridge must
         // not swallow them.
-        assert!(CLIPBOARD_BRIDGE_JS.contains("if (!e.metaKey || e.ctrlKey || e.altKey || e.shiftKey) return;"));
+        assert!(CLIPBOARD_BRIDGE_JS
+            .contains("if (!e.metaKey || e.ctrlKey || e.altKey || e.shiftKey) return;"));
     }
 }

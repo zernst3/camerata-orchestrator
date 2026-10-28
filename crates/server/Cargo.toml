@@ -27,11 +27,17 @@ camerata-api-types = { path = "../api-types" }
 # `model_registry`, `rate_limit`, and `usage_ledger` modules are now re-export shims
 # over this crate so every existing `crate::X` call site keeps resolving unchanged.
 camerata-llm = { path = "../llm" }
+# The one secret-shape detector + redactor (construction-time finding redaction, the model-prompt
+# choke point, the export release gate). Leaf crate, no camerata deps.
+camerata-secrets = { path = "../secrets" }
 axum = { version = "0.7", features = ["ws"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "signal", "time", "process", "io-util"] }
 tower = "0.5"
 serde = { workspace = true }
-serde_json = { workspace = true }
+# `preserve_order` is load-bearing: the CSV exports derive their column order from the JSON rows'
+# key order (`xlsx_export::json_array_to_csv`), so without it columns come out alphabetical.
+# It was previously enabled only by accident, through feature unification with another crate.
+serde_json = { workspace = true, features = ["preserve_order"] }
 anyhow = { workspace = true }
 futures = { workspace = true }
 # Object-safe async trait for the escalation translation-driver seam (issue #43), so the
@@ -106,15 +112,14 @@ camerata-persistence = { path = "../persistence" }
 camerata-orchestrator-core = { path = "../orchestrator" }
 # RAII temp-dir cleanup for per-run scaffold dirs and session dirs (ARCH-RESOURCE-LIFECYCLE-1).
 tempfile = "3"
-# OS-keychain credential storage for app-wide secrets (OpenRouter key, GitHub token).
-# Uses macOS Keychain / Windows Credential Manager / libsecret on Linux.
-keyring = "3"
 # Glob pattern matching for the ApiAgentDriver's in-process Glob tool executor.
 glob = "0.3"
 # Regex for the ApiAgentDriver's in-process Grep tool executor (same version as gateway).
 regex = "1"
 rust_xlsxwriter = "0.96.0"
 zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
+csv = "1"
+sha2 = { workspace = true }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
@@ -122,7 +127,16 @@ http-body-util = "0.1"
 # test-util gives start_paused so the run executor's sleeps resolve instantly in tests.
 tokio = { workspace = true, features = ["macros", "rt", "time", "test-util"] }
 tempfile = "3"
-# Serializes the handful of tests that toggle the global CAMERATA_LIVE_BUILD env var to
-# "1" (BUG B rerun-investigation coverage), mirroring `camerata-ui`'s identical
-# `#[serial(bff_env)]` use for its own global-env-var tests.
+# Process-global env vars (CAMERATA_LIVE_BUILD, ANTHROPIC_API_KEY, CAMERATA_GITHUB_TOKEN, the
+# dep-audit / semgrep opt-outs, the report brand vars, CAMERATA_CORPUS_PATH ...) are mutated by
+# tests via `camerata_test_env::EnvGuard` (restore-on-drop) and serialized with the ONE
+# workspace-wide key `#[serial_test::serial(process_env)]`, applied to every test that mutates
+# one of them AND every test whose code under test reads one. See crates/test-env for the
+# mechanism and the discipline test that enforces it.
 serial_test = "3"
+camerata-test-env = { path = "../test-env" }
+# C4-R3: real PDF text extraction so the compile_pdf tests can assert on what a reader (or a
+# copy-paste / grep workflow) actually sees in the rendered artifact, not just that compilation
+# succeeded — the draft-banner-doubling and zero-width-space bugs this cycle fixes are both
+# invisible to a "starts with %PDF" smoke check.
+pdf-extract = "0.12"

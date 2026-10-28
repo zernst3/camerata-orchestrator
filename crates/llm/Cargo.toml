@@ -31,5 +31,29 @@ async-trait = { workspace = true }
 # chat-completions + model-discovery endpoints. Same version/features as the server.
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 # OS-keychain credential storage (macOS Keychain / Windows Credential Manager /
-# libsecret) for the `KeyringCredentialStore`. Same version as the server used.
-keyring = "3"
+# Secret Service) for the `KeyringCredentialStore`. The version lives in the workspace table.
+# The base entry below enables NO backend; each platform's REAL store is switched on in its
+# own target table so a platform only pulls its own backend. Without one of these keyring 3
+# falls back to a non-persistent MOCK store and saved credentials silently vanish.
+keyring = { workspace = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { workspace = true, features = ["apple-native"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+keyring = { workspace = true, features = ["windows-native"] }
+
+# Linux: Secret Service (GNOME Keyring / KWallet) over D-Bus. `crypto-rust` avoids an OpenSSL
+# system dependency and `vendored` builds libdbus from source, so CI and dev machines need no
+# libdbus-1-dev.
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { workspace = true, features = ["sync-secret-service", "crypto-rust", "vendored"] }
+
+[dev-dependencies]
+# Mock Anthropic /v1/models server for the pagination tests (same version as the other crates).
+wiremock = "0.6"
+tokio = { workspace = true, features = ["macros", "rt"] }
+# Env-mutating tests (PATH / CAMERATA_* overrides) use EnvGuard (restore-on-drop) and the
+# workspace-wide `#[serial_test::serial(process_env)]` key; see crates/test-env.
+serial_test = "3"
+camerata-test-env = { path = "../test-env" }

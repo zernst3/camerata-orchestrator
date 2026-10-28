@@ -1,9 +1,11 @@
 id = "UI-CONSENT-GATED-1"
+version = 1
 title = "No client-side storage or third-party trackers initialize without explicit consent"
-tag = "stack"
 domain = "ui"
 layer = "universal"
 enforcement = "structured"
+kind = "default_with_exceptions"
+inspectable = true
 default = true
 verification = "grounded"
 
@@ -13,29 +15,35 @@ title = "European Data Protection Board — Guidelines 05/2020 on consent under 
 
 [decision]
 question = "What position does the project take on: No client-side storage or third-party trackers initialize without explicit consent?"
-default = "no-client-side-storage-or-third-party-trackers-i"
+default = "no-client-side-storage-or-third-party-trackers-without-consent"
 why = "GDPR and the ICO's equal-weight consent rules require opt-in for non-essential storage and tracking. A single tracker firing before consent is a compliance violation, not a UX paper cut. Forcing the consent check at the storage and initialization site, rather than at the page level, keeps the rule unambiguous, reviewable, and resistant to drift as components move across the codebase. Initializing trackers globally and relying on opt-out is a compliance violation under GDPR and the ICO's equal-weight consent rules; regulators do not accept 'we let users turn it off' as a substitute for opt-in. Checking consent at the page or route level forces every page to re-implement the check, and trackers loaded in shared components, layouts, or third-party widgets silently bypass the check. Delaying consent checks to a load-event handler runs after the tracker has already fetched its script and made its first beacon, so the violation has already happened by the time the check fires."
 
 [[option]]
-id = "no-client-side-storage-or-third-party-trackers-i"
+id = "no-client-side-storage-or-third-party-trackers-without-consent"
 label = "No client-side storage or third-party trackers initialize without explicit consent"
 directive = "No client-side cookies, localStorage, sessionStorage, IndexedDB writes, or third-party analytics or tracking scripts initialize without a runtime consent check gated by the category the user agreed to. Necessary-category storage (auth session, preference for the consent banner itself) is the only exception, and is documented as such. New trackers require a Privacy Policy update and a consent-category update in the same change."
+remediation = """
+Add a runtime consent check gated on the specific category the user agreed to, in front of every cookie write, localStorage/sessionStorage/IndexedDB write, and third-party analytics or tracking script initialization, moving the check to before the script is fetched rather than inside its load handler. Remove any page-level-only consent check that lets a component or shared layout mount a tracker unchecked. Verify by loading the page without granting consent and confirming no non-necessary storage write or tracker request fires.
+"""
 why = "GDPR and the ICO's equal-weight consent rules require opt-in for non-essential storage and tracking."
 
 [[option]]
 id = "third-party-analytics-and-tracking-scripts-initi"
+violates = true
 label = "Trackers initialize by default with opt-out"
 directive = "third-party analytics and tracking scripts initialize on every page by default, and the user is offered an opt-out control rather than an opt-in consent gate"
 why = "Opt-out is a compliance violation under GDPR and the ICO's equal-weight consent rules; regulators do not accept 'we let users turn it off' as a substitute for opt-in."
 
 [[option]]
 id = "consent-is-checked-once-at-the-page-or-route-lev"
+violates = true
 label = "Consent checked once at page/route level"
 directive = "consent is checked once at the page or route level, and any tracker mounted inside a component or shared layout under that page initializes without further check"
 why = "Page-level consent checks force every page to re-implement the check, and trackers loaded in shared components, layouts, or third-party widgets silently bypass the check."
 
 [[option]]
 id = "consent-checks-run-inside-a-load-event-handler-t"
+violates = true
 label = "Consent check fires after tracker already loaded"
 directive = "consent checks run inside a load-event handler that fires after the tracker's script has already been fetched and made its first beacon"
 why = "A load-event handler fires after the tracker has already fetched its script and made its first beacon, so the compliance violation has already occurred by the time the check runs."

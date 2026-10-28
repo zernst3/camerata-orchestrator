@@ -1,9 +1,18 @@
 id = "JAVASCRIPT-NEST-MODULES-PROVIDERS-DI-1"
+version = 1
 title = "Use NestJS modules and dependency injection to organize and inject services"
-tag = "stack"
 domain = "javascript:nest"
 layer = "framework"
 enforcement = "structured"
+kind = "decision"
+inspectable = true
+# Deviation-ceiling escape hatch, INHERITED from ARCH-SERVICE-DI-1: severity must describe the
+# PROBLEM, not which rule happened to fire. Without this, a repo on this stack caps the identical
+# architectural defect at medium while an unmirrored stack reaches high under the general rule.
+# This rule mirrors ARCH-SERVICE-DI-1 because it re-litigates the same question: dependencies
+# arrive through the framework's module/provider DI container rather than being constructed or
+# looked up inline.
+deviation_ceiling = "high"
 default = true
 verification = "grounded"
 
@@ -24,6 +33,9 @@ why = "NestJS is built on dependency injection (DI). A service is a class decora
 id = "modules-providers-di"
 label = "Use NestJS modules and dependency injection"
 directive = "Services are decorated with @Injectable() and declared as providers in a module. Controllers and services receive dependencies via constructor injection. The NestJS DI container manages instantiation and injection. Testing uses NestJS's Test.createTestingModule() to configure a DI container for the test."
+remediation = """
+Decorate the manually-instantiated service with @Injectable(), declare it as a provider in its module, and have consumers receive it via constructor injection instead of calling `new` or reading a static property. Verify by confirming the service can be resolved from the module's testing setup (Test.createTestingModule) rather than being constructed directly.
+"""
 why = "DI makes services composable, testable, and easy to wire together."
 
 [[option]]

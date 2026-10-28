@@ -8,7 +8,8 @@
 //! decoupled from the request.
 //!
 //! In-memory and ephemeral (like the transcript store): a job lives for the app session. The
-//! findings accumulated while running are a RAW preview (pre-final-dedup/calibration); the
+//! findings accumulated while running are a RAW preview (pre-final-dedup/calibration, but already
+//! severity-bounded: see `JobStore::add_findings`); the
 //! `report` set on completion is the authoritative result the UI switches to.
 
 use std::collections::HashMap;
@@ -18,6 +19,8 @@ use std::sync::{Arc, Mutex};
 use serde::Serialize;
 
 use camerata_liveness::LivenessTracker;
+
+use camerata_rules::RuleSet;
 
 use crate::onboard::{Finding, ScanReport};
 
@@ -29,6 +32,10 @@ pub struct JobMeta {
     pub tracker: LivenessTracker,
     /// Set to `true` when a cancel has been requested; checked by the job worker.
     pub cancel_requested: Arc<std::sync::atomic::AtomicBool>,
+    /// The rule corpus the job's scan runs against, registered by the scan (see
+    /// [`JobStore::set_preview_corpus`]) so the live preview can apply the same severity
+    /// bounds the final report will. Released when the job ends.
+    pub preview_corpus: Option<Arc<RuleSet>>,
 }
 
 /// The lifecycle status of one deterministic scan tool, mirroring how the AI passes stream
@@ -148,6 +155,7 @@ impl JobStore {
             // LivenessTracker::new() initialises to current wall clock (not stalled).
             tracker: LivenessTracker::new(),
             cancel_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            preview_corpus: None,
         };
         if let Ok(mut m) = self.job_meta.lock() {
             m.insert(id.clone(), meta);
@@ -167,7 +175,12 @@ impl JobStore {
     /// `det_tool_done`, and the streaming scan-tool path (per stdout line and per mtime
     /// advance) so idle time stays low while a tool is actively running.
     pub(crate) fn touch_activity(&self, id: &str) {
-        if let Some(meta) = self.job_meta.lock().unwrap().get(id) {
+        if let Some(meta) = self
+            .job_meta
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(id)
+        {
             meta.tracker.tick();
         }
     }
@@ -183,9 +196,47 @@ impl JobStore {
         self.with(id, |j| j.done += n);
     }
 
+    /// Register (or, with `None`, clear) the rule corpus the job's scan runs against. From then
+    /// on [`Self::add_findings`] bounds every streamed finding by the corpus's authored severity
+    /// bounds. The scan calls this once, at the top of `audit_repos`, where its corpus is in
+    /// scope; no streaming call site has to carry the corpus itself. Released when the job
+    /// finishes, fails or is cancelled.
+    pub fn set_preview_corpus(&self, id: &str, corpus: Option<&RuleSet>) {
+        if let Ok(mut m) = self.job_meta.lock() {
+            if let Some(meta) = m.get_mut(id) {
+                meta.preview_corpus = corpus.map(|c| Arc::new(c.clone()));
+            }
+        }
+    }
+
+    /// The corpus registered for `id`, if any (see [`Self::set_preview_corpus`]).
+    pub(crate) fn preview_corpus_for(&self, id: &str) -> Option<Arc<RuleSet>> {
+        self.job_meta
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(id)
+            .and_then(|m| m.preview_corpus.clone())
+    }
+
     /// Append findings discovered by a pass (live preview).
-    pub fn add_findings(&self, id: &str, findings: Vec<Finding>) {
+    ///
+    /// The preview is RAW in that it precedes the final dedup and calibration, but it is never
+    /// UNBOUNDED: every finding is run through the same severity chain as the final report
+    /// ([`crate::severity_bounds::apply_scan_severity_bounds`]: floor, C4-R1, ceilings) before it
+    /// is stored, so a finding cannot flash a severity above its rule's `max_severity` and then
+    /// drop when the report lands. With no corpus registered for the job, the bounds that need
+    /// none (the deviation ceiling's default, C4-R1) still apply, as in a scan that ran without
+    /// one. The streamed `kind` is whatever the producer had assigned by now, so a bound that
+    /// needs a kind (the floor, the deviation ceiling) applies only once the producer set it.
+    pub fn add_findings(&self, id: &str, mut findings: Vec<Finding>) {
+        let corpus = self.preview_corpus_for(id);
+        crate::severity_bounds::apply_scan_severity_bounds(&mut findings, corpus.as_deref());
         self.with(id, |j| j.findings.extend(findings));
+    }
+
+    /// Release the job's registered corpus: it is only needed while findings are streaming.
+    fn release_preview_corpus(&self, id: &str) {
+        self.set_preview_corpus(id, None);
     }
 
     /// Register a deterministic tool that is about to run (status `starting`), growing the
@@ -271,8 +322,14 @@ impl JobStore {
     /// Request cancellation of a job by setting its cancel flag. The background worker is
     /// expected to check `is_cancel_requested` periodically and stop early.
     pub fn request_cancel(&self, id: &str) {
-        if let Some(meta) = self.job_meta.lock().unwrap().get(id) {
-            meta.cancel_requested.store(true, std::sync::atomic::Ordering::SeqCst);
+        if let Some(meta) = self
+            .job_meta
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(id)
+        {
+            meta.cancel_requested
+                .store(true, std::sync::atomic::Ordering::SeqCst);
         }
     }
 
@@ -280,7 +337,7 @@ impl JobStore {
     pub fn is_cancel_requested(&self, id: &str) -> bool {
         self.job_meta
             .lock()
-            .unwrap()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(id)
             .map(|m| m.cancel_requested.load(std::sync::atomic::Ordering::SeqCst))
             .unwrap_or(false)
@@ -295,7 +352,7 @@ impl JobStore {
     pub fn idle_ms(&self, id: &str, now_ms: u128) -> Option<u128> {
         self.job_meta
             .lock()
-            .unwrap()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(id)
             .map(|m| u128::from(m.tracker.idle_ms(now_ms.try_into().unwrap_or(u64::MAX))))
     }
@@ -306,6 +363,7 @@ impl JobStore {
         self.with(id, |job| {
             job.status = "cancelled".to_string();
         });
+        self.release_preview_corpus(id);
     }
 
     /// Finish the job with the authoritative report.
@@ -321,10 +379,11 @@ impl JobStore {
             j.status = "done".to_string();
             j.report = Some(report);
             j.batch_id = None; // batch completed — id no longer informative
-            // ROUTES-5: stamp completion time so latest_deep_report can pick the newest
-            // deep report within a project deterministically (not by HashMap order).
+                               // ROUTES-5: stamp completion time so latest_deep_report can pick the newest
+                               // deep report within a project deterministically (not by HashMap order).
             j.completed_at_ms = Some(now_ms);
         });
+        self.release_preview_corpus(id);
     }
 
     /// Fail the job with a reason.
@@ -339,6 +398,7 @@ impl JobStore {
             j.status = "failed".to_string();
             j.message = Some(message.into());
         });
+        self.release_preview_corpus(id);
     }
 
     /// Snapshot a job's state (None for an unknown id).
@@ -373,6 +433,46 @@ impl JobStore {
             .map(|(_, deep)| deep)
     }
 
+    /// Whether a scan job that could be touching `project_id`'s repos is still `running`. A job
+    /// created with no active project (`project_id == None`) might be scanning ANY repo, so it
+    /// counts for every project: source deletion errs toward refusing, never toward removing a
+    /// checkout out from under a live scan.
+    #[must_use]
+    pub fn has_running_for_project(&self, project_id: &str) -> bool {
+        self.inner.lock().is_ok_and(|g| {
+            g.values().any(|j| {
+                j.status == "running"
+                    && j.project_id
+                        .as_deref()
+                        .is_none_or(|owner| owner == project_id)
+            })
+        })
+    }
+
+    /// Drop every FINISHED (`done`, `failed` or `cancelled`) job of `project_id`, with its
+    /// bookkeeping; returns how many were dropped. A finished job holds its report and streamed
+    /// findings in memory, i.e. client code excerpts; running jobs are left alone.
+    pub fn remove_finished_for_project(&self, project_id: &str) -> usize {
+        let Ok(mut jobs) = self.inner.lock() else {
+            return 0;
+        };
+        let doomed: Vec<String> = jobs
+            .iter()
+            .filter(|(_, j)| j.status != "running" && j.project_id.as_deref() == Some(project_id))
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in &doomed {
+            jobs.remove(id);
+        }
+        drop(jobs);
+        if let Ok(mut meta) = self.job_meta.lock() {
+            for id in &doomed {
+                meta.remove(id);
+            }
+        }
+        doomed.len()
+    }
+
     /// Test-only: force a job's completion timestamp so `latest_deep_report`'s "newest
     /// wins within a project" ordering can be exercised deterministically (two jobs finished
     /// in the same wall-clock millisecond would otherwise tie).
@@ -397,7 +497,9 @@ mod tests {
 
     fn finding(rule: &str) -> Finding {
         Finding {
+            could_be_intentional: false,
             repo: "me/api".into(),
+            kind: None,
             path: "src/x.rs".into(),
             line: 1,
             rule_id: rule.into(),
@@ -414,6 +516,11 @@ mod tests {
             effort: None,
             category: None,
             located: true,
+            captures: Default::default(),
+            evaluated_option_id: None,
+            also_locations: Vec::new(),
+            fix_specific: None,
+            calibration_rationale: None,
         }
     }
 
@@ -439,6 +546,126 @@ mod tests {
         let j = store.get(&id).unwrap();
         assert_eq!(j.status, "done");
         assert!(j.report.is_some());
+    }
+
+    /// A corpus with one rule that declares `max_severity = "low"`.
+    fn ceiling_corpus() -> RuleSet {
+        let mut rule = camerata_rules::bare_rule("CEIL-1", "test-fixture");
+        rule.max_severity = Some("low".to_string());
+        let mut set = RuleSet::default();
+        set.push(rule);
+        set
+    }
+
+    fn streamed_severities(store: &JobStore, id: &str) -> Vec<String> {
+        store
+            .get(id)
+            .unwrap()
+            .findings
+            .iter()
+            .map(|f| f.severity.clone())
+            .collect()
+    }
+
+    /// The live preview must never show a severity the finished scan cannot end with: a finding
+    /// whose rule declares a ceiling is clamped the moment it is streamed, not at the final
+    /// report. FAILS BEFORE THE FIX: `add_findings` stored the producer's severity verbatim, so
+    /// a `critical` flashed in the cockpit and then dropped to `low`.
+    #[test]
+    fn streamed_findings_never_exceed_a_declared_ceiling() {
+        let store = JobStore::new();
+        let id = store.create("audit", None);
+        store.set_preview_corpus(&id, Some(&ceiling_corpus()));
+
+        let mut critical = finding("CEIL-1");
+        critical.severity = "critical".into();
+        let unbounded = finding("OTHER-1"); // no rule, no bound: keeps its own severity
+        store.add_findings(&id, vec![critical, unbounded]);
+
+        assert_eq!(streamed_severities(&store, &id), vec!["low", "high"]);
+    }
+
+    /// Every path that streams a finding goes through `add_findings`, so the bound applies to
+    /// each of them without the call sites having to remember it.
+    #[test]
+    fn every_streamed_batch_is_bounded_not_just_the_first() {
+        let store = JobStore::new();
+        let id = store.create("audit", None);
+        store.set_preview_corpus(&id, Some(&ceiling_corpus()));
+        for _ in 0..3 {
+            let mut f = finding("CEIL-1");
+            f.severity = "critical".into();
+            store.add_findings(&id, vec![f]);
+        }
+        assert_eq!(streamed_severities(&store, &id), vec!["low", "low", "low"]);
+    }
+
+    /// The preview shows the same C4-R1 `info` for an unlocated finding as the final report.
+    #[test]
+    fn a_streamed_unlocated_finding_is_already_info() {
+        let store = JobStore::new();
+        let id = store.create("audit", None);
+        store.set_preview_corpus(&id, Some(&ceiling_corpus()));
+        let mut f = finding("OTHER-1");
+        f.path = String::new();
+        f.line = 0;
+        store.add_findings(&id, vec![f]);
+        assert_eq!(streamed_severities(&store, &id), vec!["info"]);
+    }
+
+    /// With no corpus registered the bounds that need no corpus (the deviation ceiling's
+    /// `medium` default, C4-R1) still apply, exactly as for a scan that ran without a corpus;
+    /// the per-rule ceiling, which needs the corpus, does not.
+    #[test]
+    fn with_no_corpus_registered_only_the_corpus_free_bounds_apply() {
+        let store = JobStore::new();
+        let id = store.create("audit", None);
+        let mut ceiling_rule = finding("CEIL-1");
+        ceiling_rule.severity = "critical".into();
+        let mut unlocated = finding("OTHER-1");
+        unlocated.path = String::new();
+        unlocated.line = 0;
+        store.add_findings(&id, vec![ceiling_rule, unlocated]);
+        assert_eq!(streamed_severities(&store, &id), vec!["critical", "info"]);
+    }
+
+    /// The corpus is per job and is released when the job ends, however it ends.
+    #[test]
+    fn the_preview_corpus_is_per_job_and_released_when_the_job_ends() {
+        let store = JobStore::new();
+        let a = store.create("audit", None);
+        let b = store.create("audit", None);
+        store.set_preview_corpus(&a, Some(&ceiling_corpus()));
+        assert!(store.preview_corpus_for(&a).is_some());
+        assert!(
+            store.preview_corpus_for(&b).is_none(),
+            "a corpus registered for one job must not bound another job's preview"
+        );
+
+        store.finish(&a, ScanReport::gated(&["me/api".to_string()]));
+        assert!(store.preview_corpus_for(&a).is_none(), "released on finish");
+
+        let failed = store.create("audit", None);
+        store.set_preview_corpus(&failed, Some(&ceiling_corpus()));
+        store.fail(&failed, "boom");
+        assert!(
+            store.preview_corpus_for(&failed).is_none(),
+            "released on fail"
+        );
+
+        let cancelled = store.create("audit", None);
+        store.set_preview_corpus(&cancelled, Some(&ceiling_corpus()));
+        store.cancel(&cancelled);
+        assert!(
+            store.preview_corpus_for(&cancelled).is_none(),
+            "released on cancel"
+        );
+
+        // Registering `None` clears an earlier registration.
+        let c = store.create("audit", None);
+        store.set_preview_corpus(&c, Some(&ceiling_corpus()));
+        store.set_preview_corpus(&c, None);
+        assert!(store.preview_corpus_for(&c).is_none());
     }
 
     #[test]
@@ -511,7 +738,10 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(v["deterministic"]["done"].as_u64(), Some(1));
         assert_eq!(v["deterministic"]["total"].as_u64(), Some(1));
-        assert_eq!(v["deterministic"]["tools"][0]["tool"].as_str(), Some("floor"));
+        assert_eq!(
+            v["deterministic"]["tools"][0]["tool"].as_str(),
+            Some("floor")
+        );
         assert_eq!(v["deterministic"]["tools"][0]["findings"].as_u64(), Some(2));
     }
 
@@ -559,14 +789,28 @@ mod tests {
         let a = store.create("audit", None);
         store.cancel(&a);
         store.finish(&a, ScanReport::gated(&["me/api".to_string()]));
-        assert_eq!(store.get(&a).unwrap().status, "cancelled", "finish must not clobber cancel");
-        assert!(store.get(&a).unwrap().report.is_none(), "no report written onto a cancelled job");
+        assert_eq!(
+            store.get(&a).unwrap().status,
+            "cancelled",
+            "finish must not clobber cancel"
+        );
+        assert!(
+            store.get(&a).unwrap().report.is_none(),
+            "no report written onto a cancelled job"
+        );
 
         let b = store.create("audit", None);
         store.cancel(&b);
         store.fail(&b, "late error");
-        assert_eq!(store.get(&b).unwrap().status, "cancelled", "fail must not clobber cancel");
-        assert!(store.get(&b).unwrap().message.is_none(), "no failure message onto a cancelled job");
+        assert_eq!(
+            store.get(&b).unwrap().status,
+            "cancelled",
+            "fail must not clobber cancel"
+        );
+        assert!(
+            store.get(&b).unwrap().message.is_none(),
+            "no failure message onto a cancelled job"
+        );
     }
 
     #[test]
@@ -593,7 +837,10 @@ mod tests {
             .as_millis();
         let idle = store.idle_ms(&id, after_ms).unwrap();
         // idle should be very small (just updated)
-        assert!(idle < after_ms - before_ms + 10, "idle should be near 0 after touch");
+        assert!(
+            idle < after_ms - before_ms + 10,
+            "idle should be near 0 after touch"
+        );
     }
 
     /// `declare_tools` pre-registers the full pipeline upfront so `total` reflects the true
@@ -742,5 +989,57 @@ mod tests {
             store.latest_deep_report("proj-a").unwrap().disclaimer,
             "deep-A"
         );
+    }
+
+    /// Source deletion must never pull a checkout out from under a live scan: a running job of
+    /// the project blocks it, and so does a running job of NO project (it might be scanning
+    /// anything). A finished job, or another project's job, does not.
+    #[test]
+    fn running_scan_blocks_only_its_own_project_or_an_unowned_job() {
+        let store = JobStore::new();
+        assert!(!store.has_running_for_project("proj-a"));
+
+        let mine = store.create("audit", Some("proj-a".to_string()));
+        assert!(store.has_running_for_project("proj-a"));
+        assert!(!store.has_running_for_project("proj-b"));
+
+        store.finish(&mine, ScanReport::gated(&["me/api".to_string()]));
+        assert!(!store.has_running_for_project("proj-a"), "finished");
+
+        let failed = store.create("audit", Some("proj-a".to_string()));
+        store.fail(&failed, "boom");
+        assert!(!store.has_running_for_project("proj-a"), "failed");
+
+        let unowned = store.create("audit", None);
+        assert!(store.has_running_for_project("proj-a"));
+        assert!(store.has_running_for_project("proj-b"));
+        store.cancel(&unowned);
+        assert!(!store.has_running_for_project("proj-a"), "cancelled");
+    }
+
+    #[test]
+    fn remove_finished_for_project_drops_finished_jobs_and_keeps_running_ones() {
+        let store = JobStore::new();
+        let done = store.create("audit", Some("proj-a".to_string()));
+        store.finish(&done, ScanReport::gated(&["me/api".to_string()]));
+        let failed = store.create("audit", Some("proj-a".to_string()));
+        store.fail(&failed, "boom");
+        let running = store.create("audit", Some("proj-a".to_string()));
+        let other = store.create("audit", Some("proj-b".to_string()));
+        store.finish(&other, ScanReport::gated(&["me/web".to_string()]));
+
+        assert_eq!(store.remove_finished_for_project("proj-a"), 2);
+
+        assert!(store.get(&done).is_none());
+        assert!(store.get(&failed).is_none());
+        assert!(
+            store.get(&running).is_some(),
+            "a running job is not dropped"
+        );
+        assert!(
+            store.get(&other).is_some(),
+            "another project's job survives"
+        );
+        assert_eq!(store.remove_finished_for_project("proj-a"), 0);
     }
 }

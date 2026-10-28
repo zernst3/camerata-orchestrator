@@ -272,7 +272,7 @@ impl RefinementReviewer for StubRefinementReviewer {
 /// Callers that want a different model should use
 /// [`ClaudeRefinementReviewer::with_model`]. The `CAMERATA_REVIEWER_MODEL`
 /// environment variable overrides this at runtime for CLI / one-off invocations.
-pub const DEFAULT_REVIEWER_MODEL: &str = "claude-sonnet-4-6";
+pub const DEFAULT_REVIEWER_MODEL: &str = "claude-sonnet-5";
 
 /// The REAL refinement reviewer: a headless `claude -p` call that reviews the
 /// session and returns the review JSON. Read-only and ungoverned (it plans, it
@@ -360,10 +360,7 @@ impl ClaudeRefinementReviewer {
     /// FIRST becomes the cwd + primary `--add-dir` (like [`Self::with_repo_dir`]); every other
     /// is added as its own read-only `--add-dir`, so review can scan ACROSS every repo.
     /// Builder-style. READ-ONLY — no write tools, no gateway. Empty input clears the binding.
-    pub fn with_repo_dirs(
-        mut self,
-        dirs: impl IntoIterator<Item = std::path::PathBuf>,
-    ) -> Self {
+    pub fn with_repo_dirs(mut self, dirs: impl IntoIterator<Item = std::path::PathBuf>) -> Self {
         let mut iter = dirs.into_iter();
         match iter.next() {
             Some(primary) => {
@@ -483,6 +480,8 @@ impl RefinementReviewer for ClaudeRefinementReviewer {
         // real codebase while reviewing, not just the inlined digest. No write path is added
         // (no write/exec tool is offered).
         let mut cmd = tokio::process::Command::new("claude");
+        // The subscription CLI must never inherit an API key from the parent's `.env`.
+        camerata_api_types::claude_cli::scrub_anthropic_key_env(cmd.as_std_mut());
         cmd.arg("-p")
             .arg(&prompt)
             .arg("--model")
@@ -672,7 +671,10 @@ mod tests {
     #[test]
     fn with_repo_dir_binds_the_repo_for_on_demand_read() {
         let rv = ClaudeRefinementReviewer::new().with_repo_dir("/tmp/repo");
-        assert_eq!(rv.repo_dir.as_deref(), Some(std::path::Path::new("/tmp/repo")));
+        assert_eq!(
+            rv.repo_dir.as_deref(),
+            Some(std::path::Path::new("/tmp/repo"))
+        );
         assert!(ClaudeRefinementReviewer::new().repo_dir.is_none());
     }
 
@@ -823,8 +825,7 @@ mod tests {
     fn prompt_injects_grounding_when_supplied() {
         let session = session_with_role_story(RefinementContext::PreBuild);
         let g = "=== PROJECT GROUNDING ===\nLanguages: Rust\n";
-        let prompt =
-            ClaudeRefinementReviewer::build_prompt(&session, &form_with_owner(), Some(g));
+        let prompt = ClaudeRefinementReviewer::build_prompt(&session, &form_with_owner(), Some(g));
         assert!(prompt.contains("PROJECT GROUNDING"));
         assert!(prompt.contains("Languages: Rust"));
         assert!(prompt.contains("STAFF LEAD ENGINEER"));

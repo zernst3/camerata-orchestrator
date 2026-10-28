@@ -16,8 +16,6 @@
 //! deterministic and isolated from the real bundled corpus. The arm-files + baseline pieces
 //! are pure functions driven with hand-built fixtures.
 
-use std::sync::Mutex;
-
 use camerata_server::arm::{arm_files_for_repo, existing_governance_files, ArmRule, GateRule};
 use camerata_server::effective_scan_modes;
 use camerata_server::project::{CustomRule, ProjectStore};
@@ -27,7 +25,8 @@ use camerata_server::suppression::{
 
 // `propose_corpus_rules` reads a process-global env var (`CAMERATA_CORPUS_PATH`) and the
 // corpus on disk. Serialize the env-mutating test so it never races a parallel test.
-static CORPUS_ENV_LOCK: Mutex<()> = Mutex::new(());
+// The env-mutating test carries `#[serial_test::serial(process_env)]`, so it never races a
+// parallel test and (unlike a std mutex guard) is safe to hold across its `.await`s.
 
 // ════════════════════════════════════════════════════════════════════════════════════
 // SCOPE 1 — Already-onboarded guard (#50)
@@ -137,9 +136,8 @@ fn scope2_each_flag_independently_gates_its_lane() {
 // ════════════════════════════════════════════════════════════════════════════════════
 
 #[tokio::test]
+#[serial_test::serial(process_env)]
 async fn scope3_propose_corpus_rules_returns_the_corpus_library() {
-    let _guard = CORPUS_ENV_LOCK.lock().unwrap();
-
     // Write a tiny, self-contained corpus so the proposal is deterministic + isolated from
     // the real bundled corpus. (Hermetic: local temp dir, no network.)
     let dir = tempfile::tempdir().unwrap();
@@ -166,7 +164,7 @@ directive = "Prefer explicit, robust code over terse code."
     )
     .unwrap();
 
-    std::env::set_var("CAMERATA_CORPUS_PATH", dir.path());
+    let _env = camerata_test_env::EnvGuard::set("CAMERATA_CORPUS_PATH", dir.path());
 
     // Repos with a `rust` stack: the rust rule is SUGGESTED (recommended + bound to the repo),
     // the universal rule is always present. With repos provided, the full library is returned
@@ -198,7 +196,6 @@ directive = "Prefer explicit, robust code over terse code."
     // No repos at all -> the WHOLE corpus library is still returned (un-suggested), which is
     // the handler's `corpus_rules` all-rules reference path. Same tiny corpus -> our 2 rules.
     let whole = camerata_server::onboard::propose_corpus_rules(&[]).await;
-    std::env::remove_var("CAMERATA_CORPUS_PATH");
     let whole_ids: Vec<&str> = whole.iter().map(|r| r.id.as_str()).collect();
     assert!(
         whole_ids.contains(&"RUST-DOMAIN-1") && whole_ids.contains(&"UNIVERSAL-1"),
@@ -253,10 +250,10 @@ fn scope3_apply_writes_the_expected_arm_files_set() {
 
     // The full expected arm-files set for this mix:
     for expected in [
-        "AGENTS.md",                          // prose + custom rules
-        "CONVENTIONS.md",                     // structured + mechanical rules
-        ".camerata/rules.json",               // the gate config (always, when rules exist)
-        ".camerata/checks.toml",              // CI-tier (mechanical) -> checks manifest
+        "AGENTS.md",                            // prose + custom rules
+        "CONVENTIONS.md",                       // structured + mechanical rules
+        ".camerata/rules.json",                 // the gate config (always, when rules exist)
+        ".camerata/checks.toml",                // CI-tier (mechanical) -> checks manifest
         ".github/workflows/camerata-gates.yml", // CI-tier -> generated workflow
     ] {
         assert!(
@@ -267,7 +264,10 @@ fn scope3_apply_writes_the_expected_arm_files_set() {
 
     // AGENTS.md carries the prose rule AND the custom rule.
     let agents = &files.iter().find(|(p, _)| p == "AGENTS.md").unwrap().1;
-    assert!(agents.contains("### PROSE-1"), "prose rule emitted into AGENTS.md");
+    assert!(
+        agents.contains("### PROSE-1"),
+        "prose rule emitted into AGENTS.md"
+    );
     assert!(
         agents.contains("CUSTOM-house-style"),
         "custom rule emitted into AGENTS.md"
@@ -277,10 +277,17 @@ fn scope3_apply_writes_the_expected_arm_files_set() {
     let conv = &files.iter().find(|(p, _)| p == "CONVENTIONS.md").unwrap().1;
     assert!(conv.contains("### STRUCT-1"));
     assert!(conv.contains("### MECH-1"));
-    assert!(!conv.contains("### PROSE-1"), "prose rules do NOT go in CONVENTIONS.md");
+    assert!(
+        !conv.contains("### PROSE-1"),
+        "prose rules do NOT go in CONVENTIONS.md"
+    );
 
     // .camerata/rules.json (the SELECTION PERSISTENCE: every applied rule id incl. custom).
-    let gate_json = &files.iter().find(|(p, _)| p == ".camerata/rules.json").unwrap().1;
+    let gate_json = &files
+        .iter()
+        .find(|(p, _)| p == ".camerata/rules.json")
+        .unwrap()
+        .1;
     let gate: Vec<GateRule> = serde_json::from_str(gate_json).unwrap();
     let gate_ids: Vec<&str> = gate.iter().map(|g| g.id.as_str()).collect();
     assert!(gate_ids.contains(&"PROSE-1"));
@@ -330,7 +337,10 @@ fn scope3_existing_governance_files_warns_before_clobbering() {
     ];
     let existing = existing_governance_files(dir.path(), &will_write);
 
-    assert!(existing.contains(&"AGENTS.md".to_string()), "AGENTS.md already exists");
+    assert!(
+        existing.contains(&"AGENTS.md".to_string()),
+        "AGENTS.md already exists"
+    );
     assert!(
         existing.contains(&".camerata/rules.json".to_string()),
         ".camerata/rules.json already exists"
@@ -387,7 +397,10 @@ fn scope3_active_findings_snapshot_into_baseline_and_suppress_on_reclassify() {
         Status::SuppressedBaseline,
         "a baselined finding is suppressed"
     );
-    assert_eq!(classify_one(&f2, &[], &baseline), Status::SuppressedBaseline);
+    assert_eq!(
+        classify_one(&f2, &[], &baseline),
+        Status::SuppressedBaseline
+    );
 
     // A NEW finding (not in the baseline) is ACTIVE -> the gate enforces on new code.
     let new_finding = FindingRef {

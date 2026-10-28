@@ -314,25 +314,23 @@ struct ProjectContextLite {
 /// Returns `(project_name, scan_section, selected_rules_section, ruleset_summary)`
 /// where each is `None` when absent/empty. Silently degrades: all are `None`
 /// when the endpoint is unreachable or there is no active project.
-async fn fetch_project_context_sections(
-) -> (Option<String>, Option<String>, Option<String>, Option<String>) {
-    let ctx: ProjectContextLite = match reqwest::get(format!(
-        "{}/api/projects/active/context",
-        crate::bff_base()
-    ))
-    .await
-    .ok()
-    .and_then(|r| {
-        // reqwest::Response::json is async; block via a small sync parse.
-        // We're already inside an async context so we just await below.
-        Some(r)
-    }) {
-        Some(r) => match r.json::<ProjectContextLite>().await {
-            Ok(v) => v,
-            Err(_) => return (None, None, None, None),
-        },
-        None => return (None, None, None, None),
-    };
+async fn fetch_project_context_sections() -> (
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+) {
+    let ctx: ProjectContextLite =
+        match reqwest::get(format!("{}/api/projects/active/context", crate::bff_base()))
+            .await
+            .ok()
+        {
+            Some(r) => match r.json::<ProjectContextLite>().await {
+                Ok(v) => v,
+                Err(_) => return (None, None, None, None),
+            },
+            None => return (None, None, None, None),
+        };
     if !ctx.ok {
         return (None, None, None, None);
     }
@@ -342,13 +340,6 @@ async fn fetch_project_context_sections(
         ctx.selected_rules_section.filter(|s| !s.trim().is_empty()),
         ctx.ruleset_summary.filter(|s| !s.trim().is_empty()),
     )
-}
-
-/// Fetch only the scan-results section (Layer 3c). Kept for use in unit tests
-/// that predate the selected-rules section.
-#[cfg(test)]
-async fn fetch_project_scan_section() -> Option<String> {
-    fetch_project_context_sections().await.1
 }
 
 // ── Layer 4: focused finding ──────────────────────────────────────────────────
@@ -414,6 +405,9 @@ pub(crate) const UNIFIED_NOT_COVERED_PHRASE: &str =
 /// Anthropic's automatic system-prompt caching a large stable prefix.
 /// Layers 3, 3b, and 3c are appended after the stable prefix so they don't
 /// disturb the cached portion.
+// too_many_arguments: one optional context layer per parameter, assembled in a fixed order; a
+// struct of eight `Option<&str>` layers would just rename the same call-site arguments.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn unified_system_prompt(
     rules_catalog: &str,
     uow_section: &str,
@@ -488,7 +482,7 @@ pub(crate) fn unified_system_prompt(
         }
     }
     p.push_str(uow_section);
-    p.push_str("\n");
+    p.push('\n');
 
     // ── Layer 3b: pulled issue spine (optional) ───────────────────────────────
     // Present when the architect has pulled issues from GitHub this session.
@@ -501,7 +495,7 @@ pub(crate) fn unified_system_prompt(
                 "=== LAYER 3b: PULLED ISSUES (open GitHub issues pulled this session) ===\n",
             );
             p.push_str(sec);
-            p.push_str("\n");
+            p.push('\n');
         }
     }
 
@@ -521,7 +515,7 @@ pub(crate) fn unified_system_prompt(
              findings). Do NOT infer or invent any findings.\n",
         ),
     }
-    p.push_str("\n");
+    p.push('\n');
 
     // ── Layer 3d: selected rules & options (optional) ────────────────────────
     // Present as soon as the user has selected rules in the onboarding draft —
@@ -550,7 +544,7 @@ pub(crate) fn unified_system_prompt(
              rules are selected, state plainly that none are currently selected.\n",
         ),
     }
-    p.push_str("\n");
+    p.push('\n');
 
     // ── Layer 3e: project committed ruleset (optional) ───────────────────────
     // The project's APPLIED/governing ruleset (post-onboard), distinct from the
@@ -558,9 +552,7 @@ pub(crate) fn unified_system_prompt(
     // that exist. Always rendered (absence is meaningful): an empty body must
     // read as an explicit NONE so the model never infers the governing rules
     // from the Layer 2 catalog.
-    p.push_str(
-        "=== LAYER 3e: PROJECT RULESET (committed rules governing this project) ===\n",
-    );
+    p.push_str("=== LAYER 3e: PROJECT RULESET (committed rules governing this project) ===\n");
     match project_ruleset_section {
         Some(sec) if !sec.trim().is_empty() => p.push_str(sec),
         _ => p.push_str(
@@ -568,7 +560,7 @@ pub(crate) fn unified_system_prompt(
              rules applied). Do NOT infer the governing rules from the Layer 2 catalog.\n",
         ),
     }
-    p.push_str("\n");
+    p.push('\n');
 
     // ── Layer 4: focused finding (optional) ───────────────────────────────────
     if let Some(f) = finding {
@@ -671,7 +663,11 @@ async fn fetch_models() -> Option<ModelsResp> {
             } else {
                 format!("{}  {}", e.display, parts.join(" · "))
             };
-            ModelOption { label, id: e.id, provider: e.provider }
+            ModelOption {
+                label,
+                id: e.id,
+                provider: e.provider,
+            }
         })
         .collect();
 
@@ -683,7 +679,11 @@ async fn fetch_models() -> Option<ModelsResp> {
         .unwrap_or_default();
 
     // `backend` not returned by the registry endpoint; leave empty (shown only when non-empty).
-    Some(ModelsResp { models, default, backend: String::new() })
+    Some(ModelsResp {
+        models,
+        default,
+        backend: String::new(),
+    })
 }
 
 /// The subset of `GET /api/settings` the chat selector needs: the APP-LEVEL (cross-project)
@@ -1415,14 +1415,8 @@ mod tests {
     // `CAMERATA_BFF_URL` is a process-global env var. Every Tier-2 test below sets it (to a
     // mock-server URI) then removes it. `cargo test` runs tests on parallel threads, so two such
     // tests overlapping would clobber each other's override and point a helper at the wrong server.
-    // This mutex serializes the env-mutating tests against each other (the doc's "serial_test-style
-    // mutex"; we can't add the serial_test crate without touching Cargo.toml). Lock for the whole
-    // body; recover from poisoning so one failing test doesn't cascade-fail the rest.
-    static BFF_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    fn bff_env_guard() -> std::sync::MutexGuard<'static, ()> {
-        BFF_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
-    }
+    // Every such test carries `#[serial_test::serial(process_env)]`, which serializes them crate-wide
+    // (and, unlike a std mutex guard, is safe to hold across the test's `.await`s).
 
     // ── Tier-2 UI test: a network helper against a MOCK BFF (wiremock) ──────────
     // Verifies add_chat_learning's request CONTRACT: it GETs the active project, then POSTs the
@@ -1430,12 +1424,11 @@ mod tests {
     // via the CAMERATA_BFF_URL seam. (The env override is process-global; this is the only test that
     // reads bff_base(), so it can't race another helper.)
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn add_chat_learning_resolves_active_then_posts_the_reply() {
         use wiremock::matchers::{body_json, method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
-        let _env = bff_env_guard();
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/api/projects/active"))
@@ -1450,14 +1443,15 @@ mod tests {
             .and(body_json(
                 serde_json::json!({ "kind": "decision", "text": "A durable learning." }),
             ))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": true })))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": true })),
+            )
             .expect(1)
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let ok = super::add_chat_learning("A durable learning.").await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         assert!(ok, "resolves the active project, then posts the learning");
         // `.expect(1)` on the POST mock asserts (on server drop) it was hit once with the exact
@@ -1468,39 +1462,48 @@ mod tests {
     // The request CONTRACT for the chat turn is load-bearing: a wrong field name (prompt / model /
     // system / history) silently breaks grounding or model selection. body_json asserts every field.
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn send_chat_posts_prompt_model_system_and_history() {
         use wiremock::matchers::{body_json, method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
-        let _env = bff_env_guard();
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/api/chat"))
             .and(body_json(serde_json::json!({
                 "prompt": "What is CAM-1 blocked on?",
-                "model": "claude-opus-4-8",
+                "model": "claude-opus-5",
                 "system": "SYS PROMPT",
                 "history": [
                     { "role": "user", "content": "hi" },
                     { "role": "assistant", "content": "hello" },
                 ],
             })))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_json(serde_json::json!({ "text": "It is blocked on the gate.", "backend": "cli" })),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                serde_json::json!({ "text": "It is blocked on the gate.", "backend": "cli" }),
+            ))
             .expect(1)
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let history = vec![
-            super::ChatHistoryTurn { role: "user", content: "hi".to_string() },
-            super::ChatHistoryTurn { role: "assistant", content: "hello".to_string() },
+            super::ChatHistoryTurn {
+                role: "user",
+                content: "hi".to_string(),
+            },
+            super::ChatHistoryTurn {
+                role: "assistant",
+                content: "hello".to_string(),
+            },
         ];
-        let res = super::send_chat("What is CAM-1 blocked on?", "claude-opus-4-8", "SYS PROMPT", history).await;
-        std::env::remove_var("CAMERATA_BFF_URL");
+        let res = super::send_chat(
+            "What is CAM-1 blocked on?",
+            "claude-opus-5",
+            "SYS PROMPT",
+            history,
+        )
+        .await;
 
         let resp = res.expect("2xx with a valid ChatResp body parses");
         assert_eq!(resp.text, "It is blocked on the gate.");
@@ -1511,25 +1514,28 @@ mod tests {
     // real `claude` CLI error and a generic "no response"). Asserts both the status and the body
     // text make it into the Err string.
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn send_chat_surfaces_backend_error_body() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
-        let _env = bff_env_guard();
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/api/chat"))
-            .respond_with(ResponseTemplate::new(500).set_body_string("claude CLI exited 1: rate limited"))
+            .respond_with(
+                ResponseTemplate::new(500).set_body_string("claude CLI exited 1: rate limited"),
+            )
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let res = super::send_chat("hi", "m", "s", Vec::new()).await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         let err = res.expect_err("a 500 must be an Err");
-        assert!(err.contains("500"), "error must include the status; got: {err}");
+        assert!(
+            err.contains("500"),
+            "error must include the status; got: {err}"
+        );
         assert!(
             err.contains("claude CLI exited 1: rate limited"),
             "error must preserve the backend body verbatim; got: {err}"
@@ -1538,35 +1544,34 @@ mod tests {
 
     // ── Tier-2: save_app_chat_model POSTs {model} to /api/settings/chat-model ──
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn save_app_chat_model_posts_model_body() {
         use wiremock::matchers::{body_json, method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
-        let _env = bff_env_guard();
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/api/settings/chat-model"))
             .and(body_json(serde_json::json!({ "model": "claude-sonnet-4" })))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": true })))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": true })),
+            )
             .expect(1)
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let ok = super::save_app_chat_model("claude-sonnet-4").await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         assert!(ok, "a 2xx response must be reported as success");
     }
 
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn save_app_chat_model_reports_failure_on_non_2xx() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
-        let _env = bff_env_guard();
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/api/settings/chat-model"))
@@ -1574,59 +1579,61 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let ok = super::save_app_chat_model("x").await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
-        assert!(!ok, "a 500 response must be reported as failure (best-effort helper)");
+        assert!(
+            !ok,
+            "a 500 response must be reported as failure (best-effort helper)"
+        );
     }
 
     // ── Tier-2: fetch_app_chat_model GETs /api/settings and reads chat_model ──
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn fetch_app_chat_model_parses_chat_model_field() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
-        let _env = bff_env_guard();
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/api/settings"))
             .respond_with(
                 ResponseTemplate::new(200)
-                    .set_body_json(serde_json::json!({ "chat_model": "claude-opus-4-8" })),
+                    .set_body_json(serde_json::json!({ "chat_model": "claude-opus-5" })),
             )
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let model = super::fetch_app_chat_model().await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
-        assert_eq!(model, Some("claude-opus-4-8".to_string()));
+        assert_eq!(model, Some("claude-opus-5".to_string()));
     }
 
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn fetch_app_chat_model_returns_none_for_blank_model() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
-        let _env = bff_env_guard();
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/api/settings"))
             .respond_with(
-                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "chat_model": "   " })),
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "chat_model": "   " })),
             )
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let model = super::fetch_app_chat_model().await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
-        assert_eq!(model, None, "a blank/whitespace chat_model must read as unset");
+        assert_eq!(
+            model, None,
+            "a blank/whitespace chat_model must read as unset"
+        );
     }
 
     // ── Tier-2: fetch_models GETs /api/models/registry and builds labels ──────
@@ -1634,19 +1641,18 @@ mod tests {
     // label is composed (price · tool-use · context · cache). A wrong field here makes the selector
     // mislabel models.
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn fetch_models_parses_registry_and_builds_labels() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
-        let _env = bff_env_guard();
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/api/models/registry"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "models": [
                     {
-                        "id": "claude-opus-4-8",
+                        "id": "claude-opus-5",
                         "display": "Opus",
                         "provider": "claude",
                         "free": false,
@@ -1670,35 +1676,69 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let resp = super::fetch_models().await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         let resp = resp.expect("registry response must parse into ModelsResp");
         assert_eq!(resp.models.len(), 2);
         // The first claude model is the default.
-        assert_eq!(resp.default, "claude-opus-4-8");
-        let opus = resp.models.iter().find(|m| m.id == "claude-opus-4-8").expect("opus present");
+        assert_eq!(resp.default, "claude-opus-5");
+        let opus = resp
+            .models
+            .iter()
+            .find(|m| m.id == "claude-opus-5")
+            .expect("opus present");
         assert_eq!(opus.provider, "claude");
         // price_out 15 -> "$15/M"; tool_use -> "tool-use"; 200000 ctx -> "200K"; caching -> "cache".
-        assert!(opus.label.contains("Opus"), "label keeps display name; got {}", opus.label);
-        assert!(opus.label.contains("$15/M"), "label encodes price; got {}", opus.label);
-        assert!(opus.label.contains("tool-use"), "label encodes tool-use; got {}", opus.label);
-        assert!(opus.label.contains("200K"), "label encodes context; got {}", opus.label);
-        assert!(opus.label.contains("cache"), "label encodes caching; got {}", opus.label);
-        let ds = resp.models.iter().find(|m| m.id == "ds-free").expect("deepseek present");
-        assert!(ds.label.contains("FREE"), "free models are labelled FREE; got {}", ds.label);
-        assert!(ds.label.contains("no-tools"), "non-tool models are labelled no-tools; got {}", ds.label);
+        assert!(
+            opus.label.contains("Opus"),
+            "label keeps display name; got {}",
+            opus.label
+        );
+        assert!(
+            opus.label.contains("$15/M"),
+            "label encodes price; got {}",
+            opus.label
+        );
+        assert!(
+            opus.label.contains("tool-use"),
+            "label encodes tool-use; got {}",
+            opus.label
+        );
+        assert!(
+            opus.label.contains("200K"),
+            "label encodes context; got {}",
+            opus.label
+        );
+        assert!(
+            opus.label.contains("cache"),
+            "label encodes caching; got {}",
+            opus.label
+        );
+        let ds = resp
+            .models
+            .iter()
+            .find(|m| m.id == "ds-free")
+            .expect("deepseek present");
+        assert!(
+            ds.label.contains("FREE"),
+            "free models are labelled FREE; got {}",
+            ds.label
+        );
+        assert!(
+            ds.label.contains("no-tools"),
+            "non-tool models are labelled no-tools; got {}",
+            ds.label
+        );
     }
 
     // ── Tier-2: fetch_rules_catalog GETs /api/corpus-rules and renders a catalog ──
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn fetch_rules_catalog_renders_sorted_catalog_lines() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
-        let _env = bff_env_guard();
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/api/corpus-rules"))
@@ -1721,28 +1761,41 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let catalog = super::fetch_rules_catalog().await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         let catalog = catalog.expect("non-empty rule corpus yields Some(catalog)");
-        assert!(catalog.contains("SEC-1"), "catalog must name the rule id; got:\n{catalog}");
-        assert!(catalog.contains("[security · repo-local]"), "catalog encodes domain · scope; got:\n{catalog}");
-        assert!(catalog.contains("no hardcoded secrets"), "catalog includes the title");
-        assert!(catalog.contains("alternatives: warn / deny"), "catalog lists option labels as alternatives");
+        assert!(
+            catalog.contains("SEC-1"),
+            "catalog must name the rule id; got:\n{catalog}"
+        );
+        assert!(
+            catalog.contains("[security · repo-local]"),
+            "catalog encodes domain · scope; got:\n{catalog}"
+        );
+        assert!(
+            catalog.contains("no hardcoded secrets"),
+            "catalog includes the title"
+        );
+        assert!(
+            catalog.contains("alternatives: warn / deny"),
+            "catalog lists option labels as alternatives"
+        );
         // Sorted by (domain, id): architecture sorts before security.
         let arch_pos = catalog.find("ARCH-1").expect("ARCH-1 present");
         let sec_pos = catalog.find("SEC-1").expect("SEC-1 present");
-        assert!(arch_pos < sec_pos, "rules must be sorted by domain then id (architecture before security)");
+        assert!(
+            arch_pos < sec_pos,
+            "rules must be sorted by domain then id (architecture before security)"
+        );
     }
 
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn fetch_rules_catalog_returns_none_for_empty_corpus() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
-        let _env = bff_env_guard();
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/api/corpus-rules"))
@@ -1750,23 +1803,24 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let catalog = super::fetch_rules_catalog().await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
-        assert_eq!(catalog, None, "an empty corpus must yield None, not an empty catalog string");
+        assert_eq!(
+            catalog, None,
+            "an empty corpus must yield None, not an empty catalog string"
+        );
     }
 
     // ── Tier-2: fetch_uow_snapshot prefers the object-wrapped context endpoint ──
     // The dedicated endpoint returns {"ok":true,"units_of_work":[...]}; the helper must parse the
     // OBJECT wrapper (parsing it as a bare array was the bug that silently emptied dev-state).
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn fetch_uow_snapshot_parses_object_wrapper_from_context_endpoint() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
-        let _env = bff_env_guard();
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/api/development/context"))
@@ -1779,9 +1833,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let snaps = super::fetch_uow_snapshot().await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         let snaps = snaps.expect("the context endpoint must yield Some");
         assert_eq!(snaps.len(), 1);
@@ -1792,12 +1845,11 @@ mod tests {
     // When the context endpoint is unavailable (404), the helper falls back to the legacy bare-array
     // /api/uow endpoint.
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn fetch_uow_snapshot_falls_back_to_legacy_uow_endpoint() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
-        let _env = bff_env_guard();
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/api/development/context"))
@@ -1812,9 +1864,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let snaps = super::fetch_uow_snapshot().await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         let snaps = snaps.expect("legacy /api/uow fallback must yield Some");
         assert_eq!(snaps.len(), 1);
@@ -1824,12 +1875,11 @@ mod tests {
     // ── Tier-2: fetch_project_context_sections GETs /api/projects/active/context ──
     // Asserts the four-tuple projection: name, scan section, selected-rules section, ruleset summary.
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn fetch_project_context_sections_projects_all_four_fields() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
-        let _env = bff_env_guard();
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/api/projects/active/context"))
@@ -1843,9 +1893,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let (name, scan, selected, ruleset) = super::fetch_project_context_sections().await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         assert_eq!(name, Some("agora-api".to_string()));
         assert_eq!(scan, Some("Total findings: 3\n".to_string()));
@@ -1855,34 +1904,37 @@ mod tests {
 
     // When the context reports `ok: false` (no active project), all four fields degrade to None.
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn fetch_project_context_sections_all_none_when_not_ok() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
-        let _env = bff_env_guard();
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/api/projects/active/context"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": false })))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": false })),
+            )
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let tuple = super::fetch_project_context_sections().await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
-        assert_eq!(tuple, (None, None, None, None), "ok=false must degrade every section to None");
+        assert_eq!(
+            tuple,
+            (None, None, None, None),
+            "ok=false must degrade every section to None"
+        );
     }
 
     // Whitespace-only sections must be filtered to None (empty sections are not meaningful grounding).
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn fetch_project_context_sections_filters_whitespace_sections() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
-        let _env = bff_env_guard();
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/api/projects/active/context"))
@@ -1895,13 +1947,16 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let (name, scan, selected, ruleset) = super::fetch_project_context_sections().await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         assert_eq!(name, None, "whitespace-only project_name filters to None");
         assert_eq!(scan, None, "whitespace-only scan section filters to None");
-        assert_eq!(selected, Some("real\n".to_string()), "non-blank section survives");
+        assert_eq!(
+            selected,
+            Some("real\n".to_string()),
+            "non-blank section survives"
+        );
         assert_eq!(ruleset, None, "absent ruleset_summary is None");
     }
 
@@ -1914,20 +1969,31 @@ mod tests {
     fn chat_reply_text_shows_backend_error_verbatim() {
         // A real backend failure (e.g. the `claude` CLI error) must be shown to
         // the user, not swallowed into a generic "no response" line.
-        let out = chat_reply_text(Err("backend error 500: claude CLI exited 1: rate limited".into()));
+        let out = chat_reply_text(Err(
+            "backend error 500: claude CLI exited 1: rate limited".into()
+        ));
         assert!(out.contains("chat failed"), "got: {out}");
-        assert!(out.contains("claude CLI exited 1: rate limited"), "got: {out}");
+        assert!(
+            out.contains("claude CLI exited 1: rate limited"),
+            "got: {out}"
+        );
     }
 
     #[test]
     fn chat_reply_text_returns_model_text_on_success() {
-        let out = chat_reply_text(Ok(ChatResp { text: "hello".into(), backend: "cli".into() }));
+        let out = chat_reply_text(Ok(ChatResp {
+            text: "hello".into(),
+            backend: "cli".into(),
+        }));
         assert_eq!(out, "hello");
     }
 
     #[test]
     fn chat_reply_text_flags_empty_success() {
-        let out = chat_reply_text(Ok(ChatResp { text: "   ".into(), backend: "cli".into() }));
+        let out = chat_reply_text(Ok(ChatResp {
+            text: "   ".into(),
+            backend: "cli".into(),
+        }));
         assert!(out.contains("empty response"), "got: {out}");
     }
 
@@ -1950,7 +2016,9 @@ mod tests {
             story_id: story_id.to_string(),
             stage: stage.to_string(),
             sign_off: if signed_off {
-                Some(serde_json::json!({"by": "zach", "ts": "2026-06-21T00:00:00Z", "run_id": "r1"}))
+                Some(
+                    serde_json::json!({"by": "zach", "ts": "2026-06-21T00:00:00Z", "run_id": "r1"}),
+                )
             } else {
                 None
             },
@@ -2014,7 +2082,9 @@ mod tests {
             "UNIFIED_NOT_COVERED_PHRASE should not start with a space"
         );
         assert!(
-            UNIFIED_NOT_COVERED_PHRASE.chars().any(|c| c.is_alphabetic()),
+            UNIFIED_NOT_COVERED_PHRASE
+                .chars()
+                .any(|c| c.is_alphabetic()),
             "UNIFIED_NOT_COVERED_PHRASE should contain at least one letter"
         );
     }
@@ -2050,7 +2120,8 @@ mod tests {
     #[test]
     fn unified_prompt_includes_rules_catalog_when_present() {
         let catalog = "- RULE-1 [security · repo-local]: no hardcoded secrets\n";
-        let prompt = unified_system_prompt(catalog, "No stories.\n", None, None, None, None, None, None);
+        let prompt =
+            unified_system_prompt(catalog, "No stories.\n", None, None, None, None, None, None);
         assert!(
             prompt.contains("=== LAYER 2: GOVERNANCE RULES CATALOG"),
             "Unified prompt missing LAYER 2 header"
@@ -2072,7 +2143,16 @@ mod tests {
 
     #[test]
     fn unified_prompt_omits_rules_catalog_for_whitespace_only_input() {
-        let prompt = unified_system_prompt("   \n\t  ", "No stories.\n", None, None, None, None, None, None);
+        let prompt = unified_system_prompt(
+            "   \n\t  ",
+            "No stories.\n",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
         assert!(
             !prompt.contains("=== LAYER 2: GOVERNANCE RULES CATALOG"),
             "Unified prompt should omit LAYER 2 header for whitespace-only catalog"
@@ -2090,8 +2170,16 @@ mod tests {
 
     #[test]
     fn unified_prompt_layer3_header_names_active_project_when_present() {
-        let prompt =
-            unified_system_prompt("", "No stories.\n", None, None, None, None, None, Some("agora-api"));
+        let prompt = unified_system_prompt(
+            "",
+            "No stories.\n",
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("agora-api"),
+        );
         assert!(
             prompt.contains(
                 "=== LAYER 3: LIVE DEVELOPMENT STATE (project: agora-api, refreshed this turn) ==="
@@ -2229,7 +2317,8 @@ mod tests {
     #[test]
     fn unified_prompt_with_finding_includes_focused_finding_section() {
         let f = make_finding();
-        let prompt = unified_system_prompt("", "No stories.\n", None, Some(&f), None, None, None, None);
+        let prompt =
+            unified_system_prompt("", "No stories.\n", None, Some(&f), None, None, None, None);
         assert!(
             prompt.contains("=== LAYER 4: FOCUSED FINDING"),
             "Prompt with finding missing LAYER 4 header"
@@ -2264,7 +2353,16 @@ mod tests {
     #[test]
     fn unified_prompt_with_empty_finding_has_no_layer4() {
         let empty = FindingContext::default();
-        let prompt = unified_system_prompt("", "No stories.\n", None, Some(&empty), None, None, None, None);
+        let prompt = unified_system_prompt(
+            "",
+            "No stories.\n",
+            None,
+            Some(&empty),
+            None,
+            None,
+            None,
+            None,
+        );
         assert!(
             !prompt.contains("=== LAYER 4: FOCUSED FINDING"),
             "Prompt with empty finding must not include LAYER 4"
@@ -2274,7 +2372,8 @@ mod tests {
     #[test]
     fn unified_prompt_with_finding_retains_not_covered_guardrail() {
         let f = make_finding();
-        let prompt = unified_system_prompt("", "No stories.\n", None, Some(&f), None, None, None, None);
+        let prompt =
+            unified_system_prompt("", "No stories.\n", None, Some(&f), None, None, None, None);
         assert!(
             prompt.contains(UNIFIED_NOT_COVERED_PHRASE),
             "Finding-scoped prompt must retain the not-covered guardrail"
@@ -2305,7 +2404,16 @@ mod tests {
     #[test]
     fn unified_prompt_layer3b_present_when_pulled_issues_supplied() {
         let issues = "- #10 [Epic, open]: Auth overhaul\n  - #11 [child, open]: Token refresh\n";
-        let prompt = unified_system_prompt("", "No stories.\n", Some(issues), None, None, None, None, None);
+        let prompt = unified_system_prompt(
+            "",
+            "No stories.\n",
+            Some(issues),
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
         assert!(
             prompt.contains("=== LAYER 3b: PULLED ISSUES"),
             "Layer 3b header must appear when pulled_issues_section is Some"
@@ -2327,7 +2435,16 @@ mod tests {
 
     #[test]
     fn unified_prompt_layer3b_absent_when_whitespace_only() {
-        let prompt = unified_system_prompt("", "No stories.\n", Some("   \n "), None, None, None, None, None);
+        let prompt = unified_system_prompt(
+            "",
+            "No stories.\n",
+            Some("   \n "),
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
         assert!(
             !prompt.contains("=== LAYER 3b:"),
             "Layer 3b header must not appear for whitespace-only pulled_issues_section"
@@ -2377,8 +2494,14 @@ mod tests {
         assert!(s.contains("CAM-1"), "Should include story id");
         assert!(s.contains("stage=development"), "Should include stage");
         assert!(s.contains("gate=no run yet"), "Should include gate status");
-        assert!(s.contains("not signed off"), "Should include sign-off state");
-        assert!(s.contains("2026-06-21"), "Should include last-activity timestamp");
+        assert!(
+            s.contains("not signed off"),
+            "Should include sign-off state"
+        );
+        assert!(
+            s.contains("2026-06-21"),
+            "Should include last-activity timestamp"
+        );
     }
 
     #[test]
@@ -2397,14 +2520,8 @@ mod tests {
             s.contains("gate=gate blocked"),
             "Should label gate as blocked"
         );
-        assert!(
-            s.contains("SEC-1"),
-            "Should surface rules that fired"
-        );
-        assert!(
-            s.contains("ARCH-1"),
-            "Should surface all rules that fired"
-        );
+        assert!(s.contains("SEC-1"), "Should surface rules that fired");
+        assert!(s.contains("ARCH-1"), "Should surface all rules that fired");
     }
 
     #[test]
@@ -2464,7 +2581,16 @@ mod tests {
     #[test]
     fn unified_prompt_layer3c_present_when_scan_results_supplied() {
         let scan = "Total findings: 3\n  high: 2\n  medium: 1\n";
-        let prompt = unified_system_prompt("", "No stories.\n", None, None, Some(scan), None, None, None);
+        let prompt = unified_system_prompt(
+            "",
+            "No stories.\n",
+            None,
+            None,
+            Some(scan),
+            None,
+            None,
+            None,
+        );
         assert!(
             prompt.contains("=== LAYER 3c: ACTIVE PROJECT SCAN RESULTS"),
             "Layer 3c header must appear when scan_results_section is Some, got no header in prompt"
@@ -2492,7 +2618,16 @@ mod tests {
 
     #[test]
     fn unified_prompt_layer3c_renders_none_marker_when_whitespace_only() {
-        let prompt = unified_system_prompt("", "No stories.\n", None, None, Some("   \n "), None, None, None);
+        let prompt = unified_system_prompt(
+            "",
+            "No stories.\n",
+            None,
+            None,
+            Some("   \n "),
+            None,
+            None,
+            None,
+        );
         assert!(
             prompt.contains("NONE — the active project has no scan results"),
             "whitespace-only scan results must render the explicit NONE marker"
@@ -2505,7 +2640,16 @@ mod tests {
         let uow = "- CAM-1: stage=development\n";
         let issues = "- #10 [Epic, open]: Auth\n";
         let scan = "Total findings: 1\n  high: 1\n";
-        let prompt = unified_system_prompt("", uow, Some(issues), Some(&f), Some(scan), None, None, None);
+        let prompt = unified_system_prompt(
+            "",
+            uow,
+            Some(issues),
+            Some(&f),
+            Some(scan),
+            None,
+            None,
+            None,
+        );
         let layer3b_pos = prompt
             .find("=== LAYER 3b: PULLED ISSUES")
             .expect("LAYER 3b not found");
@@ -2541,7 +2685,8 @@ mod tests {
     #[test]
     fn unified_prompt_layer3d_present_when_selected_rules_supplied() {
         let sel = "Total selected: 2 rule(s) across 1 repo(s)\nRules:\n  SEC-1 (all repos)\n";
-        let prompt = unified_system_prompt("", "No stories.\n", None, None, None, Some(sel), None, None);
+        let prompt =
+            unified_system_prompt("", "No stories.\n", None, None, None, Some(sel), None, None);
         assert!(
             prompt.contains("=== LAYER 3d: SELECTED RULES & OPTIONS"),
             "Layer 3d header must appear when selected_rules_section is Some"
@@ -2569,7 +2714,16 @@ mod tests {
 
     #[test]
     fn unified_prompt_layer3d_renders_none_marker_when_whitespace_only() {
-        let prompt = unified_system_prompt("", "No stories.\n", None, None, None, Some("  \n "), None, None);
+        let prompt = unified_system_prompt(
+            "",
+            "No stories.\n",
+            None,
+            None,
+            None,
+            Some("  \n "),
+            None,
+            None,
+        );
         assert!(
             prompt.contains("ZERO rules selected"),
             "whitespace-only selected rules must render the explicit ZERO marker"
@@ -2581,8 +2735,16 @@ mod tests {
     #[test]
     fn unified_prompt_layer3e_present_when_ruleset_supplied() {
         let ruleset = "SEC-NO-HARDCODED-SECRETS-1: all repos\nDOC-1: docs only\n";
-        let prompt =
-            unified_system_prompt("", "No stories.\n", None, None, None, None, Some(ruleset), None);
+        let prompt = unified_system_prompt(
+            "",
+            "No stories.\n",
+            None,
+            None,
+            None,
+            None,
+            Some(ruleset),
+            None,
+        );
         assert!(
             prompt.contains(
                 "=== LAYER 3e: PROJECT RULESET (committed rules governing this project) ==="
@@ -2615,8 +2777,16 @@ mod tests {
 
     #[test]
     fn unified_prompt_layer3e_renders_none_marker_when_whitespace_only() {
-        let prompt =
-            unified_system_prompt("", "No stories.\n", None, None, None, None, Some("  \n "), None);
+        let prompt = unified_system_prompt(
+            "",
+            "No stories.\n",
+            None,
+            None,
+            None,
+            None,
+            Some("  \n "),
+            None,
+        );
         assert!(
             prompt.contains("NONE — no committed ruleset for this project yet"),
             "whitespace-only committed ruleset must render the explicit NONE marker"
@@ -2649,7 +2819,16 @@ mod tests {
     fn unified_prompt_preamble_treats_changed_values_as_live_not_mistakes() {
         // Calibration guardrail: differing counts across turns are live updates,
         // not prior mistakes to apologize for; quote the exact count, no trends.
-        let prompt = unified_system_prompt("CATALOG", "No stories.\n", None, None, None, None, None, None);
+        let prompt = unified_system_prompt(
+            "CATALOG",
+            "No stories.\n",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
         assert!(
             prompt.contains("NOT a prior") && prompt.contains("WITHOUT apologizing"),
             "preamble must tell the model that a changed value is a live update, not a mistake to apologize for"
@@ -2664,7 +2843,16 @@ mod tests {
     fn unified_prompt_preamble_forbids_inferring_selections_from_catalog() {
         // Anti-fabrication guardrail: the preamble must tell the model the Layer 2
         // catalog lists rules that EXIST, not rules the user selected.
-        let prompt = unified_system_prompt("CATALOG", "No stories.\n", None, None, None, None, None, None);
+        let prompt = unified_system_prompt(
+            "CATALOG",
+            "No stories.\n",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
         assert!(
             prompt.contains("NOT rules the user has selected"),
             "preamble must forbid deriving selected-rule counts from the Layer 2 catalog"
@@ -2692,14 +2880,18 @@ mod tests {
     fn layer3d_appears_after_layer3c() {
         let scan = "Total findings: 1\n";
         let sel = "Total selected: 1 rule(s) across 1 repo(s)\nRules:\n  SEC-1 (all repos)\n";
-        let prompt =
-            unified_system_prompt("", "No stories.\n", None, None, Some(scan), Some(sel), None, None);
-        let layer3c_pos = prompt
-            .find("=== LAYER 3c:")
-            .expect("LAYER 3c not found");
-        let layer3d_pos = prompt
-            .find("=== LAYER 3d:")
-            .expect("LAYER 3d not found");
+        let prompt = unified_system_prompt(
+            "",
+            "No stories.\n",
+            None,
+            None,
+            Some(scan),
+            Some(sel),
+            None,
+            None,
+        );
+        let layer3c_pos = prompt.find("=== LAYER 3c:").expect("LAYER 3c not found");
+        let layer3d_pos = prompt.find("=== LAYER 3d:").expect("LAYER 3d not found");
         assert!(
             layer3c_pos < layer3d_pos,
             "LAYER 3c must precede LAYER 3d ({layer3c_pos} < {layer3d_pos})"

@@ -1,9 +1,15 @@
 id = "ARCH-STRICT-LAYERING-1"
+version = 1
 title = "Strict layering — services orchestrate, repositories own data access"
-tag = "stack"
 domain = "api-layer"
 layer = "universal"
 enforcement = "architectural"
+kind = "default_with_exceptions"
+inspectable = true
+# Deviation-ceiling escape hatch: the services-orchestrate / repositories-own-data-access
+# boundary is the decision every future feature's code placement depends on, so a
+# half-adopted layering makes every new feature re-litigate where its data access goes.
+deviation_ceiling = "high"
 default = true
 qualifies = "Deterministically checkable, but no off-the-shelf linter rule enforces it: the boundary is 'direct database/query CALLS (e.g. db.select, db.insert) are forbidden outside the repository layer, with transaction flow-control in services exempted', which is a call-site-and-layer predicate, not an import predicate. It is enforced by a custom AST/static-analysis CI gate — a project-configured ESLint no-restricted-syntax rule scoped to non-repository directories, a bespoke ESLint rule, a Rust module-visibility constraint, or the stack equivalent. (import/no-restricted-paths blocks imports between directories, not the DB-client call itself, so it does not honestly cover this rule off the shelf.) Conformance holds when that custom gate runs in CI and a query issued from a controller or service is rejected; it fails when DB access can happen from any layer with no mechanical boundary."
 verification = "grounded"
@@ -22,17 +28,22 @@ title = "Buschmann et al. — Pattern-Oriented Software Architecture, Volume 1: 
 
 [decision]
 question = "What position does the project take on: Strict layering — services orchestrate, repositories own data access?"
-default = "strict-layering-services-orchestrate-repositorie"
+default = "strict-layering-services-orchestrate-repositories-own-data-access"
 why = "Prevents business logic hiding inside the query layer; keeps each layer testable and swappable. Mixing layers and allowing DB access anywhere leaks business logic into the query layer, where it becomes harder to test in isolation and harder to surface during review, because reviewers naturally focus on the layer the change appears to belong to. This is the umbrella architectural principle; `arch-handler-no-db-1` (call-site AST check on handler bodies) and `arch-no-cross-boundary-imports-1` (import-graph AST check) are two narrower, mechanically-precise checks that each enforce one facet of it. The three-way split is deliberate, not redundant — see `docs/decisions/2026-06-19_ast_architectural_rule_tier.md`."
 
 [[option]]
-id = "strict-layering-services-orchestrate-repositorie"
+id = "strict-layering-services-orchestrate-repositories-own-data-access"
 label = "Strict layering — services orchestrate, repositories own data access"
 directive = "Controllers handle HTTP only; services hold framework-agnostic business logic; repositories own all DB query calls. Enforce the boundary with lint (block direct DB access outside the data layer), with the AST checks in `arch-handler-no-db-1` and `arch-no-cross-boundary-imports-1` as the concrete enforcement mechanisms. Exception: transaction flow control belongs in services."
+remediation = """
+Move the database access found in the controller or service into a repository, keep business logic in the service layer, and keep the controller limited to HTTP handling. Add or confirm the lint/AST checks (arch-handler-no-db-1 and arch-no-cross-boundary-imports-1) run in CI to keep the boundary enforced going forward. Verify by confirming the controller and service in question contain no direct DB query calls and the lint check passes.
+"""
+effort = "medium"
 why = "Prevents business logic hiding inside the query layer; keeps each layer testable and swappable."
 
 [[option]]
 id = "controllers-services-and-repositories-are-not-se"
+violates = true
 label = "No layer separation"
 directive = "controllers, services, and repositories are not separated by lint enforcement, and DB access can happen from any layer regardless of role"
 why = "Mixing layers leaks business logic into the query layer, where it becomes harder to test in isolation and harder to surface during review, because reviewers naturally focus on the layer the change appears to belong to."

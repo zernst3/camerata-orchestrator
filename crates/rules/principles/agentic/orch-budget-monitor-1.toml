@@ -1,9 +1,11 @@
 id = "ORCH-BUDGET-MONITOR-1"
+version = 1
 title = "Budget self-monitoring"
-tag = "stack"
 domain = "agentic"
 layer = "universal"
 enforcement = "prose"
+kind = "defect"
+inspectable = false
 default = true
 verification = "policy"
 
@@ -20,16 +22,21 @@ why = "An unattended routine needs a real ceiling; per-run caps prevent runaway,
 id = "rolling-window-plus-per-session-caps"
 label = "rolling-window + per-session caps, enforced by a wrapper"
 directive = "Track spend in a rolling window against a safety threshold, with per-session caps, and self-check periodically during a run. A wrapper enforces hard limits before invoking the model."
+remediation = """
+Wrap the agent invocation with a spend monitor that tracks cost in a rolling window against a configured safety threshold, and set a hard per-session cap the wrapper enforces before each model call. Have the run self-check its remaining budget periodically rather than only at the start. Verify by running past the threshold in a test session and confirming the wrapper halts the run instead of letting spend continue unbounded.
+"""
 why = "A rolling-window cap plus per-session caps covers both the single-run runaway and the cross-run accumulation cases, and the wrapper makes the limit non-bypassable."
 
 [[option]]
 id = "per-session-cap-only"
+violates = true
 label = "per-session cap only"
 directive = "Each autonomous run enforces a single per-session spend cap and halts when it is reached, with no rolling-window safety threshold across runs."
 why = "A defensible alternative that bounds any single run but leaves independent runs free to accumulate unbounded spend across a window, so it does not cover the aggregate runaway case."
 
 [[option]]
 id = "no-budget-caps"
+violates = true
 label = "no budget caps"
 directive = "The autonomous run operates with no budget caps and no rolling-window safety threshold."
 why = "A defensible alternative for attended, short runs where a human can intervene before spend escalates, but unsafe for unattended routines that have neither property."

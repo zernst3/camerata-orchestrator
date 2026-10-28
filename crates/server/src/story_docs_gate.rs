@@ -123,7 +123,10 @@ mod tests {
     fn selected_with_unknown_option_falls_back_to_default() {
         // Selected but with an unrecognised option string: the rule is still ON
         // (selection holds), so we return the default convention rather than None.
-        assert!(story_docs_hook_active(&[sel(STORY_DOCS_RULE_ID, Some("bogus-option"))]));
+        assert!(story_docs_hook_active(&[sel(
+            STORY_DOCS_RULE_ID,
+            Some("bogus-option")
+        )]));
         assert_eq!(
             story_docs_convention(&[sel(STORY_DOCS_RULE_ID, Some("bogus-option"))]),
             Some(DocConvention::PerStoryDocs)

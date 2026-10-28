@@ -1,10 +1,21 @@
+# OPT-IN ONLY: this rule's option set is incomplete doctrine, not a general invariant. It offers
+# only two positions — "route groups by access tier, enforced in middleware/data layer" (the
+# default) or "no grouping convention AND folder placement is (wrongly) treated as the auth
+# mechanism" — but conflates those as if they always go together. A repo that correctly enforces
+# auth via middleware/the data layer while organizing routes by FEATURE rather than ACCESS TIER (a
+# common, legitimate pattern) has no matching option here and would be flagged as a violation of a
+# convention it never needed. Kept opt-in (never pre-checked/auto-recommended) until the option
+# set is redesigned to separate "how routes are organized" from "how auth is actually enforced".
 id = "JAVASCRIPT-NEXT-ROUTE-PLACEMENT-1"
+version = 1
 title = "App Router pages are organized into route groups by access tier, but auth is enforced in middleware/data layer, not by folder placement"
-tag = "stack"
 domain = "javascript:next"
 layer = "framework"
 enforcement = "structured"
+kind = "decision"
+inspectable = true
 default = true
+opt_in_only = true
 verification = "grounded"
 
 [[sources]]
@@ -24,6 +35,9 @@ why = "Route groups in App Router are how layout composition is opt-in: pages ne
 id = "app-router-pages-live-under-the-gated-route-grou"
 label = "App Router pages are grouped by access tier, with auth enforced in middleware/data layer"
 directive = "Pages are organized into route groups by access tier, for example app/(authenticated)/dashboard/page.tsx for pages that share authenticated chrome, versus app/(public)/... for pages that don't. This is illustrative, not a mandated path: the specific group names and nesting are a per-project convention. Whatever the grouping, actual authorization is enforced independently of file placement: via middleware.ts matching the relevant route patterns, and/or an explicit session/auth check inside the page's server component or data-loading function. A page placed in the wrong group is a layout/UX bug (missing chrome), not a security hole, because the auth check does not depend on which group the file sits in."
+remediation = """
+Move this page under the route group matching its access tier (for example app/(authenticated)/... for pages that require a logged-in user), and add or confirm an explicit auth check in middleware or the data layer rather than relying on folder placement alone to keep it protected. Verify by requesting the page's URL directly as an unauthenticated user and confirming middleware or the data layer rejects it, not just the route group's naming convention.
+"""
 why = "Route groups in App Router are how layout composition is opt-in, but only middleware and explicit data-layer checks that run on every matching request give an actual authorization guarantee; folder placement alone is bypassable and gives no compile-time or runtime signal that a page is protected."
 
 [[option]]

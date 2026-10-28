@@ -468,7 +468,7 @@ impl LeadEngineer for StubLeadEngineer {
 /// Callers that want a different model should use [`ClaudeLeadEngineer::with_model`].
 /// The `CAMERATA_LEAD_ENGINEER_MODEL` environment variable overrides this at
 /// runtime for CLI / one-off invocations.
-pub const DEFAULT_LEAD_ENGINEER_MODEL: &str = "claude-sonnet-4-6";
+pub const DEFAULT_LEAD_ENGINEER_MODEL: &str = "claude-sonnet-5";
 
 /// The read-only built-in tools the ungoverned planning calls (lead engineer + refinement
 /// reviewer) allow so the agent can SCAN the bound repo on demand. These cannot mutate the
@@ -601,10 +601,7 @@ impl ClaudeLeadEngineer {
     /// FIRST becomes the cwd + primary `--add-dir` (like [`Self::with_repo_dir`]); every other
     /// is added as its own read-only `--add-dir`, so planning can scan ACROSS every repo.
     /// Builder-style. READ-ONLY — no write tools, no gateway. Empty input clears the binding.
-    pub fn with_repo_dirs(
-        mut self,
-        dirs: impl IntoIterator<Item = std::path::PathBuf>,
-    ) -> Self {
+    pub fn with_repo_dirs(mut self, dirs: impl IntoIterator<Item = std::path::PathBuf>) -> Self {
         let mut iter = dirs.into_iter();
         match iter.next() {
             Some(primary) => {
@@ -810,6 +807,8 @@ impl LeadEngineer for ClaudeLeadEngineer {
         // ANY file in the real codebase while planning, not just the inlined digest. Reads
         // are inherently safe here: no write/exec tool is offered, so this adds no write path.
         let mut cmd = tokio::process::Command::new("claude");
+        // The subscription CLI must never inherit an API key from the parent's `.env`.
+        camerata_api_types::claude_cli::scrub_anthropic_key_env(cmd.as_std_mut());
         cmd.arg("-p")
             .arg(&prompt)
             .arg("--model")
@@ -913,7 +912,10 @@ mod tests {
         // The planning calls offer ONLY read-class built-ins so they can scan the repo;
         // no write/exec/spawn tool may be present (these calls have no gateway either).
         for t in READ_ONLY_TOOLS {
-            assert!(["Read", "Glob", "Grep", "LS"].contains(t), "unexpected tool {t}");
+            assert!(
+                ["Read", "Glob", "Grep", "LS"].contains(t),
+                "unexpected tool {t}"
+            );
         }
         for forbidden in ["Write", "Edit", "Bash", "Task", "MultiEdit", "NotebookEdit"] {
             assert!(
@@ -926,7 +928,10 @@ mod tests {
     #[test]
     fn with_repo_dir_binds_the_repo_for_on_demand_read() {
         let le = ClaudeLeadEngineer::new().with_repo_dir("/tmp/repo");
-        assert_eq!(le.repo_dir.as_deref(), Some(std::path::Path::new("/tmp/repo")));
+        assert_eq!(
+            le.repo_dir.as_deref(),
+            Some(std::path::Path::new("/tmp/repo"))
+        );
         // Default (no repo) leaves it unbound (digest-only fallback).
         assert!(ClaudeLeadEngineer::new().repo_dir.is_none());
     }
@@ -1284,8 +1289,8 @@ mod tests {
 
     #[test]
     fn with_model_uses_supplied_id() {
-        let le = ClaudeLeadEngineer::with_model("claude-opus-4-8");
-        assert_eq!(le.model, "claude-opus-4-8");
+        let le = ClaudeLeadEngineer::with_model("claude-opus-5");
+        assert_eq!(le.model, "claude-opus-5");
     }
 
     #[test]
@@ -1302,7 +1307,7 @@ mod tests {
         // Keep this in sync with camerata_server::llm::DEFAULT_MODEL.
         // If the catalog's default changes, this test will fail as a reminder to
         // update DEFAULT_LEAD_ENGINEER_MODEL in this crate too.
-        assert_eq!(DEFAULT_LEAD_ENGINEER_MODEL, "claude-sonnet-4-6");
+        assert_eq!(DEFAULT_LEAD_ENGINEER_MODEL, "claude-sonnet-5");
     }
 
     #[test]

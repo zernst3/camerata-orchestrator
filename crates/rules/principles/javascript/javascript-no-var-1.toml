@@ -1,9 +1,11 @@
 id = "JAVASCRIPT-NO-VAR-1"
+version = 1
 title = "Bindings are declared with const or let; var is forbidden"
-tag = "stack"
 domain = "javascript"
 layer = "language"
 enforcement = "mechanical"
+kind = "default_with_exceptions"
+inspectable = true
 default = true
 qualifies = "Enforced by the ESLint no-var rule, which fails the lint step on any var declaration. Conformance holds when no-var is configured at error severity and a var in the codebase fails the build; it fails when the rule is absent or only warns."
 verification = "grounded"
@@ -15,17 +17,22 @@ linter = "eslint: no-var"
 
 [decision]
 question = "What position does the project take on: Bindings are declared with const or let; var is forbidden?"
-default = "bindings-are-declared-with-const-or-let-var-is-f"
+default = "bindings-are-declared-with-const-or-let-var-is-forbidden"
 why = "var is function-scoped and hoisted, which means a var declared anywhere in a function is visible (as undefined) from the top of that function, and var declared in a loop body is shared across every iteration rather than rebound per iteration. Both behaviors routinely surprise readers and produce closure-capture and temporal bugs that const and let, being block-scoped with a temporal dead zone, structurally cannot have. const and let say what the author means about the binding's scope and reassignability; var says neither. Continuing to use var because it still works trades a structural guarantee for nothing: there is no capability var has that let lacks, and every var in a loop or a conditional block reintroduces the function-scope-and-hoisting footguns the block-scoped forms were designed to eliminate, with the bug surfacing as a stale captured value rather than a compile error."
 
 [[option]]
-id = "bindings-are-declared-with-const-or-let-var-is-f"
+id = "bindings-are-declared-with-const-or-let-var-is-forbidden"
 label = "Bindings are declared with const or let; var is forbidden"
 directive = "Every binding is declared with const (the default) or let (only when the binding is reassigned). The var keyword is forbidden everywhere, including in loops and conditional blocks where its function-scoping and hoisting are most error-prone."
+remediation = """
+Replace the var declaration with const (if never reassigned) or let (if it is), removing the function-scoped, hoisted var form. Verify by confirming the linter's no-var rule passes on this file and the variable's scoping now matches its intended block, not the enclosing function.
+"""
+effort = "medium"
 why = "var is function-scoped and hoisted, producing closure-capture and temporal bugs that the block-scoped const and let structurally cannot have."
 
 [[option]]
 id = "var-remains-permitted-alongside-const-and-let-le"
+violates = true
 label = "Allow var alongside const and let"
 directive = "var remains permitted alongside const and let, leaving the choice of declaration keyword to the author rather than forbidding the function-scoped, hoisted var form outright"
 why = "Permitting var alongside const and let reintroduces function-scoping and hoisting exactly where they produce closure-capture and temporal bugs: a var in a loop body is shared across every iteration rather than rebound, and a var in a conditional is visible from the top of the function as undefined before it is reached. There is no capability var has that let lacks; allowing it trades a structural block-scoping guarantee for backward compatibility at the cost of the footguns the block-scoped forms were designed to eliminate."

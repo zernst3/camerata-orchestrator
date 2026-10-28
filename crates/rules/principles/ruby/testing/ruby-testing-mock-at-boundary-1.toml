@@ -1,9 +1,11 @@
 id = "RUBY-TESTING-MOCK-AT-BOUNDARY-1"
+version = 1
 title = "Mock only at architectural boundaries (external services, I/O); use instance_double/class_double to keep doubles verified"
-tag = "stack"
 domain = "ruby:testing"
 layer = "language"
 enforcement = "structured"
+kind = "defect"
+inspectable = true
 default = true
 qualifies = "The rule has two parts, and only one is mechanically checked. rubocop-rspec's RSpec/VerifiedDoubles cop enforces the HOW: it flags plain double('ClassName') and requires the verifying forms (instance_double/class_double/object_double), which is a real, deterministic lint check. It does not, and cannot, enforce the WHERE: whether a given double sits at an architectural boundary (an external service, I/O, a cross-layer seam) versus mocking an internal collaborator within the same layer is a design judgment the cop has no way to evaluate — it will happily pass an instance_double used to mock an in-process model method with no seam justification at all. So conformance for the verified-doubles half holds mechanically when RSpec/VerifiedDoubles reports no offenses; conformance for the mock-only-at-boundaries half is a code-review judgment call, not a lint gate."
 verification = "grounded"
@@ -17,13 +19,17 @@ why = "Test doubles exist to decouple a unit under test from its collaborators d
 id = "mock-at-boundary-verified-doubles"
 label = "Mock only external/I/O boundaries; use instance_double/class_double for all doubles"
 directive = "Introduce doubles only at system boundaries: HTTP clients (stub with WebMock or VCR), mailers (use ActionMailer::Base.deliveries or the deliveries matcher), background jobs (assert enqueueing rather than execution), and third-party SDKs. Within the application, use real objects and FactoryBot-created records. When a double is necessary, use a verifying form: instance_double(ClassName) for instances, class_double(ClassName) for class-method stubs. Partial doubles on real objects use allow(real_object).to receive(:method). Enable verify_partial_doubles: true in your RSpec configuration. The rubocop-rspec cop RSpec/VerifiedDoubles enforces the verified-doubles requirement. Do not mock the model layer when testing models themselves; do not mock in unit tests what can be tested with the real object at acceptable speed."
+remediation = """
+Replace the plain double() on an internal collaborator with a real instance of that collaborator, reserving doubles for genuine external boundaries (HTTP clients via WebMock/VCR, mailers, background jobs, third-party SDKs), and use instance_double/class_double so the double is verified against the real interface. Verify by confirming the test still exercises the real internal logic and only the true I/O boundary is doubled.
+"""
 why = "Verified doubles prevent phantom specs that pass despite API drift; boundary-only mocking preserves confidence in internal behavior."
 
 [[option]]
 id = "mock-freely-with-plain-doubles"
+violates = true
 label = "Mock any collaborator with plain double() to maximize isolation"
 directive = "Use plain double('Name', method: value) freely throughout all spec layers. Every collaborator beyond the immediate unit under test is mocked."
-why = "Maximum speed and isolation, but creates phantom specs that diverge from the real object's API silently."
+why = "Plain doubles do not verify that the methods they stub exist on the real object, so a spec keeps passing after the real API is renamed or its signature changes, and the suite reports green on code that cannot actually run. The specs are fast and isolated because they are no longer connected to the thing they claim to test."
 
 [[sources]]
 url = "https://rspec.info/features/3-12/rspec-mocks/verifying-doubles/"

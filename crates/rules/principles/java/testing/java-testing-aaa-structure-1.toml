@@ -1,9 +1,11 @@
 id = "JAVA-TESTING-AAA-STRUCTURE-1"
+version = 1
 title = "Every test method follows Arrange-Act-Assert: set up preconditions, invoke the single behavior under test, then assert the outcome; each test covers exactly one behavior"
-tag = "stack"
 domain = "java:testing"
 layer = "language"
 enforcement = "mechanical"
+kind = "decision"
+inspectable = true
 default = true
 qualifies = "Partially enforced by PMD's UnitTestShouldIncludeAssert (flags test methods with no assertions) and UnitTestContainsTooManyAsserts (flags tests with too many assertions, indicating multiple behaviors under test). The structural three-phase shape is prose-reviewed. Conformance holds when each test has a visible Arrange section (field or local setup), a single Act call, and one or more assertions covering exactly that call's outcome."
 verification = "grounded"
@@ -31,6 +33,10 @@ title = "JUnit 5 User Guide — Annotations (@Test, @BeforeEach, @AfterEach life
 id = "arrange-act-assert"
 label = "three-phase Arrange / Act / Assert structure, one behavior per test"
 directive = "Structure every test method as three distinct phases separated by blank lines: (1) Arrange — create objects, configure mocks, set inputs; (2) Act — call exactly one method or trigger exactly one behavior; (3) Assert — assert the outcome with explicit assertions (never assume success from no-exception). Use @BeforeEach for setup shared across all tests in the class. Each @Test method covers exactly one behavior: if you need to verify two independent behaviors, write two test methods. Do not mix multiple Act invocations in one test body."
+remediation = """
+Restructure the test method into three separated phases: Arrange (set up the system under test and its mocks), Act (exactly one call that invokes the behavior under test), and Assert (explicit assertions on the outcome). Split a test that currently exercises multiple behaviors in sequence into separate test methods, one per behavior. Verify by confirming each test method has exactly one Act step and fails for exactly one reason when it fails.
+"""
+effort = "low"
 why = "AAA makes the intent of each test legible at a glance, eliminates hidden assumptions, and ensures each failure maps to exactly one broken behavior."
 
 [[option]]

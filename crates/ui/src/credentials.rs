@@ -9,7 +9,8 @@
 
 use dioxus::prelude::*;
 
-use camerata_ui_core::llm_backend::{show_api_key_warning, LlmBackend};
+use camerata_api_types::project::ProjectBackend;
+use camerata_ui_core::backend::{show_api_key_warning, ProjectBackendExt};
 
 use crate::loading::{BombeEnabled, BombePreview};
 use crate::toast::{push_toast, ToastKind};
@@ -21,9 +22,9 @@ const BOMBE_ENABLED_KEY: &str = "camerata.bombe.enabled";
 
 const OPENROUTER_API_KEY: &str = "openrouter_api_key";
 const GITHUB_TOKEN: &str = "github_token";
-/// The Anthropic API key credential. NOT in the always-shown [`ALL_CREDENTIALS`] list —
-/// it's revealed contextually inside [`ModelBackendSettings`] only when the `api` Claude
-/// backend is selected.
+/// The Anthropic API key credential. NOT in the always-shown [`ALL_CREDENTIALS`] list, it's
+/// revealed contextually inside [`ChatBackendSettings`] only when the `api` chat backend is
+/// selected. The same keychain entry is also read by any project set to the `api` backend.
 const ANTHROPIC_API_KEY: &str = "anthropic_api_key";
 
 const ALL_CREDENTIALS: &[(&str, &str)] = &[
@@ -53,17 +54,20 @@ async fn fetch_credentials() -> Option<Vec<CredentialListItem>> {
 
 // ── LLM backend (Model backend) settings ────────────────────────────────────
 
-/// The subset of `GET /api/settings` the Model-backend control reads: the EFFECTIVE backend
-/// (stored setting > env > default `cli`) and whether an Anthropic API key is present.
+/// The subset of `GET /api/settings` the Chat-backend control reads: the GLOBAL chat
+/// assistant's backend (`settings.chat_backend`, `docs/design/2026-09-22_per-project-backend.md`)
+/// and whether an Anthropic API key is present. This backend affects ONLY the project-less
+/// chatbox — every project resolves its own scans/dev-loop from its own `Project.backend`
+/// instead (see `crate::cockpit::rules::BackendEditor`).
 #[derive(Clone, PartialEq, serde::Deserialize)]
 struct BackendSettingsView {
     #[serde(default)]
-    llm_backend: Option<String>,
+    chat_backend: Option<String>,
     #[serde(default)]
     api_key_present: bool,
 }
 
-/// Fetch the effective LLM backend + api-key presence from `GET /api/settings`.
+/// Fetch the global chat backend + api-key presence from `GET /api/settings`.
 async fn fetch_backend_settings() -> Option<BackendSettingsView> {
     reqwest::get(format!("{}/api/settings", crate::bff_base()))
         .await
@@ -73,11 +77,13 @@ async fn fetch_backend_settings() -> Option<BackendSettingsView> {
         .ok()
 }
 
-/// Persist the LLM backend via `POST /api/settings/llm-backend`. Returns the server-echoed
-/// (backend, api_key_present) on success. `None` on any transport/parse error or non-2xx.
-async fn set_backend(backend: LlmBackend) -> Option<(LlmBackend, bool)> {
+/// Persist the GLOBAL chat backend via `POST /api/settings/chat-backend`. Returns the
+/// server-echoed (backend, api_key_present) on success. `None` on any transport/parse error or
+/// non-2xx. This setting affects ONLY the chatbox — it is never read by any project's scan or
+/// governed dev loop, which resolve from that project's own `Project.backend` instead.
+async fn set_chat_backend(backend: ProjectBackend) -> Option<(ProjectBackend, bool)> {
     let resp = reqwest::Client::new()
-        .post(format!("{}/api/settings/llm-backend", crate::bff_base()))
+        .post(format!("{}/api/settings/chat-backend", crate::bff_base()))
         .json(&serde_json::json!({ "backend": backend.as_wire() }))
         .send()
         .await
@@ -86,7 +92,8 @@ async fn set_backend(backend: LlmBackend) -> Option<(LlmBackend, bool)> {
         return None;
     }
     let v: serde_json::Value = resp.json().await.ok()?;
-    let backend = LlmBackend::parse(v.get("backend").and_then(|b| b.as_str()).unwrap_or("cli"));
+    let backend =
+        ProjectBackend::parse_lenient(v.get("backend").and_then(|b| b.as_str()).unwrap_or("cli"));
     let api_key_present = v
         .get("api_key_present")
         .and_then(|b| b.as_bool())
@@ -105,10 +112,7 @@ async fn post_credential(name: &str, value: &str) -> Result<String, String> {
     let status = resp.status();
     let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
     if status.is_success() {
-        let masked = json["masked"]
-            .as_str()
-            .unwrap_or("(saved)")
-            .to_string();
+        let masked = json["masked"].as_str().unwrap_or("(saved)").to_string();
         Ok(masked)
     } else {
         // The server reports failures under `message`; fall back to `error` for resilience.
@@ -119,6 +123,27 @@ async fn post_credential(name: &str, value: &str) -> Result<String, String> {
             .to_string();
         Err(msg)
     }
+}
+
+/// `DELETE /api/credentials/{name}` — remove a saved credential. A credential saved in the app
+/// takes precedence over its environment variable, so removing it is how a user hands the
+/// credential back to the environment (or clears it altogether).
+async fn delete_credential(name: &str) -> Result<(), String> {
+    let resp = reqwest::Client::new()
+        .delete(format!("{}/api/credentials/{name}", crate::bff_base()))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let status = resp.status();
+    if status.is_success() {
+        return Ok(());
+    }
+    let json: serde_json::Value = resp.json().await.unwrap_or_default();
+    Err(json["message"]
+        .as_str()
+        .or_else(|| json["error"].as_str())
+        .unwrap_or("unknown error")
+        .to_string())
 }
 
 // ── OpenRouter model-registry refresh (manual UI trigger, 3 of 3) ─────────────
@@ -183,19 +208,24 @@ fn OpenRouterModelsRefresh() -> Element {
     let (status_text, status_is_warn): (Option<String>, bool) = match status() {
         RefreshStatus::Idle => (None, false),
         RefreshStatus::Loading => (Some("Refreshing…".to_string()), false),
-        RefreshStatus::Done { count: 0, attempted: false } => (
+        RefreshStatus::Done {
+            count: 0,
+            attempted: false,
+        } => (
             Some("Add an OpenRouter API key to load its models.".to_string()),
             true,
         ),
-        RefreshStatus::Done { count: 0, attempted: true } => {
-            (Some("OpenRouter returned 0 models.".to_string()), true)
-        }
+        RefreshStatus::Done {
+            count: 0,
+            attempted: true,
+        } => (Some("OpenRouter returned 0 models.".to_string()), true),
         RefreshStatus::Done { count, .. } => {
             (Some(format!("{count} OpenRouter models loaded.")), false)
         }
-        RefreshStatus::Failed => {
-            (Some("Refresh failed — check the server connection.".to_string()), true)
-        }
+        RefreshStatus::Failed => (
+            Some("Refresh failed — check the server connection.".to_string()),
+            true,
+        ),
     };
 
     rsx! {
@@ -226,6 +256,136 @@ fn OpenRouterModelsRefresh() -> Element {
                                         toasts,
                                         ToastKind::Error,
                                         "Could not reach the server to refresh models.".to_string(),
+                                    );
+                                }
+                            }
+                        });
+                    },
+                    if is_loading { "Refreshing…" } else { "Refresh models" }
+                }
+                if let Some(text) = status_text {
+                    span {
+                        class: if status_is_warn { "ink-soft warn" } else { "ink-soft" },
+                        "{text}"
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ── Live Anthropic model-registry refresh (Feature A manual UI trigger, 3 of 3) ──
+//
+// The Anthropic sibling of [`OpenRouterModelsRefresh`] above — see
+// `docs/design/2026-08-27_backend-safety-and-live-models.md`'s Feature A section. The
+// other two triggers (server startup, and right after `POST /api/credentials/
+// anthropic_api_key` succeeds) are wired server-side in `crates/server/src/lib.rs`
+// (`spawn_startup_anthropic_refresh`, `trigger_anthropic_refresh_if_needed`). This is the
+// manual escape hatch: hit it after rotating the key, or just to force the latest live
+// model list without waiting for a restart.
+
+/// Subset of `POST /api/models/registry/refresh/anthropic`'s response body this control
+/// reads. Mirrors [`RefreshRegistryResp`].
+#[derive(serde::Deserialize)]
+struct AnthropicRefreshRegistryResp {
+    #[serde(default)]
+    anthropic_count: usize,
+    #[serde(default)]
+    attempted: bool,
+}
+
+/// `POST /api/models/registry/refresh/anthropic` — (re-)fetch the live Anthropic model
+/// list using whatever Anthropic key is currently saved. `None` only on a transport/parse
+/// failure; the endpoint itself always returns 200 (fail-soft), so a missing key is a
+/// normal `Some(AnthropicRefreshRegistryResp { attempted: false, anthropic_count: 0 })`.
+async fn refresh_anthropic_registry() -> Option<AnthropicRefreshRegistryResp> {
+    reqwest::Client::new()
+        .post(format!(
+            "{}/api/models/registry/refresh/anthropic",
+            crate::bff_base()
+        ))
+        .send()
+        .await
+        .ok()?
+        .json::<AnthropicRefreshRegistryResp>()
+        .await
+        .ok()
+}
+
+/// Mirrors [`RefreshStatus`] for the Anthropic live-model refresh control.
+#[derive(Clone, Copy, PartialEq)]
+enum AnthropicRefreshStatus {
+    Idle,
+    Loading,
+    Done { count: usize, attempted: bool },
+    Failed,
+}
+
+/// Manual "Refresh models" control for the live Anthropic `/v1/models` catalog. Rendered
+/// only while the `api` chat backend is selected (see [`ChatBackendSettings`]), refreshing it
+/// while on the CLI backend would populate a cache the picker isn't reading from anyway.
+/// Mirrors [`OpenRouterModelsRefresh`]'s Idle → Loading → Done/Failed shape.
+#[component]
+fn AnthropicModelsRefresh() -> Element {
+    let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
+    let mut status = use_signal(|| AnthropicRefreshStatus::Idle);
+    let is_loading = status() == AnthropicRefreshStatus::Loading;
+
+    let (status_text, status_is_warn): (Option<String>, bool) = match status() {
+        AnthropicRefreshStatus::Idle => (None, false),
+        AnthropicRefreshStatus::Loading => (Some("Refreshing…".to_string()), false),
+        AnthropicRefreshStatus::Done {
+            count: 0,
+            attempted: false,
+        } => (
+            Some("Add an Anthropic API key above to load the live model list.".to_string()),
+            true,
+        ),
+        AnthropicRefreshStatus::Done {
+            count: 0,
+            attempted: true,
+        } => (
+            Some("Anthropic returned 0 models — double-check the key.".to_string()),
+            true,
+        ),
+        AnthropicRefreshStatus::Done { count, .. } => (
+            Some(format!("{count} live Anthropic models loaded.")),
+            false,
+        ),
+        AnthropicRefreshStatus::Failed => (
+            Some("Refresh failed — check the server connection.".to_string()),
+            true,
+        ),
+    };
+
+    rsx! {
+        div { class: "credentials-field-section",
+            div { class: "credentials-field-header",
+                label { class: "credentials-label", "Anthropic Models" }
+            }
+            p { class: "credentials-intro",
+                "Pulls the live model list from your Anthropic account (refreshes automatically on startup and right after you save the key above). On any error the picker falls back to the built-in Claude list, so it's never empty."
+            }
+            div { class: "credentials-input-row",
+                button {
+                    class: "credentials-save-btn btn-primary",
+                    disabled: is_loading,
+                    onclick: move |_| {
+                        status.set(AnthropicRefreshStatus::Loading);
+                        spawn(async move {
+                            match refresh_anthropic_registry().await {
+                                Some(resp) => {
+                                    status.set(AnthropicRefreshStatus::Done {
+                                        count: resp.anthropic_count,
+                                        attempted: resp.attempted,
+                                    });
+                                }
+                                None => {
+                                    status.set(AnthropicRefreshStatus::Failed);
+                                    push_toast(
+                                        toasts,
+                                        ToastKind::Error,
+                                        "Could not reach the server to refresh Anthropic models.".to_string(),
                                     );
                                 }
                             }
@@ -303,8 +463,8 @@ pub fn CredentialsSettings() -> Element {
             // ── Data safety (OpenRouter provider-safety toggle, Pass 2 §3) ──
             crate::provider_safety::DataSafetySettings {}
 
-            // ── Claude backend (CLI ⟷ API) ────────────────────────────────
-            ModelBackendSettings {}
+            // ── Chat backend (CLI ⟷ API, chatbox only) ────────────────────
+            ChatBackendSettings {}
 
             // ── Bombe animation settings ──────────────────────────────────
             BombeSettings {}
@@ -312,21 +472,26 @@ pub fn CredentialsSettings() -> Element {
     }
 }
 
-// ── ModelBackendSettings ────────────────────────────────────────────────────
+// ── ChatBackendSettings ──────────────────────────────────────────────────────
 
-/// The "Claude backend" control: a CLI ⟷ API segmented toggle for how Claude runs.
+/// The "Chat backend" control: a CLI ⟷ API segmented toggle for the project-less chat
+/// assistant ONLY (`docs/design/2026-09-22_per-project-backend.md`). It has no effect on any
+/// project's scan, alternative-recommendation pass, rescan, or governed dev loop — those all
+/// resolve from that project's own **Backend** setting (Settings → This project →
+/// `crate::cockpit::rules::BackendEditor`), never from this one.
 ///
-/// - **CLI** runs Claude via the logged-in Claude Code subscription (no key).
-/// - **API** runs Claude via the Anthropic API and requires an Anthropic API key.
+/// - **CLI** runs the chat via the logged-in Claude Code subscription (no key).
+/// - **API** runs the chat via the Anthropic API and requires an Anthropic API key.
 ///
-/// Reads the current effective backend + key presence from `GET /api/settings`, and writes the
-/// choice via `POST /api/settings/llm-backend`. When `api` is selected the Anthropic API key
-/// input is revealed inline (reusing [`CredentialRow`], stored in the keychain under
-/// `anthropic_api_key`). When `api` is selected with no key present the server silently falls
-/// back to CLI, so an inline warning is shown until a key is saved (pure view logic lives in
-/// `camerata_ui_core::llm_backend`).
+/// Reads the current global chat backend + key presence from `GET /api/settings`, and writes
+/// the choice via `POST /api/settings/chat-backend`. When `api` is selected the Anthropic API
+/// key input is revealed inline (reusing [`CredentialRow`], stored in the keychain under
+/// `anthropic_api_key` — the same key any project set to `Api` also reads). When `api` is
+/// selected with no key present, the chat is blocked rather than silently falling back to CLI,
+/// so an inline warning is shown until a key is saved (pure view logic lives in
+/// `camerata_ui_core::backend`).
 #[component]
-fn ModelBackendSettings() -> Element {
+fn ChatBackendSettings() -> Element {
     let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
     let mut settings_res = use_resource(fetch_backend_settings);
     // The credentials list drives the revealed Anthropic key row's is_set/masked state.
@@ -340,7 +505,7 @@ fn ModelBackendSettings() -> Element {
         None => rsx! {
             div { class: "credentials-field-section",
                 div { class: "credentials-field-header",
-                    label { class: "credentials-label", "Claude backend" }
+                    label { class: "credentials-label", "Chat backend" }
                 }
                 p { class: "ink-soft", "Loading…" }
             }
@@ -348,17 +513,18 @@ fn ModelBackendSettings() -> Element {
         Some(None) => rsx! {
             div { class: "credentials-field-section",
                 div { class: "credentials-field-header",
-                    label { class: "credentials-label", "Claude backend" }
+                    label { class: "credentials-label", "Chat backend" }
                 }
                 p { class: "ink-soft warn", "Could not reach the server." }
             }
         },
         Some(Some(view)) => {
-            let selected = LlmBackend::parse(view.llm_backend.as_deref().unwrap_or("cli"));
+            let selected =
+                ProjectBackend::parse_lenient(view.chat_backend.as_deref().unwrap_or("cli"));
             let api_key_present = view.api_key_present;
             let warn = show_api_key_warning(selected, api_key_present);
 
-            let seg = move |backend: LlmBackend, label: &'static str| {
+            let seg = move |backend: ProjectBackend, label: &'static str| {
                 let is_active = selected == backend;
                 rsx! {
                     button {
@@ -373,12 +539,12 @@ fn ModelBackendSettings() -> Element {
                             if is_active { return; }
                             saving.set(true);
                             spawn(async move {
-                                match set_backend(backend).await {
+                                match set_chat_backend(backend).await {
                                     Some((b, _)) => {
                                         push_toast(
                                             toasts,
                                             ToastKind::Info,
-                                            format!("Claude backend set to {}.", b.label()),
+                                            format!("Chat backend set to {}.", b.label()),
                                         );
                                         settings_res.restart();
                                     }
@@ -386,7 +552,7 @@ fn ModelBackendSettings() -> Element {
                                         push_toast(
                                             toasts,
                                             ToastKind::Error,
-                                            "Could not update the Claude backend.".to_string(),
+                                            "Could not update the chat backend.".to_string(),
                                         );
                                     }
                                 }
@@ -401,27 +567,27 @@ fn ModelBackendSettings() -> Element {
             // When API is selected, look up the Anthropic key credential's state from the
             // credentials list so the revealed row shows the correct set/masked badge.
             let anthropic_item = match &*creds_res.read() {
-                Some(Some(items)) => items
-                    .iter()
-                    .find(|i| i.name == ANTHROPIC_API_KEY)
-                    .cloned(),
+                Some(Some(items)) => items.iter().find(|i| i.name == ANTHROPIC_API_KEY).cloned(),
                 _ => None,
             };
             let anthropic_is_set = anthropic_item.as_ref().map(|i| i.is_set).unwrap_or(false);
             let anthropic_masked = anthropic_item.and_then(|i| i.masked);
-            let show_api = selected == LlmBackend::Api;
+            let show_api = selected == ProjectBackend::Api;
 
             rsx! {
                 div { class: "credentials-field-section",
                     div { class: "credentials-field-header",
-                        label { class: "credentials-label", "Claude backend" }
+                        label { class: "credentials-label", "Chat backend" }
                     }
                     p { class: "credentials-intro",
-                        "Claude runs via the CLI (your logged-in Claude Code subscription) or the Anthropic API (needs an Anthropic API key)."
+                        "This controls only the chat assistant, the chatbox that lives outside any project. It does not affect project scans or the governed dev loop, each project has its own Backend setting for that (Settings, This project, Backend)."
+                    }
+                    p { class: "credentials-intro",
+                        "CLI runs the chat via your logged-in Claude Code subscription, no key needed. API runs the chat via the Anthropic API and needs an Anthropic API key."
                     }
                     div { class: "backend-toggle",
-                        {seg(LlmBackend::Cli, "CLI")}
-                        {seg(LlmBackend::Api, "API")}
+                        {seg(ProjectBackend::Cli, "CLI")}
+                        {seg(ProjectBackend::Api, "API")}
                     }
                     // When API is selected: either reveal the key input (once we know the key
                     // isn't present) or, if a key IS present, show the set/masked row. The
@@ -429,7 +595,7 @@ fn ModelBackendSettings() -> Element {
                     if show_api {
                         if warn {
                             p { class: "ink-soft warn backend-key-warning",
-                                "API backend needs an ANTHROPIC_API_KEY — the app will fall back to CLI until one is configured."
+                                "The chat needs an Anthropic API key to run on the API backend. Until one is saved below, the chat will not run, it does not fall back to CLI."
                             }
                         }
                         CredentialRow {
@@ -445,6 +611,9 @@ fn ModelBackendSettings() -> Element {
                                 settings_res.restart();
                             },
                         }
+                        // Feature A: live Anthropic `/v1/models` manual refresh, shown only
+                        // while the API backend is selected (see the module doc above).
+                        AnthropicModelsRefresh {}
                     }
                 }
             }
@@ -505,7 +674,11 @@ fn BombeSettings() -> Element {
     });
 
     let preview_val = preview();
-    let preview_label = if preview_val { "Pause Preview" } else { "Play Preview" };
+    let preview_label = if preview_val {
+        "Pause Preview"
+    } else {
+        "Play Preview"
+    };
     let enabled_label = if enabled_val { "ON" } else { "OFF" };
 
     rsx! {
@@ -577,12 +750,10 @@ fn CredentialRow(
 ) -> Element {
     let mut input_val = use_signal(String::new);
     let mut saving = use_signal(|| false);
+    let mut removing = use_signal(|| false);
 
     let badge = if is_set {
-        let masked_display = current_masked
-            .as_deref()
-            .unwrap_or("(set)")
-            .to_string();
+        let masked_display = current_masked.as_deref().unwrap_or("(set)").to_string();
         rsx! {
             span { class: "credentials-badge-set", "Saved: {masked_display}" }
         }
@@ -592,7 +763,11 @@ fn CredentialRow(
         }
     };
 
-    let placeholder = if is_set { "Enter new value to update" } else { "Paste value here…" };
+    let placeholder = if is_set {
+        "Enter new value to update"
+    } else {
+        "Paste value here…"
+    };
 
     rsx! {
         div { class: "credentials-field-section",
@@ -647,6 +822,41 @@ fn CredentialRow(
                     },
                     if saving() { "Saving…" } else { "Save" }
                 }
+                if is_set {
+                    button {
+                        class: "credentials-remove-btn",
+                        disabled: removing(),
+                        title: "Remove the saved value. A value saved here takes precedence over the environment variable.",
+                        onclick: {
+                            let name = name.clone();
+                            move |_| {
+                                let name = name.clone();
+                                removing.set(true);
+                                spawn(async move {
+                                    match delete_credential(&name).await {
+                                        Ok(()) => {
+                                            push_toast(
+                                                toasts,
+                                                ToastKind::Info,
+                                                "Removed".to_string(),
+                                            );
+                                            on_saved.call(());
+                                        }
+                                        Err(e) => {
+                                            push_toast(
+                                                toasts,
+                                                ToastKind::Error,
+                                                format!("Failed to remove: {e}"),
+                                            );
+                                        }
+                                    }
+                                    removing.set(false);
+                                });
+                            }
+                        },
+                        if removing() { "Removing…" } else { "Remove" }
+                    }
+                }
             }
         }
     }
@@ -667,7 +877,7 @@ mod tests {
     // GET /api/credentials — asserts the path and that the JSON list is parsed into
     // the expected CredentialListItem vec.
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn fetch_credentials_gets_list_and_parses_items() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -683,9 +893,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let result = super::fetch_credentials().await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         let items = result.expect("the GET succeeds and the body parses");
         assert_eq!(items.len(), 2);
@@ -700,7 +909,7 @@ mod tests {
     // POST /api/credentials/{name} — asserts the path includes the credential name
     // and the body is exactly {"value": "..."}; on 200 it returns the masked value.
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn post_credential_posts_value_body_and_returns_masked_on_success() {
         use wiremock::matchers::{body_json, method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -710,22 +919,57 @@ mod tests {
             .and(path("/api/credentials/openrouter_api_key"))
             .and(body_json(serde_json::json!({ "value": "sk-secret-123" })))
             .respond_with(
-                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "masked": "sk-s••••" })),
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "masked": "sk-s••••" })),
             )
             .expect(1)
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let result = super::post_credential("openrouter_api_key", "sk-secret-123").await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         assert_eq!(result, Ok("sk-s••••".to_string()));
     }
 
+    // DELETE /api/credentials/{name} — one DELETE to the named path; Ok on 200, the server's
+    // `message` on a failure status.
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn delete_credential_sends_delete_and_reports_failures() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/api/credentials/anthropic_api_key"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": true })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path("/api/credentials/github_token"))
+            .respond_with(
+                ResponseTemplate::new(500)
+                    .set_body_json(serde_json::json!({ "message": "keychain locked" })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
+        assert_eq!(super::delete_credential("anthropic_api_key").await, Ok(()));
+        assert_eq!(
+            super::delete_credential("github_token").await,
+            Err("keychain locked".to_string())
+        );
+    }
+
     // POST with a non-success status — returns Err carrying the server's `message` field.
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn post_credential_returns_error_message_on_failure_status() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -741,69 +985,69 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let result = super::post_credential("github_token", "bad").await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         assert_eq!(result, Err("invalid token format".to_string()));
     }
 
-    // POST /api/settings/llm-backend — asserts the body is exactly {"backend":"api"} and
+    // POST /api/settings/chat-backend — asserts the body is exactly {"backend":"api"} and
     // that the echoed (backend, api_key_present) parse back.
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
-    async fn set_backend_posts_backend_and_parses_response() {
+    #[serial_test::serial(process_env)]
+    async fn set_chat_backend_posts_backend_and_parses_response() {
         use wiremock::matchers::{body_json, method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/api/settings/llm-backend"))
+            .and(path("/api/settings/chat-backend"))
             .and(body_json(serde_json::json!({ "backend": "api" })))
-            .respond_with(ResponseTemplate::new(200).set_body_json(
-                serde_json::json!({ "backend": "api", "api_key_present": true }),
-            ))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(
+                    serde_json::json!({ "backend": "api", "api_key_present": true }),
+                ),
+            )
             .expect(1)
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
-        let out = super::set_backend(LlmBackend::Api).await;
-        std::env::remove_var("CAMERATA_BFF_URL");
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
+        let out = super::set_chat_backend(ProjectBackend::Api).await;
 
         let (backend, key) = out.expect("backend echo parsed");
-        assert_eq!(backend, LlmBackend::Api);
+        assert_eq!(backend, ProjectBackend::Api);
         assert!(key, "api_key_present reflected");
     }
 
     // A non-2xx from the endpoint collapses to None (the UI toasts an error).
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
-    async fn set_backend_returns_none_on_error_status() {
+    #[serial_test::serial(process_env)]
+    async fn set_chat_backend_returns_none_on_error_status() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/api/settings/llm-backend"))
+            .and(path("/api/settings/chat-backend"))
             .respond_with(
-                ResponseTemplate::new(400)
-                    .set_body_json(serde_json::json!({ "ok": false, "message": "invalid backend" })),
+                ResponseTemplate::new(400).set_body_json(
+                    serde_json::json!({ "ok": false, "message": "invalid backend" }),
+                ),
             )
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
-        let out = super::set_backend(LlmBackend::Api).await;
-        std::env::remove_var("CAMERATA_BFF_URL");
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
+        let out = super::set_chat_backend(ProjectBackend::Api).await;
 
         assert!(out.is_none(), "a 400 collapses to None");
     }
 
-    // GET /api/settings — the backend view parses the effective backend + api_key_present.
+    // GET /api/settings — the backend view parses the global chat backend + api_key_present.
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
-    async fn fetch_backend_settings_parses_backend_and_key_flag() {
+    #[serial_test::serial(process_env)]
+    async fn fetch_backend_settings_parses_chat_backend_and_key_flag() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -811,18 +1055,17 @@ mod tests {
         Mock::given(method("GET"))
             .and(path("/api/settings"))
             .respond_with(ResponseTemplate::new(200).set_body_json(
-                serde_json::json!({ "llm_backend": "api", "api_key_present": false }),
+                serde_json::json!({ "chat_backend": "api", "api_key_present": false }),
             ))
             .expect(1)
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let out = super::fetch_backend_settings().await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         let view = out.expect("backend settings parsed");
-        assert_eq!(view.llm_backend.as_deref(), Some("api"));
+        assert_eq!(view.chat_backend.as_deref(), Some("api"));
         assert!(!view.api_key_present);
     }
 
@@ -831,7 +1074,7 @@ mod tests {
     // with no body, and that the response's openrouter_count/attempted fields parse; the
     // `models` array in the real response is intentionally ignored by this control.
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn refresh_openrouter_registry_posts_and_parses_count_and_attempted() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -848,9 +1091,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let out = super::refresh_openrouter_registry().await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         let resp = out.expect("refresh response parsed");
         assert_eq!(resp.openrouter_count, 345);
@@ -861,7 +1103,7 @@ mod tests {
     // NOT an error. `refresh_openrouter_registry` must surface that as `Some(..)`, not
     // collapse it to `None` (which would incorrectly toast "could not reach the server").
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn refresh_openrouter_registry_no_key_is_some_not_none() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -878,9 +1120,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let out = super::refresh_openrouter_registry().await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         let resp = out.expect("a 200 with attempted:false must still parse as Some");
         assert_eq!(resp.openrouter_count, 0);
@@ -890,12 +1131,80 @@ mod tests {
     // Transport failure (server unreachable) collapses to None — the UI shows the "could
     // not reach the server" toast rather than misreporting a fetch attempt.
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn refresh_openrouter_registry_returns_none_when_server_unreachable() {
         // An address nothing is listening on — no MockServer mounted.
-        std::env::set_var("CAMERATA_BFF_URL", "http://127.0.0.1:1");
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", "http://127.0.0.1:1");
         let out = super::refresh_openrouter_registry().await;
-        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert!(out.is_none(), "an unreachable server collapses to None");
+    }
+
+    // POST /api/models/registry/refresh/anthropic (Feature A manual "Refresh models"
+    // trigger, 3 of 3 — see crates/server/src/lib.rs for triggers 1 and 2). Mirrors the
+    // three OpenRouter refresh-helper tests immediately above, one for one.
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn refresh_anthropic_registry_posts_and_parses_count_and_attempted() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/models/registry/refresh/anthropic"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "anthropic_count": 4,
+                "attempted": true,
+                "models": [],
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
+        let out = super::refresh_anthropic_registry().await;
+
+        let resp = out.expect("refresh response parsed");
+        assert_eq!(resp.anthropic_count, 4);
+        assert!(resp.attempted);
+    }
+
+    // The no-key case: the endpoint still returns 200 with attempted:false and count:0 —
+    // NOT an error. `refresh_anthropic_registry` must surface that as `Some(..)`, not
+    // collapse it to `None` (which would incorrectly toast "could not reach the server").
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn refresh_anthropic_registry_no_key_is_some_not_none() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/models/registry/refresh/anthropic"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "anthropic_count": 4, // hardcoded catalog count — still served, no key needed to fall back
+                "attempted": false,
+                "models": [],
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
+        let out = super::refresh_anthropic_registry().await;
+
+        let resp = out.expect("a 200 with attempted:false must still parse as Some");
+        assert!(!resp.attempted);
+    }
+
+    // Transport failure (server unreachable) collapses to None — the UI shows the "could
+    // not reach the server" toast rather than misreporting a fetch attempt.
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn refresh_anthropic_registry_returns_none_when_server_unreachable() {
+        // An address nothing is listening on — no MockServer mounted.
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", "http://127.0.0.1:1");
+        let out = super::refresh_anthropic_registry().await;
 
         assert!(out.is_none(), "an unreachable server collapses to None");
     }
@@ -924,10 +1233,19 @@ mod tests {
             html.contains("Background Animation"),
             "section label renders; html=\n{html}"
         );
-        assert!(html.contains("Animate"), "the Animate control renders; html=\n{html}");
-        assert!(html.contains("Preview"), "the Preview control renders; html=\n{html}");
+        assert!(
+            html.contains("Animate"),
+            "the Animate control renders; html=\n{html}"
+        );
+        assert!(
+            html.contains("Preview"),
+            "the Preview control renders; html=\n{html}"
+        );
         // enabled defaults to true → the toggle shows "ON" and the preview button is enabled.
-        assert!(html.contains("ON"), "enabled toggle shows ON state; html=\n{html}");
+        assert!(
+            html.contains("ON"),
+            "enabled toggle shows ON state; html=\n{html}"
+        );
         assert!(
             html.contains("Play Preview"),
             "preview button shows Play (not Pause) when inactive; html=\n{html}"
@@ -967,10 +1285,17 @@ mod tests {
             html.contains("Saved:"),
             "the set-state badge renders; html=\n{html}"
         );
-        assert!(html.contains("Save"), "the Save button renders; html=\n{html}");
+        assert!(
+            html.contains("Save"),
+            "the Save button renders; html=\n{html}"
+        );
         assert!(
             html.contains("Enter new value to update"),
             "the is_set placeholder renders; html=\n{html}"
+        );
+        assert!(
+            html.contains("Remove"),
+            "a saved credential offers a Remove button; html=\n{html}"
         );
     }
 
@@ -1005,6 +1330,10 @@ mod tests {
             html.contains("Paste value here"),
             "the unset placeholder renders; html=\n{html}"
         );
+        assert!(
+            !html.contains("Remove"),
+            "nothing is saved, so there is nothing to remove; html=\n{html}"
+        );
     }
 
     // CredentialsSettings consumes four contexts (toasts Signal, BombeEnabled,
@@ -1030,7 +1359,10 @@ mod tests {
         let mut vdom = VirtualDom::new(credentials_settings_harness);
         vdom.rebuild_in_place();
         let html = dioxus_ssr::render(&vdom);
-        assert!(html.contains("Settings"), "the panel title renders; html=\n{html}");
+        assert!(
+            html.contains("Settings"),
+            "the panel title renders; html=\n{html}"
+        );
         assert!(
             html.contains("OS keychain"),
             "the intro copy renders; html=\n{html}"
@@ -1045,10 +1377,10 @@ mod tests {
             html.contains("Background Animation"),
             "the Bombe settings section renders below; html=\n{html}"
         );
-        // The Claude backend control renders below the credentials too.
+        // The Chat backend control renders below the credentials too.
         assert!(
-            html.contains("Claude backend"),
-            "the Claude backend control renders; html=\n{html}"
+            html.contains("Chat backend"),
+            "the Chat backend control renders; html=\n{html}"
         );
         // The manual OpenRouter "Refresh models" control renders too — unconditionally,
         // unlike the credential rows above it (which wait on the resource).
@@ -1061,7 +1393,10 @@ mod tests {
             html.contains("Data safety"),
             "the Data safety section renders; html=\n{html}"
         );
-        assert!(html.contains("SAFE MODE"), "the SAFE segment renders; html=\n{html}");
+        assert!(
+            html.contains("SAFE MODE"),
+            "the SAFE segment renders; html=\n{html}"
+        );
     }
 
     // OpenRouterModelsRefresh only consumes the toasts context (no resource), so SSR
@@ -1098,14 +1433,46 @@ mod tests {
         );
     }
 
-    // ModelBackendSettings consumes the toasts context and a use_resource. On first SSR
-    // render the resource is pending, so it renders the loading branch — but the "Claude
+    // AnthropicModelsRefresh mirrors OpenRouterModelsRefresh exactly — same "only consumes
+    // toasts, no resource" shape, so SSR renders its real Idle state directly too.
+    fn anthropic_refresh_harness() -> Element {
+        use_context_provider(|| Signal::new(Vec::<crate::toast::Toast>::new()));
+        rsx! {
+            AnthropicModelsRefresh {}
+        }
+    }
+
+    #[test]
+    fn anthropic_models_refresh_renders_label_and_button_idle_with_no_status_line() {
+        let mut vdom = VirtualDom::new(anthropic_refresh_harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        assert!(
+            html.contains("Anthropic Models"),
+            "the section label renders; html=\n{html}"
+        );
+        assert!(
+            html.contains("Refresh models"),
+            "the idle-state button label renders (not \"Refreshing…\"); html=\n{html}"
+        );
+        assert!(
+            !html.contains("Add an Anthropic API key"),
+            "the no-key hint must not render before any refresh attempt; html=\n{html}"
+        );
+        assert!(
+            !html.contains("live Anthropic models loaded"),
+            "no stale count must render before any refresh attempt; html=\n{html}"
+        );
+    }
+
+    // ChatBackendSettings consumes the toasts context and a use_resource. On first SSR
+    // render the resource is pending, so it renders the loading branch, but the "Chat
     // backend" label is always present. The pure CLI/API + warning logic is unit-tested in
-    // camerata_ui_core::llm_backend; here we lock the label + loading scaffold.
+    // camerata_ui_core::backend; here we lock the label + loading scaffold.
     fn model_backend_harness() -> Element {
         use_context_provider(|| Signal::new(Vec::<crate::toast::Toast>::new()));
         rsx! {
-            ModelBackendSettings {}
+            ChatBackendSettings {}
         }
     }
 
@@ -1115,8 +1482,8 @@ mod tests {
         vdom.rebuild_in_place();
         let html = dioxus_ssr::render(&vdom);
         assert!(
-            html.contains("Claude backend"),
-            "the Claude backend label renders; html=\n{html}"
+            html.contains("Chat backend"),
+            "the Chat backend label renders; html=\n{html}"
         );
         // use_resource is pending on first render → loading branch.
         assert!(
@@ -1125,16 +1492,16 @@ mod tests {
         );
     }
 
-    // The Anthropic key input is revealed inside ModelBackendSettings ONLY when the `api`
+    // The Anthropic key input is revealed inside ChatBackendSettings ONLY when the `api`
     // backend is selected. SSR keeps `use_resource` pending, so we can't drive the resolved
-    // branch here; instead we render the reveal sub-tree directly — a `CredentialRow` wired
+    // branch here; instead we render the reveal sub-tree directly, a `CredentialRow` wired
     // exactly as the API branch wires it (name `anthropic_api_key`, label "Anthropic API
-    // Key") — and, for the `cli` case, an empty tree. This locks the contract that the
+    // Key"), and, for the `cli` case, an empty tree. This locks the contract that the
     // Anthropic key input appears for API and is absent for CLI.
     #[component]
-    fn AnthropicKeyRevealProbe(backend: LlmBackend) -> Element {
+    fn AnthropicKeyRevealProbe(backend: ProjectBackend) -> Element {
         let toasts = use_signal(Vec::<crate::toast::Toast>::new);
-        if backend == LlmBackend::Api {
+        if backend == ProjectBackend::Api {
             rsx! {
                 CredentialRow {
                     name: ANTHROPIC_API_KEY.to_string(),
@@ -1152,13 +1519,13 @@ mod tests {
 
     fn anthropic_reveal_api_harness() -> Element {
         rsx! {
-            AnthropicKeyRevealProbe { backend: LlmBackend::Api }
+            AnthropicKeyRevealProbe { backend: ProjectBackend::Api }
         }
     }
 
     fn anthropic_reveal_cli_harness() -> Element {
         rsx! {
-            AnthropicKeyRevealProbe { backend: LlmBackend::Cli }
+            AnthropicKeyRevealProbe { backend: ProjectBackend::Cli }
         }
     }
 
@@ -1172,7 +1539,10 @@ mod tests {
             "the Anthropic key input is revealed for the API backend; html=\n{html}"
         );
         // The revealed row is an actual credential input (password field + Save button).
-        assert!(html.contains("Save"), "the key input has a Save button; html=\n{html}");
+        assert!(
+            html.contains("Save"),
+            "the key input has a Save button; html=\n{html}"
+        );
     }
 
     #[test]

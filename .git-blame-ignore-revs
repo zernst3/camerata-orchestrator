@@ -1,0 +1,5 @@
+# Formatting-only commits. GitHub blame skips these automatically; locally run
+#   git config blame.ignoreRevsFile .git-blame-ignore-revs
+
+# style: pin rustfmt config and format the workspace (formatting only)
+b0b543c4a9272dd65f5773ae977ef4dd7afbe65b

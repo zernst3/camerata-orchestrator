@@ -415,7 +415,7 @@ mod tests {
     #[test]
     fn classify_change_mixed_class_and_preview_picks_preview() {
         let change = change_with_touches(vec![
-            TouchedArea::new("src/server.rs"),        // MechanicallyVerified
+            TouchedArea::new("src/server.rs"),         // MechanicallyVerified
             TouchedArea::new("src/components/nav.rs"), // PreviewReversible
         ]);
         let result = classify_change(&change);
@@ -431,10 +431,7 @@ mod tests {
 
     #[test]
     fn classify_change_cargo_toml_with_dependency_cleared_is_not_irreversible() {
-        let change = change_with_touches(vec![TouchedArea::adding_dependency(
-            "Cargo.toml",
-            false,
-        )]);
+        let change = change_with_touches(vec![TouchedArea::adding_dependency("Cargo.toml", false)]);
         let result = classify_change(&change);
         assert_eq!(result.class, DecisionClass::PreviewReversible);
     }
@@ -557,7 +554,10 @@ mod tests {
 
         match outcome {
             TurnOutcome::NeedsClarification { questions } => {
-                assert_eq!(questions, vec!["Does this need end-user logins?".to_string()]);
+                assert_eq!(
+                    questions,
+                    vec!["Does this need end-user logins?".to_string()]
+                );
             }
             other => panic!("expected NeedsClarification, got {other:?}"),
         }
@@ -630,7 +630,10 @@ mod tests {
 
         let spec = crate::spec::read_or_init(dir.path()).expect("read spec");
         assert_eq!(spec.assumptions.len(), 1);
-        assert_eq!(spec.assumptions[0].text, "Assumed USD as the default currency.");
+        assert_eq!(
+            spec.assumptions[0].text,
+            "Assumed USD as the default currency."
+        );
     }
 
     #[tokio::test]
@@ -677,7 +680,10 @@ mod tests {
             .expect("handle_turn");
 
         match outcome {
-            TurnOutcome::NeedsApproval { consequence, decision } => {
+            TurnOutcome::NeedsApproval {
+                consequence,
+                decision,
+            } => {
                 assert_eq!(decision.class, DecisionClass::Irreversible);
                 assert!(consequence.contains("migrations/0003_drop.sql"));
             }

@@ -1,9 +1,11 @@
 id = "CSHARP-NO-SWALLOWED-EXCEPTIONS-1"
+version = 1
 title = "Exceptions are never silently swallowed; catch blocks log, rethrow, or transform exceptions; no empty catch bodies"
-tag = "stack"
 domain = "csharp"
 layer = "language"
 enforcement = "mechanical"
+kind = "defect"
+inspectable = true
 default = true
 qualifies = "Enforced by Roslyn analyzer CA1031 (Do not catch general exception types) plus the SonarAnalyzer rules S108 (Nested blocks of code should not be left empty) and S2486 (Generic exceptions should not be ignored), which together flag empty catch bodies and catch-all blocks that neither log nor rethrow. (CA1068 is an unrelated rule about CancellationToken parameter ordering and is not cited as enforcement here.) Conformance holds when these rules run in CI and swallowed exceptions fail the build."
 
@@ -25,16 +27,22 @@ why = "Catching an exception without logging it, rethrowing it, or transforming 
 id = "catch-specific-log-or-rethrow"
 label = "catch specific exceptions only; every handler logs or rethrows"
 directive = "Exception handlers catch the most specific exception type they can recover from. Every catch block either: (1) logs the full exception (including stack trace) via the application's structured logger, (2) rethrows the exception or a wrapped version via throw or throw new WrappedException(..., ex), or (3) recovers locally with a documented rationale (e.g., \"retrying on transient database timeout\"). Empty catch bodies are forbidden. Catch-all blocks (Exception) are allowed only at top-level application boundaries (request handlers, Main entry point) where they log and transform the error into a structured response."
+remediation = """
+Change the catch block to catch the most specific exception type it can actually recover from, and have it either log the full exception with stack trace through the application's structured logger, or rethrow it (bare throw or a wrapped exception). Remove any empty catch body. Verify by triggering the failure path in a test and confirming the exception appears in the logs or propagates, rather than disappearing silently.
+"""
+effort = "medium"
 why = "Every exception surfaces either as a log entry or is propagated to the caller; bugs never silently vanish."
 
 [[option]]
 id = "swallow-broad-exceptions"
+violates = true
 label = "catch Exception and ignore or log conditionally"
 directive = "Broad exception handlers catch Exception and may silently ignore, conditionally log, or suppress the error without rethrowing."
 why = "Hides bugs and makes debugging impossible; failures disappear into logs or are silently dropped."
 
 [[option]]
 id = "catch-all-ignore"
+violates = true
 label = "use catch blocks with empty bodies to prevent crashes"
 directive = "Exceptions are caught but not handled, logged, or rethrown; the catch body is empty or only contains a comment."
 why = "Silently masks all errors, leading to undefined state and invisible failures."

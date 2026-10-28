@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used)]
 //! Hermetic end-to-end regression net for the FULL onboarding WALK.
 //!
 //! Where `onboarding_flow_e2e.rs` exercises the onboarding PIECES in isolation
@@ -30,15 +31,14 @@
 //! pass), we assert the STRUCTURE around it (the proposal set, the deterministic
 //! floor, the emitted gate config), never AI output.
 
-use std::sync::Mutex;
-
 use camerata_server::arm::{arm_files_for_repo, existing_governance_files, ArmRule, GateRule};
 use camerata_server::project::ProjectStore;
 use camerata_server::AppState;
 
 // `propose_corpus_rules` reads a process-global env var (`CAMERATA_CORPUS_PATH`). Serialize the
 // env-mutating tests so they never race a parallel test (same guard as onboarding_flow_e2e).
-static CORPUS_ENV_LOCK: Mutex<()> = Mutex::new(());
+// The env-mutating test carries `#[serial_test::serial(process_env)]`, so it never races a
+// parallel test and (unlike a std mutex guard) is safe to hold across its `.await`s.
 
 // ════════════════════════════════════════════════════════════════════════════════════
 // Shared fixtures
@@ -148,9 +148,8 @@ fn arm_rule(id: &str, enforcement: &str, repo: &str) -> ArmRule {
 // ════════════════════════════════════════════════════════════════════════════════════
 
 #[tokio::test]
+#[serial_test::serial(process_env)]
 async fn scope1_full_onboarding_walk_scan_propose_apply_mark_gate_registry() {
-    let _guard = CORPUS_ENV_LOCK.lock().unwrap();
-
     let repo_spec = "me/api".to_string();
 
     // ── connect/native provider: an in-process AppState + a fresh project covering the repo.
@@ -171,11 +170,14 @@ async fn scope1_full_onboarding_walk_scan_propose_apply_mark_gate_registry() {
     // ── SCAN the on-disk repo: stack detect + (deterministic) proposal.
     let repo_dir = write_rust_repo_with_a_floor_finding();
     let corpus = write_tiny_corpus();
-    std::env::set_var("CAMERATA_CORPUS_PATH", corpus.path());
+    let _env = camerata_test_env::EnvGuard::set("CAMERATA_CORPUS_PATH", corpus.path());
 
     let sources = vec![(repo_spec.clone(), repo_dir.path().to_path_buf())];
     let scan = camerata_server::onboard::scan_repos(&sources, Vec::new()).await;
-    assert!(!scan.gated, "a local-dir scan is not gated on a GitHub token");
+    assert!(
+        !scan.gated,
+        "a local-dir scan is not gated on a GitHub token"
+    );
     assert_eq!(scan.repos, vec![repo_spec.clone()]);
     assert!(scan.files_scanned > 0, "the scan read the repo's files");
     // The stack detector recognized this as a Rust repo (it has Cargo.toml + .rs files).
@@ -185,7 +187,10 @@ async fn scope1_full_onboarding_walk_scan_propose_apply_mark_gate_registry() {
         .find(|s| s.repo == repo_spec)
         .expect("the scanned repo has a detected stack");
     assert!(
-        stack.languages.iter().any(|l| l.eq_ignore_ascii_case("rust")),
+        stack
+            .languages
+            .iter()
+            .any(|l| l.eq_ignore_ascii_case("rust")),
         "Cargo.toml + .rs => the Rust stack is detected: {:?}",
         stack.languages
     );
@@ -253,14 +258,16 @@ async fn scope1_full_onboarding_walk_scan_propose_apply_mark_gate_registry() {
     assert!(agents.contains("### RUST-DOMAIN-1"));
     assert!(agents.contains("### UNIVERSAL-1"));
     let conv = &files.iter().find(|(p, _)| p == "CONVENTIONS.md").unwrap().1;
-    assert!(conv.contains("### RUST-FMT-1"), "mechanical rule in CONVENTIONS.md");
+    assert!(
+        conv.contains("### RUST-FMT-1"),
+        "mechanical rule in CONVENTIONS.md"
+    );
     assert!(
         !conv.contains("### RUST-DOMAIN-1"),
         "prose rules do NOT go into CONVENTIONS.md"
     );
     // The on-disk gate config round-trips: every applied id is recorded.
-    let gate_json =
-        std::fs::read_to_string(repo_dir.path().join(".camerata/rules.json")).unwrap();
+    let gate_json = std::fs::read_to_string(repo_dir.path().join(".camerata/rules.json")).unwrap();
     let gate: Vec<GateRule> = serde_json::from_str(&gate_json).unwrap();
     let gate_ids: Vec<&str> = gate.iter().map(|g| g.id.as_str()).collect();
     assert!(gate_ids.contains(&"RUST-DOMAIN-1"));
@@ -270,7 +277,9 @@ async fn scope1_full_onboarding_walk_scan_propose_apply_mark_gate_registry() {
     // ── MARK the repo onboarded on the project (the apply step's final act).
     state
         .projects()
-        .update(&project.id, |p| p.mark_onboarded(&[repo_spec.clone()]))
+        .update(&project.id, |p| {
+            p.mark_onboarded(std::slice::from_ref(&repo_spec))
+        })
         .expect("mark the repo onboarded");
 
     // ── The development gate now SEES the repo as onboarded: a re-onboard is blocked and the
@@ -292,7 +301,6 @@ async fn scope1_full_onboarding_walk_scan_propose_apply_mark_gate_registry() {
         );
     }
 
-    std::env::remove_var("CAMERATA_CORPUS_PATH");
     // repo_dir + corpus (TempDirs) are RAII-cleaned on drop.
 }
 

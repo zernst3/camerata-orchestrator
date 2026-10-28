@@ -1,25 +1,35 @@
 id = "ARCH-EXPLICIT-TX-1"
+version = 1
 title = "Services own the transaction lifecycle; repositories receive the handle as a parameter"
-tag = "stack"
 domain = "api-layer"
 layer = "universal"
 enforcement = "structured"
+kind = "decision"
+inspectable = true
+# Deviation-ceiling escape hatch: transactional ownership is a cross-cutting contract — once
+# some repository methods expect a handle and others open their own, every future method must
+# guess which posture its callers use, and atomicity bugs follow the inconsistency.
+deviation_ceiling = "high"
 default = true
 verification = "grounded"
 
 [[sources]]
 url = "https://martinfowler.com/eaaCatalog/unitOfWork.html"
-title = "Martin Fowler — Patterns of Enterprise Application Architecture: Unit of Work (medium authority — PoEAA grounds an explicit transaction/unit-of-work boundary in general; the specific 'repository receives the handle as a parameter' shape is this project's chosen implementation of that boundary)"
+title = "Martin Fowler — Patterns of Enterprise Application Architecture: Unit of Work"
+relevance = "Authority note (author-facing): medium authority — PoEAA grounds an explicit transaction/unit-of-work boundary in general; the specific 'repository receives the handle as a parameter' shape is this project's chosen implementation of that boundary"
 
 [decision]
 question = "What position does the project take on: Services own the transaction lifecycle; repositories receive the handle as a parameter?"
-default = "services-own-the-transaction-lifecycle-repositor"
+default = "services-own-the-transaction-lifecycle-repositories-receive-the-handle"
 why = "Making the transaction handle an explicit parameter makes the unit-of-work boundary visible at every call site. A reviewer can see at a glance which calls are inside the transaction and which are outside, without having to reason about middleware order, annotation precedence, or whether the current execution context still holds the same handle as when it started. Implicit context is also a leading source of bugs in async or multithreaded code, where the execution context can move between threads or coroutines and the ambient transaction can become attached to the wrong unit of work. Implicit or ambient transaction context held in thread-local or request-scoped state works fine for the synchronous request-response shape but becomes a leading source of bugs in async, concurrent, or background-job code where the context can travel separately from the call stack. Annotations or decorators that the framework injects transactions for hide the boundary at the call site, and subtle bugs arise from annotation precedence, propagation modes, and self-invocation defeats. Repositories opening their own short transactions per call gives no unit-of-work guarantee across related writes, so partial failure leaves the database in an inconsistent state with no atomic rollback path."
 
 [[option]]
-id = "services-own-the-transaction-lifecycle-repositor"
+id = "services-own-the-transaction-lifecycle-repositories-receive-the-handle"
 label = "Services own the transaction lifecycle; repositories receive the handle as a parameter"
 directive = "When a unit of work spans multiple repository calls, the service layer opens the transaction, passes the transaction handle to each repository method as an explicit parameter, and commits or rolls back the transaction itself. Repositories never open or close transactions; they accept a handle and use it. Implicit or ambient transaction context (thread-local, request-scoped, AOP-injected, framework-magic) is forbidden, because the boundary then becomes invisible at the call site and unreliable under concurrency or async re-entry."
+remediation = """
+Move transaction opening, committing, and rollback into the service method that coordinates the multi-repository unit of work, and pass the transaction handle explicitly into each repository call. Remove any repository code that opens or closes its own transaction, or any reliance on ambient/thread-local transaction state. Verify by confirming a failure partway through the unit of work rolls back every repository call within it, not just the one that failed.
+"""
 why = "Making the transaction handle an explicit parameter makes the unit-of-work boundary visible at every call site."
 
 [[option]]

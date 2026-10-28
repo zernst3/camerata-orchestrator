@@ -1,9 +1,11 @@
 id = "PYTHON-TESTING-UNIT-LAYOUT-1"
+version = 1
 title = "Unit tests live in a top-level tests/ directory mirroring the source tree"
-tag = "stack"
 domain = "python:testing"
 layer = "language"
 enforcement = "structured"
+kind = "default_with_exceptions"
+inspectable = true
 default = true
 qualifies = "Conformance holds when unit tests live in a top-level tests/ (or src/-sibling tests/) directory whose layout mirrors the application package hierarchy; it fails when test files are scattered inside production modules without a dedicated tests/ root, or when the project has no clear unit/integration split."
 verification = "grounded"
@@ -17,6 +19,9 @@ why = "pytest's own good-integration-practices guide documents two canonical lay
 id = "top-level-tests-dir"
 label = "separate top-level tests/ directory mirroring the source hierarchy"
 directive = "All test files live in a top-level tests/ directory (or, for src-layout projects, a tests/ sibling to src/). The directory tree within tests/ mirrors the application package structure: a module at src/mypkg/foo.py has its unit tests in tests/unit/test_foo.py. Unit tests (no I/O, no network, no database) go under tests/unit/; integration tests that touch external systems go under tests/integration/. Each subdirectory may contain a conftest.py for scope-local fixtures. Test files are named test_<module>.py. No test files live inside the application package unless the project explicitly chose the co-located-inline layout."
+remediation = """
+Move the test file out of an inline package-level tests/ subdirectory (or wherever it currently sits) and into a top-level tests/ directory that mirrors the application's package structure. Verify by confirming a module at src/mypkg/foo.py has its corresponding test at tests/unit/test_foo.py, matching the source tree's shape.
+"""
 why = "Keeps tests out of the installed package, allows running tests against the installed artifact, and makes the project layout obvious."
 
 [[option]]
@@ -27,6 +32,7 @@ why = "Useful when tests are tightly coupled to a package that ships as a librar
 
 [[option]]
 id = "scattered"
+violates = true
 label = "no fixed location; test files live wherever convenient"
 directive = "Test files are placed wherever the author chooses, mixed with production code or at the repo root."
 why = "Avoided: makes coverage reporting, CI filtering, and contributor orientation significantly harder."

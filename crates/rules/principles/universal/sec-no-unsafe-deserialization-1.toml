@@ -1,9 +1,12 @@
 id = "SEC-NO-UNSAFE-DESERIALIZATION-1"
+version = 1
 title = "Unsafe deserialization of untrusted data is never used in production code; tests that require it use a suppression with a reason"
-tag = "universal"
 domain = "universal"
 layer = "universal"
 enforcement = "mechanical"
+kind = "defect"
+inspectable = true
+cwe = ["CWE-502"]
 default = true
 verification = "grounded"
 
@@ -75,7 +78,7 @@ Test-scope policy: Waive.
 
 [[option]]
 id = "never-in-production"
-label = "Unsafe deserializers are never called on untrusted input in production code; tests that need them use a camerata:allow suppression"
+label = "Unsafe deserializers are never called on untrusted input in production code; tests that need them use an explicit suppression comment"
 directive = """
 yaml.load without SafeLoader/FullLoader, yaml.unsafe_load, pickle/cPickle/_pickle .load/.loads,
 PHP unserialize(), Ruby Marshal.load/restore, and .NET BinaryFormatter/NetDataContractSerializer/
@@ -83,7 +86,15 @@ LosFormatter/ObjectStateFormatter are never called on data whose origin is not f
 sandboxed. The correct alternatives are: yaml.safe_load() or yaml.load(Loader=SafeLoader) for
 YAML; json / protobuf / msgpack for structured data that does not require arbitrary object
 reconstruction. When a test must call an unsafe deserialiser on a controlled fixture, suppress
-with a camerata:allow comment that explains why the input is trusted.
+that call with an explicit suppression comment that explains why the input is trusted.
+"""
+remediation = """
+Replace the unsafe deserializer call (yaml.load without a safe loader, pickle.load, PHP unserialize(), Ruby Marshal.load, .NET BinaryFormatter, or similar) on untrusted input with its safe equivalent (SafeLoader, a schema-validated parser, or a format that doesn't execute arbitrary code on load). If the input is genuinely from a fully trusted, sandboxed source, keep the unsafe call only behind an explicit, reviewed suppression comment documenting that trust boundary. Verify by feeding the deserializer a crafted malicious payload and confirming it is rejected or safely parsed rather than executing arbitrary code.
+"""
+effort = "medium"
+finding_headline = "Your `<path>` file deserializes data using a function that can run arbitrary code."
+finding_detail = """
+Certain deserializers reconstruct objects in a way that can execute attacker-controlled code the moment the data is loaded — before any validation of the result ever runs. If the input this call reads in `<path>` can ever come from outside your own trusted backend, switch to a safe format (JSON, or a safe YAML loader) or validate the source before it reaches this call.
 """
 why = """
 Every unsafe deserialiser in the match-set reconstructs an arbitrary object graph from the
@@ -97,8 +108,9 @@ justification via the suppression comment when a genuine exception exists.
 
 [[option]]
 id = "allow-on-trusted-input"
+violates = true
 label = "Allow unsafe deserializers when the input source is known-trusted and sandboxed"
-directive = "Unsafe deserializers may be called when the input is proven to originate from a trusted internal source with no user control; the call must carry a camerata:allow comment documenting the trust boundary"
+directive = "Unsafe deserializers may be called when the input is proven to originate from a trusted internal source with no user control; the call must carry an explicit suppression comment documenting the trust boundary"
 why = """
 Rejected as the default: 'proven trusted' is an architectural claim that cannot be verified
 at the call site by a reviewer or the gate. 'Internal source' is routinely violated by

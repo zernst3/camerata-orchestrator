@@ -93,15 +93,13 @@ impl HierarchySchema {
 /// empty/absent schema to the seeded default ladder). Returns `None` when there is no active
 /// project or on any network error.
 async fn api_fetch_active_hierarchy() -> Option<HierarchySchema> {
-    let active: serde_json::Value = reqwest::get(format!(
-        "{}/api/projects/active",
-        crate::bff_base(),
-    ))
-    .await
-    .ok()?
-    .json()
-    .await
-    .ok()?;
+    let active: serde_json::Value =
+        reqwest::get(format!("{}/api/projects/active", crate::bff_base(),))
+            .await
+            .ok()?
+            .json()
+            .await
+            .ok()?;
     let project_id = active.get("id").and_then(|v| v.as_str())?.to_string();
     let v: serde_json::Value = reqwest::get(format!(
         "{}/api/projects/{}/hierarchy",
@@ -157,12 +155,13 @@ async fn api_fetch_design_nodes(root_id: &str) -> Vec<DesignNode> {
         .unwrap_or_default()
 }
 
-async fn api_design_author(
-    node_id: &str,
-    message: &str,
-) -> Option<DesignNode> {
+async fn api_design_author(node_id: &str, message: &str) -> Option<DesignNode> {
     reqwest::Client::new()
-        .post(format!("{}/api/designs/{}/author", crate::bff_base(), node_id))
+        .post(format!(
+            "{}/api/designs/{}/author",
+            crate::bff_base(),
+            node_id
+        ))
         .json(&serde_json::json!({ "message": message }))
         .send()
         .await
@@ -172,9 +171,17 @@ async fn api_design_author(
         .ok()
 }
 
-async fn api_design_materialize(root_id: &str, parent_draft_id: &str, nodes: Vec<serde_json::Value>) -> bool {
+async fn api_design_materialize(
+    root_id: &str,
+    parent_draft_id: &str,
+    nodes: Vec<serde_json::Value>,
+) -> bool {
     reqwest::Client::new()
-        .post(format!("{}/api/designs/{}/nodes", crate::bff_base(), root_id))
+        .post(format!(
+            "{}/api/designs/{}/nodes",
+            crate::bff_base(),
+            root_id
+        ))
         .json(&serde_json::json!({
             "parent_draft_id": parent_draft_id,
             "nodes": nodes,
@@ -204,7 +211,11 @@ async fn api_design_delete_node(root_id: &str, node_id: &str) -> bool {
 /// from the UI. Returns `(ok, human-readable message)`.
 async fn api_design_publish(root_id: &str) -> (bool, String) {
     let v: serde_json::Value = match reqwest::Client::new()
-        .post(format!("{}/api/designs/{}/publish", crate::bff_base(), root_id))
+        .post(format!(
+            "{}/api/designs/{}/publish",
+            crate::bff_base(),
+            root_id
+        ))
         .json(&serde_json::json!({}))
         .send()
         .await
@@ -252,10 +263,7 @@ async fn api_active_project_id() -> Option<String> {
             .json()
             .await
             .ok()?;
-    active
-        .get("id")
-        .and_then(|v| v.as_str())
-        .map(String::from)
+    active.get("id").and_then(|v| v.as_str()).map(String::from)
 }
 
 /// Fetch the active project's connected repos. Resolves the active project via
@@ -282,7 +290,11 @@ async fn fetch_project_repos(_project_id: &str) -> Vec<String> {
 /// repo assignment. Returns `true` on a 2xx response, `false` otherwise.
 async fn api_set_publish_repos(node_id: &str, repos: Vec<String>) -> bool {
     reqwest::Client::new()
-        .post(format!("{}/api/uow/{}/publish-repos", crate::bff_base(), node_id))
+        .post(format!(
+            "{}/api/uow/{}/publish-repos",
+            crate::bff_base(),
+            node_id
+        ))
         .json(&serde_json::json!({ "repos": repos }))
         .send()
         .await
@@ -453,9 +465,9 @@ pub fn DesignCanvasView() -> Element {
     let schema = schema_res.read().clone().flatten().unwrap_or_default();
 
     // Selected node (pulled from tree for display).
-    let selected = selected_node_id().as_ref().and_then(|id| {
-        nodes.iter().find(|n| &n.story_id == id).cloned()
-    });
+    let selected = selected_node_id()
+        .as_ref()
+        .and_then(|id| nodes.iter().find(|n| &n.story_id == id).cloned());
 
     // The saved-design summary for the currently-open tree (matched by root id), used to show
     // its status badge + drive the Archive toggle in the header. Falls back to "draft" when the
@@ -1277,9 +1289,18 @@ mod tests {
         // hardcoding "Story" (which the default ladder forbids under Epic → dead-end button).
         let schema = HierarchySchema {
             relations: vec![
-                TypeRelation { parent: "Epic".into(), child: "Feature".into() },
-                TypeRelation { parent: "Feature".into(), child: "Story".into() },
-                TypeRelation { parent: "Feature".into(), child: "Defect".into() },
+                TypeRelation {
+                    parent: "Epic".into(),
+                    child: "Feature".into(),
+                },
+                TypeRelation {
+                    parent: "Feature".into(),
+                    child: "Story".into(),
+                },
+                TypeRelation {
+                    parent: "Feature".into(),
+                    child: "Defect".into(),
+                },
             ],
         };
         assert_eq!(schema.allowed_children("Epic"), vec!["Feature".to_string()]);
@@ -1301,7 +1322,10 @@ mod tests {
         vdom.rebuild_in_place();
         let html = dioxus_ssr::render(&vdom);
         assert!(html.contains("Mockup window"), "toggle label renders");
-        assert!(!html.contains("Generate HTML mockup"), "body hidden when collapsed");
+        assert!(
+            !html.contains("Generate HTML mockup"),
+            "body hidden when collapsed"
+        );
     }
 
     #[test]
@@ -1314,7 +1338,10 @@ mod tests {
         let html = dioxus_ssr::render(&vdom);
         assert!(html.contains("Design Tree"), "tree pane label renders");
         assert!(html.contains("New design"), "new design button renders");
-        assert!(html.contains("Saved designs"), "saved-designs section renders");
+        assert!(
+            html.contains("Saved designs"),
+            "saved-designs section renders"
+        );
         assert!(
             html.contains("Advanced — load by root ID"),
             "load-by-root-ID fallback still renders as advanced"
@@ -1348,7 +1375,10 @@ mod tests {
         let html = dioxus_ssr::render(&vdom);
         assert!(html.contains("Epic"), "node type renders");
         assert!(html.contains("Checkout Revamp"), "draft title renders");
-        assert!(html.contains("Publish tree to GitHub"), "publish section renders");
+        assert!(
+            html.contains("Publish tree to GitHub"),
+            "publish section renders"
+        );
         // The proposed-children outcome is now ALWAYS visible: with neither proposed nor
         // dropped children the panel renders the no-children explanation (never silent).
         assert!(
@@ -1366,7 +1396,7 @@ mod tests {
     // future server-response shape change will fail these before it reaches prod.
 
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn api_design_blank_parses_design_id() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1382,15 +1412,18 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let result = super::api_design_blank("Epic", None, None).await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
-        assert_eq!(result.as_deref(), Some("draft-x"), "must return the design_id string");
+        assert_eq!(
+            result.as_deref(),
+            Some("draft-x"),
+            "must return the design_id string"
+        );
     }
 
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn api_design_publish_parses_nodes_as_success() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1398,21 +1431,21 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/api/designs/root-1/publish"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(
-                    serde_json::json!({ "nodes": ["owner/repo#1", "owner/repo#2"], "warnings": [] }),
-                ),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                serde_json::json!({ "nodes": ["owner/repo#1", "owner/repo#2"], "warnings": [] }),
+            ))
             .expect(1)
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let (ok, msg) = super::api_design_publish("root-1").await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         assert!(ok, "nodes present => success");
-        assert!(msg.contains("2"), "message must mention the count of published nodes");
+        assert!(
+            msg.contains("2"),
+            "message must mention the count of published nodes"
+        );
     }
 
     #[test]
@@ -1442,12 +1475,18 @@ mod tests {
         let mut vdom = VirtualDom::new(harness);
         vdom.rebuild_in_place();
         let html = dioxus_ssr::render(&vdom);
-        assert!(html.contains("Feature: Auth UI"), "proposed child title renders");
+        assert!(
+            html.contains("Feature: Auth UI"),
+            "proposed child title renders"
+        );
         assert!(
             html.contains("Allow users to log in via OAuth"),
             "proposed child body is displayed in rendered HTML"
         );
-        assert!(html.contains("Materialize 1 child"), "materialize button renders");
+        assert!(
+            html.contains("Materialize 1 child"),
+            "materialize button renders"
+        );
     }
 
     #[test]
@@ -1480,14 +1519,20 @@ mod tests {
         let mut vdom = VirtualDom::new(harness);
         vdom.rebuild_in_place();
         let html = dioxus_ssr::render(&vdom);
-        assert!(html.contains("were dropped"), "dropped-children warning renders");
-        assert!(html.contains("Story: Login form"), "each dropped child is named");
+        assert!(
+            html.contains("were dropped"),
+            "dropped-children warning renders"
+        );
+        assert!(
+            html.contains("Story: Login form"),
+            "each dropped child is named"
+        );
     }
 
     // ── Designs-persistence: saved-designs list ──────────────────────────────────
 
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn fetch_designs_parses_summaries_array() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1519,9 +1564,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let out = super::fetch_designs("proj-7").await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         assert_eq!(out.len(), 2, "both designs parse");
         assert_eq!(out[0].id, "draft-a");
@@ -1537,7 +1581,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn fetch_designs_empty_array_yields_empty_vec() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1552,15 +1596,14 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let out = super::fetch_designs("proj-7").await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         assert!(out.is_empty(), "empty designs array => empty vec");
     }
 
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn delete_design_returns_true_on_ok_body() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1575,15 +1618,14 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let ok = super::delete_design("draft-a").await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         assert!(ok, "{{ ok: true }} => delete succeeded");
     }
 
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn delete_design_returns_false_on_404() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1592,20 +1634,20 @@ mod tests {
         Mock::given(method("DELETE"))
             .and(path("/api/designs/missing"))
             .respond_with(
-                ResponseTemplate::new(404).set_body_json(serde_json::json!({ "error": "not found" })),
+                ResponseTemplate::new(404)
+                    .set_body_json(serde_json::json!({ "error": "not found" })),
             )
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let ok = super::delete_design("missing").await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         assert!(!ok, "404 (no ok:true) => false");
     }
 
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn set_design_status_posts_status_and_reads_success() {
         use wiremock::matchers::{body_json, method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1622,9 +1664,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let ok = super::set_design_status("draft-a", "archived").await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         assert!(ok, "2xx => status update succeeded");
     }
@@ -1658,10 +1699,16 @@ mod tests {
             html.contains("design-status-badge published"),
             "published status badge class renders"
         );
-        assert!(html.contains("Epic · 3 nodes"), "node_count meta label renders");
+        assert!(
+            html.contains("Epic · 3 nodes"),
+            "node_count meta label renders"
+        );
         assert!(html.contains("2026-07-02"), "trimmed updated date renders");
         // Not in confirm state → shows the trash affordance, not the confirm button.
-        assert!(!html.contains("Confirm?"), "delete-confirm hidden until requested");
+        assert!(
+            !html.contains("Confirm?"),
+            "delete-confirm hidden until requested"
+        );
     }
 
     #[test]
@@ -1687,7 +1734,10 @@ mod tests {
         let mut vdom = VirtualDom::new(harness);
         vdom.rebuild_in_place();
         let html = dioxus_ssr::render(&vdom);
-        assert!(html.contains("Confirm?"), "confirm button shows in pending state");
+        assert!(
+            html.contains("Confirm?"),
+            "confirm button shows in pending state"
+        );
         assert!(html.contains("Draft"), "draft badge renders");
         // No node_type → meta drops the type prefix and pluralizes correctly.
         assert!(html.contains("1 node"), "singular node label renders");

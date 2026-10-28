@@ -83,7 +83,7 @@ pub fn short_updated(updated: &str) -> String {
         return String::new();
     }
     trimmed
-        .split(|c| c == ' ' || c == 'T')
+        .split([' ', 'T'])
         .next()
         .unwrap_or(trimmed)
         .to_string()
@@ -106,8 +106,14 @@ mod tests {
 
     #[test]
     fn meta_label_prefixes_type_and_pluralizes_nodes() {
-        assert_eq!(summary(Some("Epic"), 3, "draft").meta_label(), "Epic · 3 nodes");
-        assert_eq!(summary(Some("Epic"), 1, "draft").meta_label(), "Epic · 1 node");
+        assert_eq!(
+            summary(Some("Epic"), 3, "draft").meta_label(),
+            "Epic · 3 nodes"
+        );
+        assert_eq!(
+            summary(Some("Epic"), 1, "draft").meta_label(),
+            "Epic · 1 node"
+        );
     }
 
     #[test]
@@ -119,8 +125,14 @@ mod tests {
     #[test]
     fn status_badge_class_maps_the_three_states() {
         assert_eq!(status_badge_class("draft"), "design-status-badge draft");
-        assert_eq!(status_badge_class("published"), "design-status-badge published");
-        assert_eq!(status_badge_class("archived"), "design-status-badge archived");
+        assert_eq!(
+            status_badge_class("published"),
+            "design-status-badge published"
+        );
+        assert_eq!(
+            status_badge_class("archived"),
+            "design-status-badge archived"
+        );
         // Unknown / empty falls back to the draft look, never panics.
         assert_eq!(status_badge_class(""), "design-status-badge draft");
         assert_eq!(status_badge_class("weird"), "design-status-badge draft");

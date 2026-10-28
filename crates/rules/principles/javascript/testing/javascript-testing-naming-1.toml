@@ -1,9 +1,11 @@
 id = "JAVASCRIPT-TESTING-NAMING-1"
+version = 1
 title = "Test names describe observable behaviour in plain language; no duplicate titles within a suite"
-tag = "stack"
 domain = "javascript:testing"
 layer = "language"
 enforcement = "mechanical"
+kind = "defect"
+inspectable = true
 default = true
 qualifies = "Enforced by the jest/no-identical-title rule (eslint-plugin-jest recommended config), which fails the lint step when two describe blocks or two test cases at the same nesting level share the same title. The jest/valid-title rule (also recommended config) blocks empty strings and titles that are plain boolean, numeric, or template-only expressions. The naming content convention — describe names the unit, it/test describes behaviour in present tense — is a prose convention enforced at PR review; no linter rule enforces the wording style. Conformance holds when no-identical-title and valid-title are both configured at error severity."
 verification = "grounded"
@@ -31,10 +33,15 @@ why = "A test name is the first piece of information a developer reads when a te
 id = "test-names-describe-behaviour-no-duplicate-titles"
 label = "Test names describe observable behaviour in plain language; no duplicate titles within a suite"
 directive = "describe() blocks are named after the unit under test (a module, class, or function name: 'UserService', 'parseDate'). test() / it() blocks are named as present-tense descriptions of the expected behaviour ('returns an empty array when the input list is empty', 'throws InvalidInputError when the email is missing @'). Titles must be unique within their describe scope (enforced by jest/no-identical-title). Titles must be non-empty, non-boolean, and non-numeric (enforced by jest/valid-title). The word 'should' is omitted as redundant; 'it returns…' is preferred over 'it should return…'."
+remediation = """
+Rename the describe() block to the unit under test's name and the test()/it() block to a present-tense description of the expected behavior (for example 'returns an empty array when the input list is empty'), instead of a terse or duplicated title. Verify by confirming no two tests in the suite share the same title and each title alone communicates the scenario and expectation.
+"""
+effort = "low"
 why = "Unique, behaviour-descriptive names make failing CI output self-explanatory and eliminate the need to open the file to understand what broke."
 
 [[option]]
 id = "test-names-are-free-form-no-convention-enforced"
+violates = true
 label = "Test names are free-form; no naming convention is enforced beyond uniqueness"
 directive = "Test titles are free-form. Only jest/no-identical-title is enforced to prevent duplicate names; content and style are left to the author."
 why = "Free-form names with only a uniqueness constraint mean a developer reads 'test 1 FAILED' in CI and cannot tell what behavior broke without opening the file, navigating to the test, and reading its body. The no-identical-title rule prevents duplicate names but does nothing to make names self-explanatory; a suite of tests named 'handles input', 'works correctly', and 'test case' all pass the uniqueness constraint while providing no information about what the test verifies."

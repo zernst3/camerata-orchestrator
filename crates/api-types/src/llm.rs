@@ -2,7 +2,7 @@
 //! (Phase A of the DTO extraction) from `camerata_server::llm`, which re-exports it so
 //! `crate::llm::LlmResponse` call sites resolve unchanged.
 //!
-//! `LlmRequest`, `Llm`, `Vendor`, `Backend`, `MODELS`, and `ModelInfo` all STAY in
+//! `LlmRequest`, `Llm`, `Vendor`, `Backend`, `models`, and `ModelInfo` all STAY in
 //! `camerata_server::llm` (a later phase relocates them); only the response shape and
 //! its inherent accounting method move here.
 
@@ -16,7 +16,8 @@ pub struct LlmResponse {
     /// `cli` | `api` — which backend served it (surfaced honestly in the UI).
     pub backend: String,
     /// Cost in USD when known: the CLI reports it directly; the API path computes it from
-    /// token usage × the model's list price (see `MODELS`).
+    /// token usage × the model's list price (see `camerata_llm::llm::models`, sourced from
+    /// the live model registry).
     pub cost_usd: Option<f64>,
     /// Real billed input tokens (folds in cache read/creation), when the backend reports
     /// usage. Drives the post-scan ACTUAL-vs-estimated readout.
@@ -40,6 +41,12 @@ pub struct LlmResponse {
     /// caching not enabled). Use this to track savings in the usage ledger / UI.
     #[serde(default)]
     pub or_cache_discount: Option<f64>,
+    /// True when the model stopped because it reached the request's `max_tokens` (the API's
+    /// `stop_reason == "max_tokens"`), so `text` ends mid-output. The one case where repeating
+    /// the request with a higher cap can recover output that was cut off. `false` when the
+    /// backend gives no stop reason (the CLI path), which means "not known to be truncated".
+    #[serde(default)]
+    pub truncated: bool,
 }
 
 impl LlmResponse {
@@ -82,6 +89,7 @@ mod tests {
             cache_read_input_tokens: cache_read,
             cache_creation_input_tokens: cache_creation,
             or_cache_discount: None,
+            truncated: false,
         }
     }
 

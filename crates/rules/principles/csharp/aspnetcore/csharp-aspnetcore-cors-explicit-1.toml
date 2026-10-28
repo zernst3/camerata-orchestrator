@@ -1,9 +1,11 @@
 id = "CSHARP-ASPNETCORE-CORS-EXPLICIT-1"
+version = 1
 title = "CORS policy is declared explicitly with named origins; wildcard origin is forbidden on non-public APIs"
-tag = "stack"
 domain = "csharp:aspnetcore"
 layer = "framework"
 enforcement = "structured"
+kind = "default_with_exceptions"
+inspectable = true
 default = true
 
 verification = "grounded"
@@ -16,13 +18,17 @@ why = "ASP.NET Core does not add CORS headers by default; without UseCors and a 
 id = "explicit-named-origins"
 label = "Named CORS policy with explicit allowed origins read from configuration"
 directive = "CORS is configured via builder.Services.AddCors(options => options.AddPolicy('PolicyName', policy => policy.WithOrigins(...).AllowAnyMethod().AllowAnyHeader())); the allowed origins list is read from configuration, not hardcoded. UseCors('PolicyName') is called in the middleware pipeline in the canonical position (after UseRouting, before UseAuthentication). AllowAnyOrigin() is forbidden on any endpoint that uses authentication cookies or credential headers; if it is used on a public anonymous endpoint, a comment justifying it is required. AllowAnyOrigin().AllowCredentials() is forbidden unconditionally."
+remediation = """
+Replace the CORS policy with a named policy that lists explicit allowed origins read from configuration, rather than AllowAnyOrigin or no policy at all. Call UseCors with that named policy in the middleware pipeline before authorization. Verify by sending a cross-origin request from an origin not in the configured list and confirming the browser blocks it.
+"""
 why = "Explicit named origins are environment-configurable, auditable, and correct for authenticated APIs; they prevent the silent AllowAnyOrigin + AllowCredentials security hole."
 
 [[option]]
 id = "allow-any-origin"
+violates = true
 label = "AllowAnyOrigin CORS policy applied globally"
 directive = "CORS is configured via policy.AllowAnyOrigin().AllowAnyMethod().AllowAnyHeader() and applied globally. Any browser origin may make cross-origin requests to any endpoint."
-why = "Appropriate only for fully public, unauthenticated APIs (CDN-served static content, open read-only data APIs). Forbidden on any endpoint that authenticates users or handles user-specific data."
+why = "Access-Control-Allow-Origin: * is returned on every response, so any page on any domain can read this API's responses from a visitor's browser. On endpoints that authenticate with cookies or credential headers the browser rejects the combination outright and the API simply breaks; where it does not, the same-origin protection that stops a hostile page from reading a logged-in user's data is gone. Only a fully public, unauthenticated API whose every response is safe for anyone to read can use this."
 
 [[option]]
 id = "no-cors-configured"

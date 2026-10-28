@@ -1,9 +1,11 @@
 id = "GO-TESTING-BLACK-BOX-PKG-TEST-1"
+version = 1
 title = "Black-box tests use package foo_test to verify exported API only; white-box tests stay in package foo"
-tag = "stack"
 domain = "go:testing"
 layer = "testing"
 enforcement = "prose"
+kind = "decision"
+inspectable = true
 default = true
 verification = "grounded"
 
@@ -12,13 +14,13 @@ qualifies = "Go allows two package declarations in _test.go files: package foo (
 [[sources]]
 url = "https://pkg.go.dev/testing"
 title = "pkg.go.dev/testing — Go testing package"
-qualifies = "The testing package documentation describes the two legal package declarations for _test.go files: the package under test (white-box) and the package under test with _test suffix (black-box), compiled as a separate package linked with the main test binary."
+relevance = "The testing package documentation describes the two legal package declarations for _test.go files: the package under test (white-box) and the package under test with _test suffix (black-box), compiled as a separate package linked with the main test binary."
 
 [[sources]]
 url = "https://pkg.go.dev/cmd/go#hdr-Test_packages"
 title = "cmd/go — Test packages"
 linter = "golangci-lint: testpackage"
-qualifies = "cmd/go documents: 'Files declaring package name_test are compiled as a separate package, then linked and run with the main test binary.' golangci-lint testpackage enforces the use of separate _test packages."
+relevance = "cmd/go documents: 'Files declaring package name_test are compiled as a separate package, then linked and run with the main test binary.' golangci-lint testpackage enforces the use of separate _test packages."
 
 [[sources]]
 url = "https://golangci-lint.run/docs/linters/"
@@ -34,6 +36,9 @@ why = "Using package foo_test for tests exercises only the exported (public) API
 id = "black-box-by-default"
 label = "package foo_test by default; package foo only when internal access is required"
 directive = "New _test.go files declare package foo_test. When a test genuinely needs access to unexported symbols, it uses package foo with a comment explaining why. The testpackage linter is configured to require _test package declarations and flag exceptions."
+remediation = """
+Change the test file's package declaration to the _test suffix (package foo_test) so it exercises only the exported API, unless the test genuinely needs unexported access, in which case keep it as package foo with a comment explaining why. Verify by confirming the testpackage linter passes and any exception carries an inline justification.
+"""
 why = "Tests the public contract, prevents coupling to internals, and enables fearless refactoring."
 
 [[option]]

@@ -44,7 +44,10 @@ pub struct ProviderPolicyView {
 
 impl Default for ProviderPolicyView {
     fn default() -> Self {
-        Self { safe_mode: true, pinned_provider: None }
+        Self {
+            safe_mode: true,
+            pinned_provider: None,
+        }
     }
 }
 
@@ -105,10 +108,16 @@ async fn fetch_provider_policy() -> Option<ProviderPolicyView> {
 /// Persist `{safe_mode, pinned_provider}` via `POST /api/settings/provider-policy`.
 /// Returns the server-echoed value on success (the new source of truth to write back into
 /// the shared signal), `None` on any transport/parse error or non-2xx.
-async fn set_provider_policy(safe_mode: bool, pinned_provider: Option<String>) -> Option<ProviderPolicyView> {
+async fn set_provider_policy(
+    safe_mode: bool,
+    pinned_provider: Option<String>,
+) -> Option<ProviderPolicyView> {
     let body = serde_json::json!({ "safe_mode": safe_mode, "pinned_provider": pinned_provider });
     let resp = reqwest::Client::new()
-        .post(format!("{}/api/settings/provider-policy", crate::bff_base()))
+        .post(format!(
+            "{}/api/settings/provider-policy",
+            crate::bff_base()
+        ))
         .json(&body)
         .send()
         .await
@@ -372,7 +381,7 @@ mod tests {
     // ── Tier 2: network-helper tests (wiremock) ─────────────────────────────────
 
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn fetch_provider_policy_parses_safe_mode_and_pin() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -384,7 +393,7 @@ mod tests {
                 "workspace_root": null,
                 "repo_paths": {},
                 "chat_model": null,
-                "llm_backend": "cli",
+                "chat_backend": "cli",
                 "api_key_present": false,
                 "safe_mode": false,
                 "pinned_provider": "deepinfra",
@@ -393,9 +402,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let result = super::fetch_provider_policy().await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         let policy = result.expect("parses");
         assert!(!policy.safe_mode);
@@ -403,7 +411,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn set_provider_policy_posts_body_and_parses_echo() {
         use wiremock::matchers::{body_json, method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -423,9 +431,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let result = super::set_provider_policy(false, Some("novita".to_string())).await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         let policy = result.expect("parses");
         assert!(!policy.safe_mode);
@@ -433,7 +440,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn set_provider_policy_returns_none_on_error_status() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -445,15 +452,14 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let result = super::set_provider_policy(true, None).await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         assert!(result.is_none());
     }
 
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn fetch_model_providers_sends_model_id_query_param_and_parses_rows() {
         use wiremock::matchers::{method, path, query_param};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -472,9 +478,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let result = super::fetch_model_providers("deepseek/deepseek-chat").await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         let resp = result.expect("parses");
         assert_eq!(resp.providers.len(), 1);
@@ -492,30 +497,48 @@ mod tests {
     fn banner_renders_when_safe_mode_off() {
         fn harness() -> Element {
             policy_harness(
-                ProviderPolicyView { safe_mode: false, pinned_provider: None },
+                ProviderPolicyView {
+                    safe_mode: false,
+                    pinned_provider: None,
+                },
                 || rsx! { TestingModeBanner {} },
             )
         }
         let mut vdom = VirtualDom::new(harness);
         vdom.rebuild_in_place();
         let html = dioxus_ssr::render(&vdom);
-        assert!(html.contains("TESTING MODE"), "banner text renders; html=\n{html}");
-        assert!(html.contains("testing-mode-banner"), "banner class renders; html=\n{html}");
+        assert!(
+            html.contains("TESTING MODE"),
+            "banner text renders; html=\n{html}"
+        );
+        assert!(
+            html.contains("testing-mode-banner"),
+            "banner class renders; html=\n{html}"
+        );
     }
 
     #[test]
     fn banner_does_not_render_when_safe_mode_on() {
         fn harness() -> Element {
             policy_harness(
-                ProviderPolicyView { safe_mode: true, pinned_provider: None },
+                ProviderPolicyView {
+                    safe_mode: true,
+                    pinned_provider: None,
+                },
                 || rsx! { TestingModeBanner {} },
             )
         }
         let mut vdom = VirtualDom::new(harness);
         vdom.rebuild_in_place();
         let html = dioxus_ssr::render(&vdom);
-        assert!(!html.contains("TESTING MODE"), "no banner when safe; html=\n{html}");
-        assert!(!html.contains("testing-mode-banner"), "no banner class when safe; html=\n{html}");
+        assert!(
+            !html.contains("TESTING MODE"),
+            "no banner when safe; html=\n{html}"
+        );
+        assert!(
+            !html.contains("testing-mode-banner"),
+            "no banner class when safe; html=\n{html}"
+        );
     }
 
     fn data_safety_harness() -> Element {
@@ -529,9 +552,18 @@ mod tests {
         let mut vdom = VirtualDom::new(data_safety_harness);
         vdom.rebuild_in_place();
         let html = dioxus_ssr::render(&vdom);
-        assert!(html.contains("Data safety"), "section label renders; html=\n{html}");
-        assert!(html.contains("SAFE MODE"), "SAFE segment renders; html=\n{html}");
-        assert!(html.contains("TESTING MODE"), "TESTING segment renders; html=\n{html}");
+        assert!(
+            html.contains("Data safety"),
+            "section label renders; html=\n{html}"
+        );
+        assert!(
+            html.contains("SAFE MODE"),
+            "SAFE segment renders; html=\n{html}"
+        );
+        assert!(
+            html.contains("TESTING MODE"),
+            "TESTING segment renders; html=\n{html}"
+        );
         assert!(
             html.contains("Safe mode ON"),
             "the safe-mode status line renders by default; html=\n{html}"
@@ -578,10 +610,10 @@ mod tests {
 
     fn picker_harness_claude() -> Element {
         use_context_provider(|| ProviderPolicySignal(Signal::new(ProviderPolicyView::default())));
-        let model = use_signal(|| "claude-opus-4-8".to_string());
+        let model = use_signal(|| "claude-opus-5".to_string());
         let models = Some(ModelsResp {
-            models: vec![model_option("claude-opus-4-8", "claude")],
-            default: "claude-opus-4-8".to_string(),
+            models: vec![model_option("claude-opus-5", "claude")],
+            default: "claude-opus-5".to_string(),
             backend: String::new(),
         });
         rsx! { ProviderPicker { model, models } }
@@ -614,7 +646,10 @@ mod tests {
         let mut vdom = VirtualDom::new(picker_harness_openrouter);
         vdom.rebuild_in_place();
         let html = dioxus_ssr::render(&vdom);
-        assert!(html.contains("provider-picker"), "picker chrome renders; html=\n{html}");
+        assert!(
+            html.contains("provider-picker"),
+            "picker chrome renders; html=\n{html}"
+        );
         assert!(
             html.contains("Loading providers"),
             "use_resource is pending on first SSR render; html=\n{html}"

@@ -1,9 +1,11 @@
 id = "PYTHON-TESTING-MOCK-BOUNDARIES-1"
+version = 1
 title = "Mocks replace dependencies at the boundary where the code under test imports them, not at the definition site"
-tag = "stack"
 domain = "python:testing"
 layer = "language"
 enforcement = "structured"
+kind = "decision"
+inspectable = true
 default = true
 qualifies = "Conformance holds when unittest.mock.patch or pytest monkeypatch targets the name as it is looked up by the code under test (e.g., patch('mymodule.requests.get') when mymodule does import requests), never the canonical definition path of the object; and when mocks are applied at external boundaries only (I/O, network, database, time, randomness) rather than to implementation details inside the unit. Fails when patch targets the wrong namespace (causing the real object to be called in production paths) or when mocks are used to stub out non-boundary internal functions."
 verification = "grounded"
@@ -17,6 +19,9 @@ why = "Python's unittest.mock documentation states explicitly: 'The key is to do
 id = "patch-at-usage-namespace"
 label = "patch at the import namespace of the module under test; mock only external I/O boundaries"
 directive = "When using unittest.mock.patch, target the fully-qualified path of the name as it appears in the module under test: if mymodule.py contains `from lib import helper`, patch `mymodule.helper`, not `lib.helper`. For simple attribute replacement, prefer pytest's monkeypatch fixture over patch() to avoid context-manager boilerplate and guarantee cleanup. Mock only external boundaries: network, filesystem, database, clock (datetime.now, time.time), and randomness. Do not mock internal functions, private helpers, or anything whose only purpose is to break up a large function — that is a sign the design needs refactoring, not mocking. Use create_autospec() or spec= when creating a mock of a class or function so that the mock enforces the real signature and catches drift."
+remediation = """
+Change the unittest.mock.patch target from the canonical definition path to the fully-qualified name as it appears in the module under test (patch mymodule.helper, not lib.helper, when mymodule does `from lib import helper`). Verify by confirming the patched mock is actually invoked when the code under test calls the function, rather than the patch silently missing because it targeted the wrong import path.
+"""
 why = "Patch in the right namespace or the real code runs; mock only boundaries or tests break on every refactor."
 
 [[option]]

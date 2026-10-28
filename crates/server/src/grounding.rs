@@ -242,7 +242,10 @@ pub fn render_repo_digest(repo: &str, dir: &Path) -> Option<String> {
         s.push_str("  …(repo file scan truncated at the hard cap)\n");
     }
 
-    Some(s)
+    // The digest goes to a model (escalation chat, conflict and PR resolvers, decomposition) and
+    // quotes manifests and docs verbatim: redact credential values like every other prompt
+    // (docs/design/2026-10-23_secret-redaction-and-release-gate.md, section 5.3).
+    Some(camerata_secrets::redact_str(&s).into_owned())
 }
 
 /// Assemble the full grounding block from a pre-rendered rule section and the per-repo
@@ -290,6 +293,9 @@ pub fn assemble(
     s.push_str("=== END PROJECT GROUNDING ===\n");
     Some(truncate(&s, MAX_GROUNDING_CHARS))
 }
+
+#[cfg(test)]
+mod redaction_tests;
 
 #[cfg(test)]
 mod tests {
@@ -350,8 +356,12 @@ mod tests {
 
     #[test]
     fn assemble_reports_unresolved_repos() {
-        let out = assemble(None, &[], &[("o/r".to_string(), "no local path set".to_string())])
-            .expect("some");
+        let out = assemble(
+            None,
+            &[],
+            &[("o/r".to_string(), "no local path set".to_string())],
+        )
+        .expect("some");
         assert!(out.contains("WITHOUT A LOCAL CLONE"));
         assert!(out.contains("o/r: no local path set"));
     }
@@ -373,7 +383,11 @@ mod tests {
         )
         .unwrap();
         std::fs::write(dir.join("src/main.rs"), "fn main() {}\n").unwrap();
-        std::fs::write(dir.join("README.md"), "# Demo\nA Dioxus + Axum + SQLx app.\n").unwrap();
+        std::fs::write(
+            dir.join("README.md"),
+            "# Demo\nA Dioxus + Axum + SQLx app.\n",
+        )
+        .unwrap();
         // A secret file must NOT appear in the tree.
         std::fs::write(dir.join(".env"), "SECRET=abc123\n").unwrap();
 

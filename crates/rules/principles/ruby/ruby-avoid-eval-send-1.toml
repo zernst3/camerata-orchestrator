@@ -1,9 +1,11 @@
 id = "RUBY-AVOID-EVAL-SEND-1"
+version = 1
 title = "eval(), instance_eval(), class_eval(), and dynamic send() with user input are forbidden; use safer dispatch patterns"
-tag = "stack"
 domain = "ruby"
 layer = "language"
 enforcement = "mechanical"
+kind = "defect"
+inspectable = true
 default = true
 qualifies = "Enforced by Brakeman which flags eval, instance_eval, class_eval, and send/public_send with string or symbol parameters derived from user input. Conformance holds when the linter runs in CI and these patterns fail the build."
 verification = "grounded"
@@ -17,6 +19,10 @@ why = "eval() and eval-like functions (instance_eval, class_eval) execute arbitr
 id = "dispatch-table-or-case-statement"
 label = "Use a fixed dispatch table (hash or case statement) to route to whitelisted methods"
 directive = "Dynamic dispatch is implemented as a case statement or hash that maps a fixed set of values (derived from user input) to hardcoded method names or lambdas. Example: ACTIONS = { 'create' => :create_action, 'delete' => :delete_action }; send(ACTIONS[params[:action]]) if ACTIONS.key?(params[:action]). Or use a case statement. The allowed actions are hardcoded; new actions require code review. eval(), instance_eval(), class_eval(), and send() with user-derived strings are forbidden."
+remediation = """
+Replace the eval()/send() call driven by user input with a fixed dispatch table (a hash or case statement) that maps a known set of input values to hardcoded method names or lambdas. Verify by passing an input value not in the dispatch table and confirming it is rejected rather than dynamically evaluated or dispatched.
+"""
+effort = "medium"
 why = "A fixed whitelist eliminates the ability to invoke unintended methods."
 
 [[option]]
@@ -27,6 +33,7 @@ why = "Acceptable alternative when the allowlist is kept small and reviewed. Con
 
 [[option]]
 id = "eval-with-user-input"
+violates = true
 label = "Use eval() or send() with user input"
 directive = "Dynamic code or method names are dispatched directly from user input via eval(), instance_eval(), class_eval(), or send() with a string parameter."
 why = "Arbitrary code execution or method invocation vulnerability; every site is a vector for an attacker."

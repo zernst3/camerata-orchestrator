@@ -68,31 +68,67 @@ paths you use:
    ```bash
    export CAMERATA_GITHUB_TOKEN=github_pat_xxx
    ```
-2. **Model provider**: two paths, pick one:
+2. **Model provider**: the credentials behind each access path, both optional depending on which
+   path a project uses:
    - **Claude CLI (subscription):** the `claude` CLI on your PATH, logged in. Camerata drives it as
-     a subprocess (`ClaudeCliDriver`). Set `CAMERATA_LIVE_BUILD=1` to activate the live fleet.
-   - **API path (OpenRouter or Anthropic API):** set an **OpenRouter API key** in Settings (or
-     `ANTHROPIC_API_KEY` for direct Anthropic). The `ApiAgentDriver` owns the MCP tool-use loop
+     a subprocess (`ClaudeCliDriver`). No key needed. Set `CAMERATA_LIVE_BUILD=1` to activate the
+     live fleet.
+   - **API path (OpenRouter or Anthropic API):** set an **OpenRouter API key** in Settings, or an
+     **Anthropic API key** in Settings (Chat backend, API). The Anthropic key saved in the app is
+     the one every model call uses, in the app and in the `camerata` command line, and a key you
+     save or replace takes effect on the next call with no restart. The `ANTHROPIC_API_KEY`
+     environment variable is only a fallback (for CI and existing `.env` setups) and is used only
+     when no key has been saved in the app. The `ApiAgentDriver` owns the MCP tool-use loop
      in-process and works with any provider the model registry discovers (Claude, and every
      OpenRouter-listed model flagged for tool use).
+
+   Each saved credential row has a **Remove** button. A value saved in the app takes precedence
+   over its environment variable, so remove it there to hand the credential back to the
+   environment. A GitHub token saved or removed in Settings is used immediately, with no restart.
+
+   **macOS Keychain prompt.** The first time Camerata reads a saved credential after you launch
+   it, macOS may ask whether the app may use your confidential information. Choose **Always
+   Allow** so it does not ask again. The app reads the Keychain once per launch and then keeps
+   the values in memory (saving or removing a credential updates both). A build that is not
+   code-signed looks like a new app to macOS after every rebuild, so the prompt returns after
+   each rebuild; a signed build avoids that.
+
+   These credentials are global (one keychain entry each, shared by every project); which path is
+   actually **active** is a separate choice made **per project**, described in the next section.
 
 Launch:
 ```bash
 cargo run -p camerata-ui
 ```
-The desktop app opens with its embedded server; the topbar shows the live connection status and
-which provider path is active.
+The desktop app opens with its embedded server; the topbar shows the live connection status.
 
-### Claude backend
+### Backend: CLI vs API (per project)
 
-Camerata can call Claude in two ways, selected in **Settings → Claude backend**:
+Every project-scoped AI call, including the brownfield scan, the alternative-recommendation pass,
+the disagreement rescan, and the governed dev loop, is driven by that **project's own Backend
+setting**, not a global switch. Set it per project in that project's **Settings**:
 
 | Option | How it works | API key needed? |
 |--------|-------------|-----------------|
 | **CLI** (default) | Spawns the `claude` CLI using your logged-in Claude Code subscription | No |
-| **API** | Calls the Anthropic Messages API directly | Yes, enter it below |
+| **API** | Calls the Anthropic Messages API directly | Yes |
 
-When you select **API**, an **Anthropic API Key** input appears. Enter your key once; it is stored in the OS keychain (never in files or the repo) and hydrated into the server process automatically. If you select **API** but have not yet saved a key, the server falls back to CLI, and an inline warning stays visible until a key is present. The CLI path requires an active Claude Code subscription on the machine running Camerata; the API path works without one but consumes Anthropic API credits.
+CLI is the zero-setup default: a brand-new project's scan just works against your subscription,
+no key required. Switch a project to **API** for client work, since it is metered, single-party,
+and nameable in a contract, which a subscription running on your own machine is not.
+
+If a project is set to **API** and no Anthropic API key is configured, AI steps on that project
+(scan, decomposition, clarification questions, story and design authoring, diagrams, mockups,
+escalation chat, code review) do not run and report why; they never fall back to the Claude Code
+subscription: the scan/audit page shows an **"AI review did not run"** banner explaining why, and
+the deterministic security floor still runs on its own. To unblock it, add an **Anthropic API
+Key** in **Settings** (stored in the OS keychain, never in files or the repo; it takes effect on
+the next run, no restart needed) or switch that project's backend back to **CLI**.
+
+**Chat backend (a separate, global setting).** One global toggle in **Settings**, labeled **Chat
+backend**, controls only the project-less chat assistant (the chatbox that lives outside any
+project). It does not affect any project's scan, recommendations, rescans, or dev loop: those
+always resolve from that project's own Backend setting above, never from the chat setting.
 
 **Local-first:** Camerata stores only configs + pointers (JSON in your OS app-data dir —
 `projects.json`, `settings.json`, `onboarding-draft.json`); your repo code lives on your own
@@ -195,7 +231,9 @@ fresh scan starts a new session; a crash mid-scan just re-runs the scan).
    options, the default, and each option's rationale, and to choose an alternative. **Option choices
    are also per repo** — adopting an alternative for a rule while viewing one repo does not change
    another repo's choice. A recommended rule that still needs an alternative chosen is **highlighted
-   amber and blocks Audit / Add-rules** until you pick one (or deselect it).
+   amber**, with a "Needs option" filter to find them and an informational hint naming them, but it
+   no longer blocks Audit or Add-rules. You can leave it unresolved and proceed: the audit itself
+   recommends an alternative for it (see step 4).
 
    **Opt-in CI security rules are never pre-checked.** The two security-scan rules
    (`CICD-SEMGREP-SECURITY-SCAN-1`, `CICD-CODEQL-SECURITY-SCAN-1`) appear in the list as
@@ -224,7 +262,19 @@ fresh scan starts a new session; a crash mid-scan just re-runs the scan).
    review is off (the deep tier is itself an LLM pass). The scan-mode picker below (Parallel /
    Sequential / Background / Batch) is unchanged.
 
-   **Three kinds of finding, and the difference matters:**
+   **Two different axes, and conflating them is the usual confusion.** A finding row carries both,
+   and they answer different questions:
+
+   - **WHO produced it, and how much authority does it carry** (enforced / preview / advisory). That
+     is the three-way split immediately below, and it is what the triage table's **Authority** column
+     filters on.
+   - **WHAT the row asserts about your codebase** (defect / deviation / convention observed / no
+     convention / not assessed). That is the finding `kind`, added 2026-10-09, and it is what the
+     exported artifacts partition on. A row is no longer simply "a violation or not": three of the
+     five kinds assert that nothing is wrong. See **"What the five finding kinds mean"** further down
+     this section.
+
+   **Three kinds of finding by AUTHORITY, and the difference matters:**
    - **Deterministic floor** (`SEC-NO-HARDCODED-SECRETS-1`, `SEC-NO-RAW-SQL-CONCAT-1`,
      `ARCH-NO-SECRETS-IN-URL-1`, `SEC-NO-PRIVATE-KEY-1`, `SEC-NO-VENDOR-TOKEN-1`,
      `SEC-NO-SECRET-FILE-1`, `SEC-NO-DISABLED-TLS-1`) — pure regex/logic, no LLM. **Repeatable**
@@ -291,9 +341,30 @@ fresh scan starts a new session; a crash mid-scan just re-runs the scan).
      where a foreground scan would tie up the page. (Parallel and Sequential run in the foreground and
      block until they finish; Background job is the same work, just detached.)
    - **Batch (50% off — async, API key required)** — submits all passes as a single **Anthropic
-     Message Batch**, for a flat **50% discount on all scan tokens**. Requires `ANTHROPIC_API_KEY` and
-     the `api` backend; results arrive asynchronously (seconds to minutes, up to 24h on very large
-     scans). Best when latency is acceptable in exchange for cost.
+     Message Batch**, for a flat **50% discount on all scan tokens**. Requires this project's backend
+     to be set to **API** with an Anthropic API key configured; results arrive asynchronously
+     (seconds to minutes, up to 24h on very large scans). Best when latency is acceptable in
+     exchange for cost.
+
+   **What the five finding kinds mean.** Every row carries a `kind`, and it tells you what sort of
+   statement the row is making. This replaced a binary model in which a row was a violation or it was
+   not, and the change matters because three of the five kinds say nothing is wrong:
+
+   | Kind | What it is telling you | Where it lands in the Excel workbook |
+   |---|---|---|
+   | **Defect** | An objective fault at this site. Act on it. | All Findings |
+   | **Deviation** | A consistency violation against the convention your own codebase predominantly follows: "2 of your 47 assessed endpoints do not use URI versioning". You get the numerator, the denominator (when it could be counted honestly) and the convention's own name as separate fields, not prose to read. | All Findings (per site) and Deviations (one row per rule) |
+   | **Convention observed** | Your codebase consistently follows this convention and there are zero violations. This is not filler: it is the decision set the inspection derived from your code, and it is what governance will later enforce. | Conventions |
+   | **No convention** | No convention has been adopted here; your codebase is inconsistent with no clear majority. Exactly one row per rule, never one per site. | Conventions |
+   | **Not assessed** | The rule was armed but could not be evaluated: a tool failed, no files matched, or the model declined. An honesty row, deliberately distinguishable from "we checked and it was clean". | Coverage, under "checks we could not complete" |
+
+   A row whose producer never assigned a kind shows as **Unclassified**, and the Index sheet's
+   "Statement types" block shows that count only when it is non-zero. It is never silently rendered
+   as a defect: an unclassified row is a gap in Camerata, and it has to be visible as one.
+
+   A **deviation caps at medium severity by default**, because the cost of inconsistency is paid on
+   future features rather than on existing code. Individual rules can author a higher ceiling where
+   the inconsistency genuinely compounds (layering boundaries, error-contract shape, auth patterns).
 
    **Thorough calibration (opt-in checkbox).** Off by default. When ticked, the calibration pass
    that recalibrates AI-suggested severities runs as a **multi-vote consensus** instead of a single
@@ -303,6 +374,15 @@ fresh scan starts a new session; a crash mid-scan just re-runs the scan).
    (~3× the calibration portion)** the moment you tick it. Leave it off for a quick pass; turn it on
    when you want the audit's severities to be trustworthy enough to act on directly. It never drops
    findings either way — it only re-ranks and flags.
+
+   **Calibration is not the last word on severity.** A rule can declare, in the corpus, a minimum
+   severity (a floor) and a maximum severity (a ceiling); both are applied when the report is
+   exported, after the model and after calibration. So a rule whose author wrote "always critical"
+   cannot be talked down, and a rule whose author wrote "high, not an automatic critical" cannot be
+   inflated past high no matter what any model proposes. The floor only ever applies to a row that is
+   accusing you of something (a defect or a deviation) and only when the row has a real file and
+   line; the ceiling always gets the last word. See `docs/TECHNICAL.md` section 6a for the exact
+   resolution order and `docs/RULES_REFERENCE.md` for the fields themselves.
    Findings land in three tables you switch between: **Unresolved · Ignored · Tech debt** — select and
    **Ignore (with reason)** or **Save as tech debt**, re-bucket freely. A **Needs-review** column shows
    the calibration pass's flag + reason (and the Test badge for test-scope findings). In the Tech-debt
@@ -312,6 +392,258 @@ fresh scan starts a new session; a crash mid-scan just re-runs the scan).
    the story*). There is no separate "fix the findings" button — fixing a finding is just its
    resolve-now story flowing into the dev layer. Triage/Process is **not required** to finish
    onboarding.
+
+   **Code viewer.** To read the code a finding is about without leaving the app, press **O** while
+   the detail pane has focus, or click **Code**, or the `path:line` tag in the pane, or **Open in
+   viewer** at the top of the full-detail modal's code section. The whole file opens over the Queue,
+   as it was at the commit that was inspected, scrolled so the finding's line sits in the upper third.
+   The table and the pane stay where they were underneath. Closing (Esc, the close button, or a click
+   outside) puts focus back on the pane, on the finding you last viewed.
+
+   - **What you see.** A header with `owner/repo @ commit`, the path, `line L of N` and `finding K of M
+     in this file`. Line numbers on the left. The finding's enclosing function or statement has a soft
+     band, and its line is highlighted with a left edge in the severity colour. Other findings in the
+     same file have a dot in the gutter (and on a thin strip at the right edge, which shows the whole
+     file): a solid dot is an open finding, a hollow dot is one you have already decided, and a number
+     shows when several findings cite the same line. Click a solid dot to go to that finding. A line
+     over 2,000 characters is cut with `... (N more chars)`. Everything shown has been through the
+     secret redactor.
+   - **Which version of the code.** If the commit that was inspected is not in this clone, or the
+     inspection recorded no commit, the viewer shows the working tree and an amber banner says so. If
+     the repo's source was deleted from this machine it shows `Source deleted on <date>, re-fetch to
+     view` and no code. A file too large to view (over 4 MB) offers **Show the enclosing block**
+     instead, which opens the full-detail modal. A missing or binary file gives its reason. Files
+     between 400 KB and 4 MB are loaded 800 lines at a time and the next page loads as you scroll.
+   - **Deciding without leaving the code.** `C`, `T`, `I` and `F` do exactly what they do in the pane:
+     `C` and `T` apply at once with the five-second Undo (shown at the bottom of the viewer), and `I`
+     and `F` ask for a reason first (Enter commits, Esc cancels, and a blank reason is refused). After
+     a decision the viewer moves to the next undecided finding in the same file, and when the file is
+     finished to the next row of the Queue.
+   - **One cursor.** The viewer does not keep its own current finding. Moving in the viewer moves the
+     Queue's cursor, so the pane underneath always describes the finding the viewer is on. Findings
+     that are not rows of the table on screen (already decided, or hidden by a filter) are skipped
+     by `]` and `[`, and their dots do nothing when clicked.
+
+   | Key | What it does |
+   |---|---|
+   | `Esc` | Close the key list, else the viewer (an open prompt closes first) |
+   | `C` `T` | Confirm, tech debt (applied at once, 5 second undo) |
+   | `I` `F` | Ignore, false positive (asks for a reason) |
+   | `Down` `Up` `J` `K` | Next or previous row in the Queue |
+   | `]` `[` | Next or previous finding in this file (no wrap; the status line says when you reach the end) |
+   | `}` `{` | Next or previous file in this rule group, on its first undecided finding |
+   | `.` | Back to the line of this finding |
+   | `G` | Go to a line (Enter jumps, Esc cancels) |
+   | `/` | Search this file (the field opens; Enter next match, Shift+Enter previous, Esc closes the field) |
+   | `S` | Where else is this symbol used (the symbol prompt opens pre-filled; Enter runs the search) |
+   | `Y` | Copy a permalink to the line on screen |
+   | `Space` | Pin or unpin the finding popover |
+   | `H` | Open the Rule Hub for this rule; closing it returns here |
+   | `Backspace` `Alt+Left` | Back to where you were before the last go-to-line or reference jump |
+   | `PgUp` `PgDn` `Home` `End` | Scroll; the cursor stays |
+   | `?` | Show or hide this list |
+
+   Keys that hold Ctrl, Alt or Cmd are left alone (except `Alt+Left`), so copying code with Cmd-C
+   works. While a reason prompt, the go-to-line field, the search field or the symbol prompt is
+   open, every key is text. While the references list has the keyboard, only `Up` `Down` `J` `K`
+   (move), `Enter` (open) and `Esc` (back to the code) do anything. While the Rule Hub is open
+   above the viewer, `Esc` closes it (also after you click inside it) and every other key does
+   nothing.
+
+   - **The popover.** Rest the pointer on the finding's line, or on any gutter dot, for a quarter of
+     a second and a card shows at most eight lines: the rule id (click to open the Rule Hub), the
+     kind and authority badges, the headline (the first sentence of the detail for a defect, the
+     deviation claim for a deviation), the rule directive cut at 160 characters, severity,
+     confidence and effort, the needs-review reason in bold, the current disposition, the other
+     findings in this file (click one to go to it), and the other rules violated at the same
+     place. It never shows the fix. `Space` pins it so it stays while you scroll.
+   - **Search.** `/` opens a find field. Matches are highlighted as you type (plain text, ignoring
+     case), the current match is stronger, and the field shows `3 of 12`. Enter steps to the next
+     match and Shift+Enter to the previous one; stepping past either end wraps and the count says
+     `(wrapped)`. `Esc` closes the field and leaves the highlights until your next move (a
+     navigation key, go-to-line or opening a reference). In a file longer than 400 KB only the
+     loaded 800 lines are searched, and the count says which lines.
+   - **References.** `S` opens a prompt pre-filled with the symbol the rule captured, else the
+     longest identifier on the finding's line. Enter lists every whole-word use of it at the
+     inspected commit, at most 200 (the heading says when there are more), skipping vendored and
+     generated paths (and any folder in `CAMERATA_SCAN_EXCLUDE_DIRS`, as in the scan), with every
+     line redacted; a line of key material is shown as `[redacted]` but keeps its `path:line`.
+     `Up` `Down` choose (the list scrolls to keep the choice on screen), `Enter` opens the hit and
+     `Esc` goes back to the code. If the search could not run, or took too long, or the server was
+     busy with other code reads, the heading says `Could not search for <symbol>` and why; it never
+     says there are no references when nothing was searched. A hit is a place in the code, not a finding: opening one in another file
+     shows that file with a `reference` tag, never moves the Queue's cursor, and the decision keys
+     do nothing until you press `Backspace` to come back to the finding. Without a recorded commit
+     (or when it is not in this clone) the search runs on the working tree and an amber line says so.
+   - **Permalink.** `Y` copies `owner/repo@abc1234:path:line` and, when the repo's origin is GitHub, a
+     second line with the `https://github.com/.../blob/<commit>/<path>#L<line>` URL. A toast
+     confirms. The link names a place; it contains no code. When the code on screen is the working
+     tree (the amber banner), there is no commit to link to and `Y` says so instead of copying.
+
+   **Code under the evidence.** In the detail pane, the stored snippet under **Evidence** shows at
+   once. When the cursor has rested on a finding for about a sixth of a second, the code around it
+   fills in beneath the snippet: the finding's line and three lines either side, with the finding's
+   line highlighted and the file's own line numbers. Moving quickly down the list asks for nothing
+   until you stop. The lines come from the inspected commit and have been through the secret
+   redactor. If anything is not as expected (the commit is not in this clone, the source was
+   deleted, the file is missing or binary or too large, or the line no longer matches the stored
+   snippet) the pane shows exactly what it showed before and nothing is added. Context is never
+   taken from the working tree. It is kept for the session, and a file the code viewer has already
+   opened supplies it without asking again.
+
+   **Stacked group view ("same fix, many places").** When one rule has many findings and the
+   question is the same for all of them (is this convention real, is this pattern a bug), read them
+   together instead of one at a time. Press **B** while the detail pane has focus on a finding of a
+   deviation or defect group, or click **Stack** in the pane, or click **Review all N stacked** in
+   the rule-level bar above the table. An overlay lists every row of that rule group in the table
+   you are in, as cards. Each card shows `path:line`, a dot in the severity colour, the finding's
+   line with three lines of code either side (the finding's line highlighted), the row's status, and
+   a checkbox. Undecided cards start checked; a card that is already decided shows its status and
+   starts unchecked. All the code comes from the inspected commit in one request when the stack
+   opens and has been through the secret redactor. A card whose code cannot be read at that commit
+   (it is not in this clone, the file is gone, the line no longer matches the stored snippet)
+   shows the stored line only, and a note under the header says how many cards are like that. If
+   the server does not answer the request at all, the note says that instead (it says nothing about
+   the code), and the page is asked again when you come back to it or reopen the stack.
+
+   | Key | What it does |
+   |---|---|
+   | `J` `K` (or `Down` `Up`) | Next or previous card; the list scrolls to keep it on screen |
+   | `Space` | Check or uncheck the focused card |
+   | `C` | Confirm the checked cards (applied at once) |
+   | `T` | Save the checked cards as tech debt (applied at once) |
+   | `F` `I` | False positive, ignore: ONE reason prompt for all the checked cards (Enter commits, Esc cancels, a blank reason is refused and the prompt stays open) |
+   | `Enter` | Open the focused card in the code viewer; `Esc` there comes back to the stack on the same card |
+   | `>` `<` | Next or previous page (see below) |
+   | `Esc` | Close the stack and go back to where it was opened from (the detail pane, or the bar's button), with the Queue's cursor on the card you were on |
+
+   The buttons above the cards do the same as `C`, `T`, `I` and `F`. A decision acts on exactly
+   the cards that are checked, and the Undo that appears at the bottom (five seconds, the same one
+   the pane uses) names the count, for example `Confirmed 29 findings.`; one click puts all of them
+   back, also in the Queue's table. The same Undo now follows every way of deciding a finding in the Queue:
+   the rule-level bar's **Confirm all N**, all the toolbar buttons (**Confirm**, **Save as tech
+   debt**, the **Move to ...** buttons and their reason prompts), as well as the pane's keys. A
+   blank reason is refused in the same words everywhere, and **Move to Ignored** in the Tech debt
+   table now asks for the reason Ignored requires. The cards you decided update in place and the stack stays open,
+   so you can leave a few unchecked, confirm the rest, and then deal with the exceptions one by
+   one. A card you left unchecked stays Unresolved. If nothing is checked, a decision key says so
+   instead of doing nothing. Decided rows leave the Queue's table, so **Enter** on a decided card
+   cannot open the viewer and says so ("That finding has left the table. Undo its decision to bring
+   it back."). Keys that hold Ctrl, Alt or Cmd are left alone. While the reason prompt is open every
+   key is text and the buttons that act on cards (the four decisions, the page buttons, each card's
+   **Code** button, the checkboxes) do nothing and are greyed out, so a stray click cannot change
+   which cards the prompt's count and reason apply to; finish or cancel the prompt first. If you
+   decide a card somewhere else while the stack is open (in the viewer, for example), it comes back
+   decided and unchecked, whatever you had clicked on it before.
+
+   A group of more than 200 rows is shown 200 cards at a time. A line under the header says which
+   cards are on screen (`Showing cards 1 to 200 of 312`), `>` and `<` (or the **Next page** and
+   **Previous page** buttons) turn the page, and the keys act on the cards of the page on screen
+   only. Each page makes one request for its code.
+
+   **A reason prompt belongs to its row.** When you press `I` or `F` (or click Ignore or False
+   positive) in the detail pane, the reason you type is for the row the prompt was opened on.
+   Clicking another row of the table while the prompt is open does nothing but say so; commit or
+   press Esc first, then pick the next row.
+
+   **Previously on this shape (decision memory).** When you have already ignored or marked as a
+   false positive another finding of the same rule whose offending line is the same code (spacing
+   does not matter, an edit to the code does), the detail pane shows a quiet line under the tags,
+   for example `Previously on this shape: Ignored, 'test fixture, not shipped' (3 rows)`, and the
+   code viewer's hover card shows it on its disposition line. Pressing `I` or `F` (or clicking
+   Ignore or False positive) then opens the reason prompt with that reason already typed in. It is
+   only a starting point: nothing is decided until you have pressed the key **and** pressed Enter,
+   you can edit the text first (what is stored is what is in the box when you press Enter), and
+   Esc throws it away. Nothing is ever applied from memory, and the line never appears for a shape
+   you only confirmed or saved as tech debt, because those carry no reason to reuse. It only looks
+   at decisions made in this review (it is not carried across inspections), and an undo removes the
+   memory along with the decision. If your earlier decisions on the shape disagree, the line says
+   so instead of choosing quietly: it shows the most common one and adds `, and 2 other rows
+   decided differently` (other reasons, a different disposition, or Confirmed and Tech debt rows).
+   The same words typed with different spacing or capitals count as one decision. A reason is only
+   ever offered for the same disposition it was given for: if you had only ever ignored the shape,
+   `F` starts with an empty box (an "accepted risk" reason is not an answer to "the tool was
+   wrong"), though the line still shows the earlier decision. The same code in another repository
+   of the same review counts as the same shape. In the stacked view and for the toolbar's Ignore and
+   False positive buttons (and "False positive all N"), the prompt starts with a reason only when
+   **every** checked or selected finding would be offered the same one; if one has no earlier
+   decision, or two have different ones, the box starts empty. If you press Undo while a reason box
+   is open, the box closes (the undo moves you to the restored finding, and a reason typed for
+   another one must not follow you there). The reason text is your own words from this
+   review and is shown as plain text.
+
+   **Progress strip.** Above the table, one line says where the review stands, for example
+   `Undecided 187 of 612 · Confirmed 310 · Ignored 71 · FP 29 · Tech debt 15` (FP is false
+   positive). It counts the whole Queue, so it reads the same whichever table (Unresolved,
+   Confirmed, Ignored, Tech debt, False positive) is open, and it changes the moment you decide
+   something or undo it. The strip is plain text; it is not read out automatically after every
+   decision, because a run of single-key decisions would have a screen reader repeating the whole
+   line each time.
+
+   **Review timer (internal).** Beside the counts, the strip shows `Review timer running` (or why
+   it is paused) and a **Pause** / **Resume** button, which Tab reaches and which takes no key of
+   its own, so the decision keys keep working (after you use it the detail pane gets the keyboard
+   back). The timer starts by itself when you open a group or decide a finding. It pauses by itself
+   after 3 minutes with no key or click, and while the Camerata window is not the focused window;
+   the idle stretch before the pause is not counted. The next key or click after an idle pause
+   resumes it; a pause you made yourself with the button stays until you press **Resume**. While
+   the code viewer or the stacked view is open it covers the strip, so each of them shows the same
+   timer control (state and Pause / Resume) in its own header. Only keys, clicks and scrolling
+   inside the Queue table, the detail pane, the viewer and the stacked view count as activity; keys
+   and clicks elsewhere (the Conventions panel, say) neither add time nor resume an idle timer. The
+   timer records how long you spent on each group and,
+   for each finding you decide, that the local operator reviewed it and when. This is for your own
+   planning and pricing: it is saved in your in-progress review, it is never in a report, a
+   workbook, `findings.json` or any other file a client receives, and the **Review time** button
+   beside the strip opens a plain stats view (hours per repo, per group type and per severity)
+   with a **Save stats JSON** button. After 20 decisions the strip adds `about 3h 10m left at your
+   pace` (the median of your last 50 decisions' active time times the findings still undecided);
+   before that it shows nothing rather than guess.
+
+   **Order of the Queue.** The **Order** select above the table cuts the Queue four ways.
+   **Curated** (the default) is severity, then kind, then the cheapest deviations first, grouped by
+   rule then file. **By file** groups by file (in path order) then rule, with the rows in line order,
+   so you can read one file's findings together. **By rule** groups by rule (in rule id order) then
+   file, worst severity first within a rule, so you can decide one rule at a time. **Critical first**
+   is one flat list with no groups, worst severity first. Picking a cut re-orders the table where it
+   stands: the finding the cursor is on stays the finding the cursor is on (also right after you
+   have decided a finding, when the cursor is on the next one), its group is opened if the new
+   grouping had closed it, and the table scrolls to bring its row into view. The keyboard goes back
+   to the detail pane, so the decision keys work without a click. Your row selection is kept; a column sort you had applied is
+   dropped, because it would hide the order you just chose (**Default order**, beside the sentence
+   that names the order on screen, still removes any later column sort). The choice is saved with
+   the rest of your in-progress review, so it is still there after a restart. If a newer version of
+   the app saved a view setting this version does not know (an order, or which table was open), it
+   falls back to the default; your decisions are never lost to it.
+
+   **Command palette.** Press **Ctrl+K** (**Cmd+K** on a Mac) anywhere on the results screen
+   (you do not have to click into the Queue first), or click **Commands** at the end of the
+   toolbar, to open one list of the review actions. Type to filter
+   it as you go: every word you type must appear in a line, in any order and either case, and the
+   keys shown at the right (`C`, `Down`) are matched too. **Up** and **Down** move the highlight,
+   **Enter** runs the highlighted line (clicking a line runs it too), and **Esc** closes the
+   palette and puts the keyboard back where it was (on the detail pane if it was nowhere useful,
+   including when you opened it with the Commands button), so the decision keys work again without
+   a click. Pressing **Ctrl+K** again closes it the same way. **Tab** and **Shift+Tab** stay in the
+   palette. A letter typed in the palette's field is text; it is never read as `C` / `I` / `T` /
+   `F`.
+
+   The palette adds no action of its own. Each line runs exactly what its button or key runs:
+   deciding the focused finding (Confirm, Ignore, Tech debt, False positive), the next and
+   previous finding, **Open in the code viewer** (`O`), **Review this group stacked** (`B`, offered
+   only on a deviation or defect row), the pane's **Full detail** and Rule Hub buttons, **Undo**
+   (offered only while the five-second undo is live), the four **Order** cuts (the cut you are in
+   is not listed), the strip's **Pause** / **Resume** button and its **Review time** button. A
+   decision line has the same rules as its key: Confirm and Tech debt apply at once with the
+   five-second undo, while Ignore and False positive open the reason prompt and write nothing
+   until you commit a reason. A line whose control is not on screen is not listed, and a line is checked again at the
+   moment you run it: if what it named is gone (the focused finding was decided, the undo window
+   closed) or it now says something else (the timer paused itself, so "Pause" is now "Resume"), it
+   says what changed and runs nothing. The palette does not open while a reason prompt is open (the
+   pane's or the toolbar's), nor over the code viewer, the stacked view or any dialog (full detail,
+   the Rule Hub, the review-time view); it says so instead. If a reason prompt opens while the
+   palette is up, running a line is refused and the keyboard goes to that prompt. Keys and clicks inside the palette count as
+   review activity for the internal review timer.
 
    **Scan-time deterministic preview.** For each **mechanical** rule you selected that maps to a tool
    Camerata can drive (clippy, ruff, eslint, semgrep), the deterministic scan **runs that tool itself**
@@ -339,6 +671,37 @@ fresh scan starts a new session; a crash mid-scan just re-runs the scan).
    **Cancelled** state. Separately, if the scan makes no progress for approximately 2 minutes, an
    amber **"No progress — possible stall"** warning appears above the progress indicator. The warning
    is informational; the scan continues until you click Stop or it finishes normally.
+
+   **Rule alternatives: the audit recommends, you can disagree.** For every rule with more than one
+   adopted alternative, the same AI pass that finds violations also decides which alternative best
+   fits this codebase and evaluates the codebase against that one option (not against every option at
+   once, since an alternative the codebase doesn't follow would otherwise look like violations
+   everywhere). This is why a no-default rule no longer blocks you in step 3: the audit picks one for
+   you.
+
+   A **"Rule alternatives" panel** renders directly above the violations table, listing every
+   multi-option rule the audit evaluated, including rules with zero violations (so you can still
+   review and override them). Each row shows the rule id, its title, its finding count, and
+   **"Evaluated against: \<option\>"** with a badge: **AI recommended**, **Your choice** (you already
+   overrode it), **Override, pending rescan** (staged but not yet rescanned), or **Accepted** (the
+   selection is saved to the ruleset).
+
+   - **Why?** opens a modal with the model's reasoning for that recommendation (grounded in what it
+     saw in your code). If the model returned an option id that wasn't real for that rule, the modal
+     says so and names the fallback option shown instead, rather than hiding the problem.
+   - **Change** is a dropdown of that rule's alternatives. Picking a different option does **not**
+     rescan immediately: it **stages** an override (the row's badge switches to "Override, pending
+     rescan"). Stage as many rules as you like; they accumulate.
+   - Once at least one override is staged, a sticky **"Rescan N overridden rule(s)"** bar appears.
+     Pressing it fires **one** batched rescan covering exactly those rules, forced to your chosen
+     options (the same model, ledger, and loading animation as the main audit, just scoped to the
+     rules you changed). The violations table and the panel update in place with the new findings and
+     badges once it completes.
+   - **Accept alternatives** persists the current selection for every rule in the panel (the AI's
+     recommendation where you never overrode it, your choice where you did) into the project's
+     `chosen_option`, the same field step 3's alternative picker writes to. It's disabled while an
+     override is staged but not yet rescanned, so you can't accept a selection whose findings haven't
+     caught up with it yet.
 
 5. **Add rules to repo(s)** — writes the governance files onto a `camerata/onboard-governance` branch
    in each repo's **local clone AND pushes that branch to origin — no pull request is opened.** Each
@@ -404,8 +767,9 @@ fresh scan starts a new session; a crash mid-scan just re-runs the scan).
      database build is heavy, so CodeQL is **CI / layer-4 ONLY** — it never runs at the scan preview
      or in the dev loop (which is also why CodeQL never appears in the scan-time preview).
 
-   Both rules have **no default option** — selecting one immediately shows the amber "must choose"
-   state until you pick a tier explicitly.
+   Both rules have **no default option**, so selecting one immediately shows the amber "needs option"
+   highlight, though (as above) it is informational only: pick a tier explicitly if you want to
+   decide now, or leave it and let the audit recommend one.
 
 **Greenfield (a new repo):** name → pick starter ruleset → scaffold the repo with the rules baked in
 from commit zero.
@@ -422,7 +786,7 @@ Two tables:
 - **Project rules** — the rules the project has selected, in one table, **filterable by repo** (a repo
   single-select), with project-level rules shown too. Click a rule to switch its chosen option; remove
   a rule from a repo. Edits persist to the project's ruleset.
-- **All rules** — the full corpus (**350+ rules across many language and framework stacks**: Rust,
+- **All rules** - the full corpus (**437 rules across 22 domains** as of 2026-10-27: Rust,
   Python, Go, JS/TS and its frameworks, Java/Spring, C#/ASP.NET, Ruby/Rails, SQL, fullstack, plus the
   always-on security floor and the agentic governance rules), viewable even when unassigned. Each row
   shows **which repos it's applied to**, with **"Add to repo"** (add a rule to any repo it's not yet
@@ -444,6 +808,31 @@ Every corpus rule carries a **scope**, set by the rule's author. It is inherent 
 - **Project-level rules** (process rules like branch/commit format, and cross-repo API contracts) apply **project-wide** and are **never written into an individual repo's files**. The gates read them from the project itself. They apply everywhere in the project, always. As of 2026-07-05 (GAP-2 fix) the commit and PR gates are **enforced at server chokepoints**: a human-initiated commit or PR whose metadata violates a configured process rule is **hard-blocked** before git is touched. Previously these rules were configurable but had no enforcement path.
 
 **Adopting a rule by picking an option:** click a rule and choose an option. For a **project-level** rule the target is unambiguous (the whole project), so the pick alone selects it and it appears in the **Project rules** table. For a **repo-local** rule the pick does **not** select it on its own (there would be no way to know which repo you meant), so you choose repos separately (see §10).
+
+### Some rules are emitted but never scanned, on purpose
+
+A handful of corpus rules govern **how a team or an agent works**, not what the code looks
+like: model tiering, budget self-monitoring, commit-message format, "document the decision when
+you make it". Nothing in a file tree can confirm or refute those, so scanning for them produces
+silence, and silence used to be indistinguishable from "we checked and it was clean" - which
+meant a client report could open its healthy list with a rule about how *Camerata* runs its
+agents, presented as a verified property of *their* codebase.
+
+Those rules now carry a flag (`inspectable = false`) that separates the two roles. **26 of the
+437 corpus rules are emit-only.** For you, that means:
+
+- They are still proposed, still selectable, and still written verbatim into the repo's
+  `AGENTS.md` / `CONVENTIONS.md`. As governance directives they are unchanged.
+- They are **not** scanned, so they never appear in a finding, never appear in "what's
+  healthy", and are not counted in the Coverage sheet's "we checked N rules" line. They are
+  also not listed under "rules that did not run this scan" - they were never scan rules.
+- So the number of rules you selected and the number the report says were checked will
+  legitimately differ, and the second is the honest one. On a TypeScript repo the checked
+  count dropped from 167 to 145 when this landed; nothing stopped working, the report stopped
+  over-claiming.
+
+The flag is set by the rule's author in the corpus, not per project. It is not a switch in the
+Rules view.
 
 ### Emit rules locally (with optional escalation to a branch / push / PR)
 
@@ -529,6 +918,64 @@ Each repo resolves to a **local folder** — repos can live anywhere; the path i
 a valid local git checkout (common right after importing a project) is flagged with a warning + a
 per-repo **Resolve…** button to browse to its folder. A repo is "broken" when its path is unset,
 missing, or not a git checkout whose origin matches `owner/repo`.
+
+### 5a. Delete a client's source code, and fetch it back
+
+When an inspection has been delivered, the client's code should not stay on your machine. Each repo
+card in the **Workspace** tab has a collapsed **Danger zone** with **Delete source code from this
+machine**. Findings, the review screen and every export stay; only the code goes.
+
+**What the card tells you.** Next to the repo name the card says where the code stands:
+
+- *Source at `3f2a9c1` (the inspected commit)*: the code on disk is exactly what was inspected.
+- *Source at `9b7e21c`, 14 commits newer than the inspection (`3f2a9c1`)*: you have moved on. The
+  primary button is **Rescan changes**, which inspects only what changed since the inspection and
+  keeps the findings for everything else. **Full re-inspection** runs the whole scan again.
+- *the inspected commit is not in this clone (history was rewritten)*: only **Full re-inspection**
+  is offered, and the finding code views for that inspection are unavailable.
+- *Source deleted on 24 Oct 2026*: the code is gone. The card says what was removed ("2,729 files,
+  182.9 MB removed") and offers **Re-fetch source** and **View deletion record**.
+
+**Deleting.** Open the Danger zone and press the button. Camerata first checks that the folder really
+is a clone of this repo (the same `owner/repo` as GitHub says) and shows the list of everything it will
+remove: the checkout, any worktrees, its scan caches, the command-line cache, and the Claude Code
+session files that hold the code it sent to the model. If you have uncommitted changes, or commits
+that are not on GitHub, it says so in amber and the button stays off until you also tick **Delete
+uncommitted work too**. Type the repo name exactly (`acme/app`) to enable **Delete source code**.
+Nothing is removed until then (and not while a scan or a governed run is still working on the repo: wait for it or stop it), and nothing is removed from any folder that is not this repo's clone
+(a symlinked path, your home folder, a different repo, or Camerata's own folder are all refused with
+the reason).
+
+When it finishes you get the **deletion record**: what was removed, from where, and when, with the
+inspected commit. Use **Copy record** or **Save record as .txt** to hand it to the client. The same
+record is under **View deletion record** on the card afterwards.
+
+If you linked the repo to a folder yourself (Repo health, "choose the folder"), Delete works on
+that folder. It can aim at any clone, anywhere on disk, whose `origin` is the project's repo: that
+is by design, so a second clone can be removed through its project. The uncommitted-work and
+unpushed-commit checks still apply to that clone, and a folder that is itself a linked worktree of
+another clone is refused ("delete that clone instead").
+
+What is kept, on purpose: the findings with the lines of code they quote, because they are the
+deliverable. The record says so. It also says what it cannot cover: Claude Code session files
+from inspections that ran before Camerata recorded session ids, sessions of the chat assistant and
+of governed development that read the repo's code, files left under an old path if you moved the
+checkout, and other projects' scan caches for the same repo (only when they exist). Clear those by
+hand if the client requires it (Claude Code keeps sessions under `~/.claude/projects`).
+
+**While the source is deleted.** The project keeps working. Findings, triage, the PDF, the Excel
+workbook and the product package all regenerate from the stored inspection. Anything that needs the
+code (scan, rescan, adding rules to a repo, emitting rules locally, opening a pull request, governed
+development) is switched off, and says "Source for acme/app was deleted on 24 Oct 2026. Re-fetch source from the Workspace tab
+to rescan." In a finding, the code area reads "Source deleted on 24 Oct 2026, re-fetch to view" with
+the quoted line still shown above it.
+
+**Re-fetching.** **Re-fetch source** asks GitHub for the repo's default branch and offers two choices:
+the latest code, or exactly the commit that was inspected (to reproduce or dispute a finding). The
+clone has full history and goes back to the same folder. It needs a GitHub token (Credentials); if
+the token is missing, revoked, or cannot see the repo, the dialog says which. After it finishes the
+card is back to one of the states above. If GitHub now calls the repository something else, the card
+says so; the project still records the old name.
 
 ---
 
@@ -1036,11 +1483,25 @@ local clones, not whether its verification is still trustworthy.
 Every rule carries a provenance badge. These are **read-only in the app**: the `verified` tier is set only
 by the maintainer-side verifier tool, never from the product.
 
-| Badge | Meaning |
-|---|---|
-| ✓ **Verified** (green) | A human explicitly approved this rule, via the maintainer verifier tool. The gold standard. |
-| **Grounded** (blue) | Rule is cited in a corpus source (linter, doc, framework best practice). The cited source(s) are listed in the rule's **detail panel**: open the rule and read the **Sources** section (a rule may cite several). |
-| **Draft** (gray, italic) | AI-generated rule, not yet grounded. Advisory only, and never auto-recommended during onboarding. |
+There are **five** tiers, not three. The two the older version of this table omitted are the ones
+most likely to surprise you, so they are called out below the table.
+
+| Badge | Meaning | Pre-checked at onboarding? |
+|---|---|---|
+| ✓ **Verified** (green) | A human explicitly approved this rule, via the maintainer verifier tool. The gold standard. | Yes |
+| **Grounded** (blue) | Rule is cited in a corpus source (linter, doc, framework best practice). The cited source(s) are listed in the rule's **detail panel**: open the rule and read the **Sources** section (a rule may cite several). | Yes |
+| **Policy** | A deliberate project or team decision that cites no external authority. Any source it does cite is internal, not a published standard or a real linter rule. | **Yes** |
+| **Needs recheck** | Was `verified`, but the cited source or linter has since drifted (a version bump moved a rule id, say). Still backed by a citation and usable. | **No** |
+| **Draft** (gray, italic) | AI-generated rule, nobody has reviewed it, no citation found. Advisory only. | No |
+
+**`Policy` is armed, and that is deliberate.** "Grounded" and "pre-checked" are two different
+questions. `policy` answers the first one with a no (it cites no external authority) and the second
+with a yes (it is still a correct, checkable rule the project decided on). Treating `policy` as
+disarming was a defect, fixed 2026-10-09: it had silently switched off 17 shipped rules, including
+every `PROC-*` governance rule the product is explicitly about.
+
+**`Needs recheck` is grounded but not pre-checked.** The citation is still there; the human
+confirmation behind it is known-stale, so it wants re-confirming before you lean on it.
 
 Re-verification is a deliberate maintainer act, done with the repo-side verifier tool (which lands as a
 reviewed PR), not from inside the app.
@@ -1049,6 +1510,109 @@ reviewed PR), not from inside the app.
 > (because you updated Camerata to a version carrying a newer version of that rule), then offering a per-rule
 > "update to current version" diff so you decide whether to take it. It is informational and never
 > auto-updates an applied rule. Tracked in [#66](https://github.com/zernst3/camerata-orchestrator/issues/66).
+
+### Keeping the corpus's sources current (maintainer runbook)
+
+This is a maintainer routine, not something a client sees. It has two halves: a mechanical monthly
+check that costs nothing, and a judgment pass once a quarter. Neither one edits a rule; every change
+to the corpus is a human decision.
+
+**Part A, monthly: check the sources.** Run:
+
+```
+camerata corpus check-sources                       # text report on stdout
+camerata corpus check-sources --json --out report.json
+camerata corpus check-sources --no-save             # dry run: records nothing
+```
+
+For every `[[sources]]` URL in every rule it records one of five outcomes:
+
+- **ok**: the page answered.
+- **redirected**: it answered after a redirect; the report shows where it lives now, so the rule's
+  source can be updated.
+- **dead**: the server says the page is gone (404 or 410).
+- **unreachable**: no usable answer this run (timeout, refused connection, a 5xx, a 401/403/429, a bot
+  wall, or a redirect chain that never ends, which is what login and consent pages do). This is never a
+  verdict on the page; run again before acting on it.
+- **refused**: the tool's network policy would not contact it, and nothing was requested. Only public
+  http(s) addresses are allowed: no loopback, private, link-local or unique-local addresses, no
+  `.localhost` / `.local` / single-label names, no other schemes. This is checked on the URL, after
+  DNS resolution, and on every redirect hop, so a public page cannot bounce the check onto the
+  operator's own network.
+
+When a rule cites an anchor (`...#section`), the section's text is normalised, hashed, and compared with
+the last ACCEPTED text. A changed section is shown as removed and added sentences. A cited anchor the
+page no longer contains is listed separately, and the sidecar records since when, so an export treats it
+like a dead link (some pages build their content with JavaScript, so check before assuming the section
+was removed). A page larger than 5 MiB is cut at that size; its sections are listed as not checked and
+nothing is hashed from a partial page. Sources that are repo documents rather than web URLs are counted
+but not fetched. The report ends with the rules that have no source at all. The section counts at the
+top add up: unchanged, changed, unreviewed from earlier runs and not re-read, new baseline, anchor not
+found, and not verified together equal the cited sections.
+
+Known limit: a "soft 404" (a page that answers 200 with a "not found" body, or redirects every missing
+page to a home page) looks like a healthy page here. A moved or emptied section still shows up as a
+missing anchor or a changed section, but a vanished page behind a soft 404 does not show up as dead.
+Part B is where that gets caught.
+
+The hashes live in the sidecar `crates/rules/CORPUS_SOURCE_HASHES.json`, never in a rule file. The first
+run only records baselines; changes show from the second run on. Commit the sidecar after a run so the
+next one has something to compare against. Requests are polite: one at a time per host, a pause between
+them (`--delay-ms`, default 1500), a timeout, and a user agent that names the tool.
+
+Safety rails on the sidecar: it is written atomically (a temp file in the same folder, fsynced, then
+renamed), so a crash leaves the old file or the new one. A run or an accept that will write takes a lock
+file `CORPUS_SOURCE_HASHES.json.lock` beside it; a second one fails with a message instead of overwriting
+the first. If a run crashed and left the lock behind, delete that file. If any rule file fails to load,
+the run still prints its report but refuses to save the sidecar (and exits with an error), because the
+missing rules' URLs would otherwise look "no longer cited" and lose their baselines and unreviewed changes.
+
+**A change does not clear itself.** The first run that sees a section differ records the new text as
+pending and keeps the old baseline, so the section is listed as "changed, not yet reviewed" on every
+later run, even if nobody read the first report (and even on a run where the page did not answer). It
+clears only when you accept it after reading the diff:
+
+```
+camerata corpus check-sources --accept "https://example.com/guide#section=sha256:<hash>"  # repeatable
+camerata corpus check-sources --accept "https://example.com/guide#section"                # unpinned, warns
+camerata corpus check-sources --accept-all                    # after reviewing the whole report
+camerata corpus check-sources --accept-all --by "Zach"        # name recorded (default: $USER)
+```
+
+The report prints the pending hash for each change and a ready-to-paste `--accept "<url>=<hash>"` line.
+Use the pinned form: it is refused if the page changed again after you read the report, so you can only
+accept the text you reviewed. The bare form accepts whatever is pending at that moment and warns about
+it. `--accept-all` prints every hash it accepted. An accept is all or nothing.
+
+Accepting makes no requests. The pending text becomes the new baseline, and the sidecar records who
+accepted and on what date. Commit the sidecar afterward. If the page goes back to the accepted text on
+its own, the flag clears without any action. A client export that reads this data treats an unaccepted
+change as lowered confidence with no time limit; the 100-day window starts at the accept date.
+
+**Part B, quarterly: the judgment pass.** A model session with web access, run by hand, with Part A's
+latest report as its input. Steps:
+
+1. Run Part A (or take the most recent report) and keep the JSON.
+2. Start a session with web access and give it the report plus the list of pattern-level rules
+   (architecture, UI and framework conventions) in the domains due for review (see `camerata corpus check`
+   for which are due). Use a rotating quarter of the pattern rules each time, so the whole set is
+   covered in a year.
+3. For each rule the report flags (dead, redirected, changed section, no source) and each rule in that
+   quarter's slice, ask: is this still the vendor's or ecosystem's current guidance? If it was
+   superseded, since when and by what? Require links.
+4. The session's output is a proposed-edits file, one entry per rule: a new source, `superseded_since`
+   with `current_recommendation`, or a revised directive. It is a diff file only. Nothing is applied.
+5. Review it rule by rule and give the go for each. Apply approved edits as normal rule changes (bump
+   the rule's `version`, run `camerata corpus lock`, commit). For each section change you have now
+   reviewed (whether or not it led to an edit), run `camerata corpus check-sources --accept <url#anchor>`
+   so it stops being listed.
+6. When a domain is reviewed and you are confident it is current, run
+   `camerata corpus confirm <domain> <date>` and commit `CORPUS_FRESHNESS.toml`. Running the check never
+   advances that watermark; only your confirmation does.
+
+Why only the first half is monthly: most rules do not change in a quarter, so a monthly model pass over
+the whole corpus would spend tokens to confirm nothing moved. The mechanical check catches the common
+case (a vendor page moved or changed) for free.
 
 ---
 
@@ -1118,6 +1682,91 @@ The export is markdown, so you can **paste it into a GitHub issue, a team wiki, 
 ### Important: the SOC-2 output is advisory
 
 The SOC-2 lens produces a **gap analysis** — a conversation-starter about what controls may be underimplemented, not an audit-grade report. For true SOC-2 compliance work, pair Camerata's gap analysis with a real readiness review and, if aiming for certification, an accredited assessor. Camerata is a **governance tool**, not a compliance tool.
+
+---
+
+## 11a. The Codebase Inspection deliverable (PDF + Excel + JSON)
+
+This is a different artifact from the deep-report Markdown above. The **product export** is the
+client-facing deliverable: a ZIP holding a PDF, an Excel workbook, `findings.json`, and a
+`README.txt`. Export it from the cockpit's export button after a scan, or produce the identical ZIP
+from the command line with no server and no UI at all:
+
+```
+cargo run -p camerata -- inspect --repo <PATH> --export <OUT.zip>
+```
+
+Useful flags: `--backend api|cli` (the same API-vs-CLI compliance setting a project carries; `api`, the
+Anthropic API, is the default and uses the Anthropic key you saved in the app (Settings), with the
+`ANTHROPIC_API_KEY` environment variable only as the fallback when no key is saved there; with no key
+anywhere the run fails and tells you to add one, it never falls back to the Claude Code subscription; `--backend cli` is an explicit choice for
+internal benchmark runs, and the export's `manifest.json` and `README.txt` record the backend and provider,
+for example `api` / `anthropic`), `--batch` (the Anthropic Message Batches path, roughly half the token cost, results
+arrive asynchronously, needs `--backend api`), `--model` / `--calibration-model`, `--full` to ignore
+the incremental-scan cache and rescan every file, and `--verbose` to print the per-rule coverage
+ledger rather than the concise summary.
+
+To size a repo before quoting it, run `cargo run -p camerata -- count <PATH>` (add `--json` for
+machine-readable output). It uses no model and no network, reads the repo through the inspection's
+own file filter (gitignore, noise denylist, extension allowlist, tracked files), and prints counted
+files and non-blank lines per language, the totals, and how many files and lines were excluded as
+noise. That is the number the inspection is priced on; a plain `cloc` differs because it counts
+generated and vendored files.
+
+### The three artifacts have three different jobs
+
+- **The PDF is the summary.** It is written to be read by a person who will not open a spreadsheet.
+  It deliberately does not carry every row, and that is not a gap.
+- **The Excel workbook is the detail surface.** Every row that exists lands on exactly one sheet. A
+  row missing here IS a problem.
+- **`findings.json` is the data.** It carries the whole set, every kind included, for anything
+  programmatic downstream.
+
+### The workbook's sheets
+
+Restructured on 2026-10-11 from a single flat findings sheet into one sheet per kind of statement, so
+a row sits where its own columns mean something:
+
+| Sheet | What is on it |
+|---|---|
+| **Index** | The cover, the provenance legend, the category matrix, the disposition summary, and a "Statement types" block counting the five finding kinds and naming the tab each lives on. |
+| **All Findings** | Defects and deviations: something is wrong at a site. An **Unclassified** row lands here too, deliberately, so a gap in Camerata shows up among the accusing rows rather than being filed away in an informational tab. |
+| **Deviations** | One row per RULE, not per site, because the deviation numbers are computed per rule. "2 of 47 sites deviate from URI-versioned endpoints" is three adjacent columns. When the denominator could not be established honestly the cell reads "not counted" - never a fabricated 0. |
+| **Conventions** | Conventions your codebase already follows consistently, plus the rules where no convention has been adopted. Nothing is wrong at a site here. This is the derived decision set. |
+| per-area sheets | One per finding category, as views of the findings set only, so an area tab never mixes "you consistently use cursor pagination" into a list with a critical injection. |
+| **Dependencies** | The dependency audit, plus the dependency scanner's own coverage notes. |
+| **False Positives** | Everything you dispositioned as a false positive, kept rather than deleted. |
+| **Coverage** | What was checked and with what result, which tools could not run, which rules did not run this scan, and the "not assessed" rows in their own "checks we could not complete" section. |
+
+The Coverage sheet opens with one plain summary sentence written for a client, and the Result column
+reads "Clean — nothing found" or "N sites found" rather than a bare integer. Two coverage honesty
+properties are worth knowing because they were both once wrong: a rule that found something and then
+had its row merged into another rule's row **never** renders as clean, and a whole tool tier failing
+is disclosed in your artifacts rather than only in Camerata's internal log.
+
+### Check the scan before you pay to grade it
+
+A scan costs real model tokens. `camerata inspect` writes a coverage ledger to
+`<repo>/.camerata-scan-ledger.json`, and a second command turns that ledger into a verdict:
+
+```
+cargo run -p camerata -- integrity-gate --ledger <PATH>/.camerata-scan-ledger.json
+```
+
+| Exit code | What it means | What to do |
+|---|---|---|
+| 0 | Every engine that had to run did run, every skip was justified, and the row counts reconcile at every pipeline stage. | Proceed. |
+| 1 | The scan is degraded. | Do not act on it or pay to grade it; read the gate's output, which names the engine or stage at fault. |
+| 2 | The gate itself could not run (the ledger is missing or unreadable). | Fix that first. This is deliberately **not** a pass. |
+
+`--profile graded` (the default) requires every engine that must run for any repo to have actually
+run. `--profile smoke` checks structural integrity only and **cannot** catch a whole tier that
+silently never ran, so it is the weaker question. An unrecognised `--profile` value is rejected
+rather than defaulted, so a typo can never quietly relax the gate.
+
+The gate deliberately does not complain that a Python rule did not run against a Rust repo: a rule
+that does not run because it is irrelevant to the stack is correct behaviour. What it will not
+tolerate is a skip it cannot classify, which it treats as a defect rather than a pass.
 
 ---
 
@@ -1251,13 +1900,19 @@ graduates out of the advisory tier.
 
 Every rule also carries a `verification` badge (shown in the Rules view):
 
-| Badge | Meaning |
-|---|---|
-| **Verified** | A human explicitly checked the rule and its cited sources. No agent may set this. |
-| **Grounded** | The onboarding agents found and cited at least one real source (linter rule id, language spec, framework best practice). |
-| **Draft** | AI-generated, not yet grounded. Advisory only; never auto-recommended during onboarding. |
+| Badge | Meaning | Pre-checked at onboarding? |
+|---|---|---|
+| **Verified** | A human explicitly checked the rule and its cited sources. No agent may set this. | Yes |
+| **Grounded** | The onboarding agents found and cited at least one real source (linter rule id, language spec, framework best practice). | Yes |
+| **Policy** | A deliberate project or team decision with no external authority to cite. | Yes |
+| **Needs recheck** | Was verified; the cited source has since drifted. Still backed by a citation. | No |
+| **Draft** | AI-generated, nobody reviewed it, no citation found. Advisory only. | No |
 
-The mechanical rules in the current corpus are grounded (each maps to a real, named linter rule that was validated to exist). None are verified yet — that is a deliberate human-only step the maintainer keeps. Grounded is the baseline for a shippable rule; verified is the gold standard you can cite to an auditor.
+The full five-tier table, and why `policy` is armed while `needs_recheck` is not, is in §9
+"Verification badges". The mechanical rules in the current corpus are grounded (each maps to a real,
+named linter rule that was validated to exist). None are verified yet - that is a deliberate
+human-only step the maintainer keeps. Grounded is the baseline for a shippable rule; verified is the
+gold standard you can cite to an auditor.
 
 ---
 
@@ -1360,6 +2015,13 @@ After editing `.camerata/checks.toml`, regenerate the CI workflow by clicking th
 workflow** button in the Rules view (or calling `POST /api/projects/active/generate-ci-workflow`).
 The workflow is derived entirely from the manifest, so regenerating it is always safe to repeat.
 
+### `camerata-check --strict` and Firebase rules kept in the console
+
+`camerata-check --strict` fails when a Firebase project's security rules live only in the
+Firebase console (the repository holds no rules file the project deploys), because those rules
+are reported as not assessed and a strict gate must not pass on something it never checked. That
+is intended; commit the deployed rules file, or run without `--strict`.
+
 ---
 
 ## 15. Tool-version pinning and the drift error
@@ -1448,7 +2110,17 @@ scopes.
 ### Cross-project settings (apply to all projects)
 
 - **OpenRouter API key**: for API-path model access. Stored in the system keychain; shown masked.
+- **Anthropic API key**: needed by any project whose own Backend is set to **API** (see below), and
+  by the chat assistant when the **Chat backend** is set to API. Stored in the system keychain;
+  shown masked. A key saved or replaced here is used by the very next call, in the app and in the
+  `camerata` command line, with no restart. The `ANTHROPIC_API_KEY` environment variable is only a
+  fallback when no key is saved here.
 - **GitHub token**: for push, PR, and Issues operations. Stored in the system keychain; shown masked.
+- **Chat backend**: a CLI/API toggle for the project-less **chat assistant only**. API makes the
+  chat call the Anthropic API with your saved key (with no key it refuses rather than falling back
+  to the CLI). It has no effect
+  on any project's scan, alternative recommendations, rescans, or governed dev loop: those always
+  read that project's own Backend setting, described next.
 - **Bombe animation**: a global ON/OFF toggle and a Play/Pause preview control. ON by default;
   turning it off stops the background animation entirely. The preview lets you see the Bombe in motion
   (and pause it) without waiting for a real run to start.
@@ -1456,6 +2128,13 @@ scopes.
 ### Per-project model configuration
 
 Model configuration is the other half of the Settings page, scoped to the open project.
+
+#### Backend
+
+The first control in this section is **Backend**, the per-project CLI/API choice described in
+[§0](#0-credentials-the-only-setup). It governs every AI call this project makes: the scan, the
+alternative recommendations, rescans, and the governed dev loop. Switching it here takes effect
+immediately for this project only; other projects, and the chat assistant, are unaffected.
 
 #### Suggested profiles
 
@@ -1527,7 +2206,7 @@ does and where it runs:
 | Escalation | Translating escalation decisions into prose |
 | Clarification | Generating structured clarification questions |
 
-All steps default to `claude-sonnet-4-6` when a project is created. A change to one project never
+All steps default to `claude-sonnet-5` when a project is created. A change to one project never
 touches another project's step models.
 
 For steps where you also pick a model per run (audit, calibration, research chat), your per-run

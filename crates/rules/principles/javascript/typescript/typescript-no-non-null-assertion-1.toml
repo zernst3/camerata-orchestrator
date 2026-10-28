@@ -1,9 +1,11 @@
 id = "JAVASCRIPT-TYPESCRIPT-NO-NON-NULL-ASSERTION-1"
+version = 1
 title = "The non-null assertion operator (!) is forbidden; narrow instead"
-tag = "stack"
 domain = "javascript:typescript"
 layer = "language"
 enforcement = "mechanical"
+kind = "default_with_exceptions"
+inspectable = true
 default = true
 qualifies = "Enforced by the @typescript-eslint/no-non-null-assertion rule, which fails the lint step on any postfix ! non-null assertion. Conformance holds when the rule is at error severity and a ! assertion fails the build; it fails when the rule is absent or only warns. A rare, genuinely-justified assertion is isolated behind a single commented lint-disable carrying the proof of why the value cannot be null."
 verification = "grounded"
@@ -15,17 +17,22 @@ linter = "@typescript-eslint: no-non-null-assertion"
 
 [decision]
 question = "What position does the project take on: The non-null assertion operator (!) is forbidden; narrow instead?"
-default = "the-non-null-assertion-operator-is-forbidden-nar"
+default = "the-non-null-assertion-operator-is-forbidden-narrow-instead"
 why = "The non-null assertion ! tells the compiler 'trust me, this is not null here' and erases the very check strictNullChecks exists to enforce. It is a runtime no-op: if the author is wrong and the value is null, nothing happens at the assertion site and the program continues until the value is dereferenced, where it throws a TypeError detached from the bad assumption. This is the same hazard as Rust's unwrap, and the same discipline applies: prove the non-null-ness with a control-flow narrowing (an if guard, optional chaining with a fallback, an early return) so the compiler verifies the claim, rather than asserting it and asking to be trusted. Sprinkling ! to silence 'possibly undefined' errors works until the one input that actually is null arrives, at which point the assertion that suppressed the warning is exactly what lets the null through to the crash."
 
 [[option]]
-id = "the-non-null-assertion-operator-is-forbidden-nar"
+id = "the-non-null-assertion-operator-is-forbidden-narrow-instead"
 label = "The non-null assertion operator (!) is forbidden; narrow instead"
 directive = "The postfix non-null assertion operator (!) is forbidden. A value typed as possibly null or undefined is narrowed before use via a control-flow guard, optional chaining with a sane fallback, or an early return that proves the non-null case to the compiler. Where an assertion is genuinely unavoidable, it is isolated behind a single commented lint-disable that records why the value cannot be null at that point."
+remediation = """
+Replace the postfix non-null assertion (!) with an explicit narrowing: a control-flow guard, optional chaining with a fallback, or an early return that proves the value is non-null to the compiler. Verify by confirming the linter's no-non-null-assertion rule passes and the compiler, not an assertion, is what proves the value is present at this point.
+"""
+effort = "medium"
 why = "The non-null assertion erases the check strictNullChecks exists to enforce and is a runtime no-op, so a wrong assertion lets a null flow through to a TypeError detached from the bad assumption."
 
 [[option]]
 id = "the-non-null-assertion-operator-is-permitted-to"
+violates = true
 label = "Allow the non-null assertion operator (!)"
 directive = "the non-null assertion operator (!) is permitted to suppress possibly-null and possibly-undefined errors at the author's discretion, rather than requiring the value to be narrowed so the compiler verifies the non-null claim"
 why = "Using the non-null assertion operator at the author's discretion suppresses possibly-null errors without verifying the claim: the ! is a runtime no-op, so if the assumption is wrong and the value is null, the program continues to the dereference and throws a TypeError detached from the bad assumption. Sprinkling ! to silence 'possibly undefined' errors works until the one input that actually is null arrives, at which point the assertion that suppressed the warning is exactly what lets the null through."

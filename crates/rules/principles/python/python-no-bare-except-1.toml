@@ -1,9 +1,11 @@
 id = "PYTHON-NO-BARE-EXCEPT-1"
+version = 1
 title = "Exception handlers catch specific types; bare except is forbidden"
-tag = "stack"
 domain = "python"
 layer = "language"
 enforcement = "mechanical"
+kind = "default_with_exceptions"
+inspectable = true
 default = true
 qualifies = "Enforced by a linter rule (Ruff E722 / flake8 bare-except, plus BLE001 for blind `except Exception`) at error severity. Conformance holds when the rule runs in CI and a `except:` or unjustified `except Exception:` fails the build; it fails when the rule is absent or only warns."
 verification = "grounded"
@@ -25,13 +27,18 @@ why = "A bare `except:` catches everything, including KeyboardInterrupt and Syst
 id = "catch-specific"
 label = "catch specific exception types only"
 directive = "Exception handlers name the specific exception type(s) they can recover from. Bare `except:` is forbidden everywhere. A blind `except Exception:` is permitted only at a process or request top-level boundary that logs the full traceback and re-raises or converts the error into a structured response; it must never silently swallow. Every handler either handles, re-raises, or chains with `raise ... from`."
+remediation = """
+Replace the bare except: (or unconditional except Exception:) with the specific exception type(s) the code can actually recover from. If a broad except Exception is genuinely needed, restrict it to a top-level process or request boundary that logs the full traceback and re-raises or converts it. Verify by triggering an unrelated exception type in the same block and confirming it now propagates instead of being silently caught.
+"""
+effort = "medium"
 why = "Specific handlers recover from what they planned for and let every unanticipated failure surface where it can be diagnosed."
 
 [[option]]
 id = "allow-broad-catch"
+violates = true
 label = "allow bare except / blind except Exception anywhere"
 directive = "Handlers may use bare `except:` or `except Exception:` anywhere to keep the code running through unexpected failures."
-why = "Maximizes apparent robustness but swallows interrupts and masks real bugs, so failures vanish instead of surfacing."
+why = "A bare or broad except swallows KeyboardInterrupt, SystemExit, and genuine programming errors alongside the failure it was written for, so the process continues in a state the code never anticipated and the original fault never reaches a log or an error tracker. The code looks more robust while making its failures undiagnosable."
 
 [[sources]]
 url = "https://docs.astral.sh/ruff/rules/bare-except/"

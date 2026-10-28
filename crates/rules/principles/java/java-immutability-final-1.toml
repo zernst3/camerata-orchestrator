@@ -1,9 +1,11 @@
 id = "JAVA-IMMUTABILITY-FINAL-1"
+version = 1
 title = "Classes and fields are marked final by default; mutability is explicit and intentional"
-tag = "stack"
 domain = "java"
 layer = "language"
 enforcement = "prose"
+kind = "default_with_exceptions"
+inspectable = true
 default = true
 qualifies = "Enforced by Checkstyle rules that recommend final on classes (unless explicitly designed for subclassing) and fields (unless explicitly mutable). Code review verifies that mutability is intentional and documented."
 verification = "grounded"
@@ -27,13 +29,17 @@ linter = "Checkstyle: VisibilityModifier"
 id = "final-by-default"
 label = "mark classes and fields final unless mutability is required"
 directive = "Classes are marked final unless explicitly designed as base classes for extension. Fields are marked final unless they must be reassigned. Collections are immutable (unmodifiableList, ImmutableList) by default. Mutable fields are clearly documented with a reason (e.g., /* mutable because concurrent updates are required */)."
+remediation = """
+Mark the class final unless it is explicitly designed as a base class for extension, and mark its fields final unless they must be reassigned after construction. Replace a mutable collection field with an immutable wrapper (unmodifiableList, ImmutableList) unless the class genuinely needs to mutate it, in which case document why. Verify by confirming an attempt to subclass or reassign the field fails to compile.
+"""
 why = "Immutable-by-default prevents bugs, is thread-safe, and makes code easier to reason about."
 
 [[option]]
 id = "mutable-by-default"
+violates = true
 label = "classes and fields are mutable; mark final only when immutability is required"
 directive = "Classes are designed to be subclassed unless otherwise specified. Fields are mutable and can be reassigned. Immutability is added only when needed."
-why = "More flexibility, but allows accidental mutability and race conditions. Requires more vigilance in testing and reasoning."
+why = "Fields that can be reassigned after construction let an object's state change underneath code that has already read it, and when the object is shared across threads those writes race with nothing in the type system to signal it. The resulting defects are intermittent, reproduce only under load, and are therefore found in production rather than in tests."
 
 [[option]]
 id = "sealed-classes"

@@ -1,5 +1,8 @@
 # ARCHITECTURE.md
 
+> **For the 10-minute high-level map, read [`OVERVIEW.md`](OVERVIEW.md) first.** This doc is the
+> detailed layering/runtime view; OVERVIEW is the human entry point.
+
 The Camerata Orchestrator stack, top to bottom and sideways. This reflects the
 **verified all-Rust core** (see `RUST_CORE_VERIFICATION.md`). It supersedes the
 TypeScript-core / Rust-BFF shape in the earlier `TECH_DESIGN.md` and `UI_DESIGN.md`
@@ -20,6 +23,113 @@ boundary moved.
 > (`governance_events` in `camerata-persistence`, plus `tracing`) makes gate decisions and lifecycle
 > events readable after the fact. See
 > [`docs/decisions/2026-07-08_adapter-ladder-and-headless-core.md`](decisions/2026-07-08_adapter-ladder-and-headless-core.md).
+
+> **Update (2026-09-22, audit-integrated alternative recommendation):** many corpus rules carry
+> multiple `[[option]]` alternatives, and a project's `chosen_option` selects one. The main audit's
+> AI pass (`ai_audit.rs`, `audit_repo`) now folds in recommendation instead of running it as a
+> separate scan: for each multi-option **semantic** rule with no operator-forced choice, one
+> dedicated recommendation call (`recommend_alternatives`) is fed every alternative for that rule
+> (marked with which is currently selected) and returns a `recommended_option_id` plus
+> `recommendation_reasoning`, validated against the rule's real option ids (a hallucinated id falls
+> back to the selected/default option and is flagged). That decided option's directive then
+> **rewrites** the rule's entry in `effective_selected` before the existing chunk/violation pipeline
+> runs, completely unchanged, so every finding for a given rule is judged against exactly one option,
+> never against every option at once. Each `Finding` is tagged `evaluated_option_id` with the option
+> it was judged under, and `report_export::resolve_fix` now resolves remediation by
+> `finding.evaluated_option_id`, falling back to the project's `chosen_option` and then the corpus
+> `default_option` (`Rule::resolved_option`), so an accepted recommendation's Fix text matches the
+> option actually evaluated. Deterministic-floor and single-option rules are untouched.
+>
+> Two endpoints extend the same AI path: `POST /api/projects/:id/rescan-alternatives` (body
+> `{ overrides: [{ rule_id, chosen_option_id }] }`, re-runs the audit for only the named rules with
+> the operator's option forced, merges the results into the project's stored last scan) and
+> `POST /api/projects/:id/accept-alternatives` (body `{}` or `{ rule_ids: [...] }`, persists the
+> current selection into `RuleSelection.chosen_option`, no model call). Both route through the same
+> `resolve_backend_for_project` compliance gate and `from_env_with_ledger` usage ledger as the main
+> audit. The old "must choose an alternative before arming" block was **UI-only**
+> (`crates/ui/src/cockpit/rules.rs`), never a server-side check: `onboard::audit_repos` has always
+> accepted a selected rule with no default and no chosen option, so removing it was a UI change
+> (the highlight and hint stay, the disabling behavior does not). See
+> [`docs/design/2026-09-22_audit-integrated-alternatives.md`](design/2026-09-22_audit-integrated-alternatives.md).
+>
+> **AMENDED 2026-10-09 (finding A5.4).** "That decided option's directive then **rewrites** the
+> rule's entry in `effective_selected`" was true and was a defect, because it was unconditional.
+> When the option the repo followed WAS the rule's own named degenerate form, the violation pass
+> judged the repo against its own already-adopted defect, conformance came out perfect, and the rule
+> reported zero findings: consistently incorrect read as compliant. `apply_alternative_decision` is
+> now the single chokepoint both alternatives branches (operator-forced and model-recommended) route
+> through. If the decided option carries `violates = false` it rewrites the directive exactly as
+> described above. If it carries `violates = true` the directive is left **untouched** and a
+> `Finding` is emitted instead, carrying the rule's own citation and remediation, spliced in after
+> calibration and recorded as its own addition-side ledger stage. Rules classified `kind = "defect"`
+> are excluded from the alternatives pass entirely, since "no acceptable alternative anywhere" means
+> there is nothing to decide among.
+
+> **Update (2026-09-22, per-project backend):** the `CAMERATA_LLM_BACKEND` env var, its
+> boot-time hydration in `lib.rs`, and the per-project `cli_active: bool` flag are gone. There
+> are now exactly two backend settings: `Project.backend: ProjectBackend { Cli, Api }`
+> (default `Cli`) is the source of truth for EVERY project-scoped model call — the brownfield
+> scan, the alternative-recommendation pass, the disagreement rescan, and the governed dev
+> loop — and `settings.chat_backend` (default `Cli`) is the ONE global setting, used only by the
+> project-less chat assistant. `resolve_backend_for_project` (`crates/server/src/lib.rs`)
+> resolves trivially: `Cli` -> `Cli`; `Api` with an Anthropic key present (keychain or env) ->
+> `Api`; `Api` with no key -> `Blocked`, which surfaces as the "AI review did not run" banner
+> while the deterministic floor still runs. No cross-setting override, no silent CLI fallback,
+> no env read on any project-scoped path. A project persisted with the old `cli_active` field
+> loads as `backend = Cli` on read (migration, not a live conversion). UI: a per-project
+> **Backend** control (`crate::cockpit::rules::BackendEditor`) replaces the old "Allow Claude
+> CLI" checkbox; the Settings page's global toggle is relabeled **"Chat backend"** and scoped
+> to the chat assistant only. See
+> [`docs/design/2026-09-22_per-project-backend.md`](design/2026-09-22_per-project-backend.md).
+
+> **Update (2026-10-09 to 2026-10-13, the inspection data model).** Six architecturally
+> significant additions, all with code and tests behind them. Mechanics are in
+> [`docs/TECHNICAL.md`](TECHNICAL.md) sections 6a and 6b; this block records the shape change.
+>
+> 1. **A five-kind finding taxonomy replaced a binary one.** `FindingKind` in
+>    `camerata-api-types` (`crates/api-types/src/audit.rs`) is the new contract leaf for the
+>    inspection data model: `Defect` / `Deviation` / `ConventionObserved` / `NoConvention` /
+>    `NotAssessed`, internally tagged on `"kind"` and flattened into every exported row. Three of the
+>    five assert that nothing is wrong, so "a row is a violation or it is not" is no longer the model.
+>    The field is `Option<FindingKind>`, and an absent kind renders as the explicit wire tag
+>    `"unspecified"`, never as `defect`. Notably, this put a NEW type in `api-types` rather than in
+>    `camerata-server`, which is the right side of the layering: the taxonomy is shared by the scan
+>    pipeline and all three export artifacts, so it belongs on the contract leaf.
+> 2. **`SealedReport` makes the exporters' input immutable at the type level.**
+>    `onboard::ScanReport::seal()` returns a `Deref`-only newtype; all three exporters take
+>    `&SealedReport`. The evidence gate moved out of the export pipeline and into the scan pipeline,
+>    upstream of the seal. Post-seal row injection is now a compile error rather than a convention.
+> 3. **Rules gained a second classification axis and three authored severity bounds.** `RuleKind`
+>    (`defect` / `decision` / `default_with_exceptions`, joined on 2026-10-13 by a fourth,
+>    `decision_with_floor`, for a rule with several equal-weight options PLUS named faults)
+>    sits alongside the long-standing
+>    `EnforcementKind`, and `RuleOption::violates` marks an option as the rule's own degenerate form.
+>    `Rule::min_severity` / `max_severity` / `deviation_ceiling` move severity bounds out of prose
+>    the pipeline could not read and into structured corpus data applied at the export choke-point.
+>    Corpus-load gates fail the BUILD on a missing `kind` or an invalid or incoherent bound. **In
+>    flux as of 2026-10-11:** rules are being actively reclassified by `kind`, and a corpus-wide
+>    audit of the `violates` flags is in progress. The mechanisms are settled; those data values are
+>    not, so do not quote a count of them from any document. See
+>    [`docs/plans/2026-10-09_rule-kind-classification.md`](plans/2026-10-09_rule-kind-classification.md).
+> 3a. **A rule can now be EMITTED without being SCANNED.** `Rule::inspectable` (W16,
+>    2026-10-12) is a required boolean on all 417 corpus rules. `false` means the rule still
+>    ships into the client's `AGENTS.md`/`CONVENTIONS.md` as a directive, but is removed from
+>    the scan BEFORE arming, so it can never be recorded verified clean against a codebase that
+>    could not have been checked for it. 26 rules are emit-only - the process and agent-conduct
+>    rules whose subject is how a team works, not what the artifact looks like. The exclusion
+>    point is one line: `audit_repos` shadows its own `selected` binding with
+>    `inspectable_rules_for_scan(...)`, so the coverage ledger, `audited_rule_ids`, the semantic
+>    prompt and the architectural engine all inherit it.
+> 4. **Self-measurement became a first-class surface.** `camerata_server::integrity_gate` plus the
+>    `camerata integrity-gate` CLI command turn the pipeline-integrity ledger into a verdict with an
+>    exit code, and `camerata inspect` now persists that ledger to `<repo>/.camerata-scan-ledger.json`
+>    so it can be re-examined, diffed, or checked in CI without re-running the scan.
+>    `./scripts/self-measurement.sh` is the named, seconds-long local gate, wired into CI ahead of the
+>    full test run, and `crates/server/tests/requirement_traceability.rs` fails the build when a
+>    product requirement has no test referencing it.
+> 5. **The Excel deliverable is partitioned by finding kind** (Index / All Findings / Deviations /
+>    Conventions / per-area / Dependencies / False Positives / Coverage) rather than being one flat
+>    sheet. The PDF stays the summary and `findings.json` stays the whole data set.
 
 ---
 
@@ -226,8 +336,11 @@ the audit trail that makes the gate's decisions readable after the fact. Full de
 | Core | `camerata-app-core` | **(#117)** Backend domain types + pure state transitions |
 | Core | `camerata-ui-core` | **(#116)** Framework-agnostic UI logic + state, including the `GovDevState` TEA model (governed-dev poll/change-detection) |
 | Core | `camerata-llm` | The `LlmPort` seam (formerly `Completer` in `camerata-server`): provider stack (Llm/OpenRouter, credential store, model registry, rate limiter, usage ledger); depends only on `camerata-api-types` |
-| Core (support) | `camerata-rules` | Rule corpus loader, enforcement kinds, rule-subset selection |
-| Core (support) | `camerata-checks` | Layer-2 post-task gate logic (CheckRunner) |
+| Core (support) | `camerata-rules` | Rule corpus loader, rule-subset selection, and the corpus-load build gates. Two independent classification axes: `EnforcementKind` (prose / structured / mechanical / architectural) and `RuleKind` (defect / decision / default_with_exceptions, added 2026-10-09; decision_with_floor added 2026-10-13). Also owns `inspectable` (scan target or emit-only), the authored severity bounds and the `Verification` provenance ladder. Fields: `docs/RULES_REFERENCE.md` |
+| Core (support) | `camerata-checks` | Layer-2 post-task gate logic (CheckRunner), plus the deterministic architectural-checker registry (`arch_checker`), the AST extractor layer (`extract`), and the architecture boundary map (`architecture_config`), which is INFERRED from the repo when `.camerata/architecture.toml` is absent |
+| Core (support) | `camerata-orchestrator-core` | The confidence-dial engine: a pure effect-signature decision-CLASS classifier that never relies on a model's self-report. Named `-core` so it does not collide with the repo and binary name `camerata-orchestrator` |
+| Core (support) | `camerata-preview` | Local-first `dx serve` live-preview adapter: status parser, process manager, edit-verify fallback |
+| Core (support) | `camerata-scaffold` | Rust-fullstack PWA scaffolder: the vetted Dioxus-fullstack skeleton (templates, including the `AGENTS.md` / `CONVENTIONS.md` a scaffolded project starts with) plus the `ScaffoldStrategy` fit-check seam |
 | Core (support) | `camerata-fleet` | Reusable governed-fleet build logic (CLI + UI) |
 | Core (support) | `camerata-intake` | PO-mode intake schema + LeadEngineer |
 | Core (support) | `camerata-worktracker` | WorkItemProvider port + canonical shapes |
@@ -242,7 +355,17 @@ the audit trail that makes the gate's decisions readable after the fact. Full de
 | Adapter | `camerata-client` | Typed async HTTP client over the BFF's `/api/*` routes; shared plumbing under the MCP and CLI adapters |
 | Adapter | `camerata-mcp` | First MCP adapter rung: `rmcp` stdio server exposing Camerata's verbs as MCP tools, delegating to `camerata-client` |
 | Adapter | `camerata-ui` | Dioxus cockpit; SPAWNS `camerata-server` as a subprocess (no longer embeds it in-process, no crate dependency on it) |
-| Adapter | `camerata-cli` (`camerata`) | HTTP adapter over `camerata-client` (clap-based), plus its existing in-process demo subcommands |
+| Adapter | `camerata-cli` (`camerata`) | HTTP adapter over `camerata-client` (clap-based), plus the in-process demo subcommands, plus `inspect` (the headless Codebase Inspection product command) and `integrity-gate` (the pre-flight scan-integrity verdict) |
+| Adapter | `camerata-check` (bin) | Layer-3 CI-parity: a standalone binary distributing the `camerata-checks` architectural-checker registry so a CLIENT's own CI can run the same checks with no Camerata server or cockpit. Depends on `camerata-checks` + `camerata-rules` only, NEVER on `camerata-server` |
+
+Plus one maintainer-only workspace member outside `crates/`: `tools/corpus-verifier`, the only write
+path to `Verification::Verified`, never a dependency of the shipped app. 26 crates under `crates/`
+and 27 workspace members in total.
+
+> Not every crate above appears in the dependency diagram higher up this page. The diagram shows the
+> dependency DAG between the crates on the main request path; `camerata-orchestrator-core`,
+> `camerata-check`, `camerata-preview` and `camerata-scaffold` sit off it and are listed here rather
+> than drawn there.
 
 ---
 

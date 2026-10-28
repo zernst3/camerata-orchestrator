@@ -48,10 +48,17 @@ pub enum EditVerdict {
 /// `Some`) when `observed` is `None`; it's ignored otherwise, since a decisive dx event is
 /// authoritative on its own and running `cargo check` in that case would just be redundant
 /// extra latency on the fast path.
-pub fn decide_edit_verdict(observed: Option<&PreviewEvent>, cargo_check: Option<&CargoCheckResult>) -> EditVerdict {
+pub fn decide_edit_verdict(
+    observed: Option<&PreviewEvent>,
+    cargo_check: Option<&CargoCheckResult>,
+) -> EditVerdict {
     match observed {
-        Some(PreviewEvent::Hotreload { .. }) | Some(PreviewEvent::BuildOk { .. }) => EditVerdict::Applied,
-        Some(PreviewEvent::BuildFailed { summary }) => EditVerdict::BuildFailed { diagnostic: summary.clone() },
+        Some(PreviewEvent::Hotreload { .. }) | Some(PreviewEvent::BuildOk { .. }) => {
+            EditVerdict::Applied
+        }
+        Some(PreviewEvent::BuildFailed { summary }) => EditVerdict::BuildFailed {
+            diagnostic: summary.clone(),
+        },
         // RebuildStarted/Unknown/Serving/Some(other) is not decisive on its own; treat like a
         // timeout (verify_after_edit never actually passes these through, but stay defensive).
         _ => match cargo_check {
@@ -60,13 +67,19 @@ pub fn decide_edit_verdict(observed: Option<&PreviewEvent>, cargo_check: Option<
                 // the user's vantage point the preview still never reflected the edit, so
                 // this is still "silently ignored" -- just report the (empty/clean) check
                 // output rather than inventing a diagnostic that doesn't exist.
-                EditVerdict::SilentlyIgnored { cargo_check_output: result.output.clone() }
+                EditVerdict::SilentlyIgnored {
+                    cargo_check_output: result.output.clone(),
+                }
             }
-            Some(result) => EditVerdict::SilentlyIgnored { cargo_check_output: result.output.clone() },
+            Some(result) => EditVerdict::SilentlyIgnored {
+                cargo_check_output: result.output.clone(),
+            },
             // No cargo_check supplied at all: only reachable if a caller skips running the
             // fallback after a real timeout, which verify_after_edit never does. Still return
             // something sane rather than panicking.
-            None => EditVerdict::SilentlyIgnored { cargo_check_output: String::new() },
+            None => EditVerdict::SilentlyIgnored {
+                cargo_check_output: String::new(),
+            },
         },
     }
 }
@@ -108,7 +121,12 @@ pub async fn verify_after_edit(
 /// to even spawn `cargo` is reported as a failed check with the spawn error as the "output",
 /// rather than propagating -- the caller (verify_after_edit) always wants SOME verdict.
 async fn run_cargo_check(app_dir: &Path) -> CargoCheckResult {
-    match tokio::process::Command::new("cargo").arg("check").current_dir(app_dir).output().await {
+    match tokio::process::Command::new("cargo")
+        .arg("check")
+        .current_dir(app_dir)
+        .output()
+        .await
+    {
         Ok(output) => CargoCheckResult {
             success: output.status.success(),
             output: format!(
@@ -117,7 +135,10 @@ async fn run_cargo_check(app_dir: &Path) -> CargoCheckResult {
                 String::from_utf8_lossy(&output.stderr)
             ),
         },
-        Err(e) => CargoCheckResult { success: false, output: format!("failed to run `cargo check` in {}: {e}", app_dir.display()) },
+        Err(e) => CargoCheckResult {
+            success: false,
+            output: format!("failed to run `cargo check` in {}: {e}", app_dir.display()),
+        },
     }
 }
 
@@ -126,16 +147,24 @@ mod tests {
     use super::*;
 
     fn failed(msg: &str) -> CargoCheckResult {
-        CargoCheckResult { success: false, output: msg.to_string() }
+        CargoCheckResult {
+            success: false,
+            output: msg.to_string(),
+        }
     }
 
     fn passed() -> CargoCheckResult {
-        CargoCheckResult { success: true, output: String::new() }
+        CargoCheckResult {
+            success: true,
+            output: String::new(),
+        }
     }
 
     #[test]
     fn hotreload_event_is_applied() {
-        let ev = PreviewEvent::Hotreload { path: Some("timeline.rs".into()) };
+        let ev = PreviewEvent::Hotreload {
+            path: Some("timeline.rs".into()),
+        };
         assert_eq!(decide_edit_verdict(Some(&ev), None), EditVerdict::Applied);
     }
 
@@ -147,10 +176,14 @@ mod tests {
 
     #[test]
     fn build_failed_event_carries_the_dx_diagnostic() {
-        let ev = PreviewEvent::BuildFailed { summary: "cannot find crate `reqwest`".into() };
+        let ev = PreviewEvent::BuildFailed {
+            summary: "cannot find crate `reqwest`".into(),
+        };
         assert_eq!(
             decide_edit_verdict(Some(&ev), None),
-            EditVerdict::BuildFailed { diagnostic: "cannot find crate `reqwest`".into() }
+            EditVerdict::BuildFailed {
+                diagnostic: "cannot find crate `reqwest`".into()
+            }
         );
     }
 
@@ -163,7 +196,9 @@ mod tests {
         let verdict = decide_edit_verdict(None, Some(&check));
         assert_eq!(
             verdict,
-            EditVerdict::SilentlyIgnored { cargo_check_output: "error: expected expression, found `>>>`".into() }
+            EditVerdict::SilentlyIgnored {
+                cargo_check_output: "error: expected expression, found `>>>`".into()
+            }
         );
     }
 
@@ -174,12 +209,22 @@ mod tests {
         // verdict just carries the (clean) check output instead of a fabricated diagnostic.
         let check = passed();
         let verdict = decide_edit_verdict(None, Some(&check));
-        assert_eq!(verdict, EditVerdict::SilentlyIgnored { cargo_check_output: String::new() });
+        assert_eq!(
+            verdict,
+            EditVerdict::SilentlyIgnored {
+                cargo_check_output: String::new()
+            }
+        );
     }
 
     #[test]
     fn timeout_with_no_cargo_check_supplied_does_not_panic() {
-        assert_eq!(decide_edit_verdict(None, None), EditVerdict::SilentlyIgnored { cargo_check_output: String::new() });
+        assert_eq!(
+            decide_edit_verdict(None, None),
+            EditVerdict::SilentlyIgnored {
+                cargo_check_output: String::new()
+            }
+        );
     }
 
     #[test]
@@ -189,7 +234,12 @@ mod tests {
         let ev = PreviewEvent::RebuildStarted;
         let check = failed("boom");
         let verdict = decide_edit_verdict(Some(&ev), Some(&check));
-        assert_eq!(verdict, EditVerdict::SilentlyIgnored { cargo_check_output: "boom".into() });
+        assert_eq!(
+            verdict,
+            EditVerdict::SilentlyIgnored {
+                cargo_check_output: "boom".into()
+            }
+        );
     }
 
     // ── the live wrapper, exercised with a real broadcast channel (no real dx/cargo) ────
@@ -197,7 +247,10 @@ mod tests {
     #[tokio::test]
     async fn verify_after_edit_returns_applied_when_hotreload_arrives_in_time() {
         let (tx, mut rx) = broadcast::channel(8);
-        tx.send(PreviewEvent::Hotreload { path: Some("timeline.rs".into()) }).unwrap();
+        tx.send(PreviewEvent::Hotreload {
+            path: Some("timeline.rs".into()),
+        })
+        .unwrap();
         let verdict = verify_after_edit(Path::new("."), &mut rx, Duration::from_secs(2)).await;
         assert_eq!(verdict, EditVerdict::Applied);
     }
@@ -221,7 +274,12 @@ mod tests {
         // output isn't asserted here (that's covered by the pure decide_edit_verdict tests).
         let (tx, mut rx) = broadcast::channel::<PreviewEvent>(8);
         drop(tx);
-        let verdict = verify_after_edit(env!("CARGO_MANIFEST_DIR").as_ref(), &mut rx, Duration::from_secs(30)).await;
+        let verdict = verify_after_edit(
+            env!("CARGO_MANIFEST_DIR").as_ref(),
+            &mut rx,
+            Duration::from_secs(30),
+        )
+        .await;
         assert!(matches!(verdict, EditVerdict::SilentlyIgnored { .. }));
     }
 }

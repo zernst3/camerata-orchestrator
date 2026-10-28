@@ -1,9 +1,17 @@
 id = "SUPABASE-AUTH-EDGE-JWT-1"
+version = 1
 title = "An Edge Function with JWT verification disabled must have a compensating auth check in the function body"
-tag = "stack"
 domain = "supabase:auth"
 layer = "platform"
 enforcement = "mechanical"
+kind = "defect"
+inspectable = true
+# Severity ceiling. Rationale: `verify_jwt = false` is a legitimate, Supabase-documented pattern
+# for public webhook receivers and intentionally public endpoints, so the finding can never be
+# an unconditional critical — that would be a false positive on every correctly-built webhook
+# handler. High is the ceiling for the genuinely uncompensated case; a function with a real
+# compensating check is informational, below the ceiling and unaffected by it.
+max_severity = "high"
 default = true
 verification = "grounded"
 qualifies = "Two-stage rule. Stage one (mechanical, always emitted): a regex scan over supabase/config.toml for a `[functions.<name>]` block setting `verify_jwt = false`, and over deploy scripts/CI for `--no-verify-jwt` on the CLI — this flag detection is near-zero-FP and fires unconditionally whenever the setting is present. Stage two (prose, evidence-fed): whether the function body implements its OWN compensating auth check is a semantic judgment not expressible as a regex, so the mechanical finding is escalated to prose review with the function source attached as evidence. Conformance holds when every verify_jwt = false function either legitimately needs to be public (a genuinely unauthenticated endpoint, e.g. a public webhook receiver that verifies the provider's own signature) or implements an equivalent auth check inline; it fails when the flag is off with no compensating check and no documented reason."
@@ -21,7 +29,7 @@ url = "https://cwe.mitre.org/data/definitions/306.html"
 title = "CWE-306: Missing Authentication for Critical Function"
 
 [decision]
-question = "When an Edge Function disables JWT verification (verify_jwt = false / --no-verify-jwt), is the flag always surfaced mechanically, with a follow-on prose judgment on whether a compensating auth check exists in the function body?"
+question = "When an Edge Function disables JWT verification (verify_jwt = false / --no-verify-jwt), does the function body implement its own compensating authentication check?"
 default = "mechanical-flag-plus-prose-escalation"
 why = """
 Supabase Edge Functions default to `verify_jwt = true`, which rejects any request without a valid
@@ -45,21 +53,29 @@ design and verifies X instead" (informational, not a finding).
 
 [[option]]
 id = "mechanical-flag-plus-prose-escalation"
-label = "Always emit the mechanical verify_jwt=false flag; escalate to prose for the compensating-check judgment"
+label = "Every Edge Function that disables JWT verification authenticates callers itself, or is deliberately a public endpoint"
 directive = """
-Regex-scan supabase/config.toml for `verify_jwt = false` under any `[functions.<name>]` block, and
-scan deploy scripts/CI invocations for `--no-verify-jwt`. Emit a finding for every match
-unconditionally (the flag itself is always worth surfacing). Feed the matched function's full
-source to the prose tier with the question: does this function body implement its own
-authentication or signature verification? If no compensating check is found, report at high
-severity: "Your `<function-name>` function accepts requests from anyone on the internet, logged in
-or not." If a compensating check is found (webhook signature validation, a checked shared secret),
-downgrade to informational and name what the check does.
+Edge Functions keep Supabase's `verify_jwt = true` default, which rejects any request without a
+valid JWT before the handler runs. Where a function genuinely needs to accept unauthenticated
+requests — a webhook receiver, a deliberately public endpoint — `verify_jwt = false` is set for
+that one function in `supabase/config.toml`'s `[functions.<name>]` block (or `--no-verify-jwt` at
+deploy time) AND the handler performs its own check in place of the one it turned off: verifying
+the calling provider's webhook signature, checking a shared secret, or documenting that the
+endpoint is intentionally open to anyone. Disabling verification to get past a local development
+friction point, and leaving nothing in its place, means the function accepts requests from anyone
+on the internet with no check of any kind.
 """
+remediation = """
+Re-enable `verify_jwt` for `<function-name>` in supabase/config.toml, or add an explicit
+authenticated-user check (e.g. verify `auth.uid()` is present) at the top of the handler. Verify
+by confirming the function rejects an unauthenticated request with 401.
+"""
+effort = "medium"
 why = "Splitting mechanical evidence-gathering (the flag, which is deterministic and cheap) from the semantic judgment (does the body compensate, which needs an LLM reading real control flow) gives the report both completeness (every disabled-verification function is looked at) and precision (only genuinely uncompensated functions get the high-severity framing)."
 
 [[option]]
-id = "flag-verify-jwt-false-as-always-critical"
-label = "Treat every verify_jwt = false function as a critical finding with no compensating-check review"
-directive = "Report every function with verify_jwt disabled as critical, without inspecting the function body for a compensating auth check."
-why = "Rejected: verify_jwt = false is a legitimate, Supabase-documented pattern for public webhook receivers and intentionally public endpoints. Flagging it unconditionally at critical severity would produce a false positive on every correctly-built webhook handler in the corpus, which is exactly the kind of naive-scanner mistake this audit product must not make (cf. the anon-key carve-out in SUPABASE-KEY-SERVICE-ROLE-CLIENT-1)."
+id = "edge-function-disables-jwt-without-compensating-check"
+violates = true
+label = "An Edge Function disables JWT verification and its handler performs no compensating auth check"
+directive = "An Edge Function sets `verify_jwt = false` (or deploys with `--no-verify-jwt`) and its handler body performs no equivalent check of its own — no verified signature, no shared-secret check, no explicit authenticated-user gate — so it accepts requests from anyone on the internet."
+why = "Rejected: a function with JWT verification off and nothing in its place is unauthenticated by definition. The deliberately-public case — a webhook that validates the provider's own signature instead — carries that check inline; this is the case where nothing does."

@@ -64,34 +64,186 @@ pub fn repo_dir(root: &Path, repo: &str) -> PathBuf {
 }
 
 /// True if `dir` holds a git working copy.
-fn is_git_repo(dir: &Path) -> bool {
+pub(crate) fn is_git_repo(dir: &Path) -> bool {
     dir.join(".git").exists()
 }
 
 /// The tokenless HTTPS remote (what we persist on disk).
-fn clean_url(repo: &str) -> String {
+pub(crate) fn clean_url(repo: &str) -> String {
     format!("https://github.com/{repo}.git")
 }
 
 /// The authenticated HTTPS remote — used ONLY for transient network commands, never
 /// written into `.git/config`.
-fn authed_url(repo: &str, token: &str) -> String {
+pub(crate) fn authed_url(repo: &str, token: &str) -> String {
     format!("https://x-access-token:{token}@github.com/{repo}.git")
 }
 
-/// Run a git command (optionally in `cwd`) and capture its output.
-async fn git(cwd: Option<&Path>, args: &[&str]) -> std::io::Result<std::process::Output> {
+/// Environment variables that point git at a repository, index, object store or configuration
+/// other than the one in the working directory. A server started from a shell with one of them
+/// set (a hook, a CI step, a developer's `GIT_DIR`) would otherwise read the wrong repository,
+/// or none.
+pub const REPO_REDIRECTING_VARS: [&str; 8] = [
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_COMMON_DIR",
+    "GIT_NAMESPACE",
+    "GIT_CEILING_DIRECTORIES",
+];
+
+/// How much of the ambient git configuration environment a command keeps.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GitEnv {
+    /// Reads of client code: every `GIT_CONFIG*` variable is removed, so no operator setting
+    /// (`grep.column`, a diff driver, a textconv) can change what is read or how it is printed.
+    Isolated,
+    /// Everything else (clone, fetch, probes): the indexed `GIT_CONFIG_COUNT` / `_KEY_n` /
+    /// `_VALUE_n` pairs stay, because the tests rewrite the authenticated remote with them so no
+    /// network step leaves the machine. The other `GIT_CONFIG*` variables are removed.
+    Network,
+}
+
+/// The ambient variable names to remove for `mode`, given the names present in the environment.
+pub fn git_vars_to_remove(mode: GitEnv, ambient: impl Iterator<Item = String>) -> Vec<String> {
+    let mut out: Vec<String> = REPO_REDIRECTING_VARS
+        .iter()
+        .map(|v| (*v).to_string())
+        .collect();
+    for name in ambient {
+        if !name.starts_with("GIT_CONFIG") {
+            continue;
+        }
+        let indexed = name == "GIT_CONFIG_COUNT"
+            || name.starts_with("GIT_CONFIG_KEY_")
+            || name.starts_with("GIT_CONFIG_VALUE_");
+        if mode == GitEnv::Isolated || !indexed {
+            out.push(name);
+        }
+    }
+    out
+}
+
+/// THE ONE way this crate starts `git`: in `cwd`, killed if the future is dropped
+/// (ARCH-RESOURCE-LIFECYCLE-1), with the repository-redirecting variables removed
+/// ([`REPO_REDIRECTING_VARS`], and `GIT_CONFIG*` per [`GitEnv`]) and `GIT_OPTIONAL_LOCKS=0` so a
+/// read never takes the index lock.
+pub fn git_command(cwd: Option<&Path>, mode: GitEnv) -> Command {
     let mut cmd = Command::new("git");
     if let Some(dir) = cwd {
         cmd.current_dir(dir);
     }
-    cmd.args(args);
-    // ARCH-RESOURCE-LIFECYCLE-1: reap git if our future is dropped.
+    for name in git_vars_to_remove(mode, std::env::vars().map(|(k, _)| k)) {
+        cmd.env_remove(name);
+    }
+    cmd.env("GIT_OPTIONAL_LOCKS", "0");
     cmd.kill_on_drop(true);
+    #[cfg(test)]
+    test_seams::on_command(&mut cmd, mode);
+    cmd
+}
+
+/// Test seams of [`git_command`], all THREAD-LOCAL: a `#[tokio::test]` runs every future of its
+/// test on its own thread, so a seam set by one test is invisible to every other test running in
+/// parallel, and nothing here touches the process environment (which every spawned `git`, in
+/// every test, inherits).
+#[cfg(test)]
+pub(crate) mod test_seams {
+    use std::cell::{Cell, RefCell};
+
+    use super::{Command, GitEnv};
+
+    thread_local! {
+        /// How many commands [`super::git_command`] has built on this thread.
+        static BUILT: Cell<usize> = const { Cell::new(0) };
+        /// `(from, to)` pairs rewritten for this thread's network git steps.
+        static INSTEAD_OF: RefCell<Vec<(String, String)>> = const { RefCell::new(Vec::new()) };
+    }
+
+    /// Commands built on this thread so far.
+    pub(crate) fn commands_built() -> usize {
+        BUILT.with(Cell::get)
+    }
+
+    /// Rewrite every URL starting with `from` to start with `to` in THIS thread's network steps
+    /// (the `url.<to>.insteadOf = <from>` setting, put on the command and not on the process), so
+    /// a route that clones a GitHub URL reaches a local bare repository instead, offline. Undone
+    /// when the guard drops.
+    pub(crate) fn rewrite_remote(from: &str, to: &str) -> RewriteGuard {
+        INSTEAD_OF.with(|r| r.borrow_mut().push((from.to_string(), to.to_string())));
+        RewriteGuard
+    }
+
+    pub(crate) struct RewriteGuard;
+
+    impl Drop for RewriteGuard {
+        fn drop(&mut self) {
+            INSTEAD_OF.with(|r| r.borrow_mut().clear());
+        }
+    }
+
+    pub(super) fn on_command(cmd: &mut Command, mode: GitEnv) {
+        BUILT.with(|c| c.set(c.get() + 1));
+        if mode != GitEnv::Network {
+            return;
+        }
+        INSTEAD_OF.with(|r| {
+            let pairs = r.borrow();
+            if pairs.is_empty() {
+                return;
+            }
+            cmd.env("GIT_CONFIG_COUNT", pairs.len().to_string());
+            for (i, (from, to)) in pairs.iter().enumerate() {
+                cmd.env(format!("GIT_CONFIG_KEY_{i}"), format!("url.{to}.insteadOf"));
+                cmd.env(format!("GIT_CONFIG_VALUE_{i}"), from);
+            }
+        });
+    }
+}
+
+/// Bounds how many `git` processes read client code at once (the symbol search and the object
+/// reads behind source-file and finding-context). A viewer that fires searches faster than they
+/// finish would otherwise start one process each. When no slot frees within `wait`, the caller
+/// answers the shared `busy` outcome instead of queueing without limit.
+#[derive(Debug)]
+pub struct GitReadGate {
+    slots: tokio::sync::Semaphore,
+    wait: std::time::Duration,
+}
+
+impl GitReadGate {
+    pub const fn new(permits: usize, wait: std::time::Duration) -> Self {
+        Self {
+            slots: tokio::sync::Semaphore::const_new(permits),
+            wait,
+        }
+    }
+
+    /// A slot, or `None` when none freed within the wait. Hold the permit for the process's life.
+    pub async fn enter(&self) -> Option<tokio::sync::SemaphorePermit<'_>> {
+        tokio::time::timeout(self.wait, self.slots.acquire())
+            .await
+            .ok()
+            .and_then(Result::ok)
+    }
+}
+
+/// The process-wide gate for reads of client code: 4 at once, 3 seconds to get a slot.
+pub static GIT_READS: GitReadGate = GitReadGate::new(4, std::time::Duration::from_secs(3));
+
+/// Run a git command (optionally in `cwd`) and capture its output.
+pub(crate) async fn git(
+    cwd: Option<&Path>,
+    args: &[&str],
+) -> std::io::Result<std::process::Output> {
+    let mut cmd = git_command(cwd, GitEnv::Network);
+    cmd.args(args);
     cmd.output().await
 }
 
-fn stderr_of(out: &std::process::Output) -> String {
+pub(crate) fn stderr_of(out: &std::process::Output) -> String {
     String::from_utf8_lossy(&out.stderr).trim().to_string()
 }
 
@@ -298,20 +450,66 @@ pub async fn refresh_resolved(dir: &Path, repo: &str, token: &str) -> RepoChecko
 /// can let a developer NAVIGATE to a repo folder instead of typing `owner/repo`. Returns
 /// a specific human error so the UI can tell the user exactly what went wrong.
 pub async fn detect_remote_repo(path: &Path) -> Result<String, String> {
+    detect_origin(path).await.map_err(|e| e.to_string())
+}
+
+/// Why a folder's `origin` could not be turned into a GitHub `owner/repo`. The `Display` text is
+/// exactly the message [`detect_remote_repo`] has always returned; the variants exist so a caller
+/// that must treat the cases differently (source deletion reports a stable refusal code for each)
+/// does not have to pattern-match on prose.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OriginError {
+    /// `git` itself could not be run.
+    GitUnavailable(String),
+    /// The folder has no `origin` remote.
+    NoRemote,
+    /// `git` failed with its own message (not a repository, dubious ownership, ...).
+    Git(String),
+    /// The `origin` remote exists but is not a GitHub repository URL.
+    NotGithub { url: String },
+}
+
+impl std::fmt::Display for OriginError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            OriginError::GitUnavailable(e) => {
+                write!(
+                    f,
+                    "couldn't run `git` ({e}) — is git installed and on PATH?"
+                )
+            }
+            OriginError::NoRemote => {
+                write!(
+                    f,
+                    "that folder has no `origin` remote (is it cloned from GitHub?)"
+                )
+            }
+            OriginError::Git(stderr) => write!(f, "{stderr}"),
+            OriginError::NotGithub { url } => {
+                write!(f, "the origin remote isn't a GitHub URL: {url}")
+            }
+        }
+    }
+}
+
+/// The GitHub `owner/repo` of a local checkout's `origin` remote, with a typed reason on
+/// failure. [`detect_remote_repo`] is this with the error rendered to its message.
+pub async fn detect_origin(path: &Path) -> Result<String, OriginError> {
     let out = git(Some(path), &["config", "--get", "remote.origin.url"])
         .await
-        .map_err(|e| format!("couldn't run `git` ({e}) — is git installed and on PATH?"))?;
+        .map_err(|e| OriginError::GitUnavailable(e.to_string()))?;
     if !out.status.success() {
         let stderr = stderr_of(&out);
         return Err(if stderr.is_empty() {
-            "that folder has no `origin` remote (is it cloned from GitHub?)".to_string()
+            OriginError::NoRemote
         } else {
-            stderr
+            OriginError::Git(stderr)
         });
     }
     let url = String::from_utf8_lossy(&out.stdout);
-    parse_owner_repo(&url)
-        .ok_or_else(|| format!("the origin remote isn't a GitHub URL: {}", url.trim()))
+    parse_owner_repo(&url).ok_or_else(|| OriginError::NotGithub {
+        url: url.trim().to_string(),
+    })
 }
 
 /// Whether a git remote URL's `origin` refers to the same GitHub repo as `owner/repo`.
@@ -353,13 +551,61 @@ pub async fn validate_link_target(path: &Path, repo: &str) -> Result<(), String>
     }
 }
 
+/// A remote URL with any embedded credentials removed, safe to store in a record.
+///
+/// `http(s)://user:token@host/...` and `http(s)://token@host/...` lose their userinfo (a hand-made
+/// clone commonly carries a personal access token there). An ssh user (`ssh://git@host/...`,
+/// `git@host:o/r`) is a login name, not a secret, so ssh-style remotes are returned unchanged.
+/// Surrounding whitespace is trimmed.
+pub fn scrub_remote_url(url: &str) -> String {
+    let url = url.trim();
+    for scheme in ["https://", "http://"] {
+        let Some(rest) = url
+            .get(..scheme.len())
+            .filter(|s| s.eq_ignore_ascii_case(scheme))
+            .map(|_| &url[scheme.len()..])
+        else {
+            continue;
+        };
+        let authority_end = rest.find('/').unwrap_or(rest.len());
+        let (authority, tail) = rest.split_at(authority_end);
+        let host = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+        return format!("{}{host}{tail}", &url[..scheme.len()]);
+    }
+    url.to_string()
+}
+
+/// Split a git remote URL into its `(host, path)`, for the forms git itself accepts: a
+/// scheme URL (`https://[userinfo@]host[:port]/path`, `ssh://git@host/path`), the scp-like form
+/// (`[user@]host:path`), and a bare `host/path`. Userinfo and port are dropped from the host.
+fn split_remote(url: &str) -> Option<(&str, &str)> {
+    if let Some((_, rest)) = url.split_once("://") {
+        let (authority, path) = rest.split_once('/').unwrap_or((rest, ""));
+        let host_port = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+        let host = host_port.split(':').next().unwrap_or(host_port);
+        return Some((host, path));
+    }
+    if let Some((left, path)) = url.split_once(':') {
+        // scp-like: `[user@]host:path`
+        let host = left.rsplit_once('@').map_or(left, |(_, h)| h);
+        return Some((host, path));
+    }
+    url.split_once('/')
+}
+
 /// Parse `owner/repo` from a GitHub remote URL (https or ssh form), tolerant of a
-/// trailing `.git` and extra path segments.
+/// trailing `.git`, a trailing slash and extra path segments.
+///
+/// The HOST must be exactly `github.com` (case-insensitive). Source deletion trusts this
+/// function to decide whether a folder is the project's repository, so a lookalike such as
+/// `notgithub.com` or `github.com.evil.example` must never parse as a GitHub identity.
 fn parse_owner_repo(url: &str) -> Option<String> {
     let s = url.trim().trim_end_matches('/').trim_end_matches(".git");
-    let i = s.find("github.com")?;
-    let after = s[i + "github.com".len()..].trim_start_matches([':', '/']);
-    let parts: Vec<&str> = after.split('/').filter(|p| !p.is_empty()).collect();
+    let (host, path) = split_remote(s)?;
+    if !host.eq_ignore_ascii_case("github.com") {
+        return None;
+    }
+    let parts: Vec<&str> = path.split('/').filter(|p| !p.is_empty()).collect();
     if parts.len() >= 2 {
         Some(format!("{}/{}", parts[0], parts[1]))
     } else {
@@ -393,6 +639,28 @@ pub struct RepoResolution {
     pub resolved: bool,
     /// Human reason when not resolved (no path / not a checkout / wrong origin).
     pub reason: String,
+    /// The source was deleted on purpose (client source deletion) and has not been fetched back.
+    /// `repo_resolution` only looks at the filesystem and never sets this; the server fills it
+    /// from the deletion records (`client_source::resolution`). Such a repo has nothing to link.
+    #[serde(default)]
+    pub source_deleted: bool,
+    /// RFC3339 time of that deletion, when `source_deleted`.
+    #[serde(default)]
+    pub deleted_at: Option<String>,
+}
+
+impl RepoResolution {
+    /// A filesystem-only resolution: not deleted (the records are consulted separately).
+    fn on_disk(repo: &str, path: Option<String>, resolved: bool, reason: String) -> Self {
+        Self {
+            repo: repo.to_string(),
+            path,
+            resolved,
+            reason,
+            source_deleted: false,
+            deleted_at: None,
+        }
+    }
 }
 
 /// Resolve + validate one repo against the local filesystem: is there a folder, is it a git
@@ -403,13 +671,12 @@ pub async fn repo_resolution(
     repo: &str,
 ) -> RepoResolution {
     let Some(dir) = resolve_repo_dir(override_path, workspace_root, repo) else {
-        return RepoResolution {
-            repo: repo.to_string(),
-            path: None,
-            resolved: false,
-            reason: "no local path set — choose the repo's folder (or set a workspace root)"
-                .to_string(),
-        };
+        return RepoResolution::on_disk(
+            repo,
+            None,
+            false,
+            "no local path set — choose the repo's folder (or set a workspace root)".to_string(),
+        );
     };
     let path_str = dir.to_string_lossy().into_owned();
     // `detect_remote_repo` returns the already-parsed `owner/repo` string (from the origin
@@ -417,24 +684,16 @@ pub async fn repo_resolution(
     // project identity (e.g. stored `Owner/Repo`, origin `owner/repo`) still resolves as
     // expected — matching the same invariant enforced by `validate_link_target`.
     match detect_remote_repo(&dir).await {
-        Ok(found) if found.eq_ignore_ascii_case(repo.trim()) => RepoResolution {
-            repo: repo.to_string(),
-            path: Some(path_str),
-            resolved: true,
-            reason: String::new(),
-        },
-        Ok(found) => RepoResolution {
-            repo: repo.to_string(),
-            path: Some(path_str),
-            resolved: false,
-            reason: format!("that folder is a different repo (origin: {found})"),
-        },
-        Err(e) => RepoResolution {
-            repo: repo.to_string(),
-            path: Some(path_str),
-            resolved: false,
-            reason: e,
-        },
+        Ok(found) if found.eq_ignore_ascii_case(repo.trim()) => {
+            RepoResolution::on_disk(repo, Some(path_str), true, String::new())
+        }
+        Ok(found) => RepoResolution::on_disk(
+            repo,
+            Some(path_str),
+            false,
+            format!("that folder is a different repo (origin: {found})"),
+        ),
+        Err(e) => RepoResolution::on_disk(repo, Some(path_str), false, e),
     }
 }
 
@@ -637,8 +896,7 @@ fn canonical_or_self(p: PathBuf) -> PathBuf {
 /// for the inputs Camerata produces (branch names are slug-like).
 pub fn sanitize_branch_segment(branch: &str) -> String {
     let mut out = String::with_capacity(branch.len());
-    let mut chars = branch.chars().peekable();
-    while let Some(c) = chars.next() {
+    for c in branch.chars() {
         match c {
             '/' => out.push_str("__"),
             c if c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_' => out.push(c),
@@ -738,7 +996,12 @@ pub async fn ensure_uow_worktree(clone: &Path, branch: &str) -> anyhow::Result<P
     //    already returned that case above.
     let branch_exists = git(
         Some(clone),
-        &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{branch}")],
+        &[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{branch}"),
+        ],
     )
     .await
     .map(|o| o.status.success())
@@ -850,15 +1113,23 @@ pub(crate) async fn maybe_prune_shared_target(clone: &Path, trigger: &str) {
     }
 
     let dry_run = mode == camerata_checks::janitor::JanitorMode::DryRun;
-    let outcome = camerata_checks::janitor::reclaim_dir(&shared, clone, &[], true, trigger, dry_run, |entry| {
-        tracing::info!(
-            path = %entry.path.display(),
-            bytes = entry.bytes,
-            trigger = %entry.trigger,
-            dry_run = entry.dry_run,
-            "janitor: T2 shared-target prune"
-        );
-    });
+    let outcome = camerata_checks::janitor::reclaim_dir(
+        &shared,
+        clone,
+        &[],
+        true,
+        trigger,
+        dry_run,
+        |entry| {
+            tracing::info!(
+                path = %entry.path.display(),
+                bytes = entry.bytes,
+                trigger = %entry.trigger,
+                dry_run = entry.dry_run,
+                "janitor: T2 shared-target prune"
+            );
+        },
+    );
     if let camerata_checks::janitor::ReclaimOutcome::Skipped { reason, .. } = outcome {
         tracing::debug!(clone = %clone.display(), %reason, "janitor: T2 shared-target prune skipped");
     }
@@ -1144,9 +1415,7 @@ pub async fn git_status(dir: &Path) -> anyhow::Result<RepoGitStatus> {
         )
         .await;
         match ab {
-            Ok(o) if o.status.success() => {
-                parse_ahead_behind(&String::from_utf8_lossy(&o.stdout))
-            }
+            Ok(o) if o.status.success() => parse_ahead_behind(&String::from_utf8_lossy(&o.stdout)),
             // No upstream set, detached HEAD, or empty repo — not an error.
             _ => AheadBehind::default(),
         }
@@ -1167,19 +1436,17 @@ pub async fn git_status(dir: &Path) -> anyhow::Result<RepoGitStatus> {
 /// Kept as a pure function so the UI can format the same data without calling git.
 pub fn build_status_detail(branch: &str, dirty: bool, sync: &AheadBehind) -> String {
     let mut parts: Vec<String> = vec![format!("on {branch}")];
-    match (sync.ahead, sync.behind) {
-        (Some(a), Some(b)) => {
-            if a > 0 && b > 0 {
-                parts.push(format!("{a} ahead, {b} behind"));
-            } else if a > 0 {
-                parts.push(format!("{a} ahead"));
-            } else if b > 0 {
-                parts.push(format!("{b} behind"));
-            } else {
-                parts.push("in sync".to_string());
-            }
+    // No upstream (either side `None`) — say nothing about sync.
+    if let (Some(a), Some(b)) = (sync.ahead, sync.behind) {
+        if a > 0 && b > 0 {
+            parts.push(format!("{a} ahead, {b} behind"));
+        } else if a > 0 {
+            parts.push(format!("{a} ahead"));
+        } else if b > 0 {
+            parts.push(format!("{b} behind"));
+        } else {
+            parts.push("in sync".to_string());
         }
-        _ => {} // no upstream — say nothing about sync
     }
     if dirty {
         parts.push("uncommitted changes".to_string());
@@ -1206,7 +1473,7 @@ pub struct BranchList {
 
 /// Return the current branch and all local branch names in the working copy at `dir`.
 pub async fn list_branches(dir: &Path) -> anyhow::Result<BranchList> {
-    let current_out = git(Some(&dir), &["rev-parse", "--abbrev-ref", "HEAD"]).await?;
+    let current_out = git(Some(dir), &["rev-parse", "--abbrev-ref", "HEAD"]).await?;
     let current = if current_out.status.success() {
         String::from_utf8_lossy(&current_out.stdout)
             .trim()
@@ -1366,10 +1633,13 @@ pub enum MergeOutcome {
 /// Whether the working tree at `dir` is mid-merge (a `MERGE_HEAD` exists). Used to
 /// decide between completing the merge commit and reporting a clean fast-forward.
 pub async fn is_merge_in_progress(dir: &Path) -> bool {
-    git(Some(dir), &["rev-parse", "--verify", "--quiet", "MERGE_HEAD"])
-        .await
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+    git(
+        Some(dir),
+        &["rev-parse", "--verify", "--quiet", "MERGE_HEAD"],
+    )
+    .await
+    .map(|o| o.status.success())
+    .unwrap_or(false)
 }
 
 /// The paths with unresolved merge conflicts in the working tree at `dir`.
@@ -1488,11 +1758,11 @@ pub async fn fetch_all(dir: &Path, repo: &str, token: &str) -> anyhow::Result<St
 /// Stage all changes with `git add -A` then commit with `message`. Returns the
 /// commit output (or a "nothing to commit" notice if the tree was already clean).
 pub async fn commit_all(dir: &Path, message: &str) -> anyhow::Result<String> {
-    let add = git(Some(&dir), &["add", "-A"]).await?;
+    let add = git(Some(dir), &["add", "-A"]).await?;
     if !add.status.success() {
         anyhow::bail!("git add: {}", stderr_of(&add));
     }
-    let commit = git(Some(&dir), &["commit", "-m", message]).await?;
+    let commit = git(Some(dir), &["commit", "-m", message]).await?;
     if commit.status.success() {
         let out = String::from_utf8_lossy(&commit.stdout).trim().to_string();
         return Ok(out);
@@ -1577,26 +1847,11 @@ pub async fn snapshot_worktree(dir: &Path, task: &str) -> anyhow::Result<Option<
 /// in `.git/config`). This is the user-triggered push from the UI; the server never
 /// calls this on its own.
 pub async fn push_branch(dir: &Path, repo: &str, branch: &str, token: &str) -> anyhow::Result<()> {
-    let out = git(Some(&dir), &["push", &authed_url(repo, token), branch]).await?;
+    let out = git(Some(dir), &["push", &authed_url(repo, token), branch]).await?;
     if out.status.success() {
         return Ok(());
     }
     anyhow::bail!("git push {branch}: {}", stderr_of(&out));
-}
-
-/// Best-effort fast-forward pull of the repo's CURRENT branch from its configured origin. Used by
-/// read-only refreshes (e.g. the suppressions registry) so the data reflects the latest remote
-/// state, without touching the working copy beyond a clean fast-forward. Returns true on success;
-/// false on any failure (diverged history, no upstream, offline, not a clone) — callers treat it
-/// as best-effort and read whatever is on disk regardless.
-pub async fn pull_local_ff(dir: &Path) -> bool {
-    if !is_git_repo(dir) {
-        return false;
-    }
-    match git(Some(dir), &["pull", "--ff-only"]).await {
-        Ok(out) => out.status.success(),
-        Err(_) => false,
-    }
 }
 
 /// Fast-forward `branch` from origin using an authenticated transient URL.
@@ -1607,7 +1862,7 @@ pub async fn pull_branch(
     token: &str,
 ) -> anyhow::Result<String> {
     let out = git(
-        Some(&dir),
+        Some(dir),
         &["pull", "--ff-only", &authed_url(repo, token), branch],
     )
     .await?;
@@ -1619,7 +1874,7 @@ pub async fn pull_branch(
 
 /// Switch to an existing local branch (no creation). Use `create_branch_at` to create + switch.
 pub async fn switch_branch(dir: &Path, branch: &str) -> anyhow::Result<()> {
-    let out = git(Some(&dir), &["checkout", branch]).await?;
+    let out = git(Some(dir), &["checkout", branch]).await?;
     if out.status.success() {
         return Ok(());
     }
@@ -1630,12 +1885,12 @@ pub async fn switch_branch(dir: &Path, branch: &str) -> anyhow::Result<()> {
 /// switch to it. This variant takes the resolved `dir` directly (unlike `create_branch`
 /// which accepts root + repo identifiers).
 pub async fn create_branch_at(dir: &Path, branch: &str) -> anyhow::Result<()> {
-    let created = git(Some(&dir), &["checkout", "-b", branch]).await?;
+    let created = git(Some(dir), &["checkout", "-b", branch]).await?;
     if created.status.success() {
         return Ok(());
     }
     // Branch already exists — switch to it.
-    let switched = git(Some(&dir), &["checkout", branch]).await?;
+    let switched = git(Some(dir), &["checkout", branch]).await?;
     if switched.status.success() {
         return Ok(());
     }
@@ -1645,7 +1900,7 @@ pub async fn create_branch_at(dir: &Path, branch: &str) -> anyhow::Result<()> {
 /// Cherry-pick `sha` onto the current HEAD branch. On conflict, returns the stderr so
 /// the UI can show it; the repo is left in conflict state (the user resolves or aborts).
 pub async fn cherry_pick(dir: &Path, sha: &str) -> anyhow::Result<String> {
-    let out = git(Some(&dir), &["cherry-pick", sha]).await?;
+    let out = git(Some(dir), &["cherry-pick", sha]).await?;
     if out.status.success() {
         return Ok(String::from_utf8_lossy(&out.stdout).trim().to_string());
     }
@@ -1817,6 +2072,71 @@ mod tests {
         // Non-GitHub or malformed -> None.
         assert_eq!(parse_owner_repo("https://gitlab.com/acme/api.git"), None);
         assert_eq!(parse_owner_repo("not a url"), None);
+    }
+
+    /// The remote-match guard is what stands between "delete this folder" and the wrong
+    /// folder, so the host must be EXACTLY github.com: a lookalike host that merely contains
+    /// the string must never parse as a GitHub identity.
+    #[test]
+    fn parse_owner_repo_requires_the_exact_github_host() {
+        for lookalike in [
+            "https://notgithub.com/acme/api.git",
+            "https://github.com.evil.example/acme/api.git",
+            "https://evil.example/github.com/acme/api.git",
+            "git@notgithub.com:acme/api.git",
+            "https://gitlab.com/acme/github.com",
+            "https://user:github.com@evil.example/acme/api.git",
+        ] {
+            assert_eq!(parse_owner_repo(lookalike), None, "{lookalike}");
+        }
+        // The forms that must keep working.
+        for (url, want) in [
+            ("https://github.com/acme/api/", "acme/api"),
+            ("https://GitHub.com/Acme/Api.git", "Acme/Api"),
+            (
+                "https://x-access-token:tok@github.com/acme/api.git",
+                "acme/api",
+            ),
+            ("https://github.com:443/acme/api.git", "acme/api"),
+            ("ssh://git@github.com/acme/api.git", "acme/api"),
+            ("git@github.com:acme/api", "acme/api"),
+            ("github.com/acme/api", "acme/api"),
+        ] {
+            assert_eq!(parse_owner_repo(url).as_deref(), Some(want), "{url}");
+        }
+    }
+
+    #[test]
+    fn scrub_remote_url_drops_credentials_and_keeps_everything_else() {
+        assert_eq!(
+            scrub_remote_url("https://x-access-token:ghp_abc@github.com/acme/api.git"),
+            "https://github.com/acme/api.git"
+        );
+        assert_eq!(
+            scrub_remote_url("https://ghp_onlyatoken@github.com/acme/api.git"),
+            "https://github.com/acme/api.git"
+        );
+        assert_eq!(
+            scrub_remote_url("http://u:p@host.example:8080/a/b.git"),
+            "http://host.example:8080/a/b.git"
+        );
+        // Not credentials: an ssh user, an scp-style remote, a clean https URL.
+        assert_eq!(
+            scrub_remote_url("ssh://git@github.com/acme/api.git"),
+            "ssh://git@github.com/acme/api.git"
+        );
+        assert_eq!(
+            scrub_remote_url("git@github.com:acme/api.git"),
+            "git@github.com:acme/api.git"
+        );
+        assert_eq!(
+            scrub_remote_url("https://github.com/acme/api.git"),
+            "https://github.com/acme/api.git"
+        );
+        assert_eq!(
+            scrub_remote_url("  https://github.com/a/b \n"),
+            "https://github.com/a/b"
+        );
     }
 
     #[test]
@@ -2016,28 +2336,40 @@ mod tests {
 
     #[test]
     fn build_status_detail_in_sync_clean() {
-        let sync = AheadBehind { ahead: Some(0), behind: Some(0) };
+        let sync = AheadBehind {
+            ahead: Some(0),
+            behind: Some(0),
+        };
         let s = build_status_detail("main", false, &sync);
         assert_eq!(s, "on main · in sync");
     }
 
     #[test]
     fn build_status_detail_dirty_ahead() {
-        let sync = AheadBehind { ahead: Some(2), behind: Some(0) };
+        let sync = AheadBehind {
+            ahead: Some(2),
+            behind: Some(0),
+        };
         let s = build_status_detail("feature/x", true, &sync);
         assert_eq!(s, "on feature/x · 2 ahead · uncommitted changes");
     }
 
     #[test]
     fn build_status_detail_behind_only() {
-        let sync = AheadBehind { ahead: Some(0), behind: Some(3) };
+        let sync = AheadBehind {
+            ahead: Some(0),
+            behind: Some(3),
+        };
         let s = build_status_detail("main", false, &sync);
         assert_eq!(s, "on main · 3 behind");
     }
 
     #[test]
     fn build_status_detail_diverged() {
-        let sync = AheadBehind { ahead: Some(1), behind: Some(2) };
+        let sync = AheadBehind {
+            ahead: Some(1),
+            behind: Some(2),
+        };
         let s = build_status_detail("fix/bug", false, &sync);
         assert_eq!(s, "on fix/bug · 1 ahead, 2 behind");
     }
@@ -2132,15 +2464,24 @@ mod tests {
         let outcome = merge_source(&base, "conflict-src").await.unwrap();
         match outcome {
             MergeOutcome::Conflicts(paths) => {
-                assert!(paths.contains(&"f.txt".to_string()), "f.txt conflicted: {paths:?}");
+                assert!(
+                    paths.contains(&"f.txt".to_string()),
+                    "f.txt conflicted: {paths:?}"
+                );
             }
             MergeOutcome::Clean(_) => panic!("expected a conflict"),
         }
-        assert!(is_merge_in_progress(&base).await, "mid-merge after conflict");
+        assert!(
+            is_merge_in_progress(&base).await,
+            "mid-merge after conflict"
+        );
 
         // ── Fail-closed: abort restores a clean (non-merging) tree. ──
         merge_abort(&base).await.unwrap();
-        assert!(!is_merge_in_progress(&base).await, "abort cleared the merge");
+        assert!(
+            !is_merge_in_progress(&base).await,
+            "abort cleared the merge"
+        );
 
         // ── Hard error (unknown ref) is an Err, not a false conflict. ──
         let err = merge_source(&base, "no-such-branch").await;
@@ -2153,7 +2494,10 @@ mod tests {
 
     #[test]
     fn sanitize_branch_segment_encodes_slashes_and_unsafe_chars() {
-        assert_eq!(sanitize_branch_segment("camerata/story-7"), "camerata__story-7");
+        assert_eq!(
+            sanitize_branch_segment("camerata/story-7"),
+            "camerata__story-7"
+        );
         assert_eq!(sanitize_branch_segment("feat/a/b"), "feat__a__b");
         // Alnum, dot, dash, underscore are preserved.
         assert_eq!(sanitize_branch_segment("v1.2_x-y"), "v1.2_x-y");
@@ -2269,7 +2613,11 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(add.status.success(), "external worktree: {}", stderr_of(&add));
+        assert!(
+            add.status.success(),
+            "external worktree: {}",
+            stderr_of(&add)
+        );
 
         // Resolving the UoW for the same branch must NOT error — it returns the existing path.
         let resolved = ensure_uow_worktree(&clone, "camerata/live")
@@ -2303,16 +2651,26 @@ mod tests {
         remove_uow_worktree(&clone, "camerata/teardown").await;
         assert!(!wt.exists(), "worktree dir removed");
         // Deregistered: no worktree holds the branch anymore.
-        assert!(worktree_for_branch(&clone, "camerata/teardown").await.is_none());
+        assert!(worktree_for_branch(&clone, "camerata/teardown")
+            .await
+            .is_none());
         // The branch itself survives (it may still back a PR).
         let branch_exists = git(
             Some(&clone),
-            &["rev-parse", "--verify", "--quiet", "refs/heads/camerata/teardown"],
+            &[
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                "refs/heads/camerata/teardown",
+            ],
         )
         .await
         .map(|o| o.status.success())
         .unwrap_or(false);
-        assert!(branch_exists, "the branch is left intact after worktree removal");
+        assert!(
+            branch_exists,
+            "the branch is left intact after worktree removal"
+        );
 
         // Re-creating after removal works again (and prune of an empty clone is a no-op).
         prune_worktrees(&clone).await;
@@ -2462,8 +2820,14 @@ mod tests {
     /// `has_headroom` is a pure decision function: available >= min → true.
     #[test]
     fn has_headroom_is_true_when_available_meets_threshold() {
-        assert!(has_headroom(10 * 1024 * 1024 * 1024, 10 * 1024 * 1024 * 1024));
-        assert!(has_headroom(20 * 1024 * 1024 * 1024, 10 * 1024 * 1024 * 1024));
+        assert!(has_headroom(
+            10 * 1024 * 1024 * 1024,
+            10 * 1024 * 1024 * 1024
+        ));
+        assert!(has_headroom(
+            20 * 1024 * 1024 * 1024,
+            10 * 1024 * 1024 * 1024
+        ));
         assert!(has_headroom(u64::MAX, 0));
     }
 
@@ -2519,7 +2883,10 @@ mod tests {
         let tmp = isolated_empty_dir("actionable");
         let err = ensure_disk_headroom(&tmp, u64::MAX).unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("insufficient disk headroom"), "names problem: {msg}");
+        assert!(
+            msg.contains("insufficient disk headroom"),
+            "names problem: {msg}"
+        );
         assert!(msg.contains("GB free"), "states free space: {msg}");
         assert!(msg.contains("reclaim space"), "gives remediation: {msg}");
     }
@@ -2565,8 +2932,14 @@ mod tests {
             msg.contains("reclaimed") && msg.contains("GB of Camerata scratch first"),
             "must report that real Zone-A bytes were reclaimed before blocking: {msg}"
         );
-        assert!(!orphan.exists(), "the orphaned worktree dir must actually be gone");
-        assert!(!shared.exists(), "the shared-target dir must actually be gone");
+        assert!(
+            !orphan.exists(),
+            "the orphaned worktree dir must actually be gone"
+        );
+        assert!(
+            !shared.exists(),
+            "the shared-target dir must actually be gone"
+        );
     }
 
     /// T4's Zone-B inventory: when reclaiming this clone's OWN Zone-A scratch isn't
@@ -2588,9 +2961,18 @@ mod tests {
 
         let err = ensure_disk_headroom(&clone, u64::MAX).unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("never auto-deleted"), "names the Zone-B inventory: {msg}");
-        assert!(msg.contains("target"), "names the specific candidate dir: {msg}");
-        assert!(msg.contains("rm -rf"), "gives a concrete remedy command: {msg}");
+        assert!(
+            msg.contains("never auto-deleted"),
+            "names the Zone-B inventory: {msg}"
+        );
+        assert!(
+            msg.contains("target"),
+            "names the specific candidate dir: {msg}"
+        );
+        assert!(
+            msg.contains("rm -rf"),
+            "gives a concrete remedy command: {msg}"
+        );
         assert!(target.exists(), "Zone B must NEVER be auto-deleted");
         assert!(target.join("big.rlib").exists());
     }
@@ -2610,7 +2992,11 @@ mod tests {
     #[test]
     fn disk_headroom_threshold_respects_env_override() {
         let threshold = parse_disk_headroom_gb(Some("5"), MIN_DISK_HEADROOM_BYTES);
-        assert_eq!(threshold, 5 * 1024 * 1024 * 1024, "5 GB from env var override");
+        assert_eq!(
+            threshold,
+            5 * 1024 * 1024 * 1024,
+            "5 GB from env var override"
+        );
     }
 
     /// `parse_disk_headroom_gb` falls back to default on non-numeric input.
@@ -2629,12 +3015,32 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         // Init git repo with an initial commit.
-        let _ = tokio::process::Command::new("git").args(["init"]).current_dir(&dir).output().await;
-        let _ = tokio::process::Command::new("git").args(["config", "user.email", "t@t.com"]).current_dir(&dir).output().await;
-        let _ = tokio::process::Command::new("git").args(["config", "user.name", "T"]).current_dir(&dir).output().await;
+        let _ = tokio::process::Command::new("git")
+            .args(["init"])
+            .current_dir(&dir)
+            .output()
+            .await;
+        let _ = tokio::process::Command::new("git")
+            .args(["config", "user.email", "t@t.com"])
+            .current_dir(&dir)
+            .output()
+            .await;
+        let _ = tokio::process::Command::new("git")
+            .args(["config", "user.name", "T"])
+            .current_dir(&dir)
+            .output()
+            .await;
         std::fs::write(dir.join("README.md"), "hello").unwrap();
-        let _ = tokio::process::Command::new("git").args(["add", "."]).current_dir(&dir).output().await;
-        let _ = tokio::process::Command::new("git").args(["commit", "-m", "init"]).current_dir(&dir).output().await;
+        let _ = tokio::process::Command::new("git")
+            .args(["add", "."])
+            .current_dir(&dir)
+            .output()
+            .await;
+        let _ = tokio::process::Command::new("git")
+            .args(["commit", "-m", "init"])
+            .current_dir(&dir)
+            .output()
+            .await;
         // Tree is clean — snapshot should be a no-op.
         let result = snapshot_worktree(&dir, "test-task").await.unwrap();
         assert!(result.is_none(), "clean tree must return None (no-op)");
@@ -2646,26 +3052,49 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("cam-snap-dirty-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let _ = tokio::process::Command::new("git").args(["init"]).current_dir(&dir).output().await;
-        let _ = tokio::process::Command::new("git").args(["config", "user.email", "t@t.com"]).current_dir(&dir).output().await;
-        let _ = tokio::process::Command::new("git").args(["config", "user.name", "T"]).current_dir(&dir).output().await;
+        let _ = tokio::process::Command::new("git")
+            .args(["init"])
+            .current_dir(&dir)
+            .output()
+            .await;
+        let _ = tokio::process::Command::new("git")
+            .args(["config", "user.email", "t@t.com"])
+            .current_dir(&dir)
+            .output()
+            .await;
+        let _ = tokio::process::Command::new("git")
+            .args(["config", "user.name", "T"])
+            .current_dir(&dir)
+            .output()
+            .await;
         std::fs::write(dir.join("README.md"), "hello").unwrap();
-        let _ = tokio::process::Command::new("git").args(["add", "."]).current_dir(&dir).output().await;
-        let _ = tokio::process::Command::new("git").args(["commit", "-m", "init"]).current_dir(&dir).output().await;
+        let _ = tokio::process::Command::new("git")
+            .args(["add", "."])
+            .current_dir(&dir)
+            .output()
+            .await;
+        let _ = tokio::process::Command::new("git")
+            .args(["commit", "-m", "init"])
+            .current_dir(&dir)
+            .output()
+            .await;
         // Dirty: write a new file without committing.
         std::fs::write(dir.join("new.rs"), "fn main() {}").unwrap();
         let result = snapshot_worktree(&dir, "my-task").await.unwrap();
         // Should have made a commit (result is not None).
         // (SHA may or may not be parseable from git output depending on format, but commit happened.)
         let _ = result; // we just check no error
-        // Verify the new file is now committed (git status clean).
+                        // Verify the new file is now committed (git status clean).
         let status = tokio::process::Command::new("git")
             .args(["status", "--porcelain"])
             .current_dir(&dir)
             .output()
             .await
             .unwrap();
-        assert!(status.stdout.is_empty(), "tree must be clean after snapshot");
+        assert!(
+            status.stdout.is_empty(),
+            "tree must be clean after snapshot"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2674,15 +3103,37 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("cam-snap-msg-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let _ = tokio::process::Command::new("git").args(["init"]).current_dir(&dir).output().await;
-        let _ = tokio::process::Command::new("git").args(["config", "user.email", "t@t.com"]).current_dir(&dir).output().await;
-        let _ = tokio::process::Command::new("git").args(["config", "user.name", "T"]).current_dir(&dir).output().await;
+        let _ = tokio::process::Command::new("git")
+            .args(["init"])
+            .current_dir(&dir)
+            .output()
+            .await;
+        let _ = tokio::process::Command::new("git")
+            .args(["config", "user.email", "t@t.com"])
+            .current_dir(&dir)
+            .output()
+            .await;
+        let _ = tokio::process::Command::new("git")
+            .args(["config", "user.name", "T"])
+            .current_dir(&dir)
+            .output()
+            .await;
         std::fs::write(dir.join("f.txt"), "a").unwrap();
-        let _ = tokio::process::Command::new("git").args(["add", "."]).current_dir(&dir).output().await;
-        let _ = tokio::process::Command::new("git").args(["commit", "-m", "init"]).current_dir(&dir).output().await;
+        let _ = tokio::process::Command::new("git")
+            .args(["add", "."])
+            .current_dir(&dir)
+            .output()
+            .await;
+        let _ = tokio::process::Command::new("git")
+            .args(["commit", "-m", "init"])
+            .current_dir(&dir)
+            .output()
+            .await;
         // Make dirty.
         std::fs::write(dir.join("f.txt"), "b").unwrap();
-        let _ = snapshot_worktree(&dir, "dev-implement iteration 2").await.unwrap();
+        let _ = snapshot_worktree(&dir, "dev-implement iteration 2")
+            .await
+            .unwrap();
         // Verify commit message.
         let log = tokio::process::Command::new("git")
             .args(["log", "-1", "--pretty=%s"])
@@ -2691,7 +3142,10 @@ mod tests {
             .await
             .unwrap();
         let msg = String::from_utf8_lossy(&log.stdout);
-        assert!(msg.contains("camerata: snapshot dev-implement iteration 2"), "commit msg must contain task label; got: {msg}");
+        assert!(
+            msg.contains("camerata: snapshot dev-implement iteration 2"),
+            "commit msg must contain task label; got: {msg}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2717,7 +3171,10 @@ mod tests {
             .output()
             .await
             .unwrap();
-        assert!(status.stdout.is_empty(), "tree must be clean after the initial commit");
+        assert!(
+            status.stdout.is_empty(),
+            "tree must be clean after the initial commit"
+        );
 
         let log = tokio::process::Command::new("git")
             .args(["log", "-1", "--pretty=%s"])
@@ -2747,7 +3204,9 @@ mod tests {
             .await
             .expect("init + commit");
 
-        set_origin(dir.path(), "acme/my-app").await.expect("set_origin");
+        set_origin(dir.path(), "acme/my-app")
+            .await
+            .expect("set_origin");
 
         let remote = tokio::process::Command::new("git")
             .args(["remote", "get-url", "origin"])
@@ -2757,7 +3216,10 @@ mod tests {
             .unwrap();
         let url = String::from_utf8_lossy(&remote.stdout).trim().to_string();
         assert_eq!(url, "https://github.com/acme/my-app.git");
-        assert!(!url.contains('@'), "persisted origin must carry no credentials");
+        assert!(
+            !url.contains('@'),
+            "persisted origin must carry no credentials"
+        );
     }
 
     // ── Link-existing-clone origin validation (readiness-gate ADR) ──────────────────
@@ -2765,24 +3227,39 @@ mod tests {
     #[test]
     fn origin_matches_repo_normalizes_https_and_ssh_and_git_suffix() {
         // https, with and without a trailing `.git` / slash.
-        assert!(origin_matches_repo("https://github.com/me/api.git", "me/api"));
+        assert!(origin_matches_repo(
+            "https://github.com/me/api.git",
+            "me/api"
+        ));
         assert!(origin_matches_repo("https://github.com/me/api", "me/api"));
         assert!(origin_matches_repo("https://github.com/me/api/", "me/api"));
         // ssh form, with and without `.git`.
         assert!(origin_matches_repo("git@github.com:me/api.git", "me/api"));
         assert!(origin_matches_repo("git@github.com:me/api", "me/api"));
         // Case-insensitive on the whole owner/repo.
-        assert!(origin_matches_repo("https://github.com/Me/API.git", "me/api"));
+        assert!(origin_matches_repo(
+            "https://github.com/Me/API.git",
+            "me/api"
+        ));
         assert!(origin_matches_repo("git@github.com:ME/Api", "me/API"));
     }
 
     #[test]
     fn origin_matches_repo_rejects_different_repo_and_non_github() {
         // A DIFFERENT repo must not match — this is the guard against linking the wrong folder.
-        assert!(!origin_matches_repo("https://github.com/me/other.git", "me/api"));
-        assert!(!origin_matches_repo("git@github.com:someone/api.git", "me/api"));
+        assert!(!origin_matches_repo(
+            "https://github.com/me/other.git",
+            "me/api"
+        ));
+        assert!(!origin_matches_repo(
+            "git@github.com:someone/api.git",
+            "me/api"
+        ));
         // Non-GitHub / unparseable remotes never match.
-        assert!(!origin_matches_repo("https://gitlab.com/me/api.git", "me/api"));
+        assert!(!origin_matches_repo(
+            "https://gitlab.com/me/api.git",
+            "me/api"
+        ));
         assert!(!origin_matches_repo("not-a-url", "me/api"));
         assert!(!origin_matches_repo("", "me/api"));
     }
@@ -2869,8 +3346,7 @@ mod tests {
     // Unlinked/Partial (paused) forever. This test is the regression guard.
     #[tokio::test]
     async fn repo_resolution_resolved_when_origin_casing_differs_from_stored_repo() {
-        let base =
-            std::env::temp_dir().join(format!("cam-res-case-{}", std::process::id()));
+        let base = std::env::temp_dir().join(format!("cam-res-case-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         let dir = base.join("clone");
 
@@ -2883,7 +3359,7 @@ mod tests {
 
         let resolution = repo_resolution(
             Some(&dir.to_string_lossy()),
-            None,  // no workspace root — use the explicit override path
+            None, // no workspace root — use the explicit override path
             stored_repo,
         )
         .await;
@@ -2940,8 +3416,7 @@ mod tests {
         // A git checkout, but of a DIFFERENT repo.
         init_repo_with_origin(&dir, "https://github.com/me/other.git");
 
-        let st =
-            checkout_status_resolved(Some(&dir.to_string_lossy()), None, "me/api").await;
+        let st = checkout_status_resolved(Some(&dir.to_string_lossy()), None, "me/api").await;
 
         assert!(
             !st.cloned,
@@ -2965,9 +3440,12 @@ mod tests {
         let dir = base.join("checkout");
         init_repo_with_origin(&dir, "https://github.com/me/api.git");
 
-        let st =
-            checkout_status_resolved(Some(&dir.to_string_lossy()), None, "me/api").await;
-        assert!(st.cloned, "override must resolve with no workspace root; detail: {}", st.detail);
+        let st = checkout_status_resolved(Some(&dir.to_string_lossy()), None, "me/api").await;
+        assert!(
+            st.cloned,
+            "override must resolve with no workspace root; detail: {}",
+            st.detail
+        );
 
         // And with NEITHER an override NOR a workspace root: not-cloned with a helpful reason,
         // never a panic/error.

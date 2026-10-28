@@ -1,0 +1,42 @@
+id = "FIREBASE-ADMIN-CLAIMS-1"
+version = 2
+title = "Admin and role checks come from custom claims or from documents that no client can write"
+domain = "firebase"
+layer = "platform"
+enforcement = "architectural"
+kind = "defect"
+inspectable = true
+cwe = ["CWE-269"]
+max_severity = "high"
+min_severity = "high"
+default = true
+verification = "grounded"
+qualifies = "The self grant is checked mechanically; the general preference for claims is advisory. Mechanical part: an allow whose condition reads a role from the caller's own document (get(/databases/$(database)/documents/<collection>/$(request.auth.uid)).data.<field>), while another rule in the same file lets each user create or update their own document in that collection without pinning that field, is reported as high. A user can then set the field to an admin value on themselves. A role document with no client write, an owner write that pins the field (request.resource.data.role == resource.data.role, an affectedKeys().hasOnly list that excludes it, a keys().hasOnly list that excludes it, or a negated affectedKeys().hasAny or keys().hasAny list that names it; any other affectedKeys, unchangedKeys or hasAny construct is not modelled and silences the rule), a custom claims check, and a lookup keyed on another document are not reported. A role lookup written with exists( is not recognised, only get( keyed on the caller's own uid. Firebase documents data defined roles as legitimate with a read cost and custom claims set only from a privileged server as the pattern for access control; preferring one over the other is left to review. A rules file that firebase.json does not name (found only by its conventional name, or in a repository with no firebase.json) or that sits under an examples, example, samples, sample or docs folder is held for review with the reason stated, never asserted, and a critical severity is lowered to high. Rules edited in the Firebase console never land in the repository, so a repository scan reads only the rules file the project deploys."
+
+[[sources]]
+url = "https://firebase.google.com/docs/rules/basics"
+title = "Basic Security Rules"
+
+[[sources]]
+url = "https://firebase.google.com/docs/auth/admin/custom-claims"
+title = "Control Access with Custom Claims and Security Rules"
+
+[decision]
+question = "Can a user write the field their own role is read from?"
+default = "roles-come-from-claims-or-documents-no-client-can-write"
+why = "A role check that reads a document is only as strong as the rule protecting that document. If the same user can write their own document, they can write their own role. Custom claims are set only from a privileged server environment, which is why Firebase's guide recommends them for controlling access."
+
+[[option]]
+id = "roles-come-from-claims-or-documents-no-client-can-write"
+label = "Roles are read from custom claims or from documents that no client can write"
+directive = "Admin and role checks come from custom claims (request.auth.token.<claim>) set from a privileged server, or from documents that no client can write. A role stored in a document the user can edit is pinned in the owner's write rule so the owner cannot change it."
+remediation = "Stop letting users write the role field on `<path>`: pin it in the owner's write rule (`request.resource.data.role == resource.data.role`), or move roles to a collection with `allow write: if false` and set them from a server, or use custom claims set with the Admin SDK (`request.auth.token.admin == true`). Deploy and confirm in the emulator that a user cannot set their own role."
+effort = "medium"
+why = "A role that only a server can change cannot be granted by the user who would benefit from it."
+
+[[option]]
+id = "a-role-is-stored-where-its-holder-can-write-it"
+violates = true
+label = "A role is stored in a document that its holder can write"
+directive = "Read a user's role from their own user document without restricting which fields the owner may write."
+why = "A user can set their own role to an admin value and gain every permission the role grants, because the rule that grants the permission trusts a field the same user may edit."

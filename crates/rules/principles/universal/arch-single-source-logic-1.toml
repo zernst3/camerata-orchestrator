@@ -1,0 +1,59 @@
+id = "ARCH-SINGLE-SOURCE-LOGIC-1"
+version = 2
+title = "An application decision such as a price, a fee, a status or a permission check is implemented in one function that every place needing it calls, never written out again in a second file"
+domain = "universal"
+layer = "universal"
+enforcement = "architectural"
+kind = "defect"
+inspectable = true
+# Severity ceiling, transcribed from the rule's own framing: the same decision written in several
+# places is a consistency problem that grows into a live fault the moment the copies disagree.
+# The finding is `high` when the copies already disagree on the decision itself (a different
+# rate or number, a different operator, a different property inside a condition) and `medium`
+# when they agree or differ only elsewhere (a string, a template name, a called function);
+# `high` is the ceiling.
+max_severity = "high"
+default = true
+# `policy`, not `grounded`: the convention that an application decision has one implementation
+# is deliberate project policy, and no external authority states the cross-file, reviewed form
+# specified here. Related controls (not citations, and deliberately not in `[[sources]]`): jscpd
+# and PMD CPD are token clone detectors that report any duplication, whether or not it is a
+# decision, and never compare the copies for agreement; SonarSource's "duplicated blocks" rule
+# counts duplicated lines per project. None of them asks whether the repeated code is one
+# business decision, and none says where the copies differ. Only the owner sets `verified`.
+verification = "policy"
+qualifies = "A deterministic search followed by a reviewed assessment of the listed code, so the result is a judgment on top of a mechanical search and not a purely mechanical check. The search looks for a stretch of at least 60 tokens (roughly five to ten lines) that appears in two or more files of the same language family, with variable and function names, property names, literal values and operator spellings set aside, so a copy under renamed variables is still found. Only a stretch that contains a decision counts: a comparison, arithmetic or logical operator, or a branch (if, elif, switch, case, match, a conditional expression), together with a literal or a property name, outside any catch, except, throw or raise block, and every copy must sit inside a function body (or be a module-level statement in a file that is not a configuration file). Each candidate is then assessed on the listed code alone: is it one application decision (a price, a fee, a status derivation, a display name, a permission check, a tier or bucket computation) written more than once, as opposed to boilerplate, a framework shape or a coincidence? Only a candidate assessed as the same decision is reported, and one the assessment is unsure about is not. The copies are also compared token for token once variable names are set aside (the name of a called function is compared; a renamed variable is not, provided every use is renamed alike), and the finding names every place where they differ (a different rate, operator, property name, string or called function). It is high severity when the copies differ in an operator, a number or a property inside a condition, and medium when they agree or differ only elsewhere, such as a string, a template name or a called function. Not reported: test code, generated code, vendored code, minified code, migrations and seeds, translation catalogs and data tables, patterns that appear in more than a quarter of the files (framework skeletons), a stretch dominated by one call to a helper imported from the same module in every copy (the call and its arguments cover at least half of the stretch, or hold every operator, literal and property in it), whereas a decision written around an unrelated imported call is still reported, repetition inside a single file, and the same logic in two different languages. Copies shorter than 60 tokens, copies that differ in structure (an if ladder against a switch, a loop against a map), and a difference outside the shared stretch are not seen. Candidates beyond the 160 most significant in one scan are counted and disclosed but not assessed. When the assessment cannot run (no model available), candidates are reported as not assessed, never as clean. A scan that finds no candidate reports nothing and does not claim that no decision is written twice."
+
+[[sources]]
+url = "docs/design/2026-10-21_w29-detector-implementation.md"
+title = "Design: the W29 detector layer, ARCH-SINGLE-SOURCE-LOGIC-1: the algorithm and its traps"
+
+[[sources]]
+url = "CORPUS_WORK_ORDER_CONSISTENCY_RULES.md"
+title = "Corpus work order: consistency rules, section 2: one application decision has one implementation"
+
+[[sources]]
+url = "docs/OVERNIGHT_DECISIONS.md"
+title = "Decisions log, DECISIONS MADE, 2026-10-21: the clone detector and the three rules built on it are in V1 scope"
+
+[decision]
+question = "How does the project keep an application decision, such as a price, a fee, a status or a permission check, that several places need?"
+default = "each-decision-is-implemented-once"
+why = "A decision that is written out in more than one place has no single owner. When the rule changes, the copy that is corrected leaves the old rule running in the others, and nothing fails to show it: two screens quote different prices, or one path grants access that another denies. A single function in the module that owns the concept gives the decision one address, so a change to a rate, a threshold or a rule is one edit and a search for the function finds every user."
+
+[[option]]
+id = "each-decision-is-implemented-once"
+label = "Each application decision is implemented once, in one function that every place needing it calls"
+directive = "Implement each application decision (a price, a fee, a status derivation, a display name, a permission check, a tier or bucket computation) once, as one function in the module that owns the concept, and call that function wherever the decision is needed. Do not copy the logic into a second file. When a second copy already exists, move the logic into the owning module and replace every copy with a call, so a change to a rate, a threshold or a rule is one edit."
+remediation = """
+Move the logic into one exported function in the module that owns the concept, call it at every site listed in the finding, and delete the copies. Where the listed copies already differ, decide which version is correct before merging them, because the merged function will apply that version everywhere. Verify by searching the repository for the distinctive operator or value: only the one implementation should remain, and the project should still build and its tests pass.
+"""
+effort = "medium"
+why = "The fix is an extraction with a clear check: one implementation, one call per site. After it, a corrected rule cannot be left running in a forgotten copy."
+
+[[option]]
+id = "the-same-decision-is-written-in-several-places"
+violates = true
+label = "The same application decision is written out in several places"
+directive = "Write an application decision again in each file that needs it."
+why = "Copies of one decision drift apart. When the rule changes, the copy that is corrected in one place leaves the old rule running in the others, and nothing fails to show it: two screens quote different prices, or one path grants access that another denies. A reader cannot tell which copy is the rule, so each change has to find every copy by text search, and a copy that is missed silently keeps the old behaviour."

@@ -1,9 +1,11 @@
 id = "CSHARP-EFCORE-DBCONTEXT-SCOPED-1"
+version = 1
 title = "DbContext is registered as Scoped (per-request); never Singleton"
-tag = "stack"
 domain = "csharp:efcore"
 layer = "library"
 enforcement = "prose"
+kind = "default_with_exceptions"
+inspectable = true
 default = true
 
 verification = "grounded"
@@ -16,16 +18,21 @@ why = "DbContext is designed to be a unit-of-work: it tracks changes, caches ent
 id = "scoped-per-request"
 label = "DbContext registered as Scoped via AddDbContext<T>"
 directive = "DbContext is registered via builder.Services.AddDbContext<AppDbContext>(options => ...) which registers it as Scoped by default. No AddSingleton<AppDbContext> or AddTransient<AppDbContext> call appears. IDbContextFactory<T> (which is registered as Singleton and creates Scoped or Transient contexts on demand) may be used for background services and Blazor Server components that have non-request lifetimes, but never as a replacement for direct Scoped injection in HTTP request handlers."
+remediation = """
+Change the DbContext registration from AddSingleton or AddTransient to AddDbContext for the context type, which registers it as Scoped (per-request) by default. If multiple DbContext instances are needed within a single request, use a DbContext factory instead of widening the lifetime. Verify by confirming two concurrent requests do not share the same DbContext instance, for example by logging the context's instance id per request.
+"""
 why = "Scoped lifetime gives one DbContext instance per HTTP request, allowing transactions to span multiple service-layer calls within the same request, and disposes the connection at request end."
 
 [[option]]
 id = "singleton-dbcontext"
+violates = true
 label = "DbContext registered as Singleton"
 directive = "DbContext is registered via AddSingleton<AppDbContext>(), sharing one instance across all requests and threads."
 why = "Produces data corruption under concurrent load: shared change tracker, stale identity-map cache entries, and thread-safety violations. Forbidden."
 
 [[option]]
 id = "transient-dbcontext"
+violates = true
 label = "DbContext registered as Transient"
 directive = "DbContext is registered via AddTransient<AppDbContext>(), creating a new instance per injection site within a request."
 why = "Breaks transaction scope: two injection sites within the same request receive two independent change trackers. Changes made through one cannot participate in a transaction with the other. Inappropriate for any scenario that requires cross-service transactionality within a request."

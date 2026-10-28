@@ -127,9 +127,8 @@ async fn run_with_heartbeat(
             // Start the mtime probe against the cargo target dir when present.
             // This fires heartbeats during cold compiles where cargo writes objects
             // but emits no stdout lines.
-            let _mtime_probe = target_dir.map(|td| {
-                spawn_mtime_probe(td.to_path_buf(), cb.clone(), MTIME_PROBE_INTERVAL)
-            });
+            let _mtime_probe = target_dir
+                .map(|td| spawn_mtime_probe(td.to_path_buf(), cb.clone(), MTIME_PROBE_INTERVAL));
 
             // Read stdout AND stderr CONCURRENTLY, firing the heartbeat on a line from
             // EITHER stream. This is load-bearing for `cargo`'s "Blocking waiting for file
@@ -206,8 +205,7 @@ pub async fn run_fmt_check(
     if let Some(td) = target_dir {
         cmd.env("CARGO_TARGET_DIR", td);
     }
-    let (combined, success) =
-        run_with_heartbeat(cmd, worktree, target_dir, on_progress).await?;
+    let (combined, success) = run_with_heartbeat(cmd, worktree, target_dir, on_progress).await?;
     Ok(FmtOutput { combined, success })
 }
 
@@ -229,8 +227,7 @@ pub async fn run_clippy(
     if let Some(td) = target_dir {
         cmd.env("CARGO_TARGET_DIR", td);
     }
-    let (combined, success) =
-        run_with_heartbeat(cmd, worktree, target_dir, on_progress).await?;
+    let (combined, success) = run_with_heartbeat(cmd, worktree, target_dir, on_progress).await?;
     Ok(ClippyOutput { combined, success })
 }
 
@@ -256,8 +253,7 @@ pub async fn run_test(
     if let Some(td) = target_dir {
         cmd.env("CARGO_TARGET_DIR", td);
     }
-    let (combined, success) =
-        run_with_heartbeat(cmd, worktree, target_dir, on_progress).await?;
+    let (combined, success) = run_with_heartbeat(cmd, worktree, target_dir, on_progress).await?;
     Ok(TestOutput { combined, success })
 }
 
@@ -266,8 +262,8 @@ pub async fn run_test(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Arc;
     use tempfile::TempDir;
 
     /// The streaming path fires the heartbeat at least once per stdout line emitted.
@@ -292,9 +288,18 @@ mod tests {
         .expect("command should succeed");
 
         assert!(result.success, "sh echo should exit 0");
-        assert!(result.combined.contains("line1"), "output should contain line1");
-        assert!(result.combined.contains("line2"), "output should contain line2");
-        assert!(result.combined.contains("line3"), "output should contain line3");
+        assert!(
+            result.combined.contains("line1"),
+            "output should contain line1"
+        );
+        assert!(
+            result.combined.contains("line2"),
+            "output should contain line2"
+        );
+        assert!(
+            result.combined.contains("line3"),
+            "output should contain line3"
+        );
         assert!(
             count.load(Ordering::Relaxed) >= 3,
             "expected at least 3 heartbeat ticks (one per line), got {}",
@@ -338,14 +343,9 @@ mod tests {
     #[tokio::test]
     async fn none_path_works_without_heartbeat() {
         let tmp = TempDir::new().expect("tmp dir");
-        let result = run_command(
-            tmp.path(),
-            "sh",
-            &["-c", "echo hello"],
-            None,
-        )
-        .await
-        .expect("command should succeed");
+        let result = run_command(tmp.path(), "sh", &["-c", "echo hello"], None)
+            .await
+            .expect("command should succeed");
         assert!(result.success);
         assert!(result.combined.contains("hello"));
     }

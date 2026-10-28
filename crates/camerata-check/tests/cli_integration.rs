@@ -37,6 +37,26 @@ fn bin() -> Command {
     Command::cargo_bin("camerata-check").expect("camerata-check binary must build")
 }
 
+/// The config-gated rule ids: checkers that consult `.camerata/architecture.toml` and abstain
+/// without it (D3). The D3 parity tests scope to exactly these via `--rule-id`, so they
+/// exercise only the checkers they are about and not always-on checkers (e.g.
+/// ARCH-DEAD-CODE-1) that legitimately report on a tiny fixture repo with no entry point.
+const CONFIG_GATED_RULE_IDS: [&str; 4] = [
+    "ARCH-HANDLER-NO-DB-1",
+    "ARCH-STRICT-LAYERING-1",
+    "ARCH-NO-CROSS-BOUNDARY-IMPORTS-1",
+    "ARCH-API-DTOS-1",
+];
+
+/// `bin()` with `--rule-id` already applied for every config-gated rule.
+fn config_gated_bin() -> Command {
+    let mut cmd = bin();
+    for id in CONFIG_GATED_RULE_IDS {
+        cmd.arg("--rule-id").arg(id);
+    }
+    cmd
+}
+
 // ── known violation: non-zero exit, finding present in both output formats ──
 
 #[test]
@@ -112,7 +132,98 @@ fn clean_fixture_json_reports_clean_true() {
 #[test]
 fn no_config_repo_config_gated_rules_do_not_hard_fail() {
     let repo = server_fixture("handler_no_db_unconfigured_repo");
-    bin().arg(&repo).assert().success();
+    config_gated_bin().arg(&repo).assert().success();
+}
+
+// ── dead code runs in the CI gate (design: "scan tier and CI only") ─────────
+
+#[test]
+fn ci_gate_reports_dead_code_for_an_orphaned_file() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let write = |rel: &str, body: &str| {
+        let path = tmp.path().join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, body).unwrap();
+    };
+    // A real entry point (package.json `main`) that imports one live module, plus one file
+    // nothing imports or names anywhere: a genuine orphan.
+    write("package.json", r#"{"private":true,"main":"src/app.ts"}"#);
+    write("src/app.ts", "import './used';\n");
+    write("src/used.ts", "export const used = 1;\n");
+    write("src/orphan.ts", "export const orphan = 1;\n");
+
+    let output = bin()
+        .arg(tmp.path())
+        .arg("--format")
+        .arg("json")
+        .output()
+        .expect("must run");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let value: serde_json::Value =
+        serde_json::from_str(&stdout).expect("stdout must be valid JSON");
+    let dead: Vec<&serde_json::Value> = value["violations"]
+        .as_array()
+        .expect("violations must be an array")
+        .iter()
+        .filter(|v| v["rule_id"] == "ARCH-DEAD-CODE-1")
+        .collect();
+    assert_eq!(
+        dead.len(),
+        1,
+        "exactly the orphan must be reported, not the entry point or its import: {stdout}"
+    );
+    assert_eq!(dead[0]["file"], "src/orphan.ts", "{stdout}");
+}
+
+// ── React Hooks lint config gap runs in the CI gate (scan tier and CI only) ──
+
+/// The CI binary loads only the files matching each checker's interest globs, so this pins that
+/// the lint-configuration shapes (a dotfile included) reach the checker there.
+#[test]
+fn ci_gate_reports_a_react_repo_whose_lint_config_does_not_enable_the_hooks_rules() {
+    let hooks_lint_violations = |eslintrc: Option<&str>| -> Vec<serde_json::Value> {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let write = |rel: &str, body: &str| {
+            let path = tmp.path().join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, body).unwrap();
+        };
+        write(
+            "package.json",
+            r#"{"name":"web","private":true,"main":"src/App.jsx","dependencies":{"react":"^18"}}"#,
+        );
+        write("src/App.jsx", "export const App = () => null;\n");
+        if let Some(body) = eslintrc {
+            write(".eslintrc.json", body);
+        }
+        let output = bin()
+            .arg(tmp.path())
+            .arg("--rule-id")
+            .arg("UI-REACT-HOOKS-LINT-1")
+            .arg("--format")
+            .arg("json")
+            .output()
+            .expect("must run");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let value: serde_json::Value =
+            serde_json::from_str(&stdout).expect("stdout must be valid JSON");
+        value["violations"]
+            .as_array()
+            .expect("violations must be an array")
+            .clone()
+    };
+
+    let gap = hooks_lint_violations(Some(r#"{"extends":["eslint:recommended"]}"#));
+    assert_eq!(gap.len(), 1, "{gap:?}");
+    assert_eq!(gap[0]["rule_id"], "UI-REACT-HOOKS-LINT-1");
+    assert_eq!(gap[0]["file"], ".eslintrc.json");
+
+    let none = hooks_lint_violations(None);
+    assert_eq!(none.len(), 1, "{none:?}");
+    assert_eq!(none[0]["file"], "package.json");
+
+    let enabled = hooks_lint_violations(Some(r#"{"extends":["plugin:react-hooks/recommended"]}"#));
+    assert!(enabled.is_empty(), "{enabled:?}");
 }
 
 // ── adversarial: malformed SQL / malformed config / binary file never panics ─
@@ -176,6 +287,61 @@ fn unmatched_rule_id_surfaces_a_note_and_still_exits_clean() {
         .stdout(predicate::str::contains("ARCH-STRUCTURED-ERRORS-1"));
 }
 
+#[test]
+fn clone_based_rule_ids_are_reported_unsupported_and_never_clean() {
+    let repo = fixture("clean_repo");
+    for id in [
+        "ARCH-SINGLE-SOURCE-LOGIC-1",
+        "ARCH-NAMING-ONE-CONCEPT-1",
+        "UI-SHARED-PRIMITIVE-1",
+    ] {
+        // Human output: not clean, names the id, says why. The default gate does not fail on a
+        // rule it cannot evaluate (a CI author who lists every corpus id must not be locked
+        // out), but it never says "clean".
+        bin()
+            .arg(&repo)
+            .arg("--rule-id")
+            .arg(id)
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("NOT CLEAN"))
+            .stdout(predicate::str::contains(id))
+            .stdout(predicate::str::contains("advisory tier"))
+            .stdout(predicate::str::contains("camerata-check: clean").not());
+
+        // --strict: a rule that was never checked fails the gate.
+        bin()
+            .arg(&repo)
+            .arg("--rule-id")
+            .arg(id)
+            .arg("--strict")
+            .assert()
+            .failure()
+            .code(1);
+
+        // JSON: `clean` is false and the id is listed as unsupported, not as unmatched.
+        let out = bin()
+            .arg(&repo)
+            .arg("--rule-id")
+            .arg(id)
+            .arg("--format")
+            .arg("json")
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let value: serde_json::Value = serde_json::from_slice(&out).expect("valid json");
+        assert_eq!(value["clean"], false, "{id}");
+        assert_eq!(
+            value["unsupported_rule_ids"],
+            serde_json::json!([id]),
+            "{id}"
+        );
+        assert_eq!(value["unmatched_rule_ids"], serde_json::json!([]), "{id}");
+    }
+}
+
 // ── --strict ─────────────────────────────────────────────────────────────────
 
 #[test]
@@ -214,11 +380,11 @@ fn config_override_flag_is_honored() {
     .unwrap();
 
     // Without the override: unconfigured repo -> clean (D3).
-    bin().arg(&repo).assert().success();
+    config_gated_bin().arg(&repo).assert().success();
 
     // With the override: the same repo now has a config that makes HandlerNoDbChecker
     // deterministic, so the direct-DB-call handler must now fail the gate.
-    bin()
+    config_gated_bin()
         .arg(&repo)
         .arg("--config")
         .arg(&cfg_path)
@@ -238,4 +404,117 @@ fn missing_config_override_path_is_a_run_error_exit_code_2() {
         .assert()
         .failure()
         .code(2);
+}
+
+// ── Firebase rules through the real walk (item 24) ──────────────────────────
+
+/// The Firebase rules checker reads `firestore.rules`, `firebase.json` and `.firebaserc`:
+/// dot and non-code extensions the pruned file walk must reach.
+#[test]
+fn a_firestore_rules_file_is_checked_through_the_real_walk_and_fails_ci() {
+    let repo = server_fixture("firebase-app");
+    let output = bin()
+        .arg(&repo)
+        .arg("--format")
+        .arg("json")
+        .arg("--rule-id")
+        .arg("FIREBASE-RULES-OPEN-1")
+        .arg("--rule-id")
+        .arg("FIREBASE-RULES-OWNERSHIP-1")
+        .output()
+        .expect("must run");
+    assert_eq!(output.status.code(), Some(1), "defects are deterministic");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let value: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON");
+    let violations = value["violations"].as_array().unwrap();
+    let open = violations
+        .iter()
+        .find(|v| v["rule_id"] == "FIREBASE-RULES-OPEN-1")
+        .unwrap_or_else(|| panic!("open rule missing: {stdout}"));
+    assert_eq!(open["file"], "firestore.rules");
+    assert_eq!(open["line"], 5);
+    assert_eq!(open["needs_review"], false);
+    assert!(violations
+        .iter()
+        .any(|v| v["rule_id"] == "FIREBASE-RULES-OWNERSHIP-1"));
+}
+
+/// A Realtime Database rules file `firebase.json` renames is reached by the real walk even
+/// though the checker's own globs no longer take every `.json` file.
+#[test]
+fn a_renamed_realtime_database_rules_file_is_checked_through_the_real_walk() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("firebase.json"),
+        r#"{ "database": { "rules": "config/db-rules.json" } }"#,
+    )
+    .unwrap();
+    std::fs::create_dir_all(dir.path().join("config")).unwrap();
+    std::fs::write(
+        dir.path().join("config/db-rules.json"),
+        r#"{ "rules": { ".read": true, ".write": true } }"#,
+    )
+    .unwrap();
+    let output = bin()
+        .arg(dir.path())
+        .arg("--format")
+        .arg("json")
+        .arg("--rule-id")
+        .arg("FIREBASE-RTDB-RULES-OPEN-1")
+        .output()
+        .expect("must run");
+    assert_eq!(output.status.code(), Some(1));
+    let value: serde_json::Value =
+        serde_json::from_str(&String::from_utf8_lossy(&output.stdout)).unwrap();
+    assert!(value["violations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|v| v["file"] == "config/db-rules.json"));
+}
+
+#[test]
+fn an_unreadable_rules_file_is_listed_as_not_assessed_and_is_never_clean() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("firebase.json"),
+        r#"{ "firestore": { "rules": "firestore.rules" } }"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("firestore.rules"),
+        "service cloud.firestore {\n  match /databases/{d}/documents {\n    deny read;\n  }\n}\n",
+    )
+    .unwrap();
+    let run = |strict: bool| {
+        let mut cmd = bin();
+        cmd.arg(dir.path())
+            .arg("--format")
+            .arg("json")
+            .arg("--rule-id")
+            .arg("FIREBASE-RULES-OPEN-1");
+        if strict {
+            cmd.arg("--strict");
+        }
+        cmd.output().expect("must run")
+    };
+    let default_run = run(false);
+    assert_eq!(default_run.status.code(), Some(0), "not a violation");
+    let value: serde_json::Value =
+        serde_json::from_str(&String::from_utf8_lossy(&default_run.stdout)).unwrap();
+    assert_eq!(value["clean"], false, "an unassessed input is never clean");
+    assert_eq!(value["violations"].as_array().unwrap().len(), 0);
+    let not_assessed = value["not_assessed"].as_array().unwrap();
+    assert_eq!(not_assessed.len(), 1);
+    assert_eq!(not_assessed[0]["file"], "firestore.rules");
+    assert_eq!(run(true).status.code(), Some(1), "strict fails on it");
+
+    bin()
+        .arg(dir.path())
+        .arg("--rule-id")
+        .arg("FIREBASE-RULES-OPEN-1")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Not assessed"))
+        .stdout(predicate::str::contains("NOT CLEAN"));
 }

@@ -23,12 +23,12 @@ pub use camerata_app_core::project::{
     default_hierarchy_schema, default_max_iterations, default_model, default_operating_principles,
     default_routine_secs, default_watched_secs, export_ruleset, parse_ruleset, CustomRule,
     HierarchySchema, ImportOutcome, L3ReviewConfig, MemoryEntry, MemoryKind, MemoryStatus,
-    ModelProfile, OperatingPrinciple, Project, ProjectImport, ProjectRuleset, RuleSelection,
-    StallThresholds, StepKind, StepModels, TypeRelation, WorkType, DEFAULT_MODEL,
+    ModelProfile, OperatingPrinciple, Project, ProjectBackend, ProjectImport, ProjectRuleset,
+    RuleSelection, StallThresholds, StepKind, StepModels, TypeRelation, WorkType, DEFAULT_MODEL,
 };
 
-use camerata_checks::vcs_action::ProcessRuleConfig;
 use crate::model_tier::TierMap;
+use camerata_checks::vcs_action::ProcessRuleConfig;
 
 /// Project store + the active selection, persisted to a JSON file so projects
 /// (their configs + pointers, NOT repo contents) survive across launches.
@@ -142,6 +142,10 @@ impl ProjectStore {
                 operating_principles: default_operating_principles(),
                 memory: Vec::new(),
                 hierarchy_schema: default_hierarchy_schema(),
+                // A brand-new project runs on the metered Anthropic API; the operator opts
+                // into the Claude Code subscription explicitly. Persisted projects keep
+                // whatever backend they stored (a legacy file without the field stays `Cli`).
+                backend: ProjectBackend::for_new_project(),
             };
             s.projects.push(project.clone());
             s.active = Some(id);
@@ -244,6 +248,12 @@ impl ProjectStore {
                     // Seed the default ladder when the import omitted a schema (empty), but keep
                     // an intentionally-provided non-empty imported schema untouched.
                     hierarchy_schema: import.hierarchy_schema.resolve_effective(),
+                    // `backend` is deliberately NOT part of `ProjectImport` (not transferable):
+                    // importing another project's export must never carry over a CLIENT
+                    // project's `Api` backend choice by inheritance onto this machine. A
+                    // freshly imported project always starts on the new-project default
+                    // (`Api`), same as a brand-new project, until the operator explicitly sets it.
+                    backend: ProjectBackend::for_new_project(),
                 };
                 s.projects.push(project.clone());
                 s.active = Some(id);
@@ -301,22 +311,13 @@ impl ProjectStore {
     /// saves. Per-project isolation is structural — the closure borrows just that one
     /// project's `&mut`, so a change to project A can never touch project B. Returns the
     /// updated project, or `None` when no project has that id.
-    pub fn set_step_model(
-        &self,
-        id: &str,
-        step: StepKind,
-        model: String,
-    ) -> Option<Project> {
+    pub fn set_step_model(&self, id: &str, step: StepKind, model: String) -> Option<Project> {
         self.update(id, |p| p.set_model_for_step(step, model))
     }
 
     /// Set the stall thresholds for a single project by id. Returns the updated project,
     /// or `None` when no project has that id.
-    pub fn set_stall_thresholds(
-        &self,
-        id: &str,
-        thresholds: StallThresholds,
-    ) -> Option<Project> {
+    pub fn set_stall_thresholds(&self, id: &str, thresholds: StallThresholds) -> Option<Project> {
         self.update(id, |p| p.set_stall_thresholds(thresholds))
     }
 
@@ -330,6 +331,34 @@ impl ProjectStore {
     /// updated project, or `None` if no project has that id.
     pub fn set_hierarchy_schema(&self, id: &str, schema: HierarchySchema) -> Option<Project> {
         self.update(id, |p| p.hierarchy_schema = schema)
+    }
+
+    /// Set the per-project AI backend (`docs/design/2026-09-22_per-project-backend.md`) — the
+    /// source of truth for every project-scoped model call (scan, alternative recommendation,
+    /// rescan, governed dev loop). `Cli` runs on the Claude Code subscription (no key needed);
+    /// `Api` runs on the Anthropic API and hard-blocks (never silently falls back to the CLI)
+    /// when no key is configured. Returns the updated project, or `None` when no project has
+    /// that id. Persisted to disk like every other per-project mutator.
+    pub fn set_backend(&self, project_id: &str, backend: ProjectBackend) -> Option<Project> {
+        self.update(project_id, |p| p.backend = backend)
+    }
+
+    /// Write `chosen_option` onto `rule_id`'s selection for a single project by id — the
+    /// `accept-alternatives` persistence step (see `Project::set_rule_chosen_option`).
+    /// Returns `None` when no project has that id; `Some(true)` when a matching selection was
+    /// found and updated; `Some(false)` when the project exists but `rule_id` is not part of
+    /// its ruleset (a no-op, not an error).
+    pub fn set_rule_chosen_option(
+        &self,
+        project_id: &str,
+        rule_id: &str,
+        chosen_option: &str,
+    ) -> Option<bool> {
+        let mut matched = false;
+        self.update(project_id, |p| {
+            matched = p.set_rule_chosen_option(rule_id, chosen_option);
+        })?;
+        Some(matched)
     }
 
     /// Mutate a project in place by id, returning the updated copy.
@@ -500,7 +529,8 @@ mod tests {
             "imported project seeds a usable (non-empty) hierarchy schema",
         );
         assert_eq!(
-            project.hierarchy_schema, default_hierarchy_schema(),
+            project.hierarchy_schema,
+            default_hierarchy_schema(),
             "the seeded schema is the default ladder",
         );
 
@@ -518,7 +548,8 @@ mod tests {
             .unwrap()
             .into_project();
         assert_eq!(
-            empty.hierarchy_schema, default_hierarchy_schema(),
+            empty.hierarchy_schema,
+            default_hierarchy_schema(),
             "an empty imported schema is seeded to the default ladder",
         );
     }
@@ -775,14 +806,14 @@ mod tests {
 
         // Set A's audit model to a non-default id.
         let updated_a = store
-            .set_step_model(&a.id, StepKind::Audit, "claude-opus-4-8".to_string())
+            .set_step_model(&a.id, StepKind::Audit, "claude-opus-5".to_string())
             .unwrap();
-        assert_eq!(updated_a.model_for_step(StepKind::Audit), "claude-opus-4-8");
+        assert_eq!(updated_a.model_for_step(StepKind::Audit), "claude-opus-5");
 
         // A's audit model changed...
         assert_eq!(
             store.get(&a.id).unwrap().model_for_step(StepKind::Audit),
-            "claude-opus-4-8",
+            "claude-opus-5",
             "project A's audit model was set"
         );
         // ...but B's audit model is STILL the default — the change did not leak.
@@ -793,7 +824,10 @@ mod tests {
         );
         // And A's OTHER steps are untouched too (patch semantics, one step per call).
         assert_eq!(
-            store.get(&a.id).unwrap().model_for_step(StepKind::Calibration),
+            store
+                .get(&a.id)
+                .unwrap()
+                .model_for_step(StepKind::Calibration),
             DEFAULT_MODEL,
             "setting A's audit model must not touch A's calibration model"
         );
@@ -817,7 +851,11 @@ mod tests {
             let store = ProjectStore::load_or_new(path.clone());
             let p = store.create("Persisted", vec![]).unwrap();
             store
-                .set_step_model(&p.id, StepKind::Escalation, "claude-haiku-4-5-20251001".to_string())
+                .set_step_model(
+                    &p.id,
+                    StepKind::Escalation,
+                    "claude-haiku-4-5-20251001".to_string(),
+                )
                 .unwrap();
             p.id
         };
@@ -835,6 +873,147 @@ mod tests {
 
         // Cleanup (best-effort).
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn new_project_defaults_backend_to_api() {
+        // A freshly-created project runs on the metered Anthropic API (the compliant,
+        // client-safe chain); the operator opts into the Claude Code subscription explicitly.
+        let store = ProjectStore::new();
+        let p = store.create("Fresh", vec![]).unwrap();
+        assert_eq!(p.backend, ProjectBackend::Api);
+    }
+
+    #[test]
+    fn set_backend_is_per_project_isolated() {
+        // Mirrors set_step_model_is_per_project_isolated: flipping A's backend must not leak
+        // to B.
+        let store = ProjectStore::new();
+        let a = store.create("A", vec![]).unwrap();
+        let b = store.create("B", vec![]).unwrap();
+
+        let updated_a = store.set_backend(&a.id, ProjectBackend::Cli).unwrap();
+        assert_eq!(updated_a.backend, ProjectBackend::Cli);
+
+        assert_eq!(
+            store.get(&a.id).unwrap().backend,
+            ProjectBackend::Cli,
+            "project A was switched to Cli"
+        );
+        assert_eq!(
+            store.get(&b.id).unwrap().backend,
+            ProjectBackend::Api,
+            "project B must be untouched by A's change"
+        );
+
+        // Switching it back to Api works too.
+        let updated_a = store.set_backend(&a.id, ProjectBackend::Api).unwrap();
+        assert_eq!(updated_a.backend, ProjectBackend::Api);
+    }
+
+    #[test]
+    fn set_backend_returns_none_for_unknown_project() {
+        let store = ProjectStore::new();
+        assert!(store
+            .set_backend("does-not-exist", ProjectBackend::Api)
+            .is_none());
+    }
+
+    #[test]
+    fn set_backend_persists_to_disk_and_survives_reload() {
+        // Mirrors set_step_model_persists_to_disk_and_survives_reload.
+        let dir = std::env::temp_dir().join(format!(
+            "camerata-backend-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let path = dir.join("projects.json");
+
+        let id = {
+            let store = ProjectStore::load_or_new(path.clone());
+            let p = store.create("Persisted", vec![]).unwrap();
+            // Cli is NOT the new-project default, so surviving a reload proves the stored
+            // value is kept rather than re-defaulted.
+            store.set_backend(&p.id, ProjectBackend::Cli).unwrap();
+            p.id
+        };
+
+        // Fresh store from the SAME file: the change must have been written through.
+        let reloaded = ProjectStore::load_or_new(path.clone());
+        let p = reloaded.get(&id).expect("project survived reload");
+        assert_eq!(
+            p.backend,
+            ProjectBackend::Cli,
+            "backend survived persistence + reload"
+        );
+
+        // Cleanup (best-effort).
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── set_rule_chosen_option (audit-integrated alternative recommendation) ──────────
+
+    #[test]
+    fn set_rule_chosen_option_persists_and_is_per_project_isolated() {
+        let store = ProjectStore::new();
+        let a = store.create("A", vec![]).unwrap();
+        let b = store.create("B", vec![]).unwrap();
+        store.update(&a.id, |p| {
+            p.ruleset.selections.push(RuleSelection {
+                rule_id: "RUST-DOMAIN-7".to_string(),
+                ..Default::default()
+            });
+        });
+        store.update(&b.id, |p| {
+            p.ruleset.selections.push(RuleSelection {
+                rule_id: "RUST-DOMAIN-7".to_string(),
+                ..Default::default()
+            });
+        });
+
+        let matched = store
+            .set_rule_chosen_option(
+                &a.id,
+                "RUST-DOMAIN-7",
+                "explicit-unitofwork-parameter-on-transactional-repository-methods",
+            )
+            .expect("project A exists");
+        assert!(
+            matched,
+            "A's selection for this rule must be found and updated"
+        );
+        assert_eq!(
+            store.get(&a.id).unwrap().ruleset.selections[0]
+                .chosen_option
+                .as_deref(),
+            Some("explicit-unitofwork-parameter-on-transactional-repository-methods")
+        );
+        // B must be untouched.
+        assert!(store.get(&b.id).unwrap().ruleset.selections[0]
+            .chosen_option
+            .is_none());
+    }
+
+    #[test]
+    fn set_rule_chosen_option_returns_none_for_unknown_project() {
+        let store = ProjectStore::new();
+        assert!(store
+            .set_rule_chosen_option("does-not-exist", "RUST-DOMAIN-7", "opt-x")
+            .is_none());
+    }
+
+    #[test]
+    fn set_rule_chosen_option_returns_some_false_for_a_rule_not_in_the_ruleset() {
+        let store = ProjectStore::new();
+        let p = store.create("A", vec![]).unwrap();
+        assert_eq!(
+            store.set_rule_chosen_option(&p.id, "NO-SUCH-RULE-1", "opt-x"),
+            Some(false),
+            "the project exists but the rule id is not part of its ruleset — a no-op, not an error"
+        );
     }
 
     #[test]
@@ -866,10 +1045,21 @@ mod tests {
         let store = ProjectStore::new();
         let a = store.create("A", vec![]).unwrap();
         let b = store.create("B", vec![]).unwrap();
-        store.set_stall_thresholds(&a.id, StallThresholds { watched_secs: 300, routine_secs: 1800 }).unwrap();
+        store
+            .set_stall_thresholds(
+                &a.id,
+                StallThresholds {
+                    watched_secs: 300,
+                    routine_secs: 1800,
+                },
+            )
+            .unwrap();
         let updated_a = store.get(&a.id).unwrap();
         let unchanged_b = store.get(&b.id).unwrap();
         assert_eq!(updated_a.stall_thresholds.watched_secs, 300);
-        assert_eq!(unchanged_b.stall_thresholds.watched_secs, 120, "B must be untouched");
+        assert_eq!(
+            unchanged_b.stall_thresholds.watched_secs, 120,
+            "B must be untouched"
+        );
     }
 }

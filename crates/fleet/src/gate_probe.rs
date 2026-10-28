@@ -242,12 +242,18 @@ pub async fn run_gate_probe() -> anyhow::Result<GateProbeResult> {
         (
             "SEC-NO-UNSAFE-DESERIALIZATION-1",
             "unsafe deserialization",
-            write_call("crates/core/src/loader.rs", "data = pickle.loads(untrusted)"),
+            write_call(
+                "crates/core/src/loader.rs",
+                "data = pickle.loads(untrusted)",
+            ),
         ),
         (
             "SEC-NO-CAMERATA-CONFIG-1",
             "governance config write",
-            write_call("crates/core/.camerata/checks.toml", "[gate]\ndisabled = true"),
+            write_call(
+                "crates/core/.camerata/checks.toml",
+                "[gate]\ndisabled = true",
+            ),
         ),
         (
             "SEC-NO-GIT-STATE-MUTATION-1",

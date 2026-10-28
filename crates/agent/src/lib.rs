@@ -31,7 +31,7 @@ pub mod generic;
 pub use generic::GenericCliDriver;
 
 pub mod liveness;
-pub use liveness::{spawn_mtime_probe, newest_mtime, HeartbeatFn, MTIME_PROBE_INTERVAL};
+pub use liveness::{newest_mtime, spawn_mtime_probe, HeartbeatFn, MTIME_PROBE_INTERVAL};
 
 pub mod post_story_hook;
 pub use post_story_hook::{DocConvention, PostStoryHook, StoryCompletion, StoryDocEmitter};
@@ -50,7 +50,10 @@ pub enum AgentError {
     ParseOutput(#[source] serde_json::Error),
 
     #[error("agent subprocess stalled: no output for {idle_secs}s (last line: {last_line:?})")]
-    Stalled { idle_secs: u64, last_line: Option<String> },
+    Stalled {
+        idle_secs: u64,
+        last_line: Option<String>,
+    },
 }
 
 // ─── heartbeat + timeout constants ───────────────────────────────────────────
@@ -296,7 +299,7 @@ pub struct ClaudeCliDriver {
     /// write gate (`gated_write` jailed to `CAMERATA_WORKTREE_ROOT`) is untouched, so these
     /// dirs are NOT writable. Deduped against `worktree` when args are built.
     pub extra_read_dirs: Vec<PathBuf>,
-    /// Optional model id (e.g. `claude-sonnet-4-6`) passed via `--model`. When `None`
+    /// Optional model id (e.g. `claude-sonnet-5`) passed via `--model`. When `None`
     /// the CLI uses its configured default. Lets a caller (a routine, the fleet) run a
     /// run on a chosen model.
     pub model: Option<String>,
@@ -486,6 +489,8 @@ impl ClaudeCliDriver {
     /// note in `crates/agent/src/generic.rs` for the full disk-safety design.
     fn build_command(&self, role: &Role, task: &str) -> tokio::process::Command {
         let mut cmd = tokio::process::Command::new("claude");
+        // The subscription CLI must never inherit an API key from the parent's `.env`.
+        camerata_api_types::claude_cli::scrub_anthropic_key_env(cmd.as_std_mut());
         cmd.args(self.build_args(role, task));
         if let Some(wt) = &self.worktree {
             cmd.current_dir(wt);
@@ -546,6 +551,18 @@ mod tests {
             rule_subset: vec![RuleId("GOV-1".to_string())],
             allowed_paths: vec!["crates/core".to_string()],
         }
+    }
+
+    /// The governed agent runs on the Claude Code SUBSCRIPTION: an `ANTHROPIC_API_KEY` inherited
+    /// from the parent's `.env` must never reach the child (it would silently bill the API).
+    #[test]
+    fn the_claude_subprocess_never_inherits_the_anthropic_api_key() {
+        let driver = ClaudeCliDriver::new("/tmp/mcp.json");
+        let cmd = driver.build_command(&role(), "do the thing");
+        assert!(cmd
+            .as_std()
+            .get_envs()
+            .any(|(k, v)| k == "ANTHROPIC_API_KEY" && v.is_none()));
     }
 
     #[test]
@@ -628,7 +645,10 @@ mod tests {
         let lead = ClaudeCliDriver::new("/tmp/mcp.json").as_orchestrator(true);
         let lead_args = lead.build_args(&role(), "task");
         let lead_allowed = {
-            let i = lead_args.iter().position(|a| a == "--allowedTools").unwrap();
+            let i = lead_args
+                .iter()
+                .position(|a| a == "--allowedTools")
+                .unwrap();
             lead_args[i + 1].clone()
         };
         assert!(
@@ -696,7 +716,9 @@ mod tests {
             normal_args[i + 1].clone()
         };
         assert!(
-            !normal_allowed.split(' ').any(|t| t == ASK_CLARIFICATION_TOOL),
+            !normal_allowed
+                .split(' ')
+                .any(|t| t == ASK_CLARIFICATION_TOOL),
             "ask_clarification must be absent unless opted in"
         );
 
@@ -774,13 +796,13 @@ mod tests {
 
     #[test]
     fn build_args_with_model_passes_model_flag() {
-        let driver = ClaudeCliDriver::new("/tmp/mcp.json").with_model("claude-sonnet-4-6");
+        let driver = ClaudeCliDriver::new("/tmp/mcp.json").with_model("claude-sonnet-5");
         let args = driver.build_args(&role(), "task");
         let i = args
             .iter()
             .position(|a| a == "--model")
             .expect("--model present");
-        assert_eq!(args[i + 1], "claude-sonnet-4-6");
+        assert_eq!(args[i + 1], "claude-sonnet-5");
         // A blank model id is ignored (CLI default).
         let blank = ClaudeCliDriver::new("/tmp/mcp.json").with_model("   ");
         assert!(!blank
@@ -856,8 +878,8 @@ mod tests {
 
     #[tokio::test]
     async fn stream_subprocess_fires_heartbeat_per_line() {
-        use std::sync::Arc;
         use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
         let counter = Arc::new(AtomicUsize::new(0));
         let counter2 = counter.clone();
         let cb: HeartbeatFn = Arc::new(move || {
@@ -892,7 +914,10 @@ mod tests {
         )
         .await;
         match result {
-            Err(AgentError::Stalled { idle_secs: _, last_line }) => {
+            Err(AgentError::Stalled {
+                idle_secs: _,
+                last_line,
+            }) => {
                 // last_line is Some("started") because we got that before the sleep.
                 assert_eq!(last_line.as_deref(), Some("started"));
             }
@@ -910,7 +935,7 @@ mod tests {
         let result = stream_subprocess(
             cmd,
             None,
-            std::time::Duration::from_secs(10),   // inactivity: long
+            std::time::Duration::from_secs(10), // inactivity: long
             std::time::Duration::from_millis(300), // total: short for test
         )
         .await;

@@ -208,7 +208,10 @@ mod tests {
         assert_eq!(s.severity, camerata_rules::EscalationSeverity::HardPause);
         assert!(test_tamper_escalation(
             &c,
-            &[sel(TEST_TAMPER_RULE_ID, Some("escalate-before-modifying-or-deleting-an-existin"))]
+            &[sel(
+                TEST_TAMPER_RULE_ID,
+                Some("escalate-before-modifying-or-deleting-an-existin")
+            )]
         )
         .is_some());
     }
@@ -219,12 +222,18 @@ mod tests {
         // The KEY correctness point: an "allow" option carries no escalation spec -> no backstop.
         assert!(test_tamper_escalation(
             &c,
-            &[sel(TEST_TAMPER_RULE_ID, Some("allow-modifying-tests-within-the-same-change-whe"))]
+            &[sel(
+                TEST_TAMPER_RULE_ID,
+                Some("allow-modifying-tests-within-the-same-change-when-justified")
+            )]
         )
         .is_none());
         assert!(test_tamper_escalation(
             &c,
-            &[sel(TEST_TAMPER_RULE_ID, Some("no-restriction-on-test-edits"))]
+            &[sel(
+                TEST_TAMPER_RULE_ID,
+                Some("no-restriction-on-test-edits")
+            )]
         )
         .is_none());
     }

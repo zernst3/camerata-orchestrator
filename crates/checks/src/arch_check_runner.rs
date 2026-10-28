@@ -38,7 +38,10 @@ use std::path::Path;
 use async_trait::async_trait;
 use camerata_core::{CheckOutcome, CheckRunner, Role, RuleId};
 
-use crate::arch_checker::{all_checkers, checker_applies, matches_any_glob, ArchViolation, RepoView};
+use crate::arch_checker::{
+    all_checkers, checker_applies, matches_any_glob, ArchChecker, ArchViolation, RepoView,
+    ViolationGrade,
+};
 
 /// Layer-2 runner for the native architectural-checker registry
 /// ([`crate::arch_checker::all_checkers`]).
@@ -69,6 +72,7 @@ impl CheckRunner for NativeArchCheckRunner {
         // architectural rule's checker never even sees its interest files.
         let armed_checkers: Vec<_> = checkers
             .iter()
+            .filter(|c| c.runs_at_write_time())
             .filter(|c| c.rule_ids().iter().any(|id| armed.contains(id)))
             .collect();
 
@@ -85,35 +89,55 @@ impl CheckRunner for NativeArchCheckRunner {
         globs.sort_unstable();
         globs.dedup();
 
-        let files = collect_interest_files(worktree, &globs);
+        let mut files = collect_interest_files(worktree, &globs);
+        let checkers: Vec<&dyn ArchChecker> = armed_checkers.iter().map(|c| c.as_ref()).collect();
+        add_named_files(worktree, &checkers, &mut files);
         let repo_label = worktree.display().to_string();
-        let view = RepoView {
-            spec: &repo_label,
-            files: &files,
-        };
+        Ok(bounce_outcome(&checkers, &files, &armed, &repo_label))
+    }
+}
 
-        let mut outcome = CheckOutcome::clean();
-        for checker in &armed_checkers {
-            // Zero matching files -> skip entirely; never a false "clean" read as "this
-            // checker ran and found nothing" — see `checker_applies`'s own doc.
-            if !checker_applies(checker.as_ref(), &files) {
+/// The Layer-2 outcome for `checkers` over `files`: a violation bounces only when its rule is
+/// armed AND it is graded [`ViolationGrade::Defect`].
+fn bounce_outcome(
+    checkers: &[&dyn ArchChecker],
+    files: &[(String, String)],
+    armed: &HashSet<&str>,
+    repo_label: &str,
+) -> CheckOutcome {
+    let view = RepoView {
+        spec: repo_label,
+        files,
+    };
+    let mut outcome = CheckOutcome::clean();
+    for checker in checkers {
+        // Zero matching files -> skip entirely; never a false "clean" read as "this
+        // checker ran and found nothing" — see `checker_applies`'s own doc.
+        if !checker_applies(*checker, files) {
+            continue;
+        }
+        for violation in checker.check(&view) {
+            // Defensive re-check at the gate boundary: a checker's `check` must only
+            // emit ids from its own `rule_ids()`, but this runner never trusts that
+            // blindly — an un-armed id must never bounce the loop, even on a
+            // hypothetical checker-side bug.
+            if !armed.contains(violation.rule_id.as_str()) {
                 continue;
             }
-            for violation in checker.check(&view) {
-                // Defensive re-check at the gate boundary: a checker's `check` must only
-                // emit ids from its own `rule_ids()`, but this runner never trusts that
-                // blindly — an un-armed id must never bounce the loop, even on a
-                // hypothetical checker-side bug.
-                if !armed.contains(violation.rule_id.as_str()) {
-                    continue;
-                }
-                outcome.push_diagnostics(&format_violation(&violation));
-                outcome.violated.push(RuleId(violation.rule_id.clone()));
+            // Only an asserted defect bounces. A held-for-review fact is a true statement with
+            // a legitimate reading (a public collection, say) and a not-assessed notice is not
+            // a statement about the code at all; a bounce teaches an agent to silence the rule
+            // rather than satisfy it, and bouncing on what the report itself only holds would
+            // contradict the report.
+            if violation.grade != ViolationGrade::Defect {
+                continue;
             }
+            outcome.push_diagnostics(&format_violation(&violation));
+            outcome.violated.push(RuleId(violation.rule_id.clone()));
         }
-        outcome.violated.dedup_by(|a, b| a.0 == b.0);
-        Ok(outcome)
     }
+    outcome.violated.dedup_by(|a, b| a.0 == b.0);
+    outcome
 }
 
 /// Render one [`ArchViolation`] as a human-readable diagnostics line: `file:line [rule_id]
@@ -124,7 +148,10 @@ impl CheckRunner for NativeArchCheckRunner {
 fn format_violation(v: &ArchViolation) -> String {
     match (&v.object, v.line) {
         (Some(obj), line) if line > 0 => {
-            format!("{}:{} [{}] {} — {}", v.file, line, v.rule_id, obj, v.message)
+            format!(
+                "{}:{} [{}] {} — {}",
+                v.file, line, v.rule_id, obj, v.message
+            )
         }
         (Some(obj), _) => format!("{} [{}] {} — {}", v.file, v.rule_id, obj, v.message),
         (None, line) if line > 0 => format!("{}:{} [{}] {}", v.file, line, v.rule_id, v.message),
@@ -159,6 +186,40 @@ pub fn collect_interest_files(worktree: &Path, globs: &[&str]) -> Vec<(String, S
     out
 }
 
+/// Read the files `checkers` ask for beyond their globs ([`ArchChecker::extra_interest_paths`])
+/// and append those not already in `files`. A path that is absolute, climbs out with `..`, or is
+/// not a plain file inside `worktree` (a symlink, a directory) is skipped: the request comes from
+/// file content, so it is never followed outside the tree. One round: a named file does not name
+/// further files.
+pub fn add_named_files(
+    worktree: &Path,
+    checkers: &[&dyn ArchChecker],
+    files: &mut Vec<(String, String)>,
+) {
+    let mut wanted: Vec<String> = checkers
+        .iter()
+        .flat_map(|c| c.extra_interest_paths(files))
+        .collect();
+    wanted.sort_unstable();
+    wanted.dedup();
+    for rel in wanted {
+        let path = Path::new(&rel);
+        let plain = path
+            .components()
+            .all(|c| matches!(c, std::path::Component::Normal(_)));
+        if !plain || rel.is_empty() || files.iter().any(|(p, _)| *p == rel) {
+            continue;
+        }
+        let full = worktree.join(path);
+        if !std::fs::symlink_metadata(&full).is_ok_and(|m| m.is_file()) {
+            continue;
+        }
+        if let Ok(bytes) = std::fs::read(&full) {
+            files.push((rel, String::from_utf8_lossy(&bytes).into_owned()));
+        }
+    }
+}
+
 fn walk_collect(root: &Path, dir: &Path, globs: &[&str], out: &mut Vec<(String, String)>) {
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
@@ -171,7 +232,7 @@ fn walk_collect(root: &Path, dir: &Path, globs: &[&str], out: &mut Vec<(String, 
         };
         if file_type.is_dir() {
             let name = entry.file_name();
-            if crate::multilang::PRUNED_DIRS.contains(&name.to_string_lossy().as_ref()) {
+            if crate::multilang::is_pruned_dir_in(root, dir, name.to_string_lossy().as_ref()) {
                 continue;
             }
             walk_collect(root, &path, globs, out);
@@ -215,6 +276,74 @@ mod tests {
         let migrations = dir.join("supabase").join("migrations");
         fs::create_dir_all(&migrations).unwrap();
         fs::write(migrations.join(name), sql).unwrap();
+    }
+
+    /// A checker that emits one violation per grade, each under its own rule id.
+    struct GradedChecker;
+    impl ArchChecker for GradedChecker {
+        fn rule_ids(&self) -> &'static [&'static str] {
+            &[
+                "GRADED-DEFECT-1",
+                "GRADED-REVIEW-1",
+                "GRADED-NOT-ASSESSED-1",
+            ]
+        }
+        fn interest_globs(&self) -> &'static [&'static str] {
+            &["**/*.txt"]
+        }
+        fn check(&self, _repo: &RepoView<'_>) -> Vec<ArchViolation> {
+            [
+                ("GRADED-DEFECT-1", ViolationGrade::Defect),
+                ("GRADED-REVIEW-1", ViolationGrade::Review),
+                ("GRADED-NOT-ASSESSED-1", ViolationGrade::NotAssessed),
+            ]
+            .into_iter()
+            .map(|(rule, grade)| ArchViolation {
+                grade,
+                rule_id: rule.to_string(),
+                file: "a.txt".to_string(),
+                line: 1,
+                object: None,
+                message: "m".to_string(),
+                severity: crate::arch_checker::SEVERITY_HIGH,
+            })
+            .collect()
+        }
+    }
+
+    fn graded_outcome() -> CheckOutcome {
+        let files = vec![("a.txt".to_string(), String::new())];
+        let armed: HashSet<&str> = GradedChecker.rule_ids().iter().copied().collect();
+        bounce_outcome(&[&GradedChecker], &files, &armed, "wt")
+    }
+
+    #[test]
+    fn the_write_time_runner_never_bounces_on_a_review_graded_violation() {
+        let outcome = graded_outcome();
+        assert!(
+            !outcome
+                .violated
+                .contains(&RuleId("GRADED-REVIEW-1".to_string())),
+            "a held fact must never bounce an agent: {outcome:?}"
+        );
+        assert!(!outcome.diagnostics.contains("GRADED-REVIEW-1"));
+    }
+
+    #[test]
+    fn the_write_time_runner_never_bounces_on_a_not_assessed_notice() {
+        let outcome = graded_outcome();
+        assert!(!outcome
+            .violated
+            .contains(&RuleId("GRADED-NOT-ASSESSED-1".to_string())));
+    }
+
+    #[test]
+    fn the_write_time_runner_still_bounces_on_a_defect_graded_violation() {
+        let outcome = graded_outcome();
+        assert_eq!(
+            outcome.violated,
+            vec![RuleId("GRADED-DEFECT-1".to_string())]
+        );
     }
 
     const RLS_ENABLED: &str = "SUPABASE-RLS-ENABLED-1";
@@ -355,13 +484,21 @@ mod tests {
              /* unterminated comment\n\
              \u{0}\u{1}\u{2} garbage bytes",
         );
-        let role = role_armed_with(&[RLS_ENABLED, RLS_NO_POLICY, RLS_POLICY_DISABLED, FUNC_SEARCH_PATH]);
+        let role = role_armed_with(&[
+            RLS_ENABLED,
+            RLS_NO_POLICY,
+            RLS_POLICY_DISABLED,
+            FUNC_SEARCH_PATH,
+        ]);
         let runner = NativeArchCheckRunner::new();
 
         // The only contract under test: this must not panic and must return Ok. Whatever it
         // decides about violations is secondary (best-effort over unparseable input).
         let result = runner.check(&role, dir.path()).await;
-        assert!(result.is_ok(), "malformed SQL must never propagate as Err: {result:?}");
+        assert!(
+            result.is_ok(),
+            "malformed SQL must never propagate as Err: {result:?}"
+        );
     }
 
     #[tokio::test]
@@ -370,12 +507,19 @@ mod tests {
         let migrations = dir.path().join("supabase").join("migrations");
         fs::create_dir_all(&migrations).unwrap();
         // Invalid UTF-8 bytes — must be lossily decoded, never crash the walk.
-        fs::write(migrations.join("20240101000000_binary.sql"), [0xff, 0xfe, 0x00, 0x80, 0x81]).unwrap();
+        fs::write(
+            migrations.join("20240101000000_binary.sql"),
+            [0xff, 0xfe, 0x00, 0x80, 0x81],
+        )
+        .unwrap();
         let role = role_armed_with(&[RLS_ENABLED]);
         let runner = NativeArchCheckRunner::new();
 
         let result = runner.check(&role, dir.path()).await;
-        assert!(result.is_ok(), "non-UTF8 file must never propagate as Err: {result:?}");
+        assert!(
+            result.is_ok(),
+            "non-UTF8 file must never propagate as Err: {result:?}"
+        );
     }
 
     // ── glob-scoping: reading is limited to armed checkers' interest globs ────
@@ -385,7 +529,11 @@ mod tests {
         let dir = tmpdir();
         // A file that would trip up any naive "read everything" walk if it were parsed as
         // SQL, but sits outside every checker's interest_globs.
-        fs::write(dir.path().join("notes.sql"), "DROP TABLE everything; -- not a migration").unwrap();
+        fs::write(
+            dir.path().join("notes.sql"),
+            "DROP TABLE everything; -- not a migration",
+        )
+        .unwrap();
         write_migration(
             dir.path(),
             "20240101000000_init.sql",
@@ -403,5 +551,252 @@ mod tests {
             "the stray root-level notes.sql must never be treated as a migration: {:?}",
             outcome
         );
+    }
+
+    #[test]
+    fn collect_interest_files_reads_a_source_bin_and_skips_dotnet_build_output() {
+        let dir = tmpdir();
+        for (rel, body) in [
+            ("src/bin/tool.rs", "fn main() {}\n"),
+            ("bin/cli.js", "console.log(1);\n"),
+            ("bin/Debug/net8.0/gen.js", "built\n"),
+            ("bin/x64/Debug/gen.js", "built\n"),
+            ("bin/Any CPU/Release/gen.js", "built\n"),
+            ("bin/Release/gen.js", "built\n"),
+            ("node_modules/x/y.js", "vendored\n"),
+        ] {
+            let path = dir.path().join(rel);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, body).unwrap();
+        }
+        let mut got: Vec<String> = collect_interest_files(dir.path(), &["**/*.rs", "**/*.js"])
+            .into_iter()
+            .map(|(p, _)| p)
+            .collect();
+        got.sort();
+        assert_eq!(got, ["bin/cli.js", "src/bin/tool.rs"]);
+    }
+
+    // ── write-time opt-out: ARCH-DEAD-CODE-1 is a scan and CI rule only ───────
+
+    fn write_dead_code_tree(dir: &Path) {
+        for (rel, body) in [
+            ("package.json", r#"{"private":true}"#),
+            ("src/app.ts", "export {};\n"),
+            ("src/scaffold_unwired.ts", "export const s = 1;\n"),
+        ] {
+            let path = dir.join(rel);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, body).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn the_write_time_runner_never_reports_the_dead_code_rule_but_the_scan_tier_does() {
+        let dir = tmpdir();
+        write_dead_code_tree(dir.path());
+        let role = role_armed_with(&["ARCH-DEAD-CODE-1"]);
+
+        // Layer 2: a story may legitimately end with scaffolding nothing imports yet.
+        let outcome = NativeArchCheckRunner::new()
+            .check(&role, dir.path())
+            .await
+            .expect("must not err");
+        assert!(outcome.violated.is_empty(), "{outcome:?}");
+        assert!(outcome.diagnostics.is_empty(), "{:?}", outcome.diagnostics);
+
+        // The same tree through the registry the scan and the CI binary use: still reported.
+        let checker = all_checkers()
+            .into_iter()
+            .find(|c| c.rule_ids().contains(&"ARCH-DEAD-CODE-1"))
+            .expect("registered");
+        assert!(!checker.runs_at_write_time());
+        let files = collect_interest_files(dir.path(), checker.interest_globs());
+        let view = RepoView {
+            spec: "t/r",
+            files: &files,
+        };
+        let vs = checker.check(&view);
+        assert_eq!(vs.len(), 1, "{vs:#?}");
+        assert_eq!(vs[0].file, "src/scaffold_unwired.ts");
+    }
+
+    #[tokio::test]
+    async fn a_write_time_checker_armed_beside_the_opted_out_one_still_runs() {
+        let dir = tmpdir();
+        write_dead_code_tree(dir.path());
+        write_migration(
+            dir.path(),
+            "20240101000000_init.sql",
+            "create table public.profiles (id uuid primary key);\n",
+        );
+        let role = role_armed_with(&["ARCH-DEAD-CODE-1", RLS_ENABLED]);
+        let outcome = NativeArchCheckRunner::new()
+            .check(&role, dir.path())
+            .await
+            .expect("must not err");
+        assert_eq!(outcome.violated, vec![RuleId(RLS_ENABLED.to_string())]);
+    }
+
+    #[test]
+    fn every_other_registered_checker_still_runs_at_write_time() {
+        for checker in all_checkers() {
+            let scan_and_ci_only = checker.rule_ids().iter().any(|id| {
+                matches!(
+                    *id,
+                    "ARCH-DEAD-CODE-1"
+                        | "UI-REACT-HOOKS-LINT-1"
+                        | "FIREBASE-FUNCTIONS-AUTH-1"
+                        | "FIREBASE-RULES-TESTS-1"
+                )
+            });
+            assert_eq!(
+                checker.runs_at_write_time(),
+                !scan_and_ci_only,
+                "{:?}",
+                checker.rule_ids()
+            );
+        }
+    }
+
+    /// Fixing the React Hooks lint gap installs a dependency and picks its version, which the
+    /// project's rules route to a human, so a bounced agent could not satisfy the gate.
+    #[tokio::test]
+    async fn the_write_time_runner_never_reports_the_react_hooks_lint_gap_but_the_scan_tier_does() {
+        let dir = tmpdir();
+        fs::write(
+            dir.path().join("package.json"),
+            r#"{ "name": "app", "dependencies": { "react": "^18" } }"#,
+        )
+        .unwrap();
+        fs::create_dir_all(dir.path().join("src")).unwrap();
+        fs::write(
+            dir.path().join("src").join("App.jsx"),
+            "export const App = () => null;\n",
+        )
+        .unwrap();
+        let role = role_armed_with(&["UI-REACT-HOOKS-LINT-1"]);
+        let outcome = NativeArchCheckRunner::new()
+            .check(&role, dir.path())
+            .await
+            .expect("must not err");
+        assert!(outcome.violated.is_empty(), "{outcome:?}");
+
+        let checker = all_checkers()
+            .into_iter()
+            .find(|c| c.rule_ids().contains(&"UI-REACT-HOOKS-LINT-1"))
+            .expect("registered");
+        let files = collect_interest_files(dir.path(), checker.interest_globs());
+        let view = RepoView {
+            spec: "t/r",
+            files: &files,
+        };
+        let vs = checker.check(&view);
+        assert_eq!(vs.len(), 1, "{vs:#?}");
+        assert_eq!(vs[0].file, "package.json");
+    }
+
+    /// The Firebase rules checker no longer reads every `.json` file: a renamed Realtime Database
+    /// rules file is found because `firebase.json` names it, and an unrelated JSON file is not read.
+    fn write_renamed_rtdb_tree(dir: &Path) {
+        for (rel, body) in [
+            (
+                "firebase.json",
+                r#"{ "database": { "rules": "config/db-rules.json" } }"#,
+            ),
+            (
+                "config/db-rules.json",
+                r#"{ "rules": { ".read": true, ".write": true } }"#,
+            ),
+            ("data/huge.json", r#"{ "unrelated": true }"#),
+        ] {
+            let path = dir.join(rel);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, body).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn a_renamed_rtdb_rules_file_that_firebase_json_names_is_checked_at_write_time() {
+        let dir = tmpdir();
+        write_renamed_rtdb_tree(dir.path());
+        let role = role_armed_with(&["FIREBASE-RTDB-RULES-OPEN-1"]);
+        let outcome = NativeArchCheckRunner::new()
+            .check(&role, dir.path())
+            .await
+            .expect("must not err");
+        assert_eq!(
+            outcome.violated,
+            vec![RuleId("FIREBASE-RTDB-RULES-OPEN-1".to_string())],
+            "{outcome:?}"
+        );
+    }
+
+    #[test]
+    fn the_firebase_rules_checker_collects_what_firebase_json_names_and_no_other_json() {
+        let dir = tmpdir();
+        write_renamed_rtdb_tree(dir.path());
+        let checker = all_checkers()
+            .into_iter()
+            .find(|c| c.rule_ids().contains(&"FIREBASE-RTDB-RULES-OPEN-1"))
+            .expect("registered");
+        let mut files = collect_interest_files(dir.path(), checker.interest_globs());
+        add_named_files(dir.path(), &[checker.as_ref()], &mut files);
+        let mut got: Vec<String> = files.into_iter().map(|(p, _)| p).collect();
+        got.sort();
+        assert_eq!(got, ["config/db-rules.json", "firebase.json"]);
+    }
+
+    #[test]
+    fn a_named_file_outside_the_worktree_is_never_read() {
+        // A path with `..` or an absolute path from a checker is refused, not followed.
+        let outer = tmpdir();
+        let root = outer.path().join("repo");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(outer.path().join("secret.txt"), "outside").unwrap();
+        struct Greedy;
+        impl ArchChecker for Greedy {
+            fn rule_ids(&self) -> &'static [&'static str] {
+                &["X-1"]
+            }
+            fn interest_globs(&self) -> &'static [&'static str] {
+                &[]
+            }
+            fn check(&self, _: &RepoView<'_>) -> Vec<ArchViolation> {
+                Vec::new()
+            }
+            fn extra_interest_paths(&self, _: &[(String, String)]) -> Vec<String> {
+                vec![
+                    "../secret.txt".to_string(),
+                    "/etc/hosts".to_string(),
+                    "a/../../secret.txt".to_string(),
+                ]
+            }
+        }
+        let mut files = Vec::new();
+        add_named_files(&root, &[&Greedy], &mut files);
+        assert!(files.is_empty(), "{files:?}");
+    }
+
+    #[test]
+    fn a_repo_living_under_a_directory_named_bin_keeps_its_debug_and_release_folders() {
+        // Pruning judges the path RELATIVE to the walk root, not the absolute path.
+        let outer = tmpdir();
+        let root = outer.path().join("bin").join("myrepo");
+        for (rel, body) in [
+            ("src/Debug/real_module.js", "console.log(1);\n"),
+            ("Release/real_script.js", "console.log(1);\n"),
+            ("bin/Debug/built.js", "built\n"),
+        ] {
+            let path = root.join(rel);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, body).unwrap();
+        }
+        let mut got: Vec<String> = collect_interest_files(&root, &["**/*.js"])
+            .into_iter()
+            .map(|(p, _)| p)
+            .collect();
+        got.sort();
+        assert_eq!(got, ["Release/real_script.js", "src/Debug/real_module.js"]);
     }
 }

@@ -6,20 +6,31 @@
 //! end state is vendor-neutral: a user picks whatever model they want — Anthropic,
 //! OpenAI, Google, others. The request/response shapes here ([`LlmRequest`] /
 //! [`LlmResponse`]) are deliberately vendor-neutral; a new vendor is a new match arm in
-//! [`Llm::complete`] plus its entries in [`MODELS`], NOT a rewrite. Today only Anthropic
-//! is implemented; the other vendors are reserved knobs that return a clear
+//! [`Llm::complete`] plus its entries in [`crate::model_registry::CLAUDE_REGISTRY_MODELS`]
+//! (see [`models`]), NOT a rewrite. Today only Anthropic is implemented; the other vendors
+//! are reserved knobs that return a clear
 //! "not wired yet" message pointing at the seam.
 //!
 //! Two axes:
 //! - **Vendor** (`CAMERATA_LLM_VENDOR`, default `anthropic`) — which provider.
-//! - **Transport** (`CAMERATA_LLM_BACKEND`, default `cli`) — for a vendor that offers
-//!   both: `cli` shells the vendor's CLI (the LOCAL path: a human's own login, no key);
-//!   `api` calls the vendor's HTTP API with a key (the PRODUCTION / multi-user path).
-//!   Anthropic offers both; other vendors are API-only.
+//! - **Transport** ([`Backend`]: `Cli` | `Api`) — for a vendor that offers both: `Cli` shells
+//!   the vendor's CLI (the LOCAL path: a human's own login, no key); `Api` calls the vendor's
+//!   HTTP API with a key (the metered, multi-party-safe path). Anthropic offers both; other
+//!   vendors are API-only. Per `docs/design/2026-09-22_per-project-backend.md` this axis is
+//!   NEVER read from an env var — every project-scoped call resolves it from
+//!   `project.backend`, and the project-less chat assistant from `settings.chat_backend`,
+//!   both via [`resolve_backend`], then builds the `Llm` explicitly with
+//!   [`Llm::for_backend`] (or its ledger-attached sibling), passing the Anthropic key it
+//!   resolved with [`crate::credentials::anthropic_api_key`] (credential store first, env
+//!   fallback). [`Llm::from_env`] remains only as a keyless Cli-default construction
+//!   convenience for hermetic tests and any caller that will never make an `api` call.
 //!
 //! Model selected by `CAMERATA_LLM_MODEL`, overridable per call (the research chat).
 
 use serde::{Deserialize, Serialize};
+
+use crate::session_sink::{new_session_id, now_rfc3339};
+pub use crate::session_sink::{ModelSession, SessionSink};
 
 /// One model the UI offers, tagged with its vendor so the selector can group/extend.
 /// `price_in` / `price_out` are USD per MILLION tokens (input / output), used by the UI's
@@ -33,31 +44,28 @@ pub struct ModelInfo {
 }
 
 /// The models the UI offers. Anthropic today; add a vendor's models here when its arm
-/// is wired in [`Llm::complete`]. Latest/most capable first. Prices are $/Mtok and track
-/// the well-known tiering (Sonnet ~5× cheaper than Opus, Haiku ~15×).
-pub const MODELS: &[ModelInfo] = &[
-    ModelInfo {
-        vendor: "anthropic",
-        label: "Opus 4.8",
-        id: "claude-opus-4-8",
-        price_in: 15.0,
-        price_out: 75.0,
-    },
-    ModelInfo {
-        vendor: "anthropic",
-        label: "Sonnet 4.6",
-        id: "claude-sonnet-4-6",
-        price_in: 3.0,
-        price_out: 15.0,
-    },
-    ModelInfo {
-        vendor: "anthropic",
-        label: "Haiku 4.5",
-        id: "claude-haiku-4-5-20251001",
-        price_in: 1.0,
-        price_out: 5.0,
-    },
-];
+/// is wired in [`Llm::complete`].
+///
+/// PRICING SOURCE OF TRUTH: derived from [`crate::model_registry::CLAUDE_REGISTRY_MODELS`]
+/// (the same table `GET /api/models/registry` serves) rather than a second hardcoded price
+/// list. A prior version of this function duplicated the prices as literals here, and they
+/// drifted stale (Opus was listed at $15/$75 — a ~3x overcharge — while the registry had
+/// already moved to the correct $5/$25); every dollar figure this file computes
+/// (`compute_cost_usd`, and via it the "Actual cost" readout + the cumulative usage ledger)
+/// was inflated as a result. Sourcing from the registry means a future price update only
+/// has to happen in one place.
+pub fn models() -> Vec<ModelInfo> {
+    crate::model_registry::CLAUDE_REGISTRY_MODELS
+        .iter()
+        .map(|m| ModelInfo {
+            vendor: "anthropic",
+            label: m.display,
+            id: m.id,
+            price_in: m.price_in,
+            price_out: m.price_out,
+        })
+        .collect()
+}
 
 /// The model vendors Camerata knows about. Only `Anthropic` is wired today; the rest are
 /// reserved so the env knob + extension point are explicit (selecting them returns a
@@ -98,6 +106,13 @@ impl Vendor {
 /// uses and every `crate::llm::DEFAULT_MODEL` call site keep resolving unchanged.
 pub use camerata_api_types::project::DEFAULT_MODEL;
 
+/// The per-project / chat backend selection (`Cli` | `Api`). Relocated to
+/// `camerata_api_types::project` (same relocation reasoning as [`DEFAULT_MODEL`] above) so
+/// `camerata_app_core::project::Project.backend` and `camerata_server::settings::Settings.
+/// chat_backend` share the exact same type as [`resolve_backend`] below. Re-exported here so
+/// `crate::llm::ProjectBackend` keeps resolving for every existing/new call site.
+pub use camerata_api_types::project::ProjectBackend;
+
 /// Force the `claude -p` CLI into a PURE, non-agentic, single-shot completion. The
 /// orchestrator's model calls reason over the prompt and return text (JSON for the audit);
 /// they must never behave like an interactive coding agent. A real run derailed once — it
@@ -121,7 +136,7 @@ pub use camerata_api_types::project::DEFAULT_MODEL;
 /// rejects ANY argument containing a NUL ("nul byte found in provided data"), which
 /// fails the spawn for EVERY CLI completion whose assembled prompt or system prompt
 /// happens to contain a stray `\0` (e.g. anywhere in the chat's big system prompt).
-/// Because `complete_cli` / `harden_completion` are the shared path for all bare-LLM
+/// Because `complete_cli_streaming` / `harden_completion` are the shared path for all bare-LLM
 /// CLI calls (chat, audit, calibration, story-authoring, decompose, escalation,
 /// clarification, L3), one stray NUL would break that call app-wide. Stripping is
 /// safe: a NUL carries no meaning in prompt text.
@@ -131,6 +146,39 @@ pub(crate) fn nul_safe(s: &str) -> String {
     } else {
         s.to_string()
     }
+}
+
+/// Build the `claude -p` command for one completion (everything except the spawn), so the exact
+/// argument list is testable without a `claude` binary.
+fn build_cli_command(req: &LlmRequest, model: &str, session_id: &str) -> tokio::process::Command {
+    let mut cmd = tokio::process::Command::new("claude");
+    // kill_on_drop: a dropped future (timeout) kills the subprocess instead of
+    // leaving a stalled `claude` running in the background.
+    // stdin(null): CRITICAL. `claude -p` reads piped stdin and blocks until EOF before
+    // responding. spawn() INHERITS the parent's stdin, and the desktop app's inherited
+    // stdin is an open pipe that never EOFs — so the audit hung for minutes producing
+    // nothing (shell tests were fast only because their stdin was a TTY/closed).
+    // Redirecting stdin to /dev/null gives an immediate EOF so claude uses the -p arg
+    // and responds at once.
+    // The Cli backend is the SUBSCRIPTION path: it must never silently bill the API because an
+    // `ANTHROPIC_API_KEY` from `.env` was inherited into this subprocess.
+    camerata_api_types::claude_cli::scrub_anthropic_key_env(cmd.as_std_mut());
+    cmd.kill_on_drop(true)
+        .stdin(std::process::Stdio::null())
+        .arg("-p")
+        .arg(nul_safe(&req.prompt))
+        .arg("--model")
+        .arg(model)
+        .arg("--output-format")
+        .arg("stream-json")
+        .arg("--verbose")
+        .arg("--include-partial-messages")
+        .arg("--session-id")
+        .arg(session_id)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    harden_completion(&mut cmd, req);
+    cmd
 }
 
 fn harden_completion(cmd: &mut tokio::process::Command, req: &LlmRequest) {
@@ -215,12 +263,343 @@ impl Drop for ClaudePidGuard {
 pub fn kill_inflight_claude() {
     if let Ok(g) = inflight_claude().lock() {
         for &pid in g.iter() {
-            let _ = std::process::Command::new("kill")
-                .arg("-9")
-                .arg(pid.to_string())
-                .status();
+            kill_pid(Some(pid));
         }
     }
+}
+
+/// Best-effort SIGKILL by pid. Shared by every "the subprocess must not be leaked" path:
+/// the shutdown hook above, and the CLI timeouts below. `kill_on_drop(true)` on the
+/// `Command` already reaps the child when its owning future/value is dropped, but a hard
+/// timeout wants to be explicit and immediate rather than relying on drop timing — this
+/// is that explicit kill. Killing an already-exited pid is a harmless no-op.
+fn kill_pid(pid: Option<u32>) {
+    if let Some(pid) = pid {
+        let _ = std::process::Command::new("kill")
+            .arg("-9")
+            .arg(pid.to_string())
+            .status();
+    }
+}
+
+/// Parse a duration-in-seconds env var, falling back to `default` on missing/invalid/zero
+/// input. Shared by every CLI subprocess timeout knob (`CAMERATA_LLM_IDLE_SECS`,
+/// `CAMERATA_CLI_TIMEOUT_SECS`) so the parse-with-fallback behavior is identical across
+/// both.
+fn env_secs(var: &str, default: u64) -> std::time::Duration {
+    std::time::Duration::from_secs(
+        std::env::var(var)
+            .ok()
+            .and_then(|s| s.trim().parse::<u64>().ok())
+            .filter(|n| *n > 0)
+            .unwrap_or(default),
+    )
+}
+
+/// The hard, overall cap on a single `claude` CLI call (spawn to exit), independent of
+/// any idle/progress-based stall detection. `CAMERATA_CLI_TIMEOUT_SECS` overrides the
+/// 300s default. This is the backstop for the class of "the scan silently dies" bugs: a
+/// hung `claude` (stuck on an auth prompt, waiting on stdin despite the null redirect,
+/// or any other wedge) must always fail loudly within a bounded time rather than hang
+/// the scan forever.
+fn cli_overall_timeout() -> std::time::Duration {
+    env_secs("CAMERATA_CLI_TIMEOUT_SECS", 300)
+}
+
+// ── W6: heartbeat-based dual timeout for the streaming CLI reader ──────────────────────
+//
+// Bug this fixes: a real headless run hit "Claude CLI timed out after 300s (no output)"
+// on the alternative-recommendation pass even though the pass was a long-but-LIVE call, not
+// a genuine hang. Root cause was in `complete_cli_streaming`'s loop below: `overall_deadline`
+// used to be a FLAT instant computed once at call start and never reset — so any call
+// (however actively it was streaming content) that ran past `overall_timeout` got killed and
+// reported as "(no output)", which was also simply FALSE whenever real content had been
+// streaming the whole time.
+//
+// A LATER fix completed it: `complete_cli` — the SECOND, non-streaming CLI implementation that
+// `Llm::complete` dispatched to — still used one flat `cli_overall_timeout()` window from
+// spawn to exit, so the AI/semantic audit pass (a `complete` caller) kept dying exactly this
+// way. It could not be heartbeated in place: it waited on `.output()`, which blocks until
+// process exit and therefore offers no incremental signal to distinguish "working" from
+// "wedged". It was deleted and `complete` now routes through the streaming reader with a
+// discarding delta callback, so there is ONE timeout implementation for the CLI backend.
+//
+// Fix: two independently-tracked deadlines, extracted into a small pure/testable type so the
+// timing logic is exercisable without spawning a real subprocess (see the tests below).
+// - `idle`: resets ONLY on real model-content progress. Tight (120s default) — this is what
+//   catches a call stuck queued/rate-limited before ever producing a token.
+// - `overall`: resets on ANY streamed line at all, including non-content status/keepalive
+//   events. Wider (300s default) — this is the TRUE "this process is completely silent"
+//   backstop. Because it resets on any activity, a long-but-live call is never killed merely
+//   for running past the nominal window; only a call that goes fully silent for that long
+//   trips it, so its "(no output)" message stays accurate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HeartbeatTimeout {
+    /// No output of ANY kind (not even a keepalive/status line) for the whole `overall`
+    /// window — the process is genuinely silent. Maps to the actionable "stuck on auth/
+    /// input" message and a hard kill.
+    Silent,
+    /// Real model progress absent for the whole `idle` window — a stall before/mid
+    /// generation (often rate-limiting/queueing). The process is left to `kill_on_drop`.
+    Stalled,
+}
+
+/// Pure decision: given the current instant and the two independently-maintained deadlines,
+/// which timeout (if either) has elapsed. `Silent` takes priority when both have (it is the
+/// stronger claim — total silence, not just an absence of real progress). No I/O, no
+/// `Duration` state beyond what the caller already tracks — trivially unit-testable by
+/// advancing `now` without any real sleeping.
+fn check_heartbeat(
+    now: tokio::time::Instant,
+    idle_deadline: tokio::time::Instant,
+    overall_deadline: tokio::time::Instant,
+) -> Option<HeartbeatTimeout> {
+    if now >= overall_deadline {
+        Some(HeartbeatTimeout::Silent)
+    } else if now >= idle_deadline {
+        Some(HeartbeatTimeout::Stalled)
+    } else {
+        None
+    }
+}
+
+/// Build the actionable error for a heartbeat timeout — shared by both the top-of-loop check
+/// and the `tokio::time::timeout` race below so the message is identical either way.
+fn heartbeat_timeout_error(
+    kind: HeartbeatTimeout,
+    idle: std::time::Duration,
+    overall_timeout: std::time::Duration,
+) -> anyhow::Error {
+    match kind {
+        HeartbeatTimeout::Silent => anyhow::anyhow!(
+            "Claude CLI timed out after {}s (no output). The `claude` process may be \
+             stuck waiting for authentication or input.",
+            overall_timeout.as_secs()
+        ),
+        HeartbeatTimeout::Stalled => anyhow::anyhow!(
+            "claude produced no model output for {}s — treating as a hang (likely \
+             rate-limited/queued; set CAMERATA_LLM_IDLE_SECS to tune)",
+            idle.as_secs()
+        ),
+    }
+}
+
+/// Map a `claude` CLI spawn error to a clear, actionable message. `NotFound` gets a
+/// specific message: a Finder/Dock-launched app inherits a minimal PATH that typically
+/// omits Homebrew's `/opt/homebrew/bin`, so the raw OS error ("No such file or
+/// directory") gives no hint that the fix is a PATH problem, not a missing install.
+/// Every other spawn error keeps the original generic wording, verbatim, so this only
+/// ever narrows the message, never changes behavior for other failure kinds. Pure and
+/// unit-testable in isolation (no process spawn required).
+fn map_spawn_error(e: std::io::Error) -> anyhow::Error {
+    if e.kind() == std::io::ErrorKind::NotFound {
+        anyhow::anyhow!(
+            "Claude CLI (`claude`) was not found on PATH. If you launched the app from Finder \
+             or the Dock it may not inherit your shell PATH where `claude` is installed (for \
+             example /opt/homebrew/bin). Launch the app from a terminal, or set this project's \
+             Backend to API and add an Anthropic API key."
+        )
+    } else {
+        anyhow::anyhow!("failed to spawn `claude` CLI (is it installed/on PATH?): {e}")
+    }
+}
+
+/// Read an already-spawned `claude --output-format stream-json` child to completion under
+/// the heartbeat-based DUAL timeout (see [`check_heartbeat`]), forwarding each text delta to
+/// `on_delta` and assembling the final [`LlmResponse`].
+///
+/// This is the SINGLE CLI completion reader. It used to be the body of
+/// [`Llm::complete_cli_streaming`], with a second, separate non-streaming implementation
+/// (`complete_cli`, reached from [`Llm::complete`]) waiting on `.output()` under one FLAT
+/// deadline. W6 fixed the flat-deadline bug here and could not fix it there — `.output()`
+/// blocks until process exit, so there is no incremental signal to heartbeat on at all — and
+/// the unfixed half is what silently darkened an entire 120-rule semantic audit tier: every
+/// rule recorded "timed out after 300s (no output)" while the CLI was healthy and the call
+/// was simply long. Extracting the loop and routing BOTH entry points through it means one
+/// timeout implementation, so that bug class cannot recur on half of it.
+///
+/// Standalone from any `claude`-specific spawn setup so it is exercisable in a unit test
+/// against ANY child process that writes stream-json lines, not just a live `claude` CLI.
+async fn read_cli_stream(
+    mut child: tokio::process::Child,
+    model: &str,
+    idle: std::time::Duration,
+    overall_timeout: std::time::Duration,
+    on_delta: &mut (dyn FnMut(&str) + Send),
+) -> anyhow::Result<LlmResponse> {
+    use tokio::io::AsyncBufReadExt;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("claude CLI produced no stdout pipe"))?;
+    // CRITICAL: drain stderr CONCURRENTLY. `--verbose` makes `claude` write a lot to
+    // stderr; if we only read stdout, stderr's OS pipe buffer (~64KB) fills, the
+    // subprocess BLOCKS on its next stderr write, stops producing stdout, and this
+    // read loop hangs forever (observed: an 8-minute hang after a few tokens). A
+    // spawned reader keeps stderr flowing so stdout never stalls.
+    let stderr_task = child.stderr.take().map(|stderr| {
+        tokio::spawn(async move {
+            use tokio::io::AsyncReadExt;
+            let mut s = String::new();
+            let _ = tokio::io::BufReader::new(stderr)
+                .read_to_string(&mut s)
+                .await;
+            s
+        })
+    });
+    let mut lines = tokio::io::BufReader::new(stdout).lines();
+
+    let mut overall_deadline = tokio::time::Instant::now() + overall_timeout;
+    let mut full = String::new();
+    let mut cost = None;
+    let mut usage_in = None;
+    let mut usage_out = None;
+    let mut usage_cache_read = 0u64;
+    let mut usage_cache_creation = 0u64;
+    // An in-band failure reported by the final `result` event, paired with whether it is
+    // UNCONDITIONALLY fatal. See the `result` arm and the post-loop check below.
+    let mut result_failure: Option<(anyhow::Error, bool)> = None;
+    let mut deadline = tokio::time::Instant::now() + idle;
+    loop {
+        let now = tokio::time::Instant::now();
+        if let Some(kind) = check_heartbeat(now, deadline, overall_deadline) {
+            if kind == HeartbeatTimeout::Silent {
+                kill_pid(child.id());
+            }
+            return Err(heartbeat_timeout_error(kind, idle, overall_timeout));
+        }
+        let remaining = std::cmp::min(deadline, overall_deadline) - now;
+        match tokio::time::timeout(remaining, lines.next_line()).await {
+            Err(_) => {
+                // Re-check which specific deadline actually elapsed (the race above only
+                // tells us SOME timeout fired) so the message matches the real cause.
+                let now = tokio::time::Instant::now();
+                let kind = check_heartbeat(now, deadline, overall_deadline)
+                    .unwrap_or(HeartbeatTimeout::Stalled);
+                if kind == HeartbeatTimeout::Silent {
+                    kill_pid(child.id());
+                }
+                return Err(heartbeat_timeout_error(kind, idle, overall_timeout));
+            }
+            Ok(Ok(None)) => break, // EOF — the process finished
+            Ok(Err(e)) => anyhow::bail!("reading claude stdout: {e}"),
+            Ok(Ok(Some(line))) => {
+                // W6: ANY line at all — even one that fails to parse below, or a plain
+                // status/keepalive event — is proof the process is alive and writing, so
+                // it resets the SILENT backstop unconditionally. Only real model progress
+                // (below) resets the tighter stall window.
+                overall_deadline = tokio::time::Instant::now() + overall_timeout;
+                let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
+                    continue;
+                };
+                // Real model progress extends the deadline; status/keepalive lines do not.
+                let mut progressed = false;
+                match v["type"].as_str() {
+                    Some("stream_event") => {
+                        let ev = &v["event"];
+                        // Any of these mean the model is actively responding.
+                        if matches!(
+                            ev["type"].as_str(),
+                            Some(
+                                "message_start"
+                                    | "content_block_start"
+                                    | "content_block_delta"
+                                    | "content_block_stop"
+                                    | "message_delta"
+                            )
+                        ) {
+                            progressed = true;
+                        }
+                        if ev["type"] == "content_block_delta"
+                            && ev["delta"]["type"] == "text_delta"
+                        {
+                            if let Some(t) = ev["delta"]["text"].as_str() {
+                                full.push_str(t);
+                                on_delta(t);
+                            }
+                        }
+                    }
+                    Some("assistant") => progressed = true,
+                    Some("result") => {
+                        progressed = true;
+                        // Apply the SAME in-band failure policy the non-streaming CLI
+                        // path enforced via `cli_result_text` before it was collapsed into
+                        // this one. The CLI can exit 0 and still report failure through
+                        // `is_error:true` (execution error, max-turns abort) or omit
+                        // `result` entirely; accepting either as a successful empty
+                        // completion is what turns a backend failure into a silent
+                        // low-quality result — the precise class of bug this whole change
+                        // exists to close.
+                        match cli_result_text(&v) {
+                            Ok(r) => {
+                                // A later, healthy `result` event supersedes an earlier
+                                // failed one (the stream is not contractually limited to a
+                                // single `result`), so clear any recorded failure.
+                                result_failure = None;
+                                if !r.is_empty() {
+                                    full = r.to_string();
+                                }
+                            }
+                            Err(e) => {
+                                // `is_error:true` is an EXPLICIT failure signal from the
+                                // CLI, so it is fatal no matter what was streamed. A merely
+                                // ABSENT `result` field is weaker evidence: when real
+                                // content already streamed, that content IS the answer, so
+                                // defer to the SALVAGE rule below rather than discard it.
+                                let fatal = v["is_error"].as_bool() == Some(true);
+                                result_failure = Some((e, fatal));
+                            }
+                        }
+                        cost = v["total_cost_usd"].as_f64();
+                        let (i, o, cr, cc) = usage_tokens(&v["usage"]);
+                        usage_in = i.or(usage_in);
+                        usage_out = o.or(usage_out);
+                        // Accumulate cache token breakdowns (they may appear in multiple
+                        // stream events; take the max to avoid double-counting).
+                        usage_cache_read = usage_cache_read.max(cr);
+                        usage_cache_creation = usage_cache_creation.max(cc);
+                    }
+                    _ => {}
+                }
+                if progressed {
+                    deadline = tokio::time::Instant::now() + idle;
+                }
+            }
+        }
+    }
+    let status = child.wait().await?;
+    let stderr_text = match stderr_task {
+        Some(t) => t.await.unwrap_or_default(),
+        None => String::new(),
+    };
+    if let Some((e, fatal)) = result_failure {
+        if fatal || full.trim().is_empty() {
+            return Err(e);
+        }
+    }
+    // SALVAGE: if the process exited non-zero (e.g. SIGKILL from a timeout, or an
+    // external kill) but it already streamed a usable response, RETURN that text rather
+    // than discarding it. The model's work is in `full`; throwing it away on a late
+    // interruption is what made a fully-streamed audit collapse to "0/3 findings".
+    // Only fail when there's genuinely nothing to salvage.
+    if !status.success() && full.trim().is_empty() {
+        anyhow::bail!(
+            "claude CLI (stream) exited {status}: {}",
+            stderr_text.trim()
+        );
+    }
+    Ok(LlmResponse {
+        text: full,
+        model: model.to_string(),
+        backend: "cli".to_string(),
+        cost_usd: cost,
+        input_tokens: usage_in,
+        output_tokens: usage_out,
+        cache_read_input_tokens: usage_cache_read,
+        cache_creation_input_tokens: usage_cache_creation,
+        or_cache_discount: None,
+        truncated: false,
+    })
 }
 
 /// The minimal completion seam the audit depends on.
@@ -284,10 +663,46 @@ impl LlmPort for Llm {
     }
 }
 
+/// An [`LlmPort`] that refuses every call with a fixed message. Used where a model seam must be
+/// handed out but the backend setting forbids running it (the project is set to the API backend
+/// and no key is configured): the step then fails LOUDLY with the reason, instead of silently
+/// downgrading to the Claude Code subscription.
+#[derive(Debug, Clone)]
+pub struct RefusedLlm {
+    message: String,
+}
+
+impl RefusedLlm {
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl LlmPort for RefusedLlm {
+    async fn complete(&self, _req: LlmRequest) -> anyhow::Result<LlmResponse> {
+        Err(anyhow::anyhow!(self.message.clone()))
+    }
+
+    async fn complete_streaming(
+        &self,
+        _req: LlmRequest,
+        _on_delta: &mut (dyn for<'a> FnMut(&'a str) + Send),
+    ) -> anyhow::Result<LlmResponse> {
+        Err(anyhow::anyhow!(self.message.clone()))
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
 /// One completion request.
 #[derive(Debug, Clone)]
 pub struct LlmRequest {
-    /// Model id (e.g. `claude-opus-4-8`). Empty -> the provider's default.
+    /// Model id (e.g. `claude-opus-5`). Empty -> the provider's default.
     pub model: String,
     /// Optional system prompt.
     pub system: Option<String>,
@@ -295,17 +710,27 @@ pub struct LlmRequest {
     pub prompt: String,
     /// Token ceiling for the response (API path; the CLI manages its own).
     pub max_tokens: u32,
-    /// Prompt-caching breakpoint for the API path: number of BYTES (UTF-8) at the START of
-    /// `prompt` that form the STATIC cacheable prefix. When set, `complete_api` splits the
-    /// user message into two content blocks —
-    ///   `[{text: prefix, cache_control: {type: ephemeral}}, {text: suffix}]`
-    /// — so the provider caches the prefix once and re-reads it cheaply on every subsequent
-    /// call that shares the same prefix (same chunk digest + repo map across rule-batches).
+    /// Prompt-caching breakpoints for the API path: ascending byte (UTF-8) offsets into
+    /// `prompt`, each marking the END of one cacheable segment. The Anthropic API allows up
+    /// to 4 `cache_control` breakpoints per request; this holds however many the caller
+    /// wants (Camerata's audit pass uses up to 2 — see `ai_audit.rs`'s prompt builder).
+    ///
+    /// When non-empty, `complete_api` / `build_batch_item` / `count_tokens_body` split the
+    /// user message into `breakpoints.len() + 1` content blocks — one per segment between
+    /// consecutive offsets (and start/end) — and attach `cache_control: {type: ephemeral}`
+    /// to every block EXCEPT the last (the varying suffix that must never be cached). E.g.
+    /// two breakpoints `[a, b]` (`a < b < prompt.len()`) produce:
+    ///   `[{text: prompt[..a], cache_control}, {text: prompt[a..b], cache_control}, {text: prompt[b..]}]`
+    /// This lets an EARLIER, more-stable segment (e.g. a repo map shared across every chunk
+    /// in a scan) cache-hit independently of a LATER, less-stable one (e.g. a chunk's code
+    /// digest, stable only across that chunk's rule-batches) — ordering the prompt
+    /// stable-content-first is what makes the earlier breakpoint reusable at all.
+    ///
     /// Ignored by the CLI path (the CLI handles its own context management) and by
     /// non-Anthropic vendors (no-op until their caching protocol is wired).
-    /// Min cacheable prefix: 2048 tokens (Sonnet) / 4096 tokens (Opus/Haiku). Our digests
-    /// far exceed this, so a valid `cache_prefix_len` always meets the floor.
-    pub cache_prefix_len: Option<usize>,
+    /// Min cacheable prefix: 1024 tokens (Sonnet/Opus) / 2048 tokens (Haiku). Our digests
+    /// far exceed this, so a valid breakpoint always meets the floor.
+    pub cache_breakpoints: Vec<usize>,
     /// Optional local repo clone the model may READ on demand (THE INVARIANT: every
     /// in-project agent gets on-demand full-repo read, not just a digest). On the CLI
     /// backend this swaps the hardened `--tools ""` lockdown for the READ-ONLY built-ins
@@ -332,7 +757,7 @@ impl LlmRequest {
             system: None,
             prompt: prompt.into(),
             max_tokens: 4096,
-            cache_prefix_len: None,
+            cache_breakpoints: Vec::new(),
             repo_read_dir: None,
             repo_read_extra_dirs: Vec::new(),
         }
@@ -345,7 +770,11 @@ impl LlmRequest {
     /// backend (no filesystem). An empty path is treated as `None`.
     pub fn with_repo_read(mut self, dir: impl Into<std::path::PathBuf>) -> Self {
         let d = dir.into();
-        self.repo_read_dir = if d.as_os_str().is_empty() { None } else { Some(d) };
+        self.repo_read_dir = if d.as_os_str().is_empty() {
+            None
+        } else {
+            Some(d)
+        };
         self
     }
 
@@ -388,14 +817,44 @@ impl LlmRequest {
         self
     }
 
-    /// Mark the first `prefix_len` bytes of the prompt as the cacheable prefix (API path
-    /// only). The prefix must end on a valid UTF-8 character boundary; the builder clamps
-    /// it to the prompt length automatically so the caller can pass an oversized value safely.
-    /// Setting `prefix_len = 0` is a no-op (leaves caching disabled).
-    pub fn with_cache_prefix_len(mut self, prefix_len: usize) -> Self {
-        if prefix_len > 0 {
-            self.cache_prefix_len = Some(prefix_len.min(self.prompt.len()));
-        }
+    /// Mark the first `prefix_len` bytes of the prompt as a SINGLE cacheable prefix (API
+    /// path only) — a thin convenience wrapper over [`Self::with_cache_breakpoints`] for the
+    /// common one-breakpoint case. The prefix is clamped to the prompt length automatically
+    /// so the caller can pass an oversized value safely. `prefix_len = 0` is a no-op (leaves
+    /// caching disabled).
+    pub fn with_cache_prefix_len(self, prefix_len: usize) -> Self {
+        self.with_cache_breakpoints(vec![prefix_len])
+    }
+
+    /// Mark `breakpoints` (byte offsets into `prompt`, need not be pre-sorted or
+    /// deduplicated) as cache-control boundaries for the API path. Each offset is snapped
+    /// down to the nearest UTF-8 character boundary and any offset that is `0` or
+    /// `>= prompt.len()` is dropped (it would produce an empty content block, which the
+    /// Anthropic API rejects). The surviving offsets are sorted ascending and deduplicated.
+    /// Passing an empty slice (or one that fully degenerates after filtering) leaves caching
+    /// disabled. See the field doc on [`LlmRequest::cache_breakpoints`] for the resulting
+    /// content-block shape.
+    pub fn with_cache_breakpoints(mut self, breakpoints: impl IntoIterator<Item = usize>) -> Self {
+        let len = self.prompt.len();
+        // Filter out-of-range offsets FIRST, before snapping: an offset >= len must be
+        // dropped outright (it would produce an empty trailing block), not reinterpreted as
+        // some other in-range position by the char-boundary snap below.
+        let mut offsets: Vec<usize> = breakpoints
+            .into_iter()
+            .filter(|&b| b < len)
+            .map(|b| {
+                self.prompt
+                    .char_indices()
+                    .map(|(i, _)| i)
+                    .take_while(|&i| i <= b)
+                    .last()
+                    .unwrap_or(0)
+            })
+            .filter(|&o| o > 0)
+            .collect();
+        offsets.sort_unstable();
+        offsets.dedup();
+        self.cache_breakpoints = offsets;
         self
     }
 }
@@ -412,6 +871,45 @@ pub use camerata_api_types::llm::LlmResponse;
 /// fields so it reflects all input-side billing; absent fields are treated as zero only
 /// when `input_tokens` itself is present. `cache_read` and `cache_creation` are always
 /// returned separately so the meter can track savings independently.
+/// Build an [`LlmResponse`] from an Anthropic Messages-shaped object: the body of a real-time
+/// `/v1/messages` reply, or the `message` of a succeeded Message Batches row. One parser for both
+/// so the two can never disagree about what a response means.
+///
+/// `text` concatenates the content's text blocks; cost is computed from usage times the model's
+/// list price (the API reports no dollar figure); `truncated` is `stop_reason == "max_tokens"`.
+fn messages_response(msg: &serde_json::Value, model: &str, backend: &str) -> LlmResponse {
+    let text = msg["content"]
+        .as_array()
+        .map(|blocks| {
+            blocks
+                .iter()
+                .filter_map(|b| b["text"].as_str())
+                .collect::<Vec<_>>()
+                .join("")
+        })
+        .unwrap_or_default();
+    let (input_tokens, output_tokens, cache_read, cache_creation) = usage_tokens(&msg["usage"]);
+    let cost_usd = compute_cost_usd(
+        model,
+        input_tokens,
+        output_tokens,
+        cache_read,
+        cache_creation,
+    );
+    LlmResponse {
+        text,
+        model: model.to_string(),
+        backend: backend.to_string(),
+        cost_usd,
+        input_tokens,
+        output_tokens,
+        cache_read_input_tokens: cache_read,
+        cache_creation_input_tokens: cache_creation,
+        or_cache_discount: None,
+        truncated: msg["stop_reason"].as_str() == Some("max_tokens"),
+    }
+}
+
 fn usage_tokens(usage: &serde_json::Value) -> (Option<u64>, Option<u64>, u64, u64) {
     let base = usage["input_tokens"].as_u64();
     let cache_read = usage["cache_read_input_tokens"].as_u64().unwrap_or(0);
@@ -441,9 +939,11 @@ fn cli_result_text(v: &serde_json::Value) -> anyhow::Result<&str> {
     })
 }
 
-/// List price ($/Mtok input, $/Mtok output) for a model id, from [`MODELS`].
+/// List price ($/Mtok input, $/Mtok output) for a model id, from
+/// [`crate::model_registry::CLAUDE_REGISTRY_MODELS`] (the live registry — see [`models`]'s
+/// doc comment for why this must not be a second, independently-maintained price list).
 fn price_for(model_id: &str) -> Option<(f64, f64)> {
-    MODELS
+    crate::model_registry::CLAUDE_REGISTRY_MODELS
         .iter()
         .find(|m| m.id == model_id)
         .map(|m| (m.price_in, m.price_out))
@@ -473,23 +973,218 @@ fn compute_cost_usd(
     })
 }
 
-/// Which backend, resolved from env. Pure so it's unit-testable without real calls.
+/// The shared `reqwest::Client` for every Anthropic API call (`complete_api` + the
+/// Message Batches path). Built ONCE, lazily, on first use.
+///
+/// Two problems this fixes: (1) `reqwest::Client::new()` has **no default timeout** — a
+/// stalled TCP connection or a server that accepts the connection but never responds hangs
+/// the call FOREVER. This is especially dangerous on the streaming completion path, which
+/// previously had no backstop at all (the 600s `total_backstop` in `ai_audit.rs` only
+/// wraps the NON-streaming branch). (2) building a fresh `Client` per call throws away
+/// connection pooling/keep-alive, forcing a new TCP+TLS handshake on every single request
+/// in what can be a scan with hundreds of calls.
+///
+/// `.timeout(600s)` bounds the whole request (connect + send + full response body,
+/// including a streamed one) — matching `total_backstop`'s ceiling so neither path can
+/// hang longer than the other. `.connect_timeout(10s)` fails fast when the TCP handshake
+/// itself can't complete (DNS black hole, firewall drop), well before the 600s ceiling.
+pub(crate) fn shared_http_client() -> &'static reqwest::Client {
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(600))
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .build()
+            // Building a `Client` only fails on TLS backend init / DNS resolver setup —
+            // an environment problem so fundamental that every other HTTP call in the
+            // process would also be broken. Panicking here (once, lazily, on first real
+            // use) surfaces that immediately rather than deferring to a confusing later
+            // failure inside `complete_api`.
+            .expect("failed to build the shared Anthropic API reqwest::Client")
+    })
+}
+
+/// The Anthropic prompt-cache TTL requested via `cache_control` on the API path (both the
+/// single-call `complete_api` path and the Message Batches path — see
+/// [`build_batch_item`]). Anthropic bills a 5-minute ephemeral cache at the normal
+/// cache-write rate (~1.25x input) and a 1-hour cache at ~2x input on write; both read back
+/// at ~0.1x. 1h only pays for itself when a chunk's rule-batches are spread more than 5
+/// minutes apart (large sequential scans, slow batch-mode turnaround) — the default stays
+/// at 5m so a typical fast-parallel scan isn't paying the 2x write premium for no benefit.
+/// Message Batches are the exception: their items run minutes to hours apart, so
+/// [`build_batch_item`] always requests 1h.
+///
+/// NEEDS LIVE-KEY VERIFICATION: confirm against the current Anthropic API docs that a bare
+/// `"ttl": "1h"` field (no beta header) is accepted now that extended cache TTL has GA'd —
+/// this was written from the compliance-audit brief's description, not a live call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CacheTtl {
+    FiveMinutes,
+    OneHour,
+}
+
+impl CacheTtl {
+    /// Resolve from `CAMERATA_ANTHROPIC_CACHE_TTL_1H` (truthy -> 1h; anything else,
+    /// including unset, -> the 5m default). Opt-in, not opt-out: the 2x write premium is a
+    /// real cost, so a caller must deliberately ask for the 1h cache.
+    pub fn from_env() -> Self {
+        let truthy = std::env::var("CAMERATA_ANTHROPIC_CACHE_TTL_1H")
+            .ok()
+            .map(|v| {
+                matches!(
+                    v.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            })
+            .unwrap_or(false);
+        if truthy {
+            CacheTtl::OneHour
+        } else {
+            CacheTtl::FiveMinutes
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            CacheTtl::FiveMinutes => "5m",
+            CacheTtl::OneHour => "1h",
+        }
+    }
+
+    /// The `cache_control` JSON object to attach to a cacheable content block.
+    fn cache_control_json(self) -> serde_json::Value {
+        serde_json::json!({"type": "ephemeral", "ttl": self.as_str()})
+    }
+}
+
+/// Build the Anthropic `content` value for a user message that may carry MULTIPLE
+/// prompt-cache breakpoints — the single shared builder behind [`Llm::complete_api`],
+/// [`build_batch_item`], and `count_tokens_body`, so the three call sites can never drift on
+/// how a `cache_breakpoints` list turns into content blocks.
+///
+/// `breakpoints` is defensively re-filtered/sorted/deduped here even though
+/// [`LlmRequest::with_cache_breakpoints`] already does this on the way in (in case a caller
+/// sets the field directly): any offset that is `0` or `>= prompt.len()` is dropped so no
+/// resulting block is ever empty (the Anthropic API rejects empty text blocks). The
+/// surviving offsets split `prompt` into `N + 1` text blocks. When `with_cache_control` is
+/// true, every block EXCEPT THE LAST carries `cache_control: {type: ephemeral, ttl: ...}` —
+/// each breakpoint marks the end of one cacheable segment; the final (last) block is always
+/// left uncached since it's the per-call varying suffix. `count_tokens` doesn't need the
+/// `cache_control` tag (caching has no effect on that endpoint, only the block SPLIT
+/// matters for an accurate count) so it calls this with `with_cache_control = false`.
+///
+/// Falls back to a plain JSON string (no content-block array) when no valid breakpoint
+/// survives filtering — this covers both "caching not requested" (empty `breakpoints`) and
+/// "every offset given was degenerate" (e.g. all `>= prompt.len()`).
+fn cached_user_content(
+    prompt: &str,
+    breakpoints: &[usize],
+    with_cache_control: bool,
+    ttl: CacheTtl,
+) -> serde_json::Value {
+    let len = prompt.len();
+    let mut offsets: Vec<usize> = breakpoints
+        .iter()
+        .copied()
+        .filter(|&b| b < len)
+        .map(|b| {
+            // Snap down to the nearest valid UTF-8 char boundary <= b so a multi-byte
+            // sequence is never sliced in half.
+            prompt
+                .char_indices()
+                .map(|(i, _)| i)
+                .take_while(|&i| i <= b)
+                .last()
+                .unwrap_or(0)
+        })
+        .filter(|&o| o > 0)
+        .collect();
+    offsets.sort_unstable();
+    offsets.dedup();
+
+    if offsets.is_empty() {
+        return serde_json::json!(prompt);
+    }
+
+    let mut blocks: Vec<&str> = Vec::with_capacity(offsets.len() + 1);
+    let mut start = 0;
+    for &end in &offsets {
+        blocks.push(&prompt[start..end]);
+        start = end;
+    }
+    blocks.push(&prompt[start..]);
+
+    let n = blocks.len();
+    let arr: Vec<serde_json::Value> = blocks
+        .into_iter()
+        .enumerate()
+        .map(|(i, text)| {
+            if with_cache_control && i + 1 < n {
+                serde_json::json!({
+                    "type": "text",
+                    "text": text,
+                    "cache_control": ttl.cache_control_json()
+                })
+            } else {
+                serde_json::json!({ "type": "text", "text": text })
+            }
+        })
+        .collect();
+    serde_json::json!(arr)
+}
+
+/// Which backend a concrete [`Llm`] instance is wired to. Distinct from [`ProjectBackend`]:
+/// this is the LOW-LEVEL transport a built `Llm` actually uses; `ProjectBackend` is the
+/// SETTING (per-project or the global chat setting) that [`resolve_backend`] turns into one
+/// of these (or a [`BackendResolution::Blocked`] refusal, when it can't).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Backend {
     Cli,
     Api,
 }
 
-/// Decide the backend from the (optional) explicit preference and whether an API key is
-/// present. Explicit `api` wins when a key exists; explicit `cli` always wins; with no
-/// preference we default to the CLI (the local-human path) and only auto-pick the API
-/// when a key is set AND the CLI isn't the stated choice.
-pub fn select_backend(pref: Option<&str>, has_api_key: bool) -> Backend {
-    match pref.map(|p| p.trim().to_ascii_lowercase()).as_deref() {
-        Some("api") if has_api_key => Backend::Api,
-        Some("api") => Backend::Cli, // asked for API but no key -> fall back, never silently fail hard
-        Some("cli") => Backend::Cli,
-        _ => Backend::Cli,
+/// The compliance-safety backend decision (`docs/design/2026-09-22_per-project-backend.md`).
+///
+/// The CLI-vs-API choice is an auth/billing/compliance axis, not a model-quality axis: the
+/// CLI transport shells the operator's PERSONAL Claude Code subscription (personal account,
+/// consumer terms), while the API transport is commercial/metered/single-party. There is no
+/// silent fallback in either direction: an `Api` setting with no key never quietly downgrades
+/// to the CLI (that would be a silent compliance downgrade for a client project) — it hard
+/// blocks instead.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BackendResolution {
+    /// `Api` selected, key present. The client-safe, metered chain.
+    Api,
+    /// `Cli` selected. The zero-setup subscription path — no key needed.
+    Cli,
+    /// `Api` selected, but no Anthropic key is configured. Hard stop — the caller must not
+    /// start any model call. The deterministic floor (and any other non-AI work) may still
+    /// run; only the AI step is skipped.
+    Blocked { message: String },
+}
+
+/// Resolve the compliance-safety backend decision from a single [`ProjectBackend`] setting
+/// (a project's `backend`, or the global chat assistant's `chat_backend` — both use this
+/// exact same function) plus whether an Anthropic API key is present. The WHOLE resolution,
+/// per `docs/design/2026-09-22_per-project-backend.md`:
+///
+/// | `backend` | key? | resolution |
+/// |---|---|---|
+/// | `Api` | yes | `Api` |
+/// | `Api` | no  | `Blocked` |
+/// | `Cli` | any | `Cli` |
+///
+/// No env reads, no cross-setting override, no CLI fallback: `backend` is the caller's
+/// entire input, already resolved from `project.backend` or `settings.chat_backend`.
+pub fn resolve_backend(backend: ProjectBackend, has_api_key: bool) -> BackendResolution {
+    match backend {
+        ProjectBackend::Cli => BackendResolution::Cli,
+        ProjectBackend::Api if has_api_key => BackendResolution::Api,
+        ProjectBackend::Api => BackendResolution::Blocked {
+            message: "This project is set to the Anthropic API backend, but no API key is \
+                      configured. Add an Anthropic API key (or switch the backend to Cli) to run."
+                .to_string(),
+        },
     }
 }
 
@@ -510,6 +1205,9 @@ pub struct Llm {
     /// Process-global cumulative usage meter, threaded so the chokepoint records every call.
     /// `None` in tests / standalone construction (recording is then simply skipped).
     ledger: Option<std::sync::Arc<crate::usage_ledger::UsageLedger>>,
+    /// Collector for the Claude Code session every CLI spawn creates (see
+    /// [`crate::session_sink`]). `None` = nobody is recording; the spawn is still tagged.
+    sessions: Option<SessionSink>,
 }
 
 impl std::fmt::Debug for Llm {
@@ -525,17 +1223,22 @@ impl std::fmt::Debug for Llm {
 }
 
 impl Llm {
-    /// Build from env: `CAMERATA_LLM_VENDOR` (default anthropic), `CAMERATA_LLM_BACKEND`
-    /// (cli|api, default cli), `ANTHROPIC_API_KEY` (for the Anthropic api transport),
-    /// `CAMERATA_LLM_MODEL` (default model). No usage ledger attached (see
-    /// [`Llm::from_env_with_ledger`] for the cockpit's recording path).
-    pub fn from_env() -> Self {
+    /// Build with an EXPLICIT [`Backend`] and an EXPLICIT Anthropic key. No env read for
+    /// backend selection and NONE for the key: the caller resolves the key with
+    /// [`crate::credentials::anthropic_api_key`] (credential store first, `ANTHROPIC_API_KEY`
+    /// env only as the fallback) at the moment it builds the client, so a key saved or replaced
+    /// in the app takes effect on the next call with no restart. Only the vendor
+    /// (`CAMERATA_LLM_VENDOR`, default anthropic) and the default model (`CAMERATA_LLM_MODEL`)
+    /// still come from env.
+    ///
+    /// This is the constructor every project-scoped or chat-scoped call site uses
+    /// (`docs/design/2026-09-22_per-project-backend.md`): the caller resolves `Cli`/`Api`
+    /// itself — from `project.backend` or `settings.chat_backend` via [`resolve_backend`] —
+    /// and passes the resolved [`Backend`] in here. No usage ledger attached (see
+    /// [`Llm::for_backend_and_ledger`] for the cockpit's recording path).
+    pub fn for_backend(backend: Backend, api_key: Option<String>) -> Self {
         let vendor = Vendor::parse(std::env::var("CAMERATA_LLM_VENDOR").ok().as_deref());
-        let pref = std::env::var("CAMERATA_LLM_BACKEND").ok();
-        let api_key = std::env::var("ANTHROPIC_API_KEY")
-            .ok()
-            .filter(|k| !k.trim().is_empty());
-        let backend = select_backend(pref.as_deref(), api_key.is_some());
+        let api_key = api_key.filter(|k| !k.trim().is_empty());
         let default_model = std::env::var("CAMERATA_LLM_MODEL")
             .ok()
             .filter(|m| !m.trim().is_empty())
@@ -546,24 +1249,47 @@ impl Llm {
             default_model,
             api_key,
             ledger: None,
+            sessions: None,
         }
     }
 
-    /// Same as [`Llm::from_env`] but with the process-global usage ledger attached, so every
-    /// call this instance makes is recorded into the cumulative cockpit meter. This is the
-    /// constructor every HTTP handler / feature uses, so ALL LLM call paths feed one ledger.
-    pub fn from_env_with_ledger(
+    /// Same as [`Llm::for_backend`] but with the process-global usage ledger
+    /// attached, so every call this instance makes is recorded into the cumulative cockpit
+    /// meter. This is the constructor every HTTP handler / feature uses, so ALL LLM call
+    /// paths feed one ledger.
+    pub fn for_backend_and_ledger(
+        backend: Backend,
+        api_key: Option<String>,
         ledger: std::sync::Arc<crate::usage_ledger::UsageLedger>,
     ) -> Self {
+        Self::for_backend(backend, api_key).with_ledger(ledger)
+    }
+
+    /// Construction-only convenience for callers that have no credential store and never make
+    /// an `api` call (hermetic tests, the `backend_label` probe, and the CLI-transport floor
+    /// seam): builds with [`Backend::Cli`] and NO API key, reading no key and no backend-
+    /// selecting env var. The `claude` CLI transport never uses an API key. Anything that may
+    /// run on the `api` backend MUST use [`Llm::for_backend`] with a resolved key instead.
+    pub fn from_env() -> Self {
+        Self::for_backend(Backend::Cli, None)
+    }
+
+    /// Same as [`Llm::from_env`] but with the process-global usage ledger attached.
+    pub fn from_env_with_ledger(ledger: std::sync::Arc<crate::usage_ledger::UsageLedger>) -> Self {
         Self::from_env().with_ledger(ledger)
     }
 
     /// Attach (or replace) the process-global usage ledger on an existing instance.
-    pub fn with_ledger(
-        mut self,
-        ledger: std::sync::Arc<crate::usage_ledger::UsageLedger>,
-    ) -> Self {
+    pub fn with_ledger(mut self, ledger: std::sync::Arc<crate::usage_ledger::UsageLedger>) -> Self {
         self.ledger = Some(ledger);
+        self
+    }
+
+    /// Attach (or replace) the collector that records every Claude Code session this instance
+    /// (and every clone of it) spawns. Used by the brownfield audit so source deletion can later
+    /// remove exactly the session files that hold the client's prompts.
+    pub fn with_session_sink(mut self, sink: SessionSink) -> Self {
+        self.sessions = Some(sink);
         self
     }
 
@@ -648,19 +1374,34 @@ impl Llm {
     }
 
     /// Run a completion through the selected vendor + transport. Adding a vendor is a new
-    /// match arm here plus its [`MODELS`] entries; the request/response shapes don't change.
+    /// match arm here plus its [`crate::model_registry::CLAUDE_REGISTRY_MODELS`] entries; the
+    /// request/response shapes don't change.
     pub async fn complete(&self, req: LlmRequest) -> anyhow::Result<LlmResponse> {
         let model = self.model_for(&req);
         // CHOKEPOINT: fold every completion into the cumulative ledger. Success records usage
         // + clears the rate-limit flag; failure runs the provider-agnostic rate-limit detector.
         let result = match self.vendor {
             Vendor::Anthropic => match self.backend {
-                Backend::Cli => self.complete_cli(&req, &model).await,
+                // ONE CLI implementation. This arm used to call a separate
+                // non-streaming `complete_cli` that waited on `.output()` under a single
+                // FLAT `cli_overall_timeout()` window — so W6's heartbeat fix (which
+                // replaced exactly that flat deadline) covered only the streaming callers,
+                // and `complete` callers kept being killed mid-work and mislabeled
+                // "(no output)". That silently darkened an entire 120-rule semantic audit
+                // tier on a real scan whose CLI was healthy the whole time. There is no way
+                // to heartbeat a `.output()` call — it blocks until process exit, so there
+                // is no incremental signal to observe — so the non-streaming path is gone
+                // and non-streaming callers come through the streaming reader with a
+                // DISCARDING delta callback. Same request, same response shape, same
+                // in-band failure policy (`cli_result_text`); one timeout implementation.
+                Backend::Cli => {
+                    self.complete_cli_streaming(&req, &model, &mut |_| {}).await
+                }
                 Backend::Api => self.complete_api(&req, &model).await,
             },
             Vendor::OpenAi | Vendor::Google => anyhow::bail!(
                 "model vendor `{}` is not wired yet — the provider seam is ready (add an \
-                 arm in llm.rs::complete + its MODELS entries). Set CAMERATA_LLM_VENDOR=anthropic \
+                 arm in llm.rs::complete + its model_registry entries). Set CAMERATA_LLM_VENDOR=anthropic \
                  to use the wired vendor.",
                 self.vendor.label()
             ),
@@ -672,112 +1413,48 @@ impl Llm {
         result
     }
 
-    /// CLI path: a PURE text completion, not an agentic loop. The audit hands the model
-    /// the whole code digest in the prompt, so it must NOT load MCP servers (the GitHub
-    /// MCP), spawn sub-agents (Task/Explore), or touch the filesystem — that was wasteful,
-    /// slow, and muddied the output. `--strict-mcp-config` with no `--mcp-config` loads no
-    /// MCP servers; `--disallowedTools` forbids every built-in so the model can only
-    /// reason over the prompt and answer.
-    async fn complete_cli(&self, req: &LlmRequest, model: &str) -> anyhow::Result<LlmResponse> {
-        let mut cmd = tokio::process::Command::new("claude");
-        // kill_on_drop: if the caller's future is dropped (e.g. a timeout fires), the
-        // spawned `claude` subprocess is killed rather than orphaned and left running.
-        // stdin(null): `claude -p` blocks on inherited piped stdin until EOF (see the
-        // streaming path for the full explanation). `.output()` already nulls stdin, but
-        // set it explicitly so the behavior doesn't depend on that detail.
-        cmd.kill_on_drop(true)
-            .stdin(std::process::Stdio::null())
-            .arg("-p")
-            .arg(nul_safe(&req.prompt))
-            .arg("--model")
-            .arg(model)
-            .arg("--output-format")
-            .arg("json");
-        harden_completion(&mut cmd, req);
-        let out = cmd.output().await.map_err(|e| {
-            anyhow::anyhow!("failed to spawn `claude` CLI (is it installed/on PATH?): {e}")
-        })?;
-        if !out.status.success() {
-            anyhow::bail!(
-                "claude CLI exited {}: {}",
-                out.status,
-                String::from_utf8_lossy(&out.stderr).trim()
-            );
-        }
-        let v: serde_json::Value = serde_json::from_slice(&out.stdout)
-            .map_err(|e| anyhow::anyhow!("parse claude CLI JSON: {e}"))?;
-        let result_text = cli_result_text(&v)?;
-        let (input_tokens, output_tokens, cache_read, cache_creation) = usage_tokens(&v["usage"]);
-        Ok(LlmResponse {
-            text: result_text.to_string(),
-            model: model.to_string(),
-            backend: "cli".to_string(),
-            cost_usd: v["total_cost_usd"].as_f64(),
-            input_tokens,
-            output_tokens,
-            cache_read_input_tokens: cache_read,
-            cache_creation_input_tokens: cache_creation,
-            or_cache_discount: None,
-        })
-    }
-
-    /// CLI streaming path: `--output-format stream-json --include-partial-messages`. Reads
-    /// stdout line-by-line, calls `on_delta` with each `content_block_delta` text chunk
-    /// (so the UI shows the model writing), and captures the final `result` event.
+    /// THE CLI completion path — a PURE text completion, not an agentic loop. The audit
+    /// hands the model the whole code digest in the prompt, so it must NOT load MCP servers
+    /// (the GitHub MCP), spawn sub-agents (Task/Explore), or touch the filesystem — that was
+    /// wasteful, slow, and muddied the output. `--strict-mcp-config` with no `--mcp-config`
+    /// loads no MCP servers; [`harden_completion`] forbids every built-in so the model can
+    /// only reason over the prompt and answer.
+    ///
+    /// `--output-format stream-json --include-partial-messages`: reads stdout line-by-line
+    /// under the heartbeat dual timeout ([`read_cli_stream`]), calls `on_delta` with each
+    /// `content_block_delta` text chunk (so the UI shows the model writing), and captures
+    /// the final `result` event.
+    ///
+    /// This is now the ONLY CLI implementation. [`Llm::complete`] used to run a separate
+    /// non-streaming `complete_cli` under a FLAT overall deadline, which is why W6's
+    /// heartbeat fix covered only half the callers and the semantic audit pass (a `complete`
+    /// caller) kept being killed mid-work. Non-streaming callers now come through here with
+    /// a discarding `on_delta`.
     async fn complete_cli_streaming(
         &self,
         req: &LlmRequest,
         model: &str,
         on_delta: &mut (dyn FnMut(&str) + Send),
     ) -> anyhow::Result<LlmResponse> {
-        use tokio::io::AsyncBufReadExt;
-        let mut cmd = tokio::process::Command::new("claude");
-        // kill_on_drop: a dropped future (timeout) kills the subprocess instead of
-        // leaving a stalled `claude` running in the background.
-        // stdin(null): CRITICAL. `claude -p` reads piped stdin and blocks until EOF before
-        // responding. spawn() INHERITS the parent's stdin, and the desktop app's inherited
-        // stdin is an open pipe that never EOFs — so the audit hung for minutes producing
-        // nothing (shell tests were fast only because their stdin was a TTY/closed).
-        // Redirecting stdin to /dev/null gives an immediate EOF so claude uses the -p arg
-        // and responds at once.
-        cmd.kill_on_drop(true)
-            .stdin(std::process::Stdio::null())
-            .arg("-p")
-            .arg(nul_safe(&req.prompt))
-            .arg("--model")
-            .arg(model)
-            .arg("--output-format")
-            .arg("stream-json")
-            .arg("--verbose")
-            .arg("--include-partial-messages")
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped());
-        harden_completion(&mut cmd, req);
-        let mut child = cmd.spawn().map_err(|e| {
-            anyhow::anyhow!("failed to spawn `claude` CLI (is it installed/on PATH?): {e}")
-        })?;
+        // Tag the call with an id of OUR choosing and record it BEFORE the spawn: a call that
+        // times out or is killed has still written (part of) a session file, and "delete the
+        // client's source" must be able to find it.
+        let session_id = new_session_id();
+        if let Some(sink) = &self.sessions {
+            let cwd = match &req.repo_read_dir {
+                Some(dir) => dir.clone(),
+                None => std::env::current_dir().unwrap_or_default(),
+            };
+            sink.record(ModelSession {
+                session_id: session_id.clone(),
+                cwd: cwd.to_string_lossy().into_owned(),
+                created_at: now_rfc3339(),
+            });
+        }
+        let mut cmd = build_cli_command(req, model, &session_id);
+        let child = cmd.spawn().map_err(map_spawn_error)?;
         // Track the PID for the shutdown hook; the guard untracks on every exit path.
         let _pid_guard = child.id().map(ClaudePidGuard::new);
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| anyhow::anyhow!("claude CLI produced no stdout pipe"))?;
-        // CRITICAL: drain stderr CONCURRENTLY. `--verbose` makes `claude` write a lot to
-        // stderr; if we only read stdout, stderr's OS pipe buffer (~64KB) fills, the
-        // subprocess BLOCKS on its next stderr write, stops producing stdout, and this
-        // read loop hangs forever (observed: an 8-minute hang after a few tokens). A
-        // spawned reader keeps stderr flowing so stdout never stalls.
-        let stderr_task = child.stderr.take().map(|stderr| {
-            tokio::spawn(async move {
-                use tokio::io::AsyncReadExt;
-                let mut s = String::new();
-                let _ = tokio::io::BufReader::new(stderr)
-                    .read_to_string(&mut s)
-                    .await;
-                s
-            })
-        });
-        let mut lines = tokio::io::BufReader::new(stdout).lines();
 
         // PROGRESS/STALL timeout, not a total-time cap: the wall-clock allowed since the
         // last sign of the model actually RESPONDING. It resets only on real progress
@@ -786,173 +1463,52 @@ impl Llm {
         // resetting on them was why a stalled call ran for minutes without tripping. A
         // legitimate large scan keeps emitting content and never trips; a call stuck before
         // (or mid) generation does. `CAMERATA_LLM_IDLE_SECS` overrides the 120s default.
-        let idle = std::time::Duration::from_secs(
-            std::env::var("CAMERATA_LLM_IDLE_SECS")
-                .ok()
-                .and_then(|s| s.trim().parse::<u64>().ok())
-                .filter(|n| *n > 0)
-                .unwrap_or(120),
-        );
+        let idle = env_secs("CAMERATA_LLM_IDLE_SECS", 120);
+        // W6: the "genuinely silent" backstop, independent of the idle/progress detector
+        // above — see the `check_heartbeat`/`HeartbeatTimeout` doc comments for the full
+        // rationale. `CAMERATA_CLI_TIMEOUT_SECS` overrides the 300s default. Unlike before,
+        // this deadline is RESET on any streamed line, not just once at call start, so a
+        // long-but-live call is never killed merely for running past this window.
+        let overall_timeout = cli_overall_timeout();
 
-        let mut full = String::new();
-        let mut cost = None;
-        let mut usage_in = None;
-        let mut usage_out = None;
-        let mut usage_cache_read = 0u64;
-        let mut usage_cache_creation = 0u64;
-        let mut deadline = tokio::time::Instant::now() + idle;
-        loop {
-            let now = tokio::time::Instant::now();
-            if now >= deadline {
-                // No model progress for the whole window -> a true stall (often a queued /
-                // rate-limited call sitting before its first token). kill_on_drop reaps the
-                // subprocess when this future is dropped on the error path.
-                anyhow::bail!(
-                    "claude produced no model output for {}s — treating as a hang (likely rate-limited/queued; set CAMERATA_LLM_IDLE_SECS to tune)",
-                    idle.as_secs()
-                );
-            }
-            let remaining = deadline - now;
-            match tokio::time::timeout(remaining, lines.next_line()).await {
-                Err(_) => anyhow::bail!(
-                    "claude produced no model output for {}s — treating as a hang (likely rate-limited/queued; set CAMERATA_LLM_IDLE_SECS to tune)",
-                    idle.as_secs()
-                ),
-                Ok(Ok(None)) => break, // EOF — the process finished
-                Ok(Err(e)) => anyhow::bail!("reading claude stdout: {e}"),
-                Ok(Ok(Some(line))) => {
-                    let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
-                        continue;
-                    };
-                    // Real model progress extends the deadline; status/keepalive lines do not.
-                    let mut progressed = false;
-                    match v["type"].as_str() {
-                        Some("stream_event") => {
-                            let ev = &v["event"];
-                            // Any of these mean the model is actively responding.
-                            if matches!(
-                                ev["type"].as_str(),
-                                Some(
-                                    "message_start"
-                                        | "content_block_start"
-                                        | "content_block_delta"
-                                        | "content_block_stop"
-                                        | "message_delta"
-                                )
-                            ) {
-                                progressed = true;
-                            }
-                            if ev["type"] == "content_block_delta"
-                                && ev["delta"]["type"] == "text_delta"
-                            {
-                                if let Some(t) = ev["delta"]["text"].as_str() {
-                                    full.push_str(t);
-                                    on_delta(t);
-                                }
-                            }
-                        }
-                        Some("assistant") => progressed = true,
-                        Some("result") => {
-                            progressed = true;
-                            if let Some(r) = v["result"].as_str() {
-                                if !r.is_empty() {
-                                    full = r.to_string();
-                                }
-                            }
-                            cost = v["total_cost_usd"].as_f64();
-                            let (i, o, cr, cc) = usage_tokens(&v["usage"]);
-                            usage_in = i.or(usage_in);
-                            usage_out = o.or(usage_out);
-                            // Accumulate cache token breakdowns (they may appear in multiple
-                            // stream events; take the max to avoid double-counting).
-                            usage_cache_read = usage_cache_read.max(cr);
-                            usage_cache_creation = usage_cache_creation.max(cc);
-                        }
-                        _ => {}
-                    }
-                    if progressed {
-                        deadline = tokio::time::Instant::now() + idle;
-                    }
-                }
-            }
-        }
-        let status = child.wait().await?;
-        let stderr_text = match stderr_task {
-            Some(t) => t.await.unwrap_or_default(),
-            None => String::new(),
-        };
-        // SALVAGE: if the process exited non-zero (e.g. SIGKILL from a timeout, or an
-        // external kill) but it already streamed a usable response, RETURN that text rather
-        // than discarding it. The model's work is in `full`; throwing it away on a late
-        // interruption is what made a fully-streamed audit collapse to "0/3 findings".
-        // Only fail when there's genuinely nothing to salvage.
-        if !status.success() && full.trim().is_empty() {
-            anyhow::bail!(
-                "claude CLI (stream) exited {status}: {}",
-                stderr_text.trim()
-            );
-        }
-        Ok(LlmResponse {
-            text: full,
-            model: model.to_string(),
-            backend: "cli".to_string(),
-            cost_usd: cost,
-            input_tokens: usage_in,
-            output_tokens: usage_out,
-            cache_read_input_tokens: usage_cache_read,
-            cache_creation_input_tokens: usage_cache_creation,
-            or_cache_discount: None,
-        })
+        read_cli_stream(child, model, idle, overall_timeout, on_delta).await
     }
 
     /// API path: POST the Anthropic Messages API with the key.
     ///
-    /// Prompt caching: when `req.cache_prefix_len` is set, the user message is sent as a
-    /// TWO-BLOCK content array instead of a plain string:
-    ///   1. `{type: "text", text: <prefix>, cache_control: {type: "ephemeral"}}` — the stable
-    ///      codebase context (repo map + chunk digest) that the provider caches for 5 minutes.
-    ///   2. `{type: "text", text: <suffix>}` — the per-batch varying directive (task line +
-    ///      rules block) that differs across rule-batches and must never be part of the prefix.
+    /// Prompt caching: when `req.cache_breakpoints` is non-empty, the user message is sent
+    /// as a MULTI-BLOCK content array instead of a plain string — see
+    /// [`cached_user_content`] for the exact shape. Camerata's audit pass uses up to two
+    /// breakpoints: one after the shared repo map (re-reads across every chunk in a scan)
+    /// and one after a chunk's code digest (re-reads across that chunk's rule-batches).
+    /// Each cached block is cached for [`CacheTtl::from_env`]'s TTL (5m default, opt-in 1h).
     ///
-    /// The `anthropic-beta: prompt-caching-2024-07-31` header enables the feature. Without a
-    /// `cache_prefix_len` the request falls through to the plain-string path (no beta header,
-    /// no structural change) so non-caching callers are unaffected.
+    /// Prompt caching is GA (no beta header needed) as of this writing. With no breakpoints
+    /// the request falls through to the plain-string path (no structural change) so
+    /// non-caching callers are unaffected.
+    ///
+    /// RETRY: the POST goes through [`crate::retry::execute_with_retry`], which re-sends
+    /// this EXACT request (same model, same body) on 429/529/5xx/network errors — up to 3
+    /// extra attempts with exponential backoff (2s/8s/30s), honoring the server's
+    /// `retry-after` header when present. 400/401/403 come back as a terminal
+    /// non-success status on the first attempt (never retried) and fall through to the
+    /// `bail!` below exactly as before. This never routes through
+    /// [`call_with_fallback`]/a different model — a transient limit on the CHOSEN model is
+    /// not a reason to silently answer from a different one.
     async fn complete_api(&self, req: &LlmRequest, model: &str) -> anyhow::Result<LlmResponse> {
         let key = self.api_key.as_ref().ok_or_else(|| {
-            anyhow::anyhow!("API backend selected but ANTHROPIC_API_KEY is unset")
+            anyhow::anyhow!(
+                "API backend selected but no Anthropic API key is configured; {}",
+                crate::credentials::API_KEY_FIX_HINT
+            )
         })?;
 
-        // Build the user content: a plain string when caching is not requested; a two-block
-        // array when it is (prefix block with cache_control, suffix block without).
-        let (user_content, use_caching) = match req.cache_prefix_len {
-            Some(split_at) if split_at < req.prompt.len() => {
-                // Split on the byte boundary; clamp to a valid UTF-8 char boundary so we never
-                // slice a multi-byte sequence in half (the min clamp is the builder's job, but
-                // be defensive here too).
-                let safe_split = req.prompt
-                    .char_indices()
-                    .map(|(i, _)| i)
-                    .take_while(|&i| i <= split_at)
-                    .last()
-                    .unwrap_or(split_at)
-                    .min(req.prompt.len());
-                let prefix = &req.prompt[..safe_split];
-                let suffix = &req.prompt[safe_split..];
-                let content = serde_json::json!([
-                    {
-                        "type": "text",
-                        "text": prefix,
-                        "cache_control": {"type": "ephemeral"}
-                    },
-                    {
-                        "type": "text",
-                        "text": suffix
-                    }
-                ]);
-                (content, true)
-            }
-            _ => (serde_json::json!(req.prompt), false),
-        };
+        let user_content = cached_user_content(
+            &req.prompt,
+            &req.cache_breakpoints,
+            true,
+            CacheTtl::from_env(),
+        );
 
         let mut body = serde_json::json!({
             "model": model,
@@ -963,54 +1519,23 @@ impl Llm {
             body["system"] = serde_json::json!(system);
         }
 
-        let mut builder = reqwest::Client::new()
-            .post("https://api.anthropic.com/v1/messages")
-            .header("x-api-key", key)
-            .header("anthropic-version", "2023-06-01")
-            .header("content-type", "application/json");
-        // The prompt-caching beta header is only sent when caching is active, so the
-        // non-caching path is byte-identical to the pre-caching implementation.
-        if use_caching {
-            builder = builder.header("anthropic-beta", "prompt-caching-2024-07-31");
-        }
-        let resp = builder
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| anyhow::anyhow!("Anthropic API request failed: {e}"))?;
-        let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
+        // NOTE: no `anthropic-beta` header — `prompt-caching-2024-07-31` is GA now (the
+        // feature activates whenever a `cache_control` block is present, beta or not).
+        let make_request = || {
+            shared_http_client()
+                .post("https://api.anthropic.com/v1/messages")
+                .header("x-api-key", key)
+                .header("anthropic-version", "2023-06-01")
+                .header("content-type", "application/json")
+                .json(&body)
+        };
+        let (status, text) = crate::retry::execute_with_retry(make_request).await?;
         if !status.is_success() {
             anyhow::bail!("Anthropic API HTTP {status}: {text}");
         }
         let v: serde_json::Value =
             serde_json::from_str(&text).map_err(|e| anyhow::anyhow!("parse API JSON: {e}"))?;
-        // content is an array of blocks; concatenate the text blocks.
-        let out = v["content"]
-            .as_array()
-            .map(|blocks| {
-                blocks
-                    .iter()
-                    .filter_map(|b| b["text"].as_str())
-                    .collect::<Vec<_>>()
-                    .join("")
-            })
-            .unwrap_or_default();
-        let (input_tokens, output_tokens, cache_read, cache_creation) = usage_tokens(&v["usage"]);
-        // The API doesn't bill back a dollar figure, so compute it from usage × list price.
-        let cost_usd =
-            compute_cost_usd(model, input_tokens, output_tokens, cache_read, cache_creation);
-        Ok(LlmResponse {
-            text: out,
-            model: model.to_string(),
-            backend: "api".to_string(),
-            cost_usd,
-            input_tokens,
-            output_tokens,
-            cache_read_input_tokens: cache_read,
-            cache_creation_input_tokens: cache_creation,
-            or_cache_discount: None,
-        })
+        Ok(messages_response(&v, model, "api"))
     }
 }
 
@@ -1075,37 +1600,61 @@ pub struct BatchMessage {
     pub content: serde_json::Value,
 }
 
-/// Build a [`BatchItem`] from a [`LlmRequest`] and a deterministic `custom_id`.
-/// The content block handles prompt caching the same way `complete_api` does: when
-/// `req.cache_prefix_len` is set, the user content is split into a cached-prefix block
-/// plus a suffix block. The system prompt is forwarded verbatim (the batch API accepts
-/// the same `system` field as the messages API).
-pub fn build_batch_item(custom_id: impl Into<String>, req: &LlmRequest, model: &str) -> BatchItem {
-    let content = match req.cache_prefix_len {
-        Some(split_at) if split_at < req.prompt.len() => {
-            let safe_split = req.prompt
-                .char_indices()
-                .map(|(i, _)| i)
-                .take_while(|&i| i <= split_at)
-                .last()
-                .unwrap_or(split_at)
-                .min(req.prompt.len());
-            let prefix = &req.prompt[..safe_split];
-            let suffix = &req.prompt[safe_split..];
-            serde_json::json!([
-                {
-                    "type": "text",
-                    "text": prefix,
-                    "cache_control": {"type": "ephemeral"}
-                },
-                {
-                    "type": "text",
-                    "text": suffix
-                }
-            ])
+/// Pure request-body builder for [`Llm::count_tokens`] — mirrors `complete_api`'s content
+/// shape (same `cache_breakpoints` block split, same `system` field) via
+/// [`cached_user_content`], so the count reflects exactly what a real completion call for
+/// this `req` would send. No `cache_control` block: `count_tokens` only needs the split for
+/// an accurate count, not caching (caching has no effect on this endpoint). Kept separate
+/// from the HTTP call so the body-shape logic is unit-testable without a network call.
+fn count_tokens_body(req: &LlmRequest, model: &str) -> serde_json::Value {
+    let user_content = cached_user_content(
+        &req.prompt,
+        &req.cache_breakpoints,
+        false,
+        CacheTtl::from_env(),
+    );
+    let mut body = serde_json::json!({
+        "model": model,
+        "messages": [{ "role": "user", "content": user_content }],
+    });
+    if let Some(system) = &req.system {
+        body["system"] = serde_json::json!(system);
+    }
+    body
+}
+
+/// Exact pre-audit input-token estimate via [`Llm::count_tokens`], falling back to `None`
+/// on ANY failure (no key, network/HTTP error, malformed response) — callers are expected
+/// to fall back to the existing heuristic estimate
+/// (`camerata_ui_core::scan::estimate_audit_cost`) when this returns `None`, rather than
+/// treating it as a hard failure. A free, exact number is a nice-to-have precision upgrade
+/// on top of the heuristic, not a new way for the audit (or its cost quote) to fail.
+pub async fn exact_input_token_count(llm: &Llm, req: &LlmRequest, model: &str) -> Option<u64> {
+    match llm.count_tokens(req, model).await {
+        Ok(n) => Some(n),
+        Err(e) => {
+            eprintln!(
+                "[camerata-llm] exact count_tokens estimate unavailable, falling back to the \
+                 heuristic estimate: {e}"
+            );
+            None
         }
-        _ => serde_json::json!(req.prompt),
-    };
+    }
+}
+
+/// Build a [`BatchItem`] from a [`LlmRequest`] and a deterministic `custom_id`.
+/// The content block handles prompt caching the same way `complete_api` does (via
+/// [`cached_user_content`]): when `req.cache_breakpoints` is non-empty, the user content is
+/// split into cached segment blocks plus a final uncached suffix block. The system prompt
+/// is forwarded verbatim (the batch API accepts the same `system` field as the messages
+/// API).
+///
+/// Batch items always use the 1-hour cache TTL ([`CacheTtl::OneHour`]): Anthropic processes a
+/// batch over minutes to hours, so the 5-minute default would have expired before most items
+/// ran and every item would re-write the prefix it was meant to read. Real-time requests keep
+/// the 5-minute default (see [`CacheTtl::from_env`]).
+pub fn build_batch_item(custom_id: impl Into<String>, req: &LlmRequest, model: &str) -> BatchItem {
+    let content = cached_user_content(&req.prompt, &req.cache_breakpoints, true, CacheTtl::OneHour);
     BatchItem {
         custom_id: custom_id.into(),
         params: BatchItemParams {
@@ -1163,17 +1712,22 @@ pub struct BatchResultRow {
 impl Llm {
     /// Submit a batch of requests to the Anthropic Message Batches API. Returns the
     /// `batch_id` + initial counts, or an error if the submission failed. Requires the
-    /// `api` backend and a valid `ANTHROPIC_API_KEY`. The batch processes asynchronously;
+    /// `api` backend and a configured Anthropic API key. The batch processes asynchronously;
     /// poll with [`poll_batch_status`] and fetch results with [`fetch_batch_results`].
     ///
     /// CAP ENFORCEMENT: logs a warning when `items.len() > 100_000` (the API hard cap);
     /// the caller is responsible for splitting before calling this function. A 256MB POST
     /// body limit is not checked here (the average Camerata batch item is ~5-20KB, so
     /// 100k items is already the binding constraint in practice).
+    ///
+    /// RETRY: same policy as [`Self::complete_api`] — 429/529/5xx/network errors retry the
+    /// SAME submission (3 extra attempts, exponential backoff, `retry-after` honored);
+    /// 400/401/403 are terminal on the first attempt.
     pub async fn submit_batch(&self, items: Vec<BatchItem>) -> anyhow::Result<BatchSubmitResult> {
         let key = self.api_key.as_ref().ok_or_else(|| {
             anyhow::anyhow!(
-                "Message Batches API requires the `api` backend and ANTHROPIC_API_KEY to be set"
+                "Message Batches API requires the `api` backend and an Anthropic API key; {}",
+                crate::credentials::API_KEY_FIX_HINT
             )
         })?;
         if items.len() > 100_000 {
@@ -1185,48 +1739,57 @@ impl Llm {
             );
         }
         let body = serde_json::json!({ "requests": items });
-        let resp = reqwest::Client::new()
-            .post("https://api.anthropic.com/v1/messages/batches")
-            .header("x-api-key", key)
-            .header("anthropic-version", "2023-06-01")
-            .header("anthropic-beta", "message-batches-2024-09-24")
-            .header("content-type", "application/json")
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| anyhow::anyhow!("Message Batches submit failed: {e}"))?;
-        let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
+        // NOTE: no `anthropic-beta` header — `message-batches-2024-09-24` is GA now.
+        let make_request = || {
+            shared_http_client()
+                .post("https://api.anthropic.com/v1/messages/batches")
+                .header("x-api-key", key)
+                .header("anthropic-version", "2023-06-01")
+                .header("content-type", "application/json")
+                .json(&body)
+        };
+        let (status, text) = crate::retry::execute_with_retry(make_request).await?;
         if !status.is_success() {
             anyhow::bail!("Message Batches API HTTP {status}: {text}");
         }
-        let v: serde_json::Value =
-            serde_json::from_str(&text).map_err(|e| anyhow::anyhow!("parse batch response: {e}"))?;
+        let v: serde_json::Value = serde_json::from_str(&text)
+            .map_err(|e| anyhow::anyhow!("parse batch response: {e}"))?;
         let batch_id = v["id"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("batch response missing `id` field: {text}"))?
             .to_string();
         let counts = parse_request_counts(&v["request_counts"]);
-        Ok(BatchSubmitResult { batch_id, request_counts: counts })
+        Ok(BatchSubmitResult {
+            batch_id,
+            request_counts: counts,
+        })
     }
 
     /// Poll the status of a submitted batch. Returns the `processing_status` and current
     /// item counts. When `processing_status == "ended"` the batch is complete and results
     /// can be fetched with [`fetch_batch_results`].
+    ///
+    /// RETRY: a single poll retries transient failures the same way [`Self::complete_api`]
+    /// does. The CALLER (`ai_audit::run_passes_batch`'s poll loop) additionally tolerates
+    /// several consecutive fully-exhausted polls before giving up entirely, since an
+    /// hours-long batch must not die because of one bad polling window after the tokens
+    /// are already spent — see that function's `poll_batch_until_ended` helper.
     pub async fn poll_batch_status(&self, batch_id: &str) -> anyhow::Result<BatchStatus> {
         let key = self.api_key.as_ref().ok_or_else(|| {
-            anyhow::anyhow!("batch polling requires ANTHROPIC_API_KEY")
+            anyhow::anyhow!(
+                "batch polling requires an Anthropic API key; {}",
+                crate::credentials::API_KEY_FIX_HINT
+            )
         })?;
-        let resp = reqwest::Client::new()
-            .get(format!("https://api.anthropic.com/v1/messages/batches/{batch_id}"))
-            .header("x-api-key", key)
-            .header("anthropic-version", "2023-06-01")
-            .header("anthropic-beta", "message-batches-2024-09-24")
-            .send()
-            .await
-            .map_err(|e| anyhow::anyhow!("batch poll request failed: {e}"))?;
-        let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
+        let make_request = || {
+            shared_http_client()
+                .get(format!(
+                    "https://api.anthropic.com/v1/messages/batches/{batch_id}"
+                ))
+                .header("x-api-key", key)
+                .header("anthropic-version", "2023-06-01")
+        };
+        let (status, text) = crate::retry::execute_with_retry(make_request).await?;
         if !status.is_success() {
             anyhow::bail!("batch poll HTTP {status}: {text}");
         }
@@ -1237,7 +1800,10 @@ impl Llm {
             .unwrap_or("unknown")
             .to_string();
         let counts = parse_request_counts(&v["request_counts"]);
-        Ok(BatchStatus { processing_status, request_counts: counts })
+        Ok(BatchStatus {
+            processing_status,
+            request_counts: counts,
+        })
     }
 
     /// Stream the results of a completed batch from the Anthropic results URL. Each line
@@ -1246,25 +1812,26 @@ impl Llm {
     ///
     /// Results arrive UNORDERED — the caller must build a `custom_id -> response` map
     /// (see [`reassemble_batch_results`]) and not rely on line order.
-    pub async fn fetch_batch_results(
-        &self,
-        batch_id: &str,
-    ) -> anyhow::Result<Vec<BatchResultRow>> {
+    ///
+    /// RETRY: same policy as [`Self::complete_api`] — losing the results fetch after a
+    /// batch has already run to completion (tokens spent) would be a pure waste, so this
+    /// retries transient failures rather than surfacing immediately.
+    pub async fn fetch_batch_results(&self, batch_id: &str) -> anyhow::Result<Vec<BatchResultRow>> {
         let key = self.api_key.as_ref().ok_or_else(|| {
-            anyhow::anyhow!("batch result fetch requires ANTHROPIC_API_KEY")
+            anyhow::anyhow!(
+                "batch result fetch requires an Anthropic API key; {}",
+                crate::credentials::API_KEY_FIX_HINT
+            )
         })?;
-        let resp = reqwest::Client::new()
-            .get(format!(
-                "https://api.anthropic.com/v1/messages/batches/{batch_id}/results"
-            ))
-            .header("x-api-key", key)
-            .header("anthropic-version", "2023-06-01")
-            .header("anthropic-beta", "message-batches-2024-09-24")
-            .send()
-            .await
-            .map_err(|e| anyhow::anyhow!("batch results fetch failed: {e}"))?;
-        let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
+        let make_request = || {
+            shared_http_client()
+                .get(format!(
+                    "https://api.anthropic.com/v1/messages/batches/{batch_id}/results"
+                ))
+                .header("x-api-key", key)
+                .header("anthropic-version", "2023-06-01")
+        };
+        let (status, text) = crate::retry::execute_with_retry(make_request).await?;
         if !status.is_success() {
             anyhow::bail!("batch results HTTP {status}: {text}");
         }
@@ -1275,6 +1842,42 @@ impl Llm {
     /// the backend is viable before submitting). Returns `None` for the CLI backend.
     pub fn api_key(&self) -> Option<&str> {
         self.api_key.as_deref()
+    }
+
+    /// Call `POST /v1/messages/count_tokens` for an EXACT input-token count, without
+    /// running (or billing for) a completion. Free on Anthropic's side. Used to replace
+    /// the heuristic char-based pre-audit cost estimate with an exact one when a key is
+    /// available — see [`crate::llm::exact_input_token_count`] for the graceful
+    /// heuristic-fallback wrapper callers should actually use.
+    ///
+    /// Mirrors [`Self::complete_api`]'s request shape (system + one user message, same
+    /// `cache_breakpoints` splitting) so the token count reflects exactly what a real
+    /// completion call would send. Same retry policy as the rest of this API surface.
+    pub async fn count_tokens(&self, req: &LlmRequest, model: &str) -> anyhow::Result<u64> {
+        let key = self.api_key.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "count_tokens requires the `api` backend and an Anthropic API key; {}",
+                crate::credentials::API_KEY_FIX_HINT
+            )
+        })?;
+        let body = count_tokens_body(req, model);
+        let make_request = || {
+            shared_http_client()
+                .post("https://api.anthropic.com/v1/messages/count_tokens")
+                .header("x-api-key", key)
+                .header("anthropic-version", "2023-06-01")
+                .header("content-type", "application/json")
+                .json(&body)
+        };
+        let (status, text) = crate::retry::execute_with_retry(make_request).await?;
+        if !status.is_success() {
+            anyhow::bail!("count_tokens HTTP {status}: {text}");
+        }
+        let v: serde_json::Value = serde_json::from_str(&text)
+            .map_err(|e| anyhow::anyhow!("parse count_tokens JSON: {e}"))?;
+        v["input_tokens"]
+            .as_u64()
+            .ok_or_else(|| anyhow::anyhow!("count_tokens response missing `input_tokens`: {text}"))
     }
 }
 
@@ -1319,39 +1922,10 @@ pub fn parse_batch_results_jsonl(jsonl: &str) -> anyhow::Result<Vec<BatchResultR
         if result_type == "succeeded" {
             // The response mirrors the /v1/messages response shape.
             let msg = &v["result"]["message"];
-            let model_id = msg["model"].as_str().unwrap_or("").to_string();
-            let out = msg["content"]
-                .as_array()
-                .map(|blocks| {
-                    blocks
-                        .iter()
-                        .filter_map(|b| b["text"].as_str())
-                        .collect::<Vec<_>>()
-                        .join("")
-                })
-                .unwrap_or_default();
-            let (input_tokens, output_tokens, cache_read, cache_creation) =
-                usage_tokens(&msg["usage"]);
-            let cost_usd = compute_cost_usd(
-                &model_id,
-                input_tokens,
-                output_tokens,
-                cache_read,
-                cache_creation,
-            );
+            let model_id = msg["model"].as_str().unwrap_or("");
             rows.push(BatchResultRow {
                 custom_id,
-                response: Some(LlmResponse {
-                    text: out,
-                    model: model_id,
-                    backend: "api/batch".to_string(),
-                    cost_usd,
-                    input_tokens,
-                    output_tokens,
-                    cache_read_input_tokens: cache_read,
-                    cache_creation_input_tokens: cache_creation,
-                    or_cache_discount: None,
-                }),
+                response: Some(messages_response(msg, model_id, "api/batch")),
                 error: None,
             });
         } else {
@@ -1546,11 +2120,14 @@ impl OpenRouterCompleter {
             .registry
             .ensure_safe_providers_loaded(Some(&self.api_key), model)
             .await;
-        let provider_constraint =
-            crate::provider_policy::provider_constraint_for_request(&self.policy, &safe_providers, model)
-                .map_err(|reason| {
-                    anyhow::anyhow!("OpenRouter provider-safety check refused this request: {reason}")
-                })?;
+        let provider_constraint = crate::provider_policy::provider_constraint_for_request(
+            &self.policy,
+            &safe_providers,
+            model,
+        )
+        .map_err(|reason| {
+            anyhow::anyhow!("OpenRouter provider-safety check refused this request: {reason}")
+        })?;
 
         let body = build_openrouter_chat_body(model, req, &self.session_id, provider_constraint);
 
@@ -1608,6 +2185,11 @@ impl OpenRouterCompleter {
             }
         }
 
+        // OpenAI-compatible stop signal: `finish_reason == "length"` is the output cap.
+        let truncated = v["choices"]
+            .as_array()
+            .and_then(|choices| choices.first())
+            .is_some_and(|choice| choice["finish_reason"].as_str() == Some("length"));
         Ok(LlmResponse {
             text: output,
             model: model_returned,
@@ -1618,6 +2200,7 @@ impl OpenRouterCompleter {
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
             or_cache_discount,
+            truncated,
         })
     }
 }
@@ -1761,16 +2344,13 @@ pub fn build_completer(
 
     match provider.as_str() {
         "openrouter" => {
-            let key = creds
-                .get(crate::credentials::OPENROUTER_API_KEY)
-                .map_err(|e| anyhow::anyhow!("credential store error: {e}"))?
-                .filter(|k| !k.trim().is_empty())
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "model `{model_id}` is an OpenRouter model but OPENROUTER_API_KEY is not \
-                         set — add it via Settings → Credentials before using this model"
-                    )
-                })?;
+            let key = crate::credentials::openrouter_api_key(creds).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "model `{model_id}` is an OpenRouter model but no OpenRouter API key is \
+                     configured; add it in the app (Settings, Credentials) or set \
+                     OPENROUTER_API_KEY before using this model"
+                )
+            })?;
             Ok(std::sync::Arc::new(OpenRouterCompleter {
                 api_key: key,
                 limiter,
@@ -1812,8 +2392,10 @@ pub fn build_completer(
 pub fn is_retryable_for_chain(err_msg: &str) -> bool {
     let lower = err_msg.to_ascii_lowercase();
     // Never retry auth errors.
-    if lower.contains("401") || lower.contains("403")
-        || lower.contains("unauthorized") || lower.contains("forbidden")
+    if lower.contains("401")
+        || lower.contains("403")
+        || lower.contains("unauthorized")
+        || lower.contains("forbidden")
     {
         return false;
     }
@@ -1825,22 +2407,33 @@ pub fn is_retryable_for_chain(err_msg: &str) -> bool {
         return true;
     }
     // 5xx → retryable (provider down).
-    if lower.contains("500") || lower.contains("502") || lower.contains("503")
-        || lower.contains("504") || lower.contains("internal server error")
-        || lower.contains("bad gateway") || lower.contains("service unavailable")
+    if lower.contains("500")
+        || lower.contains("502")
+        || lower.contains("503")
+        || lower.contains("504")
+        || lower.contains("internal server error")
+        || lower.contains("bad gateway")
+        || lower.contains("service unavailable")
     {
         return true;
     }
     // Network / timeout → retryable.
-    if lower.contains("timeout") || lower.contains("timed out") || lower.contains("connection")
-        || lower.contains("network") || lower.contains("io error") || lower.contains("dns")
+    if lower.contains("timeout")
+        || lower.contains("timed out")
+        || lower.contains("connection")
+        || lower.contains("network")
+        || lower.contains("io error")
+        || lower.contains("dns")
     {
         return true;
     }
     // Capability 400s → retryable (a longer-context or tool-capable model may work).
-    if lower.contains("context_length_exceeded") || lower.contains("context length exceeded")
-        || lower.contains("too long") || lower.contains("maximum context")
-        || lower.contains("tool use not supported") || lower.contains("tools not supported")
+    if lower.contains("context_length_exceeded")
+        || lower.contains("context length exceeded")
+        || lower.contains("too long")
+        || lower.contains("maximum context")
+        || lower.contains("tool use not supported")
+        || lower.contains("tools not supported")
         || lower.contains("tool_use_not_supported")
     {
         return true;
@@ -1873,8 +2466,14 @@ pub async fn call_with_fallback(
     }
     let mut last_err = anyhow::anyhow!("call_with_fallback: no models tried");
     for model_id in chain {
-        let completer =
-            build_completer(model_id, registry, creds, llm.clone(), limiter.clone(), policy)?;
+        let completer = build_completer(
+            model_id,
+            registry,
+            creds,
+            llm.clone(),
+            limiter.clone(),
+            policy,
+        )?;
         let req = base_req.clone().with_model(model_id);
         match completer.complete(req).await {
             Ok(resp) => return Ok(resp),
@@ -1918,9 +2517,15 @@ mod tests {
     #[test]
     fn with_repo_read_binds_dir_and_default_is_none() {
         let req = LlmRequest::new("hi").with_repo_read("/tmp/repo");
-        assert_eq!(req.repo_read_dir.as_deref(), Some(std::path::Path::new("/tmp/repo")));
+        assert_eq!(
+            req.repo_read_dir.as_deref(),
+            Some(std::path::Path::new("/tmp/repo"))
+        );
         // Empty path is treated as None (no read window).
-        assert!(LlmRequest::new("hi").with_repo_read("").repo_read_dir.is_none());
+        assert!(LlmRequest::new("hi")
+            .with_repo_read("")
+            .repo_read_dir
+            .is_none());
         // Default request leaves the lockdown in place (repo_read_dir None).
         assert!(LlmRequest::new("hi").repo_read_dir.is_none());
     }
@@ -1936,18 +2541,65 @@ mod tests {
     }
 
     #[test]
-    fn backend_selection_rules() {
-        // Explicit api with a key -> api.
-        assert_eq!(select_backend(Some("api"), true), Backend::Api);
-        // Explicit api WITHOUT a key -> falls back to cli (never hard-fail silently).
-        assert_eq!(select_backend(Some("api"), false), Backend::Cli);
-        // Explicit cli -> cli regardless of key.
-        assert_eq!(select_backend(Some("cli"), true), Backend::Cli);
-        // No preference -> cli (the local-human default).
-        assert_eq!(select_backend(None, true), Backend::Cli);
-        assert_eq!(select_backend(None, false), Backend::Cli);
-        // Case / whitespace tolerant.
-        assert_eq!(select_backend(Some(" API "), true), Backend::Api);
+    fn resolve_backend_cli_is_always_quiet_regardless_of_key() {
+        // `Cli` never depends on key presence — it's the zero-setup subscription path.
+        assert_eq!(
+            resolve_backend(ProjectBackend::Cli, true),
+            BackendResolution::Cli
+        );
+        assert_eq!(
+            resolve_backend(ProjectBackend::Cli, false),
+            BackendResolution::Cli
+        );
+    }
+
+    #[test]
+    fn resolve_backend_api_with_key_resolves_api() {
+        assert_eq!(
+            resolve_backend(ProjectBackend::Api, true),
+            BackendResolution::Api
+        );
+    }
+
+    #[test]
+    fn resolve_backend_api_without_key_blocks_never_falls_back_to_cli() {
+        match resolve_backend(ProjectBackend::Api, false) {
+            BackendResolution::Blocked { message } => {
+                assert!(message.contains("Anthropic API"), "message: {message}");
+            }
+            other => panic!("expected Blocked, got {other:?}"),
+        }
+    }
+
+    #[test]
+    #[serial_test::serial(process_env)]
+    fn for_backend_carries_the_explicit_key_and_never_reads_env() {
+        let _env =
+            camerata_test_env::EnvGuard::set("ANTHROPIC_API_KEY", "sk-ant-env-must-not-leak");
+        let with_key = Llm::for_backend(Backend::Api, Some("sk-ant-explicit".to_string()));
+        assert_eq!(with_key.api_key(), Some("sk-ant-explicit"));
+        // No explicit key means no key: the constructor never falls back to env itself.
+        assert_eq!(Llm::for_backend(Backend::Api, None).api_key(), None);
+        // Blank is absent.
+        assert_eq!(
+            Llm::for_backend(Backend::Api, Some("  ".to_string())).api_key(),
+            None
+        );
+        assert_eq!(Llm::from_env().api_key(), None);
+    }
+
+    #[test]
+    #[serial_test::serial(process_env)]
+    fn for_backend_never_reads_camerata_llm_backend() {
+        // The old env-driven axis is gone: setting CAMERATA_LLM_BACKEND=api must NOT change
+        // the explicitly-requested backend on the built `Llm`.
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_LLM_BACKEND", "api");
+        let llm = Llm::for_backend(Backend::Cli, None);
+        assert_eq!(
+            llm.backend,
+            Backend::Cli,
+            "explicit Cli must win over any env var"
+        );
     }
 
     #[test]
@@ -1955,16 +2607,17 @@ mod tests {
         let llm = Llm {
             vendor: Vendor::Anthropic,
             backend: Backend::Cli,
-            default_model: "claude-sonnet-4-6".to_string(),
+            default_model: "claude-sonnet-5".to_string(),
             api_key: None,
             ledger: None,
+            sessions: None,
         };
         // Empty request model -> default.
-        assert_eq!(llm.model_for(&LlmRequest::new("hi")), "claude-sonnet-4-6");
+        assert_eq!(llm.model_for(&LlmRequest::new("hi")), "claude-sonnet-5");
         // Explicit model wins.
         assert_eq!(
-            llm.model_for(&LlmRequest::new("hi").with_model("claude-opus-4-8")),
-            "claude-opus-4-8"
+            llm.model_for(&LlmRequest::new("hi").with_model("claude-opus-5")),
+            "claude-opus-5"
         );
     }
 
@@ -1972,32 +2625,64 @@ mod tests {
     fn request_builder() {
         let r = LlmRequest::new("do it")
             .with_system("be terse")
-            .with_model("claude-opus-4-8")
+            .with_model("claude-opus-5")
             .with_max_tokens(100);
         assert_eq!(r.prompt, "do it");
         assert_eq!(r.system.as_deref(), Some("be terse"));
-        assert_eq!(r.model, "claude-opus-4-8");
+        assert_eq!(r.model, "claude-opus-5");
         assert_eq!(r.max_tokens, 100);
-        assert_eq!(r.cache_prefix_len, None, "caching off by default");
+        assert!(r.cache_breakpoints.is_empty(), "caching off by default");
     }
 
     #[test]
     fn cache_prefix_len_builder() {
-        // Normal case: prefix len < prompt len -> stored as-is (clamped to prompt len).
+        // Normal case: prefix len < prompt len -> stored as the single breakpoint.
         let r = LlmRequest::new("hello world").with_cache_prefix_len(5);
-        assert_eq!(r.cache_prefix_len, Some(5));
+        assert_eq!(r.cache_breakpoints, vec![5]);
 
-        // Oversized: clamped to the prompt length, not panicking.
+        // Oversized (>= prompt len): dropped entirely — a breakpoint at (or past) the end
+        // of the prompt would leave the trailing block empty, which the API rejects, so
+        // this must degenerate to "no caching" rather than silently rewriting the offset.
         let r2 = LlmRequest::new("hi").with_cache_prefix_len(999);
-        assert_eq!(r2.cache_prefix_len, Some(2), "clamped to prompt length");
+        assert!(
+            r2.cache_breakpoints.is_empty(),
+            "out-of-range breakpoint is dropped, not clamped"
+        );
 
         // Zero is a no-op: caching stays disabled.
         let r3 = LlmRequest::new("hi").with_cache_prefix_len(0);
-        assert_eq!(r3.cache_prefix_len, None, "zero prefix = no caching");
+        assert!(r3.cache_breakpoints.is_empty(), "zero prefix = no caching");
 
-        // Prefix == prompt length: stored as-is (whole prompt is the prefix, no suffix).
+        // Prefix == prompt length: also dropped (whole prompt as prefix leaves an empty
+        // suffix block) — same "no caching" degeneration as the oversized case.
         let r4 = LlmRequest::new("exact").with_cache_prefix_len(5);
-        assert_eq!(r4.cache_prefix_len, Some(5));
+        assert!(
+            r4.cache_breakpoints.is_empty(),
+            "prefix == prompt length is dropped, not stored"
+        );
+    }
+
+    #[test]
+    fn cache_breakpoints_builder_sorts_dedups_and_filters() {
+        // Unsorted, duplicate, and out-of-range (0 and >= len) inputs all get cleaned up.
+        let prompt = "0123456789"; // len 10
+        let r = LlmRequest::new(prompt).with_cache_breakpoints(vec![7, 3, 3, 0, 10, 999, 7]);
+        assert_eq!(
+            r.cache_breakpoints,
+            vec![3, 7],
+            "sorted, deduped, degenerate offsets dropped"
+        );
+
+        // Multi-byte UTF-8: a breakpoint landing mid-character snaps down to the previous
+        // char boundary rather than panicking on a non-boundary slice.
+        let multibyte = "café123"; // 'é' is 2 bytes, starting at byte 3
+                                   // Byte 4 is inside 'é' (bytes 3-4); snapping down lands on byte 3.
+        let r2 = LlmRequest::new(multibyte).with_cache_breakpoints(vec![4]);
+        assert_eq!(
+            r2.cache_breakpoints,
+            vec![3],
+            "mid-character offset snaps to the char boundary"
+        );
     }
 
     // `LlmResponse::cache_hit_ratio` tests moved to
@@ -2035,25 +2720,64 @@ mod tests {
 
     #[test]
     fn compute_cost_prices_cache_components_separately() {
-        // opus: price_in 15, price_out 75 ($/Mtok). input folds cache fields (base 100,
-        // read 200, creation 30 -> 330); fresh input is 100.
-        let cost = compute_cost_usd("claude-opus-4-8", Some(330), Some(50), 200, 30)
-            .expect("priced model");
-        // 100*15 (fresh) + 200*15*0.1 (read) + 30*15*1.25 (creation) + 50*75 (out) = 6112.5
-        let expected = (100.0 * 15.0 + 200.0 * 15.0 * 0.1 + 30.0 * 15.0 * 1.25 + 50.0 * 75.0)
-            / 1_000_000.0;
-        assert!((cost - expected).abs() < 1e-12, "cost={cost} expected={expected}");
+        // opus: price_in 5, price_out 25 ($/Mtok) — the registry's live Anthropic list price
+        // (see crate::model_registry::CLAUDE_REGISTRY_MODELS). input folds cache fields
+        // (base 100, read 200, creation 30 -> 330); fresh input is 100.
+        let cost =
+            compute_cost_usd("claude-opus-5", Some(330), Some(50), 200, 30).expect("priced model");
+        // 100*5 (fresh) + 200*5*0.1 (read) + 30*5*1.25 (creation) + 50*25 (out) = 1837.5
+        let expected =
+            (100.0 * 5.0 + 200.0 * 5.0 * 0.1 + 30.0 * 5.0 * 1.25 + 50.0 * 25.0) / 1_000_000.0;
+        assert!(
+            (cost - expected).abs() < 1e-12,
+            "cost={cost} expected={expected}"
+        );
         // The naive fold-everything-at-full-input rate would over-bill.
-        let naive = (330.0 * 15.0 + 50.0 * 75.0) / 1_000_000.0;
-        assert!(cost < naive, "cached reads must not be billed at full input rate");
+        let naive = (330.0 * 5.0 + 50.0 * 25.0) / 1_000_000.0;
+        assert!(
+            cost < naive,
+            "cached reads must not be billed at full input rate"
+        );
 
         // No cache tokens -> matches the plain input*price formula.
-        let plain = compute_cost_usd("claude-opus-4-8", Some(100), Some(50), 0, 0).unwrap();
-        assert!((plain - (100.0 * 15.0 + 50.0 * 75.0) / 1_000_000.0).abs() < 1e-12);
+        let plain = compute_cost_usd("claude-opus-5", Some(100), Some(50), 0, 0).unwrap();
+        assert!((plain - (100.0 * 5.0 + 50.0 * 25.0) / 1_000_000.0).abs() < 1e-12);
 
         // Unknown model or missing counts -> None.
         assert!(compute_cost_usd("nope", Some(1), Some(1), 0, 0).is_none());
-        assert!(compute_cost_usd("claude-opus-4-8", None, Some(1), 0, 0).is_none());
+        assert!(compute_cost_usd("claude-opus-5", None, Some(1), 0, 0).is_none());
+    }
+
+    // Regression for the stale-pricing bug: `price_for` (and everything built on it —
+    // `compute_cost_usd`, the usage ledger's cost fallback, and the legacy `/api/models`
+    // list) must agree EXACTLY with the live registry, never a second hand-maintained
+    // number. Locks Opus's price at the registry's $5/$25 rather than the old $15/$75.
+    #[test]
+    fn price_for_matches_the_live_model_registry_exactly() {
+        for reg in crate::model_registry::CLAUDE_REGISTRY_MODELS {
+            let (pin, pout) = price_for(reg.id).unwrap_or_else(|| {
+                panic!(
+                    "price_for must resolve every registry model id, missing {}",
+                    reg.id
+                )
+            });
+            assert_eq!(
+                pin, reg.price_in,
+                "{} price_in must match the registry",
+                reg.id
+            );
+            assert_eq!(
+                pout, reg.price_out,
+                "{} price_out must match the registry",
+                reg.id
+            );
+        }
+        let (opus_in, opus_out) = price_for("claude-opus-5").unwrap();
+        assert_eq!(
+            (opus_in, opus_out),
+            (5.0, 25.0),
+            "Opus must price at the current $5/$25, not the stale $15/$75"
+        );
     }
 
     #[test]
@@ -2063,18 +2787,25 @@ mod tests {
         assert_eq!(cli_result_text(&ok).unwrap(), "hello");
         // is_error:true -> Err even though a result string is present.
         let errored = serde_json::json!({"is_error": true, "subtype": "error_max_turns", "result": "partial"});
-        assert!(cli_result_text(&errored).is_err(), "is_error=true must fail");
+        assert!(
+            cli_result_text(&errored).is_err(),
+            "is_error=true must fail"
+        );
         // Absent result -> Err.
         let no_result = serde_json::json!({"is_error": false, "subtype": "success"});
-        assert!(cli_result_text(&no_result).is_err(), "missing result must fail");
+        assert!(
+            cli_result_text(&no_result).is_err(),
+            "missing result must fail"
+        );
     }
 
     #[test]
     fn models_list_has_known_ids() {
-        assert!(MODELS.iter().any(|m| m.id == "claude-opus-4-8"));
-        assert!(MODELS.iter().any(|m| m.id == DEFAULT_MODEL));
+        let list = models();
+        assert!(list.iter().any(|m| m.id == "claude-opus-5"));
+        assert!(list.iter().any(|m| m.id == DEFAULT_MODEL));
         // Every model is tagged with a vendor (the agent-agnostic axis).
-        assert!(MODELS.iter().all(|m| !m.vendor.is_empty()));
+        assert!(list.iter().all(|m| !m.vendor.is_empty()));
     }
 
     #[test]
@@ -2095,6 +2826,7 @@ mod tests {
             default_model: "gpt".to_string(),
             api_key: None,
             ledger: None,
+            sessions: None,
         };
         let err = llm.complete(LlmRequest::new("hi")).await.unwrap_err();
         assert!(err.to_string().contains("not wired yet"));
@@ -2107,11 +2839,11 @@ mod tests {
     #[test]
     fn build_batch_item_plain_prompt() {
         let req = LlmRequest::new("audit this code")
-            .with_model("claude-sonnet-4-6")
+            .with_model("claude-sonnet-5")
             .with_max_tokens(2048);
-        let item = build_batch_item("c0-b1", &req, "claude-sonnet-4-6");
+        let item = build_batch_item("c0-b1", &req, "claude-sonnet-5");
         assert_eq!(item.custom_id, "c0-b1");
-        assert_eq!(item.params.model, "claude-sonnet-4-6");
+        assert_eq!(item.params.model, "claude-sonnet-5");
         assert_eq!(item.params.max_tokens, 2048);
         assert!(item.params.system.is_none());
         // Plain string content when no cache prefix is set.
@@ -2127,8 +2859,8 @@ mod tests {
         let split = "static prefix part\n".len();
         let req = LlmRequest::new(prompt)
             .with_cache_prefix_len(split)
-            .with_model("claude-sonnet-4-6");
-        let item = build_batch_item("c2-b0", &req, "claude-sonnet-4-6");
+            .with_model("claude-sonnet-5");
+        let item = build_batch_item("c2-b0", &req, "claude-sonnet-5");
         let content = serde_json::to_value(&item.params.messages[0].content).unwrap();
         let arr = content.as_array().expect("cached content is an array");
         assert_eq!(arr.len(), 2);
@@ -2140,6 +2872,139 @@ mod tests {
         assert_eq!(arr[1]["type"], "text");
         assert_eq!(arr[1]["text"], "dynamic suffix");
         assert!(arr[1].get("cache_control").is_none());
+    }
+
+    /// TWO breakpoints (the Gap-3 fix): the audit prompt builder marks a boundary after the
+    /// shared repo map AND after the chunk digest — this produces THREE content blocks, with
+    /// `cache_control` on the first two (repo-map segment, digest segment) and none on the
+    /// final varying suffix (task line + rules). Mirrors the real shape
+    /// `ai_audit.rs::run_passes`/`run_passes_batch` build when `n_b > 1`.
+    #[test]
+    fn build_batch_item_with_two_cache_breakpoints() {
+        let repo_map_seg = "Repository: acme/widgets\n\nREPO MAP:\nfoo.rs: fn foo()\n";
+        let digest_seg = "(parallel 1/3)\n\nDIGEST:\nfn foo() { todo!() }\n\n";
+        let suffix = "── task line ──\n\nRULES";
+        let prompt = format!("{repo_map_seg}{digest_seg}{suffix}");
+        let bp1 = repo_map_seg.len();
+        let bp2 = repo_map_seg.len() + digest_seg.len();
+
+        let req = LlmRequest::new(&prompt)
+            .with_cache_breakpoints(vec![bp1, bp2])
+            .with_model("claude-sonnet-5");
+        let item = build_batch_item("c0-b0", &req, "claude-sonnet-5");
+        let content = serde_json::to_value(&item.params.messages[0].content).unwrap();
+        let arr = content.as_array().expect("cached content is an array");
+        assert_eq!(arr.len(), 3, "two breakpoints -> three blocks");
+
+        // Block 1: the repo map — cached (this is what lets it cache-hit ACROSS chunks).
+        assert_eq!(arr[0]["text"], repo_map_seg);
+        assert_eq!(arr[0]["cache_control"]["type"], "ephemeral");
+
+        // Block 2: the chunk digest — cached (re-reads across this chunk's rule-batches).
+        assert_eq!(arr[1]["text"], digest_seg);
+        assert_eq!(arr[1]["cache_control"]["type"], "ephemeral");
+
+        // Block 3: the varying task line + rules — never cached.
+        assert_eq!(arr[2]["text"], suffix);
+        assert!(arr[2].get("cache_control").is_none());
+    }
+
+    // ── Truncation signal: `stop_reason == "max_tokens"` ───────────────────────────────
+
+    fn message_with_stop(stop_reason: Option<&str>) -> serde_json::Value {
+        let mut v = serde_json::json!({
+            "model": "claude-sonnet-5",
+            "content": [{"type": "text", "text": "{\"findings\":[{\"path\":\"a.rs\""}],
+            "usage": {"input_tokens": 100, "output_tokens": 8192},
+        });
+        if let Some(s) = stop_reason {
+            v["stop_reason"] = serde_json::json!(s);
+        }
+        v
+    }
+
+    #[test]
+    fn a_max_tokens_stop_reason_marks_the_response_truncated() {
+        let r = messages_response(
+            &message_with_stop(Some("max_tokens")),
+            "claude-sonnet-5",
+            "api",
+        );
+        assert!(r.truncated);
+        assert_eq!(r.output_tokens, Some(8192));
+        assert_eq!(r.backend, "api");
+    }
+
+    #[test]
+    fn any_other_or_missing_stop_reason_is_not_truncated() {
+        for stop in [
+            Some("end_turn"),
+            Some("stop_sequence"),
+            Some("tool_use"),
+            None,
+        ] {
+            let r = messages_response(&message_with_stop(stop), "claude-sonnet-5", "api");
+            assert!(!r.truncated, "{stop:?}");
+        }
+    }
+
+    #[test]
+    fn a_truncated_batch_item_is_marked_truncated() {
+        let line = |stop: &str| {
+            format!(
+                r#"{{"custom_id":"c0-b0","result":{{"type":"succeeded","message":{{"model":"claude-sonnet-5","content":[{{"type":"text","text":"x"}}],"stop_reason":"{stop}","usage":{{"input_tokens":1,"output_tokens":2}}}}}}}}"#
+            )
+        };
+        let truncated = parse_batch_results_jsonl(&line("max_tokens")).unwrap();
+        assert!(truncated[0].response.as_ref().unwrap().truncated);
+        let complete = parse_batch_results_jsonl(&line("end_turn")).unwrap();
+        assert!(!complete[0].response.as_ref().unwrap().truncated);
+        assert_eq!(complete[0].response.as_ref().unwrap().backend, "api/batch");
+    }
+
+    /// Batch items are processed over minutes to hours, so the default 5-minute cache entry would
+    /// have expired before most items ran. Batch mode therefore always asks for the 1-hour TTL,
+    /// without the operator having to set `CAMERATA_ANTHROPIC_CACHE_TTL_1H`. (The real-time path
+    /// keeps its 5-minute default: its requests are minutes apart at most.) The builder reads no
+    /// environment, so this holds whatever the process env says.
+    #[test]
+    fn build_batch_item_caches_for_one_hour() {
+        let req = LlmRequest::new("static prefix\ndynamic suffix")
+            .with_cache_breakpoints(vec!["static prefix\n".len()])
+            .with_model("claude-sonnet-5");
+        let item = build_batch_item("c0-b0", &req, "claude-sonnet-5");
+        let content = serde_json::to_value(&item.params.messages[0].content).unwrap();
+        let arr = content.as_array().expect("cached content is an array");
+        assert_eq!(arr[0]["cache_control"]["type"], "ephemeral");
+        assert_eq!(arr[0]["cache_control"]["ttl"], "1h");
+        assert!(arr[1].get("cache_control").is_none());
+    }
+
+    /// The SAME repo-map segment, unmodified, appears byte-for-byte across two prompts
+    /// built for different chunk indices — this identity is exactly what lets the
+    /// repo-map cache breakpoint hit across chunks. (Regression guard for the old prefix
+    /// ordering, which embedded the chunk index BEFORE the repo map and so could never
+    /// produce two byte-identical prefixes.)
+    #[test]
+    fn repo_map_segment_is_byte_identical_across_chunks() {
+        let repo = "acme/widgets";
+        let repo_map = "REPO MAP:\nfoo.rs: fn foo()\nbar.rs: fn bar()\n";
+        let repo_map_prefix = format!("Repository: {repo}\n\n{repo_map}");
+
+        // Build the same segment for two different chunk indices — must be byte-identical.
+        let ci1_chunk_seg = format!("(parallel {}/{})\n\n{}\n\n", 1, 5, "digest for chunk 0");
+        let ci2_chunk_seg = format!("(parallel {}/{})\n\n{}\n\n", 2, 5, "digest for chunk 1");
+        let prompt1 = format!("{repo_map_prefix}{ci1_chunk_seg}task+rules A");
+        let prompt2 = format!("{repo_map_prefix}{ci2_chunk_seg}task+rules B");
+
+        assert_eq!(
+            &prompt1[..repo_map_prefix.len()],
+            &prompt2[..repo_map_prefix.len()],
+            "the repo-map segment must be byte-identical regardless of chunk index"
+        );
+        // And the chunk-specific segments genuinely differ (sanity check the test fixture
+        // isn't accidentally testing two identical prompts).
+        assert_ne!(ci1_chunk_seg, ci2_chunk_seg);
     }
 
     /// System prompt is forwarded onto `params.system` and present in the serialized item.
@@ -2159,21 +3024,28 @@ mod tests {
     /// malformed lines — the fundamental parse + reassemble contract.
     #[test]
     fn parse_batch_results_jsonl_succeeded_and_errored() {
-        let jsonl = r#"{"custom_id":"c0-b0","result":{"type":"succeeded","message":{"model":"claude-sonnet-4-6","content":[{"type":"text","text":"finding A"}],"usage":{"input_tokens":100,"output_tokens":50}}}}
+        let jsonl = r#"{"custom_id":"c0-b0","result":{"type":"succeeded","message":{"model":"claude-sonnet-5","content":[{"type":"text","text":"finding A"}],"usage":{"input_tokens":100,"output_tokens":50}}}}
 {"custom_id":"c1-b0","result":{"type":"errored","error":{"message":"token limit exceeded"}}}
-{"custom_id":"c0-b1","result":{"type":"succeeded","message":{"model":"claude-sonnet-4-6","content":[{"type":"text","text":"finding B"}],"usage":{"input_tokens":80,"output_tokens":40}}}}
+{"custom_id":"c0-b1","result":{"type":"succeeded","message":{"model":"claude-sonnet-5","content":[{"type":"text","text":"finding B"}],"usage":{"input_tokens":80,"output_tokens":40}}}}
 malformed line, not json
 "#;
         let rows = parse_batch_results_jsonl(jsonl).expect("parse should not fail");
         // 2 succeeded + 1 errored; the malformed line is skipped.
-        assert_eq!(rows.len(), 3, "3 valid rows (2 ok + 1 error), malformed skipped");
+        assert_eq!(
+            rows.len(),
+            3,
+            "3 valid rows (2 ok + 1 error), malformed skipped"
+        );
         let ok: Vec<_> = rows.iter().filter(|r| r.response.is_some()).collect();
         let err: Vec<_> = rows.iter().filter(|r| r.error.is_some()).collect();
         assert_eq!(ok.len(), 2, "two succeeded rows");
         assert_eq!(err.len(), 1, "one error row");
 
         // Spot-check a succeeded row.
-        let c0b0 = ok.iter().find(|r| r.custom_id == "c0-b0").expect("c0-b0 present");
+        let c0b0 = ok
+            .iter()
+            .find(|r| r.custom_id == "c0-b0")
+            .expect("c0-b0 present");
         let resp = c0b0.response.as_ref().unwrap();
         assert_eq!(resp.text, "finding A");
         assert_eq!(resp.backend, "api/batch");
@@ -2203,6 +3075,7 @@ malformed line, not json
                     cache_read_input_tokens: 0,
                     cache_creation_input_tokens: 0,
                     or_cache_discount: None,
+                    truncated: false,
                 }),
                 error: None,
             },
@@ -2223,6 +3096,7 @@ malformed line, not json
                     cache_read_input_tokens: 0,
                     cache_creation_input_tokens: 0,
                     or_cache_discount: None,
+                    truncated: false,
                 }),
                 error: None,
             },
@@ -2248,8 +3122,10 @@ malformed line, not json
     /// `build_batch_item` serialises correctly (no private fields, correct JSON shape).
     #[test]
     fn batch_item_serialises_to_expected_shape() {
-        let req = LlmRequest::new("hello").with_model("claude-sonnet-4-6").with_max_tokens(512);
-        let item = build_batch_item("c0-b0", &req, "claude-sonnet-4-6");
+        let req = LlmRequest::new("hello")
+            .with_model("claude-sonnet-5")
+            .with_max_tokens(512);
+        let item = build_batch_item("c0-b0", &req, "claude-sonnet-5");
         let v = serde_json::to_value(&item).unwrap();
         assert_eq!(v["custom_id"], "c0-b0");
         assert!(v["params"]["model"].is_string());
@@ -2324,9 +3200,10 @@ malformed line, not json
         std::sync::Arc::new(Llm {
             vendor: Vendor::Anthropic,
             backend: Backend::Cli,
-            default_model: "claude-sonnet-4-6".to_string(),
+            default_model: "claude-sonnet-5".to_string(),
             api_key: None,
             ledger: None,
+            sessions: None,
         })
     }
 
@@ -2346,8 +3223,14 @@ malformed line, not json
         let creds = crate::credentials::MemoryCredentialStore::new();
         let llm = make_llm();
 
-        let completer =
-            build_completer("unknown-model-xyz", &registry, &creds, llm, make_limiter(), &default_policy());
+        let completer = build_completer(
+            "unknown-model-xyz",
+            &registry,
+            &creds,
+            llm,
+            make_limiter(),
+            &default_policy(),
+        );
         // Should succeed (no error for an unknown model — safe fallback to Anthropic).
         assert!(
             completer.is_ok(),
@@ -2355,7 +3238,7 @@ malformed line, not json
         );
     }
 
-    /// For a claude-provider model (e.g. `claude-sonnet-4-6` in the static registry),
+    /// For a claude-provider model (e.g. `claude-sonnet-5` in the static registry),
     /// the factory returns the Anthropic Llm without touching the credential store.
     #[test]
     fn factory_returns_anthropic_for_claude_provider_model() {
@@ -2364,8 +3247,14 @@ malformed line, not json
         // Note: no OPENROUTER_API_KEY set, yet this must not error.
         let llm = make_llm();
 
-        let completer =
-            build_completer("claude-sonnet-4-6", &registry, &creds, llm, make_limiter(), &default_policy());
+        let completer = build_completer(
+            "claude-sonnet-5",
+            &registry,
+            &creds,
+            llm,
+            make_limiter(),
+            &default_policy(),
+        );
         assert!(
             completer.is_ok(),
             "claude-provider model must succeed even without an OpenRouter key"
@@ -2390,12 +3279,19 @@ malformed line, not json
             weight: 0,
             caching: false,
             vision: false,
+            price_known: true,
         }]);
         let creds = crate::credentials::MemoryCredentialStore::new();
         // No key set → error.
         let llm = make_llm();
-        let result =
-            build_completer("qwen/qwen3-235b:free", &registry, &creds, llm, make_limiter(), &default_policy());
+        let result = build_completer(
+            "qwen/qwen3-235b:free",
+            &registry,
+            &creds,
+            llm,
+            make_limiter(),
+            &default_policy(),
+        );
         assert!(result.is_err(), "factory must error when key is absent");
         // Extract the error without relying on `T: Debug` (Arc<dyn LlmPort> is not Debug).
         let msg = match result {
@@ -2426,6 +3322,7 @@ malformed line, not json
             weight: 0,
             caching: false,
             vision: false,
+            price_known: true,
         }]);
         let creds = crate::credentials::MemoryCredentialStore::new();
         creds
@@ -2476,7 +3373,10 @@ malformed line, not json
         assert_eq!(body["model"], "deepseek/deepseek-v4-pro");
         assert_eq!(body["session_id"], "sess-123");
         assert_eq!(body["provider"]["data_collection"], "deny");
-        assert_eq!(body["provider"]["only"], serde_json::json!(["deepinfra", "novita"]));
+        assert_eq!(
+            body["provider"]["only"],
+            serde_json::json!(["deepinfra", "novita"])
+        );
         // The messages array is present and unaffected by the constraint injection.
         assert!(body["messages"].as_array().unwrap().len() == 2);
     }
@@ -2538,10 +3438,13 @@ malformed line, not json
             !only.iter().any(|v| v == "deepseek"),
             "unsafe pinned provider must never be emitted in the request body: {only:?}"
         );
-        assert_eq!(only, &vec![
-            serde_json::Value::String("deepinfra".to_string()),
-            serde_json::Value::String("novita".to_string()),
-        ]);
+        assert_eq!(
+            only,
+            &vec![
+                serde_json::Value::String("deepinfra".to_string()),
+                serde_json::Value::String("novita".to_string()),
+            ]
+        );
     }
 
     /// FAIL-CLOSED at the body-builder call site: when the safe set is `Unknown`, the
@@ -2629,12 +3532,18 @@ malformed line, not json
     #[test]
     fn retryable_classification_selective_400() {
         // Capability 400s → retryable.
-        assert!(is_retryable_for_chain("context_length_exceeded: prompt too long"));
-        assert!(is_retryable_for_chain("tool use not supported on this model"));
+        assert!(is_retryable_for_chain(
+            "context_length_exceeded: prompt too long"
+        ));
+        assert!(is_retryable_for_chain(
+            "tool use not supported on this model"
+        ));
         assert!(is_retryable_for_chain("maximum context length exceeded"));
         // Generic 400 → fatal.
         assert!(!is_retryable_for_chain("HTTP 400: bad request"));
-        assert!(!is_retryable_for_chain("invalid parameter: model not found"));
+        assert!(!is_retryable_for_chain(
+            "invalid parameter: model not found"
+        ));
         assert!(!is_retryable_for_chain("400: malformed JSON"));
     }
 
@@ -2647,9 +3556,11 @@ malformed line, not json
     #[tokio::test]
     async fn fallback_advances_on_retryable_uses_first_success() {
         // Verify that 429 is retryable and the chain advances:
-        assert!(is_retryable_for_chain("HTTP 429: rate_limit exceeded for primary-model"));
+        assert!(is_retryable_for_chain(
+            "HTTP 429: rate_limit exceeded for primary-model"
+        ));
         // And the second model would be tried.
-        let chain = vec!["primary-model".to_string(), "fallback-model".to_string()];
+        let chain = ["primary-model".to_string(), "fallback-model".to_string()];
         assert_eq!(chain[0], "primary-model");
         assert_eq!(chain[1], "fallback-model");
     }
@@ -2658,6 +3569,683 @@ malformed line, not json
     fn call_with_fallback_empty_chain_errors() {
         // An empty chain is an immediate error — no model to try.
         let chain: Vec<String> = vec![];
-        assert!(chain.is_empty(), "empty chain should produce an error from call_with_fallback");
+        assert!(
+            chain.is_empty(),
+            "empty chain should produce an error from call_with_fallback"
+        );
+    }
+
+    // ── Silent-death-class fixes: CLI timeout, kill, and the not-found message ─────
+
+    #[test]
+    fn map_spawn_error_not_found_is_actionable() {
+        let e = std::io::Error::from(std::io::ErrorKind::NotFound);
+        let msg = map_spawn_error(e).to_string();
+        assert!(msg.contains("was not found on PATH"), "message: {msg}");
+        assert!(msg.contains("/opt/homebrew/bin"), "message: {msg}");
+        assert!(msg.contains("Backend to API"), "message: {msg}");
+    }
+
+    #[test]
+    fn map_spawn_error_other_kinds_keep_generic_message_verbatim() {
+        for kind in [
+            std::io::ErrorKind::PermissionDenied,
+            std::io::ErrorKind::Other,
+            std::io::ErrorKind::TimedOut,
+        ] {
+            let e = std::io::Error::from(kind);
+            let msg = map_spawn_error(e).to_string();
+            assert!(
+                msg.starts_with("failed to spawn `claude` CLI"),
+                "message: {msg}"
+            );
+            assert!(!msg.contains("was not found on PATH"), "message: {msg}");
+        }
+    }
+
+    #[test]
+    #[serial_test::serial(process_env)]
+    fn env_secs_falls_back_on_missing_invalid_or_zero() {
+        let var = "CAMERATA_TEST_ENV_SECS_FALLBACK";
+        let _unset = camerata_test_env::EnvGuard::remove(var);
+        assert_eq!(env_secs(var, 42), std::time::Duration::from_secs(42));
+        let _invalid = camerata_test_env::EnvGuard::set(var, "not-a-number");
+        assert_eq!(env_secs(var, 42), std::time::Duration::from_secs(42));
+        let _zero = camerata_test_env::EnvGuard::set(var, "0");
+        assert_eq!(env_secs(var, 42), std::time::Duration::from_secs(42));
+        let _valid = camerata_test_env::EnvGuard::set(var, "17");
+        assert_eq!(env_secs(var, 42), std::time::Duration::from_secs(17));
+    }
+
+    // ── `read_cli_stream` — THE single CLI reader, driven by a scripted process ──────
+    //
+    // The two `wait_with_timeout_*` tests that used to sit here were DELETED with the
+    // function they covered: `wait_with_timeout` was the non-streaming `.output()` timeout
+    // wrapper behind `complete_cli`, and both are gone now that there is one CLI path. Their
+    // coverage is not lost — it is re-asserted, more faithfully, below and by the two
+    // end-to-end `complete_cli_backend_*` tests: a wedged child still dies in bounded time
+    // with the same actionable message, and is still actually killed rather than leaked.
+    //
+    // These drive `read_cli_stream` against a SCRIPTED `/bin/sh` process rather than a live
+    // `claude`, so they are fast and deterministic.
+
+    /// Spawn `/bin/sh -c <script>` wired up exactly like the real `claude` child
+    /// (stdin null, stdout/stderr piped, kill_on_drop) so `read_cli_stream` sees the same
+    /// shape it sees in production.
+    fn spawn_scripted_cli(script: &str) -> tokio::process::Child {
+        tokio::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(script)
+            .kill_on_drop(true)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn the scripted stand-in for `claude`")
+    }
+
+    /// HALF 1, at the reader level — content keeps arriving, so the overall window keeps
+    /// being refreshed and the call is never killed for simply running long. The deltas must
+    /// also reach `on_delta`, and the final `result` event must win over the accumulated
+    /// delta text.
+    #[tokio::test]
+    async fn read_cli_stream_live_call_outlives_the_overall_window_and_streams_deltas() {
+        // 10 content deltas 100ms apart (~1s) under a 600ms overall window. The per-gap
+        // headroom (100ms vs 600ms) is deliberately 6x so a loaded CI box cannot stretch one
+        // gap past the window and make this flaky, while the TOTAL still clears the window.
+        let child = spawn_scripted_cli(
+            r#"i=0
+while [ $i -lt 10 ]; do
+  printf '%s\n' '{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"x"}}}'
+  sleep 0.1
+  i=$((i+1))
+done
+printf '%s\n' '{"type":"result","is_error":false,"result":"FINAL","usage":{"input_tokens":5,"output_tokens":2,"cache_read_input_tokens":3}}'
+"#,
+        );
+        let mut seen = String::new();
+        let started = std::time::Instant::now();
+        let resp = read_cli_stream(
+            child,
+            "m",
+            std::time::Duration::from_secs(30), // idle: never trips, content is flowing
+            std::time::Duration::from_millis(600), // overall: deliberately tiny
+            &mut |d| seen.push_str(d),
+        )
+        .await
+        .expect("a continuously-streaming call must never trip the overall window");
+        let elapsed = started.elapsed();
+
+        assert_eq!(seen, "xxxxxxxxxx", "every delta must reach on_delta");
+        assert_eq!(resp.text, "FINAL", "the result event wins over delta text");
+        assert_eq!(resp.input_tokens, Some(8), "5 base + 3 cache_read");
+        assert_eq!(resp.cache_read_input_tokens, 3);
+        assert!(
+            elapsed > std::time::Duration::from_millis(600),
+            "the test must actually outlast the overall window, took {elapsed:?}"
+        );
+    }
+
+    /// HALF 2, at the reader level — a totally silent child must be declared Silent, killed
+    /// (not leaked), and reported with the actionable message. This is the coverage the
+    /// deleted `wait_with_timeout_kills_child_and_returns_actionable_error` provided.
+    #[tokio::test]
+    async fn read_cli_stream_wedged_child_is_killed_and_reported_as_silent() {
+        let child = spawn_scripted_cli("exec sleep 30");
+        let pid = child.id().expect("child has a pid");
+
+        let err = read_cli_stream(
+            child,
+            "m",
+            std::time::Duration::from_secs(30), // idle wide, so SILENT is what fires
+            std::time::Duration::from_millis(200),
+            &mut |_| {},
+        )
+        .await
+        .expect_err("a silent child must time out");
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("timed out after 0s (no output)"),
+            "message: {msg}"
+        );
+        assert!(
+            msg.contains("stuck waiting for authentication or input"),
+            "message: {msg}"
+        );
+
+        // Confirm the process is actually gone — "do not leak it" is half the point.
+        let mut still_alive = true;
+        for _ in 0..20 {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            let status = std::process::Command::new("kill")
+                .arg("-0")
+                .arg(pid.to_string())
+                .status()
+                .expect("run `kill -0`");
+            if !status.success() {
+                still_alive = false;
+                break;
+            }
+        }
+        assert!(
+            !still_alive,
+            "child pid {pid} was not killed after the timeout"
+        );
+    }
+
+    /// A child that emits only NON-progress keepalive lines keeps the silence backstop
+    /// refreshed but must still trip the tighter idle/stall window — the outer window being
+    /// alive must never paper over a real generation stall.
+    #[tokio::test]
+    async fn read_cli_stream_keepalive_only_child_still_trips_the_idle_stall() {
+        let child = spawn_scripted_cli(
+            r#"i=0
+while [ $i -lt 30 ]; do
+  printf '%s\n' '{"type":"system","subtype":"keepalive"}'
+  sleep 0.05
+  i=$((i+1))
+done
+"#,
+        );
+        let err = read_cli_stream(
+            child,
+            "m",
+            std::time::Duration::from_millis(200), // idle: never reset, no real progress
+            std::time::Duration::from_secs(30),    // overall: kept alive by the keepalives
+            &mut |_| {},
+        )
+        .await
+        .expect_err("keepalives must not mask a generation stall");
+        let msg = err.to_string();
+        assert!(msg.contains("no model output for 0s"), "message: {msg}");
+        assert!(msg.contains("CAMERATA_LLM_IDLE_SECS"), "message: {msg}");
+    }
+
+    /// The in-band failure policy `complete_cli` enforced via `cli_result_text` must survive
+    /// the collapse: a CLI that exits 0 but reports `is_error:true` is a FAILURE, never a
+    /// successful completion — otherwise a backend error reads as a clean empty answer,
+    /// which is the silent-darkness class of bug this whole change exists to close.
+    #[tokio::test]
+    async fn read_cli_stream_rejects_an_in_band_is_error_result_even_on_exit_zero() {
+        let child = spawn_scripted_cli(
+            r#"printf '%s\n' '{"type":"result","is_error":true,"subtype":"error_max_turns","result":"partial"}'
+exit 0
+"#,
+        );
+        let err = read_cli_stream(
+            child,
+            "m",
+            std::time::Duration::from_secs(30),
+            std::time::Duration::from_secs(30),
+            &mut |_| {},
+        )
+        .await
+        .expect_err("is_error=true must never read as a successful completion");
+        let msg = err.to_string();
+        assert!(msg.contains("is_error=true"), "message: {msg}");
+        assert!(msg.contains("error_max_turns"), "message: {msg}");
+    }
+
+    /// The SALVAGE contract must survive the collapse too: a child killed mid-response after
+    /// streaming usable content returns that content rather than discarding the round.
+    /// `verify_findings`' `SalvagingFixCompleter` fake in `ai_audit.rs` models exactly this.
+    #[tokio::test]
+    async fn read_cli_stream_salvages_streamed_content_when_the_child_dies_non_zero() {
+        let child = spawn_scripted_cli(
+            r#"printf '%s\n' '{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"half an answer"}}}'
+exit 1
+"#,
+        );
+        let resp = read_cli_stream(
+            child,
+            "m",
+            std::time::Duration::from_secs(30),
+            std::time::Duration::from_secs(30),
+            &mut |_| {},
+        )
+        .await
+        .expect("a non-zero exit with usable streamed content must be salvaged");
+        assert_eq!(resp.text, "half an answer");
+    }
+
+    /// ...but a non-zero exit with NOTHING streamed is still a hard failure.
+    #[tokio::test]
+    async fn read_cli_stream_fails_when_a_non_zero_exit_left_nothing_to_salvage() {
+        let child = spawn_scripted_cli("echo 'boom' >&2; exit 3");
+        let err = read_cli_stream(
+            child,
+            "m",
+            std::time::Duration::from_secs(30),
+            std::time::Duration::from_secs(30),
+            &mut |_| {},
+        )
+        .await
+        .expect_err("nothing to salvage -> surface the failure");
+        let msg = err.to_string();
+        assert!(msg.contains("claude CLI (stream) exited"), "message: {msg}");
+        assert!(msg.contains("boom"), "message: {msg}");
+    }
+
+    // ── W6: heartbeat-based dual timeout (`check_heartbeat`) ────────────────────────────
+    //
+    // Pure-logic tests: no subprocess, no real sleeping — `now`/the two deadlines are plain
+    // `Instant` arithmetic, so these are deterministic and fast. This is the fake/mock
+    // "backend driver" double for the resilience fix: `check_heartbeat` is exactly the
+    // decision `complete_cli_streaming`'s loop makes on every line it reads, extracted so it
+    // is exercisable without a live `claude` CLI.
+
+    #[test]
+    fn heartbeat_a_slow_but_live_call_is_never_killed_even_past_the_old_flat_cap() {
+        let idle = std::time::Duration::from_secs(120);
+        let overall = std::time::Duration::from_secs(300);
+        let start = tokio::time::Instant::now();
+        let mut idle_deadline = start + idle;
+        let mut overall_deadline = start + overall;
+
+        // Simulate 6 chunks of REAL progress, 80s apart — 480s of total wall-clock, well past
+        // the old flat 300s cap — with every chunk resetting BOTH windows (real progress
+        // always resets `overall` too, since it is itself a line). Under the OLD behavior
+        // (a flat `overall_deadline` computed once) this call would have been killed at the
+        // 300s mark and mislabeled "(no output)" despite streaming the whole time.
+        let mut now = start;
+        for _ in 0..6 {
+            now += std::time::Duration::from_secs(80);
+            assert!(
+                check_heartbeat(now, idle_deadline, overall_deadline).is_none(),
+                "a call with continuous progress every 80s must never time out, even at {:?} \
+                 total elapsed",
+                now - start
+            );
+            idle_deadline = now + idle;
+            overall_deadline = now + overall;
+        }
+        assert!(
+            now - start > overall,
+            "the test must actually exceed the old flat cap"
+        );
+    }
+
+    #[test]
+    fn heartbeat_a_genuinely_silent_call_still_times_out_as_silent() {
+        let idle = std::time::Duration::from_secs(120);
+        let overall = std::time::Duration::from_secs(300);
+        let start = tokio::time::Instant::now();
+        let idle_deadline = start + idle;
+        let overall_deadline = start + overall;
+
+        // Nothing ever resets either deadline — genuine silence.
+        assert_eq!(
+            check_heartbeat(start, idle_deadline, overall_deadline),
+            None
+        );
+        let past_idle_only = start + idle + std::time::Duration::from_secs(1);
+        assert_eq!(
+            check_heartbeat(past_idle_only, idle_deadline, overall_deadline),
+            Some(HeartbeatTimeout::Stalled),
+            "past the idle window but not yet the overall window -> a stall, not silence"
+        );
+        let past_overall = start + overall + std::time::Duration::from_secs(1);
+        assert_eq!(
+            check_heartbeat(past_overall, idle_deadline, overall_deadline),
+            Some(HeartbeatTimeout::Silent),
+            "past BOTH windows with zero activity the whole time -> genuinely silent"
+        );
+    }
+
+    #[test]
+    fn heartbeat_keepalive_only_lines_reset_overall_but_not_idle() {
+        // A process that emits non-progress status/keepalive lines (resetting `overall`, per
+        // the "ANY line" rule) but never real content (never resetting `idle`) still
+        // correctly times out as a STALL once the idle window elapses — the outer window
+        // being alive doesn't paper over a real generation stall.
+        let idle = std::time::Duration::from_secs(120);
+        let overall = std::time::Duration::from_secs(300);
+        let start = tokio::time::Instant::now();
+        let idle_deadline = start + idle; // never reset in this scenario
+        let mut overall_deadline = start + overall;
+
+        // Two keepalive lines, 60s apart, each resetting overall only.
+        let t1 = start + std::time::Duration::from_secs(60);
+        assert!(check_heartbeat(t1, idle_deadline, overall_deadline).is_none());
+        overall_deadline = t1 + overall;
+        let t2 = t1 + std::time::Duration::from_secs(60); // 120s elapsed total -> idle window hit
+        assert_eq!(
+            check_heartbeat(t2, idle_deadline, overall_deadline),
+            Some(HeartbeatTimeout::Stalled),
+            "idle (real progress) must still fire even while overall keeps getting refreshed \
+             by non-progress activity"
+        );
+    }
+
+    #[test]
+    fn heartbeat_timeout_error_messages_are_actionable_and_distinct() {
+        let idle = std::time::Duration::from_secs(120);
+        let overall = std::time::Duration::from_secs(300);
+        let silent = heartbeat_timeout_error(HeartbeatTimeout::Silent, idle, overall).to_string();
+        assert!(
+            silent.contains("timed out after 300s (no output)"),
+            "message: {silent}"
+        );
+        assert!(
+            silent.contains("stuck waiting for authentication or input"),
+            "message: {silent}"
+        );
+
+        let stalled = heartbeat_timeout_error(HeartbeatTimeout::Stalled, idle, overall).to_string();
+        assert!(
+            stalled.contains("no model output for 120s"),
+            "message: {stalled}"
+        );
+        assert!(
+            stalled.contains("CAMERATA_LLM_IDLE_SECS"),
+            "message: {stalled}"
+        );
+    }
+
+    // ── `Llm::complete()`'s CLI arm must use the heartbeat timeout, not a flat cap ──────
+    //
+    // END-TO-END regression guards for the half of the bug W6 left unfixed. W6 replaced the
+    // flat overall deadline in `complete_cli_streaming`, but `Llm::complete()`'s
+    // `Backend::Cli` arm ran a SEPARATE non-streaming implementation that still used one
+    // flat `cli_overall_timeout()` window from spawn to exit. The AI/semantic audit pass
+    // calls `complete`, not `complete_streaming`, so it kept getting killed mid-work and
+    // mislabeled "(no output)": a real scan recorded 120 rules, every one of them carrying
+    // that message, while the `claude` CLI was demonstrably healthy and authenticated.
+    //
+    // These drive the REAL dispatch (`Llm::complete`) against a FAKE `claude` on PATH, so
+    // they are fast, deterministic, and need no live CLI or network. Both halves are
+    // asserted: a long-but-LIVE call must now survive past the overall window, and a
+    // genuinely WEDGED (silent) process must still be killed within a bounded time.
+
+    /// A scratch dir holding an executable named `claude`, removed on drop. Prepending this
+    /// dir to `PATH` makes `tokio::process::Command::new("claude")` resolve to the fake.
+    struct FakeClaude {
+        dir: std::path::PathBuf,
+    }
+
+    impl FakeClaude {
+        /// Write `script` (a `/bin/sh` program, shebang included) as an executable `claude`.
+        fn new(tag: &str, script: &str) -> Self {
+            use std::io::Write;
+            use std::os::unix::fs::PermissionsExt;
+            let dir = std::env::temp_dir().join(format!(
+                "camerata-llm-fake-claude-{}-{tag}",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).expect("create fake-claude dir");
+            let bin = dir.join("claude");
+            let mut f = std::fs::File::create(&bin).expect("create fake claude");
+            f.write_all(script.as_bytes()).expect("write fake claude");
+            drop(f);
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755))
+                .expect("chmod fake claude");
+            Self { dir }
+        }
+    }
+
+    impl Drop for FakeClaude {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    /// Prepend `dir` to `PATH` and pin `CAMERATA_CLI_TIMEOUT_SECS`; both are restored when
+    /// the returned guards drop. The two end-to-end tests below that use it hold the guards
+    /// across the `complete()` await (the env must stay patched for the whole call), and carry
+    /// the shared `#[serial_test::serial(process_env)]` key, which serializes them against
+    /// every other env-mutating test in this binary.
+    fn fake_cli_env(
+        dir: &std::path::Path,
+        overall_secs: u64,
+    ) -> (camerata_test_env::EnvGuard, camerata_test_env::EnvGuard) {
+        let joined = match std::env::var("PATH") {
+            Ok(p) => format!("{}:{p}", dir.display()),
+            Err(_) => dir.display().to_string(),
+        };
+        (
+            camerata_test_env::EnvGuard::set("PATH", joined),
+            camerata_test_env::EnvGuard::set("CAMERATA_CLI_TIMEOUT_SECS", overall_secs.to_string()),
+        )
+    }
+
+    /// An `Llm` pinned to Anthropic + the CLI backend, independent of any ambient env.
+    fn cli_llm() -> Llm {
+        Llm {
+            vendor: Vendor::Anthropic,
+            backend: Backend::Cli,
+            default_model: "claude-haiku-4-5".to_string(),
+            api_key: None,
+            ledger: None,
+            sessions: None,
+        }
+    }
+
+    /// The spawn is tagged with the session id Camerata chose, so the Claude Code session file
+    /// it creates can be found and deleted later (docs/design/2026-10-24_delete-and-refetch-
+    /// client-source.md, 5.1).
+    #[test]
+    fn cli_command_is_tagged_with_the_given_session_id() {
+        let req = LlmRequest::new("hello");
+        let cmd = build_cli_command(
+            &req,
+            "claude-haiku-4-5",
+            "11111111-2222-4333-8444-555555555555",
+        );
+        let args: Vec<String> = cmd
+            .as_std()
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        let at = args
+            .iter()
+            .position(|a| a == "--session-id")
+            .expect("--session-id is on the command line");
+        assert_eq!(args[at + 1], "11111111-2222-4333-8444-555555555555");
+        // The prompt rides in the same command, so the id really does name its session.
+        assert!(args.iter().any(|a| a == "hello"));
+    }
+
+    /// The Cli (subscription) backend must never inherit the Anthropic API key: a `.env` key in
+    /// the parent would otherwise silently make `claude -p` bill the API.
+    #[test]
+    fn cli_command_removes_the_inherited_anthropic_key_from_the_child_env() {
+        let cmd = build_cli_command(&LlmRequest::new("hi"), "claude-haiku-4-5", "sid");
+        let removed = cmd
+            .as_std()
+            .get_envs()
+            .any(|(k, v)| k == "ANTHROPIC_API_KEY" && v.is_none());
+        assert!(
+            removed,
+            "the child env must explicitly remove ANTHROPIC_API_KEY"
+        );
+    }
+
+    /// The id the sink records is the id the child process actually received, the cwd is
+    /// recorded, and a request without a repo-read dir records the process cwd.
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn sink_records_the_session_id_the_child_received() {
+        let fake = FakeClaude::new(
+            "sink-ok",
+            r#"#!/bin/sh
+printf '%s\n' "$@" > "$(dirname "$0")/args.txt"
+printf '%s\n' '{"type":"result","is_error":false,"result":"OK","total_cost_usd":0.01,"usage":{"input_tokens":1,"output_tokens":1}}'
+"#,
+        );
+        let _env = fake_cli_env(&fake.dir, 5);
+        let sink = SessionSink::new();
+        let llm = cli_llm().with_session_sink(sink.clone());
+
+        llm.complete(LlmRequest::new("a prompt carrying client source"))
+            .await
+            .expect("fake claude answers");
+
+        let recorded = sink.snapshot();
+        assert_eq!(recorded.len(), 1, "one spawn, one recorded session");
+        let args = std::fs::read_to_string(fake.dir.join("args.txt")).expect("fake saw args");
+        let lines: Vec<&str> = args.lines().collect();
+        let at = lines
+            .iter()
+            .position(|a| *a == "--session-id")
+            .expect("child got --session-id");
+        assert_eq!(lines[at + 1], recorded[0].session_id);
+        assert_eq!(
+            recorded[0].cwd,
+            std::env::current_dir().expect("cwd").to_string_lossy()
+        );
+        assert!(!recorded[0].created_at.is_empty());
+    }
+
+    /// A call that fails still wrote (part of) a session file, so it is still recorded.
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn sink_records_a_session_even_when_the_call_fails() {
+        let fake = FakeClaude::new(
+            "sink-fail",
+            r#"#!/bin/sh
+printf '%s\n' '{"type":"result","is_error":true,"result":"boom"}'
+exit 1
+"#,
+        );
+        let _env = fake_cli_env(&fake.dir, 5);
+        let sink = SessionSink::new();
+        let llm = cli_llm().with_session_sink(sink.clone());
+
+        let result = llm.complete(LlmRequest::new("prompt")).await;
+
+        assert!(result.is_err(), "the fake reports an error");
+        assert_eq!(
+            sink.snapshot().len(),
+            1,
+            "the failed spawn is still recorded"
+        );
+    }
+
+    /// Repo-read calls run with the repo as cwd, and the record says so (the Claude Code folder
+    /// that holds the session file is derived from the cwd).
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn sink_records_the_repo_read_dir_as_cwd() {
+        let fake = FakeClaude::new(
+            "sink-repo",
+            r#"#!/bin/sh
+printf '%s\n' '{"type":"result","is_error":false,"result":"OK","total_cost_usd":0.01,"usage":{"input_tokens":1,"output_tokens":1}}'
+"#,
+        );
+        let _env = fake_cli_env(&fake.dir, 5);
+        let repo = std::env::temp_dir().join(format!("camerata-llm-repo-{}", std::process::id()));
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        let sink = SessionSink::new();
+        let llm = cli_llm().with_session_sink(sink.clone());
+
+        llm.complete(LlmRequest::new("p").with_repo_read(repo.clone()))
+            .await
+            .expect("fake claude answers");
+
+        assert_eq!(sink.snapshot()[0].cwd, repo.to_string_lossy());
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    /// The Api backend never starts a Claude Code session, so nothing is recorded there.
+    #[tokio::test]
+    async fn api_backend_records_no_sessions() {
+        let sink = SessionSink::new();
+        let llm = Llm {
+            vendor: Vendor::Anthropic,
+            backend: Backend::Api,
+            default_model: "claude-haiku-4-5".to_string(),
+            api_key: None,
+            ledger: None,
+            sessions: None,
+        }
+        .with_session_sink(sink.clone());
+        // No key: the call fails before any network, and must not have recorded a session.
+        let _ = llm.complete(LlmRequest::new("p")).await;
+        assert!(sink.snapshot().is_empty());
+    }
+
+    /// HALF 1 — a long-but-LIVE call must survive past the overall window.
+    ///
+    /// The fake streams a real content delta every 150ms for ~2.1s while the overall window
+    /// is pinned to 1s (so each gap has ~6x headroom against a loaded box, but the TOTAL
+    /// comfortably clears the window). Before this fix `complete()` ran `complete_cli`, which waited on
+    /// `.output()` under ONE flat 1s deadline and therefore killed this demonstrably-alive
+    /// process and reported "timed out after 1s (no output)" — the exact false message the
+    /// 120-rule scan recorded. After the fix, every streamed line refreshes the silence
+    /// backstop, so the call completes and returns its text.
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn complete_cli_backend_survives_a_live_call_that_outlasts_the_overall_window() {
+        let fake = FakeClaude::new(
+            "live",
+            r#"#!/bin/sh
+i=0
+while [ $i -lt 14 ]; do
+  printf '%s\n' '{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"tok "}}}'
+  sleep 0.15
+  i=$((i+1))
+done
+printf '%s\n' '{"type":"result","is_error":false,"result":"LIVE-DONE","total_cost_usd":0.25,"usage":{"input_tokens":11,"output_tokens":7}}'
+"#,
+        );
+        let _env = fake_cli_env(&fake.dir, 1);
+
+        let started = std::time::Instant::now();
+        let resp = cli_llm()
+            .complete(LlmRequest::new("a legitimately long audit pass"))
+            .await;
+        let elapsed = started.elapsed();
+
+        let resp = resp.expect(
+            "a call that keeps streaming content must NOT be killed for outlasting the \
+             overall window",
+        );
+        assert_eq!(resp.text, "LIVE-DONE");
+        assert_eq!(resp.backend, "cli");
+        assert!(
+            elapsed > std::time::Duration::from_secs(1),
+            "the test must actually outlast the 1s overall window, took {elapsed:?}"
+        );
+        // Usage/cost accounting must survive the change too — the ledger chokepoint and the
+        // cockpit meter read these off every completion.
+        assert_eq!(resp.cost_usd, Some(0.25));
+        assert_eq!(resp.input_tokens, Some(11));
+        assert_eq!(resp.output_tokens, Some(7));
+    }
+
+    /// HALF 2 — a genuinely WEDGED (totally silent) call must still die in bounded time.
+    ///
+    /// This is the safety net the owner explicitly refused to trade away: the fix must not
+    /// amount to "remove/raise the timeout". The fake produces nothing at all and would run
+    /// for 30s; with the overall window at 1s the call must fail fast with the actionable
+    /// "(no output)" message, and the subprocess must actually be killed, not leaked.
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn complete_cli_backend_still_kills_a_genuinely_wedged_process() {
+        let fake = FakeClaude::new("wedged", "#!/bin/sh\nexec sleep 30\n");
+        let _env = fake_cli_env(&fake.dir, 1);
+
+        let started = std::time::Instant::now();
+        let err = cli_llm()
+            .complete(LlmRequest::new("this one wedges"))
+            .await
+            .expect_err("a silent process must still time out");
+        let elapsed = started.elapsed();
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("timed out after 1s (no output)"),
+            "message: {msg}"
+        );
+        assert!(
+            msg.contains("stuck waiting for authentication or input"),
+            "message: {msg}"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(15),
+            "the wedged call must die in BOUNDED time, took {elapsed:?}"
+        );
     }
 }

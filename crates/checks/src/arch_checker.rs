@@ -46,10 +46,52 @@ pub const SEVERITY_MEDIUM: &str = "medium";
 /// no-RLS table in a schema PostgREST does not serve — see `rls_checker`).
 pub const SEVERITY_INFO: &str = "info";
 
+/// How a violation is to be read. A deterministic fact is not always a defect: "anyone can read
+/// this collection" is a true statement about a rules file with a legitimate reading (public
+/// content), and "this rules file could not be parsed" is not a statement about the code at all.
+/// The grade lets a checker state the fact and have the pipeline hold it for review, or report
+/// that it did not assess, instead of asserting a defect it cannot prove.
+///
+/// Every checker that existed before the grade was added emits [`ViolationGrade::Defect`], so its
+/// behaviour is unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ViolationGrade {
+    /// An objective fault, asserted as a defect (the only grade a checker had before this seam).
+    Defect,
+    /// A true fact with a legitimate reading, held for review rather than asserted: the report
+    /// routes it to the held bucket exactly as a calibration-doubt row, and the write-time gate
+    /// never bounces an agent on it.
+    Review,
+    /// The checker could not assess this input (an unreadable rules file, rules that live only in
+    /// the console). Reported as "not assessed"; never a defect, never a clean credit, never a
+    /// bounce.
+    NotAssessed,
+}
+
+impl ViolationGrade {
+    /// Whether this grade counts toward a rule's emitted-finding total (a defect or a held
+    /// review row; a not-assessed row is neither a finding nor a clean result).
+    pub fn counts_as_finding(self) -> bool {
+        !matches!(self, ViolationGrade::NotAssessed)
+    }
+
+    /// Stable lowercase tag for machine output.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ViolationGrade::Defect => "defect",
+            ViolationGrade::Review => "review",
+            ViolationGrade::NotAssessed => "not_assessed",
+        }
+    }
+}
+
 /// One violation found by a deterministic architectural checker. Carries enough to build a
 /// `Finding` on the server side without the adapter having to re-derive anything.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArchViolation {
+    /// How this violation is read: an asserted defect, a fact held for review, or a
+    /// not-assessed notice. Every pre-existing checker emits [`ViolationGrade::Defect`].
+    pub grade: ViolationGrade,
     /// The rule id this violation answers (e.g. `SUPABASE-RLS-ENABLED-1`). Must be one of
     /// the emitting checker's own [`ArchChecker::rule_ids`].
     pub rule_id: String,
@@ -83,6 +125,15 @@ pub trait ArchChecker: Send + Sync {
     /// means skip, never a false "✓ clean" — see [`checker_applies`].
     fn interest_globs(&self) -> &'static [&'static str];
 
+    /// Repo-relative paths this checker needs beyond its static [`Self::interest_globs`],
+    /// decided from the files the globs already collected (a rules file the project config
+    /// names under any name). A worktree loader reads them after the glob walk, so a checker can
+    /// keep its globs narrow without going blind to a renamed file. The default asks for none.
+    fn extra_interest_paths(&self, files: &[(String, String)]) -> Vec<String> {
+        let _ = files;
+        Vec::new()
+    }
+
     /// Build the model from the supplied files and answer every rule this checker owns.
     /// Must never panic — a malformed / adversarial input file should degrade to fewer (or
     /// zero) violations, never a crash that takes the whole scan down with it.
@@ -105,6 +156,25 @@ pub trait ArchChecker: Send + Sync {
     /// checker-owned models" philosophy carried over to this smaller decision.
     fn advisory_coexisting(&self) -> bool {
         false
+    }
+
+    /// Whether a `Defect`-graded finding of this checker is to be read as needs-review by a CI
+    /// consumer (`camerata-check`). The default follows [`Self::advisory_coexisting`]: a checker
+    /// whose findings are advisory by the rule's own design is needs-review in CI. A checker can
+    /// keep its rule ids in the advisory prompt (for the judgment half of a rule) while its
+    /// `Defect` findings are still deterministic facts CI must fail on: it returns `false` here.
+    fn defects_need_review(&self) -> bool {
+        self.advisory_coexisting()
+    }
+
+    /// Whether the Layer-2 write-time gate ([`crate::arch_check_runner::NativeArchCheckRunner`])
+    /// may run this checker against an agent's worktree. The default is `true`. A checker that
+    /// returns `false` is a SCAN and CI rule only: a violation there would bounce work that is
+    /// legitimately unfinished or that ends in scaffolding, and a bounce teaches an agent to
+    /// silence the rule rather than satisfy it. The scan ([`all_checkers`] via the server's
+    /// architectural tier) and the standalone CI binary ignore this flag.
+    fn runs_at_write_time(&self) -> bool {
+        true
     }
 
     /// D3 (config-aware degradation, `docs/design/2026-07-27_ast-extractor-layer.md` §0):
@@ -230,12 +300,25 @@ pub fn all_checkers() -> Vec<Box<dyn ArchChecker>> {
     vec![
         Box::new(crate::supabase::rls_checker::SupabaseRlsChecker),
         Box::new(crate::supabase::search_path_checker::SupabaseFnSearchPathChecker),
+        Box::new(crate::supabase::dynamic_sql_exec_checker::DynamicSqlExecInjectionChecker),
+        Box::new(crate::supabase::privileged_no_authz_checker::PrivilegedFunctionNoAuthzChecker),
+        Box::new(crate::supabase::cross_tenant_definer_read_checker::CrossTenantDefinerReadChecker),
         Box::new(crate::python_testing::PythonTestFileNamingChecker),
         Box::new(crate::ui_dates::UtcDatesChecker),
         Box::new(crate::handler_no_db_checker::HandlerNoDbChecker),
         Box::new(crate::import_boundary_checker::ImportBoundaryChecker),
         Box::new(crate::strict_layering_call_checker::StrictLayeringCallChecker),
         Box::new(crate::resource_lifecycle_checker::ResourceLifecycleChecker),
+        Box::new(crate::weak_randomness_checker::WeakTokenRandomnessChecker),
+        Box::new(crate::query_grammar_injection_checker::QueryGrammarInjectionChecker),
+        Box::new(crate::one_import_path_checker::OneImportPathChecker),
+        Box::new(crate::shared_constant_checker::SharedConstantChecker),
+        Box::new(crate::dead_code_checker::DeadCodeChecker),
+        Box::new(crate::react_hooks_lint_checker::ReactHooksLintChecker),
+        Box::new(crate::firebase::FirebaseRulesChecker::default()),
+        Box::new(crate::firebase::FirebaseFunctionsChecker),
+        Box::new(crate::firebase::FirebaseAdminSdkClientChecker),
+        Box::new(crate::firebase::FirebaseRulesTestsChecker),
     ]
 }
 
@@ -277,6 +360,59 @@ pub fn checker_rule_ids_for_repo(repo: &RepoView<'_>) -> std::collections::HashS
         .collect()
 }
 
+/// Whether ANY registered checker in [`all_checkers`] answers `rule_id` at all — i.e. the
+/// corpus id has a REAL implementation somewhere in this registry, independent of whether
+/// that implementation currently produces a credited deterministic verdict for any
+/// particular repo. Deliberately ignores both [`ArchChecker::advisory_coexisting`] and
+/// [`ArchChecker::config_unsatisfied_for`]: this answers "does a checker exist for this id at
+/// all" (a build-time, repo-independent fact), not "did it run for this repo this scan".
+///
+/// This is the fact the scan-time ledger (`onboard::audit_repos`, `scan_ledger::ScanLedger::
+/// note_config_gated_rule`) needs to tell apart two very differently-shaped "no credited
+/// channel" outcomes for a CI-tier rule: a genuine phantom (no checker was ever written for
+/// this id — the W4 "no wired detector" case) versus a rule a real checker DOES answer, that
+/// simply didn't produce a credited verdict for THIS repo (missing `.camerata/
+/// architecture.toml`, for a config-gated checker). The latter deserves an honest
+/// "config-gated, reviewed semantically instead" disclosure; the former does not — there is
+/// nothing to disclose beyond "this rule has no detector yet," which the semantic pass
+/// already covers silently (W4).
+pub fn any_registered_checker_answers(rule_id: &str) -> bool {
+    all_checkers()
+        .iter()
+        .any(|c| c.rule_ids().contains(&rule_id))
+}
+
+/// The LEDGER-CREDIT sibling of [`checker_rule_ids_for_repo`]: the set of rule ids a
+/// registered checker answers deterministically FOR THIS SPECIFIC `repo`, for the purpose of
+/// "did a real detector run and produce a trustworthy verdict here" — NOT "should this id be
+/// subtracted from the LLM-advisory prompt" (that is what `checker_rule_ids_for_repo` answers,
+/// and the two questions diverge for exactly one case today).
+///
+/// The divergence: a checker that opts into [`ArchChecker::advisory_coexisting`] (today only
+/// `ResourceLifecycleChecker` / `ARCH-RESOURCE-LIFECYCLE-1`) is excluded from
+/// `checker_rule_ids_for_repo` ON PURPOSE, so its rule id stays eligible for an independent
+/// model read even though a native checker also runs over it (D3). But the checker's own run
+/// is still completely real and deterministic — it is NOT config-gated, it runs unconditionally
+/// whenever armed and applicable, and its findings are genuine. A caller asking "did a
+/// detector run for this repo" (the scan-time ledger's `detector_channel` classification,
+/// `mechanical_gate::detector_channel`'s channel 1) must credit that real run; reusing the
+/// LLM-prompt-subtraction set there was an accounting bug — it made a checker that
+/// unconditionally executes and found real violations misclassify as "no wired detector"
+/// whenever its findings didn't happen to also get a semantic-phase recording. This function
+/// is that corrected set: identical to `checker_rule_ids_for_repo` EXCEPT it does not filter
+/// out `advisory_coexisting` checkers — only [`ArchChecker::config_unsatisfied_for`] can
+/// exclude a checker's ids here, since that is the only fact ("this checker genuinely could
+/// not answer for this repo") the ledger's detector-channel credit actually depends on.
+pub fn ledger_detector_rule_ids_for_repo(
+    repo: &RepoView<'_>,
+) -> std::collections::HashSet<&'static str> {
+    all_checkers()
+        .iter()
+        .filter(|c| !c.config_unsatisfied_for(repo))
+        .flat_map(|c| c.rule_ids().iter().copied())
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -284,7 +420,10 @@ mod tests {
     #[test]
     fn glob_match_exact_file() {
         assert!(glob_match("supabase/config.toml", "supabase/config.toml"));
-        assert!(!glob_match("supabase/config.toml", "supabase/config.toml.bak"));
+        assert!(!glob_match(
+            "supabase/config.toml",
+            "supabase/config.toml.bak"
+        ));
     }
 
     #[test]
@@ -345,6 +484,104 @@ mod tests {
         assert!(checker_applies(&checker, &with_file));
     }
 
+    /// The seam change (`ViolationGrade`) must not change any checker that existed before it:
+    /// every one still emits `Defect`. Behavioural half: real checkers over a minimal violating
+    /// fixture each. Source half, below: no pre-existing checker constructs another grade.
+    #[test]
+    fn existing_checkers_still_emit_the_defect_grade() {
+        let files = |pairs: &[(&str, &str)]| -> Vec<(String, String)> {
+            pairs
+                .iter()
+                .map(|(p, c)| (p.to_string(), c.to_string()))
+                .collect()
+        };
+        type Case = (Box<dyn ArchChecker>, Vec<(String, String)>);
+        let cases: Vec<Case> = vec![
+            (
+                Box::new(crate::python_testing::PythonTestFileNamingChecker),
+                files(&[("tests/testfoo.py", "def check(): pass\n")]),
+            ),
+            (
+                Box::new(crate::ui_dates::UtcDatesChecker),
+                files(&[("src/a.tsx", "const s = d.toLocaleDateString();\n")]),
+            ),
+            (
+                Box::new(crate::weak_randomness_checker::WeakTokenRandomnessChecker),
+                files(&[(
+                    "src/auth/access.ts",
+                    "const accessToken = Math.random().toString(36);\n",
+                )]),
+            ),
+            (
+                Box::new(crate::supabase::rls_checker::SupabaseRlsChecker),
+                files(&[(
+                    "supabase/migrations/20240101000000_init.sql",
+                    "create table public.profiles (id uuid primary key);\n",
+                )]),
+            ),
+        ];
+        for (checker, fixture) in &cases {
+            let view = RepoView {
+                spec: "t/r",
+                files: fixture,
+            };
+            let violations = checker.check(&view);
+            assert!(
+                !violations.is_empty(),
+                "fixture must violate {:?}",
+                checker.rule_ids()
+            );
+            for v in &violations {
+                assert_eq!(v.grade, ViolationGrade::Defect, "{}", v.rule_id);
+            }
+        }
+    }
+
+    /// Every `grade:` a checker constructs, outside the Firebase module (the only checkers
+    /// allowed to emit another grade), is `Defect`. Counts the sites so a refactor that makes the
+    /// scan see nothing fails instead of passing vacuously.
+    #[test]
+    fn no_pre_existing_checker_constructs_a_non_defect_grade() {
+        fn rs_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    if path.file_name().is_some_and(|n| n == "firebase") {
+                        continue;
+                    }
+                    rs_files(&path, out);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    out.push(path);
+                }
+            }
+        }
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        rs_files(&root, &mut files);
+        let (mut defect_sites, mut other) = (0usize, Vec::new());
+        for file in files {
+            // This file names the other grades in its own tests and docs.
+            if file.ends_with("arch_checker.rs") || file.ends_with("arch_check_runner.rs") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&file).unwrap_or_default();
+            for (i, line) in text.lines().enumerate() {
+                if let Some(rest) = line.trim().strip_prefix("grade: ViolationGrade::") {
+                    if rest.starts_with("Defect") {
+                        defect_sites += 1;
+                    } else {
+                        other.push(format!("{}:{}", file.display(), i + 1));
+                    }
+                }
+            }
+        }
+        assert!(defect_sites >= 25, "scan saw only {defect_sites} sites");
+        assert!(
+            other.is_empty(),
+            "non-Defect grades outside firebase: {other:?}"
+        );
+    }
+
     #[test]
     fn all_checkers_registry_covers_expected_rule_ids() {
         let ids = all_checker_rule_ids();
@@ -353,10 +590,22 @@ mod tests {
             "SUPABASE-RLS-NO-POLICY-1",
             "SUPABASE-RLS-POLICY-DISABLED-1",
             "SUPABASE-FUNC-SEARCH-PATH-1",
+            "SUPABASE-FUNC-DYNAMIC-SQL-INJECTION-1",
+            "SUPABASE-FUNC-PRIVILEGED-NO-AUTHZ-1",
+            "SUPABASE-FUNC-DEFINER-CROSS-TENANT-READ-1",
             "PYTHON-TESTING-FILE-NAMING-1",
             "UI-UTC-DATES-1",
+            "SEC-NO-WEAK-TOKEN-RANDOMNESS-1",
+            "SEC-NO-QUERY-GRAMMAR-INJECTION-1",
+            "ARCH-ONE-IMPORT-PATH-1",
+            "ARCH-SHARED-CONSTANT-1",
+            "ARCH-DEAD-CODE-1",
+            "UI-REACT-HOOKS-LINT-1",
         ] {
-            assert!(ids.contains(expected), "missing {expected} from registry: {ids:?}");
+            assert!(
+                ids.contains(expected),
+                "missing {expected} from registry: {ids:?}"
+            );
         }
         // ARCH-NO-CROSS-BOUNDARY-IMPORTS-1 / ARCH-API-DTOS-1 / ARCH-STRICT-LAYERING-1
         // (`ImportBoundaryChecker` + Pass 4c's `StrictLayeringCallChecker`) and
@@ -371,7 +620,10 @@ mod tests {
             "ARCH-STRICT-LAYERING-1",
             "ARCH-HANDLER-NO-DB-1",
         ] {
-            assert!(ids.contains(gated), "missing {gated} from the static registry: {ids:?}");
+            assert!(
+                ids.contains(gated),
+                "missing {gated} from the static registry: {ids:?}"
+            );
         }
     }
 
@@ -392,7 +644,10 @@ mod tests {
             .iter()
             .flat_map(|c| c.rule_ids().iter().copied())
             .collect();
-        assert!(all_ids.contains("ARCH-RESOURCE-LIFECYCLE-1"), "checker must still be registered: {all_ids:?}");
+        assert!(
+            all_ids.contains("ARCH-RESOURCE-LIFECYCLE-1"),
+            "checker must still be registered: {all_ids:?}"
+        );
     }
 
     // ── `**` glob support (Pass 4a seam amendment) ──────────────────────────────
@@ -404,7 +659,10 @@ mod tests {
 
     #[test]
     fn glob_match_double_star_matches_multiple_leading_and_trailing_segments() {
-        assert!(glob_match("**/tests/**/*.py", "a/b/tests/sub/dir/test_foo.py"));
+        assert!(glob_match(
+            "**/tests/**/*.py",
+            "a/b/tests/sub/dir/test_foo.py"
+        ));
     }
 
     #[test]
@@ -458,14 +716,20 @@ mod tests {
             ".camerata/architecture.toml".to_string(),
             "version = 1\n".to_string(),
         )];
-        let repo = RepoView { spec: "test/repo", files: &files };
+        let repo = RepoView {
+            spec: "test/repo",
+            files: &files,
+        };
         assert!(!DummyConfigGatedChecker.config_unsatisfied_for(&repo));
     }
 
     #[test]
     fn config_gated_checker_stays_advisory_when_repo_config_absent() {
         let files: Vec<(String, String)> = vec![("src/a.ts".to_string(), String::new())];
-        let repo = RepoView { spec: "test/repo", files: &files };
+        let repo = RepoView {
+            spec: "test/repo",
+            files: &files,
+        };
         assert!(DummyConfigGatedChecker.config_unsatisfied_for(&repo));
     }
 
@@ -477,7 +741,10 @@ mod tests {
         // `all_checkers_registry_covers_expected_rule_ids` above) — this is exactly the
         // divergence `checker_rule_ids_for_repo` exists to compute.
         let files: Vec<(String, String)> = vec![("README.md".to_string(), String::new())];
-        let repo = RepoView { spec: "test/repo", files: &files };
+        let repo = RepoView {
+            spec: "test/repo",
+            files: &files,
+        };
         let per_repo = checker_rule_ids_for_repo(&repo);
         let static_set = all_checker_rule_ids();
         for gated in [
@@ -486,8 +753,14 @@ mod tests {
             "ARCH-STRICT-LAYERING-1",
             "ARCH-HANDLER-NO-DB-1",
         ] {
-            assert!(static_set.contains(gated), "{gated} missing from static set: {static_set:?}");
-            assert!(!per_repo.contains(gated), "{gated} must be excluded per-repo when unconfigured: {per_repo:?}");
+            assert!(
+                static_set.contains(gated),
+                "{gated} missing from static set: {static_set:?}"
+            );
+            assert!(
+                !per_repo.contains(gated),
+                "{gated} must be excluded per-repo when unconfigured: {per_repo:?}"
+            );
         }
     }
 
@@ -512,8 +785,185 @@ repositories = []
 handles = ["db"]
 allowed_in = ["repositories"]
 "#;
-        let files: Vec<(String, String)> = vec![(".camerata/architecture.toml".to_string(), cfg.to_string())];
-        let repo = RepoView { spec: "test/repo", files: &files };
+        // A source file too: `DeadCodeChecker` answers only for a repo that has source in a
+        // language it reads (`config_unsatisfied_for`), so the config alone is not "satisfied".
+        // Likewise `ReactHooksLintChecker` answers only for a React repo whose lint setup it
+        // can read; a React manifest and a component, with no ESLint configuration, is a
+        // (reportable) answer.
+        let files: Vec<(String, String)> = vec![
+            (".camerata/architecture.toml".to_string(), cfg.to_string()),
+            ("src/app.ts".to_string(), String::new()),
+            ("src/App.jsx".to_string(), String::new()),
+            (
+                "package.json".to_string(),
+                r#"{"dependencies":{"react":"18"}}"#.to_string(),
+            ),
+            // The Firebase checkers answer only for a repo that has what they read: an
+            // Admin SDK import, and a deployed rules file (the conventional name, with no
+            // `firebase.json`, is assessed).
+            (
+                "server/admin.ts".to_string(),
+                "import admin from \"firebase-admin\";\n".to_string(),
+            ),
+            ("firestore.rules".to_string(), String::new()),
+        ];
+        let repo = RepoView {
+            spec: "test/repo",
+            files: &files,
+        };
         assert_eq!(checker_rule_ids_for_repo(&repo), all_checker_rule_ids());
+    }
+
+    // ── `any_registered_checker_answers` / `ledger_detector_rule_ids_for_repo` ──────────
+    //
+    // The five corpus ids a real scan misclassified as "no wired detector" even though each
+    // has a registered checker: `ARCH-HANDLER-NO-DB-1`, `ARCH-API-DTOS-1`,
+    // `ARCH-STRICT-LAYERING-1`, `ARCH-NO-CROSS-BOUNDARY-IMPORTS-1` (all config-gated — their
+    // checkers answer nothing without `.camerata/architecture.toml`) and
+    // `ARCH-RESOURCE-LIFECYCLE-1` (not config-gated at all — its checker always runs; it was
+    // excluded from ledger credit only because the ledger reused the wrong set).
+
+    const FIVE_REAL_DETECTOR_RULES: [&str; 5] = [
+        "ARCH-HANDLER-NO-DB-1",
+        "ARCH-API-DTOS-1",
+        "ARCH-STRICT-LAYERING-1",
+        "ARCH-NO-CROSS-BOUNDARY-IMPORTS-1",
+        "ARCH-RESOURCE-LIFECYCLE-1",
+    ];
+
+    #[test]
+    fn any_registered_checker_answers_is_true_for_every_one_of_the_five_real_detector_rules() {
+        for id in FIVE_REAL_DETECTOR_RULES {
+            assert!(
+                any_registered_checker_answers(id),
+                "{id} has a registered checker in all_checkers() — any_registered_checker_answers must be true"
+            );
+        }
+    }
+
+    #[test]
+    fn any_registered_checker_answers_is_false_for_a_genuine_phantom_rule() {
+        // A corpus id with NO checker anywhere in the registry (the W4 "no wired detector"
+        // shape this function must NOT also flag) — contrast with the five above.
+        assert!(!any_registered_checker_answers(
+            "RUBY-FROZEN-STRING-LITERAL-1"
+        ));
+        assert!(!any_registered_checker_answers(
+            "NOT-A-REAL-RULE-ID-AT-ALL-1"
+        ));
+    }
+
+    #[test]
+    fn ledger_detector_rule_ids_for_repo_still_excludes_the_four_config_gated_rules_when_unconfigured(
+    ) {
+        // Unlike `advisory_coexisting`, `config_unsatisfied_for` IS still respected here — a
+        // genuinely config-gated checker that emits nothing without its config must NOT be
+        // ledger-credited just because this function stops filtering on advisory_coexisting.
+        let files: Vec<(String, String)> = vec![("README.md".to_string(), String::new())];
+        let repo = RepoView {
+            spec: "test/repo",
+            files: &files,
+        };
+        let ledger_ids = ledger_detector_rule_ids_for_repo(&repo);
+        for gated in [
+            "ARCH-NO-CROSS-BOUNDARY-IMPORTS-1",
+            "ARCH-API-DTOS-1",
+            "ARCH-STRICT-LAYERING-1",
+            "ARCH-HANDLER-NO-DB-1",
+        ] {
+            assert!(
+                !ledger_ids.contains(gated),
+                "{gated} is genuinely config-gated (checker emits nothing without config) — \
+                 must stay excluded from ledger credit when unconfigured: {ledger_ids:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn ledger_detector_rule_ids_for_repo_includes_resource_lifecycle_even_when_unconfigured() {
+        // THE divergence from `checker_rule_ids_for_repo`: `ResourceLifecycleChecker` is not
+        // config-gated at all (its `config_unsatisfied_for` is the trait default `false`), so
+        // it must be ledger-credited unconditionally — proving the ledger no longer
+        // misclassifies this rule as having no wired detector just because its checker is
+        // ALSO kept LLM-advisory-eligible.
+        let files: Vec<(String, String)> = vec![("README.md".to_string(), String::new())];
+        let repo = RepoView {
+            spec: "test/repo",
+            files: &files,
+        };
+        let ledger_ids = ledger_detector_rule_ids_for_repo(&repo);
+        assert!(
+            ledger_ids.contains("ARCH-RESOURCE-LIFECYCLE-1"),
+            "ARCH-RESOURCE-LIFECYCLE-1's checker is unconditional, not config-gated — must be \
+             ledger-credited even with no architecture config present: {ledger_ids:?}"
+        );
+        // Sanity: the OTHER function (LLM-prompt-subtraction) still excludes it — the two
+        // functions must genuinely diverge here, not coincidentally agree.
+        assert!(!checker_rule_ids_for_repo(&repo).contains("ARCH-RESOURCE-LIFECYCLE-1"));
+    }
+
+    #[test]
+    fn ledger_detector_rule_ids_for_repo_includes_all_four_config_gated_rules_once_configured() {
+        let cfg = r#"
+version = 1
+[layers]
+handlers = ["src/routes/**"]
+repositories = ["src/repositories/**"]
+[imports]
+handlers = []
+repositories = []
+[db]
+handles = ["db"]
+allowed_in = ["repositories"]
+"#;
+        let files: Vec<(String, String)> =
+            vec![(".camerata/architecture.toml".to_string(), cfg.to_string())];
+        let repo = RepoView {
+            spec: "test/repo",
+            files: &files,
+        };
+        let ledger_ids = ledger_detector_rule_ids_for_repo(&repo);
+        for id in FIVE_REAL_DETECTOR_RULES {
+            assert!(
+                ledger_ids.contains(id),
+                "{id} must be ledger-credited once this repo's architecture config satisfies \
+                 every config-gated checker: {ledger_ids:?}"
+            );
+        }
+    }
+
+    // ── ARCH-DEAD-CODE-1: per-repo applicability ─────────────────────────────
+
+    #[test]
+    fn dead_code_rule_is_answered_deterministically_only_for_a_repo_with_source_in_a_language_it_reads(
+    ) {
+        let id = "ARCH-DEAD-CODE-1";
+        let files_of = |paths: &[&str]| -> Vec<(String, String)> {
+            paths
+                .iter()
+                .map(|p| (p.to_string(), String::new()))
+                .collect()
+        };
+        for source in ["src/a.ts", "app/a.py", "src/lib.rs", "web/a.jsx"] {
+            let f = files_of(&[source]);
+            let repo = RepoView {
+                spec: "t/r",
+                files: &f,
+            };
+            assert!(
+                checker_rule_ids_for_repo(&repo).contains(id),
+                "{source}: the id is subtracted from the advisory prompt"
+            );
+        }
+        // A Java service with YAML config matches the checker's context globs, but a clean
+        // result there would read as "no dead code". It stays advisory instead.
+        let java = files_of(&["src/Main.java", "config/app.yml"]);
+        let repo = RepoView {
+            spec: "t/r",
+            files: &java,
+        };
+        assert!(!checker_rule_ids_for_repo(&repo).contains(id));
+        assert!(!ledger_detector_rule_ids_for_repo(&repo).contains(id));
+        assert!(any_registered_checker_answers(id));
     }
 }

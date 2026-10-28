@@ -1,9 +1,11 @@
 id = "GO-GORM-CONTEXT-QUERIES-1"
+version = 1
 title = "All database queries accept and respect context arguments; timeouts and cancellation propagate from requests to queries"
-tag = "stack"
 domain = "go:gorm"
 layer = "library"
 enforcement = "structured"
+kind = "defect"
+inspectable = true
 default = true
 verification = "grounded"
 
@@ -24,16 +26,21 @@ why = "GORM accepts a context as the first argument to queries: db.WithContext(c
 id = "context-all-queries"
 label = "All queries use db.WithContext(ctx); deadlines and cancellation propagate"
 directive = "Every database query (Find, Create, Update, Delete, Row, Rows) is preceded by WithContext: db.WithContext(ctx).Find(&users), db.WithContext(ctx).Create(&record). The context is passed through the entire call stack, from the handler to the service to the repository. If the context has a deadline, GORM passes it to the database driver and the query is cancelled if the deadline is exceeded."
+remediation = """
+Add .WithContext(ctx) to the database query that is missing it, threading the request's context from the handler through the service and into the repository call. Verify by cancelling the request's context mid-query and confirming the query aborts rather than completing and returning after the client has already disconnected.
+"""
 why = "Context propagation is Go's idiomatic timeout and cancellation mechanism; queries respect handler deadlines."
 
 [[option]]
 id = "no-context-in-queries"
+violates = true
 label = "Queries do not use context; no deadline enforcement at the database layer"
 directive = "Queries are called without context (db.Find(&users)) or with context.Background()."
-why = "Simpler to code; queries are not bounded by handler deadlines and may hang indefinitely if the database is slow."
+why = "Queries carry no deadline, so when the database is slow or a row is locked the handler blocks indefinitely: the connection stays checked out, the goroutine is never released, and the caller sees a request that hangs rather than one that fails. Cancelling the inbound request does not stop the query."
 
 [[option]]
 id = "context-sometimes"
+violates = true
 label = "Context is passed to some queries but not others"
 directive = "Some repository methods accept and use context; others ignore it. The pattern is inconsistent."
-why = "Common in transitional codebases; creates gaps in timeout enforcement and makes the codebase unpredictable."
+why = "Timeout enforcement reaches only the queries that happen to pass a context, so a single unconverted call hangs the whole request even though every other query in the path is bounded. Which operations are protected cannot be determined without reading every callsite, which is also the normal state of a codebase part-way through this conversion."

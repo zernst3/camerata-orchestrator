@@ -1,9 +1,11 @@
 id = "JAVA-TESTING-DETERMINISTIC-1"
+version = 1
 title = "Tests are deterministic: no Thread.sleep(), no wall-clock time (use injected Clock), no uncontrolled randomness, no ordering dependencies between test methods"
-tag = "stack"
 domain = "java:testing"
 layer = "language"
 enforcement = "mechanical"
+kind = "defect"
+inspectable = true
 default = true
 qualifies = "Enforced by SpotBugs (IJU_ASSERT_METHOD_INVOKED_FROM_RUN_METHOD, the one SpotBugs pattern that actually targets JUnit threading anti-patterns — SIC_INNER_SHOULD_BE_STATIC_ANON and PMD's DoNotCallGarbageCollectionExplicitly are unrelated to test determinism and are not cited as enforcement here). Thread.sleep in tests can be caught by Checkstyle or Semgrep regex patterns. JUnit 5's @TestMethodOrder(MethodOrderer.Random.class) can reveal hidden ordering dependencies. Conformance holds when: no Thread.sleep() appears in test code; time-dependent logic uses an injected Clock mock; random inputs use a fixed seed; each @Test method is independent of every other @Test method in the class."
 verification = "grounded"
@@ -30,16 +32,22 @@ title = "Martin Fowler — Eradicating Non-Determinism in Tests (time, ordering,
 id = "no-sleep-no-clock-no-random"
 label = "no Thread.sleep; inject Clock; fix random seeds; no inter-test ordering dependencies"
 directive = "Prohibit Thread.sleep() in all test code. Any production code that reads the current time must accept a java.time.Clock parameter (constructor-injected); tests pass Clock.fixed(...) to control time. Any production code that uses random values must accept a java.util.Random or equivalent; tests pass new Random(42) to fix the seed. Each @Test method must be independent: it must not read state written by another @Test method. Use @BeforeEach to set up fresh state before each test and @AfterEach to tear down. If a test involves asynchronous behavior, use Awaitility or CompletableFuture.get() with a timeout rather than Thread.sleep()."
+remediation = """
+Replace the Thread.sleep call in the test with a synchronization mechanism that waits for the actual condition (a latch, a polling helper with a timeout), and replace any direct read of the current time in the production code under test with an injected java.time.Clock the test can fix. Remove any shared static or instance state that lets one test's execution affect another's outcome. Verify by running the test suite repeatedly and in a randomized order, confirming no test's result depends on timing or execution order.
+"""
+effort = "medium"
 why = "Deterministic tests are the only tests worth having: they always give the same answer for the same code."
 
 [[option]]
 id = "sleep-based-timing"
+violates = true
 label = "Thread.sleep() to wait for async operations or time-based behavior"
 directive = "Tests use Thread.sleep(N) to wait for asynchronous callbacks, scheduled tasks, or time-based logic to complete."
 why = "Flaky: the sleep duration is an arbitrary guess. Under load, GC pause, or slow CI it may be too short. Over time it grows to mask real latency problems. Use Awaitility or inject a Clock/Scheduler instead."
 
 [[option]]
 id = "static-shared-state"
+violates = true
 label = "shared static or instance state mutated across multiple @Test methods"
 directive = "Test methods share mutable state through static fields or instance fields that are not reset between tests, implicitly depending on execution order."
 why = "JUnit 5 does not guarantee @Test execution order by default. Ordering-dependent tests produce intermittent failures that are nearly impossible to diagnose. Use @BeforeEach to reset all mutable state."

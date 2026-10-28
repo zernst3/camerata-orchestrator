@@ -112,6 +112,18 @@ pub struct Clarification {
     /// `Answered` iff `answer.is_some()`. Serialized so clients can branch on it
     /// directly rather than re-deriving from the nullable `answer`.
     pub state: ClarifyState,
+    /// The id of the governed run PARKED on this clarification, if any. NOT part of this
+    /// struct's own persisted state (never set here, always `None` on a freshly-posted or
+    /// stored `Clarification`) — the list handlers (`list_open_clarifications` /
+    /// `list_clarifications` in `lib.rs`) populate it at SERVE time from
+    /// `AppState::clarify_resume` (keyed by clarification id), so the client can re-attach the
+    /// Bombe loading-guard poll loop to the resumed run on answer even when answered from the
+    /// app-wide NEEDS YOU queue rather than the story's own live-run view. `skip_deserializing`
+    /// (not `skip`) so this field is NEVER read back in from persisted-on-disk JSON (avoids a
+    /// stale run id surviving a restart) while still being INCLUDED when a handler serializes an
+    /// in-memory instance out to the client after populating it.
+    #[serde(skip_deserializing, default)]
+    pub run_id: Option<String>,
 }
 
 /// Serde default for `allow_free_text` (true = the "Other" escape is on by default).
@@ -304,6 +316,7 @@ impl ClarificationStore {
             answer_selection: None,
             answered_by: None,
             state: ClarifyState::Asked,
+            run_id: None,
         };
         if let Ok(mut guard) = self.items.lock() {
             guard.insert(c.id.clone(), c.clone());
@@ -461,9 +474,15 @@ mod tests {
             .expect("clarification exists");
         assert!(!answered.is_open());
         assert_eq!(answered.state, ClarifyState::Answered);
-        let sel = answered.answer_selection.as_ref().expect("structured answer");
+        let sel = answered
+            .answer_selection
+            .as_ref()
+            .expect("structured answer");
         assert_eq!(sel.selected, vec!["Member timezone".to_string()]);
-        assert_eq!(sel.free_text.as_deref(), Some("but default to org tz if unknown"));
+        assert_eq!(
+            sel.free_text.as_deref(),
+            Some("but default to org tz if unknown")
+        );
         // The summary reflects selected labels + free-text.
         assert_eq!(
             answered.answer.as_deref(),
@@ -479,9 +498,18 @@ mod tests {
             "Which columns to include?",
             "you",
             vec![
-                ClarifyOption { label: "Name".into(), description: "d".into() },
-                ClarifyOption { label: "Email".into(), description: "d".into() },
-                ClarifyOption { label: "Phone".into(), description: "d".into() },
+                ClarifyOption {
+                    label: "Name".into(),
+                    description: "d".into(),
+                },
+                ClarifyOption {
+                    label: "Email".into(),
+                    description: "d".into(),
+                },
+                ClarifyOption {
+                    label: "Phone".into(),
+                    description: "d".into(),
+                },
             ],
             true,
             false,
@@ -543,8 +571,14 @@ mod tests {
                 "Ship behind a flag?",
                 "@maria-pm",
                 vec![
-                    ClarifyOption { label: "Flag".into(), description: "safer rollout".into() },
-                    ClarifyOption { label: "Direct".into(), description: "simpler".into() },
+                    ClarifyOption {
+                        label: "Flag".into(),
+                        description: "safer rollout".into(),
+                    },
+                    ClarifyOption {
+                        label: "Direct".into(),
+                        description: "simpler".into(),
+                    },
                 ],
                 false,
                 true,
@@ -616,7 +650,10 @@ mod tests {
         };
         assert_eq!(a.summary(), "A; B; note");
 
-        let only_sel = ClarifyAnswer { selected: vec!["A".into()], free_text: None };
+        let only_sel = ClarifyAnswer {
+            selected: vec!["A".into()],
+            free_text: None,
+        };
         assert_eq!(only_sel.summary(), "A");
 
         let only_ft = ClarifyAnswer {

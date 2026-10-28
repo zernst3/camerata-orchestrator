@@ -1,9 +1,11 @@
 id = "ORCH-ENV-GATED-QUALITY-1"
+version = 1
 title = "Environment-gated quality — nothing ships unverified"
-tag = "stack"
 domain = "agentic"
 layer = "universal"
 enforcement = "structured"
+kind = "decision"
+inspectable = true
 default = true
 qualifies = "Not enforceable by any off-the-shelf linter: this is a deployment-pipeline-topology commitment (a pre-merge quality bar plus an automated promotion gate through at least one pre-production environment), enforced by the CI/CD configuration and orchestration system, not by a third-party tool with a citable rule-id. Codified and verified at pipeline-config time: the pre-merge pipeline runs a local quality bar (a clean compile, a clean lint pass, a green test run, plus a migration-safety check on schema changes) and fails the change if any step is red; at least one pre-production environment sits between merge and users, with advancement triggered by an automated check rather than a manual approval click. Conformance holds when the CI configuration shows both the pre-merge gate and an automated promotion gate with no human-approval step between merge and the user-facing environment; it fails when code can reach users straight from a developer machine or by a reviewer pressing a button."
 verification = "grounded"
@@ -26,13 +28,16 @@ title = "DORA — research on deployment pipelines and software delivery perform
 
 [decision]
 question = "What position does the project take on: Environment-gated quality — nothing ships unverified?"
-default = "environment-gated-quality-nothing-ships-unverifi"
+default = "environment-gated-quality-nothing-ships-unverified"
 why = "Preventive gatekeeping catches issues before they compound downstream, where they are far more expensive to triage and roll back. User-end testing capacity is cheaper to scale than reviewer capacity, and a bug caught in a pre-production environment costs a fraction of the same bug caught after users have hit it. The two parts of the rule (a local quality bar plus at least one automated-gated pre-production environment) work as a gradient of escalating verification: cheap checks first, expensive ones last, no path that skips the cheap ones to save time. The rule deliberately avoids prescribing environment names because the right topology varies by organization, by deploy model, and by product surface; what stays constant across all of them is that some environment sits between merged code and user-facing code, and that advancing through it does not depend on someone remembering to push a button. Shipping autonomously-generated code straight from the author's machine to users skips the cheapest checks entirely and shifts the discovery surface to live users, where each issue costs more to triage, more to roll back, and consumes user trust in the process. Keeping the local quality bar but going directly from merge to users means CI catches what it can catch, but anything that depends on real data, real config, or real load is discovered by users rather than in a pre-production environment shaped like the real one. Maintaining one or more pre-production environments but gating advancement on manual reviewer approval reintroduces the human bottleneck the rule exists to remove, and the gating decision drifts as reviewer attention waxes and wanes."
 
 [[option]]
-id = "environment-gated-quality-nothing-ships-unverifi"
+id = "environment-gated-quality-nothing-ships-unverified"
 label = "Environment-gated quality — nothing ships unverified"
 directive = "Autonomously-generated code passes a local quality bar (compile clean, lint clean, tests green; schema changes also pass a migration-safety check) before merge. After merge, the code progresses through one or more pre-production environments before reaching users, and advancement through each one is gated by automated checks rather than reviewer judgment. The number, naming, and topology of pre-production environments is the organization's call (single staging, dev-then-staging, ephemeral preview-per-PR, canary slices of the production environment, or any combination); the rule commits to the existence of the gradient and to automated gating between its steps, not to a specific environment layout."
+remediation = """
+Require autonomously-generated code to pass a local quality bar (clean compile, clean lint, green tests, and a migration-safety check for schema changes) before it can merge. After merge, route the change through at least one pre-production environment with automated checks gating each promotion, rather than sending it straight to the user-facing environment. Verify by confirming a recent change's pipeline history shows the quality bar and each promotion gate passing before it reached production.
+"""
 why = "Preventive gatekeeping catches issues before they compound downstream, where they are far more expensive to triage and roll back."
 
 [[option]]

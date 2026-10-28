@@ -1,9 +1,11 @@
 id = "PYTHON-DJANGO-SELECT-RELATED-1"
+version = 1
 title = "select_related and prefetch_related are used to avoid N+1 queries on related objects"
-tag = "stack"
 domain = "python:django"
 layer = "framework"
 enforcement = "structured"
+kind = "default_with_exceptions"
+inspectable = true
 default = true
 verification = "grounded"
 
@@ -16,13 +18,17 @@ why = "Django's lazy-loading default means that accessing `order.customer.name` 
 id = "select-related-or-prefetch-related"
 label = "select_related for FK/O2O; prefetch_related for M2M and reverse FK"
 directive = "Any view, viewset, or serializer that will traverse a ForeignKey or OneToOne relationship adds `.select_related('relation_name')` to the queryset before evaluation. Any view that will traverse a ManyToMany or reverse ForeignKey relationship adds `.prefetch_related('relation_name')`. Django Debug Toolbar or `nplusone` is enabled in development to surface unguarded traversals as warnings or errors. Accessing a related object attribute on each item in a queryset loop without a corresponding `select_related` or `prefetch_related` is the antipattern."
+remediation = """
+Add .select_related('relation_name') to the queryset for a ForeignKey/OneToOne traversal, or .prefetch_related('relation_name') for a ManyToMany/reverse-ForeignKey traversal, instead of accessing the related objects lazily in a loop. Verify by running the view under Django's query-count assertion or debug toolbar and confirming the number of queries no longer scales with the number of rows returned.
+"""
 why = "`select_related` collapses FK traversals into a single JOIN; `prefetch_related` batches reverse and M2M traversals into one additional query."
 
 [[option]]
 id = "lazy-loading-accepted"
+violates = true
 label = "access related objects on demand; accept N+1 queries"
 directive = "Related objects are accessed via attribute traversal as needed, with no `select_related` or `prefetch_related`; the resulting N+1 queries are accepted."
-why = "Correct for one-off scripts or tiny datasets; catastrophic for any view whose queryset size is user-controlled."
+why = "Rendering a list issues one extra query per row for each related object it touches, so a page that is fast against seed data makes hundreds of round trips once real data arrives and its response time scales with the result count. Survivable only where the result set is fixed and small, as in a one-off script."
 
 [[option]]
 id = "only-and-values"

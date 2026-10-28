@@ -31,7 +31,10 @@ pub enum GovDevMsg {
     PulledLatest { id: String, updated_at: String },
     /// A full work-item pull completed for a project: cache the items keyed by project
     /// id (so switching projects never shows stale items), replacing any previous pull.
-    WorkItemsPulled { project_id: String, items: Vec<WorkItem> },
+    WorkItemsPulled {
+        project_id: String,
+        items: Vec<WorkItem>,
+    },
 }
 
 /// The Governed-Development poll / change-detection state. Pure (no I/O, no framework):
@@ -188,7 +191,10 @@ mod tests {
             state.last_seen.get("github:o/r#1").map(String::as_str),
             Some("2026-07-05T12:00:00Z")
         );
-        assert!(!state.is_changed("github:o/r#1"), "first poll must not flag");
+        assert!(
+            !state.is_changed("github:o/r#1"),
+            "first poll must not flag"
+        );
         assert_eq!(state.changed_count(), 0);
     }
 
@@ -209,7 +215,10 @@ mod tests {
 
         // Empty polled → not changed (resilient: a blank value never flags).
         poll(&mut state, "wi", "");
-        assert!(!state.is_changed("wi"), "empty polled value is not a change");
+        assert!(
+            !state.is_changed("wi"),
+            "empty polled value is not a change"
+        );
 
         // Strictly newer → changed. The last-seen baseline is deliberately NOT advanced
         // here (only a pull/open advances it), so the flag persists until the user syncs.
@@ -242,7 +251,10 @@ mod tests {
 
         // After the bump, a poll at the same (now-baseline) timestamp does NOT re-flag.
         poll(&mut state, "wi", "2026-07-06T08:00:00Z");
-        assert!(!state.is_changed("wi"), "no re-flag once the baseline caught up");
+        assert!(
+            !state.is_changed("wi"),
+            "no re-flag once the baseline caught up"
+        );
     }
 
     #[test]
@@ -255,7 +267,10 @@ mod tests {
             .insert("wi".to_string(), "2026-07-05T12:00:00Z".to_string());
         state.changed.insert("wi".to_string());
         pulled_latest(&mut state, "wi", "");
-        assert!(!state.is_changed("wi"), "flag clears even with an empty timestamp");
+        assert!(
+            !state.is_changed("wi"),
+            "flag clears even with an empty timestamp"
+        );
         assert_eq!(
             state.last_seen.get("wi").map(String::as_str),
             Some("2026-07-05T12:00:00Z"),
@@ -287,18 +302,30 @@ mod tests {
         // applies PulledLatest with that timestamp to re-baseline.
         let assign_updated_at = "2026-07-05T12:05:00Z";
         pulled_latest(&mut state, wid, assign_updated_at);
-        assert_eq!(state.last_seen.get(wid).map(String::as_str), Some(assign_updated_at));
-        assert!(!state.is_changed(wid), "a successful assign must not leave a stale flag");
+        assert_eq!(
+            state.last_seen.get(wid).map(String::as_str),
+            Some(assign_updated_at)
+        );
+        assert!(
+            !state.is_changed(wid),
+            "a successful assign must not leave a stale flag"
+        );
 
         // 3. The next background poll observes the SAME `updated_at` the assign already
         // re-baselined to (this is the case the assign itself produced) -> must NOT flag.
         poll(&mut state, wid, assign_updated_at);
-        assert!(!state.is_changed(wid), "the poll must not self-flag the assign's own update");
+        assert!(
+            !state.is_changed(wid),
+            "the poll must not self-flag the assign's own update"
+        );
 
         // 4. The story is updated again afterward by something else (a strictly newer
         // `updated_at`) -> the poll must still flag it CHANGED.
         poll(&mut state, wid, "2026-07-05T13:00:00Z");
-        assert!(state.is_changed(wid), "a later real update must still flag changed");
+        assert!(
+            state.is_changed(wid),
+            "a later real update must still flag changed"
+        );
     }
 
     #[test]
@@ -328,7 +355,10 @@ mod tests {
             project_id: "proj-2".to_string(),
             items: vec![wi("github:o/r#9")],
         });
-        assert!(state.pulled_for("proj-1").is_none(), "old project's pull is gone");
+        assert!(
+            state.pulled_for("proj-1").is_none(),
+            "old project's pull is gone"
+        );
         assert_eq!(state.pulled_for("proj-2").map(<[WorkItem]>::len), Some(1));
     }
 
@@ -347,8 +377,12 @@ mod tests {
     #[test]
     fn changed_count_tallies_flagged_items() {
         let mut state = GovDevState::new();
-        state.last_seen.insert("a".to_string(), "2026-07-05T12:00:00Z".to_string());
-        state.last_seen.insert("b".to_string(), "2026-07-05T12:00:00Z".to_string());
+        state
+            .last_seen
+            .insert("a".to_string(), "2026-07-05T12:00:00Z".to_string());
+        state
+            .last_seen
+            .insert("b".to_string(), "2026-07-05T12:00:00Z".to_string());
         poll(&mut state, "a", "2026-07-06T08:00:00Z");
         poll(&mut state, "b", "2026-07-06T08:00:00Z");
         assert_eq!(state.changed_count(), 2);

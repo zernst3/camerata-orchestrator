@@ -1,9 +1,11 @@
 id = "CSHARP-EFCORE-ASNOTRACKING-1"
+version = 1
 title = "Read-only queries use AsNoTracking; change tracking is reserved for entities that will be mutated"
-tag = "stack"
 domain = "csharp:efcore"
 layer = "library"
 enforcement = "structured"
+kind = "default_with_exceptions"
+inspectable = true
 default = true
 
 verification = "grounded"
@@ -16,6 +18,9 @@ why = "By default, EF Core attaches every entity returned by a query to the DbCo
 id = "asnotracking-for-read-only"
 label = "AsNoTracking on all read-only queries; tracked queries only when SaveChanges follows"
 directive = "Every LINQ query whose result is not subsequently passed to SaveChanges calls .AsNoTracking() before execution. Repository method naming encodes the tracking intent: Get/Find/List methods return AsNoTracking results; methods that load an entity for mutation (Update, Delete, Patch) fetch with tracking (no AsNoTracking). The global default tracking behavior is not changed (AsNoTrackingWithIdentityResolution is not set globally) so that tracked queries remain the intentional opt-in for write paths. Callers do not modify AsNoTracking results and expect SaveChanges to persist the change."
+remediation = """
+Add .AsNoTracking() to the query in the read-only repository method, reserving change tracking for methods whose result is passed to SaveChanges. Rename or document the method so its tracking intent is clear (Get/Find/List for no-tracking, Update/Delete for tracked). Verify by confirming EF Core's change tracker does not report the returned entities as tracked after a read-only call.
+"""
 why = "Read-only queries gain lower memory use, faster execution, and smaller DbContext state; tracked queries remain available for the write path that needs them."
 
 [[option]]
@@ -26,9 +31,10 @@ why = "Eliminates the per-query AsNoTracking call; the trade-off is that write p
 
 [[option]]
 id = "always-track"
+violates = true
 label = "All queries tracked; AsNoTracking never used"
 directive = "No AsNoTracking calls appear. All returned entities are attached to the change tracker regardless of whether they will be mutated."
-why = "Simplest query authoring; wastes memory and CPU allocating and maintaining change-tracking snapshots for entities that are only read, not written."
+why = "Every entity returned by a read-only query gets a change-tracking snapshot allocated and maintained for it, so read endpoints consume more memory and CPU than the work requires and the overhead scales with the size of the result set. Nothing is ever written back from those snapshots."
 
 
 [[sources]]

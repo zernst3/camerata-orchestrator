@@ -137,26 +137,12 @@ pub struct SuppressionRecord {
 
 // ── fingerprinting ──────────────────────────────────────────────────────────
 
-/// A stable, dependency-free FNV-1a 64-bit hash. Stable across machines and Rust
-/// versions (unlike `DefaultHasher`), which a COMMITTED baseline file requires.
-/// `pub(crate)` so the scan cache can fingerprint whole-file content with the same
-/// stable hash the suppression baseline uses.
-pub(crate) fn fnv1a(s: &str) -> u64 {
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for b in s.bytes() {
-        h ^= b as u64;
-        h = h.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    h
-}
-
-/// Fingerprint a violation by rule + normalized offending snippet. Whitespace is
-/// collapsed so reformatting/indent shifts don't break the match, but a real edit to
-/// the offending code does (so touching debt un-baselines it — the ratchet).
-pub fn fingerprint(rule_id: &str, snippet: &str) -> String {
-    let norm = snippet.split_whitespace().collect::<Vec<_>>().join(" ");
-    format!("{:016x}", fnv1a(&format!("{rule_id}|{norm}")))
-}
+// The hash and the fingerprint live in `camerata-api-types` so the review UI's decision memory
+// calls the SAME function the baseline commits its values from (one implementation, no copy to
+// drift). Re-exported here so every existing call site (`crate::suppression::fingerprint`, and
+// `fnv1a` for the scan cache) resolves unchanged.
+pub use camerata_api_types::fingerprint::fingerprint;
+pub(crate) use camerata_api_types::fingerprint::fnv1a;
 
 /// Build a baseline entry for a finding (accepted pre-existing debt). The caller
 /// supplies who/when/reason so this stays time-free and pure.
@@ -272,10 +258,7 @@ fn effective_reach(w: &InlineWaiver) -> usize {
 /// the marker's own line (trailing) or anywhere within the marker's reach below it — the
 /// contiguous block a reasoned waiver annotates, up to [`MAX_WAIVER_REACH`] lines.
 fn inline_applies(w: &InlineWaiver, f: &FindingRef) -> bool {
-    w.rule_id == f.rule_id
-        && w.path == f.path
-        && f.line >= w.line
-        && f.line <= effective_reach(w)
+    w.rule_id == f.rule_id && w.path == f.path && f.line >= w.line && f.line <= effective_reach(w)
 }
 
 /// Classify one finding against the inline waivers + baseline.
@@ -469,6 +452,60 @@ mod tests {
             classify_one(&f("OTHER", "a.rs", 5, "x"), &waivers, &Baseline::default()),
             Status::Active
         );
+    }
+
+    /// B.5 moved `fingerprint` to `camerata-api-types` so the review UI shares it. A baseline file
+    /// COMMITTED before the move holds literal fingerprint strings, so the suppression results must
+    /// be exactly what they were: these entries carry the pre-move values as literals, computed
+    /// independently of the function under test and pinned, and a baseline written now reproduces
+    /// them.
+    #[test]
+    fn suppression_results_are_unchanged_by_moving_the_fingerprint() {
+        let snippet = "let t = \"abc\";";
+        let baseline = Baseline {
+            entries: vec![BaselineEntry {
+                rule_id: "SEC-X".into(),
+                path: "a.rs".into(),
+                fingerprint: "61727d97b8fb274a".into(),
+                reason: "pre-existing at onboarding".into(),
+                accepted_by: "zach".into(),
+                accepted_at: "2026-06-16T00:00:00Z".into(),
+                kind: "baseline".into(),
+                ticket: None,
+            }],
+        };
+        // Matched, including through a whitespace change and a drifted line.
+        assert_eq!(
+            classify_one(&f("SEC-X", "a.rs", 1, snippet), &[], &baseline),
+            Status::SuppressedBaseline
+        );
+        assert_eq!(
+            classify_one(
+                &f("SEC-X", "a.rs", 40, "  let t =\t\"abc\";  "),
+                &[],
+                &baseline
+            ),
+            Status::SuppressedBaseline
+        );
+        // An edit, or another rule, is active.
+        assert_eq!(
+            classify_one(&f("SEC-X", "a.rs", 1, "let t = \"abd\";"), &[], &baseline),
+            Status::Active
+        );
+        assert_eq!(
+            classify_one(&f("SEC-Y", "a.rs", 1, snippet), &[], &baseline),
+            Status::Active
+        );
+        // A baseline written today holds the same literal, and the server's re-export IS the
+        // shared function.
+        let written = baseline_entry(&f("SEC-X", "a.rs", 1, snippet), "z", "t", "r");
+        assert_eq!(written.fingerprint, "61727d97b8fb274a");
+        assert_eq!(
+            fingerprint("SEC-X", snippet),
+            camerata_api_types::fingerprint::fingerprint("SEC-X", snippet)
+        );
+        // Not stale while the finding still exists.
+        assert!(stale_baseline(&baseline, &[f("SEC-X", "a.rs", 1, snippet)]).is_empty());
     }
 
     #[test]
@@ -754,7 +791,8 @@ line3; // camerata:allow R2 -- reason two, GH-7\n";
         let finding = f("SEC-X", "a.rs", 5, "bad code");
         let status = classify_one(&finding, &waivers, &Baseline::default());
         assert_eq!(
-            status, Status::Active,
+            status,
+            Status::Active,
             "waiver without reason does NOT suppress"
         );
     }
@@ -942,10 +980,7 @@ line3; // camerata:allow R2 -- reason two, GH-7\n";
 
         // Finding on different rule is NOT suppressed.
         let finding = f("SEC-Y", "a.rs", 1, snippet);
-        assert_eq!(
-            classify_one(&finding, &[], &baseline),
-            Status::Active
-        );
+        assert_eq!(classify_one(&finding, &[], &baseline), Status::Active);
     }
 
     #[test]
@@ -983,7 +1018,10 @@ create table t (\n\
         let src = "// camerata:allow R -- nothing below\n\ncode();\n";
         let w = parse_inline_waivers("a.rs", src);
         assert_eq!(w.len(), 1);
-        assert_eq!(w[0].reach_end, 1, "blank line terminates the run at the marker line");
+        assert_eq!(
+            w[0].reach_end, 1,
+            "blank line terminates the run at the marker line"
+        );
         // Legacy fallback still lets it reach the directly-below line (effective_reach).
         assert_eq!(
             classify_one(&f("R", "a.rs", 2, "x"), &w, &Baseline::default()),
@@ -1038,7 +1076,10 @@ create table t (\n\
         let w = parse_inline_waivers("a.rs", src);
         assert_eq!(w.len(), 1);
         assert!(w[0].reason.is_none());
-        assert!(w[0].reach_end >= 3, "block is computed regardless of reason");
+        assert!(
+            w[0].reach_end >= 3,
+            "block is computed regardless of reason"
+        );
         assert_eq!(
             classify_one(&f("R", "a.rs", 2, "x"), &w, &Baseline::default()),
             Status::Active,

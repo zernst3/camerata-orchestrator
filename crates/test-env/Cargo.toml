@@ -1,0 +1,13 @@
+[package]
+name = "camerata-test-env"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+version = "0.0.0"
+publish = false
+
+# TEST SUPPORT ONLY. A leaf crate with zero dependencies, consumed exclusively as a
+# `[dev-dependencies]` entry by crates whose tests mutate process-global environment
+# variables. It is never a regular dependency of any shipped crate.
+[lints]
+workspace = true

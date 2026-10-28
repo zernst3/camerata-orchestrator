@@ -151,11 +151,7 @@ impl CheckOutcome {
 /// error text, not just the rule id.
 #[async_trait::async_trait]
 pub trait CheckRunner: Send + Sync {
-    async fn check(
-        &self,
-        role: &Role,
-        worktree: &std::path::Path,
-    ) -> anyhow::Result<CheckOutcome>;
+    async fn check(&self, role: &Role, worktree: &std::path::Path) -> anyhow::Result<CheckOutcome>;
 }
 
 pub mod coordinator;

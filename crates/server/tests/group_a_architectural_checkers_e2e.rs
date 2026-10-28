@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used)]
 //! END-TO-END: Pass 4a "Group A" architectural checkers (python test-file naming,
 //! UI-UTC-DATES-1) plus the PRODUCTION `ARCH-HANDLER-NO-DB-1` AST checker (Pass 4c,
 //! `camerata_checks::handler_no_db_checker::HandlerNoDbChecker`), driven through the REAL
@@ -33,7 +34,8 @@ const RULE_HANDLER_NO_DB: &str = "ARCH-HANDLER-NO-DB-1";
 /// `architectural_executor_e2e.rs::stage_fixture_as_git_repo` (duplicated per this repo's
 /// existing convention of each e2e test file owning its own fixture-staging helpers).
 fn stage_fixture_as_git_repo(dest: &Path) {
-    let fixture_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/group_a_arch_repo");
+    let fixture_root =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/group_a_arch_repo");
     copy_dir_recursive(&fixture_root, dest);
 
     let g = |args: &[&str]| {
@@ -42,13 +44,22 @@ fn stage_fixture_as_git_repo(dest: &Path) {
             .args(args)
             .output()
             .unwrap_or_else(|e| panic!("failed to spawn git {args:?}: {e}"));
-        assert!(out.status.success(), "git {args:?} failed: {}", String::from_utf8_lossy(&out.stderr));
+        assert!(
+            out.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
     };
     g(&["init", "-q", "-b", "main"]);
     g(&["config", "user.email", "group-a-e2e@camerata.local"]);
     g(&["config", "user.name", "Camerata Group A E2E Test"]);
     g(&["add", "."]);
-    g(&["commit", "-q", "-m", "e2e fixture: one stray test file, one UTC-dates hole, one handler-no-db hole"]);
+    g(&[
+        "commit",
+        "-q",
+        "-m",
+        "e2e fixture: one stray test file, one UTC-dates hole, one handler-no-db hole",
+    ]);
 }
 
 fn copy_dir_recursive(src: &Path, dest: &Path) {
@@ -61,7 +72,8 @@ fn copy_dir_recursive(src: &Path, dest: &Path) {
         if ty.is_dir() {
             copy_dir_recursive(&from, &to);
         } else {
-            std::fs::copy(&from, &to).unwrap_or_else(|e| panic!("failed to copy fixture file {from:?} -> {to:?}: {e}"));
+            std::fs::copy(&from, &to)
+                .unwrap_or_else(|e| panic!("failed to copy fixture file {from:?} -> {to:?}: {e}"));
         }
     }
 }
@@ -81,21 +93,25 @@ async fn run_fixture_scan(repo_dir: &Path, repo_spec: &str) -> onboard::ScanRepo
     let sources = vec![(repo_spec.to_string(), repo_dir.to_path_buf())];
     let selected = selected_group_a_rules();
     let (report, _manifest) = onboard::audit_repos(
+        &camerata_server::credentials::MemoryCredentialStore::new(),
         &sources,
         &selected,
         Vec::new(), // extra_notes
         None,       // model — unused, run_ai_review is false
         None,       // calibration_model — unused
         ScanMode::Sequential,
-        false, // thorough — unused (no AI review)
-        None,  // feedback
-        None,  // job
-        None,  // incremental_prior — full scan
-        false, // deep
-        false, // soc2_enabled
-        false, // run_ai_review — zero API spend
-        true,  // run_deterministic — the floor AND the architectural engine both run
-        None,  // ledger
+        false,                                        // thorough — unused (no AI review)
+        None,                                         // feedback
+        None,                                         // job
+        None,                                         // incremental_prior — full scan
+        false,                                        // deep
+        false,                                        // soc2_enabled
+        false,                                        // run_ai_review — zero API spend
+        true, // run_deterministic — the floor AND the architectural engine both run
+        None, // ledger
+        camerata_server::llm::BackendResolution::Api, // backend gate: not under test here
+        None, // corpus
+        &std::collections::HashMap::new(), // chosen_options
     )
     .await;
     report
@@ -109,12 +125,18 @@ async fn deterministic_scan_fires_all_three_group_a_checkers_on_their_planted_ho
 
     let report = run_fixture_scan(repo_dir.path(), &repo_spec).await;
 
-    assert!(!report.gated, "a local-dir scan is never gated on a GitHub token");
+    assert!(
+        !report.gated,
+        "a local-dir scan is never gated on a GitHub token"
+    );
     assert_eq!(report.repos, vec![repo_spec.clone()]);
 
     // ═══ PYTHON-TESTING-FILE-NAMING-1: exactly one finding, on the stray file only ═══
-    let naming_findings: Vec<&onboard::Finding> =
-        report.findings.iter().filter(|f| f.rule_id == RULE_PYTHON_NAMING).collect();
+    let naming_findings: Vec<&onboard::Finding> = report
+        .findings
+        .iter()
+        .filter(|f| f.rule_id == RULE_PYTHON_NAMING)
+        .collect();
     assert_eq!(
         naming_findings.len(),
         1,
@@ -125,11 +147,18 @@ async fn deterministic_scan_fires_all_three_group_a_checkers_on_their_planted_ho
     let naming = naming_findings[0];
     assert_eq!(naming.path, "tests/testwidgethelper.py");
     assert!(naming.detail.contains("test_"), "{:?}", naming.detail);
-    assert!(naming.preview, "an architectural finding uses the existing preview mechanism");
+    assert!(
+        naming.preview,
+        "an architectural finding uses the existing preview mechanism"
+    );
     assert_eq!(naming.preview_tool.as_deref(), Some("camerata-arch"));
 
     // ═══ UI-UTC-DATES-1: exactly one finding, needs-review (no config exists yet) ═══
-    let utc_findings: Vec<&onboard::Finding> = report.findings.iter().filter(|f| f.rule_id == RULE_UTC_DATES).collect();
+    let utc_findings: Vec<&onboard::Finding> = report
+        .findings
+        .iter()
+        .filter(|f| f.rule_id == RULE_UTC_DATES)
+        .collect();
     assert_eq!(utc_findings.len(), 1, "{:?}", report.findings);
     let utc = utc_findings[0];
     assert_eq!(utc.path, "src/date_label.ts");
@@ -142,12 +171,19 @@ async fn deterministic_scan_fires_all_three_group_a_checkers_on_their_planted_ho
 
     // ═══ ARCH-HANDLER-NO-DB-1: exactly one finding, needs-review (no config -> attrs/name ═══
     // ═══ fallback tier — the production checker's degradation path, per D3)            ═══
-    let handler_findings: Vec<&onboard::Finding> =
-        report.findings.iter().filter(|f| f.rule_id == RULE_HANDLER_NO_DB).collect();
+    let handler_findings: Vec<&onboard::Finding> = report
+        .findings
+        .iter()
+        .filter(|f| f.rule_id == RULE_HANDLER_NO_DB)
+        .collect();
     assert_eq!(handler_findings.len(), 1, "{:?}", report.findings);
     let handler = handler_findings[0];
     assert_eq!(handler.path, "src/handler.rs");
-    assert!(handler.snippet.contains("list_orgs_handler"), "{:?}", handler.snippet);
+    assert!(
+        handler.snippet.contains("list_orgs_handler"),
+        "{:?}",
+        handler.snippet
+    );
     assert!(
         handler.detail.contains("[needs review"),
         "no .camerata/architecture.toml in this fixture -> the production checker's name-heuristic \
@@ -157,7 +193,10 @@ async fn deterministic_scan_fires_all_three_group_a_checkers_on_their_planted_ho
 
     // ═══ Provenance stamp sanity (mirrors architectural_executor_e2e.rs) ═══
     assert!(!report.provenance.audited_refs.is_empty());
-    let sha = report.provenance.audited_refs[0].sha.as_deref().expect("a real one-commit git repo must yield a SHA");
+    let sha = report.provenance.audited_refs[0]
+        .sha
+        .as_deref()
+        .expect("a real one-commit git repo must yield a SHA");
     assert_eq!(sha.len(), 40);
 }
 
@@ -171,9 +210,13 @@ async fn arch_handler_no_db_rule_id_stays_eligible_for_the_llm_prompt_per_d3_whe
     // `checker_rule_ids_for_repo`, not the static `all_checker_rule_ids` (which now DOES
     // contain ARCH-HANDLER-NO-DB-1, since the production checker only opts out per-repo, not
     // unconditionally — see `handler_no_db_checker`'s own registry tests for that distinction).
-    let fixture_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/group_a_arch_repo");
+    let fixture_root =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/group_a_arch_repo");
     let files = collect_fixture_files(&fixture_root);
-    let repo = camerata_checks::arch_checker::RepoView { spec: "e2e/group-a-arch-fixture", files: &files };
+    let repo = camerata_checks::arch_checker::RepoView {
+        spec: "e2e/group-a-arch-fixture",
+        files: &files,
+    };
 
     let per_repo = camerata_checks::arch_checker::checker_rule_ids_for_repo(&repo);
     assert!(
@@ -202,7 +245,11 @@ fn collect_fixture_files_into(root: &Path, dir: &Path, out: &mut Vec<(String, St
         if entry.file_type().unwrap().is_dir() {
             collect_fixture_files_into(root, &path, out);
         } else {
-            let rel = path.strip_prefix(root).unwrap().to_string_lossy().replace('\\', "/");
+            let rel = path
+                .strip_prefix(root)
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/");
             let content = std::fs::read_to_string(&path).unwrap();
             out.push((rel, content));
         }

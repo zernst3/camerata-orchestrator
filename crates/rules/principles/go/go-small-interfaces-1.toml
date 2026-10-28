@@ -1,11 +1,15 @@
 id = "GO-SMALL-INTERFACES-1"
+version = 1
 title = "Interfaces are small and cohesive; an interface has one responsibility, not a god-interface with every method a package might need"
-tag = "stack"
 domain = "go"
 layer = "architecture"
 enforcement = "prose"
+kind = "decision"
+inspectable = true
 default = true
 verification = "grounded"
+
+qualifies = "Small, focused interfaces are easier to implement, mock, and reason about. A large interface that requires many methods (e.g., Database with 50 methods) forces implementers to implement all 50 even if they only use 5, creates surface-area for mocking, and couples callers to a large contract."
 
 [[sources]]
 url = "https://go.dev/doc/effective_go#interfaces_and_types"
@@ -14,7 +18,6 @@ title = "Effective Go — Interfaces and other types"
 [[sources]]
 url = "https://go-proverbs.github.io/"
 title = "Go Proverbs — The bigger the interface, the weaker the abstraction"
-qualifies = "Small, focused interfaces are easier to implement, mock, and reason about. A large interface that requires many methods (e.g., Database with 50 methods) forces implementers to implement all 50 even if they only use 5, creates surface-area for mocking, and couples callers to a large contract."
 
 [decision]
 question = "How large should interfaces be?"
@@ -25,6 +28,9 @@ why = "Rob Pike's principle: small interfaces are the right size in Go. A callee
 id = "small-focused-interfaces"
 label = "define small, focused interfaces with 1-3 methods"
 directive = "Each interface has a single responsibility and defines the minimal set of methods a caller needs. If a service needs to read JSON and write to a database, it takes (io.Reader, database.Saver), not a large Database interface with every method. Larger interfaces are built by embedding smaller ones."
+remediation = """
+Split the large interface into smaller, single-responsibility interfaces with only the methods a given caller actually needs, and change the caller's parameter type to the smaller interface instead of the god-interface. Compose larger interfaces from the smaller ones via embedding where a consumer genuinely needs more than one capability. Verify by confirming a caller can be satisfied with a minimal stub implementing only the methods it uses, rather than the full original interface.
+"""
 why = "Small interfaces are easy to implement, mock, and test; they compose well."
 
 [[option]]

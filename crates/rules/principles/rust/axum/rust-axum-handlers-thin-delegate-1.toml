@@ -1,9 +1,17 @@
 id = "RUST-AXUM-HANDLERS-THIN-DELEGATE-1"
+version = 1
 title = "Handlers stay thin; business logic and data access live in services or repositories"
-tag = "stack"
 domain = "rust:axum"
 layer = "framework"
 enforcement = "structured"
+kind = "decision"
+inspectable = true
+# Deviation-ceiling escape hatch, INHERITED from ARCH-STRICT-LAYERING-1: severity must describe
+# the PROBLEM, not which rule happened to fire. Without this, a repo on this stack caps the
+# identical architectural defect at medium while an unmirrored stack reaches high under the
+# general rule. This rule mirrors ARCH-STRICT-LAYERING-1 because it re-litigates the same
+# hierarchy: handlers stay thin, business logic and data access live in services or repositories.
+deviation_ceiling = "high"
 default = true
 verification = "grounded"
 
@@ -16,6 +24,9 @@ why = "A handler is a translation layer: it reads the validated HTTP request (no
 id = "handlers-thin-delegate-to-services"
 label = "Handlers stay thin; delegate to services or repositories"
 directive = "Handlers are limited to HTTP concerns: extract and validate the request, call a service or repository function, and map its result or error onto a response. Business rules and data access (database queries, ORM calls, external API calls) live in a service or repository layer the handler calls. A direct database query or business-rule computation written inside a handler is forbidden; it moves behind the service layer."
+remediation = """
+Move the business logic and direct data access out of the handler and into a service or repository function the handler calls, leaving the handler limited to extracting/validating the request and mapping the result to a response. Verify by confirming the handler function contains no direct database query or external API call.
+"""
 why = "Thin handlers keep transport concerns separate from domain logic, enable reuse, and improve testability."
 
 [[option]]

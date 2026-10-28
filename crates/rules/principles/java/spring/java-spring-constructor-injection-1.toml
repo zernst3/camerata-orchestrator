@@ -1,9 +1,18 @@
 id = "JAVA-SPRING-CONSTRUCTOR-INJECTION-1"
+version = 1
 title = "Dependencies are injected via constructor parameters and stored in final fields; @Autowired field injection is forbidden"
-tag = "stack"
 domain = "java:spring"
 layer = "framework"
 enforcement = "prose"
+kind = "default_with_exceptions"
+inspectable = true
+# Deviation-ceiling escape hatch, INHERITED from ARCH-SERVICE-DI-1: severity must describe the
+# PROBLEM, not which rule happened to fire. Without this, a repo on this stack caps the identical
+# architectural defect at medium while an unmirrored stack reaches high under the general rule.
+# This rule mirrors ARCH-SERVICE-DI-1 because it re-litigates the same question (how a service
+# obtains its dependencies), answered with constructor parameters in final fields rather than
+# field injection.
+deviation_ceiling = "high"
 default = true
 qualifies = "Enforced by a Checkstyle rule or Semgrep pattern that flags @Autowired annotations on instance fields (as opposed to constructors). Conformance holds when all Spring bean dependencies are declared as constructor parameters, assigned to final fields, and no @Autowired appears on a field declaration. Single-constructor beans in Spring 4.3+ are auto-wired without requiring @Autowired on the constructor at all."
 verification = "grounded"
@@ -21,16 +30,21 @@ title = "Spring Framework Reference — Constructor-based Dependency Injection (
 id = "constructor-injection-final-fields"
 label = "All dependencies as constructor parameters; fields are private final; no @Autowired on fields"
 directive = "Every Spring bean class declares its dependencies as constructor parameters. Each parameter is assigned to a private final field in the constructor body. No @Autowired annotation appears on an instance field. For classes with a single constructor, the @Autowired annotation on the constructor itself is omitted (Spring auto-wires it). @Autowired on a constructor with multiple constructors is permitted when the intent is to disambiguate. @RequiredArgsConstructor from Lombok is an acceptable shorthand when the project uses Lombok."
+remediation = """
+Move the bean's dependencies from @Autowired-annotated fields or setters into constructor parameters, assigned to private final fields in the constructor body, and remove the @Autowired annotation. Verify by confirming the class can be instantiated in a unit test with `new` and mock dependencies passed directly to the constructor, with no Spring container involved.
+"""
 why = "Constructor injection exposes dependencies explicitly, enables final fields, makes testing trivial without a container, and surfaces circular dependency cycles at startup."
 
 [[option]]
 id = "field-injection-autowired"
+violates = true
 label = "@Autowired on instance fields"
 directive = "Dependencies are declared as instance fields annotated with @Autowired. Spring uses reflection to populate them after instantiation via the no-arg constructor."
 why = "Hides dependencies from the class's public contract, requires mutable non-final fields, makes testing require a Spring container or reflection, and is officially marked as not recommended by Spring since Spring Framework 5. Forbidden in this project."
 
 [[option]]
 id = "setter-injection"
+violates = true
 label = "Setter injection via @Autowired setter methods"
 directive = "Dependencies are declared as private fields and exposed via public setter methods annotated with @Autowired. Spring calls the setters after instantiation."
 why = "Makes dependencies optional by default (setters may not be called), allows reassignment after construction, and is more verbose than constructor injection. Acceptable only for optional dependencies that have a sensible default; not the general injection style."

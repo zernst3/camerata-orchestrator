@@ -1,9 +1,24 @@
 id = "PYTHON-SERVICE-LAYER-1"
+version = 1
 title = "Business logic lives in a service layer, not in views or route handlers"
-tag = "stack"
 domain = "python"
 layer = "language"
 enforcement = "structured"
+kind = "default_with_exceptions"
+inspectable = true
+# Deviation-ceiling escape hatch, INHERITED from ARCH-STRICT-LAYERING-1: severity must describe
+# the PROBLEM, not which rule happened to fire. Without this, a repo on this stack caps the
+# identical architectural defect at medium while an unmirrored stack reaches high under the
+# general rule. This rule mirrors ARCH-STRICT-LAYERING-1 because it re-litigates that boundary for
+# Python web frameworks generally: views and route handlers only parse input, call a service, and
+# shape the response, while every business rule and all persistence orchestration live in the
+# service layer.
+#
+# The ceiling is authored without touching this rule's `kind`, and is safe either way: as a
+# `decision` rule it already emits deviation rows, so the ceiling only BOUNDS rows that exist
+# today; were it ever reclassified as `defect` the ceiling becomes dead config rather than wrong
+# behaviour.
+deviation_ceiling = "high"
 default = true
 verification = "grounded"
 
@@ -20,10 +35,14 @@ why = "A Flask or FastAPI route handler exists to translate HTTP into a call and
 id = "service-layer"
 label = "keep handlers thin; business logic in a service layer"
 directive = "Views and route handlers only parse and validate input, call a service-layer function, and shape the response. All business rules, multi-step workflows, and persistence orchestration live in service functions or classes that take plain arguments (not request objects) and return plain values or domain objects, so they are callable from commands, tasks, and other endpoints and unit-testable without the web stack."
+remediation = """
+Move the business logic and persistence orchestration out of the view or route handler and into a service function or class that takes plain arguments, leaving the handler to parse input, call the service, and shape the response. Verify by confirming the service function can be called and tested without an HTTP request object.
+"""
 why = "A service layer makes business logic reusable and testable in isolation and keeps handlers thin and obvious."
 
 [[option]]
 id = "logic-in-views"
+violates = true
 label = "put business logic directly in views/handlers"
 directive = "Business rules and persistence orchestration are written inside view functions or route handlers alongside the HTTP handling."
 why = "Ties the logic to the request cycle: it cannot be reused outside HTTP or unit-tested without the web stack, and rules get duplicated across endpoints."

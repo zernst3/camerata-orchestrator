@@ -63,16 +63,19 @@ dotenvy = "0.15"
 pulldown-cmark = { version = "0.12", default-features = false, features = ["html"] }
 
 [dev-dependencies]
-tokio = { version = "1", features = ["time", "rt", "macros", "rt-multi-thread"] }
+tokio = { version = "1", features = ["time", "rt", "macros", "rt-multi-thread", "test-util"] }
 # UI testing (#112 follow-up). dioxus-ssr renders a component to an HTML string for headless
 # structure assertions (Tier 1); wiremock stands up a fake BFF so the reqwest network helpers can be
 # tested against CAMERATA_BFF_URL (Tier 2). No browser / wasm needed.
 dioxus-ssr = "0.7"
 wiremock = "0.6"
 # The wiremock tests point helpers at a mock BFF via the process-global CAMERATA_BFF_URL env var.
-# serial_test's shared key (#[serial(bff_env)]) serializes every such test crate-wide so they can't
-# clobber each other's override under cargo's parallel test threads.
+# serial_test's shared key (#[serial(process_env)]) serializes every such test crate-wide so they
+# can't clobber each other's override under cargo's parallel test threads; EnvGuard restores the
+# prior value on drop (even if the test panics). Same key for every process-env var in the
+# workspace (CAMERATA_SERVER_BIN too), because two keys would not exclude each other.
 serial_test = "3"
+camerata-test-env = { path = "../test-env" }
 
 # Runtime clipboard probe (src/clipboard_probe.rs): synthesizes native Cmd-key
 # NSEvents and posts them to the probe's own process, so the macOS clipboard behavior

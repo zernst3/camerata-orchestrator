@@ -34,9 +34,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::integration::vocab::{
-    normalize_path, ArtifactKind, Consumed, Produced, RepoArtifacts,
-};
+use crate::integration::vocab::{normalize_path, ArtifactKind, Consumed, Produced, RepoArtifacts};
 use crate::multilang::WorktreeLanguage;
 
 /// The pluggable per-stack extractor contract. An extractor is handed a repo dir
@@ -279,9 +277,17 @@ fn line_is_ui_gated(line: &str) -> bool {
 /// so a `.post(` on it is a route CALL, not a route declaration. Keeps the two
 /// parsers from double-counting the same `.method(` token.
 fn looks_like_client_call(lower_line: &str) -> bool {
-    ["fetch", "axios", "reqwest", "newrequest", "http.", "httpclient", ".request("]
-        .iter()
-        .any(|k| lower_line.contains(k))
+    [
+        "fetch",
+        "axios",
+        "reqwest",
+        "newrequest",
+        "http.",
+        "httpclient",
+        ".request(",
+    ]
+    .iter()
+    .any(|k| lower_line.contains(k))
 }
 
 /// Parse a route DECLARATION idiom out of one line → (METHOD, path).
@@ -356,9 +362,11 @@ fn parse_route_call(line: &str) -> Option<(String, String)> {
     // We only treat it as a CALL when the line also looks like a client call
     // (contains fetch/axios/http/request/client), to avoid double-counting a
     // server declaration as a call.
-    let looks_like_client = ["fetch", "axios", "http", "request", "reqwest", "client", "url"]
-        .iter()
-        .any(|k| lower.contains(k));
+    let looks_like_client = [
+        "fetch", "axios", "http", "request", "reqwest", "client", "url",
+    ]
+    .iter()
+    .any(|k| lower.contains(k));
 
     for m in METHODS {
         let ml = m.to_lowercase();
@@ -571,28 +579,56 @@ mod tests {
     #[test]
     fn route_declaration_forms_are_extracted() {
         let td = TempDir::new().unwrap();
-        write(td.path(), "server.js", "app.post('/members/export', handler)\n");
-        write(td.path(), "routes.rs", ".route(\"/users/{id}\", get(show))\n");
+        write(
+            td.path(),
+            "server.js",
+            "app.post('/members/export', handler)\n",
+        );
+        write(
+            td.path(),
+            "routes.rs",
+            ".route(\"/users/{id}\", get(show))\n",
+        );
         write(td.path(), "api.py", "@app.get(\"/health\")\n");
         let ex = GenericRouteExtractor;
         let a = ex.extract("api", td.path());
         let ids: Vec<String> = a.produced.iter().map(|p| p.kind.identity()).collect();
-        assert!(ids.contains(&"endpoint POST /members/export".to_string()), "{ids:?}");
-        assert!(ids.contains(&"endpoint GET /users/{}".to_string()), "{ids:?}");
+        assert!(
+            ids.contains(&"endpoint POST /members/export".to_string()),
+            "{ids:?}"
+        );
+        assert!(
+            ids.contains(&"endpoint GET /users/{}".to_string()),
+            "{ids:?}"
+        );
         assert!(ids.contains(&"endpoint GET /health".to_string()), "{ids:?}");
     }
 
     #[test]
     fn route_call_forms_are_extracted() {
         let td = TempDir::new().unwrap();
-        write(td.path(), "client.ts", "await axios.post('/members/csv', body)\n");
-        write(td.path(), "hook.ts", "await fetch('/users/1', { method: 'GET' })\n");
+        write(
+            td.path(),
+            "client.ts",
+            "await axios.post('/members/csv', body)\n",
+        );
+        write(
+            td.path(),
+            "hook.ts",
+            "await fetch('/users/1', { method: 'GET' })\n",
+        );
         let ex = GenericRouteExtractor;
         let a = ex.extract("ui", td.path());
         let ids: Vec<String> = a.consumed.iter().map(|c| c.kind.identity()).collect();
-        assert!(ids.contains(&"endpoint POST /members/csv".to_string()), "{ids:?}");
+        assert!(
+            ids.contains(&"endpoint POST /members/csv".to_string()),
+            "{ids:?}"
+        );
         // The concrete id `1` normalizes to the `{}` placeholder (matches a param route).
-        assert!(ids.contains(&"endpoint GET /users/{}".to_string()), "{ids:?}");
+        assert!(
+            ids.contains(&"endpoint GET /users/{}".to_string()),
+            "{ids:?}"
+        );
     }
 
     #[test]
@@ -618,7 +654,11 @@ mod tests {
     #[test]
     fn event_emit_and_subscribe_extracted() {
         let td = TempDir::new().unwrap();
-        write(td.path(), "emit.js", "bus.emit('member.created', payload)\n");
+        write(
+            td.path(),
+            "emit.js",
+            "bus.emit('member.created', payload)\n",
+        );
         write(td.path(), "sub.js", "bus.subscribe('member.created', h)\n");
         let ex = GenericEventExtractor;
         let a = ex.extract("api", td.path());
@@ -667,7 +707,11 @@ mod tests {
     #[test]
     fn vendored_dirs_are_pruned() {
         let td = TempDir::new().unwrap();
-        write(td.path(), "node_modules/dep/index.js", "app.get('/leak', h)\n");
+        write(
+            td.path(),
+            "node_modules/dep/index.js",
+            "app.get('/leak', h)\n",
+        );
         write(td.path(), "src/app.js", "app.get('/real', h)\n");
         let ex = GenericRouteExtractor;
         let a = ex.extract("api", td.path());

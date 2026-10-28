@@ -1,9 +1,11 @@
 id = "PYTHON-TESTING-FILE-NAMING-1"
+version = 1
 title = "Test files follow test_*.py naming so pytest auto-discovers them"
-tag = "stack"
 domain = "python:testing"
 layer = "language"
 enforcement = "architectural"
+kind = "decision"
+inspectable = true
 default = true
 qualifies = "Deterministically checkable, but no off-the-shelf linter rule enforces it: pytest's default discovery globs test_*.py (or *_test.py) and collects test_-prefixed functions and Test-prefixed classes, but a misnamed file is SILENTLY SKIPPED rather than failing the build, and flake8-pytest-style (Ruff PT rules) has no rule for test-file naming (confirmed: astral-sh/ruff#8145, #8796). Enforcing it as a hard gate needs a custom CI check — a glob over the test tree asserting every test file matches the naming pattern, or a pytest --collect-only count compared against the file count. Conformance holds when such a check runs in CI and a misnamed (therefore uncollected) test file fails the build; it fails when discovery silently skips misnamed files with no gate catching them."
 verification = "grounded"
@@ -17,6 +19,10 @@ why = "pytest's test-collection algorithm relies on naming conventions: it searc
 id = "test-prefix-convention"
 label = "test_*.py files, test_ functions, Test classes"
 directive = "Every test file is named test_<subject>.py (e.g. test_user_service.py). Every test function is named test_<behavior>() (e.g. test_create_user_returns_id). Every test class is named Test<Subject> and contains no __init__ method. The *_test.py suffix form is acceptable but should be chosen consistently within the project. No custom python_files or python_functions settings are required."
+remediation = """
+Rename the test file to the test_ prefix followed by the subject name (e.g. test_user_service.py), its test functions to the test_ prefix followed by the behavior described, and its test classes to a Test prefix followed by the subject name, with no __init__ method, so pytest default discovery picks them up without custom configuration. Verify by running pytest with no custom python_files/python_functions settings and confirming it discovers and runs the renamed tests.
+"""
+effort = "low"
 why = "Matches pytest's built-in discovery; no extra configuration required; universally familiar to Python contributors."
 
 [[option]]

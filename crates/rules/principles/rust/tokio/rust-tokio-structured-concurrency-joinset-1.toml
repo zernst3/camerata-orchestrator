@@ -1,9 +1,11 @@
 id = "RUST-TOKIO-STRUCTURED-CONCURRENCY-JOINSET-1"
+version = 1
 title = "Use JoinSet for structured concurrency; track spawned tasks and ensure all complete or are cancelled"
-tag = "stack"
 domain = "rust:tokio"
 layer = "framework"
 enforcement = "structured"
+kind = "default_with_exceptions"
+inspectable = true
 default = true
 verification = "grounded"
 
@@ -16,10 +18,14 @@ why = "tokio::task::JoinSet holds a set of spawned tasks and ensures they are jo
 id = "use-joinset-for-structured-concurrency"
 label = "Use JoinSet for structured concurrency"
 directive = "Tasks are spawned via a JoinSet, and the code joins all tasks (awaits or cancels them) before the scope exits. Unstructured tokio::spawn calls that can outlive their scope are avoided. JoinSet::join_all() or iteration over the JoinSet ensures all tasks complete or are cancelled."
+remediation = """
+Replace the unstructured tokio::spawn calls with a JoinSet, spawning tasks onto it and joining or cancelling all of them before the enclosing scope exits, instead of letting spawned tasks potentially outlive their scope. Verify by confirming the function does not return until every task in the JoinSet has completed or been explicitly cancelled.
+"""
 why = "JoinSet ensures spawned tasks are joined and prevents orphaned tasks and resource leaks."
 
 [[option]]
 id = "use-unstructured-spawn"
+violates = true
 label = "Use unstructured tokio::spawn"
 directive = "Tasks are spawned via tokio::spawn without a JoinSet. Tasks may run past the scope where they are spawned, and the application relies on explicit cancellation or task-local cleanup."
 why = "A spawned task can run past the scope where it was created, producing orphaned tasks, resource leaks, and subtle bugs where a task outlives its dependencies; if a task panics, the panic is silently lost rather than being propagated and handled at a well-defined join point."

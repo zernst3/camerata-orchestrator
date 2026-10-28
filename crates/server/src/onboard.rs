@@ -18,12 +18,18 @@
 // ── Submodules ──────────────────────────────────────────────────────────────────
 pub mod architectural;
 pub mod audit;
+pub mod clone_advisory;
+pub mod count;
 pub mod files;
 pub mod finding_context;
+pub mod finding_context_batch;
 pub mod greenfield;
 pub mod propose;
+pub(crate) mod redact;
 pub mod report;
 pub mod self_ref;
+pub mod source_file;
+pub mod symbol_refs;
 
 // ── Re-exports (keep crate::onboard::X paths stable) ────────────────────────────
 pub use architectural::{arch_violation_to_finding, audit_architectural, ARCH_PREVIEW_TOOL};
@@ -31,11 +37,11 @@ pub use audit::{audit_content, audit_files};
 pub use files::{read_local_repo_files, ExtractedRepo};
 pub use greenfield::{scaffold_greenfield_blocking, GreenfieldResult};
 pub use propose::{detect_stack, propose_corpus_rules, propose_rules};
+#[allow(unused_imports)]
+pub(crate) use report::csv_escape;
 pub use report::{
     build_report, create_issue, create_tech_debt_ticket, tech_debt_csv, tech_debt_issue_body,
 };
-#[allow(unused_imports)]
-pub(crate) use report::csv_escape;
 pub use self_ref::{
     corpus_texts_from_ruleset, is_governance_or_corpus_artifact, is_self_referential_snippet,
     suppress_self_referential,
@@ -43,7 +49,9 @@ pub use self_ref::{
 
 // Pull private/crate-internal helpers into scope for the orchestration functions and
 // test module (via `use super::*`).
-pub(crate) use audit::{classify_repo_findings, is_code_auditable_rule};
+pub(crate) use audit::{
+    build_rule_alternatives, classify_repo_findings, is_ci_tier_rule, is_semantic_multi_option_rule,
+};
 // Re-export camerata_gateway test-scope primitives so the test module's `use super::*`
 // can reach them directly (they're used in inline test assertions).
 #[allow(unused_imports)]
@@ -55,7 +63,10 @@ pub(crate) use camerata_gateway::{
 // from root's perspective (the root orchestration functions call files::* directly via
 // the submodule). The re-export is needed so `use super::*` in the test module reaches them.
 #[allow(unused_imports)]
-pub(crate) use files::{extra_exclude_dirs, has_code_ext, is_admissible_text, is_noise_path, HARD_CAP_FILES};
+pub(crate) use files::{
+    extra_exclude_dirs, has_code_ext, is_admissible_text, is_engine_artifact, is_noise_path,
+    ENGINE_ARTIFACT_PREFIX, HARD_CAP_FILES,
+};
 pub(crate) use propose::domains_for_stack;
 pub(crate) use report::merge_deep_reports;
 
@@ -167,6 +178,141 @@ pub struct Finding {
     /// findings cite real lines, so this defaults to `true` (back-compatible serde default).
     #[serde(default = "default_located")]
     pub located: bool,
+    /// Detector-supplied placeholder bindings used to instantiate the rule's authored
+    /// `RuleOption::remediation` text for THIS specific finding: token name WITHOUT angle
+    /// brackets (e.g. `"table"`, `"function-name"`, `"bucket"`) → the concrete object name the
+    /// detector matched (e.g. `"profiles"`, `"send-invite"`, `"avatars"`). Consumed by
+    /// `report_export::resolve_fix`, which substitutes `<table>` etc. in the remediation text
+    /// from this map and falls back to a readable generic ("the affected table") for any token
+    /// not present here. Empty for findings whose detector doesn't cheaply know the object
+    /// (most AI/semantic findings) — those simply get the generic fallback throughout; this is
+    /// NOT a required field to populate, only an enrichment.
+    #[serde(default)]
+    pub captures: std::collections::BTreeMap<String, String>,
+    /// For a MULTI-OPTION semantic rule (see `docs/design/2026-09-22_audit-integrated-
+    /// alternatives.md`), the option id this finding's violation was judged AGAINST — the
+    /// AI's recommended option for the main scan, or the operator's forced choice for a
+    /// targeted `rescan-alternatives` call. `None` for a single-option rule, a mechanical/
+    /// deterministic-floor finding, or any finding predating this field (back-compatible
+    /// serde default). Consumed by `report_export::resolve_fix` so the report's Fix text
+    /// matches the option the finding was actually evaluated under, never a stale default.
+    #[serde(default)]
+    pub evaluated_option_id: Option<String>,
+    /// Evidence sites ABSORBED from other findings merged into this one during cross-tier /
+    /// cross-file dedup ([`crate::ai_audit::merge_by_location`] /
+    /// [`crate::ai_audit::merge_semantic_groups`], P1 — the deduplication + cross-tier merge
+    /// design). A finding that survives a merge as the cluster's PRIMARY keeps its own
+    /// `repo`/`path`/`line`/`snippet` as before, but every OTHER cluster member's own evidence
+    /// site is preserved here instead of being silently discarded — a merged row still
+    /// discloses every location the underlying defect touches. Empty for an un-merged finding
+    /// (back-compatible serde default).
+    #[serde(default)]
+    pub also_locations: Vec<MergedLocation>,
+    /// A codebase-specific fix for THIS finding — names the actual file/symbol/column from
+    /// this finding's own evidence, and points at the repo's own correct pattern elsewhere
+    /// when one exists ("use `safeInternalPath` from lib/redirect.ts, as
+    /// app/auth/signout/route.ts does"). Generated by
+    /// [`crate::ai_audit::generate_fix_specifics`] (P2) — a dedicated AI pass, run AFTER
+    /// calibration/merge, over every non-dependency finding, with a bounded
+    /// validate-and-regenerate self-check (identifier grounding + non-contradiction; see that
+    /// module's doc comment). `None` until that pass runs (back-compatible serde default) OR
+    /// when generation still fails its self-check after retries. C3-1b: that failure is a
+    /// PIPELINE gap, not a confidence judgement — it is only logged (stderr), and NEVER sets
+    /// `needs_review` or writes anything into `detail`; bucket placement stays driven purely
+    /// by severity/effort/disposition. Read directly by `report_export::build_report_json`
+    /// into `CuratedSiteJson::fix_for_this_finding` (rendered ABOVE the rule's generic `fix`
+    /// in both the PDF and the xlsx — this is the PRIMARY remediation text when present; the
+    /// rule's authored `remediation` renders as the fix regardless, so a failed generation
+    /// still ships a usable fix) — never re-generated at report-export time, since that layer
+    /// is pure/synchronous with no model access.
+    #[serde(default)]
+    pub fix_specific: Option<String>,
+    /// A short, deterministic explanation of WHY this finding's severity was floored/adjusted by
+    /// [`crate::ai_audit::apply_severity_calibration_rules`] (D5 — severity calibration rules of
+    /// thumb): unauthenticated access / full-account compromise is always Critical; an
+    /// authenticated cross-tenant read floors at High (Critical when the data class escalates —
+    /// payment, credentials/secrets, sensitive PII); an access-control/injection finding is never
+    /// under-rated on an "RLS probably contains it" rationale. `None` when none of these rules of
+    /// thumb apply to this finding (back-compatible serde default). Recorded so the calibrated
+    /// severity is auditable — the SAME input yields the SAME severity and a human can see why,
+    /// rather than it being a per-run model whim.
+    #[serde(default)]
+    pub calibration_rationale: Option<String>,
+    /// Pass-1 W3 (A5.6): what this row IS — the five-kind taxonomy
+    /// ([`camerata_api_types::audit::FindingKind`]: `defect` / `deviation` /
+    /// `convention_observed` / `no_convention` / `not_assessed`), set EXPLICITLY by whatever
+    /// produced the row (the deterministic floor, the architectural checkers, tool previews,
+    /// the dependency audit, and every `crate::ai_audit` emission path), never derived
+    /// downstream from prose. Flattened: the wire carries one flat `"kind"` discriminator plus
+    /// the variant's payload fields as siblings of this struct's own fields. `None` ONLY for a
+    /// report persisted before this field existed (serde back-compat) or an emission path the
+    /// backfill missed — exporters surface that as the explicit `"unspecified"` tag
+    /// ([`camerata_api_types::audit::UNSPECIFIED_KIND_TAG`]), NEVER as a silent `defect`.
+    #[serde(default, flatten)]
+    pub kind: Option<camerata_api_types::audit::FindingKind>,
+    /// W31 — the engine's read on whether this state might be DELIBERATE, as a flag rather
+    /// than as prose.
+    ///
+    /// # The problem this solves
+    ///
+    /// Some faults are indistinguishable from a deliberate choice by reading code alone. A
+    /// public storage bucket is the canonical case: nothing in a repository separates a
+    /// catalog-photo bucket that is public on purpose from a user-document bucket that is
+    /// public by accident, and inferring it from the bucket's NAME is exactly the
+    /// prose-matching this effort has been removing everywhere else.
+    ///
+    /// The engine already knew this and said so — in `detail` prose, as "very likely
+    /// intentional". No renderer, no severity pass and no ranker can read prose, so three
+    /// such rows shipped at HIGH, held, each carrying text that undercut its own severity.
+    ///
+    /// # Why a third axis rather than a `FindingKind` variant
+    ///
+    /// Three orthogonal questions, and collapsing any two of them loses information:
+    ///
+    /// * [`Self::kind`] — what KIND of statement this row is (defect, deviation, convention…).
+    /// * this flag — the ENGINE's read on whether the author meant it.
+    /// * the disposition — what the CURATOR decided.
+    ///
+    /// A flagged row is capped at INFO/LOW until a curator marks it a real violation, at
+    /// which point it takes its authored severity. That cap is the whole mechanical point:
+    /// it removes the "HIGH, held, detail says probably fine" contradiction by construction
+    /// rather than by asking a renderer to notice.
+    ///
+    /// # The client-facing consequence
+    ///
+    /// Today a finding is an accusation or it is absent. This adds a third outcome: "we found
+    /// this, it may well be deliberate, your call." An untriaged flagged row ships in that
+    /// voice rather than holding sign-off (owner's ruling, 2026-10-16) — the client-visible
+    /// result is honest either way, and holding sign-off would punish the curator for the
+    /// engine's uncertainty.
+    #[serde(default)]
+    pub could_be_intentional: bool,
+}
+
+/// One evidence site absorbed into a merged finding's [`Finding::also_locations`] during
+/// cross-tier / cross-file dedup. Mirrors the subset of `Finding` fields needed to render the
+/// site as its own evidence row (repo/path/line/rule id/snippet) without duplicating the whole
+/// `Finding` (severity/detail/citations etc. belong to the surviving primary, not to each site).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MergedLocation {
+    /// `owner/repo` this site lives in — may differ from the primary's `repo` in a
+    /// multi-repo scan (a cross-file merge can span two repos in the same scan set).
+    pub repo: String,
+    /// File path within `repo`.
+    pub path: String,
+    /// 1-based line number.
+    pub line: usize,
+    /// The rule id this site was originally flagged under (before being absorbed).
+    pub rule_id: String,
+    /// The offending line/description this site cited, trimmed and length-capped.
+    pub snippet: String,
+    /// True when this site is a pure CONSEQUENCE of the primary's root cause — it has no
+    /// independently-fixable code of its own (the general signal: the absorbed finding's own
+    /// `located == false`, i.e. it cited a description/impact rather than a presence-type
+    /// violation at its own site — see `Finding::located`) — rather than an additional site
+    /// that shares the SAME fix as the primary. A report renders a consequence site under
+    /// "also affects" instead of listing it as a peer evidence location.
+    pub consequence: bool,
 }
 
 /// A finding is presumed presence-type (`located = true`) unless the AI merge pass proves its
@@ -187,6 +333,7 @@ impl Default for Finding {
     /// field doesn't break every literal.
     fn default() -> Self {
         Self {
+            could_be_intentional: false,
             repo: String::new(),
             path: String::new(),
             line: 0,
@@ -204,12 +351,81 @@ impl Default for Finding {
             effort: None,
             category: None,
             located: default_located(),
+            captures: std::collections::BTreeMap::new(),
+            evaluated_option_id: None,
+            also_locations: Vec::new(),
+            fix_specific: None,
+            calibration_rationale: None,
+            // A blank finding has no producer yet, so it has no kind yet — every PRODUCTION
+            // emission path must set one explicitly (A5.6's backfill rule); `None` surviving
+            // to an export surfaces as the explicit "unspecified" tag, never a silent defect.
+            kind: None,
         }
     }
 }
 
+/// Compute the [`crate::scan_ledger::StageAccounting`] for a stage that reduces `pre` findings
+/// to `post` findings via the `also_locations`-preserving absorb pattern used by
+/// [`crate::ai_audit::merge_semantic_groups`] and [`crate::ai_audit::group_structural_needs_review`]:
+/// every finding that does not survive as its own output row is instead represented as a
+/// [`MergedLocation`] entry (keyed by `(repo, path, line, rule_id)`) inside the row it was
+/// absorbed into.
+///
+/// # Why this exists (pipeline-integrity ledger fix)
+///
+/// The original instrumentation at both call sites counted merges by diffing `also_matches` — a
+/// rule-id SET, deduplicated by construction — before vs. after the stage. That undercounts (or,
+/// when every absorbed finding shares the surviving primary's OWN rule id — the common "one rule
+/// fires N times in this file" shape `merge_semantic_group` explicitly collapses via its
+/// same-rule-id N-site signal — drops to ZERO) whenever more than one absorbed finding shares a
+/// rule id with the primary or with each other: `seen.insert(rule_id)` in
+/// `ai_audit::merge_semantic_group` only pushes a rule id into `also_matches` the FIRST time it
+/// is seen, so a second (or Nth) absorbed finding with that same id leaves no trace in
+/// `also_matches` at all, even though its OWN evidence site is still unconditionally pushed into
+/// `also_locations`. The `also_matches` id-set is a "which rule families does this row's defect
+/// span" summary, never a per-absorbed-FINDING log — it was never the right signal for an
+/// accounting invariant.
+///
+/// `also_locations` is: every absorbed member gets exactly one entry, unconditionally, regardless
+/// of rule-id collisions (see `merge_semantic_group`'s and `build_structural_group_finding`'s
+/// unconditional pushes). Diffing THAT — as a MULTISET, so a key appearing twice pre-stage (e.g.
+/// already carried in by an earlier merge stage such as `ai-location-merge`) is matched off
+/// before anything is counted as newly merged by THIS stage, rather than naively deduplicated
+/// into a set — gives an exact, collision-proof count of what this stage actually absorbed.
+pub(crate) fn account_location_merge(
+    pre: &[Finding],
+    post: &[Finding],
+) -> crate::scan_ledger::StageAccounting {
+    fn key(l: &MergedLocation) -> (String, String, usize, String) {
+        (l.repo.clone(), l.path.clone(), l.line, l.rule_id.clone())
+    }
+    let mut pre_counts: std::collections::HashMap<(String, String, usize, String), usize> =
+        std::collections::HashMap::new();
+    for f in pre {
+        for l in &f.also_locations {
+            *pre_counts.entry(key(l)).or_insert(0) += 1;
+        }
+    }
+    let mut acc = crate::scan_ledger::StageAccounting::default();
+    for f in post {
+        for l in &f.also_locations {
+            let k = key(l);
+            if let Some(c) = pre_counts.get_mut(&k) {
+                if *c > 0 {
+                    // Already accounted for by an earlier stage — carried forward, not newly
+                    // absorbed here.
+                    *c -= 1;
+                    continue;
+                }
+            }
+            acc.push_merge(l.rule_id.clone(), f.rule_id.clone());
+        }
+    }
+    acc
+}
+
 /// One alternative the architect can codify for a proposed rule.
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RuleOptionView {
     /// Stable option id (what gets codified as the choice).
     pub id: String,
@@ -220,6 +436,13 @@ pub struct RuleOptionView {
     /// Why this alternative — the rationale shown in the rule-detail view.
     #[serde(default)]
     pub why: String,
+    /// Pass-1 W2 (A5.4): mirrors [`camerata_rules::RuleOption::violates`] — `true` when
+    /// choosing this option describes the absence/degenerate form of the rule's requirement.
+    /// Carried through to the alternatives-pass view (`crate::ai_audit::RuleAlternatives`) so
+    /// `audit_repo` can tell a genuine alternative apart from the defect wearing the same
+    /// `[[option]]` shape. Absent/default `false` for every pre-existing construction site.
+    #[serde(default)]
+    pub violates: bool,
 }
 
 /// One authoritative source backing a rule's grounding, mirrored from
@@ -239,7 +462,7 @@ pub struct RuleSourceView {
 
 /// One rule proposed for the starter ruleset, classified by SCOPE and PLACEMENT so
 /// brownfielding decides, up front, where each rule and its mechanical gate live.
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProposedRule {
     /// The rule id.
     pub id: String,
@@ -307,7 +530,7 @@ pub struct ProposedRule {
 
 /// The detected tech stack for one repo (languages from extensions, frameworks
 /// from manifests). Drives the stack-specific rule proposals (Approach B).
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RepoStack {
     /// `owner/repo`.
     pub repo: String,
@@ -315,6 +538,36 @@ pub struct RepoStack {
     pub languages: Vec<String>,
     /// Frameworks detected from manifest contents (e.g. `React`, `ASP.NET`).
     pub frameworks: Vec<String>,
+}
+
+/// Real code-volume for one language (P6, 2026-09-29): non-blank source lines counted from the
+/// exact files the scan read, after the same noise-pruning `code_chars`/`files_excluded` already
+/// apply — never a synthetic average-bytes-per-line guess. See
+/// `propose::count_source_lines`, which produces the totals this is built from, and
+/// `report_export::CoverJson::code_lines_by_language`, which renders it (hidden entirely when
+/// the total is zero, per the "never render 0" cover rule).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct LanguageVolume {
+    pub language: String,
+    pub lines: usize,
+}
+
+/// Turn a `language -> line count` accumulator (merged across every repo in the scan) into the
+/// sorted `Vec<LanguageVolume>` the report carries: highest line count first, language name as
+/// the tiebreak so output is deterministic.
+pub(crate) fn finalize_language_breakdown(
+    by_lang: std::collections::BTreeMap<String, usize>,
+) -> Vec<LanguageVolume> {
+    let mut v: Vec<LanguageVolume> = by_lang
+        .into_iter()
+        .map(|(language, lines)| LanguageVolume { language, lines })
+        .collect();
+    v.sort_by(|a, b| {
+        b.lines
+            .cmp(&a.lines)
+            .then_with(|| a.language.cmp(&b.language))
+    });
+    v
 }
 
 /// A scan-coverage note: a tool that was skipped or could not run during the
@@ -348,6 +601,17 @@ pub struct AuditedRef {
     /// True when `git status --porcelain` reported uncommitted changes at scan time.
     #[serde(default)]
     pub dirty: bool,
+    /// `git config --get remote.origin.url` as observed at scan time (tokenless by
+    /// construction: Camerata's own clone path scrubs it, and a hand-made clone's URL is the
+    /// operator's own). `None` on a non-git folder or when there is no origin. Informational,
+    /// for the deletion record and the renamed-origin report: the remote-match guard compares
+    /// `owner/repo` identities and never this string.
+    #[serde(default)]
+    pub origin_url: Option<String>,
+    /// The origin's default branch (`git symbolic-ref refs/remotes/origin/HEAD`, as `main` /
+    /// `master`); `None` when the clone has no such ref. Lets re-fetch name "latest from main".
+    #[serde(default)]
+    pub default_branch: Option<String>,
 }
 
 /// Provenance stamp on a `ScanReport`: exactly what was audited, with what
@@ -363,6 +627,13 @@ pub struct ScanProvenance {
     pub audit_model: Option<String>,
     /// The model resolved for the calibration pass. `None` when calibration never ran.
     pub calibration_model: Option<String>,
+    /// The model the clone-candidate judge (`clone_advisory`, Wave C) ran on, resolved by
+    /// `resolve_clone_judge_model`: the explicit pick, else `CAMERATA_CLONE_JUDGE_MODEL`, else
+    /// the project's fast tier. `None` when the judge never made a model call this scan (no
+    /// clone rule armed, no candidates, or no model available), so a before/after comparison
+    /// can attribute a change in the clone rules' findings to the judge.
+    #[serde(default)]
+    pub clone_judge_model: Option<String>,
     /// The execution mode (`parallel` | `sequential`).
     pub mode: String,
     /// Whether thorough (multi-pass consensus) calibration was requested (#51).
@@ -387,13 +658,20 @@ pub struct ScanProvenance {
     pub started_at: String,
     /// RFC3339 timestamp when this audit run finished.
     pub finished_at: String,
+    /// The Claude Code sessions this run's model calls created on the `Cli` backend (one per
+    /// `claude -p` spawn; empty on the `Api` backend). Each persists its prompt, which carries
+    /// client source, under `~/.claude/projects/`, so source deletion needs the ids to remove
+    /// exactly those files. Copied onto the persisted inspection entry. `serde(default)` so a
+    /// previously persisted report still loads.
+    #[serde(default)]
+    pub model_sessions: Vec<crate::llm::ModelSession>,
 }
 
 /// The full scan result across one or more repos. Brownfield onboarding treats a
 /// SET of inter-related repos (e.g. a .NET API + a Python worker + a React app) as
 /// one unit: findings and the proposed ruleset aggregate across all of them, each
 /// finding tagged with its repo.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScanReport {
     /// The repos scanned (`owner/repo`).
     pub repos: Vec<String>,
@@ -417,6 +695,21 @@ pub struct ScanReport {
     /// honest token base before chunk/batch multipliers.
     #[serde(default)]
     pub code_chars: usize,
+    /// Non-blank source lines across every scannable file this run actually read (same
+    /// noise-pruned file set `code_chars` sums), computed alongside it in `scan_repos`/
+    /// `audit_repos` via `propose::count_source_lines`. P6 (2026-09-29): the cover's "code
+    /// volume" row renders THIS (a real SLOC count), not `code_chars`. 0 when genuinely no
+    /// local file was read this run (e.g. a compliance-blocked AI-only request) — the cover
+    /// must hide the code-volume field entirely rather than render a zero.
+    #[serde(default)]
+    pub code_lines: usize,
+    /// `code_lines` broken out by language (via `propose::lang_for_ext`), sorted by line count
+    /// descending then language name. Files with an unrecognized extension still count toward
+    /// `code_lines` (matching `code_chars`'s all-files scope) but are not attributed to any
+    /// language here — exactly like `stacks.languages` already leaves them out of the
+    /// language list. Empty whenever `code_lines` is 0.
+    #[serde(default)]
+    pub code_lines_by_language: Vec<LanguageVolume>,
     /// Rule ids EXCLUDED from this code-only audit because they're MECHANICAL — enforced in
     /// CI from build/runtime/DB context (query-plan inspection, migration audit, AST lint),
     /// not judgeable from a static code digest. They're wired into `.camerata/ci-checks.json`
@@ -429,6 +722,34 @@ pub struct ScanReport {
     pub proposed_rules: Vec<ProposedRule>,
     /// True when no scan was performed because GitHub is not connected.
     pub gated: bool,
+    /// True when the scan was REFUSED by the compliance backend gate — a project on the `Api`
+    /// backend with no Anthropic key configured, i.e. a
+    /// [`crate::llm::BackendResolution::Blocked`]. Distinct from `gated` (the GitHub-connect
+    /// gate): both mean "no scan ran", but this is the compliance block, so the UI renders it
+    /// under its own "Scan blocked" heading with a key/CLI hint rather than inferring the
+    /// state from the report's shape. See `docs/design/2026-09-22_per-project-backend.md`.
+    #[serde(default)]
+    pub blocked: bool,
+    /// Set when the compliance backend gate resolved to `Blocked` (API-only project, no
+    /// Anthropic key) for this run, but the scan was NOT aborted because a local pass
+    /// (the deterministic floor, and/or preview linters / dep-audit) was requested and
+    /// ran anyway. Distinct from `blocked`: `blocked` means "nothing ran at all"; this
+    /// field means "the AI review specifically did not run, but you are still looking at
+    /// a real (partial) result, not a silent empty table". Also set (alongside `blocked`)
+    /// when the request was AI-only and therefore nothing local could run either — see
+    /// `audit_repos`'s gate-handling doc comment. `#[serde(default)]` so a report
+    /// persisted before this field existed still deserializes as `None`.
+    #[serde(default)]
+    pub ai_blocked_reason: Option<String>,
+    /// Set when the AI review was REQUESTED (compliance gate did not block it) but every
+    /// pass failed with a real error (bad model id, an API/CLI transport error, an auth
+    /// failure, …) so the AI review produced no findings. Carries the first such error's
+    /// text, verbatim, so the operator sees the actual reason rather than a silent empty
+    /// table. Never set on the happy path (some passes succeeding is not an error, even
+    /// if a minority failed). `#[serde(default)]` for the same back-compat reason as
+    /// `ai_blocked_reason`.
+    #[serde(default)]
+    pub ai_error: Option<String>,
     /// A human message (e.g. the connect-GitHub gate, a per-repo error, or a cap).
     pub message: Option<String>,
     /// REAL token usage + cost for the Phase-2 audit (every pass + calibration), when the
@@ -453,9 +774,63 @@ pub struct ScanReport {
     /// with an empty/default stamp.
     #[serde(default)]
     pub provenance: ScanProvenance,
+    /// Per-rule recommendation for every MULTI-OPTION semantic rule this scan evaluated —
+    /// keyed by rule id (uppercased). Surfaced alongside `findings` so the UI can render the
+    /// "Evaluated against: <option> (AI recommended) · Why? · Change" control per rule group,
+    /// including rules with zero violations (the review panel lists every multi-option rule
+    /// in scope, not just the ones with findings). Populated across ALL scanned repos; when a
+    /// project-level rule is scanned in more than one repo the LAST repo processed wins (a
+    /// rule's recommendation is expected to converge across repos in the common case — this
+    /// is a documented simplification, not a per-repo store). A targeted `rescan-alternatives`
+    /// call updates the entries for exactly the rules it re-evaluated, marking them
+    /// `operator_chosen`. See `docs/design/2026-09-22_audit-integrated-alternatives.md`.
+    #[serde(default)]
+    pub recommendations: std::collections::HashMap<String, crate::ai_audit::RuleRecommendation>,
+    /// W6: every audit pass that FAILED or timed out during this scan (e.g. the alternative-
+    /// recommendation pass hitting the CLI hang timeout), never silently swallowed. The
+    /// export (`report_export::build_report_json`) turns each entry into an explicit
+    /// disclosure line in BOTH the methodology and the executive summary — a scan must never
+    /// ship a report that quietly omits a pass's output. Empty on the happy path (no pass
+    /// failed). `#[serde(default)]` so a report persisted before this field existed still
+    /// deserializes as empty rather than failing to load.
+    #[serde(default)]
+    pub failed_passes: Vec<crate::ai_audit::FailedPass>,
+    /// W1: the pipeline-integrity ledger — per-rule "did it actually run" facts and
+    /// per-stage row accounting, accumulated during this scan. `report_export::
+    /// build_report_json` derives "What's healthy" / "excluded from this audit" / the
+    /// scorecard's "Clean" badge FROM this ledger rather than from mere rule selection, and
+    /// adds its own report-build-time partition stage before deriving them. Empty (not
+    /// `None`) on any pre-W1 code path that hasn't been updated to populate it yet — an empty
+    /// ledger is the documented back-compat signal `build_report_json` falls back on.
+    /// `#[serde(default)]` so a report persisted before this field existed still deserializes.
+    #[serde(default)]
+    pub ledger: crate::scan_ledger::ScanLedger,
 }
 
 impl ScanReport {
+    /// Redact every finding and every report-level string in place; returns how many secret
+    /// values had to be replaced. Zero on a healthy pipeline (every producer redacts at
+    /// construction), so a non-zero count is a missed producer. Idempotent.
+    pub(crate) fn redact_before_seal(&mut self) -> usize {
+        redact::redact_findings(&mut self.findings) + redact::redact_report_text(self)
+    }
+
+    /// Belt and braces for secret redaction (docs/design/2026-10-23_secret-redaction-and-
+    /// release-gate.md section 4.1): every producer redacts its own rows at construction, so a
+    /// non-zero count here means a producer is missing `redact_finding`. Redact anyway (the row
+    /// set is final and every consumer reads it), and say so loudly, never silently. Run by
+    /// [`Self::seal`] and by anything else that persists the report before it is sealed.
+    pub(crate) fn sweep_secrets_before_seal(&mut self) {
+        let missed = self.redact_before_seal();
+        if missed > 0 {
+            tracing::warn!(
+                missed,
+                "{missed} secret value(s) reached seal unredacted; a producer is missing \
+                 redact_finding (see docs/design/2026-10-23_secret-redaction-and-release-gate.md)"
+            );
+        }
+    }
+
     /// The connect-GitHub gate result: no scan performed.
     pub fn gated(repos: &[String]) -> Self {
         Self {
@@ -466,9 +841,14 @@ impl ScanReport {
             files_excluded: 0,
             excluded_mechanical_rules: Vec::new(),
             code_chars: 0,
+            code_lines: 0,
+            code_lines_by_language: Vec::new(),
             findings: Vec::new(),
             proposed_rules: Vec::new(),
             gated: true,
+            blocked: false,
+            ai_blocked_reason: None,
+            ai_error: None,
             actual_usage: None,
             deep: None,
             message: Some(
@@ -477,7 +857,114 @@ impl ScanReport {
             ),
             coverage_notes: Vec::new(),
             provenance: ScanProvenance::default(),
+            recommendations: std::collections::HashMap::new(),
+            failed_passes: Vec::new(),
+            ledger: crate::scan_ledger::ScanLedger::new(),
         }
+    }
+
+    /// A scan that never produced a real result because the pipeline crashed (a caught
+    /// panic) rather than returning cleanly or via [`Self::gated`] / the compliance
+    /// `blocked` gate. Deliberately shaped like an AI-review failure (`ai_error` set,
+    /// `gated`/`blocked` false) so it renders through the SAME "AI review failed" banner
+    /// the UI already has for `ai_error` — a crash must never look like a silent, clean,
+    /// zero-findings scan.
+    pub fn crashed(repos: &[String], message: String) -> Self {
+        Self {
+            repos: repos.to_vec(),
+            stacks: Vec::new(),
+            files_scanned: 0,
+            test_file_count: 0,
+            files_excluded: 0,
+            excluded_mechanical_rules: Vec::new(),
+            code_chars: 0,
+            code_lines: 0,
+            code_lines_by_language: Vec::new(),
+            findings: Vec::new(),
+            proposed_rules: Vec::new(),
+            gated: false,
+            blocked: false,
+            ai_blocked_reason: None,
+            ai_error: Some(message.clone()),
+            actual_usage: None,
+            deep: None,
+            message: Some(message),
+            coverage_notes: Vec::new(),
+            provenance: ScanProvenance::default(),
+            recommendations: std::collections::HashMap::new(),
+            failed_passes: Vec::new(),
+            ledger: crate::scan_ledger::ScanLedger::new(),
+        }
+    }
+
+    /// THE sealing point (Pass-1 W1 — see
+    /// `docs/plans/2026-10-09_audit-findings-tracker.md`, requirement C1: "every row the
+    /// engine produces reaches the reader; nothing may be added to the report after the point
+    /// where the row set is final"). Consumes `self` — the ONLY way to produce a
+    /// [`SealedReport`]. Call this exactly once, as the LAST step of a scan pipeline, strictly
+    /// AFTER every row-adding pass has already run against `self.findings`: the deterministic
+    /// floor, the architectural engine, the semantic/AI tier and its cross-family/structural
+    /// merges (all inside [`audit_repos`]), the scan-time external-tool preview pass
+    /// (`crate::merge_scan_preview`), the dependency audit, and the evidence-of-violation gate
+    /// (`crate::report_export::apply_evidence_gate`) — see each of those call sites in
+    /// `lib.rs`'s `onboard_audit`/`onboard_audit_start` and `camerata-cli`'s
+    /// `run_inspect_with_key_presence` for the exact order.
+    ///
+    /// This is a type-level guarantee, not a convention: [`crate::report_export::
+    /// build_report_json`], [`crate::xlsx_export::build_workbook`], and
+    /// [`crate::xlsx_export::build_findings_export`] all take `&SealedReport`, never
+    /// `&ScanReport`. [`SealedReport`] only implements `Deref` (read-only) — there is no way to
+    /// obtain a `&mut Vec<Finding>` out of one, so a future change that tries to inject a
+    /// finding into an exporter's input (the exact shape of the shipped defect: the evidence
+    /// gate appended to a private clone INSIDE `build_report_json` while the xlsx/JSON siblings
+    /// read the un-injected original) fails to compile instead of silently reintroducing the
+    /// row-set divergence.
+    pub fn seal(mut self) -> SealedReport {
+        self.sweep_secrets_before_seal();
+        // W21: audit every row's `path` HERE, because this is the one moment "every row" is
+        // a complete and stable statement, and it is upstream of all three exporters — so
+        // one audit covers the PDF, the workbook and the JSON rather than needing a check
+        // per renderer. Recorded into the ledger so `camerata integrity-gate` can judge it
+        // from a ledger read off disk, days later and elsewhere.
+        let hygiene =
+            crate::scan_ledger::PathHygiene::audit(self.findings.iter().map(|f| f.path.as_str()));
+        self.ledger.record_path_hygiene(hygiene);
+        SealedReport(self)
+    }
+}
+
+/// A [`ScanReport`] whose row set is FINAL. See [`ScanReport::seal`]'s doc comment for the full
+/// rationale and the exact pipeline position this must be called from.
+///
+/// Deliberately `Deref`-only (never `DerefMut`, no public mutable accessor to the wrapped
+/// value): every READ an exporter needs (`sealed.findings.iter()`, `sealed.provenance`, field
+/// access, and passing `&sealed` anywhere a `&ScanReport` is expected via deref coercion) keeps
+/// working unchanged, but nothing can mutate `.findings` through a `&SealedReport` — that
+/// asymmetry IS the compile-time enforcement this type exists for.
+#[derive(Debug, Clone, Serialize)]
+pub struct SealedReport(ScanReport);
+
+impl std::ops::Deref for SealedReport {
+    type Target = ScanReport;
+    fn deref(&self) -> &ScanReport {
+        &self.0
+    }
+}
+
+impl SealedReport {
+    /// Borrow the wrapped report directly. Equivalent to `&*sealed` / relying on `Deref`
+    /// coercion at a call site that takes `&ScanReport` — spelled out for the (rare) place that
+    /// reads more clearly with an explicit method call.
+    pub fn as_scan_report(&self) -> &ScanReport {
+        &self.0
+    }
+
+    /// Unwrap back into an owned [`ScanReport`]. Only ever needed by code that must hand the
+    /// report to something requiring ownership (e.g. storing it back into a cache keyed by
+    /// project id) — never use this to regain a mutable findings vector and keep adding to it
+    /// as though still unsealed within the same export call.
+    pub fn into_inner(self) -> ScanReport {
+        self.0
     }
 }
 
@@ -504,6 +991,166 @@ impl SelectedRule {
     /// every repo; a repo-scoped rule applies only when `repo` is in its set.
     pub fn applies_to(&self, repo: &str) -> bool {
         self.repos.is_empty() || self.repos.iter().any(|r| r == repo)
+    }
+}
+
+/// W16. The SCAN SET: every rule in `selected` the corpus says the scan can actually assess.
+///
+/// # What this removes, and why it is not a second prefix gate
+///
+/// A rule the corpus declares `inspectable = false` is **emitted, never scanned**. Its subject
+/// is the AUTHORING PROCESS (how an agent decides, which model tier ran, what a commit message
+/// says) or lives outside the repository entirely, so no amount of reading the file tree can
+/// establish compliance. Before W16 every such rule armed on every unattended scan, reached
+/// the semantic pass, returned nothing from the model — correctly; there is nothing to find —
+/// and was then recorded `RuleLedgerEntry::verified_clean()`, because that predicate is
+/// `ran && findings_emitted == 0 && !not_applicable` and nothing ever marked them otherwise.
+/// 14 of the 23 agentic rules carry an external source URL, so they resolved GROUNDED
+/// citations and sorted FIRST into the PDF's ten-slot "What's healthy" list. A paid client
+/// deliverable could open with "`ORCH-MODEL-TIERING-1`: verified clean" — a claim about how we
+/// run our agents, presented as a verified property of their codebase.
+///
+/// This NARROWS the W4 ruling recorded on [`semantic_rule_ids_for_repo`]; it does not reverse
+/// it. W4 was right that the old `ORCH-`/`SPIRIT-`/`PROC-` LEXICAL gate over-excluded — every
+/// one of those families is mixed, and `SPIRIT-FILE-SIZE-1`, `PROC-PR-CONCURRENCY-1`,
+/// `PROC-HIDE-DEAD-END-1` and the four pipeline-config `ORCH-*` rules all stay scannable here.
+/// The distinction is per-rule, declared in the rule's own TOML where its author can see it,
+/// and this function reads that declaration rather than re-deriving it from an id.
+///
+/// # Why HERE, before arming, rather than filtering findings afterwards
+///
+/// `audit_repos` calls this on its very first line, so an emit-only rule is gone before:
+///
+/// - `scan_cache::rules_fingerprint` (it must not perturb the incremental cache key's meaning
+///   beyond the one-time invalidation this change causes),
+/// - `ScanProvenance::audited_rule_ids` — which is what the Coverage sheet's per-rule rows and
+///   the G3 "we checked N rules" line are built from, and the pre-ledger fallback source for
+///   "What's healthy",
+/// - `repo_selected_ids`, so the deterministic architectural engine never arms for it either
+///   (none of the excluded rules has a registered checker, but the exclusion must be total
+///   rather than true-by-coincidence),
+/// - [`semantic_rule_ids_for_repo`], so it never enters the model prompt, and
+/// - every `ScanLedger::record_rule` call, all of which iterate one of the two sets above.
+///
+/// Suppressing its FINDINGS instead would leave the rule armed and recorded as having run with
+/// zero findings — which is precisely the defect, re-spelled. A rule that armed and was then
+/// silenced still pollutes the ledger's accounting.
+///
+/// # Degradation
+///
+/// `corpus == None` (a test fixture, or a checkout with no corpus) returns `selected`
+/// unchanged — today's behavior. So does a rule the corpus does not know, and a rule that does
+/// not declare the field (`Rule::is_inspectable` resolves an undeclared rule to `true`; the
+/// corpus-load gate `camerata_rules::rules_missing_inspectable` is what refuses those, at
+/// build time). The fail-safe direction throughout is KEEP SCANNING: a missing declaration
+/// must never silently delete coverage.
+pub fn inspectable_rules_for_scan(
+    selected: &[SelectedRule],
+    corpus: Option<&camerata_rules::RuleSet>,
+) -> Vec<SelectedRule> {
+    let Some(corpus) = corpus else {
+        return selected.to_vec();
+    };
+    selected
+        .iter()
+        .filter(|r| {
+            corpus
+                .get_by_id(&r.id)
+                .map(|rule| rule.is_inspectable())
+                .unwrap_or(true)
+        })
+        .cloned()
+        .collect()
+}
+
+/// [`semantic_rule_ids_for_repo`] for callers outside this crate (the W16 end-to-end test,
+/// which drives the real arming → prompt → ledger → export chain link by link). Same function,
+/// same no-filter contract; exported separately so the internal one keeps its `pub(crate)`
+/// visibility and its call sites stay unchanged.
+pub fn semantic_rule_ids_for_repo_public(
+    selected: &[SelectedRule],
+    spec: &str,
+) -> Vec<(String, String)> {
+    semantic_rule_ids_for_repo(selected, spec)
+}
+
+/// The SEMANTIC (LLM-audited) rule set `audit_repos` hands to `ai_audit::audit_repo` for one
+/// repo: EVERY rule in `selected` that applies to `spec`. No other filter, of any kind.
+///
+/// W16 note: the rules this sees have ALREADY had the corpus's `inspectable = false` set
+/// removed, by [`inspectable_rules_for_scan`] at the top of `audit_repos` — not here. This
+/// function's "no filter of any kind" contract is intact and deliberate: the scan-vs-emit
+/// decision belongs at the point the scan set is CHOSEN, not at the point the prompt is built,
+/// so every downstream consumer (the ledger, provenance, the architectural engine) sees the
+/// same set this one does.
+///
+/// # Why there are no exclusions left (Pass-1 W4)
+///
+/// Zach, 2026-10-09: *"Every single rule should be included in the AI semantic scan, even if
+/// they're deterministic. It gets a second pair of eyes on the deterministic scans."* Three
+/// separate exclusions have been removed from this function over two passes, each of which had
+/// a plausible-sounding rationale and each of which silently produced rules that NOTHING
+/// evaluated:
+///
+/// 1. **CI-tier enforcement** (removed earlier in W4) — "a `mechanical`/`architectural`
+///    declaration means a deterministic gate already covers it" conflated "deterministically
+///    checkable IN PRINCIPLE" with "actually checked on THIS repo". A rule like strict layering
+///    needs a repo-specific layer map no generic detector ships with, so declaring it
+///    `mechanical` bought it no detector AND no model read either.
+/// 2. **An existing gate arm / registered architectural checker** (removed earlier in W4) —
+///    same error one level down, and it is also the exact coverage the owner's "second pair of
+///    eyes" instruction asks for: a detector answering one facet of a rule is not a reason to
+///    stop looking at the others.
+/// 3. **Governance/process id prefixes** `ORCH-`/`SPIRIT-`/`PROC-` (removed here, finding A8)
+///    — this one was a blanket LEXICAL gate, and it is why `SPIRIT-FILE-SIZE-1` was doubly
+///    disarmed: excluded from selection by `verification = "policy"` AND, had it ever been
+///    selected, excluded from the only tier that could evaluate it by its id prefix. File size
+///    is a plain observable fact about source files; so is "the PR template asks for a
+///    concurrency story" (`PROC-PR-CONCURRENCY-1`, whose subject IS a file in the repo), and so
+///    is a UI rendering an action the viewer cannot perform (`PROC-HIDE-DEAD-END-1`). Calling
+///    all 32 of them "not code" because of three id prefixes was never true, and the cost of
+///    being wrong was total: a prefix-excluded rule with no detector was checked by nothing at
+///    all while the report called it clean.
+///
+/// A rule whose subject genuinely leaves no trace in the file set (e.g. a commit-message
+/// convention) returns nothing from the model. That is the CORRECT outcome and it is cheap —
+/// not a reason to pre-emptively ban a whole prefix. Token cost of removing exclusion 3,
+/// measured against the real corpus for a TypeScript/React/Next/Supabase stack: the selected
+/// rule list goes from 153 to 185 rules, ~19.7k → ~23.6k prompt tokens (+3.9k, +20% of the
+/// rule-list section and far less of the whole prompt, which also carries file contents). No
+/// batching is needed, and none was introduced — see the W4 report for the full arithmetic.
+///
+/// `is_code_auditable_rule` still exists and is still used, by `is_semantic_multi_option_rule`
+/// — "should the model be asked to pick among this rule's directive WORDINGS" is a different
+/// question from "should the model look at this rule at all", and the answer to the first can
+/// legitimately stay no.
+///
+/// Kept as its own pure, independently-testable function (rather than inline in `audit_repos`'s
+/// per-repo loop) specifically so the regression tests can assert each removed exclusion
+/// directly.
+pub(crate) fn semantic_rule_ids_for_repo(
+    selected: &[SelectedRule],
+    spec: &str,
+) -> Vec<(String, String)> {
+    selected
+        .iter()
+        .filter(|r| r.applies_to(spec))
+        .map(|r| (r.id.clone(), r.directive.clone()))
+        .collect()
+}
+
+/// Queue the honest disclosure for a rule that has a registered checker but got no credited
+/// deterministic verdict for this repo: "the scan was incomplete" when the checker was withheld
+/// for that reason, "config-gated" otherwise (the architecture config it needs is absent).
+fn note_unanswered_checker_rule(
+    ledger: &mut crate::scan_ledger::ScanLedger,
+    rule_id: &str,
+    scan_incomplete: bool,
+) {
+    if scan_incomplete && architectural::is_withheld_on_incomplete_scan(rule_id) {
+        ledger.note_incomplete_scan_rule(rule_id);
+    } else {
+        ledger.note_config_gated_rule(rule_id);
     }
 }
 
@@ -557,6 +1204,9 @@ pub async fn scan_repos(
     let mut files_total = 0usize;
     let mut files_excluded = 0usize;
     let mut code_chars = 0usize;
+    let mut code_lines = 0usize;
+    let mut lang_lines: std::collections::BTreeMap<String, usize> =
+        std::collections::BTreeMap::new();
     let mut repos_ok = Vec::new();
     let mut notes = extra_notes;
 
@@ -572,10 +1222,16 @@ pub async fn scan_repos(
                     files,
                     truncated,
                     excluded_noise,
+                    ..
                 } = extracted;
                 files_total += files.len();
                 files_excluded += excluded_noise;
                 code_chars += files.iter().map(|(_, c)| c.len()).sum::<usize>();
+                let (repo_lines, repo_lang_lines) = propose::count_source_lines(&files);
+                code_lines += repo_lines;
+                for (lang, n) in repo_lang_lines {
+                    *lang_lines.entry(lang).or_insert(0) += n;
+                }
                 stacks.push(detect_stack(spec, &files));
                 repos_ok.push(spec.to_string());
                 if truncated {
@@ -595,6 +1251,8 @@ pub async fn scan_repos(
         .collect();
     let mut report = build_report(repos_ok, stacks, files_total, Vec::new());
     report.code_chars = code_chars;
+    report.code_lines = code_lines;
+    report.code_lines_by_language = finalize_language_breakdown(lang_lines);
     report.files_excluded = files_excluded;
     report.proposed_rules = propose_corpus_rules(&repo_domains).await;
     if !notes.is_empty() {
@@ -602,9 +1260,99 @@ pub async fn scan_repos(
     }
     report
 }
-#[allow(clippy::too_many_arguments)]
+/// Build the real `Llm` for an AI audit / rescan on the given transport, with the Anthropic key
+/// read from `creds` RIGHT NOW (`credentials::anthropic_api_key`: the key saved in the app
+/// first, the `ANTHROPIC_API_KEY` env var only as the fallback). Never cached: every audit
+/// builds a fresh client, so a key saved or replaced in the app is used by the next one with no
+/// restart. The one constructor both the audit and the rescan go through.
+pub fn build_llm(
+    creds: &dyn crate::credentials::CredentialStore,
+    backend: crate::llm::Backend,
+    ledger: Option<std::sync::Arc<crate::usage_ledger::UsageLedger>>,
+) -> crate::llm::Llm {
+    let api_key = crate::credentials::anthropic_api_key(creds);
+    match ledger {
+        Some(l) => crate::llm::Llm::for_backend_and_ledger(backend, api_key, l),
+        None => crate::llm::Llm::for_backend(backend, api_key),
+    }
+}
+
+/// The production entry point of the brownfield audit: builds the real `Llm` for the resolved
+/// transport (with the cockpit's cumulative usage ledger attached when given) and runs
+/// [`audit_repos_with_llm`].
+///
+/// `creds` is the credential store the Anthropic key is read from AT THE MOMENT the `Llm` is
+/// built here ([`crate::credentials::anthropic_api_key`]: the key saved in the app first, the
+/// `ANTHROPIC_API_KEY` env var only as the fallback), so a key saved or replaced in the app
+/// takes effect on the next audit with no restart. The server passes its live store and the
+/// CLI passes the real Keychain store.
 #[allow(clippy::too_many_arguments)]
 pub async fn audit_repos(
+    creds: &dyn crate::credentials::CredentialStore,
+    sources: &[(String, std::path::PathBuf)],
+    selected: &[SelectedRule],
+    extra_notes: Vec<String>,
+    model: Option<&str>,
+    calibration_model: Option<&str>,
+    mode: crate::ai_audit::ScanMode,
+    thorough: bool,
+    feedback: Option<(&crate::transcript::TranscriptStore, &str)>,
+    job: Option<(&crate::jobs::JobStore, &str)>,
+    incremental_prior: Option<&crate::scan_cache::ScanManifest>,
+    deep: bool,
+    soc2_enabled: bool,
+    run_ai_review: bool,
+    run_deterministic: bool,
+    ledger: Option<std::sync::Arc<crate::usage_ledger::UsageLedger>>,
+    backend_resolution: crate::llm::BackendResolution,
+    corpus: Option<&camerata_rules::RuleSet>,
+    chosen_options: &std::collections::HashMap<String, String>,
+) -> (ScanReport, crate::scan_cache::ScanManifest) {
+    // The transport this run's `Llm` is built with: EXACTLY the resolution's Cli/Api choice,
+    // never re-derived from env. `Blocked` never reaches a model call (`run_ai_review` is forced
+    // off for it inside); `Cli` is supplied defensively so the `Llm` still constructs.
+    let llm_backend = match &backend_resolution {
+        crate::llm::BackendResolution::Api => crate::llm::Backend::Api,
+        crate::llm::BackendResolution::Cli => crate::llm::Backend::Cli,
+        crate::llm::BackendResolution::Blocked { .. } => crate::llm::Backend::Cli,
+    };
+    // Every `claude -p` this run spawns persists its prompt (client source) in a Claude Code
+    // session file; the sink remembers each session id so source deletion can remove exactly
+    // those files. The Api backend never spawns `claude`, so it records nothing.
+    let sessions = crate::llm::SessionSink::new();
+    let llm = build_llm(creds, llm_backend, ledger).with_session_sink(sessions.clone());
+    let (mut report, manifest) = audit_repos_with_llm(
+        &llm,
+        sources,
+        selected,
+        extra_notes,
+        model,
+        calibration_model,
+        mode,
+        thorough,
+        feedback,
+        job,
+        incremental_prior,
+        deep,
+        soc2_enabled,
+        run_ai_review,
+        run_deterministic,
+        backend_resolution,
+        corpus,
+        chosen_options,
+    )
+    .await;
+    report.provenance.model_sessions = sessions.snapshot();
+    (report, manifest)
+}
+
+/// The brownfield audit over an injected model. [`audit_repos`] is this with the real `Llm`; a
+/// test passes a scripted [`crate::llm::LlmPort`] so the WHOLE pipeline (floor, architectural
+/// checkers, the clone advisory seam, the semantic pass, calibration) runs with no network and
+/// no spend. Everything about the audit is documented on the parameters below and in the body.
+#[allow(clippy::too_many_arguments)]
+pub async fn audit_repos_with_llm(
+    llm: &dyn crate::llm::LlmPort,
     sources: &[(String, std::path::PathBuf)],
     selected: &[SelectedRule],
     extra_notes: Vec<String>,
@@ -636,12 +1384,77 @@ pub async fn audit_repos(
     // (`merge_scan_preview`) on the same `run_deterministic` flag.
     run_ai_review: bool,
     run_deterministic: bool,
-    // Process-global cumulative usage ledger. When `Some`, the audit's `Llm` is built WITH it
-    // attached, so every audit/calibration/deep-tier model call folds into the cockpit's
-    // session-wide usage meter (in addition to the per-audit `UsageMeter` below). `None` in
-    // tests / non-cockpit callers — recording is then simply skipped. Observability only.
-    ledger: Option<std::sync::Arc<crate::usage_ledger::UsageLedger>>,
+    // The compliance-safety backend gate (see
+    // `docs/design/2026-09-22_per-project-backend.md`). The caller resolves this from the
+    // project's `backend` setting + key presence via `crate::llm::resolve_backend` BEFORE
+    // calling in, so this function never has to reach for settings/credentials itself — it
+    // only has to ACT on the resolution (both to decide whether the AI review runs at all,
+    // and to pick the transport the `Llm` below is built with).
+    backend_resolution: crate::llm::BackendResolution,
+    // The loaded rule corpus, when available — joined against each repo's `semantic` rule ids
+    // to build the multi-option [`crate::ai_audit::RuleAlternatives`] set for the audit-
+    // integrated alternative-recommendation feature (see `build_rule_alternatives`). `None`
+    // degrades to today's behavior (no recommendations — every rule keeps its pre-resolved
+    // directive), exactly like every other corpus-optional join in this module.
+    corpus: Option<&camerata_rules::RuleSet>,
+    // Each rule's PROJECT-level chosen option (uppercased rule id -> option id), read from
+    // `RuleSelection.chosen_option` by the caller. Used as the "currently selected" marker in
+    // the recommendation prompt and as the fallback when the model's answer can't be trusted.
+    chosen_options: &std::collections::HashMap<String, String>,
 ) -> (ScanReport, crate::scan_cache::ScanManifest) {
+    // The live preview streams findings into the job as passes complete, BEFORE the final dedup,
+    // calibration and bounds. Hand the job the corpus up front so every streamed batch (the
+    // floor, the architectural checkers, carried-forward findings, each AI pass, dep-audit) is
+    // bounded by the same chain the report will be, and the preview never shows a severity the
+    // scan cannot end with. See `JobStore::add_findings`.
+    if let Some((jstore, jid)) = job {
+        jstore.set_preview_corpus(jid, corpus);
+    }
+    // THE GATE: resolved before anything else — no file read, no deterministic tool, no
+    // model call, UNLESS a local (non-AI) pass was actually requested. A `Blocked` project
+    // must never make an AI/model call — that part of the gate is absolute — but it must
+    // NOT ALSO kill the free, token-free deterministic security floor: that used to be a
+    // second, unintended bug riding along with the (correct) AI block. So:
+    //
+    //   * `run_ai_review` is forced off below whenever the gate is `Blocked` — no model
+    //     call happens for this run, full stop.
+    //   * When NOTHING local was requested either (`run_deterministic == false`, which also
+    //     covers the "AI-only" request shape `run_ai_review && !run_deterministic`), there
+    //     is truly nothing this call can do, so it aborts immediately exactly as before —
+    //     reusing `ScanReport::gated`'s zero-stats shape, with the EXPLICIT `blocked` flag
+    //     (not `gated`, which means the GitHub-connect gate) so the UI renders the compliance
+    //     block unambiguously rather than inferring it from the report's shape. The prior
+    //     manifest (if any) is preserved rather than wiped, so a later, unblocked scan can
+    //     still go incremental.
+    //   * Otherwise (`run_deterministic == true`) the rest of this function runs as normal —
+    //     floor, architectural checkers, preview linters, dep-audit — with `run_ai_review`
+    //     forced false, and the block reason stashed into `ai_blocked_reason` on the final
+    //     report so a no-key scan is a real (partial) result, never a silent empty table.
+    let mut run_ai_review = run_ai_review;
+    let mut ai_blocked_reason: Option<String> = None;
+    if let crate::llm::BackendResolution::Blocked { message } = &backend_resolution {
+        if !run_deterministic {
+            let repos: Vec<String> = sources.iter().map(|(spec, _)| spec.clone()).collect();
+            let mut report = ScanReport::gated(&repos);
+            report.gated = false;
+            report.blocked = true;
+            report.message = Some(message.clone());
+            report.ai_blocked_reason = Some(message.clone());
+            return (report, incremental_prior.cloned().unwrap_or_default());
+        }
+        ai_blocked_reason = Some(message.clone());
+        run_ai_review = false;
+    }
+    // W16: THE SCAN SET. Every rule the corpus declares `inspectable = false` is dropped
+    // HERE, before anything in this function has looked at it — before the rule fingerprint,
+    // before `audited_rule_ids`, before `repo_selected_ids`, before the semantic prompt,
+    // before any `record_rule` call. See `inspectable_rules_for_scan`'s doc comment for why
+    // this is the right seam and why the exclusion must happen before arming rather than by
+    // filtering findings afterwards. The EMIT path (`crate::arm`) is a separate flow over the
+    // project's selected rules and is deliberately untouched: an emit-only rule is still
+    // installed into the client's AGENTS.md/CONVENTIONS.md as a directive.
+    let scan_rules = inspectable_rules_for_scan(selected, corpus);
+    let selected: &[SelectedRule] = &scan_rules;
     // Provenance (P1): stamp the start time now, before any I/O, so `finished_at -
     // started_at` reflects the whole run including the git-ref capture below.
     let started_at = chrono::Utc::now().to_rfc3339();
@@ -655,15 +1468,57 @@ pub async fn audit_repos(
     // The set ACTUALLY audited this run (NOT `proposed_rules`, which is only the starter-set
     // proposal) — powers the "what's healthy" (audited rules with zero findings) derivation.
     let audited_rule_ids: Vec<String> = selected.iter().map(|r| r.id.clone()).collect();
-    let effective_prior = incremental_prior.filter(|m| m.matches_rules(&rules_fp));
-    let mut manifest_builder =
-        crate::scan_cache::ManifestBuilder::new().with_rules_fingerprint(rules_fp.clone());
+    // A prior manifest is only a usable AI baseline when it ALSO records that the AI actually
+    // ran and completed on the scan that produced it (`ai_covered`). A manifest from an AI-off,
+    // blocked, or AI-errored run carries an empty/stale-shaped `findings` set that must never be
+    // mistaken for "the AI looked and found nothing" — so it is filtered out here exactly like a
+    // rule-set mismatch is, and every file is treated as changed (a full AI audit) below.
+    //
+    // It must ALSO have answered the same question: the key covers the resolved audit model, the
+    // calibration model, the prompt-schema version and every selected rule's directive text. A
+    // changed model, prompt or directive re-scans instead of reusing the stale answer.
+    let ai_key = crate::scan_cache::AiScanKey::new(
+        &crate::ai_audit::resolve_audit_model(model),
+        calibration_model,
+        selected,
+    );
+    let effective_prior = incremental_prior.filter(|m| m.is_reusable_baseline(&rules_fp, &ai_key));
+    let mut manifest_builder = crate::scan_cache::ManifestBuilder::new()
+        .with_rules_fingerprint(rules_fp.clone())
+        .with_ai_key(ai_key.clone());
     let mut all_findings = Vec::new();
     let mut stacks = Vec::new();
     let mut files_total = 0usize;
     let mut test_files_total = 0usize;
+    // P6 (2026-09-29): real code-volume figures for the cover — this function (the full audit
+    // path that actually produces the report the PDF export reads) used to discard
+    // `excluded_noise` and never accumulate `code_chars`/`code_lines` at all, so the exported
+    // cover's "Code volume" row always rendered a hardcoded-looking "0 characters" no matter
+    // how large the repo was. `scan_repos` (the lighter phase-1 preview) already did this
+    // correctly; this mirrors that logic over the SAME `files` this loop already reads.
+    let mut files_excluded_total = 0usize;
+    let mut engine_artifacts_total = 0usize;
+    let mut code_chars_total = 0usize;
+    let mut code_lines_total = 0usize;
+    let mut lang_lines_total: std::collections::BTreeMap<String, usize> =
+        std::collections::BTreeMap::new();
     let mut repos_ok = Vec::new();
     let mut notes = extra_notes;
+    // Per-rule alternative recommendations, accumulated across every repo this scan touches
+    // (see `ScanReport::recommendations`'s doc comment for the last-repo-wins simplification
+    // when a project-level rule is scanned in more than one repo).
+    let mut recommendations: std::collections::HashMap<
+        String,
+        crate::ai_audit::RuleRecommendation,
+    > = std::collections::HashMap::new();
+    // W6: any pass that failed/timed out for a repo, across the whole scan — see
+    // `ScanReport::failed_passes`'s doc comment. Never omitted from the export.
+    let mut all_failed_passes: Vec<crate::ai_audit::FailedPass> = Vec::new();
+    // W1: the pipeline-integrity ledger for this scan — see `crate::scan_ledger`'s module
+    // doc. Named `pipeline_ledger` (not `ledger`) to avoid colliding with this function's own
+    // `ledger: Option<Arc<UsageLedger>>` parameter above, which is a completely different
+    // thing (cumulative token-usage accounting, not pipeline row/rule integrity).
+    let mut pipeline_ledger = crate::scan_ledger::ScanLedger::new();
     // Provenance (P1): the git identity of every source dir this run touched (sha/branch/
     // dirty), captured unconditionally per source — even a repo whose file-read later fails
     // still gets its ref recorded, since the dir is what was attempted. A dirty tree never
@@ -673,13 +1528,25 @@ pub async fn audit_repos(
     // read the full repo, not just the incrementally-changed files) and run after the standard
     // audit completes. Empty / unused when `deep` is false.
     let mut deep_inputs: Vec<(String, Vec<(String, String)>)> = Vec::new();
-    let llm = match ledger {
-        Some(l) => crate::llm::Llm::from_env_with_ledger(l),
-        None => crate::llm::Llm::from_env(),
-    };
+    // The FIRST fatal AI-review error across every repo this run touched (a bad model id,
+    // an API/CLI transport error, an auth failure, …) — i.e. `audit_repo` returning `Err`
+    // because every one of its passes failed. Surfaced on the final report as `ai_error` so
+    // the operator sees the real error text instead of a silent empty findings table. Only
+    // the FIRST is kept (matching `ai_blocked_reason`'s single-reason shape); it is still
+    // also folded into `notes` below so it is not lost from the human-readable message either.
+    let mut first_ai_error: Option<String> = None;
     // Aggregates REAL usage across every repo's audit (passes + calibration) for the
     // actual-vs-estimated readout.
     let meter = crate::ai_audit::UsageMeter::default();
+    // Wave C: the clone-candidate judge's verdict cache. Seeded from the prior manifest even when
+    // that manifest is not usable as an AI baseline (verdicts are keyed by the content of the
+    // question, so a changed rule set or an AI-off prior scan does not invalidate them); a
+    // forced full scan passes no prior manifest and so re-asks. Carried into the fresh manifest.
+    let mut clone_verdicts = incremental_prior
+        .map(|m| m.clone_verdicts.clone())
+        .unwrap_or_default();
+    // The model the clone judge actually ran on, when it made at least one call this scan.
+    let mut clone_judge_model_used: Option<String> = None;
 
     // A re-run must start from a clean transcript: drop the prior audit's per-agent
     // prompts/output so the Agent-activity drawer shows THIS run, not the last one.
@@ -687,35 +1554,54 @@ pub async fn audit_repos(
         store.clear(key);
     }
 
-    // ROUTE BY ENGINE, not by domain. A rule with a deterministic gate arm
-    // (secrets / raw-SQL / secret-URL / path / secret-files) runs through real
-    // deterministic code (`audit_files`) and must NEVER go to the LLM — fuzzy
-    // keyword-matching a deterministic rule is the flood. Only the SEMANTIC rules
-    // (no arm: layering, idempotency, authz, …) are handed to the model.
+    // EVERY selected, code-auditable rule reaches the model (W4 / root-cause fix).
     //
-    // SECOND, drop GOVERNANCE / PROCESS / ORCHESTRATION rules from the CODE audit.
-    // ORCH-* / SPIRIT-* / PROC-* describe how the fleet and team OPERATE (track AI
-    // spend, split author/reviewer agents, cite convention ids in commits, document
-    // decisions). They are correct to ARM into a repo's governance, but auditing
-    // application SOURCE against them is a category error ("this app doesn't track its
-    // AI token budget"). The arm path still installs them; only the AI code-audit
-    // prompt is filtered.
+    // The pipeline used to ROUTE BY ENGINE: a rule with a deterministic gate arm, a
+    // registered architectural checker, or a declared CI-tier (`mechanical`/
+    // `architectural`) `enforcement` was withheld from the LLM prompt entirely, on the
+    // theory that "mechanical" meant a deterministic CI gate already covered it so a
+    // model pass would be redundant at best. That theory conflated two different things:
+    // "deterministically checkable IN PRINCIPLE, once someone builds a repo-specific CI
+    // gate" is not the same as "actually checked, on THIS unseen repo, right now". A
+    // strict-layering rule depends on a repo-specific layer map no generic detector ships
+    // with the product — on a repo Camerata has never seen, no gate exists for it yet.
+    // The old filter withheld such rules from the model AND they had no shipped
+    // detector, so they were checked by NOTHING while the report called them clean. On a
+    // benchmark run this silently lost a large share of the planted architectural
+    // defects. See `crate::mechanical_gate` and `crate::scan_ledger` for the build-time
+    // and scan-time halves of the fix.
     //
-    // THIRD, drop rules a NATIVE ARCHITECTURAL CHECKER already answers deterministically
-    // (the RLS/search-path migration-replay engine, ~line 726 below) from the LLM prompt —
-    // exactly the same reasoning as the gate-arm exclusion above: fuzzing a rule the checker
-    // answers exactly is strictly worse than deterministic code answering it. Pass 4b-1 (D3)
-    // made this exclusion PER-REPO CONFIG-AWARE rather than a single static set computed once:
-    // a config-gated checker (e.g. the future `ImportBoundaryChecker`, Pass 4b-2) only answers
-    // deterministically for a repo that actually carries `.camerata/architecture.toml` — for
-    // an unconfigured repo its rule ids must STAY in the LLM prompt (see
-    // `camerata_checks::arch_checker::checker_rule_ids_for_repo`, computed per repo below
-    // AFTER that repo's files are read, since config presence is a file-content fact).
+    // The fix is additive, not a reshuffle: the deterministic engines below (the content
+    // floor, the native architectural checkers, the gateway rule registry, the scan-time
+    // linter preview) are UNCHANGED — they still run exactly the rules they always did.
+    // The model is now ALSO handed the full selected ruleset, including rules that
+    // already have a deterministic detector, as a deliberate second pair of eyes; a
+    // model finding that duplicates a deterministic one at the same site collapses back
+    // into a single row (`crate::ai_audit::merge_semantic_groups`), never doubling a row.
     //
-    // FOURTH, scope by REPO. The engine/governance filters above are global, but which
-    // rules reach a given repo's LLM audit is decided PER REPO inside the loop, from each
-    // SelectedRule's binding — so a multi-repo scan runs each repo against its own chosen
-    // rules ∪ the project-level set, never the whole selection across the board.
+    // NO exclusion remains here.
+    //
+    // **Correction, 2026-10-20.** This said "ONE exclusion remains ... GOVERNANCE / PROCESS /
+    // ORCHESTRATION rules are dropped from the CODE audit ... only the AI code-audit prompt
+    // is filtered (`is_code_auditable_rule`)". That is no longer true and had not been for
+    // some time. `semantic_rule_ids_for_repo`'s own contract is "EVERY rule in `selected`
+    // that applies to `spec`. No other filter, of any kind", and `is_code_auditable_rule`'s
+    // only live consumer is now `is_semantic_multi_option_rule` — it gates the ALTERNATIVES
+    // pass, not the code audit. `mechanical_gate.rs:330` already recorded that the old filter
+    // "NO LONGER EXISTS"; these two comments were simply never updated to match.
+    //
+    // The evidence was sitting in plain sight the whole time: `is_code_auditable_rule` is
+    // imported at the top of this file and never called in it, which the compiler has been
+    // reporting as an unused import. That warning is now resolved by deleting the import.
+    //
+    // The consequence of believing the stale version is real: `ORCH-*`/`PROC-*` rules with
+    // `inspectable = true` DO reach the model's conformance prompt today, so an auditor
+    // reasoning from these comments would wrongly conclude a whole family is out of scope.
+    //
+    // Scope by REPO: which rules reach a given repo's LLM audit is decided PER REPO
+    // inside the loop, from each `SelectedRule`'s binding — so a multi-repo scan runs
+    // each repo against its own chosen rules ∪ the project-level set, never the whole
+    // selection across the board.
 
     for (spec, dir) in sources {
         let spec = spec.trim();
@@ -734,6 +1620,10 @@ pub async fn audit_repos(
             .filter(|r| r.applies_to(spec))
             .map(|r| r.id.as_str())
             .collect();
+        // P4: a separately-named clone, taken BEFORE the `dir` shadow below moves its own
+        // clone into `spawn_blocking`, so the repo's local checkout root is still reachable
+        // later in this iteration for `attach_secret_history_capture`'s git plumbing.
+        let repo_root_for_history = dir.clone();
         // Clone `dir` for spawn_blocking (which moves it); the outer `dir` ref
         // comes from the loop binding and is the PathBuf we're iterating.
         let dir = dir.clone();
@@ -743,38 +1633,89 @@ pub async fn audit_repos(
         {
             Ok(ExtractedRepo {
                 files,
+                reference_files,
                 truncated,
-                excluded_noise: _,
+                reference_truncated,
+                excluded_noise,
+                excluded_noise_paths: _,
             }) => {
                 files_total += files.len();
+                files_excluded_total += excluded_noise;
+                // W19: must stay zero. Non-zero means Camerata admitted its own artifacts as
+                // source — the 2026-10-16 defect. Fed to the integrity gate below.
+                engine_artifacts_total += files
+                    .iter()
+                    .filter(|(path, _)| files::is_engine_artifact(path))
+                    .count();
+                code_chars_total += files.iter().map(|(_, c)| c.len()).sum::<usize>();
+                let (repo_lines, repo_lang_lines) = propose::count_source_lines(&files);
+                code_lines_total += repo_lines;
+                for (lang, n) in repo_lang_lines {
+                    *lang_lines_total.entry(lang).or_insert(0) += n;
+                }
                 test_files_total += files
                     .iter()
                     .filter(|(p, _)| is_test_or_fixture_path(p))
                     .count();
-                // The SEMANTIC (LLM-audited) rule set for THIS repo: rules bound to it (or
-                // project-level), minus the deterministic-arm, native-architectural-checker,
-                // and governance/process families. The architectural-checker exclusion is
-                // computed HERE (not before the file read) because it's PER-REPO
-                // CONFIG-AWARE (D3) — it needs this repo's actual files to know whether
-                // `.camerata/architecture.toml` is present.
-                let repo_view =
-                    camerata_checks::arch_checker::RepoView { spec, files: &files };
-                let arch_checker_rule_ids =
-                    camerata_checks::arch_checker::checker_rule_ids_for_repo(&repo_view);
-                let semantic: Vec<(String, String)> = selected
-                    .iter()
-                    .filter(|r| r.applies_to(spec))
-                    .filter(|r| camerata_gateway::lookup_arm(&r.id).is_none())
-                    .filter(|r| !arch_checker_rule_ids.contains(r.id.as_str()))
-                    .filter(|r| is_code_auditable_rule(&r.id))
-                    .map(|r| (r.id.clone(), r.directive.clone()))
-                    .collect();
+                // The SEMANTIC (LLM-audited) rule set for THIS repo: every rule bound to it
+                // (or project-level), with NO family exclusion — see the correction above;
+                // `is_code_auditable_rule` gates the alternatives pass, not this. As of the W4
+                // root-cause fix, this NO LONGER excludes a rule just because it has a
+                // deterministic gate arm, a registered architectural checker, or a declared
+                // CI-tier (`mechanical`/`architectural`) `enforcement`: see this function's
+                // top-level doc comment for why that exclusion was wrong (it starved a rule
+                // with no SHIPPED detector of the only pass that could ever evaluate it,
+                // while the report still called it clean). `repo_selected_ids` below still
+                // feeds the deterministic architectural engine's arming gate exactly as
+                // before — this is purely additive, the model now reviews the same full set.
+                //
+                // `ledger_checker_rule_ids` is computed HERE (not before the file read)
+                // because it's PER-REPO CONFIG-AWARE (D3) — it needs this repo's actual files
+                // to know whether `.camerata/architecture.toml` is present. It is used below to
+                // classify each CI-tier rule's detector channel for the pipeline-integrity
+                // ledger — specifically `ledger_detector_rule_ids_for_repo`, NOT the sibling
+                // `checker_rule_ids_for_repo` (that one answers a different question, "should
+                // this id be subtracted from the LLM-advisory prompt", and deliberately
+                // excludes an `advisory_coexisting` checker's ids for that purpose; reusing it
+                // here was an accounting bug — see that function's doc comment — because it
+                // made `ARCH-RESOURCE-LIFECYCLE-1`'s unconditionally-real checker misclassify
+                // as "no wired detector" the moment the semantic phase didn't also flag it).
+                let repo_view = camerata_checks::arch_checker::RepoView {
+                    spec,
+                    files: &files,
+                };
+                // A scan that stopped at a file limit (code or reference text) cannot prove a
+                // file is unreferenced, so rules that reason from absence are withheld: not run
+                // below, and not credited here, which sends them to the config-gated
+                // disclosure instead of "verified clean".
+                let scan_incomplete = truncated || reference_truncated;
+                let ledger_checker_rule_ids = architectural::withhold_on_incomplete_scan(
+                    &camerata_checks::arch_checker::ledger_detector_rule_ids_for_repo(&repo_view),
+                    scan_incomplete,
+                );
+                let semantic: Vec<(String, String)> = semantic_rule_ids_for_repo(selected, spec);
+                // Multi-option semantic rules in THIS repo's `semantic` set (audit-integrated
+                // alternative recommendation — see `build_rule_alternatives`'s doc comment).
+                // Empty when the corpus isn't loaded or none of this repo's semantic rules
+                // offer alternatives; `audit_repo` treats that as a no-op (today's behavior).
+                let alternatives: Vec<crate::ai_audit::RuleAlternatives> = corpus
+                    .map(|c| {
+                        build_rule_alternatives(
+                            c,
+                            semantic.iter().map(|(id, _)| id.as_str()),
+                            chosen_options,
+                        )
+                    })
+                    .unwrap_or_default();
                 // Capture the WHOLE file set for the deep tier (it reads the full repo, not the
                 // incremental subset). Only when the deep tier is on, to avoid the clone otherwise.
                 if deep && run_ai_review {
                     deep_inputs.push((spec.to_string(), files.clone()));
                 }
-                stacks.push(detect_stack(spec, &files));
+                // Kept as a local (not just pushed into `stacks`) so the stack-exception filter
+                // below (P7) can read `repo_stack.frameworks` for THIS repo specifically.
+                let repo_stack = detect_stack(spec, &files);
+                stacks.push(repo_stack.clone());
                 // Deterministic security floor (always-on, every repo): ENFORCED findings.
                 // This is the non-deselectable critical floor, so it is NOT repo-scoped —
                 // hardcoded secrets / raw-SQL concat are unsafe in any code repo. It is
@@ -786,15 +1727,43 @@ pub async fn audit_repos(
                 // is skipped. It also emits PER-TOOL progress into the job (tool name `floor`,
                 // running → done with its findings count) so the cockpit's deterministic
                 // progress view has live state even in deterministic-only mode.
+                // Shared by both branches below: which detector channel (if any) answers each
+                // CI-tier rule id deterministically — needed whether or not `run_deterministic`
+                // is on, so a rule WITH a real detector is correctly recorded as "deterministic
+                // scan deselected" (turning the toggle back on fixes it) while a rule with NO
+                // detector is correctly left for the semantic-phase ledger recording further
+                // down to account for (see that recording's doc comment).
+                let semgrep_ids = crate::mechanical_gate::semgrep_covered_rule_ids();
                 let mut repo_findings = Vec::new();
                 if run_deterministic {
                     if let Some((jstore, jid)) = job {
                         jstore.det_tool_running(jid, "floor");
                     }
-                    let floor = audit_files(spec, &files);
+                    let mut floor = audit_files(spec, &files);
+                    // P4: the ONE context fact that needs real git plumbing (whether a
+                    // committed secret also appears in an EARLIER commit) rather than just
+                    // the already-fetched file set `audit_files` works from — see
+                    // `attach_secret_history_capture`'s doc comment for why it lives here,
+                    // in the impure orchestration layer, instead of `onboard::audit`.
+                    attach_secret_history_capture(&mut floor, &repo_root_for_history).await;
                     if let Some((jstore, jid)) = job {
                         jstore.det_tool_done(jid, "floor", floor.len());
                         jstore.add_findings(jid, floor.clone());
+                    }
+                    // W1: the content floor runs AUDIT_RULES unconditionally over every file
+                    // in this repo whenever `run_deterministic` is on — record each as
+                    // genuinely ran, with its real per-rule finding count, so "verified
+                    // clean" below means exactly that.
+                    for rid in AUDIT_RULES {
+                        let emitted = floor.iter().filter(|f| f.rule_id == *rid).count();
+                        pipeline_ledger.record_rule(
+                            *rid,
+                            crate::scan_ledger::RuleTier::Deterministic,
+                            true,
+                            None,
+                            files.len(),
+                            emitted,
+                        );
                     }
                     repo_findings = floor;
 
@@ -809,12 +1778,225 @@ pub async fn audit_repos(
                     if let Some((jstore, jid)) = job {
                         jstore.det_tool_running(jid, "architectural");
                     }
-                    let arch = audit_architectural(spec, &files, &repo_selected_ids);
+                    // Reference text (HTML, components, docs) is handed to the architectural
+                    // tier ONLY, and only when an armed rule needs it: the AI digest and the
+                    // secrets floor above and below keep reading `files` alone.
+                    let arch_armed = architectural::withhold_on_incomplete_scan(
+                        &repo_selected_ids,
+                        scan_incomplete,
+                    );
+                    let arch_input =
+                        architectural::architectural_input(&files, &reference_files, &arch_armed);
+                    let arch = audit_architectural(spec, &arch_input, &arch_armed);
                     if let Some((jstore, jid)) = job {
                         jstore.det_tool_done(jid, "architectural", arch.len());
                         jstore.add_findings(jid, arch.clone());
                     }
+                    // W1 / W4: classify every CI-tier (mechanical/architectural) rule SELECTED
+                    // for this repo into the SAME four detector channels the build-time corpus
+                    // gate checks (`crate::mechanical_gate`) — a rule answered by a registered
+                    // ArchChecker or the gate's own rule registry genuinely ran deterministically
+                    // here. A rule with NO channel is NOT a defect anymore (W4 — see this
+                    // function's top-level doc comment): it is simply NOT recorded in THIS loop
+                    // at all. It is `semantic` now (nothing excludes it from the model prompt),
+                    // so the semantic-phase ledger recording further down (which iterates the
+                    // SAME `semantic` set `audit_repo` was actually handed) is the one and only
+                    // place its `ran`/`findings_emitted` facts get recorded — `RuleTier::Semantic`,
+                    // never silently "verified clean" via mere selection, and never double-counted
+                    // here as an Architectural not-run.
+                    for rid in repo_selected_ids
+                        .iter()
+                        .filter(|r| is_ci_tier_rule(r, corpus))
+                    {
+                        let emitted = architectural::emitted_count(&arch, rid);
+                        match crate::mechanical_gate::detector_channel(
+                            rid,
+                            &ledger_checker_rule_ids,
+                            &semgrep_ids,
+                            corpus,
+                        ) {
+                            Some("arch_checker") => {
+                                pipeline_ledger.record_rule(
+                                    *rid,
+                                    crate::scan_ledger::RuleTier::Architectural,
+                                    true,
+                                    None,
+                                    files.len(),
+                                    emitted,
+                                );
+                            }
+                            Some("gateway_rule_registry") => {
+                                pipeline_ledger.record_rule(
+                                    *rid,
+                                    crate::scan_ledger::RuleTier::Architectural,
+                                    true,
+                                    None,
+                                    0,
+                                    0,
+                                );
+                            }
+                            Some("semgrep") => {
+                                pipeline_ledger.record_rule(
+                                    *rid,
+                                    crate::scan_ledger::RuleTier::ExternalTool,
+                                    true,
+                                    None,
+                                    files.len(),
+                                    0,
+                                );
+                            }
+                            Some("scan_preview_linter") => {
+                                pipeline_ledger.record_rule(
+                                    *rid,
+                                    crate::scan_ledger::RuleTier::ExternalTool,
+                                    true,
+                                    None,
+                                    files.len(),
+                                    0,
+                                );
+                            }
+                            // Wave C: the clone-based rules have a candidate producer, not a
+                            // verdict, so whether they ran is decided by the advisory seam
+                            // (`clone_advisory`), which records them once per repo right after
+                            // this loop. Recording them here too would credit a run that the
+                            // judgment has not made.
+                            Some(crate::mechanical_gate::CLONE_ADVISORY_CHANNEL) => {}
+                            // W4: NO channel is no longer recorded here at all — this rule has
+                            // no shipped deterministic detector, so its only possible route is
+                            // the semantic pass. It is in `semantic` (nothing excludes it
+                            // anymore), and the semantic-phase recording further down is the
+                            // single source of truth for its `ran`/`findings_emitted` facts.
+                            // Recording a not-run entry here too would just be overwritten by
+                            // the OR-accumulate semantics of `record_rule`, but would also pin
+                            // `tier` to `Architectural` forever (tier is set on first insert
+                            // only) instead of `Semantic` — so it is correctly left unrecorded
+                            // here, full stop.
+                            //
+                            // W5: that silence is honest ONLY when nothing was ever shipped for
+                            // this id. A rule a REAL checker answers but that didn't produce a
+                            // credited verdict for THIS repo (config-gated,
+                            // `.camerata/architecture.toml` absent — `ARCH-HANDLER-NO-DB-1`,
+                            // `ARCH-API-DTOS-1`, `ARCH-STRICT-LAYERING-1`,
+                            // `ARCH-NO-CROSS-BOUNDARY-IMPORTS-1` today) must NOT silently read
+                            // the same as an ordinary prose-only rule once the semantic phase
+                            // records it `ran=true` — queue the honest disclosure now, before
+                            // that later recording settles `ran`, so it lands on whichever entry
+                            // results (see `ScanLedger::note_config_gated_rule`'s doc comment).
+                            _ => {
+                                if camerata_checks::arch_checker::any_registered_checker_answers(
+                                    rid,
+                                ) {
+                                    note_unanswered_checker_rule(
+                                        &mut pipeline_ledger,
+                                        rid,
+                                        scan_incomplete,
+                                    );
+                                }
+                            }
+                        }
+                    }
                     repo_findings.extend(arch);
+
+                    // Wave C: the clone-based rules. Candidates are deterministic (found here,
+                    // token-free); a closed model judgment decides which candidates ship, so the
+                    // judge is gated on `run_ai_review` exactly like every other model pass. With
+                    // no model the rule is reported as not assessed, never as clean. See
+                    // `clone_advisory` for the verdict classes and the cost controls.
+                    let clone_armed: std::collections::HashSet<&str> = repo_selected_ids
+                        .iter()
+                        .copied()
+                        .filter(|id| camerata_checks::clone_rules::RULE_IDS.contains(id))
+                        .collect();
+                    if !clone_armed.is_empty() {
+                        let set = camerata_checks::clone_rules::candidates(&files, &clone_armed);
+                        let judge_model = clone_advisory::resolve_clone_judge_model(None);
+                        let unavailable = ai_blocked_reason
+                            .clone()
+                            .unwrap_or_else(|| "deterministic-only scan".to_string());
+                        let outcome = clone_advisory::judge_clone_candidates(
+                            run_ai_review.then_some(llm),
+                            clone_advisory::JudgeRequest {
+                                repo: spec,
+                                files: &files,
+                                set,
+                                judge_model: &judge_model,
+                                corpus,
+                                unavailable_reason: &unavailable,
+                            },
+                            &mut clone_verdicts,
+                            Some(&meter),
+                            feedback,
+                        )
+                        .await;
+                        clone_advisory::record_in_ledger(&mut pipeline_ledger, &outcome);
+                        if outcome.judge_model.is_some() {
+                            clone_judge_model_used = outcome.judge_model.clone();
+                        }
+                        all_failed_passes.extend(outcome.failed.iter().cloned());
+                        let mut produced = outcome.findings.clone();
+                        produced.extend(outcome.not_assessed.iter().cloned());
+                        if let Some((jstore, jid)) = job {
+                            jstore.add_findings(jid, produced.clone());
+                        }
+                        repo_findings.extend(produced);
+                    }
+                } else {
+                    // W1: an honestly-disclosed scope choice, not a pipeline defect — every
+                    // rule the floor/architectural engine would otherwise have evaluated is
+                    // recorded as not-run WITH a reason, so it can never be miscounted as
+                    // "verified clean" just because it was selected.
+                    for rid in AUDIT_RULES {
+                        pipeline_ledger.record_rule(
+                            *rid,
+                            crate::scan_ledger::RuleTier::Deterministic,
+                            false,
+                            Some("deterministic scan deselected for this run".to_string()),
+                            0,
+                            0,
+                        );
+                    }
+                    // W4: only record "deterministic scan deselected" for a CI-tier rule that
+                    // actually HAS a wired detector channel — turning `run_deterministic` back
+                    // on genuinely fixes those. A CI-tier rule with NO detector channel was
+                    // never going to run deterministically regardless of this toggle; its only
+                    // possible route is the semantic pass, so it is deliberately left
+                    // unrecorded here too and accounted for entirely by the semantic-phase
+                    // recording further down (which correctly reports "AI/semantic review not
+                    // requested" when `run_ai_review` is also off, or a real semantic result
+                    // otherwise).
+                    for rid in repo_selected_ids
+                        .iter()
+                        .filter(|r| is_ci_tier_rule(r, corpus))
+                    {
+                        let has_detector = crate::mechanical_gate::detector_channel(
+                            rid,
+                            &ledger_checker_rule_ids,
+                            &semgrep_ids,
+                            corpus,
+                        )
+                        .is_some();
+                        if has_detector {
+                            pipeline_ledger.record_rule(
+                                *rid,
+                                crate::scan_ledger::RuleTier::Architectural,
+                                false,
+                                Some("deterministic scan deselected for this run".to_string()),
+                                0,
+                                0,
+                            );
+                        } else if camerata_checks::arch_checker::any_registered_checker_answers(rid)
+                        {
+                            // W5: same honest disclosure as the `run_deterministic == true`
+                            // branch above — this id has a real, registered, config-gated
+                            // checker that still would not have answered it even if the toggle
+                            // were on, since the config it needs is absent for this repo.
+                            note_unanswered_checker_rule(
+                                &mut pipeline_ledger,
+                                rid,
+                                scan_incomplete,
+                            );
+                        }
+                    }
                 }
 
                 // ── Incremental: only the AI audit (the token cost) is short-circuited. ──
@@ -824,10 +2006,18 @@ pub async fn audit_repos(
                 // file set as repo-map context (cheap symbol list) so cross-file rules keep
                 // their architectural view even when only changed bodies are sent.
                 let part = crate::scan_cache::partition(effective_prior, spec, &files);
-                if incremental_prior.is_some() && effective_prior.is_none() {
-                    notes.push(format!(
-                        "{spec}: rule selection changed since last scan — full re-scan"
-                    ));
+                if let (Some(prior), None) = (incremental_prior, effective_prior) {
+                    // The prior matched on schema, rule selection and AI coverage, so what
+                    // differs is the question it answered (model, prompt, rule wording).
+                    let question_changed =
+                        prior.is_current() && prior.matches_rules(&rules_fp) && prior.ai_covered;
+                    notes.push(if question_changed {
+                        format!(
+                            "{spec}: model, prompt or rule wording changed since last scan — full re-scan"
+                        )
+                    } else {
+                        format!("{spec}: rule selection changed since last scan — full re-scan")
+                    });
                 }
                 if effective_prior.is_some() && part.unchanged_count > 0 {
                     notes.push(format!(
@@ -860,12 +2050,32 @@ pub async fn audit_repos(
                                 "{spec}: no changes — AI audit skipped (fully cached)"
                             ));
                         }
+                        // W1: nothing fresh ran this turn, but a carried-forward result IS
+                        // real evidence from a prior scan of the SAME files — record `ran`
+                        // true (0 files freshly evaluated) rather than leaving these rules to
+                        // default-"clean" via mere selection.
+                        for (rid, _) in &semantic {
+                            let emitted = part.carried.iter().filter(|f| &f.rule_id == rid).count();
+                            pipeline_ledger.record_rule(
+                                rid.clone(),
+                                crate::scan_ledger::RuleTier::Semantic,
+                                true,
+                                None,
+                                0,
+                                emitted,
+                            );
+                        }
                     } else {
                         match crate::ai_audit::audit_repo(
-                            &llm,
+                            llm,
                             spec,
                             &part.changed,
                             &semantic,
+                            &alternatives,
+                            // `forced` is always empty on the main scan — nothing is
+                            // operator-forced here; that's exclusively the targeted
+                            // `rescan-alternatives` endpoint's job.
+                            &std::collections::HashMap::new(),
                             model,
                             calibration_model,
                             mode,
@@ -877,12 +2087,116 @@ pub async fn audit_repos(
                         )
                         .await
                         {
-                            Ok((ai_findings, _ai_rules)) => ai_for_repo.extend(ai_findings),
-                            Err(e) => notes.push(format!("{spec}: AI audit skipped ({e})")),
+                            Ok((
+                                ai_findings,
+                                _ai_rules,
+                                repo_recs,
+                                repo_failed_passes,
+                                repo_stage_samples,
+                            )) => {
+                                for sample in repo_stage_samples {
+                                    pipeline_ledger.record_stage_sample(sample);
+                                }
+                                // W1: every PRE-DECLARED semantic rule id for this repo
+                                // genuinely ran this turn (the model was asked to judge the
+                                // whole set in one pass) — record its real finding count,
+                                // counted at DETECTION time (before any later merge stage can
+                                // fold it into another row's `also_matches`), so a rule that
+                                // fires and is later merged away still counts as fired (never
+                                // "verified clean"). An AD HOC `AI-`-prefixed id the model
+                                // invented (never pre-declared — it only exists because it
+                                // fired) is recorded as its own new entry, same tier.
+                                let mut ai_counts: std::collections::HashMap<String, usize> =
+                                    std::collections::HashMap::new();
+                                for f in &ai_findings {
+                                    *ai_counts.entry(f.rule_id.clone()).or_insert(0) += 1;
+                                }
+                                // Pass-1 W2 (A5.4): a rule this repo's alternatives pass judged
+                                // NOT APPLICABLE (positive evidence the concern is absent here)
+                                // must be recorded as its OWN outcome, never folded into
+                                // "verified clean" just because `emitted` below happens to be
+                                // zero (it always is — `audit_repo`'s P7 hard filter already
+                                // strips any finding under a not-applicable rule id). Queued
+                                // BEFORE the `record_rule` loop immediately below, which is
+                                // what actually settles `ran`/`findings_emitted` for each id —
+                                // same queue-then-settle ordering `note_config_gated_rule`
+                                // already uses, for the same reason.
+                                for rec in &repo_recs {
+                                    if !rec.applicable {
+                                        pipeline_ledger.note_not_applicable_rule(
+                                            rec.rule_id.to_ascii_uppercase(),
+                                        );
+                                    }
+                                }
+                                for (rid, _) in &semantic {
+                                    let emitted = ai_counts.remove(rid).unwrap_or(0);
+                                    pipeline_ledger.record_rule(
+                                        rid.clone(),
+                                        crate::scan_ledger::RuleTier::Semantic,
+                                        true,
+                                        None,
+                                        files.len(),
+                                        emitted,
+                                    );
+                                }
+                                for (rid, emitted) in ai_counts {
+                                    pipeline_ledger.record_rule(
+                                        rid,
+                                        crate::scan_ledger::RuleTier::Semantic,
+                                        true,
+                                        None,
+                                        files.len(),
+                                        emitted,
+                                    );
+                                }
+                                ai_for_repo.extend(ai_findings);
+                                for rec in repo_recs {
+                                    recommendations.insert(rec.rule_id.clone(), rec);
+                                }
+                                // W6: a sub-pass (e.g. alternative recommendations) can fail
+                                // without failing the whole audit_repo call — never let that
+                                // be silent. Accumulated across every repo into the report.
+                                all_failed_passes.extend(repo_failed_passes);
+                            }
+                            Err(e) => {
+                                // W1 (closes the "semantic tier emitted zero rows and nothing
+                                // noticed" defect): a total pass failure for this repo must
+                                // NEVER be indistinguishable from "genuinely clean" — every
+                                // rule this repo would have been audited against is recorded
+                                // as NOT RUN, with the real error, rather than left to default
+                                // to "verified clean" via mere selection.
+                                for (rid, _) in &semantic {
+                                    pipeline_ledger.record_rule(
+                                        rid.clone(),
+                                        crate::scan_ledger::RuleTier::Semantic,
+                                        false,
+                                        Some(format!(
+                                            "AI/semantic audit pass failed for this repo: {e}"
+                                        )),
+                                        0,
+                                        0,
+                                    );
+                                }
+                                let msg = format!("{spec}: AI audit skipped ({e})");
+                                if first_ai_error.is_none() {
+                                    first_ai_error = Some(msg.clone());
+                                }
+                                notes.push(msg);
+                            }
                         }
                     }
                 } else if !files.is_empty() {
                     notes.push(format!("{spec}: AI review deselected — deterministic only"));
+                    for (rid, _) in &semantic {
+                        pipeline_ledger.record_rule(
+                            rid.clone(),
+                            crate::scan_ledger::RuleTier::Semantic,
+                            false,
+                            Some("AI/semantic review not requested this run".to_string()),
+                            0,
+                            0,
+                        );
+                    }
                 }
 
                 // Record this repo into the fresh manifest: fingerprints of EVERY current file
@@ -890,14 +2204,93 @@ pub async fn audit_repos(
                 manifest_builder.record_repo(spec, &files, &ai_for_repo);
 
                 repo_findings.extend(ai_for_repo);
+                // P7: drop any finding whose rule carries a stack exception that applies to
+                // THIS repo's detected stack + the finding's own path (e.g. monolith-first vs.
+                // a Supabase Edge Functions directory) — the finding names an idiomatic
+                // platform pattern, not a violation. General over the whole corpus (works for
+                // any rule/stack pair a `[[stack_exception]]` block declares), so this runs
+                // unconditionally whenever a corpus is loaded, not just for the one wired rule.
+                if let Some(c) = corpus {
+                    let rows_in = repo_findings.len();
+                    repo_findings = crate::ai_audit::apply_stack_exceptions(
+                        repo_findings,
+                        &repo_stack.frameworks,
+                        c,
+                    );
+                    let rows_out = repo_findings.len();
+                    // W1: a stack exception DROPS a finding outright (it names an idiomatic
+                    // platform pattern, not a violation) — the one stage in this loop that
+                    // reduces the row count without a merge target, so it gets its own
+                    // explicit `other` bucket rather than silently vanishing into
+                    // "unaccounted".
+                    if rows_in != rows_out {
+                        let mut acc = crate::scan_ledger::StageAccounting::default();
+                        acc.other
+                            .push(("stack_exception_excluded".to_string(), rows_in - rows_out));
+                        pipeline_ledger.record_stage(
+                            "stack-exception-filter",
+                            rows_in,
+                            rows_out,
+                            acc,
+                        );
+                    }
+                }
                 // Bug 3: second, cross-FAMILY merge pass over the COMBINED floor + arch + AI set
                 // (exact-location merge + snippet anchoring already ran inside the AI tier). Fuses
                 // the same defect flagged by two rule families a few lines apart, keeping the
                 // deterministic/most-specific primary + its exact line, siblings → `also_matches`.
                 // Runs BEFORE suppression classification so a waiver still sees the merged row.
+                //
+                // W1 ledger fix: account for merges via `also_locations` (one entry per
+                // ABSORBED FINDING, pushed unconditionally — see `account_location_merge`'s doc
+                // comment), not `also_matches` (a deduplicated rule-id SET that silently
+                // undercounts, or entirely drops, an absorption whose rule id collides with the
+                // primary's or with another absorbed member's — the exact shape of the
+                // 45-rows-in/32-out/8-merged/5-unaccounted defect this fixes).
+                let pre_merge_findings = repo_findings.clone();
+                let rows_in = repo_findings.len();
                 let mut repo_findings =
                     crate::ai_audit::merge_semantic_groups(repo_findings, &files);
+                let rows_out = repo_findings.len();
+                let acc = account_location_merge(&pre_merge_findings, &repo_findings);
+                pipeline_ledger.record_stage("cross-family-merge", rows_in, rows_out, acc);
                 classify_repo_findings(&mut repo_findings, spec, &files);
+                // Corpus-authored severity bounds (`min_severity` floor, `max_severity` ceiling,
+                // `deviation_ceiling`), applied to the LIVE findings so the triage view shows
+                // the same severity the PDF/xlsx will bill. Before this, the bounds ran only at
+                // export, so the two disagreed on every bounded rule. No corpus loaded still
+                // gets the deviation ceiling's `medium` default, exactly as the exporters apply
+                // it, which `apply_scan_severity_bounds` preserves. See `severity_bounds`.
+                crate::severity_bounds::apply_scan_severity_bounds(&mut repo_findings, corpus);
+                // P2: generate a codebase-specific `fix_specific` for every finding in this
+                // repo (deterministic floor + architectural + AI alike — see the design
+                // doc's "for EVERY curated finding"). This is itself a model call over
+                // client code, so it is gated on `run_ai_review` exactly like every other
+                // AI pass above: a deterministic-only scan (`run_ai_review == false`) makes
+                // ZERO model calls anywhere in this loop, `fix_specific` generation
+                // included — those findings simply keep the rule's generic `fix` in the
+                // report until a later AI-reviewed scan fills this in. Uses the SAME
+                // already-resolved `llm` (built from `backend_resolution` above) and folds
+                // usage into the SAME `meter` as calibration/audit, so its spend is never
+                // invisible to the actual-vs-estimated readout.
+                if run_ai_review && !repo_findings.is_empty() {
+                    let (fixed_findings, fix_failed_passes) =
+                        crate::ai_audit::generate_fix_specifics(
+                            llm,
+                            spec,
+                            repo_findings,
+                            &files,
+                            calibration_model.or(model),
+                            Some(&meter),
+                            corpus,
+                        )
+                        .await;
+                    repo_findings = fixed_findings;
+                    // C6-B3: same disclosure mechanism as the alternative-recommendation and
+                    // hour-estimation sub-passes above — a per-finding fix-generation give-up
+                    // is never silent.
+                    all_failed_passes.extend(fix_failed_passes);
+                }
                 all_findings.extend(repo_findings);
                 repos_ok.push(spec.to_string());
                 if truncated {
@@ -921,7 +2314,7 @@ pub async fn audit_repos(
         let mut per_repo = Vec::new();
         for (spec, files) in &deep_inputs {
             let dr = crate::ai_audit::run_deep_tier(
-                &llm,
+                llm,
                 spec,
                 files,
                 model,
@@ -938,10 +2331,95 @@ pub async fn audit_repos(
         None
     };
 
+    // P7: collapse needs-review STRUCTURAL findings (one rule flagged as a debatable
+    // structural/consistency preference at many unrelated locations) into ONE grouped,
+    // informational finding per rule — see `group_structural_needs_review`'s doc comment. Runs
+    // ACROSS THE WHOLE SCAN (every repo), after every per-repo pass, so a rule that fires in
+    // more than one repo still collapses to a single row.
+    //
+    // W1 ledger fix: this stage used to carry NO ledger instrumentation at all, so the rows it
+    // collapses were invisible to the pipeline-integrity ledger entirely (never even reported as
+    // unaccounted) — a blind spot, not a clean reconciliation. Instrumented the same way as
+    // `cross-family-merge`, via `account_location_merge` over `also_locations`.
+    let pre_structural_group = all_findings.clone();
+    let rows_in = all_findings.len();
+    let all_findings = crate::ai_audit::group_structural_needs_review(all_findings);
+    let rows_out = all_findings.len();
+    if rows_in != rows_out {
+        let acc = account_location_merge(&pre_structural_group, &all_findings);
+        pipeline_ledger.record_stage("structural-needs-review-merge", rows_in, rows_out, acc);
+    }
     let mut report = build_report(repos_ok, stacks, files_total, all_findings);
+    // A Firebase repository gets the one sentence that says what Firebase coverage is, so a
+    // clean Firebase section is never read as coverage of the Dart client or of console rules.
+    if report
+        .stacks
+        .iter()
+        .any(|s| s.frameworks.iter().any(|f| f == "Firebase"))
+    {
+        report.coverage_notes.push(CoverageNote {
+            tool: crate::FIREBASE_SCOPE_COVERAGE_TOOL.to_string(),
+            message: crate::FIREBASE_SCOPE_SENTENCE.to_string(),
+        });
+    }
     report.test_file_count = test_files_total;
+    report.files_excluded = files_excluded_total;
+    report.code_chars = code_chars_total;
+    report.code_lines = code_lines_total;
+    report.code_lines_by_language = finalize_language_breakdown(lang_lines_total);
     report.actual_usage = Some(meter.snapshot());
     report.deep = deep_report;
+    report.recommendations = recommendations;
+    // W1: fold every scan-time STAGE-level ledger integrity gap into the SAME existing
+    // `FailedPass` disclosure mechanism `all_failed_passes` already uses — runtime never
+    // refuses the export or drops a row; an unaccounted pipeline stage is recorded here so
+    // the export's methodology and executive summary state it plainly instead of silently
+    // calling the rule "verified clean". See `scan_ledger::stage_disclosure`'s doc comment for
+    // why an ordinary, honestly-scoped skip (AI not requested, deterministic deselected) does
+    // NOT raise one of these — only a genuine integrity gap does.
+    //
+    // Client-report fix (2026-10-07 grading pass): a rule declaring mechanical/architectural
+    // enforcement with no wired detector is deliberately NOT folded in here per-rule anymore.
+    // `rule_disclosure` used to be called once per such rule, each becoming its own
+    // internal-vocabulary `FailedPass` ("PYTHON-PARAMETERIZED-SQL-1 declares mechanical
+    // enforcement but has no wired detector...") — a corpus with 19 such rules shipped 19 of
+    // these bullets to the CLIENT, duplicated across the executive summary and methodology
+    // (`report_export::build_report_json` renders `failed_passes` in both sections). The full
+    // per-rule detail is NOT lost: `report.ledger = pipeline_ledger` below still carries every
+    // rule's `skip_reason`, which `camerata inspect`'s `render_ledger_summary` prints in full,
+    // and `report_export::build_report_json` now derives ONE plain client-facing sentence
+    // ("N rules could not be mechanically checked...") directly from the ledger instead of
+    // from a pile of per-rule `FailedPass` entries.
+    let repo_label = report.repos.join(", ");
+    for stage in pipeline_ledger.stages() {
+        if let Some(fp) = crate::scan_ledger::stage_disclosure(&repo_label, stage) {
+            all_failed_passes.push(fp);
+        }
+    }
+    report.ledger = pipeline_ledger;
+    // The question this scan's AI findings answered, kept on the (persisted) inspection so the
+    // delta rescan can prove its carried findings are still current. See `ScanLedger::ai_key`.
+    report.ledger.record_ai_key(ai_key);
+    // Operator telemetry: the per-stage split of the spend, joined to the SAME counted-line
+    // total `camerata count` prints (it comes from the same file filter). Lives on the ledger,
+    // never on a client export. Skipped when no model ran, so a deterministic-only scan carries
+    // no empty record.
+    if report.actual_usage.as_ref().is_some_and(|u| u.calls > 0) {
+        report
+            .ledger
+            .record_stage_telemetry(meter.stage_telemetry(code_lines_total));
+    }
+    // W6: never a silent omission — surface every failed/timed-out pass so the export's
+    // methodology and summary can disclose it explicitly instead of shipping quietly
+    // incomplete.
+    report.failed_passes = all_failed_passes;
+    // Surface the compliance block (if any) and the first fatal AI error (if any) as their
+    // own structured fields — never just buried inside `notes`/`message` — so the UI can
+    // render an unmissable banner. `blocked` stays false here: this path only runs when a
+    // local pass (the deterministic floor and friends) was requested and DID run, so this is
+    // a real partial result, not "nothing ran at all".
+    report.ai_blocked_reason = ai_blocked_reason;
+    report.ai_error = first_ai_error;
     // Fold the always-on dep-audit coverage notes into the report.  The scan-tools
     // preview notes are merged separately (via `merge_scan_preview` in lib.rs); both
     // sets land in `coverage_notes` so the UI sees them in one place.
@@ -955,10 +2433,35 @@ pub async fn audit_repos(
     // without an asterisk. `osv_scanner_version` is the PINNED version Camerata provisions
     // (`tool_provisioning::OSV_SCANNER_VERSION`) — the dep-audit pass itself runs AFTER this
     // function returns (in the caller), gated on the same `run_deterministic` flag.
+    // W19: hand the integrity gate what this scan was actually FED. Recorded at the same
+    // point provenance is stamped, because that is where the file totals and the resolved
+    // model are both settled, and the two must not be able to disagree.
+    // Computed once and shared with provenance below, so the gate and the export can never
+    // disagree about whether a model ran.
+    let ai_ran_for_ledger = report.actual_usage.as_ref().is_some_and(|u| u.calls > 0);
+    report
+        .ledger
+        .record_input(crate::scan_ledger::ScanInputFacts {
+            files_scanned: files_total,
+            files_excluded: files_excluded_total,
+            code_chars: code_chars_total,
+            engine_artifacts_admitted: engine_artifacts_total,
+            // The RESOLVED model, not the caller's raw pick. Recording the pick is what made
+            // `None` ambiguous between "no model ran" and "nobody wrote it down", and left the
+            // 2026-10-16 before/after comparison unfalsifiable. See `resolve_audit_model`.
+            audit_model: ai_ran_for_ledger.then(|| crate::ai_audit::resolve_audit_model(model)),
+        });
+    // W19: record the model that ACTUALLY ran, resolved, not the caller's raw pick — but
+    // only when the AI tier ran at all. A floor-only or compliance-blocked run made zero
+    // model calls, and naming a model there would be a different lie from the one being
+    // fixed. Zero calls is the honest signal: `None` then means "no model ran", which is
+    // what a reader always assumed it meant.
+    let ai_ran = ai_ran_for_ledger;
     report.provenance = ScanProvenance {
         audited_refs,
-        audit_model: model.map(str::to_string),
+        audit_model: ai_ran.then(|| crate::ai_audit::resolve_audit_model(model)),
         calibration_model: calibration_model.map(str::to_string),
+        clone_judge_model: clone_judge_model_used,
         mode: match mode {
             crate::ai_audit::ScanMode::Sequential => "sequential",
             crate::ai_audit::ScanMode::Parallel => "parallel",
@@ -974,8 +2477,80 @@ pub async fn audit_repos(
             .then(|| crate::tool_provisioning::OSV_SCANNER_VERSION.to_string()),
         started_at,
         finished_at: chrono::Utc::now().to_rfc3339(),
+        // Filled by [`audit_repos`], the one place that builds a real CLI `Llm`; an injected
+        // [`crate::llm::LlmPort`] has no Claude Code sessions to report.
+        model_sessions: Vec::new(),
     };
-    (report, manifest_builder.finish())
+    // Stamp `ai_covered` exactly here, not earlier: `run_ai_review` may have been forced false
+    // above (the `Blocked` gate), and `report.ai_error` (from `first_ai_error`) only reaches its
+    // final value once the per-repo loop has finished and it's been assigned onto `report` above.
+    // A manifest is `ai_covered = true` only when the AI review was actually ON for this run AND
+    // no repo hit a fatal AI error — an AI-off, blocked, or AI-errored run still stamps a
+    // manifest (the file fingerprints are always worth caching), but with `ai_covered = false` so
+    // a later AI-on scan ignores its (empty/partial) AI findings as a baseline rather than
+    // trusting them (see `effective_prior` above).
+    let ai_covered = run_ai_review && report.ai_error.is_none();
+    (
+        report,
+        manifest_builder
+            .with_ai_covered(ai_covered)
+            .with_clone_verdicts(clone_verdicts)
+            .finish(),
+    )
+}
+
+/// P4 (floor findings get finding-level treatment): whether a committed-secret finding ALSO
+/// appears in an EARLIER commit — the one cheap context fact that needs real git plumbing,
+/// unlike `onboard::audit::enrich_secret_context`'s `.gitignore`/secret-kind facts, which work
+/// from the already-fetched file set alone and stay pure. Mirrors `capture_audited_ref`'s
+/// async git-shelling pattern below (`tokio::process::Command`, fail-soft): a non-git
+/// `repo_root`, no `git` on PATH, or an unparseable result all just leave the finding's
+/// `history-status` capture unset rather than failing the scan. Purely additive — never
+/// removes or overwrites a capture a caller already set.
+async fn attach_secret_history_capture(findings: &mut [Finding], repo_root: &std::path::Path) {
+    let secret_indices: Vec<usize> = findings
+        .iter()
+        .enumerate()
+        .filter(|(_, f)| audit::SECRET_SHAPED_RULES.contains(&f.rule_id.as_str()))
+        .map(|(i, _)| i)
+        .collect();
+    for i in secret_indices {
+        if findings[i].captures.contains_key("history-status") {
+            continue;
+        }
+        let path = findings[i].path.clone();
+        if let Some(count) = commits_touching_path(repo_root, &path).await {
+            let status = if count > 1 {
+                format!(
+                    "also present in {} earlier commit(s) in this repository's history — \
+                     removing it from the current tree alone will not remove it from history",
+                    count - 1
+                )
+            } else {
+                "committed once so far in this repository's history".to_string()
+            };
+            findings[i]
+                .captures
+                .insert("history-status".to_string(), status);
+        }
+    }
+}
+
+/// `git rev-list --all --count -- <path>`, run in `repo_root`. `None` on any failure (no
+/// `.git` in `repo_root`, no `git` on PATH, non-zero exit, non-UTF8/unparseable output) — the
+/// caller treats that as "unknown," never a hard error.
+async fn commits_touching_path(repo_root: &std::path::Path, path: &str) -> Option<usize> {
+    let output = tokio::process::Command::new("git")
+        .args(["rev-list", "--all", "--count", "--", path])
+        .current_dir(repo_root)
+        .kill_on_drop(true)
+        .output()
+        .await
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8(output.stdout).ok()?.trim().parse().ok()
 }
 
 /// Capture ONE source dir's git identity for the `ScanProvenance` stamp: full commit SHA
@@ -1003,16 +2578,86 @@ async fn capture_audited_ref(spec: &str, dir: &std::path::Path) -> AuditedRef {
         .await
         .map(|o| !o.stdout.is_empty())
         .unwrap_or(false);
+    // The origin URL goes into the deletion record and the delivered provenance, so credentials a
+    // hand-made clone may carry in it are scrubbed here, at the one capture point.
+    let origin_url = run(dir, &["config", "--get", "remote.origin.url"])
+        .await
+        .filter(|o| o.status.success())
+        .map(|o| crate::workspace::scrub_remote_url(&String::from_utf8_lossy(&o.stdout)))
+        .filter(|s| !s.is_empty());
+    // `origin/main` -> `main`. Absent when the clone has no `refs/remotes/origin/HEAD`.
+    let default_branch = run(
+        dir,
+        &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
+    )
+    .await
+    .filter(|o| o.status.success())
+    .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+    .and_then(|s| s.strip_prefix("origin/").map(str::to_string))
+    .filter(|s| !s.is_empty());
     AuditedRef {
         repo: spec.to_string(),
         sha,
         branch,
         dirty,
+        origin_url,
+        default_branch,
     }
 }
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The audited ref carries the origin URL and the default branch, so the deletion record
+    /// can name where the code came from and re-fetch can offer "latest from main".
+    #[tokio::test]
+    async fn audited_ref_captures_origin_url_and_default_branch() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (_bare, url, sha) = crate::test_git::bare_remote(tmp.path(), &[("a.txt", "one\n")]);
+        let clone = tmp.path().join("clone");
+        crate::test_git::clone_as(&url, &clone, "git@github.com:acme/app.git");
+        // `clone_as` rewrote origin, so the tracking ref `origin/HEAD` still exists from the clone.
+
+        let got = capture_audited_ref("acme/app", &clone).await;
+
+        assert_eq!(got.sha.as_deref(), Some(sha.as_str()));
+        assert_eq!(
+            got.origin_url.as_deref(),
+            Some("git@github.com:acme/app.git")
+        );
+        assert_eq!(got.default_branch.as_deref(), Some("main"));
+        assert!(!got.dirty);
+    }
+
+    /// A hand-made clone whose origin embeds credentials must not carry them into the record.
+    #[tokio::test]
+    async fn audited_ref_never_records_credentials_embedded_in_the_origin() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        crate::test_git::init_repo_with_origin(
+            &repo,
+            "https://x-access-token:ghp_SECRETSECRET@github.com/acme/app.git",
+            &[("a.txt", "one\n")],
+        );
+
+        let got = capture_audited_ref("acme/app", &repo).await;
+
+        assert_eq!(
+            got.origin_url.as_deref(),
+            Some("https://github.com/acme/app.git")
+        );
+        assert!(!format!("{got:?}").contains("ghp_SECRETSECRET"));
+    }
+
+    /// A folder with no git history yields no origin and no default branch, never an error.
+    #[tokio::test]
+    async fn audited_ref_has_no_origin_for_a_plain_folder() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let got = capture_audited_ref("acme/app", tmp.path()).await;
+        assert_eq!(got.sha, None);
+        assert_eq!(got.origin_url, None);
+        assert_eq!(got.default_branch, None);
+    }
 
     fn sel(id: &str, repos: &[&str]) -> SelectedRule {
         SelectedRule {
@@ -1040,7 +2685,7 @@ mod tests {
     fn per_repo_semantic_set_is_union_of_project_level_and_repo_rules() {
         // Mirrors the per-repo filter inside `audit_repos`: each repo sees project-level
         // rules (empty `repos`) plus the rules bound to it, and nothing bound to a sibling.
-        let selected = vec![
+        let selected = [
             sel("ARCH-1", &[]),                 // project-level → both repos
             sel("RUST-DIOXUS-2", &["acme/ui"]), // ui only
             sel("SQL-1", &["acme/api"]),        // api only
@@ -1056,6 +2701,483 @@ mod tests {
 
         assert_eq!(for_repo("acme/ui"), vec!["ARCH-1", "RUST-DIOXUS-2"]);
         assert_eq!(for_repo("acme/api"), vec!["ARCH-1", "SQL-1"]);
+    }
+
+    // ── W4 root-cause fix: the semantic/AI rule set no longer excludes CI-tier rules ────────
+
+    /// THE PRECISE REGRESSION: a selected rule whose corpus `enforcement` is CI-tier
+    /// (`mechanical`) and that ALSO already has a real deterministic detector (a gateway rule
+    /// arm — `SEC-NO-HARDCODED-SECRETS-1`'s `env-or-secrets-manager` option is enforced via
+    /// `camerata_gateway::lookup_arm`) must STILL appear in `semantic_rule_ids_for_repo`'s
+    /// output. The OLD code excluded a rule for EITHER reason alone (CI-tier enforcement, or a
+    /// gate arm, or a registered architectural checker); this proves neither exclusion survived
+    /// the W4 fix — the model is now a deliberate second pair of eyes over the whole selected
+    /// ruleset, deterministic detector or not.
+    #[tokio::test]
+    async fn semantic_rule_set_includes_a_ci_tier_rule_with_an_existing_deterministic_detector() {
+        let corpus_path = camerata_rules::corpus_path();
+        let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+        assert!(errors.is_empty(), "corpus must load cleanly: {errors:?}");
+        let rule = corpus
+            .get_by_id("SEC-NO-HARDCODED-SECRETS-1")
+            .expect("precondition: the real corpus must carry this id");
+        assert!(
+            rule.enforcement.is_ci_enforced(),
+            "precondition: this id must declare CI-tier (mechanical) enforcement"
+        );
+        assert!(
+            camerata_gateway::lookup_arm("SEC-NO-HARDCODED-SECRETS-1").is_some(),
+            "precondition: this id must ALREADY have a real gateway-arm detector"
+        );
+
+        let selected = vec![sel("SEC-NO-HARDCODED-SECRETS-1", &[])];
+        let semantic = semantic_rule_ids_for_repo(&selected, "acme/api");
+        assert!(
+            semantic
+                .iter()
+                .any(|(id, _)| id == "SEC-NO-HARDCODED-SECRETS-1"),
+            "a CI-tier rule with an existing deterministic detector must still reach the \
+             model's rule set: {semantic:?}"
+        );
+    }
+
+    /// The other half of the same regression: a CI-tier (`architectural`) rule answered by a
+    /// registered native `ArchChecker` (not a gateway arm) must ALSO still reach the model.
+    #[tokio::test]
+    async fn semantic_rule_set_includes_a_ci_tier_rule_with_a_registered_arch_checker() {
+        let corpus_path = camerata_rules::corpus_path();
+        let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+        assert!(errors.is_empty(), "corpus must load cleanly: {errors:?}");
+        let rule = corpus
+            .get_by_id("SUPABASE-RLS-ENABLED-1")
+            .expect("precondition: the real corpus must carry this id");
+        assert!(
+            rule.enforcement.is_ci_enforced(),
+            "precondition: this id must declare CI-tier (architectural) enforcement"
+        );
+
+        let selected = vec![sel("SUPABASE-RLS-ENABLED-1", &[])];
+        let semantic = semantic_rule_ids_for_repo(&selected, "acme/api");
+        assert!(
+            semantic
+                .iter()
+                .any(|(id, _)| id == "SUPABASE-RLS-ENABLED-1"),
+            "a CI-tier rule with a registered architectural checker must still reach the \
+             model's rule set: {semantic:?}"
+        );
+    }
+
+    /// The root-cause case this whole fix exists for: a CI-tier rule with NO shipped detector
+    /// at all (`RUBY-FROZEN-STRING-LITERAL-1` — a real, tracked gap, see
+    /// `crate::mechanical_gate`) must reach the model too. Before the fix, this id was excluded
+    /// from the prompt AND had no detector, so NOTHING ever evaluated it.
+    #[tokio::test]
+    async fn semantic_rule_set_includes_a_ci_tier_rule_with_no_detector_at_all() {
+        let corpus_path = camerata_rules::corpus_path();
+        let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+        assert!(errors.is_empty(), "corpus must load cleanly: {errors:?}");
+        let rule = corpus
+            .get_by_id("RUBY-FROZEN-STRING-LITERAL-1")
+            .expect("precondition: the real corpus must carry this id");
+        assert!(
+            rule.enforcement.is_ci_enforced(),
+            "precondition: this id must declare CI-tier (mechanical) enforcement"
+        );
+        assert!(
+            camerata_gateway::lookup_arm("RUBY-FROZEN-STRING-LITERAL-1").is_none(),
+            "precondition: no gateway-arm detector"
+        );
+
+        let selected = vec![sel("RUBY-FROZEN-STRING-LITERAL-1", &[])];
+        let semantic = semantic_rule_ids_for_repo(&selected, "acme/api");
+        assert!(
+            semantic
+                .iter()
+                .any(|(id, _)| id == "RUBY-FROZEN-STRING-LITERAL-1"),
+            "a CI-tier rule with no detector must still reach the model's rule set — this is \
+             its ONLY possible route to ever being evaluated: {semantic:?}"
+        );
+    }
+
+    /// req_a8 / "every rule reaches the AI scan" (Pass-1 W4): the LAST exclusion is gone too.
+    /// A governance/process rule (`ORCH-`/`SPIRIT-`/`PROC-`) now reaches the code-audit prompt
+    /// alongside everything else.
+    ///
+    /// SUPERSEDES the previous expectation of this test (which asserted the prefix exclusion
+    /// survived, on the "auditing source against a fleet-process rule is a category error"
+    /// reasoning). Zach, 2026-10-09: *"Every single rule should be included in the AI semantic
+    /// scan, even if they're deterministic. It gets a second pair of eyes on the deterministic
+    /// scans."* The old reasoning was also factually wrong for the rules it banned —
+    /// `SPIRIT-FILE-SIZE-1` is about file sizes and `PROC-PR-CONCURRENCY-1` is about a file in
+    /// `.github/` — and it was the second half of finding A8's double disarm.
+    #[test]
+    fn req_a8_semantic_rule_set_no_longer_excludes_governance_process_rules() {
+        let selected = vec![
+            sel("ORCH-TRACK-AI-SPEND-1", &[]),
+            sel("SPIRIT-FILE-SIZE-1", &[]),
+            sel("PROC-PR-CONCURRENCY-1", &[]),
+            sel("ARCH-STRICT-LAYERING-1", &[]),
+        ];
+        let semantic = semantic_rule_ids_for_repo(&selected, "acme/api");
+        for id in [
+            "ORCH-TRACK-AI-SPEND-1",
+            "SPIRIT-FILE-SIZE-1",
+            "PROC-PR-CONCURRENCY-1",
+            "ARCH-STRICT-LAYERING-1",
+        ] {
+            assert!(
+                semantic.iter().any(|(got, _)| got == id),
+                "{id} must reach the model's rule set — no prefix may exclude a rule from the \
+                 only tier that can evaluate it: {semantic:?}"
+            );
+        }
+    }
+
+    /// req_a8 (the general statement): `semantic_rule_ids_for_repo` applies NO filter other
+    /// than per-repo applicability. Asserted over a deliberately adversarial selection drawn
+    /// from every id family in the corpus, so a future "small, obviously safe" exclusion
+    /// (another prefix, an enforcement tier, a detector check) fails here instead of silently
+    /// re-creating the A8 shape.
+    #[test]
+    fn req_a8_semantic_rule_set_filters_on_nothing_but_repo_applicability() {
+        let ids = [
+            "ORCH-MODEL-TIERING-1",
+            "SPIRIT-ROBUSTNESS-1",
+            "PROC-HIDE-DEAD-END-1",
+            "PROCESS-BRANCH-NAMING-1",
+            "SEC-NO-HARDCODED-SECRETS-1",
+            "SUPABASE-RLS-ENABLED-1",
+            "ARCH-HANDLER-NO-DB-1",
+            "UI-UTC-DATES-1",
+            "RUBY-FROZEN-STRING-LITERAL-1",
+        ];
+        let selected: Vec<SelectedRule> = ids.iter().map(|id| sel(id, &[])).collect();
+        let semantic = semantic_rule_ids_for_repo(&selected, "acme/api");
+        assert_eq!(
+            semantic.len(),
+            ids.len(),
+            "every applicable selected rule must reach the model: got {semantic:?}"
+        );
+
+        // The ONE filter that is real: a rule bound to a sibling repo does not apply here.
+        let scoped = vec![sel("SPIRIT-FILE-SIZE-1", &["acme/other"])];
+        assert!(
+            semantic_rule_ids_for_repo(&scoped, "acme/api").is_empty(),
+            "per-repo binding is still honored"
+        );
+    }
+
+    // ── W1 ledger fix: pipeline-integrity accounting for merge stages ──────────────────────
+
+    fn structural_site(repo: &str, path: &str, line: usize, rule_id: &str) -> Finding {
+        Finding {
+            repo: repo.to_string(),
+            path: path.to_string(),
+            line,
+            rule_id: rule_id.to_string(),
+            severity: "medium".to_string(),
+            snippet: String::new(),
+            detail: String::new(),
+            ..Finding::default()
+        }
+    }
+
+    /// REGRESSION for the real-world defect: `camerata inspect`'s ledger summary reported
+    /// `cross-family-merge rows 45 -> 32 merged=8 ... unaccounted=5` on a real scan — findings
+    /// absorbed by `ai_audit::merge_semantic_group`'s "N occurrences of one rule" collapse signal
+    /// (`same_rule_adjacent`) never show up in the surviving row's `also_matches`, because that
+    /// field is a rule-id SET deduplicated against the primary's OWN id (`seen.insert` in
+    /// `merge_semantic_group`): when every absorbed finding shares the primary's rule id, NOTHING
+    /// new is ever pushed to `also_matches`, even though each absorbed finding's own evidence
+    /// site unconditionally lands in `also_locations`. The OLD instrumentation (diffing
+    /// `also_matches` before/after) reported these rows `unaccounted` — the data survived, only
+    /// the ledger's accounting was blind to it (an accounting bug, not a deletion). This proves
+    /// `account_location_merge` reconciles the stage exactly, and that every input rule id stays
+    /// reachable.
+    #[test]
+    fn cross_family_merge_ledger_fully_reconciles_a_same_rule_id_n_site_collapse() {
+        let findings = vec![
+            structural_site("acme/api", "svc.rs", 10, "ARCH-NO-DIRECT-DB-1"),
+            structural_site("acme/api", "svc.rs", 200, "ARCH-NO-DIRECT-DB-1"),
+            structural_site("acme/api", "svc.rs", 400, "ARCH-NO-DIRECT-DB-1"),
+        ];
+        let n = findings.len();
+        let pre_merge_findings = findings.clone();
+        let rows_in = findings.len();
+        let out = crate::ai_audit::merge_semantic_groups(findings, &[]);
+        let rows_out = out.len();
+        assert_eq!(
+            rows_out, 1,
+            "sanity: the N-site collapse must still produce exactly one row: {out:?}"
+        );
+        // Sanity on the OLD, buggy signal: this is EXACTLY the defect shape — nothing new in
+        // `also_matches` for the absorbed rows, because they share the primary's own rule id.
+        assert!(
+            out[0].also_matches.is_empty(),
+            "sanity: also_matches alone can never see this absorption: {:?}",
+            out[0].also_matches
+        );
+
+        let acc = account_location_merge(&pre_merge_findings, &out);
+        let mut ledger = crate::scan_ledger::ScanLedger::new();
+        let entry = ledger.record_stage("cross-family-merge", rows_in, rows_out, acc);
+        assert_eq!(
+            entry.unaccounted, 0,
+            "every absorbed row must have a recorded disposition, not just the surviving row: \
+             {entry:?}"
+        );
+        assert_eq!(
+            entry.rows_in,
+            entry.rows_out + entry.accounted_total(),
+            "rows_in == rows_out + accounted must hold exactly for N={n}: {entry:?}"
+        );
+        assert_eq!(entry.merged_into.len(), n - 1);
+
+        // Every input rule id must still be reachable: as a surviving primary, in some row's
+        // `also_matches`, or in some row's `also_locations` (this merge's actual recording
+        // mechanism for a same-rule-id absorption).
+        let reachable: std::collections::HashSet<String> = out
+            .iter()
+            .flat_map(|f| {
+                std::iter::once(f.rule_id.clone())
+                    .chain(f.also_matches.iter().cloned())
+                    .chain(f.also_locations.iter().map(|l| l.rule_id.clone()))
+            })
+            .collect();
+        assert!(
+            reachable.contains("ARCH-NO-DIRECT-DB-1"),
+            "the absorbed rule id must remain reachable: {reachable:?}"
+        );
+    }
+
+    /// The same accounting must hold even when the absorbed findings' rule ids collide with
+    /// EACH OTHER but not with the primary — e.g. two independently-reported AI findings that
+    /// both got invented under the same ad hoc rule id, folded into a deterministic primary via
+    /// a shared captured object. `also_matches` dedupes the id down to ONE entry even though TWO
+    /// rows were absorbed; `account_location_merge` must still count both.
+    #[test]
+    fn cross_family_merge_ledger_reconciles_when_absorbed_rows_share_a_non_primary_rule_id() {
+        let mut det = structural_site("acme/api", "handler.rs", 50, "SEC-DETERMINISTIC-SITE-1");
+        det.category = Some("authorization".to_string());
+        det.captures
+            .insert("object".to_string(), "orders".to_string());
+        let mut ai1 = structural_site("acme/api", "handler.rs", 52, "AI-SITE-DEFECT-1");
+        ai1.category = Some("authorization".to_string());
+        ai1.captures
+            .insert("object".to_string(), "orders".to_string());
+        let mut ai2 = structural_site("acme/api", "handler.rs", 54, "AI-SITE-DEFECT-1");
+        ai2.category = Some("authorization".to_string());
+        ai2.captures
+            .insert("object".to_string(), "orders".to_string());
+
+        let findings = vec![det, ai1, ai2];
+        let n = findings.len();
+        let pre_merge_findings = findings.clone();
+        let rows_in = findings.len();
+        let out = crate::ai_audit::merge_semantic_groups(findings, &[]);
+        let rows_out = out.len();
+        assert_eq!(
+            rows_out, 1,
+            "all three must merge via the shared captured object: {out:?}"
+        );
+        assert_eq!(
+            out[0].also_matches,
+            vec!["AI-SITE-DEFECT-1".to_string()],
+            "sanity: also_matches dedupes the shared id down to ONE entry even though TWO rows \
+             were absorbed: {:?}",
+            out[0].also_matches
+        );
+
+        let acc = account_location_merge(&pre_merge_findings, &out);
+        let mut ledger = crate::scan_ledger::ScanLedger::new();
+        let entry = ledger.record_stage("cross-family-merge", rows_in, rows_out, acc);
+        assert_eq!(
+            entry.unaccounted, 0,
+            "both absorbed rows must be recorded even though they share a rule id with each \
+             other: {entry:?}"
+        );
+        assert_eq!(entry.merged_into.len(), n - 1);
+    }
+
+    /// W4 NEW case the root-cause fix makes reachable for the first time: a deterministic
+    /// finding and a MODEL finding for the SAME rule id at the same site. Before W4 this could
+    /// never happen — a rule with a deterministic detector was excluded from the AI prompt
+    /// entirely, so the model never had the chance to cite it. Now that every selected rule
+    /// reaches the model as a deliberate second pair of eyes, this collision is a real,
+    /// reachable shape and must still collapse to ONE row with the deterministic finding as
+    /// primary — never two rows, and never silently dropping the model's corroborating
+    /// evidence.
+    #[test]
+    fn cross_family_merge_collapses_a_deterministic_and_model_finding_sharing_one_rule_id() {
+        let mut det = structural_site("acme/api", "handler.rs", 50, "SEC-NO-HARDCODED-SECRETS-1");
+        det.severity = "medium".to_string();
+        det.detail = "deterministic-detected-secret".to_string();
+        // `confidence: None` (the `structural_site` default) + a non-`AI-` rule id ->
+        // `Origin::Deterministic`.
+
+        let mut model = structural_site(
+            "acme/api",
+            "handler.rs",
+            52, // within SEMANTIC_MERGE_WINDOW of the deterministic finding's line
+            "SEC-NO-HARDCODED-SECRETS-1", // the SAME corpus rule id — the model adopted it
+        );
+        model.severity = "critical".to_string(); // uncalibrated AI severity, routinely inflated
+        model.detail = "ai-detected-secret".to_string();
+        model.confidence = Some("high".to_string()); // calibration touched it -> Origin::AdoptedAi
+
+        let findings = vec![det, model];
+        let pre_merge_findings = findings.clone();
+        let rows_in = findings.len();
+        let out = crate::ai_audit::merge_semantic_groups(findings, &[]);
+        let rows_out = out.len();
+        assert_eq!(
+            rows_out, 1,
+            "a deterministic + model finding for the SAME rule id at one site must collapse \
+             to one row, never two: {out:?}"
+        );
+        assert_eq!(out[0].rule_id, "SEC-NO-HARDCODED-SECRETS-1");
+        // `merged_severity` only returns the PRIMARY's own severity (never `max()`) when the
+        // primary's origin is Deterministic in a mixed-tier group — "medium" surviving (not
+        // "critical") is only possible if the deterministic finding actually won primacy.
+        assert_eq!(
+            out[0].severity, "medium",
+            "the deterministic finding must win primacy over the model's inflated severity: \
+             {:?}",
+            out[0]
+        );
+        assert_eq!(
+            out[0].detail, "deterministic-detected-secret",
+            "the surviving row's own text must be the DETERMINISTIC finding's, not the \
+             model's: {:?}",
+            out[0]
+        );
+        // Sanity on the defect shape this collision is the NEW instance of: `also_matches` is a
+        // rule-id SET deduped against the primary's own id, so it can NEVER see an absorption
+        // whose rule id is identical to the primary's — same root cause as the N-site collapse
+        // tested above, just via ORIGIN instead of repeated occurrence.
+        assert!(
+            out[0].also_matches.is_empty(),
+            "sanity: also_matches alone can never see a same-rule-id absorption: {:?}",
+            out[0].also_matches
+        );
+        // The model's finding is NOT silently dropped: its own evidence site survives in
+        // `also_locations`, the mechanism `account_location_merge` reconciles on.
+        assert!(
+            out[0]
+                .also_locations
+                .iter()
+                .any(|l| l.line == 52 && l.rule_id == "SEC-NO-HARDCODED-SECRETS-1"),
+            "the model's absorbed finding must still have its own recorded site: {:?}",
+            out[0].also_locations
+        );
+
+        let acc = account_location_merge(&pre_merge_findings, &out);
+        let mut ledger = crate::scan_ledger::ScanLedger::new();
+        let entry = ledger.record_stage("cross-family-merge", rows_in, rows_out, acc);
+        assert_eq!(
+            entry.unaccounted, 0,
+            "the model's absorbed finding must have a recorded disposition, not vanish into \
+             unaccounted: {entry:?}"
+        );
+        assert_eq!(entry.merged_into.len(), 1);
+    }
+
+    /// REGRESSION for a REAL scan's `cross-family-merge rows 116 -> 83 merged=32 ... held=0
+    /// informational=0 deduped=0 unaccounted=1 !! UNACCOUNTED` — a DIFFERENT leak than the
+    /// same-rule-id-N-site-collapse case above, and different from the already-fixed
+    /// `structural-needs-review-merge` second collapse: this one lives INSIDE
+    /// `ai_audit::merge_semantic_group` itself.
+    ///
+    /// `pre_primary` already absorbed a site (acme/api, handler.rs, 52, RULE-1) in an EARLIER
+    /// stage — simulated here by pre-populating its own `also_locations`, exactly like a merged
+    /// primary surviving the intra-AI-tier exact-location merge would arrive carrying one.
+    /// `y` is a SEPARATE, genuinely distinct top-level `Finding` whose OWN identity
+    /// (repo/path/line/rule_id) happens to be IDENTICAL to that already-absorbed site — a real,
+    /// reachable shape: two different detectors (or two different pipeline stages) independently
+    /// flagging the exact same rule at the exact same line. `semantic_pair_merges`'s
+    /// `same_rule_adjacent` signal (same rule id + same file + same severity) groups `y` together
+    /// with `pre_primary`.
+    ///
+    /// The old `merge_semantic_group` pushed `y`'s own site into the SAME `also_locations` list
+    /// as `pre_primary`'s pre-existing entry, then deduplicated the WHOLE list by
+    /// `(repo, path, line, rule_id)` in one pass — so `y`'s fresh entry collided with the
+    /// pre-existing one and was silently dropped. `account_location_merge` then saw only ONE
+    /// occurrence of that key post-stage, found it already present pre-stage, and reconciled it
+    /// as "carried forward, not new" — so `y` left no trace anywhere: not a surviving row, not a
+    /// new `also_locations` entry, not counted as merged. This proves the fix keeps every
+    /// member's fresh absorption as its OWN entry regardless of a pre-existing key collision, so
+    /// `y` is never lost.
+    #[test]
+    fn cross_family_merge_ledger_reconciles_when_a_fresh_absorption_collides_with_an_already_absorbed_site(
+    ) {
+        let mut pre_primary = structural_site("acme/api", "handler.rs", 50, "RULE-1");
+        pre_primary.also_locations = vec![MergedLocation {
+            repo: "acme/api".to_string(),
+            path: "handler.rs".to_string(),
+            line: 52,
+            rule_id: "RULE-1".to_string(),
+            snippet: "already-absorbed-earlier".to_string(),
+            consequence: false,
+        }];
+        let y = structural_site("acme/api", "handler.rs", 52, "RULE-1");
+
+        let findings = vec![pre_primary, y];
+        let n = findings.len();
+        let pre_merge_findings = findings.clone();
+        let rows_in = findings.len();
+        let out = crate::ai_audit::merge_semantic_groups(findings, &[]);
+        let rows_out = out.len();
+        assert_eq!(
+            rows_out, 1,
+            "sanity: the same-rule-id/same-file/same-severity signal must still merge these \
+             into one row: {out:?}"
+        );
+        // Both the pre-existing absorbed site AND `y`'s own fresh absorption must leave a
+        // DISTINCT recorded site — not collapsed into one just because the key coincides.
+        let sites_at_52 = out[0]
+            .also_locations
+            .iter()
+            .filter(|l| l.path == "handler.rs" && l.line == 52 && l.rule_id == "RULE-1")
+            .count();
+        assert_eq!(
+            sites_at_52, 2,
+            "the pre-existing absorbed site and y's own fresh absorption must BOTH survive as \
+             distinct also_locations entries: {:?}",
+            out[0].also_locations
+        );
+
+        let acc = account_location_merge(&pre_merge_findings, &out);
+        let mut ledger = crate::scan_ledger::ScanLedger::new();
+        let entry = ledger.record_stage("cross-family-merge", rows_in, rows_out, acc);
+        assert_eq!(
+            entry.unaccounted, 0,
+            "y must have a recorded disposition, not vanish into unaccounted just because its \
+             own site coincides with something the primary already absorbed: {entry:?}"
+        );
+        assert_eq!(
+            entry.rows_in,
+            entry.rows_out + entry.accounted_total(),
+            "rows_in == rows_out + accounted must hold exactly for N={n}: {entry:?}"
+        );
+        assert_eq!(
+            entry.merged_into.len(),
+            1,
+            "exactly one NEW merge (y into pre_primary) must be recorded this stage: {entry:?}"
+        );
+
+        // Every input rule id must still be reachable.
+        let reachable: std::collections::HashSet<String> = out
+            .iter()
+            .flat_map(|f| {
+                std::iter::once(f.rule_id.clone())
+                    .chain(f.also_matches.iter().cloned())
+                    .chain(f.also_locations.iter().map(|l| l.rule_id.clone()))
+            })
+            .collect();
+        assert!(
+            reachable.contains("RULE-1"),
+            "the absorbed rule id must remain reachable: {reachable:?}"
+        );
     }
 
     #[test]
@@ -1219,6 +3341,15 @@ mod tests {
     }
 
     #[test]
+    fn has_code_ext_covers_rules_and_dart() {
+        assert!(has_code_ext("firestore.rules"));
+        assert!(has_code_ext("rules/firestore.prod.rules"));
+        assert!(has_code_ext("lib/main.dart"));
+        assert!(has_code_ext("lib/MAIN.DART"));
+        assert!(!has_code_ext("lib/rules"));
+    }
+
+    #[test]
     fn admissible_text_covers_code_plus_config_plus_dotfiles() {
         // Every has_code_ext path is still admissible.
         assert!(is_admissible_text("src/main.rs"));
@@ -1270,6 +3401,130 @@ mod tests {
         let extra = vec!["fixtures".to_string()];
         assert!(is_noise_path("test/fixtures/big.ts", &extra));
         assert!(!is_noise_path("test/fixtures/big.ts", none));
+    }
+
+    /// W20 — the engine's own output is never audit input.
+    ///
+    /// On 2026-10-16 two runs of the SAME engine over the SAME hearth commit produced digests
+    /// of 103,307 and 277,543 chars, at 88 files both times with `files_excluded = 0`. The
+    /// +174,236 was `.camerata-scan-cache.json`, written to the scanned repo's own root by
+    /// `camerata_cli::inspect_cmd::manifest_cache_path` and then collected as a dotfile. The
+    /// run shipped a CRITICAL located at `.camerata-scan-cache.json:1778` at queue position #1
+    /// — the engine re-detecting a snippet quoted inside its own cache.
+    #[test]
+    fn engine_written_artifacts_are_never_scanned() {
+        let none: &[String] = &[];
+
+        // The exact file and finding location from the 2026-10-16 export.
+        assert!(is_noise_path(".camerata-scan-cache.json", none));
+        assert!(is_noise_path(".camerata-scan-ledger.json", none));
+
+        // Three of the five are DIRECTORIES. Excluding the directory entry while admitting
+        // everything inside it would be the larger problem for a cargo target or a venv.
+        assert!(is_noise_path(
+            ".camerata-shared-target/debug/build/x.rs",
+            none
+        ));
+        assert!(is_noise_path(
+            ".camerata-venv/lib/python3.12/site-packages/x.py",
+            none
+        ));
+        assert!(is_noise_path(
+            ".camerata-worktrees/agent-3/src/main.rs",
+            none
+        ));
+
+        // Not only at the repo root — a nested checkout writes these too.
+        assert!(is_noise_path("vendor/sub/.camerata-scan-cache.json", none));
+
+        // The fix must not overreach. The dotfile admission in `is_admissible_text` exists
+        // because committed-credential incidents concentrate in exactly that file class, and
+        // W20 must not undo it: these are dotfiles, they are NOT engine artifacts, and they
+        // must still reach the secrets floor.
+        assert!(!is_noise_path(".env.production", none));
+        assert!(!is_noise_path(".npmrc", none));
+        assert!(!is_noise_path(".netrc", none));
+        assert!(!is_noise_path(".github/workflows/ci.yml", none));
+        // A client file that merely MENTIONS the vendor name is not ours.
+        assert!(!is_noise_path("docs/camerata-setup.md", none));
+        assert!(!is_noise_path("src/camerata_client.rs", none));
+    }
+
+    /// The durable half of W20: the exclusion is keyed on a reserved PREFIX, and this test
+    /// derives the artifact list from the source tree rather than restating it.
+    ///
+    /// Two entries in `NOISE_FILES` would have closed the 2026-10-16 instance and left the
+    /// mechanism intact — the next artifact would be admitted identically and found again only
+    /// by an external grader reading a shipped client report. So the assertion that matters is
+    /// not "these five are excluded" but "every `.camerata-*` literal anywhere in the
+    /// workspace is excluded", which a newly-introduced artifact joins automatically.
+    #[test]
+    fn every_engine_artifact_literal_in_the_workspace_is_excluded() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(|p| p.parent())
+            .expect("workspace root is two levels above crates/server")
+            .join("crates");
+        // Fail CLOSED: a test that silently finds no sources is a test that always passes.
+        assert!(
+            root.is_dir(),
+            "cannot locate crates/ at {} — this test must never pass by finding nothing",
+            root.display()
+        );
+
+        let mut found: std::collections::BTreeSet<String> = Default::default();
+        let mut stack = vec![root];
+        while let Some(dir) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let name = entry.file_name().to_string_lossy().to_string();
+                if path.is_dir() {
+                    // Never descend into build output; it contains copies of our own sources.
+                    if name != "target" && !name.starts_with('.') {
+                        stack.push(path);
+                    }
+                } else if name.ends_with(".rs") {
+                    let Ok(text) = std::fs::read_to_string(&path) else {
+                        continue;
+                    };
+                    // Pull every `".camerata-…"` string literal out of the source.
+                    for (idx, _) in text.match_indices(ENGINE_ARTIFACT_PREFIX) {
+                        let tail = &text[idx..];
+                        let Some(end) = tail.find('"') else { continue };
+                        let literal = &tail[..end];
+                        if !literal.is_empty()
+                            && literal
+                                .chars()
+                                .all(|c| c.is_ascii_alphanumeric() || "-_./".contains(c))
+                        {
+                            found.insert(literal.to_string());
+                        }
+                    }
+                }
+            }
+        }
+
+        assert!(
+            found.len() >= 2,
+            "expected to discover the engine's own artifact literals in the source; found {found:?}"
+        );
+        for literal in &found {
+            assert!(
+                is_noise_path(literal, &[]),
+                "`{literal}` is written by the engine but is NOT excluded from scanning. \
+                 Every artifact Camerata writes into a scanned tree must start with \
+                 `{ENGINE_ARTIFACT_PREFIX}` so `is_engine_artifact` catches it; if this one \
+                 legitimately cannot, it needs its own exclusion AND a note on why the prefix \
+                 convention did not hold."
+            );
+            assert!(
+                is_engine_artifact(literal),
+                "`{literal}` must match the prefix rule"
+            );
+        }
     }
 
     #[test]
@@ -1524,6 +3779,7 @@ mod tests {
             "supabase:storage",
             "supabase:database-functions",
             "supabase:exposure",
+            "supabase:realtime",
             "sql",
         ] {
             assert!(
@@ -1564,7 +3820,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn propose_corpus_rules_proposes_all_17_supabase_rules_for_a_supabase_repo() {
+    async fn propose_corpus_rules_proposes_all_35_supabase_rules_for_a_supabase_repo() {
         // The end-to-end regression guard for the reported bug: given a repo whose stack
         // is unambiguously Supabase, the REAL onboarding path (detect_stack ->
         // domains_for_stack -> propose_corpus_rules against the real corpus) must
@@ -1596,6 +3852,7 @@ mod tests {
             "SUPABASE-RLS-INITPLAN-1",
             "SUPABASE-RLS-PERMISSIVE-TRUE-1",
             "SUPABASE-RLS-POLICY-DISABLED-1",
+            "SUPABASE-RLS-DISABLED-NOT-RESTORED-1",
             "SUPABASE-RLS-USER-METADATA-1",
             "SUPABASE-RLS-VIEW-INVOKER-1",
             "SUPABASE-AUTH-EDGE-JWT-1",
@@ -1605,9 +3862,26 @@ mod tests {
             "SUPABASE-KEY-SERVICE-ROLE-CLIENT-1",
             "SUPABASE-STORAGE-OBJECT-POLICY-1",
             "SUPABASE-STORAGE-PUBLIC-BUCKET-1",
+            "SUPABASE-STORAGE-KEY-SANITIZATION-1",
+            "SUPABASE-STORAGE-UPLOAD-CONSTRAINTS-1",
+            "SUPABASE-STORAGE-SIGNED-URL-1",
+            "SUPABASE-STORAGE-DOWNLOAD-OWNERSHIP-1",
             "SUPABASE-FUNC-SEARCH-PATH-1",
+            "SUPABASE-FUNC-DYNAMIC-SQL-INJECTION-1",
+            "SUPABASE-FUNC-PRIVILEGED-NO-AUTHZ-1",
+            "SUPABASE-FUNC-DEFINER-CROSS-TENANT-READ-1",
             "SUPABASE-EXPOSURE-MATVIEW-1",
             "SUPABASE-EXPOSURE-SCHEMAS-1",
+            "SUPABASE-AUTH-ANON-SIGNIN-1",
+            "SUPABASE-AUTH-REDIRECT-ALLOWLIST-1",
+            "SUPABASE-AUTH-SESSION-LIFETIME-1",
+            "SUPABASE-AUTH-EMAIL-CONFIRMATION-1",
+            "SUPABASE-AUTH-PASSWORD-POLICY-1",
+            "SUPABASE-AUTH-MFA-PRIVILEGED-1",
+            "SUPABASE-REALTIME-AUTHORIZATION-1",
+            "SUPABASE-REALTIME-CHANNEL-SCOPE-1",
+            "SUPABASE-REALTIME-PAYLOAD-EXPOSURE-1",
+            "SUPABASE-REALTIME-PRESENCE-IDENTITY-1",
         ];
         // SUPABASE-RLS-INITPLAN-1 is deliberately `opt_in_only = true` (a performance
         // finding, not a security one — see its decision_why): the domain-match gate
@@ -1633,7 +3907,7 @@ mod tests {
                 );
             }
         }
-        // All 17 supabase rules — not just the 17 spot-checked above — must be present
+        // All 35 supabase rules — not just the ones spot-checked above — must be present
         // and domain-matched to this repo, so a future corpus addition under
         // supabase/<area>/ that isn't wired into domains_for_stack would still be
         // caught here failing to match.
@@ -1643,8 +3917,8 @@ mod tests {
             .collect();
         assert_eq!(
             supabase_rules.len(),
-            17,
-            "expected all 17 supabase corpus rules in the payload: {:?}",
+            35,
+            "expected all 35 supabase corpus rules in the payload: {:?}",
             supabase_rules.iter().map(|r| &r.id).collect::<Vec<_>>()
         );
         assert!(
@@ -1667,6 +3941,110 @@ mod tests {
         assert!(
             non_opt_in_unrecommended.is_empty(),
             "every non-opt-in supabase rule must be recommended for this Supabase repo: {non_opt_in_unrecommended:?}"
+        );
+    }
+
+    /// W1 (docs/plans/2026-09-30_cycle2-queue-hardening.md): SUPABASE-FUNC-SEARCH-PATH-1 must
+    /// arm for a PLAIN Postgres repo too — a SECURITY DEFINER function without a pinned
+    /// search_path is exploitable regardless of whether the repo uses Supabase at all. Before
+    /// the `extra_domains` fix, this repo (hand-written `.sql`, no `supabase/` layout, no
+    /// `@supabase/*` dependency — so `detect_frameworks` never adds "Supabase" and
+    /// `domains_for_stack` only emits the generic `sql` domain) never matched the rule's
+    /// folder-derived `supabase:database-functions` domain, so it was never proposed and
+    /// therefore `is_auto_recommended` was permanently false for it — the rule could never be
+    /// pre-checked / armed no matter how obviously the repo needed it.
+    #[tokio::test]
+    async fn propose_corpus_rules_arms_search_path_rule_for_a_plain_postgres_repo() {
+        let files = vec![(
+            "db/migrations/0001_functions.sql".to_string(),
+            "create function public.grant_access(target uuid) returns void \
+             language plpgsql security definer as $$ begin update public.accounts \
+             set access_level = 'elevated' where id = target; end; $$;"
+                .to_string(),
+        )];
+        let stack = detect_stack("acme/plain-pg", &files);
+        assert!(
+            !stack.frameworks.contains(&"Supabase".to_string()),
+            "sanity: this fixture must NOT detect as Supabase: {stack:?}"
+        );
+        let domains = domains_for_stack(&stack);
+        assert!(
+            domains.contains(&"sql".to_string()),
+            "sanity: a .sql file must still map to the generic sql domain: {domains:?}"
+        );
+        assert!(
+            !domains.iter().any(|d| d.starts_with("supabase")),
+            "sanity: no supabase:* domain should be present for a non-Supabase repo: {domains:?}"
+        );
+
+        let repo_domains = vec![("acme/plain-pg".to_string(), domains)];
+        let proposed = propose_corpus_rules(&repo_domains).await;
+
+        let rule = proposed
+            .iter()
+            .find(|r| r.id == "SUPABASE-FUNC-SEARCH-PATH-1")
+            .expect("SUPABASE-FUNC-SEARCH-PATH-1 must be present in the corpus-rules payload");
+        assert!(
+            rule.repos.contains(&"acme/plain-pg".to_string()),
+            "must be domain-matched (bound) to the plain-Postgres repo via extra_domains: {rule:?}"
+        );
+        assert!(
+            rule.recommended,
+            "must be recommended for a plain-Postgres repo, not just for Supabase repos: {rule:?}"
+        );
+        assert!(
+            rule.is_auto_recommended,
+            "must be auto-recommended (pre-checked) for a plain-Postgres repo — this is the exact \
+             arming gap W1 closes: {rule:?}"
+        );
+    }
+
+    /// P7: the real onboarding path (detect_stack -> domains_for_stack -> propose_corpus_rules
+    /// against the real corpus) must NOT recommend JAVASCRIPT-NEXT-ROUTE-PLACEMENT-1 for a
+    /// Next.js repo — it is opt-in only (its option set conflates route organization with auth
+    /// enforcement; see the corpus audit) — even though it's grounded and this repo's stack
+    /// matches its domain exactly. It must still be LISTED (present in the payload) so the
+    /// architect can deliberately opt in.
+    #[tokio::test]
+    async fn propose_corpus_rules_never_recommends_the_opt_in_next_route_placement_rule() {
+        let files = vec![
+            (
+                "app/page.tsx".to_string(),
+                "export default function Page() {}".to_string(),
+            ),
+            (
+                "package.json".to_string(),
+                r#"{ "dependencies": { "next": "14.0.0", "react": "18" } }"#.to_string(),
+            ),
+        ];
+        let stack = detect_stack("acme/web", &files);
+        assert!(
+            stack.frameworks.contains(&"Next.js".to_string()),
+            "sanity: this fixture must detect as Next.js: {stack:?}"
+        );
+        let domains = domains_for_stack(&stack);
+        assert!(
+            domains.contains(&"javascript:next".to_string()),
+            "sanity: must map to the javascript:next domain: {domains:?}"
+        );
+        let repo_domains = vec![("acme/web".to_string(), domains)];
+        let proposed = propose_corpus_rules(&repo_domains).await;
+
+        let rule = proposed
+            .iter()
+            .find(|r| r.id == "JAVASCRIPT-NEXT-ROUTE-PLACEMENT-1")
+            .expect("the rule must still be LISTED for the architect to opt into manually");
+        assert!(
+            rule.repos.contains(&"acme/web".to_string()),
+            "it must still be domain-matched to this Next.js repo: {rule:?}"
+        );
+        assert!(
+            !rule.recommended,
+            "an opt-in-only rule must never be pre-recommended, even when stack-matched: {rule:?}"
+        );
+        assert!(
+            !rule.is_auto_recommended,
+            "an opt-in-only rule must never be pre-checked, even when grounded: {rule:?}"
         );
     }
 
@@ -1705,7 +4083,10 @@ mod tests {
         assert!(
             recommended_supabase.is_empty(),
             "no supabase rule should be recommended for a plain React repo: {:?}",
-            recommended_supabase.iter().map(|r| &r.id).collect::<Vec<_>>()
+            recommended_supabase
+                .iter()
+                .map(|r| &r.id)
+                .collect::<Vec<_>>()
         );
     }
 
@@ -1774,7 +4155,9 @@ mod tests {
             ),
         ];
         let mk = |path: &str, line: usize, rule: &str, snip: &str| Finding {
+            could_be_intentional: false,
             repo: "me/api".into(),
+            kind: None,
             path: path.into(),
             line,
             rule_id: rule.into(),
@@ -1791,6 +4174,11 @@ mod tests {
             effort: None,
             category: None,
             located: true,
+            captures: Default::default(),
+            evaluated_option_id: None,
+            also_locations: Vec::new(),
+            fix_specific: None,
+            calibration_rationale: None,
         };
         let mut findings = vec![
             mk("a.rs", 5, "SEC-NO-HARDCODED-SECRETS-1", snippet), // baselined
@@ -1809,7 +4197,9 @@ mod tests {
     fn tech_debt_body_groups_by_repo() {
         let findings = vec![
             Finding {
+                could_be_intentional: false,
                 repo: "me/api".into(),
+                kind: None,
                 path: "a.rs".into(),
                 line: 3,
                 rule_id: "SEC-NO-HARDCODED-SECRETS-1".into(),
@@ -1826,9 +4216,16 @@ mod tests {
                 effort: None,
                 category: None,
                 located: true,
+                captures: Default::default(),
+                evaluated_option_id: None,
+                also_locations: Vec::new(),
+                fix_specific: None,
+                calibration_rationale: None,
             },
             Finding {
+                could_be_intentional: false,
                 repo: "me/web".into(),
+                kind: None,
                 path: "b.tsx".into(),
                 line: 7,
                 rule_id: "ARCH-NO-SECRETS-IN-URL-1".into(),
@@ -1845,6 +4242,11 @@ mod tests {
                 effort: None,
                 category: None,
                 located: true,
+                captures: Default::default(),
+                evaluated_option_id: None,
+                also_locations: Vec::new(),
+                fix_specific: None,
+                calibration_rationale: None,
             },
         ];
         let body = tech_debt_issue_body(&findings);
@@ -1868,7 +4270,9 @@ mod tests {
     /// Helper: build a minimal Finding for a given repo.
     fn finding_for(repo: &str, path: &str, line: usize, rule_id: &str) -> Finding {
         Finding {
+            could_be_intentional: false,
             repo: repo.to_string(),
+            kind: None,
             path: path.to_string(),
             line,
             rule_id: rule_id.to_string(),
@@ -1885,6 +4289,11 @@ mod tests {
             effort: None,
             category: None,
             located: true,
+            captures: Default::default(),
+            evaluated_option_id: None,
+            also_locations: Vec::new(),
+            fix_specific: None,
+            calibration_rationale: None,
         }
     }
 
@@ -2011,7 +4420,9 @@ mod tests {
     #[test]
     fn tech_debt_csv_escapes_special_fields_correctly() {
         let f = Finding {
+            could_be_intentional: false,
             repo: "me/api".into(),
+            kind: None,
             path: "src/tricky,path.rs".into(),
             line: 1,
             rule_id: "RULE-1".into(),
@@ -2028,6 +4439,11 @@ mod tests {
             effort: None,
             category: None,
             located: true,
+            captures: Default::default(),
+            evaluated_option_id: None,
+            also_locations: Vec::new(),
+            fix_specific: None,
+            calibration_rationale: None,
         };
         let csv = tech_debt_csv(&[f]);
         let data_row = csv.lines().nth(1).expect("expected data row");
@@ -2145,7 +4561,9 @@ mod tests {
             "CONVENTIONS.md in files_written"
         );
         assert!(
-            result.files_written.contains(&".camerata/rules.json".to_string()),
+            result
+                .files_written
+                .contains(&".camerata/rules.json".to_string()),
             ".camerata/rules.json in files_written"
         );
 
@@ -2243,34 +4661,96 @@ mod tests {
         (dir, sources)
     }
 
+    /// The removed "must choose an alternative before arming" gate (2026-09-22 design,
+    /// §The four changes/1): `audit_repos` accepts a SELECTED rule that has NO default option
+    /// and NO project-persisted `chosen_option` — the exact state that used to block onboarding
+    /// — and the scan simply proceeds (the AI audit recommends one instead; deterministic-only
+    /// here to stay token-free and prove there is no SERVER-side block independent of the LLM
+    /// path at all). `RUST-DOMAIN-7` is a real corpus rule with `default = false`.
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn no_default_rule_with_no_chosen_option_does_not_block_the_scan() {
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_DISABLE_DEP_AUDIT", "1");
+        let (_dir, sources) = scratch_repo_with_secret();
+        let selected = vec![SelectedRule {
+            id: "RUST-DOMAIN-7".to_string(),
+            directive: "How transactional posture reaches the repository.".to_string(),
+            repos: Vec::new(),
+        }];
+        let (report, _manifest) = audit_repos(
+            &crate::credentials::MemoryCredentialStore::new(),
+            &sources,
+            &selected,
+            Vec::new(),
+            None,
+            None,
+            crate::ai_audit::ScanMode::Parallel,
+            false,
+            None,
+            None,
+            None,
+            false,
+            true,
+            false, // run_ai_review off — stay token-free; this asserts the SERVER never blocks
+            true,  // run_deterministic on
+            None,
+            crate::llm::BackendResolution::Api,
+            None,                              // corpus
+            &std::collections::HashMap::new(), // chosen_options — no project-level choice made
+        )
+        .await;
+        assert!(
+            !report.gated,
+            "a no-default, unchosen rule must not trip the GitHub gate"
+        );
+        assert!(
+            !report.blocked,
+            "a no-default, unchosen rule must not trip the compliance gate"
+        );
+        assert_eq!(
+            report.files_scanned, 1,
+            "the scan must actually run over the repo, not short-circuit"
+        );
+        let msg = report.message.unwrap_or_default();
+        assert!(
+            !msg.to_lowercase().contains("must choose"),
+            "no 'must choose an alternative' block message may appear: {msg}"
+        );
+    }
+
     /// Scan-type selector: with deterministic ON and AI review OFF, the audit runs the
     /// always-on floor (catching the secret) and makes NO model call — a token-free assertion
     /// that the AI passes are bypassed. (`run_ai_review = false` is exactly the path that skips
     /// every `audit_repo` / deep-tier LLM call, so this test never touches a model.)
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn deterministic_only_runs_floor_and_skips_ai() {
         // Disable the always-on dep-audit pass so this test does not trigger
         // `ensure_osv_scanner` → `download_osv_scanner` (live network request).
         // This test exercises the deterministic floor + scan-mode selector logic,
         // not dep-audit. See `crate::dep_audit::DISABLE_ENV_VAR`.
-        std::env::set_var("CAMERATA_DISABLE_DEP_AUDIT", "1");
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_DISABLE_DEP_AUDIT", "1");
         let (_dir, sources) = scratch_repo_with_secret();
         let (report, _manifest) = audit_repos(
+            &crate::credentials::MemoryCredentialStore::new(),
             &sources,
-            &[],            // no semantic rules
-            Vec::new(),     // no extra notes
-            None,           // model
-            None,           // calibration model
+            &[],        // no semantic rules
+            Vec::new(), // no extra notes
+            None,       // model
+            None,       // calibration model
             crate::ai_audit::ScanMode::Parallel,
-            false,          // thorough
-            None,           // feedback
-            None,           // job
-            None,           // incremental_prior
-            false,          // deep
-            true,           // soc2_enabled
-            false,          // run_ai_review  -> AI path fully skipped (no model call)
-            true,           // run_deterministic -> floor runs
-            None,           // usage_ledger
+            false,                              // thorough
+            None,                               // feedback
+            None,                               // job
+            None,                               // incremental_prior
+            false,                              // deep
+            true,                               // soc2_enabled
+            false, // run_ai_review  -> AI path fully skipped (no model call)
+            true,  // run_deterministic -> floor runs
+            None,  // usage_ledger
+            crate::llm::BackendResolution::Api, // backend gate: not under test here
+            None,  // corpus
+            &std::collections::HashMap::new(), // chosen_options
         )
         .await;
         // The floor caught the secret.
@@ -2291,14 +4771,16 @@ mod tests {
     /// the floor is skipped — the secret is NOT flagged. Pairing AI-off keeps the test from
     /// invoking a model; the assertion isolates the deterministic-floor gate.
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn deterministic_off_skips_floor() {
         // Disable the always-on dep-audit pass so this test does not trigger
         // `ensure_osv_scanner` → `download_osv_scanner` (live network request).
         // This test exercises the scan-mode selector (deterministic gate), not dep-audit.
         // See `crate::dep_audit::DISABLE_ENV_VAR`.
-        std::env::set_var("CAMERATA_DISABLE_DEP_AUDIT", "1");
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_DISABLE_DEP_AUDIT", "1");
         let (_dir, sources) = scratch_repo_with_secret();
         let (report, _manifest) = audit_repos(
+            &crate::credentials::MemoryCredentialStore::new(),
             &sources,
             &[],
             Vec::new(),
@@ -2311,9 +4793,12 @@ mod tests {
             None,
             false,
             true,
-            false, // run_ai_review off (token-free)
-            false, // run_deterministic off -> floor skipped
-            None,  // usage_ledger
+            false,                              // run_ai_review off (token-free)
+            false,                              // run_deterministic off -> floor skipped
+            None,                               // usage_ledger
+            crate::llm::BackendResolution::Api, // backend gate: not under test here
+            None,                               // corpus
+            &std::collections::HashMap::new(),  // chosen_options
         )
         .await;
         assert!(
@@ -2338,15 +4823,17 @@ mod tests {
     /// This is the ordering regression guard: if dep-audit ever drifts back inside
     /// audit_repos, the floor-only assertion will fail.
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn audit_repos_does_not_call_dep_audit() {
         // DISABLE_DEP_AUDIT silences the provisioning path in run_dep_audit, but that
         // function is no longer called from audit_repos at all — so this env var is
         // belt-and-suspenders (and matches what real test callers set for isolation).
-        std::env::set_var("CAMERATA_DISABLE_DEP_AUDIT", "1");
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_DISABLE_DEP_AUDIT", "1");
         let (_dir, sources) = scratch_repo_with_secret();
         let jobs = crate::jobs::JobStore::new();
         let jid = jobs.create("audit", None);
         let _ = audit_repos(
+            &crate::credentials::MemoryCredentialStore::new(),
             &sources,
             &[],
             Vec::new(),
@@ -2362,6 +4849,9 @@ mod tests {
             false, // run_ai_review off
             true,  // run_deterministic on → floor runs
             None,
+            crate::llm::BackendResolution::Api, // backend gate: not under test here
+            None,                               // corpus
+            &std::collections::HashMap::new(),  // chosen_options
         )
         .await;
         let progress = jobs.det_progress(&jid).unwrap();
@@ -2385,6 +4875,619 @@ mod tests {
             !progress.tools.iter().any(|t| t.tool == "dep-audit"),
             "dep-audit must NOT appear inside audit_repos tool list; it runs in the caller"
         );
+    }
+
+    // ── The compliance-safety backend gate ────────────────────────────────────
+
+    /// Regression for the silent-empty-scan bug: a `Blocked` resolution must NEVER make an
+    /// AI/model call, but when the deterministic floor was requested (`run_deterministic:
+    /// true`) it must still RUN — a no-key project is not the same as a project that asked
+    /// for nothing. The block reason must be surfaced on the new `ai_blocked_reason` field
+    /// (never silently dropped), `blocked` stays FALSE (this is a real partial result, not
+    /// "nothing ran"), and the floor still catches the planted secret.
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn blocked_resolution_with_deterministic_requested_still_runs_the_floor() {
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_DISABLE_DEP_AUDIT", "1");
+        let (_dir, sources) = scratch_repo_with_secret();
+        let (report, manifest) = audit_repos(
+            &crate::credentials::MemoryCredentialStore::new(),
+            &sources,
+            &[],
+            Vec::new(),
+            None,
+            None,
+            crate::ai_audit::ScanMode::Parallel,
+            false,
+            None,
+            None,
+            None,
+            false,
+            true,
+            true, // run_ai_review requested...
+            true, // ...but forced off internally by the Blocked gate; run_deterministic still runs
+            None,
+            crate::llm::BackendResolution::Blocked {
+                message:
+                    "This project is API-only (CLI disabled). Add an Anthropic API key to run."
+                        .to_string(),
+            },
+            None,                              // corpus
+            &std::collections::HashMap::new(), // chosen_options
+        )
+        .await;
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|f| f.rule_id == "SEC-NO-HARDCODED-SECRETS-1"),
+            "the deterministic floor must still catch the planted secret when Blocked: {:?}",
+            report.findings
+        );
+        assert!(
+            report.files_scanned > 0,
+            "the floor pass must have actually read the repo"
+        );
+        assert!(
+            !report.gated,
+            "Blocked is a distinct condition from the GitHub-not-connected gate"
+        );
+        assert!(
+            !report.blocked,
+            "a real (partial) result — the floor ran — must not ALSO be flagged as the \
+             nothing-ran-at-all `blocked` state"
+        );
+        assert_eq!(
+            report.ai_blocked_reason.as_deref(),
+            Some("This project is API-only (CLI disabled). Add an Anthropic API key to run."),
+            "the compliance-block reason must be surfaced so the UI can render it, even though \
+             the floor ran"
+        );
+        // A real scan happened, so the manifest reflects it (not the empty/default shape of
+        // the fully-aborted path) — it carries the current schema version.
+        assert!(manifest.is_current());
+    }
+
+    /// The AI-only edge case: `run_ai_review: true, run_deterministic: false`. With nothing
+    /// local requested and the AI forced off by the gate, there is truly nothing this call can
+    /// do — it aborts immediately exactly like the old behaviour, with `blocked: true` AND
+    /// `ai_blocked_reason` set (never a silent empty result), and the prior manifest preserved.
+    #[tokio::test]
+    async fn blocked_resolution_ai_only_aborts_with_reason_surfaced() {
+        let (_dir, sources) = scratch_repo_with_secret();
+        let (report, manifest) = audit_repos(
+            &crate::credentials::MemoryCredentialStore::new(),
+            &sources,
+            &[],
+            Vec::new(),
+            None,
+            None,
+            crate::ai_audit::ScanMode::Parallel,
+            false,
+            None,
+            None,
+            None,
+            false,
+            true,
+            true,  // run_ai_review requested (AI-only)...
+            false, // ...and NOTHING local requested either
+            None,
+            crate::llm::BackendResolution::Blocked {
+                message:
+                    "This project is API-only (CLI disabled). Add an Anthropic API key to run."
+                        .to_string(),
+            },
+            None,                              // corpus
+            &std::collections::HashMap::new(), // chosen_options
+        )
+        .await;
+        assert!(
+            report.findings.is_empty(),
+            "nothing local was requested — zero findings is correct here: {:?}",
+            report.findings
+        );
+        assert_eq!(
+            report.files_scanned, 0,
+            "no file was read — nothing local was requested"
+        );
+        assert!(
+            !report.gated,
+            "Blocked is a distinct condition from the GitHub-not-connected gate"
+        );
+        assert!(
+            report.blocked,
+            "the explicit compliance-block flag must be set when truly nothing ran, so the UI \
+             renders the block unambiguously rather than inferring it from the report's shape"
+        );
+        assert_eq!(
+            report.ai_blocked_reason.as_deref(),
+            Some("This project is API-only (CLI disabled). Add an Anthropic API key to run."),
+            "the compliance-block reason must ALSO be on the dedicated field, never only on \
+             the free-text message"
+        );
+        assert_eq!(
+            report.message.as_deref(),
+            Some("This project is API-only (CLI disabled). Add an Anthropic API key to run."),
+            "the block message must be user-visible on the report"
+        );
+        // No manifest churn: an empty/default manifest, not a fingerprint stamped as if a
+        // real scan had run (this also means a PRIOR manifest, if any, must be preserved by
+        // the caller rather than clobbered — audit_repos itself just returns it unchanged).
+        assert!(manifest.rules_fingerprint.is_empty());
+    }
+
+    /// A `Blocked` resolution preserves a PRIOR incremental manifest unchanged (rather than
+    /// wiping it), so a later, unblocked scan can still go incremental.
+    #[tokio::test]
+    async fn blocked_resolution_preserves_the_prior_manifest() {
+        let (_dir, sources) = scratch_repo_with_secret();
+        let mut prior = crate::scan_cache::ManifestBuilder::new()
+            .with_rules_fingerprint("prior-fp".to_string())
+            .finish();
+        prior.version = 1;
+        let (_, manifest) = audit_repos(
+            &crate::credentials::MemoryCredentialStore::new(),
+            &sources,
+            &[],
+            Vec::new(),
+            None,
+            None,
+            crate::ai_audit::ScanMode::Parallel,
+            false,
+            None,
+            None,
+            Some(&prior),
+            false,
+            true,
+            false,
+            false,
+            None,
+            crate::llm::BackendResolution::Blocked {
+                message: "blocked".to_string(),
+            },
+            None,                              // corpus
+            &std::collections::HashMap::new(), // chosen_options
+        )
+        .await;
+        assert_eq!(
+            manifest.rules_fingerprint, "prior-fp",
+            "the prior manifest must survive a Blocked scan untouched"
+        );
+    }
+
+    /// An `Api` resolution with `run_ai_review` requested runs the `Llm` on the API
+    /// transport (`Backend::Api`), never silently re-deriving the transport from anywhere
+    /// else — the only way `audit_repos` picks a transport now is from `backend_resolution`.
+    /// A `Cli` resolution behaves the same way, on `Backend::Cli`. Both are exercised
+    /// end-to-end (token-free — `run_ai_review: false`) by the tests above; this is a
+    /// dedicated regression for the removed `CliFallbackWarn` silent-downgrade path: there is
+    /// no longer any resolution that proceeds on the CLI while claiming an `Api` gate — `Api`
+    /// with no key is `Blocked`, full stop.
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn api_backend_resolution_never_downgrades_to_cli_silently() {
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_DISABLE_DEP_AUDIT", "1");
+        let (_dir, sources) = scratch_repo_with_secret();
+        let (report, _manifest) = audit_repos(
+            &crate::credentials::MemoryCredentialStore::new(),
+            &sources,
+            &[],
+            Vec::new(),
+            None,
+            None,
+            crate::ai_audit::ScanMode::Parallel,
+            false,
+            None,
+            None,
+            None,
+            false,
+            true,
+            false, // run_ai_review off — stay token-free
+            true,  // run_deterministic on — the floor still runs
+            None,
+            crate::llm::BackendResolution::Api,
+            None,                              // corpus
+            &std::collections::HashMap::new(), // chosen_options
+        )
+        .await;
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|f| f.rule_id == "SEC-NO-HARDCODED-SECRETS-1"),
+            "an Api resolution must not affect the deterministic floor: {:?}",
+            report.findings
+        );
+        assert!(
+            !report.blocked,
+            "Api (not Blocked) must never mark the scan as blocked"
+        );
+        assert!(
+            report.ai_blocked_reason.is_none(),
+            "Api must never carry a block reason"
+        );
+    }
+
+    // ── ai_covered: incremental-cache "poisoned by an AI-less run" fix ─────────
+    //
+    // Every test below stays TOKEN-FREE / NETWORK-FREE on purpose (matching this whole file's
+    // convention — see the "stay token-free" comments throughout): a real per-file AI pass is
+    // only ever exercised when the file is actually CHANGED relative to the effective prior. The
+    // "reuse" tests below instead seed a prior whose file fingerprints EXACTLY match the current
+    // content, so `partition` reports zero changed files and `audit_repo` is never invoked at
+    // all (see its `if files.is_empty() { return ... }` guard) — the incremental-cache mechanics
+    // are fully exercised without ever making a model call.
+
+    /// An AI-off run (`run_ai_review: false`) must still stamp a fresh manifest — file
+    /// fingerprints are always worth caching — but the manifest must be marked
+    /// `ai_covered == false` so a LATER AI-on scan never mistakes "the AI didn't run" for
+    /// "the AI ran and found nothing". This is the core bug: before this fix the manifest was
+    /// indistinguishable from a real AI-covered scan.
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn ai_off_run_stamps_manifest_ai_covered_false_but_still_records_fingerprints() {
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_DISABLE_DEP_AUDIT", "1");
+        let (_dir, sources) = scratch_repo_with_secret();
+        let (_report, manifest) = audit_repos(
+            &crate::credentials::MemoryCredentialStore::new(),
+            &sources,
+            &[],
+            Vec::new(),
+            None,
+            None,
+            crate::ai_audit::ScanMode::Parallel,
+            false,
+            None,
+            None,
+            None, // incremental_prior: first-ever scan
+            false,
+            true,
+            false, // run_ai_review off — the toggle was off for this run
+            true,  // run_deterministic on — the floor still runs and is still cached
+            None,
+            crate::llm::BackendResolution::Api,
+            None,
+            &std::collections::HashMap::new(),
+        )
+        .await;
+        assert!(
+            !manifest.ai_covered,
+            "an AI-off run's manifest must be stamped ai_covered = false"
+        );
+        assert!(
+            manifest
+                .files
+                .get("me/api")
+                .is_some_and(|m| m.contains_key("config.rs")),
+            "file fingerprints must still be recorded even though the AI didn't run: {:?}",
+            manifest.files
+        );
+    }
+
+    /// A compliance-`Blocked` run with the deterministic floor requested runs the floor (see
+    /// `blocked_resolution_with_deterministic_requested_still_runs_the_floor` above) but forces
+    /// `run_ai_review` off internally — so its manifest must ALSO be `ai_covered == false`,
+    /// exactly like a manually-toggled AI-off run. A blocked project must never poison the cache
+    /// with a false "AI found nothing" baseline either.
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn blocked_run_stamps_manifest_ai_covered_false() {
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_DISABLE_DEP_AUDIT", "1");
+        let (_dir, sources) = scratch_repo_with_secret();
+        let (report, manifest) = audit_repos(
+            &crate::credentials::MemoryCredentialStore::new(),
+            &sources,
+            &[],
+            Vec::new(),
+            None,
+            None,
+            crate::ai_audit::ScanMode::Parallel,
+            false,
+            None,
+            None,
+            None,
+            false,
+            true,
+            true, // run_ai_review requested...
+            true, // ...but forced off internally by the Blocked gate
+            None,
+            crate::llm::BackendResolution::Blocked {
+                message: "blocked".to_string(),
+            },
+            None,
+            &std::collections::HashMap::new(),
+        )
+        .await;
+        assert!(
+            report.ai_blocked_reason.is_some(),
+            "sanity: this must be the blocked-but-floor-ran path"
+        );
+        assert!(
+            !manifest.ai_covered,
+            "a blocked run's manifest must be stamped ai_covered = false, never true"
+        );
+    }
+
+    /// The self-heal + gate end-to-end through `audit_repos` itself (not just the lower-level
+    /// `scan_cache` unit tests): a prior manifest whose RULE fingerprint matches the current
+    /// scan's, but whose `ai_covered` is `false`, must be treated as NO usable AI baseline —
+    /// exactly the same "no cache" path as a rule-set mismatch. Proven via the same observable
+    /// the rule-mismatch case uses (`effective_prior.is_none()` produces the "full re-scan"
+    /// note): a matching rules_fingerprint with `ai_covered = false` produces that SAME note,
+    /// which is only possible if the `ai_covered` gate (not the rules check) rejected the prior.
+    /// `run_ai_review` is kept `false` here so the test stays network-free — the note this
+    /// asserts on is pushed unconditionally before the `run_ai_review` gate is even consulted,
+    /// so it faithfully proves the `effective_prior`/`partition` decision regardless.
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn ai_covered_false_prior_is_ignored_even_when_rules_match() {
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_DISABLE_DEP_AUDIT", "1");
+        let (dir, sources) = scratch_repo_with_secret();
+        let content = std::fs::read_to_string(dir.path().join("config.rs")).unwrap();
+
+        // The exact rules_fingerprint `audit_repos` will compute for `selected: &[]`.
+        let rules_fp = crate::scan_cache::rules_fingerprint(std::iter::empty());
+        let mut b = crate::scan_cache::ManifestBuilder::new()
+            .with_rules_fingerprint(rules_fp)
+            .with_ai_covered(false); // the poisoned case: rules match, AI coverage doesn't
+        b.record_repo(
+            "me/api",
+            &[("config.rs".to_string(), content)],
+            &[], // an AI-off run has no AI findings to carry
+        );
+        let prior = b.finish();
+
+        let (report, manifest) = audit_repos(
+            &crate::credentials::MemoryCredentialStore::new(),
+            &sources,
+            &[], // matches the empty rule selection used to build `prior` above
+            Vec::new(),
+            None,
+            None,
+            crate::ai_audit::ScanMode::Parallel,
+            false,
+            None,
+            None,
+            Some(&prior),
+            false,
+            true,
+            false, // run_ai_review off (network-free); the note asserted below fires regardless
+            true,  // run_deterministic on
+            None,
+            crate::llm::BackendResolution::Api,
+            None,
+            &std::collections::HashMap::new(),
+        )
+        .await;
+
+        let msg = report.message.unwrap_or_default();
+        assert!(
+            msg.contains("full re-scan"),
+            "a matching-rules but ai_covered=false prior must be treated as no usable cache \
+             (the SAME 'no effective prior' path a rules mismatch takes), not silently reused: {msg}"
+        );
+        // A fresh manifest is still produced (and, since this run's AI was off, still correctly
+        // stamped ai_covered = false again).
+        assert!(!manifest.ai_covered);
+    }
+
+    /// Normal incremental reuse keeps working: a prior manifest with `ai_covered == true` whose
+    /// file fingerprint EXACTLY matches the current content is a usable AI baseline —
+    /// `effective_prior` accepts it, `partition` reports the file unchanged, its carried finding
+    /// survives into the report, and the resulting fresh manifest is stamped `ai_covered == true`
+    /// again (the run had AI review ON and no error — see `audit_repos`'s doc comment on exactly
+    /// where that's computed). `run_ai_review: true` is used here (unlike the tests above) and is
+    /// still network-free: with the file reported unchanged, `part.changed` is empty and the
+    /// `audit_repo` call is skipped entirely (see its own `files.is_empty()` guard) — zero model
+    /// calls, proving reuse rather than a fresh audit is what produced the finding.
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn ai_covered_true_prior_is_reused_when_rules_and_content_match() {
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_DISABLE_DEP_AUDIT", "1");
+        let (dir, sources) = scratch_repo_with_secret();
+        let content = std::fs::read_to_string(dir.path().join("config.rs")).unwrap();
+
+        let rules_fp = crate::scan_cache::rules_fingerprint(std::iter::empty());
+        let carried_finding = Finding {
+            repo: "me/api".to_string(),
+            path: "config.rs".to_string(),
+            line: 2,
+            rule_id: "ARCH-CARRIED-1".to_string(),
+            severity: "medium".to_string(),
+            snippet: "carried from last scan".to_string(),
+            detail: "d".to_string(),
+            ..Finding::default()
+        };
+        let mut b = crate::scan_cache::ManifestBuilder::new()
+            .with_rules_fingerprint(rules_fp)
+            // The question the prior answered: the model `audit_repos` will resolve for
+            // `model: None`, no calibration pick, no rules.
+            .with_ai_key(crate::scan_cache::AiScanKey::new(
+                &crate::ai_audit::resolve_audit_model(None),
+                None,
+                &[],
+            ))
+            .with_ai_covered(true); // the healthy case: AI ran and completed last time
+        b.record_repo(
+            "me/api",
+            &[("config.rs".to_string(), content)],
+            std::slice::from_ref(&carried_finding),
+        );
+        let prior = b.finish();
+
+        let (report, manifest) = audit_repos(
+            &crate::credentials::MemoryCredentialStore::new(),
+            &sources,
+            &[],
+            Vec::new(),
+            None,
+            None,
+            crate::ai_audit::ScanMode::Parallel,
+            false,
+            None,
+            None,
+            Some(&prior),
+            false,
+            true,
+            true, // run_ai_review ON — safe here because nothing changed (see doc comment)
+            true, // run_deterministic on
+            None,
+            crate::llm::BackendResolution::Api,
+            None,
+            &std::collections::HashMap::new(),
+        )
+        .await;
+
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|f| f.rule_id == "ARCH-CARRIED-1"),
+            "the cached AI finding must be carried forward into the report: {:?}",
+            report.findings
+        );
+        let msg = report.message.unwrap_or_default();
+        assert!(
+            msg.contains("fully cached") || msg.contains("reused from cache"),
+            "the report must show the incremental reuse actually happened: {msg}"
+        );
+        assert!(
+            report.actual_usage.as_ref().map(|u| u.calls).unwrap_or(0) == 0,
+            "reuse must make ZERO model calls — proves the finding came from cache, not a fresh \
+             (impossible-in-this-test) audit"
+        );
+        assert!(
+            manifest.ai_covered,
+            "an AI-on run with no fatal AI error must stamp ai_covered = true again"
+        );
+    }
+
+    /// Rank 5: through `audit_repos`, a prior whose rules, content and AI coverage all match but
+    /// whose AI findings were produced by ANOTHER MODEL (or under another prompt version) is not
+    /// a usable baseline: the scan says so and re-scans in full. `run_ai_review` stays off to keep
+    /// this network-free; the note is pushed before that gate, exactly as in
+    /// `ai_covered_false_prior_is_ignored_even_when_rules_match`.
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn a_prior_from_another_model_or_prompt_version_is_not_reused() {
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_DISABLE_DEP_AUDIT", "1");
+        let rules_fp = crate::scan_cache::rules_fingerprint(std::iter::empty());
+        let current = crate::scan_cache::AiScanKey::new("claude-sonnet-5", None, &[]);
+        let other_model = crate::scan_cache::AiScanKey::new("claude-opus-5", None, &[]);
+        let other_prompt = crate::scan_cache::AiScanKey {
+            prompt_schema_version: current.prompt_schema_version + 1,
+            ..current.clone()
+        };
+
+        for (label, prior_key) in [("model", other_model), ("prompt version", other_prompt)] {
+            let (dir, sources) = scratch_repo_with_secret();
+            let content = std::fs::read_to_string(dir.path().join("config.rs")).unwrap();
+            let mut b = crate::scan_cache::ManifestBuilder::new()
+                .with_rules_fingerprint(rules_fp.clone())
+                .with_ai_key(prior_key)
+                .with_ai_covered(true);
+            b.record_repo("me/api", &[("config.rs".to_string(), content)], &[]);
+            let prior = b.finish();
+
+            let (report, manifest) = audit_repos(
+                &crate::credentials::MemoryCredentialStore::new(),
+                &sources,
+                &[],
+                Vec::new(),
+                Some("claude-sonnet-5"),
+                None,
+                crate::ai_audit::ScanMode::Parallel,
+                false,
+                None,
+                None,
+                Some(&prior),
+                false,
+                true,
+                false,
+                true,
+                None,
+                crate::llm::BackendResolution::Api,
+                None,
+                &std::collections::HashMap::new(),
+            )
+            .await;
+
+            let msg = report.message.unwrap_or_default();
+            assert!(
+                msg.contains("model, prompt or rule wording changed")
+                    && msg.contains("full re-scan"),
+                "a prior from another {label} must not be reused: {msg}"
+            );
+            assert!(
+                !msg.contains("reused from cache"),
+                "nothing may be served from the stale prior ({label}): {msg}"
+            );
+            // The fresh manifest is stamped with TODAY's question.
+            assert_eq!(manifest.ai_key, current, "{label}");
+        }
+    }
+
+    /// The self-heal in practice, exercised through `audit_repos`: a manifest deserialized from
+    /// LEGACY JSON that predates the `ai_covered` field (no such key at all) must be treated
+    /// identically to an explicit `ai_covered: false` manifest — ignored as an AI baseline, full
+    /// re-scan — with no migration step. `run_ai_review` stays off to keep this network-free; see
+    /// `ai_covered_false_prior_is_ignored_even_when_rules_match` for why that note still proves
+    /// the gate fired.
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn legacy_manifest_json_self_heals_through_audit_repos() {
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_DISABLE_DEP_AUDIT", "1");
+        let (dir, sources) = scratch_repo_with_secret();
+        let content = std::fs::read_to_string(dir.path().join("config.rs")).unwrap();
+        let fp = crate::scan_cache::content_fingerprint(&content);
+        let rules_fp = crate::scan_cache::rules_fingerprint(std::iter::empty());
+
+        // Hand-built JSON with NO "ai_covered" key — simulates a manifest written before the
+        // field existed.
+        let legacy_json = format!(
+            r#"{{
+                "version": 1,
+                "rules_fingerprint": "{rules_fp}",
+                "files": {{"me/api": {{"config.rs": "{fp}"}}}},
+                "findings": []
+            }}"#
+        );
+        let legacy: crate::scan_cache::ScanManifest =
+            serde_json::from_str(&legacy_json).expect("legacy manifest JSON must still parse");
+        assert!(
+            !legacy.ai_covered,
+            "sanity: self-heals to false at the deserialize step"
+        );
+
+        let (report, manifest) = audit_repos(
+            &crate::credentials::MemoryCredentialStore::new(),
+            &sources,
+            &[],
+            Vec::new(),
+            None,
+            None,
+            crate::ai_audit::ScanMode::Parallel,
+            false,
+            None,
+            None,
+            Some(&legacy),
+            false,
+            true,
+            false, // network-free
+            true,
+            None,
+            crate::llm::BackendResolution::Api,
+            None,
+            &std::collections::HashMap::new(),
+        )
+        .await;
+
+        let msg = report.message.unwrap_or_default();
+        assert!(
+            msg.contains("full re-scan"),
+            "a self-healed (ai_covered=false) legacy manifest must be ignored as a baseline: {msg}"
+        );
+        assert!(!manifest.ai_covered);
     }
 
     // ── corpus-rules wire payload carries full content ────────────────────────
@@ -2455,12 +5558,107 @@ mod tests {
             decision_why: None,
             options: Vec::new(),
             default_option: None,
+            cwe: Vec::new(),
+            asvs: Vec::new(),
+            superseded_since: None,
+            current_recommendation: None,
+            version: None,
+            last_reviewed: None,
             verification: camerata_rules::Verification::Grounded,
             sources: Vec::new(),
             verified: None,
             opt_in_only,
             layer3_only: false,
+            stack_exceptions: Vec::new(),
+            extra_domains: Vec::new(),
+            kind: None,
+            inspectable: None,
+            max_severity: None,
+            min_severity: None,
+            deviation_ceiling: None,
         }
+    }
+
+    /// A synthetic rule shaped to be eligible for the alternatives pass on every axis EXCEPT
+    /// `kind`: >= 2 options, `Structured` (not CI-tier) enforcement, no registered gateway arm
+    /// (a synthetic id never matches one), and a code-auditable id (no `ORCH-`/`SPIRIT-`/
+    /// `PROC-` prefix). Used to isolate the `kind`-based exclusion (A5.4) from the three
+    /// PRE-EXISTING exclusions `is_semantic_multi_option_rule` already had.
+    fn make_multi_option_rule(
+        id: &str,
+        kind: Option<camerata_rules::RuleKind>,
+    ) -> camerata_rules::Rule {
+        let opt = |oid: &str| camerata_rules::RuleOption {
+            id: oid.to_string(),
+            label: oid.to_string(),
+            directive: format!("do it the {oid} way"),
+            why: "why".to_string(),
+            remediation: None,
+            finding_headline: None,
+            finding_detail: None,
+            escalation: None,
+            effort: None,
+            violates: false,
+        };
+        camerata_rules::Rule {
+            id: camerata_core::RuleId(id.to_string()),
+            title: "Test multi-option rule".to_string(),
+            enforcement: camerata_rules::EnforcementKind::Structured,
+            domain: "test-fixture".to_string(),
+            summary: "A test rule with two options.".to_string(),
+            decision_question: None,
+            decision_why: None,
+            options: vec![opt("opt-a"), opt("opt-b")],
+            default_option: Some("opt-a".to_string()),
+            cwe: Vec::new(),
+            asvs: Vec::new(),
+            superseded_since: None,
+            current_recommendation: None,
+            version: None,
+            last_reviewed: None,
+            verification: camerata_rules::Verification::Grounded,
+            sources: Vec::new(),
+            verified: None,
+            opt_in_only: false,
+            layer3_only: false,
+            stack_exceptions: Vec::new(),
+            extra_domains: Vec::new(),
+            kind,
+            inspectable: None,
+            max_severity: None,
+            min_severity: None,
+            deviation_ceiling: None,
+        }
+    }
+
+    /// req_a5_4: a `defect`-kind rule must NEVER enter the alternatives pass, regardless of its
+    /// option count — "no acceptable alternative anywhere" (A5.1) means there is nothing to
+    /// decide among, so offering the model a choice is never correct for this kind.
+    ///
+    /// FAILS BEFORE THE FIX: before `RuleKind`/`Rule::is_defect_kind` existed,
+    /// `is_semantic_multi_option_rule` had no way to exclude a rule on this basis at all — ANY
+    /// rule with >= 2 options, not gate-armed, not CI-tier, and code-auditable was eligible,
+    /// defect-kind or not; `make_multi_option_rule`'s shape (two options, `Structured`
+    /// enforcement, a synthetic unregistered id) would have returned `true` regardless of
+    /// `kind`. The positive twin (a `decision`-kind rule, same shape otherwise) proves this is
+    /// a `kind`-specific exclusion, not an accidental tightening that also excludes legitimate
+    /// multi-option rules.
+    #[test]
+    fn req_a5_4_defect_kind_rule_is_excluded_from_the_alternatives_pass() {
+        let defect_rule =
+            make_multi_option_rule("TEST-DEFECT-1", Some(camerata_rules::RuleKind::Defect));
+        assert!(
+            !is_semantic_multi_option_rule(&defect_rule),
+            "a defect-kind rule must never be eligible for the alternatives pass"
+        );
+
+        let decision_rule =
+            make_multi_option_rule("TEST-DECISION-1", Some(camerata_rules::RuleKind::Decision));
+        assert!(
+            is_semantic_multi_option_rule(&decision_rule),
+            "the identical shape, decision-kind instead, must still be eligible — the \
+             exclusion is kind-specific, not an accidental broader tightening"
+        );
     }
 
     /// Replicate the proposed-rule mapping logic for a single Rule + a single repo
@@ -2516,8 +5714,14 @@ mod tests {
         let r = make_ci_security_rule(true /* opt_in_only */);
         let (recommended, is_auto_recommended) =
             compute_proposed_flags(&r, false /* not stack-relevant */);
-        assert!(!recommended, "not stack-relevant + opt_in_only must not be recommended");
-        assert!(!is_auto_recommended, "not stack-relevant + opt_in_only must not be auto-recommended");
+        assert!(
+            !recommended,
+            "not stack-relevant + opt_in_only must not be recommended"
+        );
+        assert!(
+            !is_auto_recommended,
+            "not stack-relevant + opt_in_only must not be auto-recommended"
+        );
     }
 
     // ── is_test_or_fixture_path ───────────────────────────────────────────────
@@ -2525,42 +5729,105 @@ mod tests {
     #[test]
     fn test_path_classifier_false_cases() {
         // Production paths must not be classified as test paths.
-        assert!(!is_test_or_fixture_path("src/auth.rs"), "src/auth.rs is production");
-        assert!(!is_test_or_fixture_path("src/config.rs"), "src/config.rs is production");
-        assert!(!is_test_or_fixture_path("crates/api/src/handlers.rs"), "nested production path");
-        assert!(!is_test_or_fixture_path("apps/ui/src/page.tsx"), "JS production file");
-        assert!(!is_test_or_fixture_path("migrations/001_init.sql"), "migrations are production");
+        assert!(
+            !is_test_or_fixture_path("src/auth.rs"),
+            "src/auth.rs is production"
+        );
+        assert!(
+            !is_test_or_fixture_path("src/config.rs"),
+            "src/config.rs is production"
+        );
+        assert!(
+            !is_test_or_fixture_path("crates/api/src/handlers.rs"),
+            "nested production path"
+        );
+        assert!(
+            !is_test_or_fixture_path("apps/ui/src/page.tsx"),
+            "JS production file"
+        );
+        assert!(
+            !is_test_or_fixture_path("migrations/001_init.sql"),
+            "migrations are production"
+        );
         assert!(!is_test_or_fixture_path("lib/utils.py"), "plain Python lib");
-        assert!(!is_test_or_fixture_path("app.rs"), "bare filename with no test indicators");
+        assert!(
+            !is_test_or_fixture_path("app.rs"),
+            "bare filename with no test indicators"
+        );
         // GATE-F7: examples are shipped/executed code — NOT test scope.
-        assert!(!is_test_or_fixture_path("examples/demo.rs"), "examples/ is production (GATE-F7)");
+        assert!(
+            !is_test_or_fixture_path("examples/demo.rs"),
+            "examples/ is production (GATE-F7)"
+        );
     }
 
     #[test]
     fn test_path_classifier_true_cases() {
         // Directory-segment matches.
-        assert!(is_test_or_fixture_path("tests/auth_test.rs"), "tests/ segment");
+        assert!(
+            is_test_or_fixture_path("tests/auth_test.rs"),
+            "tests/ segment"
+        );
         assert!(is_test_or_fixture_path("test/helpers.ts"), "test/ segment");
-        assert!(is_test_or_fixture_path("testdata/sample.json"), "testdata/ segment");
-        assert!(is_test_or_fixture_path("fixtures/keys.env"), "fixtures/ segment");
-        assert!(is_test_or_fixture_path("crates/x/src/fixtures/keys.py"), "nested fixtures/");
-        assert!(is_test_or_fixture_path("__tests__/auth.test.ts"), "__tests__/ segment");
+        assert!(
+            is_test_or_fixture_path("testdata/sample.json"),
+            "testdata/ segment"
+        );
+        assert!(
+            is_test_or_fixture_path("fixtures/keys.env"),
+            "fixtures/ segment"
+        );
+        assert!(
+            is_test_or_fixture_path("crates/x/src/fixtures/keys.py"),
+            "nested fixtures/"
+        );
+        assert!(
+            is_test_or_fixture_path("__tests__/auth.test.ts"),
+            "__tests__/ segment"
+        );
         // GATE-F7: `examples/` is NO LONGER test scope — example code is shipped/executed,
         // so the brownfield audit classifies it as production (asserted in the false-cases test).
-        assert!(is_test_or_fixture_path("benches/bench.rs"), "benches/ segment");
+        assert!(
+            is_test_or_fixture_path("benches/bench.rs"),
+            "benches/ segment"
+        );
 
         // Filename-pattern matches.
-        assert!(is_test_or_fixture_path("tests/auth_test.rs"), "*_test.rs (Rust/Go style)");
-        assert!(is_test_or_fixture_path("src/auth_test.go"), "*_test.go in production dir");
-        assert!(is_test_or_fixture_path("app.test.ts"), "*.test.ts (JS/TS style)");
-        assert!(is_test_or_fixture_path("app.spec.ts"), "*.spec.ts (JS/TS style)");
+        assert!(
+            is_test_or_fixture_path("tests/auth_test.rs"),
+            "*_test.rs (Rust/Go style)"
+        );
+        assert!(
+            is_test_or_fixture_path("src/auth_test.go"),
+            "*_test.go in production dir"
+        );
+        assert!(
+            is_test_or_fixture_path("app.test.ts"),
+            "*.test.ts (JS/TS style)"
+        );
+        assert!(
+            is_test_or_fixture_path("app.spec.ts"),
+            "*.spec.ts (JS/TS style)"
+        );
         assert!(is_test_or_fixture_path("src/auth.spec.tsx"), "*.spec.tsx");
-        assert!(is_test_or_fixture_path("test_secrets.py"), "test_*.py (Python unittest)");
-        assert!(is_test_or_fixture_path("conftest.py"), "conftest.py (pytest)");
+        assert!(
+            is_test_or_fixture_path("test_secrets.py"),
+            "test_*.py (Python unittest)"
+        );
+        assert!(
+            is_test_or_fixture_path("conftest.py"),
+            "conftest.py (pytest)"
+        );
 
         // Case-insensitive segment match.
-        assert!(is_test_or_fixture_path("Tests/config.rs"), "Tests/ (capital T)");
-        assert!(is_test_or_fixture_path("FIXTURES/creds.json"), "FIXTURES/ (all caps)");
+        assert!(
+            is_test_or_fixture_path("Tests/config.rs"),
+            "Tests/ (capital T)"
+        );
+        assert!(
+            is_test_or_fixture_path("FIXTURES/creds.json"),
+            "FIXTURES/ (all caps)"
+        );
     }
 
     #[test]
@@ -2705,7 +5972,7 @@ mod tests {
             "\n",
             "fn do_thing() {}\n",
             "\n",
-            "#[cfg(test)]\n",   // line 6
+            "#[cfg(test)]\n", // line 6
             "mod tests {\n",
             "    #[test]\n",
             "    fn test_detection() {\n",
@@ -2730,7 +5997,11 @@ mod tests {
                 "production secret must be critical: {:?}",
                 f
             );
-            assert!(!f.in_test, "production finding must have in_test=false: {:?}", f);
+            assert!(
+                !f.in_test,
+                "production finding must have in_test=false: {:?}",
+                f
+            );
             assert!(
                 !f.needs_review,
                 "production finding must have needs_review=false: {:?}",
@@ -2739,8 +6010,7 @@ mod tests {
         }
         for f in &test_findings {
             assert_eq!(
-                f.severity,
-                TEST_PATH_SEVERITY,
+                f.severity, TEST_PATH_SEVERITY,
                 "test finding must be low: {:?}",
                 f
             );
@@ -2801,7 +6071,10 @@ mod tests {
             ..Finding::default()
         };
         let json = serde_json::to_string(&f).unwrap();
-        assert!(json.contains(r#""confidence":"needs-review""#), "json={json}");
+        assert!(
+            json.contains(r#""confidence":"needs-review""#),
+            "json={json}"
+        );
         assert!(json.contains(r#""effort":"high""#), "json={json}");
         let back: Finding = serde_json::from_str(&json).unwrap();
         assert_eq!(back.confidence.as_deref(), Some("needs-review"));
@@ -2826,29 +6099,45 @@ mod tests {
                     sha: Some("a".repeat(40)),
                     branch: Some("main".to_string()),
                     dirty: true,
+                    origin_url: Some("git@github.com:me/api.git".to_string()),
+                    default_branch: Some("main".to_string()),
                 },
                 AuditedRef {
                     repo: "me/web".to_string(),
                     sha: None,
                     branch: None,
                     dirty: false,
+                    origin_url: None,
+                    default_branch: None,
                 },
             ],
-            audit_model: Some("claude-sonnet-4-6".to_string()),
+            audit_model: Some("claude-sonnet-5".to_string()),
             calibration_model: Some("claude-haiku-4-5".to_string()),
+            clone_judge_model: None,
             mode: "parallel".to_string(),
             thorough: true,
             deep: false,
             rules_fingerprint: "fp-abc123".to_string(),
-            audited_rule_ids: vec!["SEC-NO-HARDCODED-SECRETS-1".to_string(), "ARCH-1".to_string()],
+            audited_rule_ids: vec![
+                "SEC-NO-HARDCODED-SECRETS-1".to_string(),
+                "ARCH-1".to_string(),
+            ],
             camerata_version: env!("CARGO_PKG_VERSION").to_string(),
             osv_scanner_version: Some("v1.9.2".to_string()),
             started_at: "2026-07-23T00:00:00+00:00".to_string(),
             finished_at: "2026-07-23T00:05:00+00:00".to_string(),
+            model_sessions: vec![crate::llm::ModelSession {
+                session_id: "9d1c0000-0000-4000-8000-000000000000".to_string(),
+                cwd: "/work/me/api".to_string(),
+                created_at: "2026-07-23T00:01:00Z".to_string(),
+            }],
         };
         let json = serde_json::to_string(&prov).unwrap();
         let back: ScanProvenance = serde_json::from_str(&json).unwrap();
-        assert_eq!(back, prov, "ScanProvenance must round-trip byte-for-byte via serde");
+        assert_eq!(
+            back, prov,
+            "ScanProvenance must round-trip byte-for-byte via serde"
+        );
         // The dirty flag specifically — the doc's explicit callout ("a dirty tree does NOT
         // block the scan, only disclosed") depends on this surviving the wire.
         assert!(back.audited_refs[0].dirty);
@@ -2902,17 +6191,14 @@ mod tests {
         git_init(root);
 
         // Write .gitignore so secrets.env is gitignored.
-        std::fs::write(root.join(".gitignore"), "secrets.env\n")
-            .expect("write .gitignore");
+        std::fs::write(root.join(".gitignore"), "secrets.env\n").expect("write .gitignore");
         // Write the secret file — gitignored, so should NOT appear in output.
         // Split token across concat!() so the scanner (if it were run) can't see the literal.
         let secret_content = concat!("TOKEN=", "ghp_00000000000000000000000000000000000000\n");
-        std::fs::write(root.join("secrets.env"), secret_content)
-            .expect("write secrets.env");
+        std::fs::write(root.join("secrets.env"), secret_content).expect("write secrets.env");
         // Write a normal source file that SHOULD appear.
         std::fs::create_dir_all(root.join("src")).expect("mkdir src");
-        std::fs::write(root.join("src/main.rs"), "fn main() {}\n")
-            .expect("write main.rs");
+        std::fs::write(root.join("src/main.rs"), "fn main() {}\n").expect("write main.rs");
 
         let extracted = read_local_repo_files(root).expect("scan ok");
         let paths: Vec<&str> = extracted.files.iter().map(|(p, _)| p.as_str()).collect();
@@ -2942,15 +6228,104 @@ mod tests {
         std::fs::write(root.join(".env"), env_content).expect("write .env");
         // A clean Rust file so there are multiple files.
         std::fs::create_dir_all(root.join("src")).expect("mkdir src");
-        std::fs::write(root.join("src/lib.rs"), "pub fn lib() {}\n")
-            .expect("write lib.rs");
+        std::fs::write(root.join("src/lib.rs"), "pub fn lib() {}\n").expect("write lib.rs");
 
         let extracted = read_local_repo_files(root).expect("scan ok");
         let paths: Vec<&str> = extracted.files.iter().map(|(p, _)| p.as_str()).collect();
         // The .env is NOT in .gitignore → must be scanned.
         assert!(
-            paths.iter().any(|p| *p == ".env"),
+            paths.contains(&".env"),
             "tracked .env must be scanned when not gitignored: {paths:?}"
+        );
+    }
+
+    /// Helper: `git commit` in `dir` with an inline identity (no global `user.name`/
+    /// `user.email` config needed in a sandboxed test environment).
+    fn git_commit(dir: &std::path::Path, message: &str) {
+        let status = std::process::Command::new("git")
+            .args([
+                "-c",
+                "user.name=test",
+                "-c",
+                "user.email=test@example.com",
+                "commit",
+                "-m",
+                message,
+            ])
+            .current_dir(dir)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .expect("git commit failed");
+        assert!(status.success(), "git commit must succeed");
+    }
+
+    // ── P4: attach_secret_history_capture ───────────────────────────────────────
+
+    #[tokio::test]
+    async fn attach_secret_history_capture_flags_a_secret_present_in_an_earlier_commit() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let root = dir.path();
+        git_init(root);
+        std::fs::write(root.join(".env"), "SECRET=first\n").expect("write .env v1");
+        git_add(root, &[".env"]);
+        git_commit(root, "add secret v1");
+        std::fs::write(root.join(".env"), "SECRET=second\n").expect("write .env v2");
+        git_add(root, &[".env"]);
+        git_commit(root, "rotate secret v2");
+
+        let mut findings = vec![Finding {
+            repo: "me/api".to_string(),
+            path: ".env".to_string(),
+            rule_id: "SEC-NO-SECRET-FILE-1".to_string(),
+            ..Finding::default()
+        }];
+        attach_secret_history_capture(&mut findings, root).await;
+        let status = findings[0]
+            .captures
+            .get("history-status")
+            .expect("history-status must be set: a real git repo with 2 commits touching .env");
+        assert!(
+            status.contains("earlier commit"),
+            "expected an earlier-commit note, got: {status:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn attach_secret_history_capture_is_a_noop_without_a_git_repo() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let root = dir.path(); // no git_init — not a git repo at all
+        let mut findings = vec![Finding {
+            repo: "me/api".to_string(),
+            path: ".env".to_string(),
+            rule_id: "SEC-NO-SECRET-FILE-1".to_string(),
+            ..Finding::default()
+        }];
+        attach_secret_history_capture(&mut findings, root).await;
+        assert!(
+            !findings[0].captures.contains_key("history-status"),
+            "no git repo — must degrade gracefully, never fabricate a history status"
+        );
+    }
+
+    #[tokio::test]
+    async fn attach_secret_history_capture_ignores_non_secret_shaped_findings() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let root = dir.path();
+        git_init(root);
+        std::fs::write(root.join("a.py"), "x = 1\n").unwrap();
+        git_add(root, &["a.py"]);
+        git_commit(root, "init");
+        let mut findings = vec![Finding {
+            repo: "me/api".to_string(),
+            path: "a.py".to_string(),
+            rule_id: "SEC-NO-DISABLED-TLS-1".to_string(),
+            ..Finding::default()
+        }];
+        attach_secret_history_capture(&mut findings, root).await;
+        assert!(
+            !findings[0].captures.contains_key("history-status"),
+            "a structural (non-secret-shaped) rule must never get a history-status capture"
         );
     }
 
@@ -2964,8 +6339,10 @@ mod tests {
         let root = dir.path();
         git_init(root);
 
-        let secret_content =
-            concat!("NEXT_PUBLIC_SUPABASE_SERVICE_ROLE_KEY=sb_secret_", "FAKE_DO_NOT_USE\n");
+        let secret_content = concat!(
+            "NEXT_PUBLIC_SUPABASE_SERVICE_ROLE_KEY=sb_secret_",
+            "FAKE_DO_NOT_USE\n"
+        );
         std::fs::write(root.join(".env.production"), secret_content)
             .expect("write .env.production");
         git_add(root, &[".env.production"]);
@@ -2973,8 +6350,7 @@ mod tests {
         // NOW gitignore it — a real (if mistaken) attempt to stop tracking it going forward.
         // The file remains in the index; git status would show it as still-tracked-but-
         // matches-gitignore, not untracked.
-        std::fs::write(root.join(".gitignore"), ".env.production\n")
-            .expect("write .gitignore");
+        std::fs::write(root.join(".gitignore"), ".env.production\n").expect("write .gitignore");
 
         std::fs::create_dir_all(root.join("src")).expect("mkdir src");
         std::fs::write(root.join("src/lib.rs"), "pub fn lib() {}\n").expect("write lib.rs");
@@ -2990,7 +6366,10 @@ mod tests {
             .iter()
             .find(|(p, _)| p == ".env.production")
             .expect("file present");
-        assert!(content.contains("sb_secret_"), "the union'd file must carry real content, not a stub");
+        assert!(
+            content.contains("sb_secret_"),
+            "the union'd file must carry real content, not a stub"
+        );
     }
 
     #[test]
@@ -3061,16 +6440,26 @@ mod tests {
         let extracted = read_local_repo_files(root).expect("scan ok");
         let findings = audit_files("test/repo", &extracted.files);
 
-        for path in ["k8s/deploy.yaml", "secrets.json", "config/app.properties", ".env.staging"] {
+        for path in [
+            "k8s/deploy.yaml",
+            "secrets.json",
+            "config/app.properties",
+            ".env.staging",
+        ] {
             assert!(
                 extracted.files.iter().any(|(p, _)| p == path),
                 "{path} must be admitted into the scanned file list: {:?}",
                 extracted.files.iter().map(|(p, _)| p).collect::<Vec<_>>()
             );
             assert!(
-                findings.iter().any(|f| f.path == path && f.rule_id == "SEC-NO-VENDOR-TOKEN-1"),
+                findings
+                    .iter()
+                    .any(|f| f.path == path && f.rule_id == "SEC-NO-VENDOR-TOKEN-1"),
                 "expected a SEC-NO-VENDOR-TOKEN-1 finding in {path}: {:?}",
-                findings.iter().filter(|f| f.path == path).collect::<Vec<_>>()
+                findings
+                    .iter()
+                    .filter(|f| f.path == path)
+                    .collect::<Vec<_>>()
             );
         }
     }
@@ -3086,15 +6475,21 @@ mod tests {
         let root = dir.path();
         git_init(root);
 
-        std::fs::write(root.join(".editorconfig"), "root = true\n[*]\nindent_style = space\n")
-            .expect("write .editorconfig");
+        std::fs::write(
+            root.join(".editorconfig"),
+            "root = true\n[*]\nindent_style = space\n",
+        )
+        .expect("write .editorconfig");
         std::fs::write(
             root.join("app.conf"),
             "listen_port = 8080\nlog_level = info\n",
         )
         .expect("write app.conf");
-        std::fs::write(root.join("notes.txt"), "TODO: rename this module someday.\n")
-            .expect("write notes.txt");
+        std::fs::write(
+            root.join("notes.txt"),
+            "TODO: rename this module someday.\n",
+        )
+        .expect("write notes.txt");
         std::fs::write(root.join(".npmrc"), "save-exact=true\nengine-strict=true\n")
             .expect("write .npmrc");
         std::fs::create_dir_all(root.join("config")).expect("mkdir config");
@@ -3114,7 +6509,13 @@ mod tests {
 
         // File-count sanity: the benign config files WERE admitted (so an empty-findings
         // result below is a genuine "scanned clean", not "silently skipped").
-        for path in [".editorconfig", "app.conf", "notes.txt", ".npmrc", "config/app.properties"] {
+        for path in [
+            ".editorconfig",
+            "app.conf",
+            "notes.txt",
+            ".npmrc",
+            "config/app.properties",
+        ] {
             assert!(
                 admitted_paths.contains(&path),
                 "{path} must be admitted: {admitted_paths:?}"
@@ -3127,7 +6528,13 @@ mod tests {
         );
 
         let floor_findings = audit_files("test/repo", &extracted.files);
-        let config_paths = [".editorconfig", "app.conf", "notes.txt", ".npmrc", "config/app.properties"];
+        let config_paths = [
+            ".editorconfig",
+            "app.conf",
+            "notes.txt",
+            ".npmrc",
+            "config/app.properties",
+        ];
         let floor_noise: Vec<_> = floor_findings
             .iter()
             .filter(|f| config_paths.contains(&f.path.as_str()))
@@ -3167,8 +6574,7 @@ mod tests {
             .expect("write node_modules/foo.ts");
         // Write a clean source file (must be included).
         std::fs::create_dir_all(root.join("src")).expect("mkdir src");
-        std::fs::write(root.join("src/main.rs"), "fn main() {}\n")
-            .expect("write main.rs");
+        std::fs::write(root.join("src/main.rs"), "fn main() {}\n").expect("write main.rs");
 
         let extracted = read_local_repo_files(root).expect("non-git fallback ok");
         let paths: Vec<&str> = extracted.files.iter().map(|(p, _)| p.as_str()).collect();
@@ -3285,10 +6691,12 @@ mod tests {
             "\nAnd here is a planted real credential: ghp_",
             "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n"
         );
-        let files = vec![("CONVENTIONS.md".to_string(), conventions_content.to_string())];
+        let files = vec![(
+            "CONVENTIONS.md".to_string(),
+            conventions_content.to_string(),
+        )];
         // The corpus describes "verify=False" in a rule summary.
-        let corpus_texts =
-            vec!["Do not set verify=False in TLS configuration.".to_string()];
+        let corpus_texts = vec!["Do not set verify=False in TLS configuration.".to_string()];
 
         let mut findings = vec![
             Finding {
@@ -3308,8 +6716,7 @@ mod tests {
                 rule_id: "SEC-NO-VENDOR-TOKEN-1".to_string(),
                 severity: "critical".to_string(),
                 // Split the token so the scan can't fire on this test file itself.
-                snippet: concat!("ghp_", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
-                    .to_string(),
+                snippet: concat!("ghp_", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA").to_string(),
                 detail: "Vendor token detected".to_string(),
                 ..Finding::default()
             },

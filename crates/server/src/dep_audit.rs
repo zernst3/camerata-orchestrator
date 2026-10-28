@@ -91,11 +91,60 @@ const TOOL_NAME: &str = "osv-scanner";
 /// Malformed or empty JSON returns `Err` so the caller can emit a coverage note.
 /// Advisory objects with missing fields are skipped (not surfaced as errors) —
 /// a partial parse is better than a hard failure.
-pub fn parse_osv_json(
-    repo: &str,
-    repo_root: &Path,
-    output: &str,
-) -> anyhow::Result<Vec<Finding>> {
+/// The patched version to recommend for an OSV vulnerability: the SMALLEST `fixed` version
+/// across the vuln's `affected[].ranges[].events[]` (OSV schema) — the earliest release that
+/// resolves it, i.e. the "upgrade at least to" target. `None` when OSV lists no fix (the
+/// advisory has no patched version yet). Presence vs absence is what drives the ownership split
+/// (fixable `ClientOwned` vs not-yet-fixable `ExternalDependency`) in
+/// [`crate::ownership::ownership_of`].
+fn osv_fixed_version(vuln: &serde_json::Value) -> Option<String> {
+    let mut fixed: Vec<String> = Vec::new();
+    for aff in vuln
+        .get("affected")
+        .and_then(|a| a.as_array())
+        .into_iter()
+        .flatten()
+    {
+        for range in aff
+            .get("ranges")
+            .and_then(|r| r.as_array())
+            .into_iter()
+            .flatten()
+        {
+            for event in range
+                .get("events")
+                .and_then(|e| e.as_array())
+                .into_iter()
+                .flatten()
+            {
+                if let Some(v) = event.get("fixed").and_then(|f| f.as_str()) {
+                    if !v.trim().is_empty() {
+                        fixed.push(v.to_string());
+                    }
+                }
+            }
+        }
+    }
+    fixed
+        .into_iter()
+        .min_by(|a, b| semver_sort_key(a).cmp(&semver_sort_key(b)))
+}
+
+/// A coarse semver sort key: `(major, minor, patch)` from the leading numeric components, with
+/// the original string as a final tiebreak. Pre-release/build metadata is ignored for ordering.
+/// Good enough to pick the lowest fixed version; not a full semver implementation (no dep added).
+fn semver_sort_key(v: &str) -> (u64, u64, u64, String) {
+    let core = v.split(['-', '+']).next().unwrap_or(v);
+    let mut parts = core.split('.').map(|p| p.parse::<u64>().unwrap_or(0));
+    (
+        parts.next().unwrap_or(0),
+        parts.next().unwrap_or(0),
+        parts.next().unwrap_or(0),
+        v.to_string(),
+    )
+}
+
+pub fn parse_osv_json(repo: &str, repo_root: &Path, output: &str) -> anyhow::Result<Vec<Finding>> {
     let v: serde_json::Value = serde_json::from_str(output)?;
     let mut out: Vec<Finding> = Vec::new();
 
@@ -143,10 +192,7 @@ pub fn parse_osv_json(
             // across multiple lockfile entries; `vulnerabilities` is the canonical list
             // in older versions. Both may be present. We read `vulnerabilities` (always
             // present) and deduplicate on advisory id within this package entry.
-            let Some(vulns) = pkg_entry
-                .get("vulnerabilities")
-                .and_then(|v| v.as_array())
-            else {
+            let Some(vulns) = pkg_entry.get("vulnerabilities").and_then(|v| v.as_array()) else {
                 // No vulnerabilities on this package entry (can happen in certain
                 // schema variants). Skip.
                 continue;
@@ -164,22 +210,11 @@ pub fn parse_osv_json(
                 let aliases: Vec<&str> = vuln
                     .get("aliases")
                     .and_then(|a| a.as_array())
-                    .map(|arr| {
-                        arr.iter()
-                            .filter_map(|v| v.as_str())
-                            .collect::<Vec<_>>()
-                    })
+                    .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>())
                     .unwrap_or_default();
 
                 // Advisory title / summary — used in the detail field.
-                let title = vuln
-                    .get("summary")
-                    .and_then(|s| s.as_str())
-                    .or_else(|| {
-                        // Fallback: use aliases if no summary.
-                        None
-                    })
-                    .unwrap_or("");
+                let title = vuln.get("summary").and_then(|s| s.as_str()).unwrap_or("");
 
                 // Severity: prefer database_specific.severity (a plain word like
                 // "CRITICAL"), fall back to the CVSS score bucket, then default to
@@ -192,17 +227,29 @@ pub fn parse_osv_json(
                 } else {
                     format!(" (also: {})", aliases.join(", "))
                 };
+                // W33: the patched version, if OSV knows one. Presence drives the ownership
+                // split (fixable-by-upgrade `ClientOwned` vs not-yet-fixable `ExternalDependency`)
+                // in `ownership::ownership_of`, which reads the `osv_fixed_version` capture below.
+                let fixed_version = osv_fixed_version(vuln);
+
+                let fixed_clause = match &fixed_version {
+                    Some(v) => format!(" — fixed in {v}"),
+                    None => " — no patched version available yet".to_string(),
+                };
                 let detail = if title.is_empty() {
-                    format!("{advisory_id}{aliases_str} affects {coord}")
+                    format!("{advisory_id}{aliases_str} affects {coord}{fixed_clause}")
                 } else {
-                    format!("{advisory_id}{aliases_str}: {title} (affects {coord})")
+                    format!("{advisory_id}{aliases_str}: {title} (affects {coord}){fixed_clause}")
                 };
 
-                out.push(Finding {
+                let mut finding = Finding {
+                    could_be_intentional: false,
                     repo: repo.to_string(),
                     path: lockfile_rel.clone(),
                     line: 0,
                     rule_id: DEP_AUDIT_RULE_ID.to_string(),
+                    // A5.6: a known vulnerable dependency is an objective fault.
+                    kind: Some(camerata_api_types::audit::FindingKind::Defect),
                     severity,
                     snippet: coord,
                     detail,
@@ -216,7 +263,32 @@ pub fn parse_osv_json(
                     effort: None,
                     category: None,
                     located: true,
-                });
+                    // W33: carry OSV's patched version (when any) so `ownership::ownership_of`
+                    // can split fixable-by-upgrade (ClientOwned) from not-yet-fixable
+                    // (ExternalDependency). A structured capture key, not prose in `detail`.
+                    captures: match &fixed_version {
+                        Some(v) => std::collections::BTreeMap::from([(
+                            "osv_fixed_version".to_string(),
+                            v.clone(),
+                        )]),
+                        None => Default::default(),
+                    },
+                    // Not a multi-option semantic rule finding — never evaluated under an
+                    // alternative option.
+                    evaluated_option_id: None,
+                    also_locations: Vec::new(),
+                    // W33: a concrete upgrade is the fix when OSV knows a patched version — a
+                    // fixable (ClientOwned) dependency finding then ships an actionable fix
+                    // rather than only a "you are vulnerable" statement. When no patch exists the
+                    // finding is ExternalDependency and its action comes from `ownership_action`.
+                    fix_specific: fixed_version
+                        .as_ref()
+                        .map(|v| format!("Upgrade {pkg_name} to >= {v} (the patched version).")),
+                    // Dependency findings never flow through calibration either.
+                    calibration_rationale: None,
+                };
+                crate::onboard::redact::redact_finding(&mut finding);
+                out.push(finding);
             }
         }
     }
@@ -322,9 +394,7 @@ async fn run_dep_audit_with_tooling(
                 Vec::new(),
                 Some(CoverageNote {
                     tool: TOOL_NAME.to_string(),
-                    message: format!(
-                        "dependency audit (osv-scanner) did not run: {e}"
-                    ),
+                    message: format!("dependency audit (osv-scanner) did not run: {e}"),
                 }),
             );
         }
@@ -411,9 +481,7 @@ async fn run_dep_audit_with_tooling(
             )
         } else {
             // Exit OK but empty stdout — treat as no lockfiles.
-            format!(
-                "dependency audit (osv-scanner) found no lockfiles in {repo}"
-            )
+            format!("dependency audit (osv-scanner) found no lockfiles in {repo}")
         };
 
         return (
@@ -432,9 +500,7 @@ async fn run_dep_audit_with_tooling(
             Vec::new(),
             Some(CoverageNote {
                 tool: TOOL_NAME.to_string(),
-                message: format!(
-                    "dependency audit (osv-scanner) could not parse output: {e}"
-                ),
+                message: format!("dependency audit (osv-scanner) could not parse output: {e}"),
             }),
         ),
     }
@@ -455,10 +521,7 @@ async fn run_dep_audit_with_tooling(
 /// When the Camerata data dir cannot be resolved (unusual) or osv-scanner cannot
 /// be provisioned (network unavailable, unsupported platform, no Go toolchain),
 /// a `CoverageNote` is returned and the scan is NOT aborted.
-pub async fn run_dep_audit(
-    repo: &str,
-    repo_dir: &Path,
-) -> (Vec<Finding>, Option<CoverageNote>) {
+pub async fn run_dep_audit(repo: &str, repo_dir: &Path) -> (Vec<Finding>, Option<CoverageNote>) {
     // Resolve the Camerata tooling dir where provisioned binaries live.
     let tooling_dir = match tool_provisioning::tooling_dir() {
         Some(d) => d,
@@ -547,12 +610,14 @@ mod tests {
         // Advisory id must appear in the detail.
         assert!(
             f.detail.contains("RUSTSEC-2020-0071"),
-            "advisory id must be in detail: {}", f.detail
+            "advisory id must be in detail: {}",
+            f.detail
         );
         // Alias must appear in the detail.
         assert!(
             f.detail.contains("GHSA-wcg3-cvx6-7396"),
-            "alias must be in detail: {}", f.detail
+            "alias must be in detail: {}",
+            f.detail
         );
         // Severity mapped from database_specific.severity = "HIGH".
         assert_eq!(f.severity, "high");
@@ -564,11 +629,63 @@ mod tests {
     }
 
     #[test]
+    fn osv_fixed_version_drives_the_ownership_split() {
+        use crate::ownership::{ownership_of, Ownership};
+        let root = fixture_root();
+        // A vuln WITH affected ranges carrying two `fixed` events — the SMALLEST is the target.
+        let with_fix = r#"{"results":[{"source":{"path":"/w/Cargo.lock","type":"lockfile"},
+          "packages":[{"package":{"name":"acme","version":"1.0.0","ecosystem":"crates.io"},
+          "vulnerabilities":[{"id":"CVE-9","summary":"x","database_specific":{"severity":"HIGH"},
+          "affected":[{"ranges":[{"type":"SEMVER","events":[{"introduced":"0"},{"fixed":"1.4.2"},{"fixed":"1.10.0"}]}]}]}]}]}]}"#;
+        let f = &parse_osv_json("acme/api", &root, with_fix).unwrap()[0];
+        assert_eq!(
+            f.captures.get("osv_fixed_version").map(String::as_str),
+            Some("1.4.2"),
+            "smallest fixed version by semver (1.4.2 < 1.10.0), not string order"
+        );
+        assert!(f.detail.contains("fixed in 1.4.2"), "detail: {}", f.detail);
+        assert!(
+            f.fix_specific
+                .as_deref()
+                .unwrap_or("")
+                .contains("Upgrade acme to >= 1.4.2"),
+            "fix: {:?}",
+            f.fix_specific
+        );
+        // A patched CVE is fixable by upgrade → client-owned.
+        assert_eq!(
+            ownership_of(&f.rule_id, &f.captures),
+            Ownership::ClientOwned
+        );
+
+        // A vuln with NO `fixed` event → not-yet-fixable → external-dependency.
+        let no_fix = r#"{"results":[{"source":{"path":"/w/Cargo.lock","type":"lockfile"},
+          "packages":[{"package":{"name":"acme","version":"1.0.0","ecosystem":"crates.io"},
+          "vulnerabilities":[{"id":"CVE-9","summary":"x","database_specific":{"severity":"HIGH"},
+          "affected":[{"ranges":[{"type":"SEMVER","events":[{"introduced":"0"}]}]}]}]}]}]}"#;
+        let g = &parse_osv_json("acme/api", &root, no_fix).unwrap()[0];
+        assert!(!g.captures.contains_key("osv_fixed_version"));
+        assert!(
+            g.detail.contains("no patched version"),
+            "detail: {}",
+            g.detail
+        );
+        assert!(g.fix_specific.is_none());
+        assert_eq!(
+            ownership_of(&g.rule_id, &g.captures),
+            Ownership::ExternalDependency
+        );
+    }
+
+    #[test]
     fn parse_empty_results_returns_no_findings() {
         let root = fixture_root();
         let json = r#"{"schemaVersion":"1.0","results":[]}"#;
         let findings = parse_osv_json("acme/api", &root, json).unwrap();
-        assert!(findings.is_empty(), "empty results must produce no findings");
+        assert!(
+            findings.is_empty(),
+            "empty results must produce no findings"
+        );
     }
 
     #[test]
@@ -584,7 +701,10 @@ mod tests {
     fn parse_malformed_json_returns_err() {
         let root = fixture_root();
         let result = parse_osv_json("acme/api", &root, "not json at all");
-        assert!(result.is_err(), "malformed JSON must return Err, not Ok([])");
+        assert!(
+            result.is_err(),
+            "malformed JSON must return Err, not Ok([])"
+        );
     }
 
     #[test]
@@ -644,6 +764,7 @@ mod tests {
     // provisioning failed.
 
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn provisioning_failure_emits_coverage_note_not_panic() {
         use tempfile::TempDir;
         // A fresh temp tooling dir: no cached binary inside it.  ensure_osv_scanner
@@ -654,8 +775,7 @@ mod tests {
         // We just verify the type contract, not a specific outcome.
         let tmp = TempDir::new().unwrap();
         let repo_dir = std::path::Path::new("/nonexistent-camerata-dep-audit-repo-xyz");
-        let (findings, note) =
-            run_dep_audit_with_tooling("acme/test", repo_dir, tmp.path()).await;
+        let (findings, note) = run_dep_audit_with_tooling("acme/test", repo_dir, tmp.path()).await;
         // One of two valid outcomes:
         //   (a) provisioning failed → findings empty, note is Some
         //   (b) provisioning succeeded but repo_dir doesn't exist → note is Some, findings empty
@@ -677,6 +797,7 @@ mod tests {
     /// (read-only, empty, no cached binary and no network write capability).
     /// The function must return a coverage note describing the failure, not panic.
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn no_cached_binary_and_impossible_tooling_dir_emits_note() {
         // /nonexistent-tooling-xyz: does not exist, cannot be created (root-owned
         // path segment).  ensure_osv_scanner will try PATH (likely fails), try the
@@ -690,8 +811,7 @@ mod tests {
         // "no panic and the result is well-typed."
         let tooling = std::path::Path::new("/nonexistent-camerata-tooling-dir-xyz");
         let repo_dir = std::path::Path::new("/nonexistent-camerata-repo-xyz");
-        let (findings, note) =
-            run_dep_audit_with_tooling("acme/test", repo_dir, tooling).await;
+        let (findings, note) = run_dep_audit_with_tooling("acme/test", repo_dir, tooling).await;
         // Regardless of outcome: no panic, and if there's a note it is well-formed.
         if let Some(ref n) = note {
             assert_eq!(n.tool, "osv-scanner");
@@ -812,10 +932,7 @@ mod tests {
         // assertion is that the timeout fires at all (the future is cancellable).
         let timeout_result = tokio::time::timeout(
             Duration::from_millis(100),
-            TokioCmd::new("sleep")
-                .arg("30")
-                .kill_on_drop(true)
-                .output(),
+            TokioCmd::new("sleep").arg("30").kill_on_drop(true).output(),
         )
         .await;
 
@@ -842,13 +959,12 @@ mod tests {
     /// This is the test-isolation escape hatch; tests that exercise audit_repos but not
     /// dep-audit specifically must set this env var.
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn disable_env_var_skips_all_network_activity() {
-        std::env::set_var(DISABLE_ENV_VAR, "1");
+        let _env = camerata_test_env::EnvGuard::set(DISABLE_ENV_VAR, "1");
         let tooling = std::path::Path::new("/nonexistent-tooling-for-disable-test");
         let repo_dir = std::path::Path::new("/nonexistent-repo-for-disable-test");
-        let (findings, note) =
-            run_dep_audit_with_tooling("acme/api", repo_dir, tooling).await;
-        std::env::remove_var(DISABLE_ENV_VAR);
+        let (findings, note) = run_dep_audit_with_tooling("acme/api", repo_dir, tooling).await;
         assert!(findings.is_empty(), "DISABLE → no findings");
         assert!(note.is_none(), "DISABLE → no coverage note (silent skip)");
     }

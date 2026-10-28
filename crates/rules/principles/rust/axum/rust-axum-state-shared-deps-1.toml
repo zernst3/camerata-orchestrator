@@ -1,9 +1,18 @@
 id = "RUST-AXUM-STATE-SHARED-DEPS-1"
+version = 1
 title = "Share application dependencies via Axum State, not global static variables"
-tag = "stack"
 domain = "rust:axum"
 layer = "framework"
 enforcement = "structured"
+kind = "default_with_exceptions"
+inspectable = true
+# Deviation-ceiling escape hatch, INHERITED from ARCH-SERVICE-DI-1: severity must describe the
+# PROBLEM, not which rule happened to fire. Without this, a repo on this stack caps the identical
+# architectural defect at medium while an unmirrored stack reaches high under the general rule.
+# This rule mirrors ARCH-SERVICE-DI-1 because it re-litigates the same question, and it rejects
+# the same degenerate form the spine rule names as its 'global service locator' option: shared
+# deps come from Axum State, not global statics.
+deviation_ceiling = "high"
 default = true
 verification = "grounded"
 
@@ -16,10 +25,14 @@ why = "Axum State is a typed, immutable container for application-wide dependenc
 id = "use-state-for-shared-dependencies"
 label = "Share application dependencies via Axum State"
 directive = "Application-wide dependencies (database pools, caches, config, service clients) are placed into a struct that is wrapped in Axum State and registered on the router. Handlers receive this State as an extractor argument. Global static variables or lazy_static initialization is not used for application dependencies."
+remediation = """
+Move the dependency out of a global static (lazy_static, once_cell, or manual startup init) and into a struct wrapped in Axum State, registered on the router, with handlers receiving it as an extractor argument. Verify by confirming the dependency's initialization goes through the router's State and no handler reads it from a global variable.
+"""
 why = "State makes dependencies explicit in handler signatures and simplifies testing via dependency injection."
 
 [[option]]
 id = "use-global-statics-for-dependencies"
+violates = true
 label = "Use global static variables for application dependencies"
 directive = "Application dependencies are initialized in global static variables (using lazy_static, once_cell, or manual initialization on startup) and handlers access them directly from the global scope."
 why = "Global state is invisible to the type system: a handler that depends on a database pool does not declare that dependency anywhere a linter or reviewer can see; testing becomes complex because tests must initialize and reset the global without interfering with each other; and initialization-order bugs produce failures that are hard to attribute because there is no structured way to handle initialization errors."

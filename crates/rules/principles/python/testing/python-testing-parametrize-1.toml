@@ -1,9 +1,11 @@
 id = "PYTHON-TESTING-PARAMETRIZE-1"
+version = 1
 title = "Multiple input/output variants use @pytest.mark.parametrize, not copy-paste test functions"
-tag = "stack"
 domain = "python:testing"
 layer = "language"
 enforcement = "structured"
+kind = "decision"
+inspectable = true
 default = true
 qualifies = "Ruff PT006 and PT007 are style checks on parametrize calls already in the code — PT006 flags a wrong argnames type (a tuple used where a plain string is expected for a single parameter) and PT007 flags a wrong values-list element type. Neither rule detects whether parametrize was used AT ALL in preference to copy-pasted test functions, or whether the parametrization is complete; a suite of N copy-pasted, non-parametrized test functions triggers no PT006/PT007 finding, because there is no parametrize call for the rule to check the style of. So the linter enforces idiomatic style once a team has already adopted parametrize, not the underlying discipline of using it instead of duplicating test functions — that part of the rule is enforced by code review, not by CI lint. Conformance for the style layer holds when PT006/PT007 pass on every parametrize call in the codebase; it fails when either rule reports an offense on an existing parametrize call."
 verification = "grounded"
@@ -17,6 +19,9 @@ why = "pytest's @pytest.mark.parametrize decorator enables a single test functio
 id = "parametrize-decorator"
 label = "single test function with @pytest.mark.parametrize"
 directive = "When the same test logic must run with multiple different inputs and expected outputs, express it as a single test function decorated with @pytest.mark.parametrize('arg1,arg2,...', [...]) where each element of the list is a (input, expected) tuple or a pytest.param(). For a single parameter, pass a plain string as the argnames argument (not a one-element tuple). Mark individual cases with pytest.param(..., marks=pytest.mark.xfail) when a known-failing case must be included. Do not copy-paste the test body into multiple functions differing only in their literals."
+remediation = """
+Consolidate the copy-pasted test functions covering different input/output combinations into a single test function decorated with @pytest.mark.parametrize, with each combination expressed as one entry in the parameter list. Verify by confirming pytest reports each parametrized case as a separate, individually-named test result.
+"""
 why = "Each case produces an independent result; adding a new case is a one-line change; Ruff PT006/PT007 keep the decorator call idiomatic."
 
 [[option]]

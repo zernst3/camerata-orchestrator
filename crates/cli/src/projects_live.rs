@@ -27,7 +27,16 @@ fn env_required(key: &str) -> anyhow::Result<String> {
 pub async fn run_projects_live() -> anyhow::Result<()> {
     println!("== Camerata live GitHub Projects v2 board listing ==\n");
 
-    let token = env_required("CAMERATA_GITHUB_TOKEN")?;
+    // The token saved in the app (Keychain) first, `CAMERATA_GITHUB_TOKEN` only as the fallback.
+    let token = camerata_server::credentials::github_token(
+        &camerata_server::credentials::KeyringCredentialStore,
+    )
+    .ok_or_else(|| {
+        anyhow::anyhow!(
+            "no GitHub token: add it in the app (Settings, Credentials) or set \
+             CAMERATA_GITHUB_TOKEN (see docs/GITHUB_SETUP.md)"
+        )
+    })?;
     let owner = env_required("CAMERATA_GITHUB_PROJECT_OWNER")?;
     let number: u64 = env_required("CAMERATA_GITHUB_PROJECT_NUMBER")?
         .parse()

@@ -1,6 +1,5 @@
 use super::*;
 
-
 /// Emit the project's ruleset into its repos' LOCAL working copies (POST
 /// /api/projects/:id/emit-local). Writes AGENTS.md + CONVENTIONS.md + the gate config. The
 /// cascade flags escalate (each requires the previous): `branch` commits onto the managed
@@ -50,7 +49,10 @@ pub(super) async fn emit_project_local(
         let rok = r.get("ok").and_then(|b| b.as_bool()).unwrap_or(false);
         all_ok &= rok;
         if !rok {
-            let m = r.get("message").and_then(|s| s.as_str()).unwrap_or("failed");
+            let m = r
+                .get("message")
+                .and_then(|s| s.as_str())
+                .unwrap_or("failed");
             lines.push(format!("{repo}: {m}"));
         } else if let Some(pr) = r.get("pr_url").and_then(|s| s.as_str()) {
             lines.push(format!("{repo}: PR \u{2192} {pr}"));
@@ -307,7 +309,18 @@ pub(super) struct SuppressionView {
     pub repo: String,
 }
 
-pub(super) async fn fetch_suppressions(project_id: &str) -> Option<Vec<SuppressionView>> {
+/// `GET /api/projects/:id/suppressions`: the waivers found in the repos whose source is on this
+/// machine, plus the date a repo's source was deleted when one was (its waivers cannot be read).
+#[derive(Clone, PartialEq, serde::Deserialize)]
+pub(super) struct SuppressionsListing {
+    #[serde(default)]
+    pub entries: Vec<SuppressionView>,
+    /// RFC3339 time the first deleted repo's source was removed; `None` when none was.
+    #[serde(default)]
+    pub deleted_at: Option<String>,
+}
+
+pub(super) async fn fetch_suppressions(project_id: &str) -> Option<SuppressionsListing> {
     reqwest::get(format!(
         "{}/api/projects/{}/suppressions",
         crate::bff_base(),
@@ -315,14 +328,14 @@ pub(super) async fn fetch_suppressions(project_id: &str) -> Option<Vec<Suppressi
     ))
     .await
     .ok()?
-    .json::<Vec<SuppressionView>>()
+    .json::<SuppressionsListing>()
     .await
     .ok()
 }
 
 /// The central suppression audit view: an INFORMATIONAL, read-only listing of everything waived
 /// across the project's repos (inline waivers + baseline), with stale ones flagged. Hidden until
-/// the user hits Refresh, which fast-forward-pulls each repo and then lists.
+/// the user hits Refresh, which re-reads each repo's code on this machine and lists (read-only).
 #[component]
 pub(super) fn SuppressionsPanel(project_id: String) -> Element {
     let pid = project_id.clone();
@@ -357,16 +370,29 @@ pub(super) fn SuppressionsPanel(project_id: String) -> Element {
                 }
             }
             p { class: "section-hint",
-                "Informational and read-only. Findings the team has waived across this project's repos — inline waivers (// camerata:allow) and baseline entries. Refresh fast-forward-pulls each repo, then lists what's waived. \"stale\" = the waiver no longer matches any live finding (a dead waiver, safe to remove)."
+                "Informational and read-only. Findings the team has waived across this project's repos — inline waivers (// camerata:allow) and baseline entries. Refresh re-reads each repo's code on this machine (it never changes it; use Clone / update on the Workspace tab to refresh the code itself). \"stale\" = the waiver no longer matches any live finding (a dead waiver, safe to remove)."
             }
             if !requested() {
-                p { class: "section-hint", "Press Refresh to pull the repos and list their waivers." }
+                p { class: "section-hint", "Press Refresh to list the waivers in the code on this machine." }
             } else {
                 match state {
-                    None => rsx! { p { class: "section-hint", "Refreshing… (pulling repos)" } },
+                    None => rsx! { p { class: "section-hint", "Refreshing… (reading the repos)" } },
                     Some(None) => rsx! { p { class: "section-hint", "Couldn't read suppressions (no local clones, or repos unreadable)." } },
-                    Some(Some(v)) if v.is_empty() => rsx! { p { class: "section-hint", "No suppressions recorded." } },
-                    Some(Some(v)) => rsx! {
+                    Some(Some(listing)) if listing.entries.is_empty() => rsx! {
+                        if let Some(at) = &listing.deleted_at {
+                            p { class: "section-hint",
+                                {format!("Source deleted on {}. Waivers live in the code, so they can be listed again once the source is re-fetched.", camerata_ui_core::source::format_date(at))}
+                            }
+                        } else {
+                            p { class: "section-hint", "No suppressions recorded." }
+                        }
+                    },
+                    Some(Some(listing)) => rsx! {
+                        if let Some(at) = &listing.deleted_at {
+                            p { class: "section-hint",
+                                {format!("Some source was deleted on {}; only the repos still on this machine are listed.", camerata_ui_core::source::format_date(at))}
+                            }
+                        }
                         div { class: "sups-scroll",
                             table { class: "sups-table",
                                 thead {
@@ -381,7 +407,7 @@ pub(super) fn SuppressionsPanel(project_id: String) -> Element {
                                     }
                                 }
                                 tbody {
-                                    for (i , s) in v.iter().enumerate() {
+                                    for (i , s) in listing.entries.iter().enumerate() {
                                         tr { key: "{i}", class: if s.stale { "sup-row stale" } else { "sup-row" },
                                             td { class: "sup-rule", "{s.rule_id}" }
                                             td { class: "sup-repo", "{s.repo}" }
@@ -666,23 +692,23 @@ pub(super) fn domain_from_rule_id(rule_id: &str) -> String {
     // General path: map the first dash-segment (uppercased) to its corpus folder name.
     let prefix = rule_id.split('-').next().unwrap_or(rule_id);
     match prefix {
-        "ARCH"       => "architecture".to_string(),
-        "RUST"       => "rust".to_string(),
-        "CICD"       => "ci-cd".to_string(),
-        "SQL"        => "sql".to_string(),
-        "UI"         => "ui".to_string(),
-        "TESTING"    => "testing".to_string(),
-        "ORCH"       => "agentic".to_string(),
-        "SPIRIT"     => "agentic".to_string(),
-        "GO"         => "go".to_string(),
-        "JAVA"       => "java".to_string(),
+        "ARCH" => "architecture".to_string(),
+        "RUST" => "rust".to_string(),
+        "CICD" => "ci-cd".to_string(),
+        "SQL" => "sql".to_string(),
+        "UI" => "ui".to_string(),
+        "TESTING" => "testing".to_string(),
+        "ORCH" => "agentic".to_string(),
+        "SPIRIT" => "agentic".to_string(),
+        "GO" => "go".to_string(),
+        "JAVA" => "java".to_string(),
         "JAVASCRIPT" => "javascript".to_string(),
-        "PYTHON"     => "python".to_string(),
-        "RUBY"       => "ruby".to_string(),
-        "CSHARP"     => "csharp".to_string(),
-        "PROC"       => "process".to_string(),
+        "PYTHON" => "python".to_string(),
+        "RUBY" => "ruby".to_string(),
+        "CSHARP" => "csharp".to_string(),
+        "PROC" => "process".to_string(),
         // Unknown prefix: lowercase the full id prefix as a best-effort label.
-        _            => prefix.to_lowercase(),
+        _ => prefix.to_lowercase(),
     }
 }
 
@@ -737,10 +763,13 @@ impl AppliedRuleRow {
 /// so every table uses the same visual language.
 pub(super) fn enforcement_badges() -> BadgeVariantMap {
     BadgeVariantMap::new()
-        .with("prose",        BadgeVariant::new("Prose",        "gray"))
-        .with("structured",   BadgeVariant::new("Structured",   "blue"))
-        .with("mechanical",   BadgeVariant::new("Mechanical",   "green"))
-        .with("architectural",BadgeVariant::new("Architectural","yellow"))
+        .with("prose", BadgeVariant::new("Prose", "gray"))
+        .with("structured", BadgeVariant::new("Structured", "blue"))
+        .with("mechanical", BadgeVariant::new("Mechanical", "green"))
+        .with(
+            "architectural",
+            BadgeVariant::new("Architectural", "yellow"),
+        )
         .with_fallback(BadgeVariant::new("\u{2014}", "gray"))
 }
 
@@ -766,10 +795,13 @@ pub(super) fn applied_rule_columns(
         .with("cross-repo", BadgeVariant::new("Cross-repo", "yellow"))
         .with("process", BadgeVariant::new("Process", "gray"));
     let verif_badges = BadgeVariantMap::new()
-        .with("verified",      BadgeVariant::new("\u{2713} Verified",  "green"))
-        .with("grounded",      BadgeVariant::new("\u{29bf} Grounded", "blue"))
-        .with("needs_recheck", BadgeVariant::new("Needs re-check",    "yellow"))
-        .with("draft",         BadgeVariant::new("Draft",             "gray"));
+        .with("verified", BadgeVariant::new("\u{2713} Verified", "green"))
+        .with("grounded", BadgeVariant::new("\u{29bf} Grounded", "blue"))
+        .with(
+            "needs_recheck",
+            BadgeVariant::new("Needs re-check", "yellow"),
+        )
+        .with("draft", BadgeVariant::new("Draft", "gray"));
     vec![
         ColumnDef::new(ColumnId("domain"), "Domain", |r: &AppliedRuleRow| {
             CellValue::Text(r.domain())
@@ -795,7 +827,9 @@ pub(super) fn applied_rule_columns(
             )
         })
         .sortable()
-        .filter(FilterKind::MultiSelect { options: provenances })
+        .filter(FilterKind::MultiSelect {
+            options: provenances,
+        })
         .render_kind(RenderKind::Badge(verif_badges))
         .initial_width(140.0),
         // Multi-select: the architect can filter to repo-local / cross-repo / process.
@@ -849,10 +883,13 @@ pub(super) fn corpus_columns() -> Vec<ColumnDef<ProposedRuleView>> {
         .with("cross-repo", BadgeVariant::new("Cross-repo", "yellow"))
         .with("process", BadgeVariant::new("Process", "gray"));
     let verif_badges = BadgeVariantMap::new()
-        .with("verified",      BadgeVariant::new("\u{2713} Verified",  "green"))
-        .with("grounded",      BadgeVariant::new("\u{29bf} Grounded", "blue"))
-        .with("needs_recheck", BadgeVariant::new("Needs re-check",    "yellow"))
-        .with("draft",         BadgeVariant::new("Draft",             "gray"));
+        .with("verified", BadgeVariant::new("\u{2713} Verified", "green"))
+        .with("grounded", BadgeVariant::new("\u{29bf} Grounded", "blue"))
+        .with(
+            "needs_recheck",
+            BadgeVariant::new("Needs re-check", "yellow"),
+        )
+        .with("draft", BadgeVariant::new("Draft", "gray"));
     vec![
         ColumnDef::new(ColumnId("domain"), "Domain", |r: &ProposedRuleView| {
             CellValue::Text(if r.domain.is_empty() {
@@ -1008,7 +1045,8 @@ pub(super) fn ProjectRulesTable(
     // Derived from the FULL (unfiltered) rows_data so filters stay stable regardless of
     // the current repo-filter selection.
     let filter_domains: Vec<String> = {
-        let mut v: Vec<String> = rows_data.iter()
+        let mut v: Vec<String> = rows_data
+            .iter()
             .map(|r| r.domain())
             .collect::<std::collections::BTreeSet<_>>()
             .into_iter()
@@ -1017,8 +1055,14 @@ pub(super) fn ProjectRulesTable(
         v
     };
     let filter_provenances: Vec<String> = {
-        let mut v: Vec<String> = rows_data.iter()
-            .map(|r| r.corpus.as_ref().map(|c| c.verification.clone()).unwrap_or_else(|| "draft".to_string()))
+        let mut v: Vec<String> = rows_data
+            .iter()
+            .map(|r| {
+                r.corpus
+                    .as_ref()
+                    .map(|c| c.verification.clone())
+                    .unwrap_or_else(|| "draft".to_string())
+            })
             .collect::<std::collections::BTreeSet<_>>()
             .into_iter()
             .collect();
@@ -1026,7 +1070,8 @@ pub(super) fn ProjectRulesTable(
         v
     };
     let filter_scopes: Vec<String> = {
-        let mut v: Vec<String> = rows_data.iter()
+        let mut v: Vec<String> = rows_data
+            .iter()
             .map(|r| r.scope_label().to_string())
             .collect::<std::collections::BTreeSet<_>>()
             .into_iter()
@@ -1035,7 +1080,16 @@ pub(super) fn ProjectRulesTable(
         v
     };
 
-    let handle = use_table(move || TableState::new(rows.clone(), applied_rule_columns(filter_domains.clone(), filter_provenances.clone(), filter_scopes.clone())));
+    let handle = use_table(move || {
+        TableState::new(
+            rows.clone(),
+            applied_rule_columns(
+                filter_domains.clone(),
+                filter_provenances.clone(),
+                filter_scopes.clone(),
+            ),
+        )
+    });
     use_hook(move || {
         handle.set_pagination_mode(PaginationMode::InfiniteScroll);
         let _ = handle.set_page_size(2000);
@@ -1097,7 +1151,11 @@ pub(super) fn ProjectRulesTable(
         m.insert(
             ColumnId("enf_type"),
             std::sync::Arc::new(move |r: &AppliedRuleRow, _val: &CellValue| {
-                let enf = r.corpus.as_ref().map(|c| c.enforcement.as_str()).unwrap_or("");
+                let enf = r
+                    .corpus
+                    .as_ref()
+                    .map(|c| c.enforcement.as_str())
+                    .unwrap_or("");
                 let tip = enforcement_tooltip(enf);
                 let label = if enf.is_empty() { "\u{2014}" } else { enf };
                 rsx! { span { title: "{tip}", "{label}" } }
@@ -1677,7 +1735,7 @@ pub(super) fn RulesDetailModalHost(on_option_picked: EventHandler<(String, Strin
                     div { class: "rule-modal-section",
                         span { class: "rule-modal-label", "Choose the alternative to adopt" }
                         if r.default_option.is_none() {
-                            p { class: "rule-modal-mustchoose", "No default — you must choose an alternative before arming." }
+                            p { class: "rule-modal-mustchoose", "No default set. Pick an alternative here if you'd like, or leave it: the audit will recommend one for you." }
                         }
                         div { class: "rule-modal-opts",
                             for o in r.options.iter() {
@@ -1878,7 +1936,10 @@ pub(super) fn ModelProfileEditor(project: ProjectView, refresh: Signal<u32>) -> 
 
 /// Build the human-readable change summary for the confirm popup.
 /// Returns (lines, affected_count).
-fn build_change_summary(project: &ProjectView, preview: &Option<serde_json::Value>) -> (Vec<String>, usize) {
+fn build_change_summary(
+    project: &ProjectView,
+    preview: &Option<serde_json::Value>,
+) -> (Vec<String>, usize) {
     let Some(v) = preview else {
         return (vec!["Preview unavailable.".to_string()], 0);
     };
@@ -1897,13 +1958,19 @@ fn build_change_summary(project: &ProjectView, preview: &Option<serde_json::Valu
         let new_strongest = tm.get("strongest").and_then(|v| v.as_str()).unwrap_or("");
         let cur_strongest = &project.tier_map.strongest;
         if new_strongest != cur_strongest {
-            lines.push(format!("tier.strongest: {} \u{2192} {}", cur_strongest, new_strongest));
+            lines.push(format!(
+                "tier.strongest: {} \u{2192} {}",
+                cur_strongest, new_strongest
+            ));
             count += 1;
         }
         let new_balanced = tier_chain_str(tm.get("balanced"));
         let cur_balanced = project.tier_map.balanced.join(", ");
         if new_balanced != cur_balanced {
-            lines.push(format!("tier.balanced: {} \u{2192} {}", cur_balanced, new_balanced));
+            lines.push(format!(
+                "tier.balanced: {} \u{2192} {}",
+                cur_balanced, new_balanced
+            ));
             count += 1;
         }
         let new_fast = tier_chain_str(tm.get("fast"));
@@ -1939,13 +2006,28 @@ fn build_change_summary(project: &ProjectView, preview: &Option<serde_json::Valu
         let new_enabled = l3.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false);
         let cur_enabled = project.l3_review.enabled;
         if new_enabled != cur_enabled {
-            lines.push(format!("l3.enabled: {} \u{2192} {}", cur_enabled, new_enabled));
+            lines.push(format!(
+                "l3.enabled: {} \u{2192} {}",
+                cur_enabled, new_enabled
+            ));
             count += 1;
         }
         let new_model = l3.get("model").and_then(|v| v.as_str()).unwrap_or("");
         let cur_model = project.l3_review.model.as_str();
         if new_model != cur_model {
-            lines.push(format!("l3.model: {} \u{2192} {}", if cur_model.is_empty() { "(balanced fallback)" } else { cur_model }, if new_model.is_empty() { "(balanced fallback)" } else { new_model }));
+            lines.push(format!(
+                "l3.model: {} \u{2192} {}",
+                if cur_model.is_empty() {
+                    "(balanced fallback)"
+                } else {
+                    cur_model
+                },
+                if new_model.is_empty() {
+                    "(balanced fallback)"
+                } else {
+                    new_model
+                }
+            ));
             count += 1;
         }
     }
@@ -2223,7 +2305,7 @@ pub(super) fn TierMapEditor(project: ProjectView) -> Element {
                         input {
                             class: "tier-map-input addressee-input",
                             r#type: "text",
-                            placeholder: "e.g. claude-opus-4-8",
+                            placeholder: "e.g. claude-opus-5",
                             value: "{strongest}",
                             oninput: move |e| strongest.set(e.value()),
                         }
@@ -2490,9 +2572,9 @@ pub(super) fn StepModelRow(
                         saving.set(true);
                         spawn(async move {
                             if set_project_step_model(&pid, step_key, &model).await {
-                                crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, &format!("{label} model saved."));
+                                crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, format!("{label} model saved."));
                             } else {
-                                crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, &format!("Could not save {label} model."));
+                                crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, format!("Could not save {label} model."));
                             }
                             saving.set(false);
                         });
@@ -2713,6 +2795,111 @@ pub(super) fn L3ReviewEditor(project: ProjectView) -> Element {
     }
 }
 
+/// Per-project **Backend** control (`docs/design/2026-09-22_per-project-backend.md`): a CLI /
+/// API choice that is the source of truth for EVERY project-scoped model call, the scan, the
+/// alternative-recommendation pass, the disagreement rescan, and the governed dev loop.
+/// Replaces the old "Allow Claude CLI (personal subscription)" checkbox.
+///
+/// - **CLI** (the default) runs on the operator's Claude Code subscription. No API key needed;
+///   a scan "just works" out of the box.
+/// - **API** runs on the Anthropic API. Needs an Anthropic API key; if one is missing, the AI
+///   step does not run (the deterministic floor still does) rather than silently falling back
+///   to the CLI. This is the compliant, metered, single-party chain nameable in a client
+///   contract, so a project doing client work should be set to API.
+///
+/// Auto-saves on change (same idiom as the Designer/vision toggle in `TierMapEditor`), except
+/// the local signal is reconciled from the server's ECHOED value — `set_project_backend`
+/// returns `Option<ProjectBackend>`, not a bare success flag — since this is a
+/// compliance-relevant setting that must never silently drift from what the server actually
+/// persisted. A failed save reverts the control to its pre-click state rather than leaving it
+/// showing an unconfirmed value.
+#[component]
+pub(super) fn BackendEditor(project: ProjectView) -> Element {
+    let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
+    let pid = project.id.clone();
+    let mut backend = use_signal(|| project.backend);
+    let mut saving = use_signal(|| false);
+
+    let seg = move |candidate: ProjectBackend, label: &'static str| {
+        let is_active = backend() == candidate;
+        // Cloned per invocation (`seg` is called once per segment) so the `move` onclick
+        // closure below moves this fresh clone, not the `pid` `seg` itself captured — moving
+        // the latter would make `seg` an `FnOnce`, unable to render the second segment.
+        let pid = pid.clone();
+        rsx! {
+            button {
+                key: "{label}",
+                r#type: "button",
+                class: if is_active {
+                    "backend-seg backend-seg-active"
+                } else {
+                    "backend-seg"
+                },
+                disabled: saving() || is_active,
+                onclick: move |_| {
+                    if is_active {
+                        return;
+                    }
+                    let previous = backend();
+                    // Optimistic flip so the control responds immediately; reconciled (or
+                    // reverted) below once the server confirms what it actually persisted.
+                    backend.set(candidate);
+                    let pid = pid.clone();
+                    saving.set(true);
+                    spawn(async move {
+                        match set_project_backend(&pid, candidate).await {
+                            Some(confirmed) => {
+                                backend.set(confirmed);
+                                crate::toast::push_toast(
+                                    toasts,
+                                    crate::toast::ToastKind::Info,
+                                    format!("Backend set to {} for this project.", confirmed.label()),
+                                );
+                            }
+                            None => {
+                                backend.set(previous);
+                                crate::toast::push_toast(
+                                    toasts,
+                                    crate::toast::ToastKind::Error,
+                                    "Could not update the project backend.",
+                                );
+                            }
+                        }
+                        saving.set(false);
+                    });
+                },
+                "{label}"
+            }
+        }
+    };
+
+    rsx! {
+        div { class: "tier-map-editor backend-editor",
+            p { class: "tier-map-heading", "Backend" }
+            p { class: "section-hint tier-map-hint",
+                "CLI is your Claude Code subscription, no key needed. API is the Anthropic API, \
+                 it needs an Anthropic API key and is the compliant, metered chain for client \
+                 code. This governs every AI call this project makes: the scan, alternative \
+                 recommendations, rescans, and the governed dev loop."
+            }
+            div { class: "tier-map-row backend-toggle-row",
+                label { class: "tier-map-band-label", "Project backend" }
+                div { class: "backend-toggle",
+                    {seg(ProjectBackend::Cli, "CLI")}
+                    {seg(ProjectBackend::Api, "API")}
+                }
+            }
+            span { class: "l3-review-toggle-hint backend-toggle-hint",
+                if backend() == ProjectBackend::Cli {
+                    "CLI selected. Scans and the dev loop run on your Claude Code subscription."
+                } else {
+                    "API selected. If no Anthropic API key is configured, AI steps on this project will not run until one is saved; the deterministic floor still runs."
+                }
+            }
+        }
+    }
+}
+
 #[component]
 pub(super) fn RulesView() -> Element {
     let mut refresh = use_signal(|| 0u32);
@@ -2742,6 +2929,9 @@ pub(super) fn RulesView() -> Element {
     // imported scoping as-is.
     let mut import_repos = use_signal(Vec::<String>::new);
     let mut emitting_local = use_signal(|| false);
+    // Emitting writes into (and would re-clone) every repo's checkout, so it is off while any
+    // repo's source is deleted on purpose; the notice beside it carries the way back.
+    let source_block = crate::source_ui::use_scan_block();
     // Emit cascade toggles (each requires the previous): commit to a managed branch → push it →
     // open a PR. All off = write the ruleset into the local working copy only.
     let mut emit_branch = use_signal(|| false);
@@ -2824,15 +3014,21 @@ pub(super) fn RulesView() -> Element {
             let Some(mut p) = proj_scope.clone() else {
                 return;
             };
-            let corpus_by_id: std::collections::HashMap<String, ProposedRuleView> =
-                corpus_scope.iter().map(|r| (r.id.clone(), r.clone())).collect();
+            let corpus_by_id: std::collections::HashMap<String, ProposedRuleView> = corpus_scope
+                .iter()
+                .map(|r| (r.id.clone(), r.clone()))
+                .collect();
             let changed = apply_repo_scope(&mut p, &rule_id, &repo, add, &corpus_by_id);
             if !changed {
                 return;
             }
             let pid = p.id.clone();
             let body = build_ruleset_json(&p);
-            let verb = if add { "Added rule to" } else { "Removed rule from" };
+            let verb = if add {
+                "Added rule to"
+            } else {
+                "Removed rule from"
+            };
             spawn(async move {
                 if save_ruleset(&pid, body).await {
                     crate::toast::push_toast(
@@ -3016,7 +3212,7 @@ pub(super) fn RulesView() -> Element {
                         div { class: "rules-emit",
                             button {
                                 class: "btn-run",
-                                disabled: emitting_local(),
+                                disabled: emitting_local() || source_block.is_some(),
                                 onclick: move |_| {
                                     let id = pid_emit_local.clone();
                                     let (b, pu, pr) = (emit_branch(), emit_push(), emit_pr());
@@ -3032,6 +3228,9 @@ pub(super) fn RulesView() -> Element {
                                     });
                                 },
                                 if emitting_local() { "Emitting…" } else { "Emit rules locally" }
+                            }
+                            if let Some(block) = source_block.clone() {
+                                crate::source_ui::ScanBlockNotice { block }
                             }
                             // Cascading toggles. Unchecking a level clears the deeper ones so a
                             // request can never be branch=false but push=true.
@@ -3340,9 +3539,8 @@ pub(super) fn RuleCount(label: String, n: usize) -> Element {
 // verif_badge + all rules view-model items now live in the framework-agnostic core
 // (RUST-HEADLESS-CORE-1); re-exported here so all call sites are unchanged.
 pub(super) use camerata_ui_core::rules::{
-    split_needs_review, verif_badge,
-    SelectionBucket, bucket_of, project_level_insert, RuleOptionView, RuleSourceView, ProposedRuleView, default_draft,
-    rules_csv, csv_field, rules_needing_option_chosen,
+    bucket_of, project_level_insert, rules_csv, rules_needing_option_chosen, split_needs_review,
+    verif_badge, ProposedRuleView, RuleOptionView, RuleSourceView, SelectionBucket,
 };
 
 /// Build a human-readable tooltip string from a list of sources.
@@ -3513,7 +3711,6 @@ pub(super) async fn create_ticket(
     }
 }
 
-
 /// The deterministic security-floor rule ids — the gate's content arms. A finding carrying one
 /// of these is ENFORCED: pure regex/logic, repeatable (same code → same id, same line), gateable,
 /// and its id is canonical. EVERYTHING else is ADVISORY — whether an AI-invented `AI-*` id OR the
@@ -3549,10 +3746,13 @@ pub(super) fn rule_columns(domains: Vec<String>) -> Vec<ColumnDef<ProposedRuleVi
     // `needs_recheck` -> yellow (was verified; source drifted)
     // `draft`         -> gray   (AI-generated, not yet grounded; default)
     let verif_badges = BadgeVariantMap::new()
-        .with("verified",      BadgeVariant::new("\u{2713} Verified",  "green"))
-        .with("grounded",      BadgeVariant::new("\u{29bf} Grounded", "blue"))
-        .with("needs_recheck", BadgeVariant::new("Needs re-check",    "yellow"))
-        .with("draft",         BadgeVariant::new("Draft",             "gray"));
+        .with("verified", BadgeVariant::new("\u{2713} Verified", "green"))
+        .with("grounded", BadgeVariant::new("\u{29bf} Grounded", "blue"))
+        .with(
+            "needs_recheck",
+            BadgeVariant::new("Needs re-check", "yellow"),
+        )
+        .with("draft", BadgeVariant::new("Draft", "gray"));
     vec![
         // The group-by column (the table groups on this). A rule's corpus domain —
         // sql / api-layer / ui / security / architecture / process / integration.
@@ -3585,7 +3785,10 @@ pub(super) fn rule_columns(domains: Vec<String>) -> Vec<ColumnDef<ProposedRuleVi
         .sortable()
         .render_kind(RenderKind::Badge(
             BadgeVariantMap::new()
-                .with("recommended", BadgeVariant::new("\u{2713} Recommended", "green"))
+                .with(
+                    "recommended",
+                    BadgeVariant::new("\u{2713} Recommended", "green"),
+                )
                 .with("available", BadgeVariant::new("Available", "gray")),
         ))
         .initial_width(150.0),
@@ -3641,9 +3844,11 @@ pub(super) fn rule_columns(domains: Vec<String>) -> Vec<ColumnDef<ProposedRuleVi
         // filters for free) via `handle.set_filter(ColumnId("needs_option"), ...)`. The
         // cell value is just the rule id; the toggle sets a `FilterValue::MultiSelect`
         // of exactly the ids from `rules_needing_option_chosen`.
-        ColumnDef::new(ColumnId("needs_option"), "Needs option", |r: &ProposedRuleView| {
-            CellValue::Text(r.id.clone())
-        }),
+        ColumnDef::new(
+            ColumnId("needs_option"),
+            "Needs option",
+            |r: &ProposedRuleView| CellValue::Text(r.id.clone()),
+        ),
     ]
 }
 
@@ -3726,6 +3931,11 @@ pub(super) fn ProposedRulesTable(
     findings: Vec<FindingView>,
     on_audit: EventHandler<Vec<SelectedAuditRule>>,
     auditing: bool,
+    /// Set when an audited repo's source was deleted from this machine: audit, apply and
+    /// open-PR then need source that is not there, so they are disabled (the notice carries the
+    /// way back).
+    #[props(default)]
+    scan_block: Option<camerata_ui_core::readiness::ScanBlock>,
 ) -> Element {
     let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
     let chosen = use_context::<Signal<std::collections::HashMap<String, String>>>();
@@ -4004,10 +4214,9 @@ pub(super) fn ProposedRulesTable(
         .filter_map(|rid| id_map.get(rid).map(|r| r.id.clone()))
         .collect();
     // Rules that are BOTH selected (in this table) AND still unresolved — they have options
-    // but neither a chosen alternative nor a usable default directive, so the architect must
-    // pick one before the rule can be enforced. Computed via the shared
+    // but neither a chosen alternative nor a usable default directive. Computed via the shared
     // `rules_needing_option_chosen` predicate (ui-core) so the row highlight, this table's
-    // "Needs option" filter, and the audit/arm gate below can never disagree about which
+    // "Needs option" filter, and the informational hint below can never disagree about which
     // rules still need a choice. Recomputed each render (reads `chosen` + the live
     // selection), so picking an alternative or (de)selecting a row updates it immediately.
     let cur_repo = viewed_repo();
@@ -4017,10 +4226,12 @@ pub(super) fn ProposedRulesTable(
             chosen.read().get(&chosen_key(&cur_repo, rid)).cloned()
         })
     };
-    // The SELECTED unresolved rules ACROSS EVERY REPO's picks (matching the arm guard). These
-    // BLOCK both buttons: an unresolved rule you've selected can't be audited or armed. An
-    // unresolved rule you HAVEN'T selected is only highlighted, not blocking. This is also why
-    // audit no longer silently falls back to the rule title — it's gated the same as arm now.
+    // The SELECTED unresolved rules ACROSS EVERY REPO's picks. Audit-integrated alternative
+    // recommendation (docs/design/2026-09-22_audit-integrated-alternatives.md) removed the hard
+    // gate this used to drive: an unresolved rule no longer blocks audit or arm — the audit
+    // itself now recommends an alternative when none is chosen. This set is kept ONLY to power
+    // the informational "these still need a choice" hint below (and the yellow row highlight /
+    // "Needs option" filter above); it never disables a button.
     let unresolved_selected: Vec<String> = {
         let gate_selected: std::collections::HashSet<String> = if view_repo.is_empty() {
             selected_rule_ids.clone()
@@ -4033,20 +4244,19 @@ pub(super) fn ProposedRulesTable(
             map.values().flatten().cloned().collect()
         };
         let cur_repo = cur_repo.clone();
-        let mut v: Vec<String> = rules_needing_option_chosen(
-            id_map.values(),
-            &gate_selected,
-            move |rid: &str| chosen.read().get(&chosen_key(&cur_repo, rid)).cloned(),
-        )
-        .into_iter()
-        .collect();
+        let mut v: Vec<String> =
+            rules_needing_option_chosen(id_map.values(), &gate_selected, move |rid: &str| {
+                chosen.read().get(&chosen_key(&cur_repo, rid)).cloned()
+            })
+            .into_iter()
+            .collect();
         v.sort();
         v
     };
     let has_unresolved = !unresolved_selected.is_empty();
     let unresolved_hint = if has_unresolved {
         format!(
-            "Choose an alternative first for: {}",
+            "No alternative chosen yet for: {}. The audit will recommend one automatically.",
             unresolved_selected.join(", ")
         )
     } else {
@@ -4078,11 +4288,10 @@ pub(super) fn ProposedRulesTable(
                 .iter()
                 .filter_map(|rid| id_map_filter.get(rid).map(|r| r.id.clone()))
                 .collect();
-            let needing = rules_needing_option_chosen(
-                id_map_filter.values(),
-                &selected_ids,
-                |rid: &str| chosen_map.get(&chosen_key(&cur_repo, rid)).cloned(),
-            );
+            let needing =
+                rules_needing_option_chosen(id_map_filter.values(), &selected_ids, |rid: &str| {
+                    chosen_map.get(&chosen_key(&cur_repo, rid)).cloned()
+                });
             let desired = if on && !needing.is_empty() {
                 Some(FilterValue::MultiSelect(needing))
             } else {
@@ -4170,23 +4379,26 @@ pub(super) fn ProposedRulesTable(
                 }
             }),
         }
-        // Explain WHY the buttons below are disabled: one or more selected rules still need an
-        // alternative chosen (highlighted yellow above). Click each to pick one; the buttons
-        // re-enable once all are resolved.
+        // Informational only — this no longer disables audit or arm (the audit recommends an
+        // alternative for any rule left unresolved). Highlighted yellow above so the architect
+        // can still choose one deliberately if they'd rather not wait for the recommendation.
         if has_unresolved {
             div { class: "rule-gate-warning", role: "alert",
                 span { class: "rule-gate-warning-icon", "\u{26A0}" }
                 span {
-                    "These selected rules need an alternative chosen before you can audit or add them (highlighted yellow above): "
+                    "These selected rules have no alternative chosen yet (highlighted yellow above): "
                     strong { "{unresolved_selected.join(\", \")}" }
-                    ". Click each rule to pick an option."
+                    ". The audit will recommend one for you automatically; click a rule to choose one yourself if you'd rather decide now."
                 }
             }
+        }
+        if let Some(block) = scan_block.clone() {
+            crate::source_ui::ScanBlockNotice { block }
         }
         div { class: "findings-toolbar",
             button {
                 class: "btn-run",
-                disabled: auditing || has_unresolved,
+                disabled: auditing || scan_block.is_some(),
                 title: unresolved_hint.clone(),
                 onclick: move |_| {
                     // Build the audit request from EVERY repo's saved selection, so one scan
@@ -4244,7 +4456,7 @@ pub(super) fn ProposedRulesTable(
             }
             button {
                 class: "btn-run",
-                disabled: arming() || has_unresolved,
+                disabled: arming() || scan_block.is_some(),
                 title: unresolved_hint.clone(),
                 onclick: move |_| {
                     // Arm across EVERY repo's selection: a rule selected in one or more repos'
@@ -4373,7 +4585,7 @@ pub(super) fn ProposedRulesTable(
             }
             button {
                 class: "btn-run",
-                disabled: opening_pr() || applied_repos().is_empty(),
+                disabled: opening_pr() || applied_repos().is_empty() || scan_block.is_some(),
                 title: if applied_repos().is_empty() { "Apply the rules first; then open the PR from the pushed branch." } else { "" },
                 onclick: move |_| {
                     let repos = applied_repos();
@@ -4538,7 +4750,7 @@ pub(super) fn RuleDetailModal() -> Element {
                     div { class: "rule-modal-section",
                         span { class: "rule-modal-label", "Choose the alternative to adopt" }
                         if r.default_option.is_none() {
-                            p { class: "rule-modal-mustchoose", "No default — you must choose an alternative before arming." }
+                            p { class: "rule-modal-mustchoose", "No default set. Pick an alternative here if you'd like, or leave it: the audit will recommend one for you." }
                         }
                         div { class: "rule-modal-opts",
                             for o in r.options.iter() {
@@ -4747,6 +4959,59 @@ pub(super) struct RuleDriftEntry {
     /// Repos in the project that currently have the stale directive.
     #[serde(default)]
     pub repos: Vec<String>,
+    /// `true` when the stored baseline came from an older build and cannot be compared with the
+    /// current corpus (the server sends `changed: null` for these). Nothing is known to have
+    /// changed; the entry is there so the architect can re-baseline it.
+    #[serde(default)]
+    pub legacy_baseline: bool,
+    /// The rule's `version` when it was accepted; `None` when unknown (accepted before rules
+    /// carried a version).
+    #[serde(default)]
+    pub applied_version: Option<u32>,
+    /// The rule's `version` in the corpus now; `None` when the rule was removed.
+    #[serde(default)]
+    pub current_version: Option<u32>,
+}
+
+/// `(real changes, legacy baselines)` in a drift list. The two are told apart because they mean
+/// different things to the reader: a change is a fact, a legacy baseline is an unknown.
+pub(super) fn drift_counts(entries: &[RuleDriftEntry]) -> (usize, usize) {
+    let legacy = entries.iter().filter(|e| e.legacy_baseline).count();
+    (entries.len() - legacy, legacy)
+}
+
+/// The notice's headline for `changed` real changes and `legacy` unknown baselines. A legacy
+/// baseline is never described as an update: the old fingerprint says nothing either way.
+pub(super) fn drift_notice_title(changed: usize, legacy: usize) -> String {
+    match (changed, legacy) {
+        (c, 0) => format!("{c} applied rule(s) have corpus updates"),
+        (0, l) => format!("{l} applied rule(s) have an older baseline"),
+        (c, l) => format!("{c} applied rule(s) have corpus updates, {l} have an older baseline"),
+    }
+}
+
+/// The notice's explanatory line, covering only what is actually present in the list.
+pub(super) fn drift_notice_hint(changed: usize, legacy: usize) -> String {
+    const CHANGED: &str = "Some rules were adopted before their corpus entry was updated. \
+        Review the diff and accept the update to keep your governance in sync.";
+    const LEGACY: &str = "Some rules were last accepted by an older version of Camerata, \
+        whose fingerprint cannot be compared with the current corpus; nothing is known to have \
+        changed. Review the current text and accept it to re-baseline.";
+    match (changed > 0, legacy > 0) {
+        (true, false) => CHANGED.to_string(),
+        (false, true) => LEGACY.to_string(),
+        _ => format!("{CHANGED} {LEGACY}"),
+    }
+}
+
+/// `"v2 to v4"` when the rule's version moved between acceptance and now and both ends are
+/// known; `None` otherwise (an unknown end is never guessed, and an equal version is no
+/// transition).
+pub(super) fn drift_version_note(entry: &RuleDriftEntry) -> Option<String> {
+    match (entry.applied_version, entry.current_version) {
+        (Some(a), Some(c)) if a != c => Some(format!("v{a} to v{c}")),
+        _ => None,
+    }
 }
 
 pub(super) async fn fetch_rule_drift(project_id: &str) -> Option<Vec<RuleDriftEntry>> {
@@ -4803,17 +5068,16 @@ pub(super) fn RuleDriftNotice(project_id: String) -> Element {
     // Which entry's diff is currently expanded.
     let expanded: Signal<Option<String>> = use_signal(|| None);
 
+    let (changed_n, legacy_n) = drift_counts(&drift);
+    let title = drift_notice_title(changed_n, legacy_n);
+    let hint = drift_notice_hint(changed_n, legacy_n);
+
     rsx! {
         div { class: "drift-notice",
             div { class: "drift-notice-header",
                 span { class: "drift-notice-icon", "\u{26A0}" }
-                span { class: "drift-notice-title",
-                    "{drift.len()} applied rule(s) have corpus updates"
-                }
-                p { class: "drift-notice-hint",
-                    "These rules were adopted before their corpus entry was updated. \
-                     Review the diff and accept the update to keep your governance in sync."
-                }
+                span { class: "drift-notice-title", "{title}" }
+                p { class: "drift-notice-hint", "{hint}" }
             }
             for entry in drift.iter() {
                 {
@@ -4832,6 +5096,12 @@ pub(super) fn RuleDriftNotice(project_id: String) -> Element {
                                 }
                                 if !entry.repos.is_empty() {
                                     span { class: "drift-entry-repos", "repos: {entry.repos.join(\", \")}" }
+                                }
+                                if let Some(note) = drift_version_note(&entry) {
+                                    span { class: "drift-entry-version", "{note}" }
+                                }
+                                if entry.legacy_baseline {
+                                    span { class: "drift-entry-version", "older baseline" }
                                 }
                                 button {
                                     class: "btn-edit-sm",
@@ -4886,6 +5156,12 @@ pub(super) fn RuleDriftNotice(project_id: String) -> Element {
 /// The scope at which a single-rule edit applies. Rules cascade: repo overrides
 /// project which overrides the corpus default. The editor lets the architect pick
 /// which level to write to.
+// dead_code: `SingleRuleEditor` (the only constructor) was unmounted from the Rules page when
+// row -> modal editing replaced the inline editor (ddfc61d), but the repo-scoped override
+// (`POST /api/projects/:id/repos/:repo/rules/:rule_id`) has no other UI entry point yet, so
+// the scope model is kept for re-homing into the rule modal. See
+// docs/decisions/2026-06-21_cockpit_pw_wave.md.
+#[allow(dead_code)]
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum RuleEditScope {
     /// Edit the project-level rule selection (applies to all repos in the project).
@@ -4899,7 +5175,10 @@ pub(super) enum RuleEditScope {
 /// Retained as the documented server contract; the UI currently opens the editor
 /// without pre-fetching (the data is already in `ProjectView`).
 #[allow(dead_code)]
-pub(super) async fn fetch_single_rule(project_id: &str, rule_id: &str) -> Option<serde_json::Value> {
+pub(super) async fn fetch_single_rule(
+    project_id: &str,
+    rule_id: &str,
+) -> Option<serde_json::Value> {
     reqwest::get(format!(
         "{}/api/projects/{}/rules/{}",
         crate::bff_base(),
@@ -4923,6 +5202,8 @@ pub(super) async fn fetch_single_rule(project_id: &str, rule_id: &str) -> Option
 /// Both handlers read `{ "chosen_option": "opt-id" }` from the body; the scope is
 /// carried by the URL, not a body field. Routing repo edits through the repo path
 /// is what makes the override land at repo level instead of silently at project level.
+// dead_code: see `RuleEditScope` (its only caller, `SingleRuleEditor`, is unmounted).
+#[allow(dead_code)]
 pub(super) async fn save_single_rule_edit(
     project_id: &str,
     rule_id: &str,
@@ -5127,10 +5408,9 @@ pub(super) fn SingleRuleEditor(
 mod tests {
     use super::{
         applied_rule_columns, apply_repos_to_ruleset, corpus_columns, custom_columns,
-        default_draft, domain_from_rule_id, is_inline_only_rule_id, resolve_selection_repos,
-        rule_columns, selection_key, AppliedRuleRow, CellValue, ColumnId, CustomRuleView,
-        ProposedRuleView, RuleOptionView, RuleSelectionView, SelectionBucket,
-        SINGLE_REPO_SELECTION_KEY,
+        domain_from_rule_id, is_inline_only_rule_id, resolve_selection_repos, rule_columns,
+        selection_key, AppliedRuleRow, CellValue, ColumnId, CustomRuleView, ProposedRuleView,
+        RuleOptionView, RuleSelectionView, SelectionBucket, SINGLE_REPO_SELECTION_KEY,
     };
 
     /// Find a column by its `ColumnId` string and run its `accessor` against `row`,
@@ -5168,7 +5448,7 @@ mod tests {
 
         // Sentinel → the one real repo.
         assert_eq!(
-            resolve_selection_repos(&[sentinel.clone()], &all_repos),
+            resolve_selection_repos(std::slice::from_ref(&sentinel), &all_repos),
             vec!["me/api".to_string()]
         );
 
@@ -5179,7 +5459,7 @@ mod tests {
         );
 
         // Empty all_repos → the sentinel is DROPPED, never persisted.
-        assert!(resolve_selection_repos(&[sentinel.clone()], &[]).is_empty());
+        assert!(resolve_selection_repos(std::slice::from_ref(&sentinel), &[]).is_empty());
 
         // A real repo alongside the sentinel dedups against the sentinel's expansion.
         assert_eq!(
@@ -5188,7 +5468,8 @@ mod tests {
         );
 
         // The resolved output never carries a NUL byte.
-        let resolved = resolve_selection_repos(&[SINGLE_REPO_SELECTION_KEY.to_string()], &all_repos);
+        let resolved =
+            resolve_selection_repos(&[SINGLE_REPO_SELECTION_KEY.to_string()], &all_repos);
         assert!(!resolved.iter().any(|r| r.contains('\0')));
     }
 
@@ -5237,8 +5518,16 @@ mod tests {
     /// This test documents the BROKEN behavior and shows why the gate was needed.
     #[test]
     fn writeback_before_restore_contaminates_repo_selection() {
-        let saved_picks = vec!["rule-a".to_string(), "rule-c".to_string(), "rule-d".to_string()];
-        let recommended_only_seed = vec!["rule-a".to_string(), "rule-b".to_string(), "rule-c".to_string()];
+        let saved_picks = vec![
+            "rule-a".to_string(),
+            "rule-c".to_string(),
+            "rule-d".to_string(),
+        ];
+        let recommended_only_seed = vec![
+            "rule-a".to_string(),
+            "rule-b".to_string(),
+            "rule-c".to_string(),
+        ];
 
         // repo_selection starts with saved picks (set by the use_future async restore).
         let mut repo_selection: std::collections::HashMap<String, Vec<String>> =
@@ -5254,16 +5543,28 @@ mod tests {
         );
 
         // Now restore fires and reads repo_selection — but it's been contaminated.
-        let restored = repo_selection.get(SINGLE_REPO_SELECTION_KEY).unwrap().clone();
+        let restored = repo_selection
+            .get(SINGLE_REPO_SELECTION_KEY)
+            .unwrap()
+            .clone();
         let mut restored_sorted = restored.clone();
         restored_sorted.sort();
         let mut expected_sorted = recommended_only_seed.clone();
         expected_sorted.sort();
-        assert_eq!(restored_sorted, expected_sorted, "contaminated: restore saw recommended-only seed, not saved picks");
+        assert_eq!(
+            restored_sorted, expected_sorted,
+            "contaminated: restore saw recommended-only seed, not saved picks"
+        );
         // Specifically: the user's non-recommended pick (rule-d) was lost.
-        assert!(!restored.contains(&"rule-d".to_string()), "rule-d (user pick) must be lost in the buggy path");
+        assert!(
+            !restored.contains(&"rule-d".to_string()),
+            "rule-d (user pick) must be lost in the buggy path"
+        );
         // And rule-b (which the user deselected) was reintroduced.
-        assert!(restored.contains(&"rule-b".to_string()), "rule-b (user deselected) reappears in the buggy path");
+        assert!(
+            restored.contains(&"rule-b".to_string()),
+            "rule-b (user deselected) reappears in the buggy path"
+        );
     }
 
     /// Simulates the CORRECT ordering: restore runs first (applying saved picks to
@@ -5272,8 +5573,16 @@ mod tests {
     /// `selection_restored` is true, which the restore effect sets after it completes.
     #[test]
     fn restore_before_writeback_preserves_user_picks() {
-        let saved_picks = vec!["rule-a".to_string(), "rule-c".to_string(), "rule-d".to_string()];
-        let recommended_only_seed = vec!["rule-a".to_string(), "rule-b".to_string(), "rule-c".to_string()];
+        let saved_picks = vec![
+            "rule-a".to_string(),
+            "rule-c".to_string(),
+            "rule-d".to_string(),
+        ];
+        let recommended_only_seed = vec![
+            "rule-a".to_string(),
+            "rule-b".to_string(),
+            "rule-c".to_string(),
+        ];
 
         // repo_selection starts with saved picks (set by the async use_future).
         let mut repo_selection: std::collections::HashMap<String, Vec<String>> =
@@ -5294,7 +5603,10 @@ mod tests {
 
         // Step 2: Writeback fires (only because selection_restored is now true).
         // It reads the corrected table checkboxes (saved picks, not recommended-only seed).
-        assert!(selection_restored, "writeback gate check: selection_restored must be true");
+        assert!(
+            selection_restored,
+            "writeback gate check: selection_restored must be true"
+        );
         repo_selection.insert(
             SINGLE_REPO_SELECTION_KEY.to_string(),
             current_table_selection.clone(),
@@ -5306,12 +5618,21 @@ mod tests {
         final_sorted.sort();
         let mut picks_sorted = saved_picks.clone();
         picks_sorted.sort();
-        assert_eq!(final_sorted, picks_sorted, "correct path: repo_selection must match saved picks");
+        assert_eq!(
+            final_sorted, picks_sorted,
+            "correct path: repo_selection must match saved picks"
+        );
 
         // The user's non-recommended pick (rule-d) is preserved.
-        assert!(final_selection.contains(&"rule-d".to_string()), "rule-d (user pick) must survive");
+        assert!(
+            final_selection.contains(&"rule-d".to_string()),
+            "rule-d (user pick) must survive"
+        );
         // The user's deselected rule (rule-b) stays gone.
-        assert!(!final_selection.contains(&"rule-b".to_string()), "rule-b (user-deselected) must not reappear");
+        assert!(
+            !final_selection.contains(&"rule-b".to_string()),
+            "rule-b (user-deselected) must not reappear"
+        );
     }
 
     /// When there is no saved entry (fresh first-view), the restore effect falls through
@@ -5334,13 +5655,19 @@ mod tests {
         let selection_restored = true; // unconditional set in fixed code
 
         // Writeback fires because selection_restored is true.
-        assert!(selection_restored, "writeback must be unblocked even with no saved entry");
+        assert!(
+            selection_restored,
+            "writeback must be unblocked even with no saved entry"
+        );
 
         // The writeback reads the recommended seed from the table checkboxes (use_hook
         // seeded them since there was no saved entry) and writes it to repo_selection.
         let mut result: std::collections::HashMap<String, Vec<String>> =
             std::collections::HashMap::new();
-        result.insert(SINGLE_REPO_SELECTION_KEY.to_string(), recommended_seed.clone());
+        result.insert(
+            SINGLE_REPO_SELECTION_KEY.to_string(),
+            recommended_seed.clone(),
+        );
 
         assert_eq!(
             result.get(SINGLE_REPO_SELECTION_KEY).cloned(),
@@ -5358,7 +5685,10 @@ mod tests {
 
     #[test]
     fn domain_from_rule_id_sec_prefix_is_security() {
-        assert_eq!(domain_from_rule_id("SEC-NO-HARDCODED-SECRETS-1"), "security");
+        assert_eq!(
+            domain_from_rule_id("SEC-NO-HARDCODED-SECRETS-1"),
+            "security"
+        );
         assert_eq!(domain_from_rule_id("SEC-NO-RAW-SQL-CONCAT-1"), "security");
         assert_eq!(domain_from_rule_id("SEC-NO-PRIVATE-KEY-1"), "security");
     }
@@ -5380,12 +5710,18 @@ mod tests {
 
     #[test]
     fn domain_from_rule_id_integration_prefix() {
-        assert_eq!(domain_from_rule_id("INTEGRATION-API-CONTRACT-1"), "integration");
+        assert_eq!(
+            domain_from_rule_id("INTEGRATION-API-CONTRACT-1"),
+            "integration"
+        );
     }
 
     #[test]
     fn domain_from_rule_id_process_prefix() {
-        assert_eq!(domain_from_rule_id("PROCESS-CONVENTIONAL-COMMIT-1"), "process");
+        assert_eq!(
+            domain_from_rule_id("PROCESS-CONVENTIONAL-COMMIT-1"),
+            "process"
+        );
     }
 
     #[test]
@@ -5396,7 +5732,10 @@ mod tests {
 
     #[test]
     fn domain_from_rule_id_arch_prefix() {
-        assert_eq!(domain_from_rule_id("ARCH-STRICT-LAYERING-1"), "architecture");
+        assert_eq!(
+            domain_from_rule_id("ARCH-STRICT-LAYERING-1"),
+            "architecture"
+        );
     }
 
     #[test]
@@ -5553,7 +5892,10 @@ mod tests {
             row("R", None, SelectionBucket::CrossRepo, None).scope_label(),
             "cross-repo"
         );
-        assert_eq!(row("R", None, SelectionBucket::Process, None).scope_label(), "process");
+        assert_eq!(
+            row("R", None, SelectionBucket::Process, None).scope_label(),
+            "process"
+        );
     }
 
     #[test]
@@ -5665,9 +6007,18 @@ mod tests {
 
     #[test]
     fn verif_badge_maps_each_known_state() {
-        assert_eq!(super::verif_badge("verified"), ("\u{2713} Verified", "verified"));
-        assert_eq!(super::verif_badge("grounded"), ("\u{29bf} Grounded", "grounded"));
-        assert_eq!(super::verif_badge("needs_recheck"), ("Needs re-check", "needs-recheck"));
+        assert_eq!(
+            super::verif_badge("verified"),
+            ("\u{2713} Verified", "verified")
+        );
+        assert_eq!(
+            super::verif_badge("grounded"),
+            ("\u{29bf} Grounded", "grounded")
+        );
+        assert_eq!(
+            super::verif_badge("needs_recheck"),
+            ("Needs re-check", "needs-recheck")
+        );
         assert_eq!(super::verif_badge("draft"), ("Draft", "draft"));
     }
 
@@ -5742,7 +6093,10 @@ mod tests {
         assert_eq!(out["selections"][0]["rule_id"], "RUST-FMT-1");
         assert_eq!(out["selections"][0]["chosen_option"], "a");
         assert_eq!(out["selections"][0]["repos"][0], "me/api");
-        assert_eq!(out["cross_repo"][0]["rule_id"], "INTEGRATION-API-CONTRACT-1");
+        assert_eq!(
+            out["cross_repo"][0]["rule_id"],
+            "INTEGRATION-API-CONTRACT-1"
+        );
         assert_eq!(out["process"].as_array().unwrap().len(), 0);
         // Custom rules are passed through with name/body/domain.
         assert_eq!(out["custom"][0]["name"], "house");
@@ -5777,19 +6131,22 @@ mod tests {
         // single diff line + count are produced.
         let project = project_from_json(serde_json::json!({
             "id": "p", "name": "n",
-            "tier_map": { "strongest": "claude-opus-4-8", "balanced": [], "fast": [] }
+            "tier_map": { "strongest": "claude-opus-5", "balanced": [], "fast": [] }
         }));
         let preview = Some(serde_json::json!({
             "assignments": {
-                "tier_map": { "strongest": "claude-sonnet-4-6" }
+                "tier_map": { "strongest": "claude-sonnet-5" }
             }
         }));
         let (lines, count) = super::build_change_summary(&project, &preview);
-        assert!(count >= 1, "at least the strongest change counts; lines={lines:?}");
+        assert!(
+            count >= 1,
+            "at least the strongest change counts; lines={lines:?}"
+        );
         assert!(
             lines.iter().any(|l| l.contains("tier.strongest")
-                && l.contains("claude-opus-4-8")
-                && l.contains("claude-sonnet-4-6")),
+                && l.contains("claude-opus-5")
+                && l.contains("claude-sonnet-5")),
             "lines={lines:?}"
         );
     }
@@ -5808,25 +6165,25 @@ mod tests {
         let project = project_from_json(serde_json::json!({
             "id": "p", "name": "n",
             "step_models": {
-                "audit": "claude-opus-4-8",
-                "calibration": "claude-sonnet-4-6",
-                "research_chat": "claude-sonnet-4-6",
-                "story_authoring": "claude-sonnet-4-6",
-                "decomposition": "claude-sonnet-4-6",
-                "escalation": "claude-sonnet-4-6",
-                "clarification": "claude-sonnet-4-6"
+                "audit": "claude-opus-5",
+                "calibration": "claude-sonnet-5",
+                "research_chat": "claude-sonnet-5",
+                "story_authoring": "claude-sonnet-5",
+                "decomposition": "claude-sonnet-5",
+                "escalation": "claude-sonnet-5",
+                "clarification": "claude-sonnet-5"
             }
         }));
         let preview = Some(serde_json::json!({
             "assignments": {
                 "step_models": {
-                    "audit": "claude-sonnet-4-6",
-                    "calibration": "claude-sonnet-4-6",
-                    "research_chat": "claude-sonnet-4-6",
-                    "story_authoring": "claude-sonnet-4-6",
-                    "decomposition": "claude-sonnet-4-6",
-                    "escalation": "claude-sonnet-4-6",
-                    "clarification": "claude-sonnet-4-6"
+                    "audit": "claude-sonnet-5",
+                    "calibration": "claude-sonnet-5",
+                    "research_chat": "claude-sonnet-5",
+                    "story_authoring": "claude-sonnet-5",
+                    "decomposition": "claude-sonnet-5",
+                    "escalation": "claude-sonnet-5",
+                    "clarification": "claude-sonnet-5"
                 }
             }
         }));
@@ -5834,8 +6191,8 @@ mod tests {
         assert_eq!(count, 1, "exactly the audit step changed; lines={lines:?}");
         assert!(
             lines.iter().any(|l| l.contains("step.audit")
-                && l.contains("claude-opus-4-8")
-                && l.contains("claude-sonnet-4-6")),
+                && l.contains("claude-opus-5")
+                && l.contains("claude-sonnet-5")),
             "lines={lines:?}"
         );
     }
@@ -5851,13 +6208,15 @@ mod tests {
         }));
         let preview = Some(serde_json::json!({
             "assignments": {
-                "l3_review": { "enabled": true, "model": "claude-opus-4-8" }
+                "l3_review": { "enabled": true, "model": "claude-opus-5" }
             }
         }));
         let (lines, count) = super::build_change_summary(&project, &preview);
         assert_eq!(count, 2, "enabled flip + model change; lines={lines:?}");
         assert!(
-            lines.iter().any(|l| l.contains("l3.enabled") && l.contains("false") && l.contains("true")),
+            lines
+                .iter()
+                .any(|l| l.contains("l3.enabled") && l.contains("false") && l.contains("true")),
             "lines={lines:?}"
         );
         // The current model is empty -> the line renders the "(balanced fallback)" placeholder
@@ -5865,7 +6224,7 @@ mod tests {
         assert!(
             lines.iter().any(|l| l.contains("l3.model")
                 && l.contains("(balanced fallback)")
-                && l.contains("claude-opus-4-8")),
+                && l.contains("claude-opus-5")),
             "lines={lines:?}"
         );
     }
@@ -5957,7 +6316,10 @@ mod tests {
         r.enforcement = "mechanical".to_string();
         r.repos = vec!["me/api".to_string(), "me/web".to_string()];
         assert_eq!(text(cell(&cols, "domain", &r)), "security");
-        assert_eq!(text(cell(&cols, "rule", &r)), "SEC-1 \u{2014} No hardcoded secrets");
+        assert_eq!(
+            text(cell(&cols, "rule", &r)),
+            "SEC-1 \u{2014} No hardcoded secrets"
+        );
         assert_eq!(text(cell(&cols, "verif", &r)), "verified");
         assert_eq!(text(cell(&cols, "scope", &r)), "cross-repo");
         assert_eq!(text(cell(&cols, "applied_to", &r)), "me/api, me/web");
@@ -6008,7 +6370,10 @@ mod tests {
         };
         assert_eq!(text(cell(&cols, "name", &c)), "house-style");
         assert_eq!(text(cell(&cols, "domain", &c)), "rust");
-        assert_eq!(text(cell(&cols, "body", &c)), "Prefer explicit error types.");
+        assert_eq!(
+            text(cell(&cols, "body", &c)),
+            "Prefer explicit error types."
+        );
         // Custom rules carry no formal modality: the Type column is a constant sentinel.
         assert_eq!(text(cell(&cols, "enf_type", &c)), "prose / structured");
 
@@ -6028,9 +6393,17 @@ mod tests {
     #[test]
     fn applied_row_domain_falls_through_empty_corpus_domain_to_prefix() {
         let corpus = corpus_with_options("", vec![]); // domain deliberately empty
-        let r = row("SEC-NO-HARDCODED-SECRETS-1", None, SelectionBucket::Selections, Some(corpus));
+        let r = row(
+            "SEC-NO-HARDCODED-SECRETS-1",
+            None,
+            SelectionBucket::Selections,
+            Some(corpus),
+        );
         // The empty corpus domain is skipped; domain_from_rule_id maps the SEC- prefix to "security".
-        assert_eq!(r.domain(), domain_from_rule_id("SEC-NO-HARDCODED-SECRETS-1"));
+        assert_eq!(
+            r.domain(),
+            domain_from_rule_id("SEC-NO-HARDCODED-SECRETS-1")
+        );
         assert_eq!(r.domain(), "security");
     }
 
@@ -6044,12 +6417,18 @@ mod tests {
         r.is_auto_recommended = false;
         r.recommended = true;
         r.verification = "grounded".to_string();
-        assert!(!r.effective_auto_recommended(), "must honor the server's false flag");
+        assert!(
+            !r.effective_auto_recommended(),
+            "must honor the server's false flag"
+        );
         // Flag true: true regardless of the other fields.
         r.is_auto_recommended = true;
         r.recommended = false;
         r.verification = "draft".to_string();
-        assert!(r.effective_auto_recommended(), "must honor the server's true flag");
+        assert!(
+            r.effective_auto_recommended(),
+            "must honor the server's true flag"
+        );
     }
 
     // (default_draft_is_draft_and_drives_serde_default moved to camerata-ui-core::rules.)
@@ -6060,7 +6439,7 @@ mod tests {
 // asserts the request it issues (method + path + exact body for mutating calls) and how
 // it parses the response. Every test carries BOTH attributes in this order:
 //   #[tokio::test]            (outer)
-//   #[serial_test::serial(bff_env)]   (inner — serializes env-mutating tests crate-wide)
+//   #[serial_test::serial(process_env)]   (inner — serializes env-mutating tests crate-wide)
 // CAMERATA_BFF_URL is a process-global; without the serial key these race under cargo's
 // parallel test threads and go flaky. Mirrors crates/ui/src/chat.rs precisely.
 #[cfg(test)]
@@ -6068,7 +6447,7 @@ mod bff_tests {
     use super::{ArmRuleReq, RuleEditScope};
 
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn emit_project_local_posts_cascade_flags_and_summarizes_results() {
         use wiremock::matchers::{body_json, method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -6090,17 +6469,22 @@ mod bff_tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let (ok, summary) = super::emit_project_local("proj-1", true, false, false).await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         assert!(ok, "all repos ok");
-        assert!(summary.contains("me/api: committed to branch"), "summary={summary}");
-        assert!(summary.contains("me/web: emitted locally"), "summary={summary}");
+        assert!(
+            summary.contains("me/api: committed to branch"),
+            "summary={summary}"
+        );
+        assert!(
+            summary.contains("me/web: emitted locally"),
+            "summary={summary}"
+        );
     }
 
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn emit_project_local_returns_top_level_message_on_early_return() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -6115,16 +6499,15 @@ mod bff_tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let (ok, summary) = super::emit_project_local("proj-9", false, false, false).await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         assert!(!ok);
         assert_eq!(summary, "No local path configured for this project.");
     }
 
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn emit_project_local_empty_results_reports_nothing_emitted() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -6139,16 +6522,15 @@ mod bff_tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let (ok, summary) = super::emit_project_local("proj-2", false, false, false).await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         assert!(!ok, "empty results is treated as a failure");
         assert!(summary.contains("Nothing emitted"), "summary={summary}");
     }
 
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn add_custom_rule_posts_name_body_and_repos() {
         use wiremock::matchers::{body_json, method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -6166,7 +6548,7 @@ mod bff_tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let ok = super::add_custom_rule(
             "proj-1",
             "house-style",
@@ -6174,13 +6556,12 @@ mod bff_tests {
             &["me/api".to_string()],
         )
         .await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         assert!(ok);
     }
 
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn delete_custom_rule_posts_name() {
         use wiremock::matchers::{body_json, method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -6194,15 +6575,14 @@ mod bff_tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let ok = super::delete_custom_rule("proj-1", "house-style").await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         assert!(ok);
     }
 
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn import_ruleset_posts_raw_json_body() {
         use wiremock::matchers::{body_json, method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -6210,25 +6590,23 @@ mod bff_tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/api/projects/proj-1/ruleset"))
-            .and(body_json(serde_json::json!({ "selections": [], "custom": [] })))
+            .and(body_json(
+                serde_json::json!({ "selections": [], "custom": [] }),
+            ))
             .respond_with(ResponseTemplate::new(200))
             .expect(1)
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
-        let ok = super::import_ruleset(
-            "proj-1",
-            r#"{"selections":[],"custom":[]}"#.to_string(),
-        )
-        .await;
-        std::env::remove_var("CAMERATA_BFF_URL");
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
+        let ok =
+            super::import_ruleset("proj-1", r#"{"selections":[],"custom":[]}"#.to_string()).await;
 
         assert!(ok);
     }
 
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn save_ruleset_posts_json_value() {
         use wiremock::matchers::{body_json, method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -6246,15 +6624,14 @@ mod bff_tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let ok = super::save_ruleset("proj-1", ruleset).await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         assert!(ok);
     }
 
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn fetch_corpus_rules_parses_rule_array() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -6268,9 +6645,8 @@ mod bff_tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let rules = super::fetch_corpus_rules().await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         let rules = rules.expect("valid array parses");
         assert_eq!(rules.len(), 1);
@@ -6280,7 +6656,7 @@ mod bff_tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn fetch_suppressions_parses_view_array() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -6288,33 +6664,39 @@ mod bff_tests {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/api/projects/proj-1/suppressions"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
-                {
-                    "rule_id": "SEC-NO-HARDCODED-SECRETS-1",
-                    "path": "src/main.rs",
-                    "line": 12,
-                    "source": "inline",
-                    "stale": false,
-                    "repo": "me/api"
-                }
-            ])))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "source_deleted": true,
+                "deleted_at": "2026-10-24T17:40:19Z",
+                "entries": [
+                    {
+                        "rule_id": "SEC-NO-HARDCODED-SECRETS-1",
+                        "path": "src/main.rs",
+                        "line": 12,
+                        "source": "inline",
+                        "stale": false,
+                        "repo": "me/api"
+                    }
+                ]
+            })))
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let sups = super::fetch_suppressions("proj-1").await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
-        let sups = sups.expect("valid array parses");
+        let listing = sups.expect("a valid envelope parses");
+        let sups = listing.entries;
         assert_eq!(sups.len(), 1);
         assert_eq!(sups[0].rule_id, "SEC-NO-HARDCODED-SECRETS-1");
         assert_eq!(sups[0].line, Some(12));
         assert!(!sups[0].stale);
         assert_eq!(sups[0].repo, "me/api");
+        assert_eq!(listing.deleted_at.as_deref(), Some("2026-10-24T17:40:19Z"));
     }
 
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn apply_rules_posts_rules_custom_findings_and_parses_results() {
         use wiremock::matchers::{body_json, method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -6356,9 +6738,8 @@ mod bff_tests {
             repos: vec!["me/api".to_string()],
         }];
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let res = super::apply_rules(&rules, &[], &[]).await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         let (ok, message, results) = res.expect("Some on 2xx");
         assert!(ok);
@@ -6369,7 +6750,7 @@ mod bff_tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn preflight_apply_returns_repos_when_ok() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -6386,9 +6767,8 @@ mod bff_tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let repos = super::preflight_apply(&[], &[], &[]).await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         let repos = repos.expect("Some when ok=true");
         assert_eq!(repos.len(), 1);
@@ -6397,7 +6777,7 @@ mod bff_tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn preflight_apply_returns_none_when_not_ok() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -6405,19 +6785,23 @@ mod bff_tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/api/onboard/apply/preflight"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": false })))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": false })),
+            )
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let repos = super::preflight_apply(&[], &[], &[]).await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
-        assert!(repos.is_none(), "ok=false yields None so the caller falls through");
+        assert!(
+            repos.is_none(),
+            "ok=false yields None so the caller falls through"
+        );
     }
 
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn open_governance_pr_posts_repos_and_parses_results() {
         use wiremock::matchers::{body_json, method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -6436,17 +6820,19 @@ mod bff_tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let res = super::open_governance_pr(&["me/api".to_string()]).await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         let results = res.expect("Some when ok=true");
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0].url.as_deref(), Some("https://github.com/me/api/pull/1"));
+        assert_eq!(
+            results[0].url.as_deref(),
+            Some("https://github.com/me/api/pull/1")
+        );
     }
 
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn create_ticket_posts_repo_findings_title_and_returns_url() {
         use wiremock::matchers::{body_json, method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -6467,15 +6853,14 @@ mod bff_tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let url = super::create_ticket("me/api", &[], Some("Tech debt: resolve later")).await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         assert_eq!(url.as_deref(), Some("https://github.com/me/api/issues/7"));
     }
 
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn create_ticket_returns_none_when_not_ok() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -6483,19 +6868,20 @@ mod bff_tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/api/onboard/ticket"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": false })))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": false })),
+            )
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let url = super::create_ticket("me/api", &[], None).await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         assert!(url.is_none());
     }
 
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn fetch_rule_drift_returns_entries_when_ok() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -6518,9 +6904,8 @@ mod bff_tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let drift = super::fetch_rule_drift("proj-1").await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         let drift = drift.expect("Some when ok=true");
         assert_eq!(drift.len(), 1);
@@ -6530,7 +6915,7 @@ mod bff_tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn fetch_rule_drift_returns_none_when_not_ok() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -6538,40 +6923,42 @@ mod bff_tests {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/api/projects/proj-1/rule-drift"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": false })))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": false })),
+            )
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let drift = super::fetch_rule_drift("proj-1").await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         assert!(drift.is_none());
     }
 
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn apply_rule_drift_update_posts_to_accept_endpoint() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/api/projects/proj-1/rule-drift/RUST-DIOXUS-12/accept"))
+            .and(path(
+                "/api/projects/proj-1/rule-drift/RUST-DIOXUS-12/accept",
+            ))
             .respond_with(ResponseTemplate::new(200))
             .expect(1)
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let ok = super::apply_rule_drift_update("proj-1", "RUST-DIOXUS-12").await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         assert!(ok);
     }
 
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn fetch_single_rule_parses_json_body() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -6586,16 +6973,15 @@ mod bff_tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let v = super::fetch_single_rule("proj-1", "RUST-FMT-1").await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         let v = v.expect("valid json parses");
         assert_eq!(v["chosen_option"], "a");
     }
 
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn save_single_rule_edit_project_scope_posts_null_repo() {
         use wiremock::matchers::{body_json, method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -6609,22 +6995,16 @@ mod bff_tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
-        let ok = super::save_single_rule_edit(
-            "proj-1",
-            "RUST-FMT-1",
-            "a",
-            RuleEditScope::Project,
-            None,
-        )
-        .await;
-        std::env::remove_var("CAMERATA_BFF_URL");
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
+        let ok =
+            super::save_single_rule_edit("proj-1", "RUST-FMT-1", "a", RuleEditScope::Project, None)
+                .await;
 
         assert!(ok);
     }
 
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn save_single_rule_edit_repo_scope_posts_repo() {
         use wiremock::matchers::{body_json, method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -6643,7 +7023,7 @@ mod bff_tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let ok = super::save_single_rule_edit(
             "proj-1",
             "RUST-FMT-1",
@@ -6652,7 +7032,6 @@ mod bff_tests {
             Some("me/api"),
         )
         .await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         assert!(ok);
     }
@@ -6682,7 +7061,10 @@ mod render_tests {
         assert!(html.contains("rule-count-n"), "number class; html=\n{html}");
         assert!(html.contains("rule-count-l"), "label class; html=\n{html}");
         assert!(html.contains(">7<"), "the count renders; html=\n{html}");
-        assert!(html.contains("Applied rules"), "the label renders; html=\n{html}");
+        assert!(
+            html.contains("Applied rules"),
+            "the label renders; html=\n{html}"
+        );
     }
 
     // SuppressionsPanel: hidden-by-default panel. Its use_resource is gated on `requested`
@@ -6699,14 +7081,127 @@ mod render_tests {
         vdom.rebuild_in_place();
         let html = dioxus_ssr::render(&vdom);
         assert!(html.contains("sups-panel"), "panel wrapper; html=\n{html}");
-        assert!(html.contains("Suppressions (waived findings)"), "section label; html=\n{html}");
-        assert!(html.contains("Refresh"), "the Refresh button; html=\n{html}");
+        assert!(
+            html.contains("Suppressions (waived findings)"),
+            "section label; html=\n{html}"
+        );
+        assert!(
+            html.contains("Refresh"),
+            "the Refresh button; html=\n{html}"
+        );
         // Before Refresh is pressed the panel shows the press-Refresh hint, not a table.
         assert!(
-            html.contains("Press Refresh to pull the repos"),
+            html.contains("Press Refresh to list the waivers"),
             "the hidden-until-refresh hint; html=\n{html}"
         );
-        assert!(!html.contains("sups-table"), "no table before Refresh; html=\n{html}");
+        assert!(
+            !html.contains("sups-table"),
+            "no table before Refresh; html=\n{html}"
+        );
+    }
+
+    fn drift_entry(legacy: bool, applied: Option<u32>, current: Option<u32>) -> RuleDriftEntry {
+        RuleDriftEntry {
+            rule_id: "R-1".to_string(),
+            title: String::new(),
+            applied_directive: String::new(),
+            corpus_directive: String::new(),
+            repos: Vec::new(),
+            legacy_baseline: legacy,
+            applied_version: applied,
+            current_version: current,
+        }
+    }
+
+    // The server reports a baseline written by an older build as `changed: null` +
+    // `legacy_baseline: true`. The entry must deserialize both that and the pre-version shape
+    // (no version / legacy keys at all) without error.
+    #[test]
+    fn rule_drift_entry_deserializes_legacy_flag_and_versions() {
+        let entry: RuleDriftEntry = serde_json::from_value(serde_json::json!({
+            "rule_id": "R-1",
+            "changed": null,
+            "legacy_baseline": true,
+            "applied_version": null,
+            "current_version": 3,
+        }))
+        .expect("the new shape deserializes");
+        assert!(entry.legacy_baseline);
+        assert_eq!(entry.applied_version, None);
+        assert_eq!(entry.current_version, Some(3));
+
+        let old: RuleDriftEntry =
+            serde_json::from_value(serde_json::json!({ "rule_id": "R-2", "changed": true }))
+                .expect("a pre-version server response still deserializes");
+        assert!(!old.legacy_baseline);
+        assert_eq!(old.applied_version, None);
+    }
+
+    #[test]
+    fn drift_counts_split_real_changes_from_unknown_legacy_baselines() {
+        let entries = vec![
+            drift_entry(false, Some(1), Some(2)),
+            drift_entry(true, None, Some(2)),
+            drift_entry(true, None, None),
+        ];
+        assert_eq!(drift_counts(&entries), (1, 2));
+        assert_eq!(drift_counts(&[]), (0, 0));
+    }
+
+    // A legacy baseline must never be described as "has a corpus update": nothing is known
+    // to have changed, only that the old fingerprint cannot be compared.
+    #[test]
+    fn drift_notice_title_does_not_call_a_legacy_baseline_a_corpus_update() {
+        assert_eq!(
+            drift_notice_title(2, 0),
+            "2 applied rule(s) have corpus updates"
+        );
+        let legacy_only = drift_notice_title(0, 3);
+        assert!(
+            !legacy_only.contains("corpus updates"),
+            "legacy-only title must not claim an update: {legacy_only}"
+        );
+        assert!(legacy_only.contains('3'));
+        let both = drift_notice_title(1, 2);
+        assert!(both.contains("1 applied rule(s) have corpus updates"));
+        assert!(both.contains('2'));
+    }
+
+    #[test]
+    fn drift_notice_hint_matches_what_is_actually_known() {
+        let changed = drift_notice_hint(1, 0);
+        assert!(changed.contains("adopted before their corpus entry was updated"));
+        assert!(!changed.contains("older version"));
+
+        let legacy = drift_notice_hint(0, 1);
+        assert!(legacy.contains("older version"));
+        assert!(
+            legacy.contains("nothing is known to have changed"),
+            "{legacy}"
+        );
+
+        let both = drift_notice_hint(1, 1);
+        assert!(both.contains("adopted before their corpus entry was updated"));
+        assert!(both.contains("older version"));
+    }
+
+    #[test]
+    fn drift_version_note_only_when_both_versions_are_known_and_differ() {
+        assert_eq!(
+            drift_version_note(&drift_entry(false, Some(2), Some(4))).as_deref(),
+            Some("v2 to v4")
+        );
+        assert_eq!(
+            drift_version_note(&drift_entry(false, None, Some(4))),
+            None,
+            "an unknown applied version must not be guessed"
+        );
+        assert_eq!(drift_version_note(&drift_entry(false, Some(2), None)), None);
+        assert_eq!(
+            drift_version_note(&drift_entry(false, Some(3), Some(3))),
+            None,
+            "an unchanged version is not a transition"
+        );
     }
 
     // RuleDriftNotice: returns an empty Element when there is no drift. Its use_resource is
@@ -6800,9 +7295,7 @@ mod render_tests {
     fn provide_rule_table_contexts() {
         use_context_provider(|| Signal::new(Vec::<crate::toast::Toast>::new()));
         use_context_provider(|| Signal::new(Option::<ProposedRuleView>::None));
-        use_context_provider(|| {
-            Signal::new(std::collections::HashMap::<String, String>::new())
-        });
+        use_context_provider(|| Signal::new(std::collections::HashMap::<String, String>::new()));
     }
 
     #[test]
@@ -6829,15 +7322,24 @@ mod render_tests {
         let html = dioxus_ssr::render(&vdom);
         // chorale renders each column header. These are the custom-rules columns.
         assert!(html.contains("Name"), "Name header; html=\n{html}");
-        assert!(html.contains("Directive"), "Directive header; html=\n{html}");
+        assert!(
+            html.contains("Directive"),
+            "Directive header; html=\n{html}"
+        );
         assert!(html.contains("Domain"), "Domain header; html=\n{html}");
         // The component's own static chrome below the table.
         assert!(
             html.contains("Delete selected custom rules"),
             "delete button; html=\n{html}"
         );
-        assert!(html.contains("modality-legend"), "modality legend; html=\n{html}");
-        assert!(html.contains("Type modality key"), "legend summary; html=\n{html}");
+        assert!(
+            html.contains("modality-legend"),
+            "modality legend; html=\n{html}"
+        );
+        assert!(
+            html.contains("Type modality key"),
+            "legend summary; html=\n{html}"
+        );
     }
 
     #[test]
@@ -6863,15 +7365,30 @@ mod render_tests {
         vdom.rebuild_in_place();
         let html = dioxus_ssr::render(&vdom);
         // The repo-filter bar chrome.
-        assert!(html.contains("repo-select"), "repo filter wrapper; html=\n{html}");
-        assert!(html.contains("Filter by repo:"), "filter label; html=\n{html}");
-        assert!(html.contains("All repos"), "the all-repos option; html=\n{html}");
+        assert!(
+            html.contains("repo-select"),
+            "repo filter wrapper; html=\n{html}"
+        );
+        assert!(
+            html.contains("Filter by repo:"),
+            "filter label; html=\n{html}"
+        );
+        assert!(
+            html.contains("All repos"),
+            "the all-repos option; html=\n{html}"
+        );
         // The chorale table headers for applied rules.
         assert!(html.contains("Domain"), "Domain header; html=\n{html}");
-        assert!(html.contains("Provenance"), "Provenance header; html=\n{html}");
+        assert!(
+            html.contains("Provenance"),
+            "Provenance header; html=\n{html}"
+        );
         assert!(html.contains("Scope"), "Scope header; html=\n{html}");
         // The applied selection's rule id surfaces in the "Rule" cell.
-        assert!(html.contains("RUST-DIOXUS-12"), "the applied rule row; html=\n{html}");
+        assert!(
+            html.contains("RUST-DIOXUS-12"),
+            "the applied rule row; html=\n{html}"
+        );
     }
 
     #[test]
@@ -6882,7 +7399,12 @@ mod render_tests {
             provide_rule_table_contexts();
             let project = project_with_selection();
             let corpus = vec![
-                proposed_rule("SEC-NO-HARDCODED-SECRETS-1", "No hardcoded secrets", "security", "cross-repo"),
+                proposed_rule(
+                    "SEC-NO-HARDCODED-SECRETS-1",
+                    "No hardcoded secrets",
+                    "security",
+                    "cross-repo",
+                ),
                 proposed_rule("RUST-FMT-1", "Format with rustfmt", "rust", "repo-local"),
             ];
             let refresh = use_signal(|| 0u32);
@@ -6896,10 +7418,19 @@ mod render_tests {
         let html = dioxus_ssr::render(&vdom);
         // The corpus-table column headers.
         assert!(html.contains("Domain"), "Domain header; html=\n{html}");
-        assert!(html.contains("Provenance"), "Provenance header; html=\n{html}");
-        assert!(html.contains("Applied to"), "Applied-to header; html=\n{html}");
+        assert!(
+            html.contains("Provenance"),
+            "Provenance header; html=\n{html}"
+        );
+        assert!(
+            html.contains("Applied to"),
+            "Applied-to header; html=\n{html}"
+        );
         // Real corpus rows render (synchronous prop data, not async).
-        assert!(html.contains("SEC-NO-HARDCODED-SECRETS-1"), "a corpus row; html=\n{html}");
+        assert!(
+            html.contains("SEC-NO-HARDCODED-SECRETS-1"),
+            "a corpus row; html=\n{html}"
+        );
         assert!(html.contains("RUST-FMT-1"), "a corpus row; html=\n{html}");
     }
 
@@ -6925,13 +7456,17 @@ mod render_tests {
         // A PROCESS-scope corpus rule the user opens in the All rules table.
         let corpus: std::collections::HashMap<String, ProposedRuleView> = [(
             "PROCESS-BRANCH-NAMING-1".to_string(),
-            proposed_rule("PROCESS-BRANCH-NAMING-1", "Branch naming", "process", "process"),
+            proposed_rule(
+                "PROCESS-BRANCH-NAMING-1",
+                "Branch naming",
+                "process",
+                "process",
+            ),
         )]
         .into_iter()
         .collect();
 
-        let changed =
-            apply_chosen_option(&mut project, "PROCESS-BRANCH-NAMING-1", "b", &corpus);
+        let changed = apply_chosen_option(&mut project, "PROCESS-BRANCH-NAMING-1", "b", &corpus);
 
         assert!(changed, "adopting a fresh process rule mutates the ruleset");
         assert_eq!(
@@ -6953,13 +7488,25 @@ mod render_tests {
         );
         // Idempotent: re-applying the same option is a no-op (no duplicate, no spurious save).
         let again = apply_chosen_option(&mut project, "PROCESS-BRANCH-NAMING-1", "b", &corpus);
-        assert!(!again, "re-adopting the same option does not report a change");
-        assert_eq!(project.ruleset.process.len(), 1, "no duplicate process selection");
+        assert!(
+            !again,
+            "re-adopting the same option does not report a change"
+        );
+        assert_eq!(
+            project.ruleset.process.len(),
+            1,
+            "no duplicate process selection"
+        );
 
         // Repo-local rules are NEVER auto-adopted from an option pick (no target repo).
         let repo_local: std::collections::HashMap<String, ProposedRuleView> = [(
             "RUST-DIOXUS-99".to_string(),
-            proposed_rule("RUST-DIOXUS-99", "Some repo-local rule", "rust", "repo-local"),
+            proposed_rule(
+                "RUST-DIOXUS-99",
+                "Some repo-local rule",
+                "rust",
+                "repo-local",
+            ),
         )]
         .into_iter()
         .collect();
@@ -6970,7 +7517,11 @@ mod render_tests {
             "a repo-local rule is not auto-adopted from an option pick"
         );
         assert!(
-            project.ruleset.selections.iter().all(|s| s.rule_id != "RUST-DIOXUS-99"),
+            project
+                .ruleset
+                .selections
+                .iter()
+                .all(|s| s.rule_id != "RUST-DIOXUS-99"),
             "and it is not added to any bucket"
         );
     }
@@ -6984,13 +7535,19 @@ mod render_tests {
     /// A corpus map for the repo-scope tests: a repo-local rule (with a default option) and a
     /// process rule (project-level, must never be repo-scoped by this path).
     fn repo_scope_corpus() -> std::collections::HashMap<String, ProposedRuleView> {
-        let mut repo_local = proposed_rule("RUST-FMT-1", "Format with rustfmt", "rust", "repo-local");
+        let mut repo_local =
+            proposed_rule("RUST-FMT-1", "Format with rustfmt", "rust", "repo-local");
         repo_local.default_option = Some("a".to_string());
         [
             ("RUST-FMT-1".to_string(), repo_local),
             (
                 "PROCESS-BRANCH-NAMING-1".to_string(),
-                proposed_rule("PROCESS-BRANCH-NAMING-1", "Branch naming", "process", "process"),
+                proposed_rule(
+                    "PROCESS-BRANCH-NAMING-1",
+                    "Branch naming",
+                    "process",
+                    "process",
+                ),
             ),
         ]
         .into_iter()
@@ -7009,17 +7566,32 @@ mod render_tests {
 
         // Add me/api → a fresh selection is created, carrying the corpus default option.
         let changed = apply_repo_scope(&mut project, "RUST-FMT-1", "me/api", true, &corpus);
-        assert!(changed, "adding a repo to an unselected repo-local rule mutates the ruleset");
-        assert_eq!(project.ruleset.selections.len(), 1, "one repo-local selection created");
+        assert!(
+            changed,
+            "adding a repo to an unselected repo-local rule mutates the ruleset"
+        );
+        assert_eq!(
+            project.ruleset.selections.len(),
+            1,
+            "one repo-local selection created"
+        );
         let sel = &project.ruleset.selections[0];
         assert_eq!(sel.rule_id, "RUST-FMT-1");
-        assert_eq!(sel.chosen_option.as_deref(), Some("a"), "the corpus default option is carried");
+        assert_eq!(
+            sel.chosen_option.as_deref(),
+            Some("a"),
+            "the corpus default option is carried"
+        );
         assert_eq!(sel.repos, vec!["me/api".to_string()]);
 
         // Add me/web → extends the SAME selection (no duplicate entry).
         let changed = apply_repo_scope(&mut project, "RUST-FMT-1", "me/web", true, &corpus);
         assert!(changed);
-        assert_eq!(project.ruleset.selections.len(), 1, "still one selection, extended");
+        assert_eq!(
+            project.ruleset.selections.len(),
+            1,
+            "still one selection, extended"
+        );
         assert_eq!(
             project.ruleset.selections[0].repos,
             vec!["me/api".to_string(), "me/web".to_string()]
@@ -7037,7 +7609,9 @@ mod render_tests {
         let mut repo_local = proposed_rule("RUST-DIOXUS-12", "Icons", "rust", "repo-local");
         repo_local.default_option = Some("a".to_string());
         let corpus: std::collections::HashMap<String, ProposedRuleView> =
-            [("RUST-DIOXUS-12".to_string(), repo_local)].into_iter().collect();
+            [("RUST-DIOXUS-12".to_string(), repo_local)]
+                .into_iter()
+                .collect();
 
         // Removing a repo the rule ISN'T scoped to is a no-op.
         let noop = apply_repo_scope(&mut project, "RUST-DIOXUS-12", "me/other", false, &corpus);
@@ -7066,16 +7640,38 @@ mod render_tests {
 
         // Trying to add OR remove a repo on the process rule is a no-op — project-level rules
         // apply project-wide and are never scoped to specific repos from this picker.
-        let added = apply_repo_scope(&mut project, "PROCESS-BRANCH-NAMING-1", "me/web", true, &corpus);
-        assert!(!added, "a project-level rule is not repo-scoped by this path");
-        let removed = apply_repo_scope(&mut project, "PROCESS-BRANCH-NAMING-1", "me/api", false, &corpus);
-        assert!(!removed, "a project-level rule is not repo-unscoped by this path");
+        let added = apply_repo_scope(
+            &mut project,
+            "PROCESS-BRANCH-NAMING-1",
+            "me/web",
+            true,
+            &corpus,
+        );
+        assert!(
+            !added,
+            "a project-level rule is not repo-scoped by this path"
+        );
+        let removed = apply_repo_scope(
+            &mut project,
+            "PROCESS-BRANCH-NAMING-1",
+            "me/api",
+            false,
+            &corpus,
+        );
+        assert!(
+            !removed,
+            "a project-level rule is not repo-unscoped by this path"
+        );
         // The process selection is byte-for-byte unchanged, and no stray repo-local selection
         // was created for the process rule.
         assert_eq!(project.ruleset.process.len(), 1);
         assert_eq!(project.ruleset.process[0].repos, vec!["me/api".to_string()]);
         assert!(
-            project.ruleset.selections.iter().all(|s| s.rule_id != "PROCESS-BRANCH-NAMING-1"),
+            project
+                .ruleset
+                .selections
+                .iter()
+                .all(|s| s.rule_id != "PROCESS-BRANCH-NAMING-1"),
             "the process rule never leaks into the repo-local selections bucket"
         );
     }
@@ -7089,7 +7685,12 @@ mod render_tests {
         use_context_provider(|| Signal::new(Vec::<crate::toast::Toast>::new()));
         use_context_provider(|| Signal::new(Some(open)));
         use_context_provider(|| Signal::new(std::collections::HashMap::<String, String>::new()));
-        use_context_provider(|| Signal::new(RepoScopeData { project_repos: repos, applied: std::collections::HashMap::new() }));
+        use_context_provider(|| {
+            Signal::new(RepoScopeData {
+                project_repos: repos,
+                applied: std::collections::HashMap::new(),
+            })
+        });
         use_context_provider(|| Signal::new(Option::<(String, String, bool)>::None));
     }
 
@@ -7105,20 +7706,43 @@ mod render_tests {
         let mut vdom = VirtualDom::new(harness);
         vdom.rebuild_in_place();
         let html = dioxus_ssr::render(&vdom);
-        assert!(html.contains("Applies to repos"), "the section label; html=\n{html}");
-        assert!(html.contains("rule-modal-repo-scope"), "the checkbox container; html=\n{html}");
-        assert!(html.contains("type=\"checkbox\""), "at least one checkbox; html=\n{html}");
+        assert!(
+            html.contains("Applies to repos"),
+            "the section label; html=\n{html}"
+        );
+        assert!(
+            html.contains("rule-modal-repo-scope"),
+            "the checkbox container; html=\n{html}"
+        );
+        assert!(
+            html.contains("type=\"checkbox\""),
+            "at least one checkbox; html=\n{html}"
+        );
         // Both project repos are offered.
-        assert!(html.contains("me/api"), "first repo checkbox; html=\n{html}");
-        assert!(html.contains("me/web"), "second repo checkbox; html=\n{html}");
+        assert!(
+            html.contains("me/api"),
+            "first repo checkbox; html=\n{html}"
+        );
+        assert!(
+            html.contains("me/web"),
+            "second repo checkbox; html=\n{html}"
+        );
         // A repo-local rule must NOT show the project-wide line.
-        assert!(!html.contains("Applies project-wide"), "no project-wide line for repo-local; html=\n{html}");
+        assert!(
+            !html.contains("Applies project-wide"),
+            "no project-wide line for repo-local; html=\n{html}"
+        );
     }
 
     #[test]
     fn modal_shows_project_wide_line_for_process_rule() {
         fn harness() -> Element {
-            let rule = proposed_rule("PROCESS-BRANCH-NAMING-1", "Branch naming", "process", "process");
+            let rule = proposed_rule(
+                "PROCESS-BRANCH-NAMING-1",
+                "Branch naming",
+                "process",
+                "process",
+            );
             provide_modal_scope_contexts(rule, vec!["me/api".to_string()]);
             rsx! {
                 RulesDetailModalHost { on_option_picked: move |_: (String, String)| {} }
@@ -7127,10 +7751,19 @@ mod render_tests {
         let mut vdom = VirtualDom::new(harness);
         vdom.rebuild_in_place();
         let html = dioxus_ssr::render(&vdom);
-        assert!(html.contains("Applies to repos"), "the section label; html=\n{html}");
-        assert!(html.contains("Applies project-wide (all repos)"), "the project-wide line; html=\n{html}");
+        assert!(
+            html.contains("Applies to repos"),
+            "the section label; html=\n{html}"
+        );
+        assert!(
+            html.contains("Applies project-wide (all repos)"),
+            "the project-wide line; html=\n{html}"
+        );
         // A project-level rule must NOT render repo checkboxes.
-        assert!(!html.contains("rule-modal-repo-scope"), "no per-repo checkboxes for a process rule; html=\n{html}");
+        assert!(
+            !html.contains("rule-modal-repo-scope"),
+            "no per-repo checkboxes for a process rule; html=\n{html}"
+        );
     }
 
     /// The APPLIED-ROW rendering + SEARCH layer. Once a process rule is in
@@ -7201,6 +7834,111 @@ mod render_tests {
         assert!(
             cell.matches_filter(&partial),
             "a case-insensitive substring of the rule id also finds the row; cell={cell:?}"
+        );
+    }
+
+    // BackendEditor (`docs/design/2026-09-22_per-project-backend.md`): reads only
+    // `project.backend` via use_signal and the toast context, no use_resource — so both the
+    // CLI (default) and API seed states render deterministically under SSR with no async gap
+    // to account for.
+    fn project_with_backend(backend: &str) -> ProjectView {
+        serde_json::from_value(serde_json::json!({
+            "id": "proj-backend-1",
+            "name": "Acme",
+            "backend": backend,
+        }))
+        .expect("valid ProjectView fixture")
+    }
+
+    fn project_with_no_backend_field() -> ProjectView {
+        serde_json::from_value(serde_json::json!({
+            "id": "proj-backend-legacy",
+            "name": "Acme Legacy",
+        }))
+        .expect("valid ProjectView fixture, backend absent")
+    }
+
+    #[test]
+    fn backend_editor_renders_label_and_cli_state_by_default() {
+        fn harness() -> Element {
+            use_context_provider(|| Signal::new(Vec::<crate::toast::Toast>::new()));
+            rsx! {
+                BackendEditor { project: project_with_backend("cli") }
+            }
+        }
+        let mut vdom = VirtualDom::new(harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        assert!(
+            html.contains("backend-editor"),
+            "wrapper class; html=\n{html}"
+        );
+        assert!(
+            html.contains("Backend"),
+            "the heading renders; html=\n{html}"
+        );
+        assert!(
+            html.contains("backend-toggle"),
+            "the segmented toggle renders; html=\n{html}"
+        );
+        // CLI is the active segment when the project backend is cli.
+        assert!(
+            html.contains("backend-seg backend-seg-active"),
+            "the active segment class renders; html=\n{html}"
+        );
+        assert!(
+            html.contains("CLI selected"),
+            "the CLI-selected hint renders; html=\n{html}"
+        );
+        assert!(
+            !html.contains("API selected"),
+            "the API-selected hint must not render when CLI is active; html=\n{html}"
+        );
+    }
+
+    #[test]
+    fn backend_editor_renders_api_state_when_project_backend_is_api() {
+        fn harness() -> Element {
+            use_context_provider(|| Signal::new(Vec::<crate::toast::Toast>::new()));
+            rsx! {
+                BackendEditor { project: project_with_backend("api") }
+            }
+        }
+        let mut vdom = VirtualDom::new(harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        assert!(
+            html.contains("API selected"),
+            "the API-selected hint renders; html=\n{html}"
+        );
+        assert!(
+            html.contains("AI steps on this project will not run"),
+            "the no-key consequence is explained; html=\n{html}"
+        );
+        assert!(
+            !html.contains("CLI selected"),
+            "the CLI-selected hint must not render when API is active; html=\n{html}"
+        );
+    }
+
+    /// A project persisted before this field existed (or with the old, now-dead `cli_active`
+    /// key) has no `backend` field at all — the migration path from
+    /// `docs/design/2026-09-22_per-project-backend.md` must deserialize it to `Cli`, the same
+    /// default a freshly-created project gets.
+    #[test]
+    fn backend_editor_treats_legacy_absent_backend_field_as_cli() {
+        fn harness() -> Element {
+            use_context_provider(|| Signal::new(Vec::<crate::toast::Toast>::new()));
+            rsx! {
+                BackendEditor { project: project_with_no_backend_field() }
+            }
+        }
+        let mut vdom = VirtualDom::new(harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        assert!(
+            html.contains("CLI selected"),
+            "a legacy project with no backend field defaults to Cli; html=\n{html}"
         );
     }
 }

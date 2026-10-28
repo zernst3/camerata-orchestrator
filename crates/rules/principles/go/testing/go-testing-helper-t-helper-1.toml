@@ -1,9 +1,11 @@
 id = "GO-TESTING-HELPER-T-HELPER-1"
+version = 1
 title = "Test helper functions call t.Helper() as their first statement so failures are attributed to the caller"
-tag = "stack"
 domain = "go:testing"
 layer = "testing"
 enforcement = "mechanical"
+kind = "defect"
+inspectable = true
 default = true
 verification = "grounded"
 
@@ -12,18 +14,18 @@ qualifies = "A test helper is any function that takes *testing.T and may call t.
 [[sources]]
 url = "https://pkg.go.dev/testing#T.Helper"
 title = "pkg.go.dev/testing — T.Helper"
-qualifies = "Official testing package: 'Helper marks the calling function as a test helper function. When printing file and line information, that function will be skipped. Helper may be called simultaneously from multiple goroutines.'"
+relevance = "Official testing package: 'Helper marks the calling function as a test helper function. When printing file and line information, that function will be skipped. Helper may be called simultaneously from multiple goroutines.'"
 
 [[sources]]
 url = "https://go.dev/wiki/TestComments"
 title = "Go Wiki — Test Comments (testing conventions)"
-qualifies = "Go test comments wiki: 'Call t.Helper() to attribute failures to the call site, not the helper function.' Shows readFile example with t.Helper() as first statement."
+relevance = "Go test comments wiki: 'Call t.Helper() to attribute failures to the call site, not the helper function.' Shows readFile example with t.Helper() as first statement."
 
 [[sources]]
 url = "https://golangci-lint.run/docs/linters/"
 title = "golangci-lint linters — thelper"
 linter = "golangci-lint: thelper"
-qualifies = "golangci-lint thelper: 'Detects tests helpers which do not start with the t.Helper() method.' Mechanically enforces the t.Helper() convention on functions that take *testing.T."
+relevance = "golangci-lint thelper: 'Detects tests helpers which do not start with the t.Helper() method.' Mechanically enforces the t.Helper() convention on functions that take *testing.T."
 
 [decision]
 question = "Do test helper functions (those accepting *testing.T and calling t.Fatal/t.Error) call t.Helper()?"
@@ -34,10 +36,15 @@ why = "Without t.Helper(), every failure inside a shared helper function reports
 id = "t-helper-always"
 label = "call t.Helper() as first statement in every test helper function"
 directive = "Any function that accepts *testing.T (or *testing.TB) and may call t.Fatal, t.Error, t.Fatalf, or t.Errorf calls t.Helper() as its first line. This includes helper constructors (e.g., mustOpenDB(t, dsn)), assertion helpers (e.g., assertUser(t, got, want)), and setup helpers (e.g., seedTestData(t, db)). The thelper golangci-lint linter is enabled to catch violations."
+remediation = """
+Add a t.Helper() call as the first line of the helper function that accepts *testing.T and may call t.Fatal/t.Error/t.Fatalf/t.Errorf. Verify by forcing the helper to fail and confirming the reported failure line points to the caller's call site, not to the line inside the helper.
+"""
+effort = "medium"
 why = "Failures are attributed to the call site in the test body, not the helper internals. Required for debuggable test output."
 
 [[option]]
 id = "no-t-helper"
+violates = true
 label = "omit t.Helper() from helper functions"
 directive = "Test helper functions do not call t.Helper(); failures are attributed to the line inside the helper."
 why = "Failure messages point inside the helper rather than the test that invoked it, making it harder to identify which test case failed."

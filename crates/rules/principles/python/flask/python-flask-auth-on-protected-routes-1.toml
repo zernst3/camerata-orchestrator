@@ -1,9 +1,11 @@
 id = "PYTHON-FLASK-AUTH-ON-PROTECTED-ROUTES-1"
+version = 1
 title = "Protected routes declare their authentication requirement explicitly via a decorator or Blueprint before_request hook"
-tag = "stack"
 domain = "python:flask"
 layer = "framework"
 enforcement = "structured"
+kind = "defect"
+inspectable = true
 default = true
 verification = "grounded"
 
@@ -16,16 +18,21 @@ why = "Flask applies no authentication to routes by default. A route that does n
 id = "decorator-or-before-request-hook"
 label = "@login_required / @jwt_required on each route, or a Blueprint before_request hook"
 directive = "Every route that requires authentication declares it explicitly via `@login_required` (Flask-Login), `@jwt_required()` (Flask-JWT-Extended), or an equivalent auth decorator immediately before the route function. Alternatively, a Blueprint that groups protected routes registers a `before_request` hook that enforces authentication for all routes in the blueprint, with public sub-routes within the blueprint explicitly exempted. A route that lacks an auth decorator and is not registered under a Blueprint with a before_request auth hook is treated as unintentionally public and must be corrected. Authentication checks inside the route body (after business logic begins) are not sufficient."
+remediation = """
+Add an explicit auth decorator (@login_required, @jwt_required(), or equivalent) immediately before the protected route function, or move the route into a Blueprint with a before_request hook that enforces authentication for the whole group. Verify by calling the route without valid credentials and confirming it is rejected before the route function's body runs.
+"""
 why = "Explicit decorators or Blueprint hooks make authentication requirements visible at the route definition and reviewable in code, rather than being a runtime assumption."
 
 [[option]]
 id = "manual-check-in-route-body"
+violates = true
 label = "check authentication inside the route function body"
 directive = "Route functions check `current_user.is_authenticated` or decode the token manually inside the function body before performing any protected action."
 why = "Moves the check away from the route declaration, making it easy to miss during review; a forgotten check silently makes the route public."
 
 [[option]]
 id = "no-auth-assumed-from-frontend"
+violates = true
 label = "assume only authenticated clients call protected routes"
 directive = "No authentication check is applied to protected routes; the application trusts that the frontend only calls protected routes after the user has logged in."
 why = "The server is the only enforcement point; the frontend's auth state is advisory, not authoritative; any caller with network access can invoke the route."

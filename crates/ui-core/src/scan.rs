@@ -1,6 +1,8 @@
 //! Scan-surface formatting helpers, extracted from the scan UI. Pure string/number formatting with no
 //! rendering-framework dependency, unit-tested here.
 
+use camerata_api_types::project::ProjectBackend;
+
 /// Human-readable token count by magnitude (900 -> "900", 2_000 -> "2k", 2_000_000 -> "2.0M").
 pub fn human_tokens(t: u64) -> String {
     if t >= 1_000_000 {
@@ -31,8 +33,27 @@ pub fn default_finding_status() -> String {
 /// unit-testable without rendering. Pricing is per-million-token model rates; the mode string
 /// selects `sequential` / `parallel` / `batch` pass shaping + cache/batch discounts, and the
 /// `thorough` / `incremental` / `deep` flags scale the calibration, incremental-scope, and
-/// deep-tier passes respectively. Biased HIGH on purpose (see `FUDGE`): an audit that costs
-/// more than quoted is the bad surprise.
+/// deep-tier passes respectively.
+///
+/// `backend` is the project's [`ProjectBackend`] (`docs/design/2026-09-22_per-project-backend.md`)
+/// — it changes how the shared repo digest's prompt-cache cost is modeled (see the "cacheable
+/// prefix pricing" section below), and is the single biggest lever in closing a real gap: a
+/// faktura-shaped CLI run priced ~$0.88 by the old backend-blind formula actually billed ~$3.07
+/// (~3.5×), almost entirely because the old formula assumed API-style write-once/read-cheap
+/// caching regardless of backend.
+///
+/// `multi_option_selected` is the count of SELECTED rules that offer 2+ alternative options
+/// (`docs/design/2026-09-22_audit-integrated-alternatives.md`) — it drives the size of the
+/// one-off alternative-recommendation pass (see below). Approximate by design: the caller
+/// typically doesn't have the live per-rule selection set at estimate time, so passing the
+/// count of multi-option rules in the proposed corpus is a reasonable stand-in.
+///
+/// No longer uniformly "biased high": on the API/batch backend the estimate still runs a bit
+/// hot (see `FUDGE`), but on the CLI backend — where every call is a fresh subprocess that
+/// cannot reuse another call's prompt cache — the dominant cost driver is the digest's
+/// cache-WRITE surcharge paid on every single pass, not a discount. Treat this as an
+/// approximation, not a quote: model output volume varies by codebase and can't be predicted
+/// exactly.
 #[allow(clippy::too_many_arguments)]
 pub fn estimate_audit_cost(
     code_chars: usize,
@@ -45,6 +66,8 @@ pub fn estimate_audit_cost(
     thorough: bool,
     incremental: bool,
     deep: bool,
+    backend: ProjectBackend,
+    multi_option_selected: usize,
 ) -> (u64, f64, usize) {
     const CHUNK_DIGEST_CHARS: usize = 350_000;
     const RULE_BATCH_SIZE: usize = 15;
@@ -53,17 +76,20 @@ pub fn estimate_audit_cost(
     // cached. The digest + repo map form the cached prefix, so only this remainder is
     // re-sent at full price for subsequent batches.
     const OVERHEAD_CHARS_PER_PASS: usize = 10_000;
-    // Output is findings: a baseline per pass plus a term that scales with code scanned
-    // (so a findings-dense or large scan isn't under-counted on the half that bites most).
-    const OUT_TOKENS_PER_PASS: f64 = 2_200.0;
-    const OUTPUT_PER_CODE_TOKEN: f64 = 0.02;
-    // Resolution round + general conservatism. Biased HIGH on purpose: logged real runs
-    // (budget-mini ~2.24×, chorale ~1.75×) came in UNDER estimate even before caching, and
-    // an audit that costs more than quoted is the bad surprise.
-    const FUDGE: f64 = 1.4;
+    // Output is findings: a baseline per pass plus a term that scales with code scanned (so a
+    // findings-dense or large scan isn't under-counted on the half that bites most). Widened
+    // from the original 2_200 / 0.02: a real findings-heavy run showed the recommendation,
+    // resolution, and calibration passes ALL emitting substantially more prose than a single
+    // bare violation pass, and the narrower constants under-counted that volume.
+    const OUT_TOKENS_PER_PASS: f64 = 2_600.0;
+    const OUTPUT_PER_CODE_TOKEN: f64 = 0.022;
+    // General conservatism only now — the resolution round used to be folded entirely into
+    // this fudge factor; it's now priced explicitly below (see `resolution_calls`), so this
+    // constant shrank accordingly rather than double-counting it.
+    const FUDGE: f64 = 1.0;
     // Prompt-cache pricing multipliers (Anthropic list pricing as of 2024-07):
-    //   write (first batch per chunk): 1.25× input
-    //   read  (subsequent batches):    0.10× input
+    //   write: 1.25× input
+    //   read:  0.10× input
     const CACHE_WRITE_MULT: f64 = 1.25;
     const CACHE_READ_MULT: f64 = 0.10;
     // Deep tier (#55): three EXTRA whole-repo passes (SOC-2 gap, deep security, threat model).
@@ -71,11 +97,24 @@ pub fn estimate_audit_cost(
     const DEEP_PASSES: f64 = 3.0;
     // A deep pass emits far more prose than a per-rule finding pass (full report per lens).
     const DEEP_OUT_TOKENS_PER_PASS: f64 = 8_000.0;
+    // Alternative-recommendation pass (`docs/design/2026-09-22_audit-integrated-alternatives.md`):
+    // ONE dedicated real-time call (never batched — see `recommend_alternatives` in
+    // `ai_audit.rs`) that hands the model the repo map plus every selected multi-option rule's
+    // full option set, and gets back one recommended option per rule.
+    const REC_BASE_CHARS: usize = 6_000;
+    const REC_CHARS_PER_RULE: usize = 600;
+    const REC_OUT_TOKENS_PER_RULE: f64 = 100.0;
+    // Resolution round (`ai_audit.rs`'s "Resolution round"): a SINGLE bounded extra real-time
+    // pass-group (never batched, regardless of scan mode) that re-audits the small handful of
+    // files (typically 1-5) whose cross-file rule judgment an earlier pass deferred, against
+    // the FULL selected rule set — i.e. the same rule-batch count as the main scan, but over a
+    // much smaller file digest.
+    const RESOLUTION_FILES_CHARS: usize = 25_000;
 
     // Batch mode (#61): the Anthropic Message Batches API charges a flat 50% discount on
     // ALL input and output tokens for the SCAN passes (which are submitted as a batch).
-    // The calibration pass always runs real-time (a single call over aggregated findings
-    // — not batched), so calib pricing is NOT discounted.
+    // The calibration, recommendation, and resolution passes always run real-time (never
+    // batched), so their pricing is NOT discounted.
     let batch_discount = if mode == "batch" { 0.5 } else { 1.0 };
     let (eff_audit_in, eff_audit_out) = (audit_in * batch_discount, audit_out * batch_discount);
     // Calibration is real-time even in batch mode: one call over the aggregated findings.
@@ -90,31 +129,44 @@ pub fn estimate_audit_cost(
     let passes = chunks * batches;
     let code_tokens = code_chars as f64 / CHARS_PER_TOKEN;
 
+    // ── Cacheable-prefix pricing, BACKEND-AWARE ──────────────────────────────────────────
+    //
+    // API/batch: the Messages API prompt cache persists ACROSS calls within the same
+    // scan run, so of `calls` calls sharing an identical prefix, the first pays the 1.25×
+    // cache-WRITE surcharge and the remaining `calls - 1` read it back cheaply at 0.1×. A
+    // lone call has no reuse to amortize, so it is priced at plain 1.0× with no surcharge.
+    //
+    // CLI: every `claude` invocation is spawned as its own fresh subprocess
+    // (`tokio::process::Command::new("claude")` per call) with no shared conversation state
+    // — there is NO cross-call cache reuse. EVERY one of the `calls` calls independently
+    // re-creates and pays the 1.25× cache-WRITE surcharge; none of them get the 0.1× read
+    // discount. This was the dominant source of the pre-existing estimate running ~3.5× low
+    // on CLI-backed projects (a real run showed 138k tokens written vs. only 19k read).
+    let cacheable_pass_tokens = |chars_per_call: f64, calls: usize| -> f64 {
+        if calls == 0 {
+            return 0.0;
+        }
+        let tokens = chars_per_call / CHARS_PER_TOKEN;
+        match backend {
+            ProjectBackend::Cli => tokens * CACHE_WRITE_MULT * calls as f64,
+            ProjectBackend::Api => {
+                if calls <= 1 {
+                    tokens
+                } else {
+                    tokens * CACHE_WRITE_MULT + tokens * CACHE_READ_MULT * (calls - 1) as f64
+                }
+            }
+        }
+    };
+
     // ── Scan passes, priced at the AUDIT model (with batch discount applied) ──
     //
-    // Without caching: the full digest is re-sent at full input price every pass.
-    // With caching (parallel/batch mode, batches > 1): per chunk, batch 0 pays full input
-    // + the one-time 1.25× cache-write surcharge; batches 1..N read the cached digest at
-    // 0.1×. Sequential (batches == 1) has no reuse, so no discount.
-    //
     // Overhead tokens (rules block, system prompt) are always sent at full price since they
-    // vary per batch.
-    let scan_in = if batches <= 1 {
-        // No caching benefit: every batch pays full price for the digest.
-        (code_chars * batches + OVERHEAD_CHARS_PER_PASS * passes) as f64 / CHARS_PER_TOKEN
-    } else {
-        // Batch 0 per chunk: full digest price + cache-write surcharge.
-        // Batches 1..N per chunk: digest at cache-read rate (0.1×).
-        let digest_tokens_per_chunk = code_chars as f64 / chunks as f64 / CHARS_PER_TOKEN;
-        let write_cost = digest_tokens_per_chunk * CACHE_WRITE_MULT * chunks as f64;
-        let read_cost = digest_tokens_per_chunk
-            * CACHE_READ_MULT
-            * (batches.saturating_sub(1)) as f64
-            * chunks as f64;
-        // Overhead (never cached) is full price for every pass.
-        let overhead_cost = OVERHEAD_CHARS_PER_PASS as f64 / CHARS_PER_TOKEN * passes as f64;
-        write_cost + read_cost + overhead_cost
-    };
+    // vary per batch and are never part of the cached prefix.
+    let chars_per_chunk = code_chars as f64 / chunks as f64;
+    let scan_in_digest = cacheable_pass_tokens(chars_per_chunk, batches) * chunks as f64;
+    let overhead_cost = OVERHEAD_CHARS_PER_PASS as f64 / CHARS_PER_TOKEN * passes as f64;
+    let scan_in = scan_in_digest + overhead_cost;
     let scan_out =
         OUT_TOKENS_PER_PASS * passes as f64 + OUTPUT_PER_CODE_TOKEN * code_tokens * batches as f64;
 
@@ -140,6 +192,20 @@ pub fn estimate_audit_cost(
         (0.0, 0.0)
     };
 
+    // ── Alternative-recommendation pass: one real-time call (no batch discount), priced at
+    // the audit model. Zero when no selected rule offers alternatives.
+    let rec_calls = if multi_option_selected > 0 { 1 } else { 0 };
+    let rec_chars = (REC_BASE_CHARS + REC_CHARS_PER_RULE * multi_option_selected) as f64;
+    let rec_in = cacheable_pass_tokens(rec_chars, rec_calls);
+    let rec_out = REC_OUT_TOKENS_PER_RULE * multi_option_selected as f64;
+
+    // ── Resolution round: one bounded real-time pass-group (no batch discount) over a small
+    // deferred-file subset, against the full selected rule set (same rule-batch count as the
+    // main scan). Zero when nothing is selected (nothing to defer/resolve).
+    let resolution_calls = if selected > 0 { batches } else { 0 };
+    let resolution_in = cacheable_pass_tokens(RESOLUTION_FILES_CHARS as f64, resolution_calls);
+    let resolution_out = OUT_TOKENS_PER_PASS * resolution_calls as f64;
+
     // Incremental scope (only changed files actually billed) would lower the scan portion, but
     // the client has no changed-file token breakdown today (see fn doc + followup), so we keep
     // the full-scan price and let the readout flag incremental as an over-estimate. Bind the
@@ -148,12 +214,24 @@ pub fn estimate_audit_cost(
 
     let dollars = ((scan_in * eff_audit_in + scan_out * eff_audit_out)
         + (cal_in * eff_calib_in + cal_out * eff_calib_out)
-        + (deep_in * audit_in + deep_out * audit_out))
+        + (deep_in * audit_in + deep_out * audit_out)
+        + (rec_in * audit_in + rec_out * audit_out)
+        + (resolution_in * audit_in + resolution_out * audit_out))
         / 1_000_000.0
         * FUDGE;
-    let total_tokens =
-        ((scan_in + scan_out + cal_in + cal_out + deep_in + deep_out) * FUDGE) as u64;
-    (total_tokens, dollars, passes)
+    let total_tokens = ((scan_in
+        + scan_out
+        + cal_in
+        + cal_out
+        + deep_in
+        + deep_out
+        + rec_in
+        + rec_out
+        + resolution_in
+        + resolution_out)
+        * FUDGE) as u64;
+    let total_passes = passes + rec_calls + resolution_calls;
+    (total_tokens, dollars, total_passes)
 }
 
 #[cfg(test)]
@@ -190,8 +268,20 @@ mod tests {
     #[test]
     fn sequential_mode_no_cache_discount() {
         // Small repo: 100k chars, 0 rules, sequential.
-        let (toks, dollars, passes) =
-            estimate_audit_cost(100_000, 0, "sequential", 3.0, 15.0, 3.0, 15.0, false, false, false);
+        let (toks, dollars, passes) = estimate_audit_cost(
+            100_000,
+            0,
+            "sequential",
+            3.0,
+            15.0,
+            3.0,
+            15.0,
+            false,
+            false,
+            false,
+            ProjectBackend::Api,
+            0,
+        );
         assert_eq!(passes, 1, "0 rules + sequential = one pass");
         assert!(toks > 0, "some tokens");
         assert!(dollars > 0.0, "some cost");
@@ -201,15 +291,44 @@ mod tests {
     /// price because subsequent batches read the digest from cache at ~0.1×.
     #[test]
     fn parallel_multi_batch_cheaper_than_sequential_sum() {
-        // 30 rules -> ceil(30/15)=2 batches; 350k chars = 1 chunk.
-        let (_, dollars_parallel, passes_parallel) =
-            estimate_audit_cost(350_000, 30, "parallel", 3.0, 15.0, 3.0, 15.0, false, false, false);
-        assert_eq!(passes_parallel, 2, "2 batches for 30 rules");
+        // 30 rules -> ceil(30/15)=2 batches; 350k chars = 1 chunk. Passes = 2 main scan passes
+        // + 2 resolution-round passes (the resolution round now runs the SAME rule-batch count
+        // as the main scan — see the fn doc's "Resolution round" section) = 4.
+        let (_, dollars_parallel, passes_parallel) = estimate_audit_cost(
+            350_000,
+            30,
+            "parallel",
+            3.0,
+            15.0,
+            3.0,
+            15.0,
+            false,
+            false,
+            false,
+            ProjectBackend::Api,
+            0,
+        );
+        assert_eq!(
+            passes_parallel, 4,
+            "2 scan batches + 2 resolution-round passes for 30 rules"
+        );
 
         // If we ran sequential with 30 rules we get 1 pass; run twice to simulate
         // the naive "pay full price twice" baseline.
-        let (_, dollars_seq_single, _) =
-            estimate_audit_cost(350_000, 30, "sequential", 3.0, 15.0, 3.0, 15.0, false, false, false);
+        let (_, dollars_seq_single, _) = estimate_audit_cost(
+            350_000,
+            30,
+            "sequential",
+            3.0,
+            15.0,
+            3.0,
+            15.0,
+            false,
+            false,
+            false,
+            ProjectBackend::Api,
+            0,
+        );
         let naive_two_passes = dollars_seq_single * 2.0;
 
         assert!(
@@ -223,12 +342,39 @@ mod tests {
     #[test]
     fn parallel_single_batch_no_discount() {
         // 1 rule -> 1 batch in parallel mode.
-        let (toks1, dollars1, passes1) =
-            estimate_audit_cost(350_000, 1, "parallel", 3.0, 15.0, 3.0, 15.0, false, false, false);
-        let (toks_seq, dollars_seq, passes_seq) =
-            estimate_audit_cost(350_000, 1, "sequential", 3.0, 15.0, 3.0, 15.0, false, false, false);
-        assert_eq!(passes1, 1);
-        assert_eq!(passes_seq, 1);
+        let (toks1, dollars1, passes1) = estimate_audit_cost(
+            350_000,
+            1,
+            "parallel",
+            3.0,
+            15.0,
+            3.0,
+            15.0,
+            false,
+            false,
+            false,
+            ProjectBackend::Api,
+            0,
+        );
+        let (toks_seq, dollars_seq, passes_seq) = estimate_audit_cost(
+            350_000,
+            1,
+            "sequential",
+            3.0,
+            15.0,
+            3.0,
+            15.0,
+            false,
+            false,
+            false,
+            ProjectBackend::Api,
+            0,
+        );
+        // 1 main pass + 1 resolution-round pass (selected > 0, so the bounded resolution round
+        // fires — see the fn doc's "Resolution round" section) = 2 for both modes (1 rule needs
+        // only 1 rule-batch either way).
+        assert_eq!(passes1, 2);
+        assert_eq!(passes_seq, 2);
         // Token counts should be in the same ballpark (both are 1 pass over the same chunk).
         // The cache-write surcharge on the parallel path makes it *slightly* higher than
         // sequential, but they should be within 30% of each other.
@@ -243,10 +389,34 @@ mod tests {
     /// Thorough mode triples the calibration cost; the estimate should grow accordingly.
     #[test]
     fn thorough_mode_costs_more_than_default() {
-        let (_, dollars_default, _) =
-            estimate_audit_cost(200_000, 15, "parallel", 3.0, 15.0, 1.0, 5.0, false, false, false);
-        let (_, dollars_thorough, _) =
-            estimate_audit_cost(200_000, 15, "parallel", 3.0, 15.0, 1.0, 5.0, true, false, false);
+        let (_, dollars_default, _) = estimate_audit_cost(
+            200_000,
+            15,
+            "parallel",
+            3.0,
+            15.0,
+            1.0,
+            5.0,
+            false,
+            false,
+            false,
+            ProjectBackend::Api,
+            0,
+        );
+        let (_, dollars_thorough, _) = estimate_audit_cost(
+            200_000,
+            15,
+            "parallel",
+            3.0,
+            15.0,
+            1.0,
+            5.0,
+            true,
+            false,
+            false,
+            ProjectBackend::Api,
+            0,
+        );
         assert!(
             dollars_thorough > dollars_default,
             "thorough costs more: {dollars_thorough:.4} > {dollars_default:.4}"
@@ -259,10 +429,34 @@ mod tests {
     #[test]
     fn batch_mode_cheaper_than_parallel_due_to_scan_discount() {
         // 30 rules, 350k chars = 1 chunk, 2 rule-batches. Calibration = same model.
-        let (_, dollars_parallel, passes_parallel) =
-            estimate_audit_cost(350_000, 30, "parallel", 3.0, 15.0, 3.0, 15.0, false, false, false);
-        let (_, dollars_batch, passes_batch) =
-            estimate_audit_cost(350_000, 30, "batch", 3.0, 15.0, 3.0, 15.0, false, false, false);
+        let (_, dollars_parallel, passes_parallel) = estimate_audit_cost(
+            350_000,
+            30,
+            "parallel",
+            3.0,
+            15.0,
+            3.0,
+            15.0,
+            false,
+            false,
+            false,
+            ProjectBackend::Api,
+            0,
+        );
+        let (_, dollars_batch, passes_batch) = estimate_audit_cost(
+            350_000,
+            30,
+            "batch",
+            3.0,
+            15.0,
+            3.0,
+            15.0,
+            false,
+            false,
+            false,
+            ProjectBackend::Api,
+            0,
+        );
         assert_eq!(
             passes_parallel, passes_batch,
             "same pass count in parallel and batch (only pricing differs)"
@@ -285,10 +479,34 @@ mod tests {
     /// identical in both modes; scan cost is halved. Total must be cheaper in batch mode.
     #[test]
     fn batch_mode_zero_rules_cheaper_than_parallel() {
-        let (_, dollars_parallel, _) =
-            estimate_audit_cost(200_000, 0, "parallel", 3.0, 15.0, 3.0, 15.0, false, false, false);
-        let (_, dollars_batch, _) =
-            estimate_audit_cost(200_000, 0, "batch", 3.0, 15.0, 3.0, 15.0, false, false, false);
+        let (_, dollars_parallel, _) = estimate_audit_cost(
+            200_000,
+            0,
+            "parallel",
+            3.0,
+            15.0,
+            3.0,
+            15.0,
+            false,
+            false,
+            false,
+            ProjectBackend::Api,
+            0,
+        );
+        let (_, dollars_batch, _) = estimate_audit_cost(
+            200_000,
+            0,
+            "batch",
+            3.0,
+            15.0,
+            3.0,
+            15.0,
+            false,
+            false,
+            false,
+            ProjectBackend::Api,
+            0,
+        );
         assert!(
             dollars_batch < dollars_parallel,
             "batch cheaper even with 0 rules: {dollars_batch:.4} < {dollars_parallel:.4}"
@@ -300,7 +518,21 @@ mod tests {
     #[test]
     fn deep_tier_costs_more_and_is_the_priciest_option() {
         let base = |deep: bool, thorough: bool| {
-            estimate_audit_cost(350_000, 30, "parallel", 3.0, 15.0, 3.0, 15.0, thorough, false, deep).1
+            estimate_audit_cost(
+                350_000,
+                30,
+                "parallel",
+                3.0,
+                15.0,
+                3.0,
+                15.0,
+                thorough,
+                false,
+                deep,
+                ProjectBackend::Api,
+                0,
+            )
+            .1
         };
         let standard = base(false, false);
         let thorough = base(false, true);
@@ -317,10 +549,34 @@ mod tests {
     /// blow up the estimate and must equal the full-scan number for the same inputs.
     #[test]
     fn incremental_flag_prices_same_as_full_today() {
-        let full =
-            estimate_audit_cost(350_000, 30, "parallel", 3.0, 15.0, 3.0, 15.0, false, false, false);
-        let incremental =
-            estimate_audit_cost(350_000, 30, "parallel", 3.0, 15.0, 3.0, 15.0, false, true, false);
+        let full = estimate_audit_cost(
+            350_000,
+            30,
+            "parallel",
+            3.0,
+            15.0,
+            3.0,
+            15.0,
+            false,
+            false,
+            false,
+            ProjectBackend::Api,
+            0,
+        );
+        let incremental = estimate_audit_cost(
+            350_000,
+            30,
+            "parallel",
+            3.0,
+            15.0,
+            3.0,
+            15.0,
+            false,
+            true,
+            false,
+            ProjectBackend::Api,
+            0,
+        );
         assert_eq!(
             full.1, incremental.1,
             "incremental prices the full set today (no changed-file data): {} vs {}",
@@ -334,22 +590,49 @@ mod tests {
     fn ai_scan_off_zero_prices_yields_zero_dollars() {
         // Simulate the UI's behaviour when run_ai_review() is false: both model prices
         // are clamped to (0.0, 0.0) before calling estimate_audit_cost.
-        let (toks, dollars, _passes) =
-            estimate_audit_cost(350_000, 30, "parallel", 0.0, 0.0, 0.0, 0.0, false, false, false);
+        let (toks, dollars, _passes) = estimate_audit_cost(
+            350_000,
+            30,
+            "parallel",
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            false,
+            false,
+            false,
+            ProjectBackend::Api,
+            0,
+        );
         assert_eq!(
             dollars, 0.0,
             "zero prices must produce $0 estimate (AI scan off): got {dollars}"
         );
         // Token count is still computed (for informational display) even at $0.
-        assert!(toks > 0, "token count should still be non-zero even when prices are zero");
+        assert!(
+            toks > 0,
+            "token count should still be non-zero even when prices are zero"
+        );
     }
 
     /// A free OpenRouter model has price_in=0.0 and price_out=0.0.  Passing those values
     /// must produce a $0 estimate (the model is free, so no cost regardless of token count).
     #[test]
     fn free_model_zero_prices_yields_zero_dollars() {
-        let (_, dollars, _) =
-            estimate_audit_cost(200_000, 15, "parallel", 0.0, 0.0, 0.0, 0.0, false, false, false);
+        let (_, dollars, _) = estimate_audit_cost(
+            200_000,
+            15,
+            "parallel",
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            false,
+            false,
+            false,
+            ProjectBackend::Api,
+            0,
+        );
         assert_eq!(
             dollars, 0.0,
             "free model (price_in=price_out=0) must yield $0 estimate: got {dollars}"
@@ -360,11 +643,38 @@ mod tests {
     /// estimate must scale with price: doubling the model price doubles the dollar figure.
     #[test]
     fn paid_model_registry_prices_produce_nonzero_and_scale_linearly() {
-        let (_, dollars_base, _) =
-            estimate_audit_cost(200_000, 15, "parallel", 1.0, 5.0, 1.0, 5.0, false, false, false);
-        let (_, dollars_double, _) =
-            estimate_audit_cost(200_000, 15, "parallel", 2.0, 10.0, 2.0, 10.0, false, false, false);
-        assert!(dollars_base > 0.0, "paid model must yield non-zero estimate: {dollars_base}");
+        let (_, dollars_base, _) = estimate_audit_cost(
+            200_000,
+            15,
+            "parallel",
+            1.0,
+            5.0,
+            1.0,
+            5.0,
+            false,
+            false,
+            false,
+            ProjectBackend::Api,
+            0,
+        );
+        let (_, dollars_double, _) = estimate_audit_cost(
+            200_000,
+            15,
+            "parallel",
+            2.0,
+            10.0,
+            2.0,
+            10.0,
+            false,
+            false,
+            false,
+            ProjectBackend::Api,
+            0,
+        );
+        assert!(
+            dollars_base > 0.0,
+            "paid model must yield non-zero estimate: {dollars_base}"
+        );
         // Doubling prices must double the dollar figure (the function is linear in price).
         let ratio = dollars_double / dollars_base;
         assert!(
@@ -373,13 +683,25 @@ mod tests {
         );
     }
 
-    /// Sonnet 4.6 registry prices ($3/$15 per M) produce a meaningful estimate for a
+    /// Sonnet 5 registry prices ($3/$15 per M) produce a meaningful estimate for a
     /// medium-sized repo scan — sanity-checks the default fallback used by the UI.
     #[test]
     fn sonnet_registry_price_estimate_is_positive() {
-        // Sonnet 4.6 list price: $3 in / $15 out per million tokens.
-        let (_, dollars, _) =
-            estimate_audit_cost(350_000, 30, "parallel", 3.0, 15.0, 3.0, 15.0, false, false, false);
+        // Sonnet 5 list price: $3 in / $15 out per million tokens.
+        let (_, dollars, _) = estimate_audit_cost(
+            350_000,
+            30,
+            "parallel",
+            3.0,
+            15.0,
+            3.0,
+            15.0,
+            false,
+            false,
+            false,
+            ProjectBackend::Api,
+            0,
+        );
         assert!(
             dollars > 0.0,
             "Sonnet-priced estimate must be positive for a 350k-char, 30-rule scan: {dollars}"
@@ -407,9 +729,18 @@ mod tests {
                         let mut prev_dollars = 0.0f64;
                         for &code_chars in sizes {
                             let (toks, dollars, _passes) = estimate_audit_cost(
-                                code_chars, selected, mode,
-                                3.0, 15.0, 3.0, 15.0,
-                                thorough, false, deep,
+                                code_chars,
+                                selected,
+                                mode,
+                                3.0,
+                                15.0,
+                                3.0,
+                                15.0,
+                                thorough,
+                                false,
+                                deep,
+                                ProjectBackend::Api,
+                                0,
                             );
                             assert!(
                                 toks >= prev_toks,
@@ -445,9 +776,18 @@ mod tests {
             let mut prev_dollars = 0.0f64;
             for &selected in rule_counts {
                 let (_toks, dollars, passes) = estimate_audit_cost(
-                    code_chars, selected, "parallel",
-                    3.0, 15.0, 3.0, 15.0,
-                    false, false, false,
+                    code_chars,
+                    selected,
+                    "parallel",
+                    3.0,
+                    15.0,
+                    3.0,
+                    15.0,
+                    false,
+                    false,
+                    false,
+                    ProjectBackend::Api,
+                    0,
                 );
                 assert!(
                     passes >= prev_passes,
@@ -480,14 +820,32 @@ mod tests {
             for &selected in &[0usize, 1, 15, 30, 60] {
                 for &thorough in &[false, true] {
                     let (_tp, dp, passes_p) = estimate_audit_cost(
-                        code_chars, selected, "parallel",
-                        3.0, 15.0, 3.0, 15.0,
-                        thorough, false, false,
+                        code_chars,
+                        selected,
+                        "parallel",
+                        3.0,
+                        15.0,
+                        3.0,
+                        15.0,
+                        thorough,
+                        false,
+                        false,
+                        ProjectBackend::Api,
+                        0,
                     );
                     let (_tb, db, passes_b) = estimate_audit_cost(
-                        code_chars, selected, "batch",
-                        3.0, 15.0, 3.0, 15.0,
-                        thorough, false, false,
+                        code_chars,
+                        selected,
+                        "batch",
+                        3.0,
+                        15.0,
+                        3.0,
+                        15.0,
+                        thorough,
+                        false,
+                        false,
+                        ProjectBackend::Api,
+                        0,
                     );
                     assert_eq!(
                         passes_p, passes_b,
@@ -517,13 +875,23 @@ mod tests {
                 for &mode in &["sequential", "parallel", "batch"] {
                     let base = |deep: bool, thorough: bool| {
                         estimate_audit_cost(
-                            code_chars, selected, mode,
-                            3.0, 15.0, 3.0, 15.0,
-                            thorough, false, deep,
-                        ).1
+                            code_chars,
+                            selected,
+                            mode,
+                            3.0,
+                            15.0,
+                            3.0,
+                            15.0,
+                            thorough,
+                            false,
+                            deep,
+                            ProjectBackend::Api,
+                            0,
+                        )
+                        .1
                     };
-                    let standard   = base(false, false);
-                    let with_deep  = base(true,  false);
+                    let standard = base(false, false);
+                    let with_deep = base(true, false);
                     let with_thorough = base(false, true);
 
                     assert!(
@@ -552,14 +920,32 @@ mod tests {
             for &selected in &[0usize, 1, 15, 30, 60] {
                 for &mode in &["sequential", "parallel", "batch"] {
                     let (_, dollars_default, _) = estimate_audit_cost(
-                        code_chars, selected, mode,
-                        3.0, 15.0, 3.0, 15.0,
-                        false, false, false,
+                        code_chars,
+                        selected,
+                        mode,
+                        3.0,
+                        15.0,
+                        3.0,
+                        15.0,
+                        false,
+                        false,
+                        false,
+                        ProjectBackend::Api,
+                        0,
                     );
                     let (_, dollars_thorough, _) = estimate_audit_cost(
-                        code_chars, selected, mode,
-                        3.0, 15.0, 3.0, 15.0,
-                        true, false, false,
+                        code_chars,
+                        selected,
+                        mode,
+                        3.0,
+                        15.0,
+                        3.0,
+                        15.0,
+                        true,
+                        false,
+                        false,
+                        ProjectBackend::Api,
+                        0,
                     );
                     assert!(
                         dollars_thorough > dollars_default,
@@ -584,9 +970,18 @@ mod tests {
                         for &incremental in &[false, true] {
                             for &deep in &[false, true] {
                                 let (toks, dollars, _) = estimate_audit_cost(
-                                    code_chars, selected, mode,
-                                    0.0, 0.0, 0.0, 0.0,
-                                    thorough, incremental, deep,
+                                    code_chars,
+                                    selected,
+                                    mode,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    thorough,
+                                    incremental,
+                                    deep,
+                                    ProjectBackend::Api,
+                                    0,
                                 );
                                 assert_eq!(
                                     dollars, 0.0,
@@ -616,14 +1011,32 @@ mod tests {
                     for &thorough in &[false, true] {
                         for &deep in &[false, true] {
                             let (_, dollars_base, _) = estimate_audit_cost(
-                                code_chars, selected, mode,
-                                3.0, 15.0, 3.0, 15.0,
-                                thorough, false, deep,
+                                code_chars,
+                                selected,
+                                mode,
+                                3.0,
+                                15.0,
+                                3.0,
+                                15.0,
+                                thorough,
+                                false,
+                                deep,
+                                ProjectBackend::Api,
+                                0,
                             );
                             let (_, dollars_double, _) = estimate_audit_cost(
-                                code_chars, selected, mode,
-                                6.0, 30.0, 6.0, 30.0,
-                                thorough, false, deep,
+                                code_chars,
+                                selected,
+                                mode,
+                                6.0,
+                                30.0,
+                                6.0,
+                                30.0,
+                                thorough,
+                                false,
+                                deep,
+                                ProjectBackend::Api,
+                                0,
                             );
                             // Doubling all prices must double the dollar figure.
                             let expected = dollars_base * 2.0;
@@ -659,14 +1072,32 @@ mod tests {
                     for &thorough in &[false, true] {
                         for &deep in &[false, true] {
                             let (toks_f, dollars_f, passes_f) = estimate_audit_cost(
-                                code_chars, selected, mode,
-                                3.0, 15.0, 3.0, 15.0,
-                                thorough, false, deep,
+                                code_chars,
+                                selected,
+                                mode,
+                                3.0,
+                                15.0,
+                                3.0,
+                                15.0,
+                                thorough,
+                                false,
+                                deep,
+                                ProjectBackend::Api,
+                                0,
                             );
                             let (toks_i, dollars_i, passes_i) = estimate_audit_cost(
-                                code_chars, selected, mode,
-                                3.0, 15.0, 3.0, 15.0,
-                                thorough, true, deep,
+                                code_chars,
+                                selected,
+                                mode,
+                                3.0,
+                                15.0,
+                                3.0,
+                                15.0,
+                                thorough,
+                                true,
+                                deep,
+                                ProjectBackend::Api,
+                                0,
                             );
                             assert_eq!(
                                 dollars_f, dollars_i,
@@ -676,7 +1107,10 @@ mod tests {
                                  non_incremental={dollars_f:.10} incremental={dollars_i:.10}"
                             );
                             assert_eq!(toks_f, toks_i, "incremental must not change token count");
-                            assert_eq!(passes_f, passes_i, "incremental must not change pass count");
+                            assert_eq!(
+                                passes_f, passes_i,
+                                "incremental must not change pass count"
+                            );
                         }
                     }
                 }
@@ -689,8 +1123,20 @@ mod tests {
 
     #[test]
     fn estimate_cost_returns_passes_and_nonzero_dollars() {
-        let (tokens, dollars, passes) =
-            estimate_audit_cost(400_000, 20, "parallel", 3.0, 15.0, 3.0, 15.0, false, false, false);
+        let (tokens, dollars, passes) = estimate_audit_cost(
+            400_000,
+            20,
+            "parallel",
+            3.0,
+            15.0,
+            3.0,
+            15.0,
+            false,
+            false,
+            false,
+            ProjectBackend::Api,
+            0,
+        );
         assert!(tokens > 0, "tokens estimated");
         assert!(dollars > 0.0, "dollars estimated");
         assert!(passes >= 1, "at least one pass");
@@ -698,19 +1144,549 @@ mod tests {
 
     #[test]
     fn estimate_cost_batch_mode_is_cheaper_than_parallel() {
-        let (_, parallel, _) =
-            estimate_audit_cost(400_000, 20, "parallel", 3.0, 15.0, 3.0, 15.0, false, false, false);
-        let (_, batch, _) =
-            estimate_audit_cost(400_000, 20, "batch", 3.0, 15.0, 3.0, 15.0, false, false, false);
-        assert!(batch < parallel, "batch (50% scan discount) must cost less; batch={batch} parallel={parallel}");
+        let (_, parallel, _) = estimate_audit_cost(
+            400_000,
+            20,
+            "parallel",
+            3.0,
+            15.0,
+            3.0,
+            15.0,
+            false,
+            false,
+            false,
+            ProjectBackend::Api,
+            0,
+        );
+        let (_, batch, _) = estimate_audit_cost(
+            400_000,
+            20,
+            "batch",
+            3.0,
+            15.0,
+            3.0,
+            15.0,
+            false,
+            false,
+            false,
+            ProjectBackend::Api,
+            0,
+        );
+        assert!(
+            batch < parallel,
+            "batch (50% scan discount) must cost less; batch={batch} parallel={parallel}"
+        );
     }
 
     #[test]
     fn estimate_cost_deep_tier_adds_cost() {
-        let (_, without, _) =
-            estimate_audit_cost(400_000, 20, "parallel", 3.0, 15.0, 3.0, 15.0, false, false, false);
-        let (_, with_deep, _) =
-            estimate_audit_cost(400_000, 20, "parallel", 3.0, 15.0, 3.0, 15.0, false, false, true);
-        assert!(with_deep > without, "deep tier must increase the estimate; deep={with_deep} base={without}");
+        let (_, without, _) = estimate_audit_cost(
+            400_000,
+            20,
+            "parallel",
+            3.0,
+            15.0,
+            3.0,
+            15.0,
+            false,
+            false,
+            false,
+            ProjectBackend::Api,
+            0,
+        );
+        let (_, with_deep, _) = estimate_audit_cost(
+            400_000,
+            20,
+            "parallel",
+            3.0,
+            15.0,
+            3.0,
+            15.0,
+            false,
+            false,
+            true,
+            ProjectBackend::Api,
+            0,
+        );
+        assert!(
+            with_deep > without,
+            "deep tier must increase the estimate; deep={with_deep} base={without}"
+        );
+    }
+
+    // ── Backend-awareness (docs/design/2026-09-22_per-project-backend.md) ─────────────────
+    //
+    // The CLI backend spawns a fresh `claude` subprocess per call with no shared prompt
+    // cache, so it can never get the API's write-once/read-cheap discount — every pass pays
+    // the 1.25x cache-WRITE surcharge. These tests pin that behavior down.
+
+    /// Even the simplest possible scan (0 rules, 1 chunk, 1 call either way) costs MORE on
+    /// CLI than API: the lone call still pays CLI's per-call write surcharge, while a lone
+    /// API call has no reuse to amortize and is priced at plain 1.0x. This isolates the
+    /// backend effect from the multi-batch caching machinery entirely.
+    #[test]
+    fn backend_cli_costs_more_than_api_even_for_a_single_call() {
+        let (_, dollars_cli, passes_cli) = estimate_audit_cost(
+            350_000,
+            0,
+            "parallel",
+            3.0,
+            15.0,
+            3.0,
+            15.0,
+            false,
+            false,
+            false,
+            ProjectBackend::Cli,
+            0,
+        );
+        let (_, dollars_api, passes_api) = estimate_audit_cost(
+            350_000,
+            0,
+            "parallel",
+            3.0,
+            15.0,
+            3.0,
+            15.0,
+            false,
+            false,
+            false,
+            ProjectBackend::Api,
+            0,
+        );
+        assert_eq!(
+            passes_cli, passes_api,
+            "same pass shape; only pricing differs"
+        );
+        assert!(
+            dollars_cli > dollars_api,
+            "CLI must cost more than API even for a single call (write surcharge, no reuse \
+             to discount): cli={dollars_cli:.6} api={dollars_api:.6}"
+        );
+        assert!(
+            dollars_cli > 0.0 && dollars_api > 0.0,
+            "both estimates plausible/non-zero"
+        );
+    }
+
+    /// With multiple rule-batches sharing one chunk's digest, the API backend gets a REAL
+    /// caching discount (write once, read cheap for the rest) while CLI pays the write
+    /// surcharge on every single batch. The CLI/API cost gap must be substantially larger
+    /// here than in the single-call case above — this is "the single biggest lever" the
+    /// backend-aware fix is meant to capture.
+    #[test]
+    fn backend_cli_meaningfully_more_expensive_with_multiple_batches() {
+        // 350k chars = 1 chunk, 30 rules -> 2 batches.
+        let (_, dollars_cli, passes_cli) = estimate_audit_cost(
+            350_000,
+            30,
+            "parallel",
+            3.0,
+            15.0,
+            3.0,
+            15.0,
+            false,
+            false,
+            false,
+            ProjectBackend::Cli,
+            0,
+        );
+        let (_, dollars_api, passes_api) = estimate_audit_cost(
+            350_000,
+            30,
+            "parallel",
+            3.0,
+            15.0,
+            3.0,
+            15.0,
+            false,
+            false,
+            false,
+            ProjectBackend::Api,
+            0,
+        );
+        assert_eq!(passes_cli, passes_api);
+        assert!(
+            dollars_cli > dollars_api,
+            "cli={dollars_cli:.6} api={dollars_api:.6}"
+        );
+        // The gap should be MEANINGFUL (not a rounding artifact) — require at least 30% more
+        // expensive on CLI for a scan with real multi-batch caching to give up.
+        let ratio = dollars_cli / dollars_api;
+        assert!(
+            ratio > 1.3,
+            "CLI should be meaningfully (>=30%) pricier than API when there's real caching \
+             upside for API to capture: ratio={ratio:.3}"
+        );
+    }
+
+    /// Property — CLI IS NEVER CHEAPER THAN API: across a sweep of shapes, the CLI estimate
+    /// is always >= the API estimate for identical inputs (equality only possible in
+    /// degenerate all-zero-price cases). CLI never benefits from cross-call cache reuse, so
+    /// it can never be pricing something MORE cheaply than a model that sometimes can.
+    #[test]
+    fn prop_cli_never_cheaper_than_api() {
+        for &code_chars in &[50_000usize, 200_000, 350_000, 700_000, 1_400_000] {
+            for &selected in &[0usize, 1, 15, 30, 60, 96] {
+                for &mode in &["sequential", "parallel", "batch"] {
+                    for &multi_option in &[0usize, 5, 20] {
+                        let (_, dollars_cli, _) = estimate_audit_cost(
+                            code_chars,
+                            selected,
+                            mode,
+                            3.0,
+                            15.0,
+                            3.0,
+                            15.0,
+                            false,
+                            false,
+                            false,
+                            ProjectBackend::Cli,
+                            multi_option.min(selected),
+                        );
+                        let (_, dollars_api, _) = estimate_audit_cost(
+                            code_chars,
+                            selected,
+                            mode,
+                            3.0,
+                            15.0,
+                            3.0,
+                            15.0,
+                            false,
+                            false,
+                            false,
+                            ProjectBackend::Api,
+                            multi_option.min(selected),
+                        );
+                        assert!(
+                            dollars_cli >= dollars_api,
+                            "CLI must never be cheaper than API: code_chars={code_chars} \
+                             selected={selected} mode={mode} multi_option={multi_option} \
+                             cli={dollars_cli:.6} api={dollars_api:.6}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    // ── Recommendation pass (docs/design/2026-09-22_audit-integrated-alternatives.md) ─────
+
+    /// Selecting at least one multi-option rule adds exactly ONE extra priced pass (the
+    /// dedicated recommendation call) and increases the dollar estimate, vs. an otherwise
+    /// identical run with no multi-option rules selected.
+    #[test]
+    fn recommendation_pass_adds_one_call_and_increases_cost() {
+        let (_, dollars_none, passes_none) = estimate_audit_cost(
+            200_000,
+            15,
+            "parallel",
+            3.0,
+            15.0,
+            3.0,
+            15.0,
+            false,
+            false,
+            false,
+            ProjectBackend::Api,
+            0,
+        );
+        let (_, dollars_some, passes_some) = estimate_audit_cost(
+            200_000,
+            15,
+            "parallel",
+            3.0,
+            15.0,
+            3.0,
+            15.0,
+            false,
+            false,
+            false,
+            ProjectBackend::Api,
+            5,
+        );
+        assert_eq!(
+            passes_some,
+            passes_none + 1,
+            "one multi-option rule or a hundred: still exactly ONE dedicated recommendation \
+             call (never batched)"
+        );
+        assert!(
+            dollars_some > dollars_none,
+            "adding multi-option rules must increase the estimate: \
+             none={dollars_none:.6} some={dollars_some:.6}"
+        );
+    }
+
+    /// Regardless of HOW MANY multi-option rules are selected, the recommendation pass is
+    /// still exactly one call (it covers every rule's options in a single dedicated
+    /// prompt) — but the dollar cost keeps growing with the rule count (bigger prompt,
+    /// more per-rule recommendations to emit). This is the "multi-option-rule-heavy input
+    /// costs more than the old formula" requirement: the OLD formula had no notion of
+    /// multi-option rules at all, so this whole axis of cost was invisible to it.
+    #[test]
+    fn prop_recommendation_cost_grows_with_multi_option_rule_count_but_stays_one_call() {
+        let counts: &[usize] = &[0, 1, 5, 15, 30];
+        let mut prev_dollars = 0.0f64;
+        for &multi_option in counts {
+            let (_, dollars, passes) = estimate_audit_cost(
+                200_000,
+                30,
+                "parallel",
+                3.0,
+                15.0,
+                3.0,
+                15.0,
+                false,
+                false,
+                false,
+                ProjectBackend::Api,
+                multi_option,
+            );
+            let expected_extra_pass = if multi_option > 0 { 1 } else { 0 };
+            let (_, _, passes_baseline) = estimate_audit_cost(
+                200_000,
+                30,
+                "parallel",
+                3.0,
+                15.0,
+                3.0,
+                15.0,
+                false,
+                false,
+                false,
+                ProjectBackend::Api,
+                0,
+            );
+            assert_eq!(
+                passes,
+                passes_baseline + expected_extra_pass,
+                "multi_option={multi_option} must add at most one pass"
+            );
+            assert!(
+                dollars >= prev_dollars,
+                "dollars must be non-decreasing in multi_option_selected: \
+                 multi_option={multi_option} prev={prev_dollars:.6} got={dollars:.6}"
+            );
+            prev_dollars = dollars;
+        }
+        // And strictly more expensive end-to-end (30 multi-option rules vs. none).
+        let (_, dollars_max, _) = estimate_audit_cost(
+            200_000,
+            30,
+            "parallel",
+            3.0,
+            15.0,
+            3.0,
+            15.0,
+            false,
+            false,
+            false,
+            ProjectBackend::Api,
+            30,
+        );
+        let (_, dollars_zero, _) = estimate_audit_cost(
+            200_000,
+            30,
+            "parallel",
+            3.0,
+            15.0,
+            3.0,
+            15.0,
+            false,
+            false,
+            false,
+            ProjectBackend::Api,
+            0,
+        );
+        assert!(
+            dollars_max > dollars_zero,
+            "a multi-option-rule-heavy input costs strictly more"
+        );
+    }
+
+    // ── Resolution round (`ai_audit.rs`'s "Resolution round") ──────────────────────────────
+
+    /// The resolution round fires whenever ANY rule is selected (there is something to
+    /// defer/resolve), adding exactly `batches` extra priced passes — the same rule-batch
+    /// count as the main scan, since the round re-runs the FULL selected rule set. Selecting
+    /// zero rules must NOT add a resolution round (nothing to resolve).
+    #[test]
+    fn resolution_round_adds_batches_worth_of_passes_when_rules_are_selected() {
+        // 45 rules -> ceil(45/15) = 3 batches; 350k chars = 1 chunk.
+        let (_, _, passes) = estimate_audit_cost(
+            350_000,
+            45,
+            "parallel",
+            3.0,
+            15.0,
+            3.0,
+            15.0,
+            false,
+            false,
+            false,
+            ProjectBackend::Api,
+            0,
+        );
+        // main = chunks(1) * batches(3) = 3; resolution = batches(3); rec = 0. Total = 6.
+        assert_eq!(
+            passes, 6,
+            "3 main + 3 resolution passes for 45 rules (3 rule-batches)"
+        );
+
+        // Zero rules: no resolution round (nothing selected to defer/resolve).
+        let (_, _, passes_zero) = estimate_audit_cost(
+            350_000,
+            0,
+            "parallel",
+            3.0,
+            15.0,
+            3.0,
+            15.0,
+            false,
+            false,
+            false,
+            ProjectBackend::Api,
+            0,
+        );
+        assert_eq!(passes_zero, 1, "0 rules: 1 main pass, no resolution round");
+    }
+
+    /// The resolution round measurably increases the dollar estimate vs. a (hypothetical)
+    /// formula that didn't price it — i.e. it isn't free. We can't directly instantiate "the
+    /// old formula" anymore, but we CAN show that scaling the rule count up (which scales the
+    /// resolution round's pass count 1:1 with the main scan's rule-batches) increases cost
+    /// faster than scaling would if only the main scan's `selected.div_ceil(15)` batches term
+    /// applied — i.e. cost includes a real, separate contribution from resolution.
+    #[test]
+    fn resolution_round_is_priced_not_free() {
+        let with_prices = estimate_audit_cost(
+            350_000,
+            30,
+            "parallel",
+            3.0,
+            15.0,
+            3.0,
+            15.0,
+            false,
+            false,
+            false,
+            ProjectBackend::Api,
+            0,
+        )
+        .1;
+        // A run with the SAME shape but $0 audit/calib prices must be $0 regardless of the
+        // resolution round (sanity: pricing is still price-gated, not a hidden flat fee).
+        let zero_priced = estimate_audit_cost(
+            350_000,
+            30,
+            "parallel",
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            false,
+            false,
+            false,
+            ProjectBackend::Api,
+            0,
+        )
+        .1;
+        assert!(with_prices > 0.0);
+        assert_eq!(
+            zero_priced, 0.0,
+            "zero prices still yield $0 even with the resolution round priced in"
+        );
+    }
+
+    // ── Faktura-shaped regression (the motivating real-world bug) ──────────────────────────
+    //
+    // A real CLI-backed audit of a ~38-file / ~110k-token / 96-rule repo priced ~$0.88 by the
+    // old backend-blind formula but actually billed ~$3.07 (~3.5x low), almost entirely
+    // because the old formula assumed API-style write-once/read-cheap caching regardless of
+    // backend. Exactness is impossible (model output volume varies by codebase), but the
+    // fixed estimator must land in the same ballpark, not still be ~3.5x off.
+    const FAKTURA_ACTUAL_USD: f64 = 3.07;
+    const FAKTURA_CODE_CHARS: usize = 110_000 * 4; // ~110k tokens of code, 4 chars/token
+    const FAKTURA_SELECTED_RULES: usize = 96;
+    const FAKTURA_MULTI_OPTION_RULES: usize = 20;
+
+    /// The CLI-backed estimate for a faktura-shaped run must no longer be ~3.5x UNDER the
+    /// real bill — it must land within ~2x of it (in EITHER direction; exactness is
+    /// impossible since the estimator still doesn't model per-rule domain routing, a
+    /// pre-existing and separately-tracked limitation — see `scan_routing.rs`).
+    #[test]
+    fn faktura_shaped_cli_estimate_no_longer_3x_under() {
+        let (_, dollars, _passes) = estimate_audit_cost(
+            FAKTURA_CODE_CHARS,
+            FAKTURA_SELECTED_RULES,
+            "parallel",
+            3.0,
+            15.0,
+            3.0,
+            15.0,
+            false,
+            false,
+            false,
+            ProjectBackend::Cli,
+            FAKTURA_MULTI_OPTION_RULES,
+        );
+        let ratio = dollars / FAKTURA_ACTUAL_USD;
+        // The OLD (backend-blind) formula for this shape was ~3.5x UNDER (ratio ~0.29). The
+        // fixed formula must be dramatically closer to 1.0 — allow up to ~2x in EITHER
+        // direction as the "exactness is impossible" tolerance the task calls out.
+        assert!(
+            ratio > 0.5 && ratio < 2.0,
+            "faktura-shaped CLI estimate must land within ~2x of the real ${FAKTURA_ACTUAL_USD} \
+             bill (was ~3.5x UNDER before this fix): dollars={dollars:.4} ratio={ratio:.3}"
+        );
+        // It must specifically no longer be UNDER by anything close to the old ~3.5x factor.
+        assert!(
+            ratio > 1.0 / 3.5 * 2.0,
+            "must have closed most of the old ~3.5x gap, not just nudged it: ratio={ratio:.3}"
+        );
+    }
+
+    /// For the identical faktura-shaped input, the API/batch backend's estimate must be
+    /// LOWER than the CLI backend's — the API backend gets real cross-call cache reuse that
+    /// CLI structurally cannot.
+    #[test]
+    fn faktura_shaped_api_estimate_is_lower_than_cli() {
+        let (_, dollars_cli, _) = estimate_audit_cost(
+            FAKTURA_CODE_CHARS,
+            FAKTURA_SELECTED_RULES,
+            "parallel",
+            3.0,
+            15.0,
+            3.0,
+            15.0,
+            false,
+            false,
+            false,
+            ProjectBackend::Cli,
+            FAKTURA_MULTI_OPTION_RULES,
+        );
+        let (_, dollars_api, _) = estimate_audit_cost(
+            FAKTURA_CODE_CHARS,
+            FAKTURA_SELECTED_RULES,
+            "parallel",
+            3.0,
+            15.0,
+            3.0,
+            15.0,
+            false,
+            false,
+            false,
+            ProjectBackend::Api,
+            FAKTURA_MULTI_OPTION_RULES,
+        );
+        assert!(
+            dollars_api < dollars_cli,
+            "API backend must estimate lower than CLI for the same faktura-shaped scan: \
+             api={dollars_api:.4} cli={dollars_cli:.4}"
+        );
+        // The API estimate should also be a PLAUSIBLE figure (not degenerate/zero) and in a
+        // sane neighborhood of the real bill.
+        assert!(dollars_api > 0.5 && dollars_api < FAKTURA_ACTUAL_USD * 2.0);
     }
 }

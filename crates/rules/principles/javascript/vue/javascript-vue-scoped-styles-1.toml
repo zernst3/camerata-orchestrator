@@ -1,9 +1,11 @@
 id = "JAVASCRIPT-VUE-SCOPED-STYLES-1"
+version = 1
 title = "Use scoped styles to encapsulate component styling and prevent CSS leaks"
-tag = "stack"
 domain = "javascript:vue"
 layer = "framework"
 enforcement = "structured"
+kind = "defect"
+inspectable = true
 default = true
 verification = "grounded"
 
@@ -25,10 +27,14 @@ why = "Vue's scoped styles (a <style scoped> tag) automatically add a unique att
 id = "use-scoped-styles"
 label = "Use scoped styles"
 directive = "Each component's <style> tag includes the scoped attribute, so CSS rules apply only to that component. Global styles (resets, typography, app theme) are in a separate global stylesheet."
+remediation = """
+Add the scoped attribute to the component's style block so its CSS rules apply only to that component, and move any rule meant to apply globally (resets, typography, theme) into a separate global stylesheet. Verify by confirming a class name reused in another component no longer picks up this component's styles.
+"""
 why = "Scoped styles prevent CSS leaks and make components more reusable."
 
 [[option]]
 id = "use-global-css"
+violates = true
 label = "Use global CSS for component styles"
 directive = "Component styles are written in global CSS files. CSS classes may conflict if different components use the same class names."
 why = "Global CSS for component styles means any two components that define a class with the same name conflict, and whichever is loaded last wins. A strict naming convention like BEM reduces conflicts but requires ongoing discipline; a developer who forgets the convention, or a third-party component that uses a common class name, silently overwrites styles. The failure is invisible until the conflicting component is rendered in the same page context."

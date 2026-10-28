@@ -1,9 +1,24 @@
 id = "JAVASCRIPT-ANGULAR-TYPED-HTTPCLIENT-1"
+version = 1
 title = "HTTP requests are made through typed services, not directly from components"
-tag = "stack"
 domain = "javascript:angular"
 layer = "framework"
 enforcement = "structured"
+kind = "decision"
+inspectable = true
+# Deviation-ceiling escape hatch, INHERITED from ARCH-STRICT-LAYERING-1: severity must describe
+# the PROBLEM, not which rule happened to fire. Without this, an Angular repo caps the identical
+# architectural defect at medium while an unmirrored stack reaches high under the general rule.
+#
+# This rule mirrors ARCH-STRICT-LAYERING-1 because it re-litigates that boundary in Angular's
+# vocabulary, and the corpus says so in its own words: this rule's `why` states "The pattern
+# parallels the Express backend rule: route handlers delegate to a service layer; Angular
+# components delegate to a service layer" — and JAVASCRIPT-EXPRESS-THIN-CONTROLLERS-1 is already a
+# matched mirror. Its rejected option ("components inject HttpClient and make HTTP requests
+# directly, handling the request, response, and error in the component") is the spine rule's own
+# rejected "DB access can happen from any layer regardless of role" with the presentation layer
+# doing its own data access.
+deviation_ceiling = "high"
 default = true
 verification = "grounded"
 
@@ -20,6 +35,9 @@ why = "HTTP requests are a data-access concern; making them directly from a comp
 id = "http-requests-are-made-through-typed-services"
 label = "HTTP requests are made through typed services, not directly from components"
 directive = "All HTTP requests (GET, POST, PUT, DELETE) are made through typed services that wrap HttpClient. Services inject HttpClient, define methods that call it (with proper return types and error handling), and expose Observables of typed domain objects to components. Components never inject HttpClient or call it directly; they call service methods. A component that needs to fetch data injects a data service and subscribes to its Observable, or uses the async pipe. Direct HttpClient.get() or HttpClient.post() calls from within a component are forbidden."
+remediation = """
+Move the direct HttpClient call out of the component and into a typed service method that returns an Observable of a typed domain object, and have the component call the service instead. Verify by confirming the component no longer injects HttpClient directly and the service's method signature declares its return type.
+"""
 why = "Services decouple the HTTP layer from presentation, making the logic reusable and testable. The component becomes a thin view layer."
 
 [[option]]

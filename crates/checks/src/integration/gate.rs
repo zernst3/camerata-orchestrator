@@ -208,7 +208,11 @@ pub fn run_gate(
     }
 
     // Stable output order for reproducibility.
-    failures.sort_by(|a, b| a.artifact.cmp(&b.artifact).then_with(|| a.repo.cmp(&b.repo)));
+    failures.sort_by(|a, b| {
+        a.artifact
+            .cmp(&b.artifact)
+            .then_with(|| a.repo.cmp(&b.repo))
+    });
     review.sort_by(|a, b| a.rule_id.cmp(&b.rule_id).then_with(|| a.repo.cmp(&b.repo)));
 
     GateVerdict {
@@ -322,8 +326,14 @@ mod tests {
         let ui = js_repo(&[("client.js", "axios.get('/users/1')\n")]);
         let verdict = run_gate(
             &[
-                GateRepo { repo: "api".into(), dir: api.path().into() },
-                GateRepo { repo: "ui".into(), dir: ui.path().into() },
+                GateRepo {
+                    repo: "api".into(),
+                    dir: api.path().into(),
+                },
+                GateRepo {
+                    repo: "ui".into(),
+                    dir: ui.path().into(),
+                },
             ],
             &["INTEGRATION-API-CONTRACT-1".into()],
             &[],
@@ -337,8 +347,14 @@ mod tests {
         let ui = js_repo(&[("client.js", "axios.post('/members/csv', b)\n")]);
         let verdict = run_gate(
             &[
-                GateRepo { repo: "api".into(), dir: api.path().into() },
-                GateRepo { repo: "ui".into(), dir: ui.path().into() },
+                GateRepo {
+                    repo: "api".into(),
+                    dir: api.path().into(),
+                },
+                GateRepo {
+                    repo: "ui".into(),
+                    dir: ui.path().into(),
+                },
             ],
             &["INTEGRATION-API-CONTRACT-1".into()],
             &[],
@@ -357,8 +373,14 @@ mod tests {
             "if (_can.act) axios.post('/public/action') // camerata:ui-gated\n",
         )]);
         let repos = vec![
-            GateRepo { repo: "api".into(), dir: api.path().into() },
-            GateRepo { repo: "ui".into(), dir: ui.path().into() },
+            GateRepo {
+                repo: "api".into(),
+                dir: api.path().into(),
+            },
+            GateRepo {
+                repo: "ui".into(),
+                dir: ui.path().into(),
+            },
         ];
         let no_waiver = run_gate(&repos, &["INTEGRATION-AUTH-SEAM-1".into()], &[]);
         assert!(!no_waiver.passed(), "unguarded gated affordance fails");
@@ -370,17 +392,30 @@ mod tests {
             reason: Some("intentionally public webhook".into()),
         };
         let waived = run_gate(&repos, &["INTEGRATION-AUTH-SEAM-1".into()], &[waiver]);
-        assert!(waived.passed(), "explicit waiver clears it: {:?}", waived.failures);
+        assert!(
+            waived.passed(),
+            "explicit waiver clears it: {:?}",
+            waived.failures
+        );
         assert_eq!(waived.waived.len(), 1);
     }
 
     #[test]
     fn reasonless_waiver_does_not_suppress() {
         let api = js_repo(&[("routes.js", "app.post('/x', h)\n")]);
-        let ui = js_repo(&[("ui.js", "if (_can.x) axios.post('/x') // camerata:ui-gated\n")]);
+        let ui = js_repo(&[(
+            "ui.js",
+            "if (_can.x) axios.post('/x') // camerata:ui-gated\n",
+        )]);
         let repos = vec![
-            GateRepo { repo: "api".into(), dir: api.path().into() },
-            GateRepo { repo: "ui".into(), dir: ui.path().into() },
+            GateRepo {
+                repo: "api".into(),
+                dir: api.path().into(),
+            },
+            GateRepo {
+                repo: "ui".into(),
+                dir: ui.path().into(),
+            },
         ];
         let waiver = GateWaiver {
             rule_id: "INTEGRATION-AUTH-SEAM-1".into(),
@@ -397,7 +432,10 @@ mod tests {
         let td = TempDir::new().unwrap();
         write(td.path(), "README.txt", "no manifest here\n");
         let verdict = run_gate(
-            &[GateRepo { repo: "mystery".into(), dir: td.path().into() }],
+            &[GateRepo {
+                repo: "mystery".into(),
+                dir: td.path().into(),
+            }],
             &["INTEGRATION-API-CONTRACT-1".into()],
             &[],
         );
@@ -415,19 +453,28 @@ mod tests {
         // Event rule NOT selected → an unconsumed emit does not fail.
         let api = js_repo(&[("emit.js", "bus.emit('lonely.event')\n")]);
         let verdict = run_gate(
-            &[GateRepo { repo: "api".into(), dir: api.path().into() }],
+            &[GateRepo {
+                repo: "api".into(),
+                dir: api.path().into(),
+            }],
             &["INTEGRATION-API-CONTRACT-1".into()], // event rule off
             &[],
         );
         assert!(verdict.passed());
-        assert!(verdict.review.is_empty(), "event seam not needed → not review-tier");
+        assert!(
+            verdict.review.is_empty(),
+            "event seam not needed → not review-tier"
+        );
     }
 
     #[test]
     fn event_rule_catches_dangling_emit() {
         let api = js_repo(&[("emit.js", "bus.emit('lonely.event')\n")]);
         let verdict = run_gate(
-            &[GateRepo { repo: "api".into(), dir: api.path().into() }],
+            &[GateRepo {
+                repo: "api".into(),
+                dir: api.path().into(),
+            }],
             &["INTEGRATION-EVENT-WIRING-1".into()],
             &[],
         );
@@ -440,8 +487,14 @@ mod tests {
         let api = js_repo(&[("routes.js", "app.post('/a', h)\n")]);
         let ui = js_repo(&[("client.js", "axios.post('/b')\n")]);
         let repos = vec![
-            GateRepo { repo: "api".into(), dir: api.path().into() },
-            GateRepo { repo: "ui".into(), dir: ui.path().into() },
+            GateRepo {
+                repo: "api".into(),
+                dir: api.path().into(),
+            },
+            GateRepo {
+                repo: "ui".into(),
+                dir: ui.path().into(),
+            },
         ];
         let v1 = run_gate(&repos, &["INTEGRATION-API-CONTRACT-1".into()], &[]);
         let v2 = run_gate(&repos, &["INTEGRATION-API-CONTRACT-1".into()], &[]);

@@ -1,9 +1,11 @@
 id = "JAVASCRIPT-TESTING-DETERMINISTIC-1"
+version = 1
 title = "Tests are deterministic: clocks, timers, and random values are controlled; no real I/O or network calls in unit tests"
-tag = "stack"
 domain = "javascript:testing"
 layer = "language"
 enforcement = "structured"
+kind = "defect"
+inspectable = true
 default = true
 qualifies = "No cited linter rule actually detects non-determinism. jest/no-done-callback targets a different problem entirely: it discourages Jest's legacy callback-based async style (test('...', (done) => { ... done(); })) in favor of returning a promise or using async/await, because the callback style can silently swallow a failed assertion if done() is called before the assertion runs. That is a correctness hazard in how a test signals completion, not a check for real clocks, unseeded randomness, or network calls — a fully deterministic, fake-timers-driven test and a flaky, real-clock-dependent test both pass or fail this rule identically based only on whether they use done() or async/await. jest/expect-expect (catches a test with zero assertions) is real but unrelated to determinism too. The actual determinism contract — fake timers via jest.useFakeTimers(), seeded/mocked Math.random(), no real I/O — is enforced by code review and by the jest.useFakeTimers() API itself being present in the test (there being no lint rule that flags a *missing* fake-timer call or a live network request in a unit test). Flaky-test detection is a CI-level check (repeated runs or quarantine labels), not a lint gate."
 verification = "grounded"
@@ -37,10 +39,14 @@ why = "A test is only valuable if it produces the same result on every run. A te
 id = "tests-are-deterministic-clocks-timers-and-randoms-are-controlled"
 label = "Tests are deterministic: clocks, timers, and random values are controlled; no real I/O or network calls in unit tests"
 directive = "Unit tests call jest.useFakeTimers() (optionally with a fixed { now } anchor to avoid epoch-0 side effects) whenever the module under test references Date, setTimeout, setInterval, or setImmediate. jest.useRealTimers() is called in afterEach to prevent timer-fake leakage across tests. Math.random() calls in the module under test are replaced by a jest.spyOn(Math, 'random').mockReturnValue(fixed) when the test needs deterministic random output. No unit test makes a real HTTP request, reads from a real database, or reads from the real filesystem; those calls are mocked (see JAVASCRIPT-TESTING-MOCK-AT-BOUNDARIES-1). The eslint-plugin-jest rules expect-expect and no-conditional-expect (both in the recommended config) are configured at error severity."
+remediation = """
+Add jest.useFakeTimers() (with a fixed now anchor) to this test if the module under test reads Date, setTimeout, setInterval, or setImmediate, and call jest.useRealTimers() in afterEach. Remove any real network call or busy-wait from the unit test. Verify by running the test repeatedly and confirming its outcome does not depend on wall-clock timing.
+"""
 why = "Deterministic tests produce reliable CI signal; flaky tests erode trust in the entire test suite and are more expensive to fix later than to prevent upfront."
 
 [[option]]
 id = "tests-use-real-timers-and-may-include-live-network-calls"
+violates = true
 label = "Tests use real timers; time-dependent code is tested with real waits or waitFor helpers"
 directive = "Tests do not use fake timers; time-dependent assertions use waitFor / sleep helpers that busy-wait for up to a timeout. Network calls may be live in integration tests."
 why = "Using real timers and live network calls in unit tests makes the test result depend on machine speed, scheduler scheduling, and endpoint availability, so a test that passes locally fails in CI under load and vice versa. Once a suite has a known flaky test, developers start ignoring red CI runs and the entire safety net degrades. This approach is acceptable for integration-layer tests where the real timer behaviour or live endpoint response is part of the contract under test, but for unit tests it trades reliable signal for the convenience of skipping the fake-timer setup."

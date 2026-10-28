@@ -262,21 +262,36 @@ mod tests {
     #[test]
     fn next_fire_daily_rolls_to_tomorrow_when_today_passed() {
         let now = dt(2026, 6, 29, 10, 0);
-        assert_eq!(next_fire("daily 09:00", now).unwrap(), dt(2026, 6, 30, 9, 0));
-        assert_eq!(next_fire("daily 14:00", now).unwrap(), dt(2026, 6, 29, 14, 0));
+        assert_eq!(
+            next_fire("daily 09:00", now).unwrap(),
+            dt(2026, 6, 30, 9, 0)
+        );
+        assert_eq!(
+            next_fire("daily 14:00", now).unwrap(),
+            dt(2026, 6, 29, 14, 0)
+        );
     }
 
     #[test]
     fn next_fire_monthly_rolls_to_next_month_when_day_passed() {
         let now = dt(2026, 6, 29, 10, 0);
-        assert_eq!(next_fire("monthly day 15 09:00", now).unwrap(), dt(2026, 7, 15, 9, 0));
-        assert_eq!(next_fire("monthly day 30 09:00", now).unwrap(), dt(2026, 6, 30, 9, 0));
+        assert_eq!(
+            next_fire("monthly day 15 09:00", now).unwrap(),
+            dt(2026, 7, 15, 9, 0)
+        );
+        assert_eq!(
+            next_fire("monthly day 30 09:00", now).unwrap(),
+            dt(2026, 6, 30, 9, 0)
+        );
     }
 
     #[test]
     fn next_fire_once_future_vs_past() {
         let now = dt(2026, 6, 29, 10, 0);
-        assert_eq!(next_fire("once 2026-07-04 12:00", now).unwrap(), dt(2026, 7, 4, 12, 0));
+        assert_eq!(
+            next_fire("once 2026-07-04 12:00", now).unwrap(),
+            dt(2026, 7, 4, 12, 0)
+        );
         assert!(next_fire("once 2026-06-01 12:00", now).is_none());
     }
 
@@ -302,7 +317,12 @@ mod tests {
         };
         // Today at 09:00 already passed -> same weekday next week (+7 days).
         let passed = next_fire(&format!("weekly {day} 09:00"), now).unwrap();
-        assert_eq!(passed, (now.date() + Duration::days(7)).and_hms_opt(9, 0, 0).unwrap());
+        assert_eq!(
+            passed,
+            (now.date() + Duration::days(7))
+                .and_hms_opt(9, 0, 0)
+                .unwrap()
+        );
         // Today at 14:00 still ahead -> today.
         let ahead = next_fire(&format!("weekly {day} 14:00"), now).unwrap();
         assert_eq!(ahead, dt(2026, 6, 29, 14, 0));
@@ -447,7 +467,10 @@ mod tests {
         // Also check at the exact slot time: next_fire at 09:00 must give tomorrow 09:00.
         let now_at_slot = dt(2026, 6, 1, 9, 0);
         let nf = next_fire("daily 09:00", now_at_slot).unwrap();
-        assert!(nf > now_at_slot, "next_fire at exact slot time must still be strictly after now");
+        assert!(
+            nf > now_at_slot,
+            "next_fire at exact slot time must still be strictly after now"
+        );
     }
 
     #[test]
@@ -519,7 +542,11 @@ mod tests {
         let slot = dt(2026, 6, 15, 9, 0);
         assert!(!is_due("monthly day 15 09:00", now, Some(slot)));
         // Also: last_fired slightly after the slot still blocks.
-        assert!(!is_due("monthly day 15 09:00", now, Some(dt(2026, 6, 15, 9, 30))));
+        assert!(!is_due(
+            "monthly day 15 09:00",
+            now,
+            Some(dt(2026, 6, 15, 9, 30))
+        ));
     }
 
     // ── property: manual/unrecognized NEVER fires ─────────────────────────────
@@ -530,10 +557,10 @@ mod tests {
             "manual",
             "",
             "garbage",
-            "daily",         // missing HH:MM
-            "weekly 09:00",  // missing day list
+            "daily",            // missing HH:MM
+            "weekly 09:00",     // missing day list
             "monthly 15 09:00", // missing "day" keyword
-            "once 2099-01-01", // missing HH:MM
+            "once 2099-01-01",  // missing HH:MM
         ];
         for s in cases {
             let now = dt(2026, 6, 25, 12, 0);
@@ -550,8 +577,14 @@ mod tests {
         for s in cases {
             // Try several (now, last_fired) combos — should always be false.
             let now = dt(2026, 6, 25, 12, 0);
-            assert!(!is_due(s, now, None), "is_due({s:?}, now, None) should be false");
-            assert!(!is_due(s, now, Some(dt(2026, 1, 1, 0, 0))), "is_due({s:?}, now, old_last_fired) should be false");
+            assert!(
+                !is_due(s, now, None),
+                "is_due({s:?}, now, None) should be false"
+            );
+            assert!(
+                !is_due(s, now, Some(dt(2026, 1, 1, 0, 0))),
+                "is_due({s:?}, now, old_last_fired) should be false"
+            );
         }
     }
 
@@ -560,8 +593,16 @@ mod tests {
     #[test]
     fn once_not_due_before_target_time() {
         // Strictly before target datetime: not due, regardless of last_fired.
-        assert!(!is_due("once 2026-07-04 12:00", dt(2026, 7, 4, 11, 59), None));
-        assert!(!is_due("once 2026-07-04 12:00", dt(2026, 7, 3, 23, 59), None));
+        assert!(!is_due(
+            "once 2026-07-04 12:00",
+            dt(2026, 7, 4, 11, 59),
+            None
+        ));
+        assert!(!is_due(
+            "once 2026-07-04 12:00",
+            dt(2026, 7, 3, 23, 59),
+            None
+        ));
         // Even with last_fired in the distant past:
         assert!(!is_due(
             "once 2026-07-04 12:00",
@@ -581,8 +622,16 @@ mod tests {
     fn once_not_due_after_last_fired_at_slot() {
         // Once `last_fired` is set to the slot (or later), never due again.
         let slot = dt(2026, 7, 4, 12, 0);
-        assert!(!is_due("once 2026-07-04 12:00", dt(2026, 7, 4, 12, 0), Some(slot)));
-        assert!(!is_due("once 2026-07-04 12:00", dt(2099, 1, 1, 0, 0), Some(slot)));
+        assert!(!is_due(
+            "once 2026-07-04 12:00",
+            dt(2026, 7, 4, 12, 0),
+            Some(slot)
+        ));
+        assert!(!is_due(
+            "once 2026-07-04 12:00",
+            dt(2099, 1, 1, 0, 0),
+            Some(slot)
+        ));
         // last_fired *after* the slot also blocks (e.g. fired at 12:05 due to clock drift).
         assert!(!is_due(
             "once 2026-07-04 12:00",
@@ -604,19 +653,31 @@ mod tests {
     fn monthly_day_31_clamps_in_february_non_leap() {
         // 2026 is not a leap year; Feb has 28 days. `monthly day 31` clamps to Feb 28.
         let now = dt(2026, 2, 28, 12, 0);
-        assert!(is_due("monthly day 31 09:00", now, None),
-            "monthly day 31 should fire on Feb 28 (the clamped day) when now is after 09:00");
+        assert!(
+            is_due("monthly day 31 09:00", now, None),
+            "monthly day 31 should fire on Feb 28 (the clamped day) when now is after 09:00"
+        );
         // Not due again once fired at the clamped slot.
-        assert!(!is_due("monthly day 31 09:00", now, Some(dt(2026, 2, 28, 9, 0))));
+        assert!(!is_due(
+            "monthly day 31 09:00",
+            now,
+            Some(dt(2026, 2, 28, 9, 0))
+        ));
     }
 
     #[test]
     fn monthly_day_31_clamps_in_february_leap() {
         // 2028 IS a leap year; Feb has 29 days. day 31 clamps to the 29th.
         let now = dt(2028, 2, 29, 12, 0);
-        assert!(is_due("monthly day 31 09:00", now, None),
-            "monthly day 31 should fire on Feb 29 in a leap year");
-        assert!(!is_due("monthly day 31 09:00", now, Some(dt(2028, 2, 29, 9, 0))));
+        assert!(
+            is_due("monthly day 31 09:00", now, None),
+            "monthly day 31 should fire on Feb 29 in a leap year"
+        );
+        assert!(!is_due(
+            "monthly day 31 09:00",
+            now,
+            Some(dt(2028, 2, 29, 9, 0))
+        ));
     }
 
     #[test]
@@ -624,7 +685,11 @@ mod tests {
         // June has 30 days; day 31 fires on the 30th.
         let now = dt(2026, 6, 30, 12, 0);
         assert!(is_due("monthly day 31 09:00", now, None));
-        assert!(!is_due("monthly day 31 09:00", now, Some(dt(2026, 6, 30, 9, 0))));
+        assert!(!is_due(
+            "monthly day 31 09:00",
+            now,
+            Some(dt(2026, 6, 30, 9, 0))
+        ));
     }
 
     #[test]
@@ -632,8 +697,11 @@ mod tests {
         // Before the (clamped) June 30 slot: next fire should be June 30.
         let now = dt(2026, 6, 29, 8, 0);
         let nf = next_fire("monthly day 31 09:00", now).unwrap();
-        assert_eq!(nf, dt(2026, 6, 30, 9, 0),
-            "next_fire for monthly day 31 in June should clamp to June 30");
+        assert_eq!(
+            nf,
+            dt(2026, 6, 30, 9, 0),
+            "next_fire for monthly day 31 in June should clamp to June 30"
+        );
     }
 
     #[test]
@@ -679,17 +747,23 @@ mod tests {
         // slot removes the "due" state until Thursday.
         let wed = dt(2026, 6, 3, 10, 0);
         let tue_slot = dt(2026, 6, 2, 9, 0);
-        assert!(!is_due("weekly Tue,Thu 09:00", wed, Some(tue_slot)),
-            "after Tuesday's slot is consumed, should not be due again until Thursday");
+        assert!(
+            !is_due("weekly Tue,Thu 09:00", wed, Some(tue_slot)),
+            "after Tuesday's slot is consumed, should not be due again until Thursday"
+        );
         // On Thursday it becomes due again (unfired Thu slot).
         let thu = dt(2026, 6, 4, 10, 0);
-        assert!(is_due("weekly Tue,Thu 09:00", thu, Some(tue_slot)),
-            "should be due on Thursday even though Tuesday's slot was consumed");
+        assert!(
+            is_due("weekly Tue,Thu 09:00", thu, Some(tue_slot)),
+            "should be due on Thursday even though Tuesday's slot was consumed"
+        );
         // After Thursday slot fires, not due until next Tuesday.
         let thu_slot = dt(2026, 6, 4, 9, 0);
         let fri = dt(2026, 6, 5, 10, 0);
-        assert!(!is_due("weekly Tue,Thu 09:00", fri, Some(thu_slot)),
-            "after Thursday's slot, should not be due on Friday");
+        assert!(
+            !is_due("weekly Tue,Thu 09:00", fri, Some(thu_slot)),
+            "after Thursday's slot, should not be due on Friday"
+        );
     }
 
     #[test]
@@ -698,8 +772,11 @@ mod tests {
         // Schedule: only Saturday. From a Monday, next should be the coming Saturday.
         let mon = dt(2026, 6, 1, 10, 0); // Monday
         let nf = next_fire("weekly Sat 09:00", mon).unwrap();
-        assert_eq!(nf.weekday(), chrono::Weekday::Sat,
-            "next_fire for 'weekly Sat 09:00' from Monday must land on a Saturday");
+        assert_eq!(
+            nf.weekday(),
+            chrono::Weekday::Sat,
+            "next_fire for 'weekly Sat 09:00' from Monday must land on a Saturday"
+        );
         assert!(nf > mon);
     }
 
@@ -728,8 +805,8 @@ mod tests {
     fn parse_invalid_times_become_manual() {
         assert_eq!(parse("daily 24:00"), Schedule::Manual); // hour out of range
         assert_eq!(parse("daily 23:60"), Schedule::Manual); // minute out of range
-        assert_eq!(parse("daily 9:5"),   Schedule::Daily { h: 9, m: 5 }); // single-digit ok
-        assert_eq!(parse("monthly day 0 09:00"), Schedule::Manual);  // day 0 invalid
+        assert_eq!(parse("daily 9:5"), Schedule::Daily { h: 9, m: 5 }); // single-digit ok
+        assert_eq!(parse("monthly day 0 09:00"), Schedule::Manual); // day 0 invalid
         assert_eq!(parse("monthly day 32 09:00"), Schedule::Manual); // day 32 invalid
         assert_eq!(parse("weekly  09:00"), Schedule::Manual); // missing day tokens
     }

@@ -1,9 +1,18 @@
 id = "GO-WEB-STRUCTURED-ERROR-RESPONSES-1"
+version = 1
 title = "API errors are returned as a consistent structured format with status code, error code, and message; not as raw strings or status codes alone"
-tag = "stack"
 domain = "go:web"
 layer = "framework"
 enforcement = "structured"
+kind = "default_with_exceptions"
+inspectable = true
+# Deviation-ceiling escape hatch, INHERITED from ARCH-STRUCTURED-ERRORS-1: severity must describe
+# the PROBLEM, not which rule happened to fire. Without this, a repo on this stack caps the
+# identical architectural defect at medium while an unmirrored stack reaches high under the
+# general rule. This rule mirrors ARCH-STRUCTURED-ERRORS-1 because it re-litigates the same error
+# contract, almost verbatim: a consistent structured format with status code, error code, and
+# message.
+deviation_ceiling = "high"
 default = true
 verification = "grounded"
 
@@ -20,6 +29,9 @@ why = "An error response is metadata for the client: it needs to know whether to
 id = "structured-error-format"
 label = "All errors return a consistent structured format: {code, message, statusCode, ...}"
 directive = "The API defines an error response envelope (e.g., {code: string, message: string, status: int, details?: object}). All handlers, regardless of which error they encounter, format it into this envelope before sending the HTTP response. Status codes (4xx, 5xx) are paired with the structured body; a 400 Bad Request also includes the structured error code and message."
+remediation = """
+Change the handler's error response to the project's structured error envelope (code, message, status, and optional details) instead of a bare status code or an ad-hoc shape. Verify by triggering the error from a client and confirming the response body contains the structured fields consistently, matching what other endpoints return for their errors.
+"""
 why = "Structured errors are parseable, loggable, and enable client-side error handling; one schema used across all handlers."
 
 [[option]]
@@ -30,9 +42,10 @@ why = "Minimal overhead; trades error information and client-side error handling
 
 [[option]]
 id = "ad-hoc-error-format"
+violates = true
 label = "Each handler defines its own error response format"
 directive = "Handlers return errors in their own format: some as {error: string}, others as {message: string}, others as raw strings, inconsistently."
-why = "Trades client-side consistency and error handling for freedom to tailor each response; creates parsing difficulties and logging inconsistency."
+why = "Each endpoint returns errors in its own shape, so no client can parse failures with a single code path and log aggregation cannot group errors across the API. Every endpoint added introduces another format that every consumer has to learn."
 
 [[option]]
 id = "go-rfc9457-problem-details"

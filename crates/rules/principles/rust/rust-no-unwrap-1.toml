@@ -1,9 +1,11 @@
 id = "RUST-NO-UNWRAP-1"
+version = 1
 title = "unwrap() is forbidden in non-test code; propagate the error instead"
-tag = "stack"
 domain = "rust"
 layer = "language"
 enforcement = "mechanical"
+kind = "default_with_exceptions"
+inspectable = true
 default = true
 qualifies = "Mechanical, enforced by clippy: set `clippy::unwrap_used = \"deny\"` under [workspace.lints.clippy] and run `cargo clippy -D warnings` as a required CI gate. Test code is exempt via `allow-unwrap-in-tests = true` in clippy.toml; integration tests under crates/*/tests/ carry a file-level `#![allow(clippy::unwrap_used)]`. Conformance holds when the clippy gate is green; it fails the moment any non-test `unwrap()` compiles. The strict frontier (`expect_used`, `panic`, slice indexing) is the natural next tier."
 verification = "grounded"
@@ -34,16 +36,22 @@ label = "unwrap_used is denied workspace-wide via clippy; non-test code handles 
 directive = """
 The clippy lint unwrap_used is set to deny under [workspace.lints.clippy], so any .unwrap() in non-test code fails the build. Test code is exempt via allow-unwrap-in-tests = true in clippy.toml, and integration tests under crates/*/tests/ carry a file-level #![allow(clippy::unwrap_used)]. Non-test code must handle the fallible value explicitly: propagate with ?, map to a structured error, or destructure with a fallback. A cargo clippy -D warnings gate enforces it in CI so a feature branch cannot reintroduce an unwrap without failing the merge.
 """
+remediation = """
+Set clippy's unwrap_used lint to deny under [workspace.lints.clippy], and replace the .unwrap() call in non-test code with proper error propagation (the ? operator or an explicit match/if-let). Add allow-unwrap-in-tests = true in clippy.toml so test code is exempt. Verify by running cargo clippy and confirming the build fails if a new .unwrap() appears in non-test code.
+"""
+effort = "medium"
 why = "Converts a convention into a per-build mechanical guarantee, so a reintroduced unwrap fails the merge before a human reads the diff."
 
 [[option]]
 id = "set-unwrap-used-to-warn-surfacing-without-blocki"
+violates = true
 label = "unwrap_used lint set to warn, not deny"
 directive = "The unwrap_used lint is set to warn rather than deny, so occurrences appear in clippy output but do not fail the build; the team is trusted to clean them up."
 why = "Surfaces occurrences but lets them accumulate: warnings are easy to ignore under deadline pressure, so the property the rule is meant to guarantee becomes a goal-post that contributors can move by ignoring the output, defeating the point of a lint entirely."
 
 [[option]]
 id = "discourage-unwrap-by-convention-and-code-review"
+violates = true
 label = "unwrap() discouraged by convention, no lint gate"
 directive = "unwrap() is discouraged by convention and caught in code review rather than by a lint; no mechanical gate is configured."
 why = "The failure mode this rule exists to replace: a single feature branch reintroduces one unwrap during a large merge and a human reviewer reading the diff easily skates past it, allowing a runtime panic to reach production that a mechanical gate would have caught at compile time."

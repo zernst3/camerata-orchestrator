@@ -17,7 +17,10 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use camerata_agent::{render_rules_file, HeartbeatFn, GATE_EVENTS_FILE_ENV, MCP_SERVER_KEY, RULES_FILE_ENV, WORKTREE_ROOT_ENV};
+use camerata_agent::{
+    render_rules_file, HeartbeatFn, GATE_EVENTS_FILE_ENV, MCP_SERVER_KEY, RULES_FILE_ENV,
+    WORKTREE_ROOT_ENV,
+};
 use camerata_core::{AgentDriver, Role};
 
 use crate::tier::{CapabilityBand, TierMap};
@@ -156,7 +159,10 @@ pub fn render_orchestrator_mcp_config(
         DELEGATE_MODELS_ENV.to_string(),
         delegate_models_json(tier_map, vision_enabled)?,
     );
-    env.insert(GATEWAY_BIN_ENV.to_string(), gateway_bin.display().to_string());
+    env.insert(
+        GATEWAY_BIN_ENV.to_string(),
+        gateway_bin.display().to_string(),
+    );
     env.insert(DELEGATE_DEPTH_ENV.to_string(), "0".to_string());
 
     let server = serde_json::json!({
@@ -282,10 +288,10 @@ mod tests {
     #[test]
     fn lead_is_the_first_strongest_task() {
         let tasks = vec![
-            task(TaskKind::Test, "tests"),         // Fast
-            task(TaskKind::Database, "schema"),    // Balanced
-            task(TaskKind::Backend, "domain a"),   // Strongest  <- lead
-            task(TaskKind::Backend, "domain b"),   // Strongest
+            task(TaskKind::Test, "tests"),       // Fast
+            task(TaskKind::Database, "schema"),  // Balanced
+            task(TaskKind::Backend, "domain a"), // Strongest  <- lead
+            task(TaskKind::Backend, "domain b"), // Strongest
         ];
         assert_eq!(lead_stage_index(&tasks), Some(2));
     }
@@ -306,8 +312,8 @@ mod tests {
         let json = delegate_models_json(&TierMap::default(), false).unwrap();
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(v["fast"], "claude-haiku-4-5-20251001");
-        assert_eq!(v["balanced"], "claude-sonnet-4-6");
-        assert_eq!(v["strongest"], "claude-opus-4-8");
+        assert_eq!(v["balanced"], "claude-sonnet-5");
+        assert_eq!(v["strongest"], "claude-opus-5");
         assert!(v.get("vision").is_none(), "no vision key when disabled");
     }
 
@@ -315,8 +321,10 @@ mod tests {
     fn delegate_models_json_omits_vision_when_disabled_even_if_configured() {
         // Gating is the toggle, not configuration: a populated vision chain with the
         // toggle OFF still emits NO vision key, so the band stays unreachable.
-        let mut m = TierMap::default();
-        m.vision = vec!["claude-vision-model".to_string()];
+        let m = TierMap {
+            vision: vec!["claude-vision-model".to_string()],
+            ..TierMap::default()
+        };
         let json = delegate_models_json(&m, false).unwrap();
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert!(
@@ -327,8 +335,10 @@ mod tests {
 
     #[test]
     fn delegate_models_json_includes_vision_when_enabled_and_configured() {
-        let mut m = TierMap::default();
-        m.vision = vec!["claude-vision-model".to_string()];
+        let m = TierMap {
+            vision: vec!["claude-vision-model".to_string()],
+            ..TierMap::default()
+        };
         let json = delegate_models_json(&m, true).unwrap();
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(
@@ -390,15 +400,17 @@ mod tests {
         // The models env is a JSON object string with all three tiers.
         let models: serde_json::Value =
             serde_json::from_str(env[DELEGATE_MODELS_ENV].as_str().unwrap()).unwrap();
-        assert_eq!(models["balanced"], "claude-sonnet-4-6");
+        assert_eq!(models["balanced"], "claude-sonnet-5");
     }
 
     #[test]
     fn orchestrator_mcp_config_includes_vision_model_when_enabled() {
         // With vision enabled + a configured vision model, the orchestrator's delegate
         // models env carries the vision key, making the Designer band reachable.
-        let mut m = TierMap::default();
-        m.vision = vec!["claude-vision-model".to_string()];
+        let m = TierMap {
+            vision: vec!["claude-vision-model".to_string()],
+            ..TierMap::default()
+        };
         let cfg = render_orchestrator_mcp_config(
             Path::new("/bin/camerata-gateway"),
             Path::new("/tmp/s/rules.json"),
@@ -445,7 +457,10 @@ mod tests {
     #[test]
     fn prompt_suffix_omits_vision_block_when_disabled() {
         let s = orchestrator_prompt_suffix(false);
-        assert!(!s.contains("VISION/DESIGN WORK"), "no vision block when disabled");
+        assert!(
+            !s.contains("VISION/DESIGN WORK"),
+            "no vision block when disabled"
+        );
         assert!(!s.to_lowercase().contains("html/tailwind mockup"));
     }
 

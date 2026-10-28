@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used)]
 //! END-TO-END: the deterministic-scan → PDF-report pipeline, driven through the REAL
 //! entry points a manual test would exercise — no stubbing of the scan, the finding
 //! classification, the report serializer, or (when available) the Typst compiler.
@@ -63,7 +64,12 @@ fn stage_fixture_as_git_repo(dest: &Path) {
     g(&["config", "user.email", "e2e-report-pipeline@camerata.local"]);
     g(&["config", "user.name", "Camerata E2E Test"]);
     g(&["add", "."]);
-    g(&["commit", "-q", "-m", "e2e fixture: three planted deterministic findings"]);
+    g(&[
+        "commit",
+        "-q",
+        "-m",
+        "e2e fixture: three planted deterministic findings",
+    ]);
 }
 
 fn copy_dir_recursive(src: &Path, dest: &Path) {
@@ -76,9 +82,8 @@ fn copy_dir_recursive(src: &Path, dest: &Path) {
         if ty.is_dir() {
             copy_dir_recursive(&from, &to);
         } else {
-            std::fs::copy(&from, &to).unwrap_or_else(|e| {
-                panic!("failed to copy fixture file {from:?} -> {to:?}: {e}")
-            });
+            std::fs::copy(&from, &to)
+                .unwrap_or_else(|e| panic!("failed to copy fixture file {from:?} -> {to:?}: {e}"));
         }
     }
 }
@@ -119,29 +124,37 @@ async fn e2e_deterministic_scan_to_pdf_report_pipeline() {
 
     // ═══ STEP 1: run the REAL scan entry point (deterministic-only: zero API spend). ═══
     let (report, _manifest) = onboard::audit_repos(
+        &camerata_server::credentials::MemoryCredentialStore::new(),
         &sources,
         &selected,
-        Vec::new(),   // extra_notes
-        None,         // model — unused, run_ai_review is false
-        None,         // calibration_model — unused
+        Vec::new(), // extra_notes
+        None,       // model — unused, run_ai_review is false
+        None,       // calibration_model — unused
         ScanMode::Sequential,
-        false,        // thorough — unused (no AI review)
-        None,         // feedback
-        None,         // job
-        None,         // incremental_prior — full scan
-        false,        // deep — the opt-in AI compliance tier stays off
-        false,        // soc2_enabled — irrelevant with deep off
-        false,        // run_ai_review — THE zero-spend switch: no model calls at all
-        true,         // run_deterministic — the always-on security floor DOES run
-        None,         // ledger
+        false,                                        // thorough — unused (no AI review)
+        None,                                         // feedback
+        None,                                         // job
+        None,                                         // incremental_prior — full scan
+        false, // deep — the opt-in AI compliance tier stays off
+        false, // soc2_enabled — irrelevant with deep off
+        false, // run_ai_review — THE zero-spend switch: no model calls at all
+        true,  // run_deterministic — the always-on security floor DOES run
+        None,  // ledger
+        camerata_server::llm::BackendResolution::Api, // backend gate: not under test here
+        None,  // corpus
+        &std::collections::HashMap::new(), // chosen_options
     )
     .await;
 
-    assert!(!report.gated, "a local-dir scan is never gated on a GitHub token");
+    assert!(
+        !report.gated,
+        "a local-dir scan is never gated on a GitHub token"
+    );
     assert_eq!(report.repos, vec![repo_spec.clone()]);
     // 5 auditable files: Cargo.toml (a CODE_EXTS "toml") + 4 .rs files.
     assert_eq!(
-        report.files_scanned, 5,
+        report.files_scanned,
+        5,
         "expected exactly the 5 fixture files to be read: {:?}",
         report.findings.iter().map(|f| &f.path).collect::<Vec<_>>()
     );
@@ -152,8 +165,11 @@ async fn e2e_deterministic_scan_to_pdf_report_pipeline() {
     // `audited_rule_ids` (proving the selection-to-provenance wiring, not just a serde
     // round-trip of a hand-built `ScanProvenance`).
     let find_one = |rule_id: &str| -> &onboard::Finding {
-        let matches: Vec<&onboard::Finding> =
-            report.findings.iter().filter(|f| f.rule_id == rule_id).collect();
+        let matches: Vec<&onboard::Finding> = report
+            .findings
+            .iter()
+            .filter(|f| f.rule_id == rule_id)
+            .collect();
         assert_eq!(
             matches.len(),
             1,
@@ -178,7 +194,10 @@ async fn e2e_deterministic_scan_to_pdf_report_pipeline() {
         .as_deref()
         .expect("a real one-commit git repo must yield a SHA from `git rev-parse HEAD`");
     assert_eq!(sha.len(), 40, "a full git SHA is 40 hex chars, got {sha:?}");
-    assert!(!audited_ref.dirty, "nothing was left uncommitted after `git commit`");
+    assert!(
+        !audited_ref.dirty,
+        "nothing was left uncommitted after `git commit`"
+    );
     assert!(
         !provenance.audited_rule_ids.is_empty(),
         "audited_rule_ids must be populated from `selected`"
@@ -228,8 +247,14 @@ async fn e2e_deterministic_scan_to_pdf_report_pipeline() {
         project_title: "E2E Report Pipeline Fixture Audit".to_string(),
         prepared_by: "Camerata (automated e2e test)".to_string(),
         executive_summary_override: None,
+        ..Default::default()
     };
-    let json = report_export::build_report_json(&report, &dispositions, Some(&corpus), &opts);
+    let json = report_export::build_report_json(
+        &report.clone().seal(),
+        &dispositions,
+        Some(&corpus),
+        &opts,
+    );
 
     // FalsePositive: excluded from EVERY section, counted once in methodology.
     assert_eq!(json.methodology.excluded_false_positive, 1);

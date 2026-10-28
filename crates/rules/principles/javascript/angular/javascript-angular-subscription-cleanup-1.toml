@@ -1,9 +1,11 @@
 id = "JAVASCRIPT-ANGULAR-SUBSCRIPTION-CLEANUP-1"
+version = 1
 title = "Observable subscriptions are cleaned up using takeUntilDestroyed or the async pipe"
-tag = "stack"
 domain = "javascript:angular"
 layer = "framework"
 enforcement = "structured"
+kind = "defect"
+inspectable = true
 default = true
 verification = "grounded"
 
@@ -25,10 +27,14 @@ why = "An Observable subscription that is not cleaned up continues to emit and c
 id = "subscriptions-are-cleaned-up-with-takeuntildestroy"
 label = "Observable subscriptions are cleaned up using takeUntilDestroyed or the async pipe"
 directive = "Observable subscriptions are terminated automatically using one of two patterns: (1) the takeUntilDestroyed() operator, which pipes into an Observable chain and terminates the subscription when the component is destroyed, or (2) the async pipe in the template, which subscribes and unsubscribes automatically. Manual .subscribe() without cleanup in ngOnDestroy is forbidden. If a subscription must be handled manually (rare cases), ngOnDestroy must unsubscribe from every subscription created in the component."
+remediation = """
+Add the takeUntilDestroyed() operator to the Observable chain, or replace the manual .subscribe() call with the async pipe in the template, instead of leaving the subscription to run past the component's lifetime. Remove any now-redundant manual .unsubscribe() call in ngOnDestroy(). Verify by destroying the component and confirming the subscription's callback no longer fires afterward.
+"""
 why = "takeUntilDestroyed and the async pipe guarantee cleanup and prevent memory leaks, dangling listeners, and surprising behavior after component destruction."
 
 [[option]]
 id = "manual-subscribe-calls-are-tracked-and-unsubscrib"
+violates = true
 label = "Manual subscription tracking"
 directive = "Observable subscriptions are handled manually using .subscribe() calls, tracked in fields, and cleaned up by calling .unsubscribe() in ngOnDestroy()"
 why = "Manually tracking subscriptions in fields and unsubscribing in ngOnDestroy is error-prone: the cleanup hook is easy to forget when adding a new subscription, and a subscription that is active longer than needed fires handlers on a destroyed component, producing 'ExpressionChangedAfterItHasBeenChecked' errors, memory leaks, and duplicate event listeners. The manual pattern is also more verbose and requires the developer to remember the cleanup obligation at every new subscribe call."

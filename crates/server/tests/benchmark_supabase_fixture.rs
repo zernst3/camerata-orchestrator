@@ -47,6 +47,7 @@
 //!       matching the decision already recorded in
 //!       `crates/rules/principles/supabase/secrets/supabase-key-service-role-client-1.toml`)
 //!       is a separate, later port; see the full-grade test's D3 comment.
+//!
 //!   D2, D4, D5, D6 and the I3 decoy have NO deterministic path today (no native checker
 //!   answers RLS-permissive-USING(true), public storage buckets, edge-function JWT bypass, or
 //!   `getSession()` trust — see the full-grade test's own comments for exactly why each is
@@ -110,8 +111,7 @@ const FIXTURE_REPO_SPEC: &str = "benchmark/supabase-portal-fixture";
 /// gracefully rather than failing, so this file is safe to ship into a `cargo test` gate that
 /// runs on machines without the (private, external) fixture checked out.
 fn fixture_dir() -> Option<PathBuf> {
-    let path =
-        std::env::var(FIXTURE_ENV_VAR).unwrap_or_else(|_| DEFAULT_FIXTURE_PATH.to_string());
+    let path = std::env::var(FIXTURE_ENV_VAR).unwrap_or_else(|_| DEFAULT_FIXTURE_PATH.to_string());
     let path = PathBuf::from(path);
     if path.is_dir() && path.join(".git").exists() && path.join("GROUND_TRUTH.md").exists() {
         Some(path)
@@ -178,21 +178,25 @@ async fn run_deterministic_scan(dir: &Path) -> onboard::ScanReport {
     let sources = vec![(FIXTURE_REPO_SPEC.to_string(), dir.to_path_buf())];
     let selected = recommended_selection(&sources).await;
     let (report, _manifest) = onboard::audit_repos(
+        &camerata_server::credentials::MemoryCredentialStore::new(),
         &sources,
         &selected,
         Vec::new(), // extra_notes
         None,       // model — unused, run_ai_review is false
         None,       // calibration_model — unused
         ScanMode::Sequential,
-        false, // thorough — unused (no AI review)
-        None,  // feedback
-        None,  // job
-        None,  // incremental_prior — full scan
-        false, // deep
-        false, // soc2_enabled
-        false, // run_ai_review — zero API spend
-        true,  // run_deterministic — the floor AND the architectural checkers both run
-        None,  // ledger
+        false,                                        // thorough — unused (no AI review)
+        None,                                         // feedback
+        None,                                         // job
+        None,                                         // incremental_prior — full scan
+        false,                                        // deep
+        false,                                        // soc2_enabled
+        false,                                        // run_ai_review — zero API spend
+        true, // run_deterministic — the floor AND the architectural checkers both run
+        None, // ledger
+        camerata_server::llm::BackendResolution::Api, // backend gate: not under test here
+        None, // corpus
+        &std::collections::HashMap::new(), // chosen_options
     )
     .await;
     report
@@ -205,21 +209,25 @@ async fn run_full_scan(dir: &Path) -> onboard::ScanReport {
     let sources = vec![(FIXTURE_REPO_SPEC.to_string(), dir.to_path_buf())];
     let selected = recommended_selection(&sources).await;
     let (report, _manifest) = onboard::audit_repos(
+        &camerata_server::credentials::MemoryCredentialStore::new(),
         &sources,
         &selected,
         Vec::new(),
         None, // model — resolved from CAMERATA_AUDIT_MODEL / the Llm client's default
         None, // calibration_model — same resolution
         ScanMode::Sequential,
-        false, // thorough
-        None,  // feedback
-        None,  // job
-        None,  // incremental_prior — full scan
+        false,                                        // thorough
+        None,                                         // feedback
+        None,                                         // job
+        None,                                         // incremental_prior — full scan
         false, // deep — the opt-in compliance tier stays off; out of scope for this benchmark
         false, // soc2_enabled
         true,  // run_ai_review — THE real-money switch
         true,  // run_deterministic — floor + architectural checkers also run
         None,  // ledger
+        camerata_server::llm::BackendResolution::Api, // backend gate: real-spend test, always allowed
+        None,                                         // corpus
+        &std::collections::HashMap::new(),            // chosen_options
     )
     .await;
     report
@@ -260,7 +268,10 @@ fn any_finding_in_range<'a>(
 async fn deterministic_d1_rls_enabled_flags_member_contacts_not_profiles() {
     let dir = require_fixture!();
     let report = run_deterministic_scan(&dir).await;
-    assert!(!report.gated, "a local-dir scan is never gated on a GitHub token");
+    assert!(
+        !report.gated,
+        "a local-dir scan is never gated on a GitHub token"
+    );
 
     let profiles_migration = "supabase/migrations/0002_profiles.sql";
     let rls_findings: Vec<&Finding> = report
@@ -276,8 +287,14 @@ async fn deterministic_d1_rls_enabled_flags_member_contacts_not_profiles() {
         rls_findings
     );
     let f = rls_findings[0];
-    assert_eq!(f.line, 31, "must point at member_contacts' CREATE TABLE statement: {f:?}");
-    assert_eq!(f.severity, "critical", "an exposed PII table with no RLS is critical: {f:?}");
+    assert_eq!(
+        f.line, 31,
+        "must point at member_contacts' CREATE TABLE statement: {f:?}"
+    );
+    assert_eq!(
+        f.severity, "critical",
+        "an exposed PII table with no RLS is critical: {f:?}"
+    );
     assert!(
         f.snippet.contains("member_contacts") || f.detail.contains("member_contacts"),
         "finding must name member_contacts, not profiles: {f:?}"
@@ -294,11 +311,21 @@ async fn deterministic_d7_search_path_flags_handle_new_user() {
     assert!(!report.gated);
 
     let path = "supabase/migrations/0006_functions.sql";
-    let f = find_one(&report.findings, "SUPABASE-FUNC-SEARCH-PATH-1", path)
-        .unwrap_or_else(|| panic!("expected SUPABASE-FUNC-SEARCH-PATH-1 in {path}: {:?}", report.findings));
-    assert_eq!(f.line, 8, "must point at the CREATE FUNCTION statement: {f:?}");
+    let f = find_one(&report.findings, "SUPABASE-FUNC-SEARCH-PATH-1", path).unwrap_or_else(|| {
+        panic!(
+            "expected SUPABASE-FUNC-SEARCH-PATH-1 in {path}: {:?}",
+            report.findings
+        )
+    });
+    assert_eq!(
+        f.line, 8,
+        "must point at the CREATE FUNCTION statement: {f:?}"
+    );
     assert_eq!(f.severity, "high", "{f:?}");
-    assert!(f.snippet.contains("handle_new_user") || f.detail.contains("handle_new_user"), "{f:?}");
+    assert!(
+        f.snippet.contains("handle_new_user") || f.detail.contains("handle_new_user"),
+        "{f:?}"
+    );
 }
 
 /// I1 (GROUND_TRUTH.md): `tests/integration.test.ts` disables TLS verification, but only
@@ -319,10 +346,21 @@ async fn deterministic_i1_test_tls_suppression_is_downgraded_not_critical() {
         .iter()
         .filter(|f| f.rule_id == "SEC-NO-DISABLED-TLS-1" && f.path == path)
         .collect();
-    assert_eq!(matches.len(), 1, "expected exactly one SEC-NO-DISABLED-TLS-1 finding in {path}: {:?}", matches);
+    assert_eq!(
+        matches.len(),
+        1,
+        "expected exactly one SEC-NO-DISABLED-TLS-1 finding in {path}: {:?}",
+        matches
+    );
     let f = matches[0];
-    assert_eq!(f.severity, "low", "a test-scope TLS suppression must be downgraded, not critical: {f:?}");
-    assert!(f.in_test, "must be tagged in_test so the report doesn't alarm on it: {f:?}");
+    assert_eq!(
+        f.severity, "low",
+        "a test-scope TLS suppression must be downgraded, not critical: {f:?}"
+    );
+    assert!(
+        f.in_test,
+        "must be tagged in_test so the report doesn't alarm on it: {f:?}"
+    );
 }
 
 /// I4 (GROUND_TRUTH.md): `public.billing_accounts` (`supabase/migrations/0005_billing.sql`)
@@ -370,7 +408,11 @@ async fn deterministic_d3_env_production_service_role_secret_is_found() {
         "expected a CRITICAL finding at {path}:9 (a committed/client-exposed service_role \
          credential is an exposed high-privilege secret — the general class the floor reserves \
          for critical): {:?}",
-        report.findings.iter().filter(|f| f.path == path).collect::<Vec<_>>()
+        report
+            .findings
+            .iter()
+            .filter(|f| f.path == path)
+            .collect::<Vec<_>>()
     );
     let f = hit.expect("checked above");
     assert!(
@@ -407,8 +449,18 @@ struct GradeItem {
     evidence: String,
 }
 
-fn grade(id: &'static str, description: &'static str, pass: bool, evidence: impl Into<String>) -> GradeItem {
-    GradeItem { id, description, pass, evidence: evidence.into() }
+fn grade(
+    id: &'static str,
+    description: &'static str,
+    pass: bool,
+    evidence: impl Into<String>,
+) -> GradeItem {
+    GradeItem {
+        id,
+        description,
+        pass,
+        evidence: evidence.into(),
+    }
 }
 
 fn print_scorecard(items: &[GradeItem]) {
@@ -434,7 +486,11 @@ fn print_scorecard(items: &[GradeItem]) {
 async fn full_grade_supabase_fixture_scan() {
     let dir = require_fixture!();
     let report = run_full_scan(&dir).await;
-    assert!(!report.gated, "a local-dir scan is never gated on a GitHub token: {:?}", report.message);
+    assert!(
+        !report.gated,
+        "a local-dir scan is never gated on a GitHub token: {:?}",
+        report.message
+    );
 
     let f = &report.findings;
     let mut scorecard: Vec<GradeItem> = Vec::new();
@@ -444,7 +500,11 @@ async fn full_grade_supabase_fixture_scan() {
     // deterministic sub-tests above (must still hold under the full AI-augmented report); the
     // rest (D2-D6) are exclusively AI-tier today (see module doc).
 
-    let d1 = find_one(f, "SUPABASE-RLS-ENABLED-1", "supabase/migrations/0002_profiles.sql");
+    let d1 = find_one(
+        f,
+        "SUPABASE-RLS-ENABLED-1",
+        "supabase/migrations/0002_profiles.sql",
+    );
     scorecard.push(grade(
         "D1",
         "member_contacts PII table has no RLS -> SUPABASE-RLS-ENABLED-1 critical @ 0002_profiles.sql:31",
@@ -518,7 +578,11 @@ async fn full_grade_supabase_fixture_scan() {
         format!("{d6:?}"),
     ));
 
-    let d7 = find_one(f, "SUPABASE-FUNC-SEARCH-PATH-1", "supabase/migrations/0006_functions.sql");
+    let d7 = find_one(
+        f,
+        "SUPABASE-FUNC-SEARCH-PATH-1",
+        "supabase/migrations/0006_functions.sql",
+    );
     scorecard.push(grade(
         "D7",
         "handle_new_user is SECURITY DEFINER with no search_path -> SUPABASE-FUNC-SEARCH-PATH-1 high @ 0006_functions.sql:8",
@@ -569,17 +633,26 @@ async fn full_grade_supabase_fixture_scan() {
         "PAIR-EDGE-JWT",
         "charge (verify_jwt=false, no auth) flagged / notify (verify_jwt=true + getUser()) spared",
         d5.is_some() && notify_flagged.is_none(),
-        format!("charge_finding_present={} notify_finding={:?}", d5.is_some(), notify_flagged),
+        format!(
+            "charge_finding_present={} notify_finding={:?}",
+            d5.is_some(),
+            notify_flagged
+        ),
     ));
 
     // messages SELECT policy (D2) flagged / the correctly-scoped INSERT policy (lines 27-30)
     // spared.
-    let insert_policy_flagged = any_finding_in_range(f, "supabase/migrations/0003_messages.sql", 27, 30);
+    let insert_policy_flagged =
+        any_finding_in_range(f, "supabase/migrations/0003_messages.sql", 27, 30);
     scorecard.push(grade(
         "PAIR-RLS-PERMISSIVE",
         "messages SELECT policy (using(true)) flagged / the owner-scoped INSERT policy spared",
         d2.is_some() && insert_policy_flagged.is_none(),
-        format!("select_finding_present={} insert_policy_finding={:?}", d2.is_some(), insert_policy_flagged),
+        format!(
+            "select_finding_present={} insert_policy_finding={:?}",
+            d2.is_some(),
+            insert_policy_flagged
+        ),
     ));
 
     // The anon (public) key on .env.production:5 must never be flagged — only the

@@ -128,7 +128,7 @@ impl KernelTier {
 /// Accepts both explicit tier names (`fast`, `low`, `balanced`, `mid`, `strongest`,
 /// `orchestration`) and model ids/substrings (`haiku`, `deepseek-flash`, `sonnet`,
 /// `deepseek-pro`, `opus`, `glm`, ...). Matching is case-insensitive and substring-based so a
-/// fully-qualified model id (e.g. `claude-opus-4-8` or `us.anthropic.claude-3-5-sonnet`) maps
+/// fully-qualified model id (e.g. `claude-opus-5` or `us.anthropic.claude-3-5-sonnet`) maps
 /// correctly. Anything unrecognized defaults to [`KernelTier::Balanced`] — the middle,
 /// literal-model discipline is the safest default for an unknown model.
 pub fn tier_of(model_or_tier: &str) -> KernelTier {
@@ -168,7 +168,11 @@ pub fn tier_of(model_or_tier: &str) -> KernelTier {
 /// tier map, then calls `kernel_for(model)` to get the kernel already specialized for that model's
 /// tier. See section 5 of the plan.
 pub fn kernel_for(model_or_tier: &str) -> String {
-    format!("{}\n\n{}", GOVERNANCE_KERNEL, tier_of(model_or_tier).addendum())
+    format!(
+        "{}\n\n{}",
+        GOVERNANCE_KERNEL,
+        tier_of(model_or_tier).addendum()
+    )
 }
 
 #[cfg(test)]
@@ -219,7 +223,10 @@ mod tests {
         // Kernel v2: the mid/low tier addenda are explicit state machines with numbered phases
         // and a "reject any other output" clause, so literal models stay predictable.
         for text in [KERNEL_ADDENDUM_FAST, KERNEL_ADDENDUM_BALANCED] {
-            assert!(text.contains("STATE MACHINE"), "missing state-machine framing: {text}");
+            assert!(
+                text.contains("STATE MACHINE"),
+                "missing state-machine framing: {text}"
+            );
             assert!(
                 text.contains("Phase 1"),
                 "missing explicit phase numbering: {text}"
@@ -233,12 +240,17 @@ mod tests {
         let bal = KERNEL_ADDENDUM_BALANCED;
         let test_phase = bal.find("Phase 1 of 3 (TEST)").expect("test phase");
         let impl_phase = bal.find("Phase 2 of 3 (IMPLEMENT)").expect("impl phase");
-        assert!(test_phase < impl_phase, "TEST phase must come before IMPLEMENT phase");
+        assert!(
+            test_phase < impl_phase,
+            "TEST phase must come before IMPLEMENT phase"
+        );
     }
 
     #[test]
     fn readonly_kernel_contains_analysis_markers_and_clauses() {
-        assert!(GOVERNANCE_KERNEL_READONLY.contains("=== CAMERATA OPERATING PROTOCOL (analysis) ==="));
+        assert!(
+            GOVERNANCE_KERNEL_READONLY.contains("=== CAMERATA OPERATING PROTOCOL (analysis) ===")
+        );
         assert!(GOVERNANCE_KERNEL_READONLY.contains("=== END OPERATING PROTOCOL ==="));
         assert!(GOVERNANCE_KERNEL_READONLY.contains("GROUND EVERY CLAIM"));
         assert!(GOVERNANCE_KERNEL_READONLY.contains("ENUMERATE, THEN JUDGE"));
@@ -272,11 +284,14 @@ mod tests {
 
     #[test]
     fn tier_of_resolves_model_ids_case_insensitively() {
-        assert_eq!(tier_of("claude-opus-4-8"), KernelTier::Strongest);
+        assert_eq!(tier_of("claude-opus-5"), KernelTier::Strongest);
         assert_eq!(tier_of("GLM-5.2"), KernelTier::Strongest);
         assert_eq!(tier_of("claude-3-5-haiku"), KernelTier::Fast);
         assert_eq!(tier_of("deepseek-flash"), KernelTier::Fast);
-        assert_eq!(tier_of("us.anthropic.claude-3-5-sonnet"), KernelTier::Balanced);
+        assert_eq!(
+            tier_of("us.anthropic.claude-3-5-sonnet"),
+            KernelTier::Balanced
+        );
         assert_eq!(tier_of("deepseek-pro"), KernelTier::Balanced);
     }
 
@@ -299,7 +314,7 @@ mod tests {
         assert!(balanced.contains(KERNEL_ADDENDUM_BALANCED));
         assert!(!balanced.contains(KERNEL_ADDENDUM_FAST));
 
-        let strongest = kernel_for("claude-opus-4-8");
+        let strongest = kernel_for("claude-opus-5");
         assert!(strongest.contains(GOVERNANCE_KERNEL));
         assert!(strongest.contains(KERNEL_ADDENDUM_STRONGEST));
         assert!(!strongest.contains(KERNEL_ADDENDUM_FAST));

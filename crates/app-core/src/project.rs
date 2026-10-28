@@ -29,8 +29,8 @@ use camerata_fleet::tier::TierMap;
 /// (including `llm`'s `pub use camerata_app_core::project::DEFAULT_MODEL`) keeps
 /// resolving unchanged.
 pub use camerata_api_types::project::{
-    default_model, default_routine_secs, default_watched_secs, L3ReviewConfig, StallThresholds,
-    StepModels, DEFAULT_MODEL, DEFAULT_ROUTINE_STALL_SECS,
+    default_model, default_routine_secs, default_watched_secs, L3ReviewConfig, ProjectBackend,
+    StallThresholds, StepModels, DEFAULT_MODEL, DEFAULT_ROUTINE_STALL_SECS,
 };
 
 /// The NON-FLEET AI steps whose model is configured per-project on [`StepModels`].
@@ -122,11 +122,14 @@ pub struct RuleSelection {
     #[serde(default)]
     pub repos: Vec<String>,
     /// The corpus content-hash baselined for this selection — the fingerprint of the
-    /// corpus rule as it stood when the architect last ACCEPTED it (via onboarding or
-    /// the rule-drift "Update this rule" action). Drift detection compares this against
-    /// the current corpus hash: when it is `Some(h)` and `h` differs from the current
-    /// hash, the rule has drifted upstream. `None` means "never baselined" and is treated
-    /// as in-sync (a freshly selected rule does not report drift until it is baselined).
+    /// corpus rule as it stood when the architect last ACCEPTED it: by applying the rule
+    /// (every apply writes it against the then-current corpus), by saving it into a
+    /// project, or by the rule-drift "Update this rule" action. Drift detection compares
+    /// this against the current corpus hash: when it is `Some(h)` and `h` differs from the
+    /// current hash, the rule has drifted upstream. `None` means "never baselined" (a
+    /// selection that predates apply-time baselining, or a rule the corpus does not
+    /// carry) and is treated as in-sync. Replacing the ruleset keeps an existing baseline
+    /// (see `Project::upsert_base_rules`).
     /// Serde default keeps projects persisted before this field existed loading cleanly.
     #[serde(default)]
     pub applied_hash: Option<String>,
@@ -136,6 +139,56 @@ pub struct RuleSelection {
     /// `None` when never baselined. Serde default for back-compat.
     #[serde(default)]
     pub applied_directive: Option<String>,
+    /// The corpus rule's `version` as it stood when this selection was last baselined. Stored
+    /// beside `applied_hash` so the drift notice can say "you adopted v2, the corpus is now
+    /// v4" instead of only "something changed". `None` when never baselined, or baselined
+    /// before rules carried a version. Serde default for back-compat.
+    #[serde(default)]
+    pub applied_version: Option<u32>,
+}
+
+impl RuleSelection {
+    /// Whether this selection carries a rule-drift baseline.
+    pub fn is_baselined(&self) -> bool {
+        self.applied_hash.is_some()
+    }
+
+    /// Copy `prior`'s baseline onto this selection when this one has none and `prior` is the
+    /// same decision: same rule and same chosen option. A different chosen option is a new
+    /// decision the architect has not accepted yet, and the old directive/hash describe a
+    /// different option, so it must not inherit. Returns whether a baseline was inherited.
+    pub fn inherit_baseline_from(&mut self, prior: &RuleSelection) -> bool {
+        if self.is_baselined()
+            || !prior.is_baselined()
+            || self.rule_id != prior.rule_id
+            || self.chosen_option != prior.chosen_option
+        {
+            return false;
+        }
+        self.applied_hash = prior.applied_hash.clone();
+        self.applied_directive = prior.applied_directive.clone();
+        self.applied_version = prior.applied_version;
+        true
+    }
+}
+
+/// Carry the baselines of `existing` onto the unbaselined selections in `incoming`. When a
+/// rule has several prior placements (repo-scoped selections), the one with the same repos
+/// wins; otherwise the first same-decision prior does.
+fn inherit_baselines(incoming: &mut [RuleSelection], existing: &[RuleSelection]) {
+    for sel in incoming.iter_mut().filter(|s| !s.is_baselined()) {
+        let same_placement = existing.iter().find(|e| e.repos == sel.repos);
+        if let Some(prior) = same_placement {
+            if sel.inherit_baseline_from(prior) {
+                continue;
+            }
+        }
+        for prior in existing {
+            if sel.inherit_baseline_from(prior) {
+                break;
+            }
+        }
+    }
 }
 
 /// The project's full ruleset — the single source of truth that emit upserts.
@@ -224,10 +277,17 @@ impl HierarchySchema {
 /// architect can edit via the drag-and-drop builder. `Initiative` and `Epic` are design roots.
 pub fn default_hierarchy_schema() -> HierarchySchema {
     fn ty(name: &str, is_design_root: bool) -> WorkType {
-        WorkType { name: name.to_string(), builtin: true, is_design_root }
+        WorkType {
+            name: name.to_string(),
+            builtin: true,
+            is_design_root,
+        }
     }
     fn rel(parent: &str, child: &str) -> TypeRelation {
-        TypeRelation { parent: parent.to_string(), child: child.to_string() }
+        TypeRelation {
+            parent: parent.to_string(),
+            child: child.to_string(),
+        }
     }
     HierarchySchema {
         types: vec![
@@ -282,8 +342,8 @@ pub struct Project {
     ///
     /// Serde default fills in [`TierMap::default()`] for projects persisted before this
     /// field existed, so no migration is required. The default Claude tier map is:
-    /// `fast=claude-haiku-4-5-20251001`, `balanced=claude-sonnet-4-6`,
-    /// `strongest=claude-opus-4-8`.
+    /// `fast=claude-haiku-4-5-20251001`, `balanced=claude-sonnet-5`,
+    /// `strongest=claude-opus-5`.
     #[serde(default)]
     pub tier_map: TierMap,
     /// VCS-action gate configuration: per-rule enabled flags and tunables for the
@@ -365,6 +425,31 @@ pub struct Project {
     /// `docs/plans/2026-06-30_epic-design-page.md`.
     #[serde(default = "default_hierarchy_schema")]
     pub hierarchy_schema: HierarchySchema,
+    /// The backend this project's AI calls use — the source of truth for EVERY project-scoped
+    /// model call (the brownfield scan, the alternative recommendation pass, the disagreement
+    /// rescan, and the governed dev loop). See
+    /// `docs/design/2026-09-22_per-project-backend.md`. Replaces the old `cli_active: bool`
+    /// compliance-safety flag AND the global `CAMERATA_LLM_BACKEND`-driven app preference that
+    /// used to also apply to project work — there is no cross-setting override anymore.
+    ///
+    /// **`Cli`** — the Claude Code subscription; no key needed. The value of an absent
+    /// `backend` field (legacy files); a NEW project starts on `Api` instead
+    /// ([`ProjectBackend::for_new_project`]).
+    ///
+    /// **`Api`** — the Anthropic API; needs a key. A missing key means the AI does not run at
+    /// all (`camerata_llm::BackendResolution::Blocked`) — never a silent fallback to the CLI.
+    /// The deterministic floor still runs and the "AI review did not run" banner shows. This
+    /// is the whole client-safety story now, expressed per project: set a CLIENT project's
+    /// backend to `Api` (metered, single-party, no-train, nameable in a contract).
+    ///
+    /// MIGRATION: a project persisted before this field existed carried `cli_active: bool`
+    /// instead (default `false`, i.e. API-only). `#[serde(default)]` here means an ABSENT
+    /// `backend` key deserializes to `Cli` — the new default — regardless of whatever
+    /// `cli_active` value sits alongside it in the same JSON blob: `cli_active` is simply an
+    /// unknown, ignored key (`Project` carries no `#[serde(deny_unknown_fields)]`). See
+    /// `legacy_cli_active_key_is_ignored_and_backend_defaults_to_cli` for the migration test.
+    #[serde(default)]
+    pub backend: ProjectBackend,
 }
 
 /// One agent operating principle: a single imperative line the governed agent is held to (about
@@ -502,12 +587,23 @@ impl Project {
     /// Replace the BASE rules (selections / cross-repo / process) from an edit or
     /// import, while PRESERVING the architect's custom rules. This is the upsert
     /// the ADR calls out: changing/deleting/adding base rules never clobbers custom.
+    ///
+    /// The rule-drift BASELINE (`applied_hash` / `applied_directive` / `applied_version`) is
+    /// not part of an edit's intent, so a replacement must not erase it: an incoming selection
+    /// that carries no baseline INHERITS the baseline of the selection it replaces (same rule,
+    /// same chosen option; see [`RuleSelection::inherit_baseline_from`]). An incoming
+    /// selection that carries its own baseline keeps it, and a selection with no prior
+    /// counterpart (or a changed chosen option, a new decision) stays unbaselined. Writing a
+    /// fresh baseline is the apply path's job, not this method's.
     pub fn upsert_base_rules(
         &mut self,
-        selections: Vec<RuleSelection>,
-        cross_repo: Vec<RuleSelection>,
-        process: Vec<RuleSelection>,
+        mut selections: Vec<RuleSelection>,
+        mut cross_repo: Vec<RuleSelection>,
+        mut process: Vec<RuleSelection>,
     ) {
+        inherit_baselines(&mut selections, &self.ruleset.selections);
+        inherit_baselines(&mut cross_repo, &self.ruleset.cross_repo);
+        inherit_baselines(&mut process, &self.ruleset.process);
         self.ruleset.selections = selections;
         self.ruleset.cross_repo = cross_repo;
         self.ruleset.process = process;
@@ -527,6 +623,33 @@ impl Project {
                 self.ruleset.custom.push(c.clone());
             }
         }
+    }
+
+    /// Write `chosen_option` onto whichever ruleset list (`selections` / `cross_repo` /
+    /// `process`) contains `rule_id` — the persistence step for the audit-integrated
+    /// alternative-recommendation feature (`accept-alternatives`): the operator (or the AI's
+    /// own recommendation, when accepted as-is) becomes the project's durable choice for that
+    /// rule, exactly the same field `Rule::resolved_option` reads everywhere else. Matching is
+    /// case-insensitive (rule ids are conventionally uppercase, but this is defensive).
+    /// Returns `true` if a matching selection was found and updated, `false` if `rule_id` is
+    /// not part of this project's ruleset at all — a no-op, never an error (the caller decides
+    /// whether that's worth reporting).
+    pub fn set_rule_chosen_option(&mut self, rule_id: &str, chosen_option: &str) -> bool {
+        let id_upper = rule_id.trim().to_ascii_uppercase();
+        for list in [
+            &mut self.ruleset.selections,
+            &mut self.ruleset.cross_repo,
+            &mut self.ruleset.process,
+        ] {
+            if let Some(sel) = list
+                .iter_mut()
+                .find(|s| s.rule_id.trim().to_ascii_uppercase() == id_upper)
+            {
+                sel.chosen_option = Some(chosen_option.to_string());
+                return true;
+            }
+        }
+        false
     }
 
     /// Mark `repos` as onboarded (union, deduped). Repos not already in the project's `repos`
@@ -830,6 +953,7 @@ mod tests {
             operating_principles: Vec::new(),
             memory: Vec::new(),
             hierarchy_schema: HierarchySchema::default(),
+            backend: ProjectBackend::Cli,
             ruleset: ProjectRuleset {
                 selections: vec![sel("OLD-1")],
                 cross_repo: vec![],
@@ -849,6 +973,92 @@ mod tests {
         // Custom rule survived the base upsert.
         assert_eq!(p.ruleset.custom.len(), 1);
         assert_eq!(p.ruleset.custom[0].name, "house-style");
+    }
+
+    fn project_with_selections(selections: Vec<RuleSelection>) -> Project {
+        Project {
+            id: "p1".into(),
+            name: "Proj".into(),
+            repos: vec!["me/api".into()],
+            onboarded: vec![],
+            max_iterations: default_max_iterations(),
+            tier_map: TierMap::default(),
+            process_rule_config: ProcessRuleConfig::default(),
+            step_models: StepModels::default(),
+            stall_thresholds: StallThresholds::default(),
+            l3_review: L3ReviewConfig::default(),
+            model_profile: ModelProfile::default(),
+            vision_enabled: false,
+            product_brief: String::new(),
+            operating_principles: Vec::new(),
+            memory: Vec::new(),
+            hierarchy_schema: HierarchySchema::default(),
+            backend: ProjectBackend::Cli,
+            ruleset: ProjectRuleset {
+                selections,
+                cross_repo: vec![],
+                process: vec![],
+                custom: vec![],
+            },
+        }
+    }
+
+    /// `set_rule_chosen_option` writes onto the repo-local `selections` list when the rule
+    /// lives there — the common case (the audit-integrated alternative-recommendation
+    /// `accept-alternatives` persistence step).
+    #[test]
+    fn set_rule_chosen_option_updates_a_repo_local_selection() {
+        let mut p = project_with_selections(vec![sel("RUST-DOMAIN-7")]);
+        assert!(p.ruleset.selections[0].chosen_option.is_none());
+        let ok = p.set_rule_chosen_option(
+            "RUST-DOMAIN-7",
+            "explicit-unitofwork-parameter-on-transactional-repository-methods",
+        );
+        assert!(ok, "a matching selection must be found and updated");
+        assert_eq!(
+            p.ruleset.selections[0].chosen_option.as_deref(),
+            Some("explicit-unitofwork-parameter-on-transactional-repository-methods")
+        );
+    }
+
+    /// `set_rule_chosen_option` also finds a rule living in `cross_repo` or `process`, not
+    /// just `selections` — the accept-alternatives contract makes no assumption about which
+    /// list a given rule id lives in.
+    #[test]
+    fn set_rule_chosen_option_searches_cross_repo_and_process_too() {
+        let mut p = project_with_selections(vec![]);
+        p.ruleset.cross_repo.push(sel("CROSS-RULE-1"));
+        p.ruleset.process.push(sel("PROC-RULE-1"));
+        assert!(p.set_rule_chosen_option("CROSS-RULE-1", "opt-x"));
+        assert_eq!(
+            p.ruleset.cross_repo[0].chosen_option.as_deref(),
+            Some("opt-x")
+        );
+        assert!(p.set_rule_chosen_option("PROC-RULE-1", "opt-y"));
+        assert_eq!(p.ruleset.process[0].chosen_option.as_deref(), Some("opt-y"));
+    }
+
+    /// A rule id absent from EVERY list is a no-op — `false`, never a panic or a fabricated
+    /// insertion (accept-alternatives only ever writes onto a rule the project already knows
+    /// about; a stale/removed id must be reported, not silently created).
+    #[test]
+    fn set_rule_chosen_option_returns_false_for_an_unknown_rule_id() {
+        let mut p = project_with_selections(vec![sel("RUST-DOMAIN-7")]);
+        assert!(!p.set_rule_chosen_option("NO-SUCH-RULE-1", "opt-x"));
+        // The existing selection is untouched.
+        assert!(p.ruleset.selections[0].chosen_option.is_none());
+    }
+
+    /// Matching is case-insensitive on the rule id (defensive — ids are conventionally
+    /// uppercase already, but the caller's normalization must not be load-bearing here).
+    #[test]
+    fn set_rule_chosen_option_matches_case_insensitively() {
+        let mut p = project_with_selections(vec![sel("RUST-DOMAIN-7")]);
+        assert!(p.set_rule_chosen_option("rust-domain-7", "opt-x"));
+        assert_eq!(
+            p.ruleset.selections[0].chosen_option.as_deref(),
+            Some("opt-x")
+        );
     }
 
     fn custom(name: &str, body: &str) -> CustomRule {
@@ -878,6 +1088,7 @@ mod tests {
             operating_principles: Vec::new(),
             memory: Vec::new(),
             hierarchy_schema: HierarchySchema::default(),
+            backend: ProjectBackend::Cli,
             ruleset: ProjectRuleset {
                 selections: vec![],
                 cross_repo: vec![],
@@ -935,7 +1146,10 @@ mod tests {
     #[test]
     fn manual_l3_override_flips_profile_to_custom() {
         let mut p = proj_on_balanced();
-        p.set_l3_review(L3ReviewConfig { enabled: true, model: "pinned-l3".into() });
+        p.set_l3_review(L3ReviewConfig {
+            enabled: true,
+            model: "pinned-l3".into(),
+        });
         assert_eq!(p.model_profile, ModelProfile::Custom);
     }
 
@@ -958,6 +1172,7 @@ mod tests {
             operating_principles: Vec::new(),
             memory: Vec::new(),
             hierarchy_schema: HierarchySchema::default(),
+            backend: ProjectBackend::Cli,
             ruleset: ProjectRuleset {
                 custom: vec![custom("a", "A1"), custom("b", "B1")],
                 ..Default::default()
@@ -999,6 +1214,7 @@ mod tests {
             operating_principles: Vec::new(),
             memory: Vec::new(),
             hierarchy_schema: HierarchySchema::default(),
+            backend: ProjectBackend::Cli,
             ruleset: ProjectRuleset {
                 custom: vec![custom("keep", "K"), custom("gone", "G")],
                 ..Default::default()
@@ -1033,6 +1249,7 @@ mod tests {
             operating_principles: Vec::new(),
             memory: Vec::new(),
             hierarchy_schema: HierarchySchema::default(),
+            backend: ProjectBackend::Cli,
             ruleset: ProjectRuleset::default(),
         };
         p.set_max_iterations(5);
@@ -1058,6 +1275,103 @@ mod tests {
     }
 
     #[test]
+    fn backend_defaults_to_cli_when_absent_from_persisted_json() {
+        // A project JSON written before `backend` existed (or any project export that
+        // doesn't carry it) must deserialize as `backend: Cli` — the new zero-setup
+        // subscription default. Mirrors the max_iterations/step_models/tier_map back-compat
+        // tests above.
+        let json = r#"{
+            "id": "proj-1",
+            "name": "Legacy",
+            "repos": [],
+            "ruleset": {},
+            "onboarded": []
+        }"#;
+        let p: Project = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            p.backend,
+            ProjectBackend::Cli,
+            "backend must default to Cli when absent"
+        );
+
+        // An explicit `"api"` in the JSON round-trips correctly.
+        let json_api = r#"{
+            "id": "proj-2",
+            "name": "Client",
+            "repos": [],
+            "ruleset": {},
+            "onboarded": [],
+            "backend": "api"
+        }"#;
+        let p_api: Project = serde_json::from_str(json_api).unwrap();
+        assert_eq!(p_api.backend, ProjectBackend::Api);
+    }
+
+    /// The new-project default (`Api`) must not leak into persisted projects: an explicit
+    /// `"cli"` stays `Cli`, an absent field stays `Cli` (legacy), and the new-project default
+    /// is `Api`.
+    #[test]
+    fn persisted_backend_is_never_switched_by_the_new_project_default() {
+        let explicit_cli = r#"{
+            "id": "proj-1", "name": "Cli", "repos": [], "ruleset": {}, "onboarded": [],
+            "backend": "cli"
+        }"#;
+        let p: Project = serde_json::from_str(explicit_cli).unwrap();
+        assert_eq!(p.backend, ProjectBackend::Cli);
+
+        let legacy = r#"{
+            "id": "proj-2", "name": "Legacy", "repos": [], "ruleset": {}, "onboarded": []
+        }"#;
+        let p: Project = serde_json::from_str(legacy).unwrap();
+        assert_eq!(
+            p.backend,
+            ProjectBackend::Cli,
+            "legacy file keeps the Cli behavior"
+        );
+
+        assert_eq!(ProjectBackend::for_new_project(), ProjectBackend::Api);
+    }
+
+    /// MIGRATION (per `docs/design/2026-09-22_per-project-backend.md`): a project persisted
+    /// by the OLD `cli_active: bool` model (no `backend` key at all) must load as
+    /// `backend = Cli` — the legacy `cli_active` key is simply an unknown, ignored field
+    /// (`Project` has no `#[serde(deny_unknown_fields)]`), regardless of whether it was
+    /// `true` or `false` in the persisted blob.
+    #[test]
+    fn legacy_cli_active_key_is_ignored_and_backend_defaults_to_cli() {
+        let json_cli_active_false = r#"{
+            "id": "proj-1",
+            "name": "Legacy",
+            "repos": [],
+            "ruleset": {},
+            "onboarded": [],
+            "cli_active": false
+        }"#;
+        let p: Project = serde_json::from_str(json_cli_active_false).unwrap();
+        assert_eq!(
+            p.backend,
+            ProjectBackend::Cli,
+            "a legacy cli_active=false project must migrate to backend=Cli, the new default"
+        );
+
+        let json_cli_active_true = r#"{
+            "id": "proj-2",
+            "name": "Legacy",
+            "repos": [],
+            "ruleset": {},
+            "onboarded": [],
+            "cli_active": true
+        }"#;
+        let p2: Project = serde_json::from_str(json_cli_active_true).unwrap();
+        assert_eq!(
+            p2.backend,
+            ProjectBackend::Cli,
+            "a legacy cli_active=true project must ALSO migrate to backend=Cli — cli_active is \
+             an ignored unknown key, not consulted at all"
+        );
+    }
+
+    #[test]
     fn export_import_round_trip() {
         let project = Project {
             id: "p".into(),
@@ -1076,6 +1390,7 @@ mod tests {
             operating_principles: Vec::new(),
             memory: Vec::new(),
             hierarchy_schema: HierarchySchema::default(),
+            backend: ProjectBackend::Cli,
             ruleset: ProjectRuleset {
                 selections: vec![sel("R-1")],
                 cross_repo: vec![sel("INTEGRATION-API-CONTRACT-1")],
@@ -1113,10 +1428,10 @@ mod tests {
             "repos": [],
             "ruleset": {},
             "onboarded": [],
-            "step_models": { "audit": "claude-opus-4-8" }
+            "step_models": { "audit": "claude-opus-5" }
         }"#;
         let p2: Project = serde_json::from_str(partial).unwrap();
-        assert_eq!(p2.step_models.audit, "claude-opus-4-8");
+        assert_eq!(p2.step_models.audit, "claude-opus-5");
         assert_eq!(
             p2.step_models.calibration, DEFAULT_MODEL,
             "absent step fields fall back to DEFAULT_MODEL even in a partial blob"
@@ -1142,14 +1457,18 @@ mod tests {
             operating_principles: Vec::new(),
             memory: Vec::new(),
             hierarchy_schema: HierarchySchema::default(),
+            backend: ProjectBackend::Cli,
             ruleset: ProjectRuleset::default(),
         };
-        original.set_model_for_step(StepKind::Decomposition, "claude-opus-4-8".into());
+        original.set_model_for_step(StepKind::Decomposition, "claude-opus-5".into());
         original.set_model_for_step(StepKind::ResearchChat, "claude-haiku-4-5-20251001".into());
         let json = serde_json::to_string(&original).unwrap();
         let back: Project = serde_json::from_str(&json).unwrap();
         assert_eq!(back.step_models, original.step_models);
-        assert_eq!(back.model_for_step(StepKind::Decomposition), "claude-opus-4-8");
+        assert_eq!(
+            back.model_for_step(StepKind::Decomposition),
+            "claude-opus-5"
+        );
     }
 
     #[test]
@@ -1227,10 +1546,80 @@ mod tests {
             operating_principles: Vec::new(),
             memory: Vec::new(),
             hierarchy_schema: HierarchySchema::default(),
+            backend: ProjectBackend::Cli,
             ruleset: ProjectRuleset::default(),
         };
         let json = serde_json::to_string(&original).unwrap();
         let back: Project = serde_json::from_str(&json).unwrap();
         assert_eq!(back.tier_map, original.tier_map);
+    }
+
+    // ── baseline inheritance on replace ─────────────────────────────────────────
+
+    fn baselined(rule: &str, option: Option<&str>, repos: &[&str]) -> RuleSelection {
+        RuleSelection {
+            rule_id: rule.into(),
+            chosen_option: option.map(str::to_string),
+            repos: repos.iter().map(|r| r.to_string()).collect(),
+            applied_hash: Some(format!("sha256:{rule}")),
+            applied_directive: Some(format!("directive of {rule}")),
+            applied_version: Some(3),
+        }
+    }
+
+    fn bare(rule: &str, option: Option<&str>, repos: &[&str]) -> RuleSelection {
+        RuleSelection {
+            applied_hash: None,
+            applied_directive: None,
+            applied_version: None,
+            ..baselined(rule, option, repos)
+        }
+    }
+
+    #[test]
+    fn an_unbaselined_replacement_inherits_the_same_decisions_baseline() {
+        let prior = [baselined("R-1", Some("a"), &["me/api"])];
+        let mut incoming = [bare("R-1", Some("a"), &["me/api"])];
+        inherit_baselines(&mut incoming, &prior);
+        assert_eq!(incoming[0], prior[0]);
+    }
+
+    #[test]
+    fn a_replacement_that_carries_its_own_baseline_keeps_it() {
+        let prior = [baselined("R-1", None, &["me/api"])];
+        let mut own = baselined("R-1", None, &["me/api"]);
+        own.applied_hash = Some("sha256:newer".into());
+        let mut incoming = [own.clone()];
+        inherit_baselines(&mut incoming, &prior);
+        assert_eq!(incoming[0], own);
+    }
+
+    #[test]
+    fn a_changed_option_or_a_different_rule_does_not_inherit() {
+        let prior = [baselined("R-1", Some("a"), &["me/api"])];
+        let mut incoming = [
+            bare("R-1", Some("b"), &["me/api"]),
+            bare("R-2", Some("a"), &["me/api"]),
+        ];
+        inherit_baselines(&mut incoming, &prior);
+        assert!(!incoming[0].is_baselined(), "new option = new decision");
+        assert!(!incoming[1].is_baselined(), "a different rule");
+    }
+
+    #[test]
+    fn repo_scoped_placements_each_inherit_their_own_baseline() {
+        let mut api = baselined("R-1", None, &["me/api"]);
+        api.applied_version = Some(1);
+        let mut web = baselined("R-1", None, &["me/web"]);
+        web.applied_version = Some(2);
+        let prior = [api.clone(), web.clone()];
+        // Incoming order differs from the prior order.
+        let mut incoming = [
+            bare("R-1", None, &["me/web"]),
+            bare("R-1", None, &["me/api"]),
+        ];
+        inherit_baselines(&mut incoming, &prior);
+        assert_eq!(incoming[0].applied_version, Some(2));
+        assert_eq!(incoming[1].applied_version, Some(1));
     }
 }

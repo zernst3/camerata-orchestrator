@@ -1,9 +1,11 @@
 id = "RUST-ENTITIES-1"
+version = 1
 title = "Use the DeriveEntityModel macro path"
-tag = "stack"
 domain = "rust:seaorm"
 layer = "library"
 enforcement = "structured"
+kind = "default_with_exceptions"
+inspectable = true
 default = true
 verification = "grounded"
 
@@ -16,16 +18,21 @@ why = "Matches code-generator output, is the most googleable shape, and avoids v
 id = "use-the-deriveentitymodel-macro-path"
 label = "Use the DeriveEntityModel macro path"
 directive = "Entities are defined with the DeriveEntityModel macro, not hand-rolled Entity/Column/PrimaryKey impls."
+remediation = """
+Replace the hand-rolled Entity/Column/PrimaryKey impls (or the project-specific wrapper macro) with the standard DeriveEntityModel macro on the entity struct. Verify by confirming the entity compiles using #[derive(DeriveEntityModel)] with no hand-written trait impl for Entity, Column, or PrimaryKey.
+"""
 why = "Matches code-generator output, is the most googleable shape, and avoids verbose boilerplate that offers no benefit unless you are deliberately deviating."
 
 [[option]]
 id = "entities-are-defined-with-hand-rolled-entity-col"
+violates = true
 label = "Hand-rolled Entity, Column, and PrimaryKey impls"
 directive = "entities are defined with hand-rolled Entity, Column, and PrimaryKey impls rather than the DeriveEntityModel macro"
 why = "Verbose and offers no upside over the macro path unless an entity needs specific customization of the macro expansion, which is rare: the boilerplate must be written and maintained by hand across every entity, and reviewer attention is spent on mechanical repetition rather than on actual entity semantics."
 
 [[option]]
 id = "entities-are-defined-with-a-project-specific-ent"
+violates = true
 label = "Project-specific macro wrapping DeriveEntityModel"
 directive = "entities are defined with a project-specific entity macro that wraps DeriveEntityModel and applies project-wide defaults"
 why = "Drifts from generator output and must be re-validated against every SeaORM upgrade: the custom macro adds a layer of indirection that makes troubleshooting harder, and the upgrade cost outpaces the local ergonomics gain as the library evolves."

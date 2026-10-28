@@ -8,7 +8,15 @@
 //! Issue #37 adds a full git panel per repo: branch list (switch/create), commit log,
 //! commit-all, push, pull, and cherry-pick (both via drag-and-drop and per-commit button).
 
+use camerata_ui_core::source::{
+    badge_text, card_state, offers_delete, offers_rescan_changes, CardState, SourceView,
+};
 use dioxus::prelude::*;
+
+use crate::source_ui::{
+    DangerZone, DeletionRecordLink, FullReinspectionButton, RefetchDone, RefetchFlow,
+    RescanChangesButton,
+};
 
 /// App settings as the BFF reports them (`/api/settings`).
 #[derive(Clone, PartialEq, serde::Deserialize)]
@@ -35,6 +43,10 @@ struct RepoCheckout {
     branch: Option<String>,
     dirty: bool,
     detail: String,
+    /// The repo's source status (client source lifecycle). Absent from an older server, in which
+    /// case the card falls back to the cloned / not-cloned reading of `cloned`.
+    #[serde(default)]
+    source: Option<SourceView>,
 }
 
 /// One commit from the git log panel.
@@ -519,6 +531,21 @@ pub fn WorkspaceView() -> Element {
         }
     });
     let checkouts = checkout_res.read().clone().flatten().unwrap_or_default();
+    // When the latest inspection finished, for the re-fetch dialog's "inspected commit" label.
+    let inspection_res = use_resource(move || {
+        let _dep = refresh();
+        let pid = project_res.read().clone().flatten().map(|p| p.id);
+        async move {
+            match pid {
+                Some(id) => crate::source_ui::fetch_source_listing(&id)
+                    .await
+                    .and_then(|l| l.inspection)
+                    .map(|i| i.finished_at),
+                None => None,
+            }
+        }
+    });
+    let inspected_at = inspection_res.read().clone().flatten();
 
     let busy = use_signal(|| false);
 
@@ -752,14 +779,21 @@ pub fn WorkspaceView() -> Element {
                                                 }
                                             }
                                         }
-                                        RepoCard {
-                                            key: "{active_repo}",
-                                            repo: active_repo.clone(),
-                                            project_id,
-                                            status,
-                                            refresh: Some(refresh),
-                                            on_linked: move |_| { refresh += 1; },
-                                        }
+                                        // The `key` must sit on the FIRST node of its own rsx block to take
+                                        // effect (Dioxus ignores it on later siblings), so the card is built
+                                        // in a nested block: switching repos then remounts it and drops its
+                                        // local state.
+                                        {rsx! {
+                                            RepoCard {
+                                                key: "{active_repo}",
+                                                repo: active_repo.clone(),
+                                                project_id,
+                                                status,
+                                                inspected_at: inspected_at.clone(),
+                                                refresh: Some(refresh),
+                                                on_linked: move |_| { refresh += 1; },
+                                            }
+                                        }}
                                     }
                                 }
                             }
@@ -773,11 +807,32 @@ pub fn WorkspaceView() -> Element {
 
 // ── RepoCard ──────────────────────────────────────────────────────────────────
 
+/// The card state of one repo. The server's source status decides when it is present; a server
+/// that predates the source lifecycle (no `source`) reads as the old two-state card.
+fn card_state_of(status: Option<&RepoCheckout>) -> CardState {
+    match status {
+        Some(RepoCheckout {
+            source: Some(view), ..
+        }) => card_state(view),
+        Some(s) if s.cloned => CardState::PresentUncompared { sha: None },
+        Some(s) => CardState::Unresolved {
+            reason: s.detail.clone(),
+        },
+        None => CardState::Unresolved {
+            reason: "not cloned yet".to_string(),
+        },
+    }
+}
+
 #[component]
 fn RepoCard(
     repo: String,
     project_id: String,
     status: Option<RepoCheckout>,
+    /// When the project's latest inspection finished (labels the re-fetch dialog's "inspected
+    /// commit" option).
+    #[props(default)]
+    inspected_at: Option<String>,
     #[props(default)] refresh: Option<Signal<u32>>,
     on_linked: EventHandler<()>,
 ) -> Element {
@@ -804,19 +859,99 @@ fn RepoCard(
     let dirty = status.as_ref().map(|s| s.dirty).unwrap_or(false);
     let path = status.as_ref().map(|s| s.path.clone()).unwrap_or_default();
 
+    // The source lifecycle reading of this repo (pure mapping, tested in ui-core). An older
+    // server reports no `source`; then the card is exactly the old cloned / not-cloned card.
+    let state = card_state_of(status.as_ref());
+    let present = offers_delete(&state);
+    let badge = match &state {
+        CardState::Unresolved { .. } => String::new(),
+        other => badge_text(other),
+    };
+    let (deleted_summary, record_id, deleted_path, deleted_sha) =
+        match status.as_ref().and_then(|s| s.source.as_ref()) {
+            Some(SourceView::Deleted {
+                record_id,
+                path,
+                inspected_sha,
+                ..
+            }) => (
+                match &state {
+                    CardState::Deleted { summary, .. } => summary.clone(),
+                    _ => String::new(),
+                },
+                record_id.clone(),
+                path.clone(),
+                inspected_sha.clone(),
+            ),
+            _ => (String::new(), String::new(), String::new(), None),
+        };
+    let deleted = !record_id.is_empty();
+    let newer = offers_rescan_changes(&state);
+    let unreachable = matches!(state, CardState::InspectedUnreachable { .. });
+    let badge_class = match &state {
+        CardState::Deleted { .. } => "ws-repo-source deleted",
+        CardState::Mismatch { .. } => "ws-repo-source mismatch",
+        _ => "ws-repo-source",
+    };
+
     rsx! {
         div { class: "ws-repo",
             div { class: "ws-repo-head",
                 span { class: "ws-repo-name", "{repo}" }
                 span {
-                    class: if cloned { "ws-repo-state cloned" } else { "ws-repo-state" },
+                    class: if present { "ws-repo-state cloned" } else if deleted { "ws-repo-state deleted" } else { "ws-repo-state" },
                     "{detail}"
                 }
             }
             if !path.is_empty() {
                 p { class: "ws-repo-path", "{path}" }
             }
-            if cloned {
+            if !badge.is_empty() {
+                p { class: "{badge_class}", "{badge}" }
+            }
+            if deleted {
+                p { class: "ws-repo-source-summary", "{deleted_summary}; record {record_id}" }
+                div { class: "ws-repo-actions",
+                    RefetchFlow {
+                        project_id: project_id.clone(),
+                        repo: repo.clone(),
+                        destination: deleted_path.clone(),
+                        inspected_sha: deleted_sha.clone(),
+                        inspected_at: inspected_at.clone(),
+                        on_done: {
+                            let repo = repo.clone();
+                            move |done: RefetchDone| {
+                                let mut note = Vec::new();
+                                if let Some(new_name) = done.renamed_to {
+                                    note.push(format!(
+                                        "GitHub now calls this repository {new_name}; the project still records {repo}."
+                                    ));
+                                }
+                                if let Some(notice) = done.notice {
+                                    note.push(notice);
+                                }
+                                msg.set(note.join(" "));
+                                on_linked.call(());
+                            }
+                        },
+                    }
+                    DeletionRecordLink {
+                        project_id: project_id.clone(),
+                        record_id: record_id.clone(),
+                    }
+                }
+                if !msg().is_empty() {
+                    p { class: "ws-repo-msg", "{msg}" }
+                }
+            } else if cloned {
+                if newer || unreachable {
+                    div { class: "ws-repo-actions ws-source-actions",
+                        if newer {
+                            RescanChangesButton { project_id: project_id.clone(), repo: repo.clone() }
+                        }
+                        FullReinspectionButton { primary: unreachable }
+                    }
+                }
                 div { class: "ws-repo-actions",
                     label { class: "sched-field",
                         span { "Branch" }
@@ -899,6 +1034,15 @@ fn RepoCard(
                     repo: repo.clone(),
                     project_id: project_id.clone(),
                     refresh: Some(refresh),
+                }
+
+                // ── Danger zone: only while matching source is on disk ────
+                if present {
+                    DangerZone {
+                        project_id: project_id.clone(),
+                        repo: repo.clone(),
+                        on_changed: move |_| on_linked.call(()),
+                    }
                 }
             } else {
                 p { class: "ws-hint", "Not cloned. Use \"Clone / update all repos\" above to create a local working copy, or link an existing clone below." }
@@ -1433,7 +1577,7 @@ mod tests {
     // tests in this module in-process and they each set+remove the var around one await.
 
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn fetch_settings_parses_workspace_root() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1449,16 +1593,15 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let out = super::fetch_settings().await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         let out = out.expect("settings parse");
         assert_eq!(out.workspace_root.as_deref(), Some("/tmp/ws"));
     }
 
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn set_workspace_posts_the_path() {
         use wiremock::matchers::{body_json, method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1475,9 +1618,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let out = super::set_workspace("/tmp/ws").await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         assert_eq!(
             out.expect("settings echo").workspace_root.as_deref(),
@@ -1486,7 +1628,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn fetch_active_project_parses_null_as_none() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1499,15 +1641,14 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let out = super::fetch_active_project().await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         assert!(out.is_none(), "a null body means no active project");
     }
 
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn fetch_active_project_parses_a_project() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1524,9 +1665,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let out = super::fetch_active_project().await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         let proj = out.expect("project parsed");
         assert_eq!(proj.id, "proj-7");
@@ -1535,7 +1675,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn fetch_checkout_hits_project_scoped_path() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1543,21 +1683,22 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/api/projects/proj-7/checkout"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([{
-                "repo": "zernst3/agora",
-                "cloned": true,
-                "path": "/tmp/ws/zernst3/agora",
-                "branch": "main",
-                "dirty": false,
-                "detail": "on main",
-            }])))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!([{
+                    "repo": "zernst3/agora",
+                    "cloned": true,
+                    "path": "/tmp/ws/zernst3/agora",
+                    "branch": "main",
+                    "dirty": false,
+                    "detail": "on main",
+                }])),
+            )
             .expect(1)
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let out = super::fetch_checkout("proj-7").await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         let rows = out.expect("checkout list");
         assert_eq!(rows.len(), 1);
@@ -1566,7 +1707,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn clone_project_posts_to_checkout() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1574,21 +1715,22 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/api/projects/proj-7/checkout"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([{
-                "repo": "zernst3/agora",
-                "cloned": true,
-                "path": "/tmp/ws/zernst3/agora",
-                "branch": "main",
-                "dirty": false,
-                "detail": "cloned",
-            }])))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!([{
+                    "repo": "zernst3/agora",
+                    "cloned": true,
+                    "path": "/tmp/ws/zernst3/agora",
+                    "branch": "main",
+                    "dirty": false,
+                    "detail": "cloned",
+                }])),
+            )
             .expect(1)
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let out = super::clone_project("proj-7").await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         let rows = out.expect("clone result");
         assert_eq!(rows.len(), 1);
@@ -1598,7 +1740,7 @@ mod tests {
     // A server error must surface as `Err(message)` — carrying the server's real error text —
     // so the caller can toast WHY it failed (workspace-F4) instead of a generic message.
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn clone_project_returns_err_with_server_message_on_failure() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1614,9 +1756,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let out = super::clone_project("proj-7").await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         match out {
             Err(msg) => assert_eq!(msg, "no GitHub token set"),
@@ -1625,7 +1766,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn start_branch_posts_repo_and_branch() {
         use wiremock::matchers::{body_json, method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1649,15 +1790,17 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let out = super::start_branch("proj-7", "zernst3/agora", "camerata/work").await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
-        assert_eq!(out.expect("checkout").branch.as_deref(), Some("camerata/work"));
+        assert_eq!(
+            out.expect("checkout").branch.as_deref(),
+            Some("camerata/work")
+        );
     }
 
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn ship_posts_full_body_and_returns_pr_url() {
         use wiremock::matchers::{body_json, method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1678,9 +1821,14 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
-        let out = super::ship("proj-7", "zernst3/agora", "camerata/work", "Camerata: changes").await;
-        std::env::remove_var("CAMERATA_BFF_URL");
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
+        let out = super::ship(
+            "proj-7",
+            "zernst3/agora",
+            "camerata/work",
+            "Camerata: changes",
+        )
+        .await;
 
         assert_eq!(
             out.as_deref(),
@@ -1689,7 +1837,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn api_git_status_requires_ok_true_and_encodes_repo() {
         use wiremock::matchers::{method, path, query_param};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1711,9 +1859,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let out = super::api_git_status("proj-7", "zernst3/agora").await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         let st = out.expect("status parsed when ok=true");
         assert_eq!(st.branch, "main");
@@ -1723,7 +1870,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn api_git_status_returns_none_when_not_ok() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1737,15 +1884,14 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let out = super::api_git_status("proj-7", "zernst3/agora").await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         assert!(out.is_none(), "ok=false collapses to None");
     }
 
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn api_git_branches_parses_current_and_list() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1762,17 +1908,19 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let out = super::api_git_branches("proj-7", "zernst3/agora").await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         let bl = out.expect("branches parsed");
         assert_eq!(bl.current, "main");
-        assert_eq!(bl.branches, vec!["main".to_string(), "camerata/work".to_string()]);
+        assert_eq!(
+            bl.branches,
+            vec!["main".to_string(), "camerata/work".to_string()]
+        );
     }
 
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn api_git_log_extracts_commits_array() {
         use wiremock::matchers::{method, path, query_param};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1794,9 +1942,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let out = super::api_git_log("proj-7", "zernst3/agora", 30).await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].sha, "abcdef0123");
@@ -1804,7 +1951,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn api_git_checkout_posts_create_flag_and_returns_ok_message() {
         use wiremock::matchers::{body_json, method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1825,16 +1972,15 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let (ok, msg) = super::api_git_checkout("proj-7", "zernst3/agora", "feature/x", true).await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         assert!(ok);
         assert_eq!(msg, "created feature/x");
     }
 
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn api_git_commit_posts_message_and_reads_output() {
         use wiremock::matchers::{body_json, method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1854,16 +2000,15 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let (ok, out) = super::api_git_commit("proj-7", "zernst3/agora", "wip").await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         assert!(ok);
         assert_eq!(out, "1 file changed");
     }
 
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn api_git_push_posts_branch() {
         use wiremock::matchers::{body_json, method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1882,15 +2027,14 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let (ok, _msg) = super::api_git_push("proj-7", "zernst3/agora", "camerata/work").await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         assert!(ok);
     }
 
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn api_git_pull_reports_failure_message() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1906,16 +2050,15 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let (ok, out) = super::api_git_pull("proj-7", "zernst3/agora", "main").await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         assert!(!ok);
         assert_eq!(out, "merge conflict");
     }
 
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn api_git_fetch_posts_repo() {
         use wiremock::matchers::{body_json, method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1932,16 +2075,15 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let (ok, out) = super::api_git_fetch("proj-7", "zernst3/agora").await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         assert!(ok);
         assert_eq!(out, "fetched");
     }
 
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn api_git_fetch_reports_failure_message() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1957,16 +2099,18 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let (ok, out) = super::api_git_fetch("proj-7", "zernst3/agora").await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         assert!(!ok);
-        assert_eq!(out, "no GitHub token set. Set CAMERATA_GITHUB_TOKEN to fetch.");
+        assert_eq!(
+            out,
+            "no GitHub token set. Set CAMERATA_GITHUB_TOKEN to fetch."
+        );
     }
 
     #[tokio::test]
-    #[serial_test::serial(bff_env)]
+    #[serial_test::serial(process_env)]
     async fn api_git_cherry_pick_posts_sha() {
         use wiremock::matchers::{body_json, method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1986,9 +2130,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let (ok, out) = super::api_git_cherry_pick("proj-7", "zernst3/agora", "abcdef0123").await;
-        std::env::remove_var("CAMERATA_BFF_URL");
 
         assert!(ok);
         assert_eq!(out, "applied");
@@ -2009,6 +2152,7 @@ mod tests {
                             branch: Some("main".to_string()),
                             dirty: false,
                             detail: String::new(),
+                            source: None,
                         },
                         super::RepoCheckout {
                             repo: "acme/beta".to_string(),
@@ -2017,6 +2161,7 @@ mod tests {
                             branch: Some("main".to_string()),
                             dirty: false,
                             detail: String::new(),
+                            source: None,
                         },
                     ],
                 }
@@ -2043,6 +2188,7 @@ mod tests {
                             branch: Some("main".to_string()),
                             dirty: true,
                             detail: String::new(),
+                            source: None,
                         },
                         super::RepoCheckout {
                             repo: "acme/beta".to_string(),
@@ -2051,6 +2197,7 @@ mod tests {
                             branch: None,
                             dirty: false,
                             detail: "not cloned".to_string(),
+                            source: None,
                         },
                     ],
                 }
@@ -2061,7 +2208,10 @@ mod tests {
         let html = dioxus_ssr::render(&vdom);
         assert!(html.contains("1/2 cloned"), "cloned pill shows 1/2");
         assert!(html.contains("1 dirty"), "dirty pill shows 1");
-        assert!(html.contains("ws-health-stat warn"), "warn class for partial clone");
+        assert!(
+            html.contains("ws-health-stat warn"),
+            "warn class for partial clone"
+        );
         assert!(html.contains("ws-health-stat bad"), "bad class for dirty");
     }
 
@@ -2077,6 +2227,144 @@ mod tests {
             !html.contains("ws-health"),
             "empty checkouts renders nothing"
         );
+    }
+
+    // ── RepoCard source states (client source lifecycle) ─────────────────────────
+
+    const SHA_A: &str = "3f2a9c14e0b7aaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const SHA_B: &str = "9b7e21c0000bbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+    fn present_source(
+        head: &str,
+        inspected: &str,
+        newer: Option<u64>,
+        reachable: bool,
+    ) -> SourceView {
+        SourceView::Present {
+            repo: "acme/app".to_string(),
+            path: "/w/acme/app".to_string(),
+            head_sha: Some(head.to_string()),
+            head_branch: Some("main".to_string()),
+            dirty: false,
+            inspected_sha: Some(inspected.to_string()),
+            inspected_at: Some("2026-10-24T10:05:00Z".to_string()),
+            newer_commits: newer,
+            inspected_commit_reachable: reachable,
+            has_deletion_history: false,
+        }
+    }
+
+    fn deleted_source() -> SourceView {
+        SourceView::Deleted {
+            repo: "acme/app".to_string(),
+            path: "/w/acme/app".to_string(),
+            deleted_at: "2026-10-24T17:40:19Z".to_string(),
+            record_id: "del-p1-acme-app-20261024T174019Z".to_string(),
+            inspected_sha: Some(SHA_A.to_string()),
+            total_files: 2729,
+            total_bytes: 182_900_000,
+            summary: "2,729 files, 182.9 MB removed".to_string(),
+        }
+    }
+
+    fn checkout_with(source: SourceView) -> RepoCheckout {
+        let cloned = matches!(source, SourceView::Present { .. });
+        RepoCheckout {
+            repo: "acme/app".to_string(),
+            cloned,
+            path: "/w/acme/app".to_string(),
+            branch: cloned.then(|| "main".to_string()),
+            dirty: false,
+            detail: if cloned {
+                "on main, clean".to_string()
+            } else {
+                "source deleted on 24 Oct 2026; use Re-fetch source".to_string()
+            },
+            source: Some(source),
+        }
+    }
+
+    fn render_card(source: SourceView) -> String {
+        fn harness(source: SourceView) -> Element {
+            use_context_provider(|| Signal::new(Vec::<crate::toast::Toast>::new()));
+            rsx! {
+                RepoCard {
+                    repo: "acme/app".to_string(),
+                    project_id: "p1".to_string(),
+                    status: Some(checkout_with(source)),
+                    on_linked: move |_| {},
+                }
+            }
+        }
+        let mut vdom = VirtualDom::new_with_props(harness, source);
+        vdom.rebuild_in_place();
+        dioxus_ssr::render(&vdom)
+    }
+
+    #[test]
+    fn repo_card_deleted_renders_badge_summary_and_refetch_primary() {
+        let html = render_card(deleted_source());
+        assert!(html.contains("Source deleted on 24 Oct 2026"), "{html}");
+        assert!(html.contains("ws-repo-source deleted"), "danger styling");
+        assert!(
+            html.contains("2,729 files, 182.9 MB removed; record del-p1-acme-app-20261024T174019Z"),
+            "{html}"
+        );
+        assert!(html.contains("Re-fetch source"));
+        assert!(html.contains("btn-run"), "re-fetch is the primary action");
+        assert!(html.contains("View deletion record"));
+        // Nothing that needs the source on disk.
+        assert!(!html.contains("Danger zone"));
+        assert!(!html.contains("Start branch"));
+        assert!(!html.contains("git-panel"));
+        assert!(!html.contains("Ship (push + PR)"));
+    }
+
+    #[test]
+    fn repo_card_newer_renders_commits_newer_and_rescan_changes_primary() {
+        let html = render_card(present_source(SHA_B, SHA_A, Some(14), true));
+        assert!(
+            html.contains("Source at 9b7e21c, 14 commits newer than the inspection (3f2a9c1)"),
+            "{html}"
+        );
+        assert!(html.contains("Rescan changes"));
+        assert!(html.contains("Full re-inspection"));
+        assert!(
+            html.contains("Danger zone"),
+            "source is on disk, so it can be deleted"
+        );
+    }
+
+    #[test]
+    fn repo_card_at_inspected_commit_renders_badge_and_danger_zone() {
+        let html = render_card(present_source(SHA_A, SHA_A, Some(0), true));
+        assert!(
+            html.contains("Source at 3f2a9c1 (the inspected commit)"),
+            "{html}"
+        );
+        assert!(html.contains("Danger zone"));
+        assert!(html.contains("Delete source code from this machine"));
+        assert!(html.contains(
+            "Removes the checkout and every other copy Camerata holds. Findings and exports stay."
+        ));
+        assert!(
+            !html.contains("Rescan changes"),
+            "nothing changed, nothing to rescan"
+        );
+        assert!(!html.contains("Re-fetch source"));
+        assert!(
+            html.contains("Start branch"),
+            "the git workflow is unchanged"
+        );
+    }
+
+    #[test]
+    fn repo_card_unreachable_commit_offers_only_full_reinspection() {
+        let html = render_card(present_source(SHA_B, SHA_A, None, false));
+        assert!(html.contains("history was rewritten"), "{html}");
+        assert!(html.contains("Full re-inspection"));
+        assert!(!html.contains("Rescan changes"));
+        assert!(html.contains("Danger zone"));
     }
 
     // RepoCard with status=None renders the "not cloned" branch, which does NOT mount
@@ -2126,7 +2414,10 @@ mod tests {
         let html = dioxus_ssr::render(&vdom);
         assert!(html.contains("git-panel"), "panel root renders");
         // The scoped repo is echoed at the top of the sync/git area (not just the checkout head).
-        assert!(html.contains("git-panel-repo"), "repo header renders in the git panel");
+        assert!(
+            html.contains("git-panel-repo"),
+            "repo header renders in the git panel"
+        );
         assert!(
             html.contains("zernst3/agora"),
             "the scoped repo slug renders in the git-panel repo header"

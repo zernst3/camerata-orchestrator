@@ -189,8 +189,10 @@ pub fn fixtures() -> Vec<Fixture> {
         Fixture {
             name: "secret_openai_sk_key",
             path: "src/llm.ts",
+            // An OpenAI key is also a vendor credential token (the shared detector lists it
+            // under SEC-NO-VENDOR-TOKEN-1 as well).
             content: "const apiKey = \"sk-abcdefghijklmnopqrstuvwxyz0123456789\";\n",
-            expected: &["SEC-NO-HARDCODED-SECRETS-1"],
+            expected: &["SEC-NO-HARDCODED-SECRETS-1", "SEC-NO-VENDOR-TOKEN-1"],
         },
         Fixture {
             name: "secret_named_opaque_literal",
@@ -307,11 +309,11 @@ pub fn fixtures() -> Vec<Fixture> {
             name: "vendor_token_anthropic",
             path: "src/llm_client.rs",
             // sk-ant- matches SEC-NO-VENDOR-TOKEN-1. The generic secrets heuristic uses
-            // sk-[A-Za-z0-9]{20,} which breaks on the hyphen in "sk-ant-"; the identifier
-            // heuristic also doesn't match because [A-Za-z0-9+_] excludes hyphens.
-            // So only SEC-NO-VENDOR-TOKEN-1 fires here (intentional standalone test).
+            // sk-[A-Za-z0-9]{20,} which breaks on the hyphen in "sk-ant-", but the
+            // credential-named literal heuristic admits `-` (UUID-shaped API tokens), so a
+            // quoted key on `API_KEY` is a hardcoded secret too (as a quoted `sk_live_` key is).
             content: "const API_KEY: &str = \"sk-ant-ABCDEFGHIJKLMNOPQRSTUVWXYZ123456\";\n",
-            expected: &["SEC-NO-VENDOR-TOKEN-1"],
+            expected: &["SEC-NO-HARDCODED-SECRETS-1", "SEC-NO-VENDOR-TOKEN-1"],
         },
         // ── SEC-NO-VENDOR-TOKEN-1 — clean control ─────────────────────────────
         Fixture {

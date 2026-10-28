@@ -1,9 +1,11 @@
 id = "JAVASCRIPT-VUE-NO-DIRECT-DOM-1"
+version = 1
 title = "Do not manipulate the DOM directly; declare the desired state and let Vue render it"
-tag = "stack"
 domain = "javascript:vue"
 layer = "framework"
 enforcement = "structured"
+kind = "decision"
+inspectable = true
 default = true
 verification = "grounded"
 
@@ -24,6 +26,9 @@ why = "Vue is a declarative framework: you describe the desired state (data, com
 id = "declarative-rendering-no-direct-dom"
 label = "Declare state; let Vue render; no direct DOM manipulation"
 directive = "Vue reactivity (data, computed, props) drives the DOM state. v-if, v-show, v-bind:class, v-bind:style, and other Vue directives declare the desired state. No direct DOM access via document, jQuery, or element manipulation in component code."
+remediation = """
+Replace the direct document/jQuery/element manipulation with Vue's declarative bindings (v-if, v-show, v-bind:class, v-bind:style) driven by reactive data. Verify by confirming the component no longer references document, jQuery, or raw element APIs and the same visual result is driven by reactive state instead.
+"""
 why = "Declarative rendering keeps Vue's reactivity system and the DOM in sync."
 
 [[option]]

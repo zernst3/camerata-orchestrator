@@ -85,3 +85,13 @@ Agents run via 'claude -p' with all built-in file-writing tools stripped (--disa
 
 ### CUSTOM-seam-first _(custom · domain: architecture)_
 Provider/runtime/transport concerns live behind the three core seams (GovernanceGateway, AgentDriver, CheckRunner). The core never assumes a specific model, provider, or MCP transport.
+
+## Disk hygiene (cargo artifacts)
+
+Cargo never garbage-collects, and every agent git worktree gets its own full `target/` (5-20
+GiB). On 2026-10-21 that filled the disk to 99%. `scripts/cargo-disk-guard.sh` runs every 30
+minutes via launchd (`scripts/install-cargo-disk-guard.sh` installs it): it removes merged,
+idle agent worktrees, drops the `target/` of idle unmerged ones, and escalates (sweep, then
+incremental/release caches, then whole idle targets) as free space falls below 150/75/40 GiB.
+Orchestrating sessions additionally remove each agent worktree as soon as its branch is merged.
+Never disable the guard to save a rebuild; a rebuild costs minutes, a full disk costs the day.

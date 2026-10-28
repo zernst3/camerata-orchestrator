@@ -1,9 +1,17 @@
 id = "SUPABASE-RLS-USER-METADATA-1"
+version = 1
 title = "An RLS policy predicate must never authorize against user_metadata / raw_user_meta_data"
-tag = "stack"
 domain = "supabase:rls"
 layer = "platform"
 enforcement = "mechanical"
+kind = "defect"
+inspectable = true
+# Severity floor. Rationale: user_metadata / raw_user_meta_data are writable by the user they
+# describe, through the standard update-user API. A policy authorizing on either lets any
+# authenticated account grant itself that privilege with one call — CWE-269 in its most literal
+# form, the actor setting their own privilege level. No benign counter-example exists, so this is
+# critical unconditionally rather than a needs_review carve-out.
+min_severity = "critical"
 default = true
 verification = "grounded"
 qualifies = "Enforced by a match over CREATE POLICY statement bodies: the literal tokens `user_metadata` or `raw_user_meta_data` appearing inside a policy's USING or WITH CHECK clause (whether reached via auth.jwt() or a join against auth.users) are flagged. This match is near-zero false-positive — there is no legitimate reason for a policy predicate to read user-editable profile data as an authorization input — which is why this rule is a floor-port candidate (mechanical, always-block-worthy) rather than merely advisory. Conformance holds when no policy predicate anywhere in the corpus references either token."
@@ -41,18 +49,34 @@ infrastructure the floor requires.
 
 [[option]]
 id = "never-authorize-on-user-metadata"
-label = "Never authorize on user_metadata / raw_user_meta_data; flag every match unconditionally"
+label = "No RLS policy predicate reads user_metadata or raw_user_meta_data as an authorization input"
 directive = """
-Scan every CREATE POLICY statement's USING and WITH CHECK clauses for the literal tokens
-`user_metadata` or `raw_user_meta_data`. Any match is a critical finding, phrased as: "Your admin
-check reads a field any user can edit about themselves. Anyone can promote themselves to admin
-with one API call." Remediation: move the authorization-relevant claim to `app_metadata` (settable
-only by a service_role client / admin) or to a dedicated, RLS-protected roles table.
+Neither `user_metadata` nor `raw_user_meta_data` appears in any policy's `USING` or `WITH CHECK`
+clause, whether reached through `auth.jwt()` or a join against `auth.users`. Those fields are
+profile data: the authenticated user updates them about themselves through the ordinary
+update-user API. A predicate like
+`(auth.jwt() -> 'user_metadata' ->> 'is_admin')::boolean` therefore lets any account grant itself
+that privilege with a single call — the actor setting their own privilege level.
+
+Authorization-relevant claims live where the user cannot reach them: the JWT's `app_metadata`,
+which only a service_role client or the dashboard can write, or a dedicated roles table with its
+own RLS policy. An extra application-layer check does not rescue the unsafe predicate — RLS exists
+precisely so no code path that forgets, or gets it wrong, can bypass it.
 """
+remediation = """
+Rewrite the policy predicate to read `auth.jwt() -> 'app_metadata' ->> 'role'` (or an equivalent
+`app_metadata` claim) instead of `user_metadata` / `raw_user_meta_data` — `app_metadata` can only
+be written by a service_role client or the Supabase dashboard, never by the user themselves. If
+you need richer role logic, move it to a dedicated roles table with its own RLS policy instead.
+Verify by confirming that editing your own profile's metadata through the normal client SDK no
+longer changes what the policy grants you.
+"""
+effort = "medium"
 why = "user_metadata / raw_user_meta_data are user-writable by design; using either as an authorization input is a structural privilege-escalation vector with no legitimate counter-example, so an unconditional flag is correct rather than a needs_review carve-out."
 
 [[option]]
 id = "allow-with-additional-server-side-validation"
-label = "Allow user_metadata in policies if the app also validates the claim server-side before granting privileged actions"
-directive = "Permit policies to read user_metadata / raw_user_meta_data for authorization when the application layer performs an additional server-side check before treating the user as privileged."
+violates = true
+label = "Policy predicates authorize on user_metadata, with an application-layer check before privileged actions"
+directive = "Policies read `user_metadata` / `raw_user_meta_data` as an authorization input, and the application layer performs its own server-side check before treating the user as privileged."
 why = "Rejected: RLS is the database's OWN access-control layer specifically so that no code path — including one that forgets or gets the extra check wrong — can bypass it. Requiring a compensating server-side check to make an unsafe policy predicate 'safe' reintroduces exactly the footgun RLS exists to remove, and a static scan cannot verify the compensating check exists, is complete, or survives the next refactor. The safe alternative (app_metadata or a dedicated roles table) provides the same capability with no such fragility."

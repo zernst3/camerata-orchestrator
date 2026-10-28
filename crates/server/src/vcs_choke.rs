@@ -135,7 +135,10 @@ pub fn compliant_machine_commit_message(
     let chosen_kind = if types.iter().any(|t| t == kind) {
         kind.to_string()
     } else {
-        types.first().cloned().unwrap_or_else(|| "chore".to_string())
+        types
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "chore".to_string())
     };
 
     // 2. Story-id reference token in the project's configured format (e.g. `#42`, `AB#42`,
@@ -168,9 +171,8 @@ pub fn compliant_machine_commit_message(
 
     // 5. Body: a substantive paragraph plus the story-id reference (for the Body / Either cases).
     //    Pad past `min_body_chars` so PROCESS-COMMIT-DOC-1's substantive check always passes.
-    let mut body = format!(
-        "Server-authored commit produced by Camerata's orchestration path. {summary}."
-    );
+    let mut body =
+        format!("Server-authored commit produced by Camerata's orchestration path. {summary}.");
     if !story_ref.is_empty() {
         body.push_str(&format!(" Refs {story_ref}."));
     }
@@ -236,7 +238,10 @@ pub fn compliant_machine_pr(
 /// `story-42`). Returns an empty string when no digits are present, which signals the caller
 /// that a compliant story-id reference cannot be formed.
 pub fn numeric_story_id(story_id: &str) -> String {
-    let tail = story_id.rsplit_once('#').map(|(_, n)| n).unwrap_or(story_id);
+    let tail = story_id
+        .rsplit_once('#')
+        .map(|(_, n)| n)
+        .unwrap_or(story_id);
     // Take a leading run of digits from the tail (handles `#42` and `#42-suffix`).
     let leading: String = tail.chars().take_while(|c| c.is_ascii_digit()).collect();
     if !leading.is_empty() {
@@ -353,7 +358,8 @@ mod tests {
         match err {
             ChokeError::Blocked(v) => {
                 assert!(
-                    v.iter().any(|x| x.rule_id == "PROCESS-CONVENTIONAL-COMMIT-1"),
+                    v.iter()
+                        .any(|x| x.rule_id == "PROCESS-CONVENTIONAL-COMMIT-1"),
                     "conventional-commit rule must fire: {v:?}"
                 );
             }
@@ -366,7 +372,10 @@ mod tests {
         // The shipped default has conventional_commit enabled + commit_doc enabled, so a
         // bare-junk subject with no body is blocked out of the box.
         let cfg = ProcessRuleConfig::default();
-        assert!(gated_commit(&cfg, "nonsense").is_err(), "default config must gate");
+        assert!(
+            gated_commit(&cfg, "nonsense").is_err(),
+            "default config must gate"
+        );
     }
 
     #[test]
@@ -377,7 +386,10 @@ mod tests {
         assert!(gated_commit(&cfg, "feat: add export").is_err());
         // Conventional shape + substantive body + story id -> passes.
         let ok_msg = "feat: add export\n\nImplements the CSV export flow end to end. Refs #42.";
-        assert!(gated_commit(&cfg, ok_msg).is_ok(), "compliant commit must pass");
+        assert!(
+            gated_commit(&cfg, ok_msg).is_ok(),
+            "compliant commit must pass"
+        );
     }
 
     #[test]
@@ -412,7 +424,10 @@ mod tests {
         )
         .expect("bypass must succeed with a reason");
         let summary = record.expect("a bypass record is produced for a violating action");
-        assert!(summary.contains("PROCESS-CONVENTIONAL-COMMIT-1"), "record names the rule: {summary}");
+        assert!(
+            summary.contains("PROCESS-CONVENTIONAL-COMMIT-1"),
+            "record names the rule: {summary}"
+        );
     }
 
     #[test]
@@ -426,8 +441,8 @@ mod tests {
     #[test]
     fn bypass_none_on_passing_action_consumes_no_bypass() {
         let cfg = conventional_only();
-        let record = gated_commit_or_bypass(&cfg, "feat: fine", None)
-            .expect("a compliant commit passes");
+        let record =
+            gated_commit_or_bypass(&cfg, "feat: fine", None).expect("a compliant commit passes");
         assert!(record.is_none(), "no bypass record for a passing action");
     }
 
@@ -477,8 +492,13 @@ mod tests {
         // A realistic Azure-Boards project: ADO link enabled, story-id in the SUBJECT with the
         // `AB#` format.
         use camerata_checks::vcs_action::{AdoLinkConfig, IdLocation, StoryIdFormat};
-        let mut cfg = ProcessRuleConfig::default();
-        cfg.ado_link = AdoLinkConfig { enabled: true, prefix: "AB".to_string() };
+        let mut cfg = ProcessRuleConfig {
+            ado_link: AdoLinkConfig {
+                enabled: true,
+                prefix: "AB".to_string(),
+            },
+            ..ProcessRuleConfig::default()
+        };
         cfg.commit_doc.id_location = IdLocation::Subject;
         cfg.commit_doc.story_id_format = StoryIdFormat {
             prefix: "AB".to_string(),
@@ -522,10 +542,16 @@ mod tests {
     #[test]
     fn branch_gate_blocks_nonconforming_when_rule_active() {
         use camerata_checks::vcs_action::BranchNamingConfig;
-        let mut cfg = ProcessRuleConfig::default();
-        cfg.branch_naming = BranchNamingConfig {
-            enabled: true,
-            prefixes: vec!["feature/".to_string(), "release/".to_string(), "hotfix/".to_string()],
+        let cfg = ProcessRuleConfig {
+            branch_naming: BranchNamingConfig {
+                enabled: true,
+                prefixes: vec![
+                    "feature/".to_string(),
+                    "release/".to_string(),
+                    "hotfix/".to_string(),
+                ],
+            },
+            ..ProcessRuleConfig::default()
         };
         // Camerata's default `camerata/<id>` slug does not match the required prefixes.
         assert!(

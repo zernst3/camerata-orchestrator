@@ -41,8 +41,14 @@ mod tests {
         // not pass through as literal pipe text.
         let src = "| a | b |\n|---|---|\n| 1 | 2 |";
         let html = md_to_html(src);
-        assert!(html.contains("<table>"), "expected a table element, got: {html}");
-        assert!(html.contains("<th>a</th>") || html.contains("<th>a"), "header cell missing");
+        assert!(
+            html.contains("<table>"),
+            "expected a table element, got: {html}"
+        );
+        assert!(
+            html.contains("<th>a</th>") || html.contains("<th>a"),
+            "header cell missing"
+        );
     }
 
     #[test]

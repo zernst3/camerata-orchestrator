@@ -28,7 +28,6 @@
 //! (e.g. a path-boundary check against the filesystem) drops in without an
 //! API break.
 
-
 use std::collections::HashMap;
 
 use async_trait::async_trait;
@@ -166,23 +165,36 @@ pub fn is_git_state_mutation(cmd: &str) -> bool {
         None => return false,
     };
     // Match state-mutating subcommands.
-    if rest.starts_with("stash") { return true; }
-    if rest.starts_with("rebase") { return true; }
-    if rest.starts_with("restore") { return true; }
-    if rest.starts_with("reset") && rest.contains("--hard") { return true; }
+    if rest.starts_with("stash") {
+        return true;
+    }
+    if rest.starts_with("rebase") {
+        return true;
+    }
+    if rest.starts_with("restore") {
+        return true;
+    }
+    if rest.starts_with("reset") && rest.contains("--hard") {
+        return true;
+    }
     if rest.starts_with("clean") {
         // Deny any `git clean` that has -f or -d flags (alone or combined: -fd, -df, -fdn, etc.)
         let flags = rest;
-        if flags.contains("-f") || flags.contains("-d") { return true; }
+        if flags.contains("-f") || flags.contains("-d") {
+            return true;
+        }
     }
-    if rest.starts_with("checkout") {
-        let after = rest["checkout".len()..].trim_start();
+    if let Some(after) = rest.strip_prefix("checkout") {
+        let after = after.trim_start();
         // `git checkout -- <paths>` or `git checkout .`
-        if after.starts_with("-- ") || after.starts_with(".") { return true; }
+        if after.starts_with("-- ") || after.starts_with('.') {
+            return true;
+        }
     }
-    if rest.starts_with("worktree") {
-        let after = rest["worktree".len()..].trim_start();
-        if after.starts_with("remove") { return true; }
+    if let Some(after) = rest.strip_prefix("worktree") {
+        if after.trim_start().starts_with("remove") {
+            return true;
+        }
     }
     false
 }
@@ -416,7 +428,9 @@ pub fn content_match_lines(rule_id: &str, content: &str) -> Vec<usize> {
                 let lineno = content[..m.start()].bytes().filter(|&b| b == b'\n').count() + 1;
                 // Apply SafeLoader/FullLoader carve-out: skip yaml.load( matches on lines
                 // that also carry a safe-loader keyword.
-                if m.as_str().starts_with("yaml.load(") && yaml_load_is_safe(line_text(content, lineno)) {
+                if m.as_str().starts_with("yaml.load(")
+                    && yaml_load_is_safe(line_text(content, lineno))
+                {
                     return None;
                 }
                 Some(lineno)
@@ -427,12 +441,16 @@ pub fn content_match_lines(rule_id: &str, content: &str) -> Vec<usize> {
         return lines;
     }
 
+    // The shape-driven secret rules read the shared detector (one definition of "secret-shaped"
+    // for the gate, the scan floor and the export release gate). Twins still count as rows: a
+    // committed placeholder key is worth a finding; the redactor, not the floor, keeps it readable.
+    if SHAPE_DRIVEN_SECRET_RULES.contains(&rule_id) {
+        return camerata_secrets::match_lines_for_rule(content, rule_id, true);
+    }
+
     let re = match rule_id {
-        "SEC-NO-HARDCODED-SECRETS-1" => sec_secrets_regex(),
         "SEC-NO-RAW-SQL-CONCAT-1" => sec_sql_concat_regex(),
         "ARCH-NO-SECRETS-IN-URL-1" => arch_url_secret_regex(),
-        "SEC-NO-PRIVATE-KEY-1" => sec_private_key_regex(),
-        "SEC-NO-VENDOR-TOKEN-1" => sec_vendor_token_regex(),
         "SEC-NO-DISABLED-TLS-1" => sec_disabled_tls_regex(),
         _ => return Vec::new(),
     };
@@ -556,9 +574,7 @@ pub fn is_test_or_fixture_path(path: &str) -> bool {
     let p = Path::new(path);
     let segments: Vec<String> = p
         .components()
-        .filter_map(|c| {
-            c.as_os_str().to_str().map(|s| s.to_ascii_lowercase())
-        })
+        .filter_map(|c| c.as_os_str().to_str().map(|s| s.to_ascii_lowercase()))
         .collect();
 
     // Check every directory segment (all but the last, which is the filename).
@@ -635,7 +651,6 @@ pub fn test_scope_line_ranges(path: &str, content: &str) -> Vec<(usize, usize)> 
         BlockComment,
         StringLit,
         RawString(usize), // number of leading hashes
-        CharLit,
     }
 
     let mut ranges = Vec::new();
@@ -705,17 +720,6 @@ pub fn test_scope_line_ranges(path: &str, content: &str) -> Vec<(usize, usize)> 
                 }
                 continue;
             }
-            State::CharLit => {
-                if ch == '\\' {
-                    i += 2;
-                } else if ch == '\'' {
-                    state = State::Normal;
-                    i += 1;
-                } else {
-                    i += 1;
-                }
-                continue;
-            }
             State::Normal => {}
         }
 
@@ -748,7 +752,11 @@ pub fn test_scope_line_ranges(path: &str, content: &str) -> Vec<(usize, usize)> 
         if ch == '\'' {
             // Simple char literal `'x'` or `'\n'` — single-char (or escape).
             // If the next char is `\`, skip escape + closing quote; else skip char + closing quote.
-            if i + 2 < chars.len() && chars[i + 1] == '\\' && i + 3 < chars.len() && chars[i + 3] == '\'' {
+            if i + 2 < chars.len()
+                && chars[i + 1] == '\\'
+                && i + 3 < chars.len()
+                && chars[i + 3] == '\''
+            {
                 // '\x'
                 i += 4;
                 continue;
@@ -800,7 +808,9 @@ pub fn test_scope_line_ranges(path: &str, content: &str) -> Vec<(usize, usize)> 
 
 /// Returns `true` if `line` (1-based) falls in any of the given ranges (inclusive on both ends).
 pub fn is_in_test_scope(line: usize, ranges: &[(usize, usize)]) -> bool {
-    ranges.iter().any(|&(start, end)| line >= start && line <= end)
+    ranges
+        .iter()
+        .any(|&(start, end)| line >= start && line <= end)
 }
 
 /// The note appended to floor findings whose path is in test/fixture code.
@@ -913,109 +923,89 @@ fn arm_sec_no_secret_files_1(path: &str, _content: &str) -> Result<(), String> {
     }
 }
 
-// ── SEC-NO-HARDCODED-SECRETS-1 ────────────────────────────────────────────────
+// ── Shape-driven secret rules (SEC-NO-HARDCODED-SECRETS-1, SEC-NO-PRIVATE-KEY-1, ──────────
+// ── SEC-NO-VENDOR-TOKEN-1) ────────────────────────────────────────────────────────────────
+//
+// The patterns live in `camerata-secrets` (the one detector shared with the scan floor, the chat
+// scrubber and the export release gate). These arms own only the policy: test-scope waiving and
+// the denial message. A denial message names the shape and carries the REDACTED form
+// (`prefix…tail (N chars)`), never the value.
 
-/// Compiled patterns for `SEC-NO-HARDCODED-SECRETS-1`.
-///
-/// Uses `OnceLock` so the regex objects are compiled once at first use and
-/// then reused for every subsequent call (avoids per-call allocation + compile).
-///
-/// Patterns covered (all case-sensitive unless noted):
-/// - GitHub tokens:   `ghp_`, `gho_`, `ghu_`, `ghs_`, `github_pat_`
-/// - Slack tokens:    `xox[baprs]-` (xoxb-, xoxa-, xoxp-, xoxr-, xoxs-)
-/// - AWS access keys: `AKIA` followed by 16 uppercase alphanumeric chars
-/// - OpenAI / Stripe: `sk-` followed by 20+ alphanumeric chars (both use
-///   the `sk-` prefix; Stripe also uses `sk-live_`, `sk-test_`)
-/// - Google API key:  `AIza` followed by 35 alphanumeric / `_` / `-` chars
-/// - PEM private key: `-----BEGIN` ... `PRIVATE KEY-----` (covers RSA, EC, etc.)
-static SEC_SECRETS_REGEX: OnceLock<Regex> = OnceLock::new();
+/// The corpus rules whose detection is `camerata_secrets::shapes_for_rule`.
+const SHAPE_DRIVEN_SECRET_RULES: &[&str] = &[
+    "SEC-NO-HARDCODED-SECRETS-1",
+    "SEC-NO-PRIVATE-KEY-1",
+    "SEC-NO-VENDOR-TOKEN-1",
+];
 
-fn sec_secrets_regex() -> &'static Regex {
-    SEC_SECRETS_REGEX.get_or_init(|| {
-        // One alternation — first match wins; scanning the content once is
-        // cheaper than N separate regex passes.
-        // Note: Rust's regex crate strips unescaped spaces inside character
-        // classes when (?x) verbose mode is active — unlike PCRE/Python which
-        // preserve them. Use \x20 for a literal space inside [...] in (?x) mode.
-        Regex::new(
-            r"(?x)
-            # GitHub personal / oauth / user / server / refresh / fine-grained tokens.
-            # `ghr_` (refresh) was an evasion gap — a leaked refresh token is as
-            # dangerous as an access token, so it is now covered alongside the rest.
-            (gh[pours]_[A-Za-z0-9_]{10,})
-            | (github_pat_[A-Za-z0-9_]{10,})
-            # Slack tokens (bot, app, legacy, refresh, socket, AND `xoxe` rotating /
-            # `xoxc` client tokens — adversarial cases that previously slipped the
-            # original `[baprs]`-only class).
-            | (xox[baceprs]-[A-Za-z0-9\-]{10,})
-            # AWS access key IDs. `AKIA` is the long-term form; `ASIA` is the
-            # temporary STS session form and was an evasion gap — both are a 4-letter
-            # prefix + 16 uppercase-alphanumeric chars.
-            | ((?:AKIA|ASIA)[0-9A-Z]{16})
-            # OpenAI / Stripe-style secret keys (sk- prefix, 20+ chars)
-            # Stripe also uses sk-live_ and sk-test_ sub-prefixes; those
-            # start with sk- so this pattern covers them.
-            | (sk-[A-Za-z0-9]{20,})
-            # Google API keys
-            | (AIza[0-9A-Za-z_\-]{35})
-            # PEM / armored private key header. Covers RSA / EC / DSA / OPENSSH /
-            # ENCRYPTED ... PRIVATE KEY (the `[A-Z\x20]*` middle), AND the PGP variant
-            # `-----BEGIN PGP PRIVATE KEY BLOCK-----` whose tail is `KEY BLOCK-----`
-            # rather than `KEY-----` (the `(?:\x20BLOCK)?` clause). The trailing ` BLOCK`
-            # gap was an evasion: a real exported GPG private key was being allowed.
-            # \x20 = literal space: Rust regex (?x) strips bare spaces inside [...].
-            | (-----BEGIN\s[A-Z\x20]*PRIVATE\s+KEY(?:\x20BLOCK)?-----)
-            # Heuristic: a long opaque literal assigned to a SECRET-named identifier —
-            # catches provider-agnostic keys (e.g. a Finnhub key) that match no known
-            # prefix. The identifier carries key/secret/token/password/credential, then
-            # within a short window a quoted 24+ char CONTIGUOUS-alphanumeric literal.
-            # Two branches (double- vs single-quoted) because the regex crate has no
-            # backreferences; single-quoted values were an evasion gap. A trailing run of
-            # base64 padding `=` is permitted INSIDE the closing quote (`[A-Za-z0-9+_]{24,}=*`)
-            # so a base64 secret like QUJD...WXYZ= no longer slips on its `=` padding,
-            # while `=` is still excluded from the 24+ contiguous-char count.
-            # Precision guards (unchanged): the literal class excludes / and - (so a file
-            # PATH or a hyphenated secret-NAME like plaid-access-token-item-1 does not match),
-            # and 24+ chars drops short env-var names. This is a heuristic, not entropy/AST;
-            # the name-vs-value precision limit is the gitleaks/semgrep path (see BACKLOG).
-            | ((?i:[A-Za-z0-9_]*(?:key|secret|token|password|passwd|credential)[A-Za-z0-9_]*)
-               [^\n]{0,40}?
-               (?: \x22[A-Za-z0-9+_]{24,}=*\x22 | '[A-Za-z0-9+_]{24,}=*' ))
-            ",
-        )
-        .expect("SEC-NO-HARDCODED-SECRETS-1 regex must compile")
-    })
+/// The noun and redacted form of a match, for a denial message (`Stripe live secret key
+/// sk_live_…ab12 (77 chars)`). Empty form (a bare PEM header) leaves just the noun.
+fn describe_secret_match(m: &camerata_secrets::SecretMatch, content: &str) -> String {
+    let form = m.redacted_form(content);
+    if form.is_empty() {
+        m.shape.display_name().to_string()
+    } else {
+        format!("{} {}", m.shape.display_name(), form.trim())
+    }
+}
+
+/// The shared body of the three shape-driven arms: find the first listed match for `rule_id`,
+/// apply the test-scope policy, and build the denial with `message`.
+fn deny_on_secret_shape(
+    rule_id: &str,
+    path: &str,
+    content: &str,
+    message: impl FnOnce(&camerata_secrets::SecretMatch) -> String,
+) -> Result<(), String> {
+    let Some(m) = camerata_secrets::detect_for_rule(content, rule_id)
+        .into_iter()
+        .find(camerata_secrets::SecretMatch::counts_as_finding)
+    else {
+        return Ok(());
+    };
+    let match_line = content[..m.start].bytes().filter(|&b| b == b'\n').count() + 1;
+    let in_test = is_test_or_fixture_path(path)
+        || is_in_test_scope(match_line, &test_scope_line_ranges(path, content));
+    if in_test {
+        match test_scope_policy(rule_id) {
+            TestScopePolicy::Waive => return Ok(()),
+            TestScopePolicy::Downgrade => {}
+        }
+    }
+    Err(message(&m))
 }
 
 /// SEC-NO-HARDCODED-SECRETS-1: deny content containing a credential literal.
 fn arm_sec_no_hardcoded_secrets_1(path: &str, content: &str) -> Result<(), String> {
-    if let Some(m) = sec_secrets_regex().find(content) {
-        let match_line = content[..m.start()].bytes().filter(|&b| b == b'\n').count() + 1;
-        let in_test = is_test_or_fixture_path(path)
-            || is_in_test_scope(match_line, &test_scope_line_ranges(path, content));
-        if in_test {
-            match test_scope_policy("SEC-NO-HARDCODED-SECRETS-1") {
-                TestScopePolicy::Waive => return Ok(()),
-                TestScopePolicy::Downgrade => {}
-            }
-        }
-        // Redact all but the first 6 chars so the denial message is useful
-        // without echoing the full secret.
-        let matched = m.as_str();
-        let preview: String = matched.chars().take(6).collect();
-        Err(format!(
-            "SEC-NO-HARDCODED-SECRETS-1: content appears to contain a hardcoded \
-             credential (matched prefix `{preview}...`); move secrets to env vars or \
-             a secrets manager"
-        ))
-    } else {
-        Ok(())
-    }
+    deny_on_secret_shape("SEC-NO-HARDCODED-SECRETS-1", path, content, |m| {
+        format!(
+            "SEC-NO-HARDCODED-SECRETS-1: content appears to contain a hardcoded credential \
+             ({}); move secrets to env vars or a secrets manager",
+            describe_secret_match(m, content)
+        )
+    })
 }
 
 // ── SEC-NO-RAW-SQL-CONCAT-1 ──────────────────────────────────────────────────
 
 /// Compiled pattern for `SEC-NO-RAW-SQL-CONCAT-1`.
+///
+/// # W3: demoted from "detector of record" (fast in-loop backstop only)
+///
+/// This regex is now a SECONDARY, fast, synchronous backstop for the Layer-2/3 content-scan
+/// gate — not the rule's primary detector. The PRIMARY detector for this defect class is the
+/// `camerata.security.taint-sql-injection-*` taint-mode semgrep rule family
+/// (`crates/server/assets/semgrep-rules/taint-security.yml`), which covers single-quoted
+/// strings, backtick/template literals, Python `%` formatting, and multi-segment
+/// concatenation across 8 languages — every shape this double-quote-only regex structurally
+/// cannot match (see "Known limits" below). `crate::mechanical_gate::REGEX_DEMOTED_FOR_SEMGREP`
+/// reflects this in the detector-channel classification the ledger/coverage reporting use.
+///
+/// This function is KEPT (not removed): Layer 2/3's content-scan gate runs synchronously on
+/// every file edit in the governed dev loop, and cannot shell out to an external process on
+/// that hot path — a fast, zero-dependency regex backstop is still valuable there even though
+/// it no longer carries the coverage story. See
+/// docs/decisions/2026-10-06_w3_commodity_taint_layer.md.
 ///
 /// # Heuristic and its limits
 ///
@@ -1136,22 +1126,20 @@ fn arch_url_secret_regex() -> &'static Regex {
         // `client_secret`, `private_key`, `signature`/`sig`, `pwd`/`passwd`, and a bare
         // `key` / `apikey`. Ordered longest-first within shared stems so the engine
         // does not stop on a shorter prefix and leave a trailing `=`-less tail.
-        const SECRET_PARAM: &str = r"(?:
-            access_token | refresh_token | auth_token | client_secret | private_key
-          | api_?key | passwd | password | pwd | secret | signature | sig | token | key
-        )";
+        // The param list is shared with the redactor (`camerata_secrets::URL_SECRET_PARAMS`).
+        let secret_param = format!("(?:{})", camerata_secrets::URL_SECRET_PARAMS);
         Regex::new(&format!(
             r"(?ix)
             (?:
                 # Case A: a literal HTTP/HTTPS URL carrying a secret param.
-                https?://\S+ [?&] {SECRET_PARAM} =
+                https?://\S+ [?&] {secret_param} =
                   [^\s&]+
               |
                 # Case B: a query-string SHAPE even without a literal scheme — a `?`
                 # query start, then a secret param, e.g. a templated URL like
                 # `{{base}}?symbol={{symbol}}&token={{token}}`. Requires the `?` so it
                 # stays URL-shaped (not any stray `&token=`).
-                \? [^\s\x22]* [?&] {SECRET_PARAM} =
+                \? [^\s\x22]* [?&] {secret_param} =
             )
             "
         ))
@@ -1185,87 +1173,26 @@ fn arm_arch_no_secrets_in_url_1(path: &str, content: &str) -> Result<(), String>
 
 // ── SEC-NO-PRIVATE-KEY-1 ─────────────────────────────────────────────────────
 
-static SEC_PRIVATE_KEY_REGEX: OnceLock<Regex> = OnceLock::new();
-
-fn sec_private_key_regex() -> &'static Regex {
-    SEC_PRIVATE_KEY_REGEX.get_or_init(|| {
-        Regex::new(
-            r"-----BEGIN (?:RSA |EC |DSA |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY(?:\s+BLOCK)?-----",
-        )
-        .expect("SEC-NO-PRIVATE-KEY-1 regex must compile")
-    })
-}
-
 fn arm_sec_no_private_key_1(path: &str, content: &str) -> Result<(), String> {
-    if let Some(m) = sec_private_key_regex().find(content) {
-        let match_line = content[..m.start()].bytes().filter(|&b| b == b'\n').count() + 1;
-        let in_test = is_test_or_fixture_path(path)
-            || is_in_test_scope(match_line, &test_scope_line_ranges(path, content));
-        if in_test {
-            match test_scope_policy("SEC-NO-PRIVATE-KEY-1") {
-                TestScopePolicy::Waive => return Ok(()),
-                TestScopePolicy::Downgrade => {}
-            }
-        }
-        Err(
-            "SEC-NO-PRIVATE-KEY-1: content contains a PEM private-key block; \
-             private keys must never be committed to the repo — use a secrets manager \
-             or generate ephemeral keys at test runtime"
-                .to_string(),
-        )
-    } else {
-        Ok(())
-    }
+    deny_on_secret_shape("SEC-NO-PRIVATE-KEY-1", path, content, |_| {
+        "SEC-NO-PRIVATE-KEY-1: content contains a PEM private-key block; \
+         private keys must never be committed to the repo — use a secrets manager \
+         or generate ephemeral keys at test runtime"
+            .to_string()
+    })
 }
 
 // ── SEC-NO-VENDOR-TOKEN-1 ────────────────────────────────────────────────────
 
-static SEC_VENDOR_TOKEN_REGEX: OnceLock<Regex> = OnceLock::new();
-
-fn sec_vendor_token_regex() -> &'static Regex {
-    SEC_VENDOR_TOKEN_REGEX.get_or_init(|| {
-        Regex::new(
-            r"(?x)
-            (?:AKIA|ASIA)[0-9A-Z]{16}
-            | gh[poursh]_[A-Za-z0-9_]{36}
-            | github_pat_[A-Za-z0-9_]{82}
-            | xox[baprs]-[A-Za-z0-9\-]{10,}
-            | sk_live_[A-Za-z0-9]{24,}
-            | AIza[0-9A-Za-z_\-]{35}
-            | sk-ant-[A-Za-z0-9_\-]{20,}
-            # Supabase new-format secret key: a fixed literal prefix (sb_secret_) followed by
-            # an opaque body — same near-zero-FP shape as the other vendor prefixes above (see
-            # crates/rules/principles/universal/sec-no-vendor-token-1.toml item (a)). The
-            # sibling sb_publishable_ (anon/publishable) prefix is deliberately NOT matched
-            # here — that key is designed to be public; see the same principle doc's rationale.
-            | sb_secret_[A-Za-z0-9_\-]{6,}
-            ",
-        )
-        .expect("SEC-NO-VENDOR-TOKEN-1 regex must compile")
-    })
-}
-
 fn arm_sec_no_vendor_token_1(path: &str, content: &str) -> Result<(), String> {
-    if let Some(m) = sec_vendor_token_regex().find(content) {
-        let match_line = content[..m.start()].bytes().filter(|&b| b == b'\n').count() + 1;
-        let in_test = is_test_or_fixture_path(path)
-            || is_in_test_scope(match_line, &test_scope_line_ranges(path, content));
-        if in_test {
-            match test_scope_policy("SEC-NO-VENDOR-TOKEN-1") {
-                TestScopePolicy::Waive => return Ok(()),
-                TestScopePolicy::Downgrade => {}
-            }
-        }
-        let matched = m.as_str();
-        let preview: String = matched.chars().take(8).collect();
-        Err(format!(
-            "SEC-NO-VENDOR-TOKEN-1: content contains a vendor credential token \
-             (matched `{preview}...`); tokens must live in a secrets manager or \
-             environment variables, never in source code"
-        ))
-    } else {
-        Ok(())
-    }
+    deny_on_secret_shape("SEC-NO-VENDOR-TOKEN-1", path, content, |m| {
+        format!(
+            "SEC-NO-VENDOR-TOKEN-1: content contains a vendor credential token ({}); \
+             tokens must live in a secrets manager or environment variables, never in \
+             source code",
+            describe_secret_match(m, content)
+        )
+    })
 }
 
 // ── SEC-NO-SECRET-FILE-1 ─────────────────────────────────────────────────────
@@ -1443,10 +1370,7 @@ fn byte_offset_to_line(content: &str, offset: usize) -> usize {
 
 /// Returns the text of line `lineno` (1-based) in `content`, or `""` if out of range.
 fn line_text(content: &str, lineno: usize) -> &str {
-    content
-        .lines()
-        .nth(lineno.saturating_sub(1))
-        .unwrap_or("")
+    content.lines().nth(lineno.saturating_sub(1)).unwrap_or("")
 }
 
 /// True when `line` (text of one source line) contains a safe-loader token that
@@ -1464,7 +1388,8 @@ fn arm_sec_no_unsafe_deserialization_1(_path: &str, content: &str) -> Result<(),
 
         // SafeLoader / FullLoader carve-out: if the matched token is `yaml.load(` and
         // the same line carries a safe-loader keyword, this particular call is safe — skip it.
-        if m.as_str().starts_with("yaml.load(") && yaml_load_is_safe(line_text(content, match_line)) {
+        if m.as_str().starts_with("yaml.load(") && yaml_load_is_safe(line_text(content, match_line))
+        {
             continue;
         }
 
@@ -1640,6 +1565,9 @@ impl GovernanceGateway for GovernedGateway {
 }
 
 // ─── tests (ORCH-NEW-PATH-TESTS-1) ───────────────────────────────────────────
+
+#[cfg(test)]
+mod secret_arm_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1866,6 +1794,41 @@ mod tests {
             arm_sec_no_hardcoded_secrets_1("", "const API_KEY_ENV: &str = \"FINNHUB_KEY\";")
                 .is_ok()
         );
+    }
+
+    /// A runtime-built Google key (no 39-character literal in this source).
+    fn google_key_fixture(seed: u64) -> String {
+        format!(
+            "AIza{}",
+            camerata_secrets::fixtures::body(
+                35,
+                "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789",
+                seed
+            )
+        )
+    }
+
+    fn firebase_web_config(key: &str) -> String {
+        format!(
+            "export const firebaseConfig = {{\n  apiKey: \"{key}\",\n  authDomain: \"x.firebaseapp.com\",\n  projectId: \"x\",\n  appId: \"1:2:web:3\"\n}};\n"
+        )
+    }
+
+    #[test]
+    fn sec_no_vendor_token_1_does_not_deny_a_firebase_web_config() {
+        let config = firebase_web_config(&google_key_fixture(1));
+        assert!(arm_sec_no_vendor_token_1("src/firebase.ts", &config).is_ok());
+        // The same key with no Firebase context is still denied.
+        let bare = format!("const k = \"{}\";", google_key_fixture(1));
+        assert!(arm_sec_no_vendor_token_1("src/maps.ts", &bare).is_err());
+    }
+
+    #[test]
+    fn sec_no_hardcoded_secrets_1_does_not_deny_a_firebase_web_config() {
+        let config = firebase_web_config(&google_key_fixture(2));
+        assert!(arm_sec_no_hardcoded_secrets_1("src/firebase.ts", &config).is_ok());
+        let bare = format!("const k = \"{}\";", google_key_fixture(2));
+        assert!(arm_sec_no_hardcoded_secrets_1("src/maps.ts", &bare).is_err());
     }
 
     #[test]
@@ -2403,9 +2366,15 @@ mod tests {
         let ranges = test_scope_line_ranges("src/lib.rs", content);
         assert!(!ranges.is_empty(), "should detect #[cfg(test)] scope");
         // The secret on line 6 should be inside the test scope
-        assert!(is_in_test_scope(6, &ranges), "line 6 should be in test scope");
+        assert!(
+            is_in_test_scope(6, &ranges),
+            "line 6 should be in test scope"
+        );
         // Line 2 (production_code) should NOT be in test scope
-        assert!(!is_in_test_scope(2, &ranges), "line 2 should not be in test scope");
+        assert!(
+            !is_in_test_scope(2, &ranges),
+            "line 2 should not be in test scope"
+        );
     }
 
     #[test]
@@ -2421,14 +2390,20 @@ mod tests {
     #[test]
     fn test_scope_policy_waive_rules() {
         // GATE-F7: only SQL-concat is still path-waivable in test scope.
-        assert!(matches!(test_scope_policy("SEC-NO-RAW-SQL-CONCAT-1"), TestScopePolicy::Waive));
+        assert!(matches!(
+            test_scope_policy("SEC-NO-RAW-SQL-CONCAT-1"),
+            TestScopePolicy::Waive
+        ));
     }
 
     #[test]
     fn test_scope_policy_tls_and_deser_no_longer_waived() {
         // GATE-F7: disabled-TLS and unsafe-deserialization are downgraded (not waived)
         // by test scope; they require an explicit camerata:allow at write time.
-        assert!(matches!(test_scope_policy("SEC-NO-DISABLED-TLS-1"), TestScopePolicy::Downgrade));
+        assert!(matches!(
+            test_scope_policy("SEC-NO-DISABLED-TLS-1"),
+            TestScopePolicy::Downgrade
+        ));
         assert!(matches!(
             test_scope_policy("SEC-NO-UNSAFE-DESERIALIZATION-1"),
             TestScopePolicy::Downgrade
@@ -2437,12 +2412,30 @@ mod tests {
 
     #[test]
     fn test_scope_policy_downgrade_rules() {
-        assert!(matches!(test_scope_policy("SEC-NO-HARDCODED-SECRETS-1"), TestScopePolicy::Downgrade));
-        assert!(matches!(test_scope_policy("ARCH-NO-SECRETS-IN-URL-1"), TestScopePolicy::Downgrade));
-        assert!(matches!(test_scope_policy("SEC-NO-PRIVATE-KEY-1"), TestScopePolicy::Downgrade));
-        assert!(matches!(test_scope_policy("SEC-NO-VENDOR-TOKEN-1"), TestScopePolicy::Downgrade));
-        assert!(matches!(test_scope_policy("SEC-NO-SECRET-FILE-1"), TestScopePolicy::Downgrade));
-        assert!(matches!(test_scope_policy("UNKNOWN-RULE-99"), TestScopePolicy::Downgrade));
+        assert!(matches!(
+            test_scope_policy("SEC-NO-HARDCODED-SECRETS-1"),
+            TestScopePolicy::Downgrade
+        ));
+        assert!(matches!(
+            test_scope_policy("ARCH-NO-SECRETS-IN-URL-1"),
+            TestScopePolicy::Downgrade
+        ));
+        assert!(matches!(
+            test_scope_policy("SEC-NO-PRIVATE-KEY-1"),
+            TestScopePolicy::Downgrade
+        ));
+        assert!(matches!(
+            test_scope_policy("SEC-NO-VENDOR-TOKEN-1"),
+            TestScopePolicy::Downgrade
+        ));
+        assert!(matches!(
+            test_scope_policy("SEC-NO-SECRET-FILE-1"),
+            TestScopePolicy::Downgrade
+        ));
+        assert!(matches!(
+            test_scope_policy("UNKNOWN-RULE-99"),
+            TestScopePolicy::Downgrade
+        ));
     }
 
     // ── SEC-NO-PRIVATE-KEY-1 ─────────────────────────────────────────────────────
@@ -2461,7 +2454,8 @@ mod tests {
 
     #[test]
     fn private_key_detects_openssh() {
-        let content = "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC\n-----END OPENSSH PRIVATE KEY-----";
+        let content =
+            "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC\n-----END OPENSSH PRIVATE KEY-----";
         assert!(arm_sec_no_private_key_1("src/config.rs", content).is_err());
     }
 
@@ -2473,7 +2467,8 @@ mod tests {
 
     #[test]
     fn private_key_detects_pgp_block() {
-        let content = "-----BEGIN PGP PRIVATE KEY BLOCK-----\nlQOYBF...\n-----END PGP PRIVATE KEY BLOCK-----";
+        let content =
+            "-----BEGIN PGP PRIVATE KEY BLOCK-----\nlQOYBF...\n-----END PGP PRIVATE KEY BLOCK-----";
         assert!(arm_sec_no_private_key_1("src/config.rs", content).is_err());
     }
 
@@ -2494,7 +2489,10 @@ mod tests {
         // Downgrade policy: still deny even in test scope
         let content = "\n#[cfg(test)]\nmod tests {\n    const KEY: &str = \"-----BEGIN RSA PRIVATE KEY-----\\nabc\\n-----END RSA PRIVATE KEY-----\";\n}\n";
         let result = arm_sec_no_private_key_1("src/lib.rs", content);
-        assert!(result.is_err(), "private key in test scope must still be denied (Downgrade policy)");
+        assert!(
+            result.is_err(),
+            "private key in test scope must still be denied (Downgrade policy)"
+        );
     }
 
     #[test]
@@ -2562,17 +2560,20 @@ mod tests {
     }
 
     #[test]
-    fn vendor_token_ignores_stripe_test_key() {
-        // sk_test_ is excluded (not a production credential). Prefix split across
-        // concat! so the fixture isn't a contiguous literal (GitHub push protection).
+    fn vendor_token_denies_stripe_test_key() {
+        // Owner decision (2026-10-23): a real-looking test-mode secret key is redacted like a
+        // live key, so the arm denies it too (only Stripe's published documentation key is a
+        // readable twin). Prefix split across concat! so the fixture isn't a contiguous literal
+        // (GitHub push protection).
         let content = concat!("key = \"sk_te", "st_ABCDEFGHIJKLMNOPQRSTUVWX\"");
-        assert!(arm_sec_no_vendor_token_1("src/config.rs", content).is_ok());
+        assert!(arm_sec_no_vendor_token_1("src/config.rs", content).is_err());
     }
 
     #[test]
     fn vendor_token_in_test_scope_still_denied() {
         // Downgrade policy
-        let content = "\n#[cfg(test)]\nmod tests {\n    const KEY: &str = \"AKIAIOSFODNN7EXAMPLE\";\n}\n";
+        let content =
+            "\n#[cfg(test)]\nmod tests {\n    const KEY: &str = \"AKIAIOSFODNN7EXAMPLE\";\n}\n";
         assert!(arm_sec_no_vendor_token_1("src/lib.rs", content).is_err());
     }
 
@@ -2614,7 +2615,10 @@ mod tests {
             "id_ed25519",
         ] {
             assert!(
-                matches!(evaluate_call(&subset, &write_call(p)), Decision::Deny { .. }),
+                matches!(
+                    evaluate_call(&subset, &write_call(p)),
+                    Decision::Deny { .. }
+                ),
                 "expected DENY for {p}"
             );
         }
@@ -2642,12 +2646,16 @@ mod tests {
 
     #[test]
     fn disabled_tls_detects_python_verify_false() {
-        assert!(arm_sec_no_disabled_tls_1("src/client.py", "requests.get(url, verify=False)").is_err());
+        assert!(
+            arm_sec_no_disabled_tls_1("src/client.py", "requests.get(url, verify=False)").is_err()
+        );
     }
 
     #[test]
     fn disabled_tls_detects_node_reject_unauthorized() {
-        assert!(arm_sec_no_disabled_tls_1("src/client.js", "{ rejectUnauthorized: false }").is_err());
+        assert!(
+            arm_sec_no_disabled_tls_1("src/client.js", "{ rejectUnauthorized: false }").is_err()
+        );
     }
 
     #[test]
@@ -2657,17 +2665,23 @@ mod tests {
 
     #[test]
     fn disabled_tls_detects_node_env_var() {
-        assert!(arm_sec_no_disabled_tls_1("src/config.js", "NODE_TLS_REJECT_UNAUTHORIZED=0").is_err());
+        assert!(
+            arm_sec_no_disabled_tls_1("src/config.js", "NODE_TLS_REJECT_UNAUTHORIZED=0").is_err()
+        );
     }
 
     #[test]
     fn disabled_tls_detects_curl_option() {
-        assert!(arm_sec_no_disabled_tls_1("src/client.php", "CURLOPT_SSL_VERIFYPEER, false").is_err());
+        assert!(
+            arm_sec_no_disabled_tls_1("src/client.php", "CURLOPT_SSL_VERIFYPEER, false").is_err()
+        );
     }
 
     #[test]
     fn disabled_tls_allows_verify_true() {
-        assert!(arm_sec_no_disabled_tls_1("src/client.py", "requests.get(url, verify=True)").is_ok());
+        assert!(
+            arm_sec_no_disabled_tls_1("src/client.py", "requests.get(url, verify=True)").is_ok()
+        );
     }
 
     #[test]
@@ -2734,37 +2748,54 @@ mod tests {
     #[test]
     fn unsafe_deser_detects_yaml_load_without_safeloader() {
         // Plain yaml.load( with no safe loader → must deny.
-        assert!(arm_sec_no_unsafe_deserialization_1("src/config.py", "data = yaml.load(f)").is_err());
+        assert!(
+            arm_sec_no_unsafe_deserialization_1("src/config.py", "data = yaml.load(f)").is_err()
+        );
     }
 
     #[test]
     fn unsafe_deser_detects_yaml_unsafe_load() {
-        assert!(arm_sec_no_unsafe_deserialization_1("src/parser.py", "out = yaml.unsafe_load(s)").is_err());
+        assert!(
+            arm_sec_no_unsafe_deserialization_1("src/parser.py", "out = yaml.unsafe_load(s)")
+                .is_err()
+        );
     }
 
     #[test]
     fn unsafe_deser_detects_pickle_loads() {
-        assert!(arm_sec_no_unsafe_deserialization_1("src/cache.py", "obj = pickle.loads(d)").is_err());
+        assert!(
+            arm_sec_no_unsafe_deserialization_1("src/cache.py", "obj = pickle.loads(d)").is_err()
+        );
     }
 
     #[test]
     fn unsafe_deser_detects_pickle_load() {
-        assert!(arm_sec_no_unsafe_deserialization_1("src/cache.py", "obj = pickle.load(f)").is_err());
+        assert!(
+            arm_sec_no_unsafe_deserialization_1("src/cache.py", "obj = pickle.load(f)").is_err()
+        );
     }
 
     #[test]
     fn unsafe_deser_detects_php_unserialize() {
-        assert!(arm_sec_no_unsafe_deserialization_1("src/handler.php", "$obj = unserialize($x);").is_err());
+        assert!(
+            arm_sec_no_unsafe_deserialization_1("src/handler.php", "$obj = unserialize($x);")
+                .is_err()
+        );
     }
 
     #[test]
     fn unsafe_deser_detects_ruby_marshal_load() {
-        assert!(arm_sec_no_unsafe_deserialization_1("lib/store.rb", "obj = Marshal.load(b)").is_err());
+        assert!(
+            arm_sec_no_unsafe_deserialization_1("lib/store.rb", "obj = Marshal.load(b)").is_err()
+        );
     }
 
     #[test]
     fn unsafe_deser_detects_ruby_marshal_restore() {
-        assert!(arm_sec_no_unsafe_deserialization_1("lib/store.rb", "obj = Marshal.restore(data)").is_err());
+        assert!(
+            arm_sec_no_unsafe_deserialization_1("lib/store.rb", "obj = Marshal.restore(data)")
+                .is_err()
+        );
     }
 
     #[test]
@@ -2772,7 +2803,8 @@ mod tests {
         assert!(arm_sec_no_unsafe_deserialization_1(
             "src/Serializer.cs",
             "var bf = new BinaryFormatter(); bf.Deserialize(s);"
-        ).is_err());
+        )
+        .is_err());
     }
 
     #[test]
@@ -2780,7 +2812,8 @@ mod tests {
         assert!(arm_sec_no_unsafe_deserialization_1(
             "src/Serializer.cs",
             "var s = new NetDataContractSerializer();"
-        ).is_err());
+        )
+        .is_err());
     }
 
     #[test]
@@ -2788,7 +2821,8 @@ mod tests {
         assert!(arm_sec_no_unsafe_deserialization_1(
             "src/ViewState.cs",
             "var lf = new LosFormatter(); lf.Serialize(ms, obj);"
-        ).is_err());
+        )
+        .is_err());
     }
 
     #[test]
@@ -2796,14 +2830,18 @@ mod tests {
         assert!(arm_sec_no_unsafe_deserialization_1(
             "src/ViewState.cs",
             "var osf = new ObjectStateFormatter();"
-        ).is_err());
+        )
+        .is_err());
     }
 
     // ── NEGATIVE tests (must ALLOW) ───────────────────────────────────────────────
 
     #[test]
     fn unsafe_deser_allows_yaml_safe_load() {
-        assert!(arm_sec_no_unsafe_deserialization_1("src/config.py", "data = yaml.safe_load(f)").is_ok());
+        assert!(
+            arm_sec_no_unsafe_deserialization_1("src/config.py", "data = yaml.safe_load(f)")
+                .is_ok()
+        );
     }
 
     #[test]
@@ -2812,7 +2850,8 @@ mod tests {
         assert!(arm_sec_no_unsafe_deserialization_1(
             "src/config.py",
             "data = yaml.load(f, Loader=yaml.SafeLoader)"
-        ).is_ok());
+        )
+        .is_ok());
     }
 
     #[test]
@@ -2821,7 +2860,8 @@ mod tests {
         assert!(arm_sec_no_unsafe_deserialization_1(
             "src/config.py",
             "data = yaml.load(f, Loader=yaml.FullLoader)"
-        ).is_ok());
+        )
+        .is_ok());
     }
 
     #[test]
@@ -2844,7 +2884,8 @@ mod tests {
     fn unsafe_deser_in_test_path_no_longer_waived() {
         // GATE-F7: a file under tests/ no longer path-waives an unsafe deser sink.
         assert!(
-            arm_sec_no_unsafe_deserialization_1("tests/fixtures/payload.py", "pickle.loads(d)").is_err(),
+            arm_sec_no_unsafe_deserialization_1("tests/fixtures/payload.py", "pickle.loads(d)")
+                .is_err(),
             "pickle.loads in a test path must now be DENIED without an explicit suppression"
         );
     }
@@ -2853,7 +2894,8 @@ mod tests {
     fn unsafe_deser_in_examples_dir_is_denied() {
         // GATE-F7: examples are shipped/executed code — no waive.
         assert!(
-            arm_sec_no_unsafe_deserialization_1("examples/load_cfg.py", "cfg = yaml.load(f)").is_err(),
+            arm_sec_no_unsafe_deserialization_1("examples/load_cfg.py", "cfg = yaml.load(f)")
+                .is_err(),
             "unsafe deser under examples/ must be DENIED"
         );
     }
@@ -2885,7 +2927,10 @@ mod tests {
         let result = arm_sec_no_unsafe_deserialization_1("src/legacy.py", "pickle.loads(buf)");
         assert!(result.is_err());
         let msg = result.unwrap_err();
-        assert!(msg.contains("camerata:allow"), "denial must mention camerata:allow: {msg}");
+        assert!(
+            msg.contains("camerata:allow"),
+            "denial must mention camerata:allow: {msg}"
+        );
     }
 
     // ── registry coverage for new rules ──────────────────────────────────────────
@@ -2905,7 +2950,10 @@ mod tests {
         // SEC-NO-RAW-SQL-CONCAT-1 has Waive policy: test files writing raw SQL are allowed
         let content = "\n#[cfg(test)]\nmod tests {\n    fn setup() {\n        let q = format!(\"INSERT INTO test_table VALUES ('{}')\", val);\n    }\n}\n";
         let result = arm_sec_no_raw_sql_concat_1("src/repo.rs", content);
-        assert!(result.is_ok(), "SQL concat in test scope should be ALLOWED (Waive policy)");
+        assert!(
+            result.is_ok(),
+            "SQL concat in test scope should be ALLOWED (Waive policy)"
+        );
     }
 
     #[test]
@@ -3355,7 +3403,9 @@ mod adversarial {
     #[test]
     fn git_state_mutation_guard_denies_worktree_remove() {
         assert!(is_git_state_mutation("git worktree remove /path/to/wt"));
-        assert!(is_git_state_mutation("git worktree remove --force /path/to/wt"));
+        assert!(is_git_state_mutation(
+            "git worktree remove --force /path/to/wt"
+        ));
     }
 
     #[test]
@@ -3413,7 +3463,12 @@ mod adversarial {
 
     #[test]
     fn sec_no_git_state_mutation_rule_is_registered_in_registry() {
-        let found = RULE_REGISTRY.iter().any(|e| e.id == "SEC-NO-GIT-STATE-MUTATION-1");
-        assert!(found, "SEC-NO-GIT-STATE-MUTATION-1 must be in RULE_REGISTRY");
+        let found = RULE_REGISTRY
+            .iter()
+            .any(|e| e.id == "SEC-NO-GIT-STATE-MUTATION-1");
+        assert!(
+            found,
+            "SEC-NO-GIT-STATE-MUTATION-1 must be in RULE_REGISTRY"
+        );
     }
 }

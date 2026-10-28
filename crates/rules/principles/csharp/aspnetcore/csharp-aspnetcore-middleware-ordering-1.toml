@@ -1,9 +1,11 @@
 id = "CSHARP-ASPNETCORE-MIDDLEWARE-ORDERING-1"
+version = 1
 title = "Middleware is registered in the canonical ASP.NET Core order; auth always follows routing and precedes endpoint execution"
-tag = "stack"
 domain = "csharp:aspnetcore"
 layer = "framework"
 enforcement = "structured"
+kind = "defect"
+inspectable = true
 default = true
 
 verification = "grounded"
@@ -16,13 +18,17 @@ why = "ASP.NET Core middleware executes in registration order, and order is not 
 id = "canonical-middleware-order"
 label = "Canonical middleware order: exception handler → HSTS → HTTPS redirect → static files → routing → CORS → auth/n → endpoints"
 directive = "Middleware is registered in this order: UseExceptionHandler (or UseDeveloperExceptionPage in development) first, then UseHsts, UseHttpsRedirection, UseStaticFiles, UseRouting, UseCors, UseAuthentication, UseAuthorization, and finally MapControllers / MapEndpoints (or the equivalent endpoint registration). No middleware that depends on an authenticated identity (authorization, business logic) is registered before UseAuthentication. No authorization middleware is registered before UseRouting. Any custom middleware that inspects the authenticated user is placed after UseAuthentication."
+remediation = """
+Reorder the middleware pipeline in Program.cs to the canonical sequence: exception handler, HSTS, HTTPS redirection, static files, routing, CORS, authentication, authorization, then endpoint mapping. Pay particular attention to authentication and authorization following routing and preceding endpoint execution. Verify by confirming a request to a protected endpoint is rejected before reaching the handler, and that routing-dependent middleware runs after UseRouting.
+"""
 why = "Each middleware requires specific context established by the middleware above it; the canonical order is the only order where all inter-middleware dependencies are satisfied."
 
 [[option]]
 id = "ad-hoc-middleware-order"
+violates = true
 label = "Middleware is ordered by developer discretion at the time of addition"
 directive = "Middleware is added to the pipeline in the order that seems reasonable at the time, without enforcing a canonical sequence. Developers rely on documentation or runtime errors to discover incorrect ordering."
-why = "Ad-hoc ordering gives developers flexibility to place middleware where it seems contextually appropriate and avoids the overhead of learning and enforcing a canonical sequence. The cost is that correctness becomes accidental: when the sequence happens to be right nothing fails, but a single out-of-order addition produces silent auth bypass or broken CORS preflight that is invisible at startup and surfaces only under specific request patterns in production."
+why = "Pipeline correctness becomes accidental: when the order happens to be right nothing fails, and one middleware registered in the wrong place produces an authorization check that runs after the endpoint has already handled the request, or a CORS preflight that never gets a response. Neither failure appears at startup. They surface in production under specific request patterns, and the symptom gives no indication that ordering is the cause."
 
 
 [[sources]]

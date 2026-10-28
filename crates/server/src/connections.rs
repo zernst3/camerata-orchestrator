@@ -19,11 +19,11 @@
 //! the `X-OAuth-Scopes` response header.  We classify the outcome into one of
 //! four error categories:
 //!
-//! - `NoToken`           — `CAMERATA_GITHUB_TOKEN` is absent or empty.
-//! - `InvalidOrExpired`  — GitHub returned 401: the token is wrong or has expired.
+//! - `NoToken` — `CAMERATA_GITHUB_TOKEN` is absent or empty.
+//! - `InvalidOrExpired` — GitHub returned 401: the token is wrong or has expired.
 //! - `InsufficientScope` — GitHub returned 403: the token exists but lacks the
-//!                         permissions Camerata needs (read:user + repo).
-//! - `Unreachable`       — Any other non-2xx or a transport error.
+//!   permissions Camerata needs (read:user + repo).
+//! - `Unreachable` — Any other non-2xx or a transport error.
 //!
 //! We NEVER log or return the token value; only the derived `login` + `scopes` are
 //! surfaced.
@@ -130,10 +130,6 @@ pub struct ConnectionsReport {
 }
 
 // ── GitHub probe ───────────────────────────────────────────────────────────────
-
-fn env_nonempty(key: &str) -> Option<String> {
-    std::env::var(key).ok().filter(|v| !v.is_empty())
-}
 
 /// Call `GET https://api.github.com/user` with the given token, return a
 /// structured [`GitHubProbeOutcome`].
@@ -242,11 +238,16 @@ pub(crate) fn parse_oauth_scopes_header(headers: &reqwest::header::HeaderMap) ->
 /// Probe all integrations. Does a single cheap GitHub reachability call when a
 /// token is present (`GET /user`), surfacing the authenticated login, granted
 /// scopes, and a typed error category when the token is wrong/expired/missing scope.
-pub async fn probe() -> ConnectionsReport {
+///
+/// `creds` is the credential store the Anthropic key presence is read from (the same
+/// `credentials::anthropic_api_key` resolver every model call uses, so this report never
+/// disagrees with what a call will actually find).
+pub async fn probe(creds: &dyn crate::credentials::CredentialStore) -> ConnectionsReport {
     let mut connections = Vec::new();
 
     // ── GitHub: code host (repos) + work tracker (issues/projects), one token. ──
-    match env_nonempty("CAMERATA_GITHUB_TOKEN") {
+    // The token saved in the app first, `CAMERATA_GITHUB_TOKEN` only as the fallback.
+    match crate::credentials::github_token(creds) {
         None => {
             connections.push(Connection {
                 id: "github",
@@ -284,7 +285,7 @@ pub async fn probe() -> ConnectionsReport {
 
     // ── Claude agent: CLI on PATH, else an API key (informational). ──
     let claude_cli = claude_on_path();
-    let api_key = env_nonempty("ANTHROPIC_API_KEY").is_some();
+    let api_key = crate::credentials::anthropic_api_key(creds).is_some();
     let (a_configured, a_mode) = if claude_cli {
         (true, Some("cli".to_string()))
     } else if api_key {

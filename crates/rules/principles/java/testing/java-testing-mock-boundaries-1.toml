@@ -1,9 +1,11 @@
 id = "JAVA-TESTING-MOCK-BOUNDARIES-1"
+version = 1
 title = "Mocks are used only at architectural boundaries (external services, repositories, HTTP clients); concrete classes and value objects are never mocked"
-tag = "stack"
 domain = "java:testing"
 layer = "language"
 enforcement = "prose"
+kind = "decision"
+inspectable = true
 default = true
 qualifies = "Enforced by code review. Mockito's own documentation explicitly warns against mocking concrete List implementations ('please don't mock the List class; use a real instance instead') and cautions that mocking a value object is a 'well known anti-pattern' (RETURNS_DEEP_STUBS section). Conformance holds when mocks appear only on interfaces or abstract types that represent external system boundaries: repositories, HTTP clients, message brokers, clocks, random sources."
 verification = "grounded"
@@ -25,6 +27,9 @@ title = "Mockito Core Javadoc (latest) — mocking guidelines and anti-patterns"
 id = "mock-only-external-boundaries"
 label = "mock only interfaces/abstract types at system boundaries; use real instances for everything else"
 directive = "Use Mockito (mock(), @Mock, @ExtendWith(MockitoExtension.class)) only on interfaces or abstract types that represent external system boundaries: repository interfaces, HTTP client interfaces, message broker clients, Clock, SecureRandom, or any collaborator whose real implementation requires network/disk/external-process access. Use real instances for: collections, Strings, primitive wrappers, domain value objects, internal utility classes. Never mock a concrete class that the class under test owns or controls. Prefer constructor injection so mocks are easy to pass without reflection."
+remediation = """
+Change the mocked dependency from a concrete class or value object to an interface representing the actual system boundary (a repository interface, an HTTP client, a Clock), and use the real production class for everything else in the test. Remove any test that spins up a full application context or embedded database just to isolate a unit. Verify by confirming the test still exercises the real business logic under test, with only the true I/O boundary replaced by a mock.
+"""
 why = "Mocks at boundaries make unit tests fast and deterministic; real instances for owned collaborators keep tests refactoring-safe."
 
 [[option]]

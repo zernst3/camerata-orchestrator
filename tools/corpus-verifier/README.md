@@ -10,8 +10,22 @@ maintainer has confirmed the rule's grounding (its cited source / linter) is
 accurate. The verification ladder lives in `camerata-rules`:
 
 ```
-draft  →  grounded  →  verified  →  needs_recheck (drifted)
+draft  ->  grounded  ->  verified  ->  needs_recheck (drifted)
+
+policy     (parallel: no external authority to cite, so it never
+            joins the ladder above, but it IS armed)
 ```
+
+`Verification` has **five** variants, not four. `policy` is off to the side on
+purpose: it means "a deliberate project or team decision with no external
+authority", so it can never progress to `grounded` or `verified` without someone
+finding a real citation first, and this tool has nothing to do with it. Two
+properties are deliberately separate, and this tool only moves the first one:
+
+- **Provenance** (`is_grounded()` / `is_shippable()`): true for `grounded`,
+  `verified` and `needs_recheck`; false for `draft` and `policy`.
+- **Arming** (`is_auto_recommended()`): true for `grounded`, `verified` and
+  **`policy`**; false for `draft` and `needs_recheck`.
 
 `corpus-verifier` is the **single writer** of `verified`. It:
 

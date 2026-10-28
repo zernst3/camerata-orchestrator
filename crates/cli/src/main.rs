@@ -1,6 +1,6 @@
 //! camerata orchestrator binary.
 //!
-//! Two families of subcommand:
+//! Four families of subcommand:
 //! - The original in-process demo/eval harness (`acceptance`, `gate-probe`, `eval`,
 //!   `*-demo`, `*-live`) — each calls a backend crate directly in-process (no HTTP).
 //! - The HTTP-adapter subcommands (`stories`, `run`, `uows`, `assign`, `start-run`;
@@ -9,14 +9,33 @@
 //!   holds the handlers). This is the SAME client the MCP adapter (`crates/mcp`) and
 //!   the Dioxus cockpit (`crates/ui`) use — the CLI is just another adapter over the
 //!   one capability contract.
+//! - `inspect` — a real, in-process HEADLESS product command (not a demo): runs the full
+//!   brownfield inspection pipeline and writes the same product-export ZIP the cockpit's
+//!   UI produces, with no BFF/UI involved. See `camerata::inspect_cmd`'s module doc comment
+//!   for the pipeline and which server functions it reuses.
+//! - `integrity-gate` - the PRE-FLIGHT scan-integrity verdict (W6 / I2). Reads the ledger
+//!   `inspect` persists to `<repo>/.camerata-scan-ledger.json` and exits 0 (every required
+//!   engine ran, every skip justified, every stage reconciles), 1 (the scan is degraded; do
+//!   not pay to grade it) or 2 (the GATE itself could not run). 2 is deliberately NOT a
+//!   pass: a wrapper reading "the gate could not run" as "the gate passed" would be the same
+//!   class of bug as a scan reading "the tool did not run" as "the rule is clean". Neither a
+//!   demo, nor an HTTP delegation, nor part of the `inspect` pipeline, which is why it is its
+//!   own family. See `camerata::integrity_gate_cmd`'s module doc comment.
 //!
 //! `acceptance` in particular: run the in-process, no-network planted-violation
 //! acceptance scenario and print the gate's verdict. Exit 0 if the gate denied the
 //! planted violation and allowed the control write; exit 1 otherwise.
 
+use std::path::PathBuf;
+
 use camerata::acceptance::{run_acceptance, AcceptanceResult};
+use camerata::count_cmd::CountArgs;
+use camerata::inspect_cmd::{self, InspectArgs};
+use camerata::integrity_gate_cmd::{self, GateProfile, IntegrityGateArgs, EXIT_GATE_UNAVAILABLE};
+use camerata::release_gate_cmd::{self, ReleaseGateArgs};
 use camerata_client::{Client, ClientError};
 use camerata_core::Decision;
+use camerata_server::llm::ProjectBackend;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
@@ -106,12 +125,185 @@ enum Command {
         /// Which app/project to list defect reports for.
         project_id: String,
     },
+
+    /// Headless brownfield inspection: runs the full cockpit scan pipeline over `--repo` and
+    /// writes the SAME product-export ZIP (PDF + xlsx + findings.json + README.txt) the UI's
+    /// export button produces to `--export`. No BFF, no UI — see
+    /// `camerata::inspect_cmd`'s module doc comment.
+    Inspect {
+        /// The repo's local working tree to inspect.
+        #[arg(long)]
+        repo: PathBuf,
+        /// Where to write the product-export ZIP. Its parent directory must already exist.
+        #[arg(long)]
+        export: PathBuf,
+        /// `api` (the Anthropic Messages API; uses the key saved in the app, or
+        /// `ANTHROPIC_API_KEY` as the fallback; the DEFAULT, because
+        /// a client inspection runs on a metered, single-party chain) or `cli` (the operator's
+        /// own Claude Code subscription, for internal benchmark runs only; choose it
+        /// explicitly); the same compliance-safety setting a project's `backend` field carries.
+        #[arg(long, default_value = "api", value_parser = parse_backend)]
+        backend: ProjectBackend,
+        /// Use the Anthropic Message Batches path (~50% cheaper; latency is not returned
+        /// until the whole batch completes). Requires `--backend api` plus a configured key.
+        #[arg(long)]
+        batch: bool,
+        /// Model override for the audit pass. Defaults to the project-less model floor.
+        #[arg(long)]
+        model: Option<String>,
+        /// Model override for the calibration pass. Defaults to the project-less model floor.
+        #[arg(long = "calibration-model")]
+        calibration_model: Option<String>,
+        /// Ignore the on-disk incremental-scan cache and force a full re-scan of every file.
+        #[arg(long)]
+        full: bool,
+        /// Additionally print the pipeline-integrity ledger's per-rule detail (rule id, ran?,
+        /// files evaluated, findings) alongside the default concise stage/family/not-run
+        /// summary.
+        #[arg(long)]
+        verbose: bool,
+    },
+
+    /// W6 / I2: the PRE-FLIGHT INTEGRITY GATE. Evaluate a scan ledger written by
+    /// `camerata inspect` and exit non-zero if anything that should have run did not —
+    /// run this BEFORE paying for a graded sweep. Exit 0 pass, 1 fail, 2 the gate
+    /// itself could not run. See `camerata::integrity_gate_cmd`'s module doc comment.
+    IntegrityGate {
+        /// The persisted ledger, written by `camerata inspect` to
+        /// `<repo>/.camerata-scan-ledger.json`.
+        #[arg(long)]
+        ledger: PathBuf,
+        /// `graded` (default) requires every engine that must run for any repo to have
+        /// actually run and treats a scoped-out semantic tier as a blocker; `smoke`
+        /// checks structural integrity only and CANNOT catch a dark tier.
+        #[arg(long, default_value = "graded", value_parser = integrity_gate_cmd::parse_profile)]
+        profile: GateProfile,
+    },
+
+    /// The EXPORT RELEASE GATE over an existing product zip: secrets in every file and workbook
+    /// cell, the dataset set, CSV against JSON, manifest hashes, README against manifest. The
+    /// same checks `inspect --export` runs before it writes a zip. Exit 0 clean, 3 blocked,
+    /// 2 the gate could not run. Never prints a secret value (redacted forms only). Build with
+    /// `--features pdf-text` to check the PDF's rendered text too. See
+    /// `camerata::release_gate_cmd`'s module doc comment.
+    ReleaseGate {
+        /// The product-export zip to audit.
+        zip: PathBuf,
+    },
+
+    /// Count a repo exactly as the inspection reads it: files and non-blank lines per language,
+    /// plus what the noise filter excluded. No model, no network. This is the number a quote is
+    /// priced on. See `camerata::count_cmd`'s module doc comment.
+    Count {
+        /// The repo (or folder) to count.
+        repo: PathBuf,
+        /// Print JSON instead of the plain-text table.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Compare two inspections of the SAME fixture: exit 1 when cost per 1K counted lines rose
+    /// more than the threshold, 2 when the pair cannot be compared (a ledger missing, or carrying
+    /// no telemetry), 0 otherwise. Reads the operator ledgers `camerata inspect` persists. No
+    /// model, no network. See `camerata::cost_regression_cmd`'s module doc comment.
+    CostRegression {
+        /// The previous run's ledger (the path `camerata inspect` printed as `integrity ledger`).
+        #[arg(long)]
+        baseline: PathBuf,
+        /// The new run's ledger.
+        #[arg(long)]
+        current: PathBuf,
+        /// Allowed rise in cost per 1K counted lines, in percent.
+        #[arg(long, default_value_t = camerata_server::stage_telemetry::DEFAULT_COST_REGRESSION_PCT)]
+        threshold_pct: f64,
+    },
+
+    /// Corpus staleness watermark (see docs/design/2026-10-20_corpus-staleness-check.md).
+    Corpus {
+        #[command(subcommand)]
+        action: CorpusAction,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum CorpusAction {
+    /// Report which rule domains are overdue for a staleness sweep or never confirmed.
+    /// Read-only; never blocks anything.
+    Check,
+    /// Advance ONE domain's watermark after you have reviewed that domain's sweep. This is the
+    /// only thing that advances a watermark; running a sweep never does. Writes
+    /// crates/rules/CORPUS_FRESHNESS.toml (commit it afterward).
+    Confirm {
+        /// The corpus domain just reviewed, e.g. `supabase`, `rust`, `javascript`.
+        domain: String,
+        /// The date it was confirmed current, YYYY-MM-DD.
+        date: String,
+    },
+    /// Regenerate crates/rules/CORPUS_LOCK.toml (each rule's `version` + content hash).
+    /// REFUSES, writing nothing, when a rule changed without a `version` bump. Edit the rule,
+    /// bump its `version`, run this, commit both.
+    Lock,
+    /// Check every rule's cited sources (Part A of the corpus freshness routine): fetch each
+    /// `[[sources]]` URL, record ok / redirected / dead (or unreachable), and compare each cited
+    /// section's text hash with the last run. Prints a date-stamped report; changes no rule.
+    /// Writes only the sidecar crates/rules/CORPUS_SOURCE_HASHES.json (commit it afterward).
+    CheckSources {
+        /// Print the report as JSON instead of text.
+        #[arg(long)]
+        json: bool,
+        /// Write the report to this file instead of stdout.
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// The sidecar to read and update (default: crates/rules/CORPUS_SOURCE_HASHES.json).
+        #[arg(long)]
+        sidecar: Option<PathBuf>,
+        /// Do not write the sidecar back (dry run: nothing is recorded).
+        #[arg(long)]
+        no_save: bool,
+        /// Pause between two requests to the same host, in milliseconds.
+        #[arg(long, default_value_t = 1500)]
+        delay_ms: u64,
+        /// Accept a reviewed section change: `url#anchor=sha256:<hash>` with the hash the report
+        /// printed (refused if the page changed again since), or the bare `url#anchor`
+        /// (accepts whatever is pending now, with a warning). Repeatable. A changed section
+        /// stays listed on every run until accepted. Makes no requests; it only updates the
+        /// sidecar, recording who accepted and when.
+        #[arg(long, value_name = "URL", conflicts_with_all = ["accept_all", "no_save", "json", "out"])]
+        accept: Vec<String>,
+        /// Accept every unreviewed section change (use after reading the whole report).
+        #[arg(long, conflicts_with_all = ["no_save", "json", "out"])]
+        accept_all: bool,
+        /// Who is accepting, recorded in the sidecar (default: $USER).
+        #[arg(long, value_name = "NAME")]
+        by: Option<String>,
+    },
+}
+
+/// `--backend`'s `value_parser`: `ProjectBackend` lives in `camerata-api-types`, a foreign
+/// crate, so it can't derive `clap::ValueEnum` here (the orphan rule blocks a local derive
+/// implementing a foreign trait for a foreign type) — a small manual parser is the standard
+/// clap workaround.
+fn parse_backend(s: &str) -> Result<ProjectBackend, String> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "cli" => Ok(ProjectBackend::Cli),
+        "api" => Ok(ProjectBackend::Api),
+        other => Err(format!(
+            "unknown --backend `{other}` (expected `cli` or `api`)"
+        )),
+    }
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Record the operator's redaction switch BEFORE the .env loader runs: the .env is resolved
+    // against the working directory, which may be a client repository, and must not be able to
+    // send that repo's code to a model unredacted.
+    camerata_server::feature_flags::pin_operator_redaction_setting();
     // Auto-load the gitignored .env (so the live commands pick up the token).
     let _ = dotenvy::dotenv();
+    if let Some(warning) = camerata_server::feature_flags::redaction_disabled_warning() {
+        eprintln!("{warning}");
+    }
     let cli = Cli::parse();
     let bff_url = cli.bff_url;
 
@@ -154,8 +346,7 @@ async fn main() -> anyhow::Result<()> {
         } => {
             let client = make_client(bff_url);
             print_result(
-                camerata::http_cmd::handle_start_run(&client, &story_id, model, skip_layer2)
-                    .await,
+                camerata::http_cmd::handle_start_run(&client, &story_id, model, skip_layer2).await,
             )
         }
         Command::Events { run_id } => {
@@ -169,6 +360,146 @@ async fn main() -> anyhow::Result<()> {
         Command::Feedback { project_id } => {
             let client = make_client(bff_url);
             print_result(camerata::http_cmd::handle_feedback(&client, &project_id).await)
+        }
+        Command::Inspect {
+            repo,
+            export,
+            backend,
+            batch,
+            model,
+            calibration_model,
+            full,
+            verbose,
+        } => {
+            run_inspect_cmd(InspectArgs {
+                repo,
+                export,
+                backend,
+                batch,
+                model,
+                calibration_model,
+                full,
+                verbose,
+            })
+            .await
+        }
+        Command::IntegrityGate { ledger, profile } => {
+            run_integrity_gate_cmd(IntegrityGateArgs { ledger, profile })
+        }
+        Command::ReleaseGate { zip } => run_release_gate_cmd(&ReleaseGateArgs { zip }),
+        Command::Count { repo, json } => {
+            println!(
+                "{}",
+                camerata::count_cmd::run_count(&CountArgs { repo, json })?
+            );
+            Ok(())
+        }
+        Command::CostRegression {
+            baseline,
+            current,
+            threshold_pct,
+        } => run_cost_regression_cmd(&camerata::cost_regression_cmd::CostRegressionArgs {
+            baseline,
+            current,
+            threshold_pct,
+        }),
+        Command::Corpus { action } => match action {
+            CorpusAction::Check => camerata::corpus_cmd::run_corpus_check().await,
+            CorpusAction::Confirm { domain, date } => {
+                camerata::corpus_cmd::run_corpus_confirm(domain, date).await
+            }
+            CorpusAction::Lock => camerata::corpus_cmd::run_corpus_lock().await,
+            CorpusAction::CheckSources {
+                json,
+                out,
+                sidecar,
+                no_save,
+                delay_ms,
+                accept,
+                accept_all,
+                by,
+            } => {
+                camerata::corpus_sources_cmd::run_corpus_check_sources(
+                    camerata::corpus_sources_cmd::CheckSourcesArgs {
+                        json,
+                        out,
+                        sidecar,
+                        no_save,
+                        delay_ms,
+                        accept,
+                        accept_all,
+                        by,
+                    },
+                )
+                .await
+            }
+        },
+    }
+}
+
+/// `release-gate`'s handler: the verdict to stdout (a refusal is the gate's own block, redacted),
+/// exit 0 clean / 3 blocked / 2 the gate could not run.
+fn run_release_gate_cmd(args: &ReleaseGateArgs) -> anyhow::Result<()> {
+    match release_gate_cmd::run_release_gate(args) {
+        Ok(verdict) => {
+            println!("{}", release_gate_cmd::format_verdict(&verdict));
+            std::process::exit(verdict.exit_code());
+        }
+        Err(e) => {
+            eprintln!("camerata release-gate: {e}");
+            std::process::exit(release_gate_cmd::EXIT_GATE_UNAVAILABLE);
+        }
+    }
+}
+
+/// `cost-regression`'s handler: the verdict to stdout, exit 0 within / 1 regressed / 2 the pair
+/// could not be compared (see `camerata::cost_regression_cmd`).
+fn run_cost_regression_cmd(
+    args: &camerata::cost_regression_cmd::CostRegressionArgs,
+) -> anyhow::Result<()> {
+    match camerata::cost_regression_cmd::run_cost_regression(args) {
+        Ok(result) => {
+            println!("{}", result.render());
+            std::process::exit(camerata::cost_regression_cmd::exit_code(&result));
+        }
+        Err(e) => {
+            eprintln!("camerata cost-regression: {e}");
+            std::process::exit(camerata::cost_regression_cmd::EXIT_CHECK_UNAVAILABLE);
+        }
+    }
+}
+
+/// `integrity-gate`'s handler. THREE exit codes, and the third is the point: `0` the scan is
+/// trustworthy, `1` it is degraded, `2` the gate could not run at all. Conflating `2` with
+/// `0` would reintroduce the silent degradation this gate exists to catch, inside the gate
+/// itself — so an unreadable ledger exits 2 and says so, and never looks like a pass.
+fn run_integrity_gate_cmd(args: IntegrityGateArgs) -> anyhow::Result<()> {
+    match integrity_gate_cmd::run_integrity_gate(&args) {
+        Ok(verdict) => {
+            println!("{}", integrity_gate_cmd::format_verdict(&verdict));
+            std::process::exit(verdict.exit_code());
+        }
+        Err(e) => {
+            eprintln!("camerata integrity-gate: {e}");
+            std::process::exit(EXIT_GATE_UNAVAILABLE);
+        }
+    }
+}
+
+/// `inspect`'s handler: run the headless pipeline and print its report, or fail loudly with
+/// a non-zero exit — never a silent partial result (matches every other subcommand's
+/// error-handling shape in this file).
+async fn run_inspect_cmd(args: InspectArgs) -> anyhow::Result<()> {
+    match inspect_cmd::run_inspect(args).await {
+        Ok(outcome) => {
+            println!("{}", inspect_cmd::format_outcome_report(&outcome));
+            Ok(())
+        }
+        Err(e) => {
+            // A refused export prints the gate's own block (which never carries a secret value)
+            // and exits 3; any other failure exits 1.
+            eprintln!("camerata inspect: {e}");
+            std::process::exit(e.exit_code());
         }
     }
 }
@@ -369,13 +700,10 @@ mod cli_parse_tests {
             other => panic!("expected Command::Assign, got a different variant: {other:?}"),
         }
         // Missing `--assignee` must fail to parse.
-        assert!(Cli::try_parse_from([
-            "camerata",
-            "assign",
-            "--work-item",
-            "github:owner/repo#1"
-        ])
-        .is_err());
+        assert!(
+            Cli::try_parse_from(["camerata", "assign", "--work-item", "github:owner/repo#1"])
+                .is_err()
+        );
     }
 
     #[test]
@@ -385,7 +713,7 @@ mod cli_parse_tests {
             "start-run",
             "owner/repo#1",
             "--model",
-            "claude-sonnet-4-6",
+            "claude-sonnet-5",
             "--skip-layer2",
         ])
         .expect("must parse");
@@ -396,7 +724,7 @@ mod cli_parse_tests {
                 skip_layer2,
             } => {
                 assert_eq!(story_id, "owner/repo#1");
-                assert_eq!(model.as_deref(), Some("claude-sonnet-4-6"));
+                assert_eq!(model.as_deref(), Some("claude-sonnet-5"));
                 assert!(skip_layer2);
             }
             other => panic!("expected Command::StartRun, got a different variant: {other:?}"),
@@ -471,5 +799,132 @@ mod cli_parse_tests {
             other => panic!("expected Command::Feedback, got a different variant: {other:?}"),
         }
         assert!(Cli::try_parse_from(["camerata", "feedback"]).is_err());
+    }
+
+    // ── inspect ──────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn inspect_requires_both_repo_and_export() {
+        assert!(Cli::try_parse_from(["camerata", "inspect"]).is_err());
+        assert!(Cli::try_parse_from(["camerata", "inspect", "--repo", "/tmp/r"]).is_err());
+        assert!(Cli::try_parse_from(["camerata", "inspect", "--export", "/tmp/o.zip"]).is_err());
+        assert!(Cli::try_parse_from([
+            "camerata",
+            "inspect",
+            "--repo",
+            "/tmp/r",
+            "--export",
+            "/tmp/o.zip"
+        ])
+        .is_ok());
+    }
+
+    #[test]
+    fn inspect_defaults_backend_to_api_and_every_flag_to_off() {
+        let cli = Cli::try_parse_from([
+            "camerata",
+            "inspect",
+            "--repo",
+            "/tmp/r",
+            "--export",
+            "/tmp/o.zip",
+        ])
+        .expect("must parse");
+        match cli.command {
+            Command::Inspect {
+                repo,
+                export,
+                backend,
+                batch,
+                model,
+                calibration_model,
+                full,
+                verbose,
+            } => {
+                assert_eq!(repo, PathBuf::from("/tmp/r"));
+                assert_eq!(export, PathBuf::from("/tmp/o.zip"));
+                assert_eq!(backend, ProjectBackend::Api);
+                assert!(!batch);
+                assert!(model.is_none());
+                assert!(calibration_model.is_none());
+                assert!(!full);
+                assert!(!verbose);
+            }
+            other => panic!("expected Command::Inspect, got a different variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn inspect_parses_backend_batch_model_and_full() {
+        let cli = Cli::try_parse_from([
+            "camerata",
+            "inspect",
+            "--repo",
+            "/tmp/r",
+            "--export",
+            "/tmp/o.zip",
+            "--backend",
+            "api",
+            "--batch",
+            "--model",
+            "claude-sonnet-5",
+            "--calibration-model",
+            "claude-opus-5",
+            "--full",
+            "--verbose",
+        ])
+        .expect("must parse");
+        match cli.command {
+            Command::Inspect {
+                backend,
+                batch,
+                model,
+                calibration_model,
+                full,
+                verbose,
+                ..
+            } => {
+                assert_eq!(backend, ProjectBackend::Api);
+                assert!(batch);
+                assert_eq!(model.as_deref(), Some("claude-sonnet-5"));
+                assert_eq!(calibration_model.as_deref(), Some("claude-opus-5"));
+                assert!(full);
+                assert!(verbose);
+            }
+            other => panic!("expected Command::Inspect, got a different variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn inspect_backend_is_case_insensitive_and_rejects_unknown_values() {
+        let cli = Cli::try_parse_from([
+            "camerata",
+            "inspect",
+            "--repo",
+            "/tmp/r",
+            "--export",
+            "/tmp/o.zip",
+            "--backend",
+            "API",
+        ])
+        .expect("must parse");
+        match cli.command {
+            Command::Inspect { backend, .. } => assert_eq!(backend, ProjectBackend::Api),
+            other => panic!("expected Command::Inspect, got a different variant: {other:?}"),
+        }
+
+        match Cli::try_parse_from([
+            "camerata",
+            "inspect",
+            "--repo",
+            "/tmp/r",
+            "--export",
+            "/tmp/o.zip",
+            "--backend",
+            "azure",
+        ]) {
+            Ok(_) => panic!("an unknown --backend value must fail to parse"),
+            Err(err) => assert!(err.to_string().contains("azure"), "{err}"),
+        }
     }
 }

@@ -38,7 +38,9 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use camerata_server::dep_audit::DEP_AUDIT_RULE_ID;
-use camerata_server::onboard::{AuditedRef, CoverageNote, Finding, ScanProvenance, ScanReport};
+use camerata_server::onboard::{
+    AuditedRef, CoverageNote, Finding, LanguageVolume, ScanProvenance, ScanReport,
+};
 use camerata_server::report_export::{self, DispositionWire, ReportOptions};
 use camerata_server::xlsx_export;
 
@@ -72,6 +74,11 @@ async fn regenerate_sample_report() {
     );
     rls_enabled.effort = Some("low".to_string());
     rls_enabled.confidence = Some("high".to_string());
+    // Detector-supplied placeholder binding (Fix 1): a real scan's RLS checker sets this via
+    // `arch_violation_to_finding`; the fixture sets it explicitly so the remediation names the
+    // actual object ("ALTER TABLE profiles ...") instead of the generic fallback.
+    rls_enabled.captures =
+        std::collections::BTreeMap::from([("table".to_string(), "profiles".to_string())]);
     rls_enabled.snippet = "create table public.profiles (\n  id uuid primary key references auth.users,\n  full_name text,\n  email text,\n  phone text\n);".to_string();
     // Item 1: `detail`'s FIRST SENTENCE is the punchy, defect-first headline the report's
     // serializer mechanically lifts out (`defect_headline`) — the owner's own target voice
@@ -88,7 +95,8 @@ async fn regenerate_sample_report() {
     );
     key_service_role.effort = Some("low".to_string());
     key_service_role.confidence = Some("high".to_string());
-    key_service_role.snippet = "NEXT_PUBLIC_SUPABASE_SERVICE_ROLE_KEY=sb_secret_[redacted]".to_string();
+    key_service_role.snippet =
+        "NEXT_PUBLIC_SUPABASE_SERVICE_ROLE_KEY=sb_secret_[redacted]".to_string();
     key_service_role.detail = "The service_role key is shipped to every browser: it bypasses all Row Level Security and grants full read and write access to every table. A service_role secret is assigned to a NEXT_PUBLIC_ environment variable, which Next.js inlines into the client bundle at build time. Anyone who opens browser developer tools obtains this key. Rotate it immediately, remove it from client-delivered code, and move privileged operations to a server-side route.".to_string();
 
     let mut auth_edge_jwt = finding(
@@ -100,6 +108,10 @@ async fn regenerate_sample_report() {
     );
     auth_edge_jwt.effort = Some("medium".to_string());
     auth_edge_jwt.confidence = Some("needs-review".to_string());
+    auth_edge_jwt.captures = std::collections::BTreeMap::from([(
+        "function-name".to_string(),
+        "charge-membership".to_string(),
+    )]);
     auth_edge_jwt.snippet = "[functions.charge-membership]\nverify_jwt = false".to_string();
     auth_edge_jwt.detail = "The charge-membership edge function has JWT verification disabled: any anonymous caller on the internet can invoke the payment path. Its body does not perform its own authorization check either. Re-enable verify_jwt, or add an explicit authenticated-user check inside the handler before any privileged work.".to_string();
 
@@ -117,6 +129,8 @@ async fn regenerate_sample_report() {
     // which draws on all three.
     storage_public.effort = Some("low".to_string());
     storage_public.confidence = Some("high".to_string());
+    storage_public.captures =
+        std::collections::BTreeMap::from([("bucket".to_string(), "member-documents".to_string())]);
     storage_public.snippet = "insert into storage.buckets (id, name, public)\nvalues ('member-documents', 'member-documents', true);".to_string();
     storage_public.detail = "The member-documents storage bucket is public: every uploaded document is downloadable by anyone with, or guessing, the URL. No authentication and no access policy gate object retrieval. If this bucket holds private member documents, make it private and add owner-scoped access policies.".to_string();
 
@@ -128,8 +142,20 @@ async fn regenerate_sample_report() {
         "medium",
     );
     rls_permissive.effort = Some("low".to_string());
-    rls_permissive.confidence = Some("needs-review".to_string());
-    rls_permissive.snippet = "create policy \"messages are readable\"\n  on public.messages for select\n  using (true);".to_string();
+    // `high`, not `needs-review`: a `using (true)` policy is unambiguous (it literally grants
+    // every caller access), so the calibrator would not flag it debatable. This also keeps it
+    // in the `plan` action bucket rather than the informational appendix — `is_informational`
+    // §2c correctly diverts any needs-review finding at <= medium severity, and this fixture
+    // is the sole `plan` item, so leaving it needs-review empties the plan bucket + the 2-D
+    // grid's plan row. `auth_edge_jwt` (high, needs-review) still exercises the "needs client
+    // confirmation" voice. (This was a latent fixture drift vs the Bug-4 informational rule
+    // that shipped after the sample was last regenerated; the is_informational code is correct.)
+    rls_permissive.confidence = Some("high".to_string());
+    rls_permissive.captures =
+        std::collections::BTreeMap::from([("table".to_string(), "messages".to_string())]);
+    rls_permissive.snippet =
+        "create policy \"messages are readable\"\n  on public.messages for select\n  using (true);"
+            .to_string();
     rls_permissive.detail = "The messages table's read policy grants access to everyone: using (true) lets every anon and authenticated caller read every row. If messages are meant to be private between members, scope the policy to the owning user, for example using (auth.uid() = sender_id).".to_string();
 
     // Long, real-looking path (a Next.js route group directory) — exercises the M8 path-wrap
@@ -143,24 +169,38 @@ async fn regenerate_sample_report() {
     );
     auth_getsession.effort = Some("medium".to_string());
     auth_getsession.confidence = Some("high".to_string());
-    auth_getsession.snippet = "const { data: { session } } = await supabase.auth.getSession()".to_string();
+    auth_getsession.snippet =
+        "const { data: { session } } = await supabase.auth.getSession()".to_string();
     auth_getsession.detail = "The billing settings page trusts an unverified session cookie: a forged cookie could impersonate any user at this layer. Server-side code reads getSession(), which returns the client's unverified cookie JWT rather than validating it against the auth server.".to_string();
 
     // ── 3 findings dispositioned FalsePositive (excluded, counted once in methodology) ──
-    let fp_sql = finding("SEC-NO-RAW-SQL-CONCAT-1", PORTAL, "scripts/report.rs", 40, "critical");
-    let fp_secret = finding("SEC-NO-HARDCODED-SECRETS-1", EDGE, "supabase/functions/_shared/config.ts", 5, "critical");
-    let fp_url = finding("ARCH-NO-SECRETS-IN-URL-1", PORTAL, "apps/web/lib/analytics.ts", 18, "critical");
+    let fp_sql = finding(
+        "SEC-NO-RAW-SQL-CONCAT-1",
+        PORTAL,
+        "scripts/report.rs",
+        40,
+        "critical",
+    );
+    let fp_secret = finding(
+        "SEC-NO-HARDCODED-SECRETS-1",
+        EDGE,
+        "supabase/functions/_shared/config.ts",
+        5,
+        "critical",
+    );
+    let fp_url = finding(
+        "ARCH-NO-SECRETS-IN-URL-1",
+        PORTAL,
+        "apps/web/lib/analytics.ts",
+        18,
+        "critical",
+    );
 
     // ── 1 dependency finding (carved into its own §7 lane, not counted in curated_total) ──
-    let mut dep_next = finding(
-        DEP_AUDIT_RULE_ID,
-        PORTAL,
-        "package-lock.json",
-        0,
-        "medium",
-    );
+    let mut dep_next = finding(DEP_AUDIT_RULE_ID, PORTAL, "package-lock.json", 0, "medium");
     dep_next.snippet = "next@14.1.0".to_string();
-    dep_next.detail = "Next.js SSRF via image optimization (GHSA-fr5h-rqp8-mj6g). Fixed in 14.1.1.".to_string();
+    dep_next.detail =
+        "Next.js SSRF via image optimization (GHSA-fr5h-rqp8-mj6g). Fixed in 14.1.1.".to_string();
 
     let all_findings = vec![
         rls_enabled.clone(),
@@ -265,10 +305,28 @@ async fn regenerate_sample_report() {
         test_file_count: 0,
         files_excluded: 1188,
         code_chars: 486_203,
+        code_lines: 18_700,
+        code_lines_by_language: vec![
+            LanguageVolume {
+                language: "TypeScript".to_string(),
+                lines: 14_500,
+            },
+            LanguageVolume {
+                language: "SQL".to_string(),
+                lines: 2_800,
+            },
+            LanguageVolume {
+                language: "JavaScript".to_string(),
+                lines: 1_400,
+            },
+        ],
         excluded_mechanical_rules: Vec::new(),
         findings: all_findings,
         proposed_rules: Vec::new(),
         gated: false,
+        blocked: false,
+        ai_blocked_reason: None,
+        ai_error: None,
         message: None,
         actual_usage: None,
         deep: None,
@@ -289,16 +347,19 @@ async fn regenerate_sample_report() {
                     sha: Some("a1b2c3d4e5f60718293a4b5c6d7e8f9012345678".to_string()),
                     branch: Some("main".to_string()),
                     dirty: false,
+                    ..AuditedRef::default()
                 },
                 AuditedRef {
                     repo: EDGE.to_string(),
                     sha: Some("9f8e7d6c5b4a39281706f5e4d3c2b1a098765432".to_string()),
                     branch: Some("main".to_string()),
                     dirty: true,
+                    ..AuditedRef::default()
                 },
             ],
-            audit_model: Some("anthropic/claude-opus-4.8".to_string()),
-            calibration_model: Some("anthropic/claude-sonnet-4.6".to_string()),
+            audit_model: Some("anthropic/claude-opus-5".to_string()),
+            calibration_model: Some("anthropic/claude-sonnet-5".to_string()),
+            clone_judge_model: None,
             mode: "parallel".to_string(),
             thorough: false,
             deep: false,
@@ -308,13 +369,20 @@ async fn regenerate_sample_report() {
             osv_scanner_version: Some("1.9.0".to_string()),
             started_at: "2026-07-26T15:30:00Z".to_string(),
             finished_at: "2026-07-26T15:42:00Z".to_string(),
+            model_sessions: Vec::new(),
         },
+        recommendations: std::collections::HashMap::new(),
+        failed_passes: Vec::new(),
+        ledger: camerata_server::scan_ledger::ScanLedger::new(),
     };
 
     // ═══ Load the REAL bundled rule corpus so citations/domains/titles resolve for real ═══
     let corpus_path = camerata_rules::corpus_path();
     let (corpus, corpus_errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
-    assert!(corpus_errors.is_empty(), "corpus must load cleanly: {corpus_errors:?}");
+    assert!(
+        corpus_errors.is_empty(),
+        "corpus must load cleanly: {corpus_errors:?}"
+    );
 
     // No `executive_summary_override` — the narrative shown is `default_narrative`'s REAL
     // output, not hand-written prose (this is the S7 self-consistency fix: the old sample
@@ -324,26 +392,62 @@ async fn regenerate_sample_report() {
         project_title: "Harbor Member Portal".to_string(),
         prepared_by: "Zachary Ernst".to_string(),
         executive_summary_override: None,
+        // The sample demonstrates the BRANDED cover for the practice (Cantus Works), so a
+        // prospective buyer sees the real deliverable. Camerata-the-instrument is never on the
+        // cover — it appears only in the Methodology provenance ("Scanned with Camerata v..").
+        // Set explicitly here because this test calls `build_report_json` directly, bypassing the
+        // HTTP boundary where `apply_env_defaults` would read CAMERATA_REPORT_BRAND. The neutral
+        // no-brand fallback is covered by report_export unit tests, not this fixture.
+        brand: "Cantus Works".to_string(),
+        ..Default::default()
     };
 
-    let json = report_export::build_report_json(&report, &dispositions, Some(&corpus), &opts);
+    let json = report_export::build_report_json(
+        &report.clone().seal(),
+        &dispositions,
+        Some(&corpus),
+        &opts,
+    );
 
     // Sanity: the reconciliation M1 was fixing.
+    //
+    // curated_total is 5, not 6: `SUPABASE-AUTH-EDGE-JWT-1` carries
+    // `confidence = "needs-review"`, and a needs-review finding is now HELD FOR REVIEW at any
+    // severity (`report_export::is_held_for_review`) rather than counted in the signed, curated
+    // action tiers — you do not sign off a finding you yourself flagged as needing a human call.
+    // The Sep-2026 fixture predated that routing and expected 6; the move curated -> held keeps
+    // the reconciliation whole (see below). Reconfirmed on the 2026-10-20 sample regen (W27).
     assert_eq!(json.methodology.candidates_reviewed, 10);
     assert_eq!(json.methodology.excluded_false_positive, 3);
-    assert_eq!(json.executive_summary.curated_total, 6);
+    assert_eq!(json.executive_summary.curated_total, 5);
+    assert_eq!(json.executive_summary.held_for_review, 1); // the needs-review AUTH-EDGE-JWT row
     assert_eq!(json.dependency_snapshot.rows.len(), 1);
+    // The reconciliation invariant, asserted whole so a future drift names itself:
+    // candidates_reviewed == curated + held + false_positive + dependency_advisories.
+    assert_eq!(
+        json.methodology.candidates_reviewed,
+        json.executive_summary.curated_total
+            + json.executive_summary.held_for_review
+            + json.methodology.excluded_false_positive
+            + json.executive_summary.dependency_advisories
+    );
     assert!(!json.executive_summary.is_override);
 
     // ═══ Write sample-report/data.json (pretty, reproducible byte-for-byte from this test) ═══
     let repo_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../sample-report");
     let data_json = serde_json::to_string_pretty(&json).expect("serialize AuditReportJson");
-    std::fs::write(repo_root.join("data.json"), data_json + "\n").expect("write sample-report/data.json");
+    std::fs::write(repo_root.join("data.json"), data_json + "\n")
+        .expect("write sample-report/data.json");
 
     // ═══ Build the REAL Excel workbook (the xlsx sibling of the PDF, same data pass) ═══
-    let xlsx = xlsx_export::build_workbook(&report, &dispositions, Some(&corpus), &opts)
-        .expect("build_workbook must succeed for the sample fixture");
-    assert_eq!(&xlsx[0..2], b"PK", "the workbook must be a valid xlsx (zip) container");
+    let xlsx =
+        xlsx_export::build_workbook(&report.clone().seal(), &dispositions, Some(&corpus), &opts)
+            .expect("build_workbook must succeed for the sample fixture");
+    assert_eq!(
+        &xlsx[0..2],
+        b"PK",
+        "the workbook must be a valid xlsx (zip) container"
+    );
     std::fs::write(repo_root.join("camerata-sample-audit-findings.xlsx"), &xlsx)
         .expect("write sample-report/camerata-sample-audit-findings.xlsx");
     // Sanity-check the xlsx structure: it must open as a zip and carry a workbook.xml with
@@ -383,8 +487,13 @@ async fn regenerate_sample_report() {
     // `json` (`AuditReportJson`) for provenance/summary reuse — see
     // `xlsx_export::build_findings_export`'s doc comment. Both a standalone file (for Zach
     // to eyeball) and the zip entry below come from this one call.
-    let findings_export =
-        xlsx_export::build_findings_export(&report, &dispositions, Some(&corpus), &json);
+    let findings_export = xlsx_export::build_findings_export(
+        &report.clone().seal(),
+        &dispositions,
+        Some(&corpus),
+        &json,
+        &std::collections::HashMap::new(),
+    );
     assert_eq!(
         findings_export.findings.len(),
         6,
@@ -411,68 +520,34 @@ async fn regenerate_sample_report() {
         );
         return;
     }
-    let pdf = report_export::compile_pdf(&json)
-        .await
-        .expect("compile_pdf must succeed for the sample fixture");
+    // The sample ships through the SAME assembly and the SAME release path as a real export
+    // (`build_product_package` then `release`), so the fixture mirrors the deliverable exactly:
+    // csv/*, json/*, manifest.json, and the release gate's checks. Only the filename stem differs.
+    let sealed_for_zip = report.clone().seal();
+    let package = camerata_server::release_gate::build_product_package_with_stem(
+        &sealed_for_zip,
+        &dispositions,
+        Some(&corpus),
+        &opts,
+        "camerata-sample-audit",
+    )
+    .await
+    .expect("the sample package must assemble (typst is on PATH)");
+    let pdf = package.pdf.clone();
     std::fs::write(repo_root.join("camerata-sample-audit.pdf"), &pdf)
         .expect("write sample-report/camerata-sample-audit.pdf");
     eprintln!(
         "regenerate_sample_report: wrote {} bytes to sample-report/camerata-sample-audit.pdf",
         pdf.len()
     );
-
-    // ═══ Zip PDF + xlsx + findings.json + README.txt — mirrors ═══
-    // POST /api/projects/:id/product-export's assembly (that handler's own zip-building
-    // helpers are private to camerata-server, so this inlines the same four-entry Deflate
-    // zip directly over the REAL pdf/xlsx/json bytes built above; nothing here re-derives
-    // report content).
-    let readme = format!(
-        "Camerata Audit — Product Export (sample)\n\
-         =========================================\n\
-         \n\
-         This ZIP contains three artifacts derived from the SAME audit scan:\n\
-         \n\
-         camerata-sample-audit.pdf\n\
-         \x20 The curated NARRATIVE report — cover, executive summary, category scorecard,\n\
-         \x20 severity x effort matrix, curated findings with citations and recommended\n\
-         \x20 fixes, what's healthy, dependency snapshot, and methodology.\n\
-         \n\
-         camerata-sample-audit-findings.xlsx\n\
-         \x20 The COMPLETE working dataset — every finding as its own row, a per-category\n\
-         \x20 sheet, a Dependencies sheet, a Coverage sheet, and a False Positives sheet\n\
-         \x20 with the auditor's exclusion reasons.\n\
-         \n\
-         findings.json\n\
-         \x20 The MACHINE-READABLE version of the xlsx's \"All Findings\" data, wrapped with\n\
-         \x20 the report's provenance and summary counts.\n\
-         \n\
-         Repos audited: {}\n\
-         Generated: {}\n\
-         \n\
-         {}\n",
-        json.cover.repos.join(", "),
-        json.cover.generated_at,
-        report_export::AUDIT_REPORT_DISCLAIMER,
+    let zip_bytes = camerata_server::release_gate::release(package)
+        .unwrap_or_else(|e| panic!("the sample product zip was refused: {e}"))
+        .bytes;
+    assert_eq!(
+        &zip_bytes[0..2],
+        b"PK",
+        "the product-export zip itself must be a valid zip"
     );
-    let zip_bytes = {
-        use std::io::Write;
-        let buf = std::io::Cursor::new(Vec::new());
-        let mut writer = zip::ZipWriter::new(buf);
-        let options = zip::write::SimpleFileOptions::default()
-            .compression_method(zip::CompressionMethod::Deflated);
-        writer.start_file("camerata-sample-audit.pdf", options).expect("zip entry: pdf");
-        writer.write_all(&pdf).expect("zip write: pdf");
-        writer
-            .start_file("camerata-sample-audit-findings.xlsx", options)
-            .expect("zip entry: xlsx");
-        writer.write_all(&xlsx).expect("zip write: xlsx");
-        writer.start_file("findings.json", options).expect("zip entry: findings.json");
-        writer.write_all(&findings_json_bytes).expect("zip write: findings.json");
-        writer.start_file("README.txt", options).expect("zip entry: readme");
-        writer.write_all(readme.as_bytes()).expect("zip write: readme");
-        writer.finish().expect("finish zip").into_inner()
-    };
-    assert_eq!(&zip_bytes[0..2], b"PK", "the product-export zip itself must be a valid zip");
     std::fs::write(repo_root.join("camerata-sample-audit.zip"), &zip_bytes)
         .expect("write sample-report/camerata-sample-audit.zip");
     eprintln!(

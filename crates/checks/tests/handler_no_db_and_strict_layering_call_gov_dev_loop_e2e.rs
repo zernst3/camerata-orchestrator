@@ -149,8 +149,15 @@ async fn unarmed_rules_do_not_bounce_the_combined_runner() {
     );
 
     let runner = runner_for_worktree(dir.path());
-    let role = Role { name: "Backend".to_string(), rule_subset: vec![], allowed_paths: vec![] };
-    let outcome = runner.check(&role, dir.path()).await.expect("gov-dev loop check must not error");
+    let role = Role {
+        name: "Backend".to_string(),
+        rule_subset: vec![],
+        allowed_paths: vec![],
+    };
+    let outcome = runner
+        .check(&role, dir.path())
+        .await
+        .expect("gov-dev loop check must not error");
 
     assert!(
         outcome.violated.is_empty(),
@@ -174,7 +181,10 @@ async fn unconfigured_worktree_with_the_same_shape_does_not_bounce() {
 
     let runner = runner_for_worktree(dir.path());
     let role = role_armed_with_handler_no_db_and_strict_layering();
-    let outcome = runner.check(&role, dir.path()).await.expect("gov-dev loop check must not error");
+    let outcome = runner
+        .check(&role, dir.path())
+        .await
+        .expect("gov-dev loop check must not error");
 
     assert!(
         outcome.violated.is_empty(),

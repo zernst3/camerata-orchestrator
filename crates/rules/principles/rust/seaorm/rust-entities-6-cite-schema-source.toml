@@ -1,37 +1,45 @@
 id = "RUST-ENTITIES-6"
+version = 1
 title = "Module-level doc comment citing the schema source"
-tag = "stack"
 domain = "rust:seaorm"
 layer = "library"
 enforcement = "structured"
+kind = "default_with_exceptions"
+inspectable = true
 default = true
 verification = "grounded"
 
 [decision]
 question = "What position does the project take on: Module-level doc comment citing the schema source?"
-default = "module-level-doc-comment-citing-the-schema-sourc"
+default = "module-level-doc-comment-citing-the-schema-source"
 why = "Makes drift detection a one-click trace: from the entity to the schema authority that defines it. Omitting the citation from the entity file forces drift checks to be reverse-engineered each time, since reviewers cannot tell at a glance which migration or schema doc defines the columns they are reading. Citing the source in a separate docs/ file or wiki page drifts from the entity over time: updates to one almost never propagate to the other, and the docs page eventually contradicts the code. Relying on git history to trace the schema origin works for shallow histories but breaks down after a few migrations and stops working entirely after squash merges, rebases, or migration consolidations rewrite the history that the trace would have followed."
 
 [[option]]
-id = "module-level-doc-comment-citing-the-schema-sourc"
+id = "module-level-doc-comment-citing-the-schema-source"
 label = "Module-level doc comment citing the schema source"
 directive = "Each entity file opens with a //! doc comment citing the source-of-truth schema location (e.g. the migration path or schema doc reference)."
+remediation = """
+Add a //! doc comment at the top of the entity file citing the source-of-truth schema location (the migration path or schema doc reference), instead of leaving the authority undocumented, in a separate docs file, or traceable only through git history. Verify by confirming a reader can find the schema's authoritative source directly from the entity file's own doc comment.
+"""
 why = "Makes drift detection a one-click trace: from the entity to the schema authority that defines it."
 
 [[option]]
 id = "entity-files-carry-no-citation-of-the-source-of"
+violates = true
 label = "No citation of source-of-truth schema location"
 directive = "entity files carry no citation of the source-of-truth schema location, and the authority that defines the columns must be reverse-engineered when needed"
 why = "Forces drift checks to be reverse-engineered each time: reviewers cannot tell at a glance which migration or schema doc defines the columns they are reading, so every drift investigation starts from scratch rather than from a direct link."
 
 [[option]]
 id = "the-source-of-truth-schema-citation-lives-in-a-s"
+violates = true
 label = "Schema citation lives in separate docs file"
 directive = "the source-of-truth schema citation lives in a separate docs/ file or wiki page that lists the authority for each entity, rather than inside the entity file itself"
 why = "Drifts from the entity over time: updates to one almost never propagate to the other, and the docs page eventually contradicts the code it was meant to document, which is worse than no citation at all because it actively misleads."
 
 [[option]]
 id = "the-source-of-truth-schema-authority-is-traced-t"
+violates = true
 label = "Schema authority traced through git history"
 directive = "the source-of-truth schema authority is traced through git history rather than recorded as a citation inside the entity file"
 why = "Works for shallow histories but breaks down after a few migrations and stops working entirely after squash merges, rebases, or migration consolidations rewrite the history that the trace would have followed."

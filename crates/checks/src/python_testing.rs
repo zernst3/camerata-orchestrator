@@ -12,7 +12,7 @@
 //! a test file (helper/fixture modules are legitimate), only that a file whose name signals
 //! test intent actually uses a name pytest will collect.
 
-use crate::arch_checker::{ArchChecker, ArchViolation, RepoView, SEVERITY_MEDIUM};
+use crate::arch_checker::{ArchChecker, ArchViolation, RepoView, ViolationGrade, SEVERITY_MEDIUM};
 
 pub const RULE_PYTHON_TEST_FILE_NAMING: &str = "PYTHON-TESTING-FILE-NAMING-1";
 
@@ -69,6 +69,7 @@ fn stray_test_file_violation(path: &str, filename: &str) -> Option<ArchViolation
     // the ambiguity the design memo calls out as out of scope for this lexical-grade pass.
     if filename.to_ascii_lowercase().starts_with("test") {
         return Some(ArchViolation {
+            grade: ViolationGrade::Defect,
             rule_id: RULE_PYTHON_TEST_FILE_NAMING.to_string(),
             file: path.to_string(),
             line: 0, // file-level finding — no single line is meaningful
@@ -110,11 +111,17 @@ mod tests {
     use super::*;
 
     fn view<'a>(files: &'a [(String, String)]) -> RepoView<'a> {
-        RepoView { spec: "test/repo", files }
+        RepoView {
+            spec: "test/repo",
+            files,
+        }
     }
 
     fn files(pairs: Vec<(&str, &str)>) -> Vec<(String, String)> {
-        pairs.into_iter().map(|(p, c)| (p.to_string(), c.to_string())).collect()
+        pairs
+            .into_iter()
+            .map(|(p, c)| (p.to_string(), c.to_string()))
+            .collect()
     }
 
     #[test]
@@ -150,7 +157,10 @@ mod tests {
 
     #[test]
     fn conftest_and_init_are_exempt_even_though_conftest_ends_in_test_py() {
-        let f = files(vec![("tests/conftest.py", "import pytest\n"), ("tests/__init__.py", "")]);
+        let f = files(vec![
+            ("tests/conftest.py", "import pytest\n"),
+            ("tests/__init__.py", ""),
+        ]);
         assert!(PythonTestFileNamingChecker.check(&view(&f)).is_empty());
     }
 
@@ -192,7 +202,10 @@ mod tests {
     #[test]
     fn no_test_directory_files_never_applies() {
         let f = files(vec![("README.md", "hello"), ("app/main.py", "pass\n")]);
-        assert!(!crate::arch_checker::checker_applies(&PythonTestFileNamingChecker, &f));
+        assert!(!crate::arch_checker::checker_applies(
+            &PythonTestFileNamingChecker,
+            &f
+        ));
     }
 
     #[test]
@@ -204,5 +217,23 @@ mod tests {
         let vs = PythonTestFileNamingChecker.check(&view(&f));
         assert_eq!(vs.len(), 1, "{vs:#?}");
         assert!(!vs[0].message.is_empty());
+    }
+
+    /// The scan gates each checker on its interest globs: if they stopped matching, the checker
+    /// would silently never run on any repo.
+    #[test]
+    fn the_checker_applies_to_python_files_under_a_test_directory_only() {
+        for path in ["tests/a.py", "pkg/test/a.py", "src/tests/unit/a.py"] {
+            let f = files(vec![(path, "x\n")]);
+            assert!(
+                crate::arch_checker::checker_applies(&PythonTestFileNamingChecker, &f),
+                "{path}"
+            );
+        }
+        let f = files(vec![("src/a.py", "x\n"), ("tests/a.txt", "x\n")]);
+        assert!(!crate::arch_checker::checker_applies(
+            &PythonTestFileNamingChecker,
+            &f
+        ));
     }
 }

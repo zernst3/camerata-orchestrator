@@ -873,7 +873,9 @@ impl Gateway {
         };
         eprintln!("[gateway] propose_memory recorded");
         append_memory_proposal(&record);
-        format!("MEMORY PROPOSED: \"{text}\". Recorded for the human to curate; continue your work.")
+        format!(
+            "MEMORY PROPOSED: \"{text}\". Recorded for the human to curate; continue your work."
+        )
     }
 
     /// Governed delegation. ENABLED only in orchestrator mode (the lead agent's
@@ -923,7 +925,6 @@ impl Gateway {
 
         let result = delegate::run_delegated(config, (*self.rule_subset).clone(), &subtask, &tier)
             .await
-            .map(|output| output)
             .unwrap_or_else(|e| e.to_string());
 
         // Observability: record the return. A child that could not finish above its
@@ -994,12 +995,7 @@ impl Gateway {
         });
 
         // Dispatch all workers concurrently.
-        let result = fan_out::run_fan_out(
-            config,
-            (*self.rule_subset).clone(),
-            entries,
-        )
-        .await;
+        let result = fan_out::run_fan_out(config, (*self.rule_subset).clone(), entries).await;
 
         // Observability: record the fan-out return.
         let (summary, incomplete_count) = match &result {
@@ -1126,7 +1122,10 @@ mod gate_sink_tests {
         assert!(r.content_hash.is_some());
         let hash = r.content_hash.as_deref().unwrap();
         assert_eq!(hash.len(), 64, "SHA-256 hex is 64 chars");
-        assert!(!hash.contains("secret"), "hash must not contain raw content");
+        assert!(
+            !hash.contains("secret"),
+            "hash must not contain raw content"
+        );
     }
 
     #[test]
@@ -1158,47 +1157,40 @@ mod gate_sink_tests {
     #[test]
     fn allow_record_has_no_content_hash_after_jsonl_roundtrip() {
         // #[serde(default)] means a missing field deserializes to None.
-        let r = build_gate_record(
-            "a/b.rs",
-            "ALLOWED: wrote 5 bytes to a/b.rs",
-            1,
-            "hello",
-        );
+        let r = build_gate_record("a/b.rs", "ALLOWED: wrote 5 bytes to a/b.rs", 1, "hello");
         let line = serde_json::to_string(&r).unwrap();
         let back: GateDecisionRecord = serde_json::from_str(&line).unwrap();
         assert!(back.content_hash.is_none());
     }
 
-    // Serialize the env-mutating test so it is order-independent within the binary.
-    // `pub(super)` (not private) so other env-mutating test modules in this file
-    // (e.g. `mcp_gated_write_boundary_tests`) can share the SAME lock rather than
-    // adding a second, uncoordinated mutex that would race this one over the shared
-    // `CAMERATA_*` env vars.
-    pub(super) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     #[test]
+    #[serial_test::serial(process_env)]
     fn sink_path_prefers_explicit_env_then_derives_from_rules_dir() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        // Explicit override wins.
-        std::env::set_var(super::GATE_EVENTS_FILE_ENV, "/tmp/explicit-sink.jsonl");
-        assert_eq!(
-            gate_events_sink_path(),
-            Some(std::path::PathBuf::from("/tmp/explicit-sink.jsonl"))
-        );
-        std::env::remove_var(super::GATE_EVENTS_FILE_ENV);
+        // Explicit override wins. (Scoped so each guard restores before the next phase.)
+        {
+            let _explicit = camerata_test_env::EnvGuard::set(
+                super::GATE_EVENTS_FILE_ENV,
+                "/tmp/explicit-sink.jsonl",
+            );
+            assert_eq!(
+                gate_events_sink_path(),
+                Some(std::path::PathBuf::from("/tmp/explicit-sink.jsonl"))
+            );
+        }
 
         // Otherwise it derives a gate-events.jsonl sibling of the rules file.
-        std::env::set_var(super::RULES_FILE_ENV, "/tmp/session-1/rules.json");
+        let _no_explicit = camerata_test_env::EnvGuard::remove(super::GATE_EVENTS_FILE_ENV);
+        let _rules =
+            camerata_test_env::EnvGuard::set(super::RULES_FILE_ENV, "/tmp/session-1/rules.json");
         assert_eq!(
             gate_events_sink_path(),
             Some(std::path::PathBuf::from("/tmp/session-1/gate-events.jsonl"))
         );
-        std::env::remove_var(super::RULES_FILE_ENV);
     }
 
     #[test]
+    #[serial_test::serial(process_env)]
     fn rules_file_load_failure_fails_closed_onto_the_full_floor() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let floor = enforced_gate_rules();
         // Sanity: the full floor is more than the synthetic GOV-1 fixture, and
         // includes the SEC-* content rules that a fail-OPEN [GOV-1] would shed.
@@ -1213,22 +1205,23 @@ mod gate_sink_tests {
         std::fs::create_dir_all(&dir).unwrap();
 
         // 1) File set but missing/unreadable -> full floor, NOT [GOV-1].
-        std::env::set_var(super::RULES_FILE_ENV, dir.join("does-not-exist.json"));
+        let _env = camerata_test_env::EnvGuard::set(
+            super::RULES_FILE_ENV,
+            dir.join("does-not-exist.json"),
+        );
         assert_eq!(load_rule_subset(), floor, "read failure must fail closed");
 
         // 2) File set but unparseable -> full floor.
         let bad = dir.join("bad.json");
         std::fs::write(&bad, "{ not json").unwrap();
-        std::env::set_var(super::RULES_FILE_ENV, &bad);
+        let _env2 = camerata_test_env::EnvGuard::set(super::RULES_FILE_ENV, &bad);
         assert_eq!(load_rule_subset(), floor, "parse failure must fail closed");
 
         // 3) File parses to an EMPTY subset -> full floor (never allow-everything).
         let empty = dir.join("empty.json");
         std::fs::write(&empty, "[]").unwrap();
-        std::env::set_var(super::RULES_FILE_ENV, &empty);
+        let _env3 = camerata_test_env::EnvGuard::set(super::RULES_FILE_ENV, &empty);
         assert_eq!(load_rule_subset(), floor, "empty subset must fail closed");
-
-        std::env::remove_var(super::RULES_FILE_ENV);
     }
 }
 
@@ -1237,30 +1230,34 @@ mod clarify_tool_tests {
     use super::*;
     use rmcp::handler::server::wrapper::Parameters;
 
-    // Serialize env-mutating clarify tests so they're order-independent in the binary.
-    static CLARIFY_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     #[test]
+    #[serial_test::serial(process_env)]
     fn clarify_sink_path_prefers_explicit_then_derives_from_rules_dir() {
-        let _guard = CLARIFY_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        std::env::set_var(CLARIFY_REQUESTS_FILE_ENV, "/tmp/explicit-clarify.jsonl");
-        assert_eq!(
-            clarify_requests_sink_path(),
-            Some(std::path::PathBuf::from("/tmp/explicit-clarify.jsonl"))
-        );
-        std::env::remove_var(CLARIFY_REQUESTS_FILE_ENV);
+        // Explicit override wins. (Scoped so the guard restores before the next phase.)
+        {
+            let _explicit = camerata_test_env::EnvGuard::set(
+                CLARIFY_REQUESTS_FILE_ENV,
+                "/tmp/explicit-clarify.jsonl",
+            );
+            assert_eq!(
+                clarify_requests_sink_path(),
+                Some(std::path::PathBuf::from("/tmp/explicit-clarify.jsonl"))
+            );
+        }
 
-        std::env::set_var(RULES_FILE_ENV, "/tmp/session-9/rules.json");
+        let _no_explicit = camerata_test_env::EnvGuard::remove(CLARIFY_REQUESTS_FILE_ENV);
+        let _rules = camerata_test_env::EnvGuard::set(RULES_FILE_ENV, "/tmp/session-9/rules.json");
         assert_eq!(
             clarify_requests_sink_path(),
-            Some(std::path::PathBuf::from("/tmp/session-9/clarify-requests.jsonl"))
+            Some(std::path::PathBuf::from(
+                "/tmp/session-9/clarify-requests.jsonl"
+            ))
         );
-        std::env::remove_var(RULES_FILE_ENV);
     }
 
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn ask_clarification_records_a_structured_question_to_the_sink() {
-        let _guard = CLARIFY_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = std::env::temp_dir().join(format!(
             "cam-clarify-tool-{}-{}",
             std::process::id(),
@@ -1268,7 +1265,7 @@ mod clarify_tool_tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         let sink = dir.join("clarify-requests.jsonl");
-        std::env::set_var(CLARIFY_REQUESTS_FILE_ENV, &sink);
+        let _env = camerata_test_env::EnvGuard::set(CLARIFY_REQUESTS_FILE_ENV, &sink);
 
         // A gateway with the default subset; ask_clarification is independent of rules.
         let gw = Gateway::with_rules(vec![gov1_rule()]);
@@ -1289,8 +1286,6 @@ mod clarify_tool_tests {
                 allow_free_text: true,
             }))
             .await;
-
-        std::env::remove_var(CLARIFY_REQUESTS_FILE_ENV);
 
         // The tool's return tells the agent to STOP — the pause point.
         assert!(out.contains("CLARIFICATION RECORDED"));
@@ -1314,7 +1309,11 @@ mod clarify_tool_tests {
             .filter_map(|e| e.ok())
             .map(|e| e.file_name())
             .collect();
-        assert_eq!(entries.len(), 1, "only the sink file should exist: {entries:?}");
+        assert_eq!(
+            entries.len(),
+            1,
+            "only the sink file should exist: {entries:?}"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1422,7 +1421,10 @@ mod jail_tests {
         );
 
         // A real in-jail write is still allowed.
-        assert!(within_jail(&worktree, worktree.join("src.rs").to_str().unwrap()));
+        assert!(within_jail(
+            &worktree,
+            worktree.join("src.rs").to_str().unwrap()
+        ));
 
         let _ = std::fs::remove_dir_all(&base);
     }
@@ -1456,7 +1458,7 @@ mod jail_tests {
 #[cfg(test)]
 mod fan_out_gate_invariant_tests {
     use camerata_agent::{
-        allowed_tools_for_role, allowed_tools_for_role_with_mode, FAN_OUT_TOOL, DELEGATE_TOOL,
+        allowed_tools_for_role, allowed_tools_for_role_with_mode, DELEGATE_TOOL, FAN_OUT_TOOL,
         GATED_WRITE_TOOL,
     };
     use camerata_core::{Role, RuleId};
@@ -1510,10 +1512,10 @@ mod fan_out_gate_invariant_tests {
 
 #[cfg(test)]
 mod integration_gate_module_tests {
+    use super::fan_out::WorkerResult;
     use camerata_gateway::integration_gate::{
         check_integration_gate, IntegrationGateInput, IntegrationGateResult,
     };
-    use super::fan_out::WorkerResult;
 
     fn no_workers() -> Vec<WorkerResult> {
         vec![]
@@ -1602,31 +1604,7 @@ mod integration_gate_module_tests {
 // a single-rule subset — still the real `gated_write` method, just not the full floor.
 #[cfg(test)]
 mod mcp_gated_write_boundary_tests {
-    use super::gate_sink_tests::ENV_LOCK;
     use super::*;
-
-    /// RAII guard: removes every env var it set, even if the test panics on an assertion —
-    /// so one failing test can never leak `CAMERATA_*` env state into the next test that
-    /// runs under the shared [`ENV_LOCK`].
-    #[derive(Default)]
-    struct EnvGuard {
-        keys: Vec<&'static str>,
-    }
-
-    impl EnvGuard {
-        fn set(&mut self, key: &'static str, val: impl AsRef<std::ffi::OsStr>) {
-            std::env::set_var(key, val);
-            self.keys.push(key);
-        }
-    }
-
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            for key in &self.keys {
-                std::env::remove_var(key);
-            }
-        }
-    }
 
     /// A fresh, empty, canonicalized temp directory to use as the jail root.
     fn make_jail(label: &str) -> std::path::PathBuf {
@@ -1650,11 +1628,10 @@ mod mcp_gated_write_boundary_tests {
 
     // ── 1. GOV-1: forbidden path ───────────────────────────────────────────────────────
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn forbidden_path_is_denied_and_never_written() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let jail = make_jail("gov1");
-        let mut env = EnvGuard::default();
-        env.set(WORKTREE_ROOT_ENV, &jail);
+        let _env = camerata_test_env::EnvGuard::set(WORKTREE_ROOT_ENV, &jail);
 
         let gw = Gateway::with_rules(enforced_gate_rules());
         let out = call_gated_write(&gw, "forbidden/leak.rs", "// agent tried to write here").await;
@@ -1671,12 +1648,11 @@ mod mcp_gated_write_boundary_tests {
 
     // ── 2. JAIL: absolute path outside the jail ────────────────────────────────────────
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn absolute_path_outside_jail_is_denied_by_jail_not_by_a_rule() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let jail = make_jail("jail-abs");
         let outside = make_jail("jail-abs-outside");
-        let mut env = EnvGuard::default();
-        env.set(WORKTREE_ROOT_ENV, &jail);
+        let _env = camerata_test_env::EnvGuard::set(WORKTREE_ROOT_ENV, &jail);
 
         let gw = Gateway::with_rules(enforced_gate_rules());
         let target = outside.join("leak.txt");
@@ -1686,7 +1662,10 @@ mod mcp_gated_write_boundary_tests {
             out.starts_with("DENIED [JAIL"),
             "expected a JAIL denial, got: {out}"
         );
-        assert!(!target.exists(), "a jail-denied write must never touch disk");
+        assert!(
+            !target.exists(),
+            "a jail-denied write must never touch disk"
+        );
 
         let _ = std::fs::remove_dir_all(&jail);
         let _ = std::fs::remove_dir_all(&outside);
@@ -1694,11 +1673,10 @@ mod mcp_gated_write_boundary_tests {
 
     // ── 3. JAIL: `..` traversal climbing entirely above the jail root ─────────────────
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn dotdot_traversal_escaping_the_jail_root_is_denied() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let jail = make_jail("jail-dotdot");
-        let mut env = EnvGuard::default();
-        env.set(WORKTREE_ROOT_ENV, &jail);
+        let _env = camerata_test_env::EnvGuard::set(WORKTREE_ROOT_ENV, &jail);
 
         let gw = Gateway::with_rules(enforced_gate_rules());
         // Climbs out of the jail root entirely (not just a `..` that stays inside it).
@@ -1709,18 +1687,20 @@ mod mcp_gated_write_boundary_tests {
             "expected a JAIL denial, got: {out}"
         );
         let escaped = jail.parent().unwrap().join("evil-sibling.txt");
-        assert!(!escaped.exists(), "a jail-denied write must never touch disk");
+        assert!(
+            !escaped.exists(),
+            "a jail-denied write must never touch disk"
+        );
 
         let _ = std::fs::remove_dir_all(&jail);
     }
 
     // ── 4. SEC-NO-HARDCODED-SECRETS-1 ──────────────────────────────────────────────────
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn hardcoded_secret_in_content_is_denied_and_never_written() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let jail = make_jail("secrets");
-        let mut env = EnvGuard::default();
-        env.set(WORKTREE_ROOT_ENV, &jail);
+        let _env = camerata_test_env::EnvGuard::set(WORKTREE_ROOT_ENV, &jail);
 
         let gw = Gateway::with_rules(enforced_gate_rules());
         let out = call_gated_write(
@@ -1739,11 +1719,10 @@ mod mcp_gated_write_boundary_tests {
 
     // ── 5. SEC-NO-RAW-SQL-CONCAT-1 ─────────────────────────────────────────────────────
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn raw_sql_concat_in_content_is_denied_and_never_written() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let jail = make_jail("sql-concat");
-        let mut env = EnvGuard::default();
-        env.set(WORKTREE_ROOT_ENV, &jail);
+        let _env = camerata_test_env::EnvGuard::set(WORKTREE_ROOT_ENV, &jail);
 
         let gw = Gateway::with_rules(enforced_gate_rules());
         let out = call_gated_write(
@@ -1762,11 +1741,10 @@ mod mcp_gated_write_boundary_tests {
 
     // ── 6. ARCH-NO-SECRETS-IN-URL-1 ────────────────────────────────────────────────────
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn secret_in_url_content_is_denied_and_never_written() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let jail = make_jail("url-secret");
-        let mut env = EnvGuard::default();
-        env.set(WORKTREE_ROOT_ENV, &jail);
+        let _env = camerata_test_env::EnvGuard::set(WORKTREE_ROOT_ENV, &jail);
 
         let gw = Gateway::with_rules(enforced_gate_rules());
         let out = call_gated_write(
@@ -1785,11 +1763,10 @@ mod mcp_gated_write_boundary_tests {
 
     // ── 7. SEC-NO-PATH-ESCAPE-1 via a `..` path SEGMENT (jail-legal, rule-forbidden) ──
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn dotdot_segment_that_stays_in_jail_is_denied_by_the_path_escape_rule() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let jail = make_jail("path-escape-dotdot");
-        let mut env = EnvGuard::default();
-        env.set(WORKTREE_ROOT_ENV, &jail);
+        let _env = camerata_test_env::EnvGuard::set(WORKTREE_ROOT_ENV, &jail);
 
         let gw = Gateway::with_rules(enforced_gate_rules());
         // Resolves (lexically) to `<jail>/secret.txt` — still INSIDE the jail, so the
@@ -1807,11 +1784,10 @@ mod mcp_gated_write_boundary_tests {
 
     // ── 8. SEC-NO-PATH-ESCAPE-1 via a `.git` path segment ──────────────────────────────
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn git_directory_segment_is_denied_by_the_path_escape_rule() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let jail = make_jail("path-escape-git");
-        let mut env = EnvGuard::default();
-        env.set(WORKTREE_ROOT_ENV, &jail);
+        let _env = camerata_test_env::EnvGuard::set(WORKTREE_ROOT_ENV, &jail);
 
         let gw = Gateway::with_rules(enforced_gate_rules());
         let out = call_gated_write(&gw, "repo/.git/hooks/pre-commit", "#!/bin/sh\necho hi").await;
@@ -1825,11 +1801,10 @@ mod mcp_gated_write_boundary_tests {
 
     // ── 9. SEC-NO-SECRET-FILES-1: a real `.env` ────────────────────────────────────────
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn real_dotenv_file_is_denied_and_never_written() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let jail = make_jail("dotenv");
-        let mut env = EnvGuard::default();
-        env.set(WORKTREE_ROOT_ENV, &jail);
+        let _env = camerata_test_env::EnvGuard::set(WORKTREE_ROOT_ENV, &jail);
 
         let gw = Gateway::with_rules(enforced_gate_rules());
         let out = call_gated_write(&gw, "config/.env", "API_SECRET=supersecretvalue").await;
@@ -1843,11 +1818,10 @@ mod mcp_gated_write_boundary_tests {
 
     // ── 10. SEC-NO-PRIVATE-KEY-1 (ISOLATED subset — see the masking note above) ───────
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn pem_private_key_block_is_denied_in_isolation_and_never_written() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let jail = make_jail("private-key");
-        let mut env = EnvGuard::default();
-        env.set(WORKTREE_ROOT_ENV, &jail);
+        let _env = camerata_test_env::EnvGuard::set(WORKTREE_ROOT_ENV, &jail);
 
         // Full-floor note: SEC-NO-HARDCODED-SECRETS-1 (earlier in registry order) also
         // matches a PEM header, so under the full floor THIS test would observe
@@ -1871,11 +1845,10 @@ mod mcp_gated_write_boundary_tests {
 
     // ── 11. SEC-NO-VENDOR-TOKEN-1 ──────────────────────────────────────────────────────
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn vendor_credential_token_is_denied_and_never_written() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let jail = make_jail("vendor-token");
-        let mut env = EnvGuard::default();
-        env.set(WORKTREE_ROOT_ENV, &jail);
+        let _env = camerata_test_env::EnvGuard::set(WORKTREE_ROOT_ENV, &jail);
 
         let gw = Gateway::with_rules(enforced_gate_rules());
         let out = call_gated_write(
@@ -1894,11 +1867,10 @@ mod mcp_gated_write_boundary_tests {
 
     // ── 12. SEC-NO-SECRET-FILE-1 (ISOLATED subset — see the masking note above) ───────
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn secret_bearing_file_extension_is_denied_in_isolation_and_never_written() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let jail = make_jail("secret-file-type");
-        let mut env = EnvGuard::default();
-        env.set(WORKTREE_ROOT_ENV, &jail);
+        let _env = camerata_test_env::EnvGuard::set(WORKTREE_ROOT_ENV, &jail);
 
         // Full-floor note: SEC-NO-SECRET-FILES-1 (earlier in registry order) also
         // matches `.p12`, so this rule is subsumed under the full floor. Isolating the
@@ -1915,11 +1887,10 @@ mod mcp_gated_write_boundary_tests {
 
     // ── 13. SEC-NO-DISABLED-TLS-1 ──────────────────────────────────────────────────────
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn disabled_tls_verification_is_denied_and_never_written() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let jail = make_jail("disabled-tls");
-        let mut env = EnvGuard::default();
-        env.set(WORKTREE_ROOT_ENV, &jail);
+        let _env = camerata_test_env::EnvGuard::set(WORKTREE_ROOT_ENV, &jail);
 
         let gw = Gateway::with_rules(enforced_gate_rules());
         let out = call_gated_write(&gw, "sub/http.rs", "requests.get(url, verify=False)").await;
@@ -1933,17 +1904,19 @@ mod mcp_gated_write_boundary_tests {
 
     // ── 14. SEC-NO-UNSAFE-DESERIALIZATION-1 ────────────────────────────────────────────
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn unsafe_deserialization_call_is_denied_and_never_written() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let jail = make_jail("unsafe-deser");
-        let mut env = EnvGuard::default();
-        env.set(WORKTREE_ROOT_ENV, &jail);
+        let _env = camerata_test_env::EnvGuard::set(WORKTREE_ROOT_ENV, &jail);
 
         let gw = Gateway::with_rules(enforced_gate_rules());
         let out = call_gated_write(&gw, "sub/loader.rs", "data = pickle.loads(untrusted)").await;
 
         assert!(out.starts_with("DENIED ["), "expected a denial, got: {out}");
-        assert!(out.contains("SEC-NO-UNSAFE-DESERIALIZATION-1"), "got: {out}");
+        assert!(
+            out.contains("SEC-NO-UNSAFE-DESERIALIZATION-1"),
+            "got: {out}"
+        );
         assert!(!jail.join("sub/loader.rs").exists());
 
         let _ = std::fs::remove_dir_all(&jail);
@@ -1951,14 +1924,14 @@ mod mcp_gated_write_boundary_tests {
 
     // ── 15. SEC-NO-CAMERATA-CONFIG-1 ───────────────────────────────────────────────────
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn camerata_config_write_is_denied_and_never_written() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let jail = make_jail("camerata-config");
-        let mut env = EnvGuard::default();
-        env.set(WORKTREE_ROOT_ENV, &jail);
+        let _env = camerata_test_env::EnvGuard::set(WORKTREE_ROOT_ENV, &jail);
 
         let gw = Gateway::with_rules(enforced_gate_rules());
-        let out = call_gated_write(&gw, "sub/.camerata/checks.toml", "[gate]\ndisabled = true").await;
+        let out =
+            call_gated_write(&gw, "sub/.camerata/checks.toml", "[gate]\ndisabled = true").await;
 
         assert!(out.starts_with("DENIED ["), "expected a denial, got: {out}");
         assert!(out.contains("SEC-NO-CAMERATA-CONFIG-1"), "got: {out}");
@@ -1969,11 +1942,10 @@ mod mcp_gated_write_boundary_tests {
 
     // ── 16. SEC-NO-GIT-STATE-MUTATION-1 ────────────────────────────────────────────────
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn git_state_mutating_command_in_content_is_denied_and_never_written() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let jail = make_jail("git-mutation");
-        let mut env = EnvGuard::default();
-        env.set(WORKTREE_ROOT_ENV, &jail);
+        let _env = camerata_test_env::EnvGuard::set(WORKTREE_ROOT_ENV, &jail);
 
         let gw = Gateway::with_rules(enforced_gate_rules());
         let out = call_gated_write(&gw, "sub/scripts/reset.sh", "git reset --hard HEAD").await;
@@ -1987,11 +1959,10 @@ mod mcp_gated_write_boundary_tests {
 
     // ── 17. Allow control: a clean, in-jail, rule-compliant write ─────────────────────
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn clean_write_is_allowed_and_lands_on_disk_with_exact_content() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let jail = make_jail("allow-control");
-        let mut env = EnvGuard::default();
-        env.set(WORKTREE_ROOT_ENV, &jail);
+        let _env = camerata_test_env::EnvGuard::set(WORKTREE_ROOT_ENV, &jail);
 
         // `gated_write` shells out to `std::fs::write`, which (like a real editor tool)
         // does not create missing parent directories — the parent must already exist,
@@ -2005,15 +1976,18 @@ mod mcp_gated_write_boundary_tests {
         assert!(out.starts_with("ALLOWED"), "expected an allow, got: {out}");
         let written = std::fs::read_to_string(jail.join("sub/feature.rs"))
             .expect("the gate must have written the file");
-        assert_eq!(written, content, "the file must hold EXACTLY the written content");
+        assert_eq!(
+            written, content,
+            "the file must hold EXACTLY the written content"
+        );
 
         let _ = std::fs::remove_dir_all(&jail);
     }
 
     // ── 18. Sink assertion: one deny + one allow, faithfully recorded ─────────────────
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn sink_faithfully_records_a_deny_and_an_allow_verdict() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let jail = make_jail("sink");
         let sink_dir = std::env::temp_dir().join(format!(
             "cam-gw-mcp-sink-{}-{}",
@@ -2023,9 +1997,8 @@ mod mcp_gated_write_boundary_tests {
         std::fs::create_dir_all(&sink_dir).expect("create sink dir");
         let sink = sink_dir.join("gate-events.jsonl");
 
-        let mut env = EnvGuard::default();
-        env.set(WORKTREE_ROOT_ENV, &jail);
-        env.set(GATE_EVENTS_FILE_ENV, &sink);
+        let _env = camerata_test_env::EnvGuard::set(WORKTREE_ROOT_ENV, &jail);
+        let _env2 = camerata_test_env::EnvGuard::set(GATE_EVENTS_FILE_ENV, &sink);
 
         let gw = Gateway::with_rules(enforced_gate_rules());
         let deny_out = call_gated_write(&gw, "forbidden/leak.rs", "// denied content").await;
@@ -2042,7 +2015,11 @@ mod mcp_gated_write_boundary_tests {
         assert_eq!(deny_rec.kind, "gate");
         assert_eq!(deny_rec.verdict, "deny");
         assert_eq!(deny_rec.target, "forbidden/leak.rs");
-        assert!(deny_rec.rule.as_deref().unwrap_or_default().contains("GOV-1"));
+        assert!(deny_rec
+            .rule
+            .as_deref()
+            .unwrap_or_default()
+            .contains("GOV-1"));
         assert!(
             deny_rec.content_hash.is_some(),
             "a deny record must carry the content hash (never raw content)"
@@ -2065,12 +2042,11 @@ mod mcp_gated_write_boundary_tests {
 
     // ── 19. Ordering: jail escape AND rule-forbidden — JAIL must win ──────────────────
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn jail_escape_takes_precedence_over_a_rule_denial() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let jail = make_jail("ordering");
         let outside = make_jail("ordering-outside");
-        let mut env = EnvGuard::default();
-        env.set(WORKTREE_ROOT_ENV, &jail);
+        let _env = camerata_test_env::EnvGuard::set(WORKTREE_ROOT_ENV, &jail);
 
         let gw = Gateway::with_rules(enforced_gate_rules());
         // BOTH conditions apply: absolute + outside the jail (JAIL), AND the path
@@ -2084,7 +2060,10 @@ mod mcp_gated_write_boundary_tests {
             out.starts_with("DENIED [JAIL"),
             "jail must win over the rule engine, got: {out}"
         );
-        assert!(!out.contains("GOV-1"), "the rule engine must not have run at all: {out}");
+        assert!(
+            !out.contains("GOV-1"),
+            "the rule engine must not have run at all: {out}"
+        );
         assert!(!target.exists());
 
         let _ = std::fs::remove_dir_all(&jail);

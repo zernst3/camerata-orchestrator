@@ -37,10 +37,10 @@
 //! CONFLICTING merge cannot be resolved without an agent, so the run aborts the merge and
 //! reports an honest "conflicts need live mode" failure — never a faked resolution.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
-use camerata_agent::{HeartbeatFn, prepare_session};
+use camerata_agent::{prepare_session, HeartbeatFn};
 use camerata_core::AgentDriver;
 use camerata_fleet::{governed_role, locate_gateway_bin};
 
@@ -182,7 +182,11 @@ pub async fn execute_update_branch_run(
                 content_hash: None,
             },
         );
-        uow.append_history(&story_id, "update_branch", &format!("Update branch failed: {detail}"));
+        uow.append_history(
+            &story_id,
+            "update_branch",
+            &format!("Update branch failed: {detail}"),
+        );
         // LIFECYCLE-2: a failure is a genuine FAILED terminal, not a silent AwaitingQa.
         runs.fail_with_reason(&run_id, detail);
     };
@@ -211,7 +215,11 @@ pub async fn execute_update_branch_run(
 
     // 1. Ensure the UoW branch is checked out.
     if let Err(e) = workspace::switch_branch(&dir, &target_branch).await {
-        fail(&runs, &uow, format!("could not check out the UoW branch `{target_branch}`: {e}"));
+        fail(
+            &runs,
+            &uow,
+            format!("could not check out the UoW branch `{target_branch}`: {e}"),
+        );
         return;
     }
 
@@ -222,10 +230,17 @@ pub async fn execute_update_branch_run(
         match token.as_deref() {
             Some(t) => {
                 if let Err(e) = workspace::fetch_branch(&dir, &repo, &source_branch, t).await {
-                    fail(&runs, &uow, format!("could not fetch origin branch `{source_branch}`: {e}"));
+                    fail(
+                        &runs,
+                        &uow,
+                        format!("could not fetch origin branch `{source_branch}`: {e}"),
+                    );
                     return;
                 }
-                info(&runs, format!("Fetched origin/{source_branch} for the merge."));
+                info(
+                    &runs,
+                    format!("Fetched origin/{source_branch} for the merge."),
+                );
             }
             None => {
                 info(
@@ -283,7 +298,15 @@ pub async fn execute_update_branch_run(
             // Continue the seq counter from where the merge phase left off.
             let start_seq = seq.load(Ordering::SeqCst);
             resolve_conflicts_and_commit(
-                &runs, &uow, &run_id, &story_id, &dir, &target_branch, &mref, &conflicts, &model,
+                &runs,
+                &uow,
+                &run_id,
+                &story_id,
+                &dir,
+                &target_branch,
+                &mref,
+                &conflicts,
+                &model,
                 grounding.as_deref(),
                 &read_dirs,
                 start_seq,
@@ -329,7 +352,7 @@ async fn resolve_conflicts_and_commit(
                 verdict: "error".to_string(),
                 rule: None,
                 detail: format!("{detail} (merge aborted — tree restored)."),
-            content_hash: None,
+                content_hash: None,
             },
         );
         uow.append_history(
@@ -401,7 +424,11 @@ async fn resolve_conflicts_and_commit(
             rule: None,
             detail: format!(
                 "Spawning single gated conflict-resolution agent on model `{}`.",
-                if model.trim().is_empty() { "<cli default>" } else { model }
+                if model.trim().is_empty() {
+                    "<cli default>"
+                } else {
+                    model
+                }
             ),
             content_hash: None,
         },
@@ -479,7 +506,9 @@ async fn resolve_conflicts_and_commit(
                     layer: "update-branch".to_string(),
                     verdict: "allow".to_string(),
                     rule: None,
-                    detail: format!("Conflicts resolved by the gated agent; merge committed. {out}"),
+                    detail: format!(
+                        "Conflicts resolved by the gated agent; merge committed. {out}"
+                    ),
                     content_hash: None,
                 },
             );
@@ -506,8 +535,14 @@ mod tests {
 
     #[test]
     fn merge_source_kind_parses_wire() {
-        assert_eq!(MergeSourceKind::from_wire("local"), Some(MergeSourceKind::Local));
-        assert_eq!(MergeSourceKind::from_wire("origin"), Some(MergeSourceKind::Origin));
+        assert_eq!(
+            MergeSourceKind::from_wire("local"),
+            Some(MergeSourceKind::Local)
+        );
+        assert_eq!(
+            MergeSourceKind::from_wire("origin"),
+            Some(MergeSourceKind::Origin)
+        );
         assert_eq!(MergeSourceKind::from_wire("bogus"), None);
     }
 
@@ -519,14 +554,23 @@ mod tests {
 
     #[test]
     fn conflict_prompt_is_resolution_oriented_and_forbids_commit() {
-        let p = conflict_prompt("o/r#1", "camerata/work", "origin/main", &["src/a.rs".into()], None);
+        let p = conflict_prompt(
+            "o/r#1",
+            "camerata/work",
+            "origin/main",
+            &["src/a.rs".into()],
+            None,
+        );
         assert!(p.contains("o/r#1"));
         assert!(p.contains("camerata/work"));
         assert!(p.contains("origin/main"));
         assert!(p.contains("src/a.rs"));
         // It must resolve markers + add, but NOT commit or push (server commits).
         assert!(p.contains("git add"));
-        assert!(p.to_lowercase().contains("do not run `git commit`") || p.contains("Do NOT run `git commit`"));
+        assert!(
+            p.to_lowercase().contains("do not run `git commit`")
+                || p.contains("Do NOT run `git commit`")
+        );
         assert!(p.contains("Do NOT push"));
     }
 
@@ -534,10 +578,10 @@ mod tests {
     /// error, run completes). Token-free, no network, no agent: a real local git repo is
     /// built with a guaranteed conflict and the runner is driven end to end.
     #[tokio::test(flavor = "multi_thread")]
+    #[serial_test::serial(process_env)]
     async fn conflict_with_live_mode_off_aborts_and_fails_closed() {
-        std::env::remove_var("CAMERATA_LIVE_BUILD");
-        let base =
-            std::env::temp_dir().join(format!("cam-upd-run-{}", std::process::id()));
+        let _env = camerata_test_env::EnvGuard::remove("CAMERATA_LIVE_BUILD");
+        let base = std::env::temp_dir().join(format!("cam-upd-run-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(&base).unwrap();
         let g = |dir: &std::path::Path, args: &[&str]| {
@@ -577,7 +621,7 @@ mod tests {
             "src".to_string(),
             MergeSourceKind::Local,
             None,
-            "claude-opus-4-8".to_string(),
+            "claude-opus-5".to_string(),
             None,
             Vec::new(),
             camerata_checks::vcs_action::ProcessRuleConfig::default(),
@@ -590,7 +634,10 @@ mod tests {
         assert!(run.done);
         // It must have reported the live-mode-off failure and aborted the merge.
         assert!(run.events.iter().any(|e| e.verdict == "error"));
-        assert!(run.events.iter().any(|e| e.detail.contains("live mode is off")));
+        assert!(run
+            .events
+            .iter()
+            .any(|e| e.detail.contains("live mode is off")));
         // Fail-closed: the tree is NOT mid-merge after the abort.
         assert!(!workspace::is_merge_in_progress(&base).await);
 
@@ -600,10 +647,10 @@ mod tests {
     /// A CLEAN merge completes for real even with live mode off (it is local git — no
     /// token, no model, no agent needed).
     #[tokio::test(flavor = "multi_thread")]
+    #[serial_test::serial(process_env)]
     async fn clean_merge_succeeds_with_live_mode_off() {
-        std::env::remove_var("CAMERATA_LIVE_BUILD");
-        let base =
-            std::env::temp_dir().join(format!("cam-upd-clean-{}", std::process::id()));
+        let _env = camerata_test_env::EnvGuard::remove("CAMERATA_LIVE_BUILD");
+        let base = std::env::temp_dir().join(format!("cam-upd-clean-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(&base).unwrap();
         let g = |dir: &std::path::Path, args: &[&str]| {
@@ -650,7 +697,10 @@ mod tests {
         let run = runs.get(&run_id).expect("run exists");
         assert_eq!(run.status, RunStatus::AwaitingQa);
         assert!(run.done);
-        assert!(run.events.iter().all(|e| e.verdict != "error"), "no error events on a clean merge");
+        assert!(
+            run.events.iter().all(|e| e.verdict != "error"),
+            "no error events on a clean merge"
+        );
         assert!(run.events.iter().any(|e| e.detail.contains("Clean merge")));
         // The merge produced a commit and the tree is not mid-merge.
         assert!(!workspace::is_merge_in_progress(&base).await);
@@ -662,8 +712,9 @@ mod tests {
     /// (a git mutation). The run stays in its terminal Cancelled state (never AwaitingQa),
     /// and HEAD is unchanged — no merge commit landed.
     #[tokio::test(flavor = "multi_thread")]
+    #[serial_test::serial(process_env)]
     async fn cancelled_run_does_not_merge_or_advance() {
-        std::env::remove_var("CAMERATA_LIVE_BUILD");
+        let _env = camerata_test_env::EnvGuard::remove("CAMERATA_LIVE_BUILD");
         let base = std::env::temp_dir().join(format!("cam-upd-cancel-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(&base).unwrap();
@@ -687,10 +738,7 @@ mod tests {
         g(&base, &["checkout", "-q", "main"]);
 
         // Record HEAD on main BEFORE the run so we can prove no merge commit was created.
-        let head_before = String::from_utf8(
-            g(&base, &["rev-parse", "HEAD"]).stdout,
-        )
-        .unwrap();
+        let head_before = String::from_utf8(g(&base, &["rev-parse", "HEAD"]).stdout).unwrap();
 
         let runs = RunStore::new();
         let uow = UowStore::new();
@@ -722,10 +770,16 @@ mod tests {
         assert!(run.done);
         // No merge happened: HEAD is unchanged and the tree is not mid-merge.
         let head_after = String::from_utf8(g(&base, &["rev-parse", "HEAD"]).stdout).unwrap();
-        assert_eq!(head_before, head_after, "no merge commit on a cancelled run");
+        assert_eq!(
+            head_before, head_after,
+            "no merge commit on a cancelled run"
+        );
         assert!(!workspace::is_merge_in_progress(&base).await);
         // other.txt (only on src) never landed on main.
-        assert!(!base.join("other.txt").exists(), "source file not merged in");
+        assert!(
+            !base.join("other.txt").exists(),
+            "source file not merged in"
+        );
 
         let _ = std::fs::remove_dir_all(&base);
     }

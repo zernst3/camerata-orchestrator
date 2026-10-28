@@ -1,0 +1,14 @@
+# Formatting is a CI gate (`cargo fmt --all -- --check` in .github/workflows/ci.yml).
+#
+# These values are rustfmt's defaults, pinned on purpose rather than left implicit:
+#
+# - max_width = 100: measured on 2026-10-21 against the then-unformatted tree. 100 was
+#   the LEAST-churn width (220 files, +16,525/-6,563). Every wider width churned more,
+#   because most of the tree had already been formatted at 100 and a wider limit re-joins
+#   those lines: 105 -> 298 files, 110 -> 305, 120 -> 315, 140 -> 322, 160 -> 326.
+#   The long lines that remain are mostly string literals and comments rustfmt cannot
+#   break, not code written to a wider width.
+# - edition = "2021": matches [workspace.package] edition, so a bare `rustfmt` run (an
+#   editor's format-on-save) formats exactly like `cargo fmt` does.
+max_width = 100
+edition = "2021"

@@ -1,9 +1,15 @@
 id = "ARCH-STRUCTURED-ERRORS-1"
+version = 1
 title = "Error responses use a structured envelope with stable machine-readable codes"
-tag = "stack"
 domain = "api-layer"
 layer = "universal"
 enforcement = "architectural"
+kind = "default_with_exceptions"
+inspectable = true
+# Deviation-ceiling escape hatch: a half-converted error envelope means every future endpoint
+# re-decides its error shape and every consumer must handle both, so the cost of the
+# inconsistency is paid again by each new feature on both sides of the contract.
+deviation_ceiling = "high"
 default = true
 qualifies = "Deterministically checkable, but no off-the-shelf linter rule enforces it: it requires a custom CI gate — a contract test that hits representative failure paths and validates each error body against the project's envelope schema (a top-level error object with a stable code, a human message, and optional details), optionally paired with a project-configured static check that handlers throw typed errors and route through the single error-rendering middleware rather than writing ad hoc bodies. No generic linter knows the project's envelope shape. Conformance holds when such a gate runs in CI and a handler that returns a bare string or an empty body fails it; it fails when error shapes vary per endpoint with no shared renderer."
 verification = "grounded"
@@ -14,29 +20,36 @@ title = "RFC 9457 — Problem Details for HTTP APIs"
 
 [decision]
 question = "What position does the project take on: Error responses use a structured envelope with stable machine-readable codes?"
-default = "error-responses-use-a-structured-envelope-with-s"
+default = "error-responses-use-a-structured-envelope-with-stable-machine-readable-codes"
 why = "Stringly-typed error messages are a leading source of brittle client code because logic ends up doing substring matches on text that was meant for humans. Stable machine-readable codes let clients build reliable retry, fallback, and UX behavior without coupling to wording. Returning plain string error messages forces clients to pattern-match on text; one copy edit silently breaks every consumer that pattern-matched the old wording. Returning HTTP status codes only without a body envelope does not carry enough resolution to distinguish between three different validation failures that share the same status, so clients cannot react appropriately. Per-endpoint custom error shapes force clients to write per-endpoint parsing, and the surface area grows with every new endpoint, instead of shrinking to a single shape across the API."
 
 [[option]]
-id = "error-responses-use-a-structured-envelope-with-s"
+id = "error-responses-use-a-structured-envelope-with-stable-machine-readable-codes"
 label = "Error responses use a structured envelope with stable machine-readable codes"
 directive = "Every 4xx and 5xx response uses the same shape: a top-level error object containing a code (a stable identifier like INVALID_EMAIL or RATE_LIMITED), a message (a human-readable description), and an optional details object for field-level errors or context. Codes are documented and remain stable across releases; messages may evolve freely. Clients pattern-match on code, never on message. Enforced at the controller layer with a single error-rendering middleware that all handlers route through."
+remediation = """
+Change the error response shape for this endpoint to a structured envelope with a stable code (like INVALID_EMAIL), a human-readable message, and an optional details object for field-level context. Keep the code stable across releases even if the message wording changes. Verify by triggering a 4xx/5xx from the endpoint and confirming the response body contains the code/message/details envelope instead of a plain string or empty body.
+"""
+effort = "medium"
 why = "Stringly-typed error messages are a leading source of brittle client code because logic ends up doing substring matches on text that was meant for humans."
 
 [[option]]
 id = "error-responses-are-plain-strings-or-contain-onl"
+violates = true
 label = "Plain string error responses"
 directive = "error responses are plain strings (or contain only a free-form message field) and clients are expected to pattern-match on the human-readable wording"
 why = "Plain string errors force clients to pattern-match on text; one copy edit silently breaks every consumer that pattern-matched the old wording."
 
 [[option]]
 id = "error-responses-use-only-the-http-status-code-wi"
+violates = true
 label = "Status code only, no body"
 directive = "error responses use only the HTTP status code with an empty body, and clients distinguish failure modes by status code alone"
 why = "Status-code-only errors do not carry enough resolution to distinguish between different validation failures that share the same status code, so clients cannot react appropriately."
 
 [[option]]
 id = "each-endpoint-defines-its-own-custom-error-respo"
+violates = true
 label = "Per-endpoint custom shapes"
 directive = "each endpoint defines its own custom error response shape, and clients implement per-endpoint error parsing rather than a single shared parser"
 why = "Per-endpoint custom shapes force clients to write per-endpoint parsing; the surface area grows with every new endpoint instead of shrinking to a single shared parser."

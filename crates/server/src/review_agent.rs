@@ -115,7 +115,8 @@ pub fn build_l3_prompt(input: &L3ReviewInput<'_>) -> String {
          ## Diff\n\n```diff\n{diff}\n```",
         story = input.story,
         rules = input.rules_prose,
-        diff = input.diff,
+        // The diff is client code going to a model: redact credential values first.
+        diff = camerata_secrets::redact_str(input.diff),
     )
 }
 
@@ -175,7 +176,8 @@ Be specific: name the repo and the contract clause that is violated. Do not incl
 fn l3_system_prompt() -> String {
     format!(
         "{}\n\n{}",
-        camerata_app_core::GOVERNANCE_KERNEL_READONLY, L3_SYSTEM_PROMPT
+        camerata_app_core::GOVERNANCE_KERNEL_READONLY,
+        L3_SYSTEM_PROMPT
     )
 }
 
@@ -184,7 +186,8 @@ fn l3_system_prompt() -> String {
 fn integration_system_prompt() -> String {
     format!(
         "{}\n\n{}",
-        camerata_app_core::GOVERNANCE_KERNEL_READONLY, INTEGRATION_SYSTEM_PROMPT
+        camerata_app_core::GOVERNANCE_KERNEL_READONLY,
+        INTEGRATION_SYSTEM_PROMPT
     )
 }
 
@@ -298,6 +301,9 @@ pub async fn check_integration_gate_live(
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
+mod redaction_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::project::L3ReviewConfig;
@@ -320,7 +326,7 @@ mod tests {
     fn l3_enabled_when_explicitly_set() {
         let config = L3ReviewConfig {
             enabled: true,
-            model: "claude-opus-4-8".to_string(),
+            model: "claude-opus-5".to_string(),
         };
         assert!(config.enabled);
     }
@@ -335,7 +341,7 @@ mod tests {
             story: "Add user authentication with JWT tokens.",
             rules_prose: "RULE-1: All endpoints must be authenticated.",
             diff: "+fn authenticate(token: &str) -> bool { true }",
-            model: "claude-sonnet-4-6",
+            model: "claude-sonnet-5",
         };
         let prompt = build_l3_prompt(&input);
 
@@ -490,12 +496,15 @@ mod tests {
     fn integration_prompt_includes_contract_and_repos() {
         let outputs = [
             ("backend", "GET /users returns [{id, name}]"),
-            ("frontend", "const res = await fetch('/users'); res[0].email"),
+            (
+                "frontend",
+                "const res = await fetch('/users'); res[0].email",
+            ),
         ];
         let input = IntegrationGateReviewInput {
             contract: "GET /api/users returns [{id, name, email}]",
             repo_outputs: &outputs,
-            model: "claude-sonnet-4-6",
+            model: "claude-sonnet-5",
         };
         let prompt = build_integration_prompt(&input);
 
@@ -527,11 +536,11 @@ mod tests {
                 &p.id,
                 L3ReviewConfig {
                     enabled: true,
-                    model: "claude-opus-4-8".to_string(),
+                    model: "claude-opus-5".to_string(),
                 },
             )
             .unwrap();
-        assert_eq!(updated.l3_model(), "claude-opus-4-8");
+        assert_eq!(updated.l3_model(), "claude-opus-5");
     }
 
     // ── 7. check_integration_gate_live short-circuits ─────────────────────────
@@ -560,8 +569,9 @@ mod tests {
                 self
             }
         }
-        let result =
-            check_integration_gate_live(&PanicLlm, None, &[], "claude-sonnet-4-6").await.unwrap();
+        let result = check_integration_gate_live(&PanicLlm, None, &[], "claude-sonnet-5")
+            .await
+            .unwrap();
         assert_eq!(result, LiveGateResult::NoContractRequired);
     }
 
@@ -584,6 +594,7 @@ mod tests {
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
                 or_cache_discount: None,
+                truncated: false,
             })
         }
         async fn complete_streaming(
@@ -608,7 +619,7 @@ mod tests {
             &llm,
             Some("GET /api/users returns [{id}]"),
             &[("backend", "returns [{id}]")],
-            "claude-sonnet-4-6",
+            "claude-sonnet-5",
         )
         .await
         .unwrap();
@@ -623,7 +634,7 @@ mod tests {
             &llm,
             Some("GET /api/users returns [{id, email}]"),
             &[("backend", "returns [{id}]")],
-            "claude-sonnet-4-6",
+            "claude-sonnet-5",
         )
         .await
         .unwrap();
@@ -652,12 +663,18 @@ mod tests {
         let crosses_boundary = true;
         let contract = "  ";
         let bundle_would_exist = crosses_boundary && !contract.trim().is_empty();
-        assert!(!bundle_would_exist, "no bundle when contract is whitespace-only");
+        assert!(
+            !bundle_would_exist,
+            "no bundle when contract is whitespace-only"
+        );
 
         // Real boundary + real contract → bundle IS created.
         let crosses_boundary = true;
         let contract = "GET /api/users returns [{id}]";
         let bundle_would_exist = crosses_boundary && !contract.trim().is_empty();
-        assert!(bundle_would_exist, "bundle IS created for real cross-boundary + contract");
+        assert!(
+            bundle_would_exist,
+            "bundle IS created for real cross-boundary + contract"
+        );
     }
 }

@@ -1,9 +1,17 @@
 id = "RUBY-RAILS-NO-STRING-SQL-1"
+version = 1
 title = "ActiveRecord queries use placeholders or hash conditions; SQL is never built from interpolated strings"
-tag = "stack"
 domain = "ruby:rails"
 layer = "framework"
-enforcement = "mechanical"
+# Enforcement-tier correction (the declared tier must match a detector that really runs): this
+# rule's `qualifies` text names brakeman / a Rubocop-Rails cop, but no such check is actually
+# wired today (no registered ArchChecker, no gateway rule arm, no bundled Semgrep rule, and Ruby
+# is not one of the Clippy/Ruff/ESLint preview tools). Declaring `mechanical` here claimed a hard
+# check that never ran. Corrected to `structured` (evaluated by the semantic/AI audit tier, not
+# mechanically enforced) until a real brakeman/Semgrep detector is wired.
+enforcement = "structured"
+kind = "defect"
+inspectable = true
 default = true
 qualifies = "Enforced by brakeman (SQL injection findings) and a Rubocop-Rails rule. Conformance holds when every `.where`, `.order`, `.joins`, `.group`, and `.having` call either passes a hash condition or a string literal with `?`/named-bind placeholders (`where('active = ? AND role = ?', true, role)`), never an interpolated string (`where(\"role = '#{role}'\")`). Any site where a Ruby variable or expression is interpolated directly into a SQL fragment string fails."
 verification = "grounded"
@@ -17,16 +25,22 @@ why = "String interpolation in a SQL fragment (`where(\"name = '#{params[:name]}
 id = "placeholders-or-hash-conditions"
 label = "hash conditions or ? / :named placeholders only"
 directive = "Every ActiveRecord query method that accepts a SQL fragment (`.where`, `.order`, `.joins`, `.having`, `.group`) receives either a hash (`where(status: 'active')`) or a string literal with `?` or `:name` placeholders whose values are passed as subsequent arguments (`where('status = ? AND role = :role', 'active', role: role)`). String interpolation (`\"#{variable}\"`) and string concatenation (`'col = ' + value`) inside any SQL fragment are forbidden. Column and table names that must be dynamic come from a fixed allow-list, not from request input."
+remediation = """
+Replace the string-interpolated SQL fragment in the query method (.where, .order, .joins, .having, .group) with a hash condition or ?/:named placeholders, passing the dynamic value as a separate argument instead of embedding it in the string. Verify by passing a value containing a SQL metacharacter as the bound value and confirming it is treated as data, not executable SQL.
+"""
+effort = "medium"
 why = "Hash conditions and placeholder syntax bind values separately from the SQL grammar so they can never be parsed as SQL, eliminating injection."
 
 [[option]]
 id = "sanitize-sql-for-conditions"
+violates = true
 label = "manually sanitize with sanitize_sql_for_conditions"
 directive = "Dynamic values are passed through `ActiveRecord::Base.sanitize_sql_for_conditions` or `connection.quote` before interpolation into a SQL string."
-why = "Reduces injection risk but is error-prone: missing a sanitize call at any one site reintroduces the vulnerability, and the code is harder to audit than explicit bind parameters."
+why = "Protection depends on a sanitize call being present at every single site, so the one query that omits it is injectable while the code around it looks safe, and an auditor has to inspect each query individually to tell the two apart. Bind parameters make the same guarantee structurally, without the per-site review."
 
 [[option]]
 id = "string-interpolation"
+violates = true
 label = "interpolate values directly into SQL fragment strings"
 directive = "Dynamic values are embedded into SQL strings via Ruby string interpolation or concatenation inside `.where`, `.order`, or other query methods."
 why = "The canonical SQL injection antipattern; every such site is a latent vulnerability waiting for one unsanitized input."

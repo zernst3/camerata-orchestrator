@@ -25,6 +25,8 @@ use std::path::{Path, PathBuf};
 use camerata_checks::extract::enclosing::{enclosing_block, slice_lines};
 
 use super::files::MAX_FILE_BYTES;
+use super::source_file::{decode, read_bytes, Origin, Refused};
+use crate::workspace::{git_command, GitEnv, GIT_READS};
 
 /// The result of one finding-context lookup. Serializes straight to the endpoint's JSON body
 /// via [`to_json`](FindingContextOutcome::to_json) — see the design doc §3 for the wire shape.
@@ -50,10 +52,29 @@ pub enum FindingContextOutcome {
     NotUtf8,
     /// The file exceeds [`MAX_FILE_BYTES`] — the same cap the onboarding scan itself enforces.
     TooLarge,
+    /// The code viewer refuses the file: over its cap, or too slow to prepare. Same `too_large`
+    /// status as [`TooLarge`](FindingContextOutcome::TooLarge), with a reason that does not name
+    /// the 400 KB modal cap.
+    TooLargeToView,
     /// The file is readable, but `line` is past its current end (the file shrank).
     LineGone,
     /// The requested `path` resolves outside the repo directory — refused before any read.
     PathTraversal,
+    /// The inspected commit is not in this clone (history was rewritten, or the clone is
+    /// shallow). The working tree is read instead and the response says so.
+    CommitUnavailable,
+    /// The repo's source was deleted on purpose and not fetched back. Nothing on disk is read.
+    SourceDeleted {
+        deleted_at: String,
+        record_id: String,
+    },
+    /// A search could not run at all (git missing, not a repository, an error exit). Nothing was
+    /// searched, so no answer, empty or otherwise, may be drawn from it.
+    SearchFailed,
+    /// A search ran past its time limit and was stopped.
+    SearchTooSlow,
+    /// Too many reads of client code were already running; try again in a moment.
+    Busy,
 }
 
 impl FindingContextOutcome {
@@ -91,6 +112,13 @@ impl FindingContextOutcome {
                 "status": "too_large",
                 "reason": format!("file exceeds the {} KB cap", MAX_FILE_BYTES / 1000),
             }),
+            FindingContextOutcome::TooLargeToView => serde_json::json!({
+                "status": "too_large",
+                "reason": format!(
+                    "file is too large to view here (over {} MB, or too slow to prepare)",
+                    super::source_file::MAX_VIEWER_BYTES / (1024 * 1024)
+                ),
+            }),
             FindingContextOutcome::LineGone => serde_json::json!({
                 "status": "line_gone",
                 "reason": "file changed since scan",
@@ -98,6 +126,34 @@ impl FindingContextOutcome {
             FindingContextOutcome::PathTraversal => serde_json::json!({
                 "status": "path_traversal",
                 "reason": "requested path escapes the repo directory",
+            }),
+            FindingContextOutcome::CommitUnavailable => serde_json::json!({
+                "status": "commit_unavailable",
+                "reason": "Inspected commit not available in this clone; showing the working tree",
+            }),
+            FindingContextOutcome::SearchFailed => serde_json::json!({
+                "status": "unavailable",
+                "reason": "the search could not run",
+            }),
+            FindingContextOutcome::SearchTooSlow => serde_json::json!({
+                "status": "too_large",
+                "reason": "the search took too long; try a more specific symbol",
+            }),
+            FindingContextOutcome::Busy => serde_json::json!({
+                "status": "unavailable",
+                "reason": "too many code reads are running; try again in a moment",
+            }),
+            FindingContextOutcome::SourceDeleted {
+                deleted_at,
+                record_id,
+            } => serde_json::json!({
+                "status": "source_deleted",
+                "reason": format!(
+                    "Source deleted on {}, re-fetch to view",
+                    crate::client_source::records::long_date(deleted_at)
+                ),
+                "deleted_at": deleted_at,
+                "record_id": record_id,
             }),
         }
     }
@@ -108,47 +164,266 @@ impl FindingContextOutcome {
 /// `expect` (trimmed containment either direction) for a staleness signal. Never panics; every
 /// failure mode maps to a non-`Ok` [`FindingContextOutcome`] variant (see module docs).
 ///
-/// This is the ONLY side-effecting piece here (reads exactly one file — never the whole-tree
-/// `read_local_repo_files` walker). Path containment ([`resolve_contained_path`]) runs BEFORE
-/// any filesystem read.
+/// This is the ONLY side-effecting piece here (reads exactly one file, never the whole-tree
+/// `read_local_repo_files` walker). Path containment runs BEFORE any filesystem read.
 pub async fn lookup(
     repo_dir: &Path,
     rel_path: &str,
     line: usize,
     expect: Option<&str>,
 ) -> FindingContextOutcome {
-    let Some(abs_path) = resolve_contained_path(repo_dir, rel_path) else {
-        return FindingContextOutcome::PathTraversal;
-    };
+    lookup_at(Origin::WorkingTree(repo_dir), rel_path, line, expect).await
+}
 
-    let bytes = match tokio::fs::read(&abs_path).await {
-        Ok(b) => b,
-        Err(_) => return FindingContextOutcome::FileMissing,
-    };
-    if bytes.len() > MAX_FILE_BYTES {
-        return FindingContextOutcome::TooLarge;
+/// [`lookup`] over an explicit [`Origin`]: the working tree, or a commit read through git
+/// objects. The read is `source_file::read_bytes`, the one place a `(origin, path)` becomes bytes
+/// (path jail first, a git path additionally refused when absolute, with a `..` segment or a
+/// NUL), at this endpoint's own cap ([`MAX_FILE_BYTES`]).
+pub async fn lookup_at(
+    origin: Origin<'_>,
+    rel_path: &str,
+    line: usize,
+    expect: Option<&str>,
+) -> FindingContextOutcome {
+    match read_bytes(origin, rel_path, MAX_FILE_BYTES).await {
+        Ok(bytes) => describe(bytes, rel_path, line, expect),
+        Err(refused) => outcome_of(refused),
     }
-    let source = match String::from_utf8(bytes) {
-        Ok(s) => s,
-        Err(_) => return FindingContextOutcome::NotUtf8,
+}
+
+/// A refusal in the shared vocabulary at THIS endpoint's cap: `finding-context` and the batch
+/// answer an oversized file with the 400 KB `too_large` reason, not the viewer's.
+pub(crate) fn outcome_of(refused: Refused) -> FindingContextOutcome {
+    match refused {
+        Refused::TooLarge => FindingContextOutcome::TooLarge,
+        other => other.into(),
+    }
+}
+
+thread_local! {
+    /// Test seam: how many working-tree files this thread's lookups have read. Lets a test prove
+    /// that a deleted or unresolved repo never reaches the filesystem.
+    #[cfg(test)]
+    pub(crate) static WORKING_TREE_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Read one file from the working tree. The single place the working tree is read.
+pub(crate) async fn read_working_tree_file(abs_path: &Path) -> std::io::Result<Vec<u8>> {
+    #[cfg(test)]
+    WORKING_TREE_READS.with(|c| c.set(c.get() + 1));
+    tokio::fs::read(abs_path).await
+}
+
+/// A repo-relative path that is safe to put after `<sha>:` — no leading `/`, no `..` segment, no
+/// NUL.
+pub(crate) fn is_plain_relative_path(rel_path: &str) -> bool {
+    !rel_path.starts_with('/')
+        && !rel_path.contains('\0')
+        && !rel_path.split(['/', '\\']).any(|seg| seg == "..")
+}
+
+/// Why a git object read did not return a file.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum GitReadError {
+    /// The commit is not in this clone.
+    CommitUnavailable,
+    /// The commit exists but has no such file (or the path is a directory).
+    NotFound,
+    /// The blob is larger than the caller's cap.
+    TooLarge,
+    /// Every slot for reading client code was busy for too long ([`crate::workspace::GIT_READS`]).
+    Busy,
+}
+
+/// Whether `rel_path` at commit `sha` is a regular file (tree entry mode 100644 or 100755), by
+/// the read-only `git ls-tree`. The path follows `--`, so it can never be read as an option.
+async fn is_regular_file_at(dir: &Path, sha: &str, rel_path: &str) -> bool {
+    let Ok(output) = git_command(Some(dir), GitEnv::Isolated)
+        .args([
+            "-c",
+            "core.quotepath=off",
+            "ls-tree",
+            "-z",
+            sha,
+            "--",
+            rel_path,
+        ])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .await
+    else {
+        return false;
+    };
+    if !output.status.success() {
+        return false;
+    }
+    // `<mode> SP <type> SP <object> TAB <path> NUL`; the entry for exactly this path.
+    let wanted = rel_path.trim_end_matches('/').as_bytes();
+    output.stdout.split(|b| *b == 0).any(|entry| {
+        let Some(tab) = entry.iter().position(|b| *b == b'\t') else {
+            return false;
+        };
+        let (meta, path) = (&entry[..tab], &entry[tab + 1..]);
+        path == wanted && (meta.starts_with(b"100644 ") || meta.starts_with(b"100755 "))
+    })
+}
+
+/// A commit that has been checked to exist in a clone. Checking is one process, and a batch asks
+/// for many files of one commit, so the check is its own step: [`VerifiedCommit::verify`] once,
+/// then [`read_git_blob_at`] per file. A single-file read is that same pair
+/// (`source_file::read_bytes`, `Origin::Git`); the batch holds the commit and uses
+/// `Origin::Verified`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedCommit {
+    pub(crate) dir: PathBuf,
+    pub(crate) sha: String,
+}
+
+impl VerifiedCommit {
+    /// `Ok` when `sha` names a commit in the clone at `dir`.
+    pub(crate) async fn verify(dir: &Path, sha: &str) -> Result<Self, GitReadError> {
+        #[cfg(test)]
+        trace::VERIFIES.with(|c| c.set(c.get() + 1));
+        if !crate::client_source::git::commit_exists(dir, sha).await {
+            return Err(GitReadError::CommitUnavailable);
+        }
+        Ok(Self {
+            dir: dir.to_path_buf(),
+            sha: sha.to_string(),
+        })
+    }
+}
+
+/// `git cat-file blob <sha>:<path>` at a verified commit: the file as it was at the commit, never
+/// the working tree. The output is read only up to `cap_bytes + 1` bytes, so an oversized blob is
+/// detected (and the process killed) without buffering it.
+///
+/// The gate slot ([`GIT_READS`]) is taken here, per file, and released when the blob is read.
+pub(crate) async fn read_git_blob_at(
+    commit: &VerifiedCommit,
+    rel_path: &str,
+    cap_bytes: usize,
+) -> Result<Vec<u8>, GitReadError> {
+    use tokio::io::AsyncReadExt;
+
+    let (dir, sha) = (commit.dir.as_path(), commit.sha.as_str());
+    // From here a process runs: one of a bounded number at once.
+    let Some(_slot) = GIT_READS.enter().await else {
+        return Err(GitReadError::Busy);
+    };
+    #[cfg(test)]
+    let _trace = trace::SlotTrace::enter();
+    // Only a regular file is shown. A symlink's blob is its target path and a submodule is a
+    // commit, neither of which is the code a reader expects; a directory is not a file either.
+    if !is_regular_file_at(dir, sha, rel_path).await {
+        return Err(GitReadError::NotFound);
+    }
+    // `sha:` makes the argument an object name; nothing in `rel_path` can be read as an option.
+    let spec = format!("{sha}:{rel_path}");
+    let mut child = git_command(Some(dir), GitEnv::Isolated)
+        .args(["-c", "core.quotepath=off", "cat-file", "blob", &spec])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|_| GitReadError::NotFound)?;
+    let Some(stdout) = child.stdout.take() else {
+        return Err(GitReadError::NotFound);
+    };
+    let mut bytes = Vec::new();
+    let cap = cap_bytes as u64 + 1;
+    if stdout.take(cap).read_to_end(&mut bytes).await.is_err() {
+        return Err(GitReadError::NotFound);
+    }
+    if bytes.len() > cap_bytes {
+        // Dropping the child kills it; the rest of the blob is never read.
+        return Err(GitReadError::TooLarge);
+    }
+    match child.wait().await {
+        Ok(status) if status.success() => Ok(bytes),
+        _ => Err(GitReadError::NotFound),
+    }
+}
+
+/// Test seams of the git object read, thread-local so parallel tests cannot see each other.
+#[cfg(test)]
+pub(crate) mod trace {
+    use std::cell::Cell;
+
+    thread_local! {
+        /// Commit checks started on this thread.
+        pub(crate) static VERIFIES: Cell<usize> = const { Cell::new(0) };
+        /// `(held now, most held at once, taken in all)` read-gate slots on this thread.
+        static SLOTS: Cell<(usize, usize, usize)> = const { Cell::new((0, 0, 0)) };
+    }
+
+    /// Held for as long as a read holds a gate slot.
+    pub(crate) struct SlotTrace;
+
+    impl SlotTrace {
+        pub(crate) fn enter() -> Self {
+            SLOTS.with(|c| {
+                let (now, max, all) = c.get();
+                c.set((now + 1, max.max(now + 1), all + 1));
+            });
+            SlotTrace
+        }
+    }
+
+    impl Drop for SlotTrace {
+        fn drop(&mut self) {
+            SLOTS.with(|c| {
+                let (now, max, all) = c.get();
+                c.set((now - 1, max, all));
+            });
+        }
+    }
+
+    /// Zero this thread's counters before a measurement.
+    pub(crate) fn reset() {
+        VERIFIES.with(|c| c.set(0));
+        SLOTS.with(|c| c.set((0, 0, 0)));
+    }
+
+    /// The most gate slots one read pass held at once, and how many were taken in all.
+    pub(crate) fn slots() -> (usize, usize) {
+        SLOTS.with(|c| {
+            let (_, max, all) = c.get();
+            (max, all)
+        })
+    }
+}
+
+/// The shared tail of a lookup: size cap and UTF-8 (`source_file::decode`), enclosing block,
+/// redaction.
+fn describe(
+    bytes: Vec<u8>,
+    rel_path: &str,
+    line: usize,
+    expect: Option<&str>,
+) -> FindingContextOutcome {
+    let source = match decode(bytes, MAX_FILE_BYTES) {
+        Ok(source) => source,
+        Err(refused) => return outcome_of(refused),
     };
 
     let Some(block) = enclosing_block(rel_path, &source, line) else {
         return FindingContextOutcome::LineGone;
     };
 
-    let lines = slice_lines(&source, block.start_line, block.end_line);
-    let matches_snippet = match expect.map(str::trim).filter(|e| !e.is_empty()) {
-        None => true, // nothing to compare against — don't flag stale
-        Some(exp) => source
-            .lines()
-            .nth(line.saturating_sub(1))
-            .map(|actual| {
-                let actual = actual.trim();
-                actual.contains(exp) || exp.contains(actual)
-            })
-            .unwrap_or(false),
-    };
+    // The block goes to the operator's screen (and screen shares), so it is redacted like every
+    // other surface that shows client code: the whole block at once (a multi-line key body is
+    // only recognisable as a block), then re-split. The `\n` count is preserved, so line
+    // numbers hold.
+    let lines = redact_block(&slice_lines(&source, block.start_line, block.end_line));
+    // The staleness check compares the line AS DISPLAYED (redacted with its block): a caller's
+    // `expect` must not be able to probe text the display hides.
+    let displayed = line
+        .checked_sub(block.start_line)
+        .and_then(|i| lines.get(i))
+        .map(String::as_str);
+    let matches_snippet = snippet_matches(displayed, expect);
 
     FindingContextOutcome::Ok {
         lines,
@@ -161,11 +436,38 @@ pub async fn lookup(
     }
 }
 
+/// Whether the violation line, as DISPLAYED (already redacted in the context of its file), still
+/// matches the caller-supplied `expect` snippet text. `true` when there is nothing to compare
+/// (no `expect`), so nothing is flagged stale; `false` when the line is gone. The predicate is
+/// `camerata_api_types::snippet::line_matches_snippet`, the one the detail pane applies too;
+/// finding-context and the batch endpoint both call this.
+pub(crate) fn snippet_matches(displayed_line: Option<&str>, expect: Option<&str>) -> bool {
+    match expect.map(str::trim).filter(|e| !e.is_empty()) {
+        None => true, // nothing to compare against: don't flag stale
+        Some(exp) => displayed_line
+            .is_some_and(|line| camerata_api_types::snippet::line_matches_snippet(line, exp)),
+    }
+}
+
+/// Redact a block of lines as one text, returning the same number of lines.
+pub(crate) fn redact_block(lines: &[String]) -> Vec<String> {
+    let joined = lines.join("\n");
+    match camerata_secrets::redact_str(&joined) {
+        std::borrow::Cow::Borrowed(_) => lines.to_vec(),
+        std::borrow::Cow::Owned(redacted) => redacted.split('\n').map(str::to_string).collect(),
+    }
+}
+
 /// `"sql"` for a `.sql` path, else the [`camerata_checks::extract::SourceLang`] label, else
 /// `"text"` for anything the extractor layer doesn't cover — purely cosmetic (the UI's
 /// "language" tag), never affects which block is resolved.
-fn language_label(rel_path: &str) -> String {
-    if rel_path.rsplit('.').next().map(|e| e.eq_ignore_ascii_case("sql")).unwrap_or(false) {
+pub(crate) fn language_label(rel_path: &str) -> String {
+    if rel_path
+        .rsplit('.')
+        .next()
+        .map(|e| e.eq_ignore_ascii_case("sql"))
+        .unwrap_or(false)
+    {
         return "sql".to_string();
     }
     camerata_checks::extract::lang_for_path(rel_path)
@@ -180,7 +482,7 @@ fn language_label(rel_path: &str) -> String {
 /// ancestor of both the target and the root (resolving any symlinks in it), then compare with
 /// `starts_with`. Using the existing-ancestor form (rather than requiring the exact target to
 /// exist) means containment can still be checked for a file that's already been deleted.
-fn resolve_contained_path(repo_dir: &Path, rel_path: &str) -> Option<PathBuf> {
+pub(crate) fn resolve_contained_path(repo_dir: &Path, rel_path: &str) -> Option<PathBuf> {
     if rel_path.trim().is_empty() {
         return None;
     }
@@ -197,7 +499,7 @@ fn resolve_contained_path(repo_dir: &Path, rel_path: &str) -> Option<PathBuf> {
 /// Lexically collapse `.`/`..` components WITHOUT touching the filesystem (no symlink
 /// resolution) — the first pass before [`canonicalize_existing_prefix`] resolves symlinks in
 /// whatever prefix actually exists on disk.
-fn normalize_lexical(p: &Path) -> PathBuf {
+pub(crate) fn normalize_lexical(p: &Path) -> PathBuf {
     let mut out = PathBuf::new();
     for comp in p.components() {
         match comp {
@@ -215,7 +517,7 @@ fn normalize_lexical(p: &Path) -> PathBuf {
 /// rejoin the remaining not-yet-existing tail components as-is. Lets containment be verified
 /// even for a path that doesn't exist (a deleted file, or a traversal attempt into a path that
 /// was never real) — [`std::fs::canonicalize`] alone would just error in that case.
-fn canonicalize_existing_prefix(p: &Path) -> PathBuf {
+pub(crate) fn canonicalize_existing_prefix(p: &Path) -> PathBuf {
     let mut ancestor = p.to_path_buf();
     let mut tail: Vec<std::ffi::OsString> = Vec::new();
     loop {
@@ -272,7 +574,10 @@ mod tests {
                 assert_eq!((start_line, end_line), (1, 4));
                 assert_eq!(kind, "function");
                 assert_eq!(language, "rust");
-                assert!(matches_snippet, "no `expect` supplied — must not flag stale");
+                assert!(
+                    matches_snippet,
+                    "no `expect` supplied — must not flag stale"
+                );
             }
             other => panic!("expected Ok, got {other:?}"),
         }
@@ -284,8 +589,13 @@ mod tests {
         write(tmp.path(), "src/lib.rs", "fn f() {\n    let x = 1;\n}\n");
         let outcome = lookup(tmp.path(), "src/lib.rs", 2, Some("let x = 999;")).await;
         match outcome {
-            FindingContextOutcome::Ok { matches_snippet, .. } => {
-                assert!(!matches_snippet, "expect text doesn't match — must flag stale")
+            FindingContextOutcome::Ok {
+                matches_snippet, ..
+            } => {
+                assert!(
+                    !matches_snippet,
+                    "expect text doesn't match — must flag stale"
+                )
             }
             other => panic!("expected Ok, got {other:?}"),
         }
@@ -297,7 +607,9 @@ mod tests {
         write(tmp.path(), "src/lib.rs", "fn f() {\n    let x = 1;\n}\n");
         let outcome = lookup(tmp.path(), "src/lib.rs", 2, Some("let x = 1;")).await;
         match outcome {
-            FindingContextOutcome::Ok { matches_snippet, .. } => assert!(matches_snippet),
+            FindingContextOutcome::Ok {
+                matches_snippet, ..
+            } => assert!(matches_snippet),
             other => panic!("expected Ok, got {other:?}"),
         }
     }

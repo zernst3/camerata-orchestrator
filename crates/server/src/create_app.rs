@@ -73,11 +73,8 @@ impl RepoPusher for LiveRepoPusher {
         repo_full_name: &str,
         token: &str,
     ) -> anyhow::Result<()> {
-        crate::workspace::init_repo_with_initial_commit(
-            local_dir,
-            "Initial scaffold (Camerata)",
-        )
-        .await?;
+        crate::workspace::init_repo_with_initial_commit(local_dir, "Initial scaffold (Camerata)")
+            .await?;
         crate::workspace::set_origin(local_dir, repo_full_name).await?;
         crate::workspace::push_branch(local_dir, repo_full_name, "main", token).await?;
         Ok(())
@@ -156,7 +153,10 @@ pub async fn create_and_push_repo(
         .init_commit_and_push(local_dir, &full_name, token)
         .await?;
 
-    Ok(CreatedRepo { full_name, html_url })
+    Ok(CreatedRepo {
+        full_name,
+        html_url,
+    })
 }
 
 // ── Orchestration: scaffold + create repo + register the project ───────────────────
@@ -263,7 +263,9 @@ async fn scaffold_and_register(
     let project = state
         .projects()
         .create(&name, vec![created.full_name.clone()])
-        .ok_or_else(|| anyhow::anyhow!("could not create a Camerata project for the scaffolded app"))?;
+        .ok_or_else(|| {
+            anyhow::anyhow!("could not create a Camerata project for the scaffolded app")
+        })?;
     // A scaffolded app is already governed (it shipped with the vetted skeleton's own
     // AGENTS.md/CONVENTIONS.md/.camerata rules baked in) — mark it onboarded rather
     // than leaving it in the "not yet onboarded" state a normal brownfield repo starts
@@ -300,6 +302,7 @@ async fn scaffold_and_register(
 // ── Tests ────────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
+#[derive(Default)]
 pub struct NoopRepoPusher {
     pub calls: std::sync::Mutex<Vec<(std::path::PathBuf, String, String)>>,
 }
@@ -307,7 +310,7 @@ pub struct NoopRepoPusher {
 #[cfg(test)]
 impl NoopRepoPusher {
     pub fn new() -> Self {
-        Self { calls: std::sync::Mutex::new(Vec::new()) }
+        Self::default()
     }
 }
 
@@ -320,11 +323,16 @@ impl RepoPusher for NoopRepoPusher {
         repo_full_name: &str,
         token: &str,
     ) -> anyhow::Result<()> {
-        self.calls.lock().unwrap().push((
-            local_dir.to_path_buf(),
-            repo_full_name.to_string(),
-            token.to_string(),
-        ));
+        // Test double: a poisoned lock means another test thread panicked mid-push; the Vec
+        // is still valid, so recover the guard and keep recording.
+        self.calls
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push((
+                local_dir.to_path_buf(),
+                repo_full_name.to_string(),
+                token.to_string(),
+            ));
         Ok(())
     }
 }
@@ -439,7 +447,9 @@ mod tests {
             ..Default::default()
         };
 
-        let result = run_create_app(&state, reqs, &transport, &pusher).await.unwrap();
+        let result = run_create_app(&state, reqs, &transport, &pusher)
+            .await
+            .unwrap();
         assert_eq!(result["ok"], true);
         assert_eq!(result["strategy"], "from_scratch");
         assert!(result["reason"].as_str().unwrap().contains("Desktop"));
@@ -462,18 +472,21 @@ mod tests {
             ..Default::default()
         };
 
-        let err = run_create_app(&state, reqs, &transport, &pusher).await.unwrap_err();
+        let err = run_create_app(&state, reqs, &transport, &pusher)
+            .await
+            .unwrap_err();
         assert!(err.contains("workspace"), "error was: {err}");
         assert!(transport.recorded_calls().is_empty());
     }
 
     #[tokio::test]
+    #[serial_test::serial(process_env)]
     async fn skeleton_without_github_token_fails_clearly() {
-        std::env::remove_var("CAMERATA_GITHUB_TOKEN");
+        let _env = camerata_test_env::EnvGuard::remove("CAMERATA_GITHUB_TOKEN");
         let state = crate::AppState::seeded();
-        state.settings().set_workspace_root(Some(
-            std::env::temp_dir().to_string_lossy().into_owned(),
-        ));
+        state
+            .settings()
+            .set_workspace_root(Some(std::env::temp_dir().to_string_lossy().into_owned()));
         let transport = github_transport();
         let pusher = NoopRepoPusher::new();
         let reqs = camerata_scaffold::AppRequirements {
@@ -481,7 +494,9 @@ mod tests {
             ..Default::default()
         };
 
-        let err = run_create_app(&state, reqs, &transport, &pusher).await.unwrap_err();
+        let err = run_create_app(&state, reqs, &transport, &pusher)
+            .await
+            .unwrap_err();
         assert!(err.contains("GitHub token"), "error was: {err}");
     }
 
@@ -519,7 +534,10 @@ mod tests {
 
         assert_eq!(result["ok"], true);
         assert_eq!(result["strategy"], "skeleton");
-        assert_eq!(result["repo_url"], "https://github.com/zernst3/trip-planner");
+        assert_eq!(
+            result["repo_url"],
+            "https://github.com/zernst3/trip-planner"
+        );
         let project_id = result["project_id"].as_str().unwrap().to_string();
 
         // The scaffolded files actually landed on disk, nested under owner/repo.
@@ -528,17 +546,26 @@ mod tests {
         assert!(expected_dir.join("CONVENTIONS.md").is_file());
 
         // No real git process ran (the NoopRepoPusher recorded the call instead).
-        let pusher_calls = pusher.calls.lock().unwrap();
+        // Snapshot the calls so the std MutexGuard is dropped before the later `.await`s.
+        let pusher_calls = pusher.calls.lock().unwrap().clone();
         assert_eq!(pusher_calls.len(), 1);
         assert_eq!(pusher_calls[0].1, "zernst3/trip-planner");
         assert_eq!(pusher_calls[0].2, "ghp_test_token");
 
         // The project is registered, onboarded, and carries the two seeded custom rules.
-        let project = state.projects().get(&project_id).expect("project registered");
+        let project = state
+            .projects()
+            .get(&project_id)
+            .expect("project registered");
         assert_eq!(project.repos, vec!["zernst3/trip-planner".to_string()]);
         assert_eq!(project.onboarded, vec!["zernst3/trip-planner".to_string()]);
         assert_eq!(project.ruleset.custom.len(), 2);
-        let names: Vec<&str> = project.ruleset.custom.iter().map(|c| c.name.as_str()).collect();
+        let names: Vec<&str> = project
+            .ruleset
+            .custom
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect();
         assert!(names.contains(&"db-on-demand"));
         assert!(names.contains(&"pwa-auto-capture"));
 
@@ -550,6 +577,8 @@ mod tests {
             .recent(10)
             .await
             .expect("recent governance events");
-        assert!(events.iter().any(|e| e.kind == "app_scaffolded" && e.run_id == project_id));
+        assert!(events
+            .iter()
+            .any(|e| e.kind == "app_scaffolded" && e.run_id == project_id));
     }
 }

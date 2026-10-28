@@ -1,9 +1,11 @@
 id = "RUST-TESTING-4"
+version = 1
 title = "Test bodies follow Arrange-Act-Assert (AAA): setup, execute, then assert — in that order"
-tag = "stack"
 domain = "rust:testing"
 layer = "language"
 enforcement = "prose"
+kind = "default_with_exceptions"
+inspectable = true
 default = true
 verification = "grounded"
 
@@ -24,10 +26,14 @@ why = "The Rust Book (Ch 11.1) describes the canonical three-phase test body —
 id = "arrange-act-assert-in-order"
 label = "Arrange then Act then Assert, three distinct phases in sequence"
 directive = "Each #[test] function body is organized into three sequential phases with no interleaving. Arrange: declare and initialize all inputs, expected values, and test doubles. Act: invoke the unit under test exactly once. Assert: verify the outcome with assert!, assert_eq!, assert_ne!, or by checking an Err/Ok result. A single blank line between phases makes the structure visible. A test that requires more than one Act phase should be split into separate #[test] functions. Inline // Arrange / // Act / // Assert comments are encouraged in longer tests."
+remediation = """
+Restructure the test body into three sequential, non-interleaved phases: Arrange (declare inputs and expected values), Act (invoke the unit under test exactly once), and Assert (verify the outcome). Verify by confirming the test has one Act call and its Arrange/Act/Assert phases don't interleave.
+"""
 why = "Mirrors the three-phase structure the Rust Book describes for test function bodies. One Act per test keeps failures attributable to a single cause."
 
 [[option]]
 id = "free-form-test-body"
+violates = true
 label = "Free-form test body with no enforced phase structure"
 directive = "Test bodies may interleave setup, execution, and assertion in whatever order the test author finds clearest for the specific case."
 why = "Lower friction for trivial tests but produces inconsistent structure at scale: a reviewer reading many tests in a codebase with free-form bodies must re-derive the 'given' and 'when' boundaries each time, and the root cause of a failure is harder to attribute when setup, execution, and assertions are interleaved."

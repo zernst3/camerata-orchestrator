@@ -1,9 +1,17 @@
 id = "JAVASCRIPT-NEST-THIN-CONTROLLERS-DELEGATE-1"
+version = 1
 title = "Controllers stay thin; business logic and data access live in services"
-tag = "stack"
 domain = "javascript:nest"
 layer = "framework"
 enforcement = "structured"
+kind = "decision"
+inspectable = true
+# Deviation-ceiling escape hatch, INHERITED from ARCH-STRICT-LAYERING-1: severity must describe
+# the PROBLEM, not which rule happened to fire. Without this, a repo on this stack caps the
+# identical architectural defect at medium while an unmirrored stack reaches high under the
+# general rule. This rule mirrors ARCH-STRICT-LAYERING-1 because it re-litigates the same
+# hierarchy: controllers stay thin, business logic and data access live in services.
+deviation_ceiling = "high"
 default = true
 verification = "grounded"
 
@@ -24,6 +32,9 @@ why = "A controller's job is to handle an HTTP request: extract parameters and b
 id = "thin-controllers-delegate-to-services"
 label = "Controllers stay thin; delegate to services"
 directive = "Controllers are limited to HTTP concerns: extract the request, call a service, and map the result to a response. Business rules, data access (database queries, ORM calls), and external API calls live in services or repositories that the controller calls. A database query, computation, or API call inside a controller is forbidden; it moves behind the service layer."
+remediation = """
+Move the business logic and data access out of the controller method and into a service the controller calls, leaving the controller limited to extracting the request and mapping the service's result to a response. Verify by confirming the controller method contains no direct database or external API call.
+"""
 why = "Thin controllers keep transport concerns separate from domain logic, enable reuse, and improve testability."
 
 [[option]]

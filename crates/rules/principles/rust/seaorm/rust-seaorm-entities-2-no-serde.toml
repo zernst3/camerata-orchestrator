@@ -1,21 +1,26 @@
 id = "RUST-ENTITIES-2"
+version = 1
 title = "No serde derives on the SeaORM Model (load-bearing)"
-tag = "stack"
 domain = "rust:seaorm"
 layer = "library"
 enforcement = "structured"
+kind = "decision"
+inspectable = true
 default = true
 verification = "grounded"
 
 [decision]
 question = "What position does the project take on: No serde derives on the SeaORM Model (load-bearing)?"
-default = "no-serde-derives-on-the-seaorm-model-load-bearin"
+default = "no-serde-derives-on-the-seaorm-model-load-bearing"
 why = "The compiler then enforces the hexagonal boundary at compile time: code physically cannot JSON-encode a Model directly. Deriving serde on the Models removes that compile-time enforcement and lets code encode Models directly to JSON, which breaks the hexagonal boundary the rule is paying for. Allowing per-entity opt-in to serde derives moves the decision to the wrong level: whether a payload shape gets serialized is a per-endpoint DTO question, not a per-Model question, and the per-Model opt-in collapses those two decisions into one."
 
 [[option]]
-id = "no-serde-derives-on-the-seaorm-model-load-bearin"
+id = "no-serde-derives-on-the-seaorm-model-load-bearing"
 label = "No serde derives on the SeaORM Model (load-bearing)"
 directive = "Entity Models do not derive Serialize/Deserialize, which forces every API response through an explicit DTO plus mapper."
+remediation = """
+Remove the Serialize/Deserialize derive from the SeaORM entity Model, and add an explicit DTO plus mapper for any API response that currently serializes the Model directly. Verify by confirming the entity Model no longer derives Serialize/Deserialize and the API response is built from a separate DTO type.
+"""
 why = "The compiler then enforces the hexagonal boundary at compile time: code physically cannot JSON-encode a Model directly."
 
 [[option]]

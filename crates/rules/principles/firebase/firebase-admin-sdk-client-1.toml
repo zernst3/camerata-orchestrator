@@ -1,0 +1,42 @@
+id = "FIREBASE-ADMIN-SDK-CLIENT-1"
+version = 2
+title = "The Firebase Admin SDK is imported only by server code, never by code that ships to a browser"
+domain = "firebase"
+layer = "platform"
+enforcement = "architectural"
+kind = "defect"
+inspectable = true
+cwe = ["CWE-200", "CWE-798"]
+max_severity = "high"
+min_severity = "high"
+default = true
+verification = "grounded"
+qualifies = "Structural over JavaScript and TypeScript files. An import of firebase-admin (or a firebase-admin subpath) that is not type only is reported when the file is browser bundled: its nearest package.json depends on a client bundler or single page framework (vite, react-scripts, @angular/core, vue, svelte, parcel, webpack with react) and on no server runtime (next, nuxt, @sveltejs/kit, astro, express, fastify, koa, hono, firebase-functions, remix, nest), or its first statement is the use client directive, or it sits under public, static or www. A fullstack framework keeps server and client code in one package, so for those only the directive flags a file. Type only imports, test files, declaration files and the Functions package are not reported. A package's own top level scripts, script, tools, bin, server, api, functions, cli, seed, seeds, migrations and emulator folders run under Node and are not reported, nor are *.config.* files. When the only evidence is the package's bundler and the file is outside src/, the row is held for review rather than asserted. The service account key file itself is reported by the secrets check."
+
+[[sources]]
+url = "https://firebase.google.com/docs/admin/setup"
+title = "Add the Firebase Admin SDK to your server"
+
+[[sources]]
+url = "https://firebase.google.com/docs/projects/api-keys"
+title = "Learn about using and managing API keys for Firebase"
+
+[decision]
+question = "Is the Admin SDK imported by any code that ships to a browser?"
+default = "admin-sdk-stays-in-server-code"
+why = "The Admin SDK is for privileged server environments and is initialised with a service account that has full access to the project. Code that ships to a browser is public, so an Admin SDK import there either fails to build or ships the credentials. Firebase's setup guide asks for extremely high security awareness around the service account key."
+
+[[option]]
+id = "admin-sdk-stays-in-server-code"
+label = "The Admin SDK is imported only by server code"
+directive = "The firebase-admin package is imported only by code that runs on a server, such as Cloud Functions or a backend API. Code that ships to a browser calls a function or an endpoint for privileged work instead of importing the Admin SDK."
+remediation = "Remove the `firebase-admin` import from the browser code and call a Cloud Function or your own server endpoint for privileged work instead; if the file is really server code, move it out of the browser bundle. If a build ever shipped the service account credentials, rotate the key, then rebuild and confirm the bundle no longer contains the Admin SDK."
+effort = "medium"
+why = "Privileged credentials stay on the server, where the client cannot read them."
+
+[[option]]
+id = "admin-sdk-imported-by-browser-code"
+violates = true
+label = "The Admin SDK is imported by code that ships to a browser"
+directive = "Import the Admin SDK in code that is bundled for the browser."
+why = "The Admin SDK is for privileged server environments. In a browser bundle it either fails to build or ships the service account credentials it is initialised with, which let anyone act as the project with full access."

@@ -26,9 +26,9 @@ pub const OPENROUTER_API_KEY: &str = "openrouter_api_key";
 /// GitHub PAT (issues / PRs / push).  Replaces `CAMERATA_GITHUB_TOKEN` env var,
 /// which remains supported as a back-compat fallback.
 pub const GITHUB_TOKEN: &str = "github_token";
-/// Anthropic API key for the `api` Claude backend.  Hydrated into the
-/// `ANTHROPIC_API_KEY` env var at startup and on save; the env var remains supported
-/// as a back-compat fallback.
+/// Anthropic API key for the `api` Claude backend.  Read through
+/// `camerata_llm::credentials::anthropic_api_key` whenever a client is built (never copied
+/// into process env); the `ANTHROPIC_API_KEY` env var is only the fallback.
 pub const ANTHROPIC_API_KEY: &str = "anthropic_api_key";
 
 /// Canonical set of all known credential names. Used by the list endpoint and as an

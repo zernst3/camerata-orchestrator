@@ -1,9 +1,11 @@
 id = "JAVASCRIPT-EXPRESS-SECURITY-HEADERS-1"
+version = 1
 title = "A security-headers middleware is mounted app-wide"
-tag = "stack"
 domain = "javascript:express"
 layer = "framework"
 enforcement = "structured"
+kind = "defect"
+inspectable = true
 default = true
 verification = "grounded"
 
@@ -13,17 +15,21 @@ title = "Express.js — Production best practices: Security — Use Helmet"
 
 [decision]
 question = "What position does the project take on: A security-headers middleware is mounted app-wide?"
-default = "a-security-headers-middleware-is-mounted-app-wid"
+default = "a-security-headers-middleware-is-mounted-app-wide"
 why = "Express sends no protective HTTP response headers by default, and it advertises itself via a default X-Powered-By: Express header. Without a security-headers layer, every response ships missing the headers browsers use to harden the page: no Content-Security-Policy, no Strict-Transport-Security, no X-Content-Type-Options: nosniff, no clickjacking protection. These are defense-in-depth headers whose absence is invisible in normal operation and only matters under attack, which is exactly why they get forgotten. Mounting a security-headers middleware (helmet is the de-facto standard, applied once at the top of the chain) sets a sensible baseline of these headers on every response and removes the framework-fingerprinting header, in one line, covering routes added later automatically. Setting headers by hand on individual responses, or skipping them because nothing has gone wrong yet, leaves the coverage partial and the newest route most likely uncovered; an app-wide middleware is the one place the baseline can be guaranteed for every response. Application-specific policies (a strict CSP, CORS rules) are then tuned on top of that baseline rather than assembled from nothing."
 
 [[option]]
-id = "a-security-headers-middleware-is-mounted-app-wid"
+id = "a-security-headers-middleware-is-mounted-app-wide"
 label = "A security-headers middleware is mounted app-wide"
 directive = "A security-headers middleware (helmet, or an equivalent) is mounted once near the top of the middleware chain so every response carries a baseline of protective headers (Content-Security-Policy, Strict-Transport-Security, X-Content-Type-Options, frame protection) and the X-Powered-By fingerprint is removed. Application-specific policies such as a tightened CSP or CORS rules are configured on top of that baseline. Relying on Express's header defaults, or setting protective headers ad hoc per response, is not sufficient."
+remediation = """
+Mount a security-headers middleware (helmet or equivalent) near the top of the middleware chain, before route handlers, instead of setting headers ad hoc per response. Verify by inspecting the response headers from any endpoint and confirming Content-Security-Policy, Strict-Transport-Security, and X-Content-Type-Options are present by default.
+"""
 why = "Express sends no protective headers by default and advertises X-Powered-By; an app-wide middleware sets the security-header baseline on every response, including routes added later, in one place rather than per-response and partially."
 
 [[option]]
 id = "protective-response-headers-are-set-ad-hoc-or-le"
+violates = true
 label = "Ad hoc or default security headers"
 directive = "protective response headers are set ad hoc on individual responses, or left at Express's defaults, rather than mounting an app-wide security-headers middleware that covers every response by default"
 why = "Setting protective headers ad hoc on individual responses, or relying on Express's defaults, means coverage is partial: the newest route is most likely uncovered, the X-Powered-By fingerprint is still broadcast, and the absence of headers like Content-Security-Policy and Strict-Transport-Security is invisible in normal operation and only matters under attack, which is exactly when the omission is discovered."

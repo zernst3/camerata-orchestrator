@@ -1,0 +1,41 @@
+id = "FIREBASE-RULES-FIELD-VALIDATION-1"
+version = 2
+title = "Write rules constrain which fields and types a document may contain"
+domain = "firebase"
+layer = "platform"
+enforcement = "architectural"
+kind = "defect"
+inspectable = true
+cwe = ["CWE-915"]
+max_severity = "low"
+default = true
+verification = "grounded"
+qualifies = "The edge is deterministic and review graded; which fields matter is judged by the semantic pass. A Firestore allow for create, update or write whose condition is not an unconditional or signed in only grant (those belong to their own rules) and never reads the incoming document (request.resource.data) is reported once per match block, as a held finding at a low severity: nothing in the rule constrains the fields or types written. Any reference to the incoming document, even a single type check, makes the block silent, because partial validation is a judgment and not a fact. A write gated by a custom claim (request.auth.token.<claim>) or a document lookup (get, getAfter, exists, existsAfter) is a role check and is silent too. A write once log whose validation lives in a Cloud Function is still reported and is covered by the held wording. A rules file that firebase.json does not name (found only by its conventional name, or in a repository with no firebase.json) or that sits under an examples, example, samples, sample or docs folder is held for review with the reason stated, never asserted, and a critical severity is lowered to high. Rules edited in the Firebase console never land in the repository, so a repository scan reads only the rules file the project deploys."
+
+[[sources]]
+url = "https://firebase.google.com/docs/firestore/security/rules-fields"
+title = "Control access to specific fields"
+
+[[sources]]
+url = "https://firebase.google.com/docs/rules/basics"
+title = "Basic Security Rules"
+
+[decision]
+question = "Do write rules constrain which fields and types a document may contain?"
+default = "write-rules-constrain-fields-and-types"
+why = "Firestore documents have no schema, so the security rules are the only place field names and types can be constrained. A write rule that only checks who is asking lets an owner write any field of any type, including fields the application treats as privileged. Firebase documents hasOnly, hasAll and diff().affectedKeys() for exactly this."
+
+[[option]]
+id = "write-rules-constrain-fields-and-types"
+label = "Write rules constrain the fields and types a document may contain"
+directive = "Create and update rules read the incoming document: they allow only the expected keys (request.resource.data.keys().hasOnly([...])), check types (request.resource.data.name is string) and, for updates, restrict which fields may change (request.resource.data.diff(resource.data).affectedKeys().hasOnly([...])). Privileged fields such as roles, prices and credits cannot be written by the document's owner."
+remediation = "In the write rule for `<path>`, add `request.resource.data.keys().hasOnly([...])` listing exactly the fields the app writes, a type check for each (`is string`, `is int`) and, for updates, `request.resource.data.diff(resource.data).affectedKeys().hasOnly([...])` so privileged fields cannot change. Deploy and confirm in the emulator that a write with an extra field is rejected."
+effort = "medium"
+why = "A document shape that the rules enforce cannot be widened by a client, so privileged fields stay under the server's control."
+
+[[option]]
+id = "write-rules-accept-any-fields"
+violates = true
+label = "Write rules accept any fields of any type"
+directive = "Authorise writes by who is asking alone, accepting whatever fields the caller sends."
+why = "Firestore documents have no schema, so a rule that never reads the incoming document lets a caller write any field of any type, including privileged fields such as role, isAdmin, credits or price. The rules are the only place field names and types can be constrained."
