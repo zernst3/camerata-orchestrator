@@ -64,7 +64,13 @@ and its original requirements are not written down.
 
 - **Step 1, measure before building.** Write down what the console does today (Fable-led gap
   analysis against this section), run it live on a fixture repo, and list what is missing. Only
-  then refine.
+  then refine. DONE (analysis, 2026-10-27): `docs/plans/2026-10-27_dev-console-gap-analysis.md`.
+  Headline: the console is a tested single-agent "implement one story" pipeline, not the 2a loop;
+  the UI never sets a unit's branch, so single-repo runs fall through to the greenfield
+  scaffolder; the agent's write-time rule subset is a fixed compile-time set, not the project's
+  selected rules; GitHub identity is structural (`OWNER/REPO#N` parsed at run, PR and commit
+  sites); no merge step, no decision log, no findings-to-work handoff. Ten ranked gaps, blocking
+  first. The live run (section 6 of the analysis) is still to do.
 - **The roles, as practised in this repo:**
   - Orchestrator (top tier, today Opus): plans, writes briefs, decides, merges, never edits code
     directly except small fixes.
