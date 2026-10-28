@@ -17,6 +17,8 @@ session even when nothing reports. Every decision goes into `docs/OVERNIGHT_DECI
   Keychain approval click each time it is rebuilt. It is prepared for 09:00 instead.
 - Never push or merge `main` overnight; the end-of-session PR into `main` waits for the morning.
 - A failing test is fixed or explained, never retried until it passes.
+- Zach (23:35): if any run hits something that genuinely needs his sign-off, pause that run,
+  move on to the next item, and list it in the morning report under "Needs Zach".
 
 ## Work queue, in order
 
@@ -37,6 +39,16 @@ E. After the PDF rebuild merges: viewer 7b (reviewer notes into xlsx / JSON / PD
 F. When Wave D merges: the README count becomes 440 (the count test forces it).
 G. Spare capacity: Fable read-only false-negative hunt across the inspection pipeline (every
    path where a real finding can be dropped, downgraded, merged away or hidden), fix the HIGHs.
+I. Repo hardening work order (`_workspace/brownfield-audits/WORK_ORDER_REPO_HARDENING.md`, V1,
+   added 23:30). Cloud starts were refused (Remote Control), so it runs on the Mac, slotted into
+   free builder slots, in this order: H1 hygiene (after the CI branch merges), H0 corpus phase 0
+   (with the corpus-text merge), H2 client lock + execution isolation + DATA_HANDLING, H3
+   prompt-injection defense (after rank 4 merges), H5 citations + repeatability, H4 no silent loss
+   + engine version + triage log (after the PDF rebuild merges), H6 README/PLATFORM split (after
+   Wave D). Briefs: scratchpad `hardening_tasks.md` + `hardening_local_preamble.md`. Waiting on
+   Zach: D1 (where working notes go; blocks Phase 1 item 5), D3 branch protection (his GitHub
+   step), the `.claude/settings.json` deny-list move (needs his user settings; the permission
+   classifier blocks the agent from editing them), the release tag (with the morning PR).
 H. By 08:30: morning summary at the top of `docs/OVERNIGHT_DECISIONS.md`; the PR from the
    working branch into `main` drafted but not merged.
 
@@ -51,6 +63,13 @@ H. By 08:30: morning summary at the top of `docs/OVERNIGHT_DECISIONS.md`; the PR
 
 ## Status log (newest first)
 
+- 23:12: rank 10 merged onto the current base with all 7 review fixes (5,083 tests green in its
+  worktree); waits for the current gate, then merges with the CI branch. Corpus text (cloud)
+  finished, in Fable review. Disk 66 GB.
+- 23:25: KEV/EPSS merged (all 8 review fixes) and in the full gate. CI fix branch has all 5
+  review fixes, green on GitHub again (run 40623533174); merges after the current gate. Wave D
+  merge+fix builder started. Left for later: actions/checkout Node 20 deprecation; Rust 1.99
+  lint fixes before un-pinning `rust-toolchain.toml`; `workspace.rs` keeps its own reclaim copy.
 - 23:05: Wave D (cloud) reviewed: 2 HIGH false-positive shapes (Rust method-call helpers incl.
   trybuild; React setters escaping via object shorthand), 3 MEDIUM, 4 LOW. Decision: render-only
   and compile-only tests are smoke tests, not flagged. Merge+fix brief ready
