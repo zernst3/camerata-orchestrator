@@ -1598,7 +1598,8 @@ pub async fn audit_repos_with_llm_controlled(
         &crate::ai_audit::resolve_audit_model(model),
         calibration_model,
         selected,
-    );
+    )
+    .with_terse_output(controls.efficiency.terse_output);
     // Rank 5 `result_cache`: OFF forces a full AI re-scan (the same as `--full`), whatever the
     // prior manifest holds.
     let effective_prior = incremental_prior
@@ -5487,11 +5488,15 @@ mod tests {
             .with_rules_fingerprint(rules_fp)
             // The question the prior answered: the model `audit_repos` will resolve for
             // `model: None`, no calibration pick, no rules.
-            .with_ai_key(crate::scan_cache::AiScanKey::new(
-                &crate::ai_audit::resolve_audit_model(None),
-                None,
-                &[],
-            ))
+            .with_ai_key(
+                crate::scan_cache::AiScanKey::new(
+                    &crate::ai_audit::resolve_audit_model(None),
+                    None,
+                    &[],
+                )
+                // The default switches run the scan with `terse_output` on.
+                .with_terse_output(true),
+            )
             .with_ai_covered(true); // the healthy case: AI ran and completed last time
         b.record_repo(
             "me/api",
@@ -5557,14 +5562,24 @@ mod tests {
     async fn a_prior_from_another_model_or_prompt_version_is_not_reused() {
         let _env = camerata_test_env::EnvGuard::set("CAMERATA_DISABLE_DEP_AUDIT", "1");
         let rules_fp = crate::scan_cache::rules_fingerprint(std::iter::empty());
-        let current = crate::scan_cache::AiScanKey::new("claude-sonnet-5", None, &[]);
-        let other_model = crate::scan_cache::AiScanKey::new("claude-opus-5", None, &[]);
+        // A scan under the default switches runs with `terse_output` on, and the key says so.
+        let current =
+            crate::scan_cache::AiScanKey::new("claude-sonnet-5", None, &[]).with_terse_output(true);
+        let other_model =
+            crate::scan_cache::AiScanKey::new("claude-opus-5", None, &[]).with_terse_output(true);
         let other_prompt = crate::scan_cache::AiScanKey {
             prompt_schema_version: current.prompt_schema_version + 1,
             ..current.clone()
         };
+        // Rank 4: findings written by the other setting of `terse_output` answered a different
+        // question (a different prompt, a different recall), so they are not reused either.
+        let other_terse_setting = current.clone().with_terse_output(false);
 
-        for (label, prior_key) in [("model", other_model), ("prompt version", other_prompt)] {
+        for (label, prior_key) in [
+            ("model", other_model),
+            ("prompt version", other_prompt),
+            ("terse_output setting", other_terse_setting),
+        ] {
             let (dir, sources) = scratch_repo_with_secret();
             let content = std::fs::read_to_string(dir.path().join("config.rs")).unwrap();
             let mut b = crate::scan_cache::ManifestBuilder::new()

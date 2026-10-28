@@ -65,6 +65,14 @@ pub struct AiScanKey {
     /// Order-independent digest of every selected rule's id AND directive text, which is what the
     /// audit prompt actually asks.
     pub directives_fingerprint: String,
+    /// Whether the findings were produced under the `terse_output` measure (a one-sentence scan
+    /// `detail`, the full one regenerated afterwards). It changes what the model is asked and so
+    /// what it reports, which is not a pure saving like the scheduling measures, so a baseline
+    /// from the other setting is not reused: flipping the switch to find a regression must not
+    /// be answered from the other setting's cache. Absent in a key stored before the measure
+    /// existed, which reads as `false`: those findings were produced the old way.
+    #[serde(default)]
+    pub terse_output: bool,
 }
 
 impl AiScanKey {
@@ -87,7 +95,14 @@ impl AiScanKey {
                 "{:016x}",
                 crate::suppression::fnv1a(&parts.join("\u{1e}"))
             ),
+            terse_output: false,
         }
+    }
+
+    /// The key of a scan running with the `terse_output` measure `on` or off.
+    pub fn with_terse_output(mut self, on: bool) -> Self {
+        self.terse_output = on;
+        self
     }
 }
 

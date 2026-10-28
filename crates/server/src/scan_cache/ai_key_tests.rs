@@ -145,3 +145,26 @@ fn the_system_prompt_is_pinned_to_the_prompt_schema_version() {
         "the audit system prompt changed: bump AUDIT_PROMPT_SCHEMA_VERSION and update this pin"
     );
 }
+
+/// Rank 4: `terse_output` changes what the model is asked, so a baseline written under the
+/// other setting is not reused. A key stored before the field existed reads as `false`, which
+/// is what those findings were produced under.
+#[test]
+fn the_terse_output_setting_is_part_of_the_question() {
+    let rules = [rule("ARCH-A-1", "do A")];
+    let stored_off = key(MODEL, None, &rules);
+    let m = manifest_under("fp", &stored_off);
+    assert!(m.is_reusable_baseline("fp", &key(MODEL, None, &rules)));
+    assert!(!m.is_reusable_baseline("fp", &key(MODEL, None, &rules).with_terse_output(true)));
+
+    let m_on = manifest_under("fp", &key(MODEL, None, &rules).with_terse_output(true));
+    assert!(m_on.is_reusable_baseline("fp", &key(MODEL, None, &rules).with_terse_output(true)));
+    assert!(!m_on.is_reusable_baseline("fp", &key(MODEL, None, &rules)));
+
+    // A key persisted before the field existed.
+    let legacy: AiScanKey = serde_json::from_str(
+        r#"{"audit_model":"claude-sonnet-5","calibration_model":"","prompt_schema_version":1,"directives_fingerprint":"x"}"#,
+    )
+    .unwrap();
+    assert!(!legacy.terse_output);
+}

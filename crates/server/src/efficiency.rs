@@ -96,6 +96,11 @@ efficiency_measures! {
     /// Rank 6: a finding with no surrounding code goes straight to the rule's authored
     /// remediation with no model call. Off: it is sent to the fix model like any other.
     fix_prefilter => "findings with no code context skip the fix model when the rule has an authored fix",
+    /// Rank 4: scan passes ask for a one-sentence `detail` and no `proposed_rules` (the advisory
+    /// pass keeps them), and the full `detail` is regenerated once, after the first merge and
+    /// before calibration, for the findings that survived. Off: the scan prompts and the
+    /// pipeline are exactly what they were before rank 4.
+    terse_output => "scan passes write a short detail; the full detail is regenerated for the findings that survive the merge",
 }
 
 impl EfficiencyConfig {

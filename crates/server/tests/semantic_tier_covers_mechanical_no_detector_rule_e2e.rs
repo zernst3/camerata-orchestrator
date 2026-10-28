@@ -64,11 +64,27 @@ fn canned_finding_json() -> String {
     )
 }
 
+/// The `terse_output` measure asks a second question after the scan: the full explanation of each
+/// surviving finding. This stub answers it with the canned finding's own `detail` (what the scan
+/// "wrote" in full), and answers every other call with the canned scan response, as before.
+fn answer(req: &LlmRequest, canned: String) -> String {
+    let is_regeneration = req
+        .system
+        .as_deref()
+        .is_some_and(|s| s.starts_with("You write the full explanation"));
+    if !is_regeneration {
+        return canned;
+    }
+    let scan: serde_json::Value = serde_json::from_str(&canned).expect("the canned scan response");
+    let detail = scan["findings"][0]["detail"].as_str().unwrap_or_default();
+    serde_json::json!({"details": [{"index": 0, "detail": detail}]}).to_string()
+}
+
 #[async_trait]
 impl LlmPort for StubModel {
-    async fn complete(&self, _req: LlmRequest) -> anyhow::Result<LlmResponse> {
+    async fn complete(&self, req: LlmRequest) -> anyhow::Result<LlmResponse> {
         Ok(LlmResponse {
-            text: canned_finding_json(),
+            text: answer(&req, canned_finding_json()),
             model: "stub".to_string(),
             backend: "stub".to_string(),
             cost_usd: None,
@@ -83,12 +99,12 @@ impl LlmPort for StubModel {
 
     async fn complete_streaming(
         &self,
-        _req: LlmRequest,
+        req: LlmRequest,
         on_delta: &mut (dyn for<'a> FnMut(&'a str) + Send),
     ) -> anyhow::Result<LlmResponse> {
-        let text = canned_finding_json();
-        on_delta(&text);
-        self.complete(LlmRequest::new("")).await
+        let response = self.complete(req).await?;
+        on_delta(&response.text);
+        Ok(response)
     }
 
     fn as_any(&self) -> &dyn std::any::Any {

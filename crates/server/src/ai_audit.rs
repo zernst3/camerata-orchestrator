@@ -500,6 +500,7 @@ async fn admit_stage<'a>(
 /// Stage names as the failed-pass list shows them (also the spend-cap record's keys).
 pub const STAGE_ALTERNATIVES: &str = "rule-alternative recommendations";
 pub const STAGE_CALIBRATION: &str = "calibration (verification and hour estimates)";
+pub const STAGE_DETAIL: &str = "detail regeneration";
 pub const STAGE_FIX: &str = "fix-specific generation";
 pub const STAGE_CLONE_JUDGE: &str = "clone-advisory judge";
 pub const STAGE_DEEP: &str = "deep compliance tier";
@@ -760,9 +761,34 @@ pub fn build_digest(files: &[(String, String)]) -> String {
 pub const AUDIT_PROMPT_SCHEMA_VERSION: u32 = 1;
 
 /// The system prompt: what to look for, what NOT to (the mechanical tier is already
-/// covered), and the STRICT JSON schema to return.
+/// covered), and the STRICT JSON schema to return. This is the prompt with the `terse_output`
+/// measure OFF (the long `detail`, `proposed_rules` on every pass); [`audit_system_prompt_with`]
+/// is the one implementation and takes the switch.
 pub fn audit_system_prompt() -> String {
-    r#"You are a senior software architect performing a CONFORMANCE audit of an existing codebase for Camerata.
+    audit_system_prompt_with(false)
+}
+
+/// The separator [`parse_ai_findings`] puts between a finding's one-line `title` and its
+/// `detail` when it builds `Finding::detail`. The post-merge detail regeneration splits on the
+/// same constant to keep the headline and replace the explanation, so the two cannot drift.
+pub(crate) const HEADLINE_SEP: &str = " — ";
+
+/// [`audit_system_prompt`] with the `terse_output` switch explicit.
+///
+/// OFF (`terse == false`): byte-identical to the prompt before rank 4 (the incremental cache's
+/// pin test hashes it). ON: the output schema asks for a ONE-sentence `detail` and carries no
+/// `proposed_rules` array; the advisory pass adds that array back through its own instruction
+/// line ([`pass_task_line`]), which sits in the uncached suffix.
+///
+/// # Why one prompt for every pass, and not a second one for the non-advisory passes
+///
+/// The system prompt leads the prompt-cache prefix. If the advisory pass (a chunk's first
+/// rule-batch) and its sibling passes carried different system prompts, the siblings could not
+/// read the cache entry the advisory pass wrote (the whole `warm_schedule` saving) because the
+/// first block of the prefix would differ. So the terse prompt is the same for all passes and
+/// the one difference between them lives in the instruction line.
+pub fn audit_system_prompt_with(terse: bool) -> String {
+    let base = r#"You are a senior software architect performing a CONFORMANCE audit of an existing codebase for Camerata.
 
 The user message lists the rules the project has ADOPTED, each as `- [RULE-ID] directive`. Your job is to check the code against EACH adopted rule and report EVERY place the code violates it.
 
@@ -829,7 +855,62 @@ Return ONLY a JSON object, no prose, no markdown fences, in EXACTLY this shape:
 }
 If the code genuinely conforms everywhere, return {"findings": [], "proposed_rules": [], "needs_files": []}. Every finding must point at real code at a real line."#
         .to_string()
-        + crate::onboard::redact::MODEL_REDACTION_NOTICE
+        + crate::onboard::redact::MODEL_REDACTION_NOTICE;
+    if !terse {
+        return base;
+    }
+    let base = replace_expected(
+        &base,
+        r#""detail": "why it's a problem and what the fix direction is","#,
+        r#""detail": "ONE sentence, at most 25 words: why this code violates the rule, naming any other file or symbol the judgment depends on","#,
+    );
+    let base = replace_expected(&base, AUDIT_PROPOSED_RULES_SCHEMA, "");
+    let base = replace_expected(
+        &base,
+        r#"return {"findings": [], "proposed_rules": [], "needs_files": []}."#,
+        r#"return {"findings": [], "needs_files": []}."#,
+    );
+    replace_expected(
+        &base,
+        AUDIT_OUTPUT_SHAPE_LEAD,
+        &format!("{TERSE_DETAIL_PARAGRAPH}\n\n{AUDIT_OUTPUT_SHAPE_LEAD}"),
+    )
+}
+
+/// The sentence that opens the output-shape section of both scan system prompts. The terse
+/// variants insert their short-detail paragraph in front of it.
+const AUDIT_OUTPUT_SHAPE_LEAD: &str =
+    "Return ONLY a JSON object, no prose, no markdown fences, in EXACTLY this shape:";
+
+/// The `proposed_rules` array of the full output schema, exactly as it appears in
+/// [`audit_system_prompt`] (the terse prompt removes it).
+const AUDIT_PROPOSED_RULES_SCHEMA: &str = r#"  "proposed_rules": [
+    {
+      "name": "short-kebab-name (only for issues NOT covered by an adopted rule)",
+      "title": "the rule to enforce going forward",
+      "rationale": "why this rule, grounded in the findings",
+      "severity": "critical|high|medium|low",
+      "enforcement": "mechanical|review"
+    }
+  ],
+"#;
+
+/// What the terse scan prompts tell the model about `detail`. The full explanation is written
+/// later, for the findings that survive the merge, from the title, this sentence and the code
+/// around the line, so everything the judgment rests on has to be in those three places.
+const TERSE_DETAIL_PARAGRAPH: &str = "SHORT DETAIL. Write `detail` as ONE sentence of at most 25 words: the specific reason this code violates the rule, naming every OTHER file or symbol the judgment depends on (a flag read in another file, the helper whose body decides it). If the case is borderline, begin the sentence with \"Borderline:\". Do not write fix advice or background: a separate step writes the full explanation, for the findings that survive deduplication, from your title, this sentence and the code around the line. So whatever makes this a violation must be in the title, in `code`, or in this one sentence.";
+
+/// The instruction an ADVISORY pass adds to its line under `terse_output`, restoring the
+/// `proposed_rules` array the terse system prompt left out. Later passes are told not to report
+/// novel issues, so they have nothing to propose and never see this.
+const ADVISORY_PROPOSED_RULES_INSTRUCTION: &str = "In THIS pass only, ALSO add a top-level `proposed_rules` array to your JSON, one entry per genuinely novel issue you flagged: [{\"name\": \"short-kebab-name\", \"title\": \"the rule to enforce going forward\", \"rationale\": \"why this rule, grounded in the findings\", \"severity\": \"critical|high|medium|low\", \"enforcement\": \"mechanical|review\"}]. Use an empty array when you propose none.";
+
+/// `text` with the first `from` replaced by `to`. The tests pin that each replacement applies;
+/// a miss here would silently leave the full prompt in place, which only costs the saving,
+/// never correctness.
+fn replace_expected(text: &str, from: &str, to: &str) -> String {
+    debug_assert!(text.contains(from), "terse prompt: missing `{from}`");
+    text.replacen(from, to, 1)
 }
 
 /// Pull the first balanced-looking JSON object out of a model response (tolerates
@@ -996,7 +1077,7 @@ pub fn parse_ai_findings(
             // detail so the human still sees the one-line statement.
             let snippet = if code.is_empty() { title.clone() } else { code };
             let detail = match (title.is_empty(), detail.is_empty()) {
-                (false, false) => format!("{title} — {detail}"),
+                (false, false) => format!("{title}{HEADLINE_SEP}{detail}"),
                 (false, true) => title.clone(),
                 _ => detail,
             };
@@ -4217,10 +4298,18 @@ fn batch_cache_ttl(eff: crate::efficiency::EfficiencyConfig) -> crate::llm::Cach
 /// The instruction line that closes a scan pass's prompt. ONE definition for the real-time
 /// passes, the batch items and the pre-flight sample, so the three can never disagree about what
 /// a pass asks. `advisory` adds the "also flag other genuine issues" task (first rule-batch of a
-/// chunk only).
-fn pass_task_line(advisory: bool, bi: usize, n_b: usize) -> String {
+/// chunk only). `terse` is the `terse_output` switch: the terse system prompt carries no
+/// `proposed_rules` array, so the advisory line (the only pass that may propose rules) adds it
+/// back here, in the uncached suffix, where it cannot disturb the shared cache prefix. With
+/// `terse` off the line is exactly what it always was.
+fn pass_task_line(advisory: bool, bi: usize, n_b: usize, terse: bool) -> String {
     if advisory {
-        format!("── Check the code above against the ADOPTED rules below (batch {}/{n_b}); ALSO flag any other genuine issues NOT covered by an adopted rule. Use the REPO MAP for cross-file context. ──", bi + 1)
+        let line = format!("── Check the code above against the ADOPTED rules below (batch {}/{n_b}); ALSO flag any other genuine issues NOT covered by an adopted rule. Use the REPO MAP for cross-file context. ──", bi + 1);
+        if terse {
+            format!("{line}\n{ADVISORY_PROPOSED_RULES_INSTRUCTION}")
+        } else {
+            line
+        }
     } else {
         format!("── Check the code above against ONLY the ADOPTED rules below (batch {}/{n_b}). Do NOT report issues outside these rules — a separate pass already covers novel findings. Use the REPO MAP for cross-file context. ──", bi + 1)
     }
@@ -4229,9 +4318,9 @@ fn pass_task_line(advisory: bool, bi: usize, n_b: usize) -> String {
 /// The request the exact-token sample counts for a pass whose prompt and cache layout are
 /// already built: the audit system prompt plus the prompt, split at the same breakpoints the
 /// real call uses. ONE builder for the batch path's sample and the pre-flight sample.
-fn sample_count_request(prompt: &str, cache_breakpoints: &[usize]) -> LlmRequest {
+fn sample_count_request(prompt: &str, cache_breakpoints: &[usize], terse: bool) -> LlmRequest {
     LlmRequest::new(prompt.to_string())
-        .with_system(audit_system_prompt())
+        .with_system(audit_system_prompt_with(terse))
         .with_cache_breakpoints(cache_breakpoints.to_vec())
 }
 
@@ -4277,11 +4366,11 @@ pub fn representative_scan_sample(
         chunks.len(),
         &digest,
         batches.len(),
-        &pass_task_line(true, 0, batches.len()),
+        &pass_task_line(true, 0, batches.len(), efficiency.terse_output),
         &build_rules_block(batches[0]),
     );
     Some(ScanSample {
-        request: sample_count_request(&prompt, &bps),
+        request: sample_count_request(&prompt, &bps, efficiency.terse_output),
         passes: chunks.len() * batches.len(),
     })
 }
@@ -4308,7 +4397,7 @@ async fn audit_pass(
     meter: Option<&UsageMeter>,
 ) -> anyhow::Result<(Vec<Finding>, Vec<ProposedRule>, Vec<String>)> {
     let mut req = LlmRequest::new(prompt)
-        .with_system(audit_system_prompt())
+        .with_system(audit_system_prompt_with(efficiency_of(meter).terse_output))
         .with_max_tokens(8192);
     if let Some(m) = audit_model {
         req = req.with_model(m.to_string());
@@ -4636,7 +4725,7 @@ async fn run_passes(
             // cross-cutting All group keeps advisory enabled so novel issues are surfaced
             // exactly once — against every file — with no per-language re-flagging.
             let advisory = !advisory_disabled && bi == 0;
-            let task_line = pass_task_line(advisory, bi, n_b);
+            let task_line = pass_task_line(advisory, bi, n_b, eff.terse_output);
             // PROMPT ORDER IS CACHE-AWARE, with the SHARED content leading, then the
             // PER-CHUNK content, then the PER-BATCH (varying) content trailing — built by
             // `build_pass_prompt` (shared verbatim with `run_passes_batch` so the two
@@ -4876,7 +4965,7 @@ async fn run_passes_batch(
             // duplicate novel findings for each language group (the problem advisory_disabled
             // was introduced to prevent in the parallel path).
             let advisory = !advisory_disabled && bi == 0;
-            let task_line = pass_task_line(advisory, bi, n_b);
+            let task_line = pass_task_line(advisory, bi, n_b, eff.terse_output);
             // Same `build_pass_prompt` builder as `run_passes` — see the extensive comment
             // there and on `cache_breakpoints_for_pass`. In BATCH mode this matters even
             // more: the default `BATCH_RULE_BATCH_SIZE = usize::MAX` puts every rule in ONE
@@ -4901,7 +4990,7 @@ async fn run_passes_batch(
             let custom_id = format!("c{ci}-b{bi}");
             let req = {
                 let mut r = LlmRequest::new(prompt.clone())
-                    .with_system(audit_system_prompt())
+                    .with_system(audit_system_prompt_with(eff.terse_output))
                     .with_max_tokens(8192)
                     .with_model(model.clone())
                     .with_cache_breakpoints(cache_bps.clone());
@@ -4930,7 +5019,7 @@ async fn run_passes_batch(
     let mut per_item_usd: Option<f64> = None;
     if !hint_refuses {
         if let Some((ci0, bi0, prompt0, cache_bps0)) = work_meta.first() {
-            let sample_req = sample_count_request(prompt0, cache_bps0);
+            let sample_req = sample_count_request(prompt0, cache_bps0, eff.terse_output);
             if let Some(exact) = crate::llm::exact_input_token_count(llm, &sample_req, &model).await
             {
                 eprintln!(
@@ -8124,6 +8213,28 @@ pub async fn audit_repo(
         all_proposed.retain(|p| seen_p.insert(p.id.clone()));
     }
 
+    // RANK 4 `terse_output`: the scan asked for a one-sentence `detail`; the survivors of the
+    // first merge get their full detail written NOW, before calibration, because calibration
+    // (its prompt, the precondition check, the D5 floor and D6 ceiling), the cross-family merge
+    // that runs after this function and the fix self-check all decide from the explanation.
+    // `merge_by_location` above reads no `detail`, so it ran on the short one. A finding whose
+    // detail could not be written stays, marked, and is reported as a failed pass. See
+    // `detail_regen`'s module comment for the per-consumer table.
+    if efficiency_of(meter).terse_output {
+        let (regenerated, regen_failed) = regenerate_full_details(
+            llm,
+            repo,
+            std::mem::take(&mut all_findings),
+            files,
+            &effective_selected,
+            audit_model.as_deref(),
+            meter,
+        )
+        .await;
+        all_findings = regenerated;
+        failed_passes.extend(regen_failed);
+    }
+
     // Calibration pass over ALL aggregated findings: recalibrate severity + flag
     // low-confidence findings. It does NOT drop anything — recall-first discovery hands
     // every finding to the architect. Skipped entirely when there's nothing to calibrate
@@ -8557,7 +8668,15 @@ If you genuinely cannot assess anything, return {"summary":"…","gaps":[]}."#
 /// [`parse_ai_findings`] parses it directly and the UI renders security findings in the
 /// familiar table. Deterministic-floor concerns are excluded (they are already covered).
 pub fn deep_security_system_prompt() -> String {
-    r#"You are a senior application-security engineer performing a DEEP SECURITY AUDIT of a codebase for Camerata.
+    deep_security_system_prompt_with(false)
+}
+
+/// [`deep_security_system_prompt`] with the `terse_output` switch explicit; the same rule as
+/// [`audit_system_prompt_with`]: OFF is byte-identical to the prompt before rank 4, ON asks for
+/// a one-sentence `detail` and drops the (always empty, never read) `proposed_rules` array. The
+/// lens's survivors get their full detail regenerated after its location merge.
+pub fn deep_security_system_prompt_with(terse: bool) -> String {
+    let base = r#"You are a senior application-security engineer performing a DEEP SECURITY AUDIT of a codebase for Camerata.
 
 This is DEEPER than the always-on deterministic floor (which already finds hardcoded secrets, raw SQL string concatenation, secrets-in-URLs, and path-escape writes — DO NOT re-report those). Go beyond line-level lint and reason about:
 - AUTHORIZATION: write/mutation/delete paths with no authz check; horizontal/vertical privilege gaps; missing ownership checks on resources; admin actions reachable without role checks.
@@ -8583,7 +8702,26 @@ Return ONLY a JSON object, no prose, no markdown fences, in EXACTLY this shape:
 }
 If the code is genuinely clean, return {"findings":[],"proposed_rules":[],"needs_files":[]}."#
         .to_string()
-        + crate::onboard::redact::MODEL_REDACTION_NOTICE
+        + crate::onboard::redact::MODEL_REDACTION_NOTICE;
+    if !terse {
+        return base;
+    }
+    let base = replace_expected(
+        &base,
+        r#""detail":"why it's exploitable and the fix direction"}"#,
+        r#""detail":"ONE sentence, at most 25 words: why this is exploitable, naming any other file or symbol it depends on"}"#,
+    );
+    let base = replace_expected(&base, "  \"proposed_rules\": [],\n", "");
+    let base = replace_expected(
+        &base,
+        r#"return {"findings":[],"proposed_rules":[],"needs_files":[]}."#,
+        r#"return {"findings":[],"needs_files":[]}."#,
+    );
+    replace_expected(
+        &base,
+        AUDIT_OUTPUT_SHAPE_LEAD,
+        &format!("{TERSE_DETAIL_PARAGRAPH}\n\n{AUDIT_OUTPUT_SHAPE_LEAD}"),
+    )
 }
 
 /// SYSTEM PROMPT — threat-model lens.
@@ -8853,6 +8991,26 @@ async fn run_security_lens(
     let mut seen = std::collections::HashSet::new();
     findings.retain(|f| seen.insert((f.path.clone(), f.line, f.rule_id.clone())));
     let findings = merge_by_location(findings, files);
+    // `terse_output`: the lens asked for a one-sentence `detail`; write the full one for the
+    // survivors. A lens finding that could not get one keeps the short detail plus the
+    // incomplete marker, and the lens reports it in its `error` note (the deep tier's own
+    // failed-pass path), so it is never dropped and never silently short.
+    let findings = if efficiency_of(meter).terse_output {
+        let (findings, failed) =
+            regenerate_full_details(llm, repo, findings, files, &[], audit_model, meter).await;
+        if !failed.is_empty() {
+            result.error = Some(
+                failed
+                    .iter()
+                    .map(|f| format!("{}: {}", f.pass, f.reason))
+                    .collect::<Vec<_>>()
+                    .join("; "),
+            );
+        }
+        findings
+    } else {
+        findings
+    };
     result.security_findings = findings;
     result
 }
@@ -8925,7 +9083,9 @@ async fn run_security_passes(
                 // The security lens swaps in its own system prompt; everything else mirrors
                 // `audit_pass` (streaming + meter + robust parse).
                 let mut req = LlmRequest::new(prompt)
-                    .with_system(deep_security_system_prompt())
+                    .with_system(deep_security_system_prompt_with(
+                        efficiency_of(meter).terse_output,
+                    ))
                     .with_max_tokens(8192);
                 if let Some(m) = audit_model {
                     req = req.with_model(m.to_string());
@@ -9071,6 +9231,12 @@ pub async fn run_deep_tier(
         }
     }
 }
+
+mod detail_regen;
+use detail_regen::regenerate_full_details;
+
+#[cfg(test)]
+mod detail_regen_tests;
 
 #[cfg(test)]
 mod redaction_tests;

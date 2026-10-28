@@ -36,6 +36,9 @@ pub enum Stage {
     ScanPass,
     /// Alternative-option recommendation for multi-option rules.
     Alternatives,
+    /// The post-merge regeneration of full finding detail, after a terse scan
+    /// (`terse_output`; `detail_regen`).
+    DetailRegeneration,
     /// The skeptic pass: verification, severity/confidence calibration and hour estimates
     /// (`verify_findings`).
     Calibration,
@@ -49,9 +52,10 @@ pub enum Stage {
 
 impl Stage {
     /// Every stage, in pipeline order (the order the table prints).
-    pub const ALL: [Stage; 6] = [
+    pub const ALL: [Stage; 7] = [
         Stage::ScanPass,
         Stage::Alternatives,
+        Stage::DetailRegeneration,
         Stage::Calibration,
         Stage::FixGeneration,
         Stage::DeepTier,
@@ -63,6 +67,7 @@ impl Stage {
         match self {
             Stage::ScanPass => "scan",
             Stage::Alternatives => "alternatives",
+            Stage::DetailRegeneration => "detail",
             Stage::Calibration => "calibration",
             Stage::FixGeneration => "fix",
             Stage::DeepTier => "deep",
