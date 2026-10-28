@@ -2509,7 +2509,9 @@ async fn spawn_brownfield_dev_run(
             let workspace_root = state.settings.workspace_root();
             let mut worktrees = Vec::new();
             for scope in &intake_repos {
-                let scope_branch = derive_scope_branch(&scope.branch, &story_id);
+                let scope_branch =
+                    crate::run_target::unit_branch_for_repo(&uow_data, &story_id, &scope.repo)
+                        .unwrap_or_else(|| derive_scope_branch(&scope.branch, &story_id));
                 let override_path = state.settings.repo_path(&scope.repo);
                 if let Some(wt_dir) = crate::workspace::resolve_uow_worktree(
                     override_path.as_deref(),
@@ -2721,10 +2723,16 @@ async fn start_governed_run(
                 repo,
                 branch,
                 clone,
-            } => match crate::run_target::ensure_target_worktree(&clone, &branch).await {
-                Ok(dir) => Ok(Some((repo, branch, dir))),
-                Err(reason) => Err(reason),
-            },
+            } => {
+                // One source of truth for the branch: the plan derived it from the Intake
+                // scope, so record it (the history says so when it changed) BEFORE the
+                // worktree and the implement run, which read the unit's recorded branch.
+                crate::run_target::record_run_branch(&state.uow, story_id, &branch);
+                match crate::run_target::ensure_target_worktree(&clone, &branch).await {
+                    Ok(dir) => Ok(Some((repo, branch, dir))),
+                    Err(reason) => Err(reason),
+                }
+            }
             crate::run_target::RunTarget::Greenfield => Ok(None),
             crate::run_target::RunTarget::Refused { reason } => Err(reason),
         };
@@ -14256,7 +14264,11 @@ async fn uow_intake_ship(
         let mut results: Vec<RepoShipResult> = Vec::new();
 
         for scope in &uow.intake.repos {
-            let scope_branch = derive_scope_branch(&scope.branch, &story_id);
+            // The same branch the run works on (the unit's recorded branch for its own
+            // repository; the scope's branch for the others).
+            let scope_branch =
+                crate::run_target::unit_branch_for_repo(&uow, &story_id, &scope.repo)
+                    .unwrap_or_else(|| derive_scope_branch(&scope.branch, &story_id));
             let override_path = state.settings.repo_path(&scope.repo);
 
             // Resolve the worktree for this repo + branch.

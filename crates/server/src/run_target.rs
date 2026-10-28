@@ -55,35 +55,18 @@ pub(crate) fn plan_run_target(
     override_path: impl Fn(&str) -> Option<String>,
     workspace_root: Option<&str>,
 ) -> RunTarget {
-    let branch = uow
-        .branch
-        .as_deref()
-        .map(str::trim)
-        .filter(|b| !b.is_empty());
+    let recorded = recorded_branch(uow);
     let project_has_repos = project_repos.is_some_and(|r| !r.is_empty());
     let scoped: Vec<&str> = uow.intake.repos.iter().map(|s| s.repo.as_str()).collect();
 
-    let Some(branch) = branch else {
-        if !project_has_repos && scoped.is_empty() {
+    // No branch and no Intake scope: nothing says where to work.
+    if recorded.is_none() && scoped.is_empty() {
+        if !project_has_repos {
             return RunTarget::Greenfield;
         }
         return RunTarget::Refused {
             reason: format!(
-                "This unit of work has no repository selected, so the run has nothing to work \
-                 in. Select its repository under Intake, Repos in scope, then start \
-                 development again. (Unit `{story_id}`; no branch is set.)"
-            ),
-        };
-    };
-
-    // The branch becomes a directory under the worktrees root, so it must be a real branch
-    // name: a recorded `.` or `..` (from any writer, including data saved before validation
-    // existed) is refused here, before any worktree code runs.
-    if let Err(why) = camerata_api_types::uow::validate_branch_name(branch) {
-        return RunTarget::Refused {
-            reason: format!(
-                "The branch recorded for this unit of work is unusable. {why} Fix the branch \
-                 under Intake, Repos in scope, then start development again. (Unit `{story_id}`.)"
+                "This unit of work has no repository selected, so the run has nothing to work                  in. Select its repository under Intake, Repos in scope, then start                  development again. (Unit `{story_id}`; no branch is set.)"
             ),
         };
     }
@@ -131,11 +114,91 @@ pub(crate) fn plan_run_target(
             ),
         };
     }
+
+    // ONE derivation of the branch. With an Intake scope, the scope names it (it always has an
+    // entry for `repo` here, checked above), so a scope changed after a branch was recorded
+    // wins and the run records the change ([`record_run_branch`]). With no scope, the recorded
+    // branch is the only source (the console's Begin Development and the orchestrator chat
+    // record one). The result becomes a directory name, so it is validated.
+    let Some(branch) = scope_branch_for_repo(uow, story_id, repo).or_else(|| recorded.clone())
+    else {
+        return RunTarget::Refused {
+            reason: format!(
+                "This unit of work has no branch for `{repo}`. Select the repository under                  Intake, Repos in scope, then start development again. (Unit `{story_id}`.)"
+            ),
+        };
+    };
+    if let Err(why) = camerata_api_types::uow::validate_branch_name(&branch) {
+        return RunTarget::Refused {
+            reason: format!(
+                "The branch for this unit of work is unusable. {why} Fix the branch under                  Intake, Repos in scope, then start development again. (Unit `{story_id}`.)"
+            ),
+        };
+    }
+
     RunTarget::Repository {
         repo: repo.to_string(),
-        branch: branch.to_string(),
+        branch,
         clone,
     }
+}
+
+/// The branch recorded on the unit (`uow.branch`), trimmed; `None` when unset or blank.
+fn recorded_branch(uow: &UnitOfWork) -> Option<String> {
+    uow.branch
+        .as_deref()
+        .map(str::trim)
+        .filter(|b| !b.is_empty())
+        .map(str::to_string)
+}
+
+/// The branch the Intake scope names for `repo`, derived with the shared
+/// [`BranchMode::branch_for_story`]; `None` when `repo` is not in scope. The one place a
+/// scope turns into a branch: the run target, multi-repo worktree setup and Ship all come
+/// through here (directly or via [`unit_branch_for_repo`]).
+pub(crate) fn scope_branch_for_repo(
+    uow: &UnitOfWork,
+    story_id: &str,
+    repo: &str,
+) -> Option<String> {
+    uow.intake
+        .repos
+        .iter()
+        .find(|s| s.repo == repo)
+        .map(|s| s.branch.branch_for_story(story_id))
+}
+
+/// The branch multi-repo worktree setup and Ship use for `repo`. For the unit's own
+/// repository (the one in its id) that is the unit's recorded branch, the one the run
+/// derived from the scope and committed to (so Ship pushes the branch that holds the work),
+/// falling back to the scope when nothing is recorded yet. For any other in-scope repository
+/// it is the scope's branch. `None` when `repo` is neither.
+pub(crate) fn unit_branch_for_repo(uow: &UnitOfWork, story_id: &str, repo: &str) -> Option<String> {
+    let own_repo = story_id.rsplit_once('#').map(|(r, _)| r) == Some(repo);
+    if own_repo {
+        if let Some(recorded) = recorded_branch(uow) {
+            return Some(recorded);
+        }
+    }
+    scope_branch_for_repo(uow, story_id, repo)
+}
+
+/// Record `branch` as the unit's branch when it differs from the recorded one, and say so in
+/// the unit's history: a scope changed after a branch was recorded overwrites it on the next
+/// run, never silently. A no-op when the value is unchanged.
+pub(crate) fn record_run_branch(store: &crate::uow::UowStore, story_id: &str, branch: &str) {
+    let previous = recorded_branch(&store.get_or_create(story_id));
+    if previous.as_deref() == Some(branch) {
+        return;
+    }
+    store.set_branch(story_id, Some(branch.to_string()));
+    let text = match previous {
+        Some(old) => format!(
+            "Branch changed from `{old}` to `{branch}`: the Intake scope names a different              branch for this repository, so the run works on the new one."
+        ),
+        None => format!("Branch `{branch}` recorded from the Intake scope for this run."),
+    };
+    store.append_history(story_id, "branch", &text);
 }
 
 /// Why a unit of work may not run (or have a branch recorded) in the active project: its
@@ -259,7 +322,7 @@ mod tests {
     }
 
     #[test]
-    fn a_unit_with_scoped_repos_but_no_branch_is_refused_even_without_project_repos() {
+    fn a_scoped_unit_whose_repository_has_no_configured_clone_is_refused() {
         let target = plan_run_target(
             "acme/api#7",
             &uow(None, &["acme/api"]),
@@ -378,6 +441,154 @@ mod tests {
         assert!(matches!(none, RunTarget::Repository { .. }), "{none:?}");
     }
 
+    fn existing(branch: &str) -> BranchMode {
+        BranchMode::Existing {
+            branch_name: branch.to_string(),
+        }
+    }
+
+    #[test]
+    fn the_scope_names_the_branch_and_wins_over_a_stale_recorded_one() {
+        let clone = git_clone_dir();
+        let path = clone.path().display().to_string();
+        let mut u = uow(Some("feature/old"), &["acme/api"]);
+        u.intake.repos[0].branch = existing("feature/new");
+        let target = plan_run_target(
+            "acme/api#7",
+            &u,
+            Some(&repos(&["acme/api"])),
+            |_| Some(path.clone()),
+            None,
+        );
+        assert_eq!(
+            target,
+            RunTarget::Repository {
+                repo: "acme/api".to_string(),
+                branch: "feature/new".to_string(),
+                clone: clone.path().to_path_buf(),
+            }
+        );
+    }
+
+    #[test]
+    fn a_scoped_unit_with_no_recorded_branch_derives_one_from_its_scope() {
+        let clone = git_clone_dir();
+        let path = clone.path().display().to_string();
+        let target = plan_run_target(
+            "acme/api#7",
+            &uow(None, &["acme/api"]),
+            Some(&repos(&["acme/api"])),
+            |_| Some(path.clone()),
+            None,
+        );
+        assert_eq!(
+            target,
+            RunTarget::Repository {
+                repo: "acme/api".to_string(),
+                branch: "camerata/acme/api#7".to_string(),
+                clone: clone.path().to_path_buf(),
+            }
+        );
+    }
+
+    #[test]
+    fn a_scope_that_names_an_escaping_branch_is_refused_whatever_is_recorded() {
+        let clone = git_clone_dir();
+        let path = clone.path().display().to_string();
+        for bad in [".", "..", "a/../b"] {
+            let mut u = uow(Some("feature/ok"), &["acme/api"]);
+            u.intake.repos[0].branch = existing(bad);
+            let target = plan_run_target(
+                "acme/api#7",
+                &u,
+                Some(&repos(&["acme/api"])),
+                |_| Some(path.clone()),
+                None,
+            );
+            let RunTarget::Refused { reason } = target else {
+                panic!("scope branch {bad:?} must be refused, got {target:?}");
+            };
+            assert!(reason.contains("not a valid branch name"), "{reason}");
+        }
+    }
+
+    #[test]
+    fn ship_and_multi_repo_setup_read_the_same_branch_the_run_works_on() {
+        let mut u = uow(Some("feature/new"), &["acme/api", "acme/web"]);
+        u.intake.repos[0].branch = existing("feature/new");
+        u.intake.repos[1].branch = BranchMode::NewFromBase {
+            base: "main".to_string(),
+            new_name: "camerata/web-7".to_string(),
+        };
+        let story = "acme/api#7";
+        assert_eq!(
+            unit_branch_for_repo(&u, story, "acme/api").as_deref(),
+            Some("feature/new")
+        );
+        assert_eq!(
+            unit_branch_for_repo(&u, story, "acme/web").as_deref(),
+            Some("camerata/web-7")
+        );
+        assert_eq!(unit_branch_for_repo(&u, story, "acme/other"), None);
+
+        // Between a scope change and the next run, the branch that holds the work is the
+        // recorded one: Ship pushes it, rather than a branch that has no commits yet.
+        let mut stale = u.clone();
+        stale.branch = Some("feature/old".to_string());
+        assert_eq!(
+            unit_branch_for_repo(&stale, story, "acme/api").as_deref(),
+            Some("feature/old")
+        );
+        // The unit's own repository with nothing recorded derives from the scope.
+        let mut fresh = u.clone();
+        fresh.branch = None;
+        assert_eq!(
+            unit_branch_for_repo(&fresh, story, "acme/api").as_deref(),
+            Some("feature/new")
+        );
+    }
+
+    #[test]
+    fn recording_a_changed_branch_overwrites_it_and_says_so_in_the_history() {
+        let store = crate::uow::UowStore::new();
+        let story = "acme/api#7";
+        store.set_branch(story, Some("feature/old".to_string()));
+
+        record_run_branch(&store, story, "feature/new");
+        let u = store.get_or_create(story);
+        assert_eq!(u.branch.as_deref(), Some("feature/new"));
+        let entry = u
+            .history
+            .iter()
+            .find(|h| h.kind == "branch")
+            .expect("the change is recorded in the unit's history");
+        assert!(
+            entry.text.contains("feature/old") && entry.text.contains("feature/new"),
+            "{}",
+            entry.text
+        );
+        assert!(!entry.text.contains('\u{2014}'));
+
+        // Recording the value that is already there changes and logs nothing.
+        record_run_branch(&store, story, "feature/new");
+        assert_eq!(
+            store
+                .get_or_create(story)
+                .history
+                .iter()
+                .filter(|h| h.kind == "branch")
+                .count(),
+            1
+        );
+
+        // A first record (nothing before it) is logged too.
+        let first = "acme/api#8";
+        record_run_branch(&store, first, "camerata/acme/api#8");
+        let u = store.get_or_create(first);
+        assert_eq!(u.branch.as_deref(), Some("camerata/acme/api#8"));
+        assert!(u.history.iter().any(|h| h.kind == "branch"));
+    }
+
     #[test]
     fn a_recorded_branch_that_escapes_the_worktree_root_is_refused() {
         let clone = git_clone_dir();
@@ -385,7 +596,7 @@ mod tests {
         for bad in [".", "..", "a/../b", "-rf", "x\u{7}y"] {
             let target = plan_run_target(
                 "acme/api#7",
-                &uow(Some(bad), &["acme/api"]),
+                &uow(Some(bad), &[]),
                 Some(&repos(&["acme/api"])),
                 |_| Some(path.clone()),
                 None,
@@ -757,5 +968,59 @@ mod http_tests {
         )
         .await;
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    /// One source of truth for the branch: after a branch was recorded, a changed Intake
+    /// scope makes the NEXT run re-derive it, work on the new branch, overwrite the recorded
+    /// value and say so in the unit's history.
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn changing_the_scope_after_a_branch_was_recorded_switches_the_next_run() {
+        let _live = camerata_test_env::EnvGuard::set("CAMERATA_LIVE_BUILD", "1");
+        let _token = camerata_test_env::EnvGuard::remove("CAMERATA_GITHUB_TOKEN");
+        let clone = tempfile::tempdir().unwrap();
+        crate::test_git::init_repo(clone.path(), &[("README.md", "fixture\n")]);
+        let state = state_with_project();
+        state
+            .settings
+            .set_repo_path("acme/api", Some(clone.path().display().to_string()));
+
+        // An earlier run recorded feature/a; the architect then changes the scope to feature/b.
+        state.uow.set_branch(STORY, Some("feature/a".to_string()));
+        let resp = post(
+            &state,
+            &format!("/api/uow/{STORY_SEG}/intake/repos"),
+            serde_json::json!({ "repos": [
+                { "repo": "acme/api", "branch": { "mode": "existing", "branch_name": "feature/b" } }
+            ]}),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let resp = post(
+            &state,
+            &format!("/api/stories/{STORY_SEG}/run"),
+            serde_json::json!({}),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let worktrees = crate::test_git::git(clone.path(), &["worktree", "list"]);
+        assert!(worktrees.contains("[feature/b]"), "{worktrees}");
+        assert!(!worktrees.contains("[feature/a]"), "{worktrees}");
+        let uow = state.uow.get_or_create(STORY);
+        assert_eq!(uow.branch.as_deref(), Some("feature/b"));
+        assert!(
+            uow.history.iter().any(|h| h.kind == "branch"
+                && h.text.contains("feature/a")
+                && h.text.contains("feature/b")),
+            "the switch is recorded in the history: {:?}",
+            uow.history
+        );
+        // Ship and multi-repo setup read the value the run recorded.
+        assert_eq!(
+            super::unit_branch_for_repo(&uow, STORY, "acme/api").as_deref(),
+            Some("feature/b")
+        );
     }
 }

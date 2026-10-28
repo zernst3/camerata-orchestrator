@@ -1046,10 +1046,10 @@ pub(super) async fn set_uow_branch(story_id: &str, branch: &str) -> bool {
 
 /// Before a development run starts: record the unit's branch from its Intake Repos in scope
 /// when none is set yet, so the run works in the unit's real repository. Without a branch the
-/// server has no repository to work in. An already-set branch is kept (later runs continue on
-/// the branch earlier runs committed to). Best-effort: when no repo is in scope or a call
-/// fails, the run start goes ahead and the server refuses it with the reason, which the
-/// console shows.
+/// server has no repository to work in. An already-set branch is left alone here: the server
+/// is the single owner of the branch, and a run re-derives it from the Intake scope and records
+/// any change in the unit's history. Best-effort: when no repo is in scope or a call fails, the
+/// run start goes ahead and the server refuses it with the reason, which the console shows.
 pub(super) async fn ensure_run_branch(story_id: &str) {
     let Some(uow) = fetch_uow(story_id).await else {
         return;
