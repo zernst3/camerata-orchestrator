@@ -755,6 +755,12 @@ impl UsageMeter {
         self.stages.record_fix_outcome(outcome);
     }
 
+    /// Add the detail-regeneration stage's rejection counts to the run's tally (operator
+    /// telemetry only).
+    pub fn record_detail_rejections(&self, rejections: crate::stage_telemetry::DetailRejections) {
+        self.stages.record_detail_rejections(rejections);
+    }
+
     /// Record how many (chunk, rule) pairs the rule router skipped for one repo.
     pub fn record_routing(&self, pairs_total: u64, pairs_skipped: u64) {
         self.stages.record_routing(pairs_total, pairs_skipped);
@@ -5274,15 +5280,30 @@ fn salvage_complete_findings(
     text: &str,
     adopted: &std::collections::HashSet<String>,
 ) -> (Vec<Finding>, Vec<ProposedRule>) {
-    let none = || (Vec::new(), Vec::new());
-    // Anchored at the JSON object: prose before the first `{` that happens to say "findings" is
-    // not the key, and the key must open the object or follow a comma.
+    let valid = complete_array_objects(text, "findings");
+    if valid.is_empty() {
+        return (Vec::new(), Vec::new());
+    }
+    let synthetic = format!("{{\"findings\":[{}]}}", valid.join(","));
+    parse_ai_findings(repo, &synthetic, adopted)
+}
+
+/// The COMPLETE `{...}` objects of the array under `key` in a reply that may have been cut off
+/// mid-way, each valid JSON on its own: the shared salvage walker (the scan's findings and the
+/// detail regeneration's entries both use it). The last, unfinished object and anything after it
+/// are not guessed at. Anchored at the first `{`: prose before it that happens to contain the
+/// key is not the key, and the key must open the object or follow a comma. Objects are parsed
+/// one at a time, so a complete-looking object that is not valid JSON is skipped on its own and
+/// does not cost the others. Strings and escapes are tracked, so a brace inside a string does
+/// not move an object boundary.
+pub(crate) fn complete_array_objects<'a>(text: &'a str, key: &str) -> Vec<&'a str> {
     let Some(obj_start) = text.find('{') else {
-        return none();
+        return Vec::new();
     };
     let json = &text[obj_start..];
-    let Some(key) = json
-        .match_indices("\"findings\"")
+    let quoted = format!("\"{key}\"");
+    let Some(key_at) = json
+        .match_indices(quoted.as_str())
         .map(|(i, _)| i)
         .find(|&i| {
             json[..i]
@@ -5292,15 +5313,15 @@ fn salvage_complete_findings(
                 .is_some_and(|c| c == '{' || c == ',')
         })
     else {
-        return none();
+        return Vec::new();
     };
-    let after = &json[key + "\"findings\"".len()..];
+    let after = &json[key_at + quoted.len()..];
     let Some(open) = after.find('[') else {
-        return none();
+        return Vec::new();
     };
     // Only whitespace and a colon may sit between the key and its array.
     if !after[..open].chars().all(|c| c.is_whitespace() || c == ':') {
-        return none();
+        return Vec::new();
     }
     let body = &after[open + 1..];
     let bytes = body.as_bytes();
@@ -5348,17 +5369,10 @@ fn salvage_complete_findings(
             _ => i += 1,
         }
     }
-    // One object at a time: a complete-looking object that is not valid JSON is skipped on its
-    // own and does not cost the others.
-    let valid: Vec<&str> = objects
+    objects
         .into_iter()
         .filter(|o| serde_json::from_str::<serde_json::Value>(o).is_ok())
-        .collect();
-    if valid.is_empty() {
-        return none();
-    }
-    let synthetic = format!("{{\"findings\":[{}]}}", valid.join(","));
-    parse_ai_findings(repo, &synthetic, adopted)
+        .collect()
 }
 
 /// Why a pass failed when its spend limit stopped a retry the reply needed (the reply was cut

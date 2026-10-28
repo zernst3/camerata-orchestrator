@@ -3006,8 +3006,8 @@ representative scan pass is counted through `count_tokens` (free, not billed), b
 by the same `representative_scan_sample` the batch path samples with. With
 `terse_output` on, the estimate adds the detail regeneration step
 (`camerata_ui_core::scan::regeneration_estimate`): the findings are sized from the
-scan's output, and the step is priced as an upper bound by its own limits (25
-findings to a call, 160 output tokens per finding, both rounds run on every finding),
+scan's output, and the step is priced as an upper bound by its own limits (10
+findings to a call, 450 output tokens per finding, all three rounds run on every finding),
 in real time with no batch discount. The batch spend-limit gate's fallback estimate
 and the hint `camerata inspect` hands the meter use the same figure, so neither
 under-estimates a run with the switch on. `applies_to` routing is NOT modelled: it
@@ -3144,9 +3144,18 @@ accepted on its own and only when all of these hold (`detail_regen::accept_entry
   front when it lost it.
 
 An entry that fails is treated exactly like one the model left out: it stays pending, the
-repeat round runs it again in a batch of half the size (13), and what is still unwritten
-then gets the marker. A reply cut off at the output limit is discarded whole, counted as
-waste in the telemetry, and repeated the same way.
+repeat round runs it again in a batch of half the size (5), a third round sends whatever is
+still pending one finding to a call, and what is still unwritten then gets the marker. Every
+call passes the spend-limit check first. The output budget is 450 tokens a finding (a full
+detail with its JSON wrapping was measured at about 280, and 160 cut off 4 of 10 calls on a
+real run). A reply cut off at the output limit is still counted as waste in the telemetry,
+but its complete entries are kept: the entries are read one by one with the same walker the
+scan uses to salvage a cut-off reply (`complete_array_objects`), and only the findings the
+cut-off lost go to the next round. The echoed path is compared after dropping a leading `./`
+or `/` (the line must still be exactly the finding's), and the kept-name check redacts the
+short statement the same way the written text is redacted. Why entries were turned down
+(wrong place, a dropped name, an added condition, a missing id, cut off, left out) is counted
+per reason in the operator-only stage telemetry; the failed pass carries only the total.
 
 **Who reads `detail`, and on which text.** `detail` is evidence text for several
 consumers. Each one's choice, and the test that pins it (all in
@@ -3190,10 +3199,10 @@ report only.
 $3 in and $15 out per million tokens). Batched against one call per finding, for 140
 survivors, with about 425 tokens of system prompt, 350 tokens of evidence and 100 tokens
 of output per finding: a call per finding repeats the system prompt and frame 140 times,
-about 815 input tokens each, $0.0039 per finding and $0.55 in all; 6 batches of 25 repeat
-it 6 times, $0.37 in all. Output is identical either way. Batching is about a third
-cheaper on this step and makes 6 calls instead of 140; the price is that a failed batch
-leaves 25 findings to the repeat round (and, if that fails, to the marker), which the
+about 815 input tokens each, $0.0039 per finding and $0.55 in all; 14 batches of 10 repeat
+it 14 times, about $0.38 in all. Output is identical either way. Batching is about a third
+cheaper on this step and makes 14 calls instead of 140; the price is that a failed batch
+leaves 10 findings to the repeat round (and, if that fails, to the marker), which the
 failure path covers. `batching_beats_one_call_per_finding` pins the input arithmetic.
 The whole-measure economics are NOT a given: with an assumed 100-token full detail and a
 35-token short one, the scan saves about $0.001 per raw row and the regeneration costs

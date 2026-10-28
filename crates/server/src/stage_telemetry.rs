@@ -317,6 +317,62 @@ impl CandidateTelemetry {
     }
 }
 
+/// Why the detail-regeneration stage (rank 4) did not write a finding's full explanation on an
+/// attempt, counted per attempt (a finding that fails three rounds counts three times). Operator
+/// telemetry only: the client export and the failed-pass reason carry at most the [`Self::total`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DetailRejections {
+    /// The entry echoed a path or line that is not the finding's.
+    pub mismatch: u64,
+    /// The text dropped a path or identifier the short statement named.
+    pub drops_named_token: u64,
+    /// The text added an exploit precondition nobody had made.
+    pub invented_precondition: u64,
+    /// An entry with no usable id or text, an id that is not the batch's, or an id used twice.
+    pub missing_id: u64,
+    /// A finding whose entry was lost to a reply cut off at the output limit.
+    pub truncated: u64,
+    /// A finding the reply gave no entry for at all.
+    pub left_out: u64,
+}
+
+impl DetailRejections {
+    /// Every counted attempt.
+    pub fn total(&self) -> u64 {
+        self.mismatch
+            + self.drops_named_token
+            + self.invented_precondition
+            + self.missing_id
+            + self.truncated
+            + self.left_out
+    }
+
+    /// Add another tally to this one.
+    pub fn add(&mut self, other: &Self) {
+        self.mismatch += other.mismatch;
+        self.drops_named_token += other.drops_named_token;
+        self.invented_precondition += other.invented_precondition;
+        self.missing_id += other.missing_id;
+        self.truncated += other.truncated;
+        self.left_out += other.left_out;
+    }
+
+    /// The one operator-table line.
+    fn render(&self) -> String {
+        format!(
+            "detail entries turned down: {} ({} wrong place, {} dropped a name, {} added a \
+             condition, {} missing id, {} cut off, {} left out)",
+            self.total(),
+            self.mismatch,
+            self.drops_named_token,
+            self.invented_precondition,
+            self.missing_id,
+            self.truncated,
+            self.left_out
+        )
+    }
+}
+
 /// Thread-safe per-stage accumulator (scan passes run concurrently).
 #[derive(Default)]
 pub struct StageMeter {
@@ -325,6 +381,7 @@ pub struct StageMeter {
     fix_outcome: Mutex<Option<FixOutcome>>,
     routing: Mutex<Option<RoutingTelemetry>>,
     candidates: Mutex<Option<CandidateTelemetry>>,
+    detail_rejections: Mutex<Option<DetailRejections>>,
 }
 
 impl StageMeter {
@@ -365,6 +422,15 @@ impl StageMeter {
         let r = routing.get_or_insert_with(RoutingTelemetry::default);
         r.pairs_total = r.pairs_total.saturating_add(pairs_total);
         r.pairs_skipped = r.pairs_skipped.saturating_add(pairs_skipped);
+    }
+
+    /// Add one regeneration run's rejection counts to the run's total.
+    pub fn record_detail_rejections(&self, rejections: DetailRejections) {
+        self.detail_rejections
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get_or_insert_with(DetailRejections::default)
+            .add(&rejections);
     }
 
     /// Add one (chunk, rule) decision of the candidate prefilter to the run's total.
@@ -422,6 +488,10 @@ impl StageMeter {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
+        let detail_rejections = *self
+            .detail_rejections
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let stages = self.lock();
         StageTelemetry {
             counted_lines,
@@ -429,6 +499,7 @@ impl StageMeter {
             fix_outcome,
             routing,
             candidates,
+            detail_rejections,
             stages: Stage::ALL
                 .iter()
                 .filter_map(|stage| {
@@ -489,6 +560,10 @@ pub struct StageTelemetry {
     /// should. `None` when no rule with `candidates` ran.
     #[serde(default)]
     pub candidates: Option<CandidateTelemetry>,
+    /// Why the detail-regeneration stage turned entries down, by reason. `None` when the stage
+    /// never ran (or for a record written before this existed).
+    #[serde(default)]
+    pub detail_rejections: Option<DetailRejections>,
 }
 
 impl StageTelemetry {
@@ -579,6 +654,9 @@ impl StageTelemetry {
             if !models.is_empty() {
                 writeln!(out, "  {} model: {models}", s.stage.label()).ok();
             }
+        }
+        if let Some(rejections) = &self.detail_rejections {
+            writeln!(out, "  {}", rejections.render()).ok();
         }
         if let Some(fix) = &self.fix_outcome {
             let rate = fix

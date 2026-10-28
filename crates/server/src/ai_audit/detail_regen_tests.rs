@@ -89,6 +89,13 @@ enum Regen {
     InventsPrecondition,
     /// The first call is cut off at the output limit; later calls write normally.
     TruncatedOnce,
+    /// The first call is cut off mid-entry after this many COMPLETE entries; later calls write
+    /// normally.
+    CutAfter(usize),
+    /// Leaves a batch of more than one finding unanswered; writes a batch of one.
+    OnlySingles,
+    /// Echoes every path with a leading `./`.
+    DotSlashPath,
 }
 
 /// The findings a regeneration prompt asks about: `(id, path, line)` from each block header and
@@ -171,6 +178,7 @@ impl LlmPort for RoleLlm {
                         .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     let mut rows = asked(&req.prompt);
                     match self.regen {
+                        Regen::OnlySingles if rows.len() > 1 => rows.clear(),
                         Regen::FirstOnly => rows.truncate(1),
                         Regen::DropsLast => {
                             rows.pop();
@@ -185,6 +193,12 @@ impl LlmPort for RoleLlm {
                             let (id, line_echo, text) = match self.regen {
                                 Regen::OneIndexed => ((n + 1).to_string(), *line, full_for(*line)),
                                 Regen::WrongLine => (id.clone(), line + 1, full_for(*line)),
+                                Regen::DotSlashPath => {
+                                    return format!(
+                                        r#"{{"id":"{id}","path":"./{path}","line":{line},"detail":"{}"}}"#,
+                                        full_for(*line)
+                                    );
+                                }
                                 Regen::InventsPrecondition => (
                                     id.clone(),
                                     *line,
@@ -197,6 +211,16 @@ impl LlmPort for RoleLlm {
                             )
                         })
                         .collect();
+                    if let Regen::CutAfter(n) = self.regen {
+                        if call == 0 {
+                            let kept = entries[..n.min(entries.len())].join(",");
+                            return Ok(LlmResponse {
+                                text: format!(r#"{{"details":[{kept},{{"id":"zz","path":"src/ha"#),
+                                truncated: true,
+                                ..stub_response(String::new())
+                            });
+                        }
+                    }
                     let body = format!(r#"{{"details":[{}]}}"#, entries.join(","));
                     if self.regen == Regen::TruncatedOnce && call == 0 {
                         return Ok(LlmResponse {
@@ -690,8 +714,9 @@ async fn a_failed_regeneration_keeps_the_finding_marked_and_reports_a_failed_pas
             .unwrap_or_else(|| panic!("a failed pass is reported: {failed:?}"));
         assert!(pass.reason.contains("2 of 2"), "{}", pass.reason);
         assert!(pass.reason.contains(DETAIL_INCOMPLETE_MARKER));
-        // Two rounds were attempted before giving up.
-        assert_eq!(llm.prompts(Role::Regen).len(), 2);
+        // Three rounds were attempted before giving up: both findings in one call, again in
+        // one, then one call each.
+        assert_eq!(llm.prompts(Role::Regen).len(), 4);
         // Calibration still ran: the failure does not stop the pipeline.
         assert!(llm.roles().contains(&Role::Calibrate));
     }
@@ -898,11 +923,12 @@ fn batching_beats_one_call_per_finding() {
         .expect("sonnet is priced")
     };
     let per_finding = price(n * system_tokens);
-    let batched = price(n.div_ceil(25) * system_tokens);
+    let batch = camerata_ui_core::scan::REGEN_BATCH_SIZE as u64;
+    let batched = price(n.div_ceil(batch) * system_tokens);
     assert!(
-        batched * 20.0 < per_finding,
+        batched * 8.0 < per_finding,
         "batching repeats the system prompt {} times instead of {n}: {batched} vs {per_finding}",
-        n.div_ceil(25)
+        n.div_ceil(batch)
     );
 }
 
@@ -1281,40 +1307,110 @@ async fn on_an_incremental_run_the_named_file_comes_from_the_whole_repo_not_the_
 
 // ── the repeat round, and running without a meter ───────────────────────────────────────────
 
-#[tokio::test]
-async fn the_repeat_round_uses_half_the_batch_size() {
-    // 30 findings in batches of 25 and 5; none written; the repeat runs 13, 13 and 4.
-    let findings: Vec<Finding> = (0..30)
+/// `n` findings that share one statement, on distinct lines (so each is its own place).
+fn n_findings(n: usize) -> Vec<Finding> {
+    (0..n)
         .map(|i| {
             let mut f = statement(SHORT);
             f.line = i + 1;
             f
         })
-        .collect();
-    let llm = RoleLlm::new("{}", Regen::Garbage);
-    let (out, failed) =
-        regenerate_full_details(&llm, REPO, findings, &files(), &[], &nonce(), None, None).await;
-    let sizes: Vec<usize> = llm
-        .prompts(Role::Regen)
+        .collect()
+}
+
+/// The sizes of the regeneration calls the model was sent, in order.
+fn call_sizes(llm: &RoleLlm) -> Vec<usize> {
+    llm.prompts(Role::Regen)
         .iter()
         .map(|p| asked(p).len())
-        .collect();
-    assert_eq!(sizes, vec![25, 5, 13, 13, 4]);
-    assert_eq!(out.len(), 30, "none dropped");
-    assert!(out
-        .iter()
-        .all(|f| f.detail.contains(DETAIL_INCOMPLETE_MARKER)));
-    assert!(failed[0].reason.contains("30 of 30"));
+        .collect()
+}
+
+#[test]
+fn the_budget_constants_are_the_measured_ones() {
+    // Measured on a real run: a full detail with its JSON wrapping is about 280 output tokens,
+    // so 160 a finding cut off 4 of 10 calls. A batch of 10 at 450 asks for about 4,500.
+    assert_eq!(camerata_ui_core::scan::REGEN_TOKENS_PER_FINDING, 450);
+    assert_eq!(camerata_ui_core::scan::REGEN_BATCH_SIZE, 10);
+    assert_eq!(camerata_ui_core::scan::REGEN_ROUNDS, 3);
 }
 
 #[tokio::test]
-async fn a_cut_off_reply_is_discarded_counted_as_waste_and_repeated() {
-    let llm = RoleLlm::new(&terse_scan(2), Regen::TruncatedOnce);
+async fn each_round_is_smaller_and_the_last_is_one_finding_at_a_time() {
+    // 12 findings, nothing ever written: round 1 is 10 + 2, round 2 (half) is 5 + 5 + 2, and
+    // round 3 is twelve calls of one.
+    let llm = RoleLlm::new("{}", Regen::Garbage);
+    let (out, failed) = regenerate_full_details(
+        &llm,
+        REPO,
+        n_findings(12),
+        &files(),
+        &[],
+        &nonce(),
+        None,
+        None,
+    )
+    .await;
+    let mut expected = vec![10, 2, 5, 5, 2];
+    expected.extend([1; 12]);
+    assert_eq!(call_sizes(&llm), expected);
+    assert_eq!(out.len(), 12, "none dropped");
+    assert!(out
+        .iter()
+        .all(|f| f.detail.contains(DETAIL_INCOMPLETE_MARKER)));
+    assert!(failed[0].reason.contains("12 of 12"));
+}
+
+#[tokio::test]
+async fn a_batch_asks_for_the_output_it_needs_per_finding() {
+    let llm = RoleLlm::new("{}", Regen::Garbage);
+    let _ = regenerate_full_details(
+        &llm,
+        REPO,
+        n_findings(10),
+        &files(),
+        &[],
+        &nonce(),
+        None,
+        None,
+    )
+    .await;
+    let asks: Vec<u32> = llm
+        .log
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(_, q)| q.max_tokens)
+        .collect();
+    // 10 findings at 450 is 4,500 (above the 4,096 floor); 5 and 1 are held to the floor.
+    assert_eq!(asks[0], 4_500);
+    assert_eq!(asks[1], 4_096);
+    assert!(asks.iter().all(|&t| t >= 4_096));
+    assert_eq!(
+        asks[0],
+        scaled_max_tokens(
+            camerata_ui_core::scan::REGEN_BATCH_SIZE,
+            camerata_ui_core::scan::REGEN_TOKENS_PER_FINDING
+        )
+    );
+}
+
+#[tokio::test]
+async fn a_reply_cut_off_mid_entry_keeps_its_complete_entries_and_only_the_rest_is_repeated() {
+    // Three findings; the first reply holds two whole entries and a third cut off mid-string.
+    let llm = RoleLlm::new(&terse_scan(3), Regen::CutAfter(2));
     let meter = meter_with(EfficiencyConfig::default());
-    let (findings, failed) = audit(&llm, &meter).await;
+    let (mut findings, failed) = audit(&llm, &meter).await;
+    findings.sort_by_key(|f| f.line);
+    assert_eq!(findings.len(), 3);
     assert!(own_text_landed(&findings), "{findings:?}");
-    assert!(failed.iter().all(|f| f.pass != STAGE_DETAIL));
-    assert_eq!(llm.prompts(Role::Regen).len(), 2);
+    assert!(findings
+        .iter()
+        .all(|f| !f.detail.contains(DETAIL_INCOMPLETE_MARKER)));
+    assert!(failed.iter().all(|f| f.pass != STAGE_DETAIL), "{failed:?}");
+    // The repeat is asked about the ONE finding the cut-off lost, not all three.
+    assert_eq!(call_sizes(&llm), vec![3, 1]);
+    // The cut-off call is still counted as waste, as before.
     let telemetry = meter.stage_telemetry(0);
     let usage = &telemetry
         .stages
@@ -1322,7 +1418,311 @@ async fn a_cut_off_reply_is_discarded_counted_as_waste_and_repeated() {
         .find(|s| s.stage == Stage::DetailRegeneration)
         .unwrap()
         .usage;
-    assert_eq!(usage.calls, 2);
+    assert_eq!((usage.calls, usage.wasted_calls), (2, 1));
+    assert_eq!(
+        telemetry.detail_rejections.expect("recorded").truncated,
+        1,
+        "the finding the cut-off lost is counted"
+    );
+}
+
+#[tokio::test]
+async fn a_cut_off_reply_with_no_complete_entry_is_repeated_whole() {
+    let llm = RoleLlm::new(&terse_scan(2), Regen::CutAfter(0));
+    let meter = meter_with(EfficiencyConfig::default());
+    let (findings, failed) = audit(&llm, &meter).await;
+    assert!(own_text_landed(&findings), "{findings:?}");
+    assert!(failed.iter().all(|f| f.pass != STAGE_DETAIL));
+    assert_eq!(call_sizes(&llm), vec![2, 2]);
+}
+
+#[test]
+fn the_salvage_walker_reads_the_details_array_one_object_at_a_time() {
+    let cut = r#"{"details":[{"id":"a","detail":"x } { y \" z"},{"id":"b","detail":"ok"},{"id":"c","detail":"cut o"#;
+    let objects = super::complete_array_objects(cut, "details");
+    assert_eq!(objects.len(), 2, "{objects:?}");
+    assert!(
+        objects[0].contains("x } { y"),
+        "braces in strings do not move a boundary"
+    );
+    assert!(super::complete_array_objects(cut, "findings").is_empty());
+    assert!(super::complete_array_objects("no json", "details").is_empty());
+    // A complete-looking object that is not valid JSON costs only itself.
+    let bad = r#"{"details":[{"id":"a","detail":},{"id":"b","detail":"ok"}]}"#;
+    assert_eq!(super::complete_array_objects(bad, "details").len(), 1);
+}
+
+#[tokio::test]
+async fn a_third_round_of_one_writes_a_finding_the_larger_batches_could_not() {
+    // The model answers nothing for a batch of more than one and a single finding in full.
+    let llm = RoleLlm::new("{}", Regen::OnlySingles);
+    let (out, failed) = regenerate_full_details(
+        &llm,
+        REPO,
+        n_findings(3),
+        &files(),
+        &[],
+        &nonce(),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(call_sizes(&llm), vec![3, 3, 1, 1, 1]);
+    assert!(
+        out.iter().all(|f| f.detail.contains(FULL)),
+        "every straggler written: {out:?}"
+    );
+    assert!(out
+        .iter()
+        .all(|f| !f.detail.contains(DETAIL_INCOMPLETE_MARKER)));
+    assert!(failed.is_empty(), "{failed:?}");
+}
+
+#[tokio::test]
+async fn the_third_round_is_still_bounded_by_the_spend_limit() {
+    // Each stub call costs $0.01; with the limit at $0.025 the stage is stopped after a few
+    // calls, not run through all of its rounds (three findings would be 1 + 1 + 3 calls).
+    let llm = RoleLlm::new("{}", Regen::Garbage);
+    let meter = UsageMeter::with_controls(RunControls {
+        efficiency: EfficiencyConfig::default(),
+        max_cost_usd: Some(0.025),
+        fix_model: None,
+        consensus: false,
+        estimate_hint_usd: None,
+    });
+    let (out, failed) = regenerate_full_details(
+        &llm,
+        REPO,
+        n_findings(3),
+        &files(),
+        &[],
+        &nonce(),
+        None,
+        Some(&meter),
+    )
+    .await;
+    let calls = call_sizes(&llm).len();
+    assert!(
+        (1..=4).contains(&calls),
+        "the limit stopped the stage: {calls} calls"
+    );
+    assert!(out
+        .iter()
+        .all(|f| f.detail.contains(DETAIL_INCOMPLETE_MARKER)));
+    assert!(failed.iter().any(|f| f.pass == STAGE_DETAIL));
+}
+
+// ── why entries were turned down ────────────────────────────────────────────────────────────
+
+fn rejections(meter: &UsageMeter) -> crate::stage_telemetry::DetailRejections {
+    meter
+        .stage_telemetry(0)
+        .detail_rejections
+        .expect("the stage recorded why entries were turned down")
+}
+
+#[tokio::test]
+async fn rejection_counts_by_reason_reach_the_operator_telemetry() {
+    // A wrong line is turned down once per round: 3 rounds, 1 finding.
+    let llm = RoleLlm::new(&terse_scan(1), Regen::WrongLine);
+    let meter = meter_with(EfficiencyConfig::default());
+    let _ = audit(&llm, &meter).await;
+    let r = rejections(&meter);
+    assert_eq!((r.mismatch, r.total()), (3, 3), "{r:?}");
+
+    let llm = RoleLlm::new(&terse_scan(1), Regen::InventsPrecondition);
+    let meter = meter_with(EfficiencyConfig::default());
+    let _ = audit(&llm, &meter).await;
+    let r = rejections(&meter);
+    assert_eq!((r.invented_precondition, r.total()), (3, 3), "{r:?}");
+
+    // An id that is not the batch's is a missing id.
+    let llm = RoleLlm::new(&terse_scan(2), Regen::OneIndexed);
+    let meter = meter_with(EfficiencyConfig::default());
+    let _ = audit(&llm, &meter).await;
+    let r = rejections(&meter);
+    assert!(r.missing_id >= 2, "{r:?}");
+
+    // A finding the reply simply left out: once per round (the last of a batch is dropped, and a
+    // batch of one is dropped whole).
+    let llm = RoleLlm::new(&terse_scan(2), Regen::DropsLast);
+    let meter = meter_with(EfficiencyConfig::default());
+    let _ = audit(&llm, &meter).await;
+    let r = rejections(&meter);
+    assert_eq!((r.left_out, r.total()), (3, 3), "{r:?}");
+    let table = meter.stage_telemetry(0).render_table();
+    assert!(table.contains("3 left out"), "{table}");
+}
+
+#[tokio::test]
+async fn a_dropped_named_token_is_counted_under_its_own_reason() {
+    // The statement names src/config.rs and REQUIRE_WEBHOOK_SIGNATURE; the reply has neither.
+    struct Drops;
+    #[async_trait::async_trait]
+    impl LlmPort for Drops {
+        async fn complete(&self, req: LlmRequest) -> anyhow::Result<LlmResponse> {
+            let rows = asked(&req.prompt);
+            let entries: Vec<String> = rows
+                .iter()
+                .map(|(id, path, line)| {
+                    format!(
+                        r#"{{"id":"{id}","path":"{path}","line":{line},"detail":"The handler trusts a flag."}}"#
+                    )
+                })
+                .collect();
+            Ok(stub_response(format!(
+                r#"{{"details":[{}]}}"#,
+                entries.join(",")
+            )))
+        }
+        async fn complete_streaming(
+            &self,
+            req: LlmRequest,
+            _on_delta: &mut (dyn for<'a> FnMut(&'a str) + Send),
+        ) -> anyhow::Result<LlmResponse> {
+            self.complete(req).await
+        }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+    }
+    let meter = meter_with(EfficiencyConfig::default());
+    let (_, failed) = regenerate_full_details(
+        &Drops,
+        REPO,
+        n_findings(1),
+        &files(),
+        &[],
+        &nonce(),
+        None,
+        Some(&meter),
+    )
+    .await;
+    let r = rejections(&meter);
+    assert_eq!((r.drops_named_token, r.total()), (3, 3), "{r:?}");
+    // The failed pass (which can reach a client) carries the total in plain words and none of
+    // the breakdown.
+    let reason = &failed[0].reason;
+    assert!(reason.contains("fell short 3 times"), "{reason}");
+    assert!(
+        !reason.to_ascii_lowercase().contains("mismatch"),
+        "{reason}"
+    );
+    assert!(!reason.contains("DropsNamedToken"), "{reason}");
+}
+
+#[test]
+fn the_rejection_line_is_in_the_operator_table() {
+    let meter = UsageMeter::default();
+    meter.record_stage(Stage::DetailRegeneration, &stub_response(String::new()));
+    meter.record_detail_rejections(crate::stage_telemetry::DetailRejections {
+        mismatch: 2,
+        drops_named_token: 1,
+        invented_precondition: 4,
+        missing_id: 5,
+        truncated: 6,
+        left_out: 7,
+    });
+    let table = meter.stage_telemetry(0).render_table();
+    assert!(table.contains("detail entries turned down: 25"), "{table}");
+    for part in [
+        "2 wrong place",
+        "1 dropped a name",
+        "4 added a condition",
+        "5 missing id",
+        "6 cut off",
+        "7 left out",
+    ] {
+        assert!(table.contains(part), "{part} in {table}");
+    }
+}
+
+// ── the echoed path is read forgivingly, the line is not ────────────────────────────────────
+
+#[test]
+fn a_dot_slash_or_leading_slash_path_is_the_same_path() {
+    let f = statement(SHORT);
+    let with = |path: &str, line: u64| Entry {
+        id: "x".to_string(),
+        path: Some(path.to_string()),
+        line: Some(line),
+        detail: FULL.to_string(),
+    };
+    assert!(accept_entry(&f, &with(&format!("./{HANDLER}"), 9), "").is_ok());
+    assert!(accept_entry(&f, &with(&format!("/{HANDLER}"), 9), "").is_ok());
+    assert!(accept_entry(&f, &with(&format!(".//{HANDLER}"), 9), "").is_ok());
+    // Anything else is still a different place: another file, a suffix of it, another line.
+    assert_eq!(
+        accept_entry(&f, &with("other/webhook.rs", 9), ""),
+        Err(Reject::Mismatch)
+    );
+    assert_eq!(
+        accept_entry(&f, &with("handlers/webhook.rs", 9), ""),
+        Err(Reject::Mismatch)
+    );
+    assert_eq!(
+        accept_entry(&f, &with(&format!("./{HANDLER}"), 10), ""),
+        Err(Reject::Mismatch)
+    );
+    // The finding's own path is read the same way.
+    let mut dotted = statement(SHORT);
+    dotted.path = format!("./{HANDLER}");
+    assert!(accept_entry(&dotted, &with(HANDLER, 9), "").is_ok());
+}
+
+#[tokio::test]
+async fn a_reply_that_echoes_dot_slash_paths_is_written() {
+    let llm = RoleLlm::new(&terse_scan(2), Regen::DotSlashPath);
+    let meter = meter_with(EfficiencyConfig::default());
+    let (findings, failed) = audit(&llm, &meter).await;
+    assert!(own_text_landed(&findings), "{findings:?}");
+    assert!(failed.iter().all(|f| f.pass != STAGE_DETAIL));
+    assert_eq!(call_sizes(&llm).len(), 1, "nothing needed repeating");
+}
+
+// ── named tokens are compared after the same redaction on both sides ────────────────────────
+
+#[test]
+fn a_secret_shaped_name_the_statement_kept_is_compared_after_the_same_redaction() {
+    use camerata_secrets::fixtures::planted;
+    use camerata_secrets::SecretShape;
+    let p = planted(SecretShape::SupabaseSecretKey);
+    // The statement (as the scan stored it) still holds the value; the reply repeats it, and the
+    // reply is redacted before it is written.
+    let f = statement(&format!("Hard-coded {} in src/config.rs.", p.value));
+    let reply = format!(
+        "The key {} in src/config.rs is committed; move it to the environment.",
+        p.value
+    );
+    let written = accept_entry(&f, &entry(&f, &reply), "").expect("both sides redacted alike");
+    assert!(!written.contains(&p.value), "the value is never written");
+    // A reply that drops the key's name still fails.
+    assert!(matches!(
+        accept_entry(&f, &entry(&f, "It is committed in src/config.rs."), ""),
+        Err(Reject::DropsNamedToken(_))
+    ));
+}
+
+#[tokio::test]
+async fn a_cut_off_reply_is_still_counted_as_waste_though_its_complete_entries_are_kept() {
+    let llm = RoleLlm::new(&terse_scan(2), Regen::TruncatedOnce);
+    let meter = meter_with(EfficiencyConfig::default());
+    let (findings, failed) = audit(&llm, &meter).await;
+    assert!(own_text_landed(&findings), "{findings:?}");
+    assert!(failed.iter().all(|f| f.pass != STAGE_DETAIL));
+    assert_eq!(
+        llm.prompts(Role::Regen).len(),
+        1,
+        "nothing was lost, so nothing is repeated"
+    );
+    let telemetry = meter.stage_telemetry(0);
+    let usage = &telemetry
+        .stages
+        .iter()
+        .find(|s| s.stage == Stage::DetailRegeneration)
+        .unwrap()
+        .usage;
+    assert_eq!(usage.calls, 1);
     assert_eq!(usage.wasted_calls, 1);
 }
 
