@@ -8887,7 +8887,7 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                         // alternative-recommendation pass the audit will run.
                         let multi_option_selected =
                             report.proposed_rules.iter().filter(|r| r.options.len() >= 2).count();
-                        let est_mode = camerata_ui_core::scan::estimate_mode(&audit_mode(), backend);
+                        let est_mode = camerata_ui_core::scan::estimate_mode(&audit_mode(), backend).to_string();
                         // Several repos: one estimate per repo, summed (the scan chunks and
                         // calibrates each repo on its own). Single repo, or sizes not back yet:
                         // the one-stream estimate, unchanged.
@@ -8912,7 +8912,7 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                                         }
                                     })
                                     .collect();
-                                let est = camerata_ui_core::scan::estimate_audit_cost_by_repo(&inputs, est_mode, a_in, a_out, c_in, c_out, audit_thorough(), incremental, deep, backend, true);
+                                let est = camerata_ui_core::scan::estimate_audit_cost_by_repo(&inputs, &est_mode, a_in, a_out, c_in, c_out, audit_thorough(), incremental, deep, backend, true);
                                 for z in sizes.iter() {
                                     match (&z.error, est.rows.iter().find(|r| r.repo == z.repo)) {
                                         (Some(why), _) => repo_lines.push(camerata_ui_core::scan::unreadable_repo_line(&z.repo, why)),
@@ -8922,7 +8922,7 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                                 }
                                 (est.tokens, est.dollars, est.passes)
                             }
-                            None => estimate_audit_cost(report.code_chars, sel, est_mode, a_in, a_out, c_in, c_out, audit_thorough(), incremental, deep, backend, multi_option_selected, true),
+                            None => estimate_audit_cost(report.code_chars, sel, &est_mode, a_in, a_out, c_in, c_out, audit_thorough(), incremental, deep, backend, multi_option_selected, true),
                         };
                         let code_toks = human_tokens((report.code_chars as f64 / 4.0) as u64);
                         let dollar_str = if dollars < 0.01 { "<$0.01".to_string() } else { format!("~${dollars:.2}") };

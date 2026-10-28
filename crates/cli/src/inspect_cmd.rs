@@ -511,7 +511,7 @@ fn clean_legacy_repo_file<T: serde::de::DeserializeOwned>(repo: &Path, basename:
 /// redaction, so it can hold a raw secret value, and "ignored" is not the same as "gone"
 /// (docs/design/2026-10-23_secret-redaction-and-release-gate.md, path E2).
 fn load_prior_manifest(path: &Path) -> Option<ScanManifest> {
-    let bytes = std::fs::read(&path).ok()?;
+    let bytes = std::fs::read(path).ok()?;
     let manifest: ScanManifest = serde_json::from_slice(&bytes).ok()?;
     if manifest.is_current() {
         return Some(manifest);

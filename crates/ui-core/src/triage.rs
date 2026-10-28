@@ -1998,7 +1998,7 @@ mod tests {
 
     #[test]
     fn the_default_order_does_not_interleave_two_repos_with_the_same_path() {
-        let mut rows = vec![
+        let mut rows = [
             in_repo("acme/b", "src/index.ts", 1),
             in_repo("acme/a", "src/index.ts", 1),
             in_repo("acme/b", "src/index.ts", 1),

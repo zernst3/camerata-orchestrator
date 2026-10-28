@@ -1019,6 +1019,49 @@ mod cli_parse_tests {
     }
 
     #[test]
+    fn inspect_takes_repeated_repos_with_one_name_each() {
+        let cli = Cli::try_parse_from([
+            "camerata",
+            "inspect",
+            "--repo",
+            "/tmp/a",
+            "--repo-name",
+            "acme/api",
+            "--repo",
+            "/tmp/b",
+            "--repo-name",
+            "acme/web",
+            "--export",
+            "/tmp/o.zip",
+            "--client",
+            "Example Client Ltd",
+        ])
+        .expect("must parse");
+        match cli.command {
+            Command::Inspect {
+                repo, repo_name, ..
+            } => {
+                assert_eq!(repo, vec![PathBuf::from("/tmp/a"), PathBuf::from("/tmp/b")]);
+                assert_eq!(
+                    repo_name,
+                    vec!["acme/api".to_string(), "acme/web".to_string()]
+                );
+            }
+            other => panic!("expected Command::Inspect: {other:?}"),
+        }
+        // At least one --repo is required.
+        assert!(Cli::try_parse_from([
+            "camerata",
+            "inspect",
+            "--export",
+            "/tmp/o.zip",
+            "--client",
+            "Example Client Ltd"
+        ])
+        .is_err());
+    }
+
+    #[test]
     fn inspect_defaults_backend_to_api_and_every_flag_to_off() {
         let cli = Cli::try_parse_from([
             "camerata",
@@ -1034,6 +1077,7 @@ mod cli_parse_tests {
         match cli.command {
             Command::Inspect {
                 repo,
+                repo_name,
                 export,
                 backend,
                 batch,
@@ -1051,12 +1095,13 @@ mod cli_parse_tests {
                 consensus,
             } => {
                 assert_eq!(client, "Example Client Ltd");
+                assert!(repo_name.is_empty(), "a lone repo needs no name");
                 assert!(
                     !internal,
                     "every inspection is a client engagement by default"
                 );
                 assert!(!run_client_tooling, "client tooling is opt-in");
-                assert_eq!(repo, PathBuf::from("/tmp/r"));
+                assert_eq!(repo, vec![PathBuf::from("/tmp/r")]);
                 assert_eq!(export, PathBuf::from("/tmp/o.zip"));
                 assert_eq!(backend, ProjectBackend::Api);
                 assert!(!batch, "no mode forced: the run's default applies");

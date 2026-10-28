@@ -162,7 +162,7 @@ mod tests {
         );
         assert_ne!(
             project_state_key(&[a.clone(), b.clone()]),
-            project_state_key(&[a.clone()])
+            project_state_key(std::slice::from_ref(&a))
         );
         assert_ne!(
             project_state_key(&[a.clone(), b.clone()]),

@@ -172,6 +172,35 @@ pub(crate) async fn onboard_preflight(
     axum::Json(repo_sizes(&req.repos, &facts, &unresolved))
 }
 
+/// The exact input size of one representative scan pass, from `count_tokens` (free, API backend
+/// only), and the number of passes the main scan will make. `None` when there is nothing to
+/// sample or the count was unavailable (no key, network error): the estimate then stands on its
+/// heuristic alone and says so.
+pub struct ExactSample {
+    pub input_tokens: u64,
+    pub passes: usize,
+}
+
+/// [`ExactSample`] for the first repo that has files, through the batch path's own sample
+/// builder ([`representative_scan_sample`] and `exact_input_token_count`).
+pub async fn exact_sample_tokens(
+    llm: &crate::llm::Llm,
+    facts: &[RepoScanFacts],
+    mode: ScanMode,
+    model: Option<&str>,
+    efficiency: crate::efficiency::EfficiencyConfig,
+) -> Option<ExactSample> {
+    let repo = facts.iter().find(|f| !f.files.is_empty())?;
+    let sample =
+        representative_scan_sample(&repo.repo, &repo.files, &repo.semantic, mode, efficiency)?;
+    let model = crate::ai_audit::resolve_audit_model(model);
+    let input_tokens = crate::llm::exact_input_token_count(llm, &sample.request, &model).await?;
+    Some(ExactSample {
+        input_tokens,
+        passes: sample.passes,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -250,33 +279,4 @@ mod tests {
             "an unlisted repo is still reported"
         );
     }
-}
-
-/// The exact input size of one representative scan pass, from `count_tokens` (free, API backend
-/// only), and the number of passes the main scan will make. `None` when there is nothing to
-/// sample or the count was unavailable (no key, network error): the estimate then stands on its
-/// heuristic alone and says so.
-pub struct ExactSample {
-    pub input_tokens: u64,
-    pub passes: usize,
-}
-
-/// [`ExactSample`] for the first repo that has files, through the batch path's own sample
-/// builder ([`representative_scan_sample`] and `exact_input_token_count`).
-pub async fn exact_sample_tokens(
-    llm: &crate::llm::Llm,
-    facts: &[RepoScanFacts],
-    mode: ScanMode,
-    model: Option<&str>,
-    efficiency: crate::efficiency::EfficiencyConfig,
-) -> Option<ExactSample> {
-    let repo = facts.iter().find(|f| !f.files.is_empty())?;
-    let sample =
-        representative_scan_sample(&repo.repo, &repo.files, &repo.semantic, mode, efficiency)?;
-    let model = crate::ai_audit::resolve_audit_model(model);
-    let input_tokens = crate::llm::exact_input_token_count(llm, &sample.request, &model).await?;
-    Some(ExactSample {
-        input_tokens,
-        passes: sample.passes,
-    })
 }
