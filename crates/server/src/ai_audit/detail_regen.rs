@@ -490,7 +490,8 @@ fn opaque_id(repo: &str, idx: usize, f: &Finding, taken: &[String]) -> String {
 }
 
 /// One round: the `pending` findings in batches of `batch_size`. Writes the regenerated detail
-/// into `findings` and returns the indices still without one.
+/// into `findings` and returns the indices still without one. `last_error` keeps the text of the
+/// most recent failed call, for the failed pass's reason.
 #[allow(clippy::too_many_arguments)]
 async fn run_detail_round(
     llm: &dyn LlmPort,
@@ -503,6 +504,7 @@ async fn run_detail_round(
     findings: &mut [Finding],
     pending: &[usize],
     batch_size: usize,
+    last_error: &mut Option<String>,
 ) -> Vec<usize> {
     let mut still_pending = Vec::new();
     for batch in pending.chunks(batch_size.max(1)) {
@@ -537,7 +539,11 @@ async fn run_detail_round(
         let mut on_delta = |_: &str| {};
         let resp = match llm.complete_streaming(req, &mut on_delta).await {
             Ok(r) => r,
-            Err(_) => {
+            Err(e) => {
+                // A refusal is billed: it counts toward the spend limit like any answered call
+                // (`record_failed`), and the reason the call failed reaches the failed pass.
+                meter_failed(meter, Stage::DetailRegeneration, &e);
+                *last_error = Some(format!("{e:#}"));
                 still_pending.extend(batch.iter().copied());
                 continue;
             }
@@ -612,6 +618,7 @@ pub(crate) async fn regenerate_full_details(
     let system = detail_regen_system_prompt();
     let total = findings.len();
     let mut pending: Vec<usize> = (0..total).collect();
+    let mut last_error: Option<String> = None;
     // The stage boundary check: stopped by the spend limit before it began, every finding keeps
     // its short detail, marked.
     let blocked = meter.is_some_and(|m| m.stage_blocked(repo, STAGE_DETAIL));
@@ -632,6 +639,7 @@ pub(crate) async fn regenerate_full_details(
                 &mut findings,
                 &pending,
                 batch_size,
+                &mut last_error,
             )
             .await;
             // The repeat is smaller: a cut-off or a muddled long reply is the usual reason a
@@ -657,7 +665,15 @@ pub(crate) async fn regenerate_full_details(
                 } else {
                     ""
                 },
-            ),
+            ) + &last_error
+                .as_deref()
+                .map(|e| {
+                    format!(
+                        "; a regeneration call failed with: {}",
+                        batch_mode::disclosable_error(e)
+                    )
+                })
+                .unwrap_or_default(),
         });
     }
     (findings, failed_passes)
