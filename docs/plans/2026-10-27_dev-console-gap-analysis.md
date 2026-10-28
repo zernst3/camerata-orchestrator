@@ -63,3 +63,12 @@ Expect to break: (a) without the curl, greenfield scaffold runs instead of editi
 | 8 | No merge step, no decision log, no parallel cap or resource guards | M | lib.rs run start; pr.rs; new | Open |
 | 9 | Investigation emits prose only; decisions are hand-typed | S | investigation_run.rs; ui/cockpit/uow.rs:7098 | Open |
 | 10 | Live-run proof of the console flow does not exist (LIVE_RUN_VERIFICATION covers the gate only) | S | docs/LIVE_RUN_VERIFICATION.md; run of section 6 | Open |
+
+### Known limits of the gap 1 and 2 fixes (review follow-up, 2026-10-28)
+
+Fixed after review: a branch name is validated everywhere it enters (`.`, `..` and `..` segments are refused, and the worktree code proves its directory is inside the worktrees root before any delete); a run or a branch record for a repository outside the active project is refused; the run, multi-repo setup and Ship take the unit's branch from one derivation (the Intake scope, recorded on the unit when a run starts, with any change noted in its history); selected rules bound to other repositories are left out of the implementer's rule subset.
+
+Left as they are on purpose:
+
+- `NewFromBase.base` is stored and shown in the console but never used: a new branch is cut from the clone's current HEAD, whatever base is entered, and the base name is not validated. Honouring it needs a decision on fetching and fast-forwarding the base first.
+- The HTTP test `setting_the_branch_makes_the_run_work_in_the_real_repository` proves the unit's worktree is created on its branch in the real clone before the agent task is spawned. It does not run an agent, so it does not prove the agent edits that repository; that is the live run in gap 10.

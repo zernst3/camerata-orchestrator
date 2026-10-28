@@ -1174,6 +1174,7 @@ pub async fn execute_dev_implement_run(
     let role = match crate::governed_rules::project_governed_role(
         "BrownfieldImplementer",
         project.as_ref(),
+        Some(repo.as_str()),
     )
     .await
     {
