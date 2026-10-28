@@ -51,6 +51,13 @@ H. By 08:30: morning summary at the top of `docs/OVERNIGHT_DECISIONS.md`; the PR
 
 ## Status log (newest first)
 
+- 22:50: GitHub CI green for the first time on `fix/github-ci` (run 40621036960, all four
+  gates, about 17 min); in Fable review before merge. Queued follow-ups it found:
+  `derive_shared_target_dir` returns `/.camerata-shared-target` instead of None
+  (crates/checks/src/lib.rs ~325); repo scanners return files in filesystem order, so the audit
+  digest is not deterministic across filesystems; Rust 1.99 clippy/rustc findings
+  (`double_must_use` on async_trait traits in crates/core, an unused glob import in
+  crates/ui/src/cockpit/pane_context.rs) block un-pinning the CI toolchain from 1.95.0.
 - 22:45: cost-cap metering fixes gated green (8,827 passed, 0 failed) and pushed; this also
   confirms the docs commits pushed early with them.
 - 2026-10-27 night: plan written; recurring check scheduled; Mac kept awake.
