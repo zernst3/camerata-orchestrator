@@ -89,6 +89,11 @@ H. By 08:30: morning summary at the top of `docs/OVERNIGHT_DECISIONS.md`; the PR
 
 ## Status log (newest first)
 
+- 00:30: outside-standard sources (cloud) reviewed: no HIGH; grounded 410 -> 421 accurate (strict
+  419 until two principle-level groundings are tightened). Brief queued
+  (scratchpad/sources_merge_brief.md), runs after the integration merge. Follow-up noted: about
+  700 source titles corpus-wide still carry em dashes, internal paths or rule ids (e.g.
+  orch-conformance-1 "AGENTS.md — ..."): a separate corpus title pass.
 - 00:25: boards optional (cloud) reviewed: 2 HIGH (native refs render as `#n` and GitHub
   autolinks them to real issues; merge conflict with console gaps), 3 MEDIUM (repo not
   validated before paths and push URLs; phantom units; numbers reused after delete). Brief
