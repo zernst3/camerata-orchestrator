@@ -1828,3 +1828,65 @@ fn no_client_text_the_pass_writes_has_an_em_dash_or_a_serial_comma() {
         "a, b and c"
     );
 }
+
+// ─── follow-ups: build-argument images, the Gradle gate, npm dependency kinds, the stamp ───
+
+/// The reason a declaration was left out of the checks, or `None` when it counts.
+fn excluded_reason(d: &Declaration) -> Option<String> {
+    match &d.version {
+        Version::Excluded(why) => Some(why.clone()),
+        _ => None,
+    }
+}
+
+#[test]
+fn a_dockerfile_whose_whole_image_is_a_build_argument_is_excluded_not_dropped() {
+    for text in [
+        "FROM ${BASE}\n",
+        "FROM $IMAGE AS base\nFROM base\nCMD [\"run\"]\n",
+        "FROM ${REGISTRY}/${IMAGE}:1.2\n",
+        "FROM --platform=$BUILDPLATFORM ${BASE:-node}:18\n",
+    ] {
+        let d = detect::read_dockerfile("Dockerfile", text);
+        assert_eq!(d.len(), 1, "{text}: {d:?}");
+        assert_eq!(
+            excluded_reason(&d[0]).as_deref(),
+            Some("the image is a build argument"),
+            "{text}: {d:?}"
+        );
+        assert_eq!(
+            d[0].line,
+            text.lines().position(|l| l.contains('$')).unwrap() + 1
+        );
+    }
+}
+
+#[test]
+fn a_build_argument_that_is_not_the_whole_image_or_does_not_ship_changes_nothing() {
+    // The registry is an argument but the image is a known one: it is read as before.
+    let d = detect::read_dockerfile("Dockerfile", "FROM ${REGISTRY}/node:18.17.0\n");
+    assert_eq!(d.len(), 1, "{d:?}");
+    assert_eq!(d[0].product, Product::Node);
+    assert_eq!(d[0].version, Version::Exact("18.17.0".to_string()));
+    // An unrelated image behind an argument registry is not one of ours.
+    assert!(detect::read_dockerfile("Dockerfile", "FROM ${REGISTRY}/ubuntu:22.04\n").is_empty());
+    // A build stage that never ships is not a gap, whatever its image is.
+    let d = detect::read_dockerfile("Dockerfile", "FROM $BUILDER AS build\nFROM nginx:1.27.0\n");
+    assert_eq!(d.len(), 1, "{d:?}");
+    assert_eq!(d[0].product, Product::Nginx);
+}
+
+#[tokio::test]
+async fn a_build_argument_image_reaches_coverage_and_is_never_looked_up() {
+    let dir = repo(&[("Dockerfile", "ARG BASE\nFROM ${BASE}\nRUN true\n")]);
+    let fetcher = Fixture::online();
+    let audit = run(&dir, &fetcher, None).await;
+    assert!(audit.findings.is_empty(), "{:?}", audit.findings);
+    let text = notes_text(&audit);
+    assert!(
+        text.contains("Not checked, because the image is a build argument"),
+        "{text}"
+    );
+    assert!(text.contains("`${BASE}` in Dockerfile line 2"), "{text}");
+    assert_eq!(fetcher.calls().len(), 0, "{:?}", fetcher.calls());
+}

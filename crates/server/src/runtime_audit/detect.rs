@@ -40,6 +40,9 @@ pub enum Product {
     Laravel,
     SpringBoot,
     Express,
+    /// A Dockerfile base image that is itself a build argument, so the product is unknown. It
+    /// only ever appears as an excluded declaration and is never looked up.
+    ContainerImage,
 }
 
 impl Product {
@@ -62,6 +65,8 @@ impl Product {
             Self::Laravel => "laravel",
             Self::SpringBoot => "spring-boot",
             Self::Express => "express",
+            // Never fetched: a container image of unknown product is always excluded.
+            Self::ContainerImage => "container-image",
         }
     }
 
@@ -83,6 +88,7 @@ impl Product {
             Self::Laravel => "Laravel",
             Self::SpringBoot => "Spring Boot",
             Self::Express => "Express",
+            Self::ContainerImage => "Container image",
         }
     }
 
@@ -123,6 +129,8 @@ pub enum Version {
 
 /// Why a Dockerfile stage before the final one is not checked.
 pub const BUILD_STAGE: &str = "it is a build stage, and a build image does not ship";
+/// Why a Dockerfile `FROM` whose whole image is a build argument is not checked.
+pub const BUILD_ARG_IMAGE: &str = "the image is a build argument";
 /// Why a framework found only in a lockfile is not checked.
 pub const NOT_DIRECT: &str = "it is not a direct, non-dev dependency of the project";
 
@@ -372,6 +380,15 @@ fn docker_product(image: &str) -> Option<Product> {
     }
 }
 
+/// Whether the image name itself, the part after the last `/`, is a build argument (`${BASE}`,
+/// `$IMAGE`). A registry or a tag that is an argument around a literal name is not.
+fn image_is_build_argument(image: &str) -> bool {
+    image
+        .rsplit('/')
+        .next()
+        .is_some_and(|name| name.contains('$'))
+}
+
 /// One `FROM` line.
 struct Stage {
     line: usize,
@@ -439,6 +456,17 @@ pub fn read_dockerfile(path: &str, text: &str) -> Vec<Declaration> {
             _ => (without_digest, None),
         };
         let Some(product) = docker_product(image) else {
+            // A whole image set by a build argument (`FROM ${BASE}`) cannot be named, so it is
+            // listed as not checked instead of vanishing. A stage that never ships is no gap.
+            if ships[idx] && image_is_build_argument(image) {
+                out.push(decl(
+                    Product::ContainerImage,
+                    path,
+                    stage.line,
+                    &stage.image_ref,
+                    Version::Excluded(BUILD_ARG_IMAGE.to_string()),
+                ));
+            }
             continue;
         };
         let version = if ships[idx] {
