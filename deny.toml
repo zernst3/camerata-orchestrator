@@ -100,10 +100,13 @@ exceptions = [
     { crate = "camerata-ui-core", allow = ["PolyForm-Noncommercial-1.0.0"] },
     { crate = "camerata-worktracker", allow = ["PolyForm-Noncommercial-1.0.0"] },
     { crate = "corpus-verifier", allow = ["PolyForm-Noncommercial-1.0.0"] },
-    # MPL-2.0 is weak (file-level) copyleft. These come from `kuchikiki` <- `wry`
-    # (dioxus-desktop's HTML handling) and `dirs-sys` <- `dirs`. Using them unmodified asks
-    # nothing of Camerata's own code. Modifying their files would require publishing those
-    # changes. PENDING the maintainer's sign-off.
+    # MPL-2.0 is file-level copyleft: it covers the MPL-licensed files themselves, not the
+    # code that links to them. Camerata uses these crates unmodified, so the license puts no
+    # obligation on Camerata's own source. Only modifying one of these crates' files would
+    # require publishing that change. They come from `kuchikiki` <- `wry` (dioxus-desktop's
+    # HTML handling) and `dirs-sys` <- `dirs`.
+    # TODO confirm with Zach: these five exceptions are kept so CI stays green, and are on
+    # the maintainer's sign-off list. Drop an entry if the decision is to avoid MPL-2.0.
     { crate = "cssparser", allow = ["MPL-2.0"] },
     { crate = "cssparser-macros", allow = ["MPL-2.0"] },
     { crate = "dtoa-short", allow = ["MPL-2.0"] },
