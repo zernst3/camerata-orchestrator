@@ -58,6 +58,9 @@ use camerata::inspect_cmd::build_product_export_bytes;
 use camerata_server::onboard::{AuditedRef, Finding, ScanProvenance, ScanReport};
 use camerata_server::report_export::{self, ReportOptions};
 
+/// The synthetic client both paths export for.
+const CLIENT: &str = "Example Client Ltd";
+
 fn typst_on_path() -> bool {
     std::process::Command::new("typst")
         .arg("--version")
@@ -140,6 +143,7 @@ async fn server_path_export(report: &ScanReport) -> (String, Vec<u8>) {
     let dispositions: HashMap<String, report_export::DispositionWire> = HashMap::new();
     let mut options = ReportOptions::default();
     options.apply_env_defaults();
+    options.client_name = CLIENT.to_string();
 
     // Pass-1 W1 seal fix: the exporters take `&SealedReport` — seal the fixture here (a cheap
     // clone; this hand-built test fixture has no row-adding passes of its own left to run).
@@ -293,7 +297,7 @@ async fn cli_export_assembly_matches_the_server_product_export_path_byte_for_byt
 
     let report = fixture_report();
 
-    let (cli_stem, cli_zip) = build_product_export_bytes(&report.clone().seal(), None)
+    let (cli_stem, cli_zip) = build_product_export_bytes(&report.clone().seal(), None, CLIENT)
         .await
         .expect("the CLI's export assembly must succeed");
     let (server_stem, server_zip) = server_path_export(&report).await;

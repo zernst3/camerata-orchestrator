@@ -227,8 +227,7 @@ name; the model backend and where the key is saved; the stack rules; the line co
 estimate; running the inspection; failed or skipped passes; the review queue and its four decisions;
 the speed tools (stacked review, the code viewer, the palette); review time; exporting the package.
 This first version covers the Inspection only. Where a step's own control does not exist yet (the
-client name field in the inspection setup, the spending cap), it points at the nearest control that
-does.
+spending cap), it points at the nearest control that does.
 
 ---
 
@@ -1744,8 +1743,17 @@ client-facing deliverable: a ZIP holding a PDF, an Excel workbook, `findings.jso
 from the command line with no server and no UI at all:
 
 ```
-cargo run -p camerata -- inspect --repo <PATH> --export <OUT.zip>
+cargo run -p camerata -- inspect --repo <PATH> --export <OUT.zip> --client "<CLIENT NAME>"
 ```
+
+**Confidentiality marking.** Every PDF page footer and every workbook sheet footer reads
+"Confidential, prepared for <client> on <date>", and the first page of the PDF carries a short
+handling note (who the report is for, and not to forward it outside that company without consent).
+The client name is part of the inspection setup: the **Client name** field above the cost estimate
+on the scan screen, saved with the project as you leave the field. An export with no client name is
+refused with a message saying where to enter it. On the command line, `--client` is required and is
+checked before anything is read or spent. A project imported from someone else's export starts with
+no client name, so a report is never marked for the wrong client.
 
 Useful flags: `--backend api|cli` (the same API-vs-CLI compliance setting a project carries; `api`, the
 Anthropic API, is the default and uses the Anthropic key you saved in the app (Settings), with the

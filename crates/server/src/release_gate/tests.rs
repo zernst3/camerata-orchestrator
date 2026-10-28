@@ -39,6 +39,7 @@ pub(super) fn scan_report() -> ScanReport {
         files_scanned: 10,
         test_file_count: 0,
         files_excluded: 0,
+        excluded_noise_lines: None,
         code_chars: 5000,
         code_lines: 400,
         code_lines_by_language: vec![LanguageVolume {
@@ -85,10 +86,18 @@ pub(super) fn scan_report() -> ScanReport {
     }
 }
 
+/// Report options with the client name every export needs (synthetic).
+pub(super) fn client_options() -> ReportOptions {
+    ReportOptions {
+        client_name: "Example Client Ltd".to_string(),
+        ..ReportOptions::default()
+    }
+}
+
 /// A clean package, built by the production assembly around a stand-in PDF.
 pub(super) fn package() -> ProductPackage {
     let sealed = sealed_report();
-    let options = ReportOptions::default();
+    let options = client_options();
     let json = build_report_json(&sealed, &HashMap::new(), None, &options);
     let data = render_data_json(&json).expect("data.json renders");
     assemble_package(
@@ -115,7 +124,7 @@ fn the_backend_and_provider_in_the_options_reach_the_manifest_and_readme() {
         model: Some(crate::ModelRecord::anthropic(
             crate::llm::ProjectBackend::Api,
         )),
-        ..ReportOptions::default()
+        ..client_options()
     };
     let json = build_report_json(&sealed, &HashMap::new(), None, &options);
     let data = render_data_json(&json).expect("data.json renders");
@@ -270,7 +279,7 @@ fn leaked(haystack: &str, p: &Planted) -> bool {
 // ---- the happy path -----------------------------------------------------------------------------
 
 #[test]
-fn release_passes_a_clean_package_and_reports_six_checks() {
+fn release_passes_a_clean_package_and_reports_eight_checks() {
     let z = released();
     assert!(z.report.is_clean());
     assert_eq!(
@@ -280,6 +289,8 @@ fn release_passes_a_clean_package_and_reports_six_checks() {
             "dataset set",
             "dataset parity",
             "row parity",
+            "severity and kind counts",
+            "confidentiality marking",
             "manifest",
             "provenance"
         ]
@@ -294,8 +305,8 @@ fn the_readme_and_manifest_state_the_release_checks_that_ran() {
     let readme = String::from_utf8_lossy(&entries["README.txt"]).to_string();
     assert!(
         readme.contains(
-            "Release checks: secrets, dataset set, dataset parity, row parity, manifest, \
-             provenance (all passed)"
+            "Release checks: secrets, dataset set, dataset parity, row parity, severity and \
+             kind counts, confidentiality marking, manifest, provenance (all passed)"
         ),
         "{readme}"
     );
@@ -676,7 +687,7 @@ fn audit_zip_over_a_released_zip_is_clean() {
     );
     assert_eq!(
         report.checks.len(),
-        5,
+        7,
         "row parity needs the in-memory rows"
     );
 }
@@ -881,6 +892,12 @@ fn app_with_a_leaking_path(p: &Planted) -> (crate::AppState, String) {
         .projects
         .create("Acme", vec!["acme/portal".to_string()])
         .expect("project created");
+    let project = state
+        .projects
+        .update(&project.id, |p| {
+            p.client_name = "Example Client Ltd".to_string()
+        })
+        .expect("project exists");
     let mut report = scan_report();
     report.findings[0].path = format!("src/{}.rs", p.value);
     state.set_last_scan(project.id.clone(), report);
@@ -982,6 +999,12 @@ async fn export_product_success_names_the_release_checks_in_a_header() {
         .projects
         .create("Acme", vec!["acme/portal".to_string()])
         .expect("project created");
+    let project = state
+        .projects
+        .update(&project.id, |p| {
+            p.client_name = "Example Client Ltd".to_string()
+        })
+        .expect("project exists");
     state.set_last_scan(project.id.clone(), scan_report());
     let resp = crate::export_product(
         axum::extract::State(state),
@@ -1004,7 +1027,10 @@ async fn export_product_success_names_the_release_checks_in_a_header() {
         resp.headers()
             .get("x-camerata-release-checks")
             .and_then(|v| v.to_str().ok()),
-        Some("secrets, dataset set, dataset parity, row parity, manifest, provenance")
+        Some(
+            "secrets, dataset set, dataset parity, row parity, severity and kind counts, \
+             confidentiality marking, manifest, provenance"
+        )
     );
 }
 
@@ -1039,7 +1065,7 @@ async fn a_secret_in_the_pdf_data_blocks_the_package_before_typst_is_ever_run() 
     // `data.json` without passing through the finding redactor.
     let options = ReportOptions {
         prepared_by: format!("Prepared with {}", p.value),
-        ..ReportOptions::default()
+        ..client_options()
     };
     let error = crate::report_export::TYPST_PROGRAM
         .scope(
@@ -1082,7 +1108,7 @@ async fn a_clean_package_still_reaches_the_compiler() {
                 &sealed_report(),
                 &HashMap::new(),
                 None,
-                &ReportOptions::default(),
+                &client_options(),
                 STEM,
             ),
         )
@@ -1091,6 +1117,40 @@ async fn a_clean_package_still_reaches_the_compiler() {
         .expect("the fake typst fails the compile");
     assert!(gate_failure_of(&error).is_none(), "{error}");
     assert!(marker.exists(), "a clean package is compiled");
+}
+
+/// Confidentiality (2026-10-24 decision): a blank client name blocks the export with a clear
+/// message, before Typst runs, so no deliverable says "prepared for .".
+#[cfg(unix)]
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn a_blank_client_name_blocks_the_package_before_typst_is_ever_run() {
+    let (fake_bin, marker) = recording_typst();
+    let _path = camerata_test_env::EnvGuard::set("PATH", fake_bin.path());
+    for blank in ["", "   "] {
+        let options = ReportOptions {
+            client_name: blank.to_string(),
+            ..ReportOptions::default()
+        };
+        let error = build_product_package_with_stem(
+            &sealed_report(),
+            &HashMap::new(),
+            None,
+            &options,
+            STEM,
+        )
+        .await
+        .err()
+        .expect("a blank client name must block the export");
+        let refusal = error
+            .downcast_ref::<crate::report_export::ClientNameRequired>()
+            .expect("the refusal names the missing client name");
+        assert!(
+            refusal.to_string().contains("client name"),
+            "the message says what to fix: {refusal}"
+        );
+    }
+    assert!(!marker.exists(), "typst ran for a package with no client");
 }
 
 // ---- regression guard: the seed text a client reads must never false-block the gate ------------
@@ -1162,5 +1222,406 @@ async fn the_gate_raises_no_problem_on_the_seed_text_every_package_ships() {
         "seed text false-blocks the release gate ({}):\n  {}",
         problems.len(),
         shown.join("\n  ")
+    );
+}
+
+// ---- confidentiality: the client name (2026-10-24 decision) -------------------------------------
+
+/// Both export routes refuse a project whose inspection setup has no client name, with a 422
+/// that says where to enter it, before anything is compiled (no Typst needed).
+#[tokio::test]
+async fn both_export_routes_refuse_a_project_with_no_client_name() {
+    for route in ["pdf", "zip"] {
+        let state = crate::AppState::new(std::sync::Arc::new(crate::InMemoryStoryStore::new()));
+        let project = state
+            .projects
+            .create("Acme", vec!["acme/portal".to_string()])
+            .expect("project created");
+        state.set_last_scan(project.id.clone(), scan_report());
+        let resp = if route == "pdf" {
+            crate::export_audit_report(
+                axum::extract::State(state),
+                axum::extract::Path(project.id),
+                request(),
+            )
+            .await
+        } else {
+            crate::export_product(
+                axum::extract::State(state),
+                axum::extract::Path(project.id),
+                request(),
+            )
+            .await
+        };
+        assert_eq!(
+            resp.status(),
+            axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+            "{route}"
+        );
+        let body = body_json(resp).await;
+        assert_eq!(body["gate"], "client_name", "{route}: {body}");
+        assert!(
+            body["message"]
+                .as_str()
+                .is_some_and(|m| m.contains("inspection setup")),
+            "{route}: the message says where to enter the name: {body}"
+        );
+    }
+}
+
+/// The setter saves a trimmed name on the project, and refuses one that spans lines or is too
+/// long for a footer, leaving the saved name as it was.
+#[tokio::test]
+async fn the_client_name_setter_saves_a_valid_name_and_refuses_a_bad_one() {
+    let state = crate::AppState::new(std::sync::Arc::new(crate::InMemoryStoryStore::new()));
+    let project = state
+        .projects
+        .create("Acme", vec!["acme/portal".to_string()])
+        .expect("project created");
+    let set = |name: String| {
+        crate::set_client_name(
+            axum::extract::State(state.clone()),
+            axum::extract::Path(project.id.clone()),
+            axum::Json(crate::SetClientNameReq { client_name: name }),
+        )
+    };
+    let ok = set("  Example Client Ltd ".to_string()).await;
+    assert_eq!(ok.0["ok"], true);
+    assert_eq!(
+        state
+            .projects
+            .get(&project.id)
+            .expect("project")
+            .client_name,
+        "Example Client Ltd"
+    );
+    for bad in [
+        "Example\nClient".to_string(),
+        "x".repeat(crate::report_export::CLIENT_NAME_MAX_CHARS + 1),
+    ] {
+        let refused = set(bad).await;
+        assert_eq!(refused.0["ok"], false);
+        assert!(refused.0["message"].as_str().is_some_and(|m| !m.is_empty()));
+    }
+    assert_eq!(
+        state
+            .projects
+            .get(&project.id)
+            .expect("project")
+            .client_name,
+        "Example Client Ltd",
+        "a refused name never replaces the saved one"
+    );
+}
+
+/// The marking reaches every workbook sheet's footer, it is the PDF's line, and the gate
+/// refuses a workbook whose sheets lost it.
+#[test]
+fn every_sheet_footer_carries_the_pdfs_confidentiality_line_and_the_gate_checks_it() {
+    let clean = package();
+    let line = clean.report_json.confidentiality.line.clone();
+    assert!(
+        line.starts_with("Confidential, prepared for Example Client Ltd on "),
+        "{line}"
+    );
+    let footers = crate::release_gate::xlsx_header_footers(&clean.xlsx).expect("footers");
+    let sheets = crate::release_gate::xlsx_sheet_names(&clean.xlsx).expect("sheets");
+    assert!(
+        sheets.len() > 3,
+        "anti-vacuity: the workbook has many sheets"
+    );
+    for sheet in &sheets {
+        let footer = footers
+            .iter()
+            .find(|f| f.part == "footer" && &f.sheet == sheet)
+            .unwrap_or_else(|| panic!("sheet {sheet:?} has no footer"));
+        assert_eq!(footer.left, line, "sheet {sheet:?}");
+    }
+
+    // A workbook with no footers (an older build, or a sheet writer that dropped them) is
+    // refused by the archive pass alone.
+    let mut stripped = package();
+    let entries_without = {
+        let sealed = sealed_report();
+        let options = client_options();
+        let mut wb = crate::xlsx_export::build_workbook(&sealed, &HashMap::new(), None, &options)
+            .expect("workbook");
+        // Rewrite every `<oddFooter>` out of the workbook's sheet XML.
+        wb = rewrite_xlsx(&wb, |name, xml| {
+            if name.starts_with("xl/worksheets/sheet") {
+                let mut out = xml.to_string();
+                while let (Some(a), Some(b)) = (out.find("<oddFooter>"), out.find("</oddFooter>")) {
+                    out.replace_range(a..b + "</oddFooter>".len(), "");
+                }
+                out
+            } else {
+                xml.to_string()
+            }
+        });
+        wb
+    };
+    stripped.xlsx = entries_without;
+    let error = release(stripped).expect_err("a workbook without the marking must be refused");
+    let ReleaseError::Blocked(failure) = error else {
+        panic!("expected a gate refusal, got {error}");
+    };
+    assert!(
+        failure
+            .report
+            .problems()
+            .any(|(check, p)| check == CheckId::Marking
+                && p.message.contains("no confidentiality footer")),
+        "{failure}"
+    );
+}
+
+/// Rebuild an xlsx (a zip) with each UTF-8 member passed through `f`.
+fn rewrite_xlsx(xlsx: &[u8], f: impl Fn(&str, &str) -> String) -> Vec<u8> {
+    let entries = read_zip_entries(xlsx).expect("the workbook is a zip");
+    let mut out = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    let options = zip::write::SimpleFileOptions::default();
+    for (name, bytes) in entries {
+        out.start_file(name.as_str(), options)
+            .expect("start member");
+        match std::str::from_utf8(&bytes) {
+            Ok(text) => out.write_all(f(&name, text).as_bytes()),
+            Err(_) => out.write_all(&bytes),
+        }
+        .expect("write member");
+    }
+    out.finish().expect("finish zip").into_inner()
+}
+
+/// The marking goes through the release gate like every other string: a secret-shaped value
+/// typed into the client name is caught in the workbook's sheet footers too, not only in the
+/// PDF's data.
+#[test]
+fn a_secret_in_the_client_name_is_caught_in_the_sheet_footers() {
+    let p = planted(SecretShape::StripeLiveSecretKey);
+    let sealed = sealed_report();
+    let options = ReportOptions {
+        client_name: format!("Acme {}", p.value),
+        ..ReportOptions::default()
+    };
+    let json = build_report_json(&sealed, &HashMap::new(), None, &options);
+    let data = render_data_json(&json).expect("data.json renders");
+    let package = assemble_package(
+        &sealed,
+        &HashMap::new(),
+        None,
+        &options,
+        STEM,
+        (json, data, STAND_IN_PDF.to_vec()),
+    )
+    .expect("the package assembles");
+    let error = release(package).expect_err("the package must be refused");
+    let ReleaseError::Blocked(failure) = error else {
+        panic!("expected a gate refusal, got {error}");
+    };
+    assert!(
+        failure
+            .report
+            .problems()
+            .any(|(check, q)| check == CheckId::Secrets && q.location.ends_with(" footer")),
+        "{failure}"
+    );
+    assert!(!failure.to_string().contains(&p.value));
+}
+
+// ---- 22d: severity and kind counts reconcile across PDF, workbook, JSON and CSV -----------------
+
+/// A scan with every kind and several severities, so a by-severity-and-kind tally has cells to
+/// disagree in (synthetic).
+fn mixed_scan_report() -> ScanReport {
+    use camerata_api_types::audit::{
+        ConventionObservedKind, DeviationKind, FindingKind, NoConventionKind, NotAssessedKind,
+        NotAssessedReason,
+    };
+    let deviation = || {
+        FindingKind::Deviation(DeviationKind {
+            deviating_sites: 2,
+            assessed_sites: Some(10),
+            convention_option_id: Some("versioned".to_string()),
+            convention_label: "URI-versioned endpoints".to_string(),
+        })
+    };
+    let rows: Vec<(&str, &str, Option<FindingKind>)> = vec![
+        (
+            "SEC-NO-RAW-SQL-CONCAT-1",
+            "critical",
+            Some(FindingKind::Defect),
+        ),
+        (
+            "SEC-NO-HARDCODED-SECRETS-1",
+            "high",
+            Some(FindingKind::Defect),
+        ),
+        ("SEC-NO-DISABLED-TLS-1", "high", None),
+        ("API-VERSIONING-1", "medium", Some(deviation())),
+        ("API-VERSIONING-1", "medium", Some(deviation())),
+        ("API-PAGINATION-1", "low", Some(FindingKind::Defect)),
+        (
+            "API-CURSOR-1",
+            "info",
+            Some(FindingKind::ConventionObserved(ConventionObservedKind {
+                convention_option_id: "cursor".to_string(),
+                convention_label: "Cursor pagination".to_string(),
+            })),
+        ),
+        (
+            "API-ERRORS-1",
+            "info",
+            Some(FindingKind::NoConvention(NoConventionKind {
+                observed_options: Vec::new(),
+            })),
+        ),
+        (
+            "API-TIMEOUTS-1",
+            "info",
+            Some(FindingKind::NotAssessed(NotAssessedKind {
+                reason: NotAssessedReason::NoFilesMatched,
+                reason_detail: "no file matched the rule's scope".to_string(),
+            })),
+        ),
+    ];
+    let mut report = scan_report();
+    report.findings = rows
+        .into_iter()
+        .enumerate()
+        .map(|(i, (rule, severity, kind))| Finding {
+            repo: "acme/portal".to_string(),
+            path: format!("src/mod{i}.rs"),
+            line: i + 1,
+            rule_id: rule.to_string(),
+            severity: severity.to_string(),
+            snippet: format!("let x{i} = 1;"),
+            detail: format!("detail {i}"),
+            kind,
+            ..Finding::default()
+        })
+        .collect();
+    report
+}
+
+fn mixed_package() -> ProductPackage {
+    let sealed = mixed_scan_report().seal();
+    let options = client_options();
+    let json = build_report_json(&sealed, &HashMap::new(), None, &options);
+    let data = render_data_json(&json).expect("data.json renders");
+    assemble_package(
+        &sealed,
+        &HashMap::new(),
+        None,
+        &options,
+        STEM,
+        (json, data, STAND_IN_PDF.to_vec()),
+    )
+    .expect("the package assembles")
+}
+
+fn count_problems(failure: &GateFailure) -> Vec<&Problem> {
+    failure
+        .report
+        .problems()
+        .filter(|(check, _)| *check == CheckId::Counts)
+        .map(|(_, p)| p)
+        .collect()
+}
+
+#[test]
+fn a_package_with_every_kind_reconciles_by_severity_and_kind() {
+    let package = mixed_package();
+    // Anti-vacuity: the JSON rows really span several kinds and severities.
+    let rows: Vec<Value> = serde_json::to_value(&package.findings_export).expect("rows")
+        ["findings"]
+        .as_array()
+        .expect("rows")
+        .clone();
+    let kinds: std::collections::BTreeSet<&str> =
+        rows.iter().filter_map(|r| r["kind"].as_str()).collect();
+    let severities: std::collections::BTreeSet<&str> =
+        rows.iter().filter_map(|r| r["severity"].as_str()).collect();
+    assert!(kinds.len() >= 5, "{kinds:?}");
+    assert!(severities.len() >= 4, "{severities:?}");
+    let released = release(package).unwrap_or_else(|e| panic!("{e}"));
+    assert!(released
+        .report
+        .check_names()
+        .contains(&"severity and kind counts"));
+}
+
+/// The kind dimension is checked, not only totals: a PDF row relabelled from defect to deviation
+/// keeps every severity total equal and is still caught.
+#[test]
+fn the_gate_catches_a_pdf_whose_kinds_differ_even_when_every_total_matches() {
+    let mut package = mixed_package();
+    let row = [
+        &mut package.report_json.matrix.do_now,
+        &mut package.report_json.matrix.do_next,
+        &mut package.report_json.matrix.plan,
+        &mut package.report_json.matrix.accepted,
+        &mut package.report_json.matrix.informational,
+        &mut package.report_json.matrix.held,
+    ]
+    .into_iter()
+    .flat_map(|bucket| bucket.iter_mut())
+    .find(|f| f.kind.tag() == "defect")
+    .expect("a defect row in the PDF");
+    row.kind = camerata_api_types::audit::KindOnWire(Some(
+        camerata_api_types::audit::FindingKind::Deviation(
+            camerata_api_types::audit::DeviationKind {
+                deviating_sites: 1,
+                assessed_sites: None,
+                convention_option_id: None,
+                convention_label: "x".to_string(),
+            },
+        ),
+    ));
+    let failure = blocked(package);
+    let problems = count_problems(&failure);
+    assert!(
+        problems
+            .iter()
+            .any(|p| p.file == "PDF data" && p.location.ends_with("kind deviation")),
+        "{failure}"
+    );
+    assert!(
+        !problems
+            .iter()
+            .any(|p| p.location.starts_with("cover.stats")),
+        "every severity total still matches: {failure}"
+    );
+}
+
+#[test]
+fn the_gate_catches_a_pdf_summary_count_that_is_off_by_one() {
+    let mut package = mixed_package();
+    package.report_json.cover.stats.high += 1;
+    let failure = blocked(package);
+    assert!(
+        count_problems(&failure)
+            .iter()
+            .any(|p| p.location == "cover.stats.high"),
+        "{failure}"
+    );
+}
+
+#[test]
+fn the_gate_catches_a_workbook_whose_rows_disagree_by_severity() {
+    let mut package = mixed_package();
+    // Every "Critical" severity cell now reads "Medium" (the cells share one string).
+    package.xlsx = rewrite_xlsx(&package.xlsx, |name, xml| {
+        if name == "xl/sharedStrings.xml" {
+            xml.replace("<t>Critical</t>", "<t>Medium</t>")
+        } else {
+            xml.to_string()
+        }
+    });
+    let failure = blocked(package);
+    let problems = count_problems(&failure);
+    assert!(
+        problems.iter().any(|p| p.file.ends_with("-findings.xlsx")
+            && p.location == "severity critical, kind defect"),
+        "{failure}"
     );
 }

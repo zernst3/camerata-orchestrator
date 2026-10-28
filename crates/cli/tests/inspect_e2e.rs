@@ -96,8 +96,20 @@ async fn deterministic_only_inspect_runs_end_to_end_and_writes_a_valid_zip() {
 
     let repo_dir = tempfile::tempdir().expect("create temp dir for the fixture git repo");
     stage_fixture_as_git_repo(repo_dir.path());
+    // 22c: noise the inspection's filter drops, so the manifest's excluded-noise figures are
+    // non-zero and can be compared with `camerata count`'s.
+    std::fs::write(
+        repo_dir.path().join("package-lock.json"),
+        "{\n  \"a\": 1\n}\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(repo_dir.path().join("vendor")).unwrap();
+    std::fs::write(repo_dir.path().join("vendor/lib.js"), "var a;\nvar b;\n").unwrap();
     let export_dir = tempfile::tempdir().expect("create temp dir for the export zip");
     let export_path = export_dir.path().join("inspect.zip");
+    // Counted BEFORE the run: the scan's Rust build pass leaves `target/` and `Cargo.lock` in
+    // the repo afterwards, which a later count would include.
+    let count = camerata_server::onboard::count::count_repo(repo_dir.path()).expect("count");
 
     let args = InspectArgs {
         repo: repo_dir.path().to_path_buf(),
@@ -113,6 +125,7 @@ async fn deterministic_only_inspect_runs_end_to_end_and_writes_a_valid_zip() {
         verbose: false,
         max_cost_usd: None,
         efficiency: Vec::new(),
+        client: "Example Client Ltd".to_string(),
     };
 
     let outcome = run_inspect_with_key_presence(args, false)
@@ -150,6 +163,40 @@ async fn deterministic_only_inspect_runs_end_to_end_and_writes_a_valid_zip() {
     );
     assert!(names.contains(&"findings.json".to_string()), "{names:?}");
     assert!(names.contains(&"README.txt".to_string()), "{names:?}");
+
+    // 22c: the manifest states the quote basis exactly as `camerata count` does (the same
+    // filter function, the same line definition), and names the client.
+    let manifest: serde_json::Value = {
+        use std::io::Read;
+        let mut text = String::new();
+        archive
+            .by_name("manifest.json")
+            .expect("manifest.json")
+            .read_to_string(&mut text)
+            .expect("manifest text");
+        serde_json::from_str(&text).expect("manifest parses")
+    };
+    let inspection = &manifest["inspection"];
+    assert!(count.excluded_noise_files >= 2, "anti-vacuity: {count:?}");
+    assert_eq!(
+        inspection["counted_lines"], count.total_lines,
+        "{inspection}"
+    );
+    assert_eq!(
+        inspection["excluded_noise_files"], count.excluded_noise_files,
+        "{inspection}"
+    );
+    assert_eq!(
+        inspection["excluded_noise_lines"], count.excluded_noise_lines,
+        "{inspection}"
+    );
+    assert_eq!(inspection["client_name"], "Example Client Ltd");
+    assert!(
+        inspection["corpus_rules_applied"]
+            .as_u64()
+            .is_some_and(|n| n > 0),
+        "{inspection}"
+    );
 }
 
 /// A bare-minimum synthetic git repo: no planted findings, no SQL-concat pattern anywhere —
@@ -232,6 +279,7 @@ async fn headless_inspect_discloses_when_the_commodity_taint_pass_does_not_run()
         verbose: true,
         max_cost_usd: None,
         efficiency: Vec::new(),
+        client: "Example Client Ltd".to_string(),
     };
 
     let outcome = run_inspect_with_key_presence(args, false).await;

@@ -146,6 +146,8 @@ impl ProjectStore {
                 // into the Claude Code subscription explicitly. Persisted projects keep
                 // whatever backend they stored (a legacy file without the field stays `Cli`).
                 backend: ProjectBackend::for_new_project(),
+                // Set in the inspection setup; a new project has no client yet.
+                client_name: String::new(),
             };
             s.projects.push(project.clone());
             s.active = Some(id);
@@ -254,6 +256,10 @@ impl ProjectStore {
                     // freshly imported project always starts on the new-project default
                     // (`Api`), same as a brand-new project, until the operator explicitly sets it.
                     backend: ProjectBackend::for_new_project(),
+                    // Not transferable either, for the same reason as `backend`: an imported
+                    // export must never mark a new report as prepared for the source project's
+                    // client. An overwrite (above) keeps the existing project's own name.
+                    client_name: String::new(),
                 };
                 s.projects.push(project.clone());
                 s.active = Some(id);

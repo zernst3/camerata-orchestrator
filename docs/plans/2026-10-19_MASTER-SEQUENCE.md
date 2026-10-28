@@ -26,7 +26,7 @@ everything in sequence until we are ready to start the cycle again."*
 > | 12 Corpus Group 1 | OPEN | |
 > | 13 Group 4 | DONE | `383ea21` |
 > | 14 W26 | corpus half DONE | `155cab1`, `7bee157`; runtime half rides with W27 |
-> | 15 W27 PDF rebuild | Phase-A unblocked (`f6df35d`); template rewrite OPEN (needs Zach's eye) | |
+> | 15 W27 PDF rebuild | Phase-A unblocked (`f6df35d`); brand restyle + embedded fonts + confidentiality marking BUILT on `cloud/w27-pdf` (needs Zach's eye) | see 2c |
 > | 16 W32 | (a) DONE `05d94df`; (b) dropped, see note | |
 > | 16b exports + manifest | BUILT (`524a29b`, `54ac30f`, `9209482`, `b2d8524`, `4177244`); design gates 2, 6, 7 DONE (`bc121134`, `98a61091`), see 21 | |
 > | 16c corpus staleness | BUILT incl. CLI and load/digest nag (`da85cfe9`); LLM sweep agent OPEN | `41fcb1d` et al. |
@@ -471,11 +471,15 @@ Slotted RIGHT AFTER the delete/re-fetch blocker, blocking items first, all befor
   excluded-noise count. No model, no tokens, seconds to run. It is the number quotes are priced on,
   so it MUST call the same filter function the inspection uses (DRY; a client-side `cloc` count
   includes generated files and differs). Output plain text and JSON.
-- **22c (handoff item 4, protected: export format; the remaining fields):** the manifest already
+- **22c (handoff item 4, protected: export format; the remaining fields):** DONE on `cloud/w27-pdf`
+  (client name, corpus rules applied, counted lines, excluded noise files and lines; corpus
+  version, commit and engine version confirmed populated; rules-last-reviewed stays null until
+  `CORPUS_FRESHNESS.toml` has confirmed domains). The manifest already
   exists; add client name, corpus rule count applied, model backend and provider (22a), counted
   lines and excluded-noise count (22b). Confirm the corpus version, rules-last-reviewed, inspected
   commit and engine version fields are populated.
-- **22d (handoff item 6, check):** confirm the release gate's reconciliation covers PDF summary
+- **22d (handoff item 6, check):** DONE on `cloud/w27-pdf`: it covered row identity and CSV/JSON
+  parity only; a new "severity and kind counts" gate check now reconciles them. Confirm the release gate's reconciliation covers PDF summary
   counts = workbook rows = JSON rows = CSV rows BY SEVERITY AND KIND; extend it if it only checks
   row parity.
 - **22e (handoff item 14, protected: corpus): TESTING-MEANINGFUL-ASSERTION-1.** No rule catches a

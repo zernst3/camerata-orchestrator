@@ -8782,6 +8782,15 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                         p { class: "section-hint", "You can file the CI-wiring stories (GitHub issues) from your selected rules without running the audit. Optional, and not required to finish onboarding." }
                     }
                 }
+                // Inspection setup: who the inspection is for. Saved with the project, it fills
+                // the confidentiality line on every page and sheet of every export, and the
+                // export refuses to run while it is blank (2026-10-24 decision).
+                if let Some(p) = active_project.as_ref() {
+                    ClientNameSetup {
+                        project_id: p.id.clone(),
+                        initial: p.client_name.clone(),
+                    }
+                }
                 // Cost: the pre-audit ESTIMATE for this configuration (model + calibration
                 // model + mode + ticked rules), and — once the audit has run — the ACTUAL
                 // billed usage beside it, so the estimate is verifiable, not a black box.
@@ -9558,7 +9567,6 @@ pub(super) fn DeepReportExportPanel(project_id: String, soc2_enabled: bool) -> E
 pub(super) async fn export_product_zip(
     project_id: &str,
     dispositions: &std::collections::HashMap<String, Disposition>,
-    client_name: &str,
     project_title: &str,
     prepared_by: &str,
     executive_summary_override: Option<String>,
@@ -9572,8 +9580,9 @@ pub(super) async fn export_product_zip(
         .post(url)
         .json(&serde_json::json!({
             "dispositions": dispositions,
+            // The client name is not sent: the server reads it from the project's inspection
+            // setup (`Project::client_name`), so every export names the same client.
             "options": {
-                "client_name": client_name,
                 "project_title": project_title,
                 "prepared_by": prepared_by,
                 "executive_summary_override": executive_summary_override,
@@ -9605,6 +9614,46 @@ pub(super) async fn export_product_zip(
     Ok((bytes, filename))
 }
 
+/// The inspection setup's client-name field: who the inspection is for. Saved to the project
+/// when the field loses focus after an edit (`POST /api/projects/:id/client-name`); every export
+/// prints it in the confidentiality line, and the export refuses while it is blank, so the
+/// field says so until it is filled.
+#[component]
+pub(super) fn ClientNameSetup(project_id: String, initial: String) -> Element {
+    let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
+    let mut name = use_signal(|| initial.clone());
+    let blank = name().trim().is_empty();
+    rsx! {
+        div {
+            class: "audit-model-row inspection-client-row",
+            "data-tour": camerata_ui_core::walkthrough::target::CLIENT_NAME,
+            label { class: "audit-model-label", r#for: "inspection-client-name", "Client name" }
+            input {
+                id: "inspection-client-name",
+                class: "audit-export-input",
+                placeholder: "Required before export",
+                value: "{name}",
+                oninput: move |e| name.set(e.value()),
+                onchange: move |_| {
+                    let pid = project_id.clone();
+                    let value = name();
+                    spawn(async move {
+                        match super::set_client_name(&pid, &value).await {
+                            Ok(()) => crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, "Client name saved."),
+                            Err(msg) => crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, msg),
+                        }
+                    });
+                },
+            }
+            if blank {
+                span { class: "section-hint",
+                    "Required before export. It fills the confidentiality line on every page of the report and every sheet of the workbook."
+                }
+            }
+        }
+    }
+}
+
 /// The product-export panel: client-editable report framing (all optional) + a single
 /// export button. POSTs the CURRENT triage state (`dispositions.read()`, whatever it is
 /// right now — including any still-Unresolved findings; a draft mid-engagement report is
@@ -9621,7 +9670,6 @@ pub(super) fn AuditReportExportPanel(
 ) -> Element {
     let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
     let mut loading = use_signal(|| false);
-    let mut client_name = use_signal(String::new);
     let mut project_title = use_signal(String::new);
     let mut prepared_by = use_signal(String::new);
     let mut summary_override = use_signal(String::new);
@@ -9641,19 +9689,6 @@ pub(super) fn AuditReportExportPanel(
                  export (some findings still Unresolved) is fine."
             }
             div { class: "audit-export-fields",
-                div {
-                    class: "audit-model-row",
-                    // The walkthrough's client-name step points here until the inspection-setup
-                    // field lands (then re-point `target::CLIENT_NAME` at that one).
-                    "data-tour": camerata_ui_core::walkthrough::target::CLIENT_NAME,
-                    label { class: "audit-model-label", "Client name" }
-                    input {
-                        class: "audit-export-input",
-                        placeholder: "optional",
-                        value: "{client_name}",
-                        oninput: move |e| client_name.set(e.value()),
-                    }
-                }
                 div { class: "audit-model-row",
                     label { class: "audit-model-label", "Project title" }
                     input {
@@ -9690,7 +9725,6 @@ pub(super) fn AuditReportExportPanel(
                 onclick: move |_| {
                     let pid = project_id.clone();
                     let disp_snapshot = dispositions.read().clone();
-                    let cn = client_name();
                     let pt = project_title();
                     let pb = prepared_by();
                     let so = summary_override();
@@ -9698,7 +9732,7 @@ pub(super) fn AuditReportExportPanel(
                     spawn(async move {
                         let _guard = crate::loading::LoadingGuard::new();
                         let override_opt = if so.trim().is_empty() { None } else { Some(so) };
-                        match export_product_zip(&pid, &disp_snapshot, &cn, &pt, &pb, override_opt).await {
+                        match export_product_zip(&pid, &disp_snapshot, &pt, &pb, override_opt).await {
                             Ok((bytes, filename)) => {
                                 if save_bytes(&filename, bytes).await {
                                     crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, "Product export saved.");
@@ -17641,6 +17675,7 @@ mod order_preset_tests {
 
     /// The request that asks the server for the client's export carries the dispositions and the
     /// report options and nothing else, so the review log cannot ride along even by accident.
+    /// It carries no client name either: the server reads that from the project.
     #[tokio::test(flavor = "current_thread")]
     #[serial_test::serial(process_env)]
     async fn the_product_export_request_carries_no_review_log() {
@@ -17661,7 +17696,7 @@ mod order_preset_tests {
                 ..Disposition::default()
             },
         );
-        export_product_zip("p1", &dispositions, "Client", "Title", "Me", None)
+        export_product_zip("p1", &dispositions, "Title", "Me", None)
             .await
             .expect("the export answers");
         let requests = server.received_requests().await.expect("recorded");
@@ -17674,6 +17709,10 @@ mod order_preset_tests {
             .collect();
         keys.sort_unstable();
         assert_eq!(keys, vec!["dispositions", "options"]);
+        assert!(
+            body["options"].get("client_name").is_none(),
+            "the client name comes from the project's inspection setup, never the request"
+        );
         let text = body.to_string();
         for key in camerata_api_types::review_timing::INTERNAL_ONLY_KEYS {
             assert!(!text.contains(key), "{key} in the export request: {text}");

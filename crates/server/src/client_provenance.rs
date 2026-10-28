@@ -12,6 +12,9 @@
 //!   date across the rules the scan used, `None` while any of them has never been reviewed.
 //! - **vulnerability data as of**: the scan's own `ScanProvenance::vulnerability_data` stamp
 //!   (CISA KEV, FIRST EPSS, OSV), see [`crate::vuln_intel`].
+//! - **corpus rules applied, counted lines, excluded noise** (22c): from the scan's own record
+//!   (`audited_rule_ids` against the corpus; `code_lines`, `files_excluded` and
+//!   `excluded_noise_lines`, read at scan time through `camerata count`'s filter).
 //!
 //! # The one sanctioned freshness path
 //!
@@ -82,7 +85,26 @@ pub fn export_provenance_with(
         (Some(watermark), Some(used)) => client_rules_last_reviewed(watermark, &used),
         _ => None,
     };
+    provenance.corpus_rules_applied = corpus.map(|corpus| corpus_rules_applied(report, corpus));
+    // The quote basis, as the scan recorded it through `camerata count`'s own filter and line
+    // definition (the export never reads the repository).
+    let read_files = report.code_lines > 0;
+    provenance.counted_lines = read_files.then_some(report.code_lines);
+    provenance.excluded_noise_files = read_files.then_some(report.files_excluded);
+    provenance.excluded_noise_lines = report.excluded_noise_lines.filter(|_| read_files);
     provenance
+}
+
+/// How many distinct rules the scan audited that the loaded corpus holds.
+fn corpus_rules_applied(report: &ScanReport, corpus: &RuleSet) -> usize {
+    report
+        .provenance
+        .audited_rule_ids
+        .iter()
+        .collect::<std::collections::HashSet<_>>()
+        .into_iter()
+        .filter(|id| corpus.get_by_id(id).is_some())
+        .count()
 }
 
 /// The rules the scan audited, resolved against `corpus`. `None` when there is no corpus or any

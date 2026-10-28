@@ -127,6 +127,11 @@ struct ProjectView {
     /// default as a freshly-created project.
     #[serde(default)]
     backend: ProjectBackend,
+    /// Who the inspection is for (part of the inspection setup): fills the confidentiality line
+    /// on every page and sheet of the export, and a blank one blocks the export. Absent from an
+    /// older server -> empty.
+    #[serde(default)]
+    client_name: String,
 }
 
 /// One project-memory entry as the BFF reports it (mirrors the server's `MemoryEntry`). Enum-ish
@@ -622,6 +627,31 @@ async fn set_product_brief(id: &str, brief: &str) -> bool {
         .await
         .map(|r| r.status().is_success())
         .unwrap_or(false)
+}
+
+/// Save the inspection setup's client name. `Err` carries the server's reason (too long, a line
+/// break, an unknown project) or the transport error, for the caller to toast.
+async fn set_client_name(id: &str, client_name: &str) -> Result<(), String> {
+    let resp = reqwest::Client::new()
+        .post(format!(
+            "{}/api/projects/{}/client-name",
+            crate::bff_base(),
+            id
+        ))
+        .json(&serde_json::json!({ "client_name": client_name }))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let body: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    if body.get("ok").and_then(serde_json::Value::as_bool) == Some(true) {
+        Ok(())
+    } else {
+        Err(body
+            .get("message")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("The client name was not saved.")
+            .to_string())
+    }
 }
 
 /// Add a project-memory entry (#112, Layer 3) — human-added, persisted as Approved.
