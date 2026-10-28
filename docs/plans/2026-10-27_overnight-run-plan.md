@@ -89,6 +89,40 @@ H. By 08:30: morning summary at the top of `docs/OVERNIGHT_DECISIONS.md`; the PR
 
 ## Status log (newest first)
 
+- 01:05: GATE GREEN on the integration + hygiene + Rust 1.99 merges: 9,177 passed, 0 failed;
+  pushed. W27 PDF rebuild fixed (5,016 tests); bundled-only fonts NOT forced because it drops CJK
+  and emoji from client PDFs (the test pinning that stays; decision recorded).
+- 01:00: rank 8 builder started (rank 7 is now on feat).
+- 01:00: README split merged and fixed in its worktree (camerata-rules 293 passed): README now
+  says a person reviews findings in the desktop app and the headless export is untriaged (PDF
+  stamped as an unreviewed draft); stale 417/437 lines fixed. Decision: the five linked technical
+  docs get a whole-corpus count check (any 100+ rule count must equal the real one) instead of the
+  strict check, which would have flagged about 50 correct subset counts. DATA_HANDLING.md exists
+  only on cloud/client-lock: it must land before the PR to main. Queued to merge after the gate.
+- 00:55: Fable on the integration's conflict resolutions: faithful, nothing dropped, spend cap
+  holds on every new path. Found one metering hole (detail regeneration drops errors and does
+  not charge billed refusals to the cap) and untested joins (batch + routing, batch + terse,
+  estimate without regeneration). Builder fixing all 7 items (4 compile-heavy builders now).
+- 00:47: console gaps leftovers closed (4,986 tests): Intake scope and every worktree path refuse
+  repos outside the active project (409); the console shows the server's refusal message.
+  Queued to merge after the running gate, then boards. Sources and README builders started.
+- 00:43: coverage (H4) reviewed: merge after fixes, queued after the W27 PDF merge (same
+  template, workbook tail and manifest). Merge order fixed as W27 -> coverage -> citations ->
+  injection, one at a time. Needs Zach: the engine's build commit (short hash) is printed in
+  client PDFs and findings.json.
+- 00:40: injection (H3) reviewed: merge after fixes, queued after citations (shared hunks).
+  Decided: clone-advisory judge gets the frame too; the injection checker skips test files
+  (prefer false negatives, and its own remediation says move fixtures into tests); lint-style
+  "do not flag this" fires only with an AI word on the line. Accepted cost: no prefix-cache
+  hits across runs and a one-time re-scan of cached AI findings after the schema bump.
+- 00:35: merged into feat: the five-branch integration (rank 4, rank 2 + item 21, rank 7, Wave D,
+  corpus Phase 0: 440 rules, 3 new, 211 bumped; showcased rules at v3/v2/v2 unchanged), repo
+  hygiene, and Rust 1.99 prep (reviewed clean; toolchain stays 1.95.0). Full gate running.
+  Freed 30 GB of main incremental cache plus two finished worktrees (disk 38 -> 65 GB); builders
+  now build with CARGO_INCREMENTAL=0. Citations reviewed: merge after fixes (brief queued).
+  Fable checking the integration's conflict resolutions. Needs Zach: temperature 0 on Haiku 4.5
+  (citations), old dev.zachernst.cargo-disk-guard launchd job must be booted out by hand after
+  reinstalling under the new label.
 - 00:40: cloud citations (H5), coverage (H4), injection (H3) and rust199 finished; four Fable
   reviews running. client-lock (H2) and mutants have pushed no commits after about 2 hours (the
   cloud sessions are not visible from here; check them in the app in the morning). Disk at 44 GB
