@@ -735,6 +735,76 @@ fn the_same_credential_flagged_by_the_floor_and_the_ai_on_adjacent_lines_is_one_
     assert_eq!(out[0].also_locations.len(), 1);
 }
 
+/// A password shows no prefix and no tail once redacted, only its length, and every 12-character
+/// password has that length: the length proves nothing about which password it is.
+#[test]
+fn two_different_passwords_of_one_length_two_lines_apart_stay_two_rows() {
+    let one = credential_row(
+        "SEC-NO-HARDCODED-SECRETS-1",
+        5,
+        PASSWORD_LINE,
+        "A database password is written into the source.",
+    );
+    let two = credential_row(
+        "AI-HARDCODED-SECRET-1",
+        7,
+        "const adminPassword = \"\u{2026} (12 chars)\";",
+        "An admin password is written into the source.",
+    );
+    for rows in [vec![one.clone(), two.clone()], vec![two, one]] {
+        let out = merge_semantic_groups(rows, &[]);
+        assert_eq!(out.len(), 2, "{out:?}");
+    }
+}
+
+#[test]
+fn the_same_password_at_the_same_line_is_one_row() {
+    let floor = credential_row(
+        "SEC-NO-HARDCODED-SECRETS-1",
+        5,
+        PASSWORD_LINE,
+        "A database password is written into the source.",
+    );
+    let ai = credential_row(
+        "AI-HARDCODED-SECRET-1",
+        5,
+        PASSWORD_LINE,
+        "A database password is written into the source.",
+    );
+    let out = merge_semantic_groups(vec![floor, ai], &[]);
+    assert_eq!(out.len(), 1, "{out:?}");
+}
+
+/// The transcript role labels the alternatives stage registers carry no em dash.
+#[tokio::test]
+async fn the_alternatives_transcript_labels_have_no_em_dash() {
+    let llm = StageLlm::new(&[(&cut_off(&["RULE-A"]), true), (&reply(&["RULE-B"]), false)]);
+    let store = crate::transcript::TranscriptStore::default();
+    let files = files();
+    let rules: Vec<RuleAlternatives> = ["RULE-A", "RULE-B"].iter().map(|r| alt(r)).collect();
+    recommend_alternatives(
+        &llm,
+        REPO,
+        &files,
+        &files,
+        &crate::prompt_frame::FrameNonce::generate(),
+        &rules,
+        None,
+        Some((&store, "run")),
+        None,
+    )
+    .await
+    .expect("the pass runs");
+    let roles: Vec<String> = store.get("run").iter().map(|t| t.role.clone()).collect();
+    assert_eq!(roles.len(), 2, "the first send and its retry: {roles:?}");
+    assert!(
+        roles
+            .iter()
+            .all(|r| r.starts_with("recommending") && !r.contains('\u{2014}')),
+        "{roles:?}"
+    );
+}
+
 #[test]
 fn a_row_that_cites_no_credential_value_is_not_proven_to_be_the_same_credential() {
     let floor = credential_row(

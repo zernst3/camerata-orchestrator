@@ -3950,7 +3950,7 @@ async fn recommend_alternatives(
                 session.push_str(&format!("-d{digest_idx}"));
             }
             let role = format!(
-                "recommending {} alternative(s) — {repo}{}{}",
+                "recommending {} alternative(s), {repo}{}{}",
                 pending.len(),
                 if n_chunks > 1 {
                     format!(" (batch {}/{n_chunks})", chunk_idx + 1)
@@ -4021,7 +4021,7 @@ async fn recommend_alternatives(
                     gaps.attempts = gaps.attempts.max(2);
                     let retry_session = format!("{session}-r{n}");
                     let retry_role = format!(
-                        "recommending {} alternative(s) — {repo} (retry of a cut-off reply)",
+                        "recommending {} alternative(s), {repo} (retry of a cut-off reply)",
                         group.len()
                     );
                     match ask.send(group, &retry_session, &retry_role).await {
@@ -8267,6 +8267,11 @@ fn credential_fingerprints(f: &Finding) -> std::collections::BTreeSet<String> {
         }
         let prefix: String = chars[start..i].iter().collect();
         let tail: String = chars[i + 1..end].iter().collect();
+        // A value that shows no prefix and no tail (a password) leaves only its length, which
+        // every 12-character password shares: it proves nothing, so it makes no fingerprint.
+        if prefix.is_empty() && tail.is_empty() {
+            continue;
+        }
         let mut print = format!("{prefix}{ELLIPSIS}{tail}");
         if tail.is_empty() {
             let rest: String = chars[end..].iter().collect();
