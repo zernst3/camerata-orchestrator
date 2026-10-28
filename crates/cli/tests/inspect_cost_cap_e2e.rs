@@ -279,3 +279,49 @@ async fn an_uncapped_exports_manifest_says_the_run_was_not_capped() {
     assert_eq!(value["inspection"]["cost_cap_reached"], false);
     assert!(!zip_entry(&export, "README.txt").contains("Spend limit"));
 }
+
+/// No typst needed: the refusal happens before the estimate, before any model call, before the
+/// export is even considered.
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn a_spend_limit_with_an_unpriced_model_is_refused_before_the_estimate_and_any_model_call() {
+    let _env = camerata_test_env::EnvGuard::set("CAMERATA_DISABLE_DEP_AUDIT", "1");
+    let repo = tempfile::tempdir().unwrap();
+    stage_fixture(repo.path());
+    let out = tempfile::tempdir().unwrap();
+    let export = out.path().join("inspect.zip");
+    let run = |cap: Option<f64>| {
+        let mut a = args(repo.path(), &export, cap);
+        a.model = Some("some-free-model:free".to_string());
+        a.efficiency = Vec::new();
+        a
+    };
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let llm = Scripted {
+        cost: 0.01,
+        log: log.clone(),
+        calls: AtomicUsize::new(0),
+    };
+    let sink_log = log.clone();
+    let err = run_inspect_pipeline_with(
+        run(Some(5.0)),
+        true,
+        &camerata_server::credentials::MemoryCredentialStore::new(),
+        Seams {
+            llm: Some(&llm),
+            preflight_sink: &|_| sink_log.lock().unwrap().push("preflight".to_string()),
+        },
+    )
+    .await
+    .expect_err("an unenforceable limit must stop the run");
+    let message = err.to_string();
+    assert!(message.contains("`some-free-model:free`"), "{message}");
+    assert!(message.contains("cannot be enforced"), "{message}");
+    assert_eq!(err.exit_code(), 1);
+    assert!(
+        log.lock().unwrap().is_empty(),
+        "no estimate and no model call: {:?}",
+        log.lock().unwrap()
+    );
+    assert!(!export.exists(), "no export was written");
+}

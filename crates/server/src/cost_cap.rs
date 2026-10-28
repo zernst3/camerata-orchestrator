@@ -90,6 +90,83 @@ impl RunControls {
     }
 }
 
+/// Every model a run will call, with the role it plays, resolved exactly as the stages resolve
+/// them: the scan model, the calibration model, the fix model, the deep tier's model (only when
+/// the deep tier is on) and the clone judge (only when a clone rule is selected). Roles that
+/// resolve to the same model appear once, with their roles joined.
+pub fn models_the_run_will_use(
+    model: Option<&str>,
+    calibration_model: Option<&str>,
+    deep: bool,
+    selected_rule_ids: &[&str],
+) -> Vec<(String, String)> {
+    let scan = crate::ai_audit::resolve_audit_model(model);
+    let calibration = calibration_model
+        .map(str::to_string)
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| {
+            std::env::var("CAMERATA_CALIBRATION_MODEL")
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+        })
+        .unwrap_or_else(|| scan.clone());
+    let fix = crate::ai_audit::resolve_audit_model(calibration_model.or(model));
+    let mut roles: Vec<(&str, String)> = vec![
+        ("the scan", scan.clone()),
+        ("calibration", calibration),
+        ("fix generation", fix),
+    ];
+    if deep {
+        roles.push(("the deep tier", scan));
+    }
+    if selected_rule_ids
+        .iter()
+        .any(|id| camerata_checks::clone_rules::RULE_IDS.contains(id))
+    {
+        roles.push((
+            "the clone judge",
+            crate::onboard::clone_advisory::resolve_clone_judge_model(None),
+        ));
+    }
+    let mut out: Vec<(String, String)> = Vec::new();
+    for (role, model) in roles {
+        match out.iter_mut().find(|(_, m)| *m == model) {
+            Some((roles, _)) => {
+                roles.push_str(", ");
+                roles.push_str(role);
+            }
+            None => out.push((role.to_string(), model)),
+        }
+    }
+    out
+}
+
+impl RunControls {
+    /// With a spend limit set, every model the run will use must have a list price, or its calls
+    /// cannot be costed and the limit would silently count nothing for them. Returns the message
+    /// that refuses the run (naming each unpriced model), or `None` when the run may start. With
+    /// no limit set this is always `None`: nothing changes for an uncapped run.
+    pub fn refuse_if_cap_unenforceable(&self, models: &[(String, String)]) -> Option<String> {
+        self.max_cost_usd?;
+        let priced = crate::llm::models();
+        let unpriced: Vec<String> = models
+            .iter()
+            .filter(|(_, model)| !priced.iter().any(|p| p.id == *model))
+            .map(|(roles, model)| format!("`{model}` (used for {roles})"))
+            .collect();
+        if unpriced.is_empty() {
+            return None;
+        }
+        Some(format!(
+            "The spend limit cannot be enforced: {} {} no price in the model registry, so what \
+             the calls cost cannot be counted against the limit. Nothing was run. Choose a priced \
+             model, or remove the spend limit.",
+            unpriced.join(" and "),
+            if unpriced.len() == 1 { "has" } else { "have" }
+        ))
+    }
+}
+
 /// One (chunk, rule-batch) scan pass that did not run because the cap was reached.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NotRunPass {
@@ -266,6 +343,79 @@ mod tests {
             n_rule_batches: 4,
             rule_ids: rules.iter().map(|r| r.to_string()).collect(),
         }
+    }
+
+    fn controls_with_cap(cap: Option<f64>) -> RunControls {
+        RunControls {
+            max_cost_usd: cap,
+            ..RunControls::default()
+        }
+    }
+
+    #[test]
+    fn a_cap_with_an_unpriced_model_refuses_to_start_and_names_the_model() {
+        let models = vec![
+            (
+                "the scan, calibration".to_string(),
+                "claude-sonnet-5".to_string(),
+            ),
+            (
+                "fix generation".to_string(),
+                "some-free-model:free".to_string(),
+            ),
+        ];
+        let why = controls_with_cap(Some(5.0))
+            .refuse_if_cap_unenforceable(&models)
+            .expect("an unpriced model must stop a capped run");
+        assert!(
+            why.contains("`some-free-model:free`") && why.contains("fix generation"),
+            "{why}"
+        );
+        assert!(
+            why.contains("cannot be enforced") && why.contains("Nothing was run"),
+            "{why}"
+        );
+        assert!(
+            !why.contains("claude-sonnet-5"),
+            "the priced model is not blamed: {why}"
+        );
+    }
+
+    #[test]
+    fn without_a_cap_an_unpriced_model_changes_nothing_and_priced_models_pass_with_one() {
+        let unpriced = vec![("the scan".to_string(), "some-free-model:free".to_string())];
+        assert!(controls_with_cap(None)
+            .refuse_if_cap_unenforceable(&unpriced)
+            .is_none());
+        let priced = vec![("the scan".to_string(), "claude-sonnet-5".to_string())];
+        assert!(controls_with_cap(Some(5.0))
+            .refuse_if_cap_unenforceable(&priced)
+            .is_none());
+    }
+
+    #[test]
+    fn the_models_a_run_uses_are_listed_by_role_and_deduplicated() {
+        let all = models_the_run_will_use(Some("claude-sonnet-5"), None, false, &["ARCH-1"]);
+        assert_eq!(all.len(), 1, "one model fills every role: {all:?}");
+        assert!(all[0].0.contains("the scan") && all[0].0.contains("calibration"));
+        assert!(!all[0].0.contains("clone judge") && !all[0].0.contains("deep"));
+
+        let split = models_the_run_will_use(
+            Some("claude-sonnet-5"),
+            Some("claude-opus-5"),
+            true,
+            &[camerata_checks::clone_rules::RULE_SINGLE_SOURCE],
+        );
+        let ids: Vec<&str> = split.iter().map(|(_, m)| m.as_str()).collect();
+        assert!(
+            ids.contains(&"claude-sonnet-5") && ids.contains(&"claude-opus-5"),
+            "{ids:?}"
+        );
+        let text = format!("{split:?}");
+        assert!(
+            text.contains("the deep tier") && text.contains("the clone judge"),
+            "{text}"
+        );
     }
 
     #[test]

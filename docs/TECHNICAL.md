@@ -2702,8 +2702,14 @@ against a runaway bill, not a saving, so it fails loudly:
   three calls per batch under one admission. The first pass is always admitted, so a
   limit smaller than one pass still lets that pass finish. The limit must be a
   positive finite number; the server treats an unreadable one as the tightest
-  possible limit, never as none. One known gap: a model that reports no cost for a
-  call (an unpriced model) adds nothing to the spend the limit counts.
+  possible limit, never as none.
+- **Every model must be priced.** With a limit set, a run whose scan, calibration, fix,
+  deep-tier or clone-judge model has no list price in the model registry would count
+  nothing for its calls, so the limit could not hold. `models_the_run_will_use` lists the
+  models exactly as the stages resolve them and `RunControls::refuse_if_cap_unenforceable`
+  refuses the run before any file is read or model called, naming each unpriced model
+  (`camerata inspect` exits 1 before the estimate; the app gets a blocked report carrying
+  the same message). With no limit set nothing changes.
 - **Batch mode** checks before every submission (`batch_refusal_reason`), against
   spend so far plus the larger of (a) what remains of the pre-flight estimate
   (estimate minus spend, floored at zero, so later sub-batches are not charged the

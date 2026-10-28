@@ -1556,6 +1556,22 @@ pub async fn audit_repos_with_llm_controlled(
     // installed into the client's AGENTS.md/CONVENTIONS.md as a directive.
     let scan_rules = inspectable_rules_for_scan(selected, corpus);
     let selected: &[SelectedRule] = &scan_rules;
+    // SPEND LIMIT, enforceability: with a limit set, every model this run will call must have a
+    // list price, or its calls would add nothing to the spend the limit counts. Refused here,
+    // before any file is read or any model is called.
+    if run_ai_review {
+        let ids: Vec<&str> = selected.iter().map(|r| r.id.as_str()).collect();
+        let models = crate::cost_cap::models_the_run_will_use(model, calibration_model, deep, &ids);
+        if let Some(why) = controls.refuse_if_cap_unenforceable(&models) {
+            let repos: Vec<String> = sources.iter().map(|(spec, _)| spec.clone()).collect();
+            let mut report = ScanReport::gated(&repos);
+            report.gated = false;
+            report.blocked = true;
+            report.message = Some(why.clone());
+            report.ai_blocked_reason = Some(why);
+            return (report, incremental_prior.cloned().unwrap_or_default());
+        }
+    }
     // Provenance (P1): stamp the start time now, before any I/O, so `finished_at -
     // started_at` reflects the whole run including the git-ref capture below.
     let started_at = chrono::Utc::now().to_rfc3339();

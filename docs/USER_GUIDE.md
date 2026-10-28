@@ -1595,6 +1595,11 @@ can include one retry of a reply that was cut off). When the limit stops a run:
   figure is put in the export;
 - the command exits with status 4, so a script cannot mistake it for a complete inspection.
 
+A limit needs every model the run uses to have a known price. If the scan, calibration, fix, deep-tier
+or clone-judge model has none (a model outside the built-in price list), the run refuses to start,
+before any model call, and names the model, because the cost of its calls could not be counted against
+the limit. Without a limit such a model runs as before.
+
 With `--batch` the limit is checked BEFORE the batch is submitted (a submitted batch cannot be
 cancelled cheaply); if the estimate would pass the limit, nothing is submitted and every pass is
 reported as not run. The desktop app has the same control as "Spend limit (USD)" in the scan settings.

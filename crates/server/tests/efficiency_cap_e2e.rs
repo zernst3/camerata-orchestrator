@@ -502,3 +502,55 @@ async fn the_job_counts_refused_passes_as_not_run_never_as_done() {
         "no dollar figure in the client-visible message"
     );
 }
+
+async fn scan_with_unpriced_model(dir: &Path, cap: Option<f64>, llm: &Stub) -> ScanReport {
+    let sources = vec![("acme/shop".to_string(), dir.to_path_buf())];
+    onboard::audit_repos_with_llm_controlled(
+        llm,
+        &sources,
+        &selected(),
+        Vec::new(),
+        Some("some-free-model:free"),
+        None,
+        ScanMode::Parallel,
+        false,
+        None,
+        None,
+        None,
+        false,
+        false,
+        true,
+        true,
+        BackendResolution::Api,
+        None,
+        &HashMap::new(),
+        controls(cap, EfficiencyConfig::default()),
+    )
+    .await
+    .0
+}
+
+#[tokio::test]
+async fn a_spend_limit_with_an_unpriced_model_refuses_to_start_before_any_model_call() {
+    let dir = tempfile::tempdir().unwrap();
+    stage_repo(dir.path());
+
+    // Limit set: refused, nothing called, the model is named and the reason is plain.
+    let refused = Stub::new(1.0);
+    let report = scan_with_unpriced_model(dir.path(), Some(5.0), &refused).await;
+    assert_eq!(refused.calls(), 0, "no model call");
+    assert!(report.blocked, "the scan did not start");
+    let why = report.message.as_deref().unwrap_or("");
+    assert!(why.contains("`some-free-model:free`"), "{why}");
+    assert!(
+        why.contains("cannot be enforced") && why.contains("Nothing was run"),
+        "{why}"
+    );
+    assert_eq!(report.ai_blocked_reason.as_deref(), Some(why));
+
+    // No limit: unchanged, the same unpriced model simply runs.
+    let uncapped = Stub::new(0.0);
+    let report = scan_with_unpriced_model(dir.path(), None, &uncapped).await;
+    assert!(uncapped.calls() > 0, "an uncapped run is unchanged");
+    assert!(!report.blocked);
+}

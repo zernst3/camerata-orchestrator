@@ -640,6 +640,20 @@ pub async fn run_inspect_pipeline_with(
         load_prior_manifest(&args.repo)
     };
 
+    // A spend limit needs every model priced; refuse before the estimate, before any model call.
+    if !matches!(backend_resolution, BackendResolution::Blocked { .. }) {
+        let ids: Vec<&str> = selected.iter().map(|r| r.id.as_str()).collect();
+        let models = camerata_server::cost_cap::models_the_run_will_use(
+            model,
+            calibration_model,
+            false,
+            &ids,
+        );
+        if let Some(why) = controls.refuse_if_cap_unenforceable(&models) {
+            return Err(InspectError::Failed(why));
+        }
+    }
+
     // ── Pre-flight: the estimate, printed BEFORE the first model call ──────────────────────
     // Skipped when no model call will be made (the compliance gate blocked the AI review).
     let mut preflight_text: Option<String> = None;
