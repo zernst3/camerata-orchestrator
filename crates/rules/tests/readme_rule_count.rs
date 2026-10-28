@@ -150,6 +150,10 @@ fn req_count_scanner_sees_every_shape_of_count_claim() {
         "scanner missed a domain count"
     );
     // Prose with no count claim must stay silent.
-    assert!(count_claims("the process rules and the security floor", &["rule", "rules"]).is_empty());
+    assert!(count_claims(
+        "the process rules and the security floor",
+        &["rule", "rules"]
+    )
+    .is_empty());
     assert!(count_claims("per-rule severity bounds", &["rule", "rules"]).is_empty());
 }
