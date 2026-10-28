@@ -99,6 +99,26 @@
   out.intersperse(h(0pt, weak: true)).join()
 }
 
+// Fix text (a rule's authored remediation, or the model's codebase-specific fix). Rust has
+// already joined the source's hard line wraps (`report_export::fix_text::prepare`), so a
+// single newline never reaches here; a blank line ("\n\n") is a paragraph break. A
+// `single-backtick span` is set as inline mono (raw), the way the authored text marks code,
+// instead of printing the backticks. Anything that is not a well-formed span (an unclosed
+// backtick, a run of two or more) stays literal. The regex matches non-empty, backtick-free
+// bodies only, and `breakable` keeps a long path from running off the page.
+#let fix_runs(s) = {
+  let out = ()
+  let pos = 0
+  for m in s.matches(regex("`[^`]+`")) {
+    if m.start > pos { out.push(s.slice(pos, m.start)) }
+    out.push(breakable(m.text.slice(1, -1)))
+    pos = m.end
+  }
+  if pos < s.len() { out.push(s.slice(pos)) }
+  out.join()
+}
+#let fix_body(s) = s.split("\n\n").map(fix_runs).join(parbreak())
+
 // Branding (2026-09-13 review, owner's hard constraint): Camerata is the licensable
 // APPLICATION; the auditing agency running it is not Camerata's to name. `d.cover.brand` is
 // already fully resolved (per-report ReportOptions.brand > CAMERATA_REPORT_BRAND env var > no
@@ -347,13 +367,13 @@
       #line(length: 100%, stroke: 0.5pt + line_c)
     ]
     #if site.fix_for_this_finding != none [
-      #text(weight: 600, fill: accent)[Fix: ]#site.fix_for_this_finding
+      #text(weight: 600, fill: accent)[Fix: ]#fix_body(site.fix_for_this_finding)
       #if site.fix != none [
         #v(0.05cm)
-        #text(size: 8.5pt, fill: ink_faint)[General guidance: #site.fix]
+        #text(size: 8.5pt, fill: ink_faint)[General guidance: #fix_body(site.fix)]
       ]
     ] else if site.fix != none [
-      #text(weight: 600, fill: accent)[Fix: ]#site.fix
+      #text(weight: 600, fill: accent)[Fix: ]#fix_body(site.fix)
     ]
     #v(2pt)
     #text(font: mono, size: 8pt, fill: ink_faint)[Effort: #or_not_estimated(site.effort) · Confidence: #or_not_evaluated(site.confidence) · #site.disposition]
