@@ -89,6 +89,97 @@ H. By 08:30: morning summary at the top of `docs/OVERNIGHT_DECISIONS.md`; the PR
 
 ## Status log (newest first)
 
+- 05:36: GATE GREEN on corpus cleanup, coverage, PR planner and PDF polish: 9,542 passed, 0 failed; pushed. Merged gap 4 (reviewer contract) and gap 9 (investigation decisions); workspace clippy clean; gate next.
+- 05:40: Fable read all 887 comma removals: list removals clean; about 35 verb-phrase removals restored for clarity (a comma that closed a clause or kept 'and + verb' from attaching to the wrong subject). Builder applying them.
+- 05:30: serial-comma sweep done: 887 commas removed in 321 rules (punctuation only, checked by a before/after parse), a corpus test now blocks the list pattern; 114 clause joins and asides kept. Fable spot-checking the prose before merge.
+- 05:10: client-lock merged and fixed in its worktree (server lib 3,127 and the rest green): chat
+  and draft steps refuse a non-Anthropic model on a client engagement; a scan with no active
+  project is refused; the fix-stage model is checked too; DATA_HANDLING.md scoped and lists every
+  outside service (OSV.dev, CISA KEV, FIRST EPSS, tool downloads, git host). Sent back for two more
+  holes: investigation/branch/PR runs with no project, and the chat backend under the lock. Note:
+  live_scan_severity_bounds_e2e (unlocated findings) takes over 20 minutes and dominates the gate;
+  worth a look.
+- 05:05: gap 4 follow-up done (5,218 tests): open reviewer findings are re-checked by the reviewer and close only on an explicit [FIXED] line in a well-formed reply, with run and pass recorded; parser handles bold and numbered tags; fix rounds capped at 2. Merges after the running gate. Oxford-comma sweep of client-facing rule text started.
+- 04:58: load fell to 10. Merged the per-rule PR planner (2d part A) and the PDF fix-text polish
+  (remediation wraps as paragraphs, code names in mono, plain text in the workbook and
+  findings.json; page 6 checked by eye). Freed 15 GB of main incremental cache. Full gate running
+  over corpus cleanup, coverage, planner and polish. Queued: an Oxford-comma sweep of
+  client-facing rule text (the sample's finding detail still reads "rotate it immediately,
+  remove it from client-delivered code, and move ...").
+- 04:31: recovery check: the session never hit its usage limit; nothing was interrupted. Five builders still running (client-lock, citations, PDF polish, gap 4 and gap 9 fixes), the 15-minute tick and the 08:02 wrap-up are scheduled. Load average about 140, so the gate waits until it drops.
+- 04:25: gate on corpus cleanup + coverage: 9,502 passed, 3 failed, not pushed. One was the
+  local-only sample template copy again (refreshed). Two were camerata-llm timing tests (an
+  unchanged crate that passed in the earlier gates): the machine is oversubscribed (load average
+  about 30 on 8 cores, memory nearly full, macOS XProtect at 90% CPU scanning every new
+  executable the tests write), so a three-line shell script took 6.7s. Widening the test windows
+  did not help and was reverted. Holding new builders until a quieter gate passes; the gate
+  re-runs as builders finish. Needs Zach: excluding the repo's target folders from XProtect or
+  Spotlight is a security setting change, so it is his call.
+- 04:02: Fable on the reviewer contract (gap 4): defaults equal today's, no reply can pass
+  unformatted, sign-off cannot be bypassed; one HIGH hole: a sloppy reply or a later run that
+  simply omits a finding marked an open HIGH Fixed. Decided: earlier open findings go back to the
+  reviewer, which must confirm each fix with a [FIXED] line; only confirmed ones close, with the
+  run and pass recorded. Sent back with the parser and LOW fixes. Note (pre-existing): the uow
+  routes have no auth or project-membership check; the app is local-only today.
+- 04:00: Fable approved gap 9 with fixes, sent back: record proposals before a clarification
+  pause; deny the two investigation tools to other roles outright; the card's Approve approves
+  what is selected; drop a recommendation that is not one of the options; size caps; keep option
+  descriptions. Security note for Zach (pre-existing): agent runs pass the Claude CLI
+  --dangerously-skip-permissions, so --allowedTools lists are advisory and only --disallowedTools
+  denies; every tool grant that matters must be a deny for the roles that should not have it.
+- 03:57: citations builder started in parallel with client-lock (both after coverage); whichever finishes second merges feat first.
+- 03:55: structured investigation decisions (gap 9) built (5,506 tests): a recording-only propose_decision tool for the investigation agent, proposals merged as Pending without touching approved or rejected ones, decision cards with Approve / Approve another option / Reject. Known gap: proposals made before a clarification pause are lost. Fable reviewing.
+- 03:50: PR planner review fixes in (25 tests; blank lines before tables, dedupe with a note, sanitised titles, over-limit note); ready to merge after the running gate.
+- 03:42: adversarial reviewer contract (gap 4) built: ranked findings, unformatted reply never passes, findings recorded on the unit, sign-off blocked by open HIGH/MEDIUM unless accepted with a reason (recorded as a decision); new settings default to today's behaviour. Fable reviewing.
+- 03:35: Fable approved the PR planner (nothing lost or listed twice, deterministic, acyclic, valid branch names, never shows snippets); one MEDIUM (blank line before each markdown table) and seven LOW fixes sent back to its builder.
+- 03:30: PR planner follow-up done (18 tests; absorbed findings kept on the unit and listed under the finding they merged into); Fable reviewing it. PDF template polish (soft-wrapped fix text, inline code) started now that coverage is in.
+- 03:25: gate on corpus cleanup + coverage did not compile: coverage's malformed-reply test predates rank 8's new run_passes argument. Fixed in 4e976816 (workspace clippy clean); gate re-running; client-lock builder told.
+- 03:20: per-rule PR planner (2d part A) built: 15 tests, pure module. Decision: findings absorbed by a shared-fix group are kept on the unit and listed in the PR body (otherwise they could never be reported closed); builder adding that now.
+- 03:12: client-lock builder started (coverage is in).
+- 03:10: GATE GREEN on rank 8 + mutants follow-up: 9,447 passed, 0 failed; pushed. Merged the
+  corpus cleanup (ten rules changed on both sides bumped once more, lock regenerated, one title's
+  serial comma removed) and coverage (H4: retries checked against the spend cap, skipped-file
+  lists capped at 1,000 per reason with a count, triage-log caption and export checkbox, deep
+  security tier reports malformed replies as failed passes). Full gate running over both.
+  Next in the merge order: client-lock, then citations, then injection; the PDF polish template
+  half and the three false-negative batches unblock as these land.
+- 03:00: corpus rewrite fixed: 24 added commas after a closing parenthesis removed (a full sweep,
+  not just the sample), the three named sentences and 11 stacked-colon source titles fixed; no
+  word changes. Rules + cli 482 passed. Merges after the running gate (expect the lock and a few
+  supabase rules to need a regenerate against rank 8).
+- 03:00: Fable designed the remaining V2 console gaps (copy in _workspace/brownfield-audits/
+  2026-10-28_console-v2-design.md). Started three builders in parallel: the pure per-rule PR
+  planner and PR body (2d part A), the adversarial reviewer contract (gap 4) and structured
+  investigation decisions (gap 9). Findings-to-units (2c) waits for the planner and the
+  client-lock merge; PR wiring (2d part B) after that. Every new cost setting defaults to today's
+  behaviour. Needs Zach: L3 review on by default, one fix round after a bounce, reviewer on the
+  strongest tier, fail closed on reviewer error, remediation only from Confirmed findings,
+  dependency ordering advisory only, which finding id the PR body shows.
+- 02:55: Fable read about 130 hunks of the corpus rewrite: no meaning changes, but the script added a comma after a closing parenthesis where the sentence continues (6 found), plus 3 other punctuation fixes and about 12 source titles stacking two colons. Sent back for a mechanical sweep of every changed field.
+- 02:50: GATE GREEN on boards + walkthrough: 9,377 passed, 0 failed; pushed. Merged rank 8 and the mutants follow-up (plus its two small test fixes); full gate running.
+- 02:42: corpus text cleanup done (rules + cli 482 passed): 985 em dashes removed from client-facing
+  fields in 383 rule files (more than the 227 estimated), a new corpus test bans them there, eight
+  rules relabelled policy: 415 grounded, 25 policy. Fable spot-checking the rewritten prose before
+  it merges.
+- 02:35: mutants follow-up (two test-only commits) reviewed: real kills, clean merge. Small fixes
+  queued for after the gate (one test misses the left word boundary; one doc comment overclaims;
+  MUTATION_TESTING.md names the two new test files). Observation for the false-negative list: the
+  placeholder-word rule treats a digit-to-letter edge as a word boundary, so a random key that
+  happens to contain a run like "9fake" is hidden as a placeholder.
+- 02:32: note: every efficiency measure defaults ON, so candidates_prefilter ships on. A locator
+  miss would hide a real finding, so the morning recall check is a release blocker: any finding
+  lost with it on means turning it off by default before the tag.
+- 02:30: rank 8 (candidates pre-filter) merged and fixed in its worktree (server 3,309 + checks,
+  rules, cli 2,613 passed): locators widened (views, SELECT INTO), tests that can detect a miss,
+  E'' strings handled and ambiguous backslashes fall back to whole files, an 8 MiB and timeout
+  bound with cancellation. Merges after the running gate. Added to the morning sweep runbook: the
+  per-rule recall check (11 rules, prefilter on vs off, any finding lost with it on is a miss).
+- 02:22: boards builder stopped after its report. Fable designing the remaining V2 console gaps (2c findings to units of work, 2d per-rule PRs, adversarial reviewer, structured investigation decisions) into build-ready briefs.
+- 02:20: boards optional merged (5,171 tests in its worktree): native units commit as "Refs
+  uow-N" (no GitHub autolink collision), one OWNER/REPO validator at every entry, unknown uow-
+  keys get 404 instead of being created, unit numbers never reused. Startup now refuses a
+  malformed uow.json instead of silently emptying it. Full gate running (boards + walkthrough).
+- 02:14: note: the status-log push also carried the walkthrough merge before a full local gate (it was gated in its worktree: workspace clippy plus camerata-ui and camerata-ui-core). GitHub CI runs on it; the next full gate covers it too.
 - 02:12: GATE GREEN on console gaps, README, W27, sources, mutants and the efficiency-join fixes: 9,346 passed, 0 failed; pushed (the one-off mutation_kills exit did not recur). Walkthrough step 6 merged (gates with the next branch).
 - 02:00: walkthrough step 6 now points at the real spend limit field (ui 1,039 + ui-core 551 passed); merges after the gate. Corpus em-dash cleanup and the eight policy relabels split out of the PDF polish brief and started now (corpus files only); the template half still waits for coverage.
 - 02:00: false-negative audit rechecked against today's code: of 12 HIGH, 4 partly fixed
