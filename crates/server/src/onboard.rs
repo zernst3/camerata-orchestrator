@@ -2844,6 +2844,7 @@ async fn attach_secret_history_capture(findings: &mut [Finding], repo_root: &std
 /// caller treats that as "unknown," never a hard error.
 async fn commits_touching_path(repo_root: &std::path::Path, path: &str) -> Option<usize> {
     let output = tokio::process::Command::new("git")
+        .args(crate::workspace::GIT_NO_REPO_COMMANDS)
         .args(["rev-list", "--all", "--count", "--", path])
         .current_dir(repo_root)
         .kill_on_drop(true)
@@ -2864,7 +2865,10 @@ async fn commits_touching_path(repo_root: &std::path::Path, path: &str) -> Optio
 async fn capture_audited_ref(spec: &str, dir: &std::path::Path) -> AuditedRef {
     async fn run(dir: &std::path::Path, args: &[&str]) -> Option<std::process::Output> {
         let mut cmd = tokio::process::Command::new("git");
-        cmd.args(args).current_dir(dir).kill_on_drop(true);
+        cmd.args(crate::workspace::GIT_NO_REPO_COMMANDS)
+            .args(args)
+            .current_dir(dir)
+            .kill_on_drop(true);
         cmd.output().await.ok()
     }
     let sha = run(dir, &["rev-parse", "HEAD"])
@@ -2975,6 +2979,55 @@ mod tests {
             Some("https://github.com/acme/app.git")
         );
         assert!(!format!("{got:?}").contains("ghp_SECRETSECRET"));
+    }
+
+    /// H2: a scanned repository's own git configuration can name a command git runs on
+    /// `git status` (`core.fsmonitor`). Recording the inspected commit must never run it. The
+    /// control step proves this git honours the setting, so the assertion is not vacuous.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn recording_the_commit_never_runs_the_repositorys_fsmonitor_command() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        crate::test_git::init_repo_with_origin(
+            &repo,
+            "https://github.com/acme/app.git",
+            &[("a.txt", "one\n")],
+        );
+        let marker = tmp.path().join("fsmonitor-ran");
+        let hook = tmp.path().join("hook.sh");
+        std::fs::write(
+            &hook,
+            format!("#!/bin/sh\ntouch '{}'\nexit 1\n", marker.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let set = std::process::Command::new("git")
+            .current_dir(&repo)
+            .args(["config", "core.fsmonitor", &hook.display().to_string()])
+            .status()
+            .unwrap();
+        assert!(set.success());
+
+        let got = capture_audited_ref("acme/app", &repo).await;
+        let _ = commits_touching_path(&repo, "a.txt").await;
+        let _ = crate::onboard::files::read_local_repo_files(&repo);
+        assert!(got.sha.is_some());
+        assert!(
+            !marker.exists(),
+            "the repository's fsmonitor command ran during the inspection"
+        );
+
+        // Control: plain `git status` in the same repository does run it.
+        let _ = std::process::Command::new("git")
+            .current_dir(&repo)
+            .args(["status", "--porcelain"])
+            .output()
+            .unwrap();
+        if !marker.exists() {
+            eprintln!("SKIPPED control: this git does not run core.fsmonitor hooks");
+        }
     }
 
     /// A folder with no git history yields no origin and no default branch, never an error.

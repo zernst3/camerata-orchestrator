@@ -72,6 +72,76 @@ impl ScanTool {
             ScanTool::Semgrep => "semgrep",
         }
     }
+
+    /// True when running this tool executes code the scanned repository controls, so a client
+    /// engagement skips it unless the operator opted in ([`crate::client_lock`]).
+    ///
+    /// - `cargo clippy` COMPILES the crate: that runs the repository's `build.rs` scripts and
+    ///   procedural macros, and honours its `.cargo/config.toml` (a `rustc-wrapper` there is a
+    ///   command of the repository's choosing). True.
+    /// - `ruff` and `semgrep` read the source as data, with Camerata's own rule selection and
+    ///   bundled rules. False.
+    /// - `eslint` runs with an explicit `--config` pointing at Camerata's bundled flat config
+    ///   ([`eslint_args`]), which turns off eslint's lookup of the repository's own
+    ///   `eslint.config.*` (JavaScript that would otherwise be imported), and resolves plugins
+    ///   and parsers from Camerata's provisioned workspace. False.
+    pub fn executes_repo_code(self) -> bool {
+        matches!(self, ScanTool::Clippy)
+    }
+}
+
+/// The [`CoverageNote::tool`] of the note that tells the report a step executed the client's own
+/// code with the operator's opt-in. Deliberately not a tool name: a note keyed by the tool's own
+/// name reads as that tool having failed (see `reconcile_external_tool_ledger`).
+pub const CLIENT_TOOLING_NOTE_TOOL: &str = "client-tooling";
+
+/// The phrase every client-tooling skip note carries, so the report can tell a step withheld on
+/// purpose from a tool that failed ([`is_client_tooling_skip`]).
+const CLIENT_TOOLING_SKIPPED: &str =
+    "this inspection does not execute repository code without an explicit opt-in";
+
+/// The client-facing text of a client-tooling skip note for `command`.
+pub(crate) fn client_tooling_skipped_message(command: &str, rules: usize) -> String {
+    format!(
+        "{command} was not run: it compiles the code, which runs this repository's own build \
+         scripts and procedural macros, and {CLIENT_TOOLING_SKIPPED}. The {rules} selected \
+         rule(s) it previews were not checked by it in this inspection."
+    )
+}
+
+/// True when `note` records a step skipped by the client-tooling lock (not a tool failure).
+pub fn is_client_tooling_skip(note: &CoverageNote) -> bool {
+    note.message.contains(CLIENT_TOOLING_SKIPPED)
+}
+
+/// The coverage note for `tool` skipped in a client engagement with no opt-in.
+fn client_tooling_skipped_note(tool: ScanTool, rules: usize) -> CoverageNote {
+    CoverageNote {
+        tool: tool.name().to_string(),
+        message: client_tooling_skipped_message(tool_command(tool), rules),
+    }
+}
+
+/// The coverage note for `tool` run in a client engagement because the operator opted in.
+fn client_tooling_ran_note(tool: ScanTool) -> CoverageNote {
+    CoverageNote {
+        tool: CLIENT_TOOLING_NOTE_TOOL.to_string(),
+        message: format!(
+            "{} ran with the operator's opt-in to run this repository's own tooling: compiling \
+             the code executed the repository's build scripts and procedural macros.",
+            tool_command(tool)
+        ),
+    }
+}
+
+/// The command a reader recognises for `tool`.
+fn tool_command(tool: ScanTool) -> &'static str {
+    match tool {
+        ScanTool::Clippy => "cargo clippy",
+        ScanTool::Ruff => "ruff",
+        ScanTool::Eslint => "eslint",
+        ScanTool::Semgrep => "semgrep",
+    }
 }
 
 /// Derive the scan tool a rule's findings would come from, by inspecting its
@@ -1385,6 +1455,10 @@ pub async fn run_scan_tools<'r>(
     lookup: &(dyn Fn(&str) -> Option<&'r Rule> + Send + Sync),
     present_languages: Option<&HashSet<String>>,
     progress: Option<(&crate::jobs::JobStore, &str)>,
+    // Whether a tool that executes the repository's code may run (see
+    // [`ScanTool::executes_repo_code`]). A skipped tool still counts as attempted and is
+    // disclosed with a note keyed by its own name, so the ledger records it as not run.
+    tooling: crate::client_lock::ClientTooling,
 ) -> (Vec<Finding>, Vec<CoverageNote>, HashSet<&'static str>) {
     let (by_tool, ungrouped) = group_by_tool(selected, lookup, present_languages);
     let attempted: HashSet<&'static str> = by_tool.keys().map(|t| t.name()).collect();
@@ -1436,6 +1510,16 @@ pub async fn run_scan_tools<'r>(
     });
 
     for (tool, rules) in by_tool {
+        if tool.executes_repo_code() && !tooling.allowed() {
+            coverage_notes.push(client_tooling_skipped_note(tool, rules.len()));
+            if let Some((jstore, jid)) = progress {
+                jstore.det_tool_done(jid, tool.name(), 0);
+            }
+            continue;
+        }
+        if tool.executes_repo_code() && tooling.client_engagement {
+            coverage_notes.push(client_tooling_ran_note(tool));
+        }
         if let Some((jstore, jid)) = progress {
             jstore.det_tool_running(jid, tool.name());
         }
@@ -2139,6 +2223,7 @@ mod tests {
             &lookup,
             None,
             None,
+            crate::client_lock::ClientTooling::INTERNAL,
         )
         .await;
 
@@ -2157,6 +2242,128 @@ mod tests {
                 .any(|n| n.tool == "semgrep" && n.message.contains(DISABLE_SEMGREP_ENV_VAR)),
             "a disabled tool must yield a real semgrep coverage note (never a silent clean): \
              {notes:?}"
+        );
+    }
+
+    // ── H2: the client-tooling lock ──────────────────────────────────────────
+
+    /// A crate whose `build.rs` writes `marker` when it is compiled: the observable proof of
+    /// whether `cargo clippy` executed the repository's own code.
+    fn crate_that_marks_when_built(dir: &Path, marker: &Path) {
+        std::fs::write(
+            dir.join("Cargo.toml"),
+            "[package]\nname = \"marker\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[workspace]\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("build.rs"),
+            format!(
+                "fn main() {{ std::fs::write({:?}, \"built\").unwrap(); }}\n",
+                marker.display().to_string()
+            ),
+        )
+        .unwrap();
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("src/lib.rs"), "pub fn f() -> u8 { 1 }\n").unwrap();
+    }
+
+    #[test]
+    fn only_clippy_executes_the_repository_code() {
+        assert!(ScanTool::Clippy.executes_repo_code());
+        for tool in [ScanTool::Ruff, ScanTool::Eslint, ScanTool::Semgrep] {
+            assert!(!tool.executes_repo_code(), "{tool:?}");
+        }
+    }
+
+    /// A client engagement without an opt-in never builds the client's crate: no build script
+    /// runs, and the skip is disclosed as a clippy coverage note naming why.
+    #[tokio::test]
+    async fn a_client_engagement_skips_clippy_without_running_the_build_script() {
+        let rules = vec![rule_with(
+            "RUST-NO-UNWRAP-1",
+            EnforcementKind::Mechanical,
+            false,
+            &["clippy: unwrap_used"],
+        )];
+        let lookup = lookup_over(&rules);
+        let repo = tempfile::tempdir().unwrap();
+        let marks = tempfile::tempdir().unwrap();
+        let marker = marks.path().join("built");
+        crate_that_marks_when_built(repo.path(), &marker);
+
+        let (findings, notes, attempted) = run_scan_tools(
+            "me/api",
+            repo.path(),
+            &[selected("RUST-NO-UNWRAP-1")],
+            &lookup,
+            None,
+            None,
+            crate::client_lock::ClientTooling::new(true, false),
+        )
+        .await;
+
+        assert!(!marker.exists(), "the client's build script must not run");
+        assert!(!repo.path().join("target").exists(), "nothing was compiled");
+        assert!(findings.is_empty());
+        assert!(attempted.contains("clippy"), "{attempted:?}");
+        let note = notes
+            .iter()
+            .find(|n| n.tool == "clippy")
+            .expect("the skip is disclosed");
+        assert!(note.message.contains("was not run"), "{}", note.message);
+        assert!(note.message.contains("build scripts"), "{}", note.message);
+        assert!(
+            !note.message.contains('\u{2014}'),
+            "no em dash: {}",
+            note.message
+        );
+    }
+
+    /// With the operator's opt-in, clippy runs (the build script executes) and the report is
+    /// told that the repository's own code was executed.
+    #[tokio::test]
+    async fn an_opted_in_client_engagement_runs_clippy_and_says_so() {
+        let cargo_clippy = std::process::Command::new("cargo")
+            .args(["clippy", "--version"])
+            .output()
+            .is_ok_and(|o| o.status.success());
+        if !cargo_clippy {
+            eprintln!("SKIPPED: cargo clippy is not installed");
+            return;
+        }
+        let rules = vec![rule_with(
+            "RUST-NO-UNWRAP-1",
+            EnforcementKind::Mechanical,
+            false,
+            &["clippy: unwrap_used"],
+        )];
+        let lookup = lookup_over(&rules);
+        let repo = tempfile::tempdir().unwrap();
+        let marks = tempfile::tempdir().unwrap();
+        let marker = marks.path().join("built");
+        crate_that_marks_when_built(repo.path(), &marker);
+
+        let (_findings, notes, _attempted) = run_scan_tools(
+            "me/api",
+            repo.path(),
+            &[selected("RUST-NO-UNWRAP-1")],
+            &lookup,
+            None,
+            None,
+            crate::client_lock::ClientTooling::new(true, true),
+        )
+        .await;
+
+        assert!(marker.exists(), "opted in: clippy built the crate");
+        assert!(
+            notes
+                .iter()
+                .any(|n| n.tool == CLIENT_TOOLING_NOTE_TOOL && n.message.contains("opt-in")),
+            "{notes:?}"
+        );
+        assert!(
+            !notes.iter().any(|n| n.tool == "clippy"),
+            "an opted-in run is not a clippy failure: {notes:?}"
         );
     }
 
@@ -2708,8 +2915,16 @@ mod tests {
         // A non-existent dir + (almost certainly) absent `ruff` on the test host:
         // the pass must emit a coverage NOTE, NOT an empty (clean) result and NOT a finding.
         let dir = std::path::Path::new("/nonexistent-camerata-scan-preview-dir");
-        let (findings, notes, attempted) =
-            run_scan_tools("me/api", dir, &[selected("PY-A")], &lookup, None, None).await;
+        let (findings, notes, attempted) = run_scan_tools(
+            "me/api",
+            dir,
+            &[selected("PY-A")],
+            &lookup,
+            None,
+            None,
+            crate::client_lock::ClientTooling::INTERNAL,
+        )
+        .await;
         assert!(
             findings.is_empty(),
             "missing tool must yield no finding rows"
@@ -2772,8 +2987,16 @@ mod tests {
         )];
         let lookup = lookup_over(&rules);
         let dir = std::path::Path::new("/nonexistent-camerata-scan-preview-dir");
-        let (findings, notes, attempted) =
-            run_scan_tools("me/api", dir, &[selected("PY-A")], &lookup, None, None).await;
+        let (findings, notes, attempted) = run_scan_tools(
+            "me/api",
+            dir,
+            &[selected("PY-A")],
+            &lookup,
+            None,
+            None,
+            crate::client_lock::ClientTooling::INTERNAL,
+        )
+        .await;
         assert!(
             findings.is_empty(),
             "a missing tool must yield NO finding row"
@@ -4116,8 +4339,16 @@ export function Thing({ id }) {
         let lookup = lookup_over(&rules);
         let selection = vec![selected("JAVASCRIPT-REACT-EXHAUSTIVE-DEPS-1")];
 
-        let (findings, notes, attempted) =
-            run_scan_tools("me/web", dir.path(), &selection, &lookup, None, None).await;
+        let (findings, notes, attempted) = run_scan_tools(
+            "me/web",
+            dir.path(),
+            &selection,
+            &lookup,
+            None,
+            None,
+            crate::client_lock::ClientTooling::INTERNAL,
+        )
+        .await;
 
         assert!(
             attempted.contains("eslint"),
@@ -4309,8 +4540,16 @@ export function Thing({ id }) {
             .map(selected)
             .collect();
         let lookup = |id: &str| corpus.get_by_id(id);
-        let (findings, notes, attempted) =
-            run_scan_tools("me/web", dir.path(), &selection, &lookup, None, None).await;
+        let (findings, notes, attempted) = run_scan_tools(
+            "me/web",
+            dir.path(),
+            &selection,
+            &lookup,
+            None,
+            None,
+            crate::client_lock::ClientTooling::INTERNAL,
+        )
+        .await;
         assert!(attempted.contains("eslint"), "notes={notes:?}");
         assert!(
             notes.iter().all(|n| !n.message.contains(HOOKS_LINT_RULE)),

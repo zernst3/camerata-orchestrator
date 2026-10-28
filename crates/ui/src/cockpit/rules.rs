@@ -2829,6 +2829,92 @@ pub(super) fn L3ReviewEditor(project: ProjectView) -> Element {
 /// compliance-relevant setting that must never silently drift from what the server actually
 /// persisted. A failed save reverts the control to its pre-click state rather than leaving it
 /// showing an unconfirmed value.
+/// Per-project **Client engagement** control (see `camerata_server::client_lock`). On
+/// (the default for every project) means client work: every AI call runs only on the Anthropic
+/// API with Anthropic models (the CLI backend and OpenRouter models are refused before anything
+/// is read), and steps that execute the client's own code (the `cargo clippy` preview, the dev
+/// loop's build and tests) run only with the separate opt-in below. Off is the maintainer's own
+/// development. Auto-saves on change and reconciles from the server's echoed values, like
+/// [`BackendEditor`]; a failed save reverts both controls.
+#[component]
+pub(super) fn ClientEngagementEditor(project: ProjectView) -> Element {
+    let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
+    let pid = project.id.clone();
+    let mut engagement = use_signal(|| project.client_engagement);
+    let mut opt_in = use_signal(|| project.client_tooling_opt_in);
+    let mut saving = use_signal(|| false);
+
+    let save = move |next_engagement: bool, next_opt_in: bool| {
+        let previous = (engagement(), opt_in());
+        engagement.set(next_engagement);
+        opt_in.set(next_opt_in);
+        saving.set(true);
+        let pid = pid.clone();
+        spawn(async move {
+            match set_project_client_engagement(&pid, next_engagement, next_opt_in).await {
+                Some((confirmed_engagement, confirmed_opt_in)) => {
+                    engagement.set(confirmed_engagement);
+                    opt_in.set(confirmed_opt_in);
+                }
+                None => {
+                    engagement.set(previous.0);
+                    opt_in.set(previous.1);
+                    crate::toast::push_toast(
+                        toasts,
+                        crate::toast::ToastKind::Error,
+                        "Could not update the client engagement setting.",
+                    );
+                }
+            }
+            saving.set(false);
+        });
+    };
+    let mut save_engagement = save.clone();
+    let mut save_opt_in = save;
+
+    rsx! {
+        div { class: "tier-map-editor client-engagement-editor",
+            p { class: "tier-map-heading", "Client engagement" }
+            div { class: "tier-map-row l3-review-toggle-row",
+                label { class: "tier-map-band-label", "Client engagement" }
+                input {
+                    r#type: "checkbox",
+                    class: "l3-review-checkbox",
+                    checked: engagement(),
+                    disabled: saving(),
+                    onchange: move |e: Event<FormData>| save_engagement(e.checked(), opt_in()),
+                }
+                span { class: "l3-review-toggle-hint",
+                    if engagement() {
+                        "On. Client work runs only on the Anthropic API with Claude models; the CLI backend and OpenRouter models are refused before anything is read."
+                    } else {
+                        "Not a client engagement: your own development. Any backend and model may run, and so may the repository's own tooling."
+                    }
+                }
+            }
+            if engagement() {
+                div { class: "tier-map-row l3-review-toggle-row",
+                    label { class: "tier-map-band-label", "Run client tooling" }
+                    input {
+                        r#type: "checkbox",
+                        class: "l3-review-checkbox",
+                        checked: opt_in(),
+                        disabled: saving(),
+                        onchange: move |e: Event<FormData>| save_opt_in(engagement(), e.checked()),
+                    }
+                    span { class: "l3-review-toggle-hint",
+                        if opt_in() {
+                            "Opted in. The clippy preview and the dev loop build and run this repository's own code; the report says so."
+                        } else {
+                            "Off. Steps that build or run this repository's own code are skipped, and the report says which."
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[component]
 pub(super) fn BackendEditor(project: ProjectView) -> Element {
     let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
@@ -7956,6 +8042,55 @@ mod render_tests {
         assert!(
             html.contains("CLI selected"),
             "a legacy project with no backend field defaults to Cli; html=\n{html}"
+        );
+    }
+
+    // ClientEngagementEditor (H2): reads only `project.client_engagement` /
+    // `project.client_tooling_opt_in` via use_signal, so SSR renders it deterministically.
+    fn render_client_engagement(project: ProjectView) -> String {
+        #[component]
+        fn Harness(project: ProjectView) -> Element {
+            use_context_provider(|| Signal::new(Vec::<crate::toast::Toast>::new()));
+            rsx! {
+                ClientEngagementEditor { project }
+            }
+        }
+        let mut vdom = VirtualDom::new_with_props(Harness, HarnessProps { project });
+        vdom.rebuild_in_place();
+        dioxus_ssr::render(&vdom)
+    }
+
+    #[test]
+    fn client_engagement_editor_is_on_for_a_project_without_the_field() {
+        let html = render_client_engagement(project_with_no_backend_field());
+        assert!(html.contains("client-engagement-editor"), "html=\n{html}");
+        assert!(html.contains("Client engagement"), "html=\n{html}");
+        assert!(
+            html.contains("Client work runs only on the Anthropic API"),
+            "the on-state hint renders; html=\n{html}"
+        );
+        assert!(
+            html.contains("Run client tooling"),
+            "the opt-in renders while the engagement is on; html=\n{html}"
+        );
+    }
+
+    #[test]
+    fn client_engagement_editor_off_hides_the_tooling_opt_in() {
+        let project: ProjectView = serde_json::from_value(serde_json::json!({
+            "id": "proj-internal",
+            "name": "Own",
+            "client_engagement": false,
+        }))
+        .unwrap();
+        let html = render_client_engagement(project);
+        assert!(
+            html.contains("Not a client engagement"),
+            "the off-state hint renders; html=\n{html}"
+        );
+        assert!(
+            !html.contains("Run client tooling"),
+            "no opt-in to offer when nothing is withheld; html=\n{html}"
         );
     }
 }

@@ -460,6 +460,28 @@ pub struct Project {
     /// Serde default = empty for projects persisted before this field existed (no migration).
     #[serde(default)]
     pub client_name: String,
+    /// This project is a CLIENT ENGAGEMENT (`camerata_server::client_lock`): its AI work runs
+    /// only on the Anthropic API with Anthropic models (the `Cli` backend and OpenRouter models
+    /// are refused before any file is read or any model is called), and steps that execute the
+    /// client's own code are skipped unless [`Self::client_tooling_opt_in`] is set.
+    ///
+    /// ON for every new and imported project, and for a project persisted before this field
+    /// existed (the serde default): a refusal is loud and fixed in one click (Settings, Client
+    /// engagement), while client code silently sent through the personal subscription is not
+    /// recoverable at all. The operator turns it off for their own development.
+    #[serde(default = "default_client_engagement")]
+    pub client_engagement: bool,
+    /// The operator's explicit opt-in to run the client's own tooling for this engagement (the
+    /// `cargo clippy` scan preview, which builds the code; the governed dev loop's build and
+    /// tests). Off by default; recorded in the scan ledger and stated in the report. Ignored
+    /// when [`Self::client_engagement`] is off (nothing is withheld then).
+    #[serde(default)]
+    pub client_tooling_opt_in: bool,
+}
+
+/// The serde default for [`Project::client_engagement`]: on. See that field's doc comment.
+pub fn default_client_engagement() -> bool {
+    true
 }
 
 /// One agent operating principle: a single imperative line the governed agent is held to (about
@@ -967,6 +989,8 @@ mod tests {
             hierarchy_schema: HierarchySchema::default(),
             backend: ProjectBackend::Cli,
             client_name: String::new(),
+            client_engagement: true,
+            client_tooling_opt_in: false,
             ruleset: ProjectRuleset {
                 selections: vec![sel("OLD-1")],
                 cross_repo: vec![],
@@ -1008,6 +1032,8 @@ mod tests {
             hierarchy_schema: HierarchySchema::default(),
             backend: ProjectBackend::Cli,
             client_name: String::new(),
+            client_engagement: true,
+            client_tooling_opt_in: false,
             ruleset: ProjectRuleset {
                 selections,
                 cross_repo: vec![],
@@ -1104,6 +1130,8 @@ mod tests {
             hierarchy_schema: HierarchySchema::default(),
             backend: ProjectBackend::Cli,
             client_name: String::new(),
+            client_engagement: true,
+            client_tooling_opt_in: false,
             ruleset: ProjectRuleset {
                 selections: vec![],
                 cross_repo: vec![],
@@ -1189,6 +1217,8 @@ mod tests {
             hierarchy_schema: HierarchySchema::default(),
             backend: ProjectBackend::Cli,
             client_name: String::new(),
+            client_engagement: true,
+            client_tooling_opt_in: false,
             ruleset: ProjectRuleset {
                 custom: vec![custom("a", "A1"), custom("b", "B1")],
                 ..Default::default()
@@ -1232,6 +1262,8 @@ mod tests {
             hierarchy_schema: HierarchySchema::default(),
             backend: ProjectBackend::Cli,
             client_name: String::new(),
+            client_engagement: true,
+            client_tooling_opt_in: false,
             ruleset: ProjectRuleset {
                 custom: vec![custom("keep", "K"), custom("gone", "G")],
                 ..Default::default()
@@ -1268,6 +1300,8 @@ mod tests {
             hierarchy_schema: HierarchySchema::default(),
             backend: ProjectBackend::Cli,
             client_name: String::new(),
+            client_engagement: true,
+            client_tooling_opt_in: false,
             ruleset: ProjectRuleset::default(),
         };
         p.set_max_iterations(5);
@@ -1290,6 +1324,32 @@ mod tests {
         }"#;
         let p: Project = serde_json::from_str(json).unwrap();
         assert_eq!(p.max_iterations, 1);
+    }
+
+    #[test]
+    fn a_legacy_project_is_a_client_engagement_with_no_tooling_opt_in() {
+        // A project persisted before the client lock existed fails closed: it is treated as a
+        // client engagement until the operator turns that off, and never runs client tooling.
+        let json = r#"{
+            "id": "proj-1",
+            "name": "Legacy",
+            "repos": [],
+            "ruleset": {},
+            "onboarded": []
+        }"#;
+        let p: Project = serde_json::from_str(json).unwrap();
+        assert!(p.client_engagement);
+        assert!(!p.client_tooling_opt_in);
+
+        let json_off = r#"{
+            "id": "proj-2",
+            "name": "Internal",
+            "client_engagement": false,
+            "client_tooling_opt_in": true
+        }"#;
+        let p: Project = serde_json::from_str(json_off).unwrap();
+        assert!(!p.client_engagement);
+        assert!(p.client_tooling_opt_in);
     }
 
     #[test]
@@ -1410,6 +1470,8 @@ mod tests {
             hierarchy_schema: HierarchySchema::default(),
             backend: ProjectBackend::Cli,
             client_name: String::new(),
+            client_engagement: true,
+            client_tooling_opt_in: false,
             ruleset: ProjectRuleset {
                 selections: vec![sel("R-1")],
                 cross_repo: vec![sel("INTEGRATION-API-CONTRACT-1")],
@@ -1478,6 +1540,8 @@ mod tests {
             hierarchy_schema: HierarchySchema::default(),
             backend: ProjectBackend::Cli,
             client_name: String::new(),
+            client_engagement: true,
+            client_tooling_opt_in: false,
             ruleset: ProjectRuleset::default(),
         };
         original.set_model_for_step(StepKind::Decomposition, "claude-opus-5".into());
@@ -1568,6 +1632,8 @@ mod tests {
             hierarchy_schema: HierarchySchema::default(),
             backend: ProjectBackend::Cli,
             client_name: String::new(),
+            client_engagement: true,
+            client_tooling_opt_in: false,
             ruleset: ProjectRuleset::default(),
         };
         let json = serde_json::to_string(&original).unwrap();

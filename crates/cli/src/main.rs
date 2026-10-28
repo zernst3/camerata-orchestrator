@@ -191,6 +191,17 @@ enum Command {
         /// is checked before anything is read or spent.
         #[arg(long, value_name = "NAME")]
         client: String,
+        /// Not a client engagement: the maintainer's own development. Without this flag every
+        /// inspection is a client engagement, which runs only on the Anthropic API with
+        /// Anthropic models (`--backend cli` and OpenRouter models are refused before any file
+        /// is read) and never executes the repository's own code.
+        #[arg(long)]
+        internal: bool,
+        /// Opt in to steps that execute the client's own code in a client engagement (today the
+        /// `cargo clippy` preview, which builds the crate and so runs its build scripts and
+        /// procedural macros). Off by default; recorded in the ledger and stated in the report.
+        #[arg(long = "run-client-tooling")]
+        run_client_tooling: bool,
     },
 
     /// W6 / I2: the PRE-FLIGHT INTEGRITY GATE. Evaluate a scan ledger written by
@@ -415,6 +426,8 @@ async fn main() -> anyhow::Result<()> {
             max_cost_usd,
             efficiency,
             client,
+            internal,
+            run_client_tooling,
         } => {
             run_inspect_cmd(InspectArgs {
                 repo,
@@ -430,6 +443,8 @@ async fn main() -> anyhow::Result<()> {
                 max_cost_usd,
                 efficiency,
                 client,
+                client_engagement: !internal,
+                run_client_tooling,
             })
             .await
         }
@@ -925,8 +940,15 @@ mod cli_parse_tests {
                 max_cost_usd,
                 efficiency,
                 client,
+                internal,
+                run_client_tooling,
             } => {
                 assert_eq!(client, "Example Client Ltd");
+                assert!(
+                    !internal,
+                    "every inspection is a client engagement by default"
+                );
+                assert!(!run_client_tooling, "client tooling is opt-in");
                 assert_eq!(repo, PathBuf::from("/tmp/r"));
                 assert_eq!(export, PathBuf::from("/tmp/o.zip"));
                 assert_eq!(backend, ProjectBackend::Api);
@@ -939,6 +961,32 @@ mod cli_parse_tests {
                 assert!(!verbose);
                 assert!(max_cost_usd.is_none(), "no cap unless asked for");
                 assert!(efficiency.is_empty());
+            }
+            other => panic!("expected Command::Inspect, got a different variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn inspect_parses_the_internal_and_client_tooling_flags() {
+        let cli = Cli::try_parse_from([
+            "camerata",
+            "inspect",
+            "--repo",
+            "/tmp/r",
+            "--export",
+            "/tmp/o.zip",
+            "--internal",
+            "--run-client-tooling",
+        ])
+        .expect("must parse");
+        match cli.command {
+            Command::Inspect {
+                internal,
+                run_client_tooling,
+                ..
+            } => {
+                assert!(internal);
+                assert!(run_client_tooling);
             }
             other => panic!("expected Command::Inspect, got a different variant: {other:?}"),
         }

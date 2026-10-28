@@ -71,6 +71,44 @@ async fn clone_confirmed_finding_redacts_first_line_and_also_locations() {
     }
 }
 
+/// H2: the code the judge SENDS to the model is redacted too, not only the finding it returns.
+/// The secret sits on the first line of each copy, which the judge quotes in its prompt.
+#[tokio::test]
+async fn the_judge_prompt_carries_no_secret_value() {
+    let clean = discount_repo("0.2", "0.15");
+    let stub = StubJudge::answering("same_decision", "the discount");
+    let baseline = judge(
+        Some(&stub),
+        &clean,
+        set_for(&clean, &[CloneRule::SingleSourceLogic]),
+    )
+    .await;
+    let f = &baseline.findings[0];
+    let (primary_path, primary_line) = (f.path.clone(), f.line);
+    let (other_path, other_line) = (f.also_locations[0].path.clone(), f.also_locations[0].line);
+
+    let p = planted(SecretShape::StripeLiveSecretKey);
+    let tainted = with_line_replaced(&clean, &primary_path, primary_line, &p.text);
+    let tainted = with_line_replaced(&tainted, &other_path, other_line, &p.text);
+    let set = set_for(&clean, &[CloneRule::SingleSourceLogic]);
+    let stub = StubJudge::answering("same_decision", "the discount");
+    let mut cache = VerdictCache::default();
+    let _ =
+        judge_clone_candidates(Some(&stub), request(&tainted, set), &mut cache, None, None).await;
+    assert!(stub.call_count() > 0, "the judge was asked");
+    for n in 0..stub.call_count() {
+        let req = stub.request(n);
+        assert!(
+            !req.prompt.contains(&p.value),
+            "the judge prompt leaked a secret value"
+        );
+    }
+    assert!(
+        stub.request(0).prompt.contains("sk_live_"),
+        "the redacted form stands in for the value"
+    );
+}
+
 #[test]
 fn not_assessed_row_redacts_its_reason() {
     let p = planted(SecretShape::GitHubToken);

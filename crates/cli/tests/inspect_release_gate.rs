@@ -82,6 +82,8 @@ async fn cli_inspect_export_exits_3_and_writes_nothing_when_blocked() {
         max_cost_usd: None,
         efficiency: Vec::new(),
         client: "Example Client Ltd".to_string(),
+        client_engagement: true,
+        run_client_tooling: false,
     };
 
     let err = run_inspect_with_key_presence(args, false)

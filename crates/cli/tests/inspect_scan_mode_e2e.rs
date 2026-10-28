@@ -197,6 +197,10 @@ async fn run(backend: ProjectBackend, efficiency: Vec<String>) -> RunResult {
         max_cost_usd: None,
         efficiency,
         client: "Example Client Ltd".to_string(),
+        // The maintainer's own run: one case here uses the `cli` backend, which a client
+        // engagement refuses.
+        client_engagement: false,
+        run_client_tooling: false,
     };
     // The export needs `typst`; either outcome is fine here (see the module doc).
     let _ = run_inspect_pipeline_with(

@@ -152,7 +152,11 @@ pub(crate) fn assemble_package(
     // sanctioned provenance bridge (`client_provenance`).
     let mut provenance =
         crate::client_provenance::export_provenance(report, &report_json.cover, corpus);
-    provenance.model = options.model.clone();
+    // The models are what the scan recorded as having run, never what was configured.
+    provenance.model = options
+        .model
+        .clone()
+        .map(|m| m.with_models_from(&report.provenance));
     let client = crate::report_export::clean_client_name(&options.client_name);
     provenance.client_name = (!client.is_empty()).then_some(client);
     let readme = crate::product_export_readme(stem, &provenance);
