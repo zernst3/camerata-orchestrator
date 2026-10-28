@@ -502,8 +502,14 @@ pub enum ReviewFindingStatus {
     /// Reported and not yet resolved. An open HIGH or MEDIUM blocks sign-off.
     #[default]
     Open,
-    /// An earlier pass reported it and a later pass of the same run did not.
-    Fixed { iteration: usize },
+    /// A later review re-checked it against the diff and confirmed it gone (a `[FIXED]` line).
+    /// Merely not being reported again is NOT enough. `run_id` and `iteration` name the review
+    /// that confirmed it ("Fixed in run R, pass P").
+    Fixed {
+        #[serde(default)]
+        run_id: String,
+        iteration: usize,
+    },
     /// The architect accepted it as is, with a reason (also written as a decision).
     Accepted {
         by: String,
@@ -769,7 +775,10 @@ mod tests {
         assert!(!f.blocks_sign_off(), "LOW never blocks");
         f.severity = "medium".into();
         assert!(f.blocks_sign_off());
-        f.status = ReviewFindingStatus::Fixed { iteration: 1 };
+        f.status = ReviewFindingStatus::Fixed {
+            run_id: "r".into(),
+            iteration: 1,
+        };
         assert!(!f.blocks_sign_off());
         f.status = ReviewFindingStatus::Accepted {
             by: "architect".into(),
@@ -781,8 +790,22 @@ mod tests {
 
     #[test]
     fn review_finding_status_uses_a_state_tag() {
-        let json = serde_json::to_string(&ReviewFindingStatus::Fixed { iteration: 2 }).unwrap();
-        assert_eq!(json, r#"{"state":"fixed","iteration":2}"#);
+        let json = serde_json::to_string(&ReviewFindingStatus::Fixed {
+            run_id: "run-3".into(),
+            iteration: 2,
+        })
+        .unwrap();
+        assert_eq!(json, r#"{"state":"fixed","run_id":"run-3","iteration":2}"#);
+        // A record written before the run id was kept still loads.
+        let old: ReviewFindingStatus =
+            serde_json::from_str(r#"{"state":"fixed","iteration":1}"#).unwrap();
+        assert_eq!(
+            old,
+            ReviewFindingStatus::Fixed {
+                run_id: String::new(),
+                iteration: 1
+            }
+        );
         assert_eq!(
             serde_json::to_string(&ReviewFindingStatus::Open).unwrap(),
             r#"{"state":"open"}"#

@@ -804,9 +804,17 @@ impl Project {
     }
 
     /// Replace the L3 review configuration for this project in place.
+    ///
+    /// Only a change to the model assignment (`enabled` or `model`) deviates the project off its
+    /// model-profile preset. The reviewer policy (`on_error`, `fix_rounds`, `tier`) is not part of
+    /// any preset, so changing only it leaves the profile alone.
     pub fn set_l3_review(&mut self, config: L3ReviewConfig) {
+        let assignment_changed =
+            self.l3_review.enabled != config.enabled || self.l3_review.model != config.model;
         self.l3_review = config;
-        self.mark_profile_custom();
+        if assignment_changed {
+            self.mark_profile_custom();
+        }
     }
 }
 
@@ -1170,6 +1178,26 @@ mod tests {
             model: "pinned-l3".into(),
             ..Default::default()
         });
+        assert_eq!(p.model_profile, ModelProfile::Custom);
+    }
+
+    /// The reviewer policy (fail closed, fix rounds, tier) is not a model assignment, so
+    /// changing only it must not deviate the project off its model-profile preset.
+    #[test]
+    fn changing_only_a_reviewer_policy_field_does_not_mark_the_profile_custom() {
+        let mut p = proj_on_balanced();
+        let before = p.model_profile;
+        assert_ne!(before, ModelProfile::Custom);
+        let mut next = p.l3_review.clone();
+        next.on_error = ReviewOnError::FailClosed;
+        next.fix_rounds = 2;
+        next.tier = ReviewTier::Strongest;
+        p.set_l3_review(next);
+        assert_eq!(p.model_profile, before);
+        // But the on/off toggle or a pinned model still does.
+        let mut toggled = p.l3_review.clone();
+        toggled.enabled = !toggled.enabled;
+        p.set_l3_review(toggled);
         assert_eq!(p.model_profile, ModelProfile::Custom);
     }
 

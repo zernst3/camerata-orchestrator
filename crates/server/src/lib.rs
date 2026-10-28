@@ -2462,7 +2462,10 @@ async fn spawn_brownfield_dev_run(
                 model: l3_model,
                 llm,
                 on_error: proj.l3_review.on_error,
-                fix_rounds: proj.l3_review.fix_rounds,
+                fix_rounds: proj
+                    .l3_review
+                    .fix_rounds
+                    .min(camerata_api_types::project::MAX_L3_FIX_ROUNDS),
             })
         })
     };
@@ -5181,7 +5184,10 @@ async fn set_l3_review_handler(
         enabled: req.enabled,
         model: req.model.trim().to_string(),
         on_error: req.on_error.unwrap_or(current.on_error),
-        fix_rounds: req.fix_rounds.unwrap_or(current.fix_rounds),
+        fix_rounds: req
+            .fix_rounds
+            .unwrap_or(current.fix_rounds)
+            .min(camerata_api_types::project::MAX_L3_FIX_ROUNDS),
         tier: req.tier.unwrap_or(current.tier),
     };
     match state.projects.set_l3_review(&id, config) {
@@ -15492,7 +15498,12 @@ async fn uow_accept_review_finding(
             decision_slug(&accepted.title)
         ),
         label,
-        accepted.scenario.clone(),
+        // A finding recorded without a scenario still gives the decision a question.
+        if accepted.scenario.trim().is_empty() {
+            accepted.title.clone()
+        } else {
+            accepted.scenario.clone()
+        },
         reason.to_string(),
         Vec::new(),
         chrono::Utc::now(),

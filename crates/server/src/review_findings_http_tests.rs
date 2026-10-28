@@ -53,8 +53,69 @@ fn state_with_finding(severity: ReviewSeverity) -> (AppState, String) {
         &run_id,
         0,
         &[finding(severity, "Token never expires")],
+        &[],
     );
     (state, run_id)
+}
+
+/// Accepting a finding the reviewer recorded without a scenario still writes a decision whose
+/// question is the finding title.
+#[tokio::test]
+async fn the_accept_decision_question_falls_back_to_the_finding_title() {
+    let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
+    let story = "acme/api#7";
+    let run_id = state.runs.create(story, "t", crate::run::RunKind::Watched);
+    let mut f = finding(ReviewSeverity::Medium, "Retry loop is unbounded");
+    f.scenario = String::new();
+    state
+        .uow
+        .record_review_findings(story, &run_id, 0, &[f], &[]);
+    let app = router(state.clone());
+    let (status, _) = send(
+        &app,
+        "/api/uow/acme%2Fapi%237/review-findings/0/accept",
+        serde_json::json!({ "reason": "bounded by the caller" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let decisions = state.uow.decisions_for(story);
+    assert_eq!(decisions[0].question, "Retry loop is unbounded");
+}
+
+/// The server caps fix rounds at the 2 the settings panel offers, whatever a client posts, and
+/// changing only the reviewer policy does not move the project off its model profile.
+#[tokio::test]
+async fn fix_rounds_are_capped_server_side_and_a_policy_only_change_keeps_the_profile() {
+    let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
+    let project = state
+        .projects
+        .create("P", vec!["acme/api".to_string()])
+        .unwrap();
+    let before = state.projects.get(&project.id).unwrap().model_profile;
+    assert_ne!(before, crate::project::ModelProfile::Custom);
+    let app = router(state.clone());
+    let uri = format!("/api/projects/{}/l3-review", project.id);
+    let current = state.projects.get(&project.id).unwrap().l3_review;
+    let (status, _) = send(
+        &app,
+        &uri,
+        serde_json::json!({
+            "enabled": current.enabled, "model": current.model,
+            "on_error": "fail_closed", "fix_rounds": 200, "tier": "strongest"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let p = state.projects.get(&project.id).unwrap();
+    assert_eq!(p.l3_review.fix_rounds, 2, "capped to the UI's maximum");
+    assert_eq!(
+        p.l3_review.on_error,
+        crate::project::ReviewOnError::FailClosed
+    );
+    assert_eq!(
+        p.model_profile, before,
+        "a policy-only change is not a model deviation"
+    );
 }
 
 #[tokio::test]

@@ -400,11 +400,20 @@ async fn run_l3_if_enabled(
         );
         return Some(L3Outcome::Pass);
     }
+    // The unit's still-open findings go to the reviewer to re-check; only ones it confirms gone
+    // (a `[FIXED]` line) are closed. Capped so a long-lived unit cannot bloat the prompt.
+    let earlier: Vec<String> = uow
+        .open_review_findings(story_id)
+        .iter()
+        .take(50)
+        .map(|f| format!("[{}] {}", f.severity.to_uppercase(), f.title))
+        .collect();
     let input = L3ReviewInput {
         story: &bundle.story_text,
         rules_prose: &bundle.rules_prose,
         diff: &diff,
         model: &bundle.model,
+        earlier_findings: &earlier,
     };
     let l3_event = |verdict: &str, detail: String| {
         runs.push_event(
@@ -420,10 +429,18 @@ async fn run_l3_if_enabled(
         );
     };
     match run_l3_review(bundle.llm.as_ref(), &input).await {
-        Ok(verdict) => {
-            // Record every finding on the unit (fixed ones are marked when a later pass no
-            // longer reports them), so a dropped finding is never silent.
-            let fixed = uow.record_review_findings(story_id, run_id, iteration, verdict.findings());
+        Ok(reply) => {
+            let verdict = reply.verdict;
+            // Record every finding on the unit. An earlier finding is marked fixed ONLY when
+            // the reviewer confirmed it gone with a `[FIXED]` line in a trustworthy reply;
+            // silence, a sloppy reply or a synthetic finding closes nothing.
+            let fixed = uow.record_review_findings(
+                story_id,
+                run_id,
+                iteration,
+                verdict.findings(),
+                &reply.confirmed_fixed,
+            );
             let count = |sev: ReviewSeverity| {
                 verdict
                     .findings()
@@ -437,7 +454,7 @@ async fn run_l3_if_enabled(
                 count(ReviewSeverity::Low),
             );
             let fixed_note = if fixed > 0 {
-                format!(" {fixed} earlier finding(s) marked fixed.")
+                format!(" {fixed} earlier finding(s) confirmed fixed.")
             } else {
                 String::new()
             };
@@ -3605,6 +3622,8 @@ mod tests {
     /// outage). The last reply repeats once the script runs out.
     struct ScriptedReviewer {
         replies: std::sync::Mutex<std::collections::VecDeque<Result<String, String>>>,
+        /// Every user prompt the reviewer was sent, in order.
+        prompts: std::sync::Mutex<Vec<String>>,
     }
 
     impl ScriptedReviewer {
@@ -3616,7 +3635,12 @@ mod tests {
                         .map(|r| r.map(str::to_string).map_err(str::to_string))
                         .collect(),
                 ),
+                prompts: std::sync::Mutex::new(Vec::new()),
             })
+        }
+
+        fn prompts(&self) -> Vec<String> {
+            self.prompts.lock().unwrap().clone()
         }
     }
 
@@ -3624,8 +3648,9 @@ mod tests {
     impl crate::llm::LlmPort for ScriptedReviewer {
         async fn complete(
             &self,
-            _req: crate::llm::LlmRequest,
+            req: crate::llm::LlmRequest,
         ) -> anyhow::Result<crate::llm::LlmResponse> {
+            self.prompts.lock().unwrap().push(req.prompt.clone());
             let next = {
                 let mut q = self.replies.lock().unwrap();
                 if q.len() > 1 {
@@ -3807,8 +3832,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn review_findings_are_recorded_on_the_unit_and_fixed_ones_are_marked_when_absent_next_iteration(
-    ) {
+    async fn review_findings_are_recorded_on_the_unit_and_a_fixed_line_closes_the_earlier_finding()
+    {
         let (dir, base) = repo_with_one_change();
         let runs = RunStore::new();
         let uow = UowStore::new();
@@ -3819,10 +3844,11 @@ mod tests {
                 - [LOW] Name | scenario: unclear | rule: none | where: feature.rs:1\n\
                 VERDICT: BOUNCE"),
             Ok("FINDINGS\n\
+                - [FIXED] Empty feature\n\
                 - [LOW] Name | scenario: unclear | rule: none | where: feature.rs:1\n\
                 VERDICT: PASS"),
         ]);
-        let l3 = bundle(reviewer, ReviewOnError::Advisory, 0);
+        let l3 = bundle(reviewer.clone(), ReviewOnError::Advisory, 0);
 
         // Pass 0: bounced, two findings recorded.
         let outcome = review_once(&runs, &uow, &run_id, &l3, dir.path(), &base, 0).await;
@@ -3841,20 +3867,88 @@ mod tests {
             .iter()
             .any(|d| d == "Layer-3 review: 1 high, 0 medium, 1 low. Bounced to the implementer."));
 
-        // Pass 1: passes with the LOW only. The HIGH is marked fixed, the LOW stays one record.
+        // Pass 1: the reviewer was shown the open findings and confirms the HIGH gone with a
+        // [FIXED] line; the LOW stays one record.
         let outcome = review_once(&runs, &uow, &run_id, &l3, dir.path(), &base, 1).await;
         assert_eq!(outcome, Some(L3Outcome::Pass));
+        let prompts = reviewer.prompts();
+        assert!(!prompts[0].contains("Earlier findings to re-check"));
+        assert!(prompts[1].contains("## Earlier findings to re-check"));
+        assert!(prompts[1].contains("- [HIGH] Empty feature"));
         let u = uow.get_or_create("S-9");
         assert_eq!(u.review_findings.len(), 2, "the LOW is not added twice");
         assert_eq!(
             u.review_findings[0].status,
-            crate::uow::ReviewFindingStatus::Fixed { iteration: 1 }
+            crate::uow::ReviewFindingStatus::Fixed {
+                run_id: run_id.clone(),
+                iteration: 1
+            }
         );
         assert_eq!(u.open_blocking_review_findings(), 0);
         assert!(l3_events(&runs, &run_id).iter().any(|d| d.starts_with(
             "Layer-3 review: no high or medium findings. 1 low finding(s) recorded for sign-off."
         ) && d
-            .contains("1 earlier finding(s) marked fixed")));
+            .contains("1 earlier finding(s) confirmed fixed")));
+    }
+
+    /// An earlier HIGH is recorded by a first review; the second review replies with `reply`.
+    /// Returns the outcome of the second review and whether the HIGH is still open.
+    async fn second_review_leaves_high_open(reply: &'static str) -> (Option<L3Outcome>, bool) {
+        let (dir, base) = repo_with_one_change();
+        let runs = RunStore::new();
+        let uow = UowStore::new();
+        let run_id = runs.create("S-9", "test", crate::run::RunKind::Watched);
+        let l3 = bundle(
+            ScriptedReviewer::new(vec![
+                Ok("FINDINGS\n- [HIGH] Empty feature | scenario: does nothing | rule: none | where: none\nVERDICT: BOUNCE"),
+                Ok(reply),
+            ]),
+            ReviewOnError::Advisory,
+            0,
+        );
+        review_once(&runs, &uow, &run_id, &l3, dir.path(), &base, 0).await;
+        let outcome = review_once(&runs, &uow, &run_id, &l3, dir.path(), &base, 1).await;
+        let still_open = uow
+            .open_review_findings("S-9")
+            .iter()
+            .any(|f| f.title == "Empty feature");
+        (outcome, still_open)
+    }
+
+    #[tokio::test]
+    async fn a_sloppy_reply_leaves_an_earlier_high_open() {
+        // "Looks fine": no VERDICT line, so it bounces on a synthetic finding and closes nothing.
+        let (outcome, open) = second_review_leaves_high_open("Looks fine.").await;
+        assert!(matches!(outcome, Some(L3Outcome::Bounce(_))));
+        assert!(open, "a sloppy reply is not evidence the HIGH is gone");
+        // A FIXED line inside a reply with no VERDICT line is ignored too.
+        let (_, open) = second_review_leaves_high_open("- [FIXED] Empty feature\nPASS").await;
+        assert!(open);
+        // And so is one next to a synthetic finding.
+        let (_, open) = second_review_leaves_high_open(
+            "- [FIXED] Empty feature\n- some stray note\nVERDICT: PASS",
+        )
+        .await;
+        assert!(open);
+    }
+
+    #[tokio::test]
+    async fn an_earlier_high_the_reviewer_does_not_mention_stays_open() {
+        // A clean PASS that never mentions the HIGH: the pass goes through but the HIGH stays
+        // open, so sign-off stays blocked until it is fixed on evidence or accepted.
+        let (outcome, open) =
+            second_review_leaves_high_open("FINDINGS\n- none\nVERDICT: PASS").await;
+        assert_eq!(outcome, Some(L3Outcome::Pass));
+        assert!(open, "silence is not evidence");
+    }
+
+    #[tokio::test]
+    async fn a_fixed_line_in_a_trustworthy_reply_closes_the_earlier_high() {
+        let (outcome, open) =
+            second_review_leaves_high_open("FINDINGS\n- [FIXED] Empty feature\nVERDICT: PASS")
+                .await;
+        assert_eq!(outcome, Some(L3Outcome::Pass));
+        assert!(!open);
     }
 
     #[tokio::test]

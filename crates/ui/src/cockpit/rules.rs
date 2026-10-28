@@ -2819,9 +2819,11 @@ pub(super) fn L3ReviewEditor(project: ProjectView) -> Element {
                         class: "tier-map-input run-model-select",
                         disabled: saving(),
                         onchange: move |e| {
-                            fix_rounds.set(e.value().parse::<u8>().unwrap_or(0).min(2));
+                            fix_rounds.set(
+                                e.value().parse::<u8>().unwrap_or(0).min(MAX_L3_FIX_ROUNDS),
+                            );
                         },
-                        for n in 0u8..=2 {
+                        for n in 0u8..=MAX_L3_FIX_ROUNDS {
                             option {
                                 key: "{n}",
                                 value: "{n}",

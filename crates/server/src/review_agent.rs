@@ -64,26 +64,33 @@ pub struct L3ReviewInput<'a> {
     pub diff: &'a str,
     /// The model id to use for this review.
     pub model: &'a str,
+    /// The unit's still-open findings from earlier reviews, one `[HIGH] title` line each. The
+    /// reviewer re-checks each against the diff and confirms the gone ones with `[FIXED]` lines.
+    /// Empty on a unit with nothing open.
+    pub earlier_findings: &'a [String],
 }
 
 const L3_SYSTEM_PROMPT: &str = "\
 You are an expert code reviewer performing a Layer-3 agentic review. Your job is to verify that the submitted diff:
 1. Conforms to the provided rules (the SSOT).
 2. Fulfills the story's intent (requirements, contract, integrations, acceptance criteria).
-3. Addresses the story's FULL SCOPE (completeness). If the story describes a cross-cutting change — a pattern, invariant, or class of defect that should apply EVERYWHERE it occurs (signals like \"every\", \"all\", \"across the app\", \"anywhere that\", or a fix for a mistake likely repeated elsewhere) — check that the diff addresses the WHOLE class, not just a single instance. A spot-fix for what the story frames as a pervasive pattern is INCOMPLETE: bounce it and say to sweep the codebase for the remaining instances. If the story is genuinely local and bounded, do NOT manufacture a completeness concern.
+3. Addresses the story's FULL SCOPE (completeness). If the story describes a cross-cutting change — a pattern, invariant or class of defect that should apply EVERYWHERE it occurs (signals like \"every\", \"all\", \"across the app\", \"anywhere that\" or a fix for a mistake likely repeated elsewhere) — check that the diff addresses the WHOLE class, not just a single instance. A spot-fix for what the story frames as a pervasive pattern is INCOMPLETE: bounce it and say to sweep the codebase for the remaining instances. If the story is genuinely local and bounded, do NOT manufacture a completeness concern.
 
-You see ONLY: the story, the rules, and the diff. You do NOT have access to any other agent's reasoning, implementation notes, or context (this isolation is intentional). You also cannot see the rest of the codebase, so judge completeness by whether the diff's breadth plausibly matches the story's implied scope; when a cross-cutting story is addressed by a narrow diff, bounce and ask to confirm the sweep covered every instance.
+You see ONLY: the story, the rules and the diff. You do NOT have access to any other agent's reasoning, implementation notes or context (this isolation is intentional). You also cannot see the rest of the codebase, so judge completeness by whether the diff's breadth plausibly matches the story's implied scope; when a cross-cutting story is addressed by a narrow diff, bounce and ask to confirm the sweep covered every instance.
 
 YOU ARE ADVERSARIAL. Assume the change is wrong until the diff shows otherwise. Look for the way it FAILS: the input it mishandles, the case it forgets, the rule it breaks, the acceptance criterion it skips. Do not praise the change and do not look for reasons to approve it.
 
 PROCEDURE (in order, before you decide): (1) check the diff rule-by-rule against the SSOT; (2) check it criterion-by-criterion against the story's requirements and acceptance criteria; only then form the verdict. If you cannot verify a rule or criterion from the diff alone, that is a MEDIUM finding (\"cannot verify <what>\"), never a silent PASS.
 
-List EVERY finding, ranked HIGH, MEDIUM or LOW. HIGH: the change is wrong, unsafe or breaks a rule or acceptance criterion. MEDIUM: a likely defect, an unverifiable point or an incomplete sweep. LOW: a minor issue that does not block the change. Each finding MUST carry a concrete failure scenario (the input or situation, and what goes wrong), the rule id or the specific criterion it fails, and the location in the diff. Write PASS only when there is no HIGH and no MEDIUM finding.
+List EVERY finding, ranked HIGH, MEDIUM or LOW. HIGH: the change is wrong, unsafe or breaks a rule or acceptance criterion. MEDIUM: a likely defect, an unverifiable point or an incomplete sweep. LOW: a minor issue that does not block the change. Each finding MUST carry a concrete failure scenario (the input or situation, and what goes wrong), the rule id or the specific criterion it fails and the location in the diff. Write PASS only when there is no HIGH and no MEDIUM finding.
+
+EARLIER FINDINGS: when the user message has an \"Earlier findings to re-check\" section, re-check each one against the diff. For each one you VERIFIED is gone, write one line `- [FIXED] <title>` with the title exactly as given. If it is still present, report it again as a finding with its severity. If you cannot verify it from the diff, write nothing for it: it stays open.
 
 Return your verdict in this exact format, one finding per line:
 FINDINGS
 - [HIGH] <title> | scenario: <one sentence> | rule: <id or criterion or none> | where: <file:line or none>
 - [LOW] <title> | scenario: <one sentence> | rule: <id or criterion or none> | where: <file:line or none>
+- [FIXED] <title of an earlier finding you verified is gone>
 VERDICT: PASS
 (or VERDICT: BOUNCE when any finding is HIGH or MEDIUM)
 
@@ -199,25 +206,40 @@ impl L3Verdict {
 ///
 /// Calls the LLM with a structured prompt that contains the story + rules + diff.
 /// The reviewer is BLIND to implementation notes and other-agent transcripts — only the
-/// three inputs above are forwarded. Returns an [`L3Verdict`]: a pass (carrying any LOW
-/// findings) or a bounce with every ranked finding for the developer.
+/// three inputs above (plus the unit's open earlier findings, to re-check) are forwarded.
+/// Returns an [`L3Reply`]: the [`L3Verdict`] (a pass carrying any LOW findings, or a bounce
+/// with every ranked finding for the developer) and the earlier findings confirmed gone.
 pub async fn run_l3_review(
     llm: &dyn LlmPort,
     input: &L3ReviewInput<'_>,
-) -> anyhow::Result<L3Verdict> {
+) -> anyhow::Result<L3Reply> {
     let user_prompt = build_l3_prompt(input);
     let req = LlmRequest::new(user_prompt)
         .with_system(l3_system_prompt())
         .with_model(input.model);
     let resp = llm.complete(req).await?;
-    Ok(parse_l3_verdict(&resp.text))
+    Ok(parse_l3_reply(&resp.text))
 }
 
 /// Build the user prompt for the L3 reviewer. Pure + testable.
 pub fn build_l3_prompt(input: &L3ReviewInput<'_>) -> String {
+    let earlier = if input.earlier_findings.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "## Earlier findings to re-check\n\n{}\n\n",
+            input
+                .earlier_findings
+                .iter()
+                .map(|f| format!("- {}", camerata_secrets::redact_str(f)))
+                .collect::<Vec<_>>()
+                .join("\n")
+        )
+    };
     format!(
         "## Story\n\n{story}\n\n\
          ## Rules (SSOT)\n\n{rules}\n\n\
+         {earlier}\
          ## Diff\n\n```diff\n{diff}\n```",
         story = input.story,
         rules = input.rules_prose,
@@ -232,6 +254,9 @@ enum StatedVerdict {
     Pass,
     Bounce,
 }
+
+/// The title of the finding a reply gets when it is not in the agreed format.
+const FORMAT_FINDING_TITLE: &str = "reviewer reply was not in the agreed format";
 
 /// The first alphabetic word of a line, upper-cased (`"PASS - fine"` gives `PASS`).
 fn leading_word(text: &str) -> String {
@@ -255,7 +280,7 @@ fn verdict_line(text: &str) -> Option<StatedVerdict> {
     text.lines().rev().find_map(|line| {
         let plain = line
             .trim()
-            .trim_matches(|c: char| c == '*' || c == '`' || c == '#')
+            .trim_matches(|c: char| c == '*' || c == '_' || c == '`' || c == '#')
             .trim();
         let head = plain.get(..8)?;
         if !head.eq_ignore_ascii_case("VERDICT:") {
@@ -265,24 +290,78 @@ fn verdict_line(text: &str) -> Option<StatedVerdict> {
     })
 }
 
-/// Strip a leading bullet marker (`-`, `*`, `1.`) from a line.
-fn strip_bullet(line: &str) -> &str {
+/// The body of a bullet line (`- x`, `* x`, `1. x`, `1) x`) with the marker removed; `None`
+/// when the line is not a bullet. A bare `**bold**` line is not a bullet.
+fn bullet_body(line: &str) -> Option<&str> {
     let t = line.trim_start();
-    t.strip_prefix('-')
-        .or_else(|| t.strip_prefix('*'))
-        .map(str::trim_start)
-        .unwrap_or(t)
+    if let Some(rest) = t.strip_prefix('-') {
+        return Some(rest.trim_start());
+    }
+    if let Some(rest) = t.strip_prefix('*') {
+        if rest.starts_with(char::is_whitespace) {
+            return Some(rest.trim_start());
+        }
+        return None;
+    }
+    let digits = t.chars().take_while(char::is_ascii_digit).count();
+    if digits > 0 {
+        let rest = &t[digits..];
+        let rest = rest.strip_prefix('.').or_else(|| rest.strip_prefix(')'))?;
+        if rest.starts_with(char::is_whitespace) {
+            return Some(rest.trim_start());
+        }
+    }
+    None
 }
 
-/// Parse one tagged finding line, `[HIGH] title | scenario: .. | rule: .. | where: ..`.
-/// `None` when the line carries no `[HIGH|MEDIUM|LOW]` tag.
-fn parse_tagged_finding(line: &str) -> Option<ReviewFinding> {
-    let t = strip_bullet(line);
+/// A line with its bullet marker and any leading markdown emphasis removed, so
+/// `- **[HIGH]** x` and `1. [HIGH] x` both start at the `[`.
+fn strip_decor(line: &str) -> &str {
+    let mut t = line.trim();
+    loop {
+        let next = match bullet_body(t) {
+            Some(body) => body,
+            None => t.trim_start_matches(['*', '_', '`', '#', '>']).trim_start(),
+        };
+        if next.len() == t.len() {
+            return t;
+        }
+        t = next;
+    }
+}
+
+/// Trim whitespace, emphasis marks and a leading colon from a field value.
+fn clean_field(text: &str) -> String {
+    text.trim()
+        .trim_matches(['*', '_', '`'])
+        .trim_start_matches(':')
+        .trim()
+        .trim_matches(['*', '_', '`'])
+        .trim()
+        .to_string()
+}
+
+/// One tagged line of the reply.
+enum Tagged {
+    Finding(ReviewFinding),
+    /// `- [FIXED] <title>`: the reviewer verified an earlier finding is gone.
+    Fixed(String),
+}
+
+/// Parse one tagged line, `[HIGH] title | scenario: .. | rule: .. | where: ..` or
+/// `[FIXED] title`. Bullets, numbering and markdown emphasis in front of the tag are tolerated.
+/// `None` when the line carries no `[HIGH|MEDIUM|LOW|FIXED]` tag.
+fn parse_tagged(line: &str) -> Option<Tagged> {
+    let t = strip_decor(line);
     let rest = t.strip_prefix('[')?;
     let (tag, after) = rest.split_once(']')?;
-    let severity = ReviewSeverity::from_tag(tag)?;
+    let tag = tag.trim().to_ascii_uppercase();
     let mut parts = after.split('|');
-    let title = parts.next().unwrap_or("").trim().to_string();
+    let title = clean_field(parts.next().unwrap_or(""));
+    if tag == "FIXED" {
+        return (!title.is_empty()).then_some(Tagged::Fixed(title));
+    }
+    let severity = ReviewSeverity::from_tag(&tag)?;
     let mut finding = ReviewFinding {
         severity,
         title,
@@ -294,19 +373,19 @@ fn parse_tagged_finding(line: &str) -> Option<ReviewFinding> {
         let Some((key, value)) = part.split_once(':') else {
             continue;
         };
-        let value = value.trim();
+        let value = clean_field(value);
         let none = value.is_empty() || value.eq_ignore_ascii_case("none");
-        match key.trim().to_ascii_lowercase().as_str() {
-            "scenario" => finding.scenario = value.to_string(),
-            "rule" if !none => finding.rule = Some(value.to_string()),
-            "where" | "location" if !none => finding.location = Some(value.to_string()),
+        match clean_field(key).to_ascii_lowercase().as_str() {
+            "scenario" => finding.scenario = value,
+            "rule" if !none => finding.rule = Some(value),
+            "where" | "location" if !none => finding.location = Some(value),
             _ => {}
         }
     }
     if finding.title.is_empty() {
         finding.title = "(untitled finding)".to_string();
     }
-    Some(finding)
+    Some(Tagged::Finding(finding))
 }
 
 fn medium(title: &str, scenario: String) -> ReviewFinding {
@@ -319,62 +398,13 @@ fn medium(title: &str, scenario: String) -> ReviewFinding {
     }
 }
 
-/// Parse the L3 reviewer's text response into a typed [`L3Verdict`]. Pure + testable.
-///
-/// The contract is `FINDINGS` (one `- [HIGH|MEDIUM|LOW] title | scenario: .. | rule: .. |
-/// where: ..` line each) then `VERDICT: PASS|BOUNCE`. The parser fails safe:
-/// - the findings win over the verdict line: any HIGH or MEDIUM finding is a bounce even when
-///   the reply says PASS;
-/// - the old shape still reads (`PASS`, or `BOUNCE` with `- reason` lines, each reason a MEDIUM
-///   finding);
-/// - a reply with no `VERDICT:` line and no leading `PASS` is NEVER a pass: it bounces with
-///   one MEDIUM finding carrying the raw text (so a truncated reply cannot hide a finding).
-pub fn parse_l3_verdict(text: &str) -> L3Verdict {
-    let trimmed = text.trim();
-    let tagged: Vec<ReviewFinding> = trimmed.lines().filter_map(parse_tagged_finding).collect();
-
-    // The findings win: a HIGH or MEDIUM finding is a bounce whatever the verdict line says.
-    if tagged.iter().any(|f| f.severity.blocks()) {
-        return L3Verdict::Bounce { findings: tagged };
-    }
-
-    let stated = verdict_line(trimmed).or_else(|| stated_verdict_word(&leading_word(trimmed)));
-    match stated {
-        Some(StatedVerdict::Pass) => L3Verdict::Pass { low: tagged },
-        Some(StatedVerdict::Bounce) => {
-            let mut findings = tagged;
-            findings.extend(untagged_reasons(trimmed));
-            if !findings.iter().any(|f| f.severity.blocks()) {
-                findings.push(medium(
-                    "reviewer bounced without a ranked finding",
-                    "The reviewer's verdict was BOUNCE but it listed no HIGH or MEDIUM finding."
-                        .to_string(),
-                ));
-            }
-            L3Verdict::Bounce { findings }
-        }
-        None => {
-            let mut findings = tagged;
-            findings.extend(untagged_reasons(trimmed));
-            findings.push(medium(
-                "reviewer reply was not in the agreed format",
-                truncate_chars(trimmed, 500),
-            ));
-            L3Verdict::Bounce { findings }
-        }
-    }
-}
-
-/// Bullet lines without a severity tag (the old `BOUNCE\n- reason` shape), each read as a
-/// MEDIUM finding titled with the reason. A bare `- none` is not a reason.
-fn untagged_reasons(text: &str) -> Vec<ReviewFinding> {
+/// Bullet lines that carry no severity tag (the old `BOUNCE\n- reason` shape, or stray notes),
+/// each read as a MEDIUM finding titled with the text, so nothing the reviewer wrote is dropped.
+/// A bare `- none` is not a finding.
+fn leftover_bullets(text: &str) -> Vec<ReviewFinding> {
     text.lines()
-        .filter(|l| {
-            let t = l.trim_start();
-            t.starts_with('-') || t.starts_with('*')
-        })
-        .filter(|l| parse_tagged_finding(l).is_none())
-        .map(|l| strip_bullet(l).trim().to_string())
+        .filter(|l| bullet_body(l).is_some() && parse_tagged(l).is_none())
+        .map(|l| strip_decor(l).trim().to_string())
         .filter(|s| !s.is_empty() && !s.trim_end_matches('.').eq_ignore_ascii_case("none"))
         .map(|reason| medium(&reason, String::new()))
         .collect()
@@ -382,6 +412,87 @@ fn untagged_reasons(text: &str) -> Vec<ReviewFinding> {
 
 fn truncate_chars(text: &str, max: usize) -> String {
     text.chars().take(max).collect()
+}
+
+/// A parsed reviewer reply: the verdict and the earlier findings the reviewer confirmed gone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct L3Reply {
+    pub verdict: L3Verdict,
+    /// Titles from `- [FIXED] <title>` lines. Empty unless the reply is trustworthy: it has an
+    /// explicit `VERDICT:` line and produced no synthetic finding. A finding is only ever marked
+    /// fixed on this evidence, never because a later review stayed silent about it.
+    pub confirmed_fixed: Vec<String>,
+}
+
+/// Parse the L3 reviewer's text response into a typed [`L3Verdict`]. Pure + testable.
+pub fn parse_l3_verdict(text: &str) -> L3Verdict {
+    parse_l3_reply(text).verdict
+}
+
+/// Parse the L3 reviewer's text response into a verdict plus its confirmed-fixed titles.
+///
+/// The contract is `FINDINGS` (one `- [HIGH|MEDIUM|LOW] title | scenario: .. | rule: .. |
+/// where: ..` line each, plus `- [FIXED] title` for each earlier finding verified gone) then
+/// `VERDICT: PASS|BOUNCE`. The parser fails safe:
+/// - the findings win over the verdict line: any HIGH or MEDIUM finding is a bounce even when
+///   the reply says PASS;
+/// - on a stated PASS, a leftover bullet that is not `none` becomes a MEDIUM finding (a bounce);
+/// - the old shape still reads (`PASS`, or `BOUNCE` with `- reason` lines, each reason a MEDIUM
+///   finding);
+/// - a reply with no `VERDICT:` line and no leading `PASS` is NEVER a pass: it bounces with
+///   one MEDIUM finding carrying the raw text (so a truncated reply cannot hide a finding);
+/// - `[FIXED]` lines count only from a reply with an explicit `VERDICT:` line and no synthetic
+///   finding.
+pub fn parse_l3_reply(text: &str) -> L3Reply {
+    let trimmed = text.trim();
+    let mut tagged: Vec<ReviewFinding> = Vec::new();
+    let mut fixed: Vec<String> = Vec::new();
+    for line in trimmed.lines() {
+        match parse_tagged(line) {
+            Some(Tagged::Finding(f)) => tagged.push(f),
+            Some(Tagged::Fixed(title)) => fixed.push(title),
+            None => {}
+        }
+    }
+    let explicit = verdict_line(trimmed);
+    let stated = explicit.or_else(|| stated_verdict_word(&leading_word(trimmed)));
+    let leftovers = leftover_bullets(trimmed);
+    // A synthetic finding is one the parser made up from a reply that did not follow the format.
+    let mut synthetic = !leftovers.is_empty();
+    let mut findings = tagged;
+    findings.extend(leftovers);
+
+    let verdict = if findings.iter().any(|f| f.severity.blocks()) {
+        // The findings win: a HIGH or MEDIUM finding is a bounce whatever the verdict line says.
+        L3Verdict::Bounce { findings }
+    } else {
+        match stated {
+            Some(StatedVerdict::Pass) => L3Verdict::Pass { low: findings },
+            Some(StatedVerdict::Bounce) => {
+                synthetic = true;
+                findings.push(medium(
+                    "reviewer bounced without a ranked finding",
+                    "The reviewer's verdict was BOUNCE but it listed no HIGH or MEDIUM finding."
+                        .to_string(),
+                ));
+                L3Verdict::Bounce { findings }
+            }
+            None => {
+                synthetic = true;
+                findings.push(medium(FORMAT_FINDING_TITLE, truncate_chars(trimmed, 500)));
+                L3Verdict::Bounce { findings }
+            }
+        }
+    };
+    let confirmed_fixed = if explicit.is_some() && !synthetic {
+        fixed
+    } else {
+        Vec::new()
+    };
+    L3Reply {
+        verdict,
+        confirmed_fixed,
+    }
 }
 
 // ── Integration-gate reviewer (R3.e) ─────────────────────────────────────────
@@ -590,6 +701,7 @@ mod tests {
             rules_prose: "RULE-1: All endpoints must be authenticated.",
             diff: "+fn authenticate(token: &str) -> bool { true }",
             model: "claude-sonnet-5",
+            earlier_findings: &[],
         };
         let prompt = build_l3_prompt(&input);
 
@@ -817,6 +929,141 @@ mod tests {
         assert!(parse_l3_verdict("PASS").reasons().is_empty());
         let reasons = parse_l3_verdict("BOUNCE\n- bad thing").reasons();
         assert_eq!(reasons, vec!["[MEDIUM] bad thing".to_string()]);
+    }
+
+    fn only_finding(text: &str) -> ReviewFinding {
+        let L3Verdict::Bounce { mut findings } = parse_l3_verdict(text) else {
+            panic!("expected a bounce for {text:?}");
+        };
+        assert_eq!(findings.len(), 1, "one finding in {text:?}: {findings:?}");
+        findings.remove(0)
+    }
+
+    /// Markdown decoration in front of the tag must not hide the severity or the fields.
+    #[test]
+    fn decorated_finding_lines_parse_with_severity_and_scenario() {
+        let tail = "Token never expires | scenario: a stolen token works forever | rule: SEC-1 | where: a.rs:4";
+        for prefix in [
+            "- [HIGH] ",
+            "- **[HIGH]** ",
+            "**[HIGH]** ",
+            "1. [HIGH] ",
+            "1) [HIGH] ",
+            "1. **[HIGH]** ",
+            "* [HIGH] ",
+            "- `[HIGH]` ",
+            "- _[HIGH]_ ",
+            "  - [high] ",
+        ] {
+            let text = format!("FINDINGS\n{prefix}{tail}\nVERDICT: BOUNCE");
+            let f = only_finding(&text);
+            assert_eq!(f.severity, ReviewSeverity::High, "prefix {prefix:?}");
+            assert_eq!(f.title, "Token never expires", "prefix {prefix:?}");
+            assert_eq!(
+                f.scenario, "a stolen token works forever",
+                "prefix {prefix:?}"
+            );
+            assert_eq!(f.rule.as_deref(), Some("SEC-1"), "prefix {prefix:?}");
+            assert_eq!(f.location.as_deref(), Some("a.rs:4"), "prefix {prefix:?}");
+        }
+        // Emphasis around the title and the field names too.
+        let f = only_finding(
+            "- **[MEDIUM]** **No error path** | **scenario:** a bad header panics | rule: none | where: none\nVERDICT: BOUNCE",
+        );
+        assert_eq!(f.severity, ReviewSeverity::Medium);
+        assert_eq!(f.title, "No error path");
+        assert_eq!(f.scenario, "a bad header panics");
+    }
+
+    #[test]
+    fn a_stated_pass_with_a_leftover_bullet_becomes_a_medium_not_a_silent_pass() {
+        let text = "FINDINGS\n- The retry loop looks unbounded\nVERDICT: PASS";
+        let f = only_finding(text);
+        assert_eq!(f.severity, ReviewSeverity::Medium);
+        assert_eq!(f.title, "The retry loop looks unbounded");
+        // Same for a leading PASS and a numbered leftover.
+        assert!(!parse_l3_verdict("PASS\n1. something to fix").is_pass());
+        // `none` (any case, with or without a full stop) is not a finding.
+        for none in ["- none", "- None.", "1. none", "* NONE"] {
+            let text = format!("FINDINGS\n{none}\nVERDICT: PASS");
+            assert_eq!(
+                parse_l3_verdict(&text),
+                L3Verdict::Pass { low: vec![] },
+                "{none:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn fixed_lines_are_read_from_a_trustworthy_reply() {
+        let text = "FINDINGS\n- [FIXED] Token never expires\n1. **[FIXED]** No error path\n- [LOW] nit | scenario: s | rule: none | where: none\nVERDICT: PASS";
+        let reply = parse_l3_reply(text);
+        assert_eq!(
+            reply.confirmed_fixed,
+            vec![
+                "Token never expires".to_string(),
+                "No error path".to_string()
+            ]
+        );
+        assert!(reply.verdict.is_pass());
+        // A FIXED line is not a finding.
+        assert_eq!(reply.verdict.findings().len(), 1);
+    }
+
+    #[test]
+    fn fixed_lines_are_ignored_when_the_reply_is_not_trustworthy() {
+        // No VERDICT line at all, only a leading PASS.
+        assert!(parse_l3_reply("PASS\n- [FIXED] Token never expires")
+            .confirmed_fixed
+            .is_empty());
+        // No VERDICT line and no PASS: the format finding is synthetic.
+        assert!(parse_l3_reply("- [FIXED] Token never expires\nLooks fine.")
+            .confirmed_fixed
+            .is_empty());
+        // A sloppy "Looks fine" reply.
+        assert!(parse_l3_reply("Looks fine").confirmed_fixed.is_empty());
+        // A bounce with no ranked finding (synthetic).
+        assert!(
+            parse_l3_reply("- [FIXED] Token never expires\nVERDICT: BOUNCE")
+                .confirmed_fixed
+                .is_empty()
+        );
+        // A leftover bullet made a synthetic MEDIUM.
+        assert!(
+            parse_l3_reply("- [FIXED] Token never expires\n- also this\nVERDICT: PASS")
+                .confirmed_fixed
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn the_prompt_carries_the_earlier_findings_to_re_check_only_when_there_are_some() {
+        let earlier = vec![
+            "[HIGH] Token never expires".to_string(),
+            "[LOW] nit".to_string(),
+        ];
+        let with = build_l3_prompt(&L3ReviewInput {
+            story: "S",
+            rules_prose: "R",
+            diff: "D",
+            model: "m",
+            earlier_findings: &earlier,
+        });
+        let heading = with
+            .find("## Earlier findings to re-check")
+            .expect("section");
+        assert!(with.contains("- [HIGH] Token never expires"));
+        assert!(with.contains("- [LOW] nit"));
+        assert!(heading < with.find("## Diff").unwrap(), "before the diff");
+        let without = build_l3_prompt(&L3ReviewInput {
+            story: "S",
+            rules_prose: "R",
+            diff: "D",
+            model: "m",
+            earlier_findings: &[],
+        });
+        assert!(!without.contains("Earlier findings"));
+        assert!(L3_SYSTEM_PROMPT.contains("[FIXED]"));
     }
 
     /// The prompt demands a ranked, adversarial review with a failure scenario per finding.

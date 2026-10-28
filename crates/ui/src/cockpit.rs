@@ -335,7 +335,7 @@ use camerata_api_types::project::L3ReviewConfig as L3ReviewView;
 use camerata_api_types::project::ProjectBackend;
 use camerata_api_types::project::StallThresholds as StallThresholdsView;
 use camerata_api_types::project::StepModels as StepModelsView;
-use camerata_api_types::project::{ReviewOnError, ReviewTier};
+use camerata_api_types::project::{ReviewOnError, ReviewTier, MAX_L3_FIX_ROUNDS};
 use camerata_ui_core::backend::ProjectBackendExt;
 
 /// UI mirror of `camerata_fleet::tier::TierMap`. Three model-id slots, one per

@@ -156,6 +156,10 @@ pub struct L3ReviewConfig {
     pub tier: ReviewTier,
 }
 
+/// The most extra implementer passes `L3ReviewConfig::fix_rounds` may carry (the settings
+/// panel offers 0, 1 and 2). The server clamps to this whatever a client posts.
+pub const MAX_L3_FIX_ROUNDS: u8 = 2;
+
 /// What a run does when the Layer-3 reviewer cannot run.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]

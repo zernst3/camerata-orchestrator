@@ -1223,24 +1223,55 @@ impl UowStore {
         self.flush();
     }
 
-    /// Record the findings one Layer-3 review reported on a story's unit (creating it if
-    /// needed). A finding with the same `(severity, title)` as one still `Open` is the same
-    /// finding and stays `Open` (not added twice); an `Open` finding the review did NOT
-    /// report becomes `Fixed { iteration }`; every other finding is added `Open`. LOW
-    /// findings of a passing review are recorded too: the architect decides them at sign-off.
-    /// Returns how many earlier findings this review marked fixed.
+    /// The findings of a story's unit that are still `Open`, oldest first. A read: it never
+    /// creates a unit.
+    pub fn open_review_findings(&self, story_id: &str) -> Vec<RecordedReviewFinding> {
+        let map = self.mem.lock().expect("uow mutex poisoned");
+        map.get(story_id)
+            .map(|u| {
+                u.review_findings
+                    .iter()
+                    .filter(|f| matches!(f.status, ReviewFindingStatus::Open))
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Record one Layer-3 review of a story's unit (creating it if needed).
+    ///
+    /// `findings` are what the review reported. A finding with the same `(severity, title)` as
+    /// one still `Open` is the same finding and stays `Open` (not added twice); every other
+    /// finding is added `Open`. LOW findings of a passing review are recorded too: the architect
+    /// decides them at sign-off.
+    ///
+    /// `confirmed_fixed` are the titles the reviewer verified gone (`[FIXED]` lines of a
+    /// trustworthy reply). An `Open` finding becomes `Fixed { run_id, iteration }` ONLY when its
+    /// title is confirmed and this review did not report it again. A finding the review merely
+    /// failed to mention stays `Open`: silence is not evidence. Returns how many findings this
+    /// review marked fixed.
     pub fn record_review_findings(
         &self,
         story_id: &str,
         run_id: &str,
         iteration: usize,
         findings: &[crate::review_agent::ReviewFinding],
+        confirmed_fixed: &[String],
     ) -> usize {
         let severity_wire = |f: &crate::review_agent::ReviewFinding| match f.severity {
             crate::review_agent::ReviewSeverity::High => "high",
             crate::review_agent::ReviewSeverity::Medium => "medium",
             crate::review_agent::ReviewSeverity::Low => "low",
         };
+        // Titles compare ignoring case and runs of whitespace.
+        let norm = |s: &str| {
+            s.split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .to_lowercase()
+        };
+        let confirmed: Vec<String> = confirmed_fixed.iter().map(|t| norm(t)).collect();
+        let reported: Vec<String> = findings.iter().map(|f| norm(&f.title)).collect();
         let mut fixed = 0usize;
         {
             let mut map = self.mem.lock().expect("uow mutex poisoned");
@@ -1248,12 +1279,15 @@ impl UowStore {
                 .entry(story_id.to_string())
                 .or_insert_with(|| UnitOfWork::keyed(story_id));
             for rec in uow.review_findings.iter_mut() {
+                let title = norm(&rec.title);
                 if matches!(rec.status, ReviewFindingStatus::Open)
-                    && !findings
-                        .iter()
-                        .any(|f| severity_wire(f) == rec.severity && f.title == rec.title)
+                    && confirmed.contains(&title)
+                    && !reported.contains(&title)
                 {
-                    rec.status = ReviewFindingStatus::Fixed { iteration };
+                    rec.status = ReviewFindingStatus::Fixed {
+                        run_id: run_id.to_string(),
+                        iteration,
+                    };
                     fixed += 1;
                 }
             }
@@ -4776,13 +4810,17 @@ mod review_finding_tests {
         }
     }
 
+    fn titles(t: &[&str]) -> Vec<String> {
+        t.iter().map(|s| s.to_string()).collect()
+    }
+
     #[test]
-    fn review_findings_are_recorded_open_and_fixed_ones_are_marked_when_absent_next_iteration() {
+    fn review_findings_are_recorded_open_and_only_a_confirmed_fix_marks_one_fixed() {
         let store = UowStore::new();
         let high = finding(ReviewSeverity::High, "Token never expires");
         let low = finding(ReviewSeverity::Low, "nit");
         // Pass 0 reports a HIGH and a LOW.
-        store.record_review_findings("S-1", "run-1", 0, &[high.clone(), low.clone()]);
+        store.record_review_findings("S-1", "run-1", 0, &[high.clone(), low.clone()], &[]);
         let u = store.get_or_create("S-1");
         assert_eq!(u.review_findings.len(), 2);
         assert!(u
@@ -4791,44 +4829,72 @@ mod review_finding_tests {
             .all(|f| f.status == ReviewFindingStatus::Open && f.run_id == "run-1"));
         assert_eq!(u.open_blocking_review_findings(), 1, "only the HIGH blocks");
 
-        // Pass 1 reports only the LOW again plus a new MEDIUM: the HIGH is fixed, the LOW is the
-        // same finding (not added twice), the MEDIUM is new.
+        // Pass 1 reports only the LOW again plus a new MEDIUM and says nothing about the HIGH:
+        // the HIGH stays open (silence is not evidence), the LOW is not added twice.
         let medium = finding(ReviewSeverity::Medium, "No error path");
-        let fixed = store.record_review_findings("S-1", "run-1", 1, &[low, medium]);
-        assert_eq!(fixed, 1);
+        let fixed = store.record_review_findings("S-1", "run-1", 1, &[low.clone(), medium], &[]);
+        assert_eq!(fixed, 0);
         let u = store.get_or_create("S-1");
         assert_eq!(u.review_findings.len(), 3);
+        assert_eq!(u.review_findings[0].status, ReviewFindingStatus::Open);
+        assert_eq!(u.review_findings[2].title, "No error path");
+        assert_eq!(u.open_blocking_review_findings(), 2);
+
+        // Pass 2 confirms the HIGH gone (title matched ignoring case): now it is Fixed, naming
+        // the run and pass that confirmed it. The MEDIUM, never confirmed, stays open.
+        let fixed = store.record_review_findings(
+            "S-1",
+            "run-2",
+            2,
+            &[],
+            &titles(&["token  NEVER expires"]),
+        );
+        assert_eq!(fixed, 1);
+        let u = store.get_or_create("S-1");
         assert_eq!(
             u.review_findings[0].status,
-            ReviewFindingStatus::Fixed { iteration: 1 }
+            ReviewFindingStatus::Fixed {
+                run_id: "run-2".to_string(),
+                iteration: 2
+            }
         );
-        assert_eq!(u.review_findings[1].status, ReviewFindingStatus::Open);
-        assert_eq!(u.review_findings[2].title, "No error path");
-        assert_eq!(u.review_findings[2].iteration, 1);
         assert_eq!(
             u.open_blocking_review_findings(),
             1,
             "only the MEDIUM blocks"
         );
+    }
 
-        // Pass 2 reports nothing: everything still open is fixed.
-        store.record_review_findings("S-1", "run-1", 2, &[]);
+    #[test]
+    fn a_finding_confirmed_fixed_but_reported_again_in_the_same_review_stays_open() {
+        let store = UowStore::new();
+        let high = finding(ReviewSeverity::High, "h");
+        store.record_review_findings("S-5", "run-1", 0, std::slice::from_ref(&high), &[]);
+        let fixed = store.record_review_findings("S-5", "run-1", 1, &[high], &titles(&["h"]));
+        assert_eq!(fixed, 0, "a contradictory reply closes nothing");
         assert_eq!(
-            store.get_or_create("S-1").open_blocking_review_findings(),
-            0
+            store.get_or_create("S-5").open_blocking_review_findings(),
+            1
         );
     }
 
     #[test]
-    fn a_later_run_that_no_longer_reports_a_finding_marks_the_earlier_runs_one_fixed() {
+    fn a_confirmed_fix_in_a_later_run_closes_the_earlier_runs_finding() {
         let store = UowStore::new();
         store.record_review_findings(
             "S-2",
             "run-1",
             0,
             &[finding(ReviewSeverity::High, "old bug")],
+            &[],
         );
-        store.record_review_findings("S-2", "run-2", 0, &[]);
+        // Run 2 reports nothing and does not confirm it: still open.
+        store.record_review_findings("S-2", "run-2", 0, &[], &[]);
+        assert_eq!(
+            store.get_or_create("S-2").open_blocking_review_findings(),
+            1
+        );
+        store.record_review_findings("S-2", "run-2", 1, &[], &titles(&["old bug"]));
         assert_eq!(
             store.get_or_create("S-2").open_blocking_review_findings(),
             0
@@ -4836,9 +4902,35 @@ mod review_finding_tests {
     }
 
     #[test]
+    fn open_review_findings_lists_only_open_ones_and_never_creates_a_unit() {
+        let store = UowStore::new();
+        assert!(store.open_review_findings("nope").is_empty());
+        store.record_review_findings(
+            "S-6",
+            "run-1",
+            0,
+            &[
+                finding(ReviewSeverity::High, "a"),
+                finding(ReviewSeverity::Low, "b"),
+            ],
+            &[],
+        );
+        store.record_review_findings("S-6", "run-1", 1, &[], &titles(&["a"]));
+        let open = store.open_review_findings("S-6");
+        assert_eq!(open.len(), 1);
+        assert_eq!(open[0].title, "b");
+    }
+
+    #[test]
     fn accept_sets_accepted_once_and_refuses_a_second_time_or_a_bad_index() {
         let store = UowStore::new();
-        store.record_review_findings("S-3", "run-1", 0, &[finding(ReviewSeverity::High, "h")]);
+        store.record_review_findings(
+            "S-3",
+            "run-1",
+            0,
+            &[finding(ReviewSeverity::High, "h")],
+            &[],
+        );
         let rec = store
             .accept_review_finding("S-3", 0, "architect", "tracked elsewhere")
             .unwrap();

@@ -28,7 +28,12 @@ pub(super) fn severity_row_class(severity: &str) -> &'static str {
 pub(super) fn status_label(status: &ReviewFindingStatus) -> String {
     match status {
         ReviewFindingStatus::Open => "Open".to_string(),
-        ReviewFindingStatus::Fixed { iteration } => format!("Fixed (pass {iteration})"),
+        ReviewFindingStatus::Fixed { run_id, iteration } if run_id.is_empty() => {
+            format!("Fixed (pass {iteration})")
+        }
+        ReviewFindingStatus::Fixed { run_id, iteration } => {
+            format!("Fixed in run {run_id}, pass {iteration}")
+        }
         ReviewFindingStatus::Accepted { by, reason, .. } => {
             format!("Accepted by {by}: {reason}")
         }
@@ -217,7 +222,13 @@ mod tests {
             finding("high", ReviewFindingStatus::Open),
             finding("medium", ReviewFindingStatus::Open),
             finding("low", ReviewFindingStatus::Open),
-            finding("high", ReviewFindingStatus::Fixed { iteration: 1 }),
+            finding(
+                "high",
+                ReviewFindingStatus::Fixed {
+                    run_id: "r1".into(),
+                    iteration: 1,
+                },
+            ),
         ];
         assert_eq!(blocking_count(&findings), 2);
     }
@@ -233,7 +244,18 @@ mod tests {
     fn status_reads_in_plain_words() {
         assert_eq!(status_label(&ReviewFindingStatus::Open), "Open");
         assert_eq!(
-            status_label(&ReviewFindingStatus::Fixed { iteration: 2 }),
+            status_label(&ReviewFindingStatus::Fixed {
+                run_id: "run-7".into(),
+                iteration: 2
+            }),
+            "Fixed in run run-7, pass 2"
+        );
+        // A record written before the run id was kept still reads.
+        assert_eq!(
+            status_label(&ReviewFindingStatus::Fixed {
+                run_id: String::new(),
+                iteration: 2
+            }),
             "Fixed (pass 2)"
         );
         assert_eq!(
