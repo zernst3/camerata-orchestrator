@@ -10,7 +10,7 @@ tests would not catch a real bug.
 |---|---|---|---|
 | camerata-checks | earlier | published rate (see README) | the crate the README's mutation figure refers to |
 | camerata-rules | 2026-10-28 | 64 survivors | `crates/rules/tests/mutation_kills.rs` kills the real ones |
-| camerata-secrets | 2026-10-28 | survivors in `detect.rs` and `firebase.rs` (count not recorded) | `crates/secrets/src/tests/detector_edges.rs` and `firebase_spans.rs` |
+| camerata-secrets | 2026-10-28 | survivors in `detect.rs` and `firebase.rs` (count not recorded) | `crates/secrets/src/tests/` detector_edges.rs, firebase_spans.rs, twin_boundaries.rs and json_walk.rs |
 | report export | not yet run | | open item in the repo hardening work order |
 | integrity gate | not yet run | | open item in the repo hardening work order |
 
@@ -39,6 +39,10 @@ The `firebase.rs` survivors led to a real fix: a Google key in its own object fo
 Firebase config was misread as the public Firebase web key, left readable in client artifacts and
 dropped from the findings. It is now reported. `firebase_spans.rs` holds the failing-first cases and
 tests for the bracket matcher's comment, string, division and nesting handling.
+
+`twin_boundaries.rs` kills the `twins.rs` survivors (word and identifier boundaries of the
+public-twin rules, each negative case paired with a positive control) and `json_walk.rs` kills the
+`json.rs` survivors (redacted key counts and the JSON path format).
 
 ## How to run
 

@@ -184,6 +184,9 @@ fn window_edges_inside_a_multibyte_character_are_moved_to_a_boundary() {
 
 // ---- strings, comments and words the span scanner must read exactly ------------------------
 
+/// The first three cases have no siblings, so they only check that the scanner stops at the
+/// window edge without panicking; the last case (an unclosed `/*` ending on `*`) is the one that
+/// kills the `i + 1 < len` bound.
 #[test]
 fn an_unterminated_string_or_object_runs_to_the_window_edge_without_overrunning_it() {
     let key = google_key(225);
@@ -243,7 +246,7 @@ fn a_sibling_name_inside_a_longer_identifier_is_not_a_sibling() {
     let key = google_key(230);
     assert_google_secret(
         &format!(
-            "const c = {{ apiKey: \"{key}\", appIdentity: \"x\", projectIdentifier: \"y\", myprojectId: \"z\" }};"
+            "const c = {{ apiKey: \"{key}\", appIdentity: \"x\", projectIdentifier: \"y\", myprojectId: \"z\", xappId: \"w\" }};"
         ),
         &key,
     );
