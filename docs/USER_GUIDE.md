@@ -896,7 +896,7 @@ Those rules now carry a flag (`inspectable = false`) that separates the two role
 - Two of the 28, the runtime end-of-life rule and the known-vulnerable runtime rule, are the one
   exception to "never appear in a finding". They are not scanned by the AI pass either, but their
   findings come from a dedicated check of the versions a repository declares (see "Runtime and
-  framework end of life" above). They still never appear in "what's healthy": a runtime with
+  framework end of life, and runtime vulnerabilities" below). They still never appear in "what's healthy": a runtime with
   nothing wrong produces no finding and no claim.
 
 The flag is set by the rule's author in the corpus, not per project. It is not a switch in the
@@ -1912,7 +1912,10 @@ no security fixes since 2023-09-11". One that ends within 90 days is a low advis
 known vulnerability is rated by its highest CVSS score, and raised to critical when CISA lists the
 vulnerability as known exploited. A version that is a range or a moving tag (`>=18`, `node:latest`)
 is never guessed: the Coverage section lists it as not checked, and a runtime declared without a
-patch version is checked for end of life but not for vulnerabilities. If either source cannot be
+patch version is checked for end of life but not for vulnerabilities. In a Dockerfile only the image
+the final stage is built on counts, because an earlier build stage never ships. A framework counts
+only when your project file beside the lockfile lists it as a direct, non-dev dependency; one that
+is only pulled in by something else, or only used in development, is listed as not checked. If either source cannot be
 reached, Coverage says "Runtime end-of-life data unavailable in this scan" or "Runtime vulnerability
 data unavailable in this scan", and the report makes no claim about what was not checked. What a
 repository declares is not proof of what runs in production.

@@ -1,5 +1,5 @@
 id = "SEC-NO-KNOWN-VULNERABLE-RUNTIME-1"
-version = 1
+version = 2
 title = "The runtime version the code declares has no publicly known vulnerabilities"
 domain = "universal"
 layer = "universal"
@@ -9,7 +9,7 @@ inspectable = false
 cwe = ["CWE-1395"]
 default = true
 verification = "grounded"
-qualifies = "Deterministic, from declared versions only. A runtime (Node.js, Python, PHP, Ruby, Go, Java, .NET or nginx) declared with a full version number, such as a Docker tag like node:18.17.0 or an exact line in a version file, is looked up by CPE name in the NVD CVE API. One finding is raised per runtime version, rated by its highest CVSS score, and raised to critical when any of its CVEs is on the CISA Known Exploited Vulnerabilities list. A runtime declared as a release line without a patch release (node:18) or as a range or a moving tag is not looked up, because a vulnerability is fixed in a specific patch release, and the report lists it under Coverage. What a repository declares is not proof of what runs in production. If the NVD cannot be reached the report says so under Coverage and makes no claim either way."
+qualifies = "Deterministic, from declared versions only. A runtime (Node.js, Python, PHP, Ruby, Go, Java, .NET or nginx) declared with a full version number, such as a Docker tag like node:18.17.0 or an exact line in a version file, is looked up by CPE name in the NVD CVE API. One finding is raised per runtime version, rated by its highest CVSS score, and raised to critical when any of its CVEs is on the CISA Known Exploited Vulnerabilities list. In a Dockerfile only the image the final stage is built on counts, because an earlier build stage never ships. A runtime declared as a release line without a patch release (node:18) or as a range or a moving tag is not looked up, because a vulnerability is fixed in a specific patch release, and the report lists it under Coverage. What a repository declares is not proof of what runs in production. If the NVD cannot be reached the report says so under Coverage and makes no claim either way."
 
 [[sources]]
 url = "https://owasp.org/Top10/A06_2021-Vulnerable_and_Outdated_Components/"

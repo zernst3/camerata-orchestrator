@@ -3448,14 +3448,21 @@ and its `detect`, `eol` and `nvd` modules). The dependency audit cannot see the 
 packages run on, so a second deterministic pass reads the versions a repository declares: Dockerfile
 `FROM` lines, `.nvmrc` and `.node-version`, `engines.node`, `.python-version`, `runtime.txt`,
 `requires-python`, `require.php`, `.ruby-version` and the Gemfile `ruby` line, `go.mod`,
-`rust-toolchain`, `global.json` and `TargetFramework`, `.tool-versions`, and framework versions from
-lockfiles (Next.js, React, Express, Django, Rails, Laravel, Spring Boot). Each declaration records
+`global.json` and `TargetFramework`, `.tool-versions`, and framework versions from
+lockfiles (Next.js, React, Express, Django, Rails, Laravel, Spring Boot). Only the image the final
+stage of a Dockerfile is built on is a declaration (an earlier build stage is `Version::Excluded` and
+listed under Coverage), and a lockfile framework counts only when the manifest in the same folder
+lists it as a direct, non-dev dependency (`package.json` `dependencies`, `composer.json` `require`, a
+Gemfile `gem` outside development and test groups, `pyproject.toml` or a Pipfile, a Gradle build
+file); anything else is `Excluded` too. Folders named `test`, `tests`, `__tests__`, `examples`,
+`samples`, `docs`, `e2e`, `fixtures` and `testdata` are not read. Rust is not read at all: Rust
+supports only its newest release, so every pinned toolchain would be a finding. Each declaration records
 its file and line. A declaration is exact (three or more numeric parts), a release line (`18`,
 `3.11`) or loose (a range, a moving tag, a build argument); a loose one is never guessed and is
 listed under Coverage. endoflife.date (`https://endoflife.date/api/<product>.json`, one fetch per
 product) gives a high finding under `SEC-NO-END-OF-LIFE-RUNTIME-1` once the release line's end date
 has passed and a low advisory within `WARN_DAYS` (90). The NVD CVE API 2.0 (by CPE name, only for a
-runtime declared with a patch version) gives one finding per runtime version under
+runtime declared with a patch version; nginx under both its vendor names, merged) gives one finding per runtime version under
 `SEC-NO-KNOWN-VULNERABLE-RUNTIME-1`, rated by its highest CVSS score with the dependency audit's own
 scorer; `vuln_intel::enrich_dependency_findings` then adds KEV and EPSS to those rows exactly as for
 dependency rows (a known-exploited runtime CVE is floored to critical). The pass uses the same

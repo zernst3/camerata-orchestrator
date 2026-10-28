@@ -252,17 +252,14 @@ impl Tally {
 fn merged_locations(
     repo: &str,
     rule_id: &str,
+    severity: &str,
     snippet: &str,
     rest: &[&Declaration],
 ) -> Vec<MergedLocation> {
     rest.iter()
-        .map(|d| MergedLocation {
-            repo: repo.to_string(),
-            path: d.path.clone(),
-            line: d.line,
-            rule_id: rule_id.to_string(),
-            snippet: snippet.to_string(),
-            consequence: false,
+        .map(|d| {
+            MergedLocation::site(repo, &d.path, d.line, rule_id, snippet, false)
+                .with_rating(severity, snippet)
         })
         .collect()
 }
@@ -294,7 +291,7 @@ fn finding(
         rule_id: rule_id.to_string(),
         kind: Some(camerata_api_types::audit::FindingKind::Defect),
         severity: severity.to_string(),
-        also_locations: merged_locations(repo, rule_id, &snippet, rest),
+        also_locations: merged_locations(repo, rule_id, severity, &snippet, rest),
         snippet,
         detail,
         fix_specific: Some(fix),
@@ -431,14 +428,18 @@ fn vuln_finding(
             None => format!("{} (not yet rated)", c.id),
         })
         .collect();
-    let more = if count > top.len() {
-        format!(" and {} more", count - top.len())
+    // "A, B and C", or "A, B, C and 4 more": never a serial comma.
+    let (listed, more) = if count > top.len() {
+        (top.join(", "), format!(" and {} more", count - top.len()))
     } else {
-        String::new()
+        (join_names(&top), String::new())
     };
     let unrated = cves.iter().filter(|c| !c.rated).count();
     let unrated_clause = if rated && unrated > 0 {
-        format!(" {unrated} of them have no rating from NVD yet.")
+        format!(
+            " {unrated} of them {} no rating from NVD yet.",
+            if unrated == 1 { "has" } else { "have" }
+        )
     } else {
         String::new()
     };
@@ -458,7 +459,7 @@ fn vuln_finding(
         } else {
             "vulnerabilities"
         },
-        top.join(", "),
+        listed,
         primary.raw,
         where_declared(primary),
         also_declared(&rest),
@@ -572,11 +573,29 @@ pub async fn audit_runtimes(
             ),
         ));
     }
+    // Read but deliberately not checked (a build stage, a framework that is not a direct
+    // dependency): one sentence per reason.
+    let mut excluded: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for f in &found {
+        if let Version::Excluded(why) = &f.decl.version {
+            let line = describe(&f.decl);
+            let list = excluded.entry(why.clone()).or_default();
+            if !list.contains(&line) {
+                list.push(line);
+            }
+        }
+    }
+    for (why, list) in &excluded {
+        notes.push(note(
+            EOL_NOTE_TOOL,
+            format!("Not checked, because {why}: {}.", join_capped(list)),
+        ));
+    }
 
     // 3. End of life.
     let known: Vec<&Found> = found
         .iter()
-        .filter(|f| !matches!(f.decl.version, Version::Loose(_)))
+        .filter(|f| !matches!(f.decl.version, Version::Loose(_) | Version::Excluded(_)))
         .collect();
     let mut products: Vec<Product> = known.iter().map(|f| f.decl.product).collect();
     products.sort();
@@ -619,6 +638,7 @@ pub async fn audit_runtimes(
     let mut groups: BTreeMap<(String, Product, String), Vec<&Declaration>> = BTreeMap::new();
     let mut too_broad: Vec<String> = Vec::new();
     let mut unlisted: Vec<String> = Vec::new();
+    let mut unreadable: Vec<String> = Vec::new();
     for f in &known {
         let (Version::Exact(v) | Version::Release(v)) = &f.decl.version else {
             continue;
@@ -627,6 +647,9 @@ pub async fn audit_runtimes(
             continue;
         };
         match data.cycle_for(v) {
+            eol::CycleMatch::Found(cycle) if matches!(cycle.eol, EolDate::Unreadable(_)) => {
+                unreadable.push(format!("{} {}", f.decl.product.label(), cycle.cycle));
+            }
             eol::CycleMatch::Found(cycle) => groups
                 .entry((f.repo.clone(), f.decl.product, cycle.cycle.clone()))
                 .or_default()
@@ -634,6 +657,17 @@ pub async fn audit_runtimes(
             eol::CycleMatch::TooBroad => too_broad.push(describe(&f.decl)),
             eol::CycleMatch::Unlisted => unlisted.push(describe(&f.decl)),
         }
+    }
+    if !unreadable.is_empty() {
+        unreadable.sort();
+        unreadable.dedup();
+        notes.push(note(
+            EOL_NOTE_TOOL,
+            format!(
+                "Not checked, because endoflife.date gives no readable end-of-life date for {}.",
+                join_names(&unreadable)
+            ),
+        ));
     }
     if !too_broad.is_empty() {
         too_broad.sort();
@@ -670,7 +704,7 @@ pub async fn audit_runtimes(
         if matches!(standing, eol::Standing::Supported) {
             continue;
         }
-        let next = data.nearest_supported_above(cycle_name, today);
+        let next = data.nearest_supported_above(cycle_name, today, WARN_DAYS);
         findings.extend(eol_finding(repo, *product, cycle, &standing, next, decls));
     }
 
@@ -678,7 +712,7 @@ pub async fn audit_runtimes(
     let mut vuln_groups: BTreeMap<(String, Product, String), Vec<&Declaration>> = BTreeMap::new();
     let mut release_only: Vec<String> = Vec::new();
     for f in &known {
-        if f.decl.product.cpe_prefix().is_none() {
+        if f.decl.product.cpe_prefixes().is_empty() {
             continue;
         }
         match &f.decl.version {
@@ -687,7 +721,7 @@ pub async fn audit_runtimes(
                 .or_default()
                 .push(&f.decl),
             Version::Release(_) => release_only.push(describe(&f.decl)),
-            Version::Loose(_) => {}
+            Version::Loose(_) | Version::Excluded(_) => {}
         }
     }
     if !release_only.is_empty() {
@@ -703,9 +737,10 @@ pub async fn audit_runtimes(
         ));
     }
 
-    let mut lookups: Vec<(Product, String, String)> = vuln_groups
+    let mut lookups: Vec<(Product, String, Vec<String>)> = vuln_groups
         .keys()
-        .filter_map(|(_, p, v)| nvd::cpe_name(*p, v).map(|cpe| (*p, v.clone(), cpe)))
+        .map(|(_, p, v)| (*p, v.clone(), nvd::cpe_names(*p, v)))
+        .filter(|(_, _, cpes)| !cpes.is_empty())
         .collect();
     lookups.sort();
     lookups.dedup();
@@ -714,7 +749,7 @@ pub async fn audit_runtimes(
     let mut results: BTreeMap<(Product, String), FeedState<NvdResult>> = BTreeMap::new();
     let deadline = tokio::time::Instant::now() + nvd_budget;
     let mut stop_after_failure = false;
-    for (i, (product, version, cpe)) in lookups.iter().enumerate() {
+    for (i, (product, version, cpes)) in lookups.iter().enumerate() {
         let fetched = if stop_after_failure {
             Err(anyhow::anyhow!(
                 "skipped after an earlier NVD lookup failed"
@@ -724,12 +759,13 @@ pub async fn audit_runtimes(
                 tokio::time::sleep(policy.spacing).await;
             }
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-            crate::vuln_intel::within_budget(remaining, nvd::lookup(fetcher, cpe, policy)).await
+            crate::vuln_intel::within_budget(remaining, nvd::lookup_all(fetcher, cpes, policy))
+                .await
         };
         if let Err(e) = &fetched {
             // A rate limit that outlasted its retries, a timeout or an unreachable host: do not
             // keep asking.
-            tracing::warn!("NVD lookup for {cpe} failed: {e:#}");
+            tracing::warn!("NVD lookup for {} {version} failed: {e:#}", product.label());
             stop_after_failure = true;
         }
         let path = cache_file(cache_dir, &format!("nvd-{}-{version}", product.slug()));

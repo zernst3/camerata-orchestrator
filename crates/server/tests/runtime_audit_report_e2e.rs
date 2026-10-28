@@ -264,7 +264,7 @@ async fn the_findings_reach_the_pdf_data_the_workbook_and_the_findings_json() {
         "Node.js 18 has received no security fixes since 2025-04-30.",
         "Python 3.8 has received no security fixes since 2024-10-07.",
         "Advisory: .NET 8 reaches its end of life on 2026-11-10, in 13 days",
-        "Node.js 18.17.0 has 3 known vulnerabilities recorded in the National Vulnerability Database.",
+        "Node.js 18.17.0 has 4 known vulnerabilities recorded in the National Vulnerability Database.",
         "Known exploited: CVE-2023-44487 is listed in the CISA KEV catalog (added 2023-10-10). Severity raised from high to critical.",
     ] {
         assert!(data.contains(&squeezed(sentence)), "the PDF data lacks: {sentence}");
@@ -287,7 +287,7 @@ async fn the_findings_reach_the_pdf_data_the_workbook_and_the_findings_json() {
     assert_eq!(severity_of("Node.js 18 has received"), "high");
     assert_eq!(severity_of("Python 3.8 has received"), "high");
     assert_eq!(severity_of("Advisory: .NET 8"), "low");
-    assert_eq!(severity_of("Node.js 18.17.0 has 3"), "critical");
+    assert_eq!(severity_of("Node.js 18.17.0 has 4"), "critical");
 
     // The workbook.
     let xlsx = camerata_server::xlsx_export::build_workbook(
@@ -299,7 +299,7 @@ async fn the_findings_reach_the_pdf_data_the_workbook_and_the_findings_json() {
     .unwrap();
     let text = xlsx_text(&xlsx);
     assert!(text.contains("Node.js 18 has received no security fixes since 2025-04-30."));
-    assert!(text.contains("Node.js 18.17.0 has 3 known vulnerabilities"));
+    assert!(text.contains("Node.js 18.17.0 has 4 known vulnerabilities"));
 
     // findings.json.
     let export = camerata_server::xlsx_export::build_findings_export(
@@ -377,7 +377,7 @@ async fn the_rendered_pdf_and_readme_carry_the_findings_and_the_stamp() {
     let flat = squeezed(&text);
     for sentence in [
         "Node.js 18 has received no security fixes since 2025-04-30.",
-        "Node.js 18.17.0 has 3 known vulnerabilities",
+        "Node.js 18.17.0 has 4 known vulnerabilities",
     ] {
         assert!(
             flat.contains(&squeezed(sentence)),

@@ -27,6 +27,9 @@ pub enum EolDate {
     Ended,
     /// No end date is set: the line is supported.
     Supported,
+    /// The feed gives a value for the end date that is not a date or a boolean (the text as
+    /// given). The release line is known but its end date is not, so it is not guessed.
+    Unreadable(String),
 }
 
 /// One release line.
@@ -71,20 +74,30 @@ impl EolFeed {
                 if cycle.is_empty() {
                     return None;
                 }
-                let eol = match row.get("eol")? {
-                    serde_json::Value::Bool(true) => EolDate::Ended,
-                    serde_json::Value::Bool(false) => EolDate::Supported,
-                    serde_json::Value::String(s) => {
-                        let date = s.trim().get(..10)?;
-                        NaiveDate::parse_from_str(date, "%Y-%m-%d").ok()?;
-                        EolDate::On(date.to_string())
+                let eol = match row.get("eol") {
+                    Some(serde_json::Value::Bool(true)) => EolDate::Ended,
+                    Some(serde_json::Value::Bool(false)) => EolDate::Supported,
+                    Some(serde_json::Value::String(text)) => {
+                        let date = text
+                            .trim()
+                            .get(..10)
+                            .filter(|d| NaiveDate::parse_from_str(d, "%Y-%m-%d").is_ok());
+                        match date {
+                            Some(date) => EolDate::On(date.to_string()),
+                            None => EolDate::Unreadable(text.trim().to_string()),
+                        }
                     }
-                    _ => return None,
+                    Some(other) => EolDate::Unreadable(other.to_string()),
+                    None => EolDate::Unreadable("no end date given".to_string()),
                 };
                 Some(EolCycle { cycle, eol })
             })
             .collect();
-        if cycles.is_empty() {
+        // A body whose every end date is unreadable is a changed schema, not a feed to trust.
+        if !cycles
+            .iter()
+            .any(|c| !matches!(c.eol, EolDate::Unreadable(_)))
+        {
             anyhow::bail!(
                 "endoflife.date response had {} rows but none with a release line and an end date",
                 rows.len()
@@ -113,13 +126,21 @@ impl EolFeed {
         }
     }
 
-    /// The nearest release line above `cycle` that still receives security fixes on `today`.
-    pub fn nearest_supported_above(&self, cycle: &str, today: NaiveDate) -> Option<&str> {
+    /// The nearest release line above `cycle` that is supported on `today` and does not end
+    /// within `warn_days`: moving to a line about to end would only repeat the problem. A line
+    /// whose end date cannot be read is not suggested.
+    pub fn nearest_supported_above(
+        &self,
+        cycle: &str,
+        today: NaiveDate,
+        warn_days: i64,
+    ) -> Option<&str> {
         let floor = sort_key(cycle);
         self.cycles
             .iter()
             .filter(|c| sort_key(&c.cycle) > floor)
-            .filter(|c| !matches!(standing(&c.eol, today, 0), Standing::Ended { .. }))
+            .filter(|c| !matches!(c.eol, EolDate::Unreadable(_)))
+            .filter(|c| matches!(standing(&c.eol, today, warn_days), Standing::Supported))
             .min_by_key(|c| sort_key(&c.cycle))
             .map(|c| c.cycle.as_str())
     }
@@ -146,7 +167,7 @@ fn sort_key(cycle: &str) -> Vec<u64> {
 /// Where a release line stands on `today`, with `warn_days` of notice before it ends.
 pub fn standing(eol: &EolDate, today: NaiveDate, warn_days: i64) -> Standing {
     match eol {
-        EolDate::Supported => Standing::Supported,
+        EolDate::Supported | EolDate::Unreadable(_) => Standing::Supported,
         EolDate::Ended => Standing::Ended { since: None },
         EolDate::On(date) => {
             let Ok(on) = NaiveDate::parse_from_str(date, "%Y-%m-%d") else {

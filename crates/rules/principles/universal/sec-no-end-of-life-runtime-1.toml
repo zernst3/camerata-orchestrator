@@ -1,5 +1,5 @@
 id = "SEC-NO-END-OF-LIFE-RUNTIME-1"
-version = 1
+version = 2
 title = "Runtimes and frameworks the code declares are on a release line that still receives security fixes"
 domain = "universal"
 layer = "universal"
@@ -9,7 +9,7 @@ inspectable = false
 cwe = ["CWE-1104"]
 default = true
 verification = "grounded"
-qualifies = "Deterministic, from declared versions only. A version is read from a Dockerfile FROM line, a version file (.nvmrc, .node-version, .python-version, .ruby-version, .tool-versions, runtime.txt, rust-toolchain), a manifest field (engines.node in package.json, requires-python in pyproject.toml, require.php in composer.json, the ruby line in a Gemfile, the go line in go.mod, global.json, TargetFramework in a project file) or a lockfile entry (Next.js, React, Express, Django, Rails, Laravel, Spring Boot). The release line is looked up on endoflife.date. The finding is high once the end-of-life date has passed and a low advisory when it falls within 90 days. A version that is a range or a moving tag (such as >=18, lts/* or node:latest) is never guessed: it is listed as not checked. What a repository declares is not proof of what runs in production. If endoflife.date cannot be reached the report says so under Coverage and makes no claim either way."
+qualifies = "Deterministic, from declared versions only. A version is read from a Dockerfile FROM line, a version file (.nvmrc, .node-version, .python-version, .ruby-version, .tool-versions and runtime.txt), a manifest field (engines.node in package.json, requires-python in pyproject.toml, require.php in composer.json, the ruby line in a Gemfile, the go line in go.mod, global.json, TargetFramework in a project file) or a lockfile entry (Next.js, React, Express, Django, Rails, Laravel, Spring Boot). In a Dockerfile only the image the final stage is built on counts, because an earlier build stage never ships, and a framework counts only when the project's own manifest beside the lockfile lists it as a direct, non-dev dependency. What is left out is listed under Coverage as not checked. The release line is looked up on endoflife.date. The finding is high once the end-of-life date has passed and a low advisory when it falls within 90 days. A version that is a range or a moving tag (such as >=18, lts/* or node:latest) is never guessed: it is listed as not checked. What a repository declares is not proof of what runs in production. If endoflife.date cannot be reached the report says so under Coverage and makes no claim either way."
 
 [[sources]]
 url = "https://owasp.org/Top10/A06_2021-Vulnerable_and_Outdated_Components/"

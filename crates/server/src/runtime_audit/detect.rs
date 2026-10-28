@@ -33,7 +33,6 @@ pub enum Product {
     Java,
     DotNet,
     Nginx,
-    Rust,
     Next,
     React,
     Django,
@@ -56,7 +55,6 @@ impl Product {
             Self::Java => "eclipse-temurin",
             Self::DotNet => "dotnet",
             Self::Nginx => "nginx",
-            Self::Rust => "rust",
             Self::Next => "nextjs",
             Self::React => "react",
             Self::Django => "django",
@@ -78,7 +76,6 @@ impl Product {
             Self::Java => "Java",
             Self::DotNet => ".NET",
             Self::Nginx => "nginx",
-            Self::Rust => "Rust",
             Self::Next => "Next.js",
             Self::React => "React",
             Self::Django => "Django",
@@ -89,21 +86,22 @@ impl Product {
         }
     }
 
-    /// The CPE 2.3 `part:vendor:product` NVD lists the runtime under, or `None` for a product
+    /// The CPE 2.3 `part:vendor:product` names NVD lists the runtime under, or none for a product
     /// whose vulnerabilities are not looked up here (frameworks are covered by the dependency
-    /// audit through their lockfile entries; Rust is covered by RustSec through the same audit).
-    pub fn cpe_prefix(self) -> Option<&'static str> {
+    /// audit through their lockfile entries). nginx is listed under two vendors, the older
+    /// `nginx:nginx` and the newer `f5:nginx`; both are asked and the answers merged.
+    pub fn cpe_prefixes(self) -> &'static [&'static str] {
         match self {
-            Self::Node => Some("cpe:2.3:a:nodejs:node.js"),
-            Self::Python => Some("cpe:2.3:a:python:python"),
-            Self::Php => Some("cpe:2.3:a:php:php"),
-            Self::Ruby => Some("cpe:2.3:a:ruby-lang:ruby"),
-            Self::Go => Some("cpe:2.3:a:golang:go"),
+            Self::Node => &["cpe:2.3:a:nodejs:node.js"],
+            Self::Python => &["cpe:2.3:a:python:python"],
+            Self::Php => &["cpe:2.3:a:php:php"],
+            Self::Ruby => &["cpe:2.3:a:ruby-lang:ruby"],
+            Self::Go => &["cpe:2.3:a:golang:go"],
             // OpenJDK vulnerabilities are listed under the oracle:openjdk product.
-            Self::Java => Some("cpe:2.3:a:oracle:openjdk"),
-            Self::DotNet => Some("cpe:2.3:a:microsoft:.net"),
-            Self::Nginx => Some("cpe:2.3:a:f5:nginx"),
-            _ => None,
+            Self::Java => &["cpe:2.3:a:oracle:openjdk"],
+            Self::DotNet => &["cpe:2.3:a:microsoft:.net"],
+            Self::Nginx => &["cpe:2.3:a:f5:nginx", "cpe:2.3:a:nginx:nginx"],
+            _ => &[],
         }
     }
 }
@@ -117,7 +115,16 @@ pub enum Version {
     Release(String),
     /// Not a single release line. The text says why, in words a reader can use.
     Loose(String),
+    /// A declaration that is read but deliberately not checked, with the reason in words a reader
+    /// can use: a Dockerfile build stage ([`BUILD_STAGE`]) or a framework that is not a direct,
+    /// non-dev dependency ([`NOT_DIRECT`]). It is listed under Coverage, never reported on.
+    Excluded(String),
 }
+
+/// Why a Dockerfile stage before the final one is not checked.
+pub const BUILD_STAGE: &str = "it is a build stage, and a build image does not ship";
+/// Why a framework found only in a lockfile is not checked.
+pub const NOT_DIRECT: &str = "it is not a direct, non-dev dependency of the project";
 
 /// One version a repository declares, with where it was declared.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -140,8 +147,9 @@ pub struct Detected {
     pub truncated: bool,
 }
 
-/// Directories never walked: dependencies, build output, VCS metadata and test fixtures. Test
-/// fixtures hold deliberately old versions that the repository does not run.
+/// Directories never walked: dependencies, build output, VCS metadata, tests, examples and docs.
+/// Test fixtures, examples and sample projects hold deliberately old versions that the repository
+/// does not run.
 const SKIP_DIRS: &[&str] = &[
     ".git",
     "node_modules",
@@ -157,6 +165,13 @@ const SKIP_DIRS: &[&str] = &[
     "bower_components",
     "fixtures",
     "testdata",
+    "test",
+    "tests",
+    "__tests__",
+    "examples",
+    "samples",
+    "docs",
+    "e2e",
 ];
 
 /// The most directory entries the walk visits, so a pathological tree cannot stall the scan.
@@ -351,20 +366,29 @@ fn docker_product(image: &str) -> Option<Product> {
         "php" => Some(Product::Php),
         "ruby" => Some(Product::Ruby),
         "golang" | "go" => Some(Product::Go),
-        "rust" => Some(Product::Rust),
         "nginx" => Some(Product::Nginx),
         "openjdk" | "eclipse-temurin" | "amazoncorretto" => Some(Product::Java),
         _ => None,
     }
 }
 
-/// Dockerfile `FROM` lines.
+/// One `FROM` line.
+struct Stage {
+    line: usize,
+    image_ref: String,
+    /// The index of the earlier stage this one builds on (`FROM base`), when it does.
+    parent: Option<usize>,
+}
+
+/// Dockerfile `FROM` lines. Only the image the FINAL stage is built on ships, so that is the only
+/// declaration; a stage before it (`FROM node:16 AS build`) is a builder that never reaches the
+/// image and is returned as [`Version::Excluded`]. A final stage built on an earlier stage
+/// (`FROM base`) ships that stage's image, and so on down the chain.
 pub fn read_dockerfile(path: &str, text: &str) -> Vec<Declaration> {
-    let mut out = Vec::new();
-    let mut stages: Vec<String> = Vec::new();
+    let mut stages: Vec<Stage> = Vec::new();
+    let mut aliases: Vec<(String, usize)> = Vec::new();
     for (i, line) in text.lines().enumerate() {
-        let trimmed = line.trim();
-        let mut tokens = trimmed.split_whitespace();
+        let mut tokens = line.split_whitespace();
         if !tokens
             .next()
             .is_some_and(|t| t.eq_ignore_ascii_case("from"))
@@ -375,16 +399,38 @@ pub fn read_dockerfile(path: &str, text: &str) -> Vec<Declaration> {
         let Some(image_ref) = rest.first().copied() else {
             continue;
         };
+        let parent = aliases
+            .iter()
+            .rev()
+            .find(|(alias, _)| *alias == image_ref.to_ascii_lowercase())
+            .map(|(_, idx)| *idx);
         // `FROM image AS name` registers a stage a later `FROM name` refers to.
         if rest.len() >= 3 && rest[1].eq_ignore_ascii_case("as") {
-            stages.push(rest[2].to_ascii_lowercase());
+            aliases.push((rest[2].to_ascii_lowercase(), stages.len()));
         }
-        if image_ref.eq_ignore_ascii_case("scratch")
-            || stages.contains(&image_ref.to_ascii_lowercase())
-        {
+        stages.push(Stage {
+            line: i + 1,
+            image_ref: image_ref.to_string(),
+            parent,
+        });
+    }
+    // The stages whose image reaches the final image: the last stage and every stage it builds on.
+    let mut ships = vec![false; stages.len()];
+    let mut current = stages.len().checked_sub(1);
+    while let Some(idx) = current {
+        ships[idx] = true;
+        current = stages[idx].parent;
+    }
+    let mut out = Vec::new();
+    for (idx, stage) in stages.iter().enumerate() {
+        if stage.parent.is_some() || stage.image_ref.eq_ignore_ascii_case("scratch") {
             continue;
         }
-        let without_digest = image_ref.split('@').next().unwrap_or(image_ref);
+        let without_digest = stage
+            .image_ref
+            .split('@')
+            .next()
+            .unwrap_or(&stage.image_ref);
         // A registry port (`host:5000/node`) is not a tag: the tag follows the last `/`.
         let (image, tag) = match without_digest.rfind(':') {
             Some(colon) if !without_digest[colon..].contains('/') => {
@@ -395,13 +441,12 @@ pub fn read_dockerfile(path: &str, text: &str) -> Vec<Declaration> {
         let Some(product) = docker_product(image) else {
             continue;
         };
-        out.push(decl(
-            product,
-            path,
-            i + 1,
-            image_ref,
-            image_tag_version(tag),
-        ));
+        let version = if ships[idx] {
+            image_tag_version(tag)
+        } else {
+            Version::Excluded(BUILD_STAGE.to_string())
+        };
+        out.push(decl(product, path, stage.line, &stage.image_ref, version));
     }
     out
 }
@@ -615,41 +660,6 @@ pub fn read_go_mod(path: &str, text: &str) -> Vec<Declaration> {
     out
 }
 
-/// `rust-toolchain` and `rust-toolchain.toml`.
-pub fn read_rust_toolchain(path: &str, text: &str) -> Vec<Declaration> {
-    let (channel, needle) = if text.trim_start().starts_with('[') {
-        let channel = text
-            .parse::<toml::Table>()
-            .ok()
-            .and_then(|d| {
-                d.get("toolchain")?
-                    .get("channel")?
-                    .as_str()
-                    .map(str::to_string)
-            })
-            .unwrap_or_default();
-        (channel, "channel")
-    } else {
-        (
-            first_value_line(text).map(|(_, v)| v).unwrap_or_default(),
-            "",
-        )
-    };
-    if channel.is_empty() {
-        return Vec::new();
-    }
-    let line = if needle.is_empty() {
-        first_value_line(text).map_or(1, |(l, _)| l)
-    } else {
-        line_containing(text, needle, 1).unwrap_or(1)
-    };
-    let version = match plain_version(&channel) {
-        Some(p) => version_of(p),
-        None => loose("it is a moving channel, not a release"),
-    };
-    vec![decl(Product::Rust, path, line, &channel, version)]
-}
-
 /// `global.json` `sdk.version`. An SDK version (`8.0.100`) is the SDK's feature band, not the
 /// runtime's patch release, so only its release line (`8.0`) counts.
 pub fn read_global_json(path: &str, text: &str) -> Vec<Declaration> {
@@ -725,7 +735,6 @@ pub fn read_tool_versions(path: &str, text: &str) -> Vec<Declaration> {
             "ruby" => (Product::Ruby, value),
             "golang" => (Product::Go, value),
             "php" => (Product::Php, value),
-            "rust" => (Product::Rust, value),
             "nginx" => (Product::Nginx, value),
             "dotnet" | "dotnet-core" => (Product::DotNet, value),
             // `java temurin-17.0.1` and `java openjdk-21`: the vendor prefix is not a version.
@@ -955,27 +964,182 @@ pub fn read_gradle_lockfile(path: &str, text: &str) -> Vec<Declaration> {
         .collect()
 }
 
-/// `pom.xml`: the `spring-boot-starter-parent` version.
+/// `pom.xml`: the `spring-boot-starter-parent` version, read from the `<parent>` block itself. A
+/// parent that takes its version from a property is not read from a neighbouring `<version>`.
 pub fn read_pom(path: &str, text: &str) -> Vec<Declaration> {
-    let Ok(version_tag) = Regex::new(r"<version>\s*([^<\s]+)\s*</version>") else {
+    let (Ok(version_tag), Ok(artifact_tag)) = (
+        Regex::new(r"<version>\s*([^<\s]+)\s*</version>"),
+        Regex::new(r"<artifactId>\s*([^<\s]+)\s*</artifactId>"),
+    ) else {
         return Vec::new();
     };
-    let lines: Vec<&str> = text.lines().collect();
-    for (i, l) in lines.iter().enumerate() {
-        if !l.contains("<artifactId>spring-boot-starter-parent</artifactId>") {
-            continue;
+    let mut in_parent = false;
+    let mut artifact: Option<String> = None;
+    let mut version: Option<(usize, String)> = None;
+    for (i, l) in text.lines().enumerate() {
+        if l.contains("<parent>") {
+            in_parent = true;
+            artifact = None;
+            version = None;
         }
-        // The parent block lists groupId, artifactId and version within a few lines.
-        let lo = i.saturating_sub(3);
-        for (j, near) in lines.iter().enumerate().take(i + 4).skip(lo) {
-            if let Some(c) = version_tag.captures(near) {
-                return locked(Product::SpringBoot, path, j + 1, &c[1])
+        if in_parent {
+            if let Some(c) = artifact_tag.captures(l) {
+                artifact = Some(c[1].to_string());
+            }
+            if let Some(c) = version_tag.captures(l) {
+                version = Some((i + 1, c[1].to_string()));
+            }
+        }
+        if l.contains("</parent>") {
+            if artifact.as_deref() == Some("spring-boot-starter-parent") {
+                return version
+                    .and_then(|(line, v)| locked(Product::SpringBoot, path, line, &v))
                     .into_iter()
                     .collect();
             }
+            in_parent = false;
         }
     }
     Vec::new()
+}
+
+// ─── direct dependencies ─────────────────────────────────────────────────────
+
+/// The lockfiles a framework version is read from. The project's own manifest beside them says
+/// whether the framework is a direct dependency.
+const FRAMEWORK_LOCKFILES: &[&str] = &[
+    "package-lock.json",
+    "npm-shrinkwrap.json",
+    "yarn.lock",
+    "pnpm-lock.yaml",
+    "poetry.lock",
+    "uv.lock",
+    "Pipfile.lock",
+    "Gemfile.lock",
+    "composer.lock",
+    "gradle.lockfile",
+];
+
+fn read_beside(dir: &Path, name: &str) -> Option<String> {
+    std::fs::read_to_string(dir.join(name)).ok()
+}
+
+/// Whether `product`, found in a lockfile in `dir`, is a direct, non-dev dependency declared by
+/// the manifest in the same folder. Anything only transitive, only a dev dependency, or with no
+/// manifest beside the lockfile to show otherwise is not.
+fn is_direct_dependency(dir: &Path, product: Product) -> bool {
+    match product {
+        Product::Next | Product::React | Product::Express => {
+            let name = match product {
+                Product::Next => "next",
+                Product::React => "react",
+                _ => "express",
+            };
+            read_beside(dir, "package.json")
+                .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+                .is_some_and(|v| v.get("dependencies").and_then(|d| d.get(name)).is_some())
+        }
+        Product::Laravel => read_beside(dir, "composer.json")
+            .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+            .is_some_and(|v| {
+                v.get("require")
+                    .and_then(|d| d.get("laravel/framework"))
+                    .is_some()
+            }),
+        Product::Rails => {
+            read_beside(dir, "Gemfile").is_some_and(|t| gemfile_lists_directly(&t, "rails"))
+        }
+        Product::Django => python_project_lists_django(dir),
+        Product::SpringBoot => ["build.gradle", "build.gradle.kts"]
+            .iter()
+            .filter_map(|f| read_beside(dir, f))
+            .any(|t| t.contains("org.springframework.boot")),
+        _ => true,
+    }
+}
+
+/// The group names in a Gemfile fragment (`:development, :test`), and whether all of them are
+/// development-only groups.
+fn only_dev_groups(fragment: &str) -> bool {
+    let Ok(symbol) = Regex::new(r":([A-Za-z_]+)") else {
+        return false;
+    };
+    let names: Vec<String> = symbol
+        .captures_iter(fragment)
+        .map(|c| c[1].to_string())
+        .collect();
+    !names.is_empty() && names.iter().all(|n| n == "development" || n == "test")
+}
+
+/// Whether a Gemfile lists `gem` outside every development or test group.
+fn gemfile_lists_directly(text: &str, gem: &str) -> bool {
+    let Ok(gem_line) = Regex::new(&format!(r#"^\s*gem\s+['"]{gem}['"](.*)$"#)) else {
+        return false;
+    };
+    // One entry per open `do` block: true for a development or test group.
+    let mut blocks: Vec<bool> = Vec::new();
+    for line in text.lines() {
+        let code = line.trim();
+        if code.starts_with('\u{23}') {
+            continue;
+        }
+        let opens_block = code.ends_with(" do") || code.contains(" do |") || code == "do";
+        if opens_block {
+            let group = code.starts_with("group ") || code.starts_with("group(");
+            blocks.push(group && only_dev_groups(code));
+        } else if code == "end" {
+            blocks.pop();
+        } else if let Some(c) = gem_line.captures(line) {
+            let inline = &c[1];
+            let inline_dev = inline.contains("group") && only_dev_groups(inline);
+            if !blocks.iter().any(|dev| *dev) && !inline_dev {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// The distribution name at the start of a requirement string (`Django>=4.2` is `django`).
+fn requirement_name(requirement: &str) -> String {
+    requirement
+        .trim()
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+        .collect::<String>()
+        .to_ascii_lowercase()
+        .replace(['_', '.'], "-")
+}
+
+/// Whether the project file beside a Python lockfile lists Django as a direct, non-dev
+/// dependency: `project.dependencies` or `tool.poetry.dependencies` in `pyproject.toml`, or
+/// `[packages]` in a `Pipfile`.
+fn python_project_lists_django(dir: &Path) -> bool {
+    let in_pyproject = read_beside(dir, "pyproject.toml")
+        .and_then(|t| t.parse::<toml::Table>().ok())
+        .is_some_and(|doc| {
+            let pep621 = doc
+                .get("project")
+                .and_then(|p| p.get("dependencies"))
+                .and_then(|d| d.as_array())
+                .is_some_and(|deps| {
+                    deps.iter()
+                        .filter_map(|d| d.as_str())
+                        .any(|d| requirement_name(d) == "django")
+                });
+            let poetry = doc
+                .get("tool")
+                .and_then(|t| t.get("poetry"))
+                .and_then(|p| p.get("dependencies"))
+                .and_then(|d| d.as_table())
+                .is_some_and(|deps| deps.keys().any(|k| requirement_name(k) == "django"));
+            pep621 || poetry
+        });
+    in_pyproject
+        || read_beside(dir, "Pipfile")
+            .and_then(|t| t.parse::<toml::Table>().ok())
+            .and_then(|doc| doc.get("packages").and_then(|p| p.as_table()).cloned())
+            .is_some_and(|pkgs| pkgs.keys().any(|k| requirement_name(k) == "django"))
 }
 
 // ─── the walk ────────────────────────────────────────────────────────────────
@@ -1005,7 +1169,6 @@ fn reader_for(name: &str) -> Option<Reader> {
         ".ruby-version" => read_ruby_version_file,
         "Gemfile" => read_gemfile,
         "go.mod" => read_go_mod,
-        "rust-toolchain" | "rust-toolchain.toml" => read_rust_toolchain,
         "global.json" => read_global_json,
         ".tool-versions" => read_tool_versions,
         "package-lock.json" | "npm-shrinkwrap.json" => read_package_lock,
@@ -1071,7 +1234,16 @@ fn walk(root: &Path, dir: &Path, visited: &mut usize, out: &mut Detected) {
             .unwrap_or(&path)
             .to_string_lossy()
             .replace('\\', "/");
-        out.declarations.extend(reader(&rel, &text));
+        let mut found = reader(&rel, &text);
+        if FRAMEWORK_LOCKFILES.contains(&name.as_str()) {
+            let folder = path.parent().unwrap_or(root);
+            for d in &mut found {
+                if !is_direct_dependency(folder, d.product) {
+                    d.version = Version::Excluded(NOT_DIRECT.to_string());
+                }
+            }
+        }
+        out.declarations.extend(found);
         if out.truncated {
             return;
         }

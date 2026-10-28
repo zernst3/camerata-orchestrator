@@ -84,12 +84,11 @@ pub struct NvdResult {
     pub cves: Vec<NvdCve>,
 }
 
-/// The CPE 2.3 name for a runtime at an exact version, or `None` for a product NVD is not asked
-/// about or a version that is not plain dotted numbers.
-pub fn cpe_name(product: Product, version: &str) -> Option<String> {
-    let prefix = product.cpe_prefix()?;
+/// The CPE 2.3 names for a runtime at an exact version (one per vendor NVD lists it under), or
+/// none for a product NVD is not asked about or a version that is not plain dotted numbers.
+pub fn cpe_names(product: Product, version: &str) -> Vec<String> {
     if version.is_empty() || !version.chars().all(|c| c.is_ascii_digit() || c == '.') {
-        return None;
+        return Vec::new();
     }
     // .NET Core 1.x to 3.x are listed under their own product; 5 and later are plain ".NET".
     let core = product == Product::DotNet
@@ -98,12 +97,16 @@ pub fn cpe_name(product: Product, version: &str) -> Option<String> {
             .next()
             .and_then(|major| major.parse::<u32>().ok())
             .is_some_and(|major| major < 5);
-    let prefix = if core {
-        "cpe:2.3:a:microsoft:.net_core"
-    } else {
-        prefix
-    };
-    Some(format!("{prefix}:{version}:*:*:*:*:*:*:*"))
+    if core {
+        return vec![format!(
+            "cpe:2.3:a:microsoft:.net_core:{version}:*:*:*:*:*:*:*"
+        )];
+    }
+    product
+        .cpe_prefixes()
+        .iter()
+        .map(|prefix| format!("{prefix}:{version}:*:*:*:*:*:*:*"))
+        .collect()
 }
 
 /// The request URL for one page of one CPE.
@@ -258,4 +261,30 @@ pub async fn lookup(
         }
     }
     anyhow::bail!("NVD lookup for {cpe} ran past {MAX_PAGES} pages")
+}
+
+/// [`lookup`] for each of a runtime's CPE names, `policy.spacing` apart, merged into one result
+/// (a CVE listed under two vendors counts once). If any lookup fails the whole answer is
+/// incomplete and is an error.
+pub async fn lookup_all(
+    fetcher: &dyn FeedFetcher,
+    cpes: &[String],
+    policy: &NvdPolicy,
+) -> anyhow::Result<NvdResult> {
+    let mut cves: Vec<NvdCve> = Vec::new();
+    let mut as_of: Option<String> = None;
+    for (i, cpe) in cpes.iter().enumerate() {
+        if i > 0 {
+            tokio::time::sleep(policy.spacing).await;
+        }
+        let one = lookup(fetcher, cpe, policy).await?;
+        as_of = match (as_of, one.as_of) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+        cves.extend(one.cves);
+    }
+    cves.sort_by(|a, b| a.id.cmp(&b.id));
+    cves.dedup_by(|a, b| a.id == b.id);
+    Ok(NvdResult { as_of, cves })
 }
