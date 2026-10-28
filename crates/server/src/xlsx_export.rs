@@ -1778,7 +1778,7 @@ fn write_coverage_sheet(
             ws.write_string_with_format(next_r, 0, line, &fmts.cell(None, true, false))?;
             next_r += 1;
         }
-        if !gaps.skipped_files.is_empty() {
+        if !gaps.skipped_files.is_empty() || gaps.skipped_beyond_cap_total > 0 {
             for (c, h) in ["Repo", "File", "Why it was not read"].iter().enumerate() {
                 ws.write_string_with_format(next_r, c as u16, *h, &fmts.header)?;
             }
@@ -1802,6 +1802,11 @@ fn write_coverage_sheet(
                     &skipped.reason,
                     &fmts.cell(None, false, false),
                 )?;
+                next_r += 1;
+            }
+            // The list is bounded per reason; the files past the bound are counted, not named.
+            if let Some(note) = &gaps.skipped_beyond_cap_note {
+                ws.write_string_with_format(next_r, 1, note, &fmts.cell(None, true, false))?;
                 next_r += 1;
             }
         }

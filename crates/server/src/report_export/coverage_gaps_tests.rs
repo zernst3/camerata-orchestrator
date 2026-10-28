@@ -149,3 +149,129 @@ async fn the_pdf_renders_the_coverage_gaps() {
     assert!(text.contains("data/huge.json"), "{text}");
     assert!(text.contains("files not reviewed by the AI pass"), "{text}");
 }
+
+// ── The skipped-file list is bounded; the rest is counted and every renderer says so ──────────
+
+/// A synthetic large scan: 2,500 oversize and 1,200 past-the-cap files, fed through the same
+/// collector the scan uses. No file exists on disk.
+fn report_with_a_huge_skip_list() -> crate::onboard::ScanReport {
+    let mut report = report_with(
+        vec![finding(
+            "SEC-NO-HARDCODED-SECRETS-1",
+            "src/a.rs",
+            10,
+            "high",
+        )],
+        vec!["SEC-NO-HARDCODED-SECRETS-1"],
+    );
+    let mut list = crate::scan_ledger::SkippedFileList::default();
+    for i in 0..2_500 {
+        list.push("owner/repo", format!("big/{i:05}.json"), SkipReason::Oversize);
+    }
+    for i in 0..1_200 {
+        list.push(
+            "owner/repo",
+            format!("deep/{i:05}.rs"),
+            SkipReason::BeyondFileCap,
+        );
+    }
+    let (skipped_files, skipped_beyond_cap_total) = list.finish();
+    report.ledger.record_input(ScanInputFacts {
+        skipped_files,
+        skipped_beyond_cap_total,
+        ..ScanInputFacts::default()
+    });
+    report
+}
+
+#[test]
+fn the_collector_names_the_first_thousand_paths_per_reason_and_counts_the_rest() {
+    let report = report_with_a_huge_skip_list();
+    let input = report.ledger.input();
+    let oversize = input
+        .skipped_files
+        .iter()
+        .filter(|s| s.reason == SkipReason::Oversize)
+        .count();
+    let capped = input
+        .skipped_files
+        .iter()
+        .filter(|s| s.reason == SkipReason::BeyondFileCap)
+        .count();
+    assert_eq!((oversize, capped), (1_000, 1_000));
+    assert_eq!(input.skipped_beyond_cap_total, 1_500 + 200);
+    // The FIRST paths in walk order are the ones named.
+    assert_eq!(input.skipped_files[0].path, "big/00000.json");
+    assert!(input
+        .skipped_files
+        .iter()
+        .any(|s| s.path == "big/00999.json"));
+    assert!(!input
+        .skipped_files
+        .iter()
+        .any(|s| s.path == "big/01000.json"));
+    // Nothing is lost silently: named plus counted is the full total.
+    assert_eq!(
+        input.skipped_files.len() + input.skipped_beyond_cap_total,
+        3_700
+    );
+}
+
+#[test]
+fn a_complete_list_has_no_more_line() {
+    let gaps = coverage_gaps(&report_with_gaps());
+    assert_eq!(gaps.skipped_beyond_cap_total, 0);
+    assert!(gaps.skipped_beyond_cap_note.is_none());
+}
+
+#[test]
+fn findings_json_and_the_pdf_data_carry_the_and_k_more_count() {
+    let report = report_with_a_huge_skip_list().seal();
+    let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+    assert_eq!(json.coverage_gaps.skipped_files.len(), 2_000);
+    assert_eq!(json.coverage_gaps.skipped_beyond_cap_total, 1_700);
+    let export = crate::xlsx_export::build_findings_export(
+        &report,
+        &HashMap::new(),
+        None,
+        &json,
+        &HashMap::new(),
+    );
+    let value = serde_json::to_value(&export).unwrap();
+    assert_eq!(value["coverage"]["skipped_beyond_cap_total"], 1_700);
+    assert!(value["coverage"]["skipped_beyond_cap_note"]
+        .as_str()
+        .unwrap()
+        .starts_with("and 1700 more skipped files, not listed"));
+    let data = render_data_json(&json).expect("renders");
+    assert!(data.contains("and 1700 more skipped files, not listed"));
+}
+
+#[test]
+fn the_workbook_coverage_sheet_says_and_k_more() {
+    let report = report_with_a_huge_skip_list().seal();
+    let bytes =
+        crate::xlsx_export::build_workbook(&report, &HashMap::new(), None, &empty_opts()).unwrap();
+    let strings = crate::release_gate::xlsx_strings(&bytes).expect("a workbook");
+    let all = strings.join("\n");
+    assert!(all.contains("big/00999.json"));
+    assert!(!all.contains("big/01000.json"), "the list is bounded");
+    assert!(all.contains("and 1700 more skipped files, not listed"));
+}
+
+#[tokio::test]
+async fn the_pdf_says_and_k_more() {
+    if which_typst().is_none() {
+        eprintln!("skipping the_pdf_says_and_k_more: typst not on PATH");
+        return;
+    }
+    let report = report_with_a_huge_skip_list();
+    let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
+    let pdf = compile_pdf(&json).await.expect("the PDF compiles");
+    let text = pdf_extract::extract_text_from_mem(&pdf).unwrap_or_default();
+    // The PDF names the first 100, then points to the sheet for the rest it holds.
+    assert!(text.contains("big/00000.json"), "{text}");
+    assert!(!text.contains("big/00100.json"), "the PDF list is bounded");
+    assert!(text.contains("more skipped files, listed in full"), "{text}");
+    assert!(text.contains("and 1700 more skipped files"), "{text}");
+}
