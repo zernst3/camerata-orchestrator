@@ -139,8 +139,8 @@ pub struct FindingRow {
     /// `"Deterministic"` | `"Preview: {tool}"` | `"AI-advisory"` — derived from
     /// `resolve_citation(...).kind`, per the design doc's Provenance column.
     provenance: String,
-    /// C3-6: the RAW citation kind (`"grounded"` | `"related"` | `"preview"` | `"advisory"`) behind
-    /// `provenance`'s display label above — never serialized (the label is the wire value for
+    /// C3-6: the RAW citation kind (`"grounded"` | `"related"` | `"preview"` | `"advisory"`)
+    /// behind `provenance`'s display label above — never serialized (the label is the wire value for
     /// `findings.json`); kept only so the row sort below can call the SAME
     /// `report_export::provenance_tier_rank` the within-bucket matrix ordering uses, rather
     /// than re-deriving a rank from the formatted label string.
@@ -2116,9 +2116,9 @@ fn write_index_sheet(
     ws.write_string_with_format(r, 0, "Provenance vocabulary", &fmts.bold)?;
     r += 1;
     for line in [
-        "Deterministic — corpus-grounded, cites an authoritative external source",
-        "Preview: {tool} — scan-time deterministic tool pass, not yet wired into the gate",
-        "AI-advisory — model-inferred, no corpus citation",
+        "Deterministic: corpus-grounded, cites an authoritative external source",
+        "Preview: {tool}: scan-time deterministic tool pass, not yet wired into the gate",
+        "AI-advisory: model-inferred; may cite a related standard",
         "Related standard (in the Citation column): a published standard matched to a model \
          finding by keyword, not a rule Camerata checked",
     ] {
@@ -4626,10 +4626,10 @@ mod tests {
 
     /// C4-P2: an AI-tier finding with no corpus entry of its own, classified via the P3
     /// fallback (`classify_ai_finding`) into a known defect class, must carry the IDENTICAL
-    /// citation (the class's sources, labelled as a related standard since H5), a human-readable title (never the bare invented rule id), and its
-    /// real semantic category (never a mangled rule-id-token key) across `findings.json`, the
-    /// xlsx workbook, and the PDF's curated-findings data — and the category scorecard must
-    /// count it as a checked rule. This is the general class behind the "AI-tier critical is
+    /// citation (the class's sources, labelled as a related standard since H5), a
+    /// human-readable title (never the bare invented rule id), and its real semantic category
+    /// (never a mangled rule-id-token key) across `findings.json`, the xlsx workbook, and the
+    /// PDF's curated-findings data — and the category scorecard must count it as a checked rule. This is the general class behind the "AI-tier critical is
     /// uncited in json/xlsx while the PDF prints a different rule's citation under a mangled
     /// category with 0 rules checked" bug.
     #[tokio::test]

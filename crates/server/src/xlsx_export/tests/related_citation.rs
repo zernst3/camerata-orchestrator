@@ -208,3 +208,40 @@ fn the_index_sheet_defines_related_standard() {
         "the Index sheet's vocabulary must define a related standard"
     );
 }
+
+#[test]
+fn the_index_sheet_provenance_lines_are_accurate_and_free_of_em_dashes() {
+    let report = report_with(
+        vec![finding("SEC-CRITICAL-1", "a.rs", 1, "critical")],
+        vec![],
+    );
+    let xlsx = build_workbook(&report.seal(), &HashMap::new(), None, &empty_opts())
+        .expect("workbook builds");
+    let shared = read_zip_entry(&xlsx, "xl/sharedStrings.xml");
+    // A related row now carries sources, so "no corpus citation" would be false.
+    assert!(
+        !shared.contains("no corpus citation"),
+        "AI-advisory must not be defined as having no citation"
+    );
+    assert!(
+        shared.contains("model-inferred; may cite a related standard"),
+        "AI-advisory is model-inferred and may cite a related standard"
+    );
+    for line in [
+        "Deterministic: corpus-grounded",
+        "Preview: {tool}: scan-time deterministic tool pass",
+    ] {
+        assert!(shared.contains(line), "missing Index line {line:?}");
+    }
+    // The vocabulary lines are client-facing: no em dash in them.
+    for entry in shared.split("<si>").filter(|s| {
+        s.contains("corpus-grounded")
+            || s.contains("scan-time deterministic tool pass")
+            || s.contains("model-inferred")
+    }) {
+        assert!(
+            !entry.contains('\u{2014}'),
+            "em dash in Index line: {entry}"
+        );
+    }
+}
