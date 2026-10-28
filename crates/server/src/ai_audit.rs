@@ -133,6 +133,10 @@ struct PassFailure {
     /// How many files the failed pass was shown (its chunk), so the disclosure can say how
     /// many went unreviewed. Zero when the pass is not over a file chunk.
     files: usize,
+    /// `Some(n)` when the reply was cut off at the output limit and `n` complete findings were
+    /// recovered from the part that arrived (they are in the round's findings; the rest of the
+    /// pass was not reviewed). `None` for a pass that produced nothing.
+    recovered: Option<usize>,
 }
 
 impl PassFailure {
@@ -149,6 +153,7 @@ impl PassFailure {
             pass: format!("{label} {}/{n_c} · rules {}/{n_b}", ci + 1, bi + 1),
             error: error.to_string(),
             files: 0,
+            recovered: None,
         }
     }
 
@@ -158,12 +163,20 @@ impl PassFailure {
             pass,
             error: error.to_string(),
             files: 0,
+            recovered: None,
         }
     }
 
     /// The same failure, recording that the pass was shown `files` files.
     fn with_files(mut self, files: usize) -> Self {
         self.files = files;
+        self
+    }
+
+    /// The same failure, recording that `n` complete findings were recovered from a reply that
+    /// was cut off (see [`PartialPassReply`]).
+    fn with_recovered(mut self, n: usize) -> Self {
+        self.recovered = Some(n);
         self
     }
 }
@@ -189,11 +202,21 @@ fn failed_pass_rows(repo: &str, answered: usize, failures: &[PassFailure]) -> Ve
         .map(|f| FailedPass {
             repo: repo.to_string(),
             pass: format!("audit {}", f.pass),
-            reason: format!(
-                "{} ({answered} of {total} passes in this round answered; the findings this \
-                 pass would have produced are missing)",
-                batch_mode::disclosable_error(&f.error)
-            ),
+            reason: match f.recovered {
+                // A cut-off reply: its complete findings are in the report, the rest is not.
+                Some(n) => format!(
+                    "{} ({n} complete finding{} recovered from the part that arrived and are \
+                     in this report; {answered} of {total} passes in this round answered in \
+                     full; any finding past the cut-off is missing)",
+                    batch_mode::disclosable_error(&f.error),
+                    if n == 1 { "" } else { "s" }
+                ),
+                None => format!(
+                    "{} ({answered} of {total} passes in this round answered; the findings \
+                     this pass would have produced are missing)",
+                    batch_mode::disclosable_error(&f.error)
+                ),
+            },
             files_not_reviewed: f.files,
         })
         .collect()
@@ -1311,6 +1334,93 @@ fn parse_finding_captures(f: &serde_json::Value) -> std::collections::BTreeMap<S
     out
 }
 
+/// The canonical severity label for a model-written one (M3): trimmed and case-folded, with the
+/// common synonyms mapped (`severe` and `major` to high, `moderate` to medium, `minor` and
+/// `informational` to low). A label that is none of these keeps `current`, so an odd word never
+/// quietly turns into a rating.
+pub(crate) fn parse_model_severity(raw: &str, current: &str) -> String {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "critical" | "crit" | "blocker" => "critical",
+        "high" | "severe" | "major" => "high",
+        "medium" | "moderate" | "med" => "medium",
+        "low" | "minor" | "informational" | "info" | "note" => "low",
+        _ => return current.to_string(),
+    }
+    .to_string()
+}
+
+/// A model-written rule label as a rule id candidate (M4): surrounding brackets, quotes and
+/// backticks removed, anything after a `:` or an opening parenthesis dropped, uppercased, with
+/// spaces and underscores turned into hyphens.
+fn normalize_model_rule_label(raw: &str) -> String {
+    let t = raw
+        .trim()
+        .trim_matches(|c: char| matches!(c, '[' | ']' | '`' | '"' | '\'' | '*'))
+        .trim();
+    let t = t.split(':').next().unwrap_or(t);
+    let t = t.split(" (").next().unwrap_or(t).trim();
+    t.to_ascii_uppercase().replace([' ', '_'], "-")
+}
+
+/// The adopted rule id a near-miss label means (M4): the label plus a version suffix
+/// (`SEC-NO-RAW-SQL-CONCAT` for `SEC-NO-RAW-SQL-CONCAT-1`), or the longest adopted id the label
+/// extends (`SEC-NO-RAW-SQL-CONCAT-1-IN-REPORTS`). Only a hyphenated label is tried.
+fn adopted_near_match(norm: &str, adopted: &std::collections::HashSet<String>) -> Option<String> {
+    if !norm.contains('-') {
+        return None;
+    }
+    let versioned: Vec<&String> = adopted
+        .iter()
+        .filter(|a| {
+            a.strip_prefix(norm)
+                .and_then(|rest| rest.strip_prefix('-'))
+                .is_some_and(|v| !v.is_empty() && v.chars().all(|c| c.is_ascii_digit()))
+        })
+        .collect();
+    if let [only] = versioned.as_slice() {
+        return Some((*only).clone());
+    }
+    // The label extends an adopted id. Not when what it adds is itself a run of another adopted
+    // id's words ("SEC-NO-A-1-SEC-NO-B-1": two rules named at once): that is not one rule.
+    let words_of = |id: &str| format!("-{id}-");
+    adopted
+        .iter()
+        .filter(|a| {
+            norm.strip_prefix(a.as_str())
+                .and_then(|rest| rest.strip_prefix('-'))
+                .is_some_and(|rest| {
+                    !rest.is_empty()
+                        && !adopted
+                            .iter()
+                            .any(|b| words_of(b).contains(&words_of(rest)))
+                })
+        })
+        .max_by_key(|a| a.len())
+        .cloned()
+}
+
+/// A model-written line number (M5): a number, a numeric string, `L42`, `line 42`, or a range such as
+/// `42-47` (its first line). Anything else is 0, "no line".
+fn parse_model_line(v: &serde_json::Value) -> usize {
+    if let Some(n) = v.as_u64() {
+        return n as usize;
+    }
+    if let Some(x) = v.as_f64() {
+        return if x >= 0.0 { x as usize } else { 0 };
+    }
+    let Some(t) = v.as_str() else {
+        return 0;
+    };
+    let lower = t.trim().to_ascii_lowercase();
+    let rest = ["lines", "line", "ln", "l"]
+        .iter()
+        .find_map(|p| lower.strip_prefix(p))
+        .unwrap_or(&lower);
+    let rest = rest.trim_start_matches(|c: char| c.is_whitespace() || matches!(c, ':' | '#' | '.'));
+    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+    digits.parse().unwrap_or(0)
+}
+
 /// Parse a model audit response into Findings + ProposedRules in the scan's shapes.
 /// Robust: malformed output yields empty vecs rather than erroring the whole scan.
 pub fn parse_ai_findings(
@@ -1328,8 +1438,14 @@ pub fn parse_ai_findings(
     let mut findings = Vec::new();
     if let Some(arr) = v["findings"].as_array() {
         for f in arr {
-            let rule = f["rule"].as_str().unwrap_or("architecture").trim();
-            let norm = rule.to_ascii_uppercase().replace(' ', "-");
+            let rule = ["rule", "rule_id", "id"]
+                .iter()
+                .find_map(|k| f[*k].as_str())
+                .unwrap_or("architecture");
+            let mut norm = normalize_model_rule_label(rule);
+            if norm.is_empty() {
+                norm = "ARCHITECTURE".to_string();
+            }
             // If the model cited an ADOPTED rule id, key the finding to that id directly so
             // the violation shows up under the rule the architect selected. Else try to
             // canonicalize a well-known invented name onto the adopted rule it actually
@@ -1337,17 +1453,15 @@ pub fn parse_ai_findings(
             // AI-discovered issue beyond the ruleset (AI- provenance prefix).
             let rule_id = if adopted.contains(&norm) {
                 norm
+            } else if let Some(near) = adopted_near_match(&norm, adopted) {
+                near
             } else if let Some(canon) = canonical_adopted_rule(&norm, adopted) {
                 canon
             } else {
                 format!("AI-{norm}")
             };
-            let severity = match f["severity"].as_str().unwrap_or("medium") {
-                "critical" => "critical",
-                "high" => "high",
-                "low" => "low",
-                _ => "medium",
-            };
+            let severity =
+                parse_model_severity(f["severity"].as_str().unwrap_or("medium"), "medium");
             // The title is the headline of `Finding::detail`, split off again by the detail
             // regeneration at the FIRST `HEADLINE_SEP`, so the title itself must never hold one.
             let title = f["title"]
@@ -1374,9 +1488,13 @@ pub fn parse_ai_findings(
                 could_be_intentional: false,
                 repo: repo.to_string(),
                 path: f["path"].as_str().unwrap_or("(repo)").to_string(),
-                line: f["line"].as_u64().unwrap_or(0) as usize,
+                line: ["line", "start_line", "line_number"]
+                    .iter()
+                    .map(|k| parse_model_line(&f[*k]))
+                    .find(|n| *n > 0)
+                    .unwrap_or(0),
                 rule_id,
-                severity: severity.to_string(),
+                severity,
                 snippet,
                 detail,
                 status: "active".to_string(),
@@ -1753,12 +1871,10 @@ pub fn apply_verdicts(raw: &str, findings: Vec<Finding>) -> Vec<Finding> {
     for (i, mut f) in findings.into_iter().enumerate() {
         if let Some(verdict) = arr.iter().find(|x| x["index"].as_u64() == Some(i as u64)) {
             if let Some(sev) = verdict["severity"].as_str() {
-                let candidate = match sev {
-                    "critical" => "critical",
-                    "high" => "high",
-                    "low" => "low",
-                    _ => "medium",
-                };
+                // An unrecognised label keeps the finding's current severity (M3): it must not
+                // be read as a verdict of "medium".
+                let candidate = parse_model_severity(sev, &f.severity);
+                let candidate = candidate.as_str();
                 // Raising = moving to a MORE severe label. This module's local
                 // `severity_rank` ranks `critical` highest (4) down to unrecognized/`low`
                 // (0/1), so "raise" means the candidate's rank EXCEEDS the base severity's.
@@ -1779,8 +1895,16 @@ pub fn apply_verdicts(raw: &str, findings: Vec<Finding>) -> Vec<Finding> {
                          justify one.",
                         f.severity
                     ));
-                } else {
-                    f.severity = candidate.to_string();
+                } else if candidate != f.severity {
+                    let before = std::mem::replace(&mut f.severity, candidate.to_string());
+                    let why = strip_dedup_pointers(raw_reason.trim());
+                    let why = camerata_secrets::redact_str(&why).into_owned();
+                    let why = if why.trim().is_empty() {
+                        "the calibration step's verdict".to_string()
+                    } else {
+                        format!("the calibration step's verdict: {}", why.trim())
+                    };
+                    record_severity_adjustment(&mut f, &before, candidate, &why);
                 }
             }
             let low_conf = verdict["confidence"].as_str() == Some("low");
@@ -2228,7 +2352,9 @@ fn severity_calibration_floor(f: &Finding) -> Option<(&'static str, String)> {
 fn apply_severity_calibration_rule(mut f: Finding) -> Finding {
     if let Some((floor_sev, reason)) = severity_calibration_floor(&f) {
         if severity_rank(&f.severity) < severity_rank(floor_sev) {
+            let before = f.severity.clone();
             f.severity = floor_sev.to_string();
+            record_severity_adjustment(&mut f, &before, floor_sev, &reason);
         }
         f.calibration_rationale = Some(reason);
     }
@@ -2485,7 +2611,53 @@ fn mentions_client_only_privilege_gate(text: &str) -> bool {
 /// unlike CORS, these two CAN legitimately co-occur with a floor-earned Critical in the same
 /// finding's prose, and must never demote it). R3 is a full bidirectional clamp like R2; R4 is
 /// cap-only like R1. R1 is checked last.
-fn apply_severity_ceiling_rule(mut f: Finding) -> Finding {
+fn apply_severity_ceiling_rule(f: Finding) -> Finding {
+    let before = f.severity.clone();
+    let mut out = apply_severity_ceiling_rule_inner(f);
+    if out.severity != before {
+        let why = out
+            .calibration_rationale
+            .clone()
+            .unwrap_or_else(|| "a severity ceiling applied".to_string());
+        let after = out.severity.clone();
+        record_severity_adjustment(&mut out, &before, &after, &why);
+    }
+    out
+}
+
+/// The text of `f` as its PRODUCER wrote it: `detail` up to the first calibration marker
+/// (`[calibrated: ...]` / `[needs review: ...]`, which `apply_verdicts` appends and which carry
+/// the calibration model's own one-line reason), plus `snippet` and `category`, lowercased. R1
+/// reads this, so a reason such as "confirm whether" added by the calibration step is not taken
+/// for the finding's own hedge (H7).
+fn producer_text(f: &Finding) -> String {
+    let cut = ["[calibrated", "[needs review"]
+        .iter()
+        .filter_map(|m| f.detail.find(m))
+        .min()
+        .unwrap_or(f.detail.len());
+    format!(
+        "{} {} {}",
+        &f.detail[..cut],
+        f.snippet,
+        f.category.as_deref().unwrap_or("")
+    )
+    .to_ascii_lowercase()
+}
+
+/// Whether `f` names the CORS class itself: a rule id with a `CORS` word (or `CROSS-ORIGIN`), or
+/// a category naming CORS. R2 clamps only these (M1); CORS vocabulary in the prose of an
+/// unrelated finding no longer moves its severity.
+fn names_cors_class(f: &Finding) -> bool {
+    let id = f.rule_id.to_ascii_uppercase();
+    id.split(['-', '_']).any(|w| w == "CORS")
+        || id.contains("CROSS-ORIGIN")
+        || f.category
+            .as_deref()
+            .is_some_and(|c| c.to_ascii_lowercase().contains("cors"))
+}
+
+fn apply_severity_ceiling_rule_inner(mut f: Finding) -> Finding {
     // W31 — checked FIRST, and cap-only.
     //
     // A row the engine flagged as possibly deliberate cannot be told apart from a deliberate
@@ -2564,8 +2736,12 @@ fn apply_severity_ceiling_rule(mut f: Finding) -> Finding {
     }
 
     let text = calibration_floor_scan_text(&f);
+    let floor_earned_critical = mentions_unauthenticated_or_full_compromise(&text);
 
-    if mentions_cors_misconfig(&text) {
+    // R2 runs after the floor check and only for a finding that NAMES the CORS class (M1): a
+    // floor-earned critical is never clamped, and CORS words in another rule's prose never
+    // move its rating.
+    if names_cors_class(&f) && !floor_earned_critical && mentions_cors_misconfig(&text) {
         f.severity = "medium".to_string();
         f.calibration_rationale = Some(
             "Severity ceiling: a browser-mediated CORS/cross-origin misconfiguration requires a \
@@ -2576,8 +2752,6 @@ fn apply_severity_ceiling_rule(mut f: Finding) -> Finding {
         );
         return f;
     }
-
-    let floor_earned_critical = mentions_unauthenticated_or_full_compromise(&text);
 
     if mentions_open_redirect(&text) && !floor_earned_critical {
         if mentions_redirect_chained_to_credential_capture(&text) {
@@ -2615,7 +2789,9 @@ fn apply_severity_ceiling_rule(mut f: Finding) -> Finding {
         );
     }
 
-    if mentions_self_hedged_confirmation_only(&text) {
+    // R1 reads the producer's own words only and never caps a floor-earned critical (H7): an
+    // unauthenticated delete whose calibration reason says "confirm whether" stays critical.
+    if !floor_earned_critical && mentions_self_hedged_confirmation_only(&producer_text(&f)) {
         f.confidence = Some("needs-review".to_string());
         f.needs_review = true;
         if severity_rank(&f.severity) > severity_rank("low") {
@@ -3584,6 +3760,30 @@ pub fn parse_alternative_recommendations(
     out
 }
 
+/// Most file chunks a rule judged "not applicable" is asked about again (M7). Beyond this the
+/// judgment stands and says how many chunks it covers.
+const ALTERNATIVES_MAX_FILE_CHUNKS: usize = 4;
+
+/// A path a model named in `needs_files` or a scan reply, in the form the scan lists files: no
+/// leading `./` or `/`, forward slashes, trimmed of quotes and backticks (M6).
+pub(crate) fn normalize_requested_path(raw: &str) -> String {
+    let t = raw
+        .trim()
+        .trim_matches(|c: char| matches!(c, '`' | '"' | '\''))
+        .replace('\\', "/");
+    let mut t = t.trim();
+    loop {
+        if let Some(rest) = t.strip_prefix("./") {
+            t = rest;
+        } else if let Some(rest) = t.strip_prefix('/') {
+            t = rest;
+        } else {
+            break;
+        }
+    }
+    t.to_string()
+}
+
 /// Run the dedicated recommendation pass: ONE LLM call deciding `recommended_option_id` +
 /// `recommendation_reasoning` for every rule in `alternatives`, grounded in the repo map plus
 /// a representative code digest. Deciding this ONCE (rather than once per file-chunk, as the
@@ -3617,12 +3817,23 @@ async fn recommend_alternatives(
     }
     let repo_map = build_repo_map(map_files, nonce);
     let file_chunks = chunk_files(files, CHUNK_DIGEST_CHARS);
-    let digest = file_chunks
-        .first()
-        .map(|c| build_digest(c, nonce))
-        .unwrap_or_default();
+    // M7: a rule judged "not applicable" on the first chunk's digest is asked again on each
+    // further chunk, because the code that makes it applicable may sit in any of them. Rules
+    // already judged applicable (or with no convention) are not asked again, so the common case
+    // is still ONE call per rule batch. A rule is "not applicable" only when EVERY chunk says so.
+    let total_chunks = file_chunks.len().max(1);
+    let digests: Vec<String> = if file_chunks.is_empty() {
+        vec![String::new()]
+    } else {
+        file_chunks
+            .iter()
+            .take(ALTERNATIVES_MAX_FILE_CHUNKS)
+            .map(|c| build_digest(c, nonce))
+            .collect()
+    };
+    let chunks_read = digests.len();
 
-    // Bounded chunks (see `ALTERNATIVES_BATCH_SIZE`'s doc comment) — each rule-batch is an
+    // Bounded chunks (see `ALTERNATIVES_BATCH_SIZE`'s doc comment) - each rule-batch is an
     // independent streamed call, so no single completion is asked to decide every
     // multi-option rule in the scan at once. The common case (alternatives.len() <=
     // ALTERNATIVES_BATCH_SIZE) is exactly one chunk equal to the whole input, so the
@@ -3633,81 +3844,126 @@ async fn recommend_alternatives(
     let mut recommendations = Vec::with_capacity(alternatives.len());
 
     for (chunk_idx, alt_chunk) in rule_chunks.into_iter().enumerate() {
-        let prompt = format!(
-            "Repository: {repo}\n\n{repo_map}{digest}\n\n{}",
-            build_alternatives_block(alt_chunk)
-        );
-        // Single-chunk runs keep the EXACT session id + role this function always used
-        // (`audit-{repo}-alternatives`); the `-bN` suffix + batch label only appears once
-        // there's more than one chunk.
-        let session = if n_chunks > 1 {
-            format!("audit-{repo}-alternatives-b{chunk_idx}")
-        } else {
-            format!("audit-{repo}-alternatives")
-        };
-        if let Some((store, key)) = feedback {
-            store.register(
-                key,
-                crate::transcript::AgentTranscript {
-                    session_id: session.clone(),
-                    role: format!(
-                        "recommending {} alternative(s) — {repo}{}",
-                        alt_chunk.len(),
-                        if n_chunks > 1 {
-                            format!(" (batch {}/{n_chunks})", chunk_idx + 1)
-                        } else {
-                            String::new()
-                        }
-                    ),
-                    prompt: prompt.clone(),
-                    output: String::new(),
-                    status: "running".to_string(),
-                },
-            );
-        }
-        let mut req = LlmRequest::new(prompt)
-            .with_system(crate::prompt_frame::with_untrusted_clause(
-                alternatives_system_prompt(),
-                nonce,
-            ))
-            .with_max_tokens(4096)
-            .with_temperature(AUDIT_TEMPERATURE);
-        if let Some(m) = audit_model {
-            req = req.with_model(m.to_string());
-        }
-        // Routed through the STREAMING transport EVEN WHEN there is no live transcript to
-        // feed (`feedback = None`) — the CLI leg's heartbeat resets on any progress and
-        // SALVAGES partial output on a late kill, instead of the flat non-streaming path's
-        // fixed 300s deadline with no partial credit for a near-complete run.
-        let resp_result = if let Some((store, key)) = feedback {
-            let mut on_delta = |t: &str| store.append_output_raw(key, &session, t);
-            llm.complete_streaming(req, &mut on_delta).await
-        } else {
-            let mut on_delta = |_: &str| {};
-            llm.complete_streaming(req, &mut on_delta).await
-        };
-        if let Some((store, key)) = feedback {
-            store.set_status(
-                key,
-                &session,
-                if resp_result.is_ok() {
-                    "done"
-                } else {
-                    "blocked"
-                },
-            );
-        }
-        let resp = match resp_result {
-            Ok(r) => r,
-            Err(e) => {
-                meter_failed(meter, Stage::Alternatives, &e);
-                return Err(e);
+        // The best answer so far for each rule of this batch, in the batch's order.
+        let mut best: Vec<Option<RuleRecommendation>> = vec![None; alt_chunk.len()];
+        for (digest_idx, digest) in digests.iter().enumerate() {
+            let pending: Vec<RuleAlternatives> = alt_chunk
+                .iter()
+                .zip(&best)
+                .filter(|(_, b)| b.as_ref().is_none_or(|r| !r.applicable))
+                .map(|(a, _)| a.clone())
+                .collect();
+            if pending.is_empty() {
+                break;
             }
-        };
-        if let Some(m) = meter {
-            m.record_stage(Stage::Alternatives, &resp);
+            // Later digests of a SPEND-CAPPED run are skipped, not sent: the answers so far stand.
+            if digest_idx > 0 && meter.is_some_and(UsageMeter::retry_blocked) {
+                break;
+            }
+            let prompt = format!(
+                "Repository: {repo}\n\n{repo_map}{digest}\n\n{}",
+                build_alternatives_block(&pending)
+            );
+            // Single-call runs keep the EXACT session id + role this function always used
+            // (`audit-{repo}-alternatives`); the `-bN` suffix + batch label only appears once
+            // there's more than one chunk, and `-dN` once a rule is asked on a further digest.
+            let mut session = if n_chunks > 1 {
+                format!("audit-{repo}-alternatives-b{chunk_idx}")
+            } else {
+                format!("audit-{repo}-alternatives")
+            };
+            if digest_idx > 0 {
+                session.push_str(&format!("-d{digest_idx}"));
+            }
+            if let Some((store, key)) = feedback {
+                store.register(
+                    key,
+                    crate::transcript::AgentTranscript {
+                        session_id: session.clone(),
+                        role: format!(
+                            "recommending {} alternative(s) — {repo}{}{}",
+                            pending.len(),
+                            if n_chunks > 1 {
+                                format!(" (batch {}/{n_chunks})", chunk_idx + 1)
+                            } else {
+                                String::new()
+                            },
+                            if digest_idx > 0 {
+                                format!(" (file chunk {}/{})", digest_idx + 1, digests.len())
+                            } else {
+                                String::new()
+                            }
+                        ),
+                        prompt: prompt.clone(),
+                        output: String::new(),
+                        status: "running".to_string(),
+                    },
+                );
+            }
+            let mut req = LlmRequest::new(prompt)
+                .with_system(crate::prompt_frame::with_untrusted_clause(
+                    alternatives_system_prompt(),
+                    nonce,
+                ))
+                .with_max_tokens(4096)
+                .with_temperature(AUDIT_TEMPERATURE);
+            if let Some(m) = audit_model {
+                req = req.with_model(m.to_string());
+            }
+            // Routed through the STREAMING transport EVEN WHEN there is no live transcript to
+            // feed (`feedback = None`) - the CLI leg's heartbeat resets on any progress and
+            // SALVAGES partial output on a late kill, instead of the flat non-streaming path's
+            // fixed 300s deadline with no partial credit for a near-complete run.
+            let resp_result = if let Some((store, key)) = feedback {
+                let mut on_delta = |t: &str| store.append_output_raw(key, &session, t);
+                llm.complete_streaming(req, &mut on_delta).await
+            } else {
+                let mut on_delta = |_: &str| {};
+                llm.complete_streaming(req, &mut on_delta).await
+            };
+            if let Some((store, key)) = feedback {
+                store.set_status(
+                    key,
+                    &session,
+                    if resp_result.is_ok() {
+                        "done"
+                    } else {
+                        "blocked"
+                    },
+                );
+            }
+            let resp = match resp_result {
+                Ok(r) => r,
+                Err(e) => {
+                    meter_failed(meter, Stage::Alternatives, &e);
+                    return Err(e);
+                }
+            };
+            if let Some(m) = meter {
+                m.record_stage(Stage::Alternatives, &resp);
+            }
+            for rec in parse_alternative_recommendations(&resp.text, &pending) {
+                if let Some(at) = alt_chunk.iter().position(|a| a.rule_id == rec.rule_id) {
+                    // The first answer is kept unless a later digest finds the rule applicable.
+                    if best[at]
+                        .as_ref()
+                        .is_none_or(|b| !b.applicable && rec.applicable)
+                    {
+                        best[at] = Some(rec);
+                    }
+                }
+            }
         }
-        recommendations.extend(parse_alternative_recommendations(&resp.text, alt_chunk));
+        // A rule still judged not applicable after reading fewer chunks than the repo has says
+        // so: the judgment covers part of the code only.
+        for rec in best.iter_mut().flatten() {
+            if !rec.applicable && chunks_read < total_chunks {
+                rec.recommendation_reasoning.push_str(&format!(
+                    " Judged over {chunks_read} of {total_chunks} file chunks."
+                ));
+            }
+        }
+        recommendations.extend(best.into_iter().flatten());
     }
     Ok(recommendations)
 }
@@ -3856,7 +4112,10 @@ fn fix_context_window(
 /// [`find_ungrounded_identifier`] (validation) so the two can never silently drift apart.
 fn fix_evidence_blob(f: &Finding, files: &[(String, String)]) -> String {
     let context = fix_context_window(files, &f.path, f.line, 8);
-    let captures = f.captures.values().cloned().collect::<Vec<_>>().join(" ");
+    let captures = object_captures(f)
+        .map(|(_, v)| v.clone())
+        .collect::<Vec<_>>()
+        .join(" ");
     format!(
         "{} {} {} {} {}",
         f.path, f.snippet, f.detail, captures, context
@@ -3865,12 +4124,10 @@ fn fix_evidence_blob(f: &Finding, files: &[(String, String)]) -> String {
 
 /// The "Captured objects" line of a finding's block, or nothing when it captured none.
 fn captured_objects_line(f: &Finding) -> String {
-    if f.captures.is_empty() {
+    if object_captures(f).next().is_none() {
         return String::new();
     }
-    let caps = f
-        .captures
-        .iter()
+    let caps = object_captures(f)
         .map(|(k, v)| format!("{k}={v}"))
         .collect::<Vec<_>>()
         .join(", ");
@@ -4917,6 +5174,7 @@ async fn audit_pass(
     let ScanReply {
         resp,
         malformed_retries,
+        truncation_retried,
         stopped_by_cap,
     } = retry_unusable_scan_reply(
         llm,
@@ -4939,9 +5197,168 @@ async fn audit_pass(
     if !resp.truncated && scan_output_is_malformed(&resp.text) {
         anyhow::bail!("{}", malformed_reply_reason(1 + malformed_retries));
     }
+    // A reply STILL cut off at the output limit after the retry is not a clean pass: the part
+    // that never arrived may hold findings. The complete findings that did arrive are kept and
+    // the pass is reported as failed, naming the files it did not finish (H1).
+    if resp.truncated {
+        let attempts = 1 + usize::from(truncation_retried) + malformed_retries;
+        return Err(PartialPassReply::from_cut_off(repo, &resp.text, adopted, attempts).into());
+    }
     let (f, p) = parse_ai_findings(repo, &resp.text, adopted);
     let needs = parse_needs_files(&resp.text);
     Ok((f, p, needs))
+}
+
+/// The failure reason for a scan reply that was still cut off at the output limit after
+/// `attempts` sends in all, with `recovered` complete findings salvaged from the part that
+/// arrived.
+pub(crate) fn cut_off_reply_reason(attempts: Option<usize>, recovered: usize) -> String {
+    let sent = match attempts {
+        Some(1) => " after 1 attempt".to_string(),
+        Some(n) => format!(" after {n} attempts"),
+        None => String::new(),
+    };
+    format!(
+        "the model's reply was cut off at the output limit{sent}; {recovered} finding{} \
+         recovered, the remainder of this pass was not reviewed",
+        if recovered == 1 { "" } else { "s" }
+    )
+}
+
+/// A scan pass whose reply was cut off at the output limit and stayed cut off: the complete
+/// findings that arrived (`findings`), and the reason the pass is nevertheless a FAILED one. It
+/// travels as the `Err` of a pass so every pass runner keeps the recovered findings AND records
+/// the failure; nothing that arrived is dropped and the unreviewed remainder is never read as
+/// "no findings".
+#[derive(Debug)]
+struct PartialPassReply {
+    findings: Vec<Finding>,
+    proposed: Vec<ProposedRule>,
+    needs: Vec<String>,
+    reason: String,
+}
+
+impl PartialPassReply {
+    /// Salvage what a cut-off reply holds (see [`salvage_complete_findings`]).
+    fn from_cut_off(
+        repo: &str,
+        text: &str,
+        adopted: &std::collections::HashSet<String>,
+        attempts: usize,
+    ) -> Self {
+        let (findings, proposed) = salvage_complete_findings(repo, text, adopted);
+        let reason = cut_off_reply_reason(Some(attempts), findings.len());
+        Self {
+            findings,
+            proposed,
+            needs: Vec::new(),
+            reason,
+        }
+    }
+}
+
+impl std::fmt::Display for PartialPassReply {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.reason)
+    }
+}
+
+impl std::error::Error for PartialPassReply {}
+
+/// Recover every COMPLETE finding object from a reply cut off mid-way: the `{...}` entries of
+/// the `findings` array that closed before the output limit hit. The last, unfinished object and
+/// anything after it are not guessed at. The recovered objects go through the ordinary
+/// [`parse_ai_findings`], so they are shaped, redacted and typed exactly like a whole reply's.
+fn salvage_complete_findings(
+    repo: &str,
+    text: &str,
+    adopted: &std::collections::HashSet<String>,
+) -> (Vec<Finding>, Vec<ProposedRule>) {
+    let none = || (Vec::new(), Vec::new());
+    // Anchored at the JSON object: prose before the first `{` that happens to say "findings" is
+    // not the key, and the key must open the object or follow a comma.
+    let Some(obj_start) = text.find('{') else {
+        return none();
+    };
+    let json = &text[obj_start..];
+    let Some(key) = json
+        .match_indices("\"findings\"")
+        .map(|(i, _)| i)
+        .find(|&i| {
+            json[..i]
+                .trim_end()
+                .chars()
+                .last()
+                .is_some_and(|c| c == '{' || c == ',')
+        })
+    else {
+        return none();
+    };
+    let after = &json[key + "\"findings\"".len()..];
+    let Some(open) = after.find('[') else {
+        return none();
+    };
+    // Only whitespace and a colon may sit between the key and its array.
+    if !after[..open].chars().all(|c| c.is_whitespace() || c == ':') {
+        return none();
+    }
+    let body = &after[open + 1..];
+    let bytes = body.as_bytes();
+    let mut objects: Vec<&str> = Vec::new();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'{' => {
+                let start = i;
+                let (mut depth, mut in_str, mut esc) = (0usize, false, false);
+                let mut end = None;
+                while i < bytes.len() {
+                    let b = bytes[i];
+                    if in_str {
+                        if esc {
+                            esc = false;
+                        } else if b == b'\\' {
+                            esc = true;
+                        } else if b == b'"' {
+                            in_str = false;
+                        }
+                    } else if b == b'"' {
+                        in_str = true;
+                    } else if b == b'{' {
+                        depth += 1;
+                    } else if b == b'}' {
+                        depth -= 1;
+                        if depth == 0 {
+                            end = Some(i);
+                            break;
+                        }
+                    }
+                    i += 1;
+                }
+                match end {
+                    Some(e) => {
+                        objects.push(&body[start..=e]);
+                        i = e + 1;
+                    }
+                    // The object never closed: the cut-off point. Nothing after it is read.
+                    None => break,
+                }
+            }
+            b']' => break,
+            _ => i += 1,
+        }
+    }
+    // One object at a time: a complete-looking object that is not valid JSON is skipped on its
+    // own and does not cost the others.
+    let valid: Vec<&str> = objects
+        .into_iter()
+        .filter(|o| serde_json::from_str::<serde_json::Value>(o).is_ok())
+        .collect();
+    if valid.is_empty() {
+        return none();
+    }
+    let synthetic = format!("{{\"findings\":[{}]}}", valid.join(","));
+    parse_ai_findings(repo, &synthetic, adopted)
 }
 
 /// Why a pass failed when its spend limit stopped a retry the reply needed (the reply was cut
@@ -4965,6 +5382,8 @@ struct ScanReply {
     resp: crate::llm::LlmResponse,
     /// How many malformed-reply retries were sent.
     malformed_retries: usize,
+    /// True when the truncation retry was sent (the first reply was cut off and the retry ran).
+    truncation_retried: bool,
     /// True when the spend limit stopped a retry the reply needed (the reply is still cut off or
     /// malformed). The caller decides what that means for its pass.
     stopped_by_cap: bool,
@@ -4996,10 +5415,12 @@ async fn retry_unusable_scan_reply(
     let cap_reached = || meter.is_some_and(UsageMeter::retry_blocked);
     let mut wasted_counted = false;
     let mut stopped_by_cap = false;
+    let mut truncation_retried = false;
     if resp.truncated && efficiency_of(meter).truncation_retry {
         if cap_reached() {
             stopped_by_cap = true;
         } else {
+            truncation_retried = true;
             if let Some(m) = meter {
                 m.record_wasted(Stage::ScanPass, &resp);
             }
@@ -5066,6 +5487,7 @@ async fn retry_unusable_scan_reply(
     ScanReply {
         resp,
         malformed_retries,
+        truncation_retried,
         stopped_by_cap,
     }
 }
@@ -5436,8 +5858,13 @@ async fn run_passes(
             // completes — so a Mode-3 poller sees findings appear incrementally. A failed
             // pass still counts toward `done` so the progress bar can reach 100%.
             if let Some((jstore, jid)) = job {
-                if let Ok((f, _, _)) = &r {
-                    jstore.add_findings(jid, f.clone());
+                match &r {
+                    Ok((f, _, _)) => jstore.add_findings(jid, f.clone()),
+                    Err(e) => {
+                        if let Some(partial) = e.downcast_ref::<PartialPassReply>() {
+                            jstore.add_findings(jid, partial.findings.clone());
+                        }
+                    }
                 }
                 jstore.inc_done(jid, 1);
             }
@@ -5463,8 +5890,20 @@ async fn run_passes(
                 requested.extend(needs);
                 ok += 1;
             }
-            Some(Err(e)) => failures
-                .push(PassFailure::at(label, ci, n_c, bi, n_b, &e).with_files(chunks[ci].len())),
+            Some(Err(e)) => {
+                let failure =
+                    PassFailure::at(label, ci, n_c, bi, n_b, &e).with_files(chunks[ci].len());
+                // A reply cut off at the output limit keeps the complete findings that arrived.
+                match e.downcast::<PartialPassReply>() {
+                    Ok(partial) => {
+                        failures.push(failure.with_recovered(partial.findings.len()));
+                        findings.extend(partial.findings);
+                        proposed.extend(partial.proposed);
+                        requested.extend(partial.needs);
+                    }
+                    Err(_) => failures.push(failure),
+                }
+            }
             // Refused by the spend cap: already recorded as NOT RUN on the meter.
             None => {}
         }
@@ -5799,6 +6238,13 @@ async fn run_passes_batch(
             .into_iter()
             .map(|(w, resp)| async move {
                 if !(resp.truncated && eff.truncation_retry) {
+                    // No retry for this reply (complete but not JSON, or cut off with the
+                    // retry switched off): it bought nothing, and the telemetry says so.
+                    if resp.truncated || scan_output_is_malformed(&resp.text) {
+                        if let Some(m) = meter {
+                            m.record_wasted(Stage::ScanPass, &resp);
+                        }
+                    }
                     return (w, resp);
                 }
                 // SPEND CAP: the retry is one more real-time call. Refused, the cut-off reply is
@@ -5842,6 +6288,10 @@ async fn run_passes_batch(
     // counted them), so the shared reassembly gets no meter: recording again would bill twice.
     let pairs: Vec<(usize, usize)> = work.iter().map(|w| (w.ci, w.bi)).collect();
     let chunk_files: Vec<usize> = chunks.iter().map(|c| c.len()).collect();
+    // Every reply was staged as it arrived, so the reassembly stages nothing. With batch_default
+    // on, every unusable reply was already counted wasted above: by the retry step, or by the
+    // branch that sends no retry. Only the legacy path, which has neither, needs it here.
+    let wasted_meter = if eff.batch_default { None } else { meter };
     Ok(reassemble_batch_passes(
         repo,
         label,
@@ -5852,7 +6302,8 @@ async fn run_passes_batch(
         &results,
         &round.refused,
         adopted,
-        None,
+        wasted_meter,
+        true,
         job,
     ))
 }
@@ -5875,6 +6326,7 @@ fn reassemble_batch_passes(
     refused_ids: &std::collections::HashSet<String>,
     adopted: &std::collections::HashSet<String>,
     meter: Option<&UsageMeter>,
+    replies_already_metered: bool,
     job: Option<(&crate::jobs::JobStore, &str)>,
 ) -> PassesOut {
     let mut findings = Vec::new();
@@ -5882,6 +6334,13 @@ fn reassemble_batch_passes(
     let mut requested = std::collections::HashSet::new();
     let mut ok = 0usize;
     let mut failures: Vec<PassFailure> = Vec::new();
+    // A caller that metered each reply as it arrived still needs the replies that bought nothing
+    // counted as wasted; it must not stage them a second time.
+    let stage = |m: &UsageMeter, resp: &crate::llm::LlmResponse| {
+        if !replies_already_metered {
+            m.record_stage(Stage::ScanPass, resp);
+        }
+    };
 
     for &(ci, bi) in pairs {
         let custom_id = format!("c{ci}-b{bi}");
@@ -5897,7 +6356,7 @@ fn reassemble_batch_passes(
             // batch; it is a failed pass naming its files, never "no findings" (H4).
             Some(resp) if !resp.truncated && scan_output_is_malformed(&resp.text) => {
                 if let Some(m) = meter {
-                    m.record_stage(Stage::ScanPass, resp);
+                    stage(m, resp);
                     m.record_wasted(Stage::ScanPass, resp);
                 }
                 failures.push(
@@ -5915,9 +6374,31 @@ fn reassemble_batch_passes(
                     jstore.inc_done(jid, 1);
                 }
             }
+            // A batch item still cut off at the output limit (after the one retry a batch item
+            // gets, or with no retry on the legacy path) is a failed pass naming its files, and
+            // the complete findings that arrived are kept (H2). It never reads as "no findings".
+            Some(resp) if resp.truncated => {
+                if let Some(m) = meter {
+                    stage(m, resp);
+                    m.record_wasted(Stage::ScanPass, resp);
+                }
+                let (f, p) = salvage_complete_findings(repo, &resp.text, adopted);
+                let reason = cut_off_reply_reason(None, f.len());
+                failures.push(
+                    PassFailure::at(label, ci, n_c, bi, n_b, &reason)
+                        .with_files(chunk_files.get(ci).copied().unwrap_or(0))
+                        .with_recovered(f.len()),
+                );
+                if let Some((jstore, jid)) = job {
+                    jstore.add_findings(jid, f.clone());
+                    jstore.inc_done(jid, 1);
+                }
+                findings.extend(f);
+                proposed.extend(p);
+            }
             Some(resp) => {
                 if let Some(m) = meter {
-                    m.record_stage(Stage::ScanPass, resp);
+                    stage(m, resp);
                 }
                 let (f, p) = parse_ai_findings(repo, &resp.text, adopted);
                 let needs = parse_needs_files(&resp.text);
@@ -5936,7 +6417,7 @@ fn reassemble_batch_passes(
                 // the API gave (a refusal reads as a refusal) over a generic "missing".
                 // A failed item that was still billed (a refusal) counts toward the spend cap.
                 if let (Some(m), Some(billed)) = (meter, results.billed.get(&custom_id)) {
-                    m.record_stage(Stage::ScanPass, billed);
+                    stage(m, billed);
                 }
                 let reason = results
                     .errors
@@ -6066,6 +6547,9 @@ const SECURITY_RULE_TOKENS: &[&str] = &[
     "TLS", "SSL", "HTTPS", "CERT", "CORS", "EXPOSE", "EXPOSURE", "EXPOSED", "PUBLIC-BUCKET",
     // Redirect / crypto / tokens
     "REDIRECT", "CRYPTO", "RANDOM", "NONCE", "TOKEN",
+    // Object-level access, path handling and privilege (H5): ids the model invents for these
+    // classes ("AI-IDOR-INVOICES", "AI-PATH-TRAVERSAL-DOWNLOAD") carry none of the tokens above.
+    "IDOR", "TRAVERSAL", "MASS-ASSIGNMENT", "UNAUTHENTICATED", "PRIVILEGE",
     // Explicit "security" naming (CI security-scan rules, security-headers/method-security
     // rules) — a rule that names itself "security" in its own id is Security almost by
     // definition, and this token catches `CICD-*-SECURITY-SCAN-1`,
@@ -6270,6 +6754,62 @@ fn primary_rank(f: &Finding, group_len: usize, index: usize) -> (u8, u8, u8, u8,
     )
 }
 
+/// Record that `from` became `to` on `f`, and why, as one sentence through the ONE shared
+/// writer ([`crate::severity_bounds::record_adjustment`], which de-duplicates and caps); the
+/// exporters read it back with `recorded_adjustments`. A no-op when the two are the same. The
+/// reason is flattened to one line and capped so the entry stays one sentence.
+pub(crate) fn record_severity_adjustment(f: &mut Finding, from: &str, to: &str, reason: &str) {
+    if from == to {
+        return;
+    }
+    let verb = if severity_rank(to) < severity_rank(from) {
+        "lowered"
+    } else {
+        "raised"
+    };
+    let mut why: String = reason.split_whitespace().collect::<Vec<_>>().join(" ");
+    if why.chars().count() > 300 {
+        why = why.chars().take(297).collect::<String>() + "...";
+    }
+    let sentence = if why.is_empty() {
+        format!("severity {verb} from {from} to {to}")
+    } else {
+        format!("severity {verb} from {from} to {to}: {why}")
+    };
+    crate::severity_bounds::record_adjustment(f, sentence);
+}
+
+/// The one-line headline of a finding: its title (the text before the first `HEADLINE_SEP` in
+/// `detail`), or the start of its detail when it carries no title. Capped.
+pub(crate) fn finding_headline(f: &Finding) -> String {
+    let head = match f.detail.split_once(HEADLINE_SEP) {
+        Some((title, _)) => title.trim(),
+        None => f.detail.trim(),
+    };
+    // Model text reaches client prose through this headline: no em dashes.
+    let head = head.replace(" \u{2014} ", " - ").replace('\u{2014}', "-");
+    let one_line: String = head.split_whitespace().collect::<Vec<_>>().join(" ");
+    if one_line.chars().count() > 160 {
+        one_line.chars().take(157).collect::<String>() + "..."
+    } else {
+        one_line
+    }
+}
+
+/// `f`'s own evidence site as an absorbed [`MergedLocation`], keeping its OWN severity and
+/// headline so the merge never hides a higher rating or the defect it named (H5).
+fn absorbed_site(f: &Finding) -> MergedLocation {
+    MergedLocation::site(
+        f.repo.clone(),
+        f.path.clone(),
+        f.line,
+        f.rule_id.clone(),
+        f.snippet.clone(),
+        !f.located,
+    )
+    .with_rating(f.severity.clone(), finding_headline(f))
+}
+
 /// C5-1: the merged row's severity. The default — and the ONLY behavior when every member of
 /// the group shares the SAME origin tier (all deterministic, or all AI) — is the pre-existing
 /// `max()` across the group: a higher severity among peers of equal standing is a real
@@ -6332,7 +6872,46 @@ fn merge_location_group(group: Vec<Finding>) -> Finding {
             also.push(f.rule_id.clone());
         }
     }
+    // H5: every absorbed member leaves its own rule id, severity and headline behind, so a
+    // critical AI finding folded into a medium deterministic row stays visible with the rating
+    // and the title it carried. The members' own already-nested sites are carried too.
+    //
+    // The sites ALREADY nested (the primary's own, and each member's) are de-duplicated by
+    // (repo, path, line, rule) as `merge_semantic_group` does; each member's FRESH own-site
+    // entry is always kept, so every absorbed member leaves one.
+    let mut nested = std::mem::take(&mut primary.also_locations);
+    for f in &group {
+        nested.extend(f.also_locations.iter().cloned());
+    }
+    let mut nested_seen: std::collections::HashSet<(String, String, usize, String)> =
+        std::collections::HashSet::new();
+    nested.retain(|l| {
+        nested_seen.insert((l.repo.clone(), l.path.clone(), l.line, l.rule_id.clone()))
+    });
+    primary.also_locations = nested;
+    for f in &group {
+        primary.also_locations.push(absorbed_site(f));
+    }
+    let max_sev_seen = max_sev.clone();
     primary.severity = merged_severity(&primary, max_sev, all_same_tier);
+    if primary.severity != max_sev_seen {
+        let top = group
+            .iter()
+            .find(|f| f.severity == max_sev_seen)
+            .map(|f| f.rule_id.clone())
+            .unwrap_or_default();
+        let kept = primary.severity.clone();
+        let own = primary.rule_id.clone();
+        record_severity_adjustment(
+            &mut primary,
+            &max_sev_seen,
+            &kept,
+            &format!(
+                "{top} at {max_sev_seen} was merged into the grounded rule {own} at this \
+                 location, which keeps its own rating"
+            ),
+        );
+    }
     // C5-1: a deterministic primary with no codebase-specific fix of its own yet (normally
     // `fix_specific` is only populated in a LATER pipeline pass — see `Finding::fix_specific`'s
     // doc comment — but a finding carried forward from a prior incremental run can already carry
@@ -6346,6 +6925,61 @@ fn merge_location_group(group: Vec<Finding>) -> Finding {
     // member from an older cache would not be.
     crate::onboard::redact::redact_finding(&mut primary);
     primary
+}
+
+/// The snippet as a dedup key: whitespace collapsed and lowercased, so two chunks quoting the
+/// same line with different spacing still agree.
+fn dedup_snippet_key(snippet: &str) -> String {
+    snippet
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase()
+}
+
+/// Whether two normalized snippets name the same code: equal, or one is inside the other (a
+/// chunk quoting the whole statement and another only the call in it) when the shorter has at
+/// least [`MIN_CONTAINED_SNIPPET`] characters. An empty snippet matches only another empty one.
+fn same_snippet(a: &str, b: &str) -> bool {
+    if a.is_empty() || b.is_empty() || a == b {
+        return a == b;
+    }
+    // Containment counts only for a substantial shorter snippet: a short token such as `id`
+    // sits inside almost any line and proves nothing.
+    let (short, long) = if a.len() <= b.len() { (a, b) } else { (b, a) };
+    short.chars().count() >= MIN_CONTAINED_SNIPPET && long.contains(short)
+}
+
+/// Shortest normalized snippet that may match by being contained in another (M5).
+const MIN_CONTAINED_SNIPPET: usize = 12;
+
+/// Drop the repeats of one finding reported by several passes, keyed on
+/// `(path, line, rule id)` plus the snippet (M5): two findings are repeats when their
+/// normalized snippets are equal or one contains the other. A different snippet is a different
+/// problem (two things one rule found at line 0 of a file, or at one unresolved line
+/// estimate), so it is kept. Of a group of repeats the first is kept, at the HIGHEST severity
+/// any repeat carried. Order is preserved.
+fn dedup_findings_keep_max_severity(findings: &mut Vec<Finding>) {
+    let mut by_key: std::collections::HashMap<(String, usize, String), Vec<(String, usize)>> =
+        std::collections::HashMap::new();
+    let mut kept: Vec<Finding> = Vec::with_capacity(findings.len());
+    for f in std::mem::take(findings) {
+        let key = (f.path.clone(), f.line, f.rule_id.clone());
+        let snip = dedup_snippet_key(&f.snippet);
+        let entry = by_key.entry(key).or_default();
+        match entry.iter().find(|(s, _)| same_snippet(s, &snip)) {
+            Some(&(_, at)) => {
+                if severity_rank(&f.severity) > severity_rank(&kept[at].severity) {
+                    kept[at].severity = f.severity;
+                }
+            }
+            None => {
+                entry.push((snip, kept.len()));
+                kept.push(f);
+            }
+        }
+    }
+    *findings = kept;
 }
 
 /// Resolve each finding's line DETERMINISTICALLY from its verbatim snippet. LLMs can't count
@@ -6729,15 +7363,30 @@ fn structural_objects(f: &Finding) -> std::collections::HashSet<String> {
     out
 }
 
+/// `Finding::captures` keys that are BOOKKEEPING about the row, not objects the finding is
+/// about: the severity-adjustment sentences and the carried-from commit. Two unrelated findings
+/// can carry the same such value (the same ceiling sentence, the same commit), so they are never
+/// identity evidence for a merge, a veto, a backfill or a credential-identity match.
+const BOOKKEEPING_CAPTURE_KEYS: &[&str] = &[
+    crate::severity_bounds::SEVERITY_ADJUSTMENTS_CAPTURE,
+    crate::report_export::CARRIED_FROM_CAPTURE,
+];
+
+/// The captures that name an object: every capture except the bookkeeping keys.
+fn object_captures(f: &Finding) -> impl Iterator<Item = (&String, &String)> {
+    f.captures
+        .iter()
+        .filter(|(k, _)| !BOOKKEEPING_CAPTURE_KEYS.contains(&k.as_str()))
+}
+
 /// W7 (C4): a finding's normalized detector-capture VALUES — the same normalization
 /// [`shared_captured_object`] applies (trimmed, lowercased, length-floored at
 /// [`MIN_SHARED_CAPTURE_LEN`] so a bare `id`/`ok` value proves nothing). The STRUCTURED
 /// identity a detector emitted when it matched, as opposed to whatever the prose happens to
 /// mention.
 fn normalized_capture_values(f: &Finding) -> std::collections::HashSet<String> {
-    f.captures
-        .values()
-        .map(|v| v.trim().to_ascii_lowercase())
+    object_captures(f)
+        .map(|(_, v)| v.trim().to_ascii_lowercase())
         .filter(|v| v.len() >= MIN_SHARED_CAPTURE_LEN)
         .collect()
 }
@@ -6816,19 +7465,13 @@ const MIN_SHARED_CAPTURE_LEN: usize = 3;
 /// the object they each independently identified (one might key it `table`, the other
 /// `object-name`); the object identity is what matters, not the label.
 fn shared_captured_object(a: &Finding, b: &Finding) -> bool {
-    if a.captures.is_empty() || b.captures.is_empty() {
+    if object_captures(a).next().is_none() || object_captures(b).next().is_none() {
         return false;
     }
-    let a_values: std::collections::HashSet<String> = a
-        .captures
-        .values()
-        .map(|v| v.trim().to_ascii_lowercase())
-        .filter(|v| v.len() >= MIN_SHARED_CAPTURE_LEN)
-        .collect();
-    b.captures.values().any(|v| {
-        let v = v.trim().to_ascii_lowercase();
-        v.len() >= MIN_SHARED_CAPTURE_LEN && a_values.contains(&v)
-    })
+    let a_values = normalized_capture_values(a);
+    normalized_capture_values(b)
+        .iter()
+        .any(|v| a_values.contains(v))
 }
 
 /// C4-P1 design point 2: backfill a `captures` entry from the finding's own structural-object
@@ -6847,7 +7490,7 @@ fn shared_captured_object(a: &Finding, b: &Finding) -> bool {
 /// opportunity for a finding that previously had none, never silently pick the wrong object out
 /// of several. Never overwrites a `captures` entry a detector already set.
 fn backfill_captured_object(f: &mut Finding) {
-    if !f.captures.is_empty() {
+    if object_captures(f).next().is_some() {
         return;
     }
     let mut objs = structural_objects(f).into_iter();
@@ -6951,7 +7594,7 @@ fn credential_identifier_tokens(text: &str) -> std::collections::BTreeSet<String
 /// conservatively left two same-root-cause rows distinct.
 pub(crate) fn root_cause_credential_identities(f: &Finding) -> std::collections::BTreeSet<String> {
     let mut out = credential_identifier_tokens(&format!("{} {}", f.snippet, f.detail));
-    for v in f.captures.values() {
+    for (_, v) in object_captures(f) {
         out.extend(credential_identifier_tokens(v));
     }
     out
@@ -7359,14 +8002,7 @@ fn merge_semantic_group(group: Vec<Finding>) -> Finding {
                 also.push(r.clone());
             }
         }
-        fresh_locations.push(MergedLocation {
-            repo: f.repo.clone(),
-            path: f.path.clone(),
-            line: f.line,
-            rule_id: f.rule_id.clone(),
-            snippet: f.snippet.clone(),
-            consequence: !f.located,
-        });
+        fresh_locations.push(absorbed_site(f));
         nested_locations.extend(f.also_locations.iter().cloned());
     }
     // De-duplicate identical NESTED sites only (the same already-absorbed record can arrive
@@ -7395,7 +8031,21 @@ fn merge_semantic_group(group: Vec<Finding>) -> Finding {
     });
     let mut also_locations = nested_locations;
     also_locations.extend(fresh_locations);
+    let max_sev_seen = max_sev.clone();
     primary.severity = merged_severity(&primary, max_sev, all_same_tier);
+    if primary.severity != max_sev_seen {
+        let kept = primary.severity.clone();
+        let own = primary.rule_id.clone();
+        record_severity_adjustment(
+            &mut primary,
+            &max_sev_seen,
+            &kept,
+            &format!(
+                "a member of this merge was rated {max_sev_seen}; the row keeps the rating of \
+                 the grounded rule {own}"
+            ),
+        );
+    }
     primary.also_matches = also;
     primary.also_locations = also_locations;
     if primary.fix_specific.is_none() {
@@ -7553,14 +8203,14 @@ fn build_structural_group_finding(rule_id: String, occurrences: Vec<Finding>) ->
     let mut also_locations: Vec<MergedLocation> = Vec::new();
     for (i, f) in occurrences.iter().enumerate() {
         if i > 0 {
-            also_locations.push(MergedLocation {
-                repo: f.repo.clone(),
-                path: f.path.clone(),
-                line: f.line,
-                rule_id: f.rule_id.clone(),
-                snippet: f.snippet.clone(),
-                consequence: false,
-            });
+            also_locations.push(MergedLocation::site(
+                f.repo.clone(),
+                f.path.clone(),
+                f.line,
+                f.rule_id.clone(),
+                f.snippet.clone(),
+                false,
+            ));
         }
         also_locations.extend(f.also_locations.iter().cloned());
     }
@@ -9182,7 +9832,9 @@ pub async fn audit_repo(
     // Every pass failed -> surface the error so the caller notes the AI audit was skipped
     // (the deterministic findings still return independently). Each pass already finalized
     // its own transcript status, so the UI spinner stops regardless.
-    if ok_passes == 0 {
+    // A cut-off reply that still yielded complete findings is not "nothing came back": those
+    // findings are kept and the failure is disclosed as a failed pass below (H1).
+    if ok_passes == 0 && all_findings.is_empty() {
         if let Some(last) = pass_failures.last() {
             return Err(anyhow::anyhow!(
                 "all {} audit pass(es) failed; last: {}: {}",
@@ -9209,11 +9861,68 @@ pub async fn audit_repo(
     // The resolution round runs the FULL selected rule set against the requested files (no
     // per-rule routing) so no cross-file deferred judgment is inadvertently skipped. Advisory
     // is enabled (default) since this is an independent pass over a small file set.
+    let requested_norm: std::collections::HashSet<String> = requested
+        .iter()
+        .map(|p| normalize_requested_path(p))
+        .collect();
     let resolution: Vec<(String, String)> = files
         .iter()
-        .filter(|(p, _)| requested.contains(p))
+        .filter(|(p, _)| requested_norm.contains(&normalize_requested_path(p)))
         .cloned()
         .collect();
+    // M6: a file a pass asked for but that cannot be put in front of the model is DISCLOSED, not
+    // forgotten: the judgment that wanted it stays unresolved and the report says so.
+    {
+        let have: std::collections::HashSet<String> = files
+            .iter()
+            .map(|(p, _)| normalize_requested_path(p))
+            .collect();
+        let in_repo: std::collections::HashSet<String> = map_files
+            .unwrap_or(files)
+            .iter()
+            .map(|(p, _)| normalize_requested_path(p))
+            .collect();
+        let mut missing: Vec<&String> = requested_norm
+            .iter()
+            .filter(|p| !p.is_empty() && !have.contains(*p))
+            .collect();
+        missing.sort();
+        let (unchanged, unknown): (Vec<&String>, Vec<&String>) =
+            missing.into_iter().partition(|p| in_repo.contains(*p));
+        let name_list = |v: &[&String]| {
+            let shown: Vec<&str> = v.iter().take(10).map(|s| s.as_str()).collect();
+            let more = v.len().saturating_sub(shown.len());
+            if more > 0 {
+                format!("{} and {more} more", shown.join(", "))
+            } else {
+                shown.join(", ")
+            }
+        };
+        if !unknown.is_empty() {
+            failed_passes.push(FailedPass {
+                repo: repo.to_string(),
+                pass: "deferred judgment".to_string(),
+                reason: format!(
+                    "requested files not in scan: {}. A rule that needed them could not be \
+                     judged.",
+                    name_list(&unknown)
+                ),
+                files_not_reviewed: 0,
+            });
+        }
+        if !unchanged.is_empty() {
+            failed_passes.push(FailedPass {
+                repo: repo.to_string(),
+                pass: "deferred judgment".to_string(),
+                reason: format!(
+                    "requested files not re-read in this run (unchanged since the last \
+                     inspection): {}. A rule that needed them was not re-judged.",
+                    name_list(&unchanged)
+                ),
+                files_not_reviewed: 0,
+            });
+        }
+    }
     if !resolution.is_empty() {
         let effective_pairs = crate::scan_routing::rule_pairs(&effective_selected);
         let batches_res: Vec<&[(String, String)]> = if effective_pairs.is_empty() {
@@ -9288,8 +9997,7 @@ pub async fn audit_repo(
     // is N-in / M-out (M < N), a true dedup, not the calibration pass's N-in/N-out scoring.
     {
         let rows_in = all_findings.len();
-        let mut seen = std::collections::HashSet::new();
-        all_findings.retain(|f| seen.insert((f.path.clone(), f.line, f.rule_id.clone())));
+        dedup_findings_keep_max_severity(&mut all_findings);
         let rows_after_dedup = all_findings.len();
         all_findings = merge_by_location(all_findings, files);
         let rows_out = all_findings.len();
@@ -10100,8 +10808,7 @@ async fn run_security_lens(
     // so one smell reported under several names at one line is ONE row.
     let mut findings = findings;
     resolve_finding_lines(&mut findings, files);
-    let mut seen = std::collections::HashSet::new();
-    findings.retain(|f| seen.insert((f.path.clone(), f.line, f.rule_id.clone())));
+    dedup_findings_keep_max_severity(&mut findings);
     let findings = merge_by_location(findings, files);
     // `terse_output`: the lens asked for a one-sentence `detail`; write the full one for the
     // survivors. A lens finding that could not get one keeps the short detail plus the
@@ -10240,6 +10947,16 @@ async fn run_security_passes(
                         }
                         anyhow::bail!("{}", malformed_reply_reason(1));
                     }
+                    // Cut off at the output limit: the complete findings that arrived are kept
+                    // and the chunk is reported as not fully reviewed (H1).
+                    if resp.truncated {
+                        if let Some(m) = meter {
+                            m.record_wasted(Stage::DeepTier, &resp);
+                        }
+                        return Err(
+                            PartialPassReply::from_cut_off(repo, &resp.text, adopted, 1).into()
+                        );
+                    }
                     let (f, p) = parse_ai_findings(repo, &resp.text, adopted);
                     let needs = parse_needs_files(&resp.text);
                     Ok((f, p, needs))
@@ -10268,10 +10985,19 @@ async fn run_security_passes(
                 requested.extend(needs);
                 ok += 1;
             }
-            Err(e) => failures.push(
-                PassFailure::named(format!("deep security {}/{n_c}", ci + 1), &e)
-                    .with_files(chunks[ci].len()),
-            ),
+            Err(e) => {
+                let failure = PassFailure::named(format!("deep security {}/{n_c}", ci + 1), &e)
+                    .with_files(chunks[ci].len());
+                match e.downcast::<PartialPassReply>() {
+                    Ok(partial) => {
+                        failures.push(failure.with_recovered(partial.findings.len()));
+                        findings.extend(partial.findings);
+                        proposed.extend(partial.proposed);
+                        requested.extend(partial.needs);
+                    }
+                    Err(_) => failures.push(failure),
+                }
+            }
         }
     }
     let _ = n_b; // single batch; kept for parity/readability with run_passes.
@@ -10420,6 +11146,9 @@ mod candidate_prefilter_tests;
 
 #[cfg(test)]
 mod malformed_reply_tests;
+
+#[cfg(test)]
+mod fn_batch_a_tests;
 
 #[cfg(test)]
 mod drift_tests;
@@ -10897,14 +11626,14 @@ mod tests {
         // id's own site in `also_locations`.
         let mut a = structural_needs_review("a.rs", 10);
         a.also_matches = vec!["AI-ALREADY-MERGED-1".to_string()];
-        a.also_locations = vec![MergedLocation {
-            repo: a.repo.clone(),
-            path: "already-merged-site.rs".to_string(),
-            line: 99,
-            rule_id: "AI-ALREADY-MERGED-1".to_string(),
-            snippet: "prior evidence".to_string(),
-            consequence: false,
-        }];
+        a.also_locations = vec![MergedLocation::site(
+            a.repo.clone(),
+            "already-merged-site.rs".to_string(),
+            99,
+            "AI-ALREADY-MERGED-1".to_string(),
+            "prior evidence".to_string(),
+            false,
+        )];
         let b = structural_needs_review("b.rs", 20);
 
         let out = group_structural_needs_review(vec![a, b]);
@@ -15257,6 +15986,7 @@ mod tests {
             &std::collections::HashSet::new(),
             &std::collections::HashSet::new(),
             None,
+            false,
             None,
         );
         assert_eq!(ok, 1);
@@ -16600,14 +17330,14 @@ mod tests {
                 // A merged row that ABSORBED one more site under the same rule — the
                 // numerator must count it (2 rows + 1 absorbed = 3 deviating sites).
                 let mut f = deviation_fixture("MULTI-RULE-1", "src/b.rs", 20);
-                f.also_locations.push(MergedLocation {
-                    repo: "me/api".to_string(),
-                    path: "src/c.rs".to_string(),
-                    line: 30,
-                    rule_id: "MULTI-RULE-1".to_string(),
-                    snippet: "third site".to_string(),
-                    consequence: false,
-                });
+                f.also_locations.push(MergedLocation::site(
+                    "me/api".to_string(),
+                    "src/c.rs".to_string(),
+                    30,
+                    "MULTI-RULE-1".to_string(),
+                    "third site".to_string(),
+                    false,
+                ));
                 f
             },
             // An unrelated rule's row must be untouched.

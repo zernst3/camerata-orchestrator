@@ -73,14 +73,14 @@ fn finding_carrying(p: &Planted, kind: FindingKind) -> Finding {
         )),
         calibration_rationale: Some(format!("Floored: {}", p.text)),
         captures,
-        also_locations: vec![MergedLocation {
-            repo: "acme/app".to_string(),
-            path: ".env.local".to_string(),
-            line: 5,
-            rule_id: "SEC-NO-VENDOR-TOKEN-1".to_string(),
-            snippet: p.text.clone(),
-            consequence: false,
-        }],
+        also_locations: vec![MergedLocation::site(
+            "acme/app".to_string(),
+            ".env.local".to_string(),
+            5,
+            "SEC-NO-VENDOR-TOKEN-1".to_string(),
+            p.text.clone(),
+            false,
+        )],
         kind: Some(kind),
         ..Finding::default()
     }

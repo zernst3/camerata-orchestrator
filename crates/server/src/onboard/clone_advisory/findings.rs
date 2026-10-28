@@ -332,13 +332,15 @@ pub fn confirmed_finding(
         None => (String::new(), 0, String::new()),
     };
     let also_locations: Vec<MergedLocation> = sites
-        .map(|site| MergedLocation {
-            repo: repo.to_string(),
-            path: site.path.clone(),
-            line: site.start_line as usize,
-            rule_id: c.rule.id().to_string(),
-            snippet: first_line(site, files),
-            consequence: false,
+        .map(|site| {
+            MergedLocation::site(
+                repo.to_string(),
+                site.path.clone(),
+                site.start_line as usize,
+                c.rule.id().to_string(),
+                first_line(site, files),
+                false,
+            )
         })
         .collect();
     let mut finding = Finding {

@@ -29,6 +29,8 @@ pub(super) enum Reply {
     /// A reply with no findings (for tests that look at what was SENT, not what came back).
     Empty,
     Truncated,
+    /// A complete reply that holds no JSON.
+    Malformed,
     Errored,
     Missing,
     /// A failed item that was nevertheless billed (a model refusal).
@@ -234,6 +236,10 @@ impl BatchApi for FakeBatch {
                     )),
                     Reply::Truncated => Some(row(
                         Some(response(r#"{"findings":[{"path":"#, true, self.cost)),
+                        None,
+                    )),
+                    Reply::Malformed => Some(row(
+                        Some(response("prose, not JSON at all", false, self.cost)),
                         None,
                     )),
                     Reply::Errored => Some(row(None, Some("overloaded"))),
@@ -858,4 +864,36 @@ async fn batch_items_carry_the_terse_system_prompt_and_the_token_count_uses_the_
         audit_system_prompt_with(false),
         "the two forms differ, so the loop above tells them apart"
     );
+}
+
+fn wasted_and_calls(m: &UsageMeter) -> (u64, u64) {
+    let usage = m.stage_telemetry(1_000).stages[0].usage.clone();
+    (usage.calls, usage.wasted_calls)
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_malformed_batch_reply_is_counted_wasted_once_in_both_modes() {
+    for batch_default in [true, false] {
+        let api = FakeBatch::new(|_round, _id| Reply::Malformed);
+        let m = meter(eff(batch_default), None);
+        let (_f, ok, failures) = run(&api, &m).await;
+        assert_eq!(ok, 0);
+        assert_eq!(failures.len(), 4);
+        assert_eq!(
+            wasted_and_calls(&m),
+            (4, 4),
+            "four replies, each staged once and counted wasted once (batch_default {batch_default})"
+        );
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_truncated_batch_reply_with_the_retry_off_is_counted_wasted() {
+    let api = FakeBatch::new(|_round, _id| Reply::Truncated);
+    let mut efficiency = eff(true);
+    efficiency.truncation_retry = false;
+    let m = meter(efficiency, None);
+    run(&api, &m).await;
+    assert_eq!(api.realtime.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(wasted_and_calls(&m), (4, 4));
 }

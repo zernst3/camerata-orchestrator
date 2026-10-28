@@ -307,6 +307,7 @@ fn a_malformed_batch_item_is_a_failed_pass_not_zero_findings() {
         &std::collections::HashSet::new(),
         &adopted,
         None,
+        false,
         None,
     );
     assert_eq!(ok, 1);

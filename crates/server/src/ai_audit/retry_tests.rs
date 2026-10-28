@@ -328,7 +328,11 @@ async fn a_truncated_pass_retries_once_with_a_higher_cap_and_keeps_the_complete_
 async fn a_pass_truncated_twice_is_retried_once_only() {
     let llm = ScriptedLlm::new(&[(CUT_OFF, true)]);
     let meter = UsageMeter::default();
-    let _ = pass(&llm, &meter).await.expect("the pass completes");
+    // Still cut off after the one retry: a failed pass (H1) that keeps the complete findings.
+    let err = pass(&llm, &meter)
+        .await
+        .expect_err("a reply still cut off after the retry is a failed pass, not a clean one");
+    assert!(err.downcast_ref::<PartialPassReply>().is_some(), "{err}");
     assert_eq!(llm.calls(), 2, "never a third attempt");
 }
 
@@ -359,12 +363,18 @@ async fn a_clean_pass_is_one_call_and_nothing_is_wasted() {
 
 #[tokio::test]
 async fn a_failed_retry_never_makes_the_pass_worse_than_before() {
-    // The first call is cut off, the retry hits a transport error: the pass still returns Ok with
-    // what the first response parsed to (as it always did), not an Err that loses the chunk.
+    // The first call is cut off, the retry hits a transport error: the pass keeps what the first
+    // response held (its complete findings) and is reported as cut off (H1), so the chunk is
+    // neither lost nor read as clean.
     let mut llm = ScriptedLlm::new(&[(CUT_OFF, true)]);
     llm.fail_after = Some(1);
     let meter = UsageMeter::default();
-    let out = pass(&llm, &meter).await;
-    assert!(out.is_ok(), "{out:?}");
+    let err = pass(&llm, &meter)
+        .await
+        .expect_err("cut off, so a failed pass");
+    let partial = err
+        .downcast::<PartialPassReply>()
+        .expect("the failure carries what was recovered");
+    assert!(!partial.findings.is_empty(), "{partial:?}");
     assert_eq!(llm.calls(), 2);
 }

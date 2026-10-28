@@ -50,7 +50,7 @@ fn redact_option(text: &mut Option<String>) -> usize {
 
 /// Redact every client-visible free-text field of a finding IN PLACE: `snippet`, `detail`,
 /// `fix_specific`, `calibration_rationale`, every `captures` value, every `also_locations`
-/// snippet, and the string payload of the finding's kind. Returns the number of values replaced.
+/// snippet and headline, and the string payload of the finding's kind. Returns the number of values replaced.
 /// Idempotent. Called by every producer the moment a row is complete.
 pub(crate) fn redact_finding(f: &mut Finding) -> usize {
     let mut count = redact_string(&mut f.snippet)
@@ -62,6 +62,7 @@ pub(crate) fn redact_finding(f: &mut Finding) -> usize {
     }
     for site in &mut f.also_locations {
         count += redact_string(&mut site.snippet);
+        count += redact_string(&mut site.headline);
     }
     count += match &mut f.kind {
         Some(FindingKind::Deviation(d)) => redact_string(&mut d.convention_label),

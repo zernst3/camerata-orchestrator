@@ -406,6 +406,105 @@ pub struct MergedLocation {
     /// that shares the SAME fix as the primary. A report renders a consequence site under
     /// "also affects" instead of listing it as a peer evidence location.
     pub consequence: bool,
+    /// The severity this site carried before it was absorbed. A merged row keeps ONE severity
+    /// (see `ai_audit::merged_severity`); an absorbed member's own severity is kept here so a
+    /// higher rating is never hidden by the merge. Empty for a record that predates the field
+    /// (back-compatible serde default); renderers show it only when present.
+    #[serde(default)]
+    pub severity: String,
+    /// The absorbed member's own one-line headline (its title), kept for the same reason as
+    /// `severity`. Empty when the member had none or the record predates the field.
+    #[serde(default)]
+    pub headline: String,
+}
+
+impl MergedLocation {
+    /// An absorbed site with no rating or headline recorded. Every construction goes through
+    /// this (and [`Self::with_rating`]) so a new field never breaks a caller.
+    pub fn site(
+        repo: impl Into<String>,
+        path: impl Into<String>,
+        line: usize,
+        rule_id: impl Into<String>,
+        snippet: impl Into<String>,
+        consequence: bool,
+    ) -> Self {
+        Self {
+            repo: repo.into(),
+            path: path.into(),
+            line,
+            rule_id: rule_id.into(),
+            snippet: snippet.into(),
+            consequence,
+            severity: String::new(),
+            headline: String::new(),
+        }
+    }
+
+    /// The same site, recording the severity and headline the absorbed finding carried.
+    pub fn with_rating(mut self, severity: impl Into<String>, headline: impl Into<String>) -> Self {
+        self.severity = severity.into();
+        self.headline = headline.into();
+        self
+    }
+
+    /// Where this site is, for counting distinct places.
+    pub fn place(&self) -> SitePlace {
+        site_place(
+            &self.repo,
+            &self.path,
+            self.line,
+            &self.snippet,
+            &site_identity(&self.rule_id, &self.headline),
+        )
+    }
+}
+
+/// The identity of a place in the code: repo, path and line. A finding with no line (0) has no
+/// place of its own beyond the file, so its snippet tells two apart, and with no snippet either
+/// its own identity (rule id and headline) does.
+pub type SitePlace = (String, String, usize, String);
+
+/// A finding's own identity for telling two apart when neither a line nor a snippet does.
+pub fn site_identity(rule_id: &str, headline: &str) -> String {
+    format!("{rule_id}|{}", headline.trim())
+}
+
+/// See [`SitePlace`]. `identity` is [`site_identity`] of the finding.
+pub fn site_place(repo: &str, path: &str, line: usize, snippet: &str, identity: &str) -> SitePlace {
+    let discriminator = if line != 0 {
+        String::new()
+    } else if snippet.trim().is_empty() {
+        identity.to_string()
+    } else {
+        snippet.trim().to_string()
+    };
+    (repo.to_string(), path.to_string(), line, discriminator)
+}
+
+impl Finding {
+    /// This finding's own place in the code.
+    pub fn place(&self) -> SitePlace {
+        site_place(
+            &self.repo,
+            &self.path,
+            self.line,
+            &self.snippet,
+            &site_identity(&self.rule_id, &crate::ai_audit::finding_headline(self)),
+        )
+    }
+
+    /// How many DISTINCT places this row stands for: its own plus every absorbed site at a
+    /// different place. A member absorbed at the row's own line is the same place, not another
+    /// site, and reads as "also flagged here".
+    pub fn distinct_site_count(&self) -> usize {
+        let mut seen: std::collections::HashSet<SitePlace> = std::collections::HashSet::new();
+        seen.insert(self.place());
+        for l in &self.also_locations {
+            seen.insert(l.place());
+        }
+        seen.len()
+    }
 }
 
 /// A finding is presumed presence-type (`located = true`) unless the AI merge pass proves its
@@ -3813,14 +3912,14 @@ mod tests {
     fn cross_family_merge_ledger_reconciles_when_a_fresh_absorption_collides_with_an_already_absorbed_site(
     ) {
         let mut pre_primary = structural_site("acme/api", "handler.rs", 50, "RULE-1");
-        pre_primary.also_locations = vec![MergedLocation {
-            repo: "acme/api".to_string(),
-            path: "handler.rs".to_string(),
-            line: 52,
-            rule_id: "RULE-1".to_string(),
-            snippet: "already-absorbed-earlier".to_string(),
-            consequence: false,
-        }];
+        pre_primary.also_locations = vec![MergedLocation::site(
+            "acme/api".to_string(),
+            "handler.rs".to_string(),
+            52,
+            "RULE-1".to_string(),
+            "already-absorbed-earlier".to_string(),
+            false,
+        )];
         let y = structural_site("acme/api", "handler.rs", 52, "RULE-1");
 
         let findings = vec![pre_primary, y];
