@@ -201,12 +201,14 @@ fn label_after_prefix_off_puts_the_label_back_inside_the_cached_prefix() {
 
 #[test]
 fn batch_long_cache_off_asks_for_the_five_minute_cache() {
+    // A many-item submission, where the 1-hour cache is the cheaper one (rank 2's TTL rule).
+    use super::batch_mode::batch_cache_ttl;
     assert_eq!(
-        batch_cache_ttl(EfficiencyConfig::default()),
+        batch_cache_ttl(EfficiencyConfig::default(), 40),
         crate::llm::CacheTtl::OneHour
     );
     assert_eq!(
-        batch_cache_ttl(off("batch_long_cache")),
+        batch_cache_ttl(off("batch_long_cache"), 40),
         crate::llm::CacheTtl::FiveMinutes
     );
 }

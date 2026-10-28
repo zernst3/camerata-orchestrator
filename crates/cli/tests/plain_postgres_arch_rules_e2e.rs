@@ -142,6 +142,7 @@ async fn plain_postgres_repo_fires_both_rules_through_camerata_inspect_end_to_en
         // architectural engine both still run; only the AI review is skipped.
         backend: ProjectBackend::Api,
         batch: false,
+        realtime: false,
         model: None,
         calibration_model: None,
         full: true,

@@ -566,9 +566,8 @@ pub fn render_human_for(report: &RunReport, strict: bool) -> String {
             }
         }
     }
-    if !report.corpus_bounds_applied
-        && !(report.violations.is_empty() && report.not_assessed.is_empty())
-    {
+    let nothing_reported = report.violations.is_empty() && report.not_assessed.is_empty();
+    if !report.corpus_bounds_applied && !nothing_reported {
         out.push_str(
             "\nNote: the rule corpus could not be loaded completely (set CAMERATA_CORPUS_PATH to \
              the corpus directory; skipped files are named on stderr), so the corpus's severity \

@@ -71,10 +71,15 @@ pub struct InspectArgs {
     /// project's `backend` field. The `camerata inspect` flag defaults to `Api` (a client inspection
     /// runs on the Anthropic API); `Cli` is an explicit choice for internal benchmark runs.
     pub backend: ProjectBackend,
-    /// Use the Anthropic Message Batches path (`ScanMode::Batch`): ~50% cheaper, latency is
-    /// not returned until the whole batch completes. Requires `backend: Api` plus a
-    /// configured key — [`validate_args`] rejects the combination eagerly otherwise.
+    /// `--batch`: FORCE the Anthropic Message Batches path (`ScanMode::Batch`): ~50% cheaper,
+    /// latency is not returned until the whole batch completes. Requires `backend: Api` plus a
+    /// configured key ([`validate_args`] rejects the combination eagerly otherwise). With
+    /// neither this nor [`Self::realtime`] set the run's default applies
+    /// ([`camerata_server::ai_audit::resolve_scan_mode`]): batch on the API backend unless
+    /// `batch_default` is off.
     pub batch: bool,
+    /// `--realtime`: FORCE real-time (parallel) calls. Exclusive with [`Self::batch`].
+    pub realtime: bool,
     /// Explicit model override for the audit pass. `None`/blank falls back to
     /// [`camerata_server::llm::DEFAULT_MODEL`] — the same floor `step_model` uses for the
     /// project-less edge.
@@ -127,6 +132,7 @@ pub struct InspectOutcome {
     pub export_path: PathBuf,
     pub export_zip_bytes: usize,
     pub backend: ProjectBackend,
+    /// Whether the scan ran as a Message Batch (the resolved mode, forced or default).
     pub batch: bool,
     /// Real token usage + cost for this run's AI passes (audit + calibration), when the AI
     /// review actually ran. `None` on an AI-off / compliance-blocked (floor-only) run — see
@@ -243,6 +249,9 @@ pub fn validate_args(args: &InspectArgs, has_api_key: bool) -> Result<(), String
             "--export directory {} does not exist",
             export_dir.display()
         ));
+    }
+    if args.batch && args.realtime {
+        return Err("--batch and --realtime cannot both be given (pick one mode)".to_string());
     }
     if args.batch && !matches!(args.backend, ProjectBackend::Api) {
         return Err(
@@ -612,11 +621,26 @@ pub async fn run_inspect_pipeline_with(
 
     // ── Backend resolution + the process-local usage ledger ────────────────────────────
     let backend_resolution = resolve_backend(args.backend, has_api_key);
-    let mode = if args.batch {
-        ScanMode::parse(Some("batch"))
+    // The mode: forced by `--batch` / `--realtime`, else the run's default (rank 2: a Message
+    // Batch on the API backend). The CLI backend cannot batch; that is said once, here, before
+    // any model call.
+    let requested = if args.batch {
+        Some(ScanMode::Batch)
+    } else if args.realtime {
+        Some(ScanMode::Parallel)
     } else {
-        ScanMode::Parallel
+        None
     };
+    let mode_choice = camerata_server::ai_audit::resolve_scan_mode(
+        requested,
+        &backend_resolution,
+        controls.efficiency,
+    );
+    if let Some(notice) = &mode_choice.notice {
+        (seams.preflight_sink)(&format!("camerata inspect: {notice}\n"));
+    }
+    let mode = mode_choice.mode;
+    let batch = mode == ScanMode::Batch;
     let model = args.model.as_deref().filter(|m| !m.trim().is_empty());
     let calibration_model = args
         .calibration_model
@@ -682,7 +706,7 @@ pub async fn run_inspect_pipeline_with(
         let audit_model = camerata_server::ai_audit::resolve_audit_model(model);
         let pf = preflight::build(&preflight::PreflightInputs {
             backend: args.backend,
-            batch: args.batch,
+            batch,
             calibration_model: calibration_model
                 .map(str::to_string)
                 .unwrap_or_else(|| audit_model.clone()),
@@ -849,7 +873,7 @@ pub async fn run_inspect_pipeline_with(
         export_path: args.export,
         export_zip_bytes: zip_bytes.len(),
         backend: args.backend,
-        batch: args.batch,
+        batch,
         actual_usage: report.actual_usage.clone(),
         findings_count: report.findings.len(),
         ledger_summary,
@@ -1163,6 +1187,7 @@ mod tests {
             export,
             backend: ProjectBackend::Cli,
             batch: false,
+            realtime: false,
             model: None,
             calibration_model: None,
             full: false,
@@ -1314,6 +1339,22 @@ mod tests {
         args.backend = ProjectBackend::Cli;
         let err = validate_args(&args, true).expect_err("batch must require the api backend");
         assert!(err.contains("--batch requires --backend api"), "{err}");
+    }
+
+    #[test]
+    fn validate_args_rejects_forcing_batch_and_realtime_together() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut args = base_args(dir.path().to_path_buf(), dir.path().to_path_buf());
+        args.backend = ProjectBackend::Api;
+        args.batch = true;
+        args.realtime = true;
+        let err = validate_args(&args, true).expect_err("one mode at a time");
+        assert!(err.contains("--batch and --realtime"), "{err}");
+        args.batch = false;
+        assert!(
+            validate_args(&args, true).is_ok(),
+            "--realtime alone is fine"
+        );
     }
 
     #[test]

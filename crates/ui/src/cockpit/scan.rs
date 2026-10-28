@@ -1814,13 +1814,14 @@ pub(super) async fn audit_job_start(
 
 /// Recommend a scan mode by the scanned codebase's SCALE (the design's auto-select):
 /// multi-repo or a large codebase → Background job (decoupled, walk-away); otherwise
-/// Parallel (fast enough to wait on). Sequential is never auto-recommended — it's a manual
-/// gentle/debug override. The user can always change it.
+/// `auto`, the server's default (a Message Batch on the API backend, real time on the CLI
+/// backend; `camerata_server::ai_audit::resolve_scan_mode`). Parallel and Sequential are never
+/// auto-recommended: picking one forces real time. The user can always change it.
 pub(super) fn recommend_scan_mode(report: &ScanReportView) -> String {
     if report.repos.len() > 1 || report.files_scanned > 150 {
         "job".to_string()
     } else {
-        "parallel".to_string()
+        "auto".to_string()
     }
 }
 
@@ -7532,8 +7533,9 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
             calibration_model.set(m);
         }
     }
-    // Scan mode (user-facing): "parallel" (default), "sequential" (gentle), or "job"
-    // (async — submit, walk away, poll). Job uses parallel execution + async delivery.
+    // Scan mode (user-facing): "auto" (default: the server picks batch on the API backend),
+    // "parallel" / "sequential" (forced real time), "batch" (forced batch), or "job" (async:
+    // submit, walk away, poll). Job sends "auto", so it batches on the API backend too.
     // AUTO-SELECTED by the scan's scale; the user can override.
     let recommended_mode = recommend_scan_mode(&report);
     let mut audit_mode = use_signal(|| recommended_mode.clone());
@@ -8521,7 +8523,7 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                                 let loading_count = loading_count;
                                 spawn(async move {
                                     let _guard = crate::loading::LoadingGuard::from_count(loading_count);
-                                    let Some(jid) = audit_job_start(&repos, &rules, &model, &calib, "parallel", thorough, incremental, deep, ai, det, max_cost).await else {
+                                    let Some(jid) = audit_job_start(&repos, &rules, &model, &calib, "auto", thorough, incremental, deep, ai, det, max_cost).await else {
                                         auditing.set(false);
                                         job_failed_message.set(Some(
                                             "Could not start the background scan (the request \
@@ -8685,15 +8687,16 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                         disabled: auditing(),
                         value: "{audit_mode}",
                         onchange: move |e| audit_mode.set(e.value()),
-                        option { value: "parallel", "Parallel" }
-                        option { value: "sequential", "Sequential (slower, gentlest)" }
-                        option { value: "job", "Background job (walk away)" }
-                        option { value: "batch", "Batch (50% off — async, API key required)" }
+                        option { value: "auto", "Default (batch on the API backend, else parallel)" }
+                        option { value: "parallel", "Parallel (real time)" }
+                        option { value: "sequential", "Sequential (real time, slower, gentlest)" }
+                        option { value: "job", "Background job (walk away, default mode)" }
+                        option { value: "batch", "Batch (50% off, async, API key required)" }
                     }
                     if audit_mode() == recommended_mode {
                         span { class: "audit-mode-rec", "✓ auto-selected for this scan's size" }
                     }
-                    span { class: "audit-model-hint", "Parallel runs rule-batches concurrently. Background job runs server-side so you can leave and watch findings stream in — best for huge / multi-repo scans. Batch uses the Anthropic Message Batches API for a flat 50% discount on all tokens; requires an Anthropic API key (added in the app, or set as ANTHROPIC_API_KEY) and the api backend; results arrive asynchronously (seconds to minutes, up to 24h on very large scans)." }
+                    span { class: "audit-model-hint", "Default runs the scan as a Message Batch on the API backend (half price, results when the whole batch is done) and in real time on the CLI backend. Parallel and Sequential force real time. Parallel runs rule-batches concurrently. Background job runs server-side so you can leave and watch findings stream in — best for huge / multi-repo scans. Batch uses the Anthropic Message Batches API for a flat 50% discount on all tokens; requires an Anthropic API key (added in the app, or set as ANTHROPIC_API_KEY) and the api backend; results arrive asynchronously (seconds to minutes, up to 24h on very large scans)." }
                 }
                 // Thorough calibration (#51) — opt-in, costs more AI.
                 div { class: "audit-model-row",
@@ -8816,7 +8819,7 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                         // alternative-recommendation pass the audit will run.
                         let multi_option_selected =
                             report.proposed_rules.iter().filter(|r| r.options.len() >= 2).count();
-                        let (toks, dollars, passes) = estimate_audit_cost(report.code_chars, sel, &audit_mode(), a_in, a_out, c_in, c_out, audit_thorough(), incremental, deep, backend, multi_option_selected);
+                        let (toks, dollars, passes) = estimate_audit_cost(report.code_chars, sel, camerata_ui_core::scan::estimate_mode(&audit_mode(), backend), a_in, a_out, c_in, c_out, audit_thorough(), incremental, deep, backend, multi_option_selected);
                         let code_toks = human_tokens((report.code_chars as f64 / 4.0) as u64);
                         let dollar_str = if dollars < 0.01 { "<$0.01".to_string() } else { format!("~${dollars:.2}") };
                         // ACTUAL, once the audit finished and the backend reported usage.
@@ -10656,12 +10659,12 @@ mod tests {
     }
 
     #[test]
-    fn recommend_scan_mode_parallel_for_small_single_repo() {
+    fn recommend_scan_mode_auto_for_small_single_repo() {
         let r = scan_report(serde_json::json!({
             "repos": ["a"], "files_scanned": 10,
             "findings": [], "proposed_rules": [], "gated": false
         }));
-        assert_eq!(super::recommend_scan_mode(&r), "parallel");
+        assert_eq!(super::recommend_scan_mode(&r), "auto");
     }
 
     // ── audit_rules_json (request serialization shape) ────────────────────────

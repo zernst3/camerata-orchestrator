@@ -396,6 +396,19 @@ fresh scan starts a new session; a crash mid-scan just re-runs the scan).
      (seconds to minutes, up to 24h on very large scans). Best when latency is acceptable in
      exchange for cost.
 
+   **Release note: Batch is now the default on the API backend.** When you do not pick a mode, a scan
+   on the API backend runs as a Message Batch (half price); on the CLI (subscription) backend it still
+   runs in real time and says so once. Choose Parallel or Sequential, or pass `--realtime`, to force
+   real time. A scan started as a plain foreground request (no background job) always runs in real
+   time and says so in its notes, because a batch can run for hours and a foreground request has
+   nowhere to record the batch id; start it as a background job to use batches. If the results of an
+   accepted batch cannot be retrieved, the affected passes are reported as failed with the batch id,
+   and the batch is never submitted a second time. The `batch_default=off` efficiency switch restores
+   the previous behavior (real time unless Batch is chosen). **A scan mode Camerata does not
+   recognize is now an error** (naming the valid choices) instead of silently running the default
+   mode; check any script or saved setting that passes a mode other than `parallel`, `sequential`,
+   `batch` or `auto`.
+
    **What the five finding kinds mean.** Every row carries a `kind`, and it tells you what sort of
    statement the row is making. This replaced a binary model in which a row was a violation or it was
    not, and the change matters because three of the five kinds say nothing is wrong:
