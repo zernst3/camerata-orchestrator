@@ -139,7 +139,7 @@ pub struct FindingRow {
     /// `"Deterministic"` | `"Preview: {tool}"` | `"AI-advisory"` — derived from
     /// `resolve_citation(...).kind`, per the design doc's Provenance column.
     provenance: String,
-    /// C3-6: the RAW citation kind (`"grounded"` | `"preview"` | `"advisory"`) behind
+    /// C3-6: the RAW citation kind (`"grounded"` | `"related"` | `"preview"` | `"advisory"`) behind
     /// `provenance`'s display label above — never serialized (the label is the wire value for
     /// `findings.json`); kept only so the row sort below can call the SAME
     /// `report_export::provenance_tier_rank` the within-bucket matrix ordering uses, rather
@@ -2060,6 +2060,8 @@ fn write_index_sheet(
         "Deterministic — corpus-grounded, cites an authoritative external source",
         "Preview: {tool} — scan-time deterministic tool pass, not yet wired into the gate",
         "AI-advisory — model-inferred, no corpus citation",
+        "Related standard (in the Citation column): a published standard matched to a model \
+         finding by keyword, not a rule Camerata checked",
     ] {
         ws.write_string(r, 0, line)?;
         r += 1;
@@ -2546,6 +2548,8 @@ mod tests {
     use super::*;
     use crate::onboard::{AuditedRef, Finding, ScanProvenance};
     use std::io::Read;
+
+    mod related_citation;
 
     fn finding(rule_id: &str, path: &str, line: usize, severity: &str) -> Finding {
         Finding {
@@ -4447,7 +4451,7 @@ mod tests {
 
     /// C4-P2: an AI-tier finding with no corpus entry of its own, classified via the P3
     /// fallback (`classify_ai_finding`) into a known defect class, must carry the IDENTICAL
-    /// grounded citation, a human-readable title (never the bare invented rule id), and its
+    /// citation (the class's sources, labelled as a related standard since H5), a human-readable title (never the bare invented rule id), and its
     /// real semantic category (never a mangled rule-id-token key) across `findings.json`, the
     /// xlsx workbook, and the PDF's curated-findings data — and the category scorecard must
     /// count it as a checked rule. This is the general class behind the "AI-tier critical is
@@ -4506,9 +4510,22 @@ mod tests {
             "the AI-tier finding must survive the P3 citation gate into the curated set"
         );
         let group = &json.curated_findings[0];
+        // H5: the class's sources, labelled as a related standard (a keyword match is not a
+        // rule check) — see `report_export::RELATED_STANDARD_LABEL_PREFIX`.
         assert_eq!(
-            group.citation.label, grounding_citation.label,
-            "the group header's citation must be the P3 class's grounded citation, not advisory"
+            group.citation.label,
+            format!(
+                "{}{}",
+                crate::report_export::RELATED_STANDARD_LABEL_PREFIX,
+                grounding_citation.label
+            ),
+            "the group header's citation must be the P3 class's sources as a related standard, \
+             not advisory"
+        );
+        assert_eq!(group.citation.kind, "related");
+        assert_eq!(
+            group.citation.sources.len(),
+            grounding_citation.sources.len()
         );
         assert_ne!(
             group.title, "AI-RLS-GAP-CUSTOM-7",

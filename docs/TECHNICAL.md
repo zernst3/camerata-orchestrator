@@ -2871,6 +2871,42 @@ Three coverage-honesty properties are easy to lose and are each pinned by a test
   other 3 were checked and found clean" on exactly the healthy-codebase case a
   client sees most often.
 
+#### Related standards: what a keyword-matched citation claims
+
+The AI tier invents its own rule id for each finding, so no corpus rule carries
+its citation. `report_export::classify_ai_finding` sorts such a finding into a
+small closed set of defect classes (RLS, XSS, open redirect, weak token
+randomness, query-grammar injection, permissive CORS) by rule-id tokens, its
+`category` field and keywords in its text, and `citation_for_finding` then
+borrows the sources of that class's corpus rule. The sources are real, but the
+match is a keyword match: no Camerata rule checked the code against that
+standard. Until 2026-10-28 the borrowed citation went out as `grounded`, the
+same kind a checked rule gets, and the workbook's Provenance column then read
+"Deterministic" for a model finding.
+
+Such a citation now has its own kind, `related`, and its label starts with
+"Related standard (matched by keyword, not a rule check): ". The kind and label
+are computed once in `citation_for_finding`, so the PDF (which prints that
+heading over the source list), the workbook's Citation column and
+`findings.json`'s `citation_label` all say the same thing, and the workbook's
+Provenance column reads "AI-advisory" for these rows. The Methodology section
+carries one plain sentence explaining the term (`MethodologyJson::citation_note`)
+and the Index sheet defines it. A finding whose OWN rule id is a cited corpus
+rule (a deterministic finding, or an AI finding reported against a rule the
+pass was asked to check) keeps its `grounded` citation. A `related` citation
+still counts as cited for the curation gate (`is_uncited_ai_finding`) and keeps
+the sort rank `grounded` had, so the change relabels findings without moving or
+dropping any.
+
+The brief offered a second option: hold the citation back until triage
+confirms it. It was rejected because triage is optional in the desktop flow
+(audit, triage, apply and wire-CI are all optional steps after a scan). An
+export made before anyone triages would lose the standard on every
+keyword-matched finding, and the curation gate would then move those findings,
+which are often the most serious ones, out of the curated set. Labelling is
+honest in every export, triaged or not. Tests:
+`xlsx_export::tests::related_citation` covers both directions.
+
 ## 6b. Self-measurement: the integrity gate and the in-repo harness
 
 The question none of the audits asked was why only an external graded run ever
