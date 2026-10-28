@@ -4448,6 +4448,11 @@ html, body {
   font-size: 10px; font-weight: 700; letter-spacing: .03em; color: var(--accent-ink);
   background: var(--accent-wash); border: 1px solid #e5c9bd; padding: 1px 7px; border-radius: 5px;
 }
+/* "from inspection" chip on a unit made from an inspection's findings. */
+.govdev-uow-source {
+  font-size: 10px; color: var(--ink-soft); background: var(--paper);
+  border: 1px solid var(--line); padding: 1px 6px; border-radius: 5px;
+}
 /* Assignee chip on the nav card. */
 .govdev-uow-assignee {
   font-size: 10px; color: var(--ink-soft); background: var(--paper);
