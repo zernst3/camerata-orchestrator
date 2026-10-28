@@ -14,6 +14,33 @@ use serde::Serialize;
 
 use crate::scan_ledger::{SkipReason, SKIPPED_FILES_LISTED_PER_REASON};
 
+/// The pass name a whole-repo AI review failure is recorded under (the intake side writes it,
+/// every exporter reads it). Stable: a persisted report carries it.
+pub const AI_REVIEW_ALL_PASSES: &str = "AI review (all passes)";
+
+/// The repos the advisory language-model tier did not run for, in report order. Two sources:
+/// a run-wide block or error (the whole AI review produced nothing, so every repo is listed)
+/// and a whole-repo failure recorded as a failed pass named [`AI_REVIEW_ALL_PASSES`].
+pub fn repos_without_ai_review(report: &crate::onboard::ScanReport) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut add = |repo: &str| {
+        if !out.iter().any(|r| r == repo) {
+            out.push(repo.to_string());
+        }
+    };
+    if report.ai_blocked_reason.is_some() || report.ai_error.is_some() {
+        for repo in &report.repos {
+            add(repo);
+        }
+    }
+    for f in &report.failed_passes {
+        if f.pass == AI_REVIEW_ALL_PASSES {
+            add(&f.repo);
+        }
+    }
+    out
+}
+
 /// The Coverage gaps for one report. Empty lists on a scan that covered everything.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct CoverageGapsJson {
@@ -64,12 +91,24 @@ impl CoverageGapsJson {
 /// The Coverage gaps for `report`. Pure, and the only derivation: the PDF data, the workbook
 /// and `findings.json` all call it (or reuse its output), so they cannot disagree.
 pub fn coverage_gaps(report: &crate::onboard::ScanReport) -> CoverageGapsJson {
-    let failed_ai_passes = report
+    let mut failed_ai_passes: Vec<String> = report
         .failed_passes
         .iter()
         .filter(|f| f.files_not_reviewed > 0)
         .map(crate::ai_audit::FailedPass::coverage_line)
         .collect();
+    // A repo the AI tier did not run for gets a line even when no file count was recorded.
+    for repo in repos_without_ai_review(report) {
+        let already_listed = report
+            .failed_passes
+            .iter()
+            .any(|f| f.repo == repo && f.pass == AI_REVIEW_ALL_PASSES && f.files_not_reviewed > 0);
+        if !already_listed {
+            failed_ai_passes.push(format!(
+                "{repo}, {AI_REVIEW_ALL_PASSES}: the advisory language-model review did not run"
+            ));
+        }
+    }
     let input = report.ledger.input();
     let skipped_files = input
         .skipped_files

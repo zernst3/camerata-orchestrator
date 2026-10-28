@@ -3548,8 +3548,23 @@ fn default_narrative(
 /// appears here", which is a flat fabrication on a raw, pre-review export. Neither branch
 /// contains the literal phrases "reviewed by a human reviewer" or "dispositioned by a human
 /// reviewer" in the `Raw` case — grep-tested alongside `default_narrative`'s own gate.
-fn ai_tier_note_for(review_state: ReviewState) -> String {
-    match review_state {
+fn ai_tier_note_for(review_state: ReviewState, repos_not_run: usize, total_repos: usize) -> String {
+    let repos = |n: usize| {
+        if n == 1 {
+            "1 repo".to_string()
+        } else {
+            format!("{n} repos")
+        }
+    };
+    if repos_not_run > 0 && repos_not_run >= total_repos {
+        // The tier ran nowhere: say so, and make no claim about a review that did not happen.
+        return format!(
+            "The advisory language-model tier did not run for {}; see Coverage. Every finding \
+             in this export comes from the deterministic tier.",
+            repos(repos_not_run)
+        );
+    }
+    let ran = match review_state {
         ReviewState::Reviewed => {
             "A second, advisory tier uses a calibrated language-model review for findings that \
              require semantic judgment. Every advisory finding in this export has been \
@@ -3565,6 +3580,14 @@ fn ai_tier_note_for(review_state: ReviewState) -> String {
              Lower-confidence items are marked needs-review."
                 .to_string()
         }
+    };
+    if repos_not_run == 0 {
+        ran
+    } else {
+        format!(
+            "{ran} The advisory language-model tier did not run for {}; see Coverage.",
+            repos(repos_not_run)
+        )
     }
 }
 
@@ -5009,7 +5032,11 @@ pub fn build_report_json(
              produces findings that either hold or do not, with no model judgment. These are \
              labeled deterministic in the report."
                 .to_string(),
-        ai_tier_note: ai_tier_note_for(review_state),
+        ai_tier_note: ai_tier_note_for(
+            review_state,
+            coverage_gaps::repos_without_ai_review(report).len(),
+            report.repos.len(),
+        ),
         citation_note: RELATED_STANDARD_NOTE.to_string(),
         not_done: vec![
             "No penetration testing or live exploitation was performed.".to_string(),
@@ -5281,6 +5308,9 @@ mod engine_identity_tests;
 
 #[cfg(test)]
 mod fix_text_tests;
+
+#[cfg(test)]
+mod fn_batch_c_tests;
 
 #[cfg(test)]
 mod tests {
@@ -13454,8 +13484,10 @@ mod tests {
             AUDIT_REPORT_DISCLAIMER.to_string(),
             next_steps_note(ReviewState::Reviewed, 10, 7, 0, 3),
             next_steps_note(ReviewState::Raw, 0, 0, 0, 0),
-            ai_tier_note_for(ReviewState::Raw),
-            ai_tier_note_for(ReviewState::Reviewed),
+            ai_tier_note_for(ReviewState::Raw, 0, 1),
+            ai_tier_note_for(ReviewState::Reviewed, 0, 1),
+            ai_tier_note_for(ReviewState::Raw, 1, 2),
+            ai_tier_note_for(ReviewState::Reviewed, 2, 2),
             default_narrative(ReviewState::Raw, 10, 3, 1, 1, 1, 0, 1, 0, 0, 0),
             default_narrative(ReviewState::Reviewed, 10, 3, 1, 1, 1, 0, 1, 0, 0, 0),
             disposition_label(Disposition::Ignored, "some reason", "accepted", false),
