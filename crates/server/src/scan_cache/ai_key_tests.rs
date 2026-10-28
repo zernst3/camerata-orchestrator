@@ -130,18 +130,24 @@ fn the_key_round_trips_through_the_persisted_manifest() {
 /// The audit system prompt is half of "the prompt" a carried finding answered. Editing it without
 /// bumping [`crate::ai_audit::AUDIT_PROMPT_SCHEMA_VERSION`] would reuse answers to the OLD
 /// prompt, so the pair is pinned: change the prompt, bump the version, update both numbers here.
+/// The pin covers the untrusted-content clause every scan call appends
+/// ([`crate::prompt_frame::UNTRUSTED_CONTENT_CLAUSE`]) as well.
 #[test]
 fn the_system_prompt_is_pinned_to_the_prompt_schema_version() {
     let digest = format!(
         "{:016x}",
-        crate::suppression::fnv1a(&crate::ai_audit::audit_system_prompt())
+        crate::suppression::fnv1a(&format!(
+            "{}{}",
+            crate::ai_audit::audit_system_prompt(),
+            crate::prompt_frame::UNTRUSTED_CONTENT_CLAUSE
+        ))
     );
     assert_eq!(
         (
             crate::ai_audit::AUDIT_PROMPT_SCHEMA_VERSION,
             digest.as_str()
         ),
-        (1, "3fd9d9e18a5c87d0"),
+        (2, "26495b1899b7dfa3"),
         "the audit system prompt changed: bump AUDIT_PROMPT_SCHEMA_VERSION and update this pin"
     );
 }

@@ -80,6 +80,8 @@ pub mod pr;
 pub mod pr_resolve_run;
 pub mod preflight;
 pub mod project;
+/// Delimiting client content for a model with a per-run random token (prompt-injection defense).
+pub mod prompt_frame;
 pub mod provider;
 pub mod reconcile;
 /// PDF audit-report export (brownfield audit hardening Pass B): `AuditReportJson` +

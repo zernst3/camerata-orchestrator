@@ -85,6 +85,7 @@ async fn pass(
         None,
         "prompt".to_string(),
         Vec::new(),
+        &crate::prompt_frame::FrameNonce::generate(),
         "o/r",
         &std::collections::HashSet::new(),
         None,

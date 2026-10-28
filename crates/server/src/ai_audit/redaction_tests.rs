@@ -336,10 +336,10 @@ fn two_options() -> Vec<RuleAlternatives> {
 #[test]
 fn build_digest_over_files_for_model_contains_no_secret_value() {
     let p = secret();
-    let digest = build_digest(&crate::onboard::redact::files_for_model_with(
-        &leaky_repo(&p),
-        true,
-    ));
+    let digest = build_digest(
+        &crate::onboard::redact::files_for_model_with(&leaky_repo(&p), true),
+        &crate::prompt_frame::FrameNonce::generate(),
+    );
     assert!(!digest.contains(&p.value), "the digest carried the value");
     assert!(
         digest.contains("sb_secret_\u{2026}"),

@@ -833,7 +833,9 @@ fn number_lines(content: &str) -> String {
 }
 
 /// Build a single code digest from the repo's files, capped at [`MAX_DIGEST_CHARS`].
-/// Each file is delimited and LINE-NUMBERED so the model can cite exact paths + lines.
+/// Each file is LINE-NUMBERED so the model can cite exact paths + lines, and framed by
+/// [`crate::prompt_frame::frame_untrusted`] under `nonce`, the run's random delimiter token, so a
+/// file cannot print a header that passes for the start of another file.
 ///
 /// # Truncation notice (BUG-8)
 ///
@@ -844,20 +846,21 @@ fn number_lines(content: &str) -> String {
 /// I miss something?"). The minimum drop threshold is intentionally conservative:
 /// dropping even one method body is significant; dropping only the closing brace of
 /// the last function is not.
-pub fn build_digest(files: &[(String, String)]) -> String {
+pub fn build_digest(files: &[(String, String)], nonce: &crate::prompt_frame::FrameNonce) -> String {
     let mut out = String::new();
     let mut truncated = false;
     let mut significant_truncation = false;
     for (path, content) in files {
-        let header = format!("// ===== FILE: {path} =====\n");
+        // The frame's own bytes (opening and closing lines), counted against the cap like the
+        // old header was.
+        let frame_len = crate::prompt_frame::frame_untrusted(nonce, path, "").len();
         let numbered = number_lines(content);
-        if out.len() + header.len() + numbered.len() > MAX_DIGEST_CHARS {
+        if out.len() + frame_len + numbered.len() > MAX_DIGEST_CHARS {
             // Add a partial slice of this file if there's room, then stop.
-            let remaining = MAX_DIGEST_CHARS.saturating_sub(out.len() + header.len());
+            let remaining = MAX_DIGEST_CHARS.saturating_sub(out.len() + frame_len);
             if remaining > 200 {
-                out.push_str(&header);
                 let slice: String = numbered.chars().take(remaining).collect();
-                out.push_str(&slice);
+                out.push_str(&crate::prompt_frame::frame_untrusted(nonce, path, &slice));
                 out.push('\n');
                 // BUG-8: only warn when we actually dropped a meaningful chunk of
                 // content. A trivially small drop (e.g. the last closing brace of
@@ -872,8 +875,9 @@ pub fn build_digest(files: &[(String, String)]) -> String {
             truncated = true;
             break;
         }
-        out.push_str(&header);
-        out.push_str(&numbered);
+        out.push_str(&crate::prompt_frame::frame_untrusted(
+            nonce, path, &numbered,
+        ));
         out.push('\n');
     }
     if truncated && significant_truncation {
@@ -892,7 +896,10 @@ pub fn build_digest(files: &[(String, String)]) -> String {
 /// system prompt is pinned by a test that fails until you do). Do NOT bump it for a pure
 /// scheduling or billing change (cache breakpoints, concurrency, the position of a label line),
 /// which leave the answer the model gives unchanged.
-pub const AUDIT_PROMPT_SCHEMA_VERSION: u32 = 1;
+///
+/// 2: client content framed under a per-run random delimiter token, named in the system prompt
+/// (`crate::prompt_frame`).
+pub const AUDIT_PROMPT_SCHEMA_VERSION: u32 = 2;
 
 /// The system prompt: what to look for, what NOT to (the mechanical tier is already
 /// covered), and the STRICT JSON schema to return.
@@ -2522,7 +2529,9 @@ pub async fn verify_findings(
     if findings.is_empty() {
         return (findings, Vec::new());
     }
-    let system = verify_system_prompt();
+    // One delimiter token for every calibration batch of this call (see `crate::prompt_frame`).
+    let nonce = crate::prompt_frame::FrameNonce::generate();
+    let system = crate::prompt_frame::with_untrusted_clause(verify_system_prompt(), &nonce);
     // Split into bounded chunks (see `CALIBRATION_BATCH_SIZE`'s doc comment) — each is an
     // independent streamed call with LOCAL indices `0..chunk.len()`, so a failure in one
     // chunk never touches another's verdicts. The common case (findings.len() <=
@@ -2559,13 +2568,18 @@ pub async fn verify_findings(
         ));
         prompt.push_str("\nScrutinize these findings:\n");
         for (i, f) in chunk.iter().enumerate() {
-            prompt.push_str(&format!(
-                "[{i}] (severity {}) {}:{} — {} :: {}\n",
-                f.severity,
-                f.path,
-                f.line,
-                camerata_secrets::redact_str(&f.snippet),
-                camerata_secrets::redact_str(&f.detail)
+            // The location, the quoted code and the detail all derive from the client's files.
+            prompt.push_str(&format!("[{i}] (severity {})\n", f.severity));
+            prompt.push_str(&crate::prompt_frame::frame_untrusted(
+                &nonce,
+                &format!("finding {i}"),
+                &format!(
+                    "{}:{} — {} :: {}",
+                    f.path,
+                    f.line,
+                    camerata_secrets::redact_str(&f.snippet),
+                    camerata_secrets::redact_str(&f.detail)
+                ),
             ));
         }
         // Calibration runs on its OWN selected model (the UI exposes it). Build a fresh
@@ -3345,6 +3359,7 @@ async fn recommend_alternatives(
     repo: &str,
     files: &[(String, String)],
     map_files: &[(String, String)],
+    nonce: &crate::prompt_frame::FrameNonce,
     alternatives: &[RuleAlternatives],
     audit_model: Option<&str>,
     feedback: Option<(&crate::transcript::TranscriptStore, &str)>,
@@ -3353,11 +3368,11 @@ async fn recommend_alternatives(
     if alternatives.is_empty() {
         return Ok(Vec::new());
     }
-    let repo_map = build_repo_map(map_files);
+    let repo_map = build_repo_map(map_files, nonce);
     let file_chunks = chunk_files(files, CHUNK_DIGEST_CHARS);
     let digest = file_chunks
         .first()
-        .map(|c| build_digest(c))
+        .map(|c| build_digest(c, nonce))
         .unwrap_or_default();
 
     // Bounded chunks (see `ALTERNATIVES_BATCH_SIZE`'s doc comment) — each rule-batch is an
@@ -3404,7 +3419,10 @@ async fn recommend_alternatives(
             );
         }
         let mut req = LlmRequest::new(prompt)
-            .with_system(alternatives_system_prompt())
+            .with_system(crate::prompt_frame::with_untrusted_clause(
+                alternatives_system_prompt(),
+                nonce,
+            ))
             .with_max_tokens(4096);
         if let Some(m) = audit_model {
             req = req.with_model(m.to_string());
@@ -3558,20 +3576,24 @@ fn build_fix_specific_block(
     files: &[(String, String)],
     corpus: Option<&camerata_rules::RuleSet>,
     feedback: &std::collections::HashMap<usize, String>,
+    nonce: &crate::prompt_frame::FrameNonce,
 ) -> String {
     let mut out = String::new();
     for (i, f) in findings.iter().enumerate() {
         out.push_str(&format!(
-            "[{i}] rule {} — severity {} — {}:{}\n",
-            f.rule_id, f.severity, f.path, f.line
+            "[{i}] rule {} — severity {}\n",
+            f.rule_id, f.severity
         ));
+        // Everything that derives from the client's files (location, quoted code, detail,
+        // captured object names, the context window) sits inside one frame.
+        let mut evidence = format!("Location: {}:{}\n", f.path, f.line);
         if !f.snippet.is_empty() {
-            out.push_str(&format!(
+            evidence.push_str(&format!(
                 "Snippet: {}\n",
                 camerata_secrets::redact_str(&f.snippet)
             ));
         }
-        out.push_str(&format!(
+        evidence.push_str(&format!(
             "Detail: {}\n",
             camerata_secrets::redact_str(&f.detail)
         ));
@@ -3582,12 +3604,17 @@ fn build_fix_specific_block(
                 .map(|(k, v)| format!("{k}={v}"))
                 .collect::<Vec<_>>()
                 .join(", ");
-            out.push_str(&format!("Captured objects: {caps}\n"));
+            evidence.push_str(&format!("Captured objects: {caps}\n"));
         }
         let context = fix_context_window(files, &f.path, f.line, 8);
         if !context.is_empty() {
-            out.push_str(&format!("Surrounding code:\n{context}"));
+            evidence.push_str(&format!("Surrounding code:\n{context}"));
         }
+        out.push_str(&crate::prompt_frame::frame_untrusted(
+            nonce,
+            &format!("finding {i}"),
+            &evidence,
+        ));
         if let Some(rule) = corpus.and_then(|c| c.get_by_id(&f.rule_id)) {
             if let Some(opt) = rule.resolved_option(f.evaluated_option_id.as_deref()) {
                 if let Some(rem) = opt.remediation.as_deref().filter(|s| !s.trim().is_empty()) {
@@ -3810,6 +3837,7 @@ async fn run_fix_specifics_round(
     llm: &dyn LlmPort,
     repo: &str,
     system: &str,
+    nonce: &crate::prompt_frame::FrameNonce,
     fix_model: Option<&str>,
     meter: Option<&UsageMeter>,
     corpus: Option<&camerata_rules::RuleSet>,
@@ -3845,7 +3873,7 @@ async fn run_fix_specifics_round(
                 .collect();
             format!(
                 "Repository: {repo}\n\nWrite a concrete fix for each finding below:\n\n{}",
-                build_fix_specific_block(&refs, files, corpus, &local_feedback)
+                build_fix_specific_block(&refs, files, corpus, &local_feedback, nonce)
             )
         };
         let mut req = LlmRequest::new(prompt)
@@ -4065,7 +4093,9 @@ pub async fn generate_fix_specifics(
         return (findings, Vec::new());
     }
 
-    let system = fix_specific_system_prompt();
+    // One delimiter token for every round, regeneration rounds included (see `crate::prompt_frame`).
+    let nonce = crate::prompt_frame::FrameNonce::generate();
+    let system = crate::prompt_frame::with_untrusted_clause(fix_specific_system_prompt(), &nonce);
     // The subset of `indices` still needing a valid fix this round; shrinks as findings
     // pass their self-check or exhaust retries. Original-index -> rejection reason, fed
     // back into the NEXT round's prompt for that finding only.
@@ -4080,6 +4110,7 @@ pub async fn generate_fix_specifics(
             llm,
             repo,
             &system,
+            &nonce,
             fix_model,
             meter,
             corpus,
@@ -4100,6 +4131,7 @@ pub async fn generate_fix_specifics(
             llm,
             repo,
             &system,
+            &nonce,
             fix_model,
             meter,
             corpus,
@@ -4375,9 +4407,16 @@ fn pass_task_line(advisory: bool, bi: usize, n_b: usize) -> String {
 /// The request the exact-token sample counts for a pass whose prompt and cache layout are
 /// already built: the audit system prompt plus the prompt, split at the same breakpoints the
 /// real call uses. ONE builder for the batch path's sample and the pre-flight sample.
-fn sample_count_request(prompt: &str, cache_breakpoints: &[usize]) -> LlmRequest {
+fn sample_count_request(
+    prompt: &str,
+    cache_breakpoints: &[usize],
+    nonce: &crate::prompt_frame::FrameNonce,
+) -> LlmRequest {
     LlmRequest::new(prompt.to_string())
-        .with_system(audit_system_prompt())
+        .with_system(crate::prompt_frame::with_untrusted_clause(
+            audit_system_prompt(),
+            nonce,
+        ))
         .with_cache_breakpoints(cache_breakpoints.to_vec())
 }
 
@@ -4403,7 +4442,9 @@ pub fn representative_scan_sample(
         return None;
     }
     let model_files = crate::onboard::redact::files_for_model(files);
-    let repo_map = build_repo_map(&model_files);
+    // A token of the real length, so the counted size is the real size.
+    let nonce = crate::prompt_frame::FrameNonce::generate();
+    let repo_map = build_repo_map(&model_files, &nonce);
     let chunks = chunk_files(&model_files, CHUNK_DIGEST_CHARS);
     let first_chunk = chunks.first()?;
     let (_, batch_size) = mode.tuning();
@@ -4413,7 +4454,7 @@ pub fn representative_scan_sample(
     } else {
         selected.chunks(batch_size.max(1)).collect()
     };
-    let digest = build_digest(first_chunk);
+    let digest = build_digest(first_chunk, &nonce);
     let (prompt, bps) = build_pass_prompt_with(
         efficiency.label_after_prefix,
         repo,
@@ -4427,7 +4468,7 @@ pub fn representative_scan_sample(
         &build_rules_block(batches[0]),
     );
     Some(ScanSample {
-        request: sample_count_request(&prompt, &bps),
+        request: sample_count_request(&prompt, &bps, &nonce),
         passes: chunks.len() * batches.len(),
     })
 }
@@ -4447,6 +4488,7 @@ async fn audit_pass(
     audit_model: Option<&str>,
     prompt: String,
     cache_breakpoints: Vec<usize>,
+    nonce: &crate::prompt_frame::FrameNonce,
     repo: &str,
     adopted: &std::collections::HashSet<String>,
     feedback: Option<(&crate::transcript::TranscriptStore, &str)>,
@@ -4454,7 +4496,10 @@ async fn audit_pass(
     meter: Option<&UsageMeter>,
 ) -> anyhow::Result<(Vec<Finding>, Vec<ProposedRule>, Vec<String>)> {
     let mut req = LlmRequest::new(prompt)
-        .with_system(audit_system_prompt())
+        .with_system(crate::prompt_frame::with_untrusted_clause(
+            audit_system_prompt(),
+            nonce,
+        ))
         .with_max_tokens(8192);
     if let Some(m) = audit_model {
         req = req.with_model(m.to_string());
@@ -4594,20 +4639,25 @@ fn extract_public_symbols(content: &str) -> Vec<String> {
 /// not in this pass. The map gives every chunk that architecture without every file body,
 /// so chunking doesn't reintroduce cross-file misses. (Bodies still only appear in their
 /// own chunk — a rule needing the full body of a type in another chunk is the known limit.)
-fn build_repo_map(files: &[(String, String)]) -> String {
+fn build_repo_map(files: &[(String, String)], nonce: &crate::prompt_frame::FrameNonce) -> String {
     let mut out = String::from(
         "REPO MAP — every file in the repo and the public symbols it defines. Only SOME file \
          bodies appear in THIS pass; use this map for cross-file architectural context (which \
          directories are repositories vs services vs controllers, where a named type lives):\n",
     );
+    // Paths and symbol names come from the client's files: framed like a file body.
+    let mut listing = String::new();
     for (path, content) in files {
         let syms = extract_public_symbols(content);
         if syms.is_empty() {
-            out.push_str(&format!("  {path}\n"));
+            listing.push_str(&format!("  {path}\n"));
         } else {
-            out.push_str(&format!("  {path}  [{}]\n", syms.join(", ")));
+            listing.push_str(&format!("  {path}  [{}]\n", syms.join(", ")));
         }
     }
+    out.push_str(&crate::prompt_frame::frame_untrusted(
+        nonce, "repo map", &listing,
+    ));
     out.push('\n');
     out
 }
@@ -4706,6 +4756,7 @@ async fn run_passes(
     llm: &dyn LlmPort,
     repo: &str,
     repo_map: &str,
+    nonce: &crate::prompt_frame::FrameNonce,
     adopted: &std::collections::HashSet<String>,
     audit_model: Option<&str>,
     feedback: Option<(&crate::transcript::TranscriptStore, &str)>,
@@ -4718,7 +4769,7 @@ async fn run_passes(
     meter: Option<&UsageMeter>,
     advisory_disabled: bool,
 ) -> PassesOut {
-    let digests: Vec<String> = chunks.iter().map(|c| build_digest(c)).collect();
+    let digests: Vec<String> = chunks.iter().map(|c| build_digest(c, nonce)).collect();
     let n_c = chunks.len();
     let n_b = batches.len();
     // Chunk-major work order, scheduled WARM-THEN-FAN-OUT: a chunk is one cache-prefix group
@@ -4837,6 +4888,7 @@ async fn run_passes(
                 audit_model,
                 prompt,
                 cache_bps,
+                nonce,
                 repo,
                 adopted,
                 feedback,
@@ -4970,6 +5022,7 @@ async fn run_passes_batch(
     llm: &crate::llm::Llm,
     repo: &str,
     repo_map: &str,
+    nonce: &crate::prompt_frame::FrameNonce,
     adopted: &std::collections::HashSet<String>,
     audit_model: Option<&str>,
     job: Option<(&crate::jobs::JobStore, &str)>,
@@ -5000,7 +5053,7 @@ async fn run_passes_batch(
 
     let model = resolve_audit_model(audit_model);
 
-    let digests: Vec<String> = chunks.iter().map(|c| build_digest(c)).collect();
+    let digests: Vec<String> = chunks.iter().map(|c| build_digest(c, nonce)).collect();
     let n_c = chunks.len();
     let n_b = batches.len();
 
@@ -5043,7 +5096,10 @@ async fn run_passes_batch(
             let custom_id = format!("c{ci}-b{bi}");
             let req = {
                 let mut r = LlmRequest::new(prompt.clone())
-                    .with_system(audit_system_prompt())
+                    .with_system(crate::prompt_frame::with_untrusted_clause(
+                        audit_system_prompt(),
+                        nonce,
+                    ))
                     .with_max_tokens(8192)
                     .with_model(model.clone())
                     .with_cache_breakpoints(cache_bps.clone());
@@ -5072,7 +5128,7 @@ async fn run_passes_batch(
     let mut per_item_usd: Option<f64> = None;
     if !hint_refuses {
         if let Some((ci0, bi0, prompt0, cache_bps0)) = work_meta.first() {
-            let sample_req = sample_count_request(prompt0, cache_bps0);
+            let sample_req = sample_count_request(prompt0, cache_bps0, nonce);
             if let Some(exact) = crate::llm::exact_input_token_count(llm, &sample_req, &model).await
             {
                 eprintln!(
@@ -7184,6 +7240,7 @@ async fn run_routed_passes(
     selected: &[(String, String)],
     route_plan: &crate::scan_routing::RoutePlan,
     repo_map: &str,
+    nonce: &crate::prompt_frame::FrameNonce,
     adopted: &std::collections::HashSet<String>,
     audit_model: Option<&str>,
     feedback: Option<(&crate::transcript::TranscriptStore, &str)>,
@@ -7211,6 +7268,7 @@ async fn run_routed_passes(
             llm,
             repo,
             repo_map,
+            nonce,
             adopted,
             audit_model,
             feedback,
@@ -7334,6 +7392,7 @@ async fn run_routed_passes(
             llm,
             repo,
             repo_map,
+            nonce,
             adopted,
             audit_model,
             feedback,
@@ -7895,9 +7954,12 @@ pub async fn audit_repo(
     // throughout this function) rather than threading a `&mut ScanLedger` through this
     // already-large parameter list — see `crate::scan_ledger::StageSample`'s doc comment.
     let mut stage_samples: Vec<crate::scan_ledger::StageSample> = Vec::new();
+    // The delimiter token for every model call of this audit (alternatives, scan and resolution
+    // passes). One per run, so the passes keep sharing their cached prefix; see `crate::prompt_frame`.
+    let nonce = crate::prompt_frame::FrameNonce::generate();
     // Cross-file context for every chunk (which dirs are which layer, where types live). On an
     // incremental scan this is built from the whole repo, not just the changed files.
-    let repo_map = build_repo_map(map_files.unwrap_or(files));
+    let repo_map = build_repo_map(map_files.unwrap_or(files), &nonce);
     // Key findings to the adopted rule ids (so a violation shows under e.g.
     // ARCH-STRICT-LAYERING-1, not an invented AI- name).
     let adopted: std::collections::HashSet<String> = selected
@@ -8024,6 +8086,7 @@ pub async fn audit_repo(
                 repo,
                 files,
                 map_files.unwrap_or(files),
+                &nonce,
                 &ask_alts,
                 audit_model.as_deref(),
                 feedback,
@@ -8145,6 +8208,7 @@ pub async fn audit_repo(
                 llm_concrete,
                 repo,
                 &repo_map,
+                &nonce,
                 &adopted,
                 audit_model.as_deref(),
                 job,
@@ -8172,6 +8236,7 @@ pub async fn audit_repo(
                 &effective_selected,
                 &route_plan,
                 &repo_map,
+                &nonce,
                 &adopted,
                 audit_model.as_deref(),
                 feedback,
@@ -8252,6 +8317,7 @@ pub async fn audit_repo(
             llm,
             repo,
             &repo_map,
+            &nonce,
             &adopted,
             audit_model.as_deref(),
             feedback,
@@ -9012,6 +9078,7 @@ async fn run_security_lens(
     repo: &str,
     files: &[(String, String)],
     repo_map: &str,
+    nonce: &crate::prompt_frame::FrameNonce,
     audit_model: Option<&str>,
     mode: ScanMode,
     feedback: Option<(&crate::transcript::TranscriptStore, &str)>,
@@ -9032,6 +9099,7 @@ async fn run_security_lens(
         llm,
         repo,
         repo_map,
+        nonce,
         &adopted,
         audit_model,
         feedback,
@@ -9075,6 +9143,7 @@ async fn run_security_passes(
     llm: &dyn LlmPort,
     repo: &str,
     repo_map: &str,
+    nonce: &crate::prompt_frame::FrameNonce,
     adopted: &std::collections::HashSet<String>,
     audit_model: Option<&str>,
     feedback: Option<(&crate::transcript::TranscriptStore, &str)>,
@@ -9084,7 +9153,7 @@ async fn run_security_passes(
     meter: Option<&UsageMeter>,
 ) -> PassesOut {
     use futures::stream::StreamExt;
-    let digests: Vec<String> = chunks.iter().map(|c| build_digest(c)).collect();
+    let digests: Vec<String> = chunks.iter().map(|c| build_digest(c, nonce)).collect();
     let n_c = chunks.len();
     let n_b = batches.len().max(1);
     let work: Vec<usize> = (0..n_c).collect();
@@ -9128,7 +9197,10 @@ async fn run_security_passes(
                 // The security lens swaps in its own system prompt; everything else mirrors
                 // `audit_pass` (streaming + meter + robust parse).
                 let mut req = LlmRequest::new(prompt)
-                    .with_system(deep_security_system_prompt())
+                    .with_system(crate::prompt_frame::with_untrusted_clause(
+                        deep_security_system_prompt(),
+                        nonce,
+                    ))
                     .with_max_tokens(8192);
                 if let Some(m) = audit_model {
                     req = req.with_model(m.to_string());
@@ -9218,9 +9290,11 @@ pub async fn run_deep_tier(
     // The deep tier reads the whole repo: redact before any lens sees it.
     let model_files = crate::onboard::redact::files_for_model(files);
     let files = model_files.as_slice();
-    let repo_map = build_repo_map(files);
+    // One delimiter token for all three lenses (see `crate::prompt_frame`).
+    let nonce = crate::prompt_frame::FrameNonce::generate();
+    let repo_map = build_repo_map(files, &nonce);
     // One whole-repo digest for the two single-pass prose lenses (capped at MAX_DIGEST_CHARS).
-    let digest = build_digest(files);
+    let digest = build_digest(files, &nonce);
 
     // Resolve the model the same way the standard audit does: explicit pick wins, else
     // CAMERATA_AUDIT_MODEL, else provider default. The deep tier is meant to run on the strong
@@ -9237,7 +9311,7 @@ pub async fn run_deep_tier(
         repo,
         &repo_map,
         &digest,
-        threat_model_system_prompt(),
+        crate::prompt_frame::with_untrusted_clause(threat_model_system_prompt(), &nonce),
         model.as_deref(),
         feedback,
         meter,
@@ -9247,6 +9321,7 @@ pub async fn run_deep_tier(
         repo,
         files,
         &repo_map,
+        &nonce,
         model.as_deref(),
         mode,
         feedback,
@@ -9261,7 +9336,7 @@ pub async fn run_deep_tier(
             repo,
             &repo_map,
             &digest,
-            soc2_gap_system_prompt(),
+            crate::prompt_frame::with_untrusted_clause(soc2_gap_system_prompt(), &nonce),
             model.as_deref(),
             feedback,
             meter,
@@ -9297,6 +9372,9 @@ mod cache_schedule_tests;
 
 #[cfg(test)]
 mod retry_tests;
+
+#[cfg(test)]
+mod injection_tests;
 
 #[cfg(test)]
 mod efficiency_cap_tests;
@@ -10042,7 +10120,7 @@ mod tests {
                 "pub struct AdminStats {}".to_string(),
             ),
         ];
-        let map = build_repo_map(&files);
+        let map = build_repo_map(&files, &crate::prompt_frame::FrameNonce::generate());
         // Every file is in the map even though a chunk may only hold one of them.
         assert!(map.contains("crates/api/src/repositories/user_repo.rs"));
         assert!(map.contains("crates/ui/src/services/admin_stats.rs"));
@@ -10088,14 +10166,15 @@ mod tests {
             ("a.rs".to_string(), "fn a() {}".to_string()),
             ("b.rs".to_string(), "fn b() {}".to_string()),
         ];
-        let d = build_digest(&files);
-        assert!(d.contains("FILE: a.rs"));
-        assert!(d.contains("FILE: b.rs"));
+        let nonce = crate::prompt_frame::FrameNonce::generate();
+        let d = build_digest(&files, &nonce);
+        assert!(d.contains(&format!("<<<UNTRUSTED {nonce} \"a.rs\">>>")));
+        assert!(d.contains(&format!("<<<UNTRUSTED {nonce} \"b.rs\">>>")));
         assert!(d.contains("fn a()"));
 
         // A file larger than the cap truncates and notes it.
         let big = vec![("big.rs".to_string(), "x".repeat(MAX_DIGEST_CHARS + 1000))];
-        let d2 = build_digest(&big);
+        let d2 = build_digest(&big, &nonce);
         assert!(d2.len() <= MAX_DIGEST_CHARS + 200);
         assert!(d2.contains("truncated"));
     }
@@ -10746,6 +10825,7 @@ mod tests {
             "me/api",
             &files,
             &files,
+            &crate::prompt_frame::FrameNonce::generate(),
             &[alt],
             None,
             None,
@@ -13262,8 +13342,9 @@ mod tests {
 
         // Build file-1 content sized to leave exactly `small_drop + budget_for_header_2`
         // chars remaining in the budget.
-        // Header for file-2: "// ===== FILE: src/f2.rs =====\n" ≈ 32 chars.
-        let header2_len = "// ===== FILE: src/f2.rs =====\n".len();
+        // The frame around file-2 (its opening and closing delimiter lines).
+        let nonce = crate::prompt_frame::FrameNonce::generate();
+        let header2_len = crate::prompt_frame::frame_untrusted(&nonce, "src/f2.rs", "").len();
         let file1_budget = MAX_DIGEST_CHARS
             .saturating_sub(header2_len)
             .saturating_sub(small_drop + 500); // 500-char "remaining" slice of file-2
@@ -13279,7 +13360,7 @@ mod tests {
             ("src/f1.rs".to_string(), file1_content),
             ("src/f2.rs".to_string(), file2_content),
         ];
-        let digest = build_digest(&files);
+        let digest = build_digest(&files, &nonce);
 
         // The truncation was trivial (< TRUNCATION_NOTICE_MIN_DROP bytes dropped) →
         // notice must NOT appear (BUG-8 fix).
@@ -13303,7 +13384,7 @@ mod tests {
             ("src/small.rs".to_string(), small),
             ("src/large.rs".to_string(), large),
         ];
-        let digest = build_digest(&files);
+        let digest = build_digest(&files, &crate::prompt_frame::FrameNonce::generate());
         // The large file drops a significant fraction → notice must appear.
         assert!(
             digest.contains("[digest truncated"),
@@ -13710,6 +13791,7 @@ mod tests {
             &completer,
             "acme/widgets",
             &repo_map,
+            &crate::prompt_frame::FrameNonce::generate(),
             &adopted,
             None,
             None,
@@ -13816,6 +13898,7 @@ mod tests {
             &completer,
             "acme/widgets",
             &repo_map,
+            &crate::prompt_frame::FrameNonce::generate(),
             &adopted,
             None,
             None,
