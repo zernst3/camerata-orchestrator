@@ -95,6 +95,10 @@ fn full_rule() -> Rule {
     r.asvs = vec!["V5.3.4".to_string()];
     r.superseded_since = Some("2021".to_string());
     r.current_recommendation = Some("Use X instead.".to_string());
+    r.applies_to = Some(
+        camerata_rules::AppliesTo::new(vec!["**/*.sql".to_string()], vec!["rust".to_string()])
+            .expect("a valid scope"),
+    );
     r.version = Some(4);
     r.last_reviewed = Some("2026-10-01".to_string());
     r
@@ -225,6 +229,7 @@ fn every_field_of_the_rule_except_version_and_last_reviewed_changes_the_hash() {
         asvs: _,
         superseded_since: _,
         current_recommendation: _,
+        applies_to: _,
         version: _,
         last_reviewed: _,
     } = full_rule();
@@ -287,6 +292,17 @@ fn every_field_of_the_rule_except_version_and_last_reviewed_changes_the_hash() {
         ("current_recommendation", |r| {
             r.current_recommendation = None
         }),
+        ("applies_to.paths", |r| {
+            if let Some(a) = r.applies_to.as_mut() {
+                a.paths.push("extra/**".to_string());
+            }
+        }),
+        ("applies_to.languages", |r| {
+            if let Some(a) = r.applies_to.as_mut() {
+                a.languages.clear();
+            }
+        }),
+        ("applies_to (removed)", |r| r.applies_to = None),
         ("option.id", |r| r.options[0].id.push('X')),
         ("option.label", |r| r.options[0].label.push('X')),
         ("option.directive", |r| r.options[0].directive.push('X')),

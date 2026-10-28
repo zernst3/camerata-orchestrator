@@ -1,11 +1,14 @@
 id = "SUPABASE-RLS-USER-METADATA-1"
-version = 1
+version = 2
 title = "An RLS policy predicate must never authorize against user_metadata / raw_user_meta_data"
 domain = "supabase:rls"
 layer = "platform"
 enforcement = "mechanical"
 kind = "defect"
 inspectable = true
+# Token-efficiency rank 7: where this rule can apply, so the scan sends it only with these
+# files. SQL statement rule: it is about CREATE POLICY / FUNCTION / VIEW / TABLE statements in SQL files (plus supabase/config.toml, which names the API-exposed schemas); no other file kind holds the subject.
+applies_to = { paths = ["**/*.sql", "**/supabase/config.toml"] }
 # Severity floor. Rationale: user_metadata / raw_user_meta_data are writable by the user they
 # describe, through the standard update-user API. A policy authorizing on either lets any
 # authenticated account grant itself that privilege with one call — CWE-269 in its most literal

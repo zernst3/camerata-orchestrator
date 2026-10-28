@@ -1,11 +1,14 @@
 id = "SUPABASE-AUTH-USERS-EXPOSED-1"
-version = 1
+version = 2
 title = "auth.users must never be exposed to anon/authenticated via a view, materialized view, or grant in an exposed schema"
 domain = "supabase:auth"
 layer = "platform"
 enforcement = "structured"
 kind = "defect"
 inspectable = true
+# Token-efficiency rank 7: where this rule can apply, so the scan sends it only with these
+# files. SQL statement rule: it is about CREATE POLICY / FUNCTION / VIEW / TABLE statements in SQL files (plus supabase/config.toml, which names the API-exposed schemas); no other file kind holds the subject.
+applies_to = { paths = ["**/*.sql", "**/supabase/config.toml"] }
 # Severity floor. Rationale: there is no partial-exposure form of this defect. auth.users holds
 # every account's email, phone and metadata, so ANY reference to it from an API-exposed object is
 # a full account-directory leak through PostgREST — and the correct pattern (a curated

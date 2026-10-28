@@ -164,7 +164,7 @@ async fn cross_file_config_handler_defect_survives_the_semantic_tier_to_the_expo
         &stub,
         "acme/webhooks",
         &files,
-        &selected,
+        &camerata_server::scan_routing::rules_from_pairs(&selected),
         &[], // alternatives
         &HashMap::new(),
         None, // model

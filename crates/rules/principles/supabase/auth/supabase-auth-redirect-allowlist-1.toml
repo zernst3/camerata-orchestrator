@@ -1,11 +1,14 @@
 id = "SUPABASE-AUTH-REDIRECT-ALLOWLIST-1"
-version = 1
+version = 2
 title = "OAuth and magic-link redirect URLs are an exact-origin allowlist, never a bare or broad wildcard"
 domain = "supabase:auth"
 layer = "platform"
 enforcement = "structured"
 kind = "defect"
 inspectable = true
+# Token-efficiency rank 7: where this rule can apply, so the scan sends it only with these
+# files. Config rule: the subject is a value in supabase/config.toml; a finding needs the value to be present and wrong.
+applies_to = { paths = ["**/supabase/config.toml"] }
 # Severity floor. Rationale: the redirect URL is where the session is handed off once
 # authentication completes, so a wildcard covering hosts the project does not control is not a
 # cosmetic open redirect — it is a session-token exfiltration path reachable by anyone who can

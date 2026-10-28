@@ -2198,11 +2198,14 @@ pub async fn audit_repos_with_llm_controlled(
                             );
                         }
                     } else {
+                        // The rules with the `applies_to` scope the corpus declares for
+                        // each (rank 7): `audit_repo` routes on it when the switch is on.
+                        let audit_rules = crate::scan_routing::audit_rules(&semantic, corpus);
                         match crate::ai_audit::audit_repo(
                             llm,
                             spec,
                             &part.changed,
-                            &semantic,
+                            &audit_rules,
                             &alternatives,
                             // `forced` is always empty on the main scan — nothing is
                             // operator-forced here; that's exclusively the targeted
@@ -5749,6 +5752,7 @@ mod tests {
             current_recommendation: None,
             version: None,
             last_reviewed: None,
+            applies_to: None,
             verification: camerata_rules::Verification::Grounded,
             sources: Vec::new(),
             verified: None,
@@ -5801,6 +5805,7 @@ mod tests {
             current_recommendation: None,
             version: None,
             last_reviewed: None,
+            applies_to: None,
             verification: camerata_rules::Verification::Grounded,
             sources: Vec::new(),
             verified: None,

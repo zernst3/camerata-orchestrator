@@ -1,5 +1,5 @@
 id = "SUPABASE-FUNC-PRIVILEGED-NO-AUTHZ-1"
-version = 1
+version = 2
 title = "A SECURITY DEFINER function that writes data and is granted EXECUTE to anon/public/authenticated must check caller identity/role/ownership before writing"
 domain = "supabase:database-functions"
 # General Postgres/PostgREST, not just Supabase: a SECURITY DEFINER function that performs a write
@@ -15,6 +15,9 @@ layer = "platform"
 enforcement = "architectural"
 kind = "defect"
 inspectable = true
+# Token-efficiency rank 7: where this rule can apply, so the scan sends it only with these
+# files. SQL statement rule: it is about CREATE POLICY / FUNCTION / VIEW / TABLE statements in SQL files (plus supabase/config.toml, which names the API-exposed schemas); no other file kind holds the subject.
+applies_to = { paths = ["**/*.sql", "**/supabase/config.toml"] }
 # Severity floor. Rationale: a mutating SECURITY DEFINER function reachable by a broad role with
 # no identity check is a privilege-escalation primitive — the RLS that would gate the write is
 # bypassed by the DEFINER privileges, and nothing inside the function replaces it (CWE-862). High,

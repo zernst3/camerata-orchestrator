@@ -139,10 +139,30 @@ impl StageUsage {
     }
 }
 
+/// How much the rule router (`scan_routing`) narrowed the scan: of the (chunk, rule) pairs an
+/// un-routed scan would have sent, how many routing did NOT send. Counted over every repo of
+/// the run. Operator-only, like the rest of this module.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoutingTelemetry {
+    /// (chunk, rule) pairs an un-routed scan would send: every rule with every chunk.
+    pub pairs_total: u64,
+    /// Of those, the pairs routing did not send (language prefix and, with `applies_to_routing`
+    /// on, declared `applies_to`).
+    pub pairs_skipped: u64,
+}
+
+impl RoutingTelemetry {
+    /// Skipped share of the total in percent; `None` when no pair was counted.
+    pub fn skipped_percent(&self) -> Option<f64> {
+        (self.pairs_total > 0).then(|| self.pairs_skipped as f64 * 100.0 / self.pairs_total as f64)
+    }
+}
+
 /// Thread-safe per-stage accumulator (scan passes run concurrently).
 #[derive(Default)]
 pub struct StageMeter {
     stages: Mutex<BTreeMap<Stage, StageUsage>>,
+    routing: Mutex<Option<RoutingTelemetry>>,
 }
 
 impl StageMeter {
@@ -165,12 +185,28 @@ impl StageMeter {
         self.with_stage(stage, |u| u.fold_wasted(r, share));
     }
 
+    /// Add one repo's routing counts to the run's total.
+    pub fn record_routing(&self, pairs_total: u64, pairs_skipped: u64) {
+        let mut routing = self
+            .routing
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let r = routing.get_or_insert_with(RoutingTelemetry::default);
+        r.pairs_total = r.pairs_total.saturating_add(pairs_total);
+        r.pairs_skipped = r.pairs_skipped.saturating_add(pairs_skipped);
+    }
+
     /// Snapshot, joined to the scan's counted-line total.
     pub fn snapshot(&self, counted_lines: usize) -> StageTelemetry {
+        let routing = *self
+            .routing
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let stages = self.lock();
         StageTelemetry {
             counted_lines,
             efficiency: None,
+            routing,
             stages: Stage::ALL
                 .iter()
                 .filter_map(|stage| {
@@ -218,6 +254,10 @@ pub struct StageTelemetry {
     /// switches existed.
     #[serde(default)]
     pub efficiency: Option<crate::efficiency::EfficiencyConfig>,
+    /// How many (chunk, rule) pairs the rule router skipped, so the sweep can see the saving
+    /// `applies_to_routing` buys. `None` when no repo reached the routing step.
+    #[serde(default)]
+    pub routing: Option<RoutingTelemetry>,
 }
 
 impl StageTelemetry {
@@ -246,6 +286,17 @@ impl StageTelemetry {
         .ok();
         if let Some(efficiency) = &self.efficiency {
             writeln!(out, "  efficiency measures: {}", efficiency.render()).ok();
+        }
+        if let Some(routing) = &self.routing {
+            let share = routing
+                .skipped_percent()
+                .map_or_else(String::new, |p| format!(" ({p:.1}%)"));
+            writeln!(
+                out,
+                "  rule routing: {} of {} (chunk, rule) pairs not sent{share}",
+                routing.pairs_skipped, routing.pairs_total
+            )
+            .ok();
         }
         if self.stages.is_empty() {
             writeln!(out, "  (no model call ran this scan)").ok();

@@ -1,11 +1,14 @@
 id = "SUPABASE-RLS-POLICY-DISABLED-1"
-version = 1
+version = 2
 title = "A table with CREATE POLICY statements must have Row Level Security enabled in its replayed end-state"
 domain = "supabase:rls"
 layer = "platform"
 enforcement = "architectural"
 kind = "defect"
 inspectable = true
+# Token-efficiency rank 7: where this rule can apply, so the scan sends it only with these
+# files. SQL statement rule: it is about CREATE POLICY / FUNCTION / VIEW / TABLE statements in SQL files (plus supabase/config.toml, which names the API-exposed schemas); no other file kind holds the subject.
+applies_to = { paths = ["**/*.sql", "**/supabase/config.toml"] }
 # Severity floor. Rationale: this is the more dangerous variant of a missing-RLS finding, not a
 # milder one. Written policies make the table LOOK protected in code review and in the migration
 # diff while Postgres never evaluates them, so the false sense of security is itself part of the

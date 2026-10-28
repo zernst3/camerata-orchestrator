@@ -96,6 +96,10 @@ efficiency_measures! {
     /// Rank 6: a finding with no surrounding code goes straight to the rule's authored
     /// remediation with no model call. Off: it is sent to the fix model like any other.
     fix_prefilter => "findings with no code context skip the fix model when the rule has an authored fix",
+    /// Rank 7: a rule that declares `applies_to` (file globs and languages) is sent only with
+    /// the files it can apply to, in real-time and batch mode alike. Off: `applies_to` is
+    /// ignored entirely and routing is by rule-id language prefix only (the pre-rank-7 behavior).
+    applies_to_routing => "rules that declare where they apply are sent only with matching files",
 }
 
 impl EfficiencyConfig {

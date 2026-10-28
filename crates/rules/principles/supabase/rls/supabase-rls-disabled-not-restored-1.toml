@@ -1,5 +1,5 @@
 id = "SUPABASE-RLS-DISABLED-NOT-RESTORED-1"
-version = 1
+version = 2
 title = "Row Level Security explicitly disabled on a table must be restored — never left off by omission"
 domain = "supabase:rls"
 # General Postgres, not just Supabase: an explicit `ALTER TABLE ... DISABLE ROW LEVEL SECURITY`
@@ -17,6 +17,9 @@ layer = "platform"
 enforcement = "architectural"
 kind = "defect"
 inspectable = true
+# Token-efficiency rank 7: where this rule can apply, so the scan sends it only with these
+# files. SQL statement rule: it is about CREATE POLICY / FUNCTION / VIEW / TABLE statements in SQL files (plus supabase/config.toml, which names the API-exposed schemas); no other file kind holds the subject.
+applies_to = { paths = ["**/*.sql", "**/supabase/config.toml"] }
 # Severity floor. Rationale: an explicit DISABLE that nobody restored is unambiguous in a way a
 # never-considered table is not — something deliberately turned protection off and the matching
 # re-enable was dropped or landed on the wrong object. That conclusion does not soften with the

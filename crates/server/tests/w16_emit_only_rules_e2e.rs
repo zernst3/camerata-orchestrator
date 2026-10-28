@@ -231,7 +231,7 @@ async fn req_w16_emit_only_rule_never_reaches_the_scan_or_the_healthy_list() {
         &SilentModel,
         "acme/api",
         &files,
-        &semantic,
+        &camerata_server::scan_routing::rules_from_pairs(&semantic),
         &[], // alternatives
         &HashMap::new(),
         None,
