@@ -48,6 +48,7 @@ use crate::onboard::{CoverageNote, Finding};
 use crate::tool_provisioning;
 
 mod manifests;
+pub use manifests::{scrub_local_paths, unread_files_sentence};
 
 /// When this environment variable is set (to any non-empty value), `run_dep_audit`
 /// and `run_dep_audit_with_tooling` return immediately with an empty findings list
@@ -288,8 +289,8 @@ pub fn parse_osv_json(repo: &str, repo_root: &Path, output: &str) -> anyhow::Res
                 let fixed_version = osv_fixed_version(vuln);
 
                 let fixed_clause = match &fixed_version {
-                    Some(v) => format!(" — fixed in {v}"),
-                    None => " — no patched version available yet".to_string(),
+                    Some(v) => format!(", fixed in {v}"),
+                    None => ", no patched version available yet".to_string(),
                 };
                 let mut detail = if title.is_empty() {
                     format!("{advisory_id}{aliases_str} affects {coord}{fixed_clause}")
@@ -649,7 +650,10 @@ fn cvss_v2_base_score(vector: &str) -> Option<f64> {
 
 /// Map a CVSS base score (0.0-10.0) to Camerata's four-level severity vocabulary.
 fn cvss_score_to_severity(score: f64) -> &'static str {
-    if score >= 9.0 {
+    if score <= 0.0 {
+        // CVSS rates "no impact" 0.0; that is none, not low.
+        "info"
+    } else if score >= 9.0 {
         "critical"
     } else if score >= 7.0 {
         "high"
@@ -687,7 +691,10 @@ async fn run_dep_audit_with_tooling(
                 Vec::new(),
                 Some(CoverageNote {
                     tool: TOOL_NAME.to_string(),
-                    message: format!("dependency audit (osv-scanner) did not run: {e}"),
+                    message: scrub_local_paths(
+                        &format!("dependency audit (osv-scanner) did not run: {e}"),
+                        repo_dir,
+                    ),
                 }),
             );
         }
@@ -721,9 +728,12 @@ async fn run_dep_audit_with_tooling(
                 Vec::new(),
                 Some(CoverageNote {
                     tool: TOOL_NAME.to_string(),
-                    message: format!(
-                        "dependency audit (osv-scanner) did not run: \
-                         could not spawn process: {e}"
+                    message: scrub_local_paths(
+                        &format!(
+                            "dependency audit (osv-scanner) did not run: \
+                             could not spawn process: {e}"
+                        ),
+                        repo_dir,
                     ),
                 }),
             );
@@ -774,17 +784,17 @@ async fn run_dep_audit_with_tooling(
                 None => base,
             }
         } else if !exit_ok {
-            format!(
-                "dependency audit (osv-scanner) did not run: \
-                 process exited with code {code}: {stderr}"
+            scrub_local_paths(
+                &format!(
+                    "dependency audit (osv-scanner) did not run: \
+                     process exited with code {code}: {stderr}"
+                ),
+                repo_dir,
             )
         } else {
-            // Exit OK but empty stdout — treat as no lockfiles.
-            let base = format!("dependency audit (osv-scanner) {NO_LOCKFILES} in {repo}");
-            match unaudited_manifest_sentence(repo_dir).await {
-                Some(gap) => format!("{base}. {gap}"),
-                None => base,
-            }
+            // Exit OK but empty stdout: osv-scanner printed nothing, which a completed scan
+            // never does (it prints at least an empty result). That is not "no lockfiles".
+            empty_output_message()
         };
 
         return (
@@ -817,10 +827,20 @@ async fn run_dep_audit_with_tooling(
             Vec::new(),
             Some(CoverageNote {
                 tool: TOOL_NAME.to_string(),
-                message: format!("dependency audit (osv-scanner) could not parse output: {e}"),
+                message: scrub_local_paths(
+                    &format!("dependency audit (osv-scanner) could not parse output: {e}"),
+                    repo_dir,
+                ),
             }),
         ),
     }
+}
+
+/// The coverage message for a clean exit with nothing on stdout. A scan that completed always
+/// prints a result, so this is a run that did not happen, never "no lockfiles".
+fn empty_output_message() -> String {
+    "dependency audit (osv-scanner) did not run: it exited normally but produced no output"
+        .to_string()
 }
 
 /// The sentence naming the dependency manifests under `repo_dir` that no lockfile covers, or
@@ -1014,6 +1034,45 @@ mod tests {
     }
 
     #[test]
+    fn a_zero_score_is_info_not_low() {
+        assert_eq!(cvss_score_to_severity(0.0), "info");
+        let none = r#"[{"type":"CVSS_V3","score":"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:N"}]"#;
+        let f = parse_one(none, "", "");
+        assert_eq!(f.severity, "info");
+        assert!(!f.needs_review);
+        assert_eq!(cvss_score_to_severity(0.1), "low");
+    }
+
+    #[test]
+    fn the_dependency_detail_has_no_em_dash() {
+        let found = parse_osv_json("acme/api", &fixture_root(), osv_fixture()).unwrap();
+        assert!(!found[0].detail.contains('\u{2014}'), "{}", found[0].detail);
+        let no_fix = r#"{"results":[{"source":{"path":"/w/Cargo.lock","type":"lockfile"},
+          "packages":[{"package":{"name":"a","version":"1","ecosystem":"crates.io"},
+          "vulnerabilities":[{"id":"CVE-9","summary":"x","database_specific":{"severity":"HIGH"}}]}]}]}"#;
+        let f = &parse_osv_json("acme/api", Path::new("/w"), no_fix).unwrap()[0];
+        assert!(!f.detail.contains('\u{2014}'), "{}", f.detail);
+        assert!(
+            f.detail.contains(", no patched version available yet"),
+            "{}",
+            f.detail
+        );
+    }
+
+    #[test]
+    fn a_clean_exit_with_no_output_is_not_a_finding_of_no_lockfiles() {
+        let message = empty_output_message();
+        assert!(message.contains("did not run"), "{message}");
+        assert!(!message.contains(NO_LOCKFILES), "{message}");
+        let note = CoverageNote {
+            tool: TOOL_NAME.to_string(),
+            message,
+        };
+        assert!(!note_means_scanned(&note));
+        assert!(!note_proves_clean(&note));
+    }
+
+    #[test]
     fn cvss_score_buckets() {
         assert_eq!(cvss_score_to_severity(10.0), "critical");
         assert_eq!(cvss_score_to_severity(9.0), "critical");
@@ -1022,7 +1081,7 @@ mod tests {
         assert_eq!(cvss_score_to_severity(6.9), "medium");
         assert_eq!(cvss_score_to_severity(4.0), "medium");
         assert_eq!(cvss_score_to_severity(3.9), "low");
-        assert_eq!(cvss_score_to_severity(0.0), "low");
+        assert_eq!(cvss_score_to_severity(0.0), "info");
     }
 
     // ── parse_osv_json — realistic fixture ───────────────────────────────────
