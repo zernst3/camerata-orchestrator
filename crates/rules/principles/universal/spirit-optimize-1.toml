@@ -1,5 +1,5 @@
 id = "SPIRIT-OPTIMIZE-1"
-version = 1
+version = 2
 title = "Optimization by default"
 domain = "universal"
 layer = "universal"
@@ -7,11 +7,15 @@ enforcement = "prose"
 kind = "defect"
 inspectable = true
 default = true
-verification = "policy"
+verification = "grounded"
+
+[[sources]]
+url = "https://cwe.mitre.org/data/definitions/1309.html"
+title = "MITRE CWE-1309: CISQ Quality Measures, Efficiency (weaknesses in source code whose presence could reduce the software's efficiency)"
 
 [[sources]]
 url = "AGENTS.md"
-title = "AGENTS.md — SPIRIT-OPTIMIZE-1 (optimization by default)"
+title = "Project policy: performant patterns such as parallel async work, caching, indexing and avoiding N+1 queries are the default shape of new code"
 
 [decision]
 question = "What position does the project take on: Optimization by default?"

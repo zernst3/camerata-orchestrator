@@ -1,5 +1,5 @@
 id = "ORCH-CLEAR-WINNER-1"
-version = 1
+version = 2
 title = "The clear-winner test — decide vs. stop"
 domain = "agentic"
 layer = "universal"
@@ -11,7 +11,7 @@ verification = "policy"
 
 [[sources]]
 url = "AGENTS.md"
-title = "AGENTS.md — ORCH-CLEAR-WINNER-1 (the clear-winner test)"
+title = "Project policy: before stopping to ask a person, apply a documented convention or a guiding principle that settles the choice"
 
 [decision]
 question = "What position does the project take on: The clear-winner test — decide vs. stop?"

@@ -1,5 +1,5 @@
 id = "SPIRIT-ROBUSTNESS-1"
-version = 1
+version = 2
 title = "Robustness over terseness, but buy complexity only against a named threat"
 domain = "universal"
 layer = "universal"
@@ -11,7 +11,7 @@ verification = "policy"
 
 [[sources]]
 url = "AGENTS.md"
-title = "AGENTS.md — SPIRIT-ROBUSTNESS-1 (robustness over terseness)"
+title = "Project policy: between two correct implementations prefer the more explicit and robust one, and justify added complexity by the failure it prevents"
 
 [[emits]]
 target = "aicodingrules"

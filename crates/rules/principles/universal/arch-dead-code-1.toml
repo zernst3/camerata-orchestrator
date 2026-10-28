@@ -1,5 +1,5 @@
 id = "ARCH-DEAD-CODE-1"
-version = 1
+version = 2
 title = "Every source file is used: another file imports it, a framework or tool loads it by convention, or a comment records how it is loaded"
 domain = "universal"
 layer = "universal"
@@ -12,28 +12,32 @@ inspectable = true
 # the exported finding down to low.
 max_severity = "low"
 default = true
-# `policy`, not `grounded`: the convention that every source file is reachable is deliberate
-# project policy, and no external authority states the three-language, file-level rule as
-# specified here. Related controls (not citations, and deliberately not in `[[sources]]`):
-# knip reports unused files in JavaScript and TypeScript projects, vulture reports unused code in
-# Python, and rustc's `dead_code` lint reports unused Rust items; none of them reports a whole
-# source file that no import, framework convention, manifest entry or text mention reaches, and
-# none of them is told to stay silent for a name that a build script or a README mentions. Only
-# the owner sets `verified`.
-verification = "policy"
+# `grounded`: CWE-561 states the principle, that code which can never run is a maintainability
+# weakness to remove. The three-language, file-level form specified here is this project's own.
+# Related controls (not citations, and deliberately not in `[[sources]]`): knip reports unused
+# files in JavaScript and TypeScript projects, vulture reports unused code in Python and rustc's
+# `dead_code` lint reports unused Rust items; none of them reports a whole source file that no
+# import, framework convention, manifest entry or text mention reaches, and none of them is told
+# to stay silent for a name that a build script or a README mentions.
+# Only the owner sets `verified`.
+verification = "grounded"
 qualifies = "Deterministically checkable from the repository's files, with no judgment involved, at the level of a whole source file in TypeScript, JavaScript, Python or Rust. Unused individual exports, dead private functions and unreferenced style classes are a separate, later rule and are not reported here. A file is reported only when four things hold at once: no file imports it, either directly or through a barrel or a package index; no entry point loads it (a package manifest's main, bin or exports entry, a framework's file-system route or convention folder, a script with a shebang or a Python main guard, a test runner, a computed import or glob that could reach its folder); its name appears as a whole word in no other file that is itself reachable, in any file type, so a build script, a CI step, an HTML script tag, a component import or a README line that names it keeps it; and it carries no `keep-file:` comment in its first lines. A file reached only through other unreachable files is reported with those files, and a folder whose source files are all unreachable is reported once. For Rust, a file is compiled only when a `mod` declaration reaches it from a crate root, a Cargo target or a `#[path]` attribute, so a file no `mod` statement declares is reported; crates whose roots or declarations the check cannot see (no library or main file in the scan, binary targets declared in the manifest, macro-generated modules) are skipped. Never reported: tests, fixtures, mocks, stories and end-to-end files; declaration files; files at the repository root, in dot-folders or shaped like tool configuration; generated files; files in folders that people or tools run by hand (scripts, examples, docs, migrations); a file with a short or generic name; and every file of a public package that other projects can import deeply. The check does not run on a scan that stopped at its file limit, since an importer may be missing, and it does not report a repository with no source in these languages as clean. The check is a precise but conservative signal: a file loaded by a mechanism the repository does not show is the one case it can wrongly report, and the `keep-file:` comment is how a project records that."
 
 [[sources]]
+url = "https://cwe.mitre.org/data/definitions/561.html"
+title = "MITRE CWE-561: Dead Code (code that can never be executed degrades maintainability and is removed)"
+
+[[sources]]
 url = "docs/design/2026-10-21_w29-detector-implementation.md"
-title = "Design: the W29 detector layer, ARCH-DEAD-CODE-1: the algorithm and its traps"
+title = "Design notes: how the check decides that a source file is unreachable, and the cases it must not report"
 
 [[sources]]
 url = "CORPUS_WORK_ORDER_CONSISTENCY_RULES.md"
-title = "Corpus work order: consistency rules, section 1: dead code"
+title = "Project policy: every source file is used"
 
 [[sources]]
 url = "docs/OVERNIGHT_DECISIONS.md"
-title = "Decisions log, DECISIONS MADE, 2026-10-21: ARCH-DEAD-CODE-1 ships file-level in v1; unused individual exports are a separate rule"
+title = "Decision record: the check works on whole files; unused individual exports are a separate rule"
 
 [decision]
 question = "What does the project do with a source file that no other file imports and nothing loads?"

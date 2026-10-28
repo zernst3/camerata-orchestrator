@@ -1,5 +1,5 @@
 id = "ORCH-BUDGET-MONITOR-1"
-version = 1
+version = 2
 title = "Budget self-monitoring"
 domain = "agentic"
 layer = "universal"
@@ -7,11 +7,15 @@ enforcement = "prose"
 kind = "defect"
 inspectable = false
 default = true
-verification = "policy"
+verification = "grounded"
+
+[[sources]]
+url = "https://genai.owasp.org/llmrisk/llm102025-unbounded-consumption/"
+title = "OWASP Top 10 for LLM Applications, LLM10:2025 Unbounded Consumption (quotas, resource limits and timeouts keep model use from running up unbounded cost)"
 
 [[sources]]
 url = "AGENTS.md"
-title = "AGENTS.md — ORCH-BUDGET-MONITOR-1 (budget self-monitoring)"
+title = "Project policy: an autonomous run tracks its own spend against a cap, and a wrapper enforces a hard limit before each model call"
 
 [decision]
 question = "How should an autonomous run cap its spend?"

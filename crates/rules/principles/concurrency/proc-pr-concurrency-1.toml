@@ -1,5 +1,5 @@
 id = "PROC-PR-CONCURRENCY-1"
-version = 1
+version = 2
 title = "PR template forces a concurrency story"
 domain = "concurrency"
 layer = "universal"
@@ -7,11 +7,15 @@ enforcement = "structured"
 kind = "defect"
 inspectable = true
 default = true
-verification = "grounded"
+# `policy`, not `grounded`: the only source is this project's own convention. A pull request
+# template is a host feature (GitHub documents how to add one) but no external authority states
+# that a change touching shared mutable state must carry a concurrency section, so citing the
+# template docs would ground the mechanism, not the rule. Only the owner sets `verified`.
+verification = "policy"
 
 [[sources]]
 url = "CONVENTIONS.md"
-title = "CONVENTIONS.md — §PROC-PR-CONCURRENCY-1 (PR template forces a concurrency story)"
+title = "Project policy: a pull request that touches shared mutable state documents its locking strategy and concurrency testing"
 
 [decision]
 question = "What position does the project take on: PR template forces a concurrency story?"

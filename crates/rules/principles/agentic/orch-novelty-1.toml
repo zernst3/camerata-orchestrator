@@ -1,5 +1,5 @@
 id = "ORCH-NOVELTY-1"
-version = 1
+version = 2
 title = "Novelty downgrades authority"
 domain = "agentic"
 layer = "universal"
@@ -11,7 +11,7 @@ verification = "policy"
 
 [[sources]]
 url = "AGENTS.md"
-title = "AGENTS.md — ORCH-NOVELTY-1 (novelty downgrades authority)"
+title = "Project policy: a choice with no precedent in existing conventions goes to a person, even when one answer looks obvious"
 
 [decision]
 question = "What position does the project take on: Novelty downgrades authority?"

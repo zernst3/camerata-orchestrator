@@ -1,5 +1,5 @@
 id = "SPIRIT-FILE-SIZE-1"
-version = 1
+version = 2
 title = "Files are sized for human reading, not for AI write-cost"
 domain = "universal"
 layer = "universal"
@@ -7,11 +7,19 @@ enforcement = "prose"
 kind = "default_with_exceptions"
 inspectable = true
 default = true
-verification = "policy"
+verification = "grounded"
+
+[[sources]]
+url = "https://cwe.mitre.org/data/definitions/1080.html"
+title = "MITRE CWE-1080: Source Code File with Excessive Number of Lines of Code (an oversized file is harder to maintain)"
+
+[[sources]]
+url = "https://eslint.org/docs/latest/rules/max-lines"
+title = "ESLint max-lines: enforce a maximum number of lines per file"
 
 [[sources]]
 url = "AGENTS.md"
-title = "AGENTS.md — SPIRIT-FILE-SIZE-1 (files sized for human reading)"
+title = "Project policy: hand-maintained files are split at sizes a person can read without losing their place; generated files are exempt"
 
 [decision]
 question = "What position does the project take on: Files are sized for human reading, not for AI write-cost?"
