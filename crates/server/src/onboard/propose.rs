@@ -1027,7 +1027,7 @@ mod tests {
 
     // ── req_h1 / req_a6: the "every rule can run" build gate ────────────────────────────────
     //
-    // Requirement H1 (`docs/plans/2026-10-09_audit-findings-tracker.md`): "every rule must be
+    // Requirement H1 (the audit findings tracker): "every rule must be
     // CAPABLE of running. A rule that does not run because it is irrelevant to the scanned
     // stack is CORRECT. A rule that could never run for ANY stack is a DEFECT."
     //

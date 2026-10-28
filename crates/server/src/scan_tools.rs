@@ -3631,7 +3631,7 @@ mod tests {
 
     // ── req_c11: the eslint preview failed WHOLESALE, at zero coverage and nonzero cost ──
     //
-    // `docs/plans/2026-10-09_audit-findings-tracker.md`, C11 / Fable priority #4:
+    // the audit findings tracker, C11 / Fable priority #4:
     //
     //   > The ESLint preview pass FAILED WHOLESALE on these runs: `Could not preview 10
     //   > rule(s) with eslint: EOF while parsing a value at line 1 column 0`.

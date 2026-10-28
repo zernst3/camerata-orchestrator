@@ -146,7 +146,7 @@ impl std::fmt::Display for EnforcementKind {
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-// Rule kind (Pass-1 W2 — A5.1, `docs/plans/2026-10-09_audit-findings-tracker.md`)
+// Rule kind (Pass-1 W2 — A5.1, the audit findings tracker)
 // ────────────────────────────────────────────────────────────────────────────
 
 /// The FOUR-WAY classification of how a multi-option rule's alternatives relate to the
@@ -689,7 +689,7 @@ struct RuleToml {
     #[serde(default)]
     inspectable: Option<bool>,
     /// A ceiling on the severity this rule may ever export, e.g. `"high"` — see [`Rule::
-    /// max_severity`]'s doc comment and E2 (`docs/plans/2026-10-09_audit-findings-tracker.md`).
+    /// max_severity`]'s doc comment and E2 (the audit findings tracker).
     /// Free-form lowercase severity string (`"critical"` | `"high"` | `"medium"` | `"low"`),
     /// matching the vocabulary `Finding::severity`/`report_export::normalize_severity` already
     /// use elsewhere — NOT a new enum, for the same reason `Finding::severity` itself isn't
@@ -700,13 +700,13 @@ struct RuleToml {
     max_severity: Option<String>,
     /// A FLOOR on the severity this rule may ever export, e.g. `"high"` — see
     /// [`Rule::min_severity`]'s doc comment and W5-Q2's ruling
-    /// (`docs/plans/2026-10-09_audit-findings-tracker.md`: *"Floor, it's the minimum
+    /// (the audit findings tracker: *"Floor, it's the minimum
     /// rating."*). Same free-form lowercase severity vocabulary as `max_severity`, for the
     /// same reason. `None` (the overwhelming majority of rules) means no floor — the rule's
     /// severity is whatever the calibration pipeline produces.
     #[serde(default)]
     min_severity: Option<String>,
-    /// A5.2 (`docs/plans/2026-10-09_audit-findings-tracker.md`): the severity ceiling for a
+    /// A5.2 (the audit findings tracker): the severity ceiling for a
     /// CONSISTENCY DEVIATION reported under this rule — see [`Rule::deviation_ceiling`]'s doc
     /// comment. Same free-form lowercase severity vocabulary as `max_severity`. `None` (the
     /// overwhelming majority) means the pipeline's default deviation ceiling (`"medium"`)
@@ -903,8 +903,8 @@ pub struct RuleOption {
     /// finding at render time (see `report_export::resolve_fix`).
     pub remediation: Option<String>,
     /// Authored, client-facing HEADLINE for a DETERMINISTIC FLOOR finding evaluated against
-    /// this option (P4 — floor findings get finding-level treatment: `docs/plans/
-    /// 2026-09-29_codebase-inspection-hardening.md` §P4). A short, specific sentence naming
+    /// this option (P4 — floor findings get finding-level treatment: the codebase-inspection
+    /// hardening notes §P4). A short, specific sentence naming
     /// what's wrong IN THIS REPO — never the gate's own "Deny…" enforcement phrasing
     /// (`camerata_gateway::RULE_REGISTRY`'s `description` is an internal directive the AGENT
     /// reads, not client prose; leaking it into a report is exactly the defect this field
@@ -939,7 +939,7 @@ pub struct RuleOption {
     /// not yet authored for this option; the report then renders its pre-existing honest gap
     /// rather than fabricating a number.
     pub effort: Option<String>,
-    /// Pass-1 W2 (A5.4, `docs/plans/2026-10-09_audit-findings-tracker.md`): `true` when
+    /// Pass-1 W2 (A5.4, the audit findings tracker): `true` when
     /// CHOOSING this option describes the ABSENCE or a DEGENERATE FORM of the rule's own
     /// requirement — this option IS the defect, authored as an `[[option]]` only because the
     /// corpus convention pairs the rule's correct behavior with the behavior(s) it was
@@ -1096,8 +1096,8 @@ pub struct Rule {
     ///   fail-safe direction for an undeclared rule is to keep looking, not to go quiet — and
     ///   because fixture corpora in other crates legitimately omit the key.
     pub inspectable: Option<bool>,
-    /// A ceiling on the severity this rule may ever export (E2, `docs/plans/
-    /// 2026-10-09_audit-findings-tracker.md`) — `report_export`'s severity pipeline clamps
+    /// A ceiling on the severity this rule may ever export (E2, the audit findings tracker) —
+    /// `report_export`'s severity pipeline clamps
     /// DOWN to this value whenever the finding's own (possibly floor-raised) severity would
     /// otherwise rank above it; it never RAISES a lower severity. `None` (the overwhelming
     /// majority of rules) means no ceiling. Free-form lowercase string in the same vocabulary
@@ -1140,7 +1140,7 @@ pub struct Rule {
     /// it is applied BEFORE every downstream integrity downgrade and ceiling, so neither the
     /// null-location safety net nor `max_severity` can be defeated by an authored floor.
     pub min_severity: Option<String>,
-    /// A5.2 (`docs/plans/2026-10-09_audit-findings-tracker.md`): the severity ceiling for a
+    /// A5.2 (the audit findings tracker): the severity ceiling for a
     /// CONSISTENCY DEVIATION (`FindingKind::Deviation`) reported under this rule. Deviations
     /// cap at `"medium"` BY DEFAULT — the cost of inconsistency is forward drift on future
     /// features, not current risk — but a rule whose drift cost is genuinely high can author
@@ -1191,7 +1191,7 @@ pub struct Rule {
     pub candidates: Option<Candidates>,
 }
 
-/// P7 (`docs/plans/2026-09-29_codebase-inspection-hardening.md`): a GENERAL mechanism for a
+/// P7 (the codebase-inspection hardening notes): a GENERAL mechanism for a
 /// rule whose premise conflicts with an idiomatic pattern of a DETECTED platform to be
 /// suppressed for that stack, rather than firing a false violation. Declared per-rule in the
 /// corpus TOML as `[[stack_exception]]` blocks — a rule can carry any number of them (one per
@@ -1906,7 +1906,7 @@ async fn load_one(path: &Path, corpus_dir: &Path) -> Result<Rule, RulesError> {
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-// Corpus-load gate (Pass-1 W2, item 4 — `docs/plans/2026-10-09_audit-findings-tracker.md`)
+// Corpus-load gate (Pass-1 W2, item 4 — the audit findings tracker)
 // ────────────────────────────────────────────────────────────────────────────
 //
 // Mirrors the EXISTING precedent `camerata_server::mechanical_gate` set for the W1-item-4
@@ -1989,7 +1989,7 @@ pub fn rules_declaring_emit_only(set: &RuleSet) -> Vec<String> {
 /// (`camerata_cli::inspect_cmd::curated_rule_selection`) filters on. Sorted for stable output.
 ///
 /// This is the verification half of requirement H1 (Pass-1 W4,
-/// `docs/plans/2026-10-09_audit-findings-tracker.md`): "every rule must be CAPABLE of running.
+/// the audit findings tracker): "every rule must be CAPABLE of running.
 /// A rule that does not run because it is irrelevant to the scanned stack is CORRECT. A rule
 /// that could never run for ANY stack is a DEFECT." A `verification` value is a REPO-INDEPENDENT
 /// fact, so a rule disarmed by it is disarmed everywhere, forever — exactly the defect class
@@ -2050,7 +2050,7 @@ pub fn suspicious_default_with_exceptions_rules(set: &RuleSet) -> Vec<String> {
 
 // ────────────────────────────────────────────────────────────────────────────
 // W14 corpus-load gates: flag/prose agreement, the decision-kind invariant, and
-// the schema-vocabulary gate (`docs/plans/2026-10-09_audit-findings-tracker.md`)
+// the schema-vocabulary gate (the audit findings tracker)
 // ────────────────────────────────────────────────────────────────────────────
 //
 // Same build-time-gate philosophy as `rules_missing_kind` above and the same reason: these
@@ -2151,7 +2151,7 @@ pub fn options_with_rejected_prose_but_no_violates_flag(set: &RuleSet) -> Vec<St
 /// "decision"`, zero `violates` flags, 2 options, one opening `Rejected:`) that saw 19 security
 /// rules reclassified to `defect`. Resolving it means CHANGING a rule's `kind`, and 39 rules sit
 /// on the owner's paused A5.7 classification hold — 6 of the 7 rules this function reports are on
-/// that hold list (`docs/plans/2026-10-09_rule-kind-classification.md`, "NEEDS OWNER DECISION").
+/// that hold list (the rule-kind classification notes, "NEEDS OWNER DECISION").
 /// Failing the build would force a reclassification the owner has explicitly paused. The
 /// requirement a gate can honestly carry here is that the population cannot GROW silently, which
 /// is what `req_w14_decision_kind_rules_with_rejected_prose_match_the_known_roster` pins.
@@ -5541,7 +5541,7 @@ mod tests {
     }
 
     // ── Pass-1 W2: rule kind / violates / max_severity schema ──────────────────────────────
-    // (`docs/plans/2026-10-09_audit-findings-tracker.md`, A5.1 + the corpus-load gate)
+    // (the audit findings tracker, A5.1 + the corpus-load gate)
 
     /// req_a5_1: EVERY [`RuleKind`] variant round-trips through TOML in both directions — the
     /// wire string parses to the right variant, and an ABSENT `kind` field parses to
@@ -5831,7 +5831,7 @@ mod tests {
         );
     }
 
-    /// req_h1 (Pass-1 W4, `docs/plans/2026-10-09_audit-findings-tracker.md`): no rule in the
+    /// req_h1 (Pass-1 W4, the audit findings tracker): no rule in the
     /// REAL shipped corpus may sit at a [`Verification`] value that makes it unselectable on
     /// every repo. A `verification` value is repo-independent, so a rule disarmed by it is
     /// disarmed EVERYWHERE — the exact "could never run for ANY stack" defect H1 names.
@@ -6712,7 +6712,7 @@ mod tests {
             return;
         }
         // The 58 rules whose classification review is ON HOLD
-        // (`docs/plans/2026-10-09_rule-kind-classification.md`).
+        // (the rule-kind classification notes).
         const HELD: [&str; 58] = [
             "ARCH-OBSERVABILITY-CORRELATION-ID-1",
             "ARCH-OBSERVABILITY-SILENT-FAILURE-1",
@@ -6846,7 +6846,7 @@ mod tests {
     }
 
     /// HARD CONSTRAINT check: a rule in the `NEEDS OWNER DECISION (58 rules)` hold list
-    /// (`docs/plans/2026-10-09_rule-kind-classification.md`) may carry a `deviation_ceiling`
+    /// (the rule-kind classification notes) may carry a `deviation_ceiling`
     /// ONLY where the owner named it himself. INFERRING one is still banned, because inferring
     /// presumes the kind classification he explicitly paused ("pause the rule review for me for
     /// when I can sit down and look at these"). Transcribing an explicit prose `max_severity` on

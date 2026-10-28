@@ -383,6 +383,31 @@
       #linebreak()
       #text(size: 8pt, fill: ink_faint)[Also violates: #site.also_matches_titles.join(", ")]
     ]
+    // M2/M8: when a rule's ceiling, floor or the unlocated safety net moved this row's
+    // severity, say what it was and why. Prints nothing for a row no bound moved.
+    #if site.severity_adjustments.len() > 0 [
+      #for note in site.severity_adjustments [
+        #linebreak()
+        #text(size: 8pt, fill: ink_faint)[#note]
+      ]
+    ]
+    // H6: every site a merge folded into this row, so a row that stands for several places
+    // says so. The first ten are named; the rest are counted and point to the workbook, which
+    // lists them all.
+    #if site.also_sites.len() > 0 [
+      #linebreak()
+      #text(size: 8pt, fill: ink_faint)[Also found at #str(site.also_sites.len()) other #plural(site.also_sites.len(), "site", "sites"):]
+      #for also in site.also_sites.slice(0, calc.min(site.also_sites.len(), 10)) [
+        #linebreak()
+        #text(font: mono, size: 8pt, fill: ink_faint)[#also.repo / #breakable(also.path, n: 60), line #str(also.line)]
+        #if also.title != none [#text(size: 8pt, fill: ink_faint)[(#also.title)]]
+        #if also.consequence [#text(size: 8pt, fill: ink_faint)[(also affected)]]
+      ]
+      #if site.also_sites.len() > 10 [
+        #linebreak()
+        #text(size: 8pt, fill: ink_faint)[and #str(site.also_sites.len() - 10) more, listed in full in the workbook and findings.json]
+      ]
+    ]
   ])
 }
 
@@ -451,6 +476,13 @@
 #v(0.3cm)
 #text(size: 9.5pt, fill: ink_soft)[
   #d.cover.stats.critical critical · #d.cover.stats.high high · #d.cover.stats.medium medium · #d.cover.stats.accepted accepted · #d.cover.stats.dependency_advisories #plural(d.cover.stats.dependency_advisories, "dependency advisory", "dependency advisories")
+]
+
+// H11: an incremental run says so on the first page, with how much it re-audited and how much it
+// carried forward. Prints nothing for a full scan.
+#if d.cover.incremental_note != none [
+  #v(0.3cm)
+  #text(size: 9.5pt, fill: ink_soft)[#d.cover.incremental_note]
 ]
 
 // Nice-to-have: gate the heading when there is nothing under it.
@@ -757,6 +789,10 @@
 
 #if d.dependency_snapshot.clean [
   No known vulnerable dependencies detected.
+] else if d.dependency_snapshot.rows.len() == 0 [
+  // M11: no rows is not the same as clean. The audit did not run, or left manifests out, so
+  // this section cannot say that no dependency is vulnerable.
+  Dependencies were not fully checked in this scan, so this report cannot say that none are vulnerable. The notes below say what was not checked.
 ] else [
   #table(
     columns: (1fr, auto, 2fr, auto),
@@ -846,12 +882,15 @@ Not performed in this engagement:
 // skipped files and points to the full list, which itself holds the first 1,000 per reason; the
 // rest are counted ("and K more").
 #let gaps = d.coverage_gaps
-#if gaps.failed_ai_passes.len() > 0 or gaps.skipped_files.len() > 0 or gaps.skipped_beyond_cap_total > 0 [
+#if gaps.failed_ai_passes.len() > 0 or gaps.dependency_gaps.len() > 0 or gaps.skipped_files.len() > 0 or gaps.skipped_beyond_cap_total > 0 [
   #v(0.2cm)
   #card[
     #subheading[Coverage, not reviewed this scan]
     #v(0.1cm)
     #for line in gaps.failed_ai_passes [
+      - #line
+    ]
+    #for line in gaps.dependency_gaps [
       - #line
     ]
     #let shown = calc.min(gaps.skipped_files.len(), 100)

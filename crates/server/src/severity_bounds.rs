@@ -69,6 +69,81 @@ impl BoundedFinding for Finding {
     fn set_severity(&mut self, severity: String) {
         self.severity = severity;
     }
+
+    fn note_severity_adjustment(&mut self, note: String) {
+        record_adjustment(self, note);
+    }
+}
+
+/// The `Finding::captures` key a severity adjustment is recorded under, one sentence per line.
+///
+/// M2/M8: the live scan applies the bounds in place, so by export time the producer's severity
+/// is gone and a downgrade (the unlocated safety net most of all) was invisible. The note rides
+/// with the finding instead. A capture is the carrier because it is a serde-default map that
+/// every `Finding` already has; a dedicated `Finding::severity_adjustments` field, when the AI
+/// tier adds one for its own ceilings, joins in through [`recorded_adjustments`].
+pub const SEVERITY_ADJUSTMENTS_CAPTURE: &str = "severity_adjustments";
+
+/// Append `note` to the finding's recorded adjustments (never twice).
+fn record_adjustment(f: &mut Finding, note: String) {
+    let entry = f
+        .captures
+        .entry(SEVERITY_ADJUSTMENTS_CAPTURE.to_string())
+        .or_default();
+    if entry.lines().any(|l| l == note) {
+        return;
+    }
+    if !entry.is_empty() {
+        entry.push('\n');
+    }
+    entry.push_str(&note);
+}
+
+/// The adjustments recorded on `f` so far, oldest first.
+pub(crate) fn recorded_adjustments(f: &Finding) -> Vec<String> {
+    f.captures
+        .get(SEVERITY_ADJUSTMENTS_CAPTURE)
+        .map(|v| {
+            v.lines()
+                .filter(|l| !l.trim().is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Every severity adjustment to tell the client about for `f`, as finished sentences: the ones
+/// recorded when the scan applied the bounds, plus any the bounds would make now (a finding that
+/// reached an exporter without the live bound pass). Empty for a finding no bound moved.
+pub(crate) fn severity_adjustment_lines(
+    f: &Finding,
+    corpus: Option<&camerata_rules::RuleSet>,
+) -> Vec<String> {
+    let mut notes = recorded_adjustments(f);
+    let (_, now) = camerata_rules::severity_bounds::bounded_severity_explained(
+        f,
+        corpus_rule_for(&f.rule_id, corpus),
+    );
+    for note in now {
+        if !notes.contains(&note) {
+            notes.push(note);
+        }
+    }
+    notes.iter().map(|n| finish_sentence(n)).collect()
+}
+
+/// Capitalise the first letter and end with a full stop.
+fn finish_sentence(note: &str) -> String {
+    let note = note.trim();
+    let mut chars = note.chars();
+    let mut out = match chars.next() {
+        Some(c) => c.to_uppercase().collect::<String>() + chars.as_str(),
+        None => return String::new(),
+    };
+    if !out.ends_with('.') {
+        out.push('.');
+    }
+    out
 }
 
 /// `f`'s severity after every bound (see [`camerata_rules::severity_bounds::bounded_severity`]).

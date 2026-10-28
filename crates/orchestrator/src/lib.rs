@@ -1,6 +1,6 @@
 //! camerata-orchestrator-core: the confidence engine's effect-signature classifier.
 //!
-//! See `docs/plans/2026-07-09_product-owner-head-vibe-mode.md`, the
+//! See the product-owner vibe-mode design notes, the
 //! "Architect-orchestrator design (decided 2026-07-10)" section: "The decision CLASS
 //! (A/B/C/D) comes from the action's effect-signature at the gate boundary ... detected
 //! by the same interception the deny-before-execute gate owns."

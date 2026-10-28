@@ -1,5 +1,5 @@
 //! The framework-agnostic Governed-Development state machine (Phase C of the UI-core
-//! extraction, see `docs/plans/2026-07-01_ui-core-extraction.md`).
+//! extraction, see the UI-core extraction notes).
 //!
 //! [`GovDevState`] owns the poll / change-detection state that previously lived as three
 //! process-global Dioxus signals in `camerata_ui::cockpit::uow` (`UOW_LAST_SEEN`,

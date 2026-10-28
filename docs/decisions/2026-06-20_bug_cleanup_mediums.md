@@ -4,7 +4,7 @@
 **Branch:** dev6/bug-cleanup
 **Agent:** dev6/bug-cleanup subagent (Claude Sonnet 4.6)
 **Scope:** Fixes for BUG-2, BUG-9, BUG-11, BUG-6 (MEDIUM) and BUG-10, BUG-12, BUG-7, BUG-8 (LOW)
-from the `docs/audits/2026-06-20_integration_bug_hunt.md` report.
+from the integration bug-hunt audit report (private working notes).
 **Skipped:** INT-1 (Finding.provenance schema change in onboard.rs — out of confine; ROUTE to Zach)
 
 ---

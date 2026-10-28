@@ -146,7 +146,7 @@ fn gitignore_status_phrase(path: &str, files: &[(String, String)]) -> &'static s
 /// computes "a" vs "an" from the resolved value at substitution time
 /// (`report_export::indefinite_article`). A value that carried its own article here would
 /// double up with either mechanism — see the W4 bug this shape fixes
-/// (`docs/plans/2026-09-30_cycle2-queue-hardening.md`).
+/// (the cycle-2 queue-hardening notes).
 pub(crate) fn classify_secret_kind(rule_id: &str, snippet: &str, path: &str) -> &'static str {
     match rule_id {
         "SEC-NO-SECRET-FILE-1" => secret_file_kind(path),

@@ -173,7 +173,7 @@ fn default_true_op() -> bool {
 }
 
 /// One work-item TYPE in a project's hierarchy schema, as the BFF reports it (mirrors the server's
-/// `WorkType`). See `docs/plans/2026-06-30_epic-design-page.md` §3.
+/// `WorkType`). See the epic design page notes §3.
 #[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize)]
 struct WorkTypeView {
     name: String,
@@ -2505,7 +2505,7 @@ fn UsageMeter() -> Element {
 
 /// The `/api/gate-probe` result (#14): the end-to-end gate-loop go/no-go.
 // dead_code: the `GateSelfCheck` box was unmounted from the UoW view by the 3-phase redesign
-// (docs/plans/2026-06-25_uow-3phase-redesign.md section 10: "UI affordance only"); the
+// (the UoW three-phase redesign notes section 10: "UI affordance only"); the
 // component, this view and the fetch are deliberately preserved (see `UowDevControls`).
 #[allow(dead_code)]
 #[derive(Clone, PartialEq, serde::Deserialize)]

@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-04
 **Status:** Accepted (design); implementation to follow
-**Motivated by:** the 2026-07-04 Fable 5 audit (`docs/ARCH_AUDIT_2026-07-04_fable5-complete.md`)
+**Motivated by:** the 2026-07-04 Fable 5 audit (private working notes)
 
 ## Context
 

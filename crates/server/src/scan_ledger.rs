@@ -396,6 +396,29 @@ pub struct ScanLedger {
     /// existed, or by a caller that does not record one.
     #[serde(default)]
     engagement: Option<crate::client_lock::EngagementRecord>,
+    /// H11: set when this run re-audited only the files that changed since an earlier
+    /// inspection and carried the rest of that inspection's findings forward. The exporters
+    /// state it on the cover, so a reader never takes a partial re-audit for a full one.
+    /// `None` for a full scan.
+    #[serde(default)]
+    incremental: Option<IncrementalCarry>,
+}
+
+/// H11: what an incremental run re-audited and what it carried forward unchanged.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IncrementalCarry {
+    /// Files re-audited this run (the ones that changed).
+    #[serde(default)]
+    pub changed: usize,
+    /// Files not re-audited, whose earlier findings were carried forward.
+    #[serde(default)]
+    pub carried_files: usize,
+    /// Findings carried forward from the earlier inspection.
+    #[serde(default)]
+    pub carried_findings: usize,
+    /// The commit of the earlier inspection the carried findings came from, when known.
+    #[serde(default)]
+    pub prior_sha: Option<String>,
 }
 
 /// The facts about a scan's INPUT, recorded so the integrity gate can judge them.
@@ -696,6 +719,16 @@ impl ScanLedger {
     /// Record the engagement this scan ran under. Overwrites: one scan, one record.
     pub fn record_engagement(&mut self, record: crate::client_lock::EngagementRecord) {
         self.engagement = Some(record);
+    }
+
+    /// Record that this run was incremental (H11). Overwrites: one scan, one record.
+    pub fn record_incremental(&mut self, carry: IncrementalCarry) {
+        self.incremental = Some(carry);
+    }
+
+    /// What this run carried forward from an earlier inspection, when it was incremental.
+    pub fn incremental(&self) -> Option<&IncrementalCarry> {
+        self.incremental.as_ref()
     }
 
     /// The engagement this scan ran under, when it recorded one.
@@ -1598,7 +1631,7 @@ mod tests {
     }
 
     // ── Pass-1 W2 (A5.4): "judged not applicable" is its own outcome ───────────────────────
-    // (`docs/plans/2026-10-09_audit-findings-tracker.md`)
+    // (the audit findings tracker)
 
     /// req_a5_4: a rule recorded with `ran && findings_emitted == 0` AFTER
     /// `note_not_applicable_rule` was queued for it is NEVER verified-clean / healthy — this is
@@ -1727,7 +1760,7 @@ mod tests {
     }
 
     // ── req_c1: additions are accounted exactly as deletions already are ───────────────────
-    // (docs/plans/2026-10-09_audit-findings-tracker.md, requirement C1 — the ledger used to be
+    // (the audit findings tracker, requirement C1 — the ledger used to be
     // able to represent ONLY a stage that shrinks the row set; a stage that APPENDS findings
     // (the scan-time external-tool preview merge, the evidence-of-violation gate) had no bucket
     // at all, so the two real defects this fixes ran entirely outside the ledger's view. These

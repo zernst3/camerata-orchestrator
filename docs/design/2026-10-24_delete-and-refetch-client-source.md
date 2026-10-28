@@ -1,8 +1,8 @@
 # Delete and re-fetch client source: the build-ready design (2026-10-24)
 
-Binding decisions: `docs/OVERNIGHT_DECISIONS.md`, DECISIONS MADE, the 2026-10-22 entries "Delete
+Binding decisions: the private decision log, the 2026-10-22 entries "Delete
 client source after delivery" and its re-fetch revision. Forward-compatibility note:
-`docs/plans/2026-10-22_post-v1-roadmap.md`, "Keep V1 forward-compatible". Downstream consumer:
+the post-V1 roadmap notes (private working notes), "Keep V1 forward-compatible". Downstream consumer:
 `_workspace/brownfield-audits/WORK_ORDER_REVIEW_SPEED.md` (the code viewer, built AFTER this).
 
 Branch: `feat/audit-report-export`. This document is the spec Sonnet builds from and Fable

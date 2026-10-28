@@ -299,7 +299,7 @@ pub fn site_count(f: &FindingView) -> usize {
 }
 
 /// Which of the curator workbench's four kind surfaces a finding row belongs on
-/// (`docs/plans/2026-10-11_pass2-curator-ui-design.md` §1-§2).
+/// (the pass-2 curator UI design notes §1-§2).
 ///
 /// The split is NOT a UI taste: it is the data model's own
 /// [`FindingKind::is_informational`](camerata_api_types::audit::FindingKind::is_informational)
@@ -1038,10 +1038,20 @@ pub use crate::scan::default_finding_status;
 /// Stable identity for a finding across the triage tables (repo + rule + location + snippet),
 /// so its disposition survives table switches and re-sorts.
 pub fn finding_key(f: &FindingView) -> String {
-    format!(
+    let key = format!(
         "{}\u{0}{}\u{0}{}\u{0}{}\u{0}{}",
         f.repo, f.rule_id, f.path, f.line, f.snippet
-    )
+    );
+    // M9: a dependency row's snippet is `package@version`, so two advisories on one package
+    // version in one lockfile shared the whole key and dispositioning one buried the other. The
+    // advisory id (carried on dependency rows only) tells them apart. Every other row's key is
+    // unchanged. Must match `camerata_server::report_export::finding_key` byte for byte.
+    match f.captures.get("advisory") {
+        Some(advisory) if f.rule_id == "DEP-AUDIT-1" && !advisory.is_empty() => {
+            format!("{key}\u{0}{advisory}")
+        }
+        _ => key,
+    }
 }
 
 /// The disposition state for a finding (Unresolved when absent from the map).
@@ -1814,6 +1824,32 @@ mod tests {
         assert!(key.contains("src/a.rs"));
         assert!(key.contains('7'));
         assert!(key.contains("snip"));
+    }
+
+    #[test]
+    fn two_advisories_on_one_package_version_do_not_share_a_key() {
+        let dep = |advisory: &str| {
+            finding(serde_json::json!({
+                "repo": "o/r", "path": "Cargo.lock", "line": 0,
+                "rule_id": "DEP-AUDIT-1", "severity": "high",
+                "snippet": "time@0.1.45", "detail": "",
+                "captures": { "advisory": advisory }
+            }))
+        };
+        let (a, b) = (dep("RUSTSEC-2020-0071"), dep("RUSTSEC-2021-0001"));
+        assert_ne!(finding_key(&a), finding_key(&b));
+        // The server builds the same bytes (`report_export::finding_key`).
+        assert_eq!(
+            finding_key(&a),
+            "o/r\u{0}DEP-AUDIT-1\u{0}Cargo.lock\u{0}0\u{0}time@0.1.45\u{0}RUSTSEC-2020-0071"
+        );
+        // Any other row keeps the five-part key, even with an "advisory" capture of its own.
+        let other = finding(serde_json::json!({
+            "repo": "o/r", "path": "a.rs", "line": 1, "rule_id": "RULE-X",
+            "severity": "low", "snippet": "s", "detail": "",
+            "captures": { "advisory": "X" }
+        }));
+        assert_eq!(finding_key(&other), "o/r\u{0}RULE-X\u{0}a.rs\u{0}1\u{0}s");
     }
 
     #[test]

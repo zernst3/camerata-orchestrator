@@ -41,7 +41,7 @@ chorale-dioxus = "0.2.3"
 
 # Framework-agnostic UI logic + state (RUST-HEADLESS-CORE-1). This crate is the thin Dioxus ADAPTER;
 # pure logic, data shapes, and state transitions live in camerata-ui-core (no dioxus dep), unit-tested
-# there with no VirtualDom. Extraction is incremental (docs/plans/2026-07-01_ui-core-extraction.md).
+# there with no VirtualDom. Extraction is incremental (the UI-core extraction notes).
 camerata-ui-core = { path = "../ui-core" }
 # The pure-serde wire-contract leaf. The `WorkItem` wire mirror the cockpit deserializes
 # lives there (Phase C moved it out so camerata-ui-core's GovDevState can hold it);

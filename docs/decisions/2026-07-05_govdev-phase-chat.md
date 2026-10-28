@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-05
 **Status:** Accepted (GAP-4 shipped on `fix/gap4-chat`)
-**Related:** `2026-07-02_bombe-loading-invariant`, GAP-4 in `docs/plans/2026-07-05_escalation-decisions.md`
+**Related:** `2026-07-02_bombe-loading-invariant`, GAP-4 in the escalation-decisions notes (private working notes)
 
 ## Context
 

@@ -1,7 +1,7 @@
 //! The confidence engine's decision + calibration store.
 //!
 //! An `orchestrator_decisions` table records every autonomous decision the Architect
-//! orchestrator makes (see `docs/plans/2026-07-09_product-owner-head-vibe-mode.md`,
+//! orchestrator makes (see the product-owner vibe-mode design notes,
 //! "Architect-orchestrator design (decided 2026-07-10)"): its effect-signature CLASS
 //! and CONFIDENCE (from `camerata-orchestrator-core::classify` — never an LLM
 //! self-report), what it chose, what the alternatives were, and any assumption it

@@ -4,7 +4,7 @@
 //! > Zach's added rationale: these two also **prevent overspending on tokens** by catching
 //! > regressions before an external graded run.
 //! >
-//! > — `docs/plans/2026-10-09_audit-findings-tracker.md`
+//! > — the audit findings tracker
 //!
 //! # The problem this exists to solve
 //!
@@ -753,7 +753,7 @@ mod tests {
 
     // ── req_i2: the pre-flight integrity gate ────────────────────────────────────────────
     //
-    // `docs/plans/2026-10-09_audit-findings-tracker.md`, requirement I2. Each test below
+    // the audit findings tracker, requirement I2. Each test below
     // names the shipped defect it would have caught. Every one of those defects was found by
     // a PAID external graded run while the in-repo suite was green; these are the assertions
     // that make the next one free.
