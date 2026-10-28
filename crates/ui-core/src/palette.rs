@@ -146,6 +146,8 @@ pub enum PaletteAction {
     ToggleTimer,
     /// The strip's Review time button.
     OpenStats,
+    /// The Help menu's "Start walkthrough": the inspection walkthrough, from its first step.
+    StartWalkthrough,
 }
 
 impl PaletteAction {
@@ -161,7 +163,8 @@ impl PaletteAction {
                 PaneCommand::PromptFor(_) | PaneCommand::OpenCode | PaneCommand::OpenStack,
             ) => false,
             Self::Undo | Self::SetOrder(_) | Self::ToggleTimer => true,
-            Self::OpenHub | Self::FullDetail | Self::OpenStats => false,
+            // The walkthrough's popup takes the keyboard itself.
+            Self::OpenHub | Self::FullDetail | Self::OpenStats | Self::StartWalkthrough => false,
         }
     }
 }
@@ -361,8 +364,17 @@ pub fn entries(ctx: &PaletteContext) -> Vec<PaletteEntry> {
             "stats hours minutes",
         ));
     }
+    // The Help menu's item, reachable from the keyboard here. Always listed: it needs no row.
+    out.push(entry(
+        PaletteAction::StartWalkthrough,
+        WALKTHROUGH_LABEL,
+        "help guide tour guided inspection tutorial",
+    ));
     out
 }
+
+/// The label of the walkthrough's line, the same words as the Help menu's item.
+pub const WALKTHROUGH_LABEL: &str = "Start walkthrough";
 
 // ── Staleness ────────────────────────────────────────────────────────────────────────────
 
@@ -695,6 +707,30 @@ mod tests {
     }
 
     #[test]
+    fn the_walkthrough_line_is_always_there_and_found_by_its_words() {
+        let bare = PaletteContext::default();
+        for ctx in [bare, full()] {
+            let list = entries(&ctx);
+            let line = list
+                .iter()
+                .find(|e| e.action == PaletteAction::StartWalkthrough)
+                .expect("the walkthrough line");
+            assert_eq!(line.label, WALKTHROUGH_LABEL);
+            assert_eq!(WALKTHROUGH_LABEL, "Start walkthrough");
+        }
+        let list = entries(&full());
+        for query in ["walkthrough", "guided", "tour", "help"] {
+            let found = filter(&list, query);
+            assert!(
+                found
+                    .iter()
+                    .any(|e| e.action == PaletteAction::StartWalkthrough),
+                "{query}"
+            );
+        }
+    }
+
+    #[test]
     fn the_order_entries_leave_out_the_current_cut() {
         let list = entries(&full());
         let orders: Vec<OrderPreset> = list
@@ -755,6 +791,7 @@ mod tests {
             (PaletteAction::OpenHub, false),
             (PaletteAction::FullDetail, false),
             (PaletteAction::OpenStats, false),
+            (PaletteAction::StartWalkthrough, false),
         ] {
             assert_eq!(action.returns_focus(), returns, "{action:?}");
         }

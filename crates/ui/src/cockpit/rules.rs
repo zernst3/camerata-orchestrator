@@ -4398,6 +4398,7 @@ pub(super) fn ProposedRulesTable(
         div { class: "findings-toolbar",
             button {
                 class: "btn-run",
+                "data-tour": camerata_ui_core::walkthrough::target::RUN_INSPECTION,
                 disabled: auditing || scan_block.is_some(),
                 title: unresolved_hint.clone(),
                 onclick: move |_| {
