@@ -478,6 +478,13 @@
   #d.cover.stats.critical critical · #d.cover.stats.high high · #d.cover.stats.medium medium · #d.cover.stats.accepted accepted · #d.cover.stats.dependency_advisories #plural(d.cover.stats.dependency_advisories, "dependency advisory", "dependency advisories")
 ]
 
+// H11: an incremental run says so on the first page, with how much it re-audited and how much it
+// carried forward. Prints nothing for a full scan.
+#if d.cover.incremental_note != none [
+  #v(0.3cm)
+  #text(size: 9.5pt, fill: ink_soft)[#d.cover.incremental_note]
+]
+
 // Nice-to-have: gate the heading when there is nothing under it.
 #if d.cover.audited_refs.len() > 0 [
   #v(0.4cm)

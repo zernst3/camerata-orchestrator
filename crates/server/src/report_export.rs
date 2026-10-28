@@ -737,6 +737,40 @@ pub struct CoverJson {
     /// `docs/design/2026-09-13_audit-deliverable-review-fixes.md`.
     pub brand: Option<String>,
     pub stats: CoverStatsJson,
+    /// H11: set when this run re-audited only the changed files and carried the earlier
+    /// inspection's other findings forward ("12 files re-audited this run, 3 findings carried
+    /// from the inspection at abc1234."). `None` for a full scan, and the cover then prints
+    /// nothing extra.
+    pub incremental_note: Option<String>,
+}
+
+/// H11: the cover sentence for an incremental run. Plain words; each count is the ledger's.
+pub fn incremental_cover_note(carry: &crate::scan_ledger::IncrementalCarry) -> String {
+    let files = |n: usize| {
+        if n == 1 {
+            "1 file".to_string()
+        } else {
+            format!("{n} files")
+        }
+    };
+    let findings = if carry.carried_findings == 1 {
+        "1 finding".to_string()
+    } else {
+        format!("{} findings", carry.carried_findings)
+    };
+    let source = match carry.prior_sha.as_deref().map(str::trim) {
+        Some(sha) if !sha.is_empty() => {
+            let short: String = sha.chars().take(7).collect();
+            format!("the inspection at {short}")
+        }
+        _ => "an earlier inspection".to_string(),
+    };
+    format!(
+        "{} re-audited this run. {} not re-audited; {} carried from {source}.",
+        files(carry.changed),
+        files(carry.carried_files),
+        findings
+    )
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -5079,6 +5113,7 @@ pub fn build_report_json(
         prepared_by: resolve_prepared_by(opts, None),
         brand: resolve_brand(opts, None),
         stats,
+        incremental_note: report.ledger.incremental().map(incremental_cover_note),
     };
 
     // ── Methodology (M4: ported from the better sample copy, no dashes per S12) ────────
@@ -5378,6 +5413,9 @@ mod fix_text_tests;
 
 #[cfg(test)]
 mod fn_batch_c_adjust_tests;
+
+#[cfg(test)]
+mod fn_batch_c_incremental_tests;
 
 #[cfg(test)]
 mod fn_batch_c_sites_tests;
