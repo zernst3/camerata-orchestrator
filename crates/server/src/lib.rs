@@ -87,6 +87,9 @@ pub mod preflight;
 pub mod project;
 pub mod provider;
 pub mod reconcile;
+/// Inspection findings become units of work (roadmap 2c): the plan and create routes, the
+/// implementer's findings grounding and the delta retest evidence.
+pub mod remediation;
 /// PDF audit-report export (brownfield audit hardening Pass B): `AuditReportJson` +
 /// `build_report_json` (pure serializer) + `compile_pdf` (Typst compile). See the
 /// module doc comment and `docs/design/2026-07-23_brownfield-audit-report.md`.
@@ -909,9 +912,9 @@ impl AppState {
         project_id: &str,
         report: &crate::onboard::ScanReport,
         kind: crate::inspections::InspectionKind,
-    ) {
+    ) -> Option<crate::inspections::InspectionEntry> {
         if report.gated || report.blocked || report.provenance.audited_refs.is_empty() {
-            return;
+            return None;
         }
         // The stored report is the sealed artifact every export is built from, so it carries
         // only redacted text: sweep a CLONE (the caller's copy is left as handed in) before
@@ -919,12 +922,17 @@ impl AppState {
         let mut sealed = report.clone();
         sealed.sweep_secrets_before_seal();
         let entry = crate::inspections::InspectionEntry::from_report(project_id, sealed, kind);
-        if let Err(e) = self.inspections.append(entry) {
-            tracing::warn!(
-                project = project_id,
-                error = %e,
-                "could not persist the completed inspection; exports will not survive a restart"
-            );
+        match self.inspections.append(entry) {
+            Ok(stored) => Some(stored),
+            Err(e) => {
+                tracing::warn!(
+                    project = project_id,
+                    error = %e,
+                    "could not persist the completed inspection; exports will not survive a restart"
+                );
+                // The in-memory copy was updated before the write failed, so it is the newest.
+                self.inspections.latest(project_id)
+            }
         }
     }
 
@@ -1717,6 +1725,15 @@ pub fn router(state: AppState) -> Router {
         .route("/api/projects/:id/audit-report", post(export_audit_report))
         // ── Product export (PDF + Excel workbook, zipped) ─────────────────────
         .route("/api/projects/:id/product-export", post(export_product))
+        // ── Remediation work: inspection findings become units of work (roadmap 2c) ──
+        .route(
+            "/api/projects/:id/remediation/plan",
+            post(remediation::remediation_plan_preview),
+        )
+        .route(
+            "/api/projects/:id/remediation/create",
+            post(remediation::remediation_create),
+        )
         // ── App-wide credential manager ───────────────────────────────────────
         // POST /api/credentials/:name  — store a credential (body: { "value": "…" })
         // DELETE /api/credentials/:name — remove a saved credential
@@ -2429,6 +2446,10 @@ async fn resume_governed_run(
     // so a resumed run never got provenance / evidence / a stage advance. Spawned BEFORE
     // handing `story_id` to the implement run; the watcher awaits the run's terminal state.
     spawn_provenance_watcher(state, &run_id, &story_id);
+    // A unit created from inspection findings also carries the findings it must close.
+    let extra_grounding =
+        crate::remediation::extra_grounding_for(&state.uow, &story_id, Some(directive_grounding))
+            .await;
     spawn_brownfield_dev_run(
         state,
         run_id.clone(),
@@ -2442,7 +2463,7 @@ async fn resume_governed_run(
         checkpoint.max_iterations,
         None,  // resume uses the checkpoint's single model, not a tier map
         false, // resume runs the full gates (no skip_layer2)
-        Some(directive_grounding),
+        extra_grounding,
     )
     .await;
     Ok((run_id, mode))
@@ -2825,6 +2846,11 @@ async fn start_governed_run(
                 };
                 // Derive the project inputs + spawn the implement run. SHARED with the resume path
                 // (`spawn_brownfield_dev_run`), so a fresh run and a resumed run never drift.
+                // A unit created from inspection findings carries the findings it must close and
+                // the rules they violate into the implementer's and the reviewer's prose.
+                let extra_grounding =
+                    crate::remediation::extra_grounding_for(&state.uow, &story_id_owned, None)
+                        .await;
                 spawn_brownfield_dev_run(
                     state,
                     rid,
@@ -2838,7 +2864,7 @@ async fn start_governed_run(
                     max_iterations,
                     tier_map,
                     skip_layer2,
-                    None,
+                    extra_grounding,
                 )
                 .await;
             }
@@ -7709,7 +7735,16 @@ pub(crate) async fn start_audit_job(
                 // A delta retest is recorded as its own kind of inspection, naming the
                 // inspection it was computed from and the two commits between.
                 (Some(id), Some(d)) => {
-                    scan_state.record_inspection(
+                    // The rule fingerprint of the inspection this retest was computed from, so a
+                    // unit's evidence can say when the rule selection changed in between.
+                    let base_rules_fingerprint = scan_state
+                        .inspections
+                        .list(id)
+                        .into_iter()
+                        .find(|e| e.id == d.base_inspection_id)
+                        .map(|e| e.rules_fingerprint)
+                        .unwrap_or_default();
+                    if let Some(entry) = scan_state.record_inspection(
                         id,
                         &report,
                         crate::inspections::InspectionKind::DeltaRetest {
@@ -7717,7 +7752,15 @@ pub(crate) async fn start_audit_job(
                             from_sha: d.from_sha.clone(),
                             to_sha: d.to_sha.clone(),
                         },
-                    );
+                    ) {
+                        // Units created from findings learn which of their findings are gone.
+                        crate::remediation::record_retest_evidence(
+                            &scan_state.uow,
+                            id,
+                            &entry,
+                            &base_rules_fingerprint,
+                        );
+                    }
                     scan_state.set_last_scan_in_memory(id.clone(), report.clone());
                 }
                 (Some(id), None) => scan_state.set_last_scan(id.clone(), report.clone()),
@@ -12738,6 +12781,9 @@ struct UowView {
     /// `true` when this is a blank/authoring DRAFT UoW (it has an authoring state and no
     /// work item yet). The UI renders the authoring panel instead of the dev controls.
     authoring: bool,
+    /// What the unit was created from (`"findings"` for a unit made from an inspection's
+    /// findings), so the console list can badge it. `None` for every other unit.
+    source_kind: Option<String>,
 }
 
 /// `GET /api/uows` — list all Units of Work, each with the WorkItem it references
@@ -12769,6 +12815,7 @@ async fn uows_list(State(state): State<AppState>) -> Result<Json<serde_json::Val
             UowView {
                 provider: u.provider(),
                 repo: u.repo().map(str::to_string),
+                source_kind: u.source.as_ref().map(|s| s.kind_str().to_string()),
                 id: u.story_id,
                 work_item,
                 stage: u.stage.wire_str().to_string(),
