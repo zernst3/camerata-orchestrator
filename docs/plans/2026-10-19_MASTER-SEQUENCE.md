@@ -16,14 +16,14 @@ everything in sequence until we are ready to start the cycle again."*
 > | 2 W21 artifact gate | DONE | `b632df7` |
 > | 3 model pinning | DONE | `36d5799` |
 > | 4 W22 kind integrity | DONE | `436a5a3` |
-> | 5 Corpus Group 3 (A5.7 roster) | PARTIAL: 2 of 4 | `84e8f4f`; the two needing option rewrites remain |
+> | 5 Corpus Group 3 (A5.7 roster) | DONE (verified 2026-10-28) | `84e8f4f`; the two option-rewrite rules (GETSESSION-SERVER, RLS-INITPLAN) were resolved 2026-10-20 and are pinned by `w22_detector_voice_options_rewritten.rs`; the roster in `w14_corpus_schema_gates.rs` records all four |
 > | 6 W23 | PARTIAL | `d88872f`; cross-tier remainder recorded as latent in OVERNIGHT_DECISIONS |
 > | 7 W24 | PARTIAL, then REFRAMED | `14fc75e`, `ac7359f`, `89ea732`; platform-owned remainder became W33 (approved + built, `69d40e1`..`dff2ae9`) |
 > | 8 W28 | DONE | `c9ca239` |
 > | 9 W31 | DONE | `865e66e` |
 > | 10 W25 rendered artifacts | DONE (camerata:allow + product name) | `fa88f36`, `7ee10a6` |
-> | 11 corpus wording batches | PARTIAL | supabase `12e8f69`; non-supabase directives `2a2d1e9`; process/integration `b45258a`; source titles `39f6f9a`. Not yet: slogan labels, hard-newline directives, ~54 template questions, upside-first `why`s, api-layer payment directives (verify each before starting) |
-> | 12 Corpus Group 1 | OPEN | |
+> | 11 corpus wording batches | DONE except the supabase/ and sql/ tail (2026-10-28) | earlier: supabase `12e8f69`; non-supabase directives `2a2d1e9`; process/integration `b45258a`; source titles `39f6f9a`. 2026-10-28 on `cloud/corpus-text` (`d75d713`): guide snippet fixed, 149 template questions, 23 hard-newline directives (incl. the 5 api-layer payment ones, already revoiced), 14 agentic slogan labels, 30 upside-first `why`s. Deferred while rank 7/8 edit those packs: 7 sql/ template questions; hard newlines in 36 supabase/, 8 sql/ and the 3 rank-7 ci-cd directives; upside-first `why`s in sql/; CICD-DEPENDENCY-AUDIT-1 (embeds YAML, needs a shape decision, not a join) |
+> | 12 Corpus Group 1 | DONE (verified 2026-10-28) | resolved in W22: 14 rules pinned by `w22_scanner_design_options_resolved.rs` (9 rewritten, 5 reduced to single-option defects); the 15th, RLS-NO-POLICY, already names a client state |
 > | 13 Group 4 | DONE | `383ea21` |
 > | 14 W26 | corpus half DONE | `155cab1`, `7bee157`; runtime half rides with W27 |
 > | 15 W27 PDF rebuild | Phase-A unblocked (`f6df35d`); template rewrite OPEN (needs Zach's eye) | |
@@ -32,7 +32,7 @@ everything in sequence until we are ready to start the cycle again."*
 > | 16c corpus staleness | BUILT incl. CLI and load/digest nag (`da85cfe9`); LLM sweep agent OPEN | `41fcb1d` et al. |
 > | 17 W29 | PARTIAL: 7 of 9 rules built (Waves A to C, latest `515de82e`); UI-STATE-SHAPE-1 and STYLE-NEEDLESS-COMPLEXITY-1 (Wave D) not in corpus. Design corrected 2026-10-21 (`2f45aae`) | |
 > | 18 W30 residuals | eslint pin: caret majors `f52fb48`, EXACT versions + committed lockfile (`npm ci`) 2026-10-22; other residuals OPEN | |
-> | 19 engine/doc items | `Rejected:` strip DONE `a140459`; `resolve_fix` comment DONE (correction note in place); onboard.rs comments and RULES_REFERENCE §5.3 DONE (`f612ef22`); rest OPEN | |
+> | 19 engine/doc items | `Rejected:` strip DONE `a140459`; `resolve_fix` comment DONE (correction note in place); onboard.rs comments and RULES_REFERENCE §5.3 DONE (`f612ef22`); rest OPEN; corpus sub-items DONE 2026-10-28 (`733d865`) except the 3 inert `deviation_ceiling` fields, which conflict with the W9 mirror-consistency direction (see the item) |
 > | 19a env-var flake | DONE (`79640ede`) (40 env mutations, 3 `#[serial]`) | |
 > | 19b eslint residual | DONE: real cause was version drift + macOS symlink canonicalization | `f52fb48`, `b8941a9`, `b76e8b1` |
 > | 19c supabase option rewrite | DONE | `910697d` |
@@ -121,7 +121,7 @@ _Doc step (standing): update `OVERVIEW.md` + the relevant deep doc before markin
    so their fat-controller option cannot be flagged; a repo that genuinely puts logic in
    controllers is told it "consistently follows" that). Two sibling rules already have the
    correct shape as a template. **This is kind integrity, not wording — it belongs here.**
-5. **Corpus Group 3** — the 4 A5.7-rostered rules (hold lifted, D11). Roster edits follow the
+5. **Corpus Group 3** — the 4 A5.7-rostered rules (hold lifted, D11). DONE (verified 2026-10-28). Roster edits follow the
    worked precedent already in `w14_corpus_schema_gates.rs`. Here because they are also kind
    changes.
 6. **W23 `not_assessed` honesty.** A rule contradicted by another row in the same export
@@ -137,7 +137,7 @@ _Doc step (standing): update `OVERVIEW.md` + the relevant deep doc before markin
 
 10. **W25 client-facing text hygiene — rendered artifacts.** Pipeline vocabulary, retry
     narration, CI-state text, calibration notes, placeholder tokens.
-11. **Corpus wording batches (11 of them, ~167 fields).** The upstream half of W25. Fully
+11. **Corpus wording batches (11 of them, ~167 fields).** DONE except the supabase/sql tail (see the status table, 2026-10-28). The upstream half of W25. Fully
     enumerated in the work order with proposed replacement text. Delegable in parallel.
     - supabase directives (35) · supabase labels (~26) · 31 upside-first `violates` `why`s ·
       `integration/` (3) · `process/` (4) · `universal/` gate-mechanics sentences ·
@@ -145,7 +145,7 @@ _Doc step (standing): update `OVERVIEW.md` + the relevant deep doc before markin
       13 hard-newline directives · ~54 template `[decision].question`s
     - **Fix the guide's orientation snippet FIRST** or the template questions regrow.
     - **Caveat:** severity-transcription comments quote directive prose these rewrites delete.
-12. **Corpus Group 1** — 17 inert `violates` options describing Camerata's detector design.
+12. **Corpus Group 1** — 17 inert `violates` options describing Camerata's detector design. DONE (resolved in W22, verified 2026-10-28).
     Verified runtime-inert; safe anywhere, parked here to batch with the wording.
 13. **Corpus Group 4** — truncated option ids. ✅ DONE (`383ea21`). 72 mid-word-truncated ids
     de-truncated to full/clean-trimmed label slugs; 55 `[decision].default` + only 4 remaining
@@ -338,15 +338,23 @@ _Doc step (standing): update `OVERVIEW.md` + the relevant deep doc before markin
       are dropped from the code audit; they are not. DONE (`f612ef22`).
     - three field-interaction rules to ADD to the guide: `enforcement` × multi-option (the most
       consequential and entirely absent), `remediation` × `violates`, `inspectable` scope
-      (working tree vs VCS metadata)
-    - `supabase-key-service-role-client-1` has no severity bound but says "critical" twice
-    - 3 inert `deviation_ceiling` fields on `defect`-kind rules
-    - `proc-pr-concurrency-1` is `grounded` with one non-http source → resolves zero citations
-    - `javascript-angular-subscription-cleanup-1` flags a state its own conforming option permits
+      (working tree vs VCS metadata). DONE (`733d865`, RULE_AUTHORING interactions 9 to 11).
+    - `supabase-key-service-role-client-1` has no severity bound but says "critical" twice.
+      DONE (`733d865`, `min_severity = "critical"`).
+    - 3 inert `deviation_ceiling` fields on `defect`-kind rules. BLOCKED ON A DECISION: removing
+      them breaks `req_w5_q3_every_per_stack_mirror_inherits_its_spine_rules_deviation_ceiling`,
+      which pins the owner's W9 direction that the mirror set stay consistent (tracker W9-Q1
+      records the ceilings as deliberately inert). Either keep them (close this sub-item) or
+      drop them and remove the three ids from that test's mirror lists.
+    - `proc-pr-concurrency-1` is `grounded` with one non-http source → resolves zero citations.
+      DONE (`733d865`): GitHub Docs + Go race detector sources, relabelled `policy`.
+    - `javascript-angular-subscription-cleanup-1` flags a state its own conforming option permits.
+      DONE (`733d865`): flagged option removed (W22 single-option shape).
     - `testing-one-assertion-per-test-1 / strict-one-physical-assert` — `violates` on an
-      over-application, not a fault
+      over-application, not a fault. DONE (`733d865`): flag removed, `why` revoiced.
     - `proc-permission-config-1` — `inspectable = false` with `kind = "defect"` and two
-      `violates` options is dead machinery; one of the two declarations is wrong
+      `violates` options is dead machinery; one of the two declarations is wrong. DONE
+      (`733d865`): `inspectable = false` kept (pinned in w16), the two dead options removed.
 19e. **Fold in Track 2 BEFORE the sweep (Zach, 2026-10-20).** The graded sweep does not run until
     the client-readiness items are in the product: machine-readable exports + `manifest.json`
     (`16b`), corpus staleness check (`16c`), and the W23/W24 latent remainders. Rationale: the
@@ -494,7 +502,7 @@ Slotted RIGHT AFTER the delete/re-fetch blocker, blocking items first, all befor
   section is never silently re-baselined: it stays "changed, not yet reviewed" on every run until
   `--accept <url#anchor>` / `--accept-all` (who and when recorded in the sidecar); an unaccepted
   change lowers confidence with no time limit, and the 100-day window runs from the accept date.
-- **22g (handoff item 16, protected: corpus, Zach already asked): clean three showcase rule files** PARTIAL (`18d4ae40`; two of three rules still open).
+- **22g (handoff item 16, protected: corpus, Zach already asked): clean three showcase rule files** DONE (`18d4ae40`; SEC-NO-HARDCODED-SECRETS-1 and ARCH-IDEMPOTENCY-KEYS-1 in `a8bb185`).
   of internal notes for the website overlay: SEC-NO-HARDCODED-SECRETS-1 (drop the internal
   docs/ENFORCEMENT.md source or relabel it), ARCH-IDEMPOTENCY-KEYS-1 (replace the boilerplate
   decision question), ARCH-OBSERVABILITY-LOG-CONSISTENCY-1 (move internal module notes out of
