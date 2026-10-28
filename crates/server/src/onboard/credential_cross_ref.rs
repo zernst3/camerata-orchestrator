@@ -45,8 +45,14 @@ pub struct CredentialIndex {
 
 impl CredentialIndex {
     pub fn new(findings: &[Finding]) -> Self {
+        Self::from_findings(findings)
+    }
+
+    /// The index over any set of rows: a report builds it over the rows it carries, so a row the
+    /// reviewer dismissed as a false positive is never what a note points at.
+    pub fn from_findings<'a>(findings: impl IntoIterator<Item = &'a Finding>) -> Self {
         let mut repos_by_name: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-        for f in findings.iter().filter(|f| is_secret_exposure(f)) {
+        for f in findings.into_iter().filter(|f| is_secret_exposure(f)) {
             for name in crate::ai_audit::root_cause_credential_identities(f) {
                 repos_by_name
                     .entry(name)

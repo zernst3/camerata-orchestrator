@@ -2510,7 +2510,10 @@ fn write_index_sheet(
     for sheet in sheet_plan {
         let link = format!("internal:'{}'!A1", sheet.sheet_name);
         ws.write_url_with_text(r, 0, link.as_str(), &sheet.display_name)?;
-        ws.write_number(r, 1, sheet.count as f64)?;
+        // The patterns sheet holds observations, not findings: nothing under this column.
+        if sheet.display_name != PATTERNS_SHEET {
+            ws.write_number(r, 1, sheet.count as f64)?;
+        }
         ws.write_string(r, 2, &sheet.worst_severity)?;
         r += 1;
     }

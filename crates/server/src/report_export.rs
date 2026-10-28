@@ -713,9 +713,11 @@ pub struct CodeVolumeJson {
     /// template must render the total either way and only additionally list languages when
     /// this is non-empty.
     pub by_language: Vec<crate::onboard::LanguageVolume>,
-    /// Each repo's own line count, when the project has more than one repo (empty otherwise, so
-    /// a one-repo cover reads as it always has). Never merged into the total above without
-    /// saying which repo holds what.
+    /// Each repo's own line count, when the project has more than one repo. Absent from the JSON
+    /// otherwise, so a one-repo `findings.json` is byte for byte what it always was; the template
+    /// guards for the key. Never merged into the total above without saying which repo holds
+    /// what.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub per_repo: Vec<CodeVolumeRepoJson>,
 }
 
@@ -4501,13 +4503,6 @@ pub fn build_report_json(
     // (and every other use of `report` in this function) is unchanged.
     let report = &sanitize_report_findings(report);
     let candidates_reviewed = report.findings.len();
-    // The repos that flag a credential under the same name, for the display-only note on each
-    // such site. Nothing to link in a project of one repo.
-    let credentials = if report.repos.len() > 1 {
-        crate::onboard::credential_cross_ref::CredentialIndex::new(&report.findings)
-    } else {
-        crate::onboard::credential_cross_ref::CredentialIndex::default()
-    };
 
     // Partition: false positives out (counted once), everything else keeps its finding +
     // effective disposition + REASON + normalized severity (S10 — normalized exactly once,
@@ -4549,6 +4544,16 @@ pub fn build_report_json(
         ReviewState::Reviewed
     } else {
         ReviewState::Raw
+    };
+    // The repos that flag a credential under the same name, for the display-only note on each
+    // such site. Built over the rows the report carries: a row the reviewer dismissed as a false
+    // positive is not in the report, so no note may point at it. Nothing to link in one repo.
+    let credentials = if report.repos.len() > 1 {
+        crate::onboard::credential_cross_ref::CredentialIndex::from_findings(
+            live.iter().map(|(f, _, _, _)| *f),
+        )
+    } else {
+        crate::onboard::credential_cross_ref::CredentialIndex::default()
     };
 
     // Dependency findings get their own §7 lane — carve them out of every other section.

@@ -692,3 +692,87 @@ fn the_readme_names_the_patterns_section_and_the_plural_disclaimer_only_for_seve
         "{readme}"
     );
 }
+
+/// A row the reviewer dismissed as a false positive is not in the PDF, so no other row may point
+/// at it: the note names only the repos whose rows the report still carries.
+#[test]
+fn a_credential_note_never_cites_a_row_dismissed_as_a_false_positive() {
+    use camerata_server::report_export::{finding_key, DispositionWire};
+    let mut report = two_repo_report();
+    report.findings.push(secret_in(WEB, "STRIPE_SECRET_KEY"));
+    let api_row = secret_in(API, "STRIPE_SECRET_KEY");
+    let mut dispositions = HashMap::new();
+    dispositions.insert(
+        finding_key(&api_row),
+        DispositionWire {
+            state: "FalsePositive".to_string(),
+            reason: "fixture token".to_string(),
+            ..DispositionWire::default()
+        },
+    );
+    report.findings.push(api_row);
+    let json = build_report_json(
+        &report.seal(),
+        &dispositions,
+        None,
+        &ReportOptions::default(),
+    );
+    let group = json
+        .curated_findings
+        .iter()
+        .chain(json.held_for_review_findings.iter())
+        .find(|g| g.rule_id == "SEC-NO-HARDCODED-SECRETS-1")
+        .unwrap();
+    assert_eq!(
+        group.sites.len(),
+        1,
+        "the dismissed row is out of the report"
+    );
+    assert_eq!(
+        group.sites[0].same_credential_note, "",
+        "the note must not point at a row the report does not carry"
+    );
+}
+
+/// The workbook Index lists every sheet with its number of findings. The patterns sheet holds
+/// observations, not findings, so its row carries no count under that header.
+#[test]
+fn the_index_does_not_count_pattern_rows_as_findings() {
+    let xlsx = workbook(&two_repo_report());
+    let index = grid(&xlsx, "Index");
+    let toc = index
+        .iter()
+        .position(|row| {
+            row.first().is_some_and(|c| c == "Sheet") && row.get(1).is_some_and(|c| c == "Findings")
+        })
+        .expect("the Index has a table of contents");
+    let row = index[toc + 1..]
+        .iter()
+        .find(|row| row.first().is_some_and(|c| c == "Patterns across services"))
+        .expect("the patterns sheet is listed");
+    assert_eq!(
+        row.get(1).map(String::as_str).unwrap_or(""),
+        "",
+        "pattern rows are not findings: {row:?}"
+    );
+}
+
+/// The shipped `findings.json` of a one-repo project is byte for byte what it was: the per-repo
+/// volume key exists only when there is more than one repo to list.
+#[test]
+fn a_one_repo_findings_json_carries_no_per_repo_volume_key() {
+    let one = findings_json(&one_repo_report());
+    assert!(
+        one["provenance"]["code_volume"].get("per_repo").is_none(),
+        "{}",
+        one["provenance"]["code_volume"]
+    );
+    let two = findings_json(&two_repo_report());
+    assert_eq!(
+        two["provenance"]["code_volume"]["per_repo"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+}

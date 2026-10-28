@@ -464,8 +464,8 @@
   } else {
     base + " (" + cv.by_language.map(l => l.language + ": " + thousands(l.lines)).join(", ") + ")"
   }
-  // A project of several repos also says how large each one is. Empty for one repo.
-  if cv.per_repo.len() == 0 {
+  // A project of several repos also says how large each one is. The key is absent for one repo.
+  if not ("per_repo" in cv) or cv.per_repo.len() == 0 {
     with_languages
   } else {
     with_languages + ". By repo: " + cv.per_repo.map(r => r.repo + ": " + thousands(r.lines)).join(", ")

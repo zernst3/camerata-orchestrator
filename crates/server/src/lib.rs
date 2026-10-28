@@ -5095,6 +5095,10 @@ async fn rescan_alternatives_handler(
     let mut all_findings: Vec<crate::onboard::Finding> = Vec::new();
     let mut all_recs: std::collections::HashMap<String, crate::ai_audit::RuleRecommendation> =
         std::collections::HashMap::new();
+    // The same picks with the repo each was made for, one per (rule, repo): what the stored
+    // report's per-repo list is updated from, so a multi-repo workbook never prints the pick a
+    // rescan replaced.
+    let mut all_recs_by_repo: Vec<crate::ai_audit::RuleRecommendation> = Vec::new();
     // W6: a sub-pass (e.g. a nested alternative-recommendation call) failing here must never
     // be silent either — surfaced in `run_notes` below and merged into the stored report.
     let mut all_failed_passes: Vec<crate::ai_audit::FailedPass> = Vec::new();
@@ -5163,8 +5167,10 @@ async fn rescan_alternatives_handler(
         {
             Ok((findings, _proposed, recs, failed, _stage_samples)) => {
                 all_findings.extend(findings);
-                for r in recs {
-                    all_recs.insert(r.rule_id.clone(), r);
+                for mut r in recs {
+                    r.repo = spec.to_string();
+                    all_recs.insert(r.rule_id.clone(), r.clone());
+                    all_recs_by_repo.push(r);
                 }
                 for f in &failed {
                     run_notes.push(format!("{spec}: {} not computed ({})", f.pass, f.reason));
@@ -5192,9 +5198,7 @@ async fn rescan_alternatives_handler(
             .findings
             .retain(|f| !rescanned_ids.contains(&f.rule_id.to_ascii_uppercase()));
         report.findings.extend(all_findings.clone());
-        for (rid, rec) in &all_recs {
-            report.recommendations.insert(rid.clone(), rec.clone());
-        }
+        report.fold_rescan_recommendations(all_recs_by_repo.clone());
         // W6: fold any freshly-failed pass into the stored report so a LATER export still
         // discloses it — never let a rescan's failure disappear once this handler returns.
         report.failed_passes.extend(all_failed_passes.clone());

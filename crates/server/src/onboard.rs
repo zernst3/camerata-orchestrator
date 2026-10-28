@@ -1237,6 +1237,22 @@ impl ScanReport {
         }
     }
 
+    /// Fold a targeted rescan's picks into the stored report. A pick replaces the stored one for
+    /// its (rule, repo) in [`Self::recommendations_by_repo`], the list the multi-repo workbook's
+    /// "Rules applied" rows and the evidence gate read, and the by-rule view takes it as the
+    /// rule's latest pick. A pick that names no repo updates the by-rule view only. Every other
+    /// service's pick is left as it was.
+    pub fn fold_rescan_recommendations(&mut self, picks: Vec<crate::ai_audit::RuleRecommendation>) {
+        for pick in picks {
+            if !pick.repo.is_empty() {
+                self.recommendations_by_repo
+                    .retain(|r| !(r.rule_id == pick.rule_id && r.repo == pick.repo));
+                self.recommendations_by_repo.push(pick.clone());
+            }
+            self.recommendations.insert(pick.rule_id.clone(), pick);
+        }
+    }
+
     /// Rebuild [`Self::patterns_across_services`] from the ledger and the findings. Called by
     /// [`Self::seal`] and wherever a report is stored for the cockpit, after the last change to
     /// either. The themes a model grouped the rows into are kept only while the rows they cite
@@ -3550,6 +3566,66 @@ async fn capture_audited_ref(spec: &str, dir: &std::path::Path) -> AuditedRef {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A targeted rescan re-evaluates a few rules on every repo they apply to. Its picks replace
+    /// the stored ones for the same (rule, repo) and leave every other service's pick alone, in
+    /// both the by-rule view and the per-repo list the multi-repo workbook reads.
+    #[test]
+    fn a_rescan_replaces_the_pick_for_its_rule_and_repo_and_keeps_the_other_services() {
+        fn rec(rule: &str, repo: &str, option: &str) -> crate::ai_audit::RuleRecommendation {
+            crate::ai_audit::RuleRecommendation {
+                repo: repo.to_string(),
+                rule_id: rule.to_string(),
+                recommended_option_id: option.to_string(),
+                ..Default::default()
+            }
+        }
+        let mut report = build_report(
+            vec!["acme/a".to_string(), "acme/b".to_string()],
+            Vec::new(),
+            0,
+            Vec::new(),
+        );
+        report.recommendations_by_repo = vec![
+            rec("RULE-X", "acme/a", "old"),
+            rec("RULE-X", "acme/b", "old"),
+            rec("RULE-Y", "acme/a", "keep"),
+        ];
+        report
+            .recommendations
+            .insert("RULE-X".to_string(), rec("RULE-X", "acme/b", "old"));
+        report.fold_rescan_recommendations(vec![rec("RULE-X", "acme/a", "forced")]);
+        let pick = |report: &ScanReport, rule: &str, repo: &str| {
+            report
+                .recommendations_by_repo
+                .iter()
+                .find(|r| r.rule_id == rule && r.repo == repo)
+                .map(|r| r.recommended_option_id.clone())
+        };
+        assert_eq!(pick(&report, "RULE-X", "acme/a").as_deref(), Some("forced"));
+        assert_eq!(
+            pick(&report, "RULE-X", "acme/b").as_deref(),
+            Some("old"),
+            "not rescanned"
+        );
+        assert_eq!(pick(&report, "RULE-Y", "acme/a").as_deref(), Some("keep"));
+        assert_eq!(
+            report.recommendations_by_repo.len(),
+            3,
+            "one entry per (rule, repo)"
+        );
+        assert_eq!(
+            report.recommendations["RULE-X"].recommended_option_id, "forced",
+            "the by-rule view follows the rescan too"
+        );
+        // A pick that names no repo updates the by-rule view only.
+        report.fold_rescan_recommendations(vec![rec("RULE-Y", "", "nowhere")]);
+        assert_eq!(pick(&report, "RULE-Y", "acme/a").as_deref(), Some("keep"));
+        assert_eq!(
+            report.recommendations["RULE-Y"].recommended_option_id,
+            "nowhere"
+        );
+    }
 
     /// A `NotAssessed` honesty row is not a detection: it must not count toward a rule's fired
     /// total (which would record the rule as having run and found something), and the rule must
