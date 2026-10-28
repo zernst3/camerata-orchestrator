@@ -257,8 +257,35 @@ pub struct FindingView {
     /// AI-judged findings.
     #[serde(default)]
     pub captures: std::collections::BTreeMap<String, String>,
+    /// The server's semantic category (`secret-exposure`, `authorization`, ...), mirrored from
+    /// `camerata_server::onboard::Finding::category`. `None` for a deterministic finding the
+    /// server never classified. Read only through [`FindingView::is_secret_exposure`].
+    #[serde(default)]
+    pub category: Option<String>,
     #[serde(default, flatten)]
     pub kind: Option<camerata_api_types::audit::FindingKind>,
+}
+
+impl FindingView {
+    /// True when this finding is about a leaked credential: the server classed it
+    /// `secret-exposure`, or its rule id names a secret (a deterministic finding carries no
+    /// category). The snippet of such a finding is redacted to a placeholder, so two of them in
+    /// different repos look identical while describing different credentials. Decision memory
+    /// uses this to keep them apart.
+    pub fn is_secret_exposure(&self) -> bool {
+        if self.category.as_deref() == Some("secret-exposure") {
+            return true;
+        }
+        let id = self.rule_id.to_ascii_uppercase();
+        let words: Vec<&str> = id.split('-').collect();
+        let word_starts = |t: &str| words.iter().any(|w| w.starts_with(t));
+        word_starts("SECRET")
+            || word_starts("HARDCODED")
+            || word_starts("CREDENTIAL")
+            || word_starts("APIKEY")
+            || word_starts("PASSWORD")
+            || words.windows(2).any(|w| w == ["API", "KEY"])
+    }
 }
 
 /// One evidence site absorbed into a merged finding — the view-model mirror of
