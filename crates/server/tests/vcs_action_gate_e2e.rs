@@ -33,9 +33,10 @@ use camerata_checks::vcs_action::{
     AdoLinkConfig, BranchNamingConfig, CommitDocConfig, ConventionalCommitConfig, IdLocation,
     ProcessRuleConfig, StoryIdFormat,
 };
+use camerata_server::uow::UowStore;
 use camerata_server::vcs_choke::{
     compliant_machine_commit_message, compliant_machine_pr, gated_branch, gated_commit,
-    gated_commit_or_bypass, gated_pr, gated_pr_or_bypass, numeric_story_id, ChokeError,
+    gated_commit_or_bypass, gated_pr, gated_pr_or_bypass, ChokeError,
 };
 
 // ════════════════════════════════════════════════════════════════════════════════════
@@ -249,8 +250,11 @@ fn enterprise_config() -> ProcessRuleConfig {
 fn refinement1_generated_machine_commit_passes_hard_block() {
     let cfg = enterprise_config();
     let story_id = "acme/widgets#42";
-    let numeric = numeric_story_id(story_id);
-    assert_eq!(numeric, "42", "the numeric id is the tail after '#'");
+    let numeric = UowStore::new().commit_reference_for(story_id);
+    assert_eq!(
+        numeric, "42",
+        "a GitHub-sourced unit's reference is its issue number"
+    );
 
     let msg = compliant_machine_commit_message(
         &cfg,
@@ -261,6 +265,29 @@ fn refinement1_generated_machine_commit_passes_hard_block() {
 
     gated_commit(&cfg, &msg).unwrap_or_else(|e| {
         panic!("the generated machine commit must PASS the hard-block gate, not need a bypass: {e}\nmessage was:\n{msg}")
+    });
+}
+
+/// A NATIVE unit (no board, no GitHub issue) gets a numeric reference of its own, so the
+/// machine commit Camerata writes for it passes the same HARD-BLOCK gate as an issue's.
+#[test]
+fn native_unit_machine_commit_passes_hard_block_with_no_issue() {
+    let cfg = enterprise_config();
+    let store = UowStore::new();
+    let unit = store.create_native(Some("acme/widgets".to_string()), None);
+    let numeric = store.commit_reference_for(&unit.story_id);
+    assert_eq!(numeric, "1", "the first native unit is number 1");
+    let msg = compliant_machine_commit_message(
+        &cfg,
+        "feat",
+        &format!(
+            "implement story {} on camerata/{}",
+            unit.story_id, unit.story_id
+        ),
+        &numeric,
+    );
+    gated_commit(&cfg, &msg).unwrap_or_else(|e| {
+        panic!("a native unit's machine commit must pass the gate: {e}\nmessage was:\n{msg}")
     });
 }
 

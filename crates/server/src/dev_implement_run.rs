@@ -2004,7 +2004,7 @@ pub async fn execute_dev_implement_run(
         .and_then(|pid| projects.get(pid))
         .map(|p| p.process_rule_config)
         .unwrap_or_default();
-    let numeric_id = crate::vcs_choke::numeric_story_id(&story_id);
+    let numeric_id = uow.commit_reference_for(&story_id);
     let commit_msg = crate::vcs_choke::compliant_machine_commit_message(
         &vcs_config,
         "feat",

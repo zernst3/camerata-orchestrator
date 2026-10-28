@@ -301,7 +301,7 @@ pub async fn execute_pr_resolve_run(
     // GAP-2 chokepoint. Orchestration-internal, but Camerata knows the run's story id, so we
     // author a message COMPLIANT with the project's active process rules and take the HARD-BLOCK
     // path. A non-compliant machine message surfaces as a real error rather than a silent bypass.
-    let numeric_id = crate::vcs_choke::numeric_story_id(&story_id);
+    let numeric_id = uow.commit_reference_for(&story_id);
     let commit_msg = crate::vcs_choke::compliant_machine_commit_message(
         &vcs_config,
         "fix",

@@ -24,6 +24,7 @@ use camerata_persistence::{
     encode, ArtifactKind, ArtifactStore, EditActor, NewRevision, RevisionOp,
 };
 use camerata_worktracker::investigation::{DecisionOutcome, DecisionRecord, InvestigationArtifact};
+use camerata_worktracker::{ExternalRef, Provider};
 
 use crate::lifecycle::{TransitionError, UowStage, UowTransitions};
 
@@ -80,6 +81,26 @@ pub struct UnitOfWork {
     /// `None` so a legacy `uow.json` loads unchanged.
     #[serde(default)]
     pub work_item: Option<String>,
+    /// The repository this unit's code lands in (`OWNER/REPO`, or the repository name a
+    /// project lists). Set when the unit is created; read through [`UnitOfWork::repo`], never
+    /// by parsing [`Self::story_id`]. `None` for a unit that names no repository yet (a blank
+    /// draft, a native unit whose repository is picked at Intake). Serde default so a legacy
+    /// `uow.json` loads; a legacy GitHub-keyed record gets it from its key when loaded (see
+    /// [`UnitOfWork::adopt_legacy_github_key`]).
+    #[serde(default)]
+    pub repo: Option<String>,
+    /// The external tracker item this unit is linked to (a GitHub issue today), if any.
+    /// `None` for a NATIVE unit, which Camerata tracks itself with no board. The tracker is an
+    /// optional adapter: nothing in the development path needs this to be set. Serde default
+    /// so a legacy `uow.json` loads; filled for a legacy GitHub-keyed record on load.
+    #[serde(default)]
+    pub external_ref: Option<ExternalRef>,
+    /// The unit's own reference number when it is a NATIVE unit (no tracker item), used where
+    /// a numeric reference is required, such as the story-id reference in commit messages.
+    /// Assigned once at creation, one more than the highest native number in the store.
+    /// `None` for tracker-linked units (their number is the tracker's) and legacy records.
+    #[serde(default)]
+    pub native_number: Option<u64>,
     /// The AI story-authoring state for a DRAFT UoW (created blank, no work item yet).
     /// `None` for a normal UoW that references an existing work item. `Some` while the
     /// architect is authoring a story with AI; it carries the requirements prompt, the
@@ -259,6 +280,99 @@ pub struct UnitOfWork {
 }
 
 impl UnitOfWork {
+    /// A new unit keyed `story_id`, with every other field at its default except the tracker
+    /// link a legacy GitHub issue key implies (see [`Self::adopt_legacy_github_key`]). Every
+    /// store path that materializes a unit for a key goes through this, so a unit created
+    /// implicitly for an `OWNER/REPO#N` key (the from-work-item path, a run started on a spine
+    /// story) carries its repository and issue link as fields from the start.
+    pub fn keyed(story_id: &str) -> Self {
+        let mut uow = Self {
+            story_id: story_id.to_string(),
+            ..Default::default()
+        };
+        uow.adopt_legacy_github_key();
+        uow
+    }
+
+    /// Migration for units that predate their own identity fields: a unit keyed (or, for a
+    /// published draft, linked through [`Self::work_item`]) by a GitHub issue key
+    /// `OWNER/REPO#N` gets that issue as its [`Self::external_ref`] and, when it names no
+    /// repository, the issue's repository as its [`Self::repo`]. A no-op for a unit that
+    /// already has a tracker link or is native, and for keys that are not GitHub issue keys.
+    /// The key is parsed by the GitHub adapter ([`crate::workitems::parse_github_key`]).
+    pub fn adopt_legacy_github_key(&mut self) {
+        if self.external_ref.is_some() || self.native_number.is_some() {
+            return;
+        }
+        let key = self.work_item.as_deref().unwrap_or(&self.story_id);
+        let Some(link) = crate::workitems::github_issue_ref_for_key(key) else {
+            return;
+        };
+        if self.repo.is_none() {
+            self.repo = link.container.clone();
+        }
+        self.external_ref = Some(link);
+    }
+
+    /// The repository this unit works in: its own [`Self::repo`], else its tracker item's
+    /// container, else the one repository in its Intake scope when it has exactly one. `None`
+    /// when the unit names no repository. This is THE accessor for a unit's repository; no
+    /// caller derives it from the key.
+    pub fn repo(&self) -> Option<&str> {
+        let own = self
+            .repo
+            .as_deref()
+            .map(str::trim)
+            .filter(|r| !r.is_empty());
+        let tracked = || {
+            self.external_ref
+                .as_ref()
+                .and_then(|r| r.container.as_deref())
+                .filter(|r| !r.trim().is_empty())
+        };
+        let sole_scoped = || match self.intake.repos.as_slice() {
+            [only] if !only.repo.trim().is_empty() => Some(only.repo.as_str()),
+            _ => None,
+        };
+        own.or_else(tracked).or_else(sole_scoped)
+    }
+
+    /// Where this unit is tracked: the tracker item's provider, or [`Provider::Native`] when
+    /// Camerata tracks it itself.
+    pub fn provider(&self) -> Provider {
+        self.external_ref
+            .as_ref()
+            .map(|r| r.provider)
+            .unwrap_or(Provider::Native)
+    }
+
+    /// The unit's numeric reference: its native number, else its tracker item's numeric id
+    /// (the GitHub issue number). `None` when it has neither.
+    pub fn reference_number(&self) -> Option<u64> {
+        self.native_number.or_else(|| {
+            self.external_ref
+                .as_ref()
+                .and_then(|r| r.external_id.trim().parse().ok())
+        })
+    }
+
+    /// The numeric story-id reference written into Camerata's commit and PR messages:
+    /// [`Self::reference_number`], else the trailing digits of the key (a legacy demo id such
+    /// as `story-42`). Empty when there is none, which the commit gate reports when the
+    /// project requires a story id.
+    pub fn commit_reference(&self) -> String {
+        if let Some(n) = self.reference_number() {
+            return n.to_string();
+        }
+        let tail: Vec<char> = self
+            .story_id
+            .chars()
+            .rev()
+            .take_while(|c| c.is_ascii_digit())
+            .collect();
+        tail.into_iter().rev().collect()
+    }
+
     /// `true` when this UoW has an evidence record with a critical scoped-scan finding
     /// that blocks the `AwaitingQa → SignedOff` transition until an explicit waive-with-
     /// reason is supplied. `false` when there is no evidence record yet (the gate does not
@@ -343,11 +457,16 @@ impl UowStore {
 
     /// Persist to (and rehydrate from) `path`.
     pub fn at(path: PathBuf) -> Self {
-        let mem = if let Ok(s) = std::fs::read_to_string(&path) {
+        let mut mem: HashMap<String, UnitOfWork> = if let Ok(s) = std::fs::read_to_string(&path) {
             serde_json::from_str(&s).unwrap_or_default()
         } else {
             HashMap::new()
         };
+        // Records written before units carried their own repository and tracker link get
+        // them from their GitHub issue key (in memory; persisted on the next write).
+        for uow in mem.values_mut() {
+            uow.adopt_legacy_github_key();
+        }
         Self {
             path: Some(Arc::new(path)),
             mem: Arc::new(Mutex::new(mem)),
@@ -640,9 +759,8 @@ impl UowStore {
             let uow = map
                 .entry(story_id.to_string())
                 .or_insert_with(|| UnitOfWork {
-                    story_id: story_id.to_string(),
                     updated: Self::now_rfc3339(),
-                    ..Default::default()
+                    ..UnitOfWork::keyed(story_id)
                 })
                 .clone();
             (uow, created)
@@ -670,10 +788,51 @@ impl UowStore {
     /// UoW-shaped body (e.g. `GET /api/uow/:id`) but must not write a junk record for an
     /// unknown id. The prior `get_or_create` behaviour persisted the default; this does not.
     pub fn get_or_default(&self, story_id: &str) -> UnitOfWork {
-        self.get(story_id).unwrap_or_else(|| UnitOfWork {
-            story_id: story_id.to_string(),
-            ..Default::default()
-        })
+        self.get(story_id)
+            .unwrap_or_else(|| UnitOfWork::keyed(story_id))
+    }
+
+    /// The repository of the unit `story_id` ([`UnitOfWork::repo`]). Reads without creating:
+    /// an unknown id resolves like a fresh unit for that key would. `None` when the unit names
+    /// no repository.
+    pub fn repo_for(&self, story_id: &str) -> Option<String> {
+        self.get_or_default(story_id).repo().map(str::to_string)
+    }
+
+    /// The numeric story-id reference for Camerata's commit and PR messages on the unit
+    /// `story_id` ([`UnitOfWork::commit_reference`]). Reads without creating.
+    pub fn commit_reference_for(&self, story_id: &str) -> String {
+        self.get_or_default(story_id).commit_reference()
+    }
+
+    /// Create a NATIVE unit of work: tracked by Camerata itself, with no board and no tracker
+    /// item. The key is `uow-<token>`; the unit gets the next native number (one more than
+    /// the highest in the store), the repository it works in (`None` to pick it at Intake),
+    /// and the creating project. Persists immediately and returns the unit.
+    pub fn create_native(&self, repo: Option<String>, project_id: Option<String>) -> UnitOfWork {
+        let id = format!("uow-{}", Self::next_draft_token());
+        let now = Self::now_rfc3339();
+        let uow = {
+            let mut map = self.mem.lock().expect("uow mutex poisoned");
+            let next_number = map
+                .values()
+                .filter_map(|u| u.native_number)
+                .max()
+                .unwrap_or(0)
+                + 1;
+            let uow = UnitOfWork {
+                story_id: id.clone(),
+                repo: repo.filter(|r| !r.trim().is_empty()),
+                native_number: Some(next_number),
+                project_id,
+                updated: now,
+                ..Default::default()
+            };
+            map.insert(id.clone(), uow.clone());
+            uow
+        };
+        self.flush();
+        uow
     }
 
     /// Create a blank DRAFT UoW with an empty authoring state and no work item.
@@ -729,9 +888,8 @@ impl UowStore {
             let uow = map
                 .entry(story_id.to_string())
                 .or_insert_with(|| UnitOfWork {
-                    story_id: story_id.to_string(),
                     authoring: Some(AuthoringState::default()),
-                    ..Default::default()
+                    ..UnitOfWork::keyed(story_id)
                 });
             uow.parent_id = parent_id;
             uow.updated = now;
@@ -763,9 +921,8 @@ impl UowStore {
             let uow = map
                 .entry(story_id.to_string())
                 .or_insert_with(|| UnitOfWork {
-                    story_id: story_id.to_string(),
                     authoring: Some(AuthoringState::default()),
-                    ..Default::default()
+                    ..UnitOfWork::keyed(story_id)
                 });
             let st = uow.authoring.get_or_insert_with(AuthoringState::default);
             if st.requirements_prompt.trim().is_empty() {
@@ -799,10 +956,11 @@ impl UowStore {
             let uow = map
                 .entry(story_id.to_string())
                 .or_insert_with(|| UnitOfWork {
-                    story_id: story_id.to_string(),
-                    ..Default::default()
+                    ..UnitOfWork::keyed(story_id)
                 });
             uow.work_item = Some(work_item_story_id.to_string());
+            // The published issue becomes the draft's tracker link and repository.
+            uow.adopt_legacy_github_key();
             uow.history.push(HistoryEntry {
                 ts: now.clone(),
                 kind: "authored".to_string(),
@@ -829,11 +987,10 @@ impl UowStore {
 
     /// UoWs whose repo is in `repos`, resolved purely by repo (NO project-id scoping).
     ///
-    /// The repo is resolved from the UoW's `work_item` link when present (a draft that
-    /// has been published/linked to a real issue carries the work item's `owner/repo#num`
-    /// id there, while its KEY stays the original `draft-…` id), and otherwise from the
-    /// `story_id` key. This keeps a LINKED draft visible under its work item's project
-    /// while still EXCLUDING an unlinked draft whose id has no resolvable repo.
+    /// The repo is the unit's own ([`UnitOfWork::repo`]): a draft published to an issue took
+    /// the issue's repository when it was linked, while its KEY stays the original `draft-…`
+    /// id. This keeps a LINKED draft visible under its work item's project while still
+    /// EXCLUDING an unlinked draft that names no repository.
     ///
     /// Use this for repo-only sweeps (e.g. the startup worktree teardown that unions every
     /// project's repos): a blank draft has no worktree and no resolvable repo, so it must
@@ -844,14 +1001,7 @@ impl UowStore {
             .lock()
             .expect("uow mutex poisoned")
             .values()
-            .filter(|u| {
-                let repo = u
-                    .work_item
-                    .as_deref()
-                    .and_then(crate::repo_from_story_id)
-                    .or_else(|| crate::repo_from_story_id(&u.story_id));
-                repo.is_some_and(|r| repos.iter().any(|p| p == &r))
-            })
+            .filter(|u| u.repo().is_some_and(|r| repos.iter().any(|p| p == r)))
             .cloned()
             .collect()
     }
@@ -876,12 +1026,7 @@ impl UowStore {
                 if u.project_id.as_deref() == Some(project_id) {
                     return true;
                 }
-                let repo = u
-                    .work_item
-                    .as_deref()
-                    .and_then(crate::repo_from_story_id)
-                    .or_else(|| crate::repo_from_story_id(&u.story_id));
-                repo.is_some_and(|r| repos.iter().any(|p| p == &r))
+                u.repo().is_some_and(|r| repos.iter().any(|p| p == r))
             })
             .cloned()
             .collect()
@@ -914,8 +1059,7 @@ impl UowStore {
         let uow = map
             .entry(story_id.to_string())
             .or_insert_with(|| UnitOfWork {
-                story_id: story_id.to_string(),
-                ..Default::default()
+                ..UnitOfWork::keyed(story_id)
             });
         uow.dev_status = status;
         uow.updated = Self::now_rfc3339();
@@ -929,8 +1073,7 @@ impl UowStore {
         let uow = map
             .entry(story_id.to_string())
             .or_insert_with(|| UnitOfWork {
-                story_id: story_id.to_string(),
-                ..Default::default()
+                ..UnitOfWork::keyed(story_id)
             });
         uow.branch = branch;
         uow.updated = Self::now_rfc3339();
@@ -947,8 +1090,7 @@ impl UowStore {
         let uow = map
             .entry(story_id.to_string())
             .or_insert_with(|| UnitOfWork {
-                story_id: story_id.to_string(),
-                ..Default::default()
+                ..UnitOfWork::keyed(story_id)
             });
         uow.pr_number = pr_number;
         uow.pr_url = pr_url;
@@ -963,8 +1105,7 @@ impl UowStore {
         let uow = map
             .entry(story_id.to_string())
             .or_insert_with(|| UnitOfWork {
-                story_id: story_id.to_string(),
-                ..Default::default()
+                ..UnitOfWork::keyed(story_id)
             });
         uow.history.push(HistoryEntry {
             ts: Self::now_rfc3339(),
@@ -987,8 +1128,7 @@ impl UowStore {
             let uow = map
                 .entry(story_id.to_string())
                 .or_insert_with(|| UnitOfWork {
-                    story_id: story_id.to_string(),
-                    ..Default::default()
+                    ..UnitOfWork::keyed(story_id)
                 });
             uow.intake.context = context.to_string();
             uow.updated = now;
@@ -1008,8 +1148,7 @@ impl UowStore {
             let uow = map
                 .entry(story_id.to_string())
                 .or_insert_with(|| UnitOfWork {
-                    story_id: story_id.to_string(),
-                    ..Default::default()
+                    ..UnitOfWork::keyed(story_id)
                 });
             uow.intake.repos = repos;
             uow.updated = now;
@@ -1029,8 +1168,7 @@ impl UowStore {
             let uow = map
                 .entry(story_id.to_string())
                 .or_insert_with(|| UnitOfWork {
-                    story_id: story_id.to_string(),
-                    ..Default::default()
+                    ..UnitOfWork::keyed(story_id)
                 });
             uow.investigation.chat.push(ChatTurn {
                 role: role.to_string(),
@@ -1057,8 +1195,7 @@ impl UowStore {
             let uow = map
                 .entry(story_id.to_string())
                 .or_insert_with(|| UnitOfWork {
-                    story_id: story_id.to_string(),
-                    ..Default::default()
+                    ..UnitOfWork::keyed(story_id)
                 });
             uow.investigation.contract = contract.to_string();
             uow.investigation.crosses_boundary = crosses_boundary;
@@ -1078,8 +1215,7 @@ impl UowStore {
             let uow = map
                 .entry(story_id.to_string())
                 .or_insert_with(|| UnitOfWork {
-                    story_id: story_id.to_string(),
-                    ..Default::default()
+                    ..UnitOfWork::keyed(story_id)
                 });
             uow.development.chat.push(ChatTurn {
                 role: role.to_string(),
@@ -1112,8 +1248,7 @@ impl UowStore {
             let uow = map
                 .entry(story_id.to_string())
                 .or_insert_with(|| UnitOfWork {
-                    story_id: story_id.to_string(),
-                    ..Default::default()
+                    ..UnitOfWork::keyed(story_id)
                 });
             if let Some(p) = viewed_phase {
                 uow.meta.viewed_phase = p;
@@ -1177,8 +1312,7 @@ impl UowStore {
             let uow = map
                 .entry(story_id.to_string())
                 .or_insert_with(|| UnitOfWork {
-                    story_id: story_id.to_string(),
-                    ..Default::default()
+                    ..UnitOfWork::keyed(story_id)
                 });
             uow.sign_off = Some(sign_off.clone());
             // ── BUG-9 fix: propagate sign-off into the durable evidence record ───
@@ -1316,8 +1450,7 @@ impl UowStore {
             let uow = map
                 .entry(story_id.to_string())
                 .or_insert_with(|| UnitOfWork {
-                    story_id: story_id.to_string(),
-                    ..Default::default()
+                    ..UnitOfWork::keyed(story_id)
                 });
             uow.decisions = decisions;
             uow.updated = now;
@@ -1515,8 +1648,7 @@ impl UowStore {
             let uow = map
                 .entry(story_id.to_string())
                 .or_insert_with(|| UnitOfWork {
-                    story_id: story_id.to_string(),
-                    ..Default::default()
+                    ..UnitOfWork::keyed(story_id)
                 });
             match transition(uow.stage) {
                 Ok(next) => {
@@ -1595,8 +1727,7 @@ impl UowStore {
             let uow = map
                 .entry(story_id.to_string())
                 .or_insert_with(|| UnitOfWork {
-                    story_id: story_id.to_string(),
-                    ..Default::default()
+                    ..UnitOfWork::keyed(story_id)
                 });
             uow.evidence = Some(evidence);
             uow.history.push(HistoryEntry {
@@ -1640,8 +1771,7 @@ impl UowStore {
             let uow = map
                 .entry(story_id.to_string())
                 .or_insert_with(|| UnitOfWork {
-                    story_id: story_id.to_string(),
-                    ..Default::default()
+                    ..UnitOfWork::keyed(story_id)
                 });
             uow.gate_provenance = Some(provenance);
             uow.history.push(HistoryEntry {
@@ -1667,8 +1797,7 @@ impl UowStore {
             let uow = map
                 .entry(story_id.to_string())
                 .or_insert_with(|| UnitOfWork {
-                    story_id: story_id.to_string(),
-                    ..Default::default()
+                    ..UnitOfWork::keyed(story_id)
                 });
             if let Some(pos) = uow
                 .attachments
@@ -1694,8 +1823,7 @@ impl UowStore {
             let uow = map
                 .entry(story_id.to_string())
                 .or_insert_with(|| UnitOfWork {
-                    story_id: story_id.to_string(),
-                    ..Default::default()
+                    ..UnitOfWork::keyed(story_id)
                 });
             uow.attachments.retain(|a| a.name != name);
             uow.updated = now;
@@ -1714,8 +1842,7 @@ impl UowStore {
             let uow = map
                 .entry(story_id.to_string())
                 .or_insert_with(|| UnitOfWork {
-                    story_id: story_id.to_string(),
-                    ..Default::default()
+                    ..UnitOfWork::keyed(story_id)
                 });
             uow.diagram = Some(text);
             uow.updated = now;
@@ -1733,8 +1860,7 @@ impl UowStore {
             let uow = map
                 .entry(story_id.to_string())
                 .or_insert_with(|| UnitOfWork {
-                    story_id: story_id.to_string(),
-                    ..Default::default()
+                    ..UnitOfWork::keyed(story_id)
                 });
             uow.diagram = None;
             uow.updated = now;
@@ -1817,9 +1943,8 @@ impl UowStore {
             let uow = map
                 .entry(story_id.to_string())
                 .or_insert_with(|| UnitOfWork {
-                    story_id: story_id.to_string(),
                     authoring: Some(AuthoringState::default()),
-                    ..Default::default()
+                    ..UnitOfWork::keyed(story_id)
                 });
             uow.proposed_children = proposed;
             uow.dropped_children = dropped;
@@ -1840,9 +1965,8 @@ impl UowStore {
             let uow = map
                 .entry(story_id.to_string())
                 .or_insert_with(|| UnitOfWork {
-                    story_id: story_id.to_string(),
                     authoring: Some(AuthoringState::default()),
-                    ..Default::default()
+                    ..UnitOfWork::keyed(story_id)
                 });
             uow.publish_repos = repos;
             uow.updated = now;
@@ -1969,6 +2093,135 @@ impl UowStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── Provider-neutral identity (gap 5) ─────────────────────────────────────
+
+    /// A `uow.json` written before units carried `repo`, `external_ref` and `native_number`
+    /// (a GitHub-keyed unit and a published draft) still loads, and each unit reads its
+    /// repository and issue number from its own fields afterwards.
+    #[test]
+    fn legacy_github_keyed_records_load_with_repo_and_issue_link() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("uow.json");
+        let legacy = r#"{
+            "acme/api#42": {
+                "story_id": "acme/api#42",
+                "branch": "camerata/acme/api#42",
+                "stage": "development",
+                "updated": "2026-07-01T00:00:00Z"
+            },
+            "draft-abc": {
+                "story_id": "draft-abc",
+                "work_item": "acme/web#7",
+                "updated": "2026-07-01T00:00:00Z"
+            },
+            "story-9": { "story_id": "story-9" }
+        }"#;
+        std::fs::write(&path, legacy).unwrap();
+
+        let store = UowStore::at(path.clone());
+        let issue = store.get("acme/api#42").expect("legacy unit loads");
+        assert_eq!(issue.repo(), Some("acme/api"));
+        assert_eq!(issue.provider(), Provider::GitHub);
+        assert_eq!(issue.reference_number(), Some(42));
+        assert_eq!(
+            issue.external_ref.as_ref().map(|r| r.url.as_str()),
+            Some("https://github.com/acme/api/issues/42")
+        );
+        assert_eq!(issue.branch.as_deref(), Some("camerata/acme/api#42"));
+        assert_eq!(issue.stage, UowStage::Development);
+
+        let draft = store.get("draft-abc").expect("legacy draft loads");
+        assert_eq!(
+            draft.repo(),
+            Some("acme/web"),
+            "a published draft takes its issue's repo"
+        );
+        assert_eq!(draft.reference_number(), Some(7));
+
+        let demo = store.get("story-9").expect("a non-GitHub legacy key loads");
+        assert_eq!(demo.repo(), None);
+        assert_eq!(demo.provider(), Provider::Native);
+        assert_eq!(
+            demo.commit_reference(),
+            "9",
+            "legacy demo ids keep their trailing digits"
+        );
+
+        assert_eq!(store.list_for_repos(&["acme/api".to_string()]).len(), 1);
+
+        // The adopted fields are written on the next mutation and read back as fields.
+        store.append_history("acme/api#42", "note", "touch");
+        let raw: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(raw["acme/api#42"]["repo"], "acme/api");
+        assert_eq!(raw["acme/api#42"]["external_ref"]["provider"], "github");
+        assert_eq!(raw["acme/api#42"]["external_ref"]["external_id"], "42");
+    }
+
+    /// A unit created implicitly for a GitHub issue key (the from-work-item path) carries the
+    /// issue as fields from the start.
+    #[test]
+    fn a_unit_created_for_a_github_key_carries_its_issue_link() {
+        let store = UowStore::new();
+        let uow = store.get_or_create("o/r#20");
+        assert_eq!(uow.repo(), Some("o/r"));
+        assert_eq!(uow.reference_number(), Some(20));
+        assert_eq!(store.repo_for("o/r#20").as_deref(), Some("o/r"));
+        assert_eq!(store.commit_reference_for("o/r#20"), "20");
+    }
+
+    /// A native unit has its own key, number and repository, and no tracker link.
+    #[test]
+    fn create_native_assigns_key_number_and_repo_with_no_tracker() {
+        let store = UowStore::new();
+        let a = store.create_native(Some("acme/api".to_string()), Some("p1".to_string()));
+        let b = store.create_native(None, Some("p1".to_string()));
+        assert!(a.story_id.starts_with("uow-"), "native key: {}", a.story_id);
+        assert_ne!(a.story_id, b.story_id);
+        assert_eq!(a.provider(), Provider::Native);
+        assert!(a.external_ref.is_none());
+        assert_eq!(a.native_number, Some(1));
+        assert_eq!(b.native_number, Some(2));
+        assert_eq!(a.repo(), Some("acme/api"));
+        assert_eq!(a.commit_reference(), "1");
+        assert_eq!(
+            b.repo(),
+            None,
+            "a native unit may pick its repository at Intake"
+        );
+        // Loading or re-keying never invents a GitHub link for a native unit.
+        let mut reloaded = store.get(&a.story_id).unwrap();
+        reloaded.adopt_legacy_github_key();
+        assert!(reloaded.external_ref.is_none());
+        // Visible to its own project and to a project that lists its repository.
+        assert_eq!(store.list_for_project("p1", &[]).len(), 2);
+        assert_eq!(store.list_for_repos(&["acme/api".to_string()]).len(), 1);
+    }
+
+    /// The repository accessor prefers the unit's own field, then the tracker's container,
+    /// then a sole Intake repository.
+    #[test]
+    fn repo_accessor_reads_fields_in_order_never_the_key() {
+        let mut uow = UnitOfWork {
+            story_id: "other/repo#1".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(
+            uow.repo(),
+            None,
+            "the key alone is never parsed by the accessor"
+        );
+        uow.intake.repos = vec![RepoScope {
+            repo: "scoped/one".to_string(),
+            branch: BranchMode::default(),
+        }];
+        assert_eq!(uow.repo(), Some("scoped/one"));
+        uow.external_ref = Some(crate::workitems::github_issue_ref("tracked/repo", 5));
+        assert_eq!(uow.repo(), Some("tracked/repo"));
+        uow.repo = Some("own/repo".to_string());
+        assert_eq!(uow.repo(), Some("own/repo"));
+    }
 
     #[test]
     fn round_trip_get_or_create_set_status_list() {
