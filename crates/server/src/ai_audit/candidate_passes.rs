@@ -15,8 +15,8 @@
 //!
 //! Narrowing is decided per (chunk, locator), and every doubt resolves to whole files:
 //!
-//! * the locator errors, panics, times out ([`CandidateEnv::timeout`]) or cannot parse a file of
-//!   the chunk: the rule stays in the chunk's ordinary whole-file prompt (exactly the prompt it
+//! * the locator errors, panics, times out ([`CandidateEnv::timeout`]), is handed more text than
+//!   [`LOCATOR_MAX_INPUT_BYTES`] or cannot parse a file of the chunk: the rule stays in the chunk's ordinary whole-file prompt (exactly the prompt it
 //!   gets with the switch off) and the fallback is recorded in telemetry;
 //! * a file the locator does not read (not its language, e.g. `supabase/config.toml` for a SQL
 //!   locator) is never "no candidates": it is carried WHOLE inside the candidate prompt;
@@ -37,6 +37,8 @@
 //! prompts are byte-identical.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use camerata_checks::candidates::{CandidateLocator, FileCandidates, LocateError};
@@ -58,8 +60,15 @@ const MAX_CANDIDATE_SHARE: (usize, usize) = (1, 2);
 /// How long one (chunk, locator) evaluation may take before the chunk falls back to whole files.
 const LOCATOR_TIMEOUT: Duration = Duration::from_secs(20);
 
-/// The locator a rule's `candidates` names, run over one file.
-pub(super) type LocateFn = fn(CandidateLocator, &str, &str) -> Result<FileCandidates, LocateError>;
+/// Most file text (bytes) one (chunk, locator) evaluation is handed. A chunk above it falls back
+/// to whole files without running the locator at all, so no input can pin a thread for long.
+const LOCATOR_MAX_INPUT_BYTES: usize = 8 * 1024 * 1024;
+
+/// The locator a rule's `candidates` names, run over one file. The flag is raised when the scan
+/// stops waiting (the time limit passed): a locator must poll it and return early, because a
+/// blocking thread cannot be killed from outside.
+pub(super) type LocateFn =
+    fn(CandidateLocator, &str, &str, &AtomicBool) -> Result<FileCandidates, LocateError>;
 
 /// The locator implementation and its time limit. Production is [`CandidateEnv::production`];
 /// the tests substitute a failing or hanging locator to drive the fallback.
@@ -67,14 +76,17 @@ pub(super) type LocateFn = fn(CandidateLocator, &str, &str) -> Result<FileCandid
 pub(super) struct CandidateEnv {
     pub locate: LocateFn,
     pub timeout: Duration,
+    /// Chunks with more file text than this are not located (see [`LOCATOR_MAX_INPUT_BYTES`]).
+    pub max_input_bytes: usize,
 }
 
 impl CandidateEnv {
     /// The `camerata-checks` locators with the production time limit.
     pub(super) fn production() -> Self {
         Self {
-            locate: camerata_checks::candidates::locate,
+            locate: camerata_checks::candidates::locate_until,
             timeout: LOCATOR_TIMEOUT,
+            max_input_bytes: LOCATOR_MAX_INPUT_BYTES,
         }
     }
 }
@@ -88,7 +100,9 @@ pub(super) struct PassSet {
     pub session_prefix: String,
     /// Indices into the unit's chunk list ([`chunk_files`] of the unit's files).
     pub chunk_ids: Vec<usize>,
-    /// One candidate digest per `chunk_ids` entry; `None` = the chunks' whole-file digests.
+    /// One digest per `chunk_ids` entry: the candidate digests of a candidate set, or the
+    /// already-built whole-file digests of a whole-file set in a unit that located candidates.
+    /// `None` = the pass call builds the chunks' whole-file digests itself.
     pub digests: Option<Vec<String>>,
     /// The `(id, directive)` pairs, in plan order. Empty only for an advisory-only set.
     pub rules: Vec<(String, String)>,
@@ -204,7 +218,11 @@ async fn plan_unit(
         .iter()
         .filter_map(|(id, _)| locators.get(id.as_str()).copied())
         .collect();
-    let whole_bytes: Vec<usize> = chunks.iter().map(|c| build_digest(c).len()).collect();
+    // Each chunk's whole-file digest, built ONCE: its length is the baseline the saving is
+    // measured against, and the whole-file sets reuse the text instead of building it again in
+    // `run_passes`.
+    let whole_digests: Vec<String> = chunks.iter().map(|c| build_digest(c)).collect();
+    let whole_bytes: Vec<usize> = whole_digests.iter().map(String::len).collect();
 
     // Every (chunk, locator) evaluation runs at once, each on a blocking thread under the time
     // limit.
@@ -216,8 +234,19 @@ async fn plan_unit(
     let verdicts: BTreeMap<(usize, CandidateLocator), ChunkVerdict> =
         futures::future::join_all(jobs).await.into_iter().collect();
 
-    if let Some(m) = meter {
-        for ((ci, l), verdict) in &verdicts {
+    for ((ci, l), verdict) in &verdicts {
+        // A fallback is stated whether or not a meter is attached: a scan that quietly sent whole
+        // files where it promised excerpts is a cost surprise nobody can find.
+        if let ChunkVerdict::Fallback(reason) = verdict {
+            eprintln!(
+                "[camerata-server] candidate prefilter: {repo} {} chunk {} [{}] falls back to \
+                 whole files: {reason}",
+                unit.label,
+                ci + 1,
+                l.name()
+            );
+        }
+        if let Some(m) = meter {
             let sent = match verdict {
                 ChunkVerdict::Narrowed(d) => d.len(),
                 ChunkVerdict::NoSites => 0,
@@ -237,13 +266,6 @@ async fn plan_unit(
                 );
             }
             if let ChunkVerdict::Fallback(reason) = verdict {
-                eprintln!(
-                    "[camerata-server] candidate prefilter: {repo} {} chunk {} [{}] falls back to \
-                     whole files: {reason}",
-                    unit.label,
-                    ci + 1,
-                    l.name()
-                );
                 m.record_candidate_fallback(CandidateFallback {
                     repo: repo.to_string(),
                     group: unit.label.clone(),
@@ -290,8 +312,13 @@ async fn plan_unit(
             } else {
                 format!("audit-{repo}-g{}-w{k}", unit.index)
             },
+            digests: Some(
+                chunk_ids
+                    .iter()
+                    .map(|&ci| whole_digests[ci].clone())
+                    .collect(),
+            ),
             chunk_ids,
-            digests: None,
             rules,
             advisory_disabled: unit.advisory_disabled,
         })
@@ -326,31 +353,52 @@ async fn plan_unit(
     sets
 }
 
-/// Run `locator` over one chunk under the time limit and decide the chunk. A panic or a timeout
-/// is a fallback, exactly like a locator error.
+/// Run `locator` over one chunk under the time limit and decide the chunk. A panic, a timeout or
+/// an oversized chunk is a fallback, exactly like a locator error.
+///
+/// The work runs on a blocking thread, which cannot be killed, so two things keep a pathological
+/// file from pinning the blocking pool: a chunk with more than [`CandidateEnv::max_input_bytes`]
+/// of text is never handed to the locator, and when the time limit passes the cancel flag the
+/// locator polls is raised, so the thread stops within a few thousand characters instead of
+/// running to the end of the file.
 async fn evaluate(
     locator: CandidateLocator,
     chunk: &[(String, String)],
     whole_bytes: usize,
     env: CandidateEnv,
 ) -> ChunkVerdict {
+    let input_bytes: usize = chunk.iter().map(|(_, content)| content.len()).sum();
+    if input_bytes > env.max_input_bytes {
+        return ChunkVerdict::Fallback(format!(
+            "the chunk holds {input_bytes} bytes of text, over the {} byte limit for a locator",
+            env.max_input_bytes
+        ));
+    }
     let owned: Vec<(String, String)> = chunk.to_vec();
     let locate = env.locate;
+    let cancel = Arc::new(AtomicBool::new(false));
+    let worker_cancel = Arc::clone(&cancel);
     let task = tokio::task::spawn_blocking(move || {
-        let located: Result<Vec<FileCandidates>, LocateError> = owned
-            .iter()
-            .map(|(path, content)| locate(locator, path, content))
-            .collect();
-        located.map(|found| decide(locator, &owned, &found, whole_bytes))
+        let mut found = Vec::with_capacity(owned.len());
+        for (path, content) in &owned {
+            if worker_cancel.load(Ordering::Relaxed) {
+                return Err(LocateError("cancelled: the time limit passed".to_string()));
+            }
+            found.push(locate(locator, path, content, &worker_cancel)?);
+        }
+        Ok(decide(locator, &owned, &found, whole_bytes))
     });
     match tokio::time::timeout(env.timeout, task).await {
         Ok(Ok(Ok(verdict))) => verdict,
         Ok(Ok(Err(e))) => ChunkVerdict::Fallback(e.to_string()),
         Ok(Err(join)) => ChunkVerdict::Fallback(format!("the locator failed: {join}")),
-        Err(_) => ChunkVerdict::Fallback(format!(
-            "the locator did not finish within {}s",
-            env.timeout.as_secs_f64()
-        )),
+        Err(_) => {
+            cancel.store(true, Ordering::Relaxed);
+            ChunkVerdict::Fallback(format!(
+                "the locator did not finish within {}s",
+                env.timeout.as_secs_f64()
+            ))
+        }
     }
 }
 

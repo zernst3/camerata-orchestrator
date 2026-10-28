@@ -3,6 +3,7 @@
 //! file it cannot parse? No network: the model is the rank-7 recording stub, and the prompts are
 //! read back out of what it was sent.
 
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use super::applies_to_routing_tests::Recorder;
@@ -131,17 +132,31 @@ fn carrying<'a>(prompts: &'a [String], rule: &str) -> Vec<&'a String> {
     prompts.iter().filter(|p| p.contains(&tag)).collect()
 }
 
-fn failing(_: CandidateLocator, path: &str, _: &str) -> Result<FileCandidates, LocateError> {
+fn failing(
+    _: CandidateLocator,
+    path: &str,
+    _: &str,
+    _: &AtomicBool,
+) -> Result<FileCandidates, LocateError> {
     Err(LocateError(format!("cannot read {path}")))
 }
 
-fn hanging(l: CandidateLocator, path: &str, content: &str) -> Result<FileCandidates, LocateError> {
+fn hanging(
+    l: CandidateLocator,
+    path: &str,
+    content: &str,
+    cancel: &AtomicBool,
+) -> Result<FileCandidates, LocateError> {
     std::thread::sleep(Duration::from_secs(1));
-    camerata_checks::candidates::locate(l, path, content)
+    camerata_checks::candidates::locate_until(l, path, content, cancel)
 }
 
 fn env_with(locate: LocateFn, timeout: Duration) -> CandidateEnv {
-    CandidateEnv { locate, timeout }
+    CandidateEnv {
+        locate,
+        timeout,
+        ..CandidateEnv::production()
+    }
 }
 
 #[tokio::test]
@@ -379,4 +394,363 @@ fn the_switch_is_on_by_default_and_recorded_in_the_run_line() {
     assert!(efficiency(false)
         .render()
         .contains("candidates_prefilter=off"));
+}
+
+// ── the locator's work is bounded, and cancelled when the scan stops waiting ──────────────
+
+static SPIN_SAW_CANCEL: AtomicBool = AtomicBool::new(false);
+
+/// Runs until the scan raises the cancel flag, the way a locator stuck in a huge file would.
+fn spinning(
+    _: CandidateLocator,
+    _: &str,
+    _: &str,
+    cancel: &AtomicBool,
+) -> Result<FileCandidates, LocateError> {
+    while !cancel.load(Ordering::Relaxed) {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    SPIN_SAW_CANCEL.store(true, Ordering::SeqCst);
+    Err(LocateError("cancelled".to_string()))
+}
+
+#[tokio::test]
+async fn a_timeout_cancels_the_blocking_work_instead_of_leaving_it_running() {
+    let rules = vec![plain("ARCH-1"), fn_rule()];
+    let files = supabase_files(true);
+    let (prompts, m) = run_with(
+        &rules,
+        &files,
+        true,
+        env_with(spinning, Duration::from_millis(100)),
+    )
+    .await;
+    let (off, _) = run(&rules, &files, false).await;
+    assert_eq!(sorted(prompts), sorted(off), "a timeout sends whole files");
+    let t = m.stage_telemetry(0).candidates.expect("recorded");
+    assert!(
+        t.fallbacks[0].reason.contains("did not finish"),
+        "{:?}",
+        t.fallbacks
+    );
+    // The thread was told to stop: it saw the flag and returned, rather than spinning forever.
+    for _ in 0..200 {
+        if SPIN_SAW_CANCEL.load(Ordering::SeqCst) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!("the locator never saw the cancel flag: the blocking thread is still running");
+}
+
+static COUNTED_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+fn counting(
+    l: CandidateLocator,
+    path: &str,
+    content: &str,
+    cancel: &AtomicBool,
+) -> Result<FileCandidates, LocateError> {
+    COUNTED_CALLS.fetch_add(1, Ordering::SeqCst);
+    camerata_checks::candidates::locate_until(l, path, content, cancel)
+}
+
+#[tokio::test]
+async fn a_chunk_over_the_input_cap_falls_back_without_running_the_locator() {
+    let rules = vec![plain("ARCH-1"), fn_rule()];
+    let files = supabase_files(true);
+    let env = CandidateEnv {
+        locate: counting,
+        timeout: Duration::from_secs(5),
+        max_input_bytes: 100,
+    };
+    let (prompts, m) = run_with(&rules, &files, true, env).await;
+    let (off, _) = run(&rules, &files, false).await;
+    assert_eq!(sorted(prompts), sorted(off));
+    assert_eq!(
+        COUNTED_CALLS.load(Ordering::SeqCst),
+        0,
+        "no file of an oversized chunk reaches the locator"
+    );
+    let t = m.stage_telemetry(0).candidates.expect("recorded");
+    assert_eq!(t.rules["SUPA-FN-1"].chunks_fallback, 1);
+    assert!(
+        t.fallbacks[0].reason.contains("byte limit"),
+        "{:?}",
+        t.fallbacks
+    );
+}
+
+#[tokio::test]
+async fn a_fallback_still_sends_whole_files_when_no_meter_is_attached() {
+    // The fallback notice is printed whether or not a meter records it; the behaviour (whole
+    // files) must not depend on the meter either.
+    let rules = vec![plain("ARCH-1"), fn_rule()];
+    let files = supabase_files(true);
+    let rec = Recorder::default();
+    let plan = plan_routes(&rules, &files, true);
+    let repo_map = build_repo_map(&files);
+    let adopted = rules.iter().map(|r| r.id.to_ascii_uppercase()).collect();
+    let mut skipped = Vec::new();
+    let (_f, _p, _r, ok, failures) = run_routed_passes(
+        &rec,
+        REPO,
+        &files,
+        &rules,
+        &plan,
+        &repo_map,
+        &adopted,
+        None,
+        None,
+        None,
+        1,
+        RULE_BATCH_SIZE,
+        None,
+        &mut skipped,
+        env_with(failing, Duration::from_secs(5)),
+    )
+    .await;
+    assert!(failures.is_empty(), "{failures:?}");
+    assert!(ok > 0);
+    let prompts = rec.prompts.lock().unwrap().clone();
+    assert!(prompts.iter().all(|p| !p.contains("CANDIDATE SITES")));
+    assert_eq!(carrying(&prompts, "SUPA-FN-1").len(), 1);
+}
+
+// ── several chunks: a rule can be narrowed in one and kept whole in another ───────────────
+
+const CHUNK_A: &str = "supabase/migrations/20240101_tables.sql";
+const CHUNK_B: &str = "supabase/migrations/20240102_functions.sql";
+
+/// Two SQL files that cannot share a chunk (each is over half of the chunk budget). The first is
+/// 3000 tables with one security-definer function in the middle (a tiny share of the file); the
+/// second is 2200 functions and nothing else (all of it is a site).
+fn two_chunk_files() -> Vec<(String, String)> {
+    let mut a = migration(true);
+    let table =
+        |i: usize| format!("create table public.t{i} (\n  id uuid primary key,\n  note text\n);\n");
+    a.extend((120..3000).map(table));
+    let b: String = (0..2200)
+        .map(|i| {
+            format!(
+                "create function public.f{i}() returns int\nlanguage sql\nsecurity definer\nas $$ select {i} $$;\n"
+            )
+        })
+        .collect();
+    vec![(CHUNK_A.to_string(), a), (CHUNK_B.to_string(), b)]
+}
+
+#[tokio::test]
+async fn a_rule_narrowed_in_one_chunk_and_kept_whole_in_another_sees_each_chunk_exactly_once() {
+    let rules = vec![plain("ARCH-1"), fn_rule()];
+    let files = two_chunk_files();
+    assert_eq!(
+        chunk_files(&files, CHUNK_DIGEST_CHARS).len(),
+        2,
+        "the fixture must span two chunks"
+    );
+    let (prompts, m) = run(&rules, &files, true).await;
+    let (off, _) = run(&rules, &files, false).await;
+
+    let header = |path: &str| format!("// ===== FILE: {path} =====");
+    let fn_prompts = carrying(&prompts, "SUPA-FN-1");
+    assert_eq!(
+        fn_prompts.len(),
+        2,
+        "one pass per chunk, no chunk twice or never"
+    );
+    let candidate: Vec<&&String> = fn_prompts
+        .iter()
+        .filter(|p| p.contains("CANDIDATE SITES"))
+        .collect();
+    let whole: Vec<&&String> = fn_prompts
+        .iter()
+        .filter(|p| !p.contains("CANDIDATE SITES"))
+        .collect();
+    assert_eq!((candidate.len(), whole.len()), (1, 1), "{fn_prompts:#?}");
+
+    // Chunk 1: excerpts of the tables file only.
+    assert!(candidate[0].contains(&format!("// ===== FILE: {CHUNK_A} (excerpts) =====")));
+    assert!(!candidate[0].contains(&format!("// ===== FILE: {CHUNK_B}")));
+    // Chunk 2: the functions file whole, exactly the prompt the switch-off scan sends for it.
+    assert!(whole[0].contains(&header(CHUNK_B)));
+    assert!(!whole[0].contains(&format!("// ===== FILE: {CHUNK_A}")));
+    // It is the switch-off prompt for that chunk, down to the byte, except for the pass label's
+    // position counter (this pass covers one chunk, the switch-off scan's covers chunk 2 of 2).
+    assert!(
+        off.iter()
+            .any(|p| p.replace("(pass[scoped] 2/2)", "(pass[scoped] 1/1)") == **whole[0]),
+        "the kept-whole chunk's prompt differs from the switch-off prompt"
+    );
+
+    let u = &m.stage_telemetry(0).candidates.expect("recorded").rules["SUPA-FN-1"];
+    assert_eq!(
+        (u.chunks_narrowed, u.chunks_not_narrowed, u.chunks_fallback),
+        (1, 1, 0)
+    );
+    // The other rule is untouched in both chunks.
+    assert_eq!(carrying(&prompts, "ARCH-1").len(), 2);
+}
+
+// ── batch mode sends what real-time sends ─────────────────────────────────────────────────
+
+/// A Message Batches API that answers `{}` to every item and keeps each item's prompt text.
+struct PromptBatch {
+    realtime: Recorder,
+    items: std::sync::Mutex<Vec<crate::llm::BatchItem>>,
+}
+
+fn batch_response() -> crate::llm::LlmResponse {
+    crate::llm::LlmResponse {
+        text: "{}".to_string(),
+        model: "stub".to_string(),
+        backend: "api/batch".to_string(),
+        cost_usd: Some(0.0),
+        input_tokens: Some(10),
+        output_tokens: Some(1),
+        cache_read_input_tokens: 0,
+        cache_creation_input_tokens: 0,
+        or_cache_discount: None,
+        truncated: false,
+    }
+}
+
+#[async_trait::async_trait]
+impl batch_mode::BatchApi for PromptBatch {
+    fn has_api_key(&self) -> bool {
+        true
+    }
+    fn realtime(&self) -> &dyn crate::llm::LlmPort {
+        &self.realtime
+    }
+    async fn count_input_tokens(&self, _req: &crate::llm::LlmRequest, _model: &str) -> Option<u64> {
+        Some(1_000)
+    }
+    async fn submit(&self, items: Vec<crate::llm::BatchItem>) -> anyhow::Result<String> {
+        let mut all = self.items.lock().unwrap();
+        let id = format!("msgbatch_{}", all.len());
+        all.extend(items);
+        Ok(id)
+    }
+    async fn poll(&self, _batch_id: &str) -> anyhow::Result<crate::llm::BatchStatus> {
+        Ok(crate::llm::BatchStatus {
+            processing_status: "ended".to_string(),
+            request_counts: crate::llm::BatchRequestCounts::default(),
+        })
+    }
+    async fn fetch(
+        &self,
+        _batch_id: &str,
+        _ttl: crate::llm::CacheTtl,
+    ) -> anyhow::Result<Vec<crate::llm::BatchResultRow>> {
+        // Every item submitted so far answers; re-answering an earlier round is harmless because
+        // the batch path only reads the ids of the round it submitted.
+        Ok(self
+            .items
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|i| crate::llm::BatchResultRow {
+                custom_id: i.custom_id.clone(),
+                response: Some(batch_response()),
+                error: None,
+                billed: None,
+            })
+            .collect())
+    }
+}
+
+/// The prompt text of a batch item: its content is a string, or blocks split at cache breakpoints.
+fn batch_prompt(item: &crate::llm::BatchItem) -> String {
+    let content = serde_json::to_value(&item.params.messages[0].content).unwrap();
+    match content {
+        serde_json::Value::String(s) => s,
+        serde_json::Value::Array(blocks) => blocks
+            .iter()
+            .filter_map(|b| b["text"].as_str())
+            .collect::<String>(),
+        other => panic!("unexpected batch content: {other}"),
+    }
+}
+
+/// Run the routed BATCH passes (production path below `audit_repo`) and return every prompt.
+async fn run_batch(
+    rules: &[AuditRule],
+    files: &[(String, String)],
+    prefilter: bool,
+    env: CandidateEnv,
+) -> Vec<String> {
+    let api = PromptBatch {
+        realtime: Recorder::default(),
+        items: std::sync::Mutex::new(Vec::new()),
+    };
+    let m = UsageMeter::with_controls(RunControls {
+        efficiency: efficiency(prefilter),
+        max_cost_usd: None,
+        estimate_hint_usd: None,
+        fix_model: None,
+    });
+    let plan = plan_routes(rules, files, true);
+    let repo_map = build_repo_map(files);
+    let adopted = rules.iter().map(|r| r.id.to_ascii_uppercase()).collect();
+    let mut skipped = Vec::new();
+    let (_f, _p, _r, _ok, failures) = run_routed_passes_batch(
+        &api,
+        REPO,
+        files,
+        rules,
+        &plan,
+        &repo_map,
+        &adopted,
+        None,
+        None,
+        RULE_BATCH_SIZE,
+        Some(&m),
+        &mut skipped,
+        env,
+    )
+    .await
+    .expect("the batch path runs");
+    assert!(failures.is_empty(), "{failures:?}");
+    assert!(skipped.is_empty(), "{skipped:?}");
+    let items = api.items.lock().unwrap();
+    items.iter().map(batch_prompt).collect()
+}
+
+#[tokio::test(start_paused = true)]
+async fn batch_mode_sends_exactly_the_prompts_real_time_sends() {
+    let rules = vec![plain("ARCH-1"), fn_rule()];
+    for (name, files) in [
+        ("one chunk", supabase_files(true)),
+        ("two chunks, narrowed then whole", two_chunk_files()),
+    ] {
+        let (real_time, _) = run(&rules, &files, true).await;
+        let batch = run_batch(&rules, &files, true, CandidateEnv::production()).await;
+        assert!(
+            batch.iter().any(|p| p.contains("CANDIDATE SITES")),
+            "{name}: batch mode narrows too"
+        );
+        assert_eq!(
+            sorted(batch),
+            sorted(real_time),
+            "{name}: batch and real-time prompts differ"
+        );
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn batch_mode_falls_back_to_whole_files_exactly_as_real_time_does() {
+    let rules = vec![plain("ARCH-1"), fn_rule()];
+    let files = supabase_files(true);
+    let env = env_with(failing, Duration::from_secs(5));
+    let (real_time, _) = run_with(&rules, &files, true, env).await;
+    let batch = run_batch(&rules, &files, true, env).await;
+    let off = run_batch(&rules, &files, false, CandidateEnv::production()).await;
+    assert!(batch.iter().all(|p| !p.contains("CANDIDATE SITES")));
+    assert_eq!(sorted(batch.clone()), sorted(real_time));
+    assert_eq!(
+        sorted(batch),
+        sorted(off),
+        "a failed locator = the switch-off batch"
+    );
 }

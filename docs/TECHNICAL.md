@@ -2839,33 +2839,65 @@ scope to another rule fails that test until the rule is reviewed.
 which files a rule is sent; `candidates` decides what a chunk of those files looks
 like to it. A rule declares a deterministic locator, `candidates = { locator =
 "sql_routines" }`, from the closed list `camerata_rules::CANDIDATE_LOCATORS`
-(`sql_routines`, `sql_policies`, `sql_policies_and_routines`, `sql_tables`). Each
+(`sql_routines`, `sql_policies`, `sql_policies_routines_and_views`, `sql_tables`). Each
 locator is a statement filter over the SQL statement splitter the Supabase checkers
 use (`supabase::splitter`), so a site is a whole top-level statement (a function
 arrives with its whole dollar-quoted body), and the filter is a keyword mention, not
-a judgment, so it is wide. With `candidates_prefilter` on, per (chunk, locator):
+a judgment, so it is wide. What each one selects:
+
+- `sql_routines`: any statement that mentions a `FUNCTION`, `PROCEDURE` or `ROUTINE`
+  (create, alter, drop, comment, grant, revoke, default privileges, a trigger's
+  `EXECUTE FUNCTION`), and every `DO` block;
+- `sql_policies`: any statement that mentions a `POLICY` or `POLICIES`;
+- `sql_policies_routines_and_views`: both of those plus any statement that mentions a
+  `VIEW` (a policy reads a claim through a view as readily as through a function);
+- `sql_tables`: any statement that mentions a `TABLE`, `TYPE`, `DOMAIN` or `VIEW`, plus
+  any `INTO` outside an `INSERT` or `MERGE` (`SELECT ... INTO new_table` creates a
+  table with none of those words). Not selected: a column definition list in a
+  query's `FROM` clause (`... AS t(col timestamp)`) in a plain `SELECT`, and a cast in
+  a plain `SELECT` or `INSERT ... SELECT`. Neither declares a column of the schema.
+
+Each locator's shapes, and the shapes it must not select, are tables in
+`crates/checks/src/candidates.rs`; a new way a rule's subject can be written is a new
+line there. A backslash directly before a quote outside an `E'...'` string is
+ambiguous (its meaning depends on `standard_conforming_strings`), so the strict
+splitter rejects the file and the rule gets whole files; inside `E'...'` the escape is
+honoured. With `candidates_prefilter` on, per (chunk, locator):
 
 - every file parses and has sites: the rule leaves the chunk's whole-file prompt and
   gets a candidate prompt (`pass[...] candidates[<locator>]`): the repo map, then each
   site with 8 lines of context and the file's real line numbers, then every file the
   locator does not read (any non-`.sql` file, e.g. `supabase/config.toml`) in full.
   The advisory pass never runs on it;
-- the locator errors, panics, takes longer than 20s, or a `.sql` file does not parse
-  (a string, quoted identifier, dollar quote or block comment open at end of file,
+- the locator errors, panics, takes longer than 20s, the chunk holds more than 8 MiB of
+  text, or a `.sql` file does not parse (a string, quoted identifier, dollar quote or
+  block comment open at end of file, or an ambiguous backslash,
   `split_statements_strict`): the rule stays in the chunk's whole-file prompt, which
-  is exactly the switch-off prompt, and the fallback is recorded;
+  is exactly the switch-off prompt (a chunk narrowed for one rule and not another
+  sends each its own prompt), and the fallback is recorded and printed. A chunk over
+  the size cap is never handed to the locator; at the time limit the scan raises a
+  cancel flag that the splitter polls every few thousand characters, so the blocking
+  thread stops rather than running to the end of the file;
 - the candidate section would be more than half the whole digest (a chunk mostly of
   files the locator cannot read): the rule stays in the whole-file prompt;
 - every file was read and none has a site: no pass is sent for the rule there.
 
 Rules sharing a locator share one candidate prompt per chunk. A chunk whose every
 rule was narrowed still gets its whole-file advisory pass when its group runs
-advisory. `plan_pass_sets` is the one planner; `run_routed_passes` and
-`run_routed_passes_batch` both run its pass sets, so real-time and batch mode send
+advisory. That pass reads the whole chunk, so in a group that runs advisory the
+whole-file prompt is still sent and each narrowed locator ADDS an excerpt prompt: the
+scan costs more than it did without `candidates` unless taking the rule out of the
+whole-file prompt drops a whole rule batch (15 rules) from it. The saving is real for
+a group that does not run advisory (a scoped group beside an `All` group, which is
+where the shipped rules sit) or a rule batch that empties. Read the per-stage token
+rows, not the digest-byte line, for the net. `plan_pass_sets` is the one planner;
+`run_routed_passes` and `run_routed_passes_batch` both run its pass sets, so real-time and batch mode send
 the same prompts. Validation is at corpus load (unknown locator or key: the rule's
 file fails), and `candidates` is part of `Rule::content_hash`. The rules that
 declare it are pinned, each with a synthetic violating fixture whose violating line
-its locator must return, by `crates/server/tests/candidates_corpus.rs`.
+its locator must return, by `crates/server/tests/candidates_corpus.rs`, along with
+the other ways the same subject is written (a column type declared by a cast in a
+view or by `SELECT ... INTO`, a claim read through a view a policy selects from).
 
 Telemetry: the per-stage table prints `candidate prefilter: N rules, X of Y digest
 bytes not sent`, then one line per rule (chunks narrowed, without sites, not
