@@ -7213,12 +7213,14 @@ pub(crate) fn categorize_rule_id(rule_id: &str) -> Option<String> {
         || has("API-KEY")
         || has("APIKEY")
         || has("PASSWORD")
-        // The floor's other credential rules and the Supabase service-role key: their rows carry
-        // no calibration verdict, so this is the only source of their category.
-        || has("PRIVATE-KEY")
-        || has("VENDOR-TOKEN")
-        || has("SUPABASE-KEY")
     {
+        // NOT the floor's private-key and vendor-token rules, nor the Supabase service-role
+        // rule: a category here is a MERGE key ("same file, same category, within five lines"),
+        // and two credentials a few lines apart are two defects that a redacted snippet gives
+        // `objects_conflict` no way to tell apart. See
+        // `a_floor_private_key_and_a_different_ai_secret_two_lines_apart_stay_two_rows`. The
+        // cockpit's decision memory identifies those rows by rule id instead
+        // (`FindingView::is_secret_exposure`).
         "secret-exposure"
     } else if has("RAW-SQL")
         || has("STRING-SQL")
@@ -19831,27 +19833,23 @@ mod tests {
         }
     }
 
-    /// The deterministic floor's credential rules (private key, vendor token) and the Supabase
-    /// service-role rule are secret exposure. Their rows carry no calibration verdict, so this
-    /// is the only place their `category` can come from; the cockpit keeps repos apart for
-    /// decision memory on exactly this value.
+    /// The floor's private-key and vendor-token rules get NO category from the rule-id map, and
+    /// the Supabase service-role rule keeps `authorization`. A `secret-exposure` category on
+    /// them would be a merge key, and two credentials a few lines apart (a private key under a
+    /// Stripe key) would fuse into one row. The cockpit's decision memory keeps their repos
+    /// apart by rule id (`FindingView::is_secret_exposure`), so it needs no category here.
     #[test]
-    fn floor_credential_rules_are_categorized_secret_exposure() {
-        for id in [
-            "SEC-NO-HARDCODED-SECRETS-1",
-            "SEC-NO-PRIVATE-KEY-1",
-            "SEC-NO-VENDOR-TOKEN-1",
-            "SUPABASE-KEY-SERVICE-ROLE-CLIENT-1",
-        ] {
-            assert_eq!(
-                categorize_rule_id(id).as_deref(),
-                Some("secret-exposure"),
-                "{id}"
-            );
+    fn floor_credential_rules_carry_no_secret_exposure_merge_category() {
+        for id in ["SEC-NO-PRIVATE-KEY-1", "SEC-NO-VENDOR-TOKEN-1"] {
+            assert_eq!(categorize_rule_id(id), None, "{id}");
         }
-        // Not credentials.
-        assert_ne!(
-            categorize_rule_id("SEC-NO-RAW-SQL-CONCAT-1").as_deref(),
+        assert_eq!(
+            categorize_rule_id("SUPABASE-KEY-SERVICE-ROLE-CLIENT-1").as_deref(),
+            Some("authorization")
+        );
+        // The hardcoded-secret rule is categorized, as it always was.
+        assert_eq!(
+            categorize_rule_id("SEC-NO-HARDCODED-SECRETS-1").as_deref(),
             Some("secret-exposure")
         );
     }
@@ -20822,5 +20820,138 @@ mod tests {
         fn as_any(&self) -> &dyn std::any::Any {
             self
         }
+    }
+
+    // ── Floor credential rules never fuse with a NEIGHBOURING different secret ─────────────
+    //
+    // The cross-family merge's same-category signal is "same file, same category, within five
+    // lines or one construct". That is the right key for an authorization or injection pair,
+    // but two credentials are two defects (two values to rotate, two places to delete) however
+    // close they sit, and a secret row has no structural object for `objects_conflict` to tell
+    // them apart by: a redacted snippet names nothing. So the floor's private-key, vendor-token
+    // and Supabase service-role rows carry NO `secret-exposure` category from
+    // `categorize_rule_id`; the cockpit identifies them by rule id instead
+    // (`FindingView::is_secret_exposure`). A same-credential pair at the SAME line is already one
+    // row through `merge_by_location`, which needs no category.
+
+    fn floor_credential_row(rule: &str, line: usize, snippet: &str, detail: &str) -> Finding {
+        Finding {
+            repo: "acme/api".to_string(),
+            path: "src/config.ts".to_string(),
+            line,
+            rule_id: rule.to_string(),
+            severity: "critical".to_string(),
+            snippet: snippet.to_string(),
+            detail: detail.to_string(),
+            status: "active".to_string(),
+            located: true,
+            effort: Some("low".to_string()),
+            kind: Some(camerata_api_types::audit::FindingKind::Defect),
+            ..Finding::default()
+        }
+    }
+
+    /// A committed private key at line 12 and a live Stripe key the model flagged at line 10 are
+    /// two credentials. With the floor row categorized `secret-exposure` they became ONE row
+    /// headlined "private key", the Stripe key demoted to a location of it, and one triage
+    /// decision ("false positive: fixture key") would have disposed of both.
+    #[test]
+    fn a_floor_private_key_and_a_different_ai_secret_two_lines_apart_stay_two_rows() {
+        let key = floor_credential_row(
+            "SEC-NO-PRIVATE-KEY-1",
+            12,
+            "-----BEGIN RSA PRIVATE KEY-----",
+            "No private key material in source",
+        );
+        let mut stripe = floor_credential_row(
+            "AI-SECRET-IN-CONFIG-1",
+            10,
+            "stripe: \"sk_live_…x7Yq (32 chars)\"",
+            "A live Stripe secret key is hardcoded in the config object.",
+        );
+        stripe.confidence = Some("high".to_string());
+        stripe.category = Some("secret-exposure".to_string());
+        let out = merge_semantic_groups(vec![stripe, key], &[]);
+        assert_eq!(
+            out.len(),
+            2,
+            "two different credentials two lines apart are two rows: {out:?}"
+        );
+        assert!(out.iter().all(|f| f.also_locations.is_empty()), "{out:?}");
+    }
+
+    /// A vendor token and a private key in ONE object literal are two credentials. With both
+    /// floor rows in one category the same-construct security override fused them, bypassing
+    /// the "two deterministic rows are two defects" guard.
+    #[test]
+    fn two_different_floor_credentials_in_one_construct_stay_two_rows() {
+        let content = "const config = {\n  owner: \"acme\",\n  token: \"ghp_yyy\",\n  cert: 1,\n  \
+                       key: `-----BEGIN RSA PRIVATE KEY-----`,\n};\n";
+        let token = floor_credential_row(
+            "SEC-NO-VENDOR-TOKEN-1",
+            3,
+            "token: \"ghp_…yyyy (40 chars)\"",
+            "No vendor API tokens in source",
+        );
+        let key = floor_credential_row(
+            "SEC-NO-PRIVATE-KEY-1",
+            5,
+            "key: `-----BEGIN RSA PRIVATE KEY-----`",
+            "No private key material in source",
+        );
+        let files = vec![("src/config.ts".to_string(), content.to_string())];
+        let out = merge_semantic_groups(vec![token, key], &files);
+        assert_eq!(
+            out.len(),
+            2,
+            "two floor credential rules in one construct are two rows: {out:?}"
+        );
+        let ids: Vec<&str> = out.iter().map(|f| f.rule_id.as_str()).collect();
+        assert!(ids.contains(&"SEC-NO-VENDOR-TOKEN-1") && ids.contains(&"SEC-NO-PRIVATE-KEY-1"));
+    }
+
+    /// The same credential flagged by the floor and by the model at the SAME line is still one
+    /// row: `merge_by_location` fuses exact co-location and needs no category for it.
+    #[test]
+    fn the_same_credential_at_the_same_line_is_still_one_row_by_location() {
+        let floor = floor_credential_row(
+            "SEC-NO-VENDOR-TOKEN-1",
+            10,
+            "GITHUB_TOKEN = \"ghp_…k9Qz (40 chars)\"",
+            "No vendor API tokens in source",
+        );
+        let mut model = floor_credential_row(
+            "SEC-NO-HARDCODED-SECRETS-1",
+            10,
+            "GITHUB_TOKEN = \"ghp_…k9Qz (40 chars)\"",
+            "A GitHub personal access token is hardcoded in GITHUB_TOKEN.",
+        );
+        model.confidence = Some("high".to_string());
+        model.category = Some("secret-exposure".to_string());
+        let content = (1..=12)
+            .map(|n| {
+                if n == 10 {
+                    "GITHUB_TOKEN = \"ghp_…k9Qz (40 chars)\"".to_string()
+                } else {
+                    format!("const line{n} = {n};")
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let files = vec![("src/config.ts".to_string(), content)];
+        let out = merge_by_location(vec![model, floor], &files);
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert_eq!(
+            out[0].rule_id, "SEC-NO-VENDOR-TOKEN-1",
+            "the floor row is primary"
+        );
+        assert_eq!(out[0].severity, "critical");
+        assert!(
+            out[0]
+                .also_matches
+                .contains(&"SEC-NO-HARDCODED-SECRETS-1".to_string()),
+            "{:?}",
+            out[0].also_matches
+        );
     }
 }

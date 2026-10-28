@@ -1024,15 +1024,15 @@ mod cli_parse_tests {
             "camerata",
             "inspect",
             "--repo",
-            "/tmp/a",
+            "/Users/auditor/clients/acme/api",
             "--repo-name",
             "acme/api",
             "--repo",
-            "/tmp/b",
+            "/Users/auditor/clients/acme/web",
             "--repo-name",
             "acme/web",
             "--export",
-            "/tmp/o.zip",
+            "/Users/auditor/out/acme.zip",
             "--client",
             "Example Client Ltd",
         ])
@@ -1041,7 +1041,13 @@ mod cli_parse_tests {
             Command::Inspect {
                 repo, repo_name, ..
             } => {
-                assert_eq!(repo, vec![PathBuf::from("/tmp/a"), PathBuf::from("/tmp/b")]);
+                assert_eq!(
+                    repo,
+                    vec![
+                        PathBuf::from("/Users/auditor/clients/acme/api"),
+                        PathBuf::from("/Users/auditor/clients/acme/web")
+                    ]
+                );
                 assert_eq!(
                     repo_name,
                     vec!["acme/api".to_string(), "acme/web".to_string()]
@@ -1054,7 +1060,7 @@ mod cli_parse_tests {
             "camerata",
             "inspect",
             "--export",
-            "/tmp/o.zip",
+            "/Users/auditor/out/acme.zip",
             "--client",
             "Example Client Ltd"
         ])

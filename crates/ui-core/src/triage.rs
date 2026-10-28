@@ -268,11 +268,13 @@ pub struct FindingView {
 
 impl FindingView {
     /// True when this finding is about a leaked credential: the server classed it
-    /// `secret-exposure` (it stamps that on the deterministic floor rows too), or, as a
-    /// fallback for a row without a category, its rule id names a secret, a token, a private key
-    /// or the Supabase service-role key. The snippet of such a finding is redacted to a placeholder, so two of them in
-    /// different repos look identical while describing different credentials. Decision memory
-    /// uses this to keep them apart.
+    /// `secret-exposure` (the model's rows, and the floor's hardcoded-secret rule), or its rule
+    /// id names a secret, a token, a private key or the Supabase service-role key. The rule-id
+    /// test is not a fallback: the floor's private-key and vendor-token rows carry NO category
+    /// on purpose (on the server a category is a merge key, and two credentials a few lines
+    /// apart must stay two rows), so this is the one place they are recognised. The snippet of
+    /// such a finding is redacted, so two of them in different repos can look identical while
+    /// describing different credentials. Decision memory uses this to keep them apart.
     pub fn is_secret_exposure(&self) -> bool {
         if self.category.as_deref() == Some("secret-exposure") {
             return true;
