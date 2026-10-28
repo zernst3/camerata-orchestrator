@@ -3,6 +3,18 @@
 Deferred work and known gaps not yet scheduled. Newest intent at the top. UI-only
 follow-ups live in `UI_BACKLOG.md`; this file is for engine + cross-cutting items.
 
+## C5-6: the generic "the affected table" fix filler (2026-10-28, OPEN, product polish)
+
+Until now tracked only in the `#[ignore]` reason on
+`fix_fields_can_fall_back_to_the_generic_affected_noun_phrase` (`crates/server/src/report_export.rs`).
+When a detector captured no concrete object name for a rule's `<table>`-style remediation token,
+`generic_placeholder_filler` renders "the affected table". That is filled text, never a raw or
+dangling placeholder, so it is not a correctness bug, but it reads as boilerplate next to an
+otherwise specific Fix line. Decision needed: omit the sentence when the token has no capture, or
+require every AUDIT_RULES floor checker to populate its own `captures` (several already do, see
+`onboard::audit::enrich_secret_context`). Once decided, the ignored test is the gate: un-ignore it
+with the chosen behaviour.
+
 ## `camerata-check` reads the corpus from disk for its severity bounds (2026-10-28, OPEN)
 
 The CI gate now applies the corpus's severity bounds (`camerata_rules::severity_bounds`, the same
