@@ -5367,7 +5367,11 @@ async fn run_passes_batch(
     let mut per_item_usd: Option<f64> = None;
     if !hint_refuses {
         if let Some(first) = work.first() {
-            let sample_req = sample_count_request(&first.req.prompt, &first.req.cache_breakpoints, terse_output_of(meter));
+            let sample_req = sample_count_request(
+                &first.req.prompt,
+                &first.req.cache_breakpoints,
+                terse_output_of(meter),
+            );
             if let Some(exact) = llm.count_input_tokens(&sample_req, &model).await {
                 eprintln!(
                     "[camerata-server] batch mode: exact input-token count for chunk {} rule-batch \
@@ -7745,7 +7749,6 @@ async fn run_routed_passes(
     // rather than leaving "never evaluated" indistinguishable from "assessed and clean".
     skipped_rules: &mut Vec<(String, String)>,
 ) -> PassesOut {
-
     // When there are no rules (free-form audit), skip routing and run one pass over all files.
     if selected.is_empty() {
         let chunks = chunk_files(files, CHUNK_DIGEST_CHARS);
