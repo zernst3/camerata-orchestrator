@@ -136,6 +136,8 @@ async fn sealed_report(feeds: &Feeds) -> SealedReport {
     let mut coverage_notes = runtime.notes.clone();
     coverage_notes.extend(notes);
     ScanReport {
+        repos_not_inspected: Vec::new(),
+        recommendations_by_repo: Vec::new(),
         repos: vec!["acme/app".to_string()],
         stacks: Vec::new(),
         files_scanned: 10,

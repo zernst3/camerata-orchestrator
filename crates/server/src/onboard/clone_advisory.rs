@@ -541,17 +541,17 @@ fn finish_transcript(
 /// with nothing found ran clean). Otherwise it is recorded as not run with the reason, and the
 /// matching coverage note is queued so the disclosure survives whichever later pass settles
 /// `ran` (the semantic pass reads every rule too). Findings counted are the confirmed ones.
-pub fn record_in_ledger(ledger: &mut ScanLedger, outcome: &JudgeOutcome) {
+pub fn record_in_ledger(ledger: &mut ScanLedger, repo: &str, outcome: &JudgeOutcome) {
     for (rule, counts) in &outcome.counts {
         let id = rule.id();
         let fully = counts.fully_assessed() && (outcome.model_available || counts.found == 0);
         let skip_reason = if fully {
             None
         } else if !outcome.model_available {
-            ledger.note_advisory_unavailable_rule(id);
+            ledger.note_advisory_unavailable_rule(repo, id);
             Some(crate::scan_ledger::ADVISORY_UNAVAILABLE_NOTE.to_string())
         } else {
-            ledger.note_advisory_partial_rule(id);
+            ledger.note_advisory_partial_rule(repo, id);
             Some(format!(
                 "{FAILED_PASS_NAME} incomplete: {} of {} candidate sites were not assessed this \
                  scan",
@@ -560,6 +560,7 @@ pub fn record_in_ledger(ledger: &mut ScanLedger, outcome: &JudgeOutcome) {
             ))
         };
         ledger.record_rule(
+            repo,
             id,
             RuleTier::Architectural,
             fully,

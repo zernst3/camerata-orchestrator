@@ -144,6 +144,8 @@ fn minimal_report(
     ledger: ScanLedger,
 ) -> ScanReport {
     ScanReport {
+        repos_not_inspected: Vec::new(),
+        recommendations_by_repo: Vec::new(),
         repos: vec!["acme/payments".to_string()],
         stacks: Vec::new(),
         files_scanned: 1,
@@ -274,6 +276,7 @@ async fn mechanical_rule_with_no_detector_is_evaluated_and_fires_via_the_semanti
         .filter(|f| f.rule_id == RULE_NO_DETECTOR)
         .count();
     ledger.record_rule(
+        "",
         RULE_NO_DETECTOR,
         RuleTier::Semantic,
         true,

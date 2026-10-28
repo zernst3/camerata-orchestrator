@@ -1108,3 +1108,103 @@ fn an_em_dash_in_a_model_headline_never_reaches_the_flagged_here_note() {
     assert!(!note.contains('\u{2014}'), "{note}");
     assert_eq!(note, "Also flagged here as Owner, check missing (critical)");
 }
+
+// ── one list of bookkeeping captures ────────────────────────────────────────────────────────
+
+/// The four captures that are bookkeeping about a row. Written out as text here so a key dropped
+/// from the one shared list fails this test instead of passing it.
+const BOOKKEEPING_KEY_NAMES: [&str; 6] = [
+    "severity_adjustments",
+    "carried_from",
+    "history-status",
+    "produced_tier",
+    "gitignore-status",
+    "secret-kind",
+];
+
+/// A value that would read as identity if it were counted: three or more characters, and shaped
+/// like a credential name so the credential-identity scan would pick it up too.
+const BOOKKEEPING_VALUE: &str = "STRIPE_SECRET_KEY recorded for this row";
+
+fn row_with_one_bookkeeping_key(path: &str, key: &str) -> Finding {
+    let mut f = finding("AI-X-1", "high", "Missing owner check");
+    f.path = path.to_string();
+    f.snippet = format!("code at {path}");
+    f.captures
+        .insert(key.to_string(), BOOKKEEPING_VALUE.to_string());
+    f
+}
+
+#[test]
+fn the_one_list_holds_every_bookkeeping_key() {
+    let mut listed: Vec<&str> = BOOKKEEPING_CAPTURE_KEYS.to_vec();
+    listed.sort_unstable();
+    let mut expected = BOOKKEEPING_KEY_NAMES.to_vec();
+    expected.sort_unstable();
+    assert_eq!(listed, expected);
+    assert_eq!(
+        crate::onboard::HISTORY_STATUS_CAPTURE,
+        "history-status",
+        "the history-status key is public beside the produced-tier key"
+    );
+    assert_eq!(crate::onboard::PRODUCED_TIER_CAPTURE, "produced_tier");
+}
+
+#[test]
+fn no_bookkeeping_key_is_identity_or_fix_evidence() {
+    for key in BOOKKEEPING_KEY_NAMES {
+        let a = row_with_one_bookkeeping_key("a.rs", key);
+        let b = row_with_one_bookkeeping_key("b.rs", key);
+        assert_eq!(object_captures(&a).count(), 0, "{key} counted as an object");
+        assert!(normalized_capture_values(&a).is_empty(), "{key}");
+        assert!(!shared_captured_object(&a, &b), "{key} linked two rows");
+        let blob = fix_evidence_blob(&a, &[]);
+        assert!(
+            !blob.contains("STRIPE_SECRET_KEY"),
+            "{key} in evidence: {blob}"
+        );
+        assert_eq!(captured_objects_line(&a), "", "{key}");
+        assert!(
+            root_cause_credential_identities(&a).is_empty(),
+            "{key} gave a credential identity: {:?}",
+            root_cause_credential_identities(&a)
+        );
+    }
+}
+
+#[test]
+fn a_real_capture_beside_each_bookkeeping_key_is_still_an_object() {
+    for key in BOOKKEEPING_KEY_NAMES {
+        let mut f = row_with_one_bookkeeping_key("a.rs", key);
+        f.captures
+            .insert("flag".to_string(), "debug_mode".to_string());
+        assert_eq!(object_captures(&f).count(), 1, "{key}");
+        assert!(fix_evidence_blob(&f, &[]).contains("debug_mode"), "{key}");
+        assert!(
+            captured_objects_line(&f).contains("flag=debug_mode"),
+            "{key}"
+        );
+    }
+}
+
+#[test]
+fn two_findings_sharing_only_history_status_or_produced_tier_are_not_root_cause_linked() {
+    for key in BOOKKEEPING_KEY_NAMES {
+        let a = row_with_one_bookkeeping_key("config/a.env", key);
+        let b = row_with_one_bookkeeping_key("src/b.rs", key);
+        let ids_a = root_cause_credential_identities(&a);
+        let ids_b = root_cause_credential_identities(&b);
+        assert!(
+            ids_a.is_empty() && ids_b.is_empty(),
+            "{key}: {ids_a:?} / {ids_b:?}"
+        );
+    }
+    // A credential both rows really name in their own text still links them.
+    let mut a = row_with_one_bookkeeping_key("config/a.env", "history-status");
+    let mut b = row_with_one_bookkeeping_key("src/b.rs", "produced_tier");
+    a.detail = "STRIPE_SECRET_KEY is committed".to_string();
+    b.detail = "client built from STRIPE_SECRET_KEY".to_string();
+    assert!(
+        !root_cause_credential_identities(&a).is_disjoint(&root_cause_credential_identities(&b))
+    );
+}

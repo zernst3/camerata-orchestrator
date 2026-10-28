@@ -247,6 +247,7 @@ fn fixture() -> (SealedReport, HashMap<String, DispositionWire>) {
     recommendations.insert(
         "ARCH-PAGINATION-1".to_string(),
         RuleRecommendation {
+            repo: String::new(),
             rule_id: "ARCH-PAGINATION-1".to_string(),
             recommended_option_id: "cursor".to_string(),
             evidence: Some("src/api/list.rs:42 - cursor paging, with a comma".to_string()),
@@ -257,6 +258,7 @@ fn fixture() -> (SealedReport, HashMap<String, DispositionWire>) {
     recommendations.insert(
         "ARCH-IDEMPOTENCY-1".to_string(),
         RuleRecommendation {
+            repo: String::new(),
             rule_id: "ARCH-IDEMPOTENCY-1".to_string(),
             recommended_option_id: "none".to_string(),
             evidence: None,
@@ -276,6 +278,8 @@ fn fixture() -> (SealedReport, HashMap<String, DispositionWire>) {
     .collect();
 
     let report = ScanReport {
+        repos_not_inspected: Vec::new(),
+        recommendations_by_repo: Vec::new(),
         repos: vec!["acme/portal".to_string()],
         stacks: Vec::new(),
         files_scanned: 10,

@@ -137,6 +137,8 @@ fn minimal_report(
     ledger: ScanLedger,
 ) -> ScanReport {
     ScanReport {
+        repos_not_inspected: Vec::new(),
+        recommendations_by_repo: Vec::new(),
         repos: vec!["acme/api".to_string()],
         stacks: Vec::new(),
         files_scanned: 1,
@@ -214,7 +216,7 @@ async fn config_gated_rule_with_no_architecture_config_gets_an_accurate_note_and
     // disclosure is QUEUED (not yet attached to any entry — none exists yet).
     let mut ledger = ScanLedger::new();
     assert!(ledger.rule(RULE_CONFIG_GATED).is_none());
-    ledger.note_config_gated_rule(RULE_CONFIG_GATED);
+    ledger.note_config_gated_rule("", RULE_CONFIG_GATED);
 
     // ═══ STEP 3: the real semantic-tier function against a STUBBED model, over the EXACT ═══
     // selected set the per-repo filter would hand it for this unconfigured repo — nothing
@@ -267,6 +269,7 @@ async fn config_gated_rule_with_no_architecture_config_gets_an_accurate_note_and
         .filter(|f| f.rule_id == RULE_CONFIG_GATED)
         .count();
     ledger.record_rule(
+        "",
         RULE_CONFIG_GATED,
         RuleTier::Semantic,
         true,

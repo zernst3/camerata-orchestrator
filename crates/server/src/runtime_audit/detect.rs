@@ -18,7 +18,7 @@
 //!   vulnerability is fixed in a specific patch release.
 //! - [`Version::Loose`]: anything else.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use regex::Regex;
 
@@ -40,6 +40,9 @@ pub enum Product {
     Laravel,
     SpringBoot,
     Express,
+    /// A Dockerfile base image that is itself a build argument, so the product is unknown. It
+    /// only ever appears as an excluded declaration and is never looked up.
+    ContainerImage,
 }
 
 impl Product {
@@ -62,6 +65,8 @@ impl Product {
             Self::Laravel => "laravel",
             Self::SpringBoot => "spring-boot",
             Self::Express => "express",
+            // Never fetched: a container image of unknown product is always excluded.
+            Self::ContainerImage => "container-image",
         }
     }
 
@@ -83,6 +88,7 @@ impl Product {
             Self::Laravel => "Laravel",
             Self::SpringBoot => "Spring Boot",
             Self::Express => "Express",
+            Self::ContainerImage => "Container image",
         }
     }
 
@@ -123,8 +129,14 @@ pub enum Version {
 
 /// Why a Dockerfile stage before the final one is not checked.
 pub const BUILD_STAGE: &str = "it is a build stage, and a build image does not ship";
+/// Why a Dockerfile `FROM` whose whole image is a build argument is not checked.
+pub const BUILD_ARG_IMAGE: &str = "the image is a build argument";
 /// Why a framework found only in a lockfile is not checked.
 pub const NOT_DIRECT: &str = "it is not a direct, non-dev dependency of the project";
+/// Why a framework the project lists only under `optionalDependencies` is not checked.
+pub const OPTIONAL_DEPENDENCY: &str = "it is only an optional dependency of the project";
+/// Why a framework the project lists only under `peerDependencies` is not checked.
+pub const PEER_DEPENDENCY: &str = "it is only a peer dependency of the project";
 
 /// One version a repository declares, with where it was declared.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -372,6 +384,15 @@ fn docker_product(image: &str) -> Option<Product> {
     }
 }
 
+/// Whether the image name itself, the part after the last `/`, is a build argument (`${BASE}`,
+/// `$IMAGE`). A registry or a tag that is an argument around a literal name is not.
+fn image_is_build_argument(image: &str) -> bool {
+    image
+        .rsplit('/')
+        .next()
+        .is_some_and(|name| name.contains('$'))
+}
+
 /// One `FROM` line.
 struct Stage {
     line: usize,
@@ -439,6 +460,17 @@ pub fn read_dockerfile(path: &str, text: &str) -> Vec<Declaration> {
             _ => (without_digest, None),
         };
         let Some(product) = docker_product(image) else {
+            // A whole image set by a build argument (`FROM ${BASE}`) cannot be named, so it is
+            // listed as not checked instead of vanishing. A stage that never ships is no gap.
+            if ships[idx] && image_is_build_argument(image) {
+                out.push(decl(
+                    Product::ContainerImage,
+                    path,
+                    stage.line,
+                    &stage.image_ref,
+                    Version::Excluded(BUILD_ARG_IMAGE.to_string()),
+                ));
+            }
             continue;
         };
         let version = if ships[idx] {
@@ -1024,21 +1056,186 @@ fn read_beside(dir: &Path, name: &str) -> Option<String> {
     std::fs::read_to_string(dir.join(name)).ok()
 }
 
-/// Whether `product`, found in a lockfile in `dir`, is a direct, non-dev dependency declared by
-/// the manifest in the same folder. Anything only transitive, only a dev dependency, or with no
-/// manifest beside the lockfile to show otherwise is not.
+/// How a package.json lists a package, strongest first. Only `Direct` is shipped code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum NpmListing {
+    /// In `dependencies`.
+    Direct,
+    /// Only in `optionalDependencies`.
+    Optional,
+    /// Only in `peerDependencies`.
+    Peer,
+    /// Not listed, or only in `devDependencies`.
+    Absent,
+}
+
+fn npm_listing(manifest: &serde_json::Value, name: &str) -> NpmListing {
+    let lists = |section: &str| manifest.get(section).and_then(|d| d.get(name)).is_some();
+    if lists("dependencies") {
+        NpmListing::Direct
+    } else if lists("optionalDependencies") {
+        NpmListing::Optional
+    } else if lists("peerDependencies") {
+        NpmListing::Peer
+    } else {
+        NpmListing::Absent
+    }
+}
+
+fn read_json_beside(dir: &Path, name: &str) -> Option<serde_json::Value> {
+    read_beside(dir, name).and_then(|t| serde_json::from_str(&t).ok())
+}
+
+/// The package patterns a workspace root lists: `workspaces` in its `package.json` (an array, or
+/// an object with a `packages` array) and `packages` in `pnpm-workspace.yaml`.
+fn workspace_patterns(dir: &Path) -> Vec<String> {
+    let mut patterns: Vec<String> = Vec::new();
+    if let Some(manifest) = read_json_beside(dir, "package.json") {
+        let list = manifest
+            .get("workspaces")
+            .and_then(|w| w.get("packages").or(Some(w)))
+            .and_then(|w| w.as_array());
+        patterns.extend(
+            list.into_iter()
+                .flatten()
+                .filter_map(|p| p.as_str().map(str::to_string)),
+        );
+    }
+    if let Some(yaml) = read_beside(dir, "pnpm-workspace.yaml") {
+        let mut in_packages = false;
+        for line in yaml.lines() {
+            let code = line.split(" #").next().unwrap_or("").trim_end();
+            if code.is_empty() {
+                continue;
+            }
+            if !code.starts_with([' ', '\t', '-']) {
+                in_packages = code.trim() == "packages:";
+                continue;
+            }
+            if let Some(item) = code.trim().strip_prefix('-').filter(|_| in_packages) {
+                patterns.push(item.trim().trim_matches(['"', '\'']).to_string());
+            }
+        }
+    }
+    patterns
+}
+
+/// Whether `name` matches `pattern`, where `*` matches any run of characters.
+fn glob_matches(pattern: &str, name: &str) -> bool {
+    match pattern.split_once('*') {
+        None => pattern == name,
+        Some((head, tail)) => name.strip_prefix(head).is_some_and(|rest| {
+            (0..=rest.len()).any(|i| rest.is_char_boundary(i) && glob_matches(tail, &rest[i..]))
+        }),
+    }
+}
+
+/// The most nested folders `**` descends into.
+const WORKSPACE_DEPTH: usize = 6;
+
+/// Every folder under `base` that `segments` (a path pattern split on `/`) names.
+fn expand_workspace(base: &Path, segments: &[&str], depth: usize, out: &mut Vec<PathBuf>) {
+    let Some((segment, rest)) = segments.split_first() else {
+        out.push(base.to_path_buf());
+        return;
+    };
+    if depth > WORKSPACE_DEPTH {
+        return;
+    }
+    let mut children: Vec<PathBuf> = std::fs::read_dir(base)
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n != "node_modules" && !n.starts_with('.'))
+        })
+        .collect();
+    children.sort();
+    if *segment == "**" {
+        // Zero folders deep, or one folder deeper with the same pattern still to match.
+        expand_workspace(base, rest, depth, out);
+        for child in children {
+            expand_workspace(&child, segments, depth + 1, out);
+        }
+        return;
+    }
+    for child in children {
+        let named = child
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| glob_matches(segment, n));
+        if named {
+            expand_workspace(&child, rest, depth + 1, out);
+        }
+    }
+}
+
+/// The folders a workspace root's patterns name, less the ones its `!` patterns remove.
+fn workspace_dirs(root: &Path) -> Vec<PathBuf> {
+    let mut included: Vec<PathBuf> = Vec::new();
+    let mut removed: Vec<PathBuf> = Vec::new();
+    for pattern in workspace_patterns(root) {
+        let (negated, pattern) = match pattern.strip_prefix('!') {
+            Some(rest) => (true, rest.to_string()),
+            None => (false, pattern),
+        };
+        let trimmed = pattern.trim_start_matches("./").trim_end_matches('/');
+        let segments: Vec<&str> = trimmed.split('/').filter(|s| !s.is_empty()).collect();
+        if segments.is_empty() {
+            continue;
+        }
+        let target = if negated { &mut removed } else { &mut included };
+        expand_workspace(root, &segments, 0, target);
+    }
+    included.sort();
+    included.dedup();
+    included.retain(|d| !removed.contains(d));
+    included
+}
+
+/// How the package.json files of a project list `name`: the one beside the lockfile and, for a
+/// workspace root, those of its workspace packages. The strongest listing wins.
+fn npm_project_listing(dir: &Path, name: &str) -> NpmListing {
+    let own =
+        read_json_beside(dir, "package.json").map_or(NpmListing::Absent, |m| npm_listing(&m, name));
+    if own == NpmListing::Direct {
+        return own;
+    }
+    workspace_dirs(dir)
+        .iter()
+        .filter_map(|d| read_json_beside(d, "package.json"))
+        .map(|m| npm_listing(&m, name))
+        .fold(own, NpmListing::min)
+}
+
+/// Why `product`, found in a lockfile in `dir`, is not checked, or `None` when the manifest in the
+/// same folder lists it as a direct, non-dev dependency. Anything only transitive, only a dev
+/// dependency, or with no manifest beside the lockfile to show otherwise is not.
+fn exclusion_reason(dir: &Path, product: Product) -> Option<&'static str> {
+    if let Product::Next | Product::React | Product::Express = product {
+        let name = match product {
+            Product::Next => "next",
+            Product::React => "react",
+            _ => "express",
+        };
+        return match npm_project_listing(dir, name) {
+            NpmListing::Direct => None,
+            NpmListing::Optional => Some(OPTIONAL_DEPENDENCY),
+            NpmListing::Peer => Some(PEER_DEPENDENCY),
+            NpmListing::Absent => Some(NOT_DIRECT),
+        };
+    }
+    (!is_direct_dependency(dir, product)).then_some(NOT_DIRECT)
+}
+
+/// Whether `product` is a direct, non-dev dependency declared by the manifest in `dir`, for the
+/// ecosystems that have no optional or peer kind to report.
 fn is_direct_dependency(dir: &Path, product: Product) -> bool {
     match product {
-        Product::Next | Product::React | Product::Express => {
-            let name = match product {
-                Product::Next => "next",
-                Product::React => "react",
-                _ => "express",
-            };
-            read_beside(dir, "package.json")
-                .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
-                .is_some_and(|v| v.get("dependencies").and_then(|d| d.get(name)).is_some())
-        }
         Product::Laravel => read_beside(dir, "composer.json")
             .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
             .is_some_and(|v| {
@@ -1053,9 +1250,95 @@ fn is_direct_dependency(dir: &Path, product: Product) -> bool {
         Product::SpringBoot => ["build.gradle", "build.gradle.kts"]
             .iter()
             .filter_map(|f| read_beside(dir, f))
-            .any(|t| t.contains("org.springframework.boot")),
+            .any(|t| gradle_applies_spring_boot(&t)),
         _ => true,
     }
+}
+
+/// A Gradle build file with its comments removed and its line breaks kept. A comment marker inside
+/// a string (`"https://example.com"`) is not a comment; a string ends at its closing quote or at
+/// the end of its line.
+fn strip_gradle_comments(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    let mut quote: Option<char> = None;
+    while let Some(c) = chars.next() {
+        if let Some(q) = quote {
+            out.push(c);
+            if c == '\\' {
+                out.extend(chars.next());
+            } else if c == q || c == '\n' {
+                quote = None;
+            }
+            continue;
+        }
+        match c {
+            '"' | '\'' => {
+                quote = Some(c);
+                out.push(c);
+            }
+            '/' if chars.peek() == Some(&'/') => {
+                while chars.peek().is_some_and(|n| *n != '\n') {
+                    chars.next();
+                }
+            }
+            '/' if chars.peek() == Some(&'*') => {
+                chars.next();
+                let mut previous = ' ';
+                for n in chars.by_ref() {
+                    if n == '\n' {
+                        out.push('\n');
+                    }
+                    if previous == '*' && n == '/' {
+                        break;
+                    }
+                    previous = n;
+                }
+                out.push(' ');
+            }
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// Whether a Gradle build file (Groovy or Kotlin DSL) puts Spring Boot into the shipped
+/// application: an `implementation`, `api`, `compile` or `runtimeOnly` dependency on an
+/// `org.springframework.boot` artifact (a `platform(...)` import counts), or the
+/// `org.springframework.boot` plugin applied. A test or compile-only configuration, a plugin
+/// declared `apply false`, a comment and a string that only mentions the name do not count.
+fn gradle_applies_spring_boot(text: &str) -> bool {
+    const START: &str = r"(?m)(?:^|[{;])[ \t]*";
+    const CONFIGURATION: &str = r"(?:implementation|api|compile|runtimeOnly)\b[ \t]*\(?[ \t]*";
+    const BOOT: &str = r#"['"]org\.springframework\.boot"#;
+    let code = strip_gradle_comments(text);
+    let dependency_forms = [
+        // implementation 'org.springframework.boot:spring-boot-starter'
+        format!(r"{START}{CONFIGURATION}(?:(?:enforcedPlatform|platform)[ \t]*\([ \t]*)?{BOOT}:"),
+        // implementation group: 'org.springframework.boot', name: '...'
+        format!(r#"{START}{CONFIGURATION}group[ \t]*[:=][ \t]*{BOOT}['"]"#),
+        // apply plugin: 'org.springframework.boot'
+        format!(r"{START}apply[ \t]*\(?[ \t]*plugin[ \t]*[:=][ \t]*{BOOT}['\x22]"),
+    ];
+    if dependency_forms
+        .iter()
+        .any(|pattern| Regex::new(pattern).is_ok_and(|re| re.is_match(&code)))
+    {
+        return true;
+    }
+    // id 'org.springframework.boot' version '3.2.0', but not when it ends `apply false`.
+    let (Ok(plugin), Ok(not_applied)) = (
+        Regex::new(&format!(
+            r#"{START}id[ \t]*\(?[ \t]*{BOOT}['"][ \t]*\)?([^\n;}}]*)"#
+        )),
+        Regex::new(r"\bapply\s+false\b"),
+    ) else {
+        return false;
+    };
+    let applied = plugin
+        .captures_iter(&code)
+        .any(|c| !not_applied.is_match(&c[1]));
+    applied
 }
 
 /// The group names in a Gemfile fragment (`:development, :test`), and whether all of them are
@@ -1238,8 +1521,8 @@ fn walk(root: &Path, dir: &Path, visited: &mut usize, out: &mut Detected) {
         if FRAMEWORK_LOCKFILES.contains(&name.as_str()) {
             let folder = path.parent().unwrap_or(root);
             for d in &mut found {
-                if !is_direct_dependency(folder, d.product) {
-                    d.version = Version::Excluded(NOT_DIRECT.to_string());
+                if let Some(why) = exclusion_reason(folder, d.product) {
+                    d.version = Version::Excluded(why.to_string());
                 }
             }
         }

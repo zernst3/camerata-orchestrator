@@ -1088,6 +1088,40 @@ async fn a_loose_version_is_listed_as_not_checked_and_never_guessed() {
 }
 
 #[tokio::test]
+async fn with_several_repos_a_not_checked_declaration_names_its_repo() {
+    let one = repo(&[("Dockerfile", "FROM node:latest\n")]);
+    let two = repo(&[("Dockerfile", "FROM node:latest\n")]);
+    let sources = vec![
+        ("acme/one".to_string(), one.path().to_path_buf()),
+        ("acme/two".to_string(), two.path().to_path_buf()),
+    ];
+    let audit = audit_runtimes(
+        &sources,
+        &Fixture::online(),
+        None,
+        now(),
+        &NvdPolicy::instant(),
+        Duration::from_secs(5),
+        Duration::from_secs(5),
+    )
+    .await;
+    let text = notes_text(&audit);
+    // Two repos hold the same line of the same file; the note must say which is which.
+    assert!(text.contains("acme/one: "), "{text}");
+    assert!(text.contains("acme/two: "), "{text}");
+    assert_eq!(
+        text.matches("`node:latest` in Dockerfile line 1").count(),
+        2,
+        "{text}"
+    );
+
+    // One repo: the note reads as it always did, with no repo name.
+    let single = run(&one, &Fixture::online(), None).await;
+    let text = notes_text(&single);
+    assert!(!text.contains("acme/app: "), "{text}");
+}
+
+#[tokio::test]
 async fn a_release_line_too_broad_or_unlisted_is_disclosed_not_guessed() {
     let dir = repo(&[
         (".python-version", "3\n"),
@@ -1352,8 +1386,8 @@ async fn nginx_is_looked_up_under_both_vendors_and_the_answers_are_merged() {
 #[tokio::test]
 async fn a_cve_matched_only_by_a_version_range_is_returned() {
     // CVE-2024-21892 is listed against Node.js 18.0.0 up to (excluding) 18.19.1 and has no entry
-    // for 18.17.0 itself: NVD matches the version against the range. The recorded fixture holds
-    // the live answer for this CPE, configuration included.
+    // for 18.17.0 itself: NVD matches the version against the range. The recorded fixture is a
+    // reduced copy of that record (configuration included), not the full live answer for the CPE.
     let doc: serde_json::Value = serde_json::from_str(NVD_NODE_18_17_0).unwrap();
     let record = doc["vulnerabilities"]
         .as_array()
@@ -1826,5 +1860,447 @@ fn no_client_text_the_pass_writes_has_an_em_dash_or_a_serial_comma() {
     assert_eq!(
         join_names(&["a".to_string(), "b".to_string(), "c".to_string()]),
         "a, b and c"
+    );
+}
+
+// ─── follow-ups: build-argument images, the Gradle gate, npm dependency kinds, the stamp ───
+
+/// The reason a declaration was left out of the checks, or `None` when it counts.
+fn excluded_reason(d: &Declaration) -> Option<String> {
+    match &d.version {
+        Version::Excluded(why) => Some(why.clone()),
+        _ => None,
+    }
+}
+
+#[test]
+fn a_dockerfile_whose_whole_image_is_a_build_argument_is_excluded_not_dropped() {
+    for text in [
+        "FROM ${BASE}\n",
+        "FROM $IMAGE AS base\nFROM base\nCMD [\"run\"]\n",
+        "FROM ${REGISTRY}/${IMAGE}:1.2\n",
+        "FROM --platform=$BUILDPLATFORM ${BASE:-node}:18\n",
+    ] {
+        let d = detect::read_dockerfile("Dockerfile", text);
+        assert_eq!(d.len(), 1, "{text}: {d:?}");
+        assert_eq!(
+            excluded_reason(&d[0]).as_deref(),
+            Some("the image is a build argument"),
+            "{text}: {d:?}"
+        );
+        assert_eq!(
+            d[0].line,
+            text.lines().position(|l| l.contains('$')).unwrap() + 1
+        );
+    }
+}
+
+#[test]
+fn a_build_argument_that_is_not_the_whole_image_or_does_not_ship_changes_nothing() {
+    // The registry is an argument but the image is a known one: it is read as before.
+    let d = detect::read_dockerfile("Dockerfile", "FROM ${REGISTRY}/node:18.17.0\n");
+    assert_eq!(d.len(), 1, "{d:?}");
+    assert_eq!(d[0].product, Product::Node);
+    assert_eq!(d[0].version, Version::Exact("18.17.0".to_string()));
+    // An unrelated image behind an argument registry is not one of ours.
+    assert!(detect::read_dockerfile("Dockerfile", "FROM ${REGISTRY}/ubuntu:22.04\n").is_empty());
+    // A build stage that never ships is not a gap, whatever its image is.
+    let d = detect::read_dockerfile("Dockerfile", "FROM $BUILDER AS build\nFROM nginx:1.27.0\n");
+    assert_eq!(d.len(), 1, "{d:?}");
+    assert_eq!(d[0].product, Product::Nginx);
+}
+
+#[tokio::test]
+async fn a_build_argument_image_reaches_coverage_and_is_never_looked_up() {
+    let dir = repo(&[("Dockerfile", "ARG BASE\nFROM ${BASE}\nRUN true\n")]);
+    let fetcher = Fixture::online();
+    let audit = run(&dir, &fetcher, None).await;
+    assert!(audit.findings.is_empty(), "{:?}", audit.findings);
+    let text = notes_text(&audit);
+    assert!(
+        text.contains("Not checked, because the image is a build argument"),
+        "{text}"
+    );
+    assert!(text.contains("`${BASE}` in Dockerfile line 2"), "{text}");
+    assert_eq!(fetcher.calls().len(), 0, "{:?}", fetcher.calls());
+}
+
+/// Whether Spring Boot read from a lockfile beside `build_file` is left out of the checks.
+fn boot_is_excluded(build_file: &str, body: &str) -> bool {
+    let dir = repo(&[
+        (build_file, body),
+        (
+            "gradle.lockfile",
+            "org.springframework.boot:spring-boot:3.2.0=compileClasspath\n",
+        ),
+    ]);
+    let got = frameworks(&dir);
+    assert_eq!(got.len(), 1, "{body}: {got:?}");
+    got[0].2
+}
+
+#[test]
+fn spring_boot_counts_from_a_real_dependency_line_or_the_applied_plugin() {
+    for (file, body) in [
+        (
+            "build.gradle",
+            "dependencies {\n    implementation 'org.springframework.boot:spring-boot-starter-web'\n}\n",
+        ),
+        (
+            "build.gradle",
+            "dependencies {\n    api \"org.springframework.boot:spring-boot-starter\"\n}\n",
+        ),
+        (
+            "build.gradle",
+            "dependencies {\n    compile 'org.springframework.boot:spring-boot-starter'\n}\n",
+        ),
+        (
+            "build.gradle",
+            "dependencies {\n    runtimeOnly('org.springframework.boot:spring-boot-devtools')\n}\n",
+        ),
+        (
+            "build.gradle",
+            "dependencies {\n    implementation group: 'org.springframework.boot', name: 'spring-boot-starter'\n}\n",
+        ),
+        (
+            "build.gradle",
+            "plugins {\n    id 'org.springframework.boot' version '3.2.0'\n}\n",
+        ),
+        ("build.gradle", "apply plugin: 'org.springframework.boot'\n"),
+        (
+            "build.gradle.kts",
+            "plugins {\n    id(\"org.springframework.boot\") version \"3.2.0\"\n}\n",
+        ),
+        (
+            "build.gradle.kts",
+            "dependencies {\n    implementation(\"org.springframework.boot:spring-boot-starter\")\n}\n",
+        ),
+        (
+            "build.gradle.kts",
+            "dependencies {\n    implementation(platform(\"org.springframework.boot:spring-boot-dependencies:3.2.0\"))\n}\n",
+        ),
+        (
+            "build.gradle.kts",
+            "dependencies { implementation(\"org.springframework.boot:spring-boot-starter\") }\n",
+        ),
+    ] {
+        assert!(!boot_is_excluded(file, body), "{file}: {body}");
+    }
+}
+
+#[test]
+fn spring_boot_does_not_count_from_a_test_configuration_a_comment_or_a_string() {
+    for (file, body) in [
+        (
+            "build.gradle",
+            "dependencies {\n    testImplementation 'org.springframework.boot:spring-boot-starter-test'\n}\n",
+        ),
+        (
+            "build.gradle",
+            "dependencies {\n    testRuntimeOnly 'org.springframework.boot:spring-boot-starter'\n}\n",
+        ),
+        (
+            "build.gradle",
+            "dependencies {\n    integrationTestImplementation 'org.springframework.boot:spring-boot-starter'\n}\n",
+        ),
+        (
+            "build.gradle",
+            "dependencies {\n    compileOnly 'org.springframework.boot:spring-boot-configuration-processor'\n}\n",
+        ),
+        (
+            "build.gradle",
+            "dependencies {\n    // implementation 'org.springframework.boot:spring-boot-starter'\n}\n",
+        ),
+        (
+            "build.gradle",
+            "/*\ndependencies {\n    implementation 'org.springframework.boot:spring-boot-starter'\n}\n*/\n",
+        ),
+        (
+            "build.gradle",
+            "// id 'org.springframework.boot' version '3.2.0'\n",
+        ),
+        (
+            "build.gradle",
+            "ext.bootGroup = 'org.springframework.boot'\nprintln(\"org.springframework.boot\")\n",
+        ),
+        (
+            "build.gradle",
+            "description = \"implementation 'org.springframework.boot:spring-boot-starter'\"\n",
+        ),
+        (
+            "build.gradle",
+            "plugins {\n    id 'org.springframework.boot' version '3.2.0' apply false\n}\n",
+        ),
+        (
+            "build.gradle.kts",
+            "dependencies {\n    testImplementation(\"org.springframework.boot:spring-boot-starter-test\")\n}\n",
+        ),
+        (
+            "build.gradle.kts",
+            "plugins {\n    id(\"org.springframework.boot\") version \"3.2.0\" apply false\n}\n",
+        ),
+        (
+            "build.gradle.kts",
+            "val url = \"https://example.com\" // implementation(\"org.springframework.boot:x\")\n",
+        ),
+    ] {
+        assert!(boot_is_excluded(file, body), "{file}: {body}");
+    }
+    // One real line among test lines and comments still counts.
+    let mixed = "dependencies {\n    testImplementation 'org.springframework.boot:spring-boot-starter-test'\n    // old\n    implementation 'org.springframework.boot:spring-boot-starter'\n}\n";
+    assert!(!boot_is_excluded("build.gradle", mixed));
+}
+
+/// The reason each JavaScript framework declaration read from a folder was left out, or `None`
+/// if it counts.
+fn framework_reasons(dir: &tempfile::TempDir) -> Vec<(Product, Option<String>)> {
+    detect::detect_declarations(dir.path())
+        .declarations
+        .into_iter()
+        .filter(|d| matches!(d.product, Product::Next | Product::React | Product::Express))
+        .map(|d| (d.product, excluded_reason(&d)))
+        .collect()
+}
+
+const LOCK_REACT: &str = "{\n  \"packages\": {\n    \"node_modules/react\": {\n      \"version\": \"18.2.0\"\n    }\n  }\n}\n";
+const NOT_DIRECT_TEXT: &str = "it is not a direct, non-dev dependency of the project";
+
+#[test]
+fn a_framework_in_dependencies_counts_whatever_else_lists_it() {
+    for package in [
+        "{\"dependencies\": {\"react\": \"^18\"}}",
+        "{\"dependencies\": {\"react\": \"^18\"}, \"devDependencies\": {\"react\": \"^18\"}}",
+        "{\"dependencies\": {\"react\": \"^18\"}, \"peerDependencies\": {\"react\": \">=17\"}}",
+        "{\"dependencies\": {\"react\": \"^18\"}, \"optionalDependencies\": {\"react\": \"^18\"}}",
+    ] {
+        let dir = repo(&[("package.json", package), ("package-lock.json", LOCK_REACT)]);
+        assert_eq!(
+            framework_reasons(&dir),
+            vec![(Product::React, None)],
+            "{package}"
+        );
+    }
+}
+
+#[test]
+fn a_peer_only_or_optional_only_framework_is_left_out_for_its_own_true_reason() {
+    let peer = repo(&[
+        (
+            "package.json",
+            "{\"peerDependencies\": {\"react\": \">=17\"}, \"devDependencies\": {\"react\": \"^18\"}}",
+        ),
+        ("package-lock.json", LOCK_REACT),
+    ]);
+    let got = framework_reasons(&peer);
+    assert_eq!(got.len(), 1, "{got:?}");
+    assert!(
+        got[0]
+            .1
+            .as_deref()
+            .is_some_and(|w| w.contains("a peer dependency")),
+        "{got:?}"
+    );
+    let optional = repo(&[
+        (
+            "package.json",
+            "{\"optionalDependencies\": {\"react\": \"^18\"}}",
+        ),
+        ("package-lock.json", LOCK_REACT),
+    ]);
+    let got = framework_reasons(&optional);
+    assert_eq!(got.len(), 1, "{got:?}");
+    assert!(
+        got[0]
+            .1
+            .as_deref()
+            .is_some_and(|w| w.contains("an optional dependency")),
+        "{got:?}"
+    );
+    // A dev-only framework keeps the general reason.
+    let dev = repo(&[
+        (
+            "package.json",
+            "{\"devDependencies\": {\"react\": \"^18\"}}",
+        ),
+        ("package-lock.json", LOCK_REACT),
+    ]);
+    assert_eq!(
+        framework_reasons(&dev),
+        vec![(Product::React, Some(NOT_DIRECT_TEXT.to_string()))]
+    );
+}
+
+#[tokio::test]
+async fn a_peer_only_framework_is_listed_under_coverage_with_its_reason() {
+    let dir = repo(&[
+        (
+            "package.json",
+            "{\"peerDependencies\": {\"react\": \">=17\"}}",
+        ),
+        ("package-lock.json", LOCK_REACT),
+    ]);
+    let audit = run(&dir, &Fixture::online(), None).await;
+    let text = notes_text(&audit);
+    assert!(text.contains("a peer dependency"), "{text}");
+    assert!(text.contains("package-lock.json"), "{text}");
+}
+
+#[test]
+fn a_workspace_package_json_is_read_for_the_direct_gate() {
+    let web = (
+        "packages/web/package.json",
+        "{\"dependencies\": {\"react\": \"^18\"}}",
+    );
+    // The root names the workspaces as an array.
+    let array = repo(&[
+        (
+            "package.json",
+            "{\"private\": true, \"workspaces\": [\"packages/*\"]}",
+        ),
+        web,
+        ("package-lock.json", LOCK_REACT),
+    ]);
+    assert_eq!(framework_reasons(&array), vec![(Product::React, None)]);
+    // Or as an object with a packages list.
+    let object = repo(&[
+        (
+            "package.json",
+            "{\"workspaces\": {\"packages\": [\"packages/web\"]}}",
+        ),
+        web,
+        ("package-lock.json", LOCK_REACT),
+    ]);
+    assert_eq!(framework_reasons(&object), vec![(Product::React, None)]);
+    // pnpm keeps the list in its own file, with exclusions.
+    let pnpm_lock = "packages:\n  /react@18.2.0:\n    resolution: {}\n";
+    let pnpm = repo(&[
+        ("package.json", "{\"private\": true}"),
+        (
+            "pnpm-workspace.yaml",
+            "packages:\n  - 'apps/**'\n  - '!apps/legacy'\n",
+        ),
+        (
+            "apps/site/package.json",
+            "{\"dependencies\": {\"react\": \"^18\"}}",
+        ),
+        ("pnpm-lock.yaml", pnpm_lock),
+    ]);
+    assert_eq!(framework_reasons(&pnpm), vec![(Product::React, None)]);
+    let negated = repo(&[
+        ("package.json", "{\"private\": true}"),
+        (
+            "pnpm-workspace.yaml",
+            "packages:\n  - 'apps/*'\n  - '!apps/legacy'\n",
+        ),
+        (
+            "apps/legacy/package.json",
+            "{\"dependencies\": {\"react\": \"^18\"}}",
+        ),
+        ("pnpm-lock.yaml", pnpm_lock),
+    ]);
+    assert_eq!(
+        framework_reasons(&negated),
+        vec![(Product::React, Some(NOT_DIRECT_TEXT.to_string()))]
+    );
+}
+
+#[test]
+fn a_workspace_does_not_make_a_dev_only_or_unlisted_package_direct() {
+    let dev_only = repo(&[
+        ("package.json", "{\"workspaces\": [\"packages/*\"]}"),
+        (
+            "packages/web/package.json",
+            "{\"devDependencies\": {\"react\": \"^18\"}}",
+        ),
+        ("package-lock.json", LOCK_REACT),
+    ]);
+    assert_eq!(
+        framework_reasons(&dev_only),
+        vec![(Product::React, Some(NOT_DIRECT_TEXT.to_string()))]
+    );
+    // A package outside the listed workspaces is not read.
+    let outside = repo(&[
+        ("package.json", "{\"workspaces\": [\"packages/*\"]}"),
+        (
+            "tools/web/package.json",
+            "{\"dependencies\": {\"react\": \"^18\"}}",
+        ),
+        ("package-lock.json", LOCK_REACT),
+    ]);
+    assert_eq!(
+        framework_reasons(&outside),
+        vec![(Product::React, Some(NOT_DIRECT_TEXT.to_string()))]
+    );
+    // Without a workspaces list, a nested package.json is not consulted either.
+    let none = repo(&[
+        ("package.json", "{}"),
+        (
+            "packages/web/package.json",
+            "{\"dependencies\": {\"react\": \"^18\"}}",
+        ),
+        ("package-lock.json", LOCK_REACT),
+    ]);
+    assert_eq!(
+        framework_reasons(&none),
+        vec![(Product::React, Some(NOT_DIRECT_TEXT.to_string()))]
+    );
+    // The best answer across the workspaces wins: optional beats peer.
+    let mixed = repo(&[
+        ("package.json", "{\"workspaces\": [\"packages/*\"]}"),
+        (
+            "packages/a/package.json",
+            "{\"peerDependencies\": {\"react\": \">=17\"}}",
+        ),
+        (
+            "packages/b/package.json",
+            "{\"optionalDependencies\": {\"react\": \"^18\"}}",
+        ),
+        ("package-lock.json", LOCK_REACT),
+    ]);
+    let got = framework_reasons(&mixed);
+    assert!(
+        got[0]
+            .1
+            .as_deref()
+            .is_some_and(|w| w.contains("an optional dependency")),
+        "{got:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_build_argument_image_reaches_coverage_and_the_stamp_says_why() {
+    let dir = repo(&[("Dockerfile", "ARG BASE\nFROM ${BASE}\nRUN true\n")]);
+    let fetcher = Fixture::online();
+    let audit = run(&dir, &fetcher, None).await;
+    assert!(audit.findings.is_empty(), "{:?}", audit.findings);
+    let text = notes_text(&audit);
+    assert!(
+        text.contains("Not checked, because the image is a build argument"),
+        "{text}"
+    );
+    assert!(text.contains("`${BASE}` in Dockerfile line 2"), "{text}");
+    assert_eq!(fetcher.calls().len(), 0, "{:?}", fetcher.calls());
+    // Every declaration was left out, which is not the same as finding none.
+    let FeedStamp::NotChecked { reason } = &audit.eol else {
+        panic!("expected a not-checked stamp, got {:?}", audit.eol);
+    };
+    assert_eq!(reason, "every version found was excluded (see Coverage)");
+    // The vulnerability stamp on the same report must not contradict it.
+    let FeedStamp::NotChecked { reason } = &audit.nvd else {
+        panic!("expected a not-checked NVD stamp, got {:?}", audit.nvd);
+    };
+    assert_eq!(reason, "every version found was excluded (see Coverage)");
+}
+
+#[tokio::test]
+async fn a_repository_with_nothing_declared_keeps_the_nothing_found_reason() {
+    let dir = repo(&[("README.md", "hello\n")]);
+    let audit = run(&dir, &Fixture::online(), None).await;
+    let FeedStamp::NotChecked { reason } = &audit.eol else {
+        panic!("expected a not-checked stamp, got {:?}", audit.eol);
+    };
+    assert_eq!(
+        reason,
+        "no runtime or framework version was found in the repository"
     );
 }

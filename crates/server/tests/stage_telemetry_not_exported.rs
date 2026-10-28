@@ -14,6 +14,8 @@ use camerata_server::xlsx_export::build_findings_export;
 
 fn report(ledger: ScanLedger) -> ScanReport {
     ScanReport {
+        repos_not_inspected: Vec::new(),
+        recommendations_by_repo: Vec::new(),
         repos: vec!["acme/portal".to_string()],
         stacks: Vec::new(),
         files_scanned: 10,
@@ -136,9 +138,11 @@ fn recording_the_efficiency_set_and_a_cost_cap_changes_nothing_in_the_client_exp
     efficiency.set("warm_schedule", false).unwrap();
     capped.record_efficiency(efficiency);
     capped.record_cost_cap(camerata_server::cost_cap::CostCapRecord {
+        repos_not_finished: Vec::new(),
         cap_usd: 7.77,
         spent_usd: 8.88,
         not_run_passes: vec![camerata_server::cost_cap::NotRunPass {
+            files: Vec::new(),
             repo: "acme/portal".to_string(),
             group: "pass[all]".to_string(),
             chunk: 1,

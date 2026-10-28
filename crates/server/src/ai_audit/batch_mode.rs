@@ -262,6 +262,8 @@ pub(crate) struct RoundContext<'a> {
     pub model: &'a str,
     pub n_c: usize,
     pub n_b: usize,
+    /// The file chunks, for naming the files a refused pass would have checked.
+    pub chunks: &'a [&'a [(String, String)]],
     pub batches: &'a [&'a [(String, String)]],
     pub job: Option<(&'a crate::jobs::JobStore, &'a str)>,
     pub meter: Option<&'a UsageMeter>,
@@ -309,6 +311,10 @@ pub(crate) async fn submit_round(
                         rule_batch: w.bi + 1,
                         n_rule_batches: ctx.n_b,
                         rule_ids: ctx.batches[w.bi].iter().map(|(id, _)| id.clone()).collect(),
+                        files: ctx.chunks[w.ci]
+                            .iter()
+                            .map(|(path, _)| path.clone())
+                            .collect(),
                     });
                 }
                 continue;

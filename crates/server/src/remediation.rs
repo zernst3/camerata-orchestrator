@@ -1551,7 +1551,7 @@ mod tests {
         let mut report = report_with(vec![finding("AI-NO-DEAD-CODE-1", "src/d.rs", 4, "w")]);
         report
             .ledger
-            .record_rule("ARCH-9", RuleTier::Semantic, true, None, 1, 0);
+            .record_rule("", "ARCH-9", RuleTier::Semantic, true, None, 1, 0);
 
         // A complete AI review: absent means resolved.
         let ok = retest_verdict(&src, &report, &covered);

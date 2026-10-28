@@ -2805,6 +2805,8 @@ mod tests {
 
     pub(super) fn report_with(findings: Vec<Finding>, audited_rule_ids: Vec<&str>) -> ScanReport {
         ScanReport {
+            repos_not_inspected: Vec::new(),
+            recommendations_by_repo: Vec::new(),
             repos: vec!["owner/repo".to_string()],
             stacks: Vec::new(),
             files_scanned: 10,
@@ -3288,6 +3290,7 @@ mod tests {
         report.recommendations.insert(
             "MULTI-RULE-1".to_string(),
             crate::ai_audit::RuleRecommendation {
+                repo: String::new(),
                 rule_id: "MULTI-RULE-1".to_string(),
                 recommended_option_id: "opt-b".to_string(),
                 recommendation_reasoning: "the repo already does it the B way".to_string(),
@@ -3301,6 +3304,7 @@ mod tests {
         report.recommendations.insert(
             "MULTI-RULE-2".to_string(),
             crate::ai_audit::RuleRecommendation {
+                repo: String::new(),
                 rule_id: "MULTI-RULE-2".to_string(),
                 recommended_option_id: String::new(),
                 recommendation_reasoning: "no evidence of this anywhere in the codebase"
@@ -5481,10 +5485,12 @@ mod tests {
         let f = finding("SEC-NO-RAW-SQL-CONCAT-1", "src/a.rs", 3, "high");
         let mut report = report_with(vec![f], vec!["SEC-NO-RAW-SQL-CONCAT-1"]);
         report.coverage_notes = vec![crate::onboard::CoverageNote {
+            repo: None,
             tool: "eslint".to_string(),
             message: "Could not preview 12 rule(s) with eslint: spawn ENOENT.".to_string(),
         }];
         report.ledger.record_rule(
+            "",
             "JS-SOME-NEVER-RUN-RULE-1",
             crate::scan_ledger::RuleTier::ExternalTool,
             false,
