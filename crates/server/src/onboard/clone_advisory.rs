@@ -53,7 +53,7 @@ pub mod prompt;
 mod tests;
 
 pub use cache::{cache_key, CachedVerdict, VerdictCache, MAX_CACHED_VERDICTS};
-use prompt::{batch_prompt, parse_verdicts, system_prompt, Verdict};
+use prompt::{batch_prompt, candidate_json, parse_verdicts, system_prompt, Verdict};
 
 /// Candidates per model call.
 pub const BATCH_SIZE: usize = 16;
@@ -185,6 +185,21 @@ pub async fn judge_clone_candidates(
         ui_files: req.set.index.ui_files,
         ..JudgeOutcome::default()
     };
+    // One delimiter token for the whole judge run (every rule, every batch), drawn so that it
+    // occurs in none of the excerpts it will frame. The verdict cache key does not include it.
+    let nonce = if llm.is_some() {
+        let texts: Vec<String> = req
+            .set
+            .by_rule
+            .values()
+            .flatten()
+            .map(|c| candidate_json(&judge_input(c, req.files)))
+            .collect();
+        let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
+        crate::prompt_frame::FrameNonce::generate_avoiding(&refs)
+    } else {
+        crate::prompt_frame::FrameNonce::generate()
+    };
     for rule in CloneRule::ALL {
         let Some(candidates) = req.set.by_rule.get(&rule) else {
             continue; // not armed
@@ -210,6 +225,7 @@ pub async fn judge_clone_candidates(
         let judged = judge_rule(
             llm,
             &req,
+            &nonce,
             rule,
             candidates,
             cache,
@@ -260,6 +276,7 @@ pub async fn judge_clone_candidates(
 async fn judge_rule(
     llm: Option<&dyn LlmPort>,
     req: &JudgeRequest<'_>,
+    nonce: &crate::prompt_frame::FrameNonce,
     rule: CloneRule,
     candidates: &[Candidate],
     cache: &mut VerdictCache,
@@ -291,12 +308,12 @@ async fn judge_rule(
             _ => pending.push(candidate),
         }
     }
-    let system = system_prompt(rule);
+    let system = crate::prompt_frame::with_untrusted_clause(system_prompt(rule), nonce);
     let text = rule_text(rule, req.corpus);
     let mut first_failure: Option<String> = None;
     for batch in pending.chunks(BATCH_SIZE) {
         let inputs: Vec<_> = batch.iter().map(|c| judge_input(c, req.files)).collect();
-        let (prompt, prefix_len) = batch_prompt(req.repo, rule, &text, &inputs);
+        let (prompt, prefix_len) = batch_prompt(req.repo, rule, &text, &inputs, nonce);
         let mut request = LlmRequest::new(prompt)
             .with_system(system.clone())
             .with_max_tokens(scaled_max_tokens(batch.len(), TOKENS_PER_CANDIDATE))
