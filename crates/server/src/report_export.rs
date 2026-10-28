@@ -1059,7 +1059,9 @@ pub struct CitationSourceJson {
 #[derive(Debug, Clone, Serialize)]
 pub struct CitationJson {
     /// `"grounded"` (corpus-cited) | `"preview"` (deterministic tool, no corpus citation) |
-    /// `"advisory"` (AI-tier, no corpus entry at all).
+    /// `"related"` (AI-tier, a real standard attached by keyword match, not a rule that was
+    /// checked; see [`RELATED_STANDARD_LABEL_PREFIX`]) | `"advisory"` (AI-tier, no corpus entry
+    /// at all).
     pub kind: String,
     /// One-line, template-ready label (e.g. "AI-advisory, model-inferred.").
     pub label: String,
@@ -1226,6 +1228,10 @@ pub struct MethodologyJson {
     /// did not run, rather than the reader having to notice its absence from the findings.
     #[serde(default)]
     pub failed_passes: Vec<String>,
+    /// H5: one plain sentence telling the reader what a "related standard" citation means (see
+    /// [`RELATED_STANDARD_LABEL_PREFIX`]). Rendered in the Methodology section, the report's
+    /// guide to reading its findings.
+    pub citation_note: String,
 }
 
 /// The serializer's single output type — mirrors the §4 anatomy sections in
@@ -1842,6 +1848,23 @@ pub(crate) fn resolve_citation(
     }
 }
 
+/// H5 (2026-10-28): the label prefix of a citation the P3 class fallback attached by KEYWORD
+/// match (`classify_ai_finding`). The standard is real and relevant, but no Camerata rule
+/// checked the code against it: the model reported a defect and its wording matched a defect
+/// class. Such a citation carries kind `"related"`, never `"grounded"`, so neither the report,
+/// the workbook nor `findings.json` presents it as a rule that was checked. Triage
+/// confirmation was the other option and was rejected: triage is optional in the desktop
+/// flow, so gating the citation on it would strip every keyword-matched finding of its
+/// standard (and, through `is_uncited_ai_finding`, out of the curated set) in any export made
+/// before a human triaged. See docs/TECHNICAL.md, "Related standards".
+pub(crate) const RELATED_STANDARD_LABEL_PREFIX: &str =
+    "Related standard (matched by keyword, not a rule check): ";
+
+/// The Methodology sentence that explains [`RELATED_STANDARD_LABEL_PREFIX`] to a reader.
+pub(crate) const RELATED_STANDARD_NOTE: &str = "A source marked \"related standard\" was matched \
+    to a model finding by keyword and names the published standard the issue relates to, not a \
+    rule Camerata checked the code against.";
+
 // ── P3 (2026-09-29): the citation gate ──────────────────────────────────────────────
 //
 // Several of the report's MOST important findings — a cross-tenant RLS policy, RLS
@@ -1878,7 +1901,7 @@ pub(crate) fn resolve_citation(
 /// gates the P3 citation fallback/exclusion to ONLY AI-tier findings: a deterministic
 /// floor rule that happens to lack a corpus citation (a separate, pre-existing gap — e.g.
 /// `SEC-NO-RAW-SQL-CONCAT-1`, which has no TOML entry at all) is untouched by this gate.
-pub(crate) fn is_ai_tier(finding: &Finding) -> bool {
+pub fn is_ai_tier(finding: &Finding) -> bool {
     finding.rule_id.starts_with("AI-") || finding.confidence.is_some()
 }
 
@@ -2031,6 +2054,9 @@ pub(crate) fn classify_ai_finding(
 /// advisory citation is a different, pre-existing gap this pass does not touch. Returns
 /// the ORIGINAL citation unchanged in every other case (already grounded, already
 /// preview-labeled, not AI-tier, or AI-tier but unclassifiable).
+///
+/// H5: a class-fallback citation is returned as kind `"related"` with its label prefixed by
+/// [`RELATED_STANDARD_LABEL_PREFIX`]; its sources are the grounding rule's own, unchanged.
 pub(crate) fn citation_for_finding(
     finding: &Finding,
     corpus: Option<&camerata_rules::RuleSet>,
@@ -2047,7 +2073,11 @@ pub(crate) fn citation_for_finding(
         Some(class) => {
             let grounded = resolve_citation(class.grounding_rule_id(), None, corpus);
             if grounded.kind == "grounded" {
-                grounded
+                CitationJson {
+                    kind: "related".to_string(),
+                    label: format!("{RELATED_STANDARD_LABEL_PREFIX}{}", grounded.label),
+                    sources: grounded.sources,
+                }
             } else {
                 base
             }
@@ -2982,11 +3012,13 @@ fn curated_group_sort_key(group: &CuratedGroupJson) -> (u8, u8, u8, String) {
 /// which outranks an ungrounded AI-advisory citation — so a security-floor finding (typically
 /// `"grounded"`) never prints after an architecture/advisory note (typically `"advisory"`) of
 /// the same severity, even though raw severity alone can't tell them apart. 0 sorts first.
-/// Takes a [`CitationJson::kind`] string (`"grounded"` | `"preview"` | `"advisory"`); anything
-/// else is treated as the lowest tier rather than panicking on an unrecognized value.
+/// Takes a [`CitationJson::kind`] string (`"grounded"` | `"related"` | `"preview"` |
+/// `"advisory"`); anything else is treated as the lowest tier rather than panicking on an
+/// unrecognized value. H5: `"related"` keeps the rank `"grounded"` gave the same finding
+/// before it was relabelled, so the honest label does not reorder anyone's report.
 pub(crate) fn provenance_tier_rank(citation_kind: &str) -> u8 {
     match citation_kind {
-        "grounded" => 0,
+        "grounded" | "related" => 0,
         "preview" => 1,
         _ => 2,
     }
@@ -4937,6 +4969,7 @@ pub fn build_report_json(
              labeled deterministic in the report."
                 .to_string(),
         ai_tier_note: ai_tier_note_for(review_state),
+        citation_note: RELATED_STANDARD_NOTE.to_string(),
         not_done: vec![
             "No penetration testing or live exploitation was performed.".to_string(),
             "No runtime or dynamic analysis; findings derive from static repository state."

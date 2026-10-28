@@ -191,6 +191,44 @@ enum Command {
         /// is checked before anything is read or spent.
         #[arg(long, value_name = "NAME")]
         client: String,
+        /// Three-pass consensus for client work: run the AI audit three times and keep only the
+        /// findings at least two runs report. Off by default. About three times the AI cost
+        /// (the pre-flight estimate includes it), and a finding only one run in three notices is
+        /// dropped.
+        #[arg(long)]
+        consensus: bool,
+    },
+
+    /// Measure run-to-run drift: run the full AI pass twice over `--repo` with every answer
+    /// cache bypassed and print the difference (counts by tier, rule and severity, plus the
+    /// findings one run reported and the other did not, matched by fingerprint). Prints the
+    /// pre-flight estimate first and refuses without `--max-cost-usd`. Writes nothing. Exit 0
+    /// when both runs completed, 4 when either was incomplete. See
+    /// `camerata::repeatability_cmd`'s module doc comment.
+    Repeatability {
+        /// The repo's local working tree.
+        #[arg(long)]
+        repo: PathBuf,
+        /// `api` (default) or `cli`, as for `inspect`.
+        #[arg(long, default_value = "api", value_parser = parse_backend)]
+        backend: ProjectBackend,
+        /// Model override for the audit pass.
+        #[arg(long)]
+        model: Option<String>,
+        /// Model override for the calibration pass.
+        #[arg(long = "calibration-model")]
+        calibration_model: Option<String>,
+        /// REQUIRED. The spend limit in US dollars for both runs together; each run gets half.
+        /// Refused when one run's estimate is above its half.
+        #[arg(long = "max-cost-usd", value_name = "USD")]
+        max_cost_usd: Option<f64>,
+        /// Switch a token-efficiency measure `on` or `off`, as for `inspect`. `result_cache` is
+        /// always off here.
+        #[arg(long = "efficiency", value_name = "NAME=on|off")]
+        efficiency: Vec<String>,
+        /// `text` (default) or `json`.
+        #[arg(long, default_value = "text", value_parser = camerata::repeatability_cmd::parse_format)]
+        format: camerata::repeatability_cmd::OutputFormat,
     },
 
     /// W6 / I2: the PRE-FLIGHT INTEGRITY GATE. Evaluate a scan ledger written by
@@ -415,6 +453,7 @@ async fn main() -> anyhow::Result<()> {
             max_cost_usd,
             efficiency,
             client,
+            consensus,
         } => {
             run_inspect_cmd(InspectArgs {
                 repo,
@@ -430,6 +469,27 @@ async fn main() -> anyhow::Result<()> {
                 max_cost_usd,
                 efficiency,
                 client,
+                consensus,
+            })
+            .await
+        }
+        Command::Repeatability {
+            repo,
+            backend,
+            model,
+            calibration_model,
+            max_cost_usd,
+            efficiency,
+            format,
+        } => {
+            run_repeatability_cmd(camerata::repeatability_cmd::RepeatabilityArgs {
+                repo,
+                backend,
+                model,
+                calibration_model,
+                max_cost_usd,
+                efficiency,
+                format,
             })
             .await
         }
@@ -532,6 +592,33 @@ fn run_integrity_gate_cmd(args: IntegrityGateArgs) -> anyhow::Result<()> {
         Err(e) => {
             eprintln!("camerata integrity-gate: {e}");
             std::process::exit(EXIT_GATE_UNAVAILABLE);
+        }
+    }
+}
+
+/// `repeatability`'s handler: print the comparison in the chosen format, exit
+/// [`camerata::repeatability_cmd::EXIT_INCOMPLETE`] when either run was incomplete, or print the
+/// refusal and exit 1.
+async fn run_repeatability_cmd(
+    args: camerata::repeatability_cmd::RepeatabilityArgs,
+) -> anyhow::Result<()> {
+    use camerata::repeatability_cmd::{run_repeatability, OutputFormat};
+    let format = args.format;
+    match run_repeatability(args).await {
+        Ok(outcome) => {
+            match format {
+                OutputFormat::Text => println!("{}", outcome.render_text()),
+                OutputFormat::Json => println!("{}", outcome.render_json()),
+            }
+            let code = outcome.exit_code();
+            if code != 0 {
+                std::process::exit(code);
+            }
+            Ok(())
+        }
+        Err(e) => {
+            eprintln!("camerata repeatability: {e}");
+            std::process::exit(1);
         }
     }
 }
@@ -925,6 +1012,7 @@ mod cli_parse_tests {
                 max_cost_usd,
                 efficiency,
                 client,
+                consensus,
             } => {
                 assert_eq!(client, "Example Client Ltd");
                 assert_eq!(repo, PathBuf::from("/tmp/r"));
@@ -939,9 +1027,27 @@ mod cli_parse_tests {
                 assert!(!verbose);
                 assert!(max_cost_usd.is_none(), "no cap unless asked for");
                 assert!(efficiency.is_empty());
+                assert!(!consensus, "consensus is off unless asked for");
             }
             other => panic!("expected Command::Inspect, got a different variant: {other:?}"),
         }
+        let cli = Cli::try_parse_from([
+            "camerata",
+            "inspect",
+            "--repo",
+            "/tmp/r",
+            "--export",
+            "/tmp/o.zip",
+            "--consensus",
+        ])
+        .expect("must parse");
+        assert!(matches!(
+            cli.command,
+            Command::Inspect {
+                consensus: true,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -974,6 +1080,58 @@ mod cli_parse_tests {
             }
             other => panic!("expected Command::Inspect, got a different variant: {other:?}"),
         }
+    }
+
+    #[test]
+    fn repeatability_parses_its_flags_and_defaults_to_text() {
+        let cli = Cli::try_parse_from([
+            "camerata",
+            "repeatability",
+            "--repo",
+            "/tmp/r",
+            "--max-cost-usd",
+            "8",
+            "--format",
+            "json",
+        ])
+        .expect("must parse");
+        match cli.command {
+            Command::Repeatability {
+                max_cost_usd,
+                format,
+                backend,
+                ..
+            } => {
+                assert_eq!(max_cost_usd, Some(8.0));
+                assert_eq!(format, camerata::repeatability_cmd::OutputFormat::Json);
+                assert!(matches!(backend, ProjectBackend::Api));
+            }
+            other => panic!("expected Command::Repeatability, got {other:?}"),
+        }
+        // The limit is checked at run time, after the estimate is printed, so clap accepts its
+        // absence; the format defaults to text.
+        let cli = Cli::try_parse_from(["camerata", "repeatability", "--repo", "/tmp/r"])
+            .expect("must parse");
+        match cli.command {
+            Command::Repeatability {
+                max_cost_usd,
+                format,
+                ..
+            } => {
+                assert_eq!(max_cost_usd, None);
+                assert_eq!(format, camerata::repeatability_cmd::OutputFormat::Text);
+            }
+            other => panic!("expected Command::Repeatability, got {other:?}"),
+        }
+        assert!(Cli::try_parse_from([
+            "camerata",
+            "repeatability",
+            "--repo",
+            "/tmp/r",
+            "--format",
+            "yaml"
+        ])
+        .is_err());
     }
 
     #[test]

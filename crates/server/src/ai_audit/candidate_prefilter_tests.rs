@@ -85,6 +85,7 @@ async fn run_with(
         max_cost_usd: None,
         estimate_hint_usd: None,
         fix_model: None,
+        consensus: false,
     });
     let plan = plan_routes(rules, files, true);
     let repo_map = build_repo_map(files);
@@ -689,6 +690,7 @@ async fn run_batch(
         max_cost_usd: None,
         estimate_hint_usd: None,
         fix_model: None,
+        consensus: false,
     });
     let plan = plan_routes(rules, files, true);
     let repo_map = build_repo_map(files);

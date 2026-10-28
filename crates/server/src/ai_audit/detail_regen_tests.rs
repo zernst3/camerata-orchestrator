@@ -269,6 +269,7 @@ fn meter_with(config: EfficiencyConfig) -> UsageMeter {
         max_cost_usd: None,
         estimate_hint_usd: None,
         fix_model: None,
+        consensus: false,
     })
 }
 
@@ -695,6 +696,7 @@ async fn the_spend_limit_stopping_the_step_leaves_every_finding_marked() {
         efficiency: EfficiencyConfig::default(),
         max_cost_usd: Some(0.005),
         fix_model: None,
+        consensus: false,
         estimate_hint_usd: None,
     });
     let (findings, failed) = audit(&llm, &meter).await;
@@ -763,6 +765,7 @@ async fn a_billed_refusal_in_regeneration_counts_toward_the_cap_and_is_named_in_
         efficiency: EfficiencyConfig::default(),
         max_cost_usd: Some(0.50),
         fix_model: None,
+        consensus: false,
         estimate_hint_usd: None,
     });
     let (out, failed) = regenerate_full_details(

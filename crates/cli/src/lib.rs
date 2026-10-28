@@ -27,5 +27,8 @@ pub mod po_demo;
 pub mod projects_live;
 /// `camerata release-gate <zip>`: the export release gate over an existing product zip.
 pub mod release_gate_cmd;
+/// `camerata repeatability`: the full AI pass twice, every answer cache bypassed, and the
+/// difference between the two runs (H5).
+pub mod repeatability_cmd;
 pub mod worktracker_demo;
 pub mod worktracker_live;

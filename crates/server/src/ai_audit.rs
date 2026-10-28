@@ -1027,6 +1027,14 @@ pub fn build_digest(files: &[(String, String)]) -> String {
 /// which leave the answer the model gives unchanged.
 pub const AUDIT_PROMPT_SCHEMA_VERSION: u32 = 1;
 
+/// H5: the sampling temperature asked for on every pass that decides WHICH findings exist (the
+/// scan passes, batch or not, the alternatives choice, calibration and the deep security pass).
+/// Sent only where the model accepts it (`LlmRequest::temperature`); the strict models ignore it
+/// and the legacy ones (Haiku 4.5, the default fast tier) and future permissive ones get the
+/// least random answer they offer. The fix-text and prose-lens passes keep the provider
+/// default: they word findings, not choose them.
+pub const AUDIT_TEMPERATURE: f32 = 0.0;
+
 /// The system prompt: what to look for, what NOT to (the mechanical tier is already
 /// covered), and the STRICT JSON schema to return. This is the prompt with the `terse_output`
 /// measure OFF (the long `detail`, `proposed_rules` on every pass); [`audit_system_prompt_with`]
@@ -2792,7 +2800,8 @@ pub async fn verify_findings(
         let build_req = || {
             let mut req = LlmRequest::new(prompt.clone())
                 .with_system(system.clone())
-                .with_max_tokens(scaled_max_tokens(chunk_len, VERIFY_TOKENS_PER_FINDING));
+                .with_max_tokens(scaled_max_tokens(chunk_len, VERIFY_TOKENS_PER_FINDING))
+                .with_temperature(AUDIT_TEMPERATURE);
             if let Some(m) = calibration_model {
                 req = req.with_model(m.to_string());
             }
@@ -3625,7 +3634,8 @@ async fn recommend_alternatives(
         }
         let mut req = LlmRequest::new(prompt)
             .with_system(alternatives_system_prompt())
-            .with_max_tokens(4096);
+            .with_max_tokens(4096)
+            .with_temperature(AUDIT_TEMPERATURE);
         if let Some(m) = audit_model {
             req = req.with_model(m.to_string());
         }
@@ -4824,7 +4834,8 @@ async fn audit_pass(
 ) -> anyhow::Result<(Vec<Finding>, Vec<ProposedRule>, Vec<String>)> {
     let mut req = LlmRequest::new(prompt)
         .with_system(audit_system_prompt_with(terse_output_of(meter)))
-        .with_max_tokens(8192);
+        .with_max_tokens(8192)
+        .with_temperature(AUDIT_TEMPERATURE);
     if let Some(m) = audit_model {
         req = req.with_model(m.to_string());
     }
@@ -5548,7 +5559,8 @@ async fn run_passes_batch(
                 .with_system(audit_system_prompt_with(terse_output_of(meter)))
                 .with_max_tokens(8192)
                 .with_model(model.clone())
-                .with_cache_breakpoints(cache_bps);
+                .with_cache_breakpoints(cache_bps)
+                .with_temperature(AUDIT_TEMPERATURE);
             work.push(BatchWork {
                 custom_id: format!("c{ci}-b{bi}"),
                 ci,
@@ -8756,9 +8768,20 @@ pub async fn audit_repo(
     // below (the digest, the repo map, the fix context window, line anchoring) reads this model-
     // facing set: same paths, same line numbers, every credential value replaced by its redacted
     // form, so a `path:line` the model cites still resolves and a snippet it quotes still anchors.
-    let model_files = crate::onboard::redact::files_for_model(files);
+    let mut model_files = crate::onboard::redact::files_for_model(files);
+    let mut model_map_files = map_files.map(crate::onboard::redact::files_for_model);
+    // H5: one canonical input order. The file walk follows the filesystem's directory order and
+    // the rule selection its caller's, and either reorders every prompt (and so the answer) when
+    // it changes. Path order for files, id order for rules, so the same inputs always produce
+    // the same prompts. Stable sorts: equal keys keep their relative order.
+    model_files.sort_by(|a, b| a.0.cmp(&b.0));
+    if let Some(m) = model_map_files.as_mut() {
+        m.sort_by(|a, b| a.0.cmp(&b.0));
+    }
+    let mut ordered_selected = selected.to_vec();
+    ordered_selected.sort_by(|a, b| a.id.cmp(&b.id));
+    let selected = ordered_selected.as_slice();
     let files = model_files.as_slice();
-    let model_map_files = map_files.map(crate::onboard::redact::files_for_model);
     let map_files = model_map_files.as_deref();
     // W1: this call's own merge/calibration stage samples, returned alongside the normal
     // result (mirroring the EXISTING `Vec<FailedPass>` accumulation pattern already used
@@ -10081,7 +10104,8 @@ async fn run_security_passes(
                 // `audit_pass` (streaming + meter + robust parse).
                 let mut req = LlmRequest::new(prompt)
                     .with_system(deep_security_system_prompt_with(terse_output_of(meter)))
-                    .with_max_tokens(8192);
+                    .with_max_tokens(8192)
+                    .with_temperature(AUDIT_TEMPERATURE);
                 if let Some(m) = audit_model {
                     req = req.with_model(m.to_string());
                 }
@@ -10289,6 +10313,9 @@ mod candidate_prefilter_tests;
 
 #[cfg(test)]
 mod malformed_reply_tests;
+
+#[cfg(test)]
+mod drift_tests;
 
 #[cfg(test)]
 mod tests {

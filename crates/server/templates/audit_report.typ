@@ -649,6 +649,10 @@
           // those same titles) is dropped. `label` is shown only when there are no external
           // sources to bullet (the advisory/preview case), where it is the sole honesty note.
           #if group.citation.sources.len() > 0 [
+            // H5: a keyword-matched standard is labelled as related, never as a rule check.
+            #if group.citation.kind == "related" [
+              #text(size: 8.5pt, fill: rgb("#555555"))[Related standard (matched by keyword, not a rule check):]
+            ]
             #for s in group.citation.sources [
               #text(size: 8.5pt, fill: ink_faint)[- #s.title #if s.url != "" [(#s.url)]]
             ]
@@ -773,6 +777,8 @@
 #d.methodology.deterministic_note
 
 #d.methodology.ai_tier_note
+
+#d.methodology.citation_note
 
 // Branding (2026-09-13 review): Audit model / Calibration model / Camerata version used to sit
 // on the cover; they now render here instead. Camerata is the inspecting INSTRUMENT,

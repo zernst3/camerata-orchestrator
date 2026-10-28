@@ -197,6 +197,7 @@ async fn run(backend: ProjectBackend, efficiency: Vec<String>) -> RunResult {
         max_cost_usd: None,
         efficiency,
         client: "Example Client Ltd".to_string(),
+        consensus: false,
     };
     // The export needs `typst`; either outcome is fine here (see the module doc).
     let _ = run_inspect_pipeline_with(

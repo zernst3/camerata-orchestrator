@@ -3212,6 +3212,116 @@ carrying `[detail incomplete]` (it should be zero; a high rate means the groundi
 precondition checks are rejecting good text); and the cost split, scan output tokens
 and the "detail" stage against the previous run's scan output.
 
+#### Repeatability: measuring run-to-run drift
+
+A model is not a pure function, so two inspections of the same commit can
+disagree. `camerata repeatability` measures by how much:
+
+```
+cargo run -p camerata -- repeatability --repo <PATH> --max-cost-usd <USD> [--format text|json]
+```
+
+It runs the same Phases 1 to 3 as `camerata inspect` (stack detection, the
+curated rule selection, the corpus, `audit_repos` with the deterministic floor
+and the AI review) twice, applies the corpus severity bounds to each run and
+compares the two finding sets with `camerata_server::repeatability::diff_runs`:
+counts by tier (`deterministic`, `ai`, `preview`), by rule and by severity in
+each run, plus every finding one run reported and the other did not. Findings
+are matched by `finding_match_key`: repo, path and the content fingerprint
+baselines use (rule id plus whitespace-collapsed snippet), so a finding quoted
+at a neighbouring line still matches; repeats are matched one for one. The
+deterministic floor is the control: its counts never change between runs.
+
+**Every answer cache is bypassed.** The incremental-scan manifest is never
+loaded (and never written), and `result_cache` is forced off whatever the
+flags or `CAMERATA_EFFICIENCY` say. The provider's prompt cache is left as
+configured: it stores the processed prompt prefix, not an answer, so it cannot
+make two runs agree.
+
+**Spend guards.** The pre-flight estimate is printed first, before any model
+call, with a line for the two runs together. The command then refuses without
+an explicit `--max-cost-usd`. The limit covers both runs and each run gets
+half, so the first cannot starve the second. When one run's estimate is above
+its half it refuses too, naming the limit that would be enough: a run the limit
+stops part way turns coverage into apparent drift. Nothing is written to disk.
+
+**Output and exit code.** Text by default, `--format json` for the same data
+as JSON (`RepeatabilityOutcome`). A run is incomplete when the AI review
+failed, the spend limit stopped anything or a pass that can change which
+findings exist failed; only the effort-estimate and fix-text stages are
+treated as unable to (`FINDING_NEUTRAL_PASSES`), so an unknown failure flags
+the comparison. Every failed pass is listed either way. Exit 0 when both runs
+completed (whether or not they agree), 4 when either was incomplete, 1 on a
+refusal.
+
+`crates/cli/tests/repeatability_e2e.rs` drives the whole command with a fake
+completer whose answers drift between runs; it is never run against a live
+model in CI.
+
+**Trying it on the sample-report repo.** To see the command work end to end,
+point `--repo` at a local checkout of the small repo the sample report was
+modelled on and start with `--max-cost-usd 10`. The pre-flight estimate prints
+first. If one run is estimated above half the limit the command refuses and
+names the limit that would be enough, so a first attempt costs nothing. This
+is a manual check for a person with an API key and a spend limit they are
+happy with; no test or CI job runs it.
+
+#### Drift reduction: temperature, input order and the consensus option
+
+Three measures make two runs of the same scan agree more often. The first two
+are always on; the third is an option for client work and is off by default.
+
+**Temperature 0 where the model accepts it.** `LlmRequest` carries an optional
+`temperature`. It is put on the wire (the Messages body and a batch item) only
+when the model's catalog request shape accepts sampling parameters
+(`camerata_llm::model_registry::accepts_sampling_params`, which presumes an
+unknown model strict), and `conform_messages_body` still runs last. Every
+current Claude model in the catalog is strict except one: Haiku 4.5
+(`claude-haiku-4-5-20251001`, `RequestShapeSpec::LEGACY`), which is the default
+fast-tier model and the clone-judge model, accepts sampling parameters and so
+now gets temperature 0. Nothing is sent to the strict models, so the "a call
+site sent something this model rejects" warning never fires; Haiku 4.5 and any
+future permissive model get the least random answer they offer. The passes that
+decide which findings exist ask for `ai_audit::AUDIT_TEMPERATURE` (0): the scan
+passes (real time and batch), the alternatives choice, calibration and the deep
+security pass. Fix text and the prose lenses keep the provider default because
+they word findings rather than choose them. The CLI backend (`claude -p` has no
+temperature flag) and OpenRouter ignore the field.
+
+**One canonical input order.** `ai_audit::audit_repo` sorts the model-facing
+files and the repo-map files by path and the rules by id before building any
+prompt, so the same files and rules always produce the same prompts whatever
+order the caller handed them in (a reversed order used to reorder both the
+digest and the rule list). The repo walk
+(`onboard::files::read_local_repo_files`) is sorted by path, so neither the file
+list nor the `HARD_CAP_FILES` cut on a very large repo depends on the
+filesystem's directory order. The fallback walk for a directory with no `.git`
+is unchanged; its prompts are still ordered by `audit_repo`.
+
+**Three-pass consensus (`camerata inspect --consensus`, off by default).** With
+`RunControls::consensus` on, `audit_repos` runs each repo's whole AI audit
+(`audit_repo`: scan passes, alternatives, calibration and fixes) three times in
+sequence through `consensus::run_audit_passes` and keeps a finding only when at
+least two audits reported it, matched by the same `finding_match_key`
+`camerata repeatability` uses; repeats are counted, so a site two audits saw
+twice is kept twice. Proposed rules and alternative recommendations come from
+the first audit that answered, so every kept finding was judged against one
+set of options. The vote is recorded as a `consensus` ledger stage whose
+removed rows are accounted as agreeing copies (`deduped`) or
+`consensus_minority_dropped`, so the integrity gate reconciles. An audit that
+errors is disclosed as a failed pass ("consensus audit N of 3") and the vote
+runs over the audits that answered: two must still agree and a lone answer
+stands and says so. If none answers, the error is returned as a single audit's
+would be. It costs about three times the AI spend (the pre-flight estimate
+triples and says so; the spend limit is checked between the audits as between
+any passes) and it trades recall for stability: a real issue the model notices
+one time in three is dropped. Use it for a client deliverable where a finding
+that comes and goes between runs does more harm than one that is missed. The
+desktop app does not expose it.
+
+Tests: `ai_audit::drift_tests`, `llm::temperature_tests`,
+`consensus::tests` and `crates/server/tests/consensus_e2e.rs`.
+
 The ZIP holds four entries, and they are deliberately not three views of the same
 thing:
 
@@ -3354,6 +3464,42 @@ Three coverage-honesty properties are easy to lose and are each pinned by a test
   because the single-template version produced "0 found something to look at; the
   other 3 were checked and found clean" on exactly the healthy-codebase case a
   client sees most often.
+
+#### Related standards: what a keyword-matched citation claims
+
+The AI tier invents its own rule id for each finding, so no corpus rule carries
+its citation. `report_export::classify_ai_finding` sorts such a finding into a
+small closed set of defect classes (RLS, XSS, open redirect, weak token
+randomness, query-grammar injection, permissive CORS) by rule-id tokens, its
+`category` field and keywords in its text, and `citation_for_finding` then
+borrows the sources of that class's corpus rule. The sources are real, but the
+match is a keyword match: no Camerata rule checked the code against that
+standard. Until 2026-10-28 the borrowed citation went out as `grounded`, the
+same kind a checked rule gets, and the workbook's Provenance column then read
+"Deterministic" for a model finding.
+
+Such a citation now has its own kind, `related`, and its label starts with
+"Related standard (matched by keyword, not a rule check): ". The kind and label
+are computed once in `citation_for_finding`, so the PDF (which prints that
+heading over the source list), the workbook's Citation column and
+`findings.json`'s `citation_label` all say the same thing, and the workbook's
+Provenance column reads "AI-advisory" for these rows. The Methodology section
+carries one plain sentence explaining the term (`MethodologyJson::citation_note`)
+and the Index sheet defines it. A finding whose OWN rule id is a cited corpus
+rule (a deterministic finding, or an AI finding reported against a rule the
+pass was asked to check) keeps its `grounded` citation. A `related` citation
+still counts as cited for the curation gate (`is_uncited_ai_finding`) and keeps
+the sort rank `grounded` had, so the change relabels findings without moving or
+dropping any.
+
+The brief offered a second option: hold the citation back until triage
+confirms it. It was rejected because triage is optional in the desktop flow
+(audit, triage, apply and wire-CI are all optional steps after a scan). An
+export made before anyone triages would lose the standard on every
+keyword-matched finding, and the curation gate would then move those findings,
+which are often the most serious ones, out of the curated set. Labelling is
+honest in every export, triaged or not. Tests:
+`xlsx_export::tests::related_citation` covers both directions.
 
 ## 6b. Self-measurement: the integrity gate and the in-repo harness
 

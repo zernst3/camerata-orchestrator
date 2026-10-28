@@ -168,6 +168,7 @@ async fn export_text(regeneration_down: bool) -> (String, Vec<camerata_server::o
         max_cost_usd: None,
         estimate_hint_usd: None,
         fix_model: None,
+        consensus: false,
     });
     let (findings, _proposed, _recs, failed_passes, stage_samples) = ai_audit::audit_repo(
         &stub,
