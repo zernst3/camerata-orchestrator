@@ -375,9 +375,13 @@ _Doc step (standing): update `OVERVIEW.md` + the relevant deep doc before markin
 - **Export gates 2, 6 (corrupted-byte clause), 7** from `2026-10-20_machine-readable-exports.md`
   §Testing are DONE (`bc121134`, `98a61091`; gate 6 corruption test in `tests/product_export_manifest_gates.rs`). Also update that design's Status line and dataset count (8): DONE (`05c51b6a`).
 - **Staleness nag** at corpus load and in the digest (only `camerata corpus check` exists). DONE (`da85cfe9`).
-- **`is_in_repo_scope` symlink fix** has no direct unit test with a real symlinked root.
-- **Ownership:** `Generated`/`Vendored` have no producer; `PlatformManaged` dormant by design.
-- **C5-6** is tracked only in an `#[ignore]` reason (`report_export.rs`); give it a ledger line.
+- **`is_in_repo_scope` symlink fix** has no direct unit test with a real symlinked root. DONE (`957a927`):
+  `scope_compares_canonical_forms_under_a_real_symlinked_root` (`scan_tools.rs`, `#[cfg(unix)]`).
+- **Ownership:** `Generated`/`Vendored` have no producer; `PlatformManaged` dormant by design. NOT BUILT,
+  reason ledgered (`d884ea2`, `docs/BACKLOG.md`): the file filter already keeps those files out of the
+  audit, so a marker-keyed producer would be dead code, and a path guess risks hiding a client-owned finding.
+- **C5-6** is tracked only in an `#[ignore]` reason (`report_export.rs`); give it a ledger line. DONE
+  (`a27eb12`, `docs/BACKLOG.md`); C5-6 itself stays OPEN there (product polish, needs a decision).
 - ~~W29 corpus rules need Zach's go~~ GIVEN 2026-10-21 (all nine).
 - **`domain_to_glob("ui")` excludes `.jsx`**; fix with the first `ui` W29 rule. DONE (`4695efa5`).
 - **Memory location:** Camerata memory lives under the agora-mono project dir, so a session
@@ -404,7 +408,10 @@ _Doc step (standing): update `OVERVIEW.md` + the relevant deep doc before markin
   re-apply. So "a rule you applied changed upstream" silently covers nothing for a freshly applied
   rule. The June feature spec intends detection from apply time. Decision (Opus, per the
   never-defer-hardening directive): baseline at apply time and preserve baselines across
-  re-apply. PARTIAL (`e31d1ef8`: baseline at apply and save; preservation across re-apply not confirmed).
+  re-apply. DONE (`e31d1ef8`; preservation verified 2026-10-28, already at HEAD before item 21's branch):
+  `upsert_base_rules` inherits each prior same-decision baseline (`inherit_baselines`, app-core), pinned by
+  `re_applying_without_a_corpus_keeps_the_existing_baseline`, `saving_other_selections_keeps_an_untouched_selections_baseline`
+  and `a_changed_chosen_option_is_a_new_decision_and_does_not_inherit_the_old_baseline` (server) plus the app-core upsert tests.
 
 - **CI gate binary (`camerata-check`) ignores corpus severity bounds** (found 2026-10-21 merging
   the W29 detectors): it reported ARCH-DEAD-CODE-1 at `medium` though the corpus ceiling is `low`,
@@ -412,7 +419,10 @@ _Doc step (standing): update `OVERVIEW.md` + the relevant deep doc before markin
   through the same bounds function (`apply_corpus_severity_bounds`, now in camerata-server) or
   hoist that function into `camerata-rules` so both crates share it. Also decide, per the
   `stages` target design, whether low-severity consistency rules should HARD-FAIL a client's CI
-  build or report advisory; today any deterministic finding fails `camerata-check`.
+  build or report advisory; today any deterministic finding fails `camerata-check`. DONE (`c24e0b5`, `aedb987`):
+  the chain is hoisted into `camerata_rules::severity_bounds` and shared by server and check; low/info
+  deterministic findings are advisory (exit 0), medium and above fail (`FAIL_AT_SEVERITY`, documented in
+  USER_GUIDE section 14). Open remainder in `docs/BACKLOG.md`: a vendored binary needs the corpus on disk.
 
 - **Model registry is stale** (found by the Wave C spec, 2026-10-22): `crates/llm/src/model_registry.rs`
   has no entry for the current fast tier (Haiku 5.5) and its Sonnet prices may be outdated (a test
