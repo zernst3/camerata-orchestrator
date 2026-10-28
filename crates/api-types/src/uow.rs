@@ -596,6 +596,10 @@ pub struct FindingsSource {
     /// several when one fix closes findings under several rules.
     #[serde(default)]
     pub rule_ids: Vec<String>,
+    /// The rule fingerprint of the inspection the findings came from (`rules_fingerprint`), so a
+    /// later retest can say whether the rule selection changed since. Empty when unknown.
+    #[serde(default)]
+    pub rules_fingerprint: String,
     /// The planner's area label when a rule was split by directory (`None` when not split).
     #[serde(default)]
     pub area: Option<String>,
@@ -633,6 +637,11 @@ pub struct SourceFinding {
     /// The snippet after `camerata_secrets::redact_str`. Never the raw line.
     #[serde(default)]
     pub snippet: String,
+    /// Set on a finding that a shared-fix group absorbed: the `key` of the finding at the same
+    /// location that stands for the group. The unit closes both; the PR body lists this one
+    /// straight under the other.
+    #[serde(default)]
+    pub merged_into: Option<String>,
 }
 
 /// Where a unit of work came from. `None` on every unit created before this existed and on
@@ -677,6 +686,14 @@ pub struct RetestEvidence {
     /// (`rules_fingerprint` differs), so "resolved" may mean "no longer selected".
     #[serde(default)]
     pub rules_changed: bool,
+    /// The retest's AI review did not finish (an error, a block or a failed pass), so findings
+    /// from the semantic tier are in `not_rechecked`, never in `resolved`.
+    #[serde(default)]
+    pub ai_incomplete: bool,
+    /// Findings reported at a different file than the unit recorded (a rename is not a fix):
+    /// fingerprint to the new path. Each is also in `still_open`.
+    #[serde(default)]
+    pub moved: std::collections::BTreeMap<String, String>,
 }
 
 #[cfg(test)]
@@ -698,6 +715,12 @@ mod tests {
         let r: RetestEvidence = serde_json::from_str(r#"{"inspection_id":"d1"}"#).expect("partial");
         assert_eq!(r.inspection_id, "d1");
         assert!(r.resolved.is_empty() && !r.rules_changed);
+        assert!(!r.ai_incomplete && r.moved.is_empty());
+        // Records written before these fields existed still load.
+        let f: SourceFinding = serde_json::from_str(r#"{"path":"a"}"#).unwrap();
+        assert_eq!(f.merged_into, None);
+        let s: FindingsSource = serde_json::from_str(r#"{"inspection_id":"i"}"#).unwrap();
+        assert_eq!(s.rules_fingerprint, "");
     }
 
     #[test]

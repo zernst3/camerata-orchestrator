@@ -18,8 +18,24 @@
 //! request carries them. Creating units is a data operation and is always allowed: the client
 //! lock applies when a unit runs, and the plan response carries its notice so the console can
 //! say so up front.
+//!
+//! # Choices worth knowing
+//!
+//! - **The lock notice's model.** The notice asks `dev_loop_client_lock_refusal` about the
+//!   project's strongest-tier model (`tier_map.strongest`), because that is the model the tiered
+//!   dev run picks for the implementer. A project that pins another model for the run sees the
+//!   run's own refusal at the first run; the notice is advice up front, never the gate.
+//! - **Disposition keys.** Triage arrives keyed by `report_export::finding_key`, built from the
+//!   inspection's stored (already redacted) findings, exactly as the UI keys its own triage. The
+//!   export looks a finding up by the zero-width-stripped copy, so a key that only matches after
+//!   that sanitising is accepted here too ([`eligible_findings`]).
+//! - **Merged findings.** A finding a shared-fix group absorbed is a second entry in
+//!   `source.findings` whose `merged_into` names the finding that stands for the group; the PR
+//!   body derives its "merged into the row above" rows from that.
+//! - **Creating is one claim.** [`remediation_create`] holds a per-project claim from the dedup
+//!   check to the last unit, so two overlapping creates make one set of units.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -34,9 +50,11 @@ use camerata_worktracker::{CanonicalStory, FeatureStatus};
 use serde::{Deserialize, Serialize};
 
 use crate::inspections::{InspectionEntry, InspectionKind};
+use crate::lifecycle::UowStage;
 use crate::onboard::{Finding, ScanReport};
 use crate::remediation_plan::{PlanFinding, PlanOptions, PlannedUnit, RuleInfo};
 use crate::report_export::{finding_key, DispositionWire};
+use crate::scan_ledger::RuleTier;
 use crate::uow::{BranchMode, RepoScope, UnitOfWork, UowStore};
 use crate::AppState;
 
@@ -147,6 +165,7 @@ fn source_finding(f: &PlanFinding) -> SourceFinding {
         rule_id: f.rule_id.clone(),
         severity: f.severity.clone(),
         snippet: f.snippet.clone(),
+        merged_into: None,
     }
 }
 
@@ -233,20 +252,49 @@ fn coverage_key(f: &SourceFinding) -> CoverageKey {
     )
 }
 
+fn parse_time(text: &str) -> Option<chrono::DateTime<chrono::FixedOffset>> {
+    chrono::DateTime::parse_from_rfc3339(text).ok()
+}
+
+/// A unit that has been through QA (or past it): its work is on a branch for review, so its
+/// retests say whether it worked.
+fn shipped(stage: UowStage) -> bool {
+    matches!(stage, UowStage::AwaitingQa | UowStage::SignedOff)
+}
+
 /// The findings existing units already close, keyed line-shift tolerantly (repo, file, rule,
-/// fingerprint). A finding the unit's latest delta retest still reports does not count as
-/// closed by it: a unit that did not fix it must not block a new one.
-fn existing_coverage(units: &[UnitOfWork]) -> HashMap<CoverageKey, Covering> {
+/// fingerprint). A unit covers its findings while its stage is before Awaiting QA, whatever its
+/// retests say (a retest from before the unit ran must not make it look unfinished). Once it
+/// has shipped, a finding its latest delta retest still reports is no longer covered (the unit
+/// did not fix it), and neither is anything when the inspection being planned started after
+/// that retest (a regression found later is work). `inspection_started_at` is that inspection's
+/// start time (RFC 3339).
+///
+/// Units of other projects count too when they share a repository with this one, because the
+/// unit list is by repository: a finding another project's unit already covers in a shared
+/// repository is not planned twice.
+fn existing_coverage(
+    units: &[UnitOfWork],
+    inspection_started_at: &str,
+) -> HashMap<CoverageKey, Covering> {
+    let started = parse_time(inspection_started_at);
     let mut map = HashMap::new();
     for u in units {
         let Some(src) = u.findings_source() else {
             continue;
         };
-        let still_open: HashSet<&str> = u
-            .retests
-            .last()
-            .map(|r| r.still_open.iter().map(String::as_str).collect())
-            .unwrap_or_default();
+        let done = shipped(u.stage);
+        let latest = u.retests.last();
+        if done {
+            let retest_at = latest.and_then(|r| parse_time(&r.recorded));
+            if matches!((started, retest_at), (Some(planned), Some(retest)) if planned > retest) {
+                continue;
+            }
+        }
+        let still_open: HashSet<&str> = match (done, latest) {
+            (true, Some(r)) => r.still_open.iter().map(String::as_str).collect(),
+            _ => HashSet::new(),
+        };
         for f in &src.findings {
             if still_open.contains(f.fingerprint.as_str()) {
                 continue;
@@ -312,15 +360,25 @@ async fn compute(
     let plan = crate::remediation_plan::plan(eligible, &rules, &req.options);
 
     let existing = state.uow.list_for_project(&project.id, &project.repos);
-    let coverage = existing_coverage(&existing);
+    let coverage = existing_coverage(&existing, &entry.started_at);
     let mut notes = plan.notes.clone();
     let mut units = Vec::new();
     for planned in plan.units {
+        // The unit's findings, then those a shared-fix group absorbed, each pointing at the
+        // finding at its location that stands for the group.
         let all: Vec<SourceFinding> = planned
             .findings
             .iter()
-            .chain(planned.merged.iter())
             .map(source_finding)
+            .chain(planned.merged.iter().map(|m| {
+                let mut found = source_finding(m);
+                found.merged_into = planned
+                    .findings
+                    .iter()
+                    .find(|p| p.path == m.path && p.line == m.line)
+                    .map(|p| p.key.clone());
+                found
+            }))
             .collect();
         let (covered, open): (Vec<SourceFinding>, Vec<SourceFinding>) = all
             .into_iter()
@@ -479,20 +537,25 @@ fn taken_branches(existing: &[UnitOfWork], repo: &str) -> HashSet<String> {
     taken
 }
 
-/// `branch`, or `branch-2`, `branch-3` and so on: the first that is valid and not taken.
-fn free_branch(branch: &str, taken: &HashSet<String>) -> String {
+/// The most numbered names tried for one branch before giving up.
+const BRANCH_TRIES: usize = 1000;
+
+/// `branch`, or `branch-2`, `branch-3` and so on: the first that is valid and not taken. An
+/// error after [`BRANCH_TRIES`] names, or when the name can never be valid.
+fn free_branch(branch: &str, taken: &HashSet<String>) -> Result<String, String> {
     let mut candidate = branch.to_string();
-    let mut n = 2usize;
-    while taken.contains(&candidate.to_ascii_lowercase())
-        || validate_branch_name(&candidate).is_err()
-    {
-        if n > 1000 {
-            break;
+    for n in 2..=BRANCH_TRIES + 1 {
+        if !taken.contains(&candidate.to_ascii_lowercase())
+            && validate_branch_name(&candidate).is_ok()
+        {
+            return Ok(candidate);
         }
         candidate = format!("{branch}-{n}");
-        n += 1;
     }
-    candidate
+    Err(format!(
+        "No free branch name was found for `{branch}` after {BRANCH_TRIES} tries. Remove the \
+         old remediation branches or units and plan again."
+    ))
 }
 
 fn table_cell(text: &str) -> String {
@@ -551,6 +614,10 @@ fn story_description(
     out
 }
 
+/// The per-project claim [`remediation_create`] holds (a pseudo repository name in the
+/// source-operation claims, which no real repository can equal).
+const CREATE_CLAIM: &str = "remediation:create";
+
 /// `POST /api/projects/:id/remediation/create`: runs the same plan, then creates one native
 /// unit per planned group that is not already covered.
 pub(crate) async fn remediation_create(
@@ -560,6 +627,19 @@ pub(crate) async fn remediation_create(
 ) -> Response {
     let Some(project) = state.projects.get(&id) else {
         return no_such_project();
+    };
+    // One create at a time per project, from the dedup check to the last unit: two overlapping
+    // creates would both see "nothing covered yet" and make two sets.
+    let Some(_claim) = state.source_ops.try_begin(&project.id, CREATE_CLAIM) else {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": "remediation_in_progress",
+                "message": "Units of work are already being created for this project. Wait \
+                            for that to finish, then plan again."
+            })),
+        )
+            .into_response();
     };
     if state.jobs.has_running_for_project(&project.id) || state.source_ops.scan_running(&project.id)
     {
@@ -627,7 +707,10 @@ pub(crate) async fn remediation_create(
         let taken_here = taken
             .entry(repo.to_ascii_lowercase())
             .or_insert_with(|| taken_branches(&existing, &repo));
-        let branch = free_branch(&u.planned.branch, taken_here);
+        let branch = match free_branch(&u.planned.branch, taken_here) {
+            Ok(b) => b,
+            Err(reason) => return error(StatusCode::CONFLICT, reason),
+        };
         taken_here.insert(branch.to_ascii_lowercase());
 
         let uow = match state
@@ -645,6 +728,7 @@ pub(crate) async fn remediation_create(
                 sha: sha.clone(),
             }],
             rule_ids: u.planned.rule_ids.clone(),
+            rules_fingerprint: computed.entry.rules_fingerprint.clone(),
             area: u.planned.area.clone(),
             findings: u.findings.clone(),
             depends_on: u
@@ -817,16 +901,54 @@ pub(crate) async fn extra_grounding_for(
 
 // ── Delta retest evidence ───────────────────────────────────────────────────────
 
-/// The retest's verdict on each of `source`'s findings, as `(resolved, still_open,
-/// not_rechecked)` lists of fingerprints. A finding is present when the retest report has one
-/// in the same repository and file for the same rule with the same fingerprint, whatever line
-/// it moved to; a row that demoted the rule into `also_matches` at that file counts too. A
-/// finding in a repository the retest did not cover is neither resolved nor open.
+/// The retest's verdict on each of a unit's findings, as lists of fingerprints.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(crate) struct Verdict {
+    pub resolved: Vec<String>,
+    pub still_open: Vec<String>,
+    pub not_rechecked: Vec<String>,
+    /// Findings reported at another file than the unit recorded (also in `still_open`):
+    /// fingerprint to the new path.
+    pub moved: BTreeMap<String, String>,
+    /// The retest's AI review did not finish.
+    pub ai_incomplete: bool,
+}
+
+/// Whether the retest's AI review did not finish: an error, a block or a failed pass.
+fn ai_review_incomplete(report: &ScanReport) -> bool {
+    report.ai_error.is_some()
+        || report.ai_blocked_reason.is_some()
+        || !report.failed_passes.is_empty()
+}
+
+/// Whether `rule_id` is judged by the AI review (the semantic tier), so a clean report from a
+/// retest whose AI review did not finish says nothing about it.
+fn is_semantic(report: &ScanReport, rule_id: &str) -> bool {
+    rule_id.starts_with("AI-")
+        || report
+            .ledger
+            .rule(rule_id)
+            .is_some_and(|e| e.tier == RuleTier::Semantic)
+}
+
+/// The retest's verdict on each of `source`'s findings.
+///
+/// A finding is present when the retest report has one in the same repository and file for the
+/// same rule with the same fingerprint, whatever line it moved to; a row that demoted the rule
+/// into `also_matches` at that file counts too. One that is absent from its file but reported
+/// under the same rule and fingerprint in another file is still present, moved: a rename is not a
+/// fix. A finding in a repository the retest did not cover is neither resolved nor open. When
+/// the retest's AI review did not finish, an absent semantic-tier finding is not rechecked
+/// rather than resolved.
 pub(crate) fn retest_verdict(
     source: &FindingsSource,
     report: &ScanReport,
     covered_repos: &[String],
-) -> (Vec<String>, Vec<String>, Vec<String>) {
+) -> Verdict {
+    let mut verdict = Verdict {
+        ai_incomplete: ai_review_incomplete(report),
+        ..Verdict::default()
+    };
     let mut by_file: HashMap<(String, &str), Vec<&Finding>> = HashMap::new();
     for f in &report.findings {
         by_file
@@ -834,37 +956,62 @@ pub(crate) fn retest_verdict(
             .or_default()
             .push(f);
     }
-    let (mut resolved, mut open, mut unchecked) = (Vec::new(), Vec::new(), Vec::new());
+    let matches_rule = |f: &Finding, sf: &SourceFinding| {
+        (f.rule_id == sf.rule_id || f.also_matches.contains(&sf.rule_id))
+            && fingerprint(&sf.rule_id, &f.snippet) == sf.fingerprint
+    };
+    // A report row at a path the unit itself records for the same finding is that finding's, not
+    // somebody else's that moved.
+    let recorded_here = |sf: &SourceFinding, path: &str| {
+        source.findings.iter().any(|o| {
+            o.repo.eq_ignore_ascii_case(&sf.repo)
+                && o.rule_id == sf.rule_id
+                && o.fingerprint == sf.fingerprint
+                && o.path == path
+        })
+    };
     for sf in &source.findings {
         if !covered_repos
             .iter()
             .any(|r| r.eq_ignore_ascii_case(&sf.repo))
         {
-            unchecked.push(sf.fingerprint.clone());
+            verdict.not_rechecked.push(sf.fingerprint.clone());
             continue;
         }
         let present = by_file
             .get(&(sf.repo.to_ascii_lowercase(), sf.path.as_str()))
-            .is_some_and(|rows| {
-                rows.iter().any(|f| {
-                    let same_rule = f.rule_id == sf.rule_id || f.also_matches.contains(&sf.rule_id);
-                    same_rule && fingerprint(&sf.rule_id, &f.snippet) == sf.fingerprint
-                })
-            });
+            .is_some_and(|rows| rows.iter().any(|f| matches_rule(f, sf)));
         if present {
-            open.push(sf.fingerprint.clone());
+            verdict.still_open.push(sf.fingerprint.clone());
+            continue;
+        }
+        let moved_to = report
+            .findings
+            .iter()
+            .filter(|f| f.repo.eq_ignore_ascii_case(&sf.repo) && f.path != sf.path)
+            .filter(|f| matches_rule(f, sf) && !recorded_here(sf, &f.path))
+            .map(|f| f.path.as_str())
+            .min();
+        if let Some(path) = moved_to {
+            verdict.still_open.push(sf.fingerprint.clone());
+            verdict
+                .moved
+                .insert(sf.fingerprint.clone(), path.to_string());
+        } else if verdict.ai_incomplete && is_semantic(report, &sf.rule_id) {
+            verdict.not_rechecked.push(sf.fingerprint.clone());
         } else {
-            resolved.push(sf.fingerprint.clone());
+            verdict.resolved.push(sf.fingerprint.clone());
         }
     }
-    (resolved, open, unchecked)
+    verdict
 }
 
 /// Write a delta retest's verdict onto every findings unit it answers for: a unit of
 /// `project_id` whose source is the retest's base inspection or that audited a repository the
 /// retest covered, and at least one of whose repositories the retest did cover. A no-op for an
-/// entry that is not a delta retest. `base_rules_fingerprint` is the base inspection's rule
-/// fingerprint ("" when unknown), to flag a retest run under a different rule selection.
+/// entry that is not a delta retest. Whether the rule selection changed is judged per unit, from
+/// the rule fingerprint the unit recorded when it was made; `base_rules_fingerprint` (the base
+/// inspection's, "" when unknown) is only the fallback for a unit that recorded none.
 pub(crate) fn record_retest_evidence(
     uow: &UowStore,
     project_id: &str,
@@ -880,8 +1027,6 @@ pub(crate) fn record_retest_evidence(
         return;
     };
     let covered: Vec<String> = entry.repos.iter().map(|r| r.repo.clone()).collect();
-    let rules_changed =
-        !base_rules_fingerprint.is_empty() && base_rules_fingerprint != entry.rules_fingerprint;
     for unit in uow.list() {
         if unit.project_id.as_deref() != Some(project_id) {
             continue;
@@ -901,17 +1046,31 @@ pub(crate) fn record_retest_evidence(
         if !answers || !touches {
             continue;
         }
-        let (resolved, still_open, not_rechecked) = retest_verdict(src, &entry.report, &covered);
+        let compared = if src.rules_fingerprint.is_empty() {
+            base_rules_fingerprint
+        } else {
+            src.rules_fingerprint.as_str()
+        };
+        let rules_changed = !compared.is_empty() && compared != entry.rules_fingerprint;
+        let verdict = retest_verdict(src, &entry.report, &covered);
         let total = src.findings.len();
         let mut text = format!(
             "Delta retest {} at {}: {} of {total} findings gone, {} still present",
             entry.id,
             short_sha(to_sha),
-            resolved.len(),
-            still_open.len()
+            verdict.resolved.len(),
+            verdict.still_open.len()
         );
-        if !not_rechecked.is_empty() {
-            text.push_str(&format!(", {} not rechecked", not_rechecked.len()));
+        if !verdict.moved.is_empty() {
+            text.push_str(&format!(" ({} moved to another file)", verdict.moved.len()));
+        }
+        if !verdict.not_rechecked.is_empty() {
+            text.push_str(&format!(", {} not rechecked", verdict.not_rechecked.len()));
+        }
+        if verdict.ai_incomplete {
+            text.push_str(
+                "; the AI review did not finish, so semantic findings could not be rechecked",
+            );
         }
         if rules_changed {
             text.push_str("; the rule selection changed since the inspection");
@@ -922,10 +1081,12 @@ pub(crate) fn record_retest_evidence(
             from_sha: from_sha.clone(),
             to_sha: to_sha.clone(),
             recorded: chrono::Utc::now().to_rfc3339(),
-            resolved,
-            still_open,
-            not_rechecked,
+            resolved: verdict.resolved,
+            still_open: verdict.still_open,
+            not_rechecked: verdict.not_rechecked,
             rules_changed,
+            ai_incomplete: verdict.ai_incomplete,
+            moved: verdict.moved,
         };
         uow.push_retest(&unit.story_id, evidence, &text);
     }
@@ -1076,6 +1237,7 @@ mod tests {
             rule_id: rule.to_string(),
             severity: "high".to_string(),
             snippet: snippet.to_string(),
+            merged_into: None,
         }
     }
 
@@ -1154,22 +1316,25 @@ mod tests {
         let src = source_with(vec![gone.clone(), moved.clone(), other.clone()], &["A-1"]);
         // The moved finding sits on a different line now; the fingerprint still matches.
         let report = report_with(vec![finding("A-1", "src/moved.rs", 31, "moved snippet")]);
-        let (resolved, open, unchecked) = retest_verdict(&src, &report, &["acme/api".to_string()]);
-        assert_eq!(resolved, vec![gone.fingerprint]);
-        assert_eq!(open, vec![moved.fingerprint]);
-        assert_eq!(unchecked, vec![other.fingerprint]);
+        let v = retest_verdict(&src, &report, &["acme/api".to_string()]);
+        assert_eq!(v.resolved, vec![gone.fingerprint]);
+        assert_eq!(v.still_open, vec![moved.fingerprint]);
+        assert_eq!(v.not_rechecked, vec![other.fingerprint]);
+        assert!(v.moved.is_empty(), "same file, new line: not a move");
     }
 
     #[test]
-    fn retest_verdict_does_not_confuse_the_same_snippet_in_another_file_or_rule() {
+    fn retest_verdict_does_not_confuse_another_rule_with_the_same_snippet() {
         let a = sf("A-1", "src/a.rs", 1, "same");
         let src = source_with(vec![a.clone()], &["A-1"]);
+        // Another rule on the same line, and the same line under another rule elsewhere: neither
+        // is this finding.
         let report = report_with(vec![
-            finding("A-1", "src/elsewhere.rs", 1, "same"),
             finding("B-2", "src/a.rs", 1, "same"),
+            finding("B-2", "src/elsewhere.rs", 1, "same"),
         ]);
-        let (resolved, open, _) = retest_verdict(&src, &report, &["acme/api".to_string()]);
-        assert_eq!((resolved.len(), open.len()), (1, 0));
+        let v = retest_verdict(&src, &report, &["acme/api".to_string()]);
+        assert_eq!((v.resolved.len(), v.still_open.len()), (1, 0));
     }
 
     #[test]
@@ -1180,9 +1345,9 @@ mod tests {
         let mut merged = finding("A-1", "src/a.rs", 4, "shared line");
         merged.also_matches = vec!["B-2".to_string()];
         let report = report_with(vec![merged]);
-        let (resolved, open, _) = retest_verdict(&src, &report, &["acme/api".to_string()]);
-        assert!(resolved.is_empty(), "{resolved:?}");
-        assert_eq!(open, vec![secondary.fingerprint]);
+        let v = retest_verdict(&src, &report, &["acme/api".to_string()]);
+        assert!(v.resolved.is_empty(), "{:?}", v.resolved);
+        assert_eq!(v.still_open, vec![secondary.fingerprint]);
     }
 
     fn delta_entry(report: ScanReport, repos: &[&str], rules_fp: &str) -> InspectionEntry {
@@ -1299,21 +1464,264 @@ mod tests {
         assert!(store.get(&unit.story_id).unwrap().retests.is_empty());
     }
 
-    #[test]
-    fn existing_coverage_ignores_findings_the_latest_retest_still_reports() {
+    const RETEST_AT: &str = "2026-10-28T10:00:00+00:00";
+    const BEFORE_RETEST: &str = "2026-10-28T09:00:00+00:00";
+    const AFTER_RETEST: &str = "2026-10-28T11:00:00+00:00";
+
+    /// A unit at `stage` whose latest retest (at `RETEST_AT`) still reports `b` and cleared `a`.
+    fn unit_after_a_retest(stage: UowStage) -> (UnitOfWork, SourceFinding, SourceFinding) {
         let a = sf("A-1", "src/a.rs", 1, "x");
         let b = sf("A-1", "src/b.rs", 2, "y");
         let mut unit = unit_with(source_with(vec![a.clone(), b.clone()], &["A-1"]));
+        unit.stage = stage;
         unit.retests.push(RetestEvidence {
+            recorded: RETEST_AT.to_string(),
             still_open: vec![b.fingerprint.clone()],
             resolved: vec![a.fingerprint.clone()],
             ..RetestEvidence::default()
         });
-        let cover = existing_coverage(&[unit]);
+        (unit, a, b)
+    }
+
+    #[test]
+    fn an_unshipped_unit_covers_its_findings_whatever_its_retests_say() {
+        // A retest from before the unit ran lists everything as still open; the unit has not
+        // shipped, so it still owns the work, even for an inspection planned after that retest.
+        for stage in [
+            UowStage::Intake,
+            UowStage::Investigating,
+            UowStage::DecisionsApproved,
+            UowStage::Development,
+        ] {
+            let (unit, a, b) = unit_after_a_retest(stage);
+            let cover = existing_coverage(&[unit], AFTER_RETEST);
+            assert!(cover.contains_key(&coverage_key(&a)), "{stage:?}");
+            assert!(cover.contains_key(&coverage_key(&b)), "{stage:?}");
+        }
+    }
+
+    #[test]
+    fn a_shipped_unit_stops_covering_findings_its_latest_retest_still_reports() {
+        for stage in [UowStage::AwaitingQa, UowStage::SignedOff] {
+            let (unit, a, b) = unit_after_a_retest(stage);
+            let cover = existing_coverage(&[unit], BEFORE_RETEST);
+            assert!(cover.contains_key(&coverage_key(&a)));
+            assert!(
+                !cover.contains_key(&coverage_key(&b)),
+                "a unit that did not close a finding must not block a new one"
+            );
+        }
+    }
+
+    #[test]
+    fn a_shipped_unit_stops_covering_when_the_inspection_started_after_its_latest_retest() {
+        // The finding was cleared by the retest, but a newer inspection reports it again: a
+        // regression, which is work.
+        let (unit, a, b) = unit_after_a_retest(UowStage::AwaitingQa);
+        let cover = existing_coverage(&[unit], AFTER_RETEST);
+        assert!(cover.is_empty(), "{:?}", cover.keys().collect::<Vec<_>>());
+        let _ = (a, b);
+    }
+
+    #[test]
+    fn a_shipped_unit_with_no_retest_keeps_covering_its_findings() {
+        let a = sf("A-1", "src/a.rs", 1, "x");
+        let mut unit = unit_with(source_with(vec![a.clone()], &["A-1"]));
+        unit.stage = UowStage::AwaitingQa;
+        let cover = existing_coverage(&[unit], AFTER_RETEST);
         assert!(cover.contains_key(&coverage_key(&a)));
+    }
+
+    #[test]
+    fn a_retest_with_an_unfinished_ai_review_never_marks_a_semantic_finding_resolved() {
+        let semantic = sf("AI-NO-DEAD-CODE-1", "src/a.rs", 1, "x");
+        let ledger_semantic = sf("ARCH-9", "src/b.rs", 2, "y");
+        let deterministic = sf("SEC-A-1", "src/c.rs", 3, "z");
+        let present = sf("AI-NO-DEAD-CODE-1", "src/d.rs", 4, "w");
+        let src = source_with(
+            vec![
+                semantic.clone(),
+                ledger_semantic.clone(),
+                deterministic.clone(),
+                present.clone(),
+            ],
+            &["AI-NO-DEAD-CODE-1"],
+        );
+        let covered = ["acme/api".to_string()];
+        let mut report = report_with(vec![finding("AI-NO-DEAD-CODE-1", "src/d.rs", 4, "w")]);
+        report
+            .ledger
+            .record_rule("ARCH-9", RuleTier::Semantic, true, None, 1, 0);
+
+        // A complete AI review: absent means resolved.
+        let ok = retest_verdict(&src, &report, &covered);
+        assert!(!ok.ai_incomplete);
+        assert_eq!(ok.resolved.len(), 3);
+
+        for break_it in [
+            |r: &mut ScanReport| r.ai_error = Some("every pass failed".to_string()),
+            |r: &mut ScanReport| r.ai_blocked_reason = Some("blocked by the lock".to_string()),
+        ] {
+            let mut report = report.clone();
+            break_it(&mut report);
+            let v = retest_verdict(&src, &report, &covered);
+            assert!(v.ai_incomplete);
+            assert_eq!(
+                v.not_rechecked,
+                vec![
+                    semantic.fingerprint.clone(),
+                    ledger_semantic.fingerprint.clone()
+                ],
+                "semantic findings are not rechecked, by AI- id or by ledger tier"
+            );
+            assert_eq!(v.resolved, vec![deterministic.fingerprint.clone()]);
+            assert_eq!(
+                v.still_open,
+                vec![present.fingerprint.clone()],
+                "a semantic finding the retest did report is still present"
+            );
+        }
+    }
+
+    #[test]
+    fn the_history_line_says_when_the_ai_review_did_not_finish() {
+        let store = UowStore::new();
+        let unit = store
+            .create_native(Some("acme/api".to_string()), Some("proj-1".to_string()))
+            .unwrap();
+        store.set_source(
+            &unit.story_id,
+            Some(UowSource::Findings(source_with(
+                vec![
+                    sf("AI-X-1", "src/a.rs", 1, "x"),
+                    sf("SEC-A-1", "src/b.rs", 2, "y"),
+                ],
+                &["AI-X-1"],
+            ))),
+        );
+        let mut report = report_with(vec![]);
+        report.ai_error = Some("boom".to_string());
+        let entry = delta_entry(report, &["acme/api"], "r");
+        record_retest_evidence(&store, "proj-1", &entry, "r");
+        let got = store.get(&unit.story_id).unwrap();
+        assert!(got.retests[0].ai_incomplete);
+        assert_eq!(got.retests[0].not_rechecked.len(), 1);
+        assert_eq!(got.retests[0].resolved.len(), 1);
+        assert_eq!(
+            got.history.last().unwrap().text,
+            "Delta retest insp-d at fedcba9: 1 of 2 findings gone, 0 still present, 1 not rechecked; the AI review did not finish, so semantic findings could not be rechecked."
+        );
+    }
+
+    #[test]
+    fn a_renamed_file_is_not_a_fix() {
+        let old = sf("SEC-A-1", "src/old.rs", 5, "risky call");
+        let src = source_with(vec![old.clone()], &["SEC-A-1"]);
+        let covered = ["acme/api".to_string()];
+        // The same line now lives in src/new.rs.
+        let report = report_with(vec![finding("SEC-A-1", "src/new.rs", 5, "risky call")]);
+        let v = retest_verdict(&src, &report, &covered);
+        assert!(v.resolved.is_empty());
+        assert_eq!(v.still_open, vec![old.fingerprint.clone()]);
+        assert_eq!(v.moved.get(&old.fingerprint).unwrap(), "src/new.rs");
+
+        // When the unit itself records that finding at src/new.rs too, that row is its own
+        // finding's, not the old one moved: the old one is genuinely gone.
+        let twin = sf("SEC-A-1", "src/new.rs", 5, "risky call");
+        let src = source_with(vec![old.clone(), twin], &["SEC-A-1"]);
+        let v = retest_verdict(&src, &report, &covered);
+        assert_eq!(v.resolved, vec![old.fingerprint.clone()]);
+        assert!(v.moved.is_empty());
+    }
+
+    #[test]
+    fn the_history_line_names_how_many_findings_moved() {
+        let store = UowStore::new();
+        let unit = store
+            .create_native(Some("acme/api".to_string()), Some("proj-1".to_string()))
+            .unwrap();
+        store.set_source(
+            &unit.story_id,
+            Some(UowSource::Findings(source_with(
+                vec![sf("SEC-A-1", "src/old.rs", 5, "risky call")],
+                &["SEC-A-1"],
+            ))),
+        );
+        let entry = delta_entry(
+            report_with(vec![finding("SEC-A-1", "src/new.rs", 5, "risky call")]),
+            &["acme/api"],
+            "r",
+        );
+        record_retest_evidence(&store, "proj-1", &entry, "r");
+        let got = store.get(&unit.story_id).unwrap();
+        assert_eq!(got.retests[0].moved.len(), 1);
+        assert!(got
+            .history
+            .last()
+            .unwrap()
+            .text
+            .contains("0 of 1 findings gone, 1 still present (1 moved to another file)."));
+    }
+
+    #[test]
+    fn rules_changed_compares_the_units_own_fingerprint_and_falls_back_to_the_base() {
+        let store = UowStore::new();
+        let make = |fp: &str| {
+            let unit = store
+                .create_native(Some("acme/api".to_string()), Some("proj-1".to_string()))
+                .unwrap();
+            let mut src = source_with(vec![sf("A-1", "src/a.rs", 1, "x")], &["A-1"]);
+            src.rules_fingerprint = fp.to_string();
+            store.set_source(&unit.story_id, Some(UowSource::Findings(src)));
+            unit.story_id
+        };
+        let same = make("rules-now");
+        let older = make("rules-then");
+        let unrecorded = make("");
+        let entry = delta_entry(report_with(vec![]), &["acme/api"], "rules-now");
+        // The base inspection's fingerprint differs from the retest's, but each unit that
+        // recorded its own is judged by it.
+        record_retest_evidence(&store, "proj-1", &entry, "rules-base");
+        let flag = |id: &str| store.get(id).unwrap().retests[0].rules_changed;
+        assert!(!flag(&same), "the unit's own fingerprint matches");
+        assert!(flag(&older), "the unit's own fingerprint differs");
         assert!(
-            !cover.contains_key(&coverage_key(&b)),
-            "a unit that did not close a finding must not block a new one"
+            flag(&unrecorded),
+            "no own fingerprint: the base is the fallback"
+        );
+    }
+
+    #[tokio::test]
+    async fn extra_grounding_keeps_the_resume_directive_first_and_adds_the_findings_block() {
+        let store = UowStore::new();
+        let unit = store
+            .create_native(Some("acme/api".to_string()), Some("proj-1".to_string()))
+            .unwrap();
+        store.set_source(
+            &unit.story_id,
+            Some(UowSource::Findings(source_with(
+                vec![sf("SEC-A-1", "src/a.rs", 1, "x")],
+                &["SEC-A-1"],
+            ))),
+        );
+        let directive = "## RESUMED AFTER HUMAN REVIEW\n\nApprove it.".to_string();
+        let got = extra_grounding_for(&store, &unit.story_id, Some(directive.clone()))
+            .await
+            .expect("grounding");
+        assert!(got.starts_with(&directive), "{got}");
+        let at = got
+            .find("## Findings this change must close")
+            .expect("the block");
+        assert!(at > directive.len(), "{got}");
+        // A unit that did not come from findings keeps only what it had.
+        let plain = store.create_native(None, None).unwrap();
+        assert_eq!(
+            extra_grounding_for(&store, &plain.story_id, Some(directive.clone())).await,
+            Some(directive)
+        );
+        assert_eq!(
+            extra_grounding_for(&store, &plain.story_id, None).await,
+            None
         );
     }
 
@@ -1321,12 +1729,29 @@ mod tests {
     fn free_branch_appends_a_number_when_the_name_is_taken() {
         let taken: HashSet<String> = ["camerata/remediation/a-1".to_string()].into();
         assert_eq!(
-            free_branch("camerata/remediation/a-1", &taken),
+            free_branch("camerata/remediation/a-1", &taken).unwrap(),
             "camerata/remediation/a-1-2"
         );
         assert_eq!(
-            free_branch("camerata/remediation/b-2", &taken),
+            free_branch("camerata/remediation/b-2", &taken).unwrap(),
             "camerata/remediation/b-2"
+        );
+    }
+
+    #[test]
+    fn free_branch_gives_up_with_a_plain_error_past_the_cap() {
+        let mut taken: HashSet<String> = HashSet::new();
+        taken.insert("camerata/remediation/a-1".to_string());
+        for n in 2..=BRANCH_TRIES {
+            taken.insert(format!("camerata/remediation/a-1-{n}"));
+        }
+        let err = free_branch("camerata/remediation/a-1", &taken).unwrap_err();
+        assert!(err.contains("No free branch name"), "{err}");
+        // One short of the cap still finds a name.
+        taken.remove(&format!("camerata/remediation/a-1-{}", BRANCH_TRIES));
+        assert_eq!(
+            free_branch("camerata/remediation/a-1", &taken).unwrap(),
+            format!("camerata/remediation/a-1-{}", BRANCH_TRIES)
         );
     }
 }

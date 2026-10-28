@@ -661,6 +661,50 @@ mod tests {
         );
     }
 
+    /// A focus rule that has a gateway arm denies the matching write, and the run event counts it
+    /// as enforced. Every armed rule is also an enforced gate rule (the gate list is derived from
+    /// the registry), so no armed rule can be only a focus rule: the focus rules a unit adds
+    /// beyond the gate are always grounding only.
+    #[tokio::test]
+    async fn an_armed_focus_rule_denies_at_write_time_and_is_counted_as_enforced() {
+        for entry in camerata_gateway::RULE_REGISTRY {
+            assert!(
+                enforced_gate_rules().iter().any(|r| r.0 == entry.id),
+                "{} has an arm, so it is always in the gate subset",
+                entry.id
+            );
+        }
+        let project = project_selecting(&["SUPABASE-RLS-ENABLED-1"]);
+        let (role, source) = project_governed_role(
+            "BrownfieldImplementer",
+            Some(&project),
+            Some("acme/db"),
+            &["SEC-NO-RAW-SQL-CONCAT-1".to_string()],
+        )
+        .await
+        .unwrap();
+        let decision = evaluate_call(
+            &role.rule_subset,
+            &write(
+                "db/queries.ts",
+                "const q = \"SELECT * FROM users WHERE id = \" + userId;",
+            ),
+        );
+        match decision {
+            Decision::Deny { rule, .. } => assert_eq!(rule.0, "SEC-NO-RAW-SQL-CONCAT-1"),
+            Decision::Allow => panic!("the focus rule must deny the write"),
+        }
+        let RuleSubsetSource::ProjectSelection {
+            focus,
+            focus_enforced,
+            ..
+        } = source
+        else {
+            panic!("a selection");
+        };
+        assert_eq!((focus, focus_enforced), (1, 1));
+    }
+
     /// With no project selection the unit still gates on its own rules, on top of the corpus
     /// fallback.
     #[tokio::test]

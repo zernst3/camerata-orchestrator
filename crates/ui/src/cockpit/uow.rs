@@ -1015,6 +1015,9 @@ pub(super) struct UowView {
     /// What each delta retest said about those findings, oldest first.
     #[serde(default)]
     pub retests: Vec<super::remediation::RetestEvidenceView>,
+    /// The project the unit belongs to (a rescan runs against it).
+    #[serde(default)]
+    pub project_id: Option<String>,
     /// The persisted Intake state (#105): free-text context + repo/branch scope (R6).
     #[serde(default)]
     pub intake: IntakeStateView,
@@ -5390,10 +5393,11 @@ pub(super) fn DevelopmentPhaseView(
         .unwrap_or_default();
 
     // The inspection findings this unit closes, with what each delta retest said (gap 6).
-    let (findings_source, findings_retests, findings_repo): (
+    let (findings_source, findings_retests, findings_repo, findings_project): (
         Option<super::remediation::FindingsSourceView>,
         Vec<super::remediation::RetestEvidenceView>,
         String,
+        Option<String>,
     ) = uow_for_stage
         .read()
         .clone()
@@ -5403,7 +5407,7 @@ pub(super) fn DevelopmentPhaseView(
             let source = u
                 .source
                 .map(|super::remediation::UowSourceView::Findings(f)| f);
-            (source, u.retests, repo)
+            (source, u.retests, repo, u.project_id)
         })
         .unwrap_or_default();
 
@@ -5872,7 +5876,7 @@ pub(super) fn DevelopmentPhaseView(
 
             // ── Inspection findings this unit closes (gap 6): rendered only for such a unit ───
             if let Some(source) = findings_source {
-                super::remediation::FindingsSourceSection { source, retests: findings_retests, repo: findings_repo, story_id: story_id.clone(), uow_refresh }
+                super::remediation::FindingsSourceSection { source, retests: findings_retests, repo: findings_repo, story_id: story_id.clone(), project_id: findings_project, uow_refresh }
             }
 
             // ── §8: Ship panel (§5.7) — per in-scope repo ───────────────────────

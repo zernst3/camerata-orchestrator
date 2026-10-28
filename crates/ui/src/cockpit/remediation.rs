@@ -111,6 +111,20 @@ pub(super) fn create_label(n: usize) -> String {
     }
 }
 
+/// The toast after creating: "Created 1 unit of work." or "Created 3 units of work." The unit
+/// list is the console's own and refreshes when the console is opened, so the toast says to open it.
+pub(super) fn created_text(n: usize) -> String {
+    let what = if n == 1 {
+        "1 unit of work".to_string()
+    } else {
+        format!("{n} units of work")
+    };
+    format!(
+        "Created {what}. Open the console to run {}.",
+        if n == 1 { "it" } else { "them" }
+    )
+}
+
 /// The status column: "new", or "already uow-N" for a unit the findings already belong to.
 pub(super) fn status_text(unit: &PlanUnitView) -> String {
     match (&unit.already_covered_label, &unit.already_covered_by) {
@@ -304,11 +318,10 @@ pub(super) fn RemediationPlanPanel(
                             spawn(async move {
                                 match create_units(&pid, &triage, tech_debt).await {
                                     Ok(done) => {
-                                        let n = done.created.len();
                                         crate::toast::push_toast(
                                             toasts,
                                             crate::toast::ToastKind::Info,
-                                            format!("Created {n} units of work. Open the console to run them."),
+                                            created_text(done.created.len()),
                                         );
                                         // The units exist now; the preview would call them all covered.
                                         plan.set(None);
@@ -345,7 +358,10 @@ pub(super) fn finding_status(fingerprint: &str, retests: &[RetestEvidenceView]) 
     let sha = short_sha(&latest.to_sha);
     let has = |list: &[String]| list.iter().any(|f| f == fingerprint);
     if has(&latest.still_open) {
-        format!("still present at {sha}")
+        match latest.moved.get(fingerprint) {
+            Some(path) => format!("still present at {sha}, moved to {path}"),
+            None => format!("still present at {sha}"),
+        }
     } else if has(&latest.resolved) {
         format!("gone at {sha}")
     } else if has(&latest.not_rechecked) {
@@ -364,13 +380,30 @@ pub(super) fn retest_line(r: &RetestEvidenceView) -> String {
         r.resolved.len(),
         r.still_open.len()
     );
+    if !r.moved.is_empty() {
+        line.push_str(&format!(" {} moved to another file.", r.moved.len()));
+    }
     if !r.not_rechecked.is_empty() {
         line.push_str(&format!(" {} not rechecked.", r.not_rechecked.len()));
+    }
+    if r.ai_incomplete {
+        line.push_str(" The AI review did not finish, so semantic findings were not rechecked.");
     }
     if r.rules_changed {
         line.push_str(" The rule selection changed since the inspection.");
     }
     line
+}
+
+/// The project a rescan runs against: the unit's own, else the active one.
+pub(super) fn rescan_project_id(
+    unit_project: Option<&str>,
+    active: Option<String>,
+) -> Option<String> {
+    unit_project
+        .filter(|p| !p.trim().is_empty())
+        .map(str::to_string)
+        .or(active)
 }
 
 /// The findings a unit closes, their retest status, the retest history and the rescan button.
@@ -380,6 +413,11 @@ pub(super) fn FindingsSourceSection(
     retests: Vec<RetestEvidenceView>,
     repo: String,
     story_id: String,
+    /// The project the unit belongs to (`UnitOfWork::project_id`). The rescan runs against it,
+    /// not against whichever project is active; a unit that records none falls back to the
+    /// active project.
+    #[props(default)]
+    project_id: Option<String>,
     mut uow_refresh: Signal<u32>,
 ) -> Element {
     let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
@@ -425,8 +463,10 @@ pub(super) fn FindingsSourceSection(
                     onclick: {
                         let repo = repo.clone();
                         let story_id = story_id.clone();
+                        let unit_project = project_id.clone();
                         move |_| {
-                            let Some(project_id) = project.read().clone().flatten().map(|p| p.id) else {
+                            let active = project.read().clone().flatten().map(|p| p.id);
+                            let Some(project_id) = rescan_project_id(unit_project.as_deref(), active) else {
                                 crate::toast::push_toast(
                                     toasts,
                                     crate::toast::ToastKind::Error,
@@ -451,9 +491,14 @@ pub(super) fn FindingsSourceSection(
                                             crate::toast::ToastKind::Info,
                                             format!("{header} started. This unit updates when it finishes."),
                                         );
-                                        // The retest runs as a job; poll the unit until its verdict lands.
-                                        for _ in 0..60 {
+                                        // The retest runs as a job; poll the unit until its verdict
+                                        // lands. The button is free again after the first look, so
+                                        // a long retest does not hold it.
+                                        for round in 0..60 {
                                             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                                            if round == 0 {
+                                                busy.set(false);
+                                            }
                                             let seen = super::uow::fetch_uow(&story_id)
                                                 .await
                                                 .map_or(0, |u| u.retests.len());
@@ -559,6 +604,58 @@ mod tests {
             }),
             "Delta retest at abc: 1 of 3 findings gone, 2 still present."
         );
+    }
+
+    #[test]
+    fn a_moved_or_unrechecked_finding_says_so() {
+        let mut moved = std::collections::BTreeMap::new();
+        moved.insert("fp-m".to_string(), "src/new.rs".to_string());
+        let latest = RetestEvidenceView {
+            to_sha: "2222222bbbb".into(),
+            still_open: vec!["fp-m".into()],
+            moved,
+            ai_incomplete: true,
+            not_rechecked: vec!["fp-s".into()],
+            ..RetestEvidenceView::default()
+        };
+        let all = [latest.clone()];
+        assert_eq!(
+            finding_status("fp-m", &all),
+            "still present at 2222222, moved to src/new.rs"
+        );
+        assert_eq!(
+            retest_line(&latest),
+            "Delta retest at 2222222: 0 of 2 findings gone, 1 still present. 1 moved to another file. 1 not rechecked. The AI review did not finish, so semantic findings were not rechecked."
+        );
+    }
+
+    #[test]
+    fn the_toast_after_creating_is_singular_for_one_unit() {
+        assert_eq!(
+            created_text(1),
+            "Created 1 unit of work. Open the console to run it."
+        );
+        assert_eq!(
+            created_text(3),
+            "Created 3 units of work. Open the console to run them."
+        );
+    }
+
+    #[test]
+    fn a_rescan_runs_against_the_units_own_project() {
+        assert_eq!(
+            rescan_project_id(Some("proj-unit"), Some("proj-active".into())).as_deref(),
+            Some("proj-unit")
+        );
+        assert_eq!(
+            rescan_project_id(None, Some("proj-active".into())).as_deref(),
+            Some("proj-active")
+        );
+        assert_eq!(
+            rescan_project_id(Some(" "), Some("proj-active".into())).as_deref(),
+            Some("proj-active")
+        );
+        assert_eq!(rescan_project_id(None, None), None);
     }
 
     #[test]
@@ -741,6 +838,7 @@ mod tests {
                     retests,
                     repo: "acme/api".to_string(),
                     story_id: "uow-1".to_string(),
+                    project_id: Some("proj-1".to_string()),
                     uow_refresh,
                 }
             }

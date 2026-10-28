@@ -412,6 +412,90 @@ async fn findings_a_shared_fix_group_absorbed_stay_on_the_unit() {
         rules.contains(&SQL) && rules.contains(&OTHER),
         "both findings stay traceable: {rules:?}"
     );
+    // The absorbed finding points at the one that stands for the group, and only it.
+    let primary = src
+        .findings
+        .iter()
+        .find(|f| f.merged_into.is_none())
+        .expect("a primary finding");
+    let absorbed: Vec<_> = src
+        .findings
+        .iter()
+        .filter(|f| f.merged_into.is_some())
+        .collect();
+    assert_eq!(absorbed.len(), 1, "{:?}", src.findings);
+    assert_eq!(
+        absorbed[0].merged_into.as_deref(),
+        Some(primary.key.as_str())
+    );
+    assert_eq!(
+        src.rules_fingerprint, "rules-1",
+        "the inspection's rule fingerprint"
+    );
+
+    // The PR body lists the absorbed finding under its primary and counts both.
+    let body = crate::remediation_plan::pr_body(src, &HashMap::new());
+    let lines: Vec<&str> = body.lines().collect();
+    let at = lines
+        .iter()
+        .position(|l| l.contains(&primary.fingerprint))
+        .expect("the primary row");
+    assert!(lines[at + 1].contains(&absorbed[0].fingerprint), "{body}");
+    assert!(
+        lines[at + 1].contains("merged into the row above"),
+        "{body}"
+    );
+    assert!(body.contains("\n2 findings."), "{body}");
+}
+
+#[tokio::test]
+async fn a_held_claim_refuses_a_create_and_a_released_one_lets_it_through() {
+    let findings = three_findings();
+    let (state, project_id, _) = seeded(&findings);
+    let app = router(state.clone());
+    let uri = format!("/api/projects/{project_id}/remediation/create");
+    let body = serde_json::json!({ "dispositions": confirmed(&findings) });
+    let claim = state
+        .source_ops
+        .try_begin(&project_id, "remediation:create")
+        .expect("the claim is free");
+    let (status, refused) = send(&app, &uri, body.clone()).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{refused}");
+    assert_eq!(refused["error"], "remediation_in_progress");
+    assert!(state.uow.list().is_empty());
+    drop(claim);
+    let (status, done) = send(&app, &uri, body.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{done}");
+    assert_eq!(done["created"].as_array().unwrap().len(), 2);
+    // The claim is released when the handler finishes, success or not.
+    let (status, _) = send(&app, &uri, body).await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_overlapping_creates_make_one_set_of_units() {
+    let findings = three_findings();
+    let (state, project_id, _) = seeded(&findings);
+    let app = router(state.clone());
+    let uri = format!("/api/projects/{project_id}/remediation/create");
+    let body = serde_json::json!({ "dispositions": confirmed(&findings) });
+    let calls: Vec<_> = (0..4)
+        .map(|_| {
+            let (app, uri, body) = (app.clone(), uri.clone(), body.clone());
+            tokio::spawn(async move { send(&app, &uri, body).await })
+        })
+        .collect();
+    let mut created = 0;
+    for call in calls {
+        let (status, json) = call.await.unwrap();
+        assert!(
+            status == StatusCode::OK || status == StatusCode::CONFLICT,
+            "{status}: {json}"
+        );
+        created += json["created"].as_array().map_or(0, Vec::len);
+    }
+    assert_eq!(created, 2, "one set, however the calls overlapped");
+    assert_eq!(state.uow.list().len(), 2);
 }
 
 #[tokio::test]
