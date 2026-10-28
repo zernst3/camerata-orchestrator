@@ -45,21 +45,21 @@ One branch per UoW (`camerata/<story_id>` fallback 2727), one PR per UoW with ca
 
 ## 6. Smallest live run that would prove it
 
-Fixture: `crates/server/tests/fixtures/e2e_report_repo` (Rust, 3 planted violations: SQL concat, AKIA secret, token-in-URL; not a git repo). Steps: copy to scratch, `git init` + commit, push to a throwaway GitHub repo `zernst/camerata-fixture`; `cargo build --release -p camerata-gateway`; `claude` CLI logged in; `CAMERATA_LIVE_BUILD=1`, `CAMERATA_GITHUB_TOKEN`; create project with that repo, `settings.repo_paths` override to the clone, L3 enabled; open issue #1 "remove the hardcoded AWS key in config.rs"; pull, create UoW, begin investigation, add one approved decision, approve, **`POST /api/uow/zernst%2Fcamerata-fixture%231/branch {"branch":"camerata/fix-1"}` via curl (the UI cannot)**, run with tier_map, open PR, merge by hand, sign off.
+Fixture: `crates/server/tests/fixtures/e2e_report_repo` (Rust, 3 planted violations: SQL concat, AKIA secret, token-in-URL; not a git repo). Steps: copy to scratch, `git init` + commit, push to a throwaway GitHub repo `zernst/camerata-fixture`; `cargo build --release -p camerata-gateway`; `claude` CLI logged in; `CAMERATA_LIVE_BUILD=1`, `CAMERATA_GITHUB_TOKEN`; create project with that repo, `settings.repo_paths` override to the clone, L3 enabled; open issue #1 "remove the hardcoded AWS key in config.rs"; pull, create UoW, begin investigation, add one approved decision, approve, **`POST /api/uow/zernst%2Fcamerata-fixture%231/branch {"branch":"camerata/fix-1"}` via curl (the UI cannot)** (fixed 2026-10-28: Begin Development records it from the Intake scope), run with tier_map, open PR, merge by hand, sign off.
 
-Expect to break: (a) without the curl, greenfield scaffold runs instead of editing the fixture; (b) the agent's L1 subset is the Rust/agentic corpus slice, so a non-Rust client repo gets Rust rules; (c) L2 `cargo clippy/test` on the fixture may fail "could-not-run" (bootstrap toggle exists, cockpit.rs:1484); (d) L3 bounce with `max_iterations = 1` fails the run rather than iterating; (e) path params carrying `/` and `#` need percent-encoding in every client, verify axum matching; (f) Opus cost and stall thresholds (120 s watched) on a slow first run.
+Expect to break: (a) without the curl, greenfield scaffold runs instead of editing the fixture (fixed 2026-10-28: such a run is now refused with the reason); (b) the agent's L1 subset is the Rust/agentic corpus slice, so a non-Rust client repo gets Rust rules; (c) L2 `cargo clippy/test` on the fixture may fail "could-not-run" (bootstrap toggle exists, cockpit.rs:1484); (d) L3 bounce with `max_iterations = 1` fails the run rather than iterating; (e) path params carrying `/` and `#` need percent-encoding in every client, verify axum matching; (f) Opus cost and stall thresholds (120 s watched) on a slow first run.
 
 ## 7. Ranked gaps
 
-| # | Gap | Size | Files |
-|---|---|---|---|
-| 1 | UI never sets `uow.branch`; single-repo runs fall to greenfield | S | lib.rs 2693-2735, 13970; ui/cockpit/uow.rs intake scope |
-| 2 | Agent L1 rule subset is compile-time corpus + fixed domains, not the project's selected rules | M | fleet/lib.rs:36,88; rules/lib.rs:1586; dev_implement_run.rs:1169 |
-| 3 | No orchestrator/builder/reviewer loop in brownfield; strongest model implements directly, no delegate | L | dev_implement_run.rs:1211,1238; live_fleet.rs; gateway/delegate.rs |
-| 4 | Reviewer not adversarial by contract: opt-in, balanced default, PASS/BOUNCE, advisory on error | M | review_agent.rs:35-135,371; api-types/project.rs:97 |
-| 5 | GitHub-shaped UoW identity and token-gated push/PR (2b) | L | workitems.rs; lib.rs 15354 + sites above; worktracker Provider::Native |
-| 6 | No findings -> UoW handoff, no delta-retest evidence on UoW (2c) | L | lib.rs 7595, 6960; uow.rs; new endpoint |
-| 7 | Per-rule grouping, split, ordering, traceable PR body (2d) | M | new planner; vcs_choke compliant_machine_pr |
-| 8 | No merge step, no decision log, no parallel cap or resource guards | M | lib.rs run start; pr.rs; new |
-| 9 | Investigation emits prose only; decisions are hand-typed | S | investigation_run.rs; ui/cockpit/uow.rs:7098 |
-| 10 | Live-run proof of the console flow does not exist (LIVE_RUN_VERIFICATION covers the gate only) | S | docs/LIVE_RUN_VERIFICATION.md; run of section 6 |
+| # | Gap | Size | Files | Status |
+|---|---|---|---|---|
+| 1 | UI never sets `uow.branch`; single-repo runs fall to greenfield | S | lib.rs 2693-2735, 13970; ui/cockpit/uow.rs intake scope | FIXED 2026-10-28 (`cloud/console-gaps`). Begin Development (and the bug-fix re-run) now calls `POST /api/uow/:id/branch` with the branch derived from the Intake repo scope when none is set (`ui/cockpit/uow.rs` `ensure_run_branch`; derivation shared with the server as `api-types` `BranchMode::branch_for_story`). The server decides the target in `server/src/run_target.rs`: a unit that should work in a repository but has no branch, no local clone, or an issue repo outside its scope is refused with the reason (409 on `POST /api/stories/:id/run`, a failed run for direct callers); greenfield only for a project with no repositories, announced in the run events. Also covers multi-repo when the issue repo is in scope. Correction: `uow.branch` had a second writer, `orchestrator_message.rs` (~345). |
+| 2 | Agent L1 rule subset is compile-time corpus + fixed domains, not the project's selected rules | M | fleet/lib.rs:36,88; rules/lib.rs:1586; dev_implement_run.rs:1169 | Open |
+| 3 | No orchestrator/builder/reviewer loop in brownfield; strongest model implements directly, no delegate | L | dev_implement_run.rs:1211,1238; live_fleet.rs; gateway/delegate.rs | Open |
+| 4 | Reviewer not adversarial by contract: opt-in, balanced default, PASS/BOUNCE, advisory on error | M | review_agent.rs:35-135,371; api-types/project.rs:97 | Open |
+| 5 | GitHub-shaped UoW identity and token-gated push/PR (2b) | L | workitems.rs; lib.rs 15354 + sites above; worktracker Provider::Native | Open |
+| 6 | No findings -> UoW handoff, no delta-retest evidence on UoW (2c) | L | lib.rs 7595, 6960; uow.rs; new endpoint | Open |
+| 7 | Per-rule grouping, split, ordering, traceable PR body (2d) | M | new planner; vcs_choke compliant_machine_pr | Open |
+| 8 | No merge step, no decision log, no parallel cap or resource guards | M | lib.rs run start; pr.rs; new | Open |
+| 9 | Investigation emits prose only; decisions are hand-typed | S | investigation_run.rs; ui/cockpit/uow.rs:7098 | Open |
+| 10 | Live-run proof of the console flow does not exist (LIVE_RUN_VERIFICATION covers the gate only) | S | docs/LIVE_RUN_VERIFICATION.md; run of section 6 | Open |

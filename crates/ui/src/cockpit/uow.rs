@@ -1008,6 +1008,130 @@ pub(super) async fn fetch_uow(story_id: &str) -> Option<UowView> {
     .ok()
 }
 
+/// The branch a development run works on for this unit, derived from its Intake Repos in
+/// scope: the branch mode of the single in-scope repo or, with several, of the repo named in
+/// the unit's id (`OWNER/REPO#N`, the repo a run works in). `None` when no such repo is in
+/// scope. Uses the shared [`camerata_api_types::uow::BranchMode::branch_for_story`], so the
+/// branch matches the one the server derives for that repo's worktree.
+pub(super) fn run_branch_from_scope(story_id: &str, repos: &[RepoScopeView]) -> Option<String> {
+    let entry = match repos {
+        [only] => only,
+        many => {
+            let (repo, _) = story_id.rsplit_once('#')?;
+            many.iter().find(|r| r.repo == repo)?
+        }
+    };
+    // A malformed mode reads as the default (new branch from base), exactly as the server's
+    // `#[serde(default)]` does.
+    let mode: camerata_api_types::uow::BranchMode =
+        serde_json::from_value(entry.branch.clone()).unwrap_or_default();
+    Some(mode.branch_for_story(story_id))
+}
+
+/// `POST /api/uow/:story_id/branch` body `{ branch }`: record the unit's branch. Returns
+/// `true` on a 2xx.
+pub(super) async fn set_uow_branch(story_id: &str, branch: &str) -> bool {
+    reqwest::Client::new()
+        .post(format!(
+            "{}/api/uow/{}/branch",
+            crate::bff_base(),
+            enc_seg(story_id)
+        ))
+        .json(&serde_json::json!({ "branch": branch }))
+        .send()
+        .await
+        .map(|r| r.status().is_success())
+        .unwrap_or(false)
+}
+
+/// Before a development run starts: record the unit's branch from its Intake Repos in scope
+/// when none is set yet, so the run works in the unit's real repository. Without a branch the
+/// server has no repository to work in. An already-set branch is kept (later runs continue on
+/// the branch earlier runs committed to). Best-effort: when no repo is in scope or a call
+/// fails, the run start goes ahead and the server refuses it with the reason, which the
+/// console shows.
+pub(super) async fn ensure_run_branch(story_id: &str) {
+    let Some(uow) = fetch_uow(story_id).await else {
+        return;
+    };
+    if uow.branch.as_deref().is_some_and(|b| !b.trim().is_empty()) {
+        return;
+    }
+    if let Some(branch) = run_branch_from_scope(story_id, &uow.intake.repos) {
+        let _ = set_uow_branch(story_id, &branch).await;
+    }
+}
+
+#[cfg(test)]
+mod run_branch_tests {
+    use super::{run_branch_from_scope, RepoScopeView};
+
+    fn scope(repo: &str, branch: serde_json::Value) -> RepoScopeView {
+        RepoScopeView {
+            repo: repo.to_string(),
+            branch,
+        }
+    }
+
+    #[test]
+    fn a_single_new_from_base_repo_works_on_the_story_branch() {
+        let repos = [scope(
+            "acme/api",
+            serde_json::json!({ "mode": "new_from_base", "base": "main", "new_name": "" }),
+        )];
+        assert_eq!(
+            run_branch_from_scope("acme/api#7", &repos).as_deref(),
+            Some("camerata/acme/api#7")
+        );
+    }
+
+    #[test]
+    fn a_single_existing_branch_repo_works_on_that_branch() {
+        let repos = [scope(
+            "acme/api",
+            serde_json::json!({ "mode": "existing", "branch_name": "feature/x" }),
+        )];
+        assert_eq!(
+            run_branch_from_scope("acme/api#7", &repos).as_deref(),
+            Some("feature/x")
+        );
+    }
+
+    #[test]
+    fn with_several_repos_the_issue_repo_decides_and_a_missing_one_gives_none() {
+        let repos = [
+            scope(
+                "acme/web",
+                serde_json::json!({ "mode": "existing", "branch_name": "web-branch" }),
+            ),
+            scope(
+                "acme/api",
+                serde_json::json!({ "mode": "existing", "branch_name": "api-branch" }),
+            ),
+        ];
+        assert_eq!(
+            run_branch_from_scope("acme/api#7", &repos).as_deref(),
+            Some("api-branch")
+        );
+        assert_eq!(run_branch_from_scope("acme/other#7", &repos), None);
+        assert_eq!(run_branch_from_scope("draft-1", &repos), None);
+    }
+
+    #[test]
+    fn no_repo_in_scope_gives_none() {
+        assert_eq!(run_branch_from_scope("acme/api#7", &[]), None);
+    }
+
+    #[test]
+    fn a_malformed_mode_reads_as_the_default_new_branch() {
+        let repos = [scope("acme/api", serde_json::json!("bogus"))];
+        assert_eq!(
+            run_branch_from_scope("acme/api#7", &repos).as_deref(),
+            Some("camerata/acme/api#7")
+        );
+    }
+}
+
 /// POST a new dev-status for a story's UoW. Returns `Some(())` on a 2xx. The server
 /// responds with the full `UnitOfWork` (not the UI's `UowView`), so we DO NOT try to
 /// deserialize the body — the caller just bumps the refresh tick and re-fetches the UoW.

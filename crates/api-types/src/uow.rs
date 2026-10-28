@@ -243,6 +243,21 @@ impl Default for BranchMode {
     }
 }
 
+impl BranchMode {
+    /// The branch the unit of work `story_id` works on in this repo: the named existing
+    /// branch, the requested new branch name, or `camerata/<story_id>` when neither is
+    /// given. The ONE derivation shared by the server's multi-repo worktree setup and the
+    /// console's run start (which records it as the unit's branch), so the two can never
+    /// pick different branches for the same repo.
+    pub fn branch_for_story(&self, story_id: &str) -> String {
+        match self {
+            Self::Existing { branch_name } if !branch_name.trim().is_empty() => branch_name.clone(),
+            Self::NewFromBase { new_name, .. } if !new_name.trim().is_empty() => new_name.clone(),
+            _ => format!("camerata/{story_id}"),
+        }
+    }
+}
+
 /// One in-scope repo for a story, with its branch mode (R6). Out-of-scope repos are not
 /// mounted into the agents' read grounding — this set is the token-cost / correctness
 /// control the orchestrator's fan-out is bounded to (fleet doc R6).
@@ -426,6 +441,28 @@ mod tests {
         assert_eq!(new["mode"], "new_from_base");
         assert_eq!(new["base"], "main");
         assert_eq!(new["new_name"], "n");
+    }
+
+    #[test]
+    fn branch_for_story_uses_the_named_branch_or_falls_back_to_the_story_slug() {
+        let existing = BranchMode::Existing {
+            branch_name: "feature/x".into(),
+        };
+        assert_eq!(existing.branch_for_story("acme/api#7"), "feature/x");
+        let new = BranchMode::NewFromBase {
+            base: "main".into(),
+            new_name: "camerata/fix-7".into(),
+        };
+        assert_eq!(new.branch_for_story("acme/api#7"), "camerata/fix-7");
+        // Blank names (the console sends `new_name: ""`) fall back to the story slug.
+        for blank in [
+            BranchMode::Existing {
+                branch_name: "  ".into(),
+            },
+            BranchMode::default(),
+        ] {
+            assert_eq!(blank.branch_for_story("acme/api#7"), "camerata/acme/api#7");
+        }
     }
 
     #[test]
