@@ -47,6 +47,8 @@ use std::time::Duration;
 use crate::onboard::{CoverageNote, Finding};
 use crate::tool_provisioning;
 
+mod manifests;
+
 /// When this environment variable is set (to any non-empty value), `run_dep_audit`
 /// and `run_dep_audit_with_tooling` return immediately with an empty findings list
 /// and no coverage note — skipping ALL provisioning and network activity.
@@ -84,6 +86,10 @@ const NO_LOCKFILES: &str = "found no lockfiles";
 /// no lockfile sits beside or above them (M12).
 pub const MANIFESTS_UNAUDITED: &str = "Dependency manifests not audited";
 
+/// The phrase that opens the coverage sentence quoting osv-scanner's own stderr about files it
+/// could not read (M12).
+pub const UNREAD_FILES: &str = "Dependency files not read";
+
 /// The `Finding::captures` key every dependency row carries: the advisory id (for example
 /// `GHSA-...` or `RUSTSEC-...`). Two advisories on one package version share a snippet, path
 /// and line, so the finding key needs this to tell them apart (M9).
@@ -93,7 +99,9 @@ pub const ADVISORY_CAPTURE: &str = "advisory";
 /// ran and listed manifests it could not audit); false for every "did not run" outcome
 /// (provisioning, spawn, timeout, parse).
 pub fn note_means_scanned(note: &CoverageNote) -> bool {
-    note.message.contains(NO_LOCKFILES) || note.message.contains(MANIFESTS_UNAUDITED)
+    note.message.contains(NO_LOCKFILES)
+        || note.message.contains(MANIFESTS_UNAUDITED)
+        || note.message.contains(UNREAD_FILES)
 }
 
 /// True when a dep-audit coverage note leaves nothing unchecked, so "no known vulnerable
@@ -101,7 +109,9 @@ pub fn note_means_scanned(note: &CoverageNote) -> bool {
 /// there were no manifests left unaudited either. A note that says the audit did not run, or that
 /// manifests were left out, is not clean (M11).
 pub fn note_proves_clean(note: &CoverageNote) -> bool {
-    note.message.contains(NO_LOCKFILES) && !note.message.contains(MANIFESTS_UNAUDITED)
+    note.message.contains(NO_LOCKFILES)
+        && !note.message.contains(MANIFESTS_UNAUDITED)
+        && !note.message.contains(UNREAD_FILES)
 }
 
 // ─── JSON parser (pure, unit-tested) ─────────────────────────────────────────
@@ -753,10 +763,16 @@ async fn run_dep_audit_with_tooling(
             || stderr.to_ascii_lowercase().contains("no lockfiles")
             || stderr.to_ascii_lowercase().contains("no packages")
         {
-            format!(
+            let base = format!(
                 "dependency audit (osv-scanner) {NO_LOCKFILES} in {repo}; \
                  no dependency exposure detected (or no supported lockfile present)"
-            )
+            );
+            // M12: no lockfile anywhere does not mean no dependencies. Name the manifests
+            // that declare packages nobody checked.
+            match unaudited_manifest_sentence(repo_dir).await {
+                Some(gap) => format!("{base}. {gap}"),
+                None => base,
+            }
         } else if !exit_ok {
             format!(
                 "dependency audit (osv-scanner) did not run: \
@@ -764,7 +780,11 @@ async fn run_dep_audit_with_tooling(
             )
         } else {
             // Exit OK but empty stdout — treat as no lockfiles.
-            format!("dependency audit (osv-scanner) {NO_LOCKFILES} in {repo}")
+            let base = format!("dependency audit (osv-scanner) {NO_LOCKFILES} in {repo}");
+            match unaudited_manifest_sentence(repo_dir).await {
+                Some(gap) => format!("{base}. {gap}"),
+                None => base,
+            }
         };
 
         return (
@@ -778,7 +798,21 @@ async fn run_dep_audit_with_tooling(
 
     // Parse the JSON output.
     match parse_osv_json(repo, repo_dir, &stdout) {
-        Ok(findings) => (findings, None),
+        Ok(findings) => {
+            // M12: a successful run used to say nothing about what it left out: manifests no
+            // lockfile covers, and files osv-scanner reported on stderr that it could not read.
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let message = manifests::success_gap_message(
+                unaudited_manifest_sentence(repo_dir).await,
+                &stderr,
+                repo_dir,
+            );
+            let note = message.map(|message| CoverageNote {
+                tool: TOOL_NAME.to_string(),
+                message,
+            });
+            (findings, note)
+        }
         Err(e) => (
             Vec::new(),
             Some(CoverageNote {
@@ -789,9 +823,21 @@ async fn run_dep_audit_with_tooling(
     }
 }
 
+/// The sentence naming the dependency manifests under `repo_dir` that no lockfile covers, or
+/// `None` when every manifest is covered (or the walk could not run).
+async fn unaudited_manifest_sentence(repo_dir: &Path) -> Option<String> {
+    let dir = repo_dir.to_path_buf();
+    let found = tokio::task::spawn_blocking(move || manifests::unaudited_manifests(&dir))
+        .await
+        .ok()?;
+    manifests::manifests_sentence(&found)
+}
+
 /// Run osv-scanner on `repo_dir` and return `(findings, coverage_note)`.
 ///
-/// On success: returns a possibly-empty `Vec<Finding>` and `None` for the note.
+/// On success: returns a possibly-empty `Vec<Finding>` and `None` for the note, unless the run
+/// left something unchecked (manifests no lockfile covers, files osv-scanner could not read), in
+/// which case the note says so (M12).
 /// On any failure (provisioning, subprocess, parse): returns `Vec::new()` and
 /// `Some(CoverageNote)` describing why dep-audit did not run.  The scan continues
 /// either way.
