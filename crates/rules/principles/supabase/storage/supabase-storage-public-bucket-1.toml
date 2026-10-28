@@ -1,5 +1,5 @@
 id = "SUPABASE-STORAGE-PUBLIC-BUCKET-1"
-version = 1
+version = 2
 title = "A storage bucket created public bypasses auth/RLS for object retrieval; every public bucket is named and reviewed"
 domain = "supabase:storage"
 layer = "platform"
@@ -23,11 +23,11 @@ qualifies = "Enforced by a scan for bucket-publicness declarations: `insert into
 
 [[sources]]
 url = "https://supabase.com/docs/guides/storage/buckets/fundamentals"
-title = "Supabase docs — Storage bucket fundamentals: a public bucket bypasses access control for retrieving/serving files"
+title = "Supabase docs: Storage bucket fundamentals: a public bucket bypasses access control for retrieving/serving files"
 
 [[sources]]
 url = "https://supabase.com/docs/guides/storage/security/access-control"
-title = "Supabase docs — Storage access control (RLS on storage.objects; public buckets skip it for reads)"
+title = "Supabase docs: Storage access control (RLS on storage.objects; public buckets skip it for reads)"
 
 [[sources]]
 url = "https://cwe.mitre.org/data/definitions/732.html"
@@ -58,15 +58,15 @@ certainty the scanner does not have — `needs_review`, not an automatic critica
 id = "flag-public-buckets-needs-review"
 label = "Every bucket marked public holds only content meant to be downloadable by anyone with the link"
 directive = """
-Marking a bucket public — `public = true` in a `storage.buckets` insert or update, or
-`createBucket(name, { public: true })` — bypasses access control for retrieving and serving its
+Marking a bucket public (`public = true` in a `storage.buckets` insert or update, or
+`createBucket(name, { public: true })`) bypasses access control for retrieving and serving its
 files. Every object inside becomes downloadable by anyone who has or can guess its URL: no signed
 URL, no auth header, and no RLS evaluation on that read path, whatever policies exist on
 `storage.objects` (those still gate upload, delete and move, but not public reads).
 
 So publicness is a per-bucket decision about contents, made deliberately. Avatars, product photos
 and marketing assets are genuinely public and belong in a public bucket. Anything a user would
-expect to be theirs — documents, invoices, uploads — goes in a private bucket with owner-scoped
+expect to be theirs (documents, invoices, uploads) goes in a private bucket with owner-scoped
 policies for the operations the app actually performs, and is served through signed URLs. A bucket
 whose name says `avatars` but holds user documents is private; the contents decide, not the name.
 """

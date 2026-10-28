@@ -1,5 +1,5 @@
 id = "GO-NO-GOROUTINE-GLOBALS-1"
-version = 1
+version = 2
 title = "Goroutine-unsafe state is never stored in global or package-level variables; mutable state is thread-local or guarded by locks"
 domain = "go"
 layer = "language"
@@ -17,7 +17,7 @@ title = "Go Data Race Detector"
 
 [[sources]]
 url = "https://go.dev/doc/effective_go#goroutines"
-title = "Effective Go — Goroutines"
+title = "Effective Go: Goroutines"
 
 [decision]
 question = "Where are goroutine-unsafe mutable values stored?"

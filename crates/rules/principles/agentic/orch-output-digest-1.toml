@@ -1,6 +1,6 @@
 id = "ORCH-OUTPUT-DIGEST-1"
-version = 2
-title = "Output discipline — local-mostly + a single consolidated digest"
+version = 3
+title = "Output discipline: local-mostly + a single consolidated digest"
 domain = "agentic"
 layer = "universal"
 enforcement = "prose"
@@ -11,11 +11,11 @@ verification = "grounded"
 
 [[sources]]
 url = "AGENTS.md"
-title = "AGENTS.md — ORCH-OUTPUT-DIGEST-1 (output discipline — local-mostly + single consolidated digest)"
+title = "AGENTS.md: ORCH-OUTPUT-DIGEST-1 (output discipline: local-mostly + single consolidated digest)"
 
 [[sources]]
 url = "https://sre.google/sre-book/monitoring-distributed-systems/"
-title = "Google SRE Book — Monitoring Distributed Systems (alert on symptoms, keep noise out of paging channels)"
+title = "Google SRE Book: Monitoring Distributed Systems (alert on symptoms, keep noise out of paging channels)"
 
 [decision]
 question = "How should routines report their output?"

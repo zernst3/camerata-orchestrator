@@ -646,8 +646,8 @@ role.
   - `Policy` was ADDED to the auto-recommended set in Pass-1 W4 (finding A8): provenance
     ("this encodes a project decision, no external authority") is not a statement about
     whether the rule is worth running; excluding it silently disarmed 17 shipped rules on
-    every repo, including `SPIRIT-FILE-SIZE-1` (`lib.rs:1258-1269`). 21 corpus rules carry
-    `policy` and all 21 arm.
+    every repo, including `SPIRIT-FILE-SIZE-1` (`lib.rs:1258-1269`). 25 corpus rules carry
+    `policy` and all 25 arm.
   - **The source comment describing `Policy` was itself wrong until W17, and believing it did
     real damage.** `Verification::Policy`'s doc comment (`lib.rs:399-421`) used to read "kept
     out of the armed ruleset like `draft`, but labeled honestly rather than as `grounded`" -

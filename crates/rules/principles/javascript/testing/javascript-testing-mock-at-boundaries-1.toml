@@ -1,5 +1,5 @@
 id = "JAVASCRIPT-TESTING-MOCK-AT-BOUNDARIES-1"
-version = 2
+version = 3
 title = "Mocks replace external system boundaries (network, DB, clock); own domain logic is tested through real implementations"
 domain = "javascript:testing"
 layer = "language"
@@ -12,15 +12,15 @@ verification = "grounded"
 
 [[sources]]
 url = "https://jestjs.io/docs/mock-functions"
-title = "Jest — Mock Functions documentation"
+title = "Jest: Mock Functions documentation"
 
 [[sources]]
 url = "https://testing-library.com/docs/guiding-principles/"
-title = "Testing Library — Guiding Principles"
+title = "Testing Library: Guiding Principles"
 
 [[sources]]
 url = "https://github.com/jest-community/eslint-plugin-jest/blob/main/README.md"
-title = "eslint-plugin-jest — prefer-spy-on rule"
+title = "eslint-plugin-jest: prefer-spy-on rule"
 linter = "jest: prefer-spy-on"
 
 [decision]
@@ -31,7 +31,7 @@ why = "Mocking is appropriate where real execution is either impossible (a third
 [[option]]
 id = "mocks-replace-external-boundaries-not-own-domain-logic"
 label = "Mocks replace external system boundaries (network, DB, clock); own domain logic is tested through real implementations"
-directive = "jest.mock() or jest.fn() is used to replace modules and functions that represent an external boundary the test cannot own: network clients (axios, fetch, node:http), database drivers (Prisma client, pg, knex), file system operations (node:fs when I/O is not the SUT), message queues, and time (jest.useFakeTimers for Date / setTimeout). Own domain code — services, repositories, utilities, validators — is exercised through real call chains so the test validates actual behaviour. A mock of a domain function is a code smell and requires an explicit justification in a comment."
+directive = "jest.mock() or jest.fn() is used to replace modules and functions that represent an external boundary the test cannot own: network clients (axios, fetch, node:http), database drivers (Prisma client, pg, knex), file system operations (node:fs when I/O is not the SUT), message queues, and time (jest.useFakeTimers for Date / setTimeout). Own domain code (services, repositories, utilities, validators) is exercised through real call chains so the test validates actual behaviour. A mock of a domain function is a code smell and requires an explicit justification in a comment."
 remediation = """
 Remove the mock on the own-domain dependency and let the test exercise the real implementation, reserving jest.mock()/jest.fn() for genuine external boundaries (network clients, database drivers, the clock). Verify by confirming the test still passes when only the true I/O boundary is mocked and the rest of the call chain runs for real.
 """

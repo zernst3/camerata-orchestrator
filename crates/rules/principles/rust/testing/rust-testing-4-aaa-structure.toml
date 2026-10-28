@@ -1,6 +1,6 @@
 id = "RUST-TESTING-4"
-version = 2
-title = "Test bodies follow Arrange-Act-Assert (AAA): setup, execute, then assert — in that order"
+version = 3
+title = "Test bodies follow Arrange-Act-Assert (AAA): setup, execute, then assert, in that order"
 domain = "rust:testing"
 layer = "language"
 enforcement = "prose"
@@ -11,11 +11,11 @@ verification = "grounded"
 
 [[sources]]
 url = "https://doc.rust-lang.org/book/ch11-01-writing-tests.html"
-title = "The Rust Book — Ch 11.1: Writing Tests (three-phase test body: set up, run, assert)"
+title = "The Rust Book: Ch 11.1: Writing Tests (three-phase test body: set up, run, assert)"
 
 [[sources]]
 url = "https://doc.rust-lang.org/rust-by-example/testing/unit_testing.html"
-title = "Rust By Example — Unit Testing (setup / execute / assert pattern)"
+title = "Rust By Example: Unit Testing (setup / execute / assert pattern)"
 
 [decision]
 question = "How is the body of a test structured?"

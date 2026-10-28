@@ -1,5 +1,5 @@
 id = "GO-GORM-NO-N-PLUS-ONE-1"
-version = 1
+version = 2
 title = "Related data is loaded with Preload or Join in a single query; no N+1 patterns where a loop fetches related records one-by-one"
 domain = "go:gorm"
 layer = "library"
@@ -11,7 +11,7 @@ verification = "grounded"
 
 [[sources]]
 url = "https://gorm.io/docs/preload.html"
-title = "GORM — Preloading (Eager Loading)"
+title = "GORM: Preloading (Eager Loading)"
 
 [decision]
 question = "How should related records (foreign keys, associations) be loaded from the database?"

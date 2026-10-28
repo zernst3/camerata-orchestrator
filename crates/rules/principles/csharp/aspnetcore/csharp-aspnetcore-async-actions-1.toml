@@ -1,5 +1,5 @@
 id = "CSHARP-ASPNETCORE-ASYNC-ACTIONS-1"
-version = 1
+version = 2
 title = "All I/O-bound controller actions and endpoint handlers are async; no sync-over-async blocking"
 domain = "csharp:aspnetcore"
 layer = "framework"
@@ -47,7 +47,7 @@ why = "async void removes the caller's ability to await completion or observe ex
 
 [[sources]]
 url = "https://learn.microsoft.com/en-us/aspnet/core/fundamentals/best-practices?view=aspnetcore-10.0"
-title = "ASP.NET Core Best Practices — Avoid blocking calls | Microsoft Learn"
+title = "ASP.NET Core Best Practices: Avoid blocking calls | Microsoft Learn"
 
 [[sources]]
 url = "https://www.nuget.org/packages/AsyncFixer"

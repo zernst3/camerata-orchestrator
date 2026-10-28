@@ -1,5 +1,5 @@
 id = "RUBY-TESTING-INTEGRATION-LOCATION-1"
-version = 1
+version = 2
 title = "Integration and system tests live in spec/requests/ (API flows) and spec/system/ (browser flows), not spec/controllers/"
 domain = "ruby:testing"
 layer = "language"
@@ -31,12 +31,12 @@ why = "Faster isolation but tests an artificial boundary; the RSpec core team di
 
 [[sources]]
 url = "https://rspec.info/features/6-0/rspec-rails/directory-structure/"
-title = "RSpec Rails — Directory Structure"
+title = "RSpec Rails: Directory Structure"
 
 [[sources]]
 url = "https://www.codewithjason.com/difference-system-specs-feature-specs/"
-title = "The difference between system specs and feature specs — Code with Jason"
+title = "The difference between system specs and feature specs: Code with Jason"
 
 [[sources]]
 url = "https://guides.rubyonrails.org/testing.html"
-title = "Rails Guides — Testing Rails Applications (integration + system directories)"
+title = "Rails Guides: Testing Rails Applications (integration + system directories)"

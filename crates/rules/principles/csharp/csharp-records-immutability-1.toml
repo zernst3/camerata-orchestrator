@@ -1,5 +1,5 @@
 id = "CSHARP-RECORDS-IMMUTABILITY-1"
-version = 1
+version = 2
 title = "Data transfer objects and value types use records (C# 9+) or immutable classes; mutable classes are avoided outside of domain entities"
 domain = "csharp"
 layer = "language"
@@ -38,4 +38,4 @@ why = "Correct but more verbose than records. Necessary for older C# versions (p
 
 [[sources]]
 url = "https://learn.microsoft.com/en-us/dotnet/csharp/fundamentals/types/records"
-title = "C# record types — Microsoft Learn"
+title = "C# record types: Microsoft Learn"

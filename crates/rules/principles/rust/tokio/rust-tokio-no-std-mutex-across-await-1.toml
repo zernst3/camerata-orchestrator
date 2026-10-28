@@ -1,5 +1,5 @@
 id = "RUST-TOKIO-NO-STD-MUTEX-ACROSS-AWAIT-1"
-version = 2
+version = 3
 title = "Do not hold a std::sync::Mutex lock across await points; use tokio::sync::Mutex"
 domain = "rust:tokio"
 layer = "framework"
@@ -32,8 +32,8 @@ why = "When a task holds a std::sync::Mutex lock across an await, it keeps the l
 
 [[sources]]
 url = "https://docs.rs/tokio/latest/tokio/sync/struct.Mutex.html"
-title = "tokio::sync::Mutex — Async mutex for holding locks across await points"
+title = "tokio::sync::Mutex: Async mutex for holding locks across await points"
 
 [[sources]]
 url = "https://tokio.rs/tokio/tutorial/shared-state"
-title = "Tokio tutorial: Shared State — Mutex usage across await points"
+title = "Tokio tutorial: Shared State: Mutex usage across await points"

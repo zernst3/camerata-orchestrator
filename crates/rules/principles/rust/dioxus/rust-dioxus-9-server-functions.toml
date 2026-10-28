@@ -1,5 +1,5 @@
 id = "RUST-DIOXUS-9"
-version = 2
+version = 3
 title = "Server-to-client calls: framework server functions or a REST API"
 domain = "rust:dioxus"
 layer = "framework"
@@ -16,7 +16,7 @@ why = "Both are legitimate, widely-used ways for a Dioxus UI to reach its server
 [[option]]
 id = "server-to-client-calls-use-server-functions-not"
 label = "The UI calls the server through framework server functions"
-directive = "When the UI needs data or actions from the server, the framework's server-function macro (`#[server]`) is used to declare them. The macro generates the client-side call (over the wire, serialized) and the server-side handler from a single function definition; the body runs server-side and may call the application's service layer directly. Within this choice the UI does not also maintain a separate REST/RPC client for the same operations — the server function is the single source of truth per operation. When a function needs to reach a third party (payment provider, email gateway, external API), that call lives in the server-side body of a server function, never in client-side code."
+directive = "When the UI needs data or actions from the server, the framework's server-function macro (`#[server]`) is used to declare them. The macro generates the client-side call (over the wire, serialized) and the server-side handler from a single function definition; the body runs server-side and may call the application's service layer directly. Within this choice the UI does not also maintain a separate REST/RPC client for the same operations: the server function is the single source of truth per operation. When a function needs to reach a third party (payment provider, email gateway, external API), that call lives in the server-side body of a server function, never in client-side code."
 remediation = """
 Replace the hand-rolled REST call, the typed RPC layer, or the graph-query fetch with a function declared using the framework's #[server] macro, so the client-side call and server-side handler are generated from a single function definition. Verify by confirming the UI calls the server through the generated server-function client, not a separate HTTP client or RPC stub.
 """
@@ -25,7 +25,7 @@ why = "Keeps one source of truth per operation: a single function definition gen
 [[option]]
 id = "server-to-client-calls-go-through-a-hand-rolled"
 label = "The server exposes a REST API the UI consumes through an HTTP client"
-directive = "The server exposes versioned REST endpoints, and the UI calls them through an HTTP client — preferably a typed or OpenAPI-generated client so call sites stay type-checked. The server is treated as an independent boundary: its API is documented and stable enough to serve other consumers (mobile apps, third-party integrations, other services), and it can be versioned and deployed on a cadence independent of the front end. Standard HTTP semantics — caching, status codes, auth middleware, gateways, observability — apply uniformly across every consumer."
+directive = "The server exposes versioned REST endpoints, and the UI calls them through an HTTP client, preferably a typed or OpenAPI-generated client so call sites stay type-checked. The server is treated as an independent boundary: its API is documented and stable enough to serve other consumers (mobile apps, third-party integrations, other services), and it can be versioned and deployed on a cadence independent of the front end. Standard HTTP semantics (caching, status codes, auth middleware, gateways, observability) apply uniformly across every consumer."
 remediation = """
 Replace the framework server function (or RPC/graph-query call) with a versioned REST endpoint on the server, and have the UI call it through a typed or OpenAPI-generated HTTP client instead. Verify by confirming the endpoint is independently documented and callable by a consumer other than this UI, such as a mobile app or API client.
 """
@@ -51,8 +51,8 @@ why = "Premature complexity for the common case: the project's data graph rarely
 
 [[sources]]
 url = "https://dioxuslabs.com/learn/0.6/guides/fullstack/server_functions"
-title = "Dioxus fullstack: Server Functions — #[server] macro generates client/server from one definition"
+title = "Dioxus fullstack: Server Functions: #[server] macro generates client/server from one definition"
 
 [[sources]]
 url = "https://developer.mozilla.org/en-US/docs/Web/HTTP"
-title = "MDN: HTTP — standard semantics a REST API gives every consumer (caching, status codes, methods)"
+title = "MDN: HTTP: standard semantics a REST API gives every consumer (caching, status codes, methods)"

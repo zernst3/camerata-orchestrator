@@ -1,5 +1,5 @@
 id = "ARCH-EXPLICIT-TX-1"
-version = 2
+version = 3
 title = "Services own the transaction lifecycle; repositories receive the handle as a parameter"
 domain = "api-layer"
 layer = "universal"
@@ -15,7 +15,7 @@ verification = "grounded"
 
 [[sources]]
 url = "https://martinfowler.com/eaaCatalog/unitOfWork.html"
-title = "Martin Fowler — Patterns of Enterprise Application Architecture: Unit of Work"
+title = "Martin Fowler: Patterns of Enterprise Application Architecture: Unit of Work"
 relevance = "Authority note (author-facing): medium authority — PoEAA grounds an explicit transaction/unit-of-work boundary in general; the specific 'repository receives the handle as a parameter' shape is this project's chosen implementation of that boundary"
 
 [decision]

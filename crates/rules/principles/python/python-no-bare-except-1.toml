@@ -1,5 +1,5 @@
 id = "PYTHON-NO-BARE-EXCEPT-1"
-version = 1
+version = 2
 title = "Exception handlers catch specific types; bare except is forbidden"
 domain = "python"
 layer = "language"
@@ -12,11 +12,11 @@ verification = "grounded"
 
 [[sources]]
 url = "https://docs.astral.sh/ruff/rules/blind-except/"
-title = "Ruff — blind-except (BLE001)"
+title = "Ruff: blind-except (BLE001)"
 
 [[sources]]
 url = "https://peps.python.org/pep-0008/#programming-recommendations"
-title = "PEP 8 — Programming Recommendations (bare except discouraged)"
+title = "PEP 8: Programming Recommendations (bare except discouraged)"
 
 [decision]
 question = "What may an exception handler catch?"
@@ -42,14 +42,14 @@ why = "A bare or broad except swallows KeyboardInterrupt, SystemExit, and genuin
 
 [[sources]]
 url = "https://docs.astral.sh/ruff/rules/bare-except/"
-title = "Ruff E722 — bare-except"
+title = "Ruff E722: bare-except"
 linter = "Ruff: E722"
 
 [[sources]]
 url = "https://docs.astral.sh/ruff/rules/blind-exception/"
-title = "Ruff BLE001 — blind-exception (flake8-blind-except)"
+title = "Ruff BLE001: blind-exception (flake8-blind-except)"
 linter = "Ruff: BLE001"
 
 [[sources]]
 url = "https://peps.python.org/pep-0008/#exception-handling"
-title = "PEP 8 — Exception Handling (bare except clause)"
+title = "PEP 8: Exception Handling (bare except clause)"

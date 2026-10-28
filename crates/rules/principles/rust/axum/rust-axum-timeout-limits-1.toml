@@ -1,5 +1,5 @@
 id = "RUST-AXUM-TIMEOUT-LIMITS-1"
-version = 2
+version = 3
 title = "Set request timeouts and body size limits to prevent resource exhaustion"
 domain = "rust:axum"
 layer = "framework"
@@ -32,8 +32,8 @@ why = "A single slow or malicious client can hold connections open indefinitely 
 
 [[sources]]
 url = "https://docs.rs/axum/latest/axum/extract/struct.DefaultBodyLimit.html"
-title = "axum::extract::DefaultBodyLimit — Default request body size limit"
+title = "axum::extract::DefaultBodyLimit: Default request body size limit"
 
 [[sources]]
 url = "https://docs.rs/tower-http/latest/tower_http/timeout/index.html"
-title = "tower_http::timeout — Request timeout middleware"
+title = "tower_http::timeout: Request timeout middleware"

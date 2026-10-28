@@ -1,5 +1,5 @@
 id = "RUST-DIOXUS-8"
-version = 2
+version = 3
 title = "Templates use native control flow; iterated children must carry a stable key"
 domain = "rust:dioxus"
 layer = "framework"
@@ -45,4 +45,4 @@ why = "Visually the list renders correctly without keys, but reorders silently r
 
 [[sources]]
 url = "https://dioxuslabs.com/learn/0.6/reference/rsx"
-title = "Dioxus reference: RSX — declarative UI with native Rust control flow in rsx!"
+title = "Dioxus reference: RSX: declarative UI with native Rust control flow in rsx!"

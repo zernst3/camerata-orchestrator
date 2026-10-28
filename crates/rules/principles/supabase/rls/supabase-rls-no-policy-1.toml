@@ -1,5 +1,5 @@
 id = "SUPABASE-RLS-NO-POLICY-1"
-version = 3
+version = 4
 title = "A table with Row Level Security enabled but zero policies denies all anon/authenticated access"
 domain = "supabase:rls"
 layer = "platform"
@@ -26,11 +26,11 @@ qualifies = "Enforced by the same migration-timeline replay pass as SUPABASE-RLS
 
 [[sources]]
 url = "https://supabase.com/docs/guides/database/postgres/row-level-security"
-title = "Supabase docs — Row Level Security guide (deny-by-default with RLS enabled and no policy)"
+title = "Supabase docs: Row Level Security guide (deny-by-default with RLS enabled and no policy)"
 
 [[sources]]
 url = "https://supabase.com/docs/guides/database/database-advisors?lint=0008_rls_enabled_no_policy"
-title = "Supabase Database Linter — 0008_rls_enabled_no_policy (\"No access rules defined\")"
+title = "Supabase Database Linter: 0008_rls_enabled_no_policy (\"No access rules defined\")"
 linter = "splinter: rls_enabled_no_policy"
 
 [decision]
@@ -58,7 +58,7 @@ RLS enabled with no `CREATE POLICY` is deny-by-default in Postgres: the `anon` a
 roles get zero rows and zero writes. So a table in that state is carrying a lock with no key cut
 for anyone, and it means one of two things, both worth knowing. Either a feature is silently
 failing because the roles it depends on were never granted anything, or the application only ever
-touches the table through a service_role-backed client — which bypasses RLS entirely and makes the
+touches the table through a service_role-backed client, which bypasses RLS entirely and makes the
 table's own policies moot, moving the real access-control question into whichever handler
 constructs that client.
 
@@ -82,4 +82,4 @@ id = "treat-zero-policy-as-non-finding"
 violates = true
 label = "Tables are left RLS-enabled with zero policies, treated as an intentional, already-secure lockdown"
 directive = "Tables may stay RLS-enabled with no policy at all, the deny-by-default state being taken as an intentional and already-secure configuration rather than as a sign that a feature is broken or that access runs through a service_role client."
-why = "Rejected: a zero-policy table is exactly the shape a vibe-coded app produces when the developer enabled RLS (perhaps prompted by Supabase's dashboard nudge) and then gave up on writing policies, routing all access through the service_role key instead — which is a real architectural risk this report exists to surface, not a state to stay silent about. Silence here would mean the report misses the single clearest signal that a service_role bypass is in play."
+why = "Rejected: a zero-policy table is exactly the shape a vibe-coded app produces when the developer enabled RLS (perhaps prompted by Supabase's dashboard nudge) and then gave up on writing policies, routing all access through the service_role key instead, which is a real architectural risk this report exists to surface, not a state to stay silent about. Silence here would mean the report misses the single clearest signal that a service_role bypass is in play."

@@ -1,5 +1,5 @@
 id = "SUPABASE-AUTH-GETSESSION-SERVER-1"
-version = 1
+version = 2
 title = "Server-side code must not trust getSession() for identity; use getClaims() or getUser() instead"
 domain = "supabase:auth"
 layer = "platform"
@@ -15,7 +15,7 @@ qualifies = "Enforced by a path-scoped regex for `getSession(` inside server-exe
 
 [[sources]]
 url = "https://supabase.com/docs/guides/auth/server-side/nextjs"
-title = "Supabase docs — Server-Side Auth (Next.js): never trust getSession() in server code; use getClaims() to protect pages/data, getUser() when a fresh server-confirmed record is needed"
+title = "Supabase docs: Server-Side Auth (Next.js): never trust getSession() in server code; use getClaims() to protect pages/data, getUser() when a fresh server-confirmed record is needed"
 
 [[sources]]
 url = "https://cwe.mitre.org/data/definitions/345.html"
@@ -52,13 +52,13 @@ than an under-flagged ambiguous case.
 id = "server-identity-via-getclaims-or-getuser"
 label = "Server-side identity is established with getClaims() or getUser(), never getSession()"
 directive = """
-Every server execution path that establishes who the caller is — middleware, route handlers,
-server actions, server-rendered page loaders, Edge Functions — derives that identity from
+Every server execution path that establishes who the caller is (middleware, route handlers,
+server actions, server-rendered page loaders, Edge Functions) derives that identity from
 `getClaims()` (verifies the JWT signature locally) or `getUser()` (round-trips to the auth
 server for a fully fresh record, when that freshness matters). `getSession()` is not used for
 any authorization decision on the server: it reads whatever is in the cookie and explicitly
 does not revalidate it, so a forged or expired token is returned as though it were valid.
-Client-side `getSession()` is correct and unaffected — a React component checking whether to
+Client-side `getSession()` is correct and unaffected: a React component checking whether to
 show a logged-in view crosses no trust boundary.
 """
 remediation = """

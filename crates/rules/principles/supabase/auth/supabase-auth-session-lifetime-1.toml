@@ -1,5 +1,5 @@
 id = "SUPABASE-AUTH-SESSION-LIFETIME-1"
-version = 3
+version = 4
 title = "JWT expiry and refresh-token rotation are tuned deliberately for the project's risk profile, not left at whichever default was never revisited"
 domain = "supabase:auth"
 layer = "platform"
@@ -21,7 +21,7 @@ qualifies = "Enforced by a scan over supabase/config.toml's `[auth]` section for
 
 [[sources]]
 url = "https://supabase.com/docs/guides/local-development/cli/config"
-title = "Supabase CLI config reference — auth.jwt_expiry (default 3600s), auth.enable_refresh_token_rotation (default true), auth.refresh_token_reuse_interval (default 10s)"
+title = "Supabase CLI config reference: auth.jwt_expiry (default 3600s), auth.enable_refresh_token_rotation (default true), auth.refresh_token_reuse_interval (default 10s)"
 
 [[sources]]
 url = "https://cwe.mitre.org/data/definitions/613.html"
@@ -58,15 +58,15 @@ directive = """
 exchanges the old refresh token on every refresh, so a leaked one stops working as soon as the
 legitimate holder refreshes; with it off, nothing in the system ever expires that token and it mints
 new access tokens indefinitely. It is a security control with no functional downside, so there is no
-general-purpose reason to turn it off. `jwt_expiry` is a genuine risk-profile judgement — a
-low-sensitivity consumer app and one handling financial or health data differ legitimately — so this
+general-purpose reason to turn it off. `jwt_expiry` is a genuine risk-profile judgement (a
+low-sensitivity consumer app and one handling financial or health data differ legitimately) so this
 project either keeps it near Supabase's 3600-second default or records, in a comment beside the
 setting, why a longer-lived access token is right here. A longer expiry widens the window in which a
 stolen access token keeps working, so the number is chosen rather than inherited.
 """
 remediation = """
 In supabase/config.toml, set `enable_refresh_token_rotation = true` (the Supabase default) unless there is a
-specific, documented reason your project needs it off — there is no general-purpose justification for disabling
+specific, documented reason your project needs it off: there is no general-purpose justification for disabling
 it. Review `jwt_expiry`: either return it to a value close to the 3600-second default, or leave a comment in the
 config recording why your project's risk profile calls for a longer-lived access token. Verify by confirming a
 refresh token that has already been exchanged once is rejected on reuse, and that the access-token lifetime matches
@@ -79,5 +79,5 @@ why = "Refresh-token rotation is a strictly beneficial, no-downside security con
 id = "disable-rotation-or-extend-expiry-for-fewer-refreshes"
 violates = true
 label = "Refresh-token rotation is off, or jwt_expiry is set long, so sessions refresh less often"
-directive = "`enable_refresh_token_rotation` is off, or `jwt_expiry` is set well beyond the one-hour default, so client sessions refresh or re-authenticate less frequently — and a stolen refresh or access token stays usable correspondingly longer."
-why = "Rejected: disabling rotation removes the ONLY mechanism that bounds a leaked refresh token's useful life — once off, a stolen refresh token is valid indefinitely, with no event (a legitimate refresh) that would ever invalidate it. Extending jwt_expiry for the same convenience reason widens the exposure window of a stolen access token proportionally. Both trade a real, uncapped security cost for a marginal reduction in how often a client-side refresh call fires, which is not a meaningful problem the rotation/expiry defaults were causing in the first place."
+directive = "`enable_refresh_token_rotation` is off, or `jwt_expiry` is set well beyond the one-hour default, so client sessions refresh or re-authenticate less frequently, and a stolen refresh or access token stays usable correspondingly longer."
+why = "Rejected: disabling rotation removes the ONLY mechanism that bounds a leaked refresh token's useful life: once off, a stolen refresh token is valid indefinitely, with no event (a legitimate refresh) that would ever invalidate it. Extending jwt_expiry for the same convenience reason widens the exposure window of a stolen access token proportionally. Both trade a real, uncapped security cost for a marginal reduction in how often a client-side refresh call fires, which is not a meaningful problem the rotation/expiry defaults were causing in the first place."

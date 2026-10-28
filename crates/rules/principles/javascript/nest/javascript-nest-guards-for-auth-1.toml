@@ -1,5 +1,5 @@
 id = "JAVASCRIPT-NEST-GUARDS-FOR-AUTH-1"
-version = 2
+version = 3
 title = "Use guards for authentication and authorization checks"
 domain = "javascript:nest"
 layer = "framework"
@@ -11,7 +11,7 @@ verification = "grounded"
 
 [[sources]]
 url = "https://docs.nestjs.com/guards"
-title = "NestJS Docs — Guards: CanActivate for authentication and authorization"
+title = "NestJS Docs: Guards: CanActivate for authentication and authorization"
 
 [decision]
 question = "How are authentication checks applied to NestJS routes so that a new endpoint is not left unprotected?"

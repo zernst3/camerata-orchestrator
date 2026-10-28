@@ -1,5 +1,5 @@
 id = "JAVA-SPRING-METHOD-SECURITY-1"
-version = 2
+version = 3
 title = "Protected service methods carry @PreAuthorize; authorization is not re-implemented in every controller"
 domain = "java:spring"
 layer = "framework"
@@ -16,7 +16,7 @@ why = "Spring Security's @PreAuthorize('hasRole(...)') and @PreAuthorize('hasAut
 
 [[sources]]
 url = "https://docs.spring.io/spring-security/reference/servlet/authorization/method-security.html"
-title = "Spring Security Reference — Method Security (@PreAuthorize, @EnableMethodSecurity)"
+title = "Spring Security Reference: Method Security (@PreAuthorize, @EnableMethodSecurity)"
 
 [[option]]
 id = "preauthorize-on-service-methods"

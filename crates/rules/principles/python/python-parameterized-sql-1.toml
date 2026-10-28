@@ -1,5 +1,5 @@
 id = "PYTHON-PARAMETERIZED-SQL-1"
-version = 1
+version = 2
 title = "SQL is parameterized; query strings are never built from interpolated values"
 domain = "python"
 layer = "language"
@@ -34,10 +34,10 @@ why = "Escaping is applied by hand at each callsite, so one query that misses it
 
 [[sources]]
 url = "https://docs.astral.sh/ruff/rules/hardcoded-sql-expression/"
-title = "Ruff S608 — hardcoded-sql-expression"
+title = "Ruff S608: hardcoded-sql-expression"
 linter = "Ruff: S608"
 
 [[sources]]
 url = "https://bandit.readthedocs.io/en/latest/plugins/b608_hardcoded_sql_expressions.html"
-title = "Bandit B608 — hardcoded_sql_expressions"
+title = "Bandit B608: hardcoded_sql_expressions"
 linter = "Bandit: B608"

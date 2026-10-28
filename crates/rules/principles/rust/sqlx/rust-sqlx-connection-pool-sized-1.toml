@@ -1,5 +1,5 @@
 id = "RUST-SQLX-CONNECTION-POOL-SIZED-1"
-version = 2
+version = 3
 title = "Use a connection pool with explicit size configuration and reuse connections"
 domain = "rust:sqlx"
 layer = "framework"
@@ -37,8 +37,8 @@ why = "Lower effort than hand-tuning a pool size upfront, and avoids the common 
 
 [[sources]]
 url = "https://docs.rs/sqlx/latest/sqlx/pool/struct.Pool.html"
-title = "sqlx::Pool — Connection pool: reduces connection overhead, limits per-server connections"
+title = "sqlx::Pool: Connection pool: reduces connection overhead, limits per-server connections"
 
 [[sources]]
 url = "https://docs.rs/sqlx/latest/sqlx/pool/struct.PoolOptions.html"
-title = "sqlx::PoolOptions — max_connections, min_connections, acquire_timeout, idle_timeout"
+title = "sqlx::PoolOptions: max_connections, min_connections, acquire_timeout, idle_timeout"

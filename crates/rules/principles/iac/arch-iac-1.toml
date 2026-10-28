@@ -1,5 +1,5 @@
 id = "ARCH-IAC-1"
-version = 2
+version = 3
 title = "Infrastructure as code, per-environment isolation"
 domain = "iac"
 layer = "universal"
@@ -15,7 +15,7 @@ title = "Decision: Credential-delegated scope + story-source/build-target separa
 
 [[sources]]
 url = "https://www.oreilly.com/library/view/infrastructure-as-code/9781098114664/"
-title = "Kief Morris — Infrastructure as Code, 2nd Edition (O'Reilly)"
+title = "Kief Morris: Infrastructure as Code, 2nd Edition (O'Reilly)"
 
 [[sources]]
 url = "https://cheatsheetseries.owasp.org/cheatsheets/Secrets_Management_Cheat_Sheet.html"
@@ -40,11 +40,11 @@ id = "infrastructure-is-provisioned-manually-through-a"
 violates = true
 label = "infrastructure is provisioned manually through a cloud console (click-ops), with no IaC"
 directive = "Infrastructure is provisioned and changed manually through a cloud console (click-ops) rather than through IaC definitions checked into source control."
-why = "Manual console provisioning leaves no audit trail of what changed, when, or why; it produces silent drift between environments that are supposed to be identical (dev/staging/prod diverge one manual click at a time); and it isn't reproducible — recreating the environment from scratch (disaster recovery, a new region, a new environment) requires someone to remember or reverse-engineer every manual step rather than replaying a plan."
+why = "Manual console provisioning leaves no audit trail of what changed, when, or why; it produces silent drift between environments that are supposed to be identical (dev/staging/prod diverge one manual click at a time); and it isn't reproducible: recreating the environment from scratch (disaster recovery, a new region, a new environment) requires someone to remember or reverse-engineer every manual step rather than replaying a plan."
 
 [[option]]
 id = "secrets-committed-directly-into-iac-source-files"
 violates = true
 label = "secrets/credentials are committed directly into IaC source files"
 directive = "Secrets or credentials (API keys, connection strings, private keys) are written directly into IaC source files (e.g. hardcoded in a Terraform .tf file or a tfvars file checked into the repo) rather than sourced from a per-environment vault or secret manager at apply time."
-why = "Committing secrets into IaC source exposes them to everyone with repo read access, not just those who should hold the credential, and git history makes exposure durable — rotating the credential doesn't remove it from history, and a leaked repo (or an overly broad CI token) means every historical secret is compromised too. This is an orthogonal failure mode to click-ops: a project can be fully IaC-driven with excellent change tracking and still leak credentials this way if secrets aren't routed through a vault."
+why = "Committing secrets into IaC source exposes them to everyone with repo read access, not just those who should hold the credential, and git history makes exposure durable: rotating the credential doesn't remove it from history, and a leaked repo (or an overly broad CI token) means every historical secret is compromised too. This is an orthogonal failure mode to click-ops: a project can be fully IaC-driven with excellent change tracking and still leak credentials this way if secrets aren't routed through a vault."

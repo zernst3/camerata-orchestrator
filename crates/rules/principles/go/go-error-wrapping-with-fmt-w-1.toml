@@ -1,5 +1,5 @@
 id = "GO-ERROR-WRAPPING-WITH-FMT-W-1"
-version = 1
+version = 2
 title = "Errors are wrapped with %w; error chains remain inspectable via errors.Unwrap and errors.Is"
 domain = "go"
 layer = "language"
@@ -13,7 +13,7 @@ qualifies = "When an error is returned from a lower layer and needs context, it 
 
 [[sources]]
 url = "https://go.dev/blog/go1.13-errors"
-title = "Go Blog — Working with Errors in Go 1.13"
+title = "Go Blog: Working with Errors in Go 1.13"
 
 [decision]
 question = "How are errors from lower layers augmented with context?"

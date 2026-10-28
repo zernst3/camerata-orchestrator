@@ -1,5 +1,5 @@
 id = "RUST-SQLX-COMPILE-CHECKED-QUERIES-1"
-version = 2
+version = 3
 title = "Use the sqlx::query! macro for compile-time SQL validation; never use format! to build SQL strings"
 domain = "rust:sqlx"
 layer = "framework"
@@ -32,8 +32,8 @@ why = "Bypasses compile-time SQL validation entirely: typos in column names, mis
 
 [[sources]]
 url = "https://docs.rs/sqlx/latest/sqlx/macro.query.html"
-title = "sqlx::query! — Statically checked SQL query macro"
+title = "sqlx::query!: Statically checked SQL query macro"
 
 [[sources]]
 url = "https://github.com/launchbadge/sqlx/blob/main/README.md"
-title = "SQLx README — compile-time SQL verification against live database schema"
+title = "SQLx README: compile-time SQL verification against live database schema"

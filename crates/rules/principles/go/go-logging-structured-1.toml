@@ -1,5 +1,5 @@
 id = "GO-LOGGING-STRUCTURED-1"
-version = 1
+version = 2
 title = "Logging is structured using a logger interface (slog, zap); log lines are not built with string concatenation or Printf"
 domain = "go"
 layer = "language"
@@ -13,11 +13,11 @@ qualifies = "Structured logging (JSON or key-value format) is easier to parse, s
 
 [[sources]]
 url = "https://go.dev/blog/slog"
-title = "Go Blog — Structured Logging with slog"
+title = "Go Blog: Structured Logging with slog"
 
 [[sources]]
 url = "https://pkg.go.dev/log/slog"
-title = "pkg.go.dev — log/slog"
+title = "pkg.go.dev: log/slog"
 
 [decision]
 question = "How are logs written?"

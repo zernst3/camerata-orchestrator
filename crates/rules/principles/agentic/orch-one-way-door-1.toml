@@ -1,6 +1,6 @@
 id = "ORCH-ONE-WAY-DOOR-1"
-version = 2
-title = "One-way-door routing — blast radius gates autonomy"
+version = 3
+title = "One-way-door routing: blast radius gates autonomy"
 domain = "agentic"
 layer = "universal"
 enforcement = "prose"
@@ -11,15 +11,15 @@ verification = "grounded"
 
 [[sources]]
 url = "AGENTS.md"
-title = "AGENTS.md — ORCH-ONE-WAY-DOOR-1 (one-way-door routing)"
+title = "AGENTS.md: ORCH-ONE-WAY-DOOR-1 (one-way-door routing)"
 
 [[sources]]
 url = "docs/decisions/2026-06-15_cross_agent_integration_gate.md"
-title = "Decision: Cross-agent rules — the integration gate (a third enforcement tier)"
+title = "Decision: Cross-agent rules: the integration gate (a third enforcement tier)"
 
 [[sources]]
 url = "https://s2.q4cdn.com/299287126/files/doc_financials/annual/2015-Letter-to-Shareholders.PDF"
-title = "Jeff Bezos — 2015 Letter to Amazon Shareholders (Type 1 / one-way-door vs. Type 2 / two-way-door decisions)"
+title = "Jeff Bezos: 2015 Letter to Amazon Shareholders (Type 1 / one-way-door vs. Type 2 / two-way-door decisions)"
 
 [decision]
 question = "How is it decided whether an agent may make a hard-to-reverse change on its own?"

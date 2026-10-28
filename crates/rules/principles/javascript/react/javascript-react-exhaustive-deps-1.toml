@@ -1,5 +1,5 @@
 id = "JAVASCRIPT-REACT-EXHAUSTIVE-DEPS-1"
-version = 2
+version = 3
 title = "Effect and memo dependency arrays list every reactive value the body reads"
 domain = "javascript:react"
 layer = "framework"
@@ -21,12 +21,12 @@ verification = "grounded"
 
 [[sources]]
 url = "https://react.dev/reference/eslint-plugin-react-hooks/lints/exhaustive-deps"
-title = "React docs — exhaustive-deps lint rule"
+title = "React docs: exhaustive-deps lint rule"
 linter = "react-hooks: exhaustive-deps"
 
 [[sources]]
 url = "https://react.dev/learn/synchronizing-with-effects#step-2-specify-the-effect-dependencies"
-title = "React docs — Synchronizing with Effects: specify the effect dependencies"
+title = "React docs: Synchronizing with Effects: specify the effect dependencies"
 
 [decision]
 question = "How are dependency arrays for effects and memoized values kept in step with the reactive values their bodies read?"

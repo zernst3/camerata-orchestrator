@@ -1,5 +1,5 @@
 id = "PYTHON-TESTING-AAA-STRUCTURE-1"
-version = 1
+version = 2
 title = "Each test follows Arrange-Act-Assert: one act, one assertion focus"
 domain = "python:testing"
 layer = "language"
@@ -18,7 +18,7 @@ why = "pytest's own anatomy documentation names the four phases of a test: Arran
 [[option]]
 id = "aaa-one-act"
 label = "Arrange-Act-Assert with a single act per test"
-directive = "Each test function body is organized in three phases. Arrange: prepare all preconditions (create objects, set up fakes, seed data) using fixtures or local setup; this phase may be empty when fixtures cover it entirely. Act: a single call that exercises the behavior under test (one function call, one method invocation, one HTTP request). Assert: verify the outcome of the act; a test may have multiple assert statements as long as they all check the same behavior — use pytest.approx() for floats and pytest.raises() for expected exceptions. If two unrelated behaviors need testing, write two test functions. Never put a second act+assert cycle inside the same test body."
+directive = "Each test function body is organized in three phases. Arrange: prepare all preconditions (create objects, set up fakes, seed data) using fixtures or local setup; this phase may be empty when fixtures cover it entirely. Act: a single call that exercises the behavior under test (one function call, one method invocation, one HTTP request). Assert: verify the outcome of the act; a test may have multiple assert statements as long as they all check the same behavior: use pytest.approx() for floats and pytest.raises() for expected exceptions. If two unrelated behaviors need testing, write two test functions. Never put a second act+assert cycle inside the same test body."
 remediation = """
 Restructure the test function into three phases: Arrange (set up preconditions via fixtures or local setup), Act (a single call exercising the behavior under test), and Assert (assertions focused on that one outcome). Split a test currently checking intermediate state after multiple steps into separate test functions, one per behavior. Verify by confirming each test has exactly one Act call and fails for exactly one reason when it fails.
 """
@@ -32,9 +32,9 @@ why = "Produces cheaper tests at the cost of ambiguous failures: when the test f
 
 [[sources]]
 url = "https://docs.pytest.org/en/stable/explanation/anatomy.html"
-title = "pytest — Anatomy of a test (Arrange-Act-Assert-Cleanup)"
+title = "pytest: Anatomy of a test (Arrange-Act-Assert-Cleanup)"
 
 [[sources]]
 url = "https://docs.astral.sh/ruff/rules/pytest-composite-assertion/"
-title = "Ruff PT018 — pytest-composite-assertion"
+title = "Ruff PT018: pytest-composite-assertion"
 linter = "Ruff: PT018"

@@ -1,5 +1,5 @@
 id = "SEC-NO-UNSAFE-HTML-SINK-1"
-version = 1
+version = 2
 title = "User- or attacker-influenced data is never rendered through a raw-HTML sink without sanitization"
 domain = "universal"
 layer = "universal"
@@ -16,7 +16,7 @@ title = "CWE-79: Improper Neutralization of Input During Web Page Generation ('C
 
 [[sources]]
 url = "https://react.dev/reference/react-dom/components/common#dangerously-setting-the-inner-html"
-title = "React docs — dangerouslySetInnerHTML: rendering raw HTML bypasses React's default escaping"
+title = "React docs: dangerouslySetInnerHTML: rendering raw HTML bypasses React's default escaping"
 
 [[sources]]
 url = "https://cheatsheetseries.owasp.org/cheatsheets/Cross_Site_Scripting_Prevention_Cheat_Sheet.html"

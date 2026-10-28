@@ -1,5 +1,5 @@
 id = "JAVASCRIPT-TESTING-AAA-STRUCTURE-1"
-version = 2
+version = 3
 title = "Every test body follows Arrange-Act-Assert structure with one act per test"
 domain = "javascript:testing"
 layer = "language"
@@ -12,11 +12,11 @@ verification = "grounded"
 
 [[sources]]
 url = "https://jestjs.io/docs/api"
-title = "Jest globals API — describe, it/test, expect"
+title = "Jest globals API: describe, it/test, expect"
 
 [[sources]]
 url = "https://github.com/jest-community/eslint-plugin-jest/blob/main/docs/rules/no-conditional-expect.md"
-title = "eslint-plugin-jest — no-conditional-expect rule"
+title = "eslint-plugin-jest: no-conditional-expect rule"
 linter = "jest: no-conditional-expect"
 
 [decision]
@@ -27,7 +27,7 @@ why = "The Arrange-Act-Assert (AAA) pattern structures each test into three clea
 [[option]]
 id = "every-test-follows-arrange-act-assert-one-act-per-test"
 label = "Every test body follows Arrange-Act-Assert structure with one act per test"
-directive = "Each test (it/test block) is divided into three phases in order: (1) Arrange — set up state, inputs, and mock return values; (2) Act — call the function or trigger the event under test exactly once; (3) Assert — make all expect() calls for this test. A blank line separates the three phases. A test that requires two distinct Act invocations is split into two tests. Conditional logic inside a test body is forbidden (see jest/no-conditional-expect); if the tested outcome depends on a condition, that condition is a fixture variation handled by separate test cases or a parameterised describe.each / test.each block."
+directive = "Each test (it/test block) is divided into three phases in order: (1) Arrange: set up state, inputs, and mock return values; (2) Act: call the function or trigger the event under test exactly once; (3) Assert: make all expect() calls for this test. A blank line separates the three phases. A test that requires two distinct Act invocations is split into two tests. Conditional logic inside a test body is forbidden (see jest/no-conditional-expect); if the tested outcome depends on a condition, that condition is a fixture variation handled by separate test cases or a parameterised describe.each / test.each block."
 remediation = """
 Restructure the test body into three ordered phases: Arrange (set up state and mocks), Act (call the function or trigger the event under test exactly once), and Assert (make all expect() calls). Split a test currently mixing setup, action, and assertion out of order, or exercising multiple actions, into separate tests. Verify by confirming each test has exactly one Act step and fails for exactly one reason when it fails.
 """

@@ -1,5 +1,5 @@
 id = "GO-GRPC-INTERCEPTORS-AUTH-LOGGING-1"
-version = 1
+version = 2
 title = "Authentication, logging, error recovery, and other cross-cutting concerns are implemented as interceptors, not duplicated in handler methods"
 domain = "go:grpc"
 layer = "framework"
@@ -11,7 +11,7 @@ verification = "grounded"
 
 [[sources]]
 url = "https://pkg.go.dev/google.golang.org/grpc#UnaryServerInterceptor"
-title = "grpc-go — UnaryServerInterceptor / StreamServerInterceptor"
+title = "grpc-go: UnaryServerInterceptor / StreamServerInterceptor"
 
 [decision]
 question = "How should authentication, logging, and error recovery be applied across gRPC service methods?"

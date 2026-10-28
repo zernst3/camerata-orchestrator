@@ -1,5 +1,5 @@
 id = "JAVASCRIPT-ANGULAR-ROUTE-GUARDS-1"
-version = 2
+version = 3
 title = "Protected routes are guarded by canActivate guards, not checked in component ngOnInit"
 domain = "javascript:angular"
 layer = "framework"
@@ -11,11 +11,11 @@ verification = "grounded"
 
 [[sources]]
 url = "https://angular.dev/guide/routing/route-guards"
-title = "Angular — Route guards: CanActivateFn"
+title = "Angular: Route guards: CanActivateFn"
 
 [[sources]]
 url = "https://angular.dev/api/router/CanActivateFn"
-title = "Angular API — CanActivateFn"
+title = "Angular API: CanActivateFn"
 
 [decision]
 question = "Where is access to protected Angular routes checked?"

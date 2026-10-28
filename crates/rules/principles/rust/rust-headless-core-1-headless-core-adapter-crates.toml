@@ -1,5 +1,5 @@
 id = "RUST-HEADLESS-CORE-1"
-version = 1
+version = 2
 title = "UI logic and state live in a framework-agnostic core; the rendering framework is a thin adapter (applications, not just libraries)"
 domain = "rust"
 layer = "library"
@@ -11,11 +11,11 @@ verification = "grounded"
 
 [[sources]]
 url = "https://martinfowler.com/eaaDev/PresentationModel.html"
-title = "Martin Fowler — Presentation Model (state and behavior fully separated from the view/renderer; now widely known as MVVM)"
+title = "Martin Fowler: Presentation Model (state and behavior fully separated from the view/renderer; now widely known as MVVM)"
 
 [[sources]]
 url = "https://tanstack.com/table/latest/docs/introduction"
-title = "TanStack Table — Introduction"
+title = "TanStack Table: Introduction"
 relevance = "Authority note (author-facing): medium authority — a concrete, widely-used instance of the headless-core-plus-thin-adapter shape for UI logic"
 
 [decision]

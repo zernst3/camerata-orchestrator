@@ -1,5 +1,5 @@
 id = "ARCH-MONOLITH-FIRST-1"
-version = 1
+version = 2
 title = "Deployment topology: a single service, a message broker, or independent services"
 domain = "fullstack"
 layer = "universal"
@@ -11,11 +11,11 @@ verification = "grounded"
 
 [[sources]]
 url = "docs/decisions/2026-06-14_persistence_sqlite_event_sourced_versioning.md"
-title = "Decision: Persistence — SQLite now, event-sourced versioning, Postgres later (single-process Tokio monolith was the chosen topology for THIS project)"
+title = "Decision: Persistence: SQLite now, event-sourced versioning, Postgres later (single-process Tokio monolith was the chosen topology for THIS project)"
 
 [[sources]]
 url = "https://martinfowler.com/bliki/MonolithFirst.html"
-title = "Martin Fowler — MonolithFirst"
+title = "Martin Fowler: MonolithFirst"
 
 # Stack exception. Supabase Edge Functions are a second, independently-deployed runtime BY DESIGN
 # on the Supabase platform (Deno-based functions deployed and invoked separately from the primary

@@ -1,5 +1,5 @@
 id = "TESTING-PYRAMID-1"
-version = 2
+version = 3
 title = "Test pyramid: many unit tests, fewer integration tests, few end-to-end tests"
 domain = "testing"
 layer = "universal"
@@ -11,15 +11,15 @@ verification = "grounded"
 
 [[sources]]
 url = "https://martinfowler.com/articles/practical-test-pyramid.html"
-title = "Ham Vocke / Martin Fowler — The Practical Test Pyramid"
+title = "Ham Vocke / Martin Fowler: The Practical Test Pyramid"
 
 [[sources]]
 url = "https://martinfowler.com/bliki/TestPyramid.html"
-title = "Martin Fowler — TestPyramid (bliki)"
+title = "Martin Fowler: TestPyramid (bliki)"
 
 [[sources]]
 url = "https://www.mountaingoatsoftware.com/blog/the-forgotten-layer-of-the-test-automation-pyramid"
-title = "Mike Cohn (Mountain Goat Software) — The Forgotten Layer of the Test Automation Pyramid (the pyramid originates in Cohn's 'Succeeding with Agile', 2009, not xUnit Test Patterns)"
+title = "Mike Cohn (Mountain Goat Software): The Forgotten Layer of the Test Automation Pyramid (the pyramid originates in Cohn's 'Succeeding with Agile', 2009, not xUnit Test Patterns)"
 
 [decision]
 question = "How should test effort be distributed across the unit / integration / end-to-end spectrum?"

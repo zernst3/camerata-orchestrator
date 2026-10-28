@@ -1,5 +1,5 @@
 id = "CSHARP-EFCORE-PARAMETERIZED-LINQ-1"
-version = 1
+version = 2
 title = "LINQ queries pass values as parameters; string interpolation into raw SQL is forbidden"
 domain = "csharp:efcore"
 layer = "library"
@@ -39,4 +39,4 @@ why = "Produces SQL injection vulnerabilities whenever a user-controlled value r
 
 [[sources]]
 url = "https://learn.microsoft.com/en-us/ef/core/querying/sql-queries"
-title = "SQL Queries — EF Core | Microsoft Learn"
+title = "SQL Queries: EF Core | Microsoft Learn"

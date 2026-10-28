@@ -1,5 +1,5 @@
 id = "SUPABASE-STORAGE-KEY-SANITIZATION-1"
-version = 1
+version = 2
 title = "Storage object keys must never be built directly from a client-supplied filename or path segment"
 domain = "supabase:storage"
 layer = "platform"
@@ -17,7 +17,7 @@ qualifies = "Enforced by a scan over storage upload call sites (`.from(bucket).u
 
 [[sources]]
 url = "https://cheatsheetseries.owasp.org/cheatsheets/File_Upload_Cheat_Sheet.html"
-title = "OWASP File Upload Cheat Sheet — generate a new name for the file on upload; never trust the client-supplied filename for a server-side path"
+title = "OWASP File Upload Cheat Sheet: generate a new name for the file on upload; never trust the client-supplied filename for a server-side path"
 
 [[sources]]
 url = "https://cwe.mitre.org/data/definitions/22.html"
@@ -46,8 +46,8 @@ case for free: a UUID has no `../` to reject in the first place.
 id = "server-generates-the-key-rejects-traversal"
 label = "Storage object keys are generated server-side; the client's filename is never used as the path"
 directive = """
-The destination path at every upload call site is a server-generated identifier — a UUID or a
-content hash — optionally prefixed with the authenticated user's id for natural per-user scoping
+The destination path at every upload call site is a server-generated identifier, a UUID or a
+content hash, optionally prefixed with the authenticated user's id for natural per-user scoping
 (`${auth.uid()}/${uuid()}.${ext}`). It is never `file.name`, a multipart `originalname`, or a raw
 query/body/form parameter. The client's original filename is kept where it belongs: a database
 column, for display, with no role in addressing the object.
@@ -61,7 +61,7 @@ name to collide. Client-supplied path components are still rejected for `..`, a 
 null byte, as defence in depth rather than as the primary control.
 """
 remediation = """
-In `<file>`, replace the upload path with a server-generated identifier — a UUID or content hash — optionally
+In `<file>`, replace the upload path with a server-generated identifier, a UUID or content hash, optionally
 prefixed with the authenticated user's id for natural per-user scoping, instead of the client-supplied filename.
 Store the original filename in a database column for display purposes if the UI needs to show it, never as the
 object's own storage path. Reject any client-supplied path component containing `..`, a leading `/`, or a null byte
@@ -78,4 +78,4 @@ id = "sanitize-but-keep-client-filename-as-the-key"
 violates = true
 label = "The client's filename is stripped of `../` sequences and then used as the object key"
 directive = "A blocklist filter strips or rejects `../` sequences from the client-supplied filename, and the remaining string is used unchanged as the storage object key."
-why = "Rejected: a blocklist against one traversal spelling is an incomplete defense (URL-encoded traversal, backslash variants on some storage backends, or simply a null byte can still slip through a hand-rolled filter), and even a perfectly sanitized filename is still the client's own string — two uploads of `report.pdf` from two different users still collide or overwrite, and a predictable filename is still trivially enumerable. Sanitizing in place treats only the traversal symptom while leaving the underlying trust-the-client-string problem, and the collision/enumeration risk, fully intact."
+why = "Rejected: a blocklist against one traversal spelling is an incomplete defense (URL-encoded traversal, backslash variants on some storage backends, or simply a null byte can still slip through a hand-rolled filter), and even a perfectly sanitized filename is still the client's own string: two uploads of `report.pdf` from two different users still collide or overwrite, and a predictable filename is still trivially enumerable. Sanitizing in place treats only the traversal symptom while leaving the underlying trust-the-client-string problem, and the collision/enumeration risk, fully intact."

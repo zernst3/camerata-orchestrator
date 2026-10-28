@@ -1,5 +1,5 @@
 id = "GO-GORM-MIGRATIONS-MANAGED-1"
-version = 1
+version = 2
 title = "Schema changes are managed by migrations; direct SQL ALTER statements or manual schema edits are not used in production"
 domain = "go:gorm"
 layer = "library"
@@ -11,7 +11,7 @@ verification = "grounded"
 
 [[sources]]
 url = "https://gorm.io/docs/migration.html"
-title = "GORM — Migration"
+title = "GORM: Migration"
 
 [decision]
 question = "How should schema changes (add column, create table, rename field) be applied to the database?"

@@ -1,5 +1,5 @@
 id = "JAVASCRIPT-ANGULAR-AVOID-LOGIC-IN-TEMPLATES-1"
-version = 2
+version = 3
 title = "Templates are simple and logic-free; complex conditions and computations live in the component"
 domain = "javascript:angular"
 layer = "framework"
@@ -11,11 +11,11 @@ verification = "grounded"
 
 [[sources]]
 url = "https://angular.dev/style-guide"
-title = "Angular Style Guide — Avoid overly complex logic in templates"
+title = "Angular Style Guide: Avoid overly complex logic in templates"
 
 [[sources]]
 url = "https://github.com/angular-eslint/angular-eslint/blob/main/packages/eslint-plugin-template/src/rules/no-call-expression.ts"
-title = "angular-eslint template plugin — no-call-expression"
+title = "angular-eslint template plugin: no-call-expression"
 linter = "@angular-eslint/template/no-call-expression"
 
 [decision]

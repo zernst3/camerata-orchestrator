@@ -1,5 +1,5 @@
 id = "PYTHON-FLASK-PARAMETERIZED-SQL-1"
-version = 1
+version = 2
 title = "Database queries use SQLAlchemy ORM or parameterized text() expressions; f-strings in SQL are forbidden"
 domain = "python:flask"
 layer = "framework"
@@ -40,10 +40,10 @@ why = "Eliminates injection at the application layer but tightly couples busines
 
 [[sources]]
 url = "https://docs.astral.sh/ruff/rules/hardcoded-sql-expression/"
-title = "Ruff S608 — hardcoded-sql-expression"
+title = "Ruff S608: hardcoded-sql-expression"
 linter = "Ruff: S608"
 
 [[sources]]
 url = "https://bandit.readthedocs.io/en/latest/plugins/b608_hardcoded_sql_expressions.html"
-title = "Bandit B608 — hardcoded_sql_expressions"
+title = "Bandit B608: hardcoded_sql_expressions"
 linter = "Bandit: B608"

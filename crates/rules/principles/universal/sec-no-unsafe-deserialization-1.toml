@@ -1,5 +1,5 @@
 id = "SEC-NO-UNSAFE-DESERIALIZATION-1"
-version = 2
+version = 3
 title = "Unsafe deserialization of untrusted data is never used in production code; tests that require it use a suppression with a reason"
 domain = "universal"
 layer = "universal"
@@ -12,11 +12,11 @@ verification = "grounded"
 
 [[sources]]
 url = "docs/ENFORCEMENT.md"
-title = "docs/ENFORCEMENT.md — RULE_REGISTRY §SEC-NO-UNSAFE-DESERIALIZATION-1 (enforced gate rule)"
+title = "docs/ENFORCEMENT.md: RULE_REGISTRY §SEC-NO-UNSAFE-DESERIALIZATION-1 (enforced gate rule)"
 
 [[sources]]
 url = "https://owasp.org/www-community/vulnerabilities/Deserialization_of_untrusted_data"
-title = "OWASP — Deserialization of Untrusted Data"
+title = "OWASP: Deserialization of Untrusted Data"
 
 [[sources]]
 url = "https://cheatsheetseries.owasp.org/cheatsheets/Deserialization_Cheat_Sheet.html"
@@ -86,7 +86,7 @@ Replace the unsafe deserializer call (yaml.load without a safe loader, pickle.lo
 effort = "medium"
 finding_headline = "Your `<path>` file deserializes data using a function that can run arbitrary code."
 finding_detail = """
-Certain deserializers reconstruct objects in a way that can execute attacker-controlled code the moment the data is loaded — before any validation of the result ever runs. If the input this call reads in `<path>` can ever come from outside your own trusted backend, switch to a safe format (JSON, or a safe YAML loader) or validate the source before it reaches this call.
+Certain deserializers reconstruct objects in a way that can execute attacker-controlled code the moment the data is loaded: before any validation of the result ever runs. If the input this call reads in `<path>` can ever come from outside your own trusted backend, switch to a safe format (JSON, or a safe YAML loader) or validate the source before it reaches this call.
 """
 why = """
 Every unsafe deserialiser in the match-set reconstructs an arbitrary object graph from the

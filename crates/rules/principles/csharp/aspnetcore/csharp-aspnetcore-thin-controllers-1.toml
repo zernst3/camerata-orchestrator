@@ -1,5 +1,5 @@
 id = "CSHARP-ASPNETCORE-THIN-CONTROLLERS-1"
-version = 2
+version = 3
 title = "Controllers contain no business logic; they translate HTTP to service calls and service results to HTTP"
 domain = "csharp:aspnetcore"
 layer = "framework"
@@ -44,4 +44,4 @@ why = "DbContext already implements the Unit-of-Work and (via DbSet<T>) Reposito
 
 [[sources]]
 url = "https://learn.microsoft.com/en-us/dotnet/architecture/modern-web-apps-azure/common-web-application-architectures"
-title = "Common web application architectures — .NET | Microsoft Learn"
+title = "Common web application architectures: .NET | Microsoft Learn"

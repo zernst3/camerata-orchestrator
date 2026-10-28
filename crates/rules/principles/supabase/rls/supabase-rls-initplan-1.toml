@@ -1,5 +1,5 @@
 id = "SUPABASE-RLS-INITPLAN-1"
-version = 4
+version = 5
 title = "RLS policy predicates should wrap auth.uid()/auth.jwt() in a scalar subselect so they evaluate once per query, not once per row"
 domain = "supabase:rls"
 layer = "platform"
@@ -32,7 +32,7 @@ qualifies = "Enforced by a statement-granular scan of CREATE POLICY bodies: an u
 
 [[sources]]
 url = "https://supabase.com/docs/guides/database/database-advisors?lint=0003_auth_rls_initplan"
-title = "Supabase Database Linter — 0003_auth_rls_initplan (\"Slow security policy detected\")"
+title = "Supabase Database Linter: 0003_auth_rls_initplan (\"Slow security policy detected\")"
 linter = "splinter: auth_rls_initplan"
 
 [decision]

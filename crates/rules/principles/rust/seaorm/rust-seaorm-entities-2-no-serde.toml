@@ -1,5 +1,5 @@
 id = "RUST-ENTITIES-2"
-version = 2
+version = 3
 title = "No serde derives on the SeaORM Model (load-bearing)"
 domain = "rust:seaorm"
 layer = "library"
@@ -37,4 +37,4 @@ why = "Moves the decision to the wrong level: whether a payload shape gets seria
 
 [[sources]]
 url = "https://docs.rs/sea-orm/latest/sea_orm/derive.DeriveEntityModel.html"
-title = "sea_orm::DeriveEntityModel — Entity Model definition; no Serialize/Deserialize by default"
+title = "sea_orm::DeriveEntityModel: Entity Model definition; no Serialize/Deserialize by default"

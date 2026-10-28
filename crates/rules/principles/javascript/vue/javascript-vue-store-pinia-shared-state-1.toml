@@ -1,5 +1,5 @@
 id = "JAVASCRIPT-VUE-STORE-PINIA-SHARED-STATE-1"
-version = 1
+version = 2
 title = "Sharing state across Vue components: a Pinia store, or passing it through props"
 domain = "javascript:vue"
 layer = "framework"
@@ -11,11 +11,11 @@ verification = "grounded"
 
 [[sources]]
 url = "https://pinia.vuejs.org/introduction.html"
-title = "Pinia — Introduction: official Vue state management recommendation"
+title = "Pinia: Introduction: official Vue state management recommendation"
 
 [[sources]]
 url = "https://vuejs.org/guide/scaling-up/state-management"
-title = "Vue.js — State Management: Pinia as official solution"
+title = "Vue.js: State Management: Pinia as official solution"
 
 [decision]
 question = "How is state that more than one component needs shared: through a Pinia store, or by passing it down through props and back up through events?"

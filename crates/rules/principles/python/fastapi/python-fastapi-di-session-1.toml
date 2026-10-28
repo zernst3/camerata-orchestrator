@@ -1,5 +1,5 @@
 id = "PYTHON-FASTAPI-DI-SESSION-1"
-version = 1
+version = 2
 title = "Database sessions are dependency-injected with a per-request lifecycle"
 domain = "python:fastapi"
 layer = "framework"
@@ -39,4 +39,4 @@ why = "Sessions are not safe to share across concurrent requests; a global sessi
 
 [[sources]]
 url = "https://fastapi.tiangolo.com/tutorial/sql-databases/"
-title = "FastAPI Tutorial — SQL Databases (per-request session via Depends yield)"
+title = "FastAPI Tutorial: SQL Databases (per-request session via Depends yield)"

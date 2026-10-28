@@ -1,5 +1,5 @@
 id = "PYTHON-FLASK-AUTH-ON-PROTECTED-ROUTES-1"
-version = 1
+version = 2
 title = "Protected routes declare their authentication requirement explicitly via a decorator or Blueprint before_request hook"
 domain = "python:flask"
 layer = "framework"
@@ -39,4 +39,4 @@ why = "The server is the only enforcement point; the frontend's auth state is ad
 
 [[sources]]
 url = "https://flask-login.readthedocs.io/en/latest/"
-title = "Flask-Login docs — login_required decorator"
+title = "Flask-Login docs: login_required decorator"
