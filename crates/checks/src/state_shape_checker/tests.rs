@@ -443,3 +443,25 @@ fn output_is_deterministic_and_free_of_dashes_and_tool_names() {
         assert!(!v.message.to_ascii_lowercase().contains("camerata"));
     }
 }
+
+#[test]
+fn a_copy_named_as_lagging_may_mean_the_stale_render() {
+    let src = PROFILE
+        .replace("fullName", "prevName")
+        .replace("setFullName", "setPrevName")
+        .replace("setprevName", "setPrevName");
+    assert!(one("src/Profile.jsx", &src).is_empty(), "{src}");
+}
+
+#[test]
+fn a_mirror_that_starts_from_another_value_may_be_a_transition() {
+    let src = "\
+import { useEffect, useState } from 'react';
+export function Fade({ open }) {
+  const [visible, setVisible] = useState(false);
+  useEffect(() => { setVisible(open); }, [open]);
+  return <div className={visible ? 'in' : 'out'} />;
+}
+";
+    assert!(one("src/Fade.jsx", src).is_empty());
+}

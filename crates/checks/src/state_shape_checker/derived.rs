@@ -6,7 +6,10 @@
 //! "Pure" is read narrowly: names, member reads, literals, operators, conditionals, templates,
 //! array and object literals, and calls of a short list of array and string methods whose
 //! callbacks obey the same limits. Anything else (another call, `new`, `await`, an assignment,
-//! `this`, a `.current` read, a name that is not a dependency) leaves the effect alone.
+//! `this`, a `.current` read, a name that is not a dependency) leaves the effect alone, and so do
+//! two shapes where the extra render can be the point: a copy named as lagging (`prevValue`), and
+//! a plain mirror of a name into state that starts from a different value (a CSS transition that
+//! needs one render in its initial state).
 
 use std::collections::HashSet;
 
@@ -87,7 +90,10 @@ fn derived_effect(
         return None;
     };
     let dependencies = Dependencies::read(deps, source)?;
-    if !pure(expr, source, &dependencies, &HashSet::new()) {
+    if !pure(expr, source, &dependencies, &HashSet::new())
+        || deliberately_lagging(&state.value)
+        || transition_mirror(expr, state.initial, source)
+    {
         return None;
     }
 
@@ -120,6 +126,23 @@ fn derived_effect(
         // contract forbids emitting `low` directly.
         severity: SEVERITY_MEDIUM,
     })
+}
+
+/// A name that says the copy is meant to lag one render behind (`prevValue`, `lastQuery`): the
+/// stale render the rule warns about may be the point.
+fn deliberately_lagging(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    ["prev", "previous", "last", "old"]
+        .iter()
+        .any(|p| lower.starts_with(p))
+}
+
+/// A plain mirror of one name or property (`setVisible(open)`) into state that starts from a
+/// different value: the first render with the old value can be deliberate (a CSS transition
+/// that needs one render in its initial state).
+fn transition_mirror(expr: Node<'_>, initial: Option<Node<'_>>, source: &str) -> bool {
+    let plain = matches!(expr.kind(), "identifier" | "member_expression");
+    plain && initial.is_none_or(|i| text(i, source) != text(expr, source))
 }
 
 /// An arrow or function expression with an empty parameter list.
