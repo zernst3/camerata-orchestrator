@@ -1,5 +1,5 @@
 id = "JAVASCRIPT-ANGULAR-SUBSCRIPTION-CLEANUP-1"
-version = 1
+version = 2
 title = "Observable subscriptions are cleaned up using takeUntilDestroyed or the async pipe"
 domain = "javascript:angular"
 layer = "framework"
@@ -19,7 +19,7 @@ title = "angular-eslint — no-implicit-take-until-destroyed (requires an explic
 linter = "@angular-eslint/no-implicit-take-until-destroyed"
 
 [decision]
-question = "What position does the project take on: Observable subscriptions are cleaned up using takeUntilDestroyed or the async pipe?"
+question = "How do components end their Observable subscriptions when they are destroyed?"
 default = "subscriptions-are-cleaned-up-with-takeuntildestroy"
 why = "An Observable subscription that is not cleaned up continues to emit and consume resources even after a component is destroyed, creating memory leaks, duplicate event listeners, and unpredictable behavior. The manual pattern of calling .subscribe() and storing the Subscription in a field, then unsubscribing in ngOnDestroy, is error-prone: the cleanup hook is easy to forget, and the subscription is active for longer than needed. Modern Angular provides two reliable patterns: the takeUntilDestroyed operator (Angular 16+), which automatically terminates the subscription when the component is destroyed; and the async pipe in the template, which subscribes and unsubscribes automatically. Both are implicit, automatic, and guaranteed. The rule is: Observable chains should use takeUntilDestroyed to terminate them automatically, or the subscription should live in a template via the async pipe. Manual .subscribe() calls without cleanup in ngOnDestroy are forbidden."
 
@@ -32,9 +32,12 @@ Add the takeUntilDestroyed() operator to the Observable chain, or replace the ma
 """
 why = "takeUntilDestroyed and the async pipe guarantee cleanup and prevent memory leaks, dangling listeners, and surprising behavior after component destruction."
 
-[[option]]
-id = "manual-subscribe-calls-are-tracked-and-unsubscrib"
-violates = true
-label = "Manual subscription tracking"
-directive = "Observable subscriptions are handled manually using .subscribe() calls, tracked in fields, and cleaned up by calling .unsubscribe() in ngOnDestroy()"
-why = "Manually tracking subscriptions in fields and unsubscribing in ngOnDestroy is error-prone: the cleanup hook is easy to forget when adding a new subscription, and a subscription that is active longer than needed fires handlers on a destroyed component, producing 'ExpressionChangedAfterItHasBeenChecked' errors, memory leaks, and duplicate event listeners. The manual pattern is also more verbose and requires the developer to remember the cleanup obligation at every new subscribe call."
+# Design note (item 19, 2026-10-28): this rule previously carried a second `[[option]]`,
+# `manual-subscribe-calls-are-tracked-and-unsubscrib`, flagged `violates = true` and labelled
+# "Manual subscription tracking". The default option's own directive PERMITS that state ("If a
+# subscription must be handled manually (rare cases), ngOnDestroy must unsubscribe from every
+# subscription created in the component"), so the rule flagged a state it also allowed. The
+# fault this rule exists to catch is a subscription that is never cleaned up at all, which is
+# simply the absence of the default option, so the option was removed and the rule is a
+# single-option defect (the W22 shape). Its rationale, that manual tracking is error-prone, is
+# already stated in `[decision].why`.

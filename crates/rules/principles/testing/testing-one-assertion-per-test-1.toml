@@ -1,5 +1,5 @@
 id = "TESTING-ONE-ASSERTION-PER-TEST-1"
-version = 1
+version = 2
 title = "One logical assertion per test (guideline): each test verifies a single behavior"
 domain = "testing"
 layer = "universal"
@@ -40,11 +40,10 @@ id = "no-assertion-count-constraint"
 violates = true
 label = "No constraint on assertion count per test"
 directive = "Tests may assert on as many properties as the author finds useful in a single test body."
-why = "Maximizes assertion density per test and avoids setup duplication, but when the test fails, only the first failing assertion is reported. The remaining assertions are untested until the first is fixed, hiding the full scope of breakage and slowing the debugging cycle."
+why = "When a test that checks many independent behaviors fails, only the first failing assertion is reported. The remaining assertions do not run until that one is fixed, so the full scope of the breakage stays hidden and debugging takes several rounds of fix and re-run instead of one."
 
 [[option]]
 id = "strict-one-physical-assert"
-violates = true
 label = "Strict one physical assert statement per test"
-directive = "Each test file contains exactly one assert statement; all setup and teardown exists solely to enable that single check."
-why = "Guarantees the clearest possible failure signal per test, but applied literally it splits multi-facet verifications (confirming every field of a returned object) into dozens of tiny tests that each duplicate the full Arrange and Act setup. The result is verbose, repetitive test suites where changing a factory attribute requires updating a long list of single-assert files."
+directive = "Each test contains exactly one assert statement; all setup and teardown exists solely to enable that single check."
+why = "A legitimate, stricter reading of the guideline: every failure names exactly one check, so the failure signal is never ambiguous. The cost is duplicated setup when one outcome has many facets (every field of a returned record becomes its own test), which teams that choose it usually absorb with shared fixtures or builders."

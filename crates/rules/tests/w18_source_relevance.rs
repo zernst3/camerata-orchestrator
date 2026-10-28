@@ -504,16 +504,22 @@ async fn req_w18_the_nineteen_migrated_annotations_are_loaded_from_the_corpus() 
     // caught exactly as before. Each of the 13 is a source whose title carried an authority
     // grade; `w25_source_title_grading` pins that no title carries one anymore.
     const W25_AUTHORITY_NOTE_SOURCES: usize = 13;
+    // Corpus text work (2026-10-28): sources added to replace a non-http or missing citation,
+    // each carrying a note on what the source does and does not establish (for example, that a
+    // cited page documents a mechanism while the rule's requirement is the project's own
+    // policy). Same author-facing use as the W25 moves. Rules: PROC-PR-CONCURRENCY-1 (2).
+    const CORPUS_TEXT_SOURCE_NOTES: usize = 2;
     let total: usize = set
         .iter()
         .map(|r| r.sources.iter().filter(|s| s.relevance.is_some()).count())
         .sum();
     assert_eq!(
         total,
-        19 + W25_AUTHORITY_NOTE_SOURCES,
+        19 + W25_AUTHORITY_NOTE_SOURCES + CORPUS_TEXT_SOURCE_NOTES,
         "expected the 19 migrated go/testing annotations plus the {W25_AUTHORITY_NOTE_SOURCES} \
-         W25 authority-note moves; a different count means the migration lost one, or `relevance` \
-         is spreading beyond those two reviewed populations"
+         W25 authority-note moves plus the {CORPUS_TEXT_SOURCE_NOTES} corpus-text source notes; \
+         a different count means the migration lost one, or `relevance` is spreading beyond \
+         those three reviewed populations"
     );
 }
 
