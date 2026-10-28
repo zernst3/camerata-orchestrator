@@ -1,5 +1,5 @@
 id = "CICD-DEPENDENCY-AUDIT-1"
-version = 2
+version = 3
 title = "Scan dependencies for known vulnerabilities (osv-scanner)"
 domain = "ci-cd"
 layer = "universal"
@@ -135,7 +135,7 @@ id = "dep-audit-every-pass"
 label = "Run both locally during development AND in CI: highest coverage"
 directive = """Run osv-scanner both in CI and continuously during development: locally on every change (for example as a pre-commit or pre-push hook, or a file-watch task) AND in CI on a schedule or per-PR. This is the highest-coverage option: every local change AND every CI run is gated. It adds latency to the local dev cycle; accept that trade only if the security posture demands it.
 
-osv-scanner is fast (it reads lock files, not a full build), so the local overhead is typically a few seconds per run. Pin an exact osv-scanner version (no ranges) and fail on findings at or above the chosen severity in both places. The team wires the local hook and the CI cadence (weekly cron, per-PR, or both)."""
+osv-scanner is fast (it reads lock files, not a full build), so the local overhead is typically a few seconds per run. Pin an exact osv-scanner version (no ranges) and fail on findings at or above the chosen severity in both places. The team wires the local hook and the CI cadence (weekly cron, per-PR or both)."""
 remediation = """
 Wire osv-scanner into both the in-loop development gate (set in_loop = true in the manifest) and CI, so every agent task and every CI run is scanned. Verify by confirming a vulnerable dependency is caught both during local/agent development and again in the CI run.
 """
@@ -171,7 +171,7 @@ jobs:
 
 Replace `<x.y.z>` with an exact pinned osv-scanner version. The team owns the decision of when to fire the workflow, and can upgrade to a scheduled or per-PR cadence as the project matures."""
 remediation = """
-Add a manual, on-demand osv-scanner workflow (workflow_dispatch) with no scheduled or PR-triggered runs, and have the team run it deliberately before releases or after dependency bumps. Verify by manually triggering the workflow and confirming it reports known vulnerabilities in the current lock file.
+Add a manual, on-demand osv-scanner workflow (workflow_dispatch) with no scheduled or PR-triggered runs and have the team run it deliberately before releases or after dependency bumps. Verify by manually triggering the workflow and confirming it reports known vulnerabilities in the current lock file.
 """
 effort = "medium"
 why = "Manual-only scanning is appropriate for early-stage projects or teams not ready for automated scanning. It documents the decision and the tool, and is easily upgraded to an automated cadence later."

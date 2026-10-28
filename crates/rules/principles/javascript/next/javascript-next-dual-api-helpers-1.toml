@@ -1,5 +1,5 @@
 id = "JAVASCRIPT-NEXT-DUAL-API-1"
-version = 3
+version = 4
 title = "Client-side code goes through sanctioned API helpers; Server Components may fetch directly"
 domain = "javascript:next"
 layer = "framework"
@@ -27,9 +27,9 @@ why = "Browser fetches and server-side fetches (RSC, metadata, route handlers) h
 [[option]]
 id = "two-sanctioned-api-helpers-client-vs-server-only"
 label = "Client-side calls go through a shared client helper; Server Components fetch directly"
-directive = "Client-side code (client components, hooks, event handlers) makes API calls through a shared client-side helper (browser context, attaches credentials, handles auth redirects). Direct fetch calls in client components are forbidden; call the shared helper instead. Server Components, route handlers, and other server-side rendering paths may call fetch directly: this is the documented App Router pattern and does not need to route through a shared helper. A separate server-only helper marked 'server-only' remains available (and is used) for server-side calls that need private-network hostnames or centralized secret handling, and is never bundled to the client."
+directive = "Client-side code (client components, hooks, event handlers) makes API calls through a shared client-side helper (browser context, attaches credentials, handles auth redirects). Direct fetch calls in client components are forbidden; call the shared helper instead. Server Components, route handlers and other server-side rendering paths may call fetch directly: this is the documented App Router pattern and does not need to route through a shared helper. A separate server-only helper marked 'server-only' remains available (and is used) for server-side calls that need private-network hostnames or centralized secret handling, and is never bundled to the client."
 remediation = """
-Replace the raw fetch call in this client component, hook, or event handler with a call through the shared client-side API helper, which attaches credentials and handles auth redirects consistently. Leave Server Components free to fetch directly, since they run in a different context. Verify by confirming no client component issues a raw fetch call and each instead goes through the shared helper.
+Replace the raw fetch call in this client component, hook or event handler with a call through the shared client-side API helper, which attaches credentials and handles auth redirects consistently. Leave Server Components free to fetch directly, since they run in a different context. Verify by confirming no client component issues a raw fetch call and each instead goes through the shared helper.
 """
 effort = "medium"
 why = "Client-side code doesn't get Next's automatic fetch memoization/caching, so centralizing credentials, base URLs, and error handling in one client helper avoids re-deriving those rules at every call site. Server Components get equivalent caching and dedup for free from Next's extended fetch, so forcing every server-side fetch through a shared helper adds indirection without the benefit that justifies it on the client."
@@ -38,12 +38,12 @@ why = "Client-side code doesn't get Next's automatic fetch memoization/caching, 
 id = "a-single-isomorphic-api-helper-covers-both-brows"
 violates = true
 label = "Single isomorphic API helper for both runtimes"
-directive = "a single isomorphic API helper covers both browser and server contexts, with the same code path handling cookies, hostname resolution, and secret access across both runtimes"
-why = "A single isomorphic helper must compromise on cookies, hostname resolution, and secret handling because no one shape satisfies both contexts at once: any compromise the helper makes leaks a failure mode into one side or the other, either exposing server-only secrets to the client bundle or silently breaking SSR for routes that depend on server-only cookies or private-network hostnames."
+directive = "a single isomorphic API helper covers both browser and server contexts, with the same code path handling cookies, hostname resolution and secret access across both runtimes"
+why = "A single isomorphic helper must compromise on cookies, hostname resolution and secret handling because no one shape satisfies both contexts at once: any compromise the helper makes leaks a failure mode into one side or the other, either exposing server-only secrets to the client bundle or silently breaking SSR for routes that depend on server-only cookies or private-network hostnames."
 
 [[option]]
 id = "api-calls-are-made-via-raw-fetch-at-each-call-si"
 violates = true
 label = "Raw fetch calls at each call site"
-directive = "API calls are made via raw fetch at each call site, with each call site responsible for attaching its own credentials, choosing its own hostnames, and handling its own context-specific concerns"
-why = "Raw fetch at each call site pushes cookie attachment, hostname resolution, and credential handling out to every individual call, so each one must independently re-derive the context rules: one slip leaks a server-only secret into the client bundle, or breaks SSR for a route that worked locally, with no build-time enforcement to catch the mistake."
+directive = "API calls are made via raw fetch at each call site, with each call site responsible for attaching its own credentials, choosing its own hostnames and handling its own context-specific concerns"
+why = "Raw fetch at each call site pushes cookie attachment, hostname resolution and credential handling out to every individual call, so each one must independently re-derive the context rules: one slip leaks a server-only secret into the client bundle, or breaks SSR for a route that worked locally, with no build-time enforcement to catch the mistake."

@@ -1,5 +1,5 @@
 id = "PROC-REGRESSION-TEST-1"
-version = 3
+version = 4
 title = "Every bug fix ships with a regression test that fails before the fix and passes after"
 domain = "universal"
 layer = "universal"
@@ -36,7 +36,7 @@ id = "the-bug-fix-lands-without-any-accompanying-test"
 violates = true
 label = "Bug fix lands without any accompanying test"
 directive = "the bug fix lands without any accompanying test; the project relies on the surrounding test suite staying green to catch any related regression in the future"
-why = "No accompanying test removes the immediate defect but leaves zero regression guard; the same failure can be reintroduced by the next refactor, dependency upgrade, or AI-authored change with no signal from CI."
+why = "No accompanying test removes the immediate defect but leaves zero regression guard; the same failure can be reintroduced by the next refactor, dependency upgrade or AI-authored change with no signal from CI."
 
 [[option]]
 id = "the-bug-fix-lands-with-a-regression-test-only-wh"

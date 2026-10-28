@@ -1,5 +1,5 @@
 id = "ARCH-REPO-PER-AGGREGATE-1"
-version = 3
+version = 4
 title = "One repository abstraction per aggregate, declared in the domain layer"
 domain = "api-layer"
 layer = "universal"
@@ -25,7 +25,7 @@ why = "Per-aggregate abstractions let services depend on the shape of the data t
 [[option]]
 id = "one-repository-abstraction-per-aggregate-declared-in-the-domain-layer"
 label = "One repository abstraction per aggregate, declared in the domain layer"
-directive = "Each domain aggregate has its own repository abstraction (an interface, trait, or protocol depending on the language) declared in the domain layer. The methods take and return domain types only. Concrete implementations live in the infrastructure layer and are wired in at the edges. Services depend on the abstraction, not the implementation."
+directive = "Each domain aggregate has its own repository abstraction (an interface, trait or protocol depending on the language) declared in the domain layer. The methods take and return domain types only. Concrete implementations live in the infrastructure layer and are wired in at the edges. Services depend on the abstraction, not the implementation."
 remediation = """
 Declare a repository abstraction for the affected aggregate in the domain layer, with methods that take and return domain types only, and move the concrete implementation into the infrastructure layer wired in at the composition root. Update the service to depend on the abstraction rather than a concrete implementation or a different aggregate's repository. Verify by confirming the domain layer contains only the interface/trait definition and services reference it, not a concrete persistence type.
 """
@@ -43,7 +43,7 @@ id = "the-domain-layer-declares-one-repository-abstrac"
 violates = true
 label = "One repository per use case"
 directive = "the domain layer declares one repository abstraction per use case (find-user-by-email, find-active-projects-in-org) rather than per aggregate"
-why = "Per-use-case abstractions proliferate across the codebase, lose aggregate cohesion, and produce a large surface of one-method interfaces with no grouping by domain boundary."
+why = "Per-use-case abstractions proliferate across the codebase, lose aggregate cohesion and produce a large surface of one-method interfaces with no grouping by domain boundary."
 
 [[option]]
 id = "the-domain-layer-declares-no-repository-abstract"
@@ -55,5 +55,5 @@ why = "No abstraction couples every service to the chosen persistence library; t
 [[option]]
 id = "cqrs-read-model-queries-bypass-the-aggregate-rep"
 label = "CQRS read/write split: read-model queries bypass the aggregate repository; writes still go through it"
-directive = "Split reads from writes: write operations (commands) go through the per-aggregate repository as usual, but read operations that serve a specific view or report query a separate, often denormalized read model directly (a dedicated query/projection layer, a read replica, or hand-written SQL tailored to that view), bypassing the aggregate repository's finder methods entirely. Keep the aggregate repository as the sole write path so invariants are still enforced in one place."
+directive = "Split reads from writes: write operations (commands) go through the per-aggregate repository as usual, but read operations that serve a specific view or report query a separate, often denormalized read model directly (a dedicated query/projection layer, a read replica or hand-written SQL tailored to that view), bypassing the aggregate repository's finder methods entirely. Keep the aggregate repository as the sole write path so invariants are still enforced in one place."
 why = "Aggregate-shaped repository finders are a poor fit for multi-aggregate, denormalized, or list/report-style views — forcing every read through the aggregate repository either produces N+1 fetch-and-assemble code in services or pressures the repository into growing view-specific methods that don't belong to the aggregate. A read model built and queried for the view it serves avoids both. The trade-off is real: the read model can drift from the write model if projections aren't kept in sync, and the codebase now carries two data-access paths (command-side repository, query-side read model) instead of one, which is more machinery for a team that doesn't have read-shape problems severe enough to justify it. This is a complement to per-aggregate repositories, not a replacement — the write side still needs exactly the aggregate-repository discipline this rule describes."

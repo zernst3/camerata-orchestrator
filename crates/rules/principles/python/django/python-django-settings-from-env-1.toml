@@ -1,5 +1,5 @@
 id = "PYTHON-DJANGO-SETTINGS-FROM-ENV-1"
-version = 2
+version = 3
 title = "Django settings read credentials from environment variables; no secrets in settings.py"
 domain = "python:django"
 layer = "framework"
@@ -18,7 +18,7 @@ why = "A Django `settings.py` file is Python source code committed to version co
 [[option]]
 id = "env-vars-in-settings"
 label = "read all credentials and env-specific values from environment variables"
-directive = "All values that vary by environment or that are credentials (SECRET_KEY, database URL, email credentials, API keys, ALLOWED_HOSTS, CORS origins) are read from environment variables via `os.environ.get('VAR')`, `os.environ['VAR']`, `django-environ`'s `env(...)`, or `python-decouple`'s `config(...)`. `settings.py` contains only the logic to read these values and their defaults for local development (where the risk is low); no production credential or secret appears as a string literal. A `.env` file for local development is listed in `.gitignore` and is never committed."
+directive = "All values that vary by environment or that are credentials (SECRET_KEY, database URL, email credentials, API keys, ALLOWED_HOSTS, CORS origins) are read from environment variables via `os.environ.get('VAR')`, `os.environ['VAR']`, `django-environ`'s `env(...)` or `python-decouple`'s `config(...)`. `settings.py` contains only the logic to read these values and their defaults for local development (where the risk is low); no production credential or secret appears as a string literal. A `.env` file for local development is listed in `.gitignore` and is never committed."
 remediation = """
 Move the hardcoded credential or environment-specific value out of settings.py (or a committed per-environment settings file) and read it from an environment variable instead, using os.environ.get or django-environ's env(). Rotate any secret that was previously committed to version control. Verify by searching the codebase for the literal value and confirming it no longer appears, while the application still starts successfully using the environment-sourced value.
 """
@@ -29,7 +29,7 @@ why = "Environment variables keep secrets outside the repository and git history
 id = "hardcoded-in-settings"
 violates = true
 label = "embed credentials as string literals directly in settings.py"
-directive = "SECRET_KEY, database passwords, and API keys are defined as string literals in `settings.py` and committed to version control."
+directive = "SECRET_KEY, database passwords and API keys are defined as string literals in `settings.py` and committed to version control."
 why = "The credentials enter git history permanently; anyone with repository access can read them; rotation requires a commit."
 
 [[option]]

@@ -1,5 +1,5 @@
 id = "GO-ERRORS-MUST-BE-CHECKED-1"
-version = 2
+version = 3
 title = "Errors are always checked; no naked return statements or silently ignored errors"
 domain = "go"
 layer = "language"
@@ -39,5 +39,5 @@ why = "Checking every error keeps the contract visible and prevents silent casca
 id = "ignore-low-consequence-errors"
 violates = true
 label = "ignore errors from calls deemed low-consequence"
-directive = "Some error-returning calls are assumed to be low-consequence (e.g., closing a file handle, flushing a buffer, or calling Fprintf to log); their errors are discarded with blank assignments to reduce visual noise."
+directive = "Some error-returning calls are assumed to be low-consequence (e.g., closing a file handle, flushing a buffer or calling Fprintf to log); their errors are discarded with blank assignments to reduce visual noise."
 why = "Any callsite judged safe to ignore becomes a silent failure when that judgement turns out to be wrong: a deferred Close() whose write buffer never flushed returns an error nobody reads, so the data loss surfaces later as a truncated file rather than at the point it happened. Nothing in the code records which callsites were actually reviewed, so the reduction in error-check clutter is paid for by failures that leave no trace."

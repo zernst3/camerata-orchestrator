@@ -1,5 +1,5 @@
 id = "CSHARP-EFCORE-MIGRATIONS-CHECKED-IN-1"
-version = 3
+version = 4
 title = "EF Core migrations are checked into source control and applied as part of the deployment process"
 domain = "csharp:efcore"
 layer = "library"
@@ -17,7 +17,7 @@ why = "EF Core's dotnet ef migrations add command generates a C# migration file 
 [[option]]
 id = "migrations-in-source-control"
 label = "Migrations generated via dotnet ef migrations add, checked in, applied as a pre-deploy step"
-directive = "Schema changes are made by modifying the EF Core model (entities, relationships, configuration) and running dotnet ef migrations add <Name> to generate a migration file. The generated migration file and the updated model snapshot are committed to source control in the same PR as the model change they implement. Migrations are applied as a pre-deploy step (migration runner job, EF Bundle, or pipeline step), not inside Program.cs. Database.EnsureCreated() is forbidden in production code; it may appear only in test setup helpers that create in-memory or ephemeral databases."
+directive = "Schema changes are made by modifying the EF Core model (entities, relationships, configuration) and running dotnet ef migrations add <Name> to generate a migration file. The generated migration file and the updated model snapshot are committed to source control in the same PR as the model change they implement. Migrations are applied as a pre-deploy step (migration runner job, EF Bundle or pipeline step), not inside Program.cs. Database.EnsureCreated() is forbidden in production code; it may appear only in test setup helpers that create in-memory or ephemeral databases."
 remediation = """
 Generate a migration file with dotnet ef migrations add for this schema change, and commit the migration file and the updated model snapshot in the same PR as the entity change that caused it. Apply migrations as an explicit pre-deploy step rather than relying on EnsureCreated. Verify by confirming the migrations folder in source control reflects the current entity model and a fresh database ends up in the same schema state after applying them.
 """

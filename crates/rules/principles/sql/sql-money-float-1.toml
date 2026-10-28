@@ -1,5 +1,5 @@
 id = "SQL-MONEY-FLOAT-1"
-version = 3
+version = 4
 title = "Money and currency amounts are stored as numeric/decimal, never as a floating-point type"
 domain = "sql"
 layer = "universal"
@@ -20,7 +20,7 @@ qualifies = "Enforced by a scan over CREATE TABLE / ALTER TABLE ADD COLUMN (and 
 
 [[sources]]
 url = "https://www.postgresql.org/docs/current/datatype-numeric.html"
-title = "PostgreSQL: Numeric Types: 'If you require exact storage and calculations (such as for monetary amounts), use the numeric type instead' of real/double precision, which are inexact and can show discrepancies on storage, retrieval, and equality comparison"
+title = "PostgreSQL: Numeric Types: 'If you require exact storage and calculations (such as for monetary amounts), use the numeric type instead' of real/double precision, which are inexact and can show discrepancies on storage, retrieval and equality comparison"
 
 [[sources]]
 url = "https://cwe.mitre.org/data/definitions/1339.html"
@@ -54,8 +54,8 @@ label = "Flag money-shaped columns declared as real/double precision; require nu
 directive = """
 Money and currency columns are stored as `numeric`/`decimal` (with a scale matching the currency's minor unit,
 typically 2) or as an exact integer in minor units (e.g. `amount_cents integer`), never as `real`, `float4`,
-`double precision`, `float8`, or a floating-point ORM column type. Column names in this class include amount,
-price, cost, fee, balance, total, subtotal, tax, charge, payout, salary, and currency-minor-unit-suffixed names.
+`double precision`, `float8` or a floating-point ORM column type. Column names in this class include amount,
+price, cost, fee, balance, total, subtotal, tax, charge, payout, salary and currency-minor-unit-suffixed names.
 Because the storage type is exact, summed totals and equality comparisons on these columns cannot silently drift
 the way IEEE-754 binary floating point does.
 """

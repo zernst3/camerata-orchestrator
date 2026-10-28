@@ -1,5 +1,5 @@
 id = "SUPABASE-STORAGE-DOWNLOAD-OWNERSHIP-1"
-version = 2
+version = 3
 title = "A handler that signs or downloads a client-supplied object path must verify the caller is entitled to that specific object first"
 domain = "supabase:storage"
 layer = "platform"
@@ -56,7 +56,7 @@ directive = """
 Wherever `createSignedUrl` or `download` is called with a path that came from the request (a route
 parameter, a query string, a body field) the handler first confirms the requesting user is
 entitled to that EXACT object. In practice that is a lookup keyed on both the object identifier and
-the caller's user id (`where object_path = $1 and owner_id = $2`, not just the path), or an explicit
+the caller's user id (`where object_path = $1 and owner_id = $2`, not just the path) or an explicit
 `storage.objects` owner check. Signing a URL is functionally granting read access, so the check
 happens before the storage call, not after it.
 

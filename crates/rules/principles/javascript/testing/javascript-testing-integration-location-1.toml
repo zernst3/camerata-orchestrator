@@ -1,5 +1,5 @@
 id = "JAVASCRIPT-TESTING-INTEGRATION-LOCATION-1"
-version = 3
+version = 4
 title = "Integration tests live in a dedicated __tests__/integration/ or tests/integration/ directory, not co-located"
 domain = "javascript:testing"
 layer = "language"
@@ -30,14 +30,14 @@ why = "An integration test exercises multiple modules working together (e.g. a s
 [[option]]
 id = "integration-tests-live-in-dedicated-integration-directory"
 label = "Integration tests live in a dedicated __tests__/integration/ or tests/integration/ directory"
-directive = "Integration tests (tests that span more than one real module and may require a database, HTTP server, or message queue) are placed in a dedicated tests/integration/ (or __tests__/integration/) directory at the project root or the package root. They are excluded from the default unit-test Jest/Vitest run via testPathIgnorePatterns or a separate project config entry. A separate CI step or npm script (test:integration) invokes them explicitly."
+directive = "Integration tests (tests that span more than one real module and may require a database, HTTP server or message queue) are placed in a dedicated tests/integration/ (or __tests__/integration/) directory at the project root or the package root. They are excluded from the default unit-test Jest/Vitest run via testPathIgnorePatterns or a separate project config entry. A separate CI step or npm script (test:integration) invokes them explicitly."
 remediation = """
-Move the integration test (one that spans more than one real module or needs a database, HTTP server, or queue) into the dedicated tests/integration/ (or __tests__/integration/) directory, out of the unit-test tree. Verify by confirming the fast unit-test run excludes this file and a separate integration-test command picks it up.
+Move the integration test (one that spans more than one real module or needs a database, HTTP server or queue) into the dedicated tests/integration/ (or __tests__/integration/) directory, out of the unit-test tree. Verify by confirming the fast unit-test run excludes this file and a separate integration-test command picks it up.
 """
 why = "Integration tests have a different cost model (slower, require infra), need to be runnable independently, and cannot be owned by a single source file."
 
 [[option]]
 id = "integration-tests-co-located-with-test-suffix"
 label = "Integration tests are co-located with source using a .integration.test.ts suffix"
-directive = "Integration tests live next to the source under test, distinguished from unit tests by a .integration.test.ts (or .e2e.test.ts) suffix, and excluded from the fast unit-test run via a glob filter on that suffix."
+directive = "Integration tests live next to the source under test, distinguished from unit tests by a .integration.test.ts (or .e2e.test.ts) suffix and excluded from the fast unit-test run via a glob filter on that suffix."
 why = "Co-locating integration tests with source using a suffix keeps all tests near the module under test, which reduces navigation cost; a glob filter on the suffix can still exclude them from the fast unit-test run. The cost is that co-location implies ownership by the adjacent source file, which is false for an integration test that exercises multiple modules, and the unit/integration boundary becomes blurry enough that the CI split between fast and slow test runs is harder to maintain consistently."

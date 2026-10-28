@@ -1,5 +1,5 @@
 id = "RUST-DIOXUS-8"
-version = 3
+version = 4
 title = "Templates use native control flow; iterated children must carry a stable key"
 domain = "rust:dioxus"
 layer = "framework"
@@ -17,7 +17,7 @@ why = "Native Rust control flow inside the template means contributors do not ha
 [[option]]
 id = "templates-use-native-control-flow-iterated-children-must-carry-a-stable-key"
 label = "Templates use native control flow; iterated children must carry a stable key"
-directive = "Inside the framework's template macro, conditional rendering uses native if expressions, optional rendering uses native if-let expressions, iteration uses native for expressions, and multi-branch rendering uses native match expressions. Signal and string interpolation happens through curly-brace placeholders in attribute and text positions. Every child produced by a for expression carries a stable key derived from a property of the underlying data, never the loop index. Without a stable key, the framework cannot diff list reorders and every row remounts, destroying child state."
+directive = "Inside the framework's template macro, conditional rendering uses native if expressions, optional rendering uses native if-let expressions, iteration uses native for expressions and multi-branch rendering uses native match expressions. Signal and string interpolation happens through curly-brace placeholders in attribute and text positions. Every child produced by a for expression carries a stable key derived from a property of the underlying data, never the loop index. Without a stable key, the framework cannot diff list reorders and every row remounts, destroying child state."
 remediation = """
 Replace the iterator-chain-built vector or string-concatenated markup with native if/if-let/for/match expressions inside the template macro, and add a stable key derived from the underlying data to every iterated child that currently omits one. Verify by reordering or removing an item in the iterated list and confirming the framework's diffing preserves the correct component identity rather than misattributing state to the wrong item.
 """
@@ -41,7 +41,7 @@ id = "lists-rendered-in-templates-omit-the-key-attribu"
 violates = true
 label = "Omit key attribute on iterated children"
 directive = "lists rendered in templates omit the key attribute on iterated children when the list looks stable in practice, rather than always supplying a stable key derived from the underlying data"
-why = "Visually the list renders correctly without keys, but reorders silently rebuild every row's children, losing focus state, scroll position, and any in-progress input; the cost of finding and fixing this after launch is significantly higher than the cost of writing the key at the time of authoring."
+why = "Visually the list renders correctly without keys, but reorders silently rebuild every row's children, losing focus state, scroll position and any in-progress input; the cost of finding and fixing this after launch is significantly higher than the cost of writing the key at the time of authoring."
 
 [[sources]]
 url = "https://dioxuslabs.com/learn/0.6/reference/rsx"

@@ -1,6 +1,6 @@
 id = "RUST-DIOXUS-1"
-version = 1
-title = "How the UI crate is organized: by file role, by feature, flat, or file-based routing"
+version = 2
+title = "How the UI crate is organized: by file role, by feature, flat or file-based routing"
 domain = "rust:dioxus"
 layer = "framework"
 enforcement = "structured"
@@ -16,7 +16,7 @@ why = "All of these are legitimate ways to lay out a UI crate, and the right one
 [[option]]
 id = "ui-crate-is-organized-by-file-role-views-components-hooks-contexts-services"
 label = "UI crate is organized by file role: views, components, hooks, contexts, services"
-directive = "The UI crate splits source by what a file does, not by what feature it belongs to. Page-level components (one folder per route) live under views. Reusable primitives and composites (Button, Modal, Toast and similar) live under components. Custom hooks live under hooks. Cross-tree context providers live under contexts. Server-call wrappers live under services. Pure helpers (formatting, validation, class composition) live under lib. A central Routable enum lives at the top of the crate. Page-level views compose primitives; primitives never compose views. Per-folder rules (no rsx in lib, no service calls in components, and similar) attach to the folder names, so the role of any file is obvious from its path."
+directive = "The UI crate splits source by what a file does, not by what feature it belongs to. Page-level components (one folder per route) live under views. Reusable primitives and composites (Button, Modal, Toast and similar) live under components. Custom hooks live under hooks. Cross-tree context providers live under contexts. Server-call wrappers live under services. Pure helpers (formatting, validation, class composition) live under lib. A central Routable enum lives at the top of the crate. Page-level views compose primitives; primitives never compose views. Per-folder rules (no rsx in lib, no service calls in components and similar) attach to the folder names, so the role of any file is obvious from its path."
 remediation = """
 Move the file into the directory matching what it does (views for page-level components, components for reusable primitives, hooks for custom hooks, contexts for providers), rather than grouping it with everything else belonging to the same feature or leaving it flat at the crate root. Verify by confirming the crate's top-level folders are role names (views/, components/, hooks/, contexts/), not feature names, and this file lives under the one matching its role.
 """
@@ -25,9 +25,9 @@ why = "Gives a predictable file-path-to-role mapping that every other UI convent
 [[option]]
 id = "the-ui-crate-is-organized-into-feature-folders-w"
 label = "Feature folders group everything by feature"
-directive = "the UI crate is organized into feature folders where everything related to feature X (views, components, hooks, services, helpers) lives under a single feature-X folder, rather than being split by file role across views, components, hooks, contexts, services, and lib"
+directive = "the UI crate is organized into feature folders where everything related to feature X (views, components, hooks, services, helpers) lives under a single feature-X folder, rather than being split by file role across views, components, hooks, contexts, services and lib"
 remediation = """
-Move the file into a single folder named for its feature, alongside that feature's other views, components, hooks, and helpers, rather than splitting it by file role across the crate. Verify by confirming everything related to one feature lives under one feature folder rather than being scattered across separate views/components/hooks folders.
+Move the file into a single folder named for its feature, alongside that feature's other views, components, hooks and helpers, rather than splitting it by file role across the crate. Verify by confirming everything related to one feature lives under one feature folder rather than being scattered across separate views/components/hooks folders.
 """
 why = "Co-locates everything a feature needs in one place, so a feature can be understood, changed, or owned by a team without touching the rest of the tree. The natural fit for a large UI with strong feature-team ownership boundaries; its trade-off is that shared primitives are harder to discover and tend to be duplicated across features or hidden inside whichever feature first authored them, so cross-feature reuse needs deliberate attention."
 

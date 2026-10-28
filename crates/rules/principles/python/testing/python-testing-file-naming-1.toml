@@ -1,5 +1,5 @@
 id = "PYTHON-TESTING-FILE-NAMING-1"
-version = 2
+version = 3
 title = "Test files follow test_*.py naming so pytest auto-discovers them"
 domain = "python:testing"
 layer = "language"

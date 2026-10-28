@@ -1,5 +1,5 @@
 id = "RUST-DOMAIN-6"
-version = 2
+version = 3
 title = "Crate-boundary error types: typed enums organized by category or by aggregate"
 domain = "rust"
 layer = "language"
@@ -28,9 +28,9 @@ why = "This rule assumes `rust-domain-4-errors-via-thiserror`'s default (a typed
 [[option]]
 id = "errors-are-category-scoped-one-shared-enum-per-f"
 label = "Errors are organized by failure category, one shared enum per category"
-directive = "Each Rust crate exposes errors organized by failure category at its public boundary, with one shared enum per category. The categories are whatever distinct failure surfaces the crate exposes; examples include persistence and IO failures, input validation, business rule violations, parsing, and networking, but the actual set depends on what the crate does. Variants within an enum enumerate the distinct failure modes for that category. Driver-specific or framework-specific errors map into the appropriate category enum at the boundary; they do not leak through the public API directly."
+directive = "Each Rust crate exposes errors organized by failure category at its public boundary, with one shared enum per category. The categories are whatever distinct failure surfaces the crate exposes; examples include persistence and IO failures, input validation, business rule violations, parsing and networking, but the actual set depends on what the crate does. Variants within an enum enumerate the distinct failure modes for that category. Driver-specific or framework-specific errors map into the appropriate category enum at the boundary; they do not leak through the public API directly."
 remediation = """
-Split the crate's single mixed error enum (or per-aggregate error, re-exported driver error, or Box-of-dyn-Error/anyhow return type) into category-scoped enums at the crate's public boundary, one per distinct failure surface (persistence, validation, business rule, and so on). Verify by confirming callers can match on a specific failure category's enum rather than a single catch-all type or an opaque boxed error.
+Split the crate's single mixed error enum (or per-aggregate error, re-exported driver error or Box-of-dyn-Error/anyhow return type) into category-scoped enums at the crate's public boundary, one per distinct failure surface (persistence, validation, business rule and so on). Verify by confirming callers can match on a specific failure category's enum rather than a single catch-all type or an opaque boxed error.
 """
 why = "Keeps callers matching a small, stable set of category enums even as the crate grows: failure modes that recur across many operations (a NotFound, a constraint violation) are defined once per category rather than restated per operation. The natural fit for larger crates whose failure surfaces are shared across many entry points."
 
@@ -49,7 +49,7 @@ violates = true
 label = "Single error enum mixing every failure category"
 directive = "the crate exposes a single error enum that mixes every failure category (persistence, validation, business rule, parsing, networking) into one type, rather than splitting failures into category enums or per-aggregate enums"
 remediation = """
-Consolidate the crate's category-scoped or per-aggregate error enums into a single enum that mixes every failure category, rather than splitting them by category or aggregate. Verify by confirming the crate's public API surfaces exactly one error type covering persistence, validation, business rule, and other failures.
+Consolidate the crate's category-scoped or per-aggregate error enums into a single enum that mixes every failure category, rather than splitting them by category or aggregate. Verify by confirming the crate's public API surfaces exactly one error type covering persistence, validation, business rule and other failures.
 """
 why = "Collapses orthogonal concerns regardless of how the rest of the crate is organized: callers cannot distinguish a validation failure from a persistence failure without inspecting the variant, the single enum's arms accumulate without bound as the crate grows, and a match that handles only one failure surface must either wildcard or exhaustively name unrelated variants."
 

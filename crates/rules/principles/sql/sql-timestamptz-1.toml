@@ -1,5 +1,5 @@
 id = "SQL-TIMESTAMPTZ-1"
-version = 3
+version = 4
 title = "A column recording when an EVENT happened uses timestamp WITH time zone, never the bare, zone-less timestamp type"
 domain = "sql"
 layer = "universal"
@@ -50,7 +50,7 @@ id = "event-timestamps-are-timestamptz"
 label = "Flag zone-less timestamp columns whose name suggests an event instant; timestamptz is the default for created_at/occurred_at/expires_at-shaped columns"
 directive = """
 A column that records when an event happened (created_at, updated_at, occurred_at, started_at, completed_at,
-expires_at, and close variants) is declared `timestamp with time zone` (`timestamptz`), never the bare, zone-less
+expires_at and close variants) is declared `timestamp with time zone` (`timestamptz`), never the bare, zone-less
 `timestamp` type. The value is therefore stored normalized to UTC and represents one unambiguous instant regardless
 of which session time zone later reads it, rather than a wall-clock reading whose real-world moment shifts with the
 reader's zone. A column that intentionally represents a zone-agnostic wall-clock value (a recurring local time, a

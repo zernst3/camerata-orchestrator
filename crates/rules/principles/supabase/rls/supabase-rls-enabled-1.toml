@@ -1,5 +1,5 @@
 id = "SUPABASE-RLS-ENABLED-1"
-version = 4
+version = 5
 title = "Every table in an API-exposed schema has Row Level Security enabled in its replayed end-state"
 domain = "supabase:rls"
 layer = "platform"
@@ -66,7 +66,7 @@ label = "Every table in an API-exposed schema has Row Level Security enabled"
 directive = """
 Every table reachable through an API-exposed schema (`public` by default, plus any schema named in
 `[api] schemas`) ends the migration history with
-`ALTER TABLE <table> ENABLE ROW LEVEL SECURITY;` in force, and carries at least one policy scoping
+`ALTER TABLE <table> ENABLE ROW LEVEL SECURITY;` in force and carries at least one policy scoping
 who may read and write it. RLS alone with zero policies denies everyone, which is safe but is
 usually not what the feature wanted.
 
@@ -76,7 +76,7 @@ application firewall in front of PostgREST, so RLS is the only thing standing be
 internet request and the table's rows. Whether RLS is on is a fact about the ORDERED migration
 history, not about any one file (a later migration can enable what an earlier one left off, or
 disable what an earlier one turned on) so the state that counts is the one the last relevant
-statement leaves behind, or the declarative `supabase/schemas/*.sql` snapshot where the project
+statement leaves behind or the declarative `supabase/schemas/*.sql` snapshot where the project
 keeps one.
 """
 remediation = """

@@ -1,5 +1,5 @@
 id = "SUPABASE-REALTIME-CHANNEL-SCOPE-1"
-version = 2
+version = 3
 title = "A channel topic must not be a guessable/enumerable identifier or an unvalidated client-supplied string standing in for an authorization check"
 domain = "supabase:realtime"
 layer = "platform"
@@ -69,7 +69,7 @@ trivially enumerable by anyone authorized for their own.
 """
 remediation = """
 Construct `<topic>` from a server-issued or genuinely unguessable identifier (a UUID tied to the resource, not a
-sequential id), and ensure the client never gets to choose an arbitrary topic string outright: the server should
+sequential id) and ensure the client never gets to choose an arbitrary topic string outright: the server should
 be the one that decides, for a given authenticated user, which topic(s) they are allowed to request. Pair this with
 a realtime.messages RLS policy (SUPABASE-REALTIME-AUTHORIZATION-1) so that even a leaked topic name does not grant
 access on its own. Verify by attempting to join a channel for another user's resource using a guessed or adjacent

@@ -1,5 +1,5 @@
 id = "RUST-DIOXUS-9"
-version = 3
+version = 4
 title = "Server-to-client calls: framework server functions or a REST API"
 domain = "rust:dioxus"
 layer = "framework"
@@ -18,7 +18,7 @@ id = "server-to-client-calls-use-server-functions-not"
 label = "The UI calls the server through framework server functions"
 directive = "When the UI needs data or actions from the server, the framework's server-function macro (`#[server]`) is used to declare them. The macro generates the client-side call (over the wire, serialized) and the server-side handler from a single function definition; the body runs server-side and may call the application's service layer directly. Within this choice the UI does not also maintain a separate REST/RPC client for the same operations: the server function is the single source of truth per operation. When a function needs to reach a third party (payment provider, email gateway, external API), that call lives in the server-side body of a server function, never in client-side code."
 remediation = """
-Replace the hand-rolled REST call, the typed RPC layer, or the graph-query fetch with a function declared using the framework's #[server] macro, so the client-side call and server-side handler are generated from a single function definition. Verify by confirming the UI calls the server through the generated server-function client, not a separate HTTP client or RPC stub.
+Replace the hand-rolled REST call, the typed RPC layer or the graph-query fetch with a function declared using the framework's #[server] macro, so the client-side call and server-side handler are generated from a single function definition. Verify by confirming the UI calls the server through the generated server-function client, not a separate HTTP client or RPC stub.
 """
 why = "Keeps one source of truth per operation: a single function definition generates both sides, so a renamed field or changed return type is updated in one place, and the same call resolves in-process during server-side rendering and over the network during hydration. The strongest fit when the UI and server ship together as one fullstack app and the server has no consumers other than this front end."
 
@@ -34,9 +34,9 @@ why = "The right shape when the server is a standalone product surface rather th
 [[option]]
 id = "server-to-client-calls-go-through-a-typed-rpc-la"
 label = "Typed RPC layer as separate dependency"
-directive = "server-to-client calls go through a typed RPC layer added as a separate dependency (gRPC, tarpc, or similar), rather than through the framework's server-function macro"
+directive = "server-to-client calls go through a typed RPC layer added as a separate dependency (gRPC, tarpc or similar), rather than through the framework's server-function macro"
 remediation = """
-Replace the framework server function (or REST/graph-query call) with a call through the typed RPC layer (gRPC, tarpc, or similar) added as a separate dependency, and generate client stubs from that layer's schema. Verify by confirming the UI calls the server through the RPC client's generated stub, not the #[server] macro or a hand-rolled HTTP client.
+Replace the framework server function (or REST/graph-query call) with a call through the typed RPC layer (gRPC, tarpc or similar) added as a separate dependency and generate client stubs from that layer's schema. Verify by confirming the UI calls the server through the RPC client's generated stub, not the #[server] macro or a hand-rolled HTTP client.
 """
 why = "Equivalent in shape to server functions but adds an extra dependency to maintain for what the framework already provides natively: the generated stub types must stay in sync with the service definition, codegen adds a build step, and the project takes on the full surface of the RPC library's maintenance and upgrade cycle. Reasonable when an RPC ecosystem (shared contracts, polyglot services) is already in use across the system."
 

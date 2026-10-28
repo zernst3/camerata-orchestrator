@@ -1,5 +1,5 @@
 id = "ARCH-TOKEN-REFRESH-ROTATION-1"
-version = 3
+version = 4
 title = "Access tokens are short-lived; a long-lived session is maintained by a rotating refresh token whose reuse is detected and revokes the whole token family"
 domain = "permissions"
 layer = "universal"
@@ -62,7 +62,7 @@ access tokens before their natural expiry. Add rotation to the refresh-token exc
 refresh token and immediately invalidates the one just presented, tracked by a token-family identifier. Add reuse
 detection: if an already-invalidated refresh token from a given family is presented again, revoke every token in
 that family rather than accepting or silently rejecting just the one request. Verify with an integration test that
-issues a token, performs a refresh, then replays the ORIGINAL (now-stale) refresh token, and confirms the session is
+issues a token, performs a refresh, then replays the ORIGINAL (now-stale) refresh token and confirms the session is
 fully revoked rather than the stale token being silently accepted or silently ignored with the session otherwise
 intact.
 """
@@ -73,7 +73,7 @@ why = "A stolen refresh token used alongside the legitimate client's own continu
 id = "single-long-lived-access-token-as-the-session"
 violates = true
 label = "Issue one long-lived access token per login and use it as the session for its full validity window, with no refresh/rotation mechanism"
-directive = "A single access token is issued at login with a long expiry (hours to weeks) and is used directly as the session credential for its entire lifetime, with no shorter-lived token, no refresh exchange, and no rotation."
+directive = "A single access token is issued at login with a long expiry (hours to weeks) and is used directly as the session credential for its entire lifetime, with no shorter-lived token, no refresh exchange and no rotation."
 why = "Rejected: a long-lived token used this way is difficult to revoke before its natural expiry (many designs specifically avoid a server-side revocation list for statelessness), so a stolen copy remains fully valid for as long as the token's lifetime, with no mechanism that would ever surface the theft to the legitimate user: the attacker's use is indistinguishable from the legitimate user's own continued use, forever, until expiry."
 
 [[option]]

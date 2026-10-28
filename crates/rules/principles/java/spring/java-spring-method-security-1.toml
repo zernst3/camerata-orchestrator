@@ -1,5 +1,5 @@
 id = "JAVA-SPRING-METHOD-SECURITY-1"
-version = 3
+version = 4
 title = "Protected service methods carry @PreAuthorize; authorization is not re-implemented in every controller"
 domain = "java:spring"
 layer = "framework"
@@ -32,14 +32,14 @@ id = "preauthorize-on-controller-methods"
 violates = true
 label = "@PreAuthorize on @RequestMapping methods in controllers only"
 directive = "@PreAuthorize is applied to controller action methods rather than service methods. Service methods carry no authorization annotations. A background job or alternative entry point that calls the service method gets no authorization check unless the developer explicitly adds @PreAuthorize to that entry point as well."
-why = "The authorization check lives on the controller, so the moment the same service method is reached from a scheduled task, a message listener, or an integration test, it executes with no check at all and nothing reports that one was skipped. The protection holds only for as long as HTTP remains the single entry point."
+why = "The authorization check lives on the controller, so the moment the same service method is reached from a scheduled task, a message listener or an integration test, it executes with no check at all and nothing reports that one was skipped. The protection holds only for as long as HTTP remains the single entry point."
 
 [[option]]
 id = "manual-role-check-in-controller"
 violates = true
 label = "Manual SecurityContextHolder role checks in each controller action"
 directive = "Controllers check authorization manually by introspecting SecurityContextHolder.getContext().getAuthentication().getAuthorities() and returning ResponseEntity.status(403) when the required authority is absent. No @PreAuthorize or @EnableMethodSecurity."
-why = "Repeats the same pattern in every controller action that needs it, is not enforced at non-HTTP entry points, and produces inconsistent 403 response bodies compared to Spring Security's AccessDeniedException handler."
+why = "Repeats the same pattern in every controller action that needs it, is not enforced at non-HTTP entry points and produces inconsistent 403 response bodies compared to Spring Security's AccessDeniedException handler."
 
 [[option]]
 id = "url-pattern-authorizehttprequests"

@@ -1,5 +1,5 @@
 id = "SUPABASE-REALTIME-AUTHORIZATION-1"
-version = 2
+version = 3
 title = "Every private Realtime channel has an RLS policy on realtime.messages; public-access is an explicit, reviewed choice, never the silent default"
 domain = "supabase:realtime"
 layer = "platform"
@@ -59,7 +59,7 @@ is configured with both halves in place:
   disabled in the project's Realtime Settings, which is what routes the channel through
   authorization at all; and
 - `realtime.messages` has RLS enabled with at least one `CREATE POLICY` scoping who may join,
-  broadcast to, or receive from that topic, typically keyed off a claim or a join against the
+  broadcast to or receive from that topic, typically keyed off a claim or a join against the
   application's own membership or ownership table.
 
 Either half alone leaves the check absent. A channel with no `private` flag is public: anyone who
@@ -70,7 +70,7 @@ validated at connection time against the policies that exist, and zero policies 
 remediation = """
 For `<topic>`, set `config: { private: true }` on the channel and disable 'Allow public access' in your project's
 Realtime Settings. Add a CREATE POLICY on `realtime.messages` scoping which authenticated users may join, broadcast
-to, or receive from this topic (typically keyed off a claim or a join against your application's own membership/
+to or receive from this topic (typically keyed off a claim or a join against your application's own membership/
 ownership table). Verify by connecting to the channel as a user who should NOT have access and confirming the
 connection is rejected, not merely that the client UI happens not to display anything.
 """

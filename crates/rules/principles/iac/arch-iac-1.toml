@@ -1,5 +1,5 @@
 id = "ARCH-IAC-1"
-version = 3
+version = 4
 title = "Infrastructure as code, per-environment isolation"
 domain = "iac"
 layer = "universal"
@@ -40,7 +40,7 @@ id = "infrastructure-is-provisioned-manually-through-a"
 violates = true
 label = "infrastructure is provisioned manually through a cloud console (click-ops), with no IaC"
 directive = "Infrastructure is provisioned and changed manually through a cloud console (click-ops) rather than through IaC definitions checked into source control."
-why = "Manual console provisioning leaves no audit trail of what changed, when, or why; it produces silent drift between environments that are supposed to be identical (dev/staging/prod diverge one manual click at a time); and it isn't reproducible: recreating the environment from scratch (disaster recovery, a new region, a new environment) requires someone to remember or reverse-engineer every manual step rather than replaying a plan."
+why = "Manual console provisioning leaves no audit trail of what changed, when or why; it produces silent drift between environments that are supposed to be identical (dev/staging/prod diverge one manual click at a time); and it isn't reproducible: recreating the environment from scratch (disaster recovery, a new region, a new environment) requires someone to remember or reverse-engineer every manual step rather than replaying a plan."
 
 [[option]]
 id = "secrets-committed-directly-into-iac-source-files"

@@ -1,5 +1,5 @@
 id = "SEC-NO-QUERY-GRAMMAR-INJECTION-1"
-version = 2
+version = 3
 title = "User-controlled data is never concatenated into a query/filter grammar string (PostgREST .or()/.filter(), a NoSQL operator string, an LDAP filter); it is passed as a bound argument"
 domain = "universal"
 layer = "universal"
@@ -41,7 +41,7 @@ filter builder) — never string interpolation into the grammar itself.
 [[option]]
 id = "bind-dont-concatenate-into-query-grammar"
 label = "Use the client library's bound-argument filter methods, never string-built grammar"
-directive = "Any filter or query expression accepting user-controlled data uses the client library's own bound-argument methods (e.g. .eq(column, value), a properly escaped .ilike(), a parameterized LDAP filter) instead of concatenating the value into a .or()/.filter() grammar string, a raw NoSQL operator string, or a hand-built LDAP filter."
+directive = "Any filter or query expression accepting user-controlled data uses the client library's own bound-argument methods (e.g. .eq(column, value), a properly escaped .ilike(), a parameterized LDAP filter) instead of concatenating the value into a .or()/.filter() grammar string, a raw NoSQL operator string or a hand-built LDAP filter."
 remediation = """
 Rewrite the concatenated filter expression to use the client library's bound-argument methods
 (PostgREST/Supabase: .eq(column, value) chains instead of a string-built .or()/.filter()

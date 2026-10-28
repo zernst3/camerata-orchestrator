@@ -1,5 +1,5 @@
 id = "RUBY-TESTING-AAA-STRUCTURE-1"
-version = 2
+version = 3
 title = "Each example follows Arrange-Act-Assert: let/subject for setup, a single action, then expect(); hooks appear before examples"
 domain = "ruby:testing"
 layer = "language"
@@ -17,7 +17,7 @@ why = "Arrange-Act-Assert (AAA) is a universal test-structure principle: set up 
 [[option]]
 id = "aaa-with-let-before"
 label = "let/subject → before → it with one expect(); hooks placed before examples"
-directive = "Within each describe or context block, declarations appear in this order: (1) subject (the unit under test, using described_class when applicable); (2) let and let! blocks for lazy and eager Arrange data; (3) before(:each) / after(:each) hooks for imperative setup; (4) shared_examples_for or it_behaves_like; (5) it examples. Inside an it block, aim for one expect() or use aggregate_failures { } when multiple related assertions belong together. The it block describes the outcome, not the method call: it 'returns the signed token' do / expect(result).to be_a(String) / end. Use before(:all) only for truly class-level setup that cannot create state leakage (prefer before(:each) by default). rubocop-rspec cops RSpec/LetBeforeExamples, RSpec/HooksBeforeExamples, and RSpec/LeadingSubject enforce placement order."
+directive = "Within each describe or context block, declarations appear in this order: (1) subject (the unit under test, using described_class when applicable); (2) let and let! blocks for lazy and eager Arrange data; (3) before(:each) / after(:each) hooks for imperative setup; (4) shared_examples_for or it_behaves_like; (5) it examples. Inside an it block, aim for one expect() or use aggregate_failures { } when multiple related assertions belong together. The it block describes the outcome, not the method call: it 'returns the signed token' do / expect(result).to be_a(String) / end. Use before(:all) only for truly class-level setup that cannot create state leakage (prefer before(:each) by default). rubocop-rspec cops RSpec/LetBeforeExamples, RSpec/HooksBeforeExamples and RSpec/LeadingSubject enforce placement order."
 remediation = """
 Restructure the example so subject and let/let! declarations come first, before(:each)/after(:each) hooks come next, and the it block contains a single action followed by one expect(). Move any Arrange logic currently inline in the it block into let or before. Verify by confirming the example has exactly one expectation and its setup is expressed through let/before rather than inline in the it block.
 """
@@ -26,7 +26,7 @@ why = "Produces visually separable AAA phases, minimal duplication, and is enfor
 [[option]]
 id = "inline-setup"
 label = "Inline all setup inside each it block"
-directive = "All Arrange, Act, and Assert code lives inside the it block body. No let, no before hooks."
+directive = "All Arrange, Act and Assert code lives inside the it block body. No let, no before hooks."
 why = "Explicit and self-contained per example, but creates significant duplication across examples that share setup and buries the Act/Assert signal."
 
 [[sources]]

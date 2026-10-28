@@ -1,5 +1,5 @@
 id = "CICD-LEAST-PRIVILEGE-TOKEN-1"
-version = 4
+version = 5
 title = "The CI job token's default permissions are scoped to least privilege explicitly, never left at the platform's broad default"
 domain = "ci-cd"
 layer = "universal"
@@ -69,7 +69,7 @@ that genuinely needs a write scope, move that elevated permission to a job-level
 only that job and only the specific scope required, rather than granting it workflow-wide. Confirm (or request) the
 repository or organization's default GITHUB_TOKEN permission is also set to read-only, so a workflow that omits the
 key entirely still fails safe. Verify by confirming a job that does not need to write (lint, test) genuinely cannot
-write to repository contents, issues, or packages even if its own code attempted to.
+write to repository contents, issues or packages even if its own code attempted to.
 """
 effort = "low"
 why = "The default token scope on many repositories is broad read/write across most of what it could plausibly need, available to every step including third-party code the project does not fully control; an explicit least-privilege permissions block bounds what a compromised step in that job can actually do, rather than leaving the ceiling at whatever the platform or organization default happens to be."
@@ -79,4 +79,4 @@ id = "no-explicit-permissions-block-inherit-platform-default"
 violates = true
 label = "Omit the permissions block entirely and inherit whatever the platform/organization's default GITHUB_TOKEN scope currently is"
 directive = "Workflow files set no explicit permissions: key at all, relying on the repository or organization's currently-configured default token scope, whatever that happens to be."
-why = "Rejected: the default scope varies by repository age, organization policy, and settings nobody reviewing this specific workflow necessarily controls or has verified: a workflow that looks correct by its own content can still run with a broad read/write token simply because the organization default was never tightened. Every step in the workflow, including any executing third-party code, inherits that scope; explicitly declaring the minimum needed removes the dependency on an assumption about a setting that lives outside the workflow file entirely."
+why = "Rejected: the default scope varies by repository age, organization policy and settings nobody reviewing this specific workflow necessarily controls or has verified: a workflow that looks correct by its own content can still run with a broad read/write token simply because the organization default was never tightened. Every step in the workflow, including any executing third-party code, inherits that scope; explicitly declaring the minimum needed removes the dependency on an assumption about a setting that lives outside the workflow file entirely."

@@ -1,5 +1,5 @@
 id = "UI-STATE-SHAPE-1"
-version = 1
+version = 2
 title = "Component state stores each fact once: mutually exclusive flags are one status value, and a value computed from props or state is computed during render, not copied into state by an effect"
 domain = "ui"
 layer = "universal"
@@ -42,7 +42,7 @@ id = "each-fact-is-stored-once"
 label = "Mutually exclusive flags are one status value, and values computed from props or state are computed during render"
 directive = "Store each fact of a component's state once. When several boolean flags describe one status and only one may be true at a time (loading, error, success; which panel is open), keep a single state variable for the status, such as a string union or an enum, and derive each boolean from it during render. When a value can be computed from props or other state, compute it during render (with useMemo if the computation is expensive) instead of copying it into state with an effect."
 remediation = """
-For exclusive flags: replace the boolean state variables named in the finding with one state variable whose value is the status (for example `'idle' | 'loading' | 'error'`), set it once in each place that currently sets the flags, and derive each boolean from it during render (`const isLoading = status === 'loading'`). For a value copied by an effect: delete the state variable and the effect named in the finding, and compute the value during render from the same inputs, wrapping it in `useMemo` only if it is expensive. Verify by running the component's tests and checking that every place that read the old variables still renders the same output.
+For exclusive flags: replace the boolean state variables named in the finding with one state variable whose value is the status (for example `'idle' | 'loading' | 'error'`), set it once in each place that currently sets the flags and derive each boolean from it during render (`const isLoading = status === 'loading'`). For a value copied by an effect: delete the state variable and the effect named in the finding, and compute the value during render from the same inputs, wrapping it in `useMemo` only if it is expensive. Verify by running the component's tests and checking that every place that read the old variables still renders the same output.
 """
 effort = "low"
 why = "The change is local to one component: one state variable in place of several, or a computed value in place of a state variable and an effect. Afterwards no handler can leave the flags in a contradictory combination, and the computed value is never stale."
@@ -52,4 +52,4 @@ id = "facts-are-stored-in-several-variables"
 violates = true
 label = "One status is spread over several boolean flags, or a value computed from props or state is copied into state by an effect"
 directive = "Components may keep a separate boolean for each status a process can be in, and may copy values computed from props or state into state with an effect."
-why = "Flags that must never be true together depend on every handler setting all of them correctly; a handler that sets one and forgets another produces a combination the rest of the component never expects, such as a spinner and an error message at once. A value copied into state by an effect is one render behind its inputs after every change, costs an extra render, and can drift from them as soon as anything else writes it. The disagreement shows only at runtime, usually as a flash of wrong content or a stuck state."
+why = "Flags that must never be true together depend on every handler setting all of them correctly; a handler that sets one and forgets another produces a combination the rest of the component never expects, such as a spinner and an error message at once. A value copied into state by an effect is one render behind its inputs after every change, costs an extra render and can drift from them as soon as anything else writes it. The disagreement shows only at runtime, usually as a flash of wrong content or a stuck state."

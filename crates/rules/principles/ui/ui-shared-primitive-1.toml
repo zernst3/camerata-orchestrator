@@ -1,5 +1,5 @@
 id = "UI-SHARED-PRIMITIVE-1"
-version = 3
+version = 4
 title = "A UI mechanism such as a spinner, a retry control, an outside-click dismiss or a scroll lock is built once as a shared hook or component and used wherever it is needed, never hand-written again in each component"
 domain = "ui"
 layer = "universal"
@@ -48,7 +48,7 @@ id = "repeated-ui-mechanisms-are-one-shared-component"
 label = "A UI mechanism that several components need is built once as a shared hook or component and used by each of them"
 directive = "Build a UI mechanism that more than one component needs (a loading spinner, a retry control, a menu host, an empty state, a focus trap, an outside-click dismiss, a scroll lock) once, as a hook or a component in the shared UI module, and use it in each place that needs it. Do not hand-write the same mechanism again inside another component. When copies already exist, extract the mechanism and replace each copy with a use of it."
 remediation = """
-Extract the mechanism into one hook or component in the shared UI module, replace each copy listed in the finding with a use of it, and pass what differs (labels, class names, event names) as arguments or props. Verify by searching the repository for the mechanism's distinctive call, such as the event name or the hook it uses: it should appear only in the shared module, and the affected screens should still behave as before.
+Extract the mechanism into one hook or component in the shared UI module, replace each copy listed in the finding with a use of it and pass what differs (labels, class names, event names) as arguments or props. Verify by searching the repository for the mechanism's distinctive call, such as the event name or the hook it uses: it should appear only in the shared module, and the affected screens should still behave as before.
 """
 effort = "low"
 why = "Extracting a repeated mechanism is a mechanical edit: one hook or component, one use per listed place. Afterwards a fix or an improvement to the mechanism reaches every screen at once."

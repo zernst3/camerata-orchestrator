@@ -1,5 +1,5 @@
 id = "CSHARP-DEPENDENCY-INJECTION-CONSTRUCTOR-1"
-version = 2
+version = 3
 title = "Dependencies are injected via constructor parameters (including C# 12 primary constructors), not [Inject]/[Service] property injection or a service locator"
 domain = "csharp"
 layer = "language"
@@ -36,15 +36,15 @@ why = "Constructor injection (traditional or primary-constructor form) is explic
 id = "property-injection"
 violates = true
 label = "inject dependencies via [Inject] attributes on properties (outside Blazor components)"
-directive = "Dependencies of an ordinary service, handler, controller, or other DI-constructed class are declared as public properties annotated with [Inject] or [Service] rather than passed via the constructor. The container uses reflection to set values at runtime after instantiation."
-why = "Outside the Blazor component model, this hides dependencies (invisible until runtime), allows reassignment, makes testing awkward (must mock the container), and can lead to NullReferenceException if the container fails to inject."
+directive = "Dependencies of an ordinary service, handler, controller or other DI-constructed class are declared as public properties annotated with [Inject] or [Service] rather than passed via the constructor. The container uses reflection to set values at runtime after instantiation."
+why = "Outside the Blazor component model, this hides dependencies (invisible until runtime), allows reassignment, makes testing awkward (must mock the container) and can lead to NullReferenceException if the container fails to inject."
 
 [[option]]
 id = "service-locator"
 violates = true
 label = "use a service locator or manual resolution from IServiceProvider"
 directive = "Dependencies are resolved on-demand from IServiceProvider.GetRequiredService<T>() within the method or constructor."
-why = "Obscures dependencies, makes testing harder (must mock IServiceProvider), and is generally considered an anti-pattern in dependency-injection frameworks."
+why = "Obscures dependencies, makes testing harder (must mock IServiceProvider) and is generally considered an anti-pattern in dependency-injection frameworks."
 
 
 [[sources]]

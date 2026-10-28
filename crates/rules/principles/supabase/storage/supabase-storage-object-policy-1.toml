@@ -1,5 +1,5 @@
 id = "SUPABASE-STORAGE-OBJECT-POLICY-1"
-version = 4
+version = 5
 title = "storage.objects policies must not grant unconditional or unscoped anon write/delete access"
 domain = "supabase:storage"
 layer = "platform"
@@ -67,7 +67,7 @@ Policies on `storage.objects` that cover INSERT, UPDATE or DELETE scope the oper
 object's owner: `using (bucket_id = '<bucket>' and owner = auth.uid())`, or a folder-prefix
 convention keyed to the user's id. They are not `USING (true)` / `WITH CHECK (true)`, and they do
 not grant to `anon` or `public` without an ownership predicate, because either shape lets anyone
-upload into, overwrite, or delete from the bucket rather than just the person whose file it is.
+upload into, overwrite or delete from the bucket rather than just the person whose file it is.
 Read access is scoped the same way unless the bucket's contents are deliberately public.
 """
 remediation = """
@@ -83,5 +83,5 @@ why = "Storage authorization is RLS on storage.objects in every respect that mat
 id = "unscoped-storage-write-policy-for-anon-or-public"
 violates = true
 label = "A storage.objects write or delete policy for anon or public is unscoped to the object's owner"
-directive = "A `storage.objects` policy granting INSERT/UPDATE/DELETE to anon or public carries `USING (true)` / `WITH CHECK (true)` with no owner or per-user folder predicate, so anyone can upload into, overwrite, or delete from the bucket."
+directive = "A `storage.objects` policy granting INSERT/UPDATE/DELETE to anon or public carries `USING (true)` / `WITH CHECK (true)` with no owner or per-user folder predicate, so anyone can upload into, overwrite or delete from the bucket."
 why = "Rejected: an unscoped write grant on storage.objects reachable by anon/public is a world-writable bucket. A SELECT-only unscoped policy for deliberately public read data is the default option's reviewed case."

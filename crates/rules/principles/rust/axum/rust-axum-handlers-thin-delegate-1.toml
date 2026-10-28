@@ -1,5 +1,5 @@
 id = "RUST-AXUM-HANDLERS-THIN-DELEGATE-1"
-version = 3
+version = 4
 title = "Handlers stay thin; business logic and data access live in services or repositories"
 domain = "rust:axum"
 layer = "framework"
@@ -23,7 +23,7 @@ why = "A handler is a translation layer: it reads the validated HTTP request (no
 [[option]]
 id = "handlers-thin-delegate-to-services"
 label = "Handlers stay thin; delegate to services or repositories"
-directive = "Handlers are limited to HTTP concerns: extract and validate the request, call a service or repository function, and map its result or error onto a response. Business rules and data access (database queries, ORM calls, external API calls) live in a service or repository layer the handler calls. A direct database query or business-rule computation written inside a handler is forbidden; it moves behind the service layer."
+directive = "Handlers are limited to HTTP concerns: extract and validate the request, call a service or repository function and map its result or error onto a response. Business rules and data access (database queries, ORM calls, external API calls) live in a service or repository layer the handler calls. A direct database query or business-rule computation written inside a handler is forbidden; it moves behind the service layer."
 remediation = """
 Move the business logic and direct data access out of the handler and into a service or repository function the handler calls, leaving the handler limited to extracting/validating the request and mapping the result to a response. Verify by confirming the handler function contains no direct database query or external API call.
 """
@@ -32,9 +32,9 @@ why = "Thin handlers keep transport concerns separate from domain logic, enable 
 [[option]]
 id = "handlers-contain-business-logic-and-data-access"
 label = "Handlers contain business logic and data access inline"
-directive = "Handlers contain business logic, data access (database queries, ORM calls), and external API calls inline, handling validation, rules, and data retrieval together in the handler, rather than delegating to a separate service or repository layer."
+directive = "Handlers contain business logic, data access (database queries, ORM calls) and external API calls inline, handling validation, rules and data retrieval together in the handler, rather than delegating to a separate service or repository layer."
 why = "Logic embedded in a handler is reachable only through an HTTP request, so it cannot be unit-tested or reused by a CLI or scheduled job without spinning up the web layer; the same rule duplicated in a second handler that needs it drifts out of sync; and the handler mixes transport concerns with domain concerns so a change to either touches code that does both."
 
 [[sources]]
 url = "https://docs.rs/axum/latest/axum/"
-title = "axum: Overview: handlers, extractors, and routing architecture"
+title = "axum: Overview: handlers, extractors and routing architecture"

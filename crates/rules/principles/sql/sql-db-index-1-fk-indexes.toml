@@ -1,5 +1,5 @@
 id = "SQL-DB-INDEX-1"
-version = 2
+version = 3
 title = "Every foreign-key column gets an index in the same migration"
 domain = "sql"
 layer = "universal"
@@ -28,7 +28,7 @@ id = "every-foreign-key-column-gets-an-index-in-the-same-migration"
 label = "Every foreign-key column gets an index in the same migration"
 directive = "When a migration adds a foreign-key column, the same migration adds an index on it. Declare the index adjacent to the FK in the file so a reviewer can see them together. The pair is enforceable by a migration linter that scans for FK declarations and verifies a matching index in the same change."
 remediation = """
-Add an index on the foreign-key column in the same migration that introduces the FK, declared adjacent to the FK declaration, rather than relying on the database to auto-index it, or adding the index reactively in a later migration after performance degrades. Verify by confirming the migration that adds the FK column also creates a matching index, checkable via a migration linter that scans for FK declarations without a paired index.
+Add an index on the foreign-key column in the same migration that introduces the FK, declared adjacent to the FK declaration, rather than relying on the database to auto-index it or adding the index reactively in a later migration after performance degrades. Verify by confirming the migration that adds the FK column also creates a matching index, checkable via a migration linter that scans for FK declarations without a paired index.
 """
 why = "Most major databases (PostgreSQL, SQL Server, Oracle, SQLite) do not automatically index foreign-key columns; missing FK indexes are invisible at low data volume and devastating at high, and no cache layer above the database can compensate for an unindexed FK join."
 
@@ -37,7 +37,7 @@ id = "the-project-relies-on-the-database-engine-to-aut"
 violates = true
 label = "Rely on the database engine to auto-index FKs"
 directive = "the project relies on the database engine to auto-index foreign-key columns and does not declare explicit indexes on FK columns in migrations"
-why = "Reduces migration boilerplate on MySQL with InnoDB, where auto-indexing holds, but is silently brittle on PostgreSQL, SQL Server, Oracle, and SQLite, which do not auto-index FK columns. The engine assumption is invisible in the migration file and breaks when the engine changes or the project deploys to a mixed environment."
+why = "Reduces migration boilerplate on MySQL with InnoDB, where auto-indexing holds, but is silently brittle on PostgreSQL, SQL Server, Oracle and SQLite, which do not auto-index FK columns. The engine assumption is invisible in the migration file and breaks when the engine changes or the project deploys to a mixed environment."
 
 [[option]]
 id = "fk-indexes-are-added-reactively-in-later-migrati"

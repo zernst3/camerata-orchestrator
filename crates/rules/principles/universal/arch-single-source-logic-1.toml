@@ -1,5 +1,5 @@
 id = "ARCH-SINGLE-SOURCE-LOGIC-1"
-version = 3
+version = 4
 title = "An application decision such as a price, a fee, a status or a permission check is implemented in one function that every place needing it calls, never written out again in a second file"
 domain = "universal"
 layer = "universal"
@@ -52,7 +52,7 @@ id = "each-decision-is-implemented-once"
 label = "Each application decision is implemented once, in one function that every place needing it calls"
 directive = "Implement each application decision (a price, a fee, a status derivation, a display name, a permission check, a tier or bucket computation) once, as one function in the module that owns the concept, and call that function wherever the decision is needed. Do not copy the logic into a second file. When a second copy already exists, move the logic into the owning module and replace every copy with a call, so a change to a rate, a threshold or a rule is one edit."
 remediation = """
-Move the logic into one exported function in the module that owns the concept, call it at every site listed in the finding, and delete the copies. Where the listed copies already differ, decide which version is correct before merging them, because the merged function will apply that version everywhere. Verify by searching the repository for the distinctive operator or value: only the one implementation should remain, and the project should still build and its tests pass.
+Move the logic into one exported function in the module that owns the concept, call it at every site listed in the finding and delete the copies. Where the listed copies already differ, decide which version is correct before merging them, because the merged function will apply that version everywhere. Verify by searching the repository for the distinctive operator or value: only the one implementation should remain, and the project should still build and its tests pass.
 """
 effort = "medium"
 why = "The fix is an extraction with a clear check: one implementation, one call per site. After it, a corrected rule cannot be left running in a forgotten copy."

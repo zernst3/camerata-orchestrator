@@ -1,6 +1,6 @@
 id = "ARCH-SERVER-COMPUTED-AMOUNT-1"
-version = 3
-title = "A charge's price, quantity, and discount are computed server-side from the merchant's own records; the client supplies only a selection, never an amount"
+version = 4
+title = "A charge's price, quantity and discount are computed server-side from the merchant's own records; the client supplies only a selection, never an amount"
 domain = "api-layer"
 layer = "universal"
 enforcement = "architectural"
@@ -45,15 +45,15 @@ clear error on mismatch (catching integration bugs), never a value it uses.
 
 [[option]]
 id = "recompute-amount-server-side-from-authoritative-records"
-label = "Server recomputes price, total, and discount from its own records; the client supplies only a product/quantity selection"
-directive = "A charge's amount, line-item total, and discount are computed server-side from the merchant's own authoritative product, price, and coupon records; the client supplies only a product/SKU selection and quantity, never a price, total, or discount amount. Every value that reaches a payment-provider charge call's amount/total/price field (or an internal ledger entry recording what was charged) originates from a server-side lookup keyed by the client-supplied selection, never from the request body, query string, or path parameters unchanged. A client-supplied amount, if present at all, is used only to compare against the server-computed value and abort on mismatch, never as the amount charged."
+label = "Server recomputes price, total and discount from its own records; the client supplies only a product/quantity selection"
+directive = "A charge's amount, line-item total and discount are computed server-side from the merchant's own authoritative product, price and coupon records; the client supplies only a product/SKU selection and quantity, never a price, total or discount amount. Every value that reaches a payment-provider charge call's amount/total/price field (or an internal ledger entry recording what was charged) originates from a server-side lookup keyed by the client-supplied selection, never from the request body, query string or path parameters unchanged. A client-supplied amount, if present at all, is used only to compare against the server-computed value and abort on mismatch, never as the amount charged."
 remediation = """
 In the endpoint that creates the charge, change the amount/total passed to the payment provider so it is computed
 from a server-side lookup against the authoritative product/price table (and, for discounts, a server-side coupon
-validation) using only the client-supplied product id(s) and quantity, never the client-supplied price, line total,
+validation) using only the client-supplied product id(s) and quantity, never the client-supplied price, line total
 or discount amount directly. If a client-supplied amount is also present in the request for display/confirmation
 purposes, compare it against the server-computed value and reject the request on mismatch rather than using the
-client's number. Verify by submitting a request with a product's price, quantity total, or discount amount altered
+client's number. Verify by submitting a request with a product's price, quantity total or discount amount altered
 in the request body and confirming the actual charge amount is unaffected (recomputed from the server's own
 records) rather than reflecting the tampered value.
 """
@@ -64,5 +64,5 @@ why = "A request is editable by anyone who can see it leave the browser, so any 
 id = "trust-client-supplied-amount-with-display-validation-only"
 violates = true
 label = "Trust the client-supplied amount/total/discount, validating only that it looks well-formed (a positive number, correct currency shape)"
-directive = "Accept the amount, line-item total, or discount value supplied in the request body and pass it to the payment-provider charge call after only syntactic validation (type, sign, format), with no comparison against a server-side price or coupon lookup."
+directive = "Accept the amount, line-item total or discount value supplied in the request body and pass it to the payment-provider charge call after only syntactic validation (type, sign, format), with no comparison against a server-side price or coupon lookup."
 why = "Rejected: syntactic validation (is it a positive number) says nothing about whether the number is the CORRECT one for what was actually ordered. An attacker who edits a request from $499.99 to $4.99 still passes 'positive number' validation; the charge is for $4.99 regardless of what was in the cart, and nothing in this approach catches it."

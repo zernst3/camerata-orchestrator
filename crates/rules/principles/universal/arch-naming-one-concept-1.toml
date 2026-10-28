@@ -1,5 +1,5 @@
 id = "ARCH-NAMING-ONE-CONCEPT-1"
-version = 3
+version = 4
 title = "A helper that does one thing exists once under one name that says what it does, and two modules do not each carry their own copy of it under different names"
 domain = "universal"
 layer = "universal"

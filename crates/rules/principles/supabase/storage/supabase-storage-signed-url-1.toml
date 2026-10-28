@@ -1,5 +1,5 @@
 id = "SUPABASE-STORAGE-SIGNED-URL-1"
-version = 2
+version = 3
 title = "Signed download URLs use the shortest expiry the use case allows and are never persisted into a readable column"
 domain = "supabase:storage"
 layer = "platform"
@@ -62,7 +62,7 @@ which is not a secret, and `createSignedUrl` is called fresh each time a client 
 remediation = """
 In `<file>`, scope the `createSignedUrl` expiry to how long the recipient actually needs the link to remain valid
 for this feature, rather than a long default. If the generated URL is being written to `<table>.<column>`, change
-that column to store the object's storage PATH instead, and call `createSignedUrl` fresh each time a client needs
+that column to store the object's storage PATH instead and call `createSignedUrl` fresh each time a client needs
 to download it, rather than persisting and reusing a single signed URL. Verify by confirming a signed URL generated
 for this feature stops working shortly after the stated use case would reasonably be finished with it, and that no
 table column contains a value matching the signed-URL shape.
@@ -75,4 +75,4 @@ id = "cache-the-signed-url-in-a-column-for-reuse"
 violates = true
 label = "A signed URL is generated once and persisted in a column, and later reads serve the stored value"
 directive = "`createSignedUrl` is called once, typically at upload or first-request time; the resulting URL string is written to a database column, and subsequent requests serve that stored value rather than re-signing."
-why = "Rejected: persisting the signed URL creates a durable secondary copy of a bearer credential in a location, a table column, that was not designed as a secret store. Its exposure now depends on the table's own RLS policy, backups, replicas, and any export path, none of which the expiry value accounts for. Engineers choosing this pattern also tend to pick an unusually long expiresIn specifically so the cached value doesn't go stale, which compounds the problem: the one mechanism that bounds a signed URL's lifetime (its expiry) gets weakened at exactly the call site whose output is about to be copied somewhere durable."
+why = "Rejected: persisting the signed URL creates a durable secondary copy of a bearer credential in a location, a table column, that was not designed as a secret store. Its exposure now depends on the table's own RLS policy, backups, replicas and any export path, none of which the expiry value accounts for. Engineers choosing this pattern also tend to pick an unusually long expiresIn specifically so the cached value doesn't go stale, which compounds the problem: the one mechanism that bounds a signed URL's lifetime (its expiry) gets weakened at exactly the call site whose output is about to be copied somewhere durable."

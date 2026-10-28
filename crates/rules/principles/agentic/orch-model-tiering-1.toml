@@ -1,5 +1,5 @@
 id = "ORCH-MODEL-TIERING-1"
-version = 3
+version = 4
 title = "Model tiering: cheap for bulk, top-tier for decisions"
 domain = "agentic"
 layer = "universal"
@@ -31,7 +31,7 @@ id = "tiered"
 label = "Bulk mechanical work runs on a cheaper model; the top model handles new decisions and one-way-door validation"
 directive = "Run high-volume mechanical work (applying documented rules, repetitive porting) on a cheaper model; reserve the top model for genuinely new decisions and one-way-door validation."
 remediation = """
-Route high-volume mechanical work, such as applying already-documented rules or repetitive porting, to a cheaper model, and reserve the top-tier model for genuinely new decisions and one-way-door validation. Configure the tiering in the run's model-selection logic rather than leaving every step on the same model by default. Verify by checking a recent run's logs to confirm mechanical steps used the cheaper model and only novel-decision steps used the top-tier one.
+Route high-volume mechanical work, such as applying already-documented rules or repetitive porting, to a cheaper model and reserve the top-tier model for genuinely new decisions and one-way-door validation. Configure the tiering in the run's model-selection logic rather than leaving every step on the same model by default. Verify by checking a recent run's logs to confirm mechanical steps used the cheaper model and only novel-decision steps used the top-tier one.
 """
 why = "Top-tier judgment where it matters (data-model-shaping calls), cheap throughput on the bulk."
 

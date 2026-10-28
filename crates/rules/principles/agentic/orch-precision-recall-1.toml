@@ -1,5 +1,5 @@
 id = "ORCH-PRECISION-RECALL-1"
-version = 4
+version = 5
 title = "Autonomous detection defaults to recall, precision-tuning is a per-signal opt-in"
 domain = "agentic"
 layer = "universal"

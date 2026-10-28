@@ -1,5 +1,5 @@
 id = "RUST-ENTITIES-1"
-version = 3
+version = 4
 title = "Use the DeriveEntityModel macro path"
 domain = "rust:seaorm"
 layer = "library"
@@ -19,15 +19,15 @@ id = "use-the-deriveentitymodel-macro-path"
 label = "Use the DeriveEntityModel macro path"
 directive = "Entities are defined with the DeriveEntityModel macro, not hand-rolled Entity/Column/PrimaryKey impls."
 remediation = """
-Replace the hand-rolled Entity/Column/PrimaryKey impls (or the project-specific wrapper macro) with the standard DeriveEntityModel macro on the entity struct. Verify by confirming the entity compiles using #[derive(DeriveEntityModel)] with no hand-written trait impl for Entity, Column, or PrimaryKey.
+Replace the hand-rolled Entity/Column/PrimaryKey impls (or the project-specific wrapper macro) with the standard DeriveEntityModel macro on the entity struct. Verify by confirming the entity compiles using #[derive(DeriveEntityModel)] with no hand-written trait impl for Entity, Column or PrimaryKey.
 """
 why = "Matches code-generator output, is the most googleable shape, and avoids verbose boilerplate that offers no benefit unless you are deliberately deviating."
 
 [[option]]
 id = "entities-are-defined-with-hand-rolled-entity-col"
 violates = true
-label = "Hand-rolled Entity, Column, and PrimaryKey impls"
-directive = "entities are defined with hand-rolled Entity, Column, and PrimaryKey impls rather than the DeriveEntityModel macro"
+label = "Hand-rolled Entity, Column and PrimaryKey impls"
+directive = "entities are defined with hand-rolled Entity, Column and PrimaryKey impls rather than the DeriveEntityModel macro"
 why = "Verbose and offers no upside over the macro path unless an entity needs specific customization of the macro expansion, which is rare: the boilerplate must be written and maintained by hand across every entity, and reviewer attention is spent on mechanical repetition rather than on actual entity semantics."
 
 [[option]]

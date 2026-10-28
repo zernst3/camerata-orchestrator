@@ -1,6 +1,6 @@
 id = "JAVASCRIPT-NEST-INTERCEPTORS-CROSS-CUTTING-1"
-version = 3
-title = "Use interceptors for cross-cutting concerns like logging, tracing, and response transformation"
+version = 4
+title = "Use interceptors for cross-cutting concerns like logging, tracing and response transformation"
 domain = "javascript:nest"
 layer = "framework"
 enforcement = "structured"
@@ -21,14 +21,14 @@ why = "NestJS interceptors are functions that run before and after a controller 
 [[option]]
 id = "interceptors-for-cross-cutting"
 label = "Use interceptors for cross-cutting concerns"
-directive = "Logging, tracing, response transformation, caching, and other cross-cutting concerns that span multiple routes are implemented as NestJS interceptors. Interceptors are applied via @UseInterceptors() decorators or registered globally. Centralized exception-to-HTTP-response mapping is implemented as Exception Filters (@Catch(), ExceptionFilter, @UseFilters() or a global APP_FILTER), not as interceptor logic. Controllers and services do not contain duplicate logging, transformation, or ad hoc exception-to-response mapping logic."
+directive = "Logging, tracing, response transformation, caching and other cross-cutting concerns that span multiple routes are implemented as NestJS interceptors. Interceptors are applied via @UseInterceptors() decorators or registered globally. Centralized exception-to-HTTP-response mapping is implemented as Exception Filters (@Catch(), ExceptionFilter, @UseFilters() or a global APP_FILTER), not as interceptor logic. Controllers and services do not contain duplicate logging, transformation or ad hoc exception-to-response mapping logic."
 remediation = """
-Move the logging, tracing, or response-transformation logic duplicated in the controller method into a NestJS interceptor applied via @UseInterceptors() or registered globally, and remove the inline copy from the controller. Verify by confirming the controller method no longer contains that logic and the concern still applies after moving it to the interceptor.
+Move the logging, tracing or response-transformation logic duplicated in the controller method into a NestJS interceptor applied via @UseInterceptors() or registered globally and remove the inline copy from the controller. Verify by confirming the controller method no longer contains that logic and the concern still applies after moving it to the interceptor.
 """
 why = "Interceptors centralize cross-cutting logic (logging, tracing, response shaping, caching) and ensure consistent application; exception-to-response mapping is a related but distinct concern owned by Nest's Exception Filter mechanism."
 
 [[option]]
 id = "cross-cutting-logic-in-controllers"
 label = "Implement cross-cutting logic in controllers"
-directive = "Each controller method handles logging, tracing, error handling, and response transformation explicitly."
+directive = "Each controller method handles logging, tracing, error handling and response transformation explicitly."
 why = "Implementing logging, tracing, and response transformation directly in each controller method duplicates the same cross-cutting concerns across every route: a developer adding a new endpoint must remember to include the logging call, and a change to the log format or tracing strategy requires updating every controller method individually. This approach produces inconsistent telemetry, clutters controller code with concerns unrelated to business logic, and scales poorly as the number of routes grows. Ad hoc per-controller error handling has the same problem regardless of whether the centralized alternative is an interceptor or (correctly) an exception filter."

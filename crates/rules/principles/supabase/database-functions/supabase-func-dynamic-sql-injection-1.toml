@@ -1,5 +1,5 @@
 id = "SUPABASE-FUNC-DYNAMIC-SQL-INJECTION-1"
-version = 5
+version = 6
 title = "A database function must not EXECUTE a dynamically-assembled query string built via non-quoting interpolation (|| concatenation or format()'s %s)"
 domain = "supabase:database-functions"
 # General Postgres, not just Supabase: a plpgsql function that EXECUTEs a dynamically-built query
@@ -97,7 +97,7 @@ EXECUTE strings are fine; the defect is the non-escaping channel, not dynamic SQ
 remediation = """
 For `<function-name>`, replace the unsafe interpolation with an escaping or bound channel: use
 `format('...%I...', column_name)` to quote an identifier, `format('...%L...', literal_value)` to
-quote a literal value, or rewrite the EXECUTE as `EXECUTE '... $1 ...' USING value` to bind the
+quote a literal value or rewrite the EXECUTE as `EXECUTE '... $1 ...' USING value` to bind the
 value instead of concatenating it into the string. Verify by confirming a payload containing the
 target quoting character (a single quote for %L/USING, a double quote or dot for %I) no longer
 changes which statement actually executes.

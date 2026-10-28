@@ -1,5 +1,5 @@
 id = "JAVASCRIPT-VUE-NO-DIRECT-DOM-1"
-version = 3
+version = 4
 title = "Do not manipulate the DOM directly; declare the desired state and let Vue render it"
 domain = "javascript:vue"
 layer = "framework"
@@ -25,14 +25,14 @@ why = "Vue is a declarative framework: you describe the desired state (data, com
 [[option]]
 id = "declarative-rendering-no-direct-dom"
 label = "Declare state; let Vue render; no direct DOM manipulation"
-directive = "Vue reactivity (data, computed, props) drives the DOM state. v-if, v-show, v-bind:class, v-bind:style, and other Vue directives declare the desired state. No direct DOM access via document, jQuery, or element manipulation in component code."
+directive = "Vue reactivity (data, computed, props) drives the DOM state. v-if, v-show, v-bind:class, v-bind:style and other Vue directives declare the desired state. No direct DOM access via document, jQuery or element manipulation in component code."
 remediation = """
-Replace the direct document/jQuery/element manipulation with Vue's declarative bindings (v-if, v-show, v-bind:class, v-bind:style) driven by reactive data. Verify by confirming the component no longer references document, jQuery, or raw element APIs and the same visual result is driven by reactive state instead.
+Replace the direct document/jQuery/element manipulation with Vue's declarative bindings (v-if, v-show, v-bind:class, v-bind:style) driven by reactive data. Verify by confirming the component no longer references document, jQuery or raw element APIs, and the same visual result is driven by reactive state instead.
 """
 why = "Declarative rendering keeps Vue's reactivity system and the DOM in sync."
 
 [[option]]
 id = "direct-dom-manipulation"
 label = "Directly manipulate the DOM"
-directive = "Component code accesses and modifies the DOM directly via document.querySelector, element.style, element.classList, jQuery, or similar methods."
+directive = "Component code accesses and modifies the DOM directly via document.querySelector, element.style, element.classList, jQuery or similar methods."
 why = "Directly manipulating the DOM bypasses Vue's reactivity system: if document.querySelector is used to hide an element, Vue still thinks the element should be visible, and the next reactive data change that triggers a re-render may unhide it, contradicting the direct change. Coordinating between direct DOM mutation and Vue's rendering produces state/view divergence bugs that are difficult to reproduce because the sequence of render cycles and direct mutations matters."
