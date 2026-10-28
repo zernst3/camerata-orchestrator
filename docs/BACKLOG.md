@@ -3,6 +3,31 @@
 Deferred work and known gaps not yet scheduled. Newest intent at the top. UI-only
 follow-ups live in `UI_BACKLOG.md`; this file is for engine + cross-cutting items.
 
+## Ownership: no producer for `Generated` / `Vendored` (2026-10-28, NOT BUILT, reason recorded)
+
+`Ownership::Generated` and `Ownership::Vendored` exist (`camerata_api_types::audit::Ownership`, with
+their client actions in `crates/server/src/ownership.rs`), but nothing assigns them
+(`PlatformManaged` is dormant by design). Checked against the existing file-filter knowledge; a
+producer is not small and certain, so none was added:
+
+1. The scan never audits those files. `onboard/files.rs` prunes vendor directories (`vendor`,
+   `node_modules`, and the rest of its denylist) and generated code (`GENERATED_NOISE_SUFFIXES`,
+   `GENERATED_NOISE_DIRS`), admitting generated code only as reference text, and
+   `scan_tools::is_in_repo_scope` drops external-tool rows on generated files and `dist/`. A
+   producer keyed on those same markers would match only rows the pipeline already removes: dead
+   code with no real scan to test it against.
+2. The one row that survives is an external tool's finding under a vendor directory, which
+   `is_in_repo_scope` keeps. Classifying it needs a path input to `ownership_of`, which today
+   derives only from `rule_id` and `captures`; that signature change touches both exporters
+   (`report_export`, `xlsx_export`).
+3. A wrong `Vendored` or `Generated` call moves a client-owned finding out of the action tiers and
+   the remediation budget: a silent under-report. A path heuristic alone (a directory named
+   `vendor`, a `generated` segment) cannot tell first-party code that sits there from real
+   vendored or generated output.
+
+Revisit when a real scan reports a finding inside such a path: the producer should then read a
+detector-set capture (as `platform_schema` does), not guess from the path.
+
 ## C5-6: the generic "the affected table" fix filler (2026-10-28, OPEN, product polish)
 
 Until now tracked only in the `#[ignore]` reason on
