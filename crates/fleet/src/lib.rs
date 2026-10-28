@@ -6,9 +6,9 @@
 //!
 //! # What lives here
 //!
-//! - Scaffolding helpers: [`governed_role`], [`locate_gateway_bin`],
-//!   [`scaffold_crate`], [`run_cargo`], [`tail_lines`], [`NoopChecks`],
-//!   [`CargoOutcome`], [`FLEET_DOMAINS`], [`DEFAULT_CORPUS_PATH`].
+//! - Scaffolding helpers: [`governed_role`], [`governed_role_from_rules`],
+//!   [`locate_gateway_bin`], [`scaffold_crate`], [`run_cargo`], [`tail_lines`],
+//!   [`NoopChecks`], [`CargoOutcome`], [`FLEET_DOMAINS`], [`DEFAULT_CORPUS_PATH`].
 //! - Stage-task helpers: [`stage_task_for`], [`describe_task_kind`].
 //! - The high-level runner: [`build_from_plan`], [`BuildEvent`], [`BuildOutcome`].
 //! - Model-tiering: [`tier`] module — [`tier::CapabilityBand`], [`tier::TierMap`],
@@ -85,14 +85,41 @@ fn layer2_runner_with_activity(
 /// to the gateway registry is automatically applied here with no edit.
 pub async fn governed_role(role_name: &str) -> anyhow::Result<Role> {
     let corpus = Path::new(DEFAULT_CORPUS_PATH);
-    let mut role = role_from_corpus(corpus, role_name, FLEET_DOMAINS, &[]).await?;
+    let role = role_from_corpus(corpus, role_name, FLEET_DOMAINS, &[]).await?;
+    Ok(with_enforced_gate_rules(role))
+}
 
+/// Build a governed role named `role_name` whose rule subset is `rule_ids` (a project's
+/// selected rules, in order, duplicates dropped) plus EVERY gateway-enforced gate rule,
+/// exactly as [`governed_role`] guarantees them: a selection can add rules to the gate but
+/// never remove an enforced one. `allowed_paths` is unrestricted (`**`): a project's
+/// repository can be in any language, unlike the Rust-only fleet scaffold.
+pub fn governed_role_from_rules(
+    role_name: &str,
+    rule_ids: impl IntoIterator<Item = camerata_core::RuleId>,
+) -> Role {
+    let mut rule_subset = Vec::new();
+    for id in rule_ids {
+        if !rule_subset.contains(&id) {
+            rule_subset.push(id);
+        }
+    }
+    with_enforced_gate_rules(Role {
+        name: role_name.to_owned(),
+        rule_subset,
+        allowed_paths: vec!["**".to_owned()],
+    })
+}
+
+/// Put every gateway-enforced gate rule ([`enforced_gate_rules`]) missing from `role`'s
+/// subset at its front, so the per-session governance is genuinely active.
+fn with_enforced_gate_rules(mut role: Role) -> Role {
     for gate_rule in enforced_gate_rules() {
         if !role.rule_subset.contains(&gate_rule) {
             role.rule_subset.insert(0, gate_rule);
         }
     }
-    Ok(role)
+    role
 }
 
 // ─── locate_gateway_bin ───────────────────────────────────────────────────────
@@ -941,6 +968,42 @@ mod tests {
     use camerata_agent::{HeartbeatFn, GATED_WRITE_TOOL};
     use camerata_core::{Role, RuleId};
     use camerata_intake::PlanTask;
+
+    // ── governed_role_from_rules ─────────────────────────────────────────────
+
+    #[test]
+    fn governed_role_from_rules_carries_the_selection_plus_every_enforced_gate_rule() {
+        let selection = ["SUPABASE-RLS-ENABLED-1", "SQL-PRIVILEGED-WRITE-AUDIT-1"];
+        let role = governed_role_from_rules(
+            "BrownfieldImplementer",
+            selection.iter().map(|id| RuleId(id.to_string())),
+        );
+        assert_eq!(role.name, "BrownfieldImplementer");
+        assert_eq!(role.allowed_paths, vec!["**".to_string()]);
+        for id in selection {
+            assert!(role.rule_subset.contains(&RuleId(id.to_string())), "{id}");
+        }
+        for gate_rule in enforced_gate_rules() {
+            assert!(role.rule_subset.contains(&gate_rule), "{gate_rule:?}");
+        }
+        assert_eq!(
+            role.rule_subset.len(),
+            selection.len() + enforced_gate_rules().len()
+        );
+    }
+
+    #[test]
+    fn governed_role_from_rules_does_not_duplicate_a_selected_gate_rule() {
+        let role = governed_role_from_rules(
+            "R",
+            ["SEC-NO-RAW-SQL-CONCAT-1", "SEC-NO-RAW-SQL-CONCAT-1"]
+                .iter()
+                .map(|id| RuleId(id.to_string())),
+        );
+        let sql = RuleId("SEC-NO-RAW-SQL-CONCAT-1".to_string());
+        assert_eq!(role.rule_subset.iter().filter(|r| **r == sql).count(), 1);
+        assert_eq!(role.rule_subset.len(), enforced_gate_rules().len());
+    }
 
     // ── scaffold_crate ────────────────────────────────────────────────────────
 

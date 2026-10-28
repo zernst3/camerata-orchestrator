@@ -57,6 +57,7 @@ pub mod evidence;
 pub mod feature_flags;
 pub mod fix;
 pub mod github_issues;
+mod governed_rules;
 pub mod grounding;
 pub mod inspections;
 pub mod investigation_run;
