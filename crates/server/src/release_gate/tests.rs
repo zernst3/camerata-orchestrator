@@ -278,7 +278,7 @@ fn leaked(haystack: &str, p: &Planted) -> bool {
 // ---- the happy path -----------------------------------------------------------------------------
 
 #[test]
-fn release_passes_a_clean_package_and_reports_seven_checks() {
+fn release_passes_a_clean_package_and_reports_eight_checks() {
     let z = released();
     assert!(z.report.is_clean());
     assert_eq!(
@@ -288,6 +288,7 @@ fn release_passes_a_clean_package_and_reports_seven_checks() {
             "dataset set",
             "dataset parity",
             "row parity",
+            "severity and kind counts",
             "confidentiality marking",
             "manifest",
             "provenance"
@@ -303,8 +304,8 @@ fn the_readme_and_manifest_state_the_release_checks_that_ran() {
     let readme = String::from_utf8_lossy(&entries["README.txt"]).to_string();
     assert!(
         readme.contains(
-            "Release checks: secrets, dataset set, dataset parity, row parity, \
-             confidentiality marking, manifest, provenance (all passed)"
+            "Release checks: secrets, dataset set, dataset parity, row parity, severity and \
+             kind counts, confidentiality marking, manifest, provenance (all passed)"
         ),
         "{readme}"
     );
@@ -685,7 +686,7 @@ fn audit_zip_over_a_released_zip_is_clean() {
     );
     assert_eq!(
         report.checks.len(),
-        6,
+        7,
         "row parity needs the in-memory rows"
     );
 }
@@ -1031,8 +1032,8 @@ async fn export_product_success_names_the_release_checks_in_a_header() {
             .get("x-camerata-release-checks")
             .and_then(|v| v.to_str().ok()),
         Some(
-            "secrets, dataset set, dataset parity, row parity, confidentiality marking, \
-             manifest, provenance"
+            "secrets, dataset set, dataset parity, row parity, severity and kind counts, \
+             confidentiality marking, manifest, provenance"
         )
     );
 }
@@ -1416,4 +1417,202 @@ fn a_secret_in_the_client_name_is_caught_in_the_sheet_footers() {
         "{failure}"
     );
     assert!(!failure.to_string().contains(&p.value));
+}
+
+// ---- 22d: severity and kind counts reconcile across PDF, workbook, JSON and CSV -----------------
+
+/// A scan with every kind and several severities, so a by-severity-and-kind tally has cells to
+/// disagree in (synthetic).
+fn mixed_scan_report() -> ScanReport {
+    use camerata_api_types::audit::{
+        ConventionObservedKind, DeviationKind, FindingKind, NoConventionKind, NotAssessedKind,
+        NotAssessedReason,
+    };
+    let deviation = || {
+        FindingKind::Deviation(DeviationKind {
+            deviating_sites: 2,
+            assessed_sites: Some(10),
+            convention_option_id: Some("versioned".to_string()),
+            convention_label: "URI-versioned endpoints".to_string(),
+        })
+    };
+    let rows: Vec<(&str, &str, Option<FindingKind>)> = vec![
+        (
+            "SEC-NO-RAW-SQL-CONCAT-1",
+            "critical",
+            Some(FindingKind::Defect),
+        ),
+        (
+            "SEC-NO-HARDCODED-SECRETS-1",
+            "high",
+            Some(FindingKind::Defect),
+        ),
+        ("SEC-NO-DISABLED-TLS-1", "high", None),
+        ("API-VERSIONING-1", "medium", Some(deviation())),
+        ("API-VERSIONING-1", "medium", Some(deviation())),
+        ("API-PAGINATION-1", "low", Some(FindingKind::Defect)),
+        (
+            "API-CURSOR-1",
+            "info",
+            Some(FindingKind::ConventionObserved(ConventionObservedKind {
+                convention_option_id: "cursor".to_string(),
+                convention_label: "Cursor pagination".to_string(),
+            })),
+        ),
+        (
+            "API-ERRORS-1",
+            "info",
+            Some(FindingKind::NoConvention(NoConventionKind {
+                observed_options: Vec::new(),
+            })),
+        ),
+        (
+            "API-TIMEOUTS-1",
+            "info",
+            Some(FindingKind::NotAssessed(NotAssessedKind {
+                reason: NotAssessedReason::NoFilesMatched,
+                reason_detail: "no file matched the rule's scope".to_string(),
+            })),
+        ),
+    ];
+    let mut report = scan_report();
+    report.findings = rows
+        .into_iter()
+        .enumerate()
+        .map(|(i, (rule, severity, kind))| Finding {
+            repo: "acme/portal".to_string(),
+            path: format!("src/mod{i}.rs"),
+            line: i + 1,
+            rule_id: rule.to_string(),
+            severity: severity.to_string(),
+            snippet: format!("let x{i} = 1;"),
+            detail: format!("detail {i}"),
+            kind,
+            ..Finding::default()
+        })
+        .collect();
+    report
+}
+
+fn mixed_package() -> ProductPackage {
+    let sealed = mixed_scan_report().seal();
+    let options = client_options();
+    let json = build_report_json(&sealed, &HashMap::new(), None, &options);
+    let data = render_data_json(&json).expect("data.json renders");
+    assemble_package(
+        &sealed,
+        &HashMap::new(),
+        None,
+        &options,
+        STEM,
+        (json, data, STAND_IN_PDF.to_vec()),
+    )
+    .expect("the package assembles")
+}
+
+fn count_problems(failure: &GateFailure) -> Vec<&Problem> {
+    failure
+        .report
+        .problems()
+        .filter(|(check, _)| *check == CheckId::Counts)
+        .map(|(_, p)| p)
+        .collect()
+}
+
+#[test]
+fn a_package_with_every_kind_reconciles_by_severity_and_kind() {
+    let package = mixed_package();
+    // Anti-vacuity: the JSON rows really span several kinds and severities.
+    let rows: Vec<Value> = serde_json::to_value(&package.findings_export).expect("rows")
+        ["findings"]
+        .as_array()
+        .expect("rows")
+        .clone();
+    let kinds: std::collections::BTreeSet<&str> =
+        rows.iter().filter_map(|r| r["kind"].as_str()).collect();
+    let severities: std::collections::BTreeSet<&str> =
+        rows.iter().filter_map(|r| r["severity"].as_str()).collect();
+    assert!(kinds.len() >= 5, "{kinds:?}");
+    assert!(severities.len() >= 4, "{severities:?}");
+    let released = release(package).unwrap_or_else(|e| panic!("{e}"));
+    assert!(released
+        .report
+        .check_names()
+        .contains(&"severity and kind counts"));
+}
+
+/// The kind dimension is checked, not only totals: a PDF row relabelled from defect to deviation
+/// keeps every severity total equal and is still caught.
+#[test]
+fn the_gate_catches_a_pdf_whose_kinds_differ_even_when_every_total_matches() {
+    let mut package = mixed_package();
+    let row = [
+        &mut package.report_json.matrix.do_now,
+        &mut package.report_json.matrix.do_next,
+        &mut package.report_json.matrix.plan,
+        &mut package.report_json.matrix.accepted,
+        &mut package.report_json.matrix.informational,
+        &mut package.report_json.matrix.held,
+    ]
+    .into_iter()
+    .flat_map(|bucket| bucket.iter_mut())
+    .find(|f| f.kind.tag() == "defect")
+    .expect("a defect row in the PDF");
+    row.kind = camerata_api_types::audit::KindOnWire(Some(
+        camerata_api_types::audit::FindingKind::Deviation(
+            camerata_api_types::audit::DeviationKind {
+                deviating_sites: 1,
+                assessed_sites: None,
+                convention_option_id: None,
+                convention_label: "x".to_string(),
+            },
+        ),
+    ));
+    let failure = blocked(package);
+    let problems = count_problems(&failure);
+    assert!(
+        problems
+            .iter()
+            .any(|p| p.file == "PDF data" && p.location.ends_with("kind deviation")),
+        "{failure}"
+    );
+    assert!(
+        !problems
+            .iter()
+            .any(|p| p.location.starts_with("cover.stats")),
+        "every severity total still matches: {failure}"
+    );
+}
+
+#[test]
+fn the_gate_catches_a_pdf_summary_count_that_is_off_by_one() {
+    let mut package = mixed_package();
+    package.report_json.cover.stats.high += 1;
+    let failure = blocked(package);
+    assert!(
+        count_problems(&failure)
+            .iter()
+            .any(|p| p.location == "cover.stats.high"),
+        "{failure}"
+    );
+}
+
+#[test]
+fn the_gate_catches_a_workbook_whose_rows_disagree_by_severity() {
+    let mut package = mixed_package();
+    // Every "Critical" severity cell now reads "Medium" (the cells share one string).
+    package.xlsx = rewrite_xlsx(&package.xlsx, |name, xml| {
+        if name == "xl/sharedStrings.xml" {
+            xml.replace("<t>Critical</t>", "<t>Medium</t>")
+        } else {
+            xml.to_string()
+        }
+    });
+    let failure = blocked(package);
+    let problems = count_problems(&failure);
+    assert!(
+        problems.iter().any(|p| p.file.ends_with("-findings.xlsx")
+            && p.location == "severity critical, kind defect"),
+        "{failure}"
+    );
 }

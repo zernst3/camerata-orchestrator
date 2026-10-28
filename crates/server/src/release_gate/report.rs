@@ -19,6 +19,9 @@ pub enum CheckId {
     DatasetParity,
     /// The PDF's rows and `findings.json`'s rows are the same set.
     RowParity,
+    /// The PDF's rows and cover summary, the workbook's rows and Index summaries and the CSV
+    /// agree with `json/all-findings.json` by severity AND kind (22d).
+    Counts,
     /// Every workbook sheet's footer carries the confidentiality line, naming the client, and
     /// it is the PDF's line.
     Marking,
@@ -30,11 +33,12 @@ pub enum CheckId {
 
 impl CheckId {
     /// Every check, in run order.
-    pub const ALL: [CheckId; 7] = [
+    pub const ALL: [CheckId; 8] = [
         CheckId::Secrets,
         CheckId::DatasetSet,
         CheckId::DatasetParity,
         CheckId::RowParity,
+        CheckId::Counts,
         CheckId::Marking,
         CheckId::Manifest,
         CheckId::Provenance,
@@ -47,6 +51,7 @@ impl CheckId {
             CheckId::DatasetSet => "dataset set",
             CheckId::DatasetParity => "dataset parity",
             CheckId::RowParity => "row parity",
+            CheckId::Counts => "severity and kind counts",
             CheckId::Marking => "confidentiality marking",
             CheckId::Manifest => "manifest",
             CheckId::Provenance => "provenance",

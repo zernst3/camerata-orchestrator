@@ -319,6 +319,299 @@ pub fn row_parity(report: &AuditReportJson, findings: &FindingsExport) -> Vec<Pr
     problems
 }
 
+// ---- severity and kind counts (22d) ------------------------------------------------------------
+
+const COUNTS: &str = "severity and kind counts";
+
+/// Rows counted by `(severity, kind tag)`.
+type Tally = BTreeMap<(String, String), usize>;
+
+/// The four severity columns the summaries print (PDF cover, workbook Index): anything that is
+/// not critical, high or medium is counted as low, exactly as both summaries count it.
+fn severity_bucket(severity: &str) -> &'static str {
+    match severity {
+        "critical" => "critical",
+        "high" => "high",
+        "medium" => "medium",
+        _ => "low",
+    }
+}
+
+fn by_severity_bucket(tally: &Tally) -> BTreeMap<&'static str, usize> {
+    let mut out: BTreeMap<&'static str, usize> = ["critical", "high", "medium", "low"]
+        .iter()
+        .map(|s| (*s, 0))
+        .collect();
+    for ((severity, _), n) in tally {
+        *out.entry(severity_bucket(severity)).or_insert(0) += n;
+    }
+    out
+}
+
+fn by_kind(tally: &Tally) -> BTreeMap<String, usize> {
+    let mut out = BTreeMap::new();
+    for ((_, kind), n) in tally {
+        *out.entry(kind.clone()).or_insert(0) += n;
+    }
+    out
+}
+
+/// Every `(severity, kind)` cell where `got` differs from `want`, one problem each, named by the
+/// cell and both counts (never row text).
+fn tally_differences(file: &str, what: &str, want: &Tally, got: &Tally) -> Vec<Problem> {
+    let keys: BTreeSet<&(String, String)> = want.keys().chain(got.keys()).collect();
+    keys.into_iter()
+        .filter_map(|key| {
+            let (w, g) = (
+                want.get(key).copied().unwrap_or(0),
+                got.get(key).copied().unwrap_or(0),
+            );
+            (w != g).then(|| {
+                problem(
+                    file,
+                    &format!("severity {}, kind {}", key.0, key.1),
+                    format!("{what} has {g} rows here and json/all-findings.json has {w}"),
+                )
+            })
+        })
+        .collect()
+}
+
+/// `json/all-findings.json` by `(severity, kind)`: the reference every other artifact is held to.
+fn json_tally(entries: &Entries) -> Option<Result<Tally, Problem>> {
+    let bytes = entries.get("json/all-findings.json")?;
+    Some(
+        rows_of(bytes)
+            .map(|rows| {
+                let mut tally = Tally::new();
+                for row in rows {
+                    *tally
+                        .entry((cell_text(&row, "severity"), cell_text(&row, "kind")))
+                        .or_insert(0) += 1;
+                }
+                tally
+            })
+            .map_err(|e| problem("json/all-findings.json", COUNTS, e)),
+    )
+}
+
+/// `csv/all-findings.csv` by `(severity, kind)`, located by header name.
+fn csv_tally(bytes: &[u8]) -> Result<Tally, String> {
+    let mut reader = csv::ReaderBuilder::new().from_reader(bytes);
+    let headers = reader.headers().map_err(|e| e.to_string())?.clone();
+    let col = |name: &str| {
+        headers
+            .iter()
+            .position(|h| h == name)
+            .ok_or_else(|| format!("the CSV has no {name:?} column"))
+    };
+    let (sev, kind) = (col("severity")?, col("kind")?);
+    let mut tally = Tally::new();
+    for record in reader.records() {
+        let record = record.map_err(|e| e.to_string())?;
+        let key = (
+            record.get(sev).unwrap_or("").to_string(),
+            record.get(kind).unwrap_or("").to_string(),
+        );
+        *tally.entry(key).or_insert(0) += 1;
+    }
+    Ok(tally)
+}
+
+/// The workbook's "All Findings" sheet by `(severity, kind)` (its Severity cells are
+/// title-cased for the reader; compared lower-cased).
+fn workbook_rows_tally(xlsx: &[u8]) -> Result<Tally, String> {
+    let grid = super::archive::xlsx_sheet_grid(xlsx, "All Findings")?;
+    let header = grid.first().ok_or("the All Findings sheet is empty")?;
+    let col = |name: &str| {
+        header
+            .iter()
+            .position(|h| h == name)
+            .ok_or_else(|| format!("the All Findings sheet has no {name:?} column"))
+    };
+    let (sev, kind) = (col("Severity")?, col("Kind")?);
+    let mut tally = Tally::new();
+    for row in grid.iter().skip(1) {
+        let cell = |c: usize| row.get(c).map(String::as_str).unwrap_or("");
+        if row.iter().all(String::is_empty) {
+            continue;
+        }
+        *tally
+            .entry((cell(sev).to_lowercase(), cell(kind).to_string()))
+            .or_insert(0) += 1;
+    }
+    Ok(tally)
+}
+
+/// The workbook Index's summaries: the "Statement types" count per kind tag, and the
+/// "Findings by category" Total row per severity column.
+type IndexSummary = (BTreeMap<String, usize>, BTreeMap<&'static str, usize>);
+
+fn workbook_index_summary(xlsx: &[u8]) -> Result<IndexSummary, String> {
+    let grid = super::archive::xlsx_sheet_grid(xlsx, "Index")?;
+    let number = |row: &Vec<String>, c: usize| -> usize {
+        row.get(c)
+            .and_then(|t| t.parse::<f64>().ok())
+            .map_or(0, |n| n as usize)
+    };
+    let mut kinds = BTreeMap::new();
+    for (tag, label) in crate::xlsx_export::STATEMENT_TYPES {
+        // "Unclassified" renders only when non-zero; an absent line is zero.
+        let count = grid
+            .iter()
+            .find(|row| row.first().is_some_and(|c| c == label))
+            .map_or(0, |row| number(row, 1));
+        if count > 0 {
+            kinds.insert(tag.to_string(), count);
+        }
+    }
+    let header_at = grid
+        .iter()
+        .position(|row| {
+            row.first().is_some_and(|c| c == "Category") && row.get(5).is_some_and(|c| c == "Total")
+        })
+        .ok_or("the Index has no category matrix")?;
+    let total_row = grid
+        .iter()
+        .skip(header_at + 1)
+        .find(|row| row.first().is_some_and(|c| c == "Total"))
+        .ok_or("the Index category matrix has no Total row")?;
+    let severities = ["critical", "high", "medium", "low"]
+        .into_iter()
+        .enumerate()
+        .map(|(i, s)| (s, number(total_row, i + 1)))
+        .collect();
+    Ok((kinds, severities))
+}
+
+/// 22d, over the archive: the CSV, the workbook's "All Findings" rows and the workbook Index's
+/// summaries agree with `json/all-findings.json` by severity AND kind, not only in total.
+/// Missing files are the dataset-set check's to report.
+pub fn count_reconciliation_problems(entries: &Entries) -> Vec<Problem> {
+    let json = match json_tally(entries) {
+        None => return Vec::new(),
+        Some(Err(p)) => return vec![p],
+        Some(Ok(tally)) => tally,
+    };
+    let mut problems = Vec::new();
+    if let Some(csv) = entries.get("csv/all-findings.csv") {
+        match csv_tally(csv) {
+            Ok(tally) => problems.extend(tally_differences(
+                "csv/all-findings.csv",
+                "the CSV",
+                &json,
+                &tally,
+            )),
+            Err(e) => problems.push(problem("csv/all-findings.csv", COUNTS, e)),
+        }
+    }
+    let Some(stem) = package_stem(entries) else {
+        return problems;
+    };
+    let xlsx_name = format!("{stem}-findings.xlsx");
+    let Some(xlsx) = entries.get(&xlsx_name) else {
+        return problems;
+    };
+    let sheet_kinds = crate::xlsx_export::ALL_FINDINGS_SHEET_KINDS;
+    let json_for_sheet: Tally = json
+        .iter()
+        .filter(|((_, kind), _)| sheet_kinds.contains(&kind.as_str()))
+        .map(|(k, n)| (k.clone(), *n))
+        .collect();
+    match workbook_rows_tally(xlsx) {
+        Ok(tally) => problems.extend(tally_differences(
+            &xlsx_name,
+            "the All Findings sheet",
+            &json_for_sheet,
+            &tally,
+        )),
+        Err(e) => problems.push(problem(&xlsx_name, COUNTS, e)),
+    }
+    match workbook_index_summary(xlsx) {
+        Ok((kinds, severities)) => {
+            let want_kinds = by_kind(&json);
+            for kind in want_kinds
+                .keys()
+                .chain(kinds.keys())
+                .collect::<BTreeSet<_>>()
+            {
+                let (w, g) = (
+                    want_kinds.get(kind).copied().unwrap_or(0),
+                    kinds.get(kind).copied().unwrap_or(0),
+                );
+                if w != g {
+                    problems.push(problem(
+                        &xlsx_name,
+                        &format!("sheet \"Index\" statement types, kind {kind}"),
+                        format!("the Index counts {g} and json/all-findings.json has {w}"),
+                    ));
+                }
+            }
+            for (severity, w) in by_severity_bucket(&json) {
+                let g = severities.get(severity).copied().unwrap_or(0);
+                if w != g {
+                    problems.push(problem(
+                        &xlsx_name,
+                        &format!("sheet \"Index\" category totals, severity {severity}"),
+                        format!("the Index counts {g} and json/all-findings.json has {w}"),
+                    ));
+                }
+            }
+        }
+        Err(e) => problems.push(problem(&xlsx_name, COUNTS, e)),
+    }
+    problems
+}
+
+/// 22d, the PDF side (the in-memory release, which holds the PDF's data): the rows the PDF
+/// renders (all six matrix buckets) agree with `json/all-findings.json` by severity and kind,
+/// and the cover's severity summary agrees by severity column.
+pub fn pdf_count_reconciliation_problems(
+    entries: &Entries,
+    report: &AuditReportJson,
+) -> Vec<Problem> {
+    let json = match json_tally(entries) {
+        None => return Vec::new(),
+        Some(Err(p)) => return vec![p],
+        Some(Ok(tally)) => tally,
+    };
+    let mut pdf = Tally::new();
+    for bucket in [
+        &report.matrix.do_now,
+        &report.matrix.do_next,
+        &report.matrix.plan,
+        &report.matrix.accepted,
+        &report.matrix.informational,
+        &report.matrix.held,
+    ] {
+        for f in bucket {
+            *pdf.entry((f.severity.clone(), f.kind.tag().to_string()))
+                .or_insert(0) += 1;
+        }
+    }
+    let mut problems = tally_differences("PDF data", "the PDF", &json, &pdf);
+    let stats = &report.cover.stats;
+    for (severity, printed) in [
+        ("critical", stats.critical),
+        ("high", stats.high),
+        ("medium", stats.medium),
+        ("low", stats.low),
+    ] {
+        let w = by_severity_bucket(&json)
+            .get(severity)
+            .copied()
+            .unwrap_or(0);
+        if w != printed {
+            problems.push(problem(
+                "PDF data",
+                &format!("cover.stats.{severity}"),
+                format!("the PDF summary counts {printed} and json/all-findings.json has {w}"),
+            ));
+        }
+    }
+    problems
+}
+
 // ---- confidentiality marking (2026-10-24 decision) -------------------------------------------
 
 const MARKING: &str = "confidentiality marking";

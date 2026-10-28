@@ -10,8 +10,8 @@
 //! if any check finds a problem. A source-grep test pins that no other production code calls
 //! `build_product_zip(` or `compile_pdf_from_data(`.
 //!
-//! The checks, in order: secrets, dataset set, dataset parity, row parity, confidentiality
-//! marking, manifest, provenance
+//! The checks, in order: secrets, dataset set, dataset parity, row parity, severity and kind
+//! counts, confidentiality marking, manifest, provenance
 //! (see [`CheckId`]). The comparison logic lives in [`consistency`]; the export tests call those
 //! same functions, so the test and the runtime check cannot drift.
 
@@ -32,8 +32,9 @@ pub use archive::{
     xlsx_strings, XlsxCell, XlsxHeaderFooter,
 };
 pub use consistency::{
-    compare_csv_to_json, dataset_parity_problems, dataset_set_problems, marking_problems,
-    package_stem, parse_readme_provenance, pdf_marking_problems, row_parity, verify_manifest,
+    compare_csv_to_json, count_reconciliation_problems, dataset_parity_problems,
+    dataset_set_problems, marking_problems, package_stem, parse_readme_provenance,
+    pdf_count_reconciliation_problems, pdf_marking_problems, row_parity, verify_manifest,
     verify_readme_provenance, ReadmeProvenance,
 };
 pub use report::{CheckId, CheckOutcome, GateFailure, GateReport, Problem};
@@ -259,6 +260,7 @@ pub fn audit_zip(zip_bytes: &[u8], pdf_text: Option<&str>) -> GateReport {
     );
     report.record(CheckId::DatasetSet, dataset_set_problems(&entries));
     report.record(CheckId::DatasetParity, dataset_parity_problems(&entries));
+    report.record(CheckId::Counts, count_reconciliation_problems(&entries));
     report.record(CheckId::Marking, marking_problems(&entries));
     report.record(CheckId::Manifest, verify_manifest(&entries));
     report.record(CheckId::Provenance, provenance_problems(&entries));
@@ -333,9 +335,14 @@ pub fn release(package: ProductPackage) -> Result<ReleasedZip, ReleaseError> {
 
     let mut report = audit_zip(&bytes, None);
     report.record(CheckId::Secrets, pdf_data_problems(&package.data_json));
-    // The archive pass above checked the workbook's footers against each other; this one also
-    // holds them to the PDF's own line.
+    // The archive pass above held the workbook and the CSV to the JSON rows, and the sheet
+    // footers to each other; this pass also holds the PDF's rows, cover summary and
+    // confidentiality line to them.
     if let Ok(entries) = read_zip_entries(&bytes) {
+        report.record(
+            CheckId::Counts,
+            pdf_count_reconciliation_problems(&entries, &package.report_json),
+        );
         report.record(
             CheckId::Marking,
             pdf_marking_problems(&entries, &package.report_json.confidentiality.line),

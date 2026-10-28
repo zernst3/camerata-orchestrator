@@ -2782,6 +2782,16 @@ thing:
   `files_excluded`, so the export never reads the repository. Filled in
   `client_provenance::export_provenance_with`; the README renders each line and gate 7 parses
   it back.
+- **Release gate check "severity and kind counts"** (22d): before this, the gate checked
+  row IDENTITY (PDF rows vs `findings.json`) and CSV vs JSON cell parity, but no count by
+  severity and kind. `release_gate::consistency::count_reconciliation_problems` (archive pass)
+  holds `csv/all-findings.csv`, the workbook's All Findings rows (for the kinds that sheet lists,
+  `xlsx_export::ALL_FINDINGS_SHEET_KINDS`), the Index "Statement types" counts
+  (`STATEMENT_TYPES`, the labels the writer uses) and the Index category Total row to
+  `json/all-findings.json`'s tally by `(severity, kind)`;
+  `pdf_count_reconciliation_problems` (in-memory release) does the same for the PDF's rendered
+  rows and its cover severity summary. A difference names the cell and both counts. The gate
+  now runs eight checks.
 - **`findings.xlsx`** is the DETAIL surface, and a missing row there IS a fault.
 - **`findings.json`** is the machine-readable data structure. It carries the WHOLE
   non-false-positive row set, every kind included, with `provenance` and `summary`
