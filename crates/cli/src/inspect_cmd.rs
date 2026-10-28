@@ -1,5 +1,5 @@
 //! `camerata inspect` — Step 0 of the refinement loop (see
-//! `~/Documents/Repos/_workspace/brownfield-audits/CAMERATA_LOOP_HANDOFF.md`): a HEADLESS
+//! `<workspace>/brownfield-audits/CAMERATA_LOOP_HANDOFF.md`): a HEADLESS
 //! brownfield inspection that runs the exact pipeline the cockpit's "Run audit" + "product
 //! export" buttons drive, with no UI and no running BFF, so it can be scripted from a shell
 //! (CI, batch scans, and the refinement loop that needs to grade a scan without a browser).

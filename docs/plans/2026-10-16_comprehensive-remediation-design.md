@@ -171,7 +171,7 @@ fix for anything the sweep measured** - see section 5, question 2.*
 
 #### W29 amendments from the source document (reconciled 2026-10-18)
 
-The authoritative spec is `~/Documents/Repos/_workspace/brownfield-audits/CORPUS_WORK_ORDER_CONSISTENCY_RULES.md`.
+The authoritative spec is `<workspace>/brownfield-audits/CORPUS_WORK_ORDER_CONSISTENCY_RULES.md`.
 Re-read against it, the nine rules above are correct and the D/H/J split is accurate (5
 deterministic, 3 clone-detector hybrid, 1 judgment with a deterministic edge). Four things in
 that document were NOT carried into this plan.

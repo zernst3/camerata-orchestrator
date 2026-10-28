@@ -252,7 +252,7 @@ Removed
   scan cache entry    scan-cache.json#proj-3/acme/app                           -          0.9 MB
   CLI scan cache      ~/Library/Caches/camerata/app-3f2a9c14.cache.json         1           0.4 MB
   CLI ledger          ~/Library/Caches/camerata/app-3f2a9c14.ledger.json        1          12.1 KB
-  model session file  ~/.claude/projects/-Users-zach-Camerata/9d1c....jsonl     1           2.3 MB
+  model session file  ~/.claude/projects/-Users-auditor-Camerata/9d1c....jsonl  1           2.3 MB
 Total                                                                      2,729 files   182.9 MB
 Kept                code excerpts inside the inspection findings (part of the delivered report)
 Method              Ordinary file removal on a FileVault-encrypted APFS volume. Not a forensic
