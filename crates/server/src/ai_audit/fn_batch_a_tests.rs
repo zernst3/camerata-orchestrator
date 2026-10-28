@@ -1103,8 +1103,8 @@ fn an_em_dash_in_a_model_headline_never_reaches_the_flagged_here_note() {
     let mut f = finding("AI-X-1", "critical", "Owner\u{2014}check missing");
     f.line = 3;
     let site = absorbed_site(&f);
-    assert_eq!(site.headline, "Owner-check missing");
+    assert_eq!(site.headline, "Owner, check missing");
     let note = crate::report_export::flagged_sentence(&site, true, None);
     assert!(!note.contains('\u{2014}'), "{note}");
-    assert_eq!(note, "Also flagged here as Owner-check missing (critical)");
+    assert_eq!(note, "Also flagged here as Owner, check missing (critical)");
 }

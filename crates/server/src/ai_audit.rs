@@ -6786,8 +6786,9 @@ pub(crate) fn finding_headline(f: &Finding) -> String {
         Some((title, _)) => title.trim(),
         None => f.detail.trim(),
     };
-    // Model text reaches client prose through this headline: no em dashes.
-    let head = head.replace(" \u{2014} ", " - ").replace('\u{2014}', "-");
+    // Model text reaches client prose through this headline: no em dashes, and no hyphen standing
+    // in for one (house style); a dash between clauses becomes a comma.
+    let head = head.replace(" \u{2014} ", ", ").replace('\u{2014}', ", ");
     let one_line: String = head.split_whitespace().collect::<Vec<_>>().join(" ");
     if one_line.chars().count() > 160 {
         one_line.chars().take(157).collect::<String>() + "..."
