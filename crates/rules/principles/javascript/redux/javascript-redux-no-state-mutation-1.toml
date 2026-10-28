@@ -1,5 +1,5 @@
 id = "JAVASCRIPT-REDUX-NO-STATE-MUTATION-1"
-version = 1
+version = 2
 title = "Reducers never mutate existing state; they produce a new state value"
 domain = "javascript:redux"
 layer = "library"
@@ -14,7 +14,7 @@ url = "https://redux.js.org/style-guide/#do-not-mutate-state"
 title = "Redux Style Guide — Do Not Mutate State (Priority A: Essential)"
 
 [decision]
-question = "What position does the project take on: Reducers never mutate existing state; they produce a new state value?"
+question = "How do Redux reducers produce the next state from the current state?"
 default = "reducers-never-mutate-existing-state-they-produce-a-new-state-value"
 why = "Redux's entire model rests on state being treated as immutable: the store holds one state object, and change is expressed by replacing it with a new object, never editing the old one in place. Two things break the moment a reducer mutates the previous state directly. First, React-Redux decides whether a connected component needs to re-render by comparing the previous and next state references with a shallow (===) check; an in-place mutation keeps the same reference, so the comparison says 'unchanged' and the UI silently fails to update even though the data did change. Second, time-travel debugging, undo/redo, and the devtools all assume past states are preserved, and a mutation corrupts that history. The correct shape is to return a new object/array with the changed parts replaced (via spreads, or via Redux Toolkit's createSlice, which wraps Immer so apparently-mutating code produces an immutable update under the hood). Editing state directly because it is fewer keystrokes produces a store that updates internally but a UI that does not move, which reads as a baffling 'my state changed but nothing rendered' bug rather than an error."
 

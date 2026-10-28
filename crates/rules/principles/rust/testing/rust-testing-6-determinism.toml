@@ -1,5 +1,5 @@
 id = "RUST-TESTING-6"
-version = 1
+version = 2
 title = "Tests are deterministic: no global mutable state, no wall-clock time, no random without a fixed seed"
 domain = "rust:testing"
 layer = "language"
@@ -22,7 +22,7 @@ url = "https://nexte.st/book/retries.html"
 title = "cargo-nextest — Retries and Flaky Tests (a retried success is marked flaky)"
 
 [decision]
-question = "What position does the project take on: what are the isolation requirements for Rust tests?"
+question = "How do tests avoid depending on global state, wall-clock time, and unseeded randomness?"
 default = "deterministic-no-global-state-no-wall-clock-no-unseeded-random"
 why = "Cargo runs tests in parallel across threads by default (cargo test) and across processes (cargo-nextest). A test that reads or writes global mutable state (a static Mutex, an environment variable, a shared temp file) will produce different results depending on which other tests happen to run concurrently — the definition of a flaky test. The Rust Book (Ch 11.2) explicitly warns that tests sharing state must be run with --test-threads=1 and treats independence as the default requirement for parallel safety. Wall-clock time (SystemTime::now(), chrono::Utc::now()) in test assertions produces different values on every run; the correct pattern is to inject a clock as a trait and provide a fixed fake clock in tests. Uncontrolled random (rand::random(), OsRng) produces different values on every run; the correct pattern is to accept a seed or an Rng impl in the function under test. Environment-variable mutation (std::env::set_var) is globally visible to all threads in the process and is one of the most common sources of flaky parallel tests. cargo-nextest's per-process isolation catches many of these bugs by giving each test its own clean process — the presence of a test that only passes when isolated is evidence that it was reading or corrupting shared state."
 
@@ -40,11 +40,11 @@ id = "sequential-tests-with-global-state"
 violates = true
 label = "Allow global state; run tests sequentially (--test-threads=1)"
 directive = "Tests may share global mutable state; the test suite is run with --test-threads=1 to prevent concurrency issues."
-why = "Correct in that it prevents concurrent failures, but slow: the entire test suite runs sequentially so wall time scales linearly with test count; a future contributor running cargo test without the flag will see non-deterministic failures with no obvious cause, and the workaround's presence anywhere in CI makes the suite permanently slower than it needs to be."
+why = "The whole suite runs sequentially, so wall time scales linearly with test count, and a contributor who runs cargo test without the flag sees non-deterministic failures with no obvious cause. It does prevent concurrent failures, but the workaround's presence in CI makes the suite permanently slower than it needs to be."
 
 [[option]]
 id = "per-test-cleanup-with-mutex"
 violates = true
 label = "Serialize access to shared state via a test Mutex"
 directive = "Tests that must share global mutable state serialize access via a shared Mutex in the test module, acquiring the lock at the start of each test and releasing on drop."
-why = "Safer than --test-threads=1 for concurrent tests because other tests can still run in parallel, but still couples the test to a shared resource: the lock must be acquired and released correctly in every test that touches the state, and the coupling does not compose with process-per-test runners like cargo-nextest where each test gets its own process and the in-process Mutex provides no isolation."
+why = "Tests stay coupled to a shared resource: every test that touches the state must acquire and release the lock correctly, and the coupling does not compose with process-per-test runners like cargo-nextest, where an in-process Mutex provides no isolation. It is safer than --test-threads=1 only because other tests can still run in parallel."

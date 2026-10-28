@@ -1,5 +1,5 @@
 id = "JAVASCRIPT-REACT-EXHAUSTIVE-DEPS-1"
-version = 1
+version = 2
 title = "Effect and memo dependency arrays list every reactive value the body reads"
 domain = "javascript:react"
 layer = "framework"
@@ -29,7 +29,7 @@ url = "https://react.dev/learn/synchronizing-with-effects#step-2-specify-the-eff
 title = "React docs — Synchronizing with Effects: specify the effect dependencies"
 
 [decision]
-question = "What position does the project take on: Effect and memo dependency arrays list every reactive value the body reads?"
+question = "How are dependency arrays for effects and memoized values kept in step with the reactive values their bodies read?"
 default = "effect-and-memo-dependency-arrays-list-every-reactive-value-the-body-reads"
 why = "The dependency array is React's declaration of what the effect (or memoized value) depends on, and React re-runs the effect only when one of those values changes. If the body reads a prop, state value, or derived value that is not in the array, the effect closes over the value from the render where it last ran and never sees later updates: the effect operates on stale data indefinitely. This produces the hardest class of React bug, where the UI shows one value but an effect acts on an older one, with no error and no obvious cause. Omitting dependencies to stop an effect from re-running 'too often' treats the symptom by lying about the dependency, which trades a visible re-render for an invisible staleness bug; the correct fixes keep the array honest (move the value out of the effect, wrap a function in useCallback, use a functional state updater, or split the effect) so re-runs are controlled without hiding a real dependency. A blanket eslint-disable on the deps line is the same lie written down."
 

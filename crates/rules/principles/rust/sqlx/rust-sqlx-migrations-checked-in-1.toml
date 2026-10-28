@@ -1,5 +1,5 @@
 id = "RUST-SQLX-MIGRATIONS-CHECKED-IN-1"
-version = 1
+version = 2
 title = "Check database migrations into version control; run migrations as part of application startup"
 domain = "rust:sqlx"
 layer = "framework"
@@ -10,7 +10,7 @@ default = true
 verification = "grounded"
 
 [decision]
-question = "What position does the project take on: Database migrations?"
+question = "How are database migrations stored and applied to the database?"
 default = "version-control-migrations-on-startup"
 why = "sqlx::migrate! allows migrations to be written as SQL files, checked into the repository, and applied via sqlx CLI during development or at application startup. When migrations are in version control, every code change that touches the database schema is paired with the migration, so reviewers see both together. If migrations are applied manually or stored outside version control, it is easy to miss a migration or to deploy code that assumes a schema that has not been applied. Running migrations at application startup (via sqlx::migrate!().run()) ensures the database is in the correct state before the application starts accepting requests. If a migration fails, the application can fail fast and log the error."
 

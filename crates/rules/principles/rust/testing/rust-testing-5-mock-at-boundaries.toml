@@ -1,5 +1,5 @@
 id = "RUST-TESTING-5"
-version = 1
+version = 2
 title = "Mocking is done at trait boundaries; concrete dependencies are injected as trait objects or generics"
 domain = "rust:testing"
 layer = "language"
@@ -18,7 +18,7 @@ url = "https://docs.rs/mockall/latest/mockall/"
 title = "mockall — Automock attribute for generating mock implementations of traits"
 
 [decision]
-question = "What position does the project take on: how are external dependencies replaced in Rust unit tests?"
+question = "How are external dependencies replaced with test doubles in tests?"
 default = "mock-at-trait-boundaries-inject-via-generic-or-dyn"
 why = "Rust's ownership and type system make monkey-patching and global-function replacement impossible at runtime; the only idiomatic substitution point is a trait. A function or struct that depends on a concrete type (e.g., a specific database client or HTTP client struct) cannot be tested in isolation without spinning up that concrete dependency. A function or struct that depends on a trait (e.g., a Repository trait, a Mailer trait) can be tested by injecting any type that implements the trait, including a test double. This pattern — depend on the abstraction, not the concretion — is the prerequisite for unit testing in Rust. The trait object (dyn Trait) approach avoids a generic type parameter on the struct, which is simpler for most cases; the generic (impl Trait / T: Trait) approach is zero-cost but propagates type parameters up the call chain. For generating mock implementations, mockall's #[automock] attribute is the ecosystem-standard tool; hand-written test doubles are preferred when the mock logic is trivial. Mock types must be confined to #[cfg(test)] so they are not compiled into production binaries."
 

@@ -1,5 +1,5 @@
 id = "ARCH-OBSERVABILITY-LOG-CONSISTENCY-1"
-version = 2
+version = 3
 title = "Once a repo has adopted a structured logger, every log call site goes through it; bare print/console-style calls do not sit alongside it"
 domain = "universal"
 layer = "universal"
@@ -40,15 +40,7 @@ question (the per-language stance rules), not this one.
 [[option]]
 id = "one-logger-for-the-whole-repo"
 label = "Every log call site in the repo goes through the same adopted structured logger; no bare print/console-style calls alongside it"
-directive = """
-In a repository that has already adopted a structured logger (slog/zap/winston/pino/slf4j/serilog/tracing,
-or an equivalent project-specific wrapper) at one or more call sites, every log-shaped call site goes
-through that logger; a bare print/console.log/puts/fmt.Println-style call emitting an operational event, an
-error, or a status update does not sit alongside it. Every such message therefore lands in the same
-structured format and the same aggregated stream as the rest of the repo's logs, rather than a fraction of
-them bypassing the logger a log aggregator was built to parse. A call site that goes through the adopted
-logger is conforming regardless of its level or format.
-"""
+directive = "In a repository that has already adopted a structured logger (slog/zap/winston/pino/slf4j/serilog/tracing, or an equivalent project-specific wrapper) at one or more call sites, every log-shaped call site goes through that logger; a bare print/console.log/puts/fmt.Println-style call emitting an operational event, an error, or a status update does not sit alongside it. Every such message therefore lands in the same structured format and the same aggregated stream as the rest of the repo's logs, rather than a fraction of them bypassing the logger a log aggregator was built to parse. A call site that goes through the adopted logger is conforming regardless of its level or format."
 remediation = """
 Replace the ad hoc print/console-style call with a call through the repo's existing structured logger,
 at the same log level and with the same message content, rather than introducing a second logging

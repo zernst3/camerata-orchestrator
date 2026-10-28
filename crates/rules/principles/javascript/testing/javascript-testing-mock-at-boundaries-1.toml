@@ -1,5 +1,5 @@
 id = "JAVASCRIPT-TESTING-MOCK-AT-BOUNDARIES-1"
-version = 1
+version = 2
 title = "Mocks replace external system boundaries (network, DB, clock); own domain logic is tested through real implementations"
 domain = "javascript:testing"
 layer = "language"
@@ -24,7 +24,7 @@ title = "eslint-plugin-jest — prefer-spy-on rule"
 linter = "jest: prefer-spy-on"
 
 [decision]
-question = "What position does the project take on: what should be mocked in tests?"
+question = "What do tests replace with mocks, and what is exercised through its real implementation?"
 default = "mocks-replace-external-boundaries-not-own-domain-logic"
 why = "Mocking is appropriate where real execution is either impossible (a third-party API in a unit test), too slow (a database query that requires infra), or non-deterministic (a payment SDK, an analytics event). When a developer mocks their own domain functions — e.g. replacing a real service method with jest.fn() in a unit test of a controller — they have written a test that asserts wiring ('the controller called the service') rather than correctness ('the system produces the right output'). Such tests are fragile: they break on safe internal refactors and pass even when the mocked dependency is wrong. Jest's own documentation demonstrates this principle with the axiosmock example: the external HTTP client is mocked so the test does not hit the real API; the in-process business logic is exercised through its real implementation. Testing Library codifies the same idea as its primary guiding principle: tests that resemble real software usage produce confidence; tests that enumerate internal calls produce noise."
 

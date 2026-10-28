@@ -1,5 +1,5 @@
 id = "RUST-DIOXUS-9"
-version = 1
+version = 2
 title = "Server-to-client calls: framework server functions or a REST API"
 domain = "rust:dioxus"
 layer = "framework"
@@ -10,7 +10,7 @@ default = false
 verification = "grounded"
 
 [decision]
-question = "What position does the project take on: how the UI calls the server — framework server functions or a REST API?"
+question = "How does the Dioxus UI call the server?"
 why = "Both are legitimate, widely-used ways for a Dioxus UI to reach its server, and neither is presumed correct — the right choice follows from where the project draws its boundaries. Framework server functions (the `#[server]` macro) generate the client and server sides from one definition, keep a single source of truth per operation, and resolve in-process during server-side rendering and over the network during hydration: a natural fit when the UI and server ship together as one fullstack unit. A REST API is the natural fit when the server is a standalone boundary — it serves consumers beyond this UI (mobile, third parties, other services), speaks standard HTTP semantics (caching, status codes, auth middleware, gateways, observability), and can be versioned and deployed independently of the front end; a typed or OpenAPI-generated client keeps its call sites type-checked. Choose by asking whether the server is an internal detail of one app (which favors server functions) or an independent product surface (which favors a REST API), not by defaulting to either."
 
 [[option]]

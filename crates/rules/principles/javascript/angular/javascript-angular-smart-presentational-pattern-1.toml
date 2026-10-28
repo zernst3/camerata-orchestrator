@@ -1,5 +1,5 @@
 id = "JAVASCRIPT-ANGULAR-SMART-PRESENTATIONAL-PATTERN-1"
-version = 2
+version = 3
 title = "Components follow the smart (container) vs. presentational pattern"
 domain = "javascript:angular"
 layer = "framework"
@@ -15,7 +15,7 @@ url = "https://angular.dev/style-guide"
 title = "Angular style guide: Keep components and directives focused on presentation"
 relevance = "The official guide says code inside components should generally relate to the UI shown on the page, and logic that makes sense on its own should move to other files. That supports the presentational half of the pattern; the guide does not name the smart/presentational split itself, which remains this project's policy."
 [decision]
-question = "What position does the project take on: Components follow the smart (container) vs. presentational pattern?"
+question = "How do Angular components divide state handling from presentation?"
 default = "components-follow-the-smart-container-vs-presentational-pattern"
 why = "The smart/container vs. presentational component pattern separates concerns across the component tree. A smart (container) component manages state, fetches data from services, handles business logic, and coordinates the flow of data into presentational children. A presentational (dumb) component receives data via @Input() properties, emits user actions via @Output() events, and knows nothing about services, state management, or business rules. This separation makes presentational components reusable, testable without mocking services, and easy to understand at a glance. Smart components are the thin glue between state and presentation. When all logic lives in a single component, the component becomes a monolith that is difficult to test (every test needs a full setup of services and state) and reuse (it can only render in the context where that state is available). The pattern is: a route or top-level feature component is 'smart' (fetches data, subscribes to services, manages local state); its children are presentational (receive data as @Input, emit actions as @Output). The children are small, comprehensible, and independently testable; the smart parent is the only one that needs the mocking infrastructure."
 

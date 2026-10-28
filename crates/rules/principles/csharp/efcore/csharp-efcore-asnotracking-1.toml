@@ -1,5 +1,5 @@
 id = "CSHARP-EFCORE-ASNOTRACKING-1"
-version = 1
+version = 2
 title = "Read-only queries use AsNoTracking; change tracking is reserved for entities that will be mutated"
 domain = "csharp:efcore"
 layer = "library"
@@ -10,7 +10,7 @@ default = true
 
 verification = "grounded"
 [decision]
-question = "What position does the project take on: Read-only queries use AsNoTracking; change tracking is reserved for entities that will be mutated?"
+question = "How do read-only EF Core queries handle change tracking?"
 default = "asnotracking-for-read-only"
 why = "By default, EF Core attaches every entity returned by a query to the DbContext's change tracker. The change tracker holds a snapshot of the original values, compares the current state to the snapshot on SaveChanges, and generates UPDATE statements for changed properties. For a query whose result is only being read (returned as a DTO, rendered in a view, written to a response), this tracking overhead is pure waste: a snapshot is allocated and never used, and the change tracker grows with every entity returned. Under load, a request handler that reads 50 entities for a list page allocates tracking overhead for all 50, only to discard them when the DbContext is disposed at request end. AsNoTracking() opts out of this: returned entities are not attached to the change tracker, allocation is lower, query execution is faster (no snapshot construction), and the DbContext consumes less memory per request. The discipline is to decide at the query site: if the entity will be passed to SaveChanges after modification, omit AsNoTracking; if the entity is read and discarded, add AsNoTracking. A useful heuristic is that repository methods named GetXxx or FindXxx return AsNoTracking results; repository methods named UpdateXxx or DeleteXxx first fetch with tracking."
 

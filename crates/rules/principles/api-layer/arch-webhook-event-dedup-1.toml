@@ -1,5 +1,5 @@
 id = "ARCH-WEBHOOK-EVENT-DEDUP-1"
-version = 1
+version = 2
 title = "Payment-provider webhook handlers deduplicate by the provider's event id so redelivery never re-applies a side effect"
 domain = "api-layer"
 layer = "universal"
@@ -43,15 +43,7 @@ because two near-simultaneous redeliveries can both pass a non-atomic lookup bef
 [[option]]
 id = "dedupe-by-provider-event-id-before-applying-effect"
 label = "Persist the provider's event id in an atomic, uniquely-constrained insert before applying the side effect; a duplicate delivery is a no-op 2xx"
-directive = """
-The webhook handler, after verifying the provider's signature, attempts to INSERT the event's provider-assigned id
-into a dedicated processed-events table (or equivalent key-value record) with a unique constraint on that id, as a
-single atomic operation. If the insert succeeds, the handler proceeds to apply the event's side effect. If the
-insert fails on the uniqueness constraint (this event id has already been recorded), the handler treats this as an
-already-processed duplicate: it does NOT re-apply the side effect, and it still returns a 2xx response so the
-provider stops retrying. The dedup check is never implemented as a separate read followed by a separate write, since
-that sequence is racy under concurrent redelivery.
-"""
+directive = "The webhook handler, after verifying the provider's signature, attempts to INSERT the event's provider-assigned id into a dedicated processed-events table (or equivalent key-value record) with a unique constraint on that id, as a single atomic operation. If the insert succeeds, the handler proceeds to apply the event's side effect. If the insert fails on the uniqueness constraint (this event id has already been recorded), the handler treats this as an already-processed duplicate: it does NOT re-apply the side effect, and it still returns a 2xx response so the provider stops retrying. The dedup check is never implemented as a separate read followed by a separate write, since that sequence is racy under concurrent redelivery."
 remediation = """
 Add a processed-events table (or equivalent) keyed by the payment provider's own event id with a unique constraint,
 and change the webhook handler to attempt an atomic insert of the incoming event's id before applying its side

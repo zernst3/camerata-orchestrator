@@ -1,5 +1,5 @@
 id = "SPIRIT-ROBUSTNESS-1"
-version = 1
+version = 2
 title = "Robustness over terseness, but buy complexity only against a named threat"
 domain = "universal"
 layer = "universal"
@@ -17,7 +17,7 @@ title = "AGENTS.md — SPIRIT-ROBUSTNESS-1 (robustness over terseness)"
 target = "aicodingrules"
 
 [decision]
-question = "What position does the project take on: Robustness over terseness, but buy complexity only against a named threat?"
+question = "How does the team choose between a terse implementation and a more explicit, robust one?"
 default = "robustness-over-terseness-but-buy-complexity-only-against-a-named-threat"
 why = "Two-part calculus. (1) Explicitness is near-free under AI because the AI writes the boilerplate, so the pre-AI tradeoff (terseness to cut maintenance tax) inverts and the more explicit version usually wins. (2) Complexity is not free. Hardening against an unnamed threat wastes attention and creates false complexity. Prefer explicit by default; justify complex by a named threat. The terseness-default is the pre-AI position whose calculus inverts as soon as AI writes the boilerplate, since the maintenance tax it was protecting against has been amortized away. Always-defensive over-engineers low-stakes code, hardens fully-encapsulated internals with no real attack surface, and accumulates the false-complexity tax that part (2) of the rule exists to prevent."
 

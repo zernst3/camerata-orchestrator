@@ -1,5 +1,5 @@
 id = "JAVASCRIPT-VUE-PROPS-DOWN-EVENTS-UP-1"
-version = 1
+version = 2
 title = "Props flow down; events flow up; avoid direct parent-to-child method calls and shared mutable state"
 domain = "javascript:vue"
 layer = "framework"
@@ -23,7 +23,7 @@ title = "eslint-plugin-vue — vue/no-mutating-props"
 linter = "eslint-plugin-vue: vue/no-mutating-props"
 
 [decision]
-question = "What position does the project take on: Props down, events up data flow?"
+question = "How do Vue parent and child components exchange data and updates?"
 default = "props-down-events-up"
 why = "Vue components are organized in a tree. A parent component should pass data to child components via props (one-way binding) and handle updates via emitted events. This unidirectional flow makes data movement predictable and traceable: any change to a child's state either comes from a prop the parent passed or from the child's own logic. When a parent directly calls child methods (via template refs) or when parent and child share mutable state, the data flow becomes bidirectional and hard to trace. Debugging requires searching for all places that mutate shared state. The rule is: props flow from parent to child, events flow from child to parent, and shared state is managed by a store (Pinia) or passed through context/provide, not mutated directly in components."
 

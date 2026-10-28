@@ -1,5 +1,5 @@
 id = "JAVASCRIPT-NEST-GUARDS-FOR-AUTH-1"
-version = 1
+version = 2
 title = "Use guards for authentication and authorization checks"
 domain = "javascript:nest"
 layer = "framework"
@@ -14,7 +14,7 @@ url = "https://docs.nestjs.com/guards"
 title = "NestJS Docs — Guards: CanActivate for authentication and authorization"
 
 [decision]
-question = "What position does the project take on: Guards for auth?"
+question = "How are authentication checks applied to NestJS routes so that a new endpoint is not left unprotected?"
 default = "global-guard-with-public-decorator-opt-out"
 why = "NestJS guards are functions that run before a controller method and determine if the request should proceed. A guard can check authentication (is the request from a logged-in user?) or authorization (does the user have permission to access this resource?). Applying a guard per-route via @UseGuards() centralizes the check's implementation, but it is still an opt-in, fail-open default at the routing level: a new endpoint added without remembering to annotate it is silently unprotected until someone notices. NestJS's own documented pattern for authentication is closer to opt-out: register the auth guard once, application-wide, as an APP_GUARD provider, so every route requires authentication unless explicitly marked otherwise with a custom @Public() decorator (implemented via SetMetadata plus a Reflector check in the guard's canActivate). This flips the failure mode from fail-open to fail-closed: a forgotten annotation on a new endpoint means the route is protected when it shouldn't need to be, not open when it should have been protected. Per-route @UseGuards() remains a legitimate, more explicit approach, particularly for APIs where most routes are public and only a minority need protection, or for authorization checks (role/permission guards) layered on top of a globally-required authentication guard. When authentication and authorization logic lives inline inside a controller method or in service code instead of any guard at all, the same checks are duplicated across routes, drift out of sync when roles or permission models change, and a developer might forget to add the check to a new endpoint entirely."
 

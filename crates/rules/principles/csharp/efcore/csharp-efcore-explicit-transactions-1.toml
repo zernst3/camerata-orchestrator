@@ -1,5 +1,5 @@
 id = "CSHARP-EFCORE-EXPLICIT-TRANSACTIONS-1"
-version = 1
+version = 2
 title = "Multi-write operations are wrapped in an explicit transaction; partial writes are not observable"
 domain = "csharp:efcore"
 layer = "library"
@@ -19,7 +19,7 @@ default = true
 
 verification = "grounded"
 [decision]
-question = "What position does the project take on: Multi-write operations are wrapped in an explicit transaction; partial writes are not observable?"
+question = "How are operations that make several related EF Core writes kept atomic?"
 default = "explicit-transaction-for-multi-write"
 why = "EF Core's SaveChanges/SaveChangesAsync wraps all pending changes in a single implicit transaction by default. This means all changes tracked in one DbContext instance since the last SaveChanges are committed atomically. The implicit transaction covers only changes that were tracked on that one DbContext. When a service method calls SaveChanges multiple times (first to insert a parent, then to insert a child using the parent's generated ID), the first SaveChanges commits in its own transaction. If the second fails, the parent row is committed and the child is not: the database is in a partial state that the application may never resolve. Explicit transactions via context.Database.BeginTransactionAsync() cover multiple SaveChanges calls within the same scope, so either all commits succeed or the entire operation rolls back. The discipline is to identify any code path that calls SaveChanges more than once within a logical operation (the definition of a business transaction, not an EF Core operation) and wrap it in an explicit transaction. The common trigger is ID generation: an entity must be persisted to receive its database-generated ID before a related entity referencing that ID can be inserted. The explicit transaction is the correct tool; structuring the DbContext to track both entities together and calling SaveChanges once (letting EF Core order the inserts) is the alternative."
 

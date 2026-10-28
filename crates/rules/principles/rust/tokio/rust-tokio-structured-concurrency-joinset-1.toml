@@ -1,5 +1,5 @@
 id = "RUST-TOKIO-STRUCTURED-CONCURRENCY-JOINSET-1"
-version = 1
+version = 2
 title = "Use JoinSet for structured concurrency; track spawned tasks and ensure all complete or are cancelled"
 domain = "rust:tokio"
 layer = "framework"
@@ -10,7 +10,7 @@ default = true
 verification = "grounded"
 
 [decision]
-question = "What position does the project take on: Structured concurrency with JoinSet?"
+question = "How are spawned async tasks tracked so that all of them complete or are cancelled?"
 default = "use-joinset-for-structured-concurrency"
 why = "tokio::task::JoinSet holds a set of spawned tasks and ensures they are joined (awaited or cancelled) before the scope exits. Without JoinSet, a task spawned via tokio::spawn can run past the scope where it was created, leading to orphaned tasks, resource leaks, and subtle bugs where a task outlives its dependencies (e.g., a spawned task tries to access data that has been dropped). JoinSet enforces structured concurrency: all spawned tasks are joined at a well-defined point, and the code path cannot exit until all tasks are accounted for. If a task panics, the panic is caught when joining and can be handled. JoinSet makes concurrent code easier to reason about because the lifetime of spawned tasks is visible and finite."
 

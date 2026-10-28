@@ -1,5 +1,5 @@
 id = "JAVASCRIPT-VUE-COMPUTED-OVER-METHODS-1"
-version = 1
+version = 2
 title = "Use computed properties for derived state, not methods with side effects"
 domain = "javascript:vue"
 layer = "framework"
@@ -21,7 +21,7 @@ title = "eslint-plugin-vue — vue/no-side-effects-in-computed-properties"
 linter = "eslint-plugin-vue: vue/no-side-effects-in-computed-properties"
 
 [decision]
-question = "What position does the project take on: Computed properties vs methods?"
+question = "How is state derived from other reactive state in Vue components?"
 default = "computed-for-derived-state"
 why = "A computed property derives a value from reactive data and caches the result. When the underlying data changes, the computed property recomputes automatically. When data does not change, the computed property returns the cached value without recomputing. A method, by contrast, runs every time it is called, so if you call the same method twice with no data change in between, the computation happens twice. Using a method to derive state (e.g., a method that filters and transforms a list) means the transformation runs on every template render and every method call, even if the input data has not changed. Using a computed property for the same transformation means the result is computed once and cached. Computed properties also signal intent: a computed property is a pure function with no side effects that transforms input data. A method can have side effects (call an API, mutate global state). Using computed for derived state and methods for side-effect-triggering actions keeps the code readable."
 

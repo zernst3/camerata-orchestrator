@@ -1,5 +1,5 @@
 id = "ARCH-CURRENCY-CONSISTENCY-1"
-version = 1
+version = 2
 title = "A payment amount's currency code and minor-unit denomination stay consistent from authorization through storage and comparison"
 domain = "api-layer"
 layer = "universal"
@@ -43,15 +43,7 @@ expected.
 [[option]]
 id = "single-consistent-denomination-end-to-end"
 label = "Track currency and minor-unit convention as an explicit, carried property of the amount; handle zero-decimal currencies as a named exception"
-directive = """
-Every amount that reaches a payment-provider call, a cross-currency comparison, or a persisted monetary column
-carries its currency code alongside the numeric value (never a bare number with currency assumed from context), and
-the minor-unit convention applied before a provider call explicitly branches on whether the currency is zero-decimal
-(no multiplication) versus standard (x100, or the currency-specific minor-unit factor). A value computed in one
-currency is explicitly converted, with a recorded exchange rate and timestamp, before being compared against or
-combined with a value in a different currency — it is never compared or summed across currencies as if the numbers
-were on the same scale.
-"""
+directive = "Every amount that reaches a payment-provider call, a cross-currency comparison, or a persisted monetary column carries its currency code alongside the numeric value (never a bare number with currency assumed from context), and the minor-unit convention applied before a provider call explicitly branches on whether the currency is zero-decimal (no multiplication) versus standard (x100, or the currency-specific minor-unit factor). A value computed in one currency is explicitly converted, with a recorded exchange rate and timestamp, before being compared against or combined with a value in a different currency — it is never compared or summed across currencies as if the numbers were on the same scale."
 remediation = """
 Add an explicit currency-and-denomination check at the payment-provider call site: before applying the usual
 minor-unit multiplication, branch on whether the order's currency is a zero-decimal currency (per the provider's

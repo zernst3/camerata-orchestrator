@@ -1,5 +1,5 @@
 id = "JAVASCRIPT-TYPESCRIPT-NO-FLOATING-PROMISES-1"
-version = 1
+version = 2
 title = "Every Promise is awaited, returned, or explicitly handled"
 domain = "javascript:typescript"
 layer = "language"
@@ -16,7 +16,7 @@ title = "typescript-eslint — @typescript-eslint/no-floating-promises rule"
 linter = "@typescript-eslint: no-floating-promises"
 
 [decision]
-question = "What position does the project take on: Every Promise is awaited, returned, or explicitly handled?"
+question = "What happens to the Promise returned by an async call whose result the caller does not use?"
 default = "every-promise-is-awaited-returned-or-explicitly"
 why = "A Promise whose result is discarded is a floating promise: the asynchronous work still runs, but nothing waits for it and nothing observes its rejection. The two failure modes are both silent and both serious. First, a rejection in a floating promise becomes an unhandled rejection that no try/catch can reach, crashing the process on some runtimes and vanishing on others. Second, the surrounding function continues past the un-awaited call as though the work were done, so ordering guarantees the author assumed (write completes before read, transaction commits before response) are quietly violated under load. The bug is invisible in local testing where the async work happens to finish fast enough, and surfaces as a flaky, timing-dependent failure in production. Letting promises float because the result 'is not needed' conflates not needing the value with not needing the completion or the error; if a call is genuinely fire-and-forget, marking it void with the rejection explicitly handled states that intent, whereas a bare floating call states nothing."
 

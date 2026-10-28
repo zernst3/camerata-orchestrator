@@ -1,5 +1,5 @@
 id = "CSHARP-ASPNETCORE-OPTIONS-PATTERN-1"
-version = 1
+version = 2
 title = "Configuration values are bound via the Options pattern (IOptions<T>); no raw IConfiguration access in service classes"
 domain = "csharp:aspnetcore"
 layer = "framework"
@@ -10,7 +10,7 @@ default = true
 
 verification = "grounded"
 [decision]
-question = "What position does the project take on: Configuration values are bound via the Options pattern (IOptions<T>); no raw IConfiguration access in service classes?"
+question = "How do service classes receive their configuration values?"
 default = "options-pattern-ioptionst"
 why = "ASP.NET Core's IConfiguration is a flat string-keyed dictionary that accepts any key and returns null for missing keys silently. When service classes accept IConfiguration and read values by string key, three things follow. The configuration requirement of the class is invisible from its constructor: callers cannot tell which keys it reads, whether any are missing, or what happens when one is absent. Missing or misspelled keys are null at runtime, often surfacing as NullReferenceException or a silent wrong value deep in a request, not at application startup. Testing the class requires constructing a mock IConfiguration that matches the exact string keys the class reads, an implementation detail that now leaks into the test. The Options pattern replaces this with a typed POCO bound from configuration in Program.cs: the section is bound once, validated at startup (via ValidateOnStart or DataAnnotations), and injected as IOptions<T>. The service class declares exactly what configuration it needs in its constructor (the POCO type), the POCO's fields are statically typed (no silent null for a missing key), and the binding failure is a startup error rather than a runtime error under load. Named and snapshot options (IOptionsSnapshot<T>) also allow per-request reload without restarting the process."
 

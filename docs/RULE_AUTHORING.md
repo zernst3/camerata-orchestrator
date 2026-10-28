@@ -140,7 +140,7 @@ opt_in_only = true             # never auto-recommended / pre-checked at onboard
 layer3_only = true             # CI-tier only; never run at layer-2 or scan time
 
 [decision]
-question = "What position does the project take on …?"
+question = "How does the API deduplicate retried mutations?"   # asked OF the client's code; options answer it
 default  = "the-default-option-id"
 why      = "rationale for the adopted default"
 

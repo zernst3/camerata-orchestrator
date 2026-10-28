@@ -1,5 +1,5 @@
 id = "ORCH-NO-NATURAL-BREAK-1"
-version = 1
+version = 2
 title = "Never stop on a \"natural break\""
 domain = "agentic"
 layer = "universal"
@@ -14,13 +14,13 @@ url = "AGENTS.md"
 title = "AGENTS.md — ORCH-NO-NATURAL-BREAK-1 (never stop on a natural break)"
 
 [decision]
-question = "What position does the project take on: Never stop on a \"natural break\"?"
+question = "When an agent finishes a chunk of work or reaches a milestone with budget remaining, what does it do?"
 default = "never-stop-on-a-natural-break"
 why = "For long-running work, the budget cap is the ceiling, not the target; quitting early with capacity left is a failure mode. Stopping at milestones or other natural seams feels disciplined but in practice under-uses the available budget, because the routine treats a completed-chunk feeling as a stop signal rather than as a self-check that confirms forward progress and then continues. The budget cap, the real escalation triggers, an empty queue, and unrecoverable errors are the only signals that mean stop; anything else is a false stop that wastes paid-for capacity. This rule has a real failure mode of its own if read too literally: pressuring the routine to always start another unit of work, even when the remaining budget cannot possibly finish it, creates a make-work incentive that produces either a broken/uncommitted tree at the hard cutoff or padded busywork to look active until time runs out. That is not what this rule asks for. Insufficient remaining budget for the next atomic unit of work is itself one of the named valid stop signals (a form of the budget/time cap), not a natural-break rationalization — see the last-verified-green-checkpoint option, which resolves this without weakening the rule against quitting early merely because a milestone feels like a good stopping point."
 
 [[option]]
 id = "never-stop-on-a-natural-break"
-label = "Never stop on a \"natural break\""
+label = "Runs stop only at a budget or time cap, a real escalation, an empty queue, or an unrecoverable error"
 directive = "A completed chunk, a milestone, or a periodic self-check is NOT a valid stop. The only valid exits are: budget/time cap, a real escalation trigger, queue genuinely empty, or unrecoverable error. Don't wrap early with budget unspent."
 remediation = """
 Configure the autonomous run so completing a chunk, hitting a milestone, or finishing a periodic self-check is not treated as a stopping point on its own. Restrict valid stops to the budget or time cap being reached, a real escalation trigger firing, the work queue being genuinely empty, or an unrecoverable error. Verify by checking that a run with remaining budget and queued work continued past a completed milestone instead of exiting early.

@@ -1,5 +1,5 @@
 id = "JAVASCRIPT-NEST-DTOS-VALIDATION-PIPE-1"
-version = 1
+version = 2
 title = "Use DTOs with class-validator and ValidationPipe to validate incoming requests"
 domain = "javascript:nest"
 layer = "framework"
@@ -18,7 +18,7 @@ url = "https://docs.nestjs.com/techniques/validation"
 title = "NestJS Docs — Validation techniques: DTOs with class-validator"
 
 [decision]
-question = "What position does the project take on: DTOs and validation?"
+question = "How does the NestJS application validate incoming request payloads?"
 default = "dtos-with-validation-pipe"
 why = "NestJS allows defining Data Transfer Objects (DTOs) with validation decorators from class-validator (@IsString, @IsEmail, @Min, etc.). The global ValidationPipe automatically validates incoming payloads against the DTO shape before the controller is invoked. If validation fails, the pipe rejects the request with a 400 error containing validation error details. When DTOs and validation are not used, the controller must manually check the request shape and field types, and duplicate validation logic appears in every controller. DTOs make the expected shape explicit and machine-readable, and ValidationPipe ensures consistency. Controllers receive validated, typed data and can assume the input is correct."
 

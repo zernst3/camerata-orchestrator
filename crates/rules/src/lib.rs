@@ -800,7 +800,8 @@ struct StackExceptionToml {
 
 #[derive(Debug, Deserialize)]
 struct DecisionToml {
-    /// The decision this rule frames (e.g. "What position does the project take on …?").
+    /// The decision this rule frames, asked of the client's code (e.g. "How does the API
+    /// deduplicate retried mutations?"). See `docs/RULE_AUTHORING.md`, `[decision].question`.
     #[serde(default)]
     question: Option<String>,
     #[serde(default)]

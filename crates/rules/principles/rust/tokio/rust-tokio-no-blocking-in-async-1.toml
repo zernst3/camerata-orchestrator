@@ -1,5 +1,5 @@
 id = "RUST-TOKIO-NO-BLOCKING-IN-ASYNC-1"
-version = 1
+version = 2
 title = "Do not call blocking operations directly in async code; use tokio::task::spawn_blocking"
 domain = "rust:tokio"
 layer = "framework"
@@ -10,7 +10,7 @@ default = true
 verification = "grounded"
 
 [decision]
-question = "What position does the project take on: Blocking operations in async code?"
+question = "How does async code run blocking operations such as synchronous file I/O or heavy computation?"
 default = "use-spawn-blocking-for-blocking-calls"
 why = "Tokio is a cooperative multitasking runtime; it schedules many async tasks on a small number of worker threads. When a task calls a blocking operation (e.g., a synchronous I/O read, std::fs::File, a mutex lock that will block for a meaningful duration, or CPU-intensive work) directly inside an async function, it blocks the entire worker thread. While that task is blocked, all other tasks scheduled on that thread cannot run, even if they are ready (e.g., waiting for a network response). If many tasks block their worker threads simultaneously, the runtime starves and the application becomes unresponsive. tokio::task::spawn_blocking runs the blocking operation on a separate thread pool so the async executor can keep running other tasks. When a blocking operation is unavoidable (e.g., reading from a file or computing a hash), spawn_blocking is the correct tool. If the operation is I/O that has an async alternative (e.g., tokio::fs instead of std::fs), the async version should be used instead. Not every lock acquisition counts as a blocking operation in this sense: a std::sync::Mutex whose critical section is short and never spans an .await point (no I/O or other yield happens while the lock is held) typically holds the worker thread for a negligible, bounded time and is commonly used directly in async code without spawn_blocking or a switch to tokio::sync::Mutex — the concern this rule targets is operations that block for an unbounded or substantial duration (disk I/O, network calls made synchronously, CPU-heavy work, or lock contention that can stall)."
 

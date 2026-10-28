@@ -1,5 +1,5 @@
 id = "ARCH-OBSERVABILITY-SILENT-FAILURE-1"
-version = 2
+version = 3
 title = "A caught or inspected error is never discarded with zero action; it is logged, rethrown, transformed, or its silence is explicitly justified"
 domain = "universal"
 layer = "universal"
@@ -49,16 +49,7 @@ Low rather than letting a model's rating inflate it.
 [[option]]
 id = "log-or-justify-every-caught-error"
 label = "Every caught/inspected error is logged, rethrown, transformed, or explicitly justified; no empty catch/except/rescue bodies"
-directive = """
-A caught or inspected error is never discarded with zero action. Every catch/except/rescue block that
-does not rethrow or return the error upward, and every explicit error-value check (Go's `if err != nil`,
-a Rust `Err(e)` match arm) that does not propagate it, either calls the project's logger with the error
-or carries an inline comment that explicitly justifies the silence (a best-effort cleanup step, a
-known-benign race). A block that is empty, holds only a comment, or merely discards the error binding (a
-bare `pass`, `_ = err`, a caught variable never referenced) is exactly the lost-signal case this forbids;
-a block that logs the error, propagates it, or carries a justifying comment is conforming regardless of
-what else it does.
-"""
+directive = "A caught or inspected error is never discarded with zero action. Every catch/except/rescue block that does not rethrow or return the error upward, and every explicit error-value check (Go's `if err != nil`, a Rust `Err(e)` match arm) that does not propagate it, either calls the project's logger with the error or carries an inline comment that explicitly justifies the silence (a best-effort cleanup step, a known-benign race). A block that is empty, holds only a comment, or merely discards the error binding (a bare `pass`, `_ = err`, a caught variable never referenced) is exactly the lost-signal case this forbids; a block that logs the error, propagates it, or carries a justifying comment is conforming regardless of what else it does."
 remediation = """
 Add a call to the project's existing logger (passing the caught error/exception so its message and
 stack trace are captured) inside the empty block, OR rethrow/return the error (or a wrapped, more

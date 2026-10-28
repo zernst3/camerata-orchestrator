@@ -1,5 +1,5 @@
 id = "RUST-DOMAIN-5"
-version = 1
+version = 2
 title = "Async all the way down"
 domain = "rust"
 layer = "language"
@@ -18,7 +18,7 @@ url = "https://tokio.rs/tokio/tutorial"
 title = "Tokio Tutorial — async I/O and the requirement to avoid blocking calls in async contexts"
 
 [decision]
-question = "What position does the project take on: Async all the way down?"
+question = "Which functions in the Rust codebase are async, and where, if anywhere, does sync code call into async?"
 default = "async-all-the-way-down"
 why = "The Rust I/O ecosystem (SeaORM, Axum, tokio) is async-first; mixing sync wrappers around async runtimes is friction and a perf loss. Going sync-first and using block_on at the layer boundaries fights the ecosystem at every layer, produces measurable perf regressions, and creates the runtime-pinning bugs that block_on-inside-an-async-context is famous for. Maintaining dual sync and async APIs doubles the public surface and forces every consumer to choose which variant to call, which is a recurring point of confusion and a maintenance burden for very little gain in the Rust ecosystem."
 

@@ -1,5 +1,5 @@
 id = "JAVASCRIPT-TESTING-AAA-STRUCTURE-1"
-version = 1
+version = 2
 title = "Every test body follows Arrange-Act-Assert structure with one act per test"
 domain = "javascript:testing"
 layer = "language"
@@ -20,7 +20,7 @@ title = "eslint-plugin-jest — no-conditional-expect rule"
 linter = "jest: no-conditional-expect"
 
 [decision]
-question = "What position does the project take on: how should the body of an individual test be structured?"
+question = "How is the body of an individual test structured, and how many actions does each test perform?"
 default = "every-test-follows-arrange-act-assert-one-act-per-test"
 why = "The Arrange-Act-Assert (AAA) pattern structures each test into three clearly delimited phases: Arrange sets up the preconditions and test data, Act executes the single operation under test, and Assert verifies the outcome. When a test mixes setup, exercise, and verification in an undivided block the reader must reconstruct these phases mentally before they can understand what the test is doing. The single-act constraint is equally important: a test with two Act phases verifies too many things at once, and when it fails the failure points to a sequence of operations rather than a single cause, forcing the reader to bisect the compound case themselves."
 
