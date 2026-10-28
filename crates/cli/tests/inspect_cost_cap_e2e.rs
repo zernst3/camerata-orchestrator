@@ -100,6 +100,8 @@ fn stage_fixture(dest: &Path) {
 fn args(repo: &Path, export: &Path, cap: Option<f64>) -> InspectArgs {
     InspectArgs {
         repo: repo.to_path_buf(),
+        also_repos: Vec::new(),
+        repo_names: Vec::new(),
         export: export.to_path_buf(),
         backend: ProjectBackend::Api,
         batch: false,

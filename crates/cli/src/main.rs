@@ -131,9 +131,15 @@ enum Command {
     /// export button produces to `--export`. No BFF, no UI — see
     /// `camerata::inspect_cmd`'s module doc comment.
     Inspect {
-        /// The repo's local working tree to inspect.
-        #[arg(long)]
-        repo: PathBuf,
+        /// The repo's local working tree to inspect. Repeat it to inspect several repos as ONE
+        /// project (one scan, one report, one cache); each then needs a `--repo-name`.
+        #[arg(long, required = true)]
+        repo: Vec<PathBuf>,
+        /// The repo's name as OWNER/REPO, one per `--repo` in the same order. It tags every
+        /// finding, so two repos that both have a `src/index.ts` stay apart. Required when more
+        /// than one `--repo` is given; a single repo is named for its folder when this is omitted.
+        #[arg(long = "repo-name", value_name = "OWNER/REPO")]
+        repo_name: Vec<String>,
         /// Where to write the product-export ZIP. Its parent directory must already exist.
         #[arg(long)]
         export: PathBuf,
@@ -457,6 +463,7 @@ async fn main() -> anyhow::Result<()> {
         }
         Command::Inspect {
             repo,
+            repo_name,
             export,
             backend,
             batch,
@@ -473,8 +480,13 @@ async fn main() -> anyhow::Result<()> {
             run_client_tooling,
             consensus,
         } => {
+            let mut repos = repo.into_iter();
+            // `required = true` guarantees at least one.
+            let first = repos.next().unwrap_or_default();
             run_inspect_cmd(InspectArgs {
-                repo,
+                repo: first,
+                also_repos: repos.collect(),
+                repo_names: repo_name,
                 export,
                 backend,
                 batch,
@@ -1007,6 +1019,55 @@ mod cli_parse_tests {
     }
 
     #[test]
+    fn inspect_takes_repeated_repos_with_one_name_each() {
+        let cli = Cli::try_parse_from([
+            "camerata",
+            "inspect",
+            "--repo",
+            "/Users/auditor/clients/acme/api",
+            "--repo-name",
+            "acme/api",
+            "--repo",
+            "/Users/auditor/clients/acme/web",
+            "--repo-name",
+            "acme/web",
+            "--export",
+            "/Users/auditor/out/acme.zip",
+            "--client",
+            "Example Client Ltd",
+        ])
+        .expect("must parse");
+        match cli.command {
+            Command::Inspect {
+                repo, repo_name, ..
+            } => {
+                assert_eq!(
+                    repo,
+                    vec![
+                        PathBuf::from("/Users/auditor/clients/acme/api"),
+                        PathBuf::from("/Users/auditor/clients/acme/web")
+                    ]
+                );
+                assert_eq!(
+                    repo_name,
+                    vec!["acme/api".to_string(), "acme/web".to_string()]
+                );
+            }
+            other => panic!("expected Command::Inspect: {other:?}"),
+        }
+        // At least one --repo is required.
+        assert!(Cli::try_parse_from([
+            "camerata",
+            "inspect",
+            "--export",
+            "/Users/auditor/out/acme.zip",
+            "--client",
+            "Example Client Ltd"
+        ])
+        .is_err());
+    }
+
+    #[test]
     fn inspect_defaults_backend_to_api_and_every_flag_to_off() {
         let cli = Cli::try_parse_from([
             "camerata",
@@ -1022,6 +1083,7 @@ mod cli_parse_tests {
         match cli.command {
             Command::Inspect {
                 repo,
+                repo_name,
                 export,
                 backend,
                 batch,
@@ -1039,12 +1101,13 @@ mod cli_parse_tests {
                 consensus,
             } => {
                 assert_eq!(client, "Example Client Ltd");
+                assert!(repo_name.is_empty(), "a lone repo needs no name");
                 assert!(
                     !internal,
                     "every inspection is a client engagement by default"
                 );
                 assert!(!run_client_tooling, "client tooling is opt-in");
-                assert_eq!(repo, PathBuf::from("/tmp/r"));
+                assert_eq!(repo, vec![PathBuf::from("/tmp/r")]);
                 assert_eq!(export, PathBuf::from("/tmp/o.zip"));
                 assert_eq!(backend, ProjectBackend::Api);
                 assert!(!batch, "no mode forced: the run's default applies");

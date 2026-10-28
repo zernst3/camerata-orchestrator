@@ -185,6 +185,8 @@ async fn run(backend: ProjectBackend, efficiency: Vec<String>) -> RunResult {
     let printed = Mutex::new(Vec::new());
     let args = InspectArgs {
         repo: repo.path().to_path_buf(),
+        also_repos: Vec::new(),
+        repo_names: Vec::new(),
         export: out.path().join("inspect.zip"),
         backend,
         batch: false,

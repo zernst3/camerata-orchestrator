@@ -108,6 +108,8 @@ async fn deterministic_only_inspect_runs_end_to_end_and_writes_a_valid_zip() {
 
     let args = InspectArgs {
         repo: repo_dir.path().to_path_buf(),
+        also_repos: Vec::new(),
+        repo_names: Vec::new(),
         export: export_path.clone(),
         // `Api` + `has_api_key: false` below resolves to `Blocked` — the real compliance
         // gate, not a test-only bypass. See this file's own doc comment.
@@ -268,6 +270,8 @@ async fn headless_inspect_discloses_when_the_commodity_taint_pass_does_not_run()
 
     let args = InspectArgs {
         repo: repo_dir.path().to_path_buf(),
+        also_repos: Vec::new(),
+        repo_names: Vec::new(),
         export: export_path.clone(),
         backend: ProjectBackend::Api,
         batch: false,

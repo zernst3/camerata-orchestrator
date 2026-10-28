@@ -674,6 +674,7 @@ use camerata_ui_core::progress::{progress_text, FP_MEANING};
 // for the rule-level bulk actions. Both are pure and structured-fields-only — there is no prose
 // path in either, and there must never be one.
 pub(super) use camerata_ui_core::triage::{deviation_groups, rule_group_label, DeviationGroup};
+pub(super) use camerata_ui_core::triage::{finding_location_label, repo_counts_line};
 
 // Pass 2 step 4 (THE DOCKED DETAIL PANE, design §2 + the owner's Q5 ruling in §13). All pure
 // and all in core: the row cursor that arrow keys drive, the SCOPED key handler (the whole of
@@ -1610,6 +1611,35 @@ impl RegistryEntryWire {
     }
 }
 
+/// One repo's size for the pre-audit estimate, from `POST /api/onboard/preflight`: what the scan
+/// will read from it, or why it cannot be read.
+#[derive(Clone, PartialEq, serde::Deserialize)]
+pub(super) struct RepoSizeView {
+    pub repo: String,
+    #[serde(default)]
+    pub files: usize,
+    #[serde(default)]
+    pub code_chars: usize,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+/// Ask the server how big each repo is as the scan will read it. The scan chunks and calibrates
+/// every repo on its own, so a project of several repos is estimated repo by repo, not as one
+/// stream of code. `None` when the server cannot be reached (the caller falls back to the one
+/// total it already has).
+pub(super) async fn fetch_repo_sizes(repos: &[String]) -> Option<Vec<RepoSizeView>> {
+    reqwest::Client::new()
+        .post(format!("{}/api/onboard/preflight", crate::bff_base()))
+        .json(&serde_json::json!({ "repos": repos }))
+        .send()
+        .await
+        .ok()?
+        .json()
+        .await
+        .ok()
+}
+
 #[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize)]
 pub(super) struct AuditModelsResp {
     pub models: Vec<AuditModelOption>,
@@ -2058,6 +2088,7 @@ pub(super) fn finding_columns(
             BadgeVariant::new("Medium", "yellow"),
         )
         .with(severity_sort_value("low"), BadgeVariant::new("Low", "gray"));
+    let multi_repo = repos.len() > 1;
     let mut cols = vec![
         ColumnDef::new(ColumnId("repo"), "Repo", |f: &FindingView| {
             CellValue::Text(f.repo.clone())
@@ -2232,8 +2263,10 @@ pub(super) fn finding_columns(
         // rule → file, so a rule violated 4× across one file collapses under a
         // "handlers.rs (4)" sub-header instead of 4 loose rows. Path-only (not path:line)
         // so all sites in a file share one group; the line lives in the Line column.
-        ColumnDef::new(ColumnId("file"), "File", |f: &FindingView| {
-            CellValue::Text(f.path.clone())
+        // Several repos: the value leads with the repo, because `src/index.ts` exists in every
+        // service and a bare path would merge them into one group (and one filter match).
+        ColumnDef::new(ColumnId("file"), "File", move |f: &FindingView| {
+            CellValue::Text(camerata_ui_core::triage::file_group_label(f, multi_repo))
         })
         .sortable()
         .filter(FilterKind::Text)
@@ -5339,6 +5372,9 @@ pub(super) enum RepoDetect {
         repo: String,
         path: String,
         onboarded_in: Option<String>,
+        /// What is limited for a folder that is not on GitHub (it can be inspected, but push and
+        /// pull requests are GitHub-only). `None` for a GitHub repo.
+        note: Option<String>,
     },
     /// Couldn't derive one — carries a human reason for a toast.
     Failed(String),
@@ -5376,6 +5412,10 @@ pub(super) async fn detect_local_repo() -> RepoDetect {
                 onboarded_in: v
                     .get("onboarded_project")
                     .and_then(|p| p.as_str())
+                    .map(|s| s.to_string()),
+                note: v
+                    .get("note")
+                    .and_then(|n| n.as_str())
                     .map(|s| s.to_string()),
             },
             None => RepoDetect::Failed("no repo in the response".to_string()),
@@ -5622,9 +5662,9 @@ pub(super) fn OnboardView(connection: Option<ProviderView>) -> Element {
                                     RepoDetect::Cancelled => {}
                                     // #50: block re-onboarding a repo that's already onboarded.
                                     RepoDetect::Found { repo: found, onboarded_in: Some(project), .. } => {
-                                        crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, format!("{found} is already onboarded (project \u{201c}{project}\u{201d}). Onboarding is one-time — add it to your workspace to work on it, instead of re-onboarding."));
+                                        crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, format!("{found} is already onboarded (project \u{201c}{project}\u{201d}). Onboarding is one-time, so add it to your workspace to work on it, instead of re-onboarding."));
                                     }
-                                    RepoDetect::Found { repo: found, path: folder, .. } => {
+                                    RepoDetect::Found { repo: found, path: folder, note, .. } => {
                                         let saved = set_repo_path(&found, &folder).await;
                                         let mut cur = repo();
                                         let exists = cur.split([',', '\n']).any(|s| s.trim() == found);
@@ -5637,14 +5677,15 @@ pub(super) fn OnboardView(connection: Option<ProviderView>) -> Element {
                                             cur.push_str(&found);
                                             repo.set(cur);
                                             if saved {
-                                                crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, format!("Added {found} ({folder})"));
+                                                let limit = note.map(|n| format!(" {n}")).unwrap_or_default();
+                                                crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, format!("Added {found} ({folder}).{limit}"));
                                             } else {
                                                 crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, format!("Added {found}, but couldn't record its local path."));
                                             }
                                         }
                                     }
                                     RepoDetect::Failed(msg) => {
-                                        crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, format!("Couldn't read that folder: {msg}. It must be a local git repo with a GitHub origin remote."));
+                                        crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, format!("Couldn't read that folder: {msg}. It must be a local git repository."));
                                     }
                                 }
                             });
@@ -7639,6 +7680,20 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
     use_context_provider(|| repo_selection);
     // Which repo's rule table is in view. Defaults to the first scanned repo. Provided as
     // context so the rule-detail modal + the table key the per-repo `chosen` map by it.
+    // Per-repo sizes for the estimate (several repos only): fetched once per mount.
+    let repo_sizes = {
+        let repos = report.repos.clone();
+        use_resource(move || {
+            let repos = repos.clone();
+            async move {
+                if repos.len() > 1 {
+                    fetch_repo_sizes(&repos).await
+                } else {
+                    None
+                }
+            }
+        })
+    };
     let viewed_repo = use_signal(|| report.repos.first().cloned().unwrap_or_default());
     use_context_provider(|| viewed_repo);
     let mut viewed_repo = viewed_repo;
@@ -7945,11 +8000,13 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
     // With a fifth disposition the duplicate became a real drift risk — a state the loop
     // forgot would show a permanent zero on its tab AND silently stop blocking the Process
     // gate — so the tally is now taken by core's own function, the one the unit tests cover.
-    let triage_counts: TriageCounts = TriageModel {
+    let triage_model = TriageModel {
         dispositions: dispositions.read().clone(),
         triage_view: triage_view(),
-    }
-    .counts(&queue_findings);
+    };
+    let triage_counts: TriageCounts = triage_model.counts(&queue_findings);
+    // The same tally per repo, shown under the tabs when the scan covers several repos.
+    let repo_counts: Vec<(String, TriageCounts)> = triage_model.counts_by_repo(&queue_findings);
 
     // THE RULE HUB's data for whichever rule is open, derived once per render from the scan's
     // own rows by core's `rule_hub`. A request for a rule with no rows in that repo resolves
@@ -8175,7 +8232,7 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                             }
                             div { class: "rule-modal-meta",
                                 span { class: "rule-modal-tag", "severity · {f.severity}" }
-                                span { class: "rule-modal-tag", "{f.path}:{f.line}" }
+                                span { class: "rule-modal-tag", "{finding_location_label(&f)}" }
                                 span { class: "rule-modal-tag", "{f.status}" }
                                 // Authority: deterministic floor (stable, gateable) vs AI-advisory
                                 // (model-inferred, id/severity may vary run-to-run).
@@ -8830,7 +8887,42 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                         // alternative-recommendation pass the audit will run.
                         let multi_option_selected =
                             report.proposed_rules.iter().filter(|r| r.options.len() >= 2).count();
-                        let (toks, dollars, passes) = estimate_audit_cost(report.code_chars, sel, camerata_ui_core::scan::estimate_mode(&audit_mode(), backend), a_in, a_out, c_in, c_out, audit_thorough(), incremental, deep, backend, multi_option_selected, true);
+                        let est_mode = camerata_ui_core::scan::estimate_mode(&audit_mode(), backend).to_string();
+                        // Several repos: one estimate per repo, summed (the scan chunks and
+                        // calibrates each repo on its own). Single repo, or sizes not back yet:
+                        // the one-stream estimate, unchanged.
+                        let sizes: Option<Vec<RepoSizeView>> = if multi_repo { (*repo_sizes.read()).clone().flatten() } else { None };
+                        let mut repo_lines: Vec<String> = Vec::new();
+                        let (toks, dollars, passes) = match sizes {
+                            Some(sizes) => {
+                                let selection = repo_selection.read().clone();
+                                // A repo is priced only when its rule choice is known: a guessed
+                                // rule count would put a made-up figure in front of a spend decision.
+                                let inputs: Vec<camerata_ui_core::scan::RepoEstimateInput> = sizes
+                                    .iter()
+                                    .filter(|z| z.error.is_none())
+                                    .filter_map(|z| {
+                                        let ids = selection.get(&z.repo)?;
+                                        Some(camerata_ui_core::scan::RepoEstimateInput {
+                                            repo: z.repo.clone(),
+                                            code_chars: z.code_chars,
+                                            selected: ids.len(),
+                                            multi_option_selected: report.proposed_rules.iter().filter(|r| r.options.len() >= 2 && ids.contains(&r.id)).count(),
+                                        })
+                                    })
+                                    .collect();
+                                let est = camerata_ui_core::scan::estimate_audit_cost_by_repo(&inputs, &est_mode, a_in, a_out, c_in, c_out, audit_thorough(), incremental, deep, backend, true);
+                                for z in sizes.iter() {
+                                    match (&z.error, est.rows.iter().find(|r| r.repo == z.repo)) {
+                                        (Some(why), _) => repo_lines.push(camerata_ui_core::scan::unreadable_repo_line(&z.repo, why)),
+                                        (None, Some(row)) => repo_lines.push(camerata_ui_core::scan::repo_estimate_line(&z.repo, z.files, z.code_chars, row)),
+                                        (None, None) => repo_lines.push(camerata_ui_core::scan::unknown_rules_repo_line(&z.repo)),
+                                    }
+                                }
+                                (est.tokens, est.dollars, est.passes)
+                            }
+                            None => estimate_audit_cost(report.code_chars, sel, &est_mode, a_in, a_out, c_in, c_out, audit_thorough(), incremental, deep, backend, multi_option_selected, true),
+                        };
                         let code_toks = human_tokens((report.code_chars as f64 / 4.0) as u64);
                         let dollar_str = if dollars < 0.01 { "<$0.01".to_string() } else { format!("~${dollars:.2}") };
                         // ACTUAL, once the audit finished and the backend reported usage.
@@ -8874,6 +8966,13 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                                         span { class: "audit-cost-label", "Estimated cost" }
                                         span { class: "audit-cost-val", "{dollar_str}" }
                                         span { class: "audit-cost-meta", "~{human_tokens(toks)} tokens · {passes} pass(es) · {sel} rule(s)" }
+                                    }
+                                    if !repo_lines.is_empty() {
+                                        ul { class: "audit-cost-repos",
+                                            for line in repo_lines.iter() {
+                                                li { key: "{line}", "{line}" }
+                                            }
+                                        }
                                     }
                                     p { class: "audit-cost-note",
                                         // Approximate in both directions now, not uniformly "biased high": output
@@ -9078,6 +9177,19 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                                         "{st.label()} "
                                         span { class: "triage-tab-count", "{count}" }
                                     }
+                                }
+                            }
+                        }
+                    }
+
+                    // Several repos: how much is left to review in each, beside the total above.
+                    if repo_counts.len() > 1 {
+                        div { class: "triage-repo-counts",
+                            for (repo, counts) in repo_counts.iter() {
+                                span {
+                                    key: "{repo}",
+                                    class: "triage-repo-count",
+                                    "{repo_counts_line(repo, *counts)}"
                                 }
                             }
                         }
@@ -13346,6 +13458,64 @@ mod render_tests {
     /// Mint `(RowId, FindingView)` pairs in the given order, as `FindingsTable` does.
     fn sort_rows(findings: &[FindingView]) -> Vec<(RowId, FindingView)> {
         findings.iter().map(|f| (RowId::new(), f.clone())).collect()
+    }
+
+    /// M10: eleven services each have a `src/index.ts`. Grouped by file, the Queue must show one
+    /// group per repo's file, not one merged `src/index.ts` group, and say which repo each is.
+    #[test]
+    fn m10_the_same_path_in_two_repos_is_two_file_groups() {
+        use chorale_core::{set_grouping, visible_grouped_view, GroupedRow};
+
+        fn in_repo(repo: &str, line: usize) -> FindingView {
+            serde_json::from_value(serde_json::json!({
+                "repo": repo, "path": "src/index.ts", "line": line, "rule_id": "R-1",
+                "severity": "high", "snippet": format!("s{line}"), "detail": "d",
+                "status": "active", "kind": "defect"
+            }))
+            .expect("fixture")
+        }
+        let rows = vec![
+            in_repo("acme/a", 1),
+            in_repo("acme/b", 1),
+            in_repo("acme/a", 2),
+            in_repo("acme/b", 2),
+        ];
+        let headers = |repos: Vec<String>| -> Vec<(String, usize)> {
+            let state = finding_table_state(sort_rows(&rows), repos, false);
+            let state = set_grouping(&state, vec![ColumnId("file")]);
+            visible_grouped_view(&state)
+                .into_iter()
+                .filter_map(|r| match r {
+                    GroupedRow::Header {
+                        label, row_count, ..
+                    } => Some((label, row_count)),
+                    _ => None,
+                })
+                .collect()
+        };
+        assert_eq!(
+            headers(vec!["acme/a".into(), "acme/b".into()]),
+            vec![
+                ("acme/a: src/index.ts".to_string(), 2),
+                ("acme/b: src/index.ts".to_string(), 2)
+            ]
+        );
+        // One repo in play: the bare path, as before.
+        let single: Vec<FindingView> = rows
+            .iter()
+            .filter(|f| f.repo == "acme/a")
+            .cloned()
+            .collect();
+        let state = finding_table_state(sort_rows(&single), vec!["acme/a".into()], false);
+        let state = set_grouping(&state, vec![ColumnId("file")]);
+        let labels: Vec<String> = visible_grouped_view(&state)
+            .into_iter()
+            .filter_map(|r| match r {
+                GroupedRow::Header { label, .. } => Some(label),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(labels, vec!["src/index.ts".to_string()]);
     }
 
     /// A `TableState` over the real findings columns, rows in the curated default order and
