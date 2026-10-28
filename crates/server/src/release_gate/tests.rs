@@ -1588,6 +1588,89 @@ fn the_gate_catches_a_pdf_whose_kinds_differ_even_when_every_total_matches() {
     );
 }
 
+/// The groups the PDF renders as finding cards: "Curated findings" and "Held for review".
+fn rendered_groups(
+    package: &mut ProductPackage,
+) -> impl Iterator<Item = &mut crate::report_export::CuratedGroupJson> {
+    package
+        .report_json
+        .curated_findings
+        .iter_mut()
+        .chain(package.report_json.held_for_review_findings.iter_mut())
+}
+
+fn rendered_count(package: &mut ProductPackage, severity: &str, kind: &str) -> usize {
+    rendered_groups(package)
+        .flat_map(|g| g.sites.iter())
+        .filter(|s| s.severity == severity && s.kind.tag() == kind)
+        .count()
+}
+
+/// The PDF renders its findings from `curated_findings` and `held_for_review_findings`, not from
+/// the matrix the counts are first taken from. A site that falls out of those lists is a finding
+/// the reader never sees while the matrix, the cover and every total still agree.
+#[test]
+fn the_gate_catches_a_finding_the_pdf_counts_but_does_not_render() {
+    let mut package = mixed_package();
+    // Anti-vacuity: the critical defect really is rendered once.
+    assert_eq!(rendered_count(&mut package, "critical", "defect"), 1);
+    for group in rendered_groups(&mut package) {
+        group
+            .sites
+            .retain(|s| !(s.severity == "critical" && s.kind.tag() == "defect"));
+    }
+    let failure = blocked(package);
+    assert!(
+        count_problems(&failure).iter().any(|p| p.file == "PDF data"
+            && p.location == "severity critical, kind defect"
+            && p.message.contains("rendered")),
+        "{failure}"
+    );
+}
+
+#[test]
+fn the_gate_catches_a_rendered_finding_whose_kind_differs_from_the_matrix() {
+    let mut package = mixed_package();
+    let site = rendered_groups(&mut package)
+        .flat_map(|g| g.sites.iter_mut())
+        .find(|s| s.kind.tag() == "defect")
+        .expect("a rendered defect");
+    site.kind = camerata_api_types::audit::KindOnWire(Some(
+        camerata_api_types::audit::FindingKind::Deviation(
+            camerata_api_types::audit::DeviationKind {
+                deviating_sites: 1,
+                assessed_sites: None,
+                convention_option_id: None,
+                convention_label: "x".to_string(),
+            },
+        ),
+    ));
+    let failure = blocked(package);
+    assert!(
+        count_problems(&failure)
+            .iter()
+            .any(|p| p.file == "PDF data" && p.message.contains("rendered")),
+        "{failure}"
+    );
+}
+
+#[test]
+fn the_gate_catches_a_finding_rendered_twice() {
+    let mut package = mixed_package();
+    let group = rendered_groups(&mut package)
+        .find(|g| !g.sites.is_empty())
+        .expect("a rendered group");
+    let again = group.sites[0].clone();
+    group.sites.push(again);
+    let failure = blocked(package);
+    assert!(
+        count_problems(&failure)
+            .iter()
+            .any(|p| p.file == "PDF data" && p.message.contains("rendered")),
+        "{failure}"
+    );
+}
+
 #[test]
 fn the_gate_catches_a_pdf_summary_count_that_is_off_by_one() {
     let mut package = mixed_package();
@@ -1617,6 +1700,101 @@ fn the_gate_catches_a_workbook_whose_rows_disagree_by_severity() {
     assert!(
         problems.iter().any(|p| p.file.ends_with("-findings.xlsx")
             && p.location == "severity critical, kind defect"),
+        "{failure}"
+    );
+}
+
+// ---- 22d: the Conventions and Coverage sheets' rows are tallied too ----------------------------
+
+/// The position of `text` in the workbook's shared-string table (each distinct cell text is
+/// stored once; a cell holds the position).
+fn shared_string_index(xlsx: &[u8], text: &str) -> usize {
+    let entries = read_zip_entries(xlsx).expect("the workbook is a zip");
+    let table = String::from_utf8(
+        entries
+            .get("xl/sharedStrings.xml")
+            .expect("a shared string table")
+            .clone(),
+    )
+    .expect("utf8");
+    table
+        .split("<si>")
+        .skip(1)
+        .position(|item| item.contains(&format!(">{text}</t>")))
+        .unwrap_or_else(|| panic!("the workbook has no cell text {text:?}"))
+}
+
+/// Remove every worksheet row that holds a cell with exactly this text, leaving the rest of the
+/// workbook (its Index counts included) untouched: a row dropped from one sheet by itself.
+fn drop_sheet_rows_with_text(xlsx: &[u8], text: &str) -> Vec<u8> {
+    let cell = format!("t=\"s\"><v>{}</v>", shared_string_index(xlsx, text));
+    rewrite_xlsx(xlsx, |name, xml| {
+        if !(name.starts_with("xl/worksheets/sheet") && name.ends_with(".xml")) {
+            return xml.to_string();
+        }
+        let mut out = String::new();
+        let mut rest = xml;
+        while let Some(start) = rest.find("<row ") {
+            let end = rest[start..]
+                .find("</row>")
+                .map(|e| start + e + "</row>".len())
+                .expect("a closed row");
+            out.push_str(&rest[..start]);
+            if !rest[start..end].contains(&cell) {
+                out.push_str(&rest[start..end]);
+            }
+            rest = &rest[end..];
+        }
+        out.push_str(rest);
+        out
+    })
+}
+
+#[test]
+fn the_gate_catches_a_no_convention_row_dropped_from_the_conventions_sheet() {
+    let mut package = mixed_package();
+    package.xlsx = drop_sheet_rows_with_text(&package.xlsx, "No single convention adopted");
+    let failure = blocked(package);
+    let problems = count_problems(&failure);
+    assert!(
+        problems.iter().any(|p| p.file.ends_with("-findings.xlsx")
+            && p.location == "sheet \"Conventions\" rows, kind no_convention"),
+        "{failure}"
+    );
+    assert!(
+        !problems
+            .iter()
+            .any(|p| p.location.contains("kind convention_observed")),
+        "only the dropped kind is named: {failure}"
+    );
+}
+
+#[test]
+fn the_gate_catches_a_not_assessed_row_dropped_from_the_coverage_sheet() {
+    let mut package = mixed_package();
+    package.xlsx = drop_sheet_rows_with_text(&package.xlsx, "API-TIMEOUTS-1");
+    let failure = blocked(package);
+    assert!(
+        count_problems(&failure)
+            .iter()
+            .any(|p| p.file.ends_with("-findings.xlsx")
+                && p.location == "sheet \"Coverage\" rows, kind not_assessed"),
+        "{failure}"
+    );
+}
+
+#[test]
+fn the_gate_catches_a_followed_convention_row_dropped_from_the_conventions_sheet() {
+    let mut package = mixed_package();
+    package.xlsx = drop_sheet_rows_with_text(
+        &package.xlsx,
+        "Followed consistently \u{2014} no exceptions found",
+    );
+    let failure = blocked(package);
+    assert!(
+        count_problems(&failure)
+            .iter()
+            .any(|p| p.location == "sheet \"Conventions\" rows, kind convention_observed"),
         "{failure}"
     );
 }

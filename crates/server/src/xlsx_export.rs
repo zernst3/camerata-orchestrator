@@ -791,6 +791,18 @@ fn build_deviation_groups(
     out
 }
 
+/// The Conventions sheet's Status cell for a convention the codebase follows, and for a rule
+/// with no convention adopted. The sheet prints no kind tag (`convention_observed` is our
+/// taxonomy, not the client's vocabulary), so these two plain-language cells are the only kind
+/// marker on its rows. The writer and the release gate's count reconciliation both read them
+/// from here, so the gate counts exactly the cells written.
+pub(crate) const CONVENTION_STATUS_FOLLOWED: &str = "Followed consistently — no exceptions found";
+pub(crate) const CONVENTION_STATUS_NONE_ADOPTED: &str = "No single convention adopted";
+
+/// The Coverage sheet's section title above its "could not complete" rows (one per
+/// `not_assessed` finding). Shared with the release gate for the same reason as the statuses.
+pub(crate) const NOT_ASSESSED_SECTION_TITLE: &str = "Checks we could not complete this scan";
+
 /// One row of the `Conventions` sheet — the derived decision set (A5.5). A shipped
 /// deliverable: the audit derives the client's conventions and this is the sheet those
 /// conventions are read off, so it answers "what does our codebase already do well and
@@ -832,13 +844,13 @@ fn build_convention_rows(
             let (rank, status, convention_label, patterns_in_use) = match &row.kind.0 {
                 Some(FindingKind::ConventionObserved(c)) => (
                     0u8,
-                    "Followed consistently — no exceptions found".to_string(),
+                    CONVENTION_STATUS_FOLLOWED.to_string(),
                     c.convention_label.clone(),
                     String::new(),
                 ),
                 Some(FindingKind::NoConvention(n)) => (
                     1u8,
-                    "No single convention adopted".to_string(),
+                    CONVENTION_STATUS_NONE_ADOPTED.to_string(),
                     String::new(),
                     n.observed_options
                         .iter()
@@ -1710,12 +1722,7 @@ fn write_coverage_sheet(
     // EXPORTED ROW (it reaches findings.json), so this section renders each row's own
     // headline verbatim — that is what keeps artifact parity true after the kind partition.
     if !not_assessed.is_empty() {
-        ws.write_string_with_format(
-            next_r,
-            0,
-            "Checks we could not complete this scan",
-            &fmts.section_title,
-        )?;
+        ws.write_string_with_format(next_r, 0, NOT_ASSESSED_SECTION_TITLE, &fmts.section_title)?;
         next_r += 1;
         for (c, h) in [
             "What was checked",

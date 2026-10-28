@@ -359,6 +359,18 @@ fn by_kind(tally: &Tally) -> BTreeMap<String, usize> {
 /// Every `(severity, kind)` cell where `got` differs from `want`, one problem each, named by the
 /// cell and both counts (never row text).
 fn tally_differences(file: &str, what: &str, want: &Tally, got: &Tally) -> Vec<Problem> {
+    tally_differences_against(file, what, "json/all-findings.json", want, got)
+}
+
+/// [`tally_differences`] against a reference other than `json/all-findings.json`, named in the
+/// message.
+fn tally_differences_against(
+    file: &str,
+    what: &str,
+    reference: &str,
+    want: &Tally,
+    got: &Tally,
+) -> Vec<Problem> {
     let keys: BTreeSet<&(String, String)> = want.keys().chain(got.keys()).collect();
     keys.into_iter()
         .filter_map(|key| {
@@ -370,7 +382,7 @@ fn tally_differences(file: &str, what: &str, want: &Tally, got: &Tally) -> Vec<P
                 problem(
                     file,
                     &format!("severity {}, kind {}", key.0, key.1),
-                    format!("{what} has {g} rows here and json/all-findings.json has {w}"),
+                    format!("{what} has {g} rows here and {reference} has {w}"),
                 )
             })
         })
@@ -443,6 +455,53 @@ fn workbook_rows_tally(xlsx: &[u8]) -> Result<Tally, String> {
     Ok(tally)
 }
 
+/// The Conventions sheet's rows by kind, read from the Status cell (the sheet prints no kind
+/// tag). A Status cell with neither known wording counts under `"unrecognised status"`, so an
+/// edited cell shows up as a disagreement instead of vanishing.
+fn conventions_sheet_tally(xlsx: &[u8]) -> Result<BTreeMap<String, usize>, String> {
+    let grid = super::archive::xlsx_sheet_grid(xlsx, "Conventions")?;
+    let header = grid.first().ok_or("the Conventions sheet is empty")?;
+    let status = header
+        .iter()
+        .position(|h| h == "Status")
+        .ok_or("the Conventions sheet has no \"Status\" column")?;
+    let mut tally = BTreeMap::new();
+    for row in grid.iter().skip(1) {
+        // The note on an empty sheet sits in the first column with no Status beside it.
+        let cell = row.get(status).map(String::as_str).unwrap_or("");
+        if cell.is_empty() {
+            continue;
+        }
+        let kind = if cell == crate::xlsx_export::CONVENTION_STATUS_FOLLOWED {
+            "convention_observed"
+        } else if cell == crate::xlsx_export::CONVENTION_STATUS_NONE_ADOPTED {
+            "no_convention"
+        } else {
+            "unrecognised status"
+        };
+        *tally.entry(kind.to_string()).or_insert(0) += 1;
+    }
+    Ok(tally)
+}
+
+/// How many rows the Coverage sheet lists under "Checks we could not complete this scan": its
+/// `not_assessed` rows. The section is absent when there are none.
+fn coverage_sheet_not_assessed(xlsx: &[u8]) -> Result<usize, String> {
+    let grid = super::archive::xlsx_sheet_grid(xlsx, "Coverage")?;
+    let Some(title) = grid.iter().position(|row| {
+        row.first()
+            .is_some_and(|c| c == crate::xlsx_export::NOT_ASSESSED_SECTION_TITLE)
+    }) else {
+        return Ok(0);
+    };
+    // The title, then the column headers, then one row per check until the next blank row.
+    Ok(grid
+        .iter()
+        .skip(title + 2)
+        .take_while(|row| row.iter().any(|c| !c.is_empty()))
+        .count())
+}
+
 /// The workbook Index's summaries: the "Statement types" count per kind tag, and the
 /// "Findings by category" Total row per severity column.
 type IndexSummary = (BTreeMap<String, usize>, BTreeMap<&'static str, usize>);
@@ -484,8 +543,9 @@ fn workbook_index_summary(xlsx: &[u8]) -> Result<IndexSummary, String> {
     Ok((kinds, severities))
 }
 
-/// 22d, over the archive: the CSV, the workbook's "All Findings" rows and the workbook Index's
-/// summaries agree with `json/all-findings.json` by severity AND kind, not only in total.
+/// 22d, over the archive: the CSV, the workbook's "All Findings" rows, the Conventions and
+/// Coverage sheets' rows (by kind) and the workbook Index's summaries agree with
+/// `json/all-findings.json` by severity AND kind, not only in total.
 /// Missing files are the dataset-set check's to report.
 pub fn count_reconciliation_problems(entries: &Entries) -> Vec<Problem> {
     let json = match json_tally(entries) {
@@ -527,6 +587,38 @@ pub fn count_reconciliation_problems(entries: &Entries) -> Vec<Problem> {
         )),
         Err(e) => problems.push(problem(&xlsx_name, COUNTS, e)),
     }
+    // The Conventions and Coverage sheets hold the other three kinds, grouped by sheet rather
+    // than by severity, so their rows are tallied by kind against the same JSON rows. (The
+    // Index summaries below count from the report, so they cannot see a row dropped from a
+    // sheet.)
+    let json_kinds = by_kind(&json);
+    let mut listed_rows: Vec<(&str, String, usize)> = Vec::new();
+    match conventions_sheet_tally(xlsx) {
+        Ok(listed) => {
+            for kind in ["convention_observed", "no_convention"] {
+                let n = listed.get(kind).copied().unwrap_or(0);
+                listed_rows.push(("Conventions", kind.to_string(), n));
+            }
+            if let Some(n) = listed.get("unrecognised status") {
+                listed_rows.push(("Conventions", "unrecognised status".to_string(), *n));
+            }
+        }
+        Err(e) => problems.push(problem(&xlsx_name, COUNTS, e)),
+    }
+    match coverage_sheet_not_assessed(xlsx) {
+        Ok(n) => listed_rows.push(("Coverage", "not_assessed".to_string(), n)),
+        Err(e) => problems.push(problem(&xlsx_name, COUNTS, e)),
+    }
+    for (sheet, kind, listed) in listed_rows {
+        let want = json_kinds.get(&kind).copied().unwrap_or(0);
+        if listed != want {
+            problems.push(problem(
+                &xlsx_name,
+                &format!("sheet \"{sheet}\" rows, kind {kind}"),
+                format!("the sheet lists {listed} rows and json/all-findings.json has {want}"),
+            ));
+        }
+    }
     match workbook_index_summary(xlsx) {
         Ok((kinds, severities)) => {
             let want_kinds = by_kind(&json);
@@ -564,17 +656,13 @@ pub fn count_reconciliation_problems(entries: &Entries) -> Vec<Problem> {
 }
 
 /// 22d, the PDF side (the in-memory release, which holds the PDF's data): the rows the PDF
-/// renders (all six matrix buckets) agree with `json/all-findings.json` by severity and kind,
-/// and the cover's severity summary agrees by severity column.
+/// counts (all six matrix buckets) agree with `json/all-findings.json` by severity and kind, the
+/// finding cards it renders (curated plus held for review) agree with those matrix rows by
+/// severity and kind, and the cover's severity summary agrees by severity column.
 pub fn pdf_count_reconciliation_problems(
     entries: &Entries,
     report: &AuditReportJson,
 ) -> Vec<Problem> {
-    let json = match json_tally(entries) {
-        None => return Vec::new(),
-        Some(Err(p)) => return vec![p],
-        Some(Ok(tally)) => tally,
-    };
     let mut pdf = Tally::new();
     for bucket in [
         &report.matrix.do_now,
@@ -589,7 +677,38 @@ pub fn pdf_count_reconciliation_problems(
                 .or_insert(0) += 1;
         }
     }
-    let mut problems = tally_differences("PDF data", "the PDF", &json, &pdf);
+    // What the PDF actually draws is its finding cards, "Curated findings" plus "Held for
+    // review", not the matrix the totals above are taken from. Every matrix row must be drawn
+    // exactly once, so a finding that falls out of the cards (or is drawn twice) fails here
+    // even though the matrix, the cover and every total still agree.
+    let mut rendered = Tally::new();
+    for group in report
+        .curated_findings
+        .iter()
+        .chain(report.held_for_review_findings.iter())
+    {
+        for site in &group.sites {
+            *rendered
+                .entry((site.severity.clone(), site.kind.tag().to_string()))
+                .or_insert(0) += 1;
+        }
+    }
+    let mut problems = tally_differences_against(
+        "PDF data",
+        "the PDF's rendered finding cards",
+        "its own matrix",
+        &pdf,
+        &rendered,
+    );
+    let json = match json_tally(entries) {
+        None => return problems,
+        Some(Err(p)) => {
+            problems.push(p);
+            return problems;
+        }
+        Some(Ok(tally)) => tally,
+    };
+    problems.extend(tally_differences("PDF data", "the PDF", &json, &pdf));
     let stats = &report.cover.stats;
     for (severity, printed) in [
         ("critical", stats.critical),
