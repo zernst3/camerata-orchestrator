@@ -1081,9 +1081,95 @@ fn is_direct_dependency(dir: &Path, product: Product) -> bool {
         Product::SpringBoot => ["build.gradle", "build.gradle.kts"]
             .iter()
             .filter_map(|f| read_beside(dir, f))
-            .any(|t| t.contains("org.springframework.boot")),
+            .any(|t| gradle_applies_spring_boot(&t)),
         _ => true,
     }
+}
+
+/// A Gradle build file with its comments removed and its line breaks kept. A comment marker inside
+/// a string (`"https://example.com"`) is not a comment; a string ends at its closing quote or at
+/// the end of its line.
+fn strip_gradle_comments(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    let mut quote: Option<char> = None;
+    while let Some(c) = chars.next() {
+        if let Some(q) = quote {
+            out.push(c);
+            if c == '\\' {
+                out.extend(chars.next());
+            } else if c == q || c == '\n' {
+                quote = None;
+            }
+            continue;
+        }
+        match c {
+            '"' | '\'' => {
+                quote = Some(c);
+                out.push(c);
+            }
+            '/' if chars.peek() == Some(&'/') => {
+                while chars.peek().is_some_and(|n| *n != '\n') {
+                    chars.next();
+                }
+            }
+            '/' if chars.peek() == Some(&'*') => {
+                chars.next();
+                let mut previous = ' ';
+                for n in chars.by_ref() {
+                    if n == '\n' {
+                        out.push('\n');
+                    }
+                    if previous == '*' && n == '/' {
+                        break;
+                    }
+                    previous = n;
+                }
+                out.push(' ');
+            }
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// Whether a Gradle build file (Groovy or Kotlin DSL) puts Spring Boot into the shipped
+/// application: an `implementation`, `api`, `compile` or `runtimeOnly` dependency on an
+/// `org.springframework.boot` artifact (a `platform(...)` import counts), or the
+/// `org.springframework.boot` plugin applied. A test or compile-only configuration, a plugin
+/// declared `apply false`, a comment and a string that only mentions the name do not count.
+fn gradle_applies_spring_boot(text: &str) -> bool {
+    const START: &str = r"(?m)(?:^|[{;])[ \t]*";
+    const CONFIGURATION: &str = r"(?:implementation|api|compile|runtimeOnly)\b[ \t]*\(?[ \t]*";
+    const BOOT: &str = r#"['"]org\.springframework\.boot"#;
+    let code = strip_gradle_comments(text);
+    let dependency_forms = [
+        // implementation 'org.springframework.boot:spring-boot-starter'
+        format!(r"{START}{CONFIGURATION}(?:(?:enforcedPlatform|platform)[ \t]*\([ \t]*)?{BOOT}:"),
+        // implementation group: 'org.springframework.boot', name: '...'
+        format!(r#"{START}{CONFIGURATION}group[ \t]*[:=][ \t]*{BOOT}['"]"#),
+        // apply plugin: 'org.springframework.boot'
+        format!(r"{START}apply[ \t]*\(?[ \t]*plugin[ \t]*[:=][ \t]*{BOOT}['\x22]"),
+    ];
+    if dependency_forms
+        .iter()
+        .any(|pattern| Regex::new(pattern).is_ok_and(|re| re.is_match(&code)))
+    {
+        return true;
+    }
+    // id 'org.springframework.boot' version '3.2.0', but not when it ends `apply false`.
+    let (Ok(plugin), Ok(not_applied)) = (
+        Regex::new(&format!(
+            r#"{START}id[ \t]*\(?[ \t]*{BOOT}['"][ \t]*\)?([^\n;}}]*)"#
+        )),
+        Regex::new(r"\bapply\s+false\b"),
+    ) else {
+        return false;
+    };
+    let applied = plugin
+        .captures_iter(&code)
+        .any(|c| !not_applied.is_match(&c[1]));
+    applied
 }
 
 /// The group names in a Gemfile fragment (`:development, :test`), and whether all of them are

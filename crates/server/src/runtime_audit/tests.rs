@@ -1890,3 +1890,129 @@ async fn a_build_argument_image_reaches_coverage_and_is_never_looked_up() {
     assert!(text.contains("`${BASE}` in Dockerfile line 2"), "{text}");
     assert_eq!(fetcher.calls().len(), 0, "{:?}", fetcher.calls());
 }
+
+/// Whether Spring Boot read from a lockfile beside `build_file` is left out of the checks.
+fn boot_is_excluded(build_file: &str, body: &str) -> bool {
+    let dir = repo(&[
+        (build_file, body),
+        (
+            "gradle.lockfile",
+            "org.springframework.boot:spring-boot:3.2.0=compileClasspath\n",
+        ),
+    ]);
+    let got = frameworks(&dir);
+    assert_eq!(got.len(), 1, "{body}: {got:?}");
+    got[0].2
+}
+
+#[test]
+fn spring_boot_counts_from_a_real_dependency_line_or_the_applied_plugin() {
+    for (file, body) in [
+        (
+            "build.gradle",
+            "dependencies {\n    implementation 'org.springframework.boot:spring-boot-starter-web'\n}\n",
+        ),
+        (
+            "build.gradle",
+            "dependencies {\n    api \"org.springframework.boot:spring-boot-starter\"\n}\n",
+        ),
+        (
+            "build.gradle",
+            "dependencies {\n    compile 'org.springframework.boot:spring-boot-starter'\n}\n",
+        ),
+        (
+            "build.gradle",
+            "dependencies {\n    runtimeOnly('org.springframework.boot:spring-boot-devtools')\n}\n",
+        ),
+        (
+            "build.gradle",
+            "dependencies {\n    implementation group: 'org.springframework.boot', name: 'spring-boot-starter'\n}\n",
+        ),
+        (
+            "build.gradle",
+            "plugins {\n    id 'org.springframework.boot' version '3.2.0'\n}\n",
+        ),
+        ("build.gradle", "apply plugin: 'org.springframework.boot'\n"),
+        (
+            "build.gradle.kts",
+            "plugins {\n    id(\"org.springframework.boot\") version \"3.2.0\"\n}\n",
+        ),
+        (
+            "build.gradle.kts",
+            "dependencies {\n    implementation(\"org.springframework.boot:spring-boot-starter\")\n}\n",
+        ),
+        (
+            "build.gradle.kts",
+            "dependencies {\n    implementation(platform(\"org.springframework.boot:spring-boot-dependencies:3.2.0\"))\n}\n",
+        ),
+        (
+            "build.gradle.kts",
+            "dependencies { implementation(\"org.springframework.boot:spring-boot-starter\") }\n",
+        ),
+    ] {
+        assert!(!boot_is_excluded(file, body), "{file}: {body}");
+    }
+}
+
+#[test]
+fn spring_boot_does_not_count_from_a_test_configuration_a_comment_or_a_string() {
+    for (file, body) in [
+        (
+            "build.gradle",
+            "dependencies {\n    testImplementation 'org.springframework.boot:spring-boot-starter-test'\n}\n",
+        ),
+        (
+            "build.gradle",
+            "dependencies {\n    testRuntimeOnly 'org.springframework.boot:spring-boot-starter'\n}\n",
+        ),
+        (
+            "build.gradle",
+            "dependencies {\n    integrationTestImplementation 'org.springframework.boot:spring-boot-starter'\n}\n",
+        ),
+        (
+            "build.gradle",
+            "dependencies {\n    compileOnly 'org.springframework.boot:spring-boot-configuration-processor'\n}\n",
+        ),
+        (
+            "build.gradle",
+            "dependencies {\n    // implementation 'org.springframework.boot:spring-boot-starter'\n}\n",
+        ),
+        (
+            "build.gradle",
+            "/*\ndependencies {\n    implementation 'org.springframework.boot:spring-boot-starter'\n}\n*/\n",
+        ),
+        (
+            "build.gradle",
+            "// id 'org.springframework.boot' version '3.2.0'\n",
+        ),
+        (
+            "build.gradle",
+            "ext.bootGroup = 'org.springframework.boot'\nprintln(\"org.springframework.boot\")\n",
+        ),
+        (
+            "build.gradle",
+            "description = \"implementation 'org.springframework.boot:spring-boot-starter'\"\n",
+        ),
+        (
+            "build.gradle",
+            "plugins {\n    id 'org.springframework.boot' version '3.2.0' apply false\n}\n",
+        ),
+        (
+            "build.gradle.kts",
+            "dependencies {\n    testImplementation(\"org.springframework.boot:spring-boot-starter-test\")\n}\n",
+        ),
+        (
+            "build.gradle.kts",
+            "plugins {\n    id(\"org.springframework.boot\") version \"3.2.0\" apply false\n}\n",
+        ),
+        (
+            "build.gradle.kts",
+            "val url = \"https://example.com\" // implementation(\"org.springframework.boot:x\")\n",
+        ),
+    ] {
+        assert!(boot_is_excluded(file, body), "{file}: {body}");
+    }
+    // One real line among test lines and comments still counts.
+    let mixed = "dependencies {\n    testImplementation 'org.springframework.boot:spring-boot-starter-test'\n    // old\n    implementation 'org.springframework.boot:spring-boot-starter'\n}\n";
+    assert!(!boot_is_excluded("build.gradle", mixed));
+}
