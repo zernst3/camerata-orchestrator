@@ -1,18 +1,17 @@
 id = "ARCH-OBSERVABILITY-CORRELATION-ID-1"
-version = 1
+version = 2
 title = "A single request's handling path carries one correlation/request id across every log line it writes and every downstream call it makes"
 domain = "universal"
 layer = "universal"
 enforcement = "architectural"
 kind = "decision"
 inspectable = true
-# Severity ceiling, transcribed from this rule's own prose: "the pipeline's observability cap plus
-# `report_export::is_informational`'s structural bypass force this rule's findings to severity Low
-# and out of every action bucket regardless of the model's proposed severity."
+# Findings from this rule are capped at Low severity and listed as informational, outside the
+# action buckets, however severe a model rates them.
 max_severity = "low"
 default = true
 verification = "grounded"
-qualifies = "Whether a given handler's log lines and downstream calls are missing correlation-id propagation is a repo-relative judgment call about an observability PRACTICE, not a universal defect — it has no shipped detector and reaches the codebase only through the semantic/AI audit pass. This is distinct from ARCH-MIDDLEWARE-FIRST-1's bare mention of 'request ID generation' as one of many cross-cutting concerns that belong in middleware (that rule is about WHERE cross-cutting code lives, not about propagation across a request's full path) and from ARCH-NO-LEAKY-ERROR-DETAILS-1's narrower use of a correlation id specifically in the client-facing error-envelope contract (that rule is about what an ERROR RESPONSE contains, not about every log line and downstream call along the way). `ai_audit`'s D8 observability cap plus `report_export::is_informational`'s structural bypass force this rule's findings to severity Low and out of every action bucket regardless of the model's proposed severity."
+qualifies = "Whether a given handler's log lines and downstream calls are missing correlation-id propagation is a repo-relative judgment call about an observability PRACTICE, not a universal defect — it has no detector and is checked by an AI review of the code. This is distinct from ARCH-MIDDLEWARE-FIRST-1's bare mention of 'request ID generation' as one of many cross-cutting concerns that belong in middleware (that rule is about WHERE cross-cutting code lives, not about propagation across a request's full path) and from ARCH-NO-LEAKY-ERROR-DETAILS-1's narrower use of a correlation id specifically in the client-facing error-envelope contract (that rule is about what an ERROR RESPONSE contains, not about every log line and downstream call along the way). Findings from this rule are capped at Low severity and listed as informational, outside the action buckets, regardless of the severity the model proposes."
 
 [[sources]]
 url = "https://www.w3.org/TR/trace-context/"

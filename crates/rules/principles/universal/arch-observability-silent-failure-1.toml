@@ -1,28 +1,21 @@
 id = "ARCH-OBSERVABILITY-SILENT-FAILURE-1"
-version = 1
+version = 2
 title = "A caught or inspected error is never discarded with zero action; it is logged, rethrown, transformed, or its silence is explicitly justified"
 domain = "universal"
 layer = "universal"
 enforcement = "architectural"
-# RECLASSIFIED from `decision` to `defect`. Two options, one of which this rule's own author opens
-# with `Rejected:`, is not a decision under any reading — "allow a caught error to be discarded
-# with no log call, no propagation and no comment" is the fault CWE-390 names, not an equal-weight
-# alternative. As `decision` with zero `violates` flags the rule reported NOTHING: fed a codebase
-# of empty catch blocks it emitted a single `ConventionObserved` row claiming the codebase
-# "consistently follows" that discard convention (measured against the real corpus end to end, not
-# inferred). The `max_severity = "low"` ceiling below is UNCHANGED and deliberate: low is the
-# volume control for a fault this common, and a low-severity defect is coherent. Severity and kind
-# are orthogonal — see `RuleKind`'s doc comment.
+# This rule is a defect, not a decision. Allowing a caught error to be discarded with no log call,
+# no propagation and no comment is the fault CWE-390 names, not an equal-weight alternative.
+# Severity and kind are separate: the Low ceiling below is a deliberate volume control for a
+# fault this common, and a low-severity defect is coherent.
 kind = "defect"
 inspectable = true
-# Severity ceiling, transcribed from this rule's own prose: "deliberately CAPPED LOW (owner
-# directive)"; "forces every finding of this rule to severity Low ... regardless of what severity
-# the model itself proposes"; "caps its severity at [low]". Previously enforced only by a
-# hard-coded rule-id list inside the engine; now declared where the rule itself is authored.
+# Capped at Low by design: findings from this rule are informational and never occupy an action tier
+# on their own, whatever severity a model proposes.
 max_severity = "low"
 default = true
 verification = "grounded"
-qualifies = "Whether a given empty catch/except/rescue block or ignored error value is a real defect or a deliberate, locally-justified no-op is a repo-relative judgment call Camerata cannot verify mechanically — unlike CSHARP-NO-SWALLOWED-EXCEPTIONS-1 (a C#-specific, full-severity, MECHANICALLY enforced rule backed by real Roslyn/Sonar analyzers, which remains authoritative wherever it applies), this rule has no shipped detector and reaches the codebase only through the semantic/AI audit pass. Camerata's own severity-ceiling pass (see `ai_audit`'s D8 observability cap, and `report_export::is_informational`'s structural bypass of its own severity invariant for this exact rule-id class) forces every finding of this rule to severity Low and routes it OUT of every action bucket (do_now/do_next/plan) regardless of what severity the model itself proposes — this class must never occupy an action tier on its own. Conformance holds when every catch/except/rescue block that does not rethrow or return the error upward, and every explicit error-value check (Go's `if err != nil`, Rust's `Err(e)` match arm) that does not propagate it, either calls the project's logger with the error or carries an inline comment explicitly justifying the silence; it is flagged when a block is empty (or equivalent to empty: a bare `pass`, a comment-only body, a `_ = err`/discarded binding with no accompanying log call or justification comment)."
+qualifies = "Whether a given empty catch/except/rescue block or ignored error value is a real defect or a deliberate, locally justified no-op is a repo-relative judgment call that cannot be verified mechanically. Unlike CSHARP-NO-SWALLOWED-EXCEPTIONS-1 (a C#-specific, full-severity rule backed by Roslyn and Sonar analyzers, which stays authoritative wherever it applies), this rule has no detector and is checked by an AI review of the code. Its findings are capped at Low severity and kept out of the report's action tiers (do now, do next, plan) regardless of the severity the model proposes: this class of finding must never occupy an action tier on its own. Conformance holds when every catch/except/rescue block that does not rethrow or return the error upward, and every explicit error-value check (Go's `if err != nil`, Rust's `Err(e)` match arm) that does not propagate it, either calls the project's logger with the error or carries an inline comment explicitly justifying the silence; it is flagged when a block is empty (or equivalent to empty: a bare `pass`, a comment-only body, a `_ = err`/discarded binding with no accompanying log call or justification comment)."
 
 [[sources]]
 url = "https://cwe.mitre.org/data/definitions/390.html"
@@ -46,11 +39,11 @@ debugging a downstream symptom — a stale cache, a missing record, a silently-f
 has no trail back to the actual root cause. This is deliberately scoped NARROWLY to the zero-action
 case, not "every catch block must do something elaborate": a catch block that rethrows, returns a
 wrapped error, or recovers with an inline comment explaining why silence is intentional (a best-effort
-cleanup step, a known-benign race) is already conforming. The owner was explicit that this whole class
-is a judgment call, not a universal floor — a repo's own context (is this a hot path where even a log
+cleanup step, a known-benign race) is already conforming. This whole class
+is a judgment call, not a universal floor: a repo's own context (is this a hot path where even a log
 call has a real cost? is this truly best-effort cleanup?) decides whether a given empty block is
-defensible, which is exactly why Camerata ships no mechanical detector for it and caps its severity at
-Low structurally rather than letting a model's enthusiasm inflate it.
+defensible, which is why Camerata has no mechanical detector for it and caps its severity at
+Low rather than letting a model's rating inflate it.
 """
 
 [[option]]
