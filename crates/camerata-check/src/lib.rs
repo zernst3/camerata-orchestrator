@@ -73,8 +73,9 @@
 //!
 //! A deterministic violation BELOW [`FAIL_AT_SEVERITY`] (a `low` or `info` finding, such as a
 //! consistency rule the corpus caps at `low`) is ADVISORY: reported, counted, and exit code 0.
-//! Decision recorded 2026-10-21 (MASTER-SEQUENCE section 2b): a client's CI build should not
-//! hard-fail on a low-severity consistency finding; `medium` and above fail it.
+//! Decision (Opus, 2026-10-27, recorded in `docs/OVERNIGHT_DECISIONS.md`; MASTER-SEQUENCE section
+//! 2b): a client's CI build should not hard-fail on a low-severity consistency finding; `medium`
+//! and above fail it.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
