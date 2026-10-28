@@ -10,6 +10,8 @@
 //! - the rule `summary`, but ONLY for a rule with no options, because
 //!   `resolved_directive` falls back to it when there is no directive to show.
 //!
+//! The field walk itself lives in `tests/common/mod.rs`, shared with the serial-comma gate.
+//!
 //! Deliberately OUT of scope (author/operator-facing, never shown to a client): `qualifies`,
 //! `[decision].why`, `[decision].question`, `[[sources]].relevance`, and a NON-`violates`
 //! option's `why`.
@@ -17,7 +19,10 @@
 //! The replacement is by meaning (a colon for an explanation or title separator, a comma for an
 //! aside, parentheses for a parenthetical), never a hyphen standing in for the dash.
 
+mod common;
+
 use camerata_rules::{corpus_path, load_corpus_lenient, RuleSet};
+use common::client_facing_fields;
 
 /// U+2014, spelled as an escape so this file does not itself contain the character.
 const EM_DASH: char = '\u{2014}';
@@ -28,46 +33,11 @@ fn has_em_dash(text: &str) -> bool {
 
 /// Every `<rule id>: <field>` whose text carries an em dash, over the client-facing fields.
 fn em_dash_offenders(corpus: &RuleSet) -> Vec<String> {
-    let mut offenders: Vec<String> = Vec::new();
-    let mut flag = |rid: &str, loc: String| offenders.push(format!("{rid}: {loc}"));
-
-    for rule in corpus.iter() {
-        if has_em_dash(&rule.title) {
-            flag(&rule.id.0, "title".into());
-        }
-        if rule.options.is_empty() && has_em_dash(&rule.summary) {
-            flag(&rule.id.0, "summary (option-less rule)".into());
-        }
-        for s in &rule.sources {
-            if has_em_dash(&s.title) {
-                flag(
-                    &rule.id.0,
-                    format!("source `{}`", s.title.chars().take(40).collect::<String>()),
-                );
-            }
-        }
-        for o in &rule.options {
-            if has_em_dash(&o.directive) {
-                flag(&rule.id.0, format!("{}.directive", o.id));
-            }
-            if o.remediation.as_deref().is_some_and(has_em_dash) {
-                flag(&rule.id.0, format!("{}.remediation", o.id));
-            }
-            if has_em_dash(&o.label) {
-                flag(&rule.id.0, format!("{}.label", o.id));
-            }
-            if o.finding_headline.as_deref().is_some_and(has_em_dash) {
-                flag(&rule.id.0, format!("{}.finding_headline", o.id));
-            }
-            if o.finding_detail.as_deref().is_some_and(has_em_dash) {
-                flag(&rule.id.0, format!("{}.finding_detail", o.id));
-            }
-            if o.violates && has_em_dash(&o.why) {
-                flag(&rule.id.0, format!("{}.why (violates)", o.id));
-            }
-        }
-    }
-    offenders
+    client_facing_fields(corpus)
+        .into_iter()
+        .filter(|f| has_em_dash(f.text))
+        .map(|f| format!("{}: {}", f.rule_id, f.loc))
+        .collect()
 }
 
 #[tokio::test]
