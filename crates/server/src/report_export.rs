@@ -1143,6 +1143,11 @@ pub struct CuratedSiteJson {
     /// each was flagged under (never the raw rule id). The PDF renders these as "Also found at".
     /// Empty for an un-merged row.
     pub also_sites: Vec<AlsoSiteJson>,
+    /// M2/M8: one finished sentence for every bound that moved this row's severity ("Severity
+    /// lowered from high to info: no file or line was identified for this finding."). The
+    /// severity shown is the adjusted one; this says what it was and why it changed. Empty
+    /// when nothing moved it, and the PDF then prints nothing.
+    pub severity_adjustments: Vec<String>,
     /// Pass-1 W7 (C5): total distinct evidence sites this row represents — its own
     /// `path:line` plus every `also_locations` entry. `1` for an un-merged row.
     pub site_count: usize,
@@ -1164,6 +1169,19 @@ pub struct AlsoSiteJson {
     pub title: Option<String>,
     /// True for a site that is only a consequence of the row's root cause.
     pub consequence: bool,
+}
+
+/// The `Finding::captures` key an incremental run writes on a finding it carried forward from the
+/// earlier inspection: the commit it was last found at.
+pub const CARRIED_FROM_CAPTURE: &str = "carried_from";
+
+/// H11: the commit of the earlier inspection `f` was carried forward from, when this run did not
+/// re-audit its file. `None` for a row found this run.
+pub fn carried_from(f: &Finding) -> Option<String> {
+    f.captures
+        .get(CARRIED_FROM_CAPTURE)
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
 }
 
 /// H6: the absorbed sites of `f`, titled from the corpus.
@@ -4477,6 +4495,9 @@ pub fn build_report_json(
                     // W7 (C5): the absorbed sites, verbatim — see the field's doc comment.
                     also_locations: f.also_locations.clone(),
                     also_sites: also_sites_for(f, corpus),
+                    severity_adjustments: crate::severity_bounds::severity_adjustment_lines(
+                        f, corpus,
+                    ),
                     site_count: 1 + f.also_locations.len(),
                     kind: camerata_api_types::audit::KindOnWire(f.kind.clone()),
                 }
@@ -5354,6 +5375,9 @@ mod engine_identity_tests;
 
 #[cfg(test)]
 mod fix_text_tests;
+
+#[cfg(test)]
+mod fn_batch_c_adjust_tests;
 
 #[cfg(test)]
 mod fn_batch_c_sites_tests;

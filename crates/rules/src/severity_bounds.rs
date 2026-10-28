@@ -115,6 +115,12 @@ pub trait BoundedFinding {
     fn is_unlocated(&self) -> bool;
     /// Overwrite the severity. Called only when a bound moved it.
     fn set_severity(&mut self, severity: String);
+    /// Record why a bound moved the severity (one plain sentence per step, for example
+    /// "severity lowered from high to info: no file or line was identified for this finding").
+    /// Called by [`apply_corpus_severity_bounds`] right after [`Self::set_severity`], once per
+    /// bound that moved it. The default drops the note, so a caller with nowhere to put it
+    /// (the CI gate) is unchanged.
+    fn note_severity_adjustment(&mut self, _note: String) {}
 }
 
 /// E2: clamp `severity` DOWN to `rule`'s [`Rule::max_severity`], when one is declared and
@@ -215,10 +221,51 @@ pub fn downgrade_unlocated<F: BoundedFinding + ?Sized>(severity: String, f: &F) 
 /// module docs for the order). `rule` is the corpus rule the caller resolved for `f`; `None`
 /// still applies C4-R1 and the deviation ceiling's default, which need no authored rule.
 pub fn bounded_severity<F: BoundedFinding + ?Sized>(f: &F, rule: Option<&Rule>) -> String {
-    let severity = raise_to_min_severity(normalize_severity(f.severity()), f, rule);
-    let severity = downgrade_unlocated(severity, f);
-    let severity = clamp_to_max_severity(severity, rule);
-    clamp_deviation_severity(severity, f, rule)
+    bounded_severity_explained(f, rule).0
+}
+
+/// [`bounded_severity`] plus one plain sentence for every bound that moved the severity, in the
+/// order they ran. The severity is the same value `bounded_severity` returns (that function
+/// calls this one), so the reason can never disagree with the result. A bound that leaves the
+/// severity alone adds nothing; an unmoved finding returns an empty list.
+pub fn bounded_severity_explained<F: BoundedFinding + ?Sized>(
+    f: &F,
+    rule: Option<&Rule>,
+) -> (String, Vec<String>) {
+    let mut notes: Vec<String> = Vec::new();
+    let mut step = |before: &str, after: String, why: String| -> String {
+        if after != before {
+            let verb = if severity_rank(&after) < severity_rank(before) {
+                "raised"
+            } else {
+                "lowered"
+            };
+            notes.push(format!("severity {verb} from {before} to {after}: {why}"));
+        }
+        after
+    };
+    let start = normalize_severity(f.severity());
+    let raised = step(
+        &start,
+        raise_to_min_severity(start.clone(), f, rule),
+        "the rule sets a minimum severity for what it finds".to_string(),
+    );
+    let located = step(
+        &raised,
+        downgrade_unlocated(raised.clone(), f),
+        "no file or line was identified for this finding".to_string(),
+    );
+    let capped = step(
+        &located,
+        clamp_to_max_severity(located.clone(), rule),
+        "the rule caps the severity of what it finds".to_string(),
+    );
+    let last = step(
+        &capped,
+        clamp_deviation_severity(capped.clone(), f, rule),
+        "a consistency deviation is capped below the severity of a defect".to_string(),
+    );
+    (last, notes)
 }
 
 /// Apply every severity bound to every finding, in place. `resolve` maps a finding's rule id
@@ -237,11 +284,14 @@ pub fn apply_corpus_severity_bounds<'c, F: BoundedFinding>(
     resolve: impl Fn(&str) -> Option<&'c Rule>,
 ) {
     for f in findings.iter_mut() {
-        let bounded = bounded_severity(f, resolve(f.rule_id()));
+        let (bounded, notes) = bounded_severity_explained(f, resolve(f.rule_id()));
         // Compare against the NORMALIZED original, so an unrelated casing difference
         // ("High" vs "high") is not mistaken for a bound moving the severity.
         if bounded != normalize_severity(f.severity()) {
             f.set_severity(bounded);
+            for note in notes {
+                f.note_severity_adjustment(note);
+            }
         }
     }
 }
@@ -395,6 +445,99 @@ mod tests {
         let once = rows.clone();
         apply_corpus_severity_bounds(&mut rows, |id| set.get_by_id(id));
         assert_eq!(rows, once);
+    }
+
+    /// A row that keeps the notes the bounds hand it, to prove nothing moves silently.
+    #[derive(Debug, Clone)]
+    struct NotedRow {
+        inner: Row,
+        notes: Vec<String>,
+    }
+
+    impl BoundedFinding for NotedRow {
+        fn severity(&self) -> &str {
+            self.inner.severity()
+        }
+        fn rule_id(&self) -> &str {
+            self.inner.rule_id()
+        }
+        fn bound_kind(&self) -> BoundKind {
+            self.inner.bound_kind()
+        }
+        fn is_unlocated(&self) -> bool {
+            self.inner.is_unlocated()
+        }
+        fn set_severity(&mut self, severity: String) {
+            self.inner.severity = severity;
+        }
+        fn note_severity_adjustment(&mut self, note: String) {
+            self.notes.push(note);
+        }
+    }
+
+    fn noted(severity: &str, kind: BoundKind) -> NotedRow {
+        NotedRow {
+            inner: row(severity, kind),
+            notes: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_ceiling_says_it_lowered_the_severity_and_why() {
+        let set = rule_set(|r| r.max_severity = Some("low".to_string()));
+        let mut rows = vec![noted("high", BoundKind::Defect)];
+        apply_corpus_severity_bounds(&mut rows, |id| set.get_by_id(id));
+        assert_eq!(rows[0].inner.severity, "low");
+        assert_eq!(
+            rows[0].notes,
+            ["severity lowered from high to low: the rule caps the severity of what it finds"]
+        );
+    }
+
+    #[test]
+    fn the_unlocated_downgrade_is_no_longer_silent() {
+        let set = RuleSet::default();
+        let mut unlocated = noted("high", BoundKind::Defect);
+        unlocated.inner.path = String::new();
+        unlocated.inner.line = 0;
+        let mut rows = vec![unlocated];
+        apply_corpus_severity_bounds(&mut rows, |id| set.get_by_id(id));
+        assert_eq!(rows[0].inner.severity, "info");
+        assert_eq!(
+            rows[0].notes,
+            ["severity lowered from high to info: no file or line was identified for this finding"]
+        );
+    }
+
+    #[test]
+    fn a_floor_says_it_raised_the_severity() {
+        let set = rule_set(|r| r.min_severity = Some("high".to_string()));
+        let mut rows = vec![noted("low", BoundKind::Defect)];
+        apply_corpus_severity_bounds(&mut rows, |id| set.get_by_id(id));
+        assert_eq!(rows[0].inner.severity, "high");
+        assert_eq!(rows[0].notes.len(), 1);
+        assert!(rows[0].notes[0].starts_with("severity raised from low to high"));
+    }
+
+    #[test]
+    fn an_unmoved_row_and_a_rerun_add_no_notes_and_the_result_matches_bounded_severity() {
+        let set = rule_set(|r| r.max_severity = Some("low".to_string()));
+        let mut rows = vec![
+            noted("high", BoundKind::Defect),
+            noted("low", BoundKind::Defect),
+        ];
+        apply_corpus_severity_bounds(&mut rows, |id| set.get_by_id(id));
+        apply_corpus_severity_bounds(&mut rows, |id| set.get_by_id(id));
+        assert_eq!(rows[0].notes.len(), 1, "the rerun must not repeat the note");
+        assert!(rows[1].notes.is_empty());
+        for severity in ["critical", "high", "medium", "low", "info", "Critical"] {
+            let f = noted(severity, BoundKind::Defect);
+            let rule = set.get_by_id("BOUND-1");
+            assert_eq!(
+                bounded_severity_explained(&f, rule).0,
+                bounded_severity(&f, rule)
+            );
+        }
     }
 
     #[test]

@@ -383,6 +383,14 @@
       #linebreak()
       #text(size: 8pt, fill: ink_faint)[Also violates: #site.also_matches_titles.join(", ")]
     ]
+    // M2/M8: when a rule's ceiling, floor or the unlocated safety net moved this row's
+    // severity, say what it was and why. Prints nothing for a row no bound moved.
+    #if site.severity_adjustments.len() > 0 [
+      #for note in site.severity_adjustments [
+        #linebreak()
+        #text(size: 8pt, fill: ink_faint)[#note]
+      ]
+    ]
     // H6: every site a merge folded into this row, so a row that stands for several places
     // says so. The first ten are named; the rest are counted and point to the workbook, which
     // lists them all.
