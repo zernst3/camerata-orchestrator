@@ -74,7 +74,7 @@ const REVIEWED: &[(&str, CandidateLocator, &str, usize)] = &[
     // A policy reaches user_metadata through a helper: the helper body is a site too.
     (
         "SUPABASE-RLS-USER-METADATA-1",
-        CandidateLocator::SqlPoliciesAndRoutines,
+        CandidateLocator::SqlPoliciesRoutinesAndViews,
         "create table t (id uuid);\n\
          create function public.is_admin() returns boolean language sql stable\n\
          as $$ select (auth.jwt() -> 'user_metadata' ->> 'role') = 'admin' $$;\n\
@@ -105,6 +105,70 @@ const REVIEWED: &[(&str, CandidateLocator, &str, usize)] = &[
         "SQL-FK-CASCADE-FINANCIAL-1",
         CandidateLocator::SqlTables,
         "create table payments (\n  id bigint,\n  user_id uuid references users(id) on delete cascade\n);\n",
+        3,
+    ),
+];
+
+/// More violating shapes of the same rules, each of which the rule's locator must still find. The
+/// first fixture of a rule is the plain `CREATE`/`ALTER` shape; these are the other ways the same
+/// subject is written (a column type declared by a cast in a view, or by `SELECT ... INTO`; a
+/// claim read through a view a policy selects from).
+const EXTRA_SHAPES: &[(&str, CandidateLocator, &str, usize)] = &[
+    (
+        "SQL-TIMESTAMPTZ-1",
+        CandidateLocator::SqlTables,
+        "insert into events values (1);\n\
+         select id, created_at::timestamp as created_at into events_archive from events;\n",
+        2,
+    ),
+    (
+        "SQL-TIMESTAMPTZ-1",
+        CandidateLocator::SqlTables,
+        "create view recent as\n  select created_at::timestamp as created_at from events;\n",
+        2,
+    ),
+    (
+        "SQL-MONEY-FLOAT-1",
+        CandidateLocator::SqlTables,
+        "create materialized view revenue as\n  select sum(amount)::double precision as total from invoices;\n",
+        2,
+    ),
+    (
+        "SQL-MONEY-FLOAT-1",
+        CandidateLocator::SqlTables,
+        "insert into invoices values (1, 2.5);\n\
+         select id, amount::float8 as amount into invoice_copy from invoices;\n",
+        2,
+    ),
+    (
+        "SQL-ENUM-TEXT-CONSTRAINT-1",
+        CandidateLocator::SqlTables,
+        "create table orders (id bigint);\n\
+         alter table orders add column status text;\n",
+        2,
+    ),
+    (
+        "SQL-FK-CASCADE-FINANCIAL-1",
+        CandidateLocator::SqlTables,
+        "create table sessions (id bigint);\n\
+         alter table sessions add constraint s_pay foreign key (id)\n\
+           references payments (id) on delete cascade;\n",
+        3,
+    ),
+    // The role claim reaches the policy through a view, not through the policy's own text.
+    (
+        "SUPABASE-RLS-USER-METADATA-1",
+        CandidateLocator::SqlPoliciesRoutinesAndViews,
+        "create view me as\n  select (auth.jwt() -> 'user_metadata' ->> 'role') as role;\n\
+         create policy admins on t using ((select role from me) = 'admin');\n",
+        2,
+    ),
+    (
+        "SUPABASE-FUNC-SEARCH-PATH-1",
+        CandidateLocator::SqlRoutines,
+        "alter table t add column a int;\n\
+         create or replace function public.g() returns void\n\
+         language plpgsql security definer as $$ begin end $$;\n",
         3,
     ),
 ];
@@ -141,7 +205,7 @@ async fn the_rules_with_candidates_are_exactly_the_reviewed_set_with_their_locat
 #[tokio::test]
 async fn every_reviewed_locator_still_finds_the_violating_line_of_its_fixture() {
     let set = corpus().await;
-    for (id, locator, fixture, line) in REVIEWED {
+    for (id, locator, fixture, line) in REVIEWED.iter().chain(EXTRA_SHAPES) {
         let rule = audit_rules(&[((*id).to_string(), "d".to_string())], Some(&set))
             .pop()
             .unwrap();
@@ -162,6 +226,16 @@ async fn every_reviewed_locator_still_finds_the_violating_line_of_its_fixture() 
                 .iter()
                 .any(|s| s.start_line <= *line && *line <= s.end_line),
             "{id}: the locator must return a site covering line {line}: {sites:?}"
+        );
+    }
+}
+
+#[test]
+fn every_extra_shape_belongs_to_a_reviewed_rule_with_its_reviewed_locator() {
+    for (id, locator, _, _) in EXTRA_SHAPES {
+        assert!(
+            REVIEWED.iter().any(|(r, l, _, _)| r == id && l == locator),
+            "{id}: an extra shape must name a reviewed rule and its locator"
         );
     }
 }

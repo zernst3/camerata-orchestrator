@@ -42,11 +42,15 @@ pub enum CandidateLocator {
     /// SQL statements that create, alter or drop a Row Level Security policy (`POLICY`,
     /// `POLICIES`).
     SqlPolicies,
-    /// The union of [`Self::SqlPolicies`] and [`Self::SqlRoutines`]: for a rule about policy
-    /// predicates that a policy can also reach through a helper function it calls.
-    SqlPoliciesAndRoutines,
-    /// SQL statements that define or alter a table, a type or a domain (`TABLE`, `TYPE`,
-    /// `DOMAIN`): where column types, constraints and foreign keys are declared.
+    /// The union of [`Self::SqlPolicies`], [`Self::SqlRoutines`] and every view statement
+    /// (`VIEW`, `VIEWS`, materialized views included): for a rule about policy predicates that a
+    /// policy can also reach through a helper function it calls or a view it selects from.
+    SqlPoliciesRoutinesAndViews,
+    /// SQL statements that define or alter anything that gives a value a column type: a table,
+    /// a type, a domain, a view or materialized view (`TABLE`, `TYPE`, `DOMAIN`, `VIEW`, plural
+    /// forms included), and any non-INSERT statement with an `INTO` (`SELECT ... INTO new_table`,
+    /// `CREATE TABLE ... AS`-style shapes): where column types, constraints and foreign keys are
+    /// declared.
     SqlTables,
 }
 
@@ -54,7 +58,7 @@ pub enum CandidateLocator {
 pub const CANDIDATE_LOCATORS: &[&str] = &[
     "sql_routines",
     "sql_policies",
-    "sql_policies_and_routines",
+    "sql_policies_routines_and_views",
     "sql_tables",
 ];
 
@@ -63,7 +67,7 @@ impl CandidateLocator {
     pub const ALL: &'static [CandidateLocator] = &[
         Self::SqlRoutines,
         Self::SqlPolicies,
-        Self::SqlPoliciesAndRoutines,
+        Self::SqlPoliciesRoutinesAndViews,
         Self::SqlTables,
     ];
 
@@ -72,7 +76,7 @@ impl CandidateLocator {
         match self {
             Self::SqlRoutines => "sql_routines",
             Self::SqlPolicies => "sql_policies",
-            Self::SqlPoliciesAndRoutines => "sql_policies_and_routines",
+            Self::SqlPoliciesRoutinesAndViews => "sql_policies_routines_and_views",
             Self::SqlTables => "sql_tables",
         }
     }

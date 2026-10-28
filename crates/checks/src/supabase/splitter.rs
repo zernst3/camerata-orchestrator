@@ -473,7 +473,8 @@ mod tests {
     #[test]
     fn an_escape_string_honours_a_backslash_escaped_quote() {
         // `\'` inside E'' is data, so the `;` after it is still inside the string.
-        let sql = "insert into t values (E'it\\'s; still inside');\ncreate table after_it (id int);";
+        let sql =
+            "insert into t values (E'it\\'s; still inside');\ncreate table after_it (id int);";
         let stmts = split_statements(sql);
         assert_eq!(stmts.len(), 2, "{stmts:#?}");
         assert!(stmts[0].text.contains("it\\'s; still inside"));
