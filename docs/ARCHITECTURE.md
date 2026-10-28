@@ -112,7 +112,7 @@ boundary moved.
 >    not, so do not quote a count of them from any document. See
 >    [`docs/plans/2026-10-09_rule-kind-classification.md`](plans/2026-10-09_rule-kind-classification.md).
 > 3a. **A rule can now be EMITTED without being SCANNED.** `Rule::inspectable` (W16,
->    2026-10-12) is a required boolean on all 417 corpus rules. `false` means the rule still
+>    2026-10-12) is a required boolean on every corpus rule. `false` means the rule still
 >    ships into the client's `AGENTS.md`/`CONVENTIONS.md` as a directive, but is removed from
 >    the scan BEFORE arming, so it can never be recorded verified clean against a codebase that
 >    could not have been checked for it. 26 rules are emit-only - the process and agent-conduct

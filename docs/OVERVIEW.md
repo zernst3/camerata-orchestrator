@@ -1,20 +1,21 @@
-# Camerata — system overview (the human map)
+# Camerata: system overview (the human map)
 
-> **Audience & purpose.** The codebase is ~320k Rust LOC across 26 crates — too much to read.
+> **Audience & purpose.** The codebase is too large to read end to end; its current size is in
+> the README's "By the numbers" table, so this map carries no line or crate counts of its own.
 > This is the HIGH-LEVEL map a human reads to understand the whole system in one sitting: what
-> the parts are, how they fit, and the handful of concepts everything else is built on. For
+> the parts are, how they fit and the handful of concepts everything else is built on. For
 > code-level depth see `TECHNICAL.md`; for the layering/runtime view see `ARCHITECTURE.md`; for
-> the rule schema see `RULE_AUTHORING.md`. **Keep this doc current — every work pass updates it.**
+> the rule schema see `RULE_AUTHORING.md`. **Keep this doc current - every work pass updates it.**
 > Last refreshed: 2026-10-21.
 
 ## What Camerata is
 
 A single all-Rust workspace that does two things, sharing one governance core:
 
-1. **Brownfield Codebase Inspection** — point it at a repo; it produces a client-facing audit:
-   a narrative PDF, a full workbook, and machine-readable data. This is the product most of the
+1. **Brownfield Codebase Inspection**: point it at a repo; it produces a client-facing audit:
+   a narrative PDF, a full workbook and machine-readable data. This is the product most of the
    recent work has hardened.
-2. **Governed Development** — orchestrate AI coding agents through a lifecycle with a
+2. **Governed Development**: orchestrate AI coding agents through a lifecycle with a
    deny-before-execute gate that blocks a forbidden write before it touches disk (binary
    pass/fail, not an LLM grading an LLM).
 
@@ -36,14 +37,14 @@ THE CORPUS + ITS ENFORCEMENT
   checks        the deterministic CHECKERS: arch/import/layering/RLS/weak-rand/one-import-path/
                 dead-code/react-hooks-lint (does the project's OWN eslint config enable the hooks
                 rules; reads config, runs no eslint)/… + the AST extractors (extract::ecma|python|rust_syn incl. `mod_decls`
-                and `computed_loads`, resolver, shared `paths`, and the literal index behind the
+                and `computed_loads`, resolver, shared `paths` and the literal index behind the
                 cross-file ARCH-SHARED-CONSTANT-1 check, and the shared token clone detector
                 `extract::clone` with the Wave C candidate producer `clone_rules`) + integration gate
   linter-registry  stack→linter mapping
   camerata-check   thin check CLI
 
 THE INSPECTION ENGINE
-  server        the big one (~139k LOC): the scan pipeline, calibration, classification, the
+  server        the largest crate: the scan pipeline, calibration, classification, the
                 report/xlsx/csv/json/manifest exporters, the integrity gate, dep-audit (osv),
                 ownership derivation, the BFF HTTP API
   preview       preview-scan helpers
@@ -96,31 +97,31 @@ repo ─▶ ONBOARD/DETECT        stack detection (languages, frameworks) → wh
 
 ## The handful of concepts everything is built on
 
-Each FINDING carries a set of ORTHOGONAL axes — learn these and the rest follows:
+Each FINDING carries a set of ORTHOGONAL axes - learn these and the rest follows:
 
 | Axis | Values | Answers |
 |------|--------|---------|
 | **enforcement** | prose / structured / mechanical / architectural | how the rule is enforced (emit vs runnable check vs AST pass) |
 | **kind** | defect / deviation / convention_observed / no_convention / not_assessed | what the finding IS |
-| **severity** | info / low / medium / high / critical (+ anchors) | how bad — anchors keep e.g. test-coverage below critical, floor-inject SEC/ARCH |
+| **severity** | info / low / medium / high / critical (+ anchors) | how bad - anchors keep e.g. test-coverage below critical, floor-inject SEC/ARCH |
 | **disposition** | open / accepted / false-positive / held-for-review | the triage call on it this run |
-| **ownership** (W33) | client_owned / platform_managed / external_dependency / generated / vendored | WHO can fix it — non-client-owned routes out of the action tiers + budget |
+| **ownership** (W33) | client_owned / platform_managed / external_dependency / generated / vendored | WHO can fix it - non-client-owned routes out of the action tiers + budget |
 | **inspectable** | true / false | can a working-tree scan assess it? `false` = emit-only (a convention, never scanned) |
 
 And two kinds of GATE guard quality:
 
 - **The integrity gate** (`server/src/integrity_gate.rs`, runnable as `camerata integrity-gate`):
-  pre-export INPUT invariants — no engine self-ingestion, files actually scanned, the audit
+  pre-export INPUT invariants - no engine self-ingestion, files actually scanned, the audit
   model recorded, repo-relative paths. Run it BEFORE spending a graded sweep.
 - **The corpus gates** (`crates/rules/tests/w*.rs`): ESLint-flat-config-style structural
-  enforcement ON THE CORPUS ITSELF — schema, sources, client-facing voice, no vendor name, no
+  enforcement ON THE CORPUS ITSELF - schema, sources, client-facing voice, no vendor name, no
   high+ finding without a fix+citation, no truncated option ids, CWE on security rules, etc.
   These are why the 440 rules stay consistent as they change.
 
 ## The rule corpus in one paragraph
 
 440 TOML rules under `crates/rules/principles/<domain>/<id>.toml`. Each declares its
-enforcement tier, kind, severity bounds, `inspectable`, authoritative `[[sources]]`, and one or
+enforcement tier, kind, severity bounds, `inspectable`, authoritative `[[sources]]` and one or
 more `[[option]]`s (the directive emitted to the client's `AGENTS.md`/`CONVENTIONS.md`, a
 client-facing remediation, and finding text). Rules are selected per detected stack by DOMAIN.
 Every rule carries a `version` (an integer, bumped on any change) that is enforced, not trusted:
@@ -134,7 +135,7 @@ the cockpit banner), strictly operator-only and never in a client artifact. Auth
 `RULE_AUTHORING.md`.
 
 ## Where to go deeper
-- **Code-level HOW:** `TECHNICAL.md` (the 4k-line reference).
+- **Code-level HOW:** `TECHNICAL.md` (the full reference).
 - **Layering / runtime stack:** `ARCHITECTURE.md`.
 - **Rule schema + authoring:** `RULE_AUTHORING.md`, `RULES_REFERENCE.md`.
 - **In-flight design:** `docs/design/` (e.g. the machine-readable exports, the ownership/unfixable
