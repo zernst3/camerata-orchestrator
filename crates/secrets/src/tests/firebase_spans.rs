@@ -196,6 +196,11 @@ fn an_unterminated_string_or_object_runs_to_the_window_edge_without_overrunning_
         &format!("const maps = {{ apiKey: \"{key}\", /* never closed"),
         &key,
     );
+    // The last byte is a `*`: the closer check must not read past it.
+    assert_google_secret(
+        &format!("const maps = {{ apiKey: \"{key}\", /* never closed *"),
+        &key,
+    );
 }
 
 #[test]
@@ -212,6 +217,18 @@ fn a_block_comment_after_the_maps_key_ends_at_its_own_closer() {
     let text = format!(
         "const maps = {{ apiKey: \"{maps}\" /* a note */ }};\n{}",
         js_config(&google_key(228))
+    );
+    assert_google_secret(&text, &maps);
+}
+
+#[test]
+fn a_block_comment_ends_exactly_after_its_closing_slash() {
+    // `*//`: the comment's closing `*/` and then a `/` (division) directly after it. Resuming on
+    // the closing `/` instead would read `//` as a line comment and swallow the object's `}`.
+    let maps = google_key(232);
+    let text = format!(
+        "const maps = {{ apiKey: \"{maps}\" /* a *// }};\n{}",
+        js_config(&google_key(233))
     );
     assert_google_secret(&text, &maps);
 }
