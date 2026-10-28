@@ -8,6 +8,8 @@ Two kinds of check run. A deterministic scan answers the questions that have a p
 
 The rules are plain TOML files in [`crates/rules/principles/`](crates/rules/principles/), so you can read exactly what an inspection checks. The library holds 437 rules across 22 domains, each one versioned and locked by content hash so no rule can change silently. [`docs/RULES_REFERENCE.md`](docs/RULES_REFERENCE.md) documents the format and [`docs/RULE_AUTHORING.md`](docs/RULE_AUTHORING.md) the authoring workflow.
 
+**How a client's code is handled** (the API backend client work runs on, what is redacted before a model sees code, where copies live and how they are deleted) is set out in [`DATA_HANDLING.md`](DATA_HANDLING.md).
+
 > **New here? Read [`docs/OVERVIEW.md`](docs/OVERVIEW.md) first.** It is the high-level map of
 > the whole system (crates, the inspection pipeline, the core concepts) in one sitting. This
 > README is the product pitch; OVERVIEW is the architecture at a glance.

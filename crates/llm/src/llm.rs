@@ -3423,6 +3423,30 @@ mod tests {
 
     // ── Message Batches (#61) ──────────────────────────────────────────────────────
 
+    /// The API request bodies Camerata sends carry no `tools` (and no `tool_choice`): a model
+    /// reading client code is given text to answer, never a tool to call. `LlmRequest` has no
+    /// field that could add one; this pins the wire shape of both the Messages and the Batches
+    /// paths so a future field cannot add one silently.
+    #[test]
+    fn api_request_bodies_never_carry_tools() {
+        let req = LlmRequest::new("review this code")
+            .with_model("claude-sonnet-5")
+            .with_max_tokens(256);
+        let messages = messages_request_body(&req, "claude-sonnet-5", CacheTtl::FiveMinutes);
+        let batch = serde_json::to_value(build_batch_item(
+            "c0",
+            &req,
+            "claude-sonnet-5",
+            BATCH_CACHE_TTL,
+        ))
+        .unwrap();
+        for (what, body) in [("messages", &messages), ("batch params", &batch["params"])] {
+            let obj = body.as_object().expect("a JSON object");
+            assert!(!obj.contains_key("tools"), "{what}: {body}");
+            assert!(!obj.contains_key("tool_choice"), "{what}: {body}");
+        }
+    }
+
     /// `build_batch_item` produces a correctly-shaped item with the deterministic `custom_id`
     /// and the prompt forwarded into the `messages[0].content` field.
     #[test]
