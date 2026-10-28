@@ -553,6 +553,59 @@ fn a_real_secret_alone_keeps_its_rating_and_a_non_secret_rule_in_an_example_file
     assert_eq!(out[0].severity, "critical", "only secret rules are lowered");
 }
 
+/// A real key pasted into an example file is a classic leak, not a placeholder: the file name
+/// says "example" but the row cites a real value (redacted, or raw before redaction), so the
+/// rating stands. Only a row with no real value in it is lowered on the strength of its path.
+#[test]
+fn a_real_key_committed_in_an_example_file_keeps_its_rating() {
+    let redacted = secret_row("SEC-NO-VENDOR-TOKEN-1", ".env.example", REAL_LINE);
+    let out = merge_semantic_groups(vec![redacted], &[]);
+    assert_eq!(out[0].severity, "critical", "{out:?}");
+    assert!(crate::severity_bounds::recorded_adjustments(&out[0]).is_empty());
+    // A raw value as the floor sees it before redaction, built at run time (mixed-case body, no
+    // placeholder word), in a `*.example` file.
+    let body: String = (0..40).map(|i| char::from(b"aZ3kQ9mT"[i % 8])).collect();
+    let raw = secret_row(
+        "SEC-NO-VENDOR-TOKEN-1",
+        "config/settings.yaml.example",
+        &format!("SUPABASE_SERVICE_ROLE_KEY=sb_secret_{body}"),
+    );
+    let out = merge_semantic_groups(vec![raw], &[]);
+    assert_eq!(out[0].severity, "critical", "{out:?}");
+    // A placeholder in the same kind of file is still lowered, and ranks below the real key.
+    let out = merge_semantic_groups(vec![placeholder_row()], &[]);
+    assert_eq!(out[0].severity, "low");
+}
+
+/// The `SEC-` prefix covers injection, transport and sink rules too; none of those is about a
+/// credential, so an example file name or a template token in the snippet says nothing about
+/// them and must not lower their rating.
+#[test]
+fn a_security_rule_that_is_not_a_secret_rule_is_not_lowered_in_an_example_file() {
+    for (rule, path, snippet) in [
+        (
+            "SEC-NO-RAW-SQL-CONCAT-1",
+            "db/queries.sql.example",
+            "SELECT * FROM users WHERE id = ' + id + '",
+        ),
+        (
+            "SEC-NO-DISABLED-TLS-1",
+            "docker-compose.yml.example",
+            "NODE_TLS_REJECT_UNAUTHORIZED=0",
+        ),
+        (
+            "SEC-NO-COMMAND-INJECTION-1",
+            "scripts/deploy.sh.example",
+            "eval \"$CMD\"",
+        ),
+    ] {
+        let mut f = secret_row(rule, path, snippet);
+        f.detail = "A security defect.".to_string();
+        let out = merge_semantic_groups(vec![f], &[]);
+        assert_eq!(out[0].severity, "critical", "{rule} in {path}: {out:?}");
+    }
+}
+
 // ── 4. Two different credentials near each other stay two rows ──────────────────────────────
 
 /// A redacted password (no prefix, no tail) and a redacted Stripe-shaped key: two different

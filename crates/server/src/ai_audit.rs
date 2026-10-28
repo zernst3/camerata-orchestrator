@@ -7100,9 +7100,15 @@ fn primary_rank(
 /// but is not a live credential.
 const PLACEHOLDER_SEVERITY_CEILING: &str = "low";
 
-/// Whether `rule_id` is one of the secret rules (the secret detectors and the secret-file rule).
+/// The floor rule about committed secret-bearing files (`.env.production`, key files): a secret
+/// rule with no value shape of its own.
+const SECRET_FILE_RULE: &str = "SEC-NO-SECRET-FILE-1";
+
+/// Whether `rule_id` is one of the secret rules: a rule the secrets crate detects values for, or
+/// the secret-file rule. NOT every `SEC-` rule: the prefix also covers injection, transport and
+/// sink rules, which an example file name or a template token says nothing about.
 fn is_secret_rule(rule_id: &str) -> bool {
-    rule_id.starts_with("SEC-") || !camerata_secrets::shapes_for_rule(rule_id).is_empty()
+    rule_id == SECRET_FILE_RULE || !camerata_secrets::shapes_for_rule(rule_id).is_empty()
 }
 
 /// Whether `path` names an example, sample or template file: `.env.example`, `.env.sample` or
@@ -7128,10 +7134,23 @@ fn snippet_is_placeholder(snippet: &str) -> bool {
             .all(|m| matches!(m.twin, Some(Twin::PlaceholderWord(_) | Twin::TemplateToken)))
 }
 
-/// Whether `f` is a secret row about a placeholder: a secret rule whose file is an example file
-/// or whose own value the secrets crate classes as a placeholder.
+/// Whether `snippet` cites a real credential value: one the secrets crate classes as a secret (a
+/// raw value, as the floor sees the line before redaction) or one already redacted (the redaction
+/// ellipsis is left only where a real value was). A real key pasted into `.env.example` is a
+/// leak, whatever the file is called.
+fn snippet_holds_real_secret(snippet: &str) -> bool {
+    snippet.contains('\u{2026}')
+        || camerata_secrets::detect_all(snippet)
+            .iter()
+            .any(camerata_secrets::SecretMatch::is_secret)
+}
+
+/// Whether `f` is a secret row about a placeholder: a secret rule whose row cites no real value
+/// and whose file is an example file or whose own value the secrets crate classes as a
+/// placeholder.
 fn is_placeholder_secret_row(f: &Finding) -> bool {
     is_secret_rule(&f.rule_id)
+        && !snippet_holds_real_secret(&f.snippet)
         && (is_example_file_path(&f.path) || snippet_is_placeholder(&f.snippet))
 }
 
