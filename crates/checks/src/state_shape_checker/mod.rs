@@ -304,10 +304,7 @@ pub(super) fn component_label(component: &Component<'_>) -> String {
 }
 
 /// `a`, `a and b`, `a, b and c`.
-pub(super) fn join_words(items: &[String]) -> String {
-    match items {
-        [] => String::new(),
-        [one] => one.clone(),
-        [init @ .., last] => format!("{} and {last}", init.join(", ")),
-    }
+pub(crate) fn join_words(items: &[String]) -> String {
+    let words: Vec<&str> = items.iter().map(String::as_str).collect();
+    crate::firebase::grants::join_words(&words, "and")
 }

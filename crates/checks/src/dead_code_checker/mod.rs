@@ -85,7 +85,7 @@ mod emit;
 // `pub(crate)`: the clone detector reuses the generated-file, declaration-file and test-file
 // predicates rather than keeping a second copy of the marker lists.
 pub(crate) mod exclusions;
-mod manifests;
+pub(crate) mod manifests;
 mod mentions;
 mod roots;
 mod rust_pass;

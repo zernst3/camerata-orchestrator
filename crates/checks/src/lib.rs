@@ -182,6 +182,14 @@ pub mod react_hooks_lint_checker;
 /// semantic pass. See `crates/rules/principles/ui/ui-state-shape-1.toml`.
 pub mod state_shape_checker;
 
+/// `STYLE-NEEDLESS-COMPLEXITY-1` (W29 Wave D, `docs/design/2026-10-21_w29-detector-implementation.md`):
+/// a negated conditional (`!x ? a : b`, which is `x ? b : a` written backwards), and a TSX
+/// component prop declared optional that every call site passes with a defined value. Call
+/// sites are found through [`one_import_path_checker`]'s re-export graph, and a component any
+/// of whose references cannot be accounted for is skipped. See
+/// `crates/rules/principles/javascript/style-needless-complexity-1.toml`.
+pub mod needless_complexity_checker;
+
 /// The Layer-2 (Governed Development write-time gate) executor for [`arch_checker`]'s
 /// checker registry — "Plug point B" in
 /// `docs/design/2026-07-26_architectural-executor-feasibility.md` §2.3. Composed into

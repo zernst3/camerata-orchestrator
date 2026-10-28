@@ -316,6 +316,7 @@ pub fn all_checkers() -> Vec<Box<dyn ArchChecker>> {
         Box::new(crate::dead_code_checker::DeadCodeChecker),
         Box::new(crate::react_hooks_lint_checker::ReactHooksLintChecker),
         Box::new(crate::state_shape_checker::StateShapeChecker),
+        Box::new(crate::needless_complexity_checker::NeedlessComplexityChecker),
         Box::new(crate::firebase::FirebaseRulesChecker::default()),
         Box::new(crate::firebase::FirebaseFunctionsChecker),
         Box::new(crate::firebase::FirebaseAdminSdkClientChecker),
@@ -602,6 +603,7 @@ mod tests {
             "ARCH-SHARED-CONSTANT-1",
             "ARCH-DEAD-CODE-1",
             "UI-REACT-HOOKS-LINT-1",
+            "STYLE-NEEDLESS-COMPLEXITY-1",
         ] {
             assert!(
                 ids.contains(expected),

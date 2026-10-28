@@ -89,6 +89,51 @@ pub(crate) fn function_name<'s>(node: Node<'_>, source: &'s str) -> Option<&'s s
         .map(|n| text(n, source))
 }
 
+/// Whether the subtree renders JSX.
+pub(crate) fn has_jsx(node: Node<'_>) -> bool {
+    descendants(node).into_iter().any(|n| {
+        matches!(
+            n.kind(),
+            "jsx_element" | "jsx_self_closing_element" | "jsx_fragment"
+        )
+    })
+}
+
+/// Whether an identifier-like node DECLARES its name (a variable, function, class, parameter,
+/// destructuring target, catch parameter or import binding) rather than using it.
+pub(crate) fn is_binding_position(node: Node<'_>) -> bool {
+    if node.kind() == "shorthand_property_identifier_pattern" {
+        return true;
+    }
+    let Some(parent) = node.parent() else {
+        return false;
+    };
+    let is_field = |field: &str| {
+        parent
+            .child_by_field_name(field)
+            .is_some_and(|f| f.id() == node.id())
+    };
+    match parent.kind() {
+        "variable_declarator"
+        | "function_declaration"
+        | "generator_function_declaration"
+        | "class_declaration"
+        | "function_expression"
+        | "class" => is_field("name"),
+        "required_parameter" | "optional_parameter" => is_field("pattern"),
+        "arrow_function" => is_field("parameter"),
+        "assignment_pattern" | "object_assignment_pattern" => is_field("left"),
+        "pair_pattern" => is_field("value"),
+        "catch_clause" => is_field("parameter"),
+        "formal_parameters" | "array_pattern" | "rest_pattern" | "import_clause"
+        | "namespace_import" => true,
+        "import_specifier" => {
+            is_field("alias") || (is_field("name") && parent.child_by_field_name("alias").is_none())
+        }
+        _ => false,
+    }
+}
+
 /// The file's named and default import bindings by local name (`import { a as b }` maps `b`).
 pub(crate) fn import_bindings(tree: &Tree, source: &str) -> HashMap<String, ImportBinding> {
     ecma::import_bindings(tree.root_node(), source)

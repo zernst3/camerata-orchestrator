@@ -18,7 +18,7 @@ A single all-Rust workspace that does two things, sharing one governance core:
    deny-before-execute gate that blocks a forbidden write before it touches disk (binary
    pass/fail, not an LLM grading an LLM).
 
-Both rest on the **rule corpus** (438 rules) and **deterministic gates**.
+Both rest on the **rule corpus** (439 rules) and **deterministic gates**.
 
 ## The crate map, grouped by role
 
@@ -31,7 +31,7 @@ CONTRACTS / CORE
   app-core      framework-agnostic application core (projects, readiness)
 
 THE CORPUS + ITS ENFORCEMENT
-  rules         the 438-rule corpus loader + schema + corpus gates + the CORPUS_FRESHNESS watermark
+  rules         the 439-rule corpus loader + schema + corpus gates + the CORPUS_FRESHNESS watermark
                 + per-rule `version` and the content-hash lock (CORPUS_LOCK.toml)
   checks        the deterministic CHECKERS: arch/import/layering/RLS/weak-rand/one-import-path/
                 dead-code/react-hooks-lint (does the project's OWN eslint config enable the hooks
@@ -115,11 +115,11 @@ And two kinds of GATE guard quality:
 - **The corpus gates** (`crates/rules/tests/w*.rs`): ESLint-flat-config-style structural
   enforcement ON THE CORPUS ITSELF — schema, sources, client-facing voice, no vendor name, no
   high+ finding without a fix+citation, no truncated option ids, CWE on security rules, etc.
-  These are why the 438 rules stay consistent as they change.
+  These are why the 439 rules stay consistent as they change.
 
 ## The rule corpus in one paragraph
 
-438 TOML rules under `crates/rules/principles/<domain>/<id>.toml`. Each declares its
+439 TOML rules under `crates/rules/principles/<domain>/<id>.toml`. Each declares its
 enforcement tier, kind, severity bounds, `inspectable`, authoritative `[[sources]]`, and one or
 more `[[option]]`s (the directive emitted to the client's `AGENTS.md`/`CONVENTIONS.md`, a
 client-facing remediation, and finding text). Rules are selected per detected stack by DOMAIN.

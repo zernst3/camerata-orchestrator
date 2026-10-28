@@ -1981,6 +1981,45 @@ mod tests {
         );
     }
 
+    /// `STYLE-NEEDLESS-COMPLEXITY-1` (Wave D) lives in the `javascript` domain, which a
+    /// JavaScript repo reaches directly and a TypeScript repo through the `javascript:typescript`
+    /// parent expansion, so no `domains_for_stack` edit is needed. A Python repo is not handed it.
+    #[tokio::test]
+    async fn style_needless_complexity_is_proposed_for_js_and_ts_stacks_and_not_for_python() {
+        const ID: &str = "STYLE-NEEDLESS-COMPLEXITY-1";
+        for (repo, path) in [
+            ("acme/js-app", "src/app.js"),
+            ("acme/ts-app", "src/app.ts"),
+            ("acme/tsx-app", "src/App.tsx"),
+        ] {
+            let repo_files = files(&[(path, "export {};")]);
+            let stack = detect_stack(repo, &repo_files);
+            let domains = domains_for_stack(&stack);
+            let proposed = propose_corpus_rules(&[(repo.to_string(), domains)]).await;
+            let rule = proposed
+                .iter()
+                .find(|r| r.id == ID)
+                .unwrap_or_else(|| panic!("{ID} must be proposed for {repo}"));
+            assert_eq!(rule.domain, "javascript");
+            assert!(rule.recommended, "{repo}: suggested, not merely available");
+            assert!(
+                rule.is_auto_recommended,
+                "{repo}: a grounded rule is auto-recommended (pre-checked)"
+            );
+            assert_eq!(rule.repos, vec![repo.to_string()]);
+        }
+
+        let py_files = files(&[("app/main.py", "print('hi')")]);
+        let stack = detect_stack("acme/py-app", &py_files);
+        let domains = domains_for_stack(&stack);
+        let proposed = propose_corpus_rules(&[("acme/py-app".to_string(), domains)]).await;
+        let rule = proposed.iter().find(|r| r.id == ID);
+        assert!(
+            rule.is_none_or(|r| !r.recommended),
+            "a Python-only repo must not have {ID} suggested: {rule:?}"
+        );
+    }
+
     /// req_a6: a plain Rust + Axum + Tokio + sqlx service must arm `rust:axum`, `rust:tokio`
     /// and `rust:sqlx` — the three Rust families the audit named, 15 rules between them.
     #[test]
