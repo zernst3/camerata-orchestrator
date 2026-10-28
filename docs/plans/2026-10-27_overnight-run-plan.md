@@ -89,6 +89,52 @@ H. By 08:30: morning summary at the top of `docs/OVERNIGHT_DECISIONS.md`; the PR
 
 ## Status log (newest first)
 
+- 02:12: GATE GREEN on console gaps, README, W27, sources, mutants and the efficiency-join fixes: 9,346 passed, 0 failed; pushed (the one-off mutation_kills exit did not recur). Walkthrough step 6 merged (gates with the next branch).
+- 02:00: walkthrough step 6 now points at the real spend limit field (ui 1,039 + ui-core 551 passed); merges after the gate. Corpus em-dash cleanup and the eight policy relabels split out of the PDF polish brief and started now (corpus files only); the template half still waits for coverage.
+- 02:00: false-negative audit rechecked against today's code: of 12 HIGH, 4 partly fixed
+  (truncated replies, batch truncation, skipped files, language routing; some by coverage), 8
+  still open; M1 to M12 mostly open. Fable wrote fix specs in three builder batches that do not
+  share functions (AI tier, intake and ledger, exporters and dependency audit); each starts once
+  the branches it overlaps (coverage, rank 8, citations, client-lock, injection) have merged.
+  Needs Zach: which severity wins when findings merge at one location (H5) and the self-hedge
+  cap (H7); builders do only the safe half (keep absorbed findings visible).
+- 01:55: gate on sources + mutants: 9,307 passed, 0 failed, but the mutation_kills test program exited with no output once (26 of 26 pass alone, six runs out of six); not pushed on that evidence. Merged the efficiency-join fixes; full gate re-running over both.
+- 01:50: strict-source audit (Fable, 20 sources fetched, the rest judged from source titles and
+  notes, about plus or minus 10): 323 of 440 rules cite an outside source that itself states what
+  the rule requires; 100 grounded rules cite a source that sets the direction while the project
+  sets the specifics. The earlier "419 strict" figure was wrong. Eight rules whose own sources
+  concede project policy get relabelled policy (grounded 423 -> 415), folded into the PDF polish
+  corpus pass. Needs Zach: which number the site publishes (it says 410). Proposed sentence:
+  "323 of Camerata's 440 rules trace to an outside standard that states the rule itself, not just
+  its topic." List at scratchpad notstrict_final.txt.
+- 01:45: efficiency-join fixes done in their worktree (all 7 items; regeneration failures now
+  metered against the cap; a failed routing group no longer discards other groups' paid
+  replies; the estimate includes regeneration); merges after the running gate. Walkthrough step 6
+  re-pointed at the real spend limit input (builder started). Viewer 7c deferred: the server has
+  no mapped_rule_id yet and ai_audit.rs is held by four queued merges. Fable re-verifying the
+  false-negative audit against today's code to plan the HIGH fixes.
+- 01:40: gate re-run: 9,277 passed, 2 failed: a CLI parse test W27 left without --client (fixed on the sources branch) and the local-only sample-report template copy (refreshed). Merged sources and mutants plus docs/MUTATION_TESTING.md; gate re-running.
+- 01:35: sources merged and fixed in its worktree: 423 of 440 rules grounded (cite an outside
+  standard), 17 policy. spirit-optimize-1 relabelled policy (no CWE says build optimisations in
+  from day one; it cites the three member CWEs with notes). Strict count (the source states the
+  directive) is being audited by Fable before any number goes on the site. Boards builder started.
+- 01:30: mutants reviewed: merge after one fix (the docs file its tests cite). Its secrets fix closes a false negative (a Google key next to a Firebase config was hidden as a public key). Docs file written; merges after the running gate.
+- 01:23: mutants finished (tests killing surviving mutants in rules and secrets, one secrets fix); Fable review running.
+- 01:25: client-lock (H2) reviewed: merge after fixes. The lock fails closed on every inspection
+  path; two holes to close (chat and draft steps can reach a non-Anthropic model on a client
+  engagement; a scan with no active project is treated as non-client) and DATA_HANDLING.md
+  overclaims (dev loop sends tools; OSV.dev gets dependency names). Merge order: coverage ->
+  client-lock -> citations -> injection (folds its section into DATA_HANDLING.md). Needs Zach:
+  DATA_HANDLING.md is a public claims document; the default backend in .env.example becomes the
+  API; every saved project, his own included, becomes a client engagement on upgrade and refuses
+  until switched off in Settings; the client README.txt prints "Client engagement: yes/no".
+- 01:20: gate on console + README + W27 failed to compile two test literals (fields W27 added, tests from the integration predate them); fixed in cbcca7ac (workspace clippy clean), gate re-running; builders told to merge feat.
+- 01:08: client-lock (H2) finished after its 2-hour silence; Fable review running.
+- 01:05: merged console gaps, README split and W27 PDF rebuild into feat; full gate running.
+  Coverage builder started. Checked the regenerated sample PDF by eye: the Fix text keeps the
+  rule file's hard line wraps and prints backticks literally, and 227 rule files carry em dashes
+  that reach client PDFs. Brief queued (after coverage): soft-wrap and inline code in the
+  template, a corpus test banning em dashes in client-facing rule text, and the cleanup.
 - 01:05: GATE GREEN on the integration + hygiene + Rust 1.99 merges: 9,177 passed, 0 failed;
   pushed. W27 PDF rebuild fixed (5,016 tests); bundled-only fonts NOT forced because it drops CJK
   and emoji from client PDFs (the test pinning that stays; decision recorded).
