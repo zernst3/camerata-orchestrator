@@ -193,3 +193,39 @@ fn the_terse_prompts_are_pinned_to_the_prompt_schema_version() {
         "a terse-output prompt changed: bump AUDIT_PROMPT_SCHEMA_VERSION and update this pin"
     );
 }
+
+/// Rank 7: `applies_to_routing` decides which rules are sent with which files, so findings
+/// written under one setting answered a different question than the other setting asks. Neither
+/// setting's cache answers the other, in both directions. A key stored before the field existed
+/// reads as `false`: those findings were produced without `applies_to` routing.
+#[test]
+fn the_applies_to_routing_setting_is_part_of_the_question() {
+    let rules = [rule("ARCH-A-1", "do A")];
+    let off = key(MODEL, None, &rules);
+    let on = key(MODEL, None, &rules).with_applies_to_routing(true);
+    assert_ne!(off, on);
+
+    let m_off = manifest_under("fp", &off);
+    assert!(m_off.is_reusable_baseline("fp", &key(MODEL, None, &rules)));
+    assert!(
+        !m_off.is_reusable_baseline("fp", &on),
+        "off's cache must not answer on"
+    );
+
+    let m_on = manifest_under("fp", &on);
+    assert!(m_on.is_reusable_baseline(
+        "fp",
+        &key(MODEL, None, &rules).with_applies_to_routing(true)
+    ));
+    assert!(
+        !m_on.is_reusable_baseline("fp", &off),
+        "on's cache must not answer off"
+    );
+
+    let legacy: AiScanKey = serde_json::from_str(
+        r#"{"audit_model":"claude-sonnet-5","calibration_model":"","prompt_schema_version":1,"directives_fingerprint":"x","terse_output":true}"#,
+    )
+    .unwrap();
+    assert!(!legacy.applies_to_routing);
+    assert!(legacy.terse_output);
+}

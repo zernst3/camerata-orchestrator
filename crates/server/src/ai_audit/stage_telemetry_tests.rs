@@ -237,3 +237,37 @@ async fn the_deep_tier_is_recorded_under_the_deep_stage() {
     assert!(meter.snapshot().calls > 0, "the deep tier made calls");
     assert_eq!(stages_seen(&meter), vec![Stage::DeepTier]);
 }
+
+/// The fix give-up tally (rank 6) and the routing counts (rank 7) are separate fields of the same
+/// snapshot: recording both must leave both in one `stage_telemetry`, and each keeps its own
+/// numbers (the two merged branches each added one field to this struct).
+#[test]
+fn fix_outcome_and_routing_both_survive_one_snapshot() {
+    use crate::stage_telemetry::{FixOutcome, RoutingTelemetry};
+    let meter = UsageMeter::default();
+    let outcome = FixOutcome {
+        sent_to_model: 7,
+        answered: 6,
+        gave_up: 2,
+        cap_stopped: 1,
+        transport_failed: 0,
+        authored_without_model: 3,
+    };
+    meter.record_fix_outcome(outcome);
+    meter.record_routing(40, 25);
+    meter.record_routing(10, 5);
+
+    let t = meter.stage_telemetry(1_000);
+    assert_eq!(t.fix_outcome, Some(outcome));
+    assert_eq!(
+        t.routing,
+        Some(RoutingTelemetry {
+            pairs_total: 50,
+            pairs_skipped: 30,
+        })
+    );
+    // And neither disappears when the snapshot is taken again.
+    let again = meter.stage_telemetry(1_000);
+    assert_eq!(again.fix_outcome, t.fix_outcome);
+    assert_eq!(again.routing, t.routing);
+}

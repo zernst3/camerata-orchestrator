@@ -73,6 +73,12 @@ pub struct AiScanKey {
     /// existed, which reads as `false`: those findings were produced the old way.
     #[serde(default)]
     pub terse_output: bool,
+    /// Whether the findings were produced with `applies_to` routing on (a rule that declares
+    /// where it applies is sent only with matching files). It changes which (chunk, rule) pairs
+    /// the model is asked about, so one setting's cache must not answer the other's. Absent in a
+    /// key stored before rank 7, which reads as `false`: those findings were produced without it.
+    #[serde(default)]
+    pub applies_to_routing: bool,
 }
 
 impl AiScanKey {
@@ -96,12 +102,19 @@ impl AiScanKey {
                 crate::suppression::fnv1a(&parts.join("\u{1e}"))
             ),
             terse_output: false,
+            applies_to_routing: false,
         }
     }
 
     /// The key of a scan running with the `terse_output` measure `on` or off.
     pub fn with_terse_output(mut self, on: bool) -> Self {
         self.terse_output = on;
+        self
+    }
+
+    /// The key of a scan running with `applies_to` routing `on` or off.
+    pub fn with_applies_to_routing(mut self, on: bool) -> Self {
+        self.applies_to_routing = on;
         self
     }
 }
