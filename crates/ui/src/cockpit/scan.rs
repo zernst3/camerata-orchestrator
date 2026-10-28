@@ -4724,7 +4724,8 @@ pub(super) fn FindingsTable(
             // for a reason prompt, an overlay or a dialog itself and refuses under one.
             PaletteAction::StartWalkthrough => {
                 if let Some(tour) = tour_handle {
-                    tour.start();
+                    // Only this line may start it while the palette (which is running it) is open.
+                    tour.start(camerata_ui_core::walkthrough::StartSource::Palette);
                 }
             }
         }

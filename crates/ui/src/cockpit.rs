@@ -1916,9 +1916,10 @@ fn HomeNav(home_view: Signal<HomeView>) -> Element {
                 onclick: move |_| hv.set(HomeView::Docs),
                 "Docs"
             }
+            // No `data-tour` here: the walkthrough's backend step is about the Settings tab INSIDE
+            // a project, and a click on this one (before any project is open) must not advance it.
             button {
                 class: cls(HomeView::Settings),
-                "data-tour": camerata_ui_core::walkthrough::target::SETTINGS,
                 onclick: move |_| hv.set(HomeView::Settings),
                 "Settings"
             }

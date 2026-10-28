@@ -15,20 +15,26 @@
 //!   or a dialog is up) and draws the popup and the highlight.
 //!
 //! It never clicks, types or decides anything for the user. The only thing it does to the page
-//! besides drawing is scroll the current control into view once per step, and move the keyboard
-//! (into the popup when the walkthrough is started, back to the highlighted control when it is
-//! closed with Exit, Done or Esc).
+//! besides drawing is scroll the current control into view once per step (never behind a dialog
+//! or the palette), and move the keyboard (into the popup when the walkthrough is started; back to
+//! the popup if a step change dropped it; back to the highlighted control when it is closed with
+//! Exit, Done or Esc, and then onto the control itself, never onto something inside it).
+//!
+//! The page-side listeners (clicks, Esc) record only while a walkthrough is running: they are
+//! switched on at the start and off at the exit, and their buffers are emptied at each start, so
+//! a stray Esc or click between walkthroughs can never act on the next one.
 //!
 //! Remembered per user in the webview's own storage, the same store as the background animation
 //! switch, and never in a project (so no project export carries it).
 
 use std::collections::BTreeSet;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use camerata_ui_core::walkthrough::{
-    guided_word, parse_prefs, place, popup_mode, should_offer, tour_gate, Offer, PopupMode,
-    Progress, Rect, Side, Tour, TourGate, TourPrefs, Viewport, KEY_GUIDED, KEY_OFFER,
-    TOUR_ATTRIBUTE,
+    guided_word, parse_prefs, place, popup_mode, should_offer, start_gate, tour_gate, Offer,
+    PopupMode, Progress, Rect, Side, StartSource, Tour, TourGate, TourPrefs, Viewport, KEY_GUIDED,
+    KEY_OFFER, TOUR_ATTRIBUTE,
 };
 use dioxus::prelude::*;
 
@@ -52,18 +58,24 @@ const MODAL_SELECTOR: &str = ".rule-modal-overlay:not(.cv-overlay):not(.pal-over
 /// Install the page-side listeners, once: a click anywhere is noted by the nearest `data-tour`
 /// control it landed in, and Esc is noted when nothing else owns it (no reason prompt, overlay or
 /// dialog is up, and the keyboard is not in a field). Neither listener stops, prevents or
-/// consumes an event.
-fn install_script() -> String {
+/// consumes an event, and both record ONLY while `window.__camerataTourActive` is set (a
+/// walkthrough is running); the click buffer is capped.
+pub(crate) fn install_script() -> String {
     format!(
         r#"if (!window.__camerataTourInstalled) {{
   window.__camerataTourInstalled = true;
-  window.__camerataTourClicks = [];
-  window.__camerataTourEsc = false;
+  if (typeof window.__camerataTourActive === "undefined") window.__camerataTourActive = false;
+  window.__camerataTourClicks = window.__camerataTourClicks || [];
+  window.__camerataTourEsc = !!window.__camerataTourEsc;
   document.addEventListener("click", function (e) {{
+    if (!window.__camerataTourActive) return;
     var t = e.target && e.target.closest ? e.target.closest("[{TOUR_ATTRIBUTE}]") : null;
-    if (t) window.__camerataTourClicks.push(t.getAttribute("{TOUR_ATTRIBUTE}"));
+    if (t && window.__camerataTourClicks.length < {MAX_RECORDED_CLICKS}) {{
+      window.__camerataTourClicks.push(t.getAttribute("{TOUR_ATTRIBUTE}"));
+    }}
   }}, true);
   document.addEventListener("keydown", function (e) {{
+    if (!window.__camerataTourActive) return;
     if (e.key !== "Escape" || e.ctrlKey || e.metaKey || e.altKey) return;
     if (document.querySelector("{REASON_SELECTOR}, {OVERLAY_SELECTOR}, {MODAL_SELECTOR}")) return;
     var a = document.activeElement;
@@ -75,15 +87,40 @@ fn install_script() -> String {
     )
 }
 
+/// The most clicks held between two looks.
+const MAX_RECORDED_CLICKS: usize = 50;
+
+/// A walkthrough is starting: install the listeners, empty what they hold (nothing recorded
+/// before this moment counts), and switch them on.
+pub(crate) fn begin_js() -> String {
+    let install = install_script();
+    format!(
+        r#"{install}
+window.__camerataTourClicks = [];
+window.__camerataTourEsc = false;
+window.__camerataTourActive = true;"#
+    )
+}
+
+/// A walkthrough ended: switch the listeners off and empty them. Safe to run when nothing was
+/// ever installed.
+pub(crate) fn end_js() -> &'static str {
+    r#"window.__camerataTourActive = false;
+window.__camerataTourClicks = [];
+window.__camerataTourEsc = false;"#
+}
+
 /// One look at the page for the step whose control is `target`. Answers (to `dioxus.send`) the
 /// `data-tour` ids on screen, the control's rectangle, the window size, what owns the screen, the
-/// ids clicked since the last look, and whether Esc was pressed. When `scroll` is set it first
-/// scrolls the control into view if it is outside the window.
+/// ids clicked since the last look, whether Esc was pressed, and whether the keyboard is inside
+/// the popup. When `scroll` is set it first scrolls the control into view if it is outside the
+/// window, but only when nothing owns the screen (never behind a dialog or the palette).
 pub(crate) fn probe_js(target: &str, scroll: bool) -> String {
     let target_json = serde_json::to_string(target).unwrap_or_else(|_| "\"\"".to_string());
     let install = install_script();
     format!(
         r#"{install}
+window.__camerataTourActive = true;
 var target = {target_json};
 var visible = function (el) {{
   var r = el.getBoundingClientRect();
@@ -91,6 +128,9 @@ var visible = function (el) {{
   var s = window.getComputedStyle(el);
   return s.visibility !== "hidden" && s.display !== "none";
 }};
+var reason = !!document.querySelector("{REASON_SELECTOR}");
+var overlay = !!document.querySelector("{OVERLAY_SELECTOR}");
+var modal = !!document.querySelector("{MODAL_SELECTOR}");
 var ids = [];
 var found = null;
 document.querySelectorAll("[{TOUR_ATTRIBUTE}]").forEach(function (el) {{
@@ -103,7 +143,7 @@ var rect = null;
 if (found) {{
   var r = found.getBoundingClientRect();
   var outside = r.top < 0 || r.bottom > window.innerHeight || r.left < 0 || r.right > window.innerWidth;
-  if ({scroll} && outside) {{
+  if ({scroll} && outside && !(reason || overlay || modal)) {{
     found.scrollIntoView({{ block: "center", inline: "nearest" }});
     r = found.getBoundingClientRect();
   }}
@@ -111,31 +151,51 @@ if (found) {{
 }}
 var clicks = window.__camerataTourClicks; window.__camerataTourClicks = [];
 var esc = window.__camerataTourEsc; window.__camerataTourEsc = false;
+var pop = document.getElementById("{POPUP_ID}");
 dioxus.send({{
   target: target,
   ids: ids,
   rect: rect,
   vw: window.innerWidth,
   vh: window.innerHeight,
-  reason: !!document.querySelector("{REASON_SELECTOR}"),
-  overlay: !!document.querySelector("{OVERLAY_SELECTOR}"),
-  modal: !!document.querySelector("{MODAL_SELECTOR}"),
+  reason: reason,
+  overlay: overlay,
+  modal: modal,
   clicks: clicks,
-  esc: esc
+  esc: esc,
+  focus_in_popup: !!(pop && pop.contains(document.activeElement))
 }});"#
     )
 }
 
 /// What owns the screen right now, asked of the page: used to refuse starting the walkthrough
-/// under a reason prompt, an overlay or a dialog. The palette's own overlay is not counted (the
-/// palette is open when its line is run, and it closes itself).
+/// under a reason prompt, the code viewer or the stacked view, the palette, or a dialog. The
+/// palette is reported on its own, so that the palette's own line (which runs while the palette
+/// is open and closes it) can be told apart from the Help menu (which must not start under it).
 fn gate_js() -> String {
     format!(
         r#"dioxus.send({{
   reason: !!document.querySelector("{REASON_SELECTOR}"),
   overlay: !!document.querySelector(".cv-overlay"),
+  palette: !!document.querySelector(".pal-overlay"),
   modal: !!document.querySelector("{MODAL_SELECTOR}")
 }});"#
+    )
+}
+
+/// The start gate from what the page said, for the source of the request.
+fn parse_gate(v: &serde_json::Value, source: StartSource) -> TourGate {
+    let flag = |k: &str| {
+        v.get(k)
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+    };
+    start_gate(
+        flag("reason"),
+        flag("overlay"),
+        flag("palette"),
+        flag("modal"),
+        source,
     )
 }
 
@@ -148,11 +208,13 @@ dioxus.send({{ guided: g, offer: o }});"#
     )
 }
 
-/// Write one remembered word.
+/// Write one remembered word, and say whether it was kept.
 fn write_pref_js(key: &str, value: &str) -> String {
     let key = serde_json::to_string(key).unwrap_or_default();
     let value = serde_json::to_string(value).unwrap_or_default();
-    format!("try {{ localStorage.setItem({key}, {value}); }} catch (e) {{}}")
+    format!(
+        "try {{ localStorage.setItem({key}, {value}); dioxus.send(true); }} catch (e) {{ dioxus.send(false); }}"
+    )
 }
 
 /// Put the keyboard on the popup.
@@ -160,16 +222,38 @@ fn focus_popup_js() -> String {
     format!("var p = document.getElementById(\"{POPUP_ID}\"); if (p) p.focus();")
 }
 
-/// Put the keyboard back on the control the popup was pointing at: the control itself when it can
-/// take focus, else the first thing inside it that can. Nothing when it is gone.
+/// A step change dropped the keyboard out of the popup: put it back on the popup's forward
+/// button. Does nothing when the keyboard is still inside it (or the popup is not drawn).
+fn refocus_popup_js() -> String {
+    format!(
+        r#"var p = document.getElementById("{POPUP_ID}");
+if (p && !p.contains(document.activeElement)) {{
+  var b = p.querySelector(".tour-next") || p;
+  b.focus();
+}}"#
+    )
+}
+
+/// Whether to put the keyboard back in the popup after a look: the step changed, and the keyboard
+/// was inside the popup when the look was taken.
+pub(crate) fn refocus_after(step_changed: bool, focus_was_in_popup: bool) -> bool {
+    step_changed && focus_was_in_popup
+}
+
+/// Put the keyboard back on the control the popup was pointing at, and ONLY that control. A
+/// control that takes focus itself (a button, a field, a link) gets it. Anything else (a block, a
+/// bar, a banner) gets focus on the block itself, made focusable for the purpose, and never on
+/// something inside it: the first button inside the review queue's toolbar is Confirm, and a
+/// reflex Enter must not decide a finding. Nothing when the control is gone.
 pub(crate) fn focus_control_js(target: &str) -> String {
     let target = serde_json::to_string(target).unwrap_or_else(|_| "\"\"".to_string());
     format!(
         r#"var el = document.querySelector('[{TOUR_ATTRIBUTE}=' + JSON.stringify({target}) + ']');
 if (el) {{
-  var focusable = 'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])';
-  var to = el.matches(focusable) ? el : el.querySelector(focusable);
-  if (to && typeof to.focus === 'function') to.focus();
+  if (!el.matches('button, [href], input, select, textarea') && !el.hasAttribute('tabindex')) {{
+    el.setAttribute('tabindex', '-1');
+  }}
+  if (typeof el.focus === 'function') el.focus();
 }}"#
     )
 }
@@ -191,6 +275,8 @@ pub(crate) struct Probe {
     pub clicks: Vec<String>,
     /// Esc was pressed with nothing else owning it.
     pub esc: bool,
+    /// The keyboard was inside the popup when the look was taken.
+    pub focus_in_popup: bool,
 }
 
 /// Hand one look at the page to the tour: what the user did first (a click can also be what
@@ -237,6 +323,7 @@ pub(crate) fn parse_probe(v: &serde_json::Value) -> Option<Probe> {
         gate: tour_gate(flag("reason")?, flag("overlay")?, flag("modal")?),
         clicks: strings("clicks"),
         esc: flag("esc")?,
+        focus_in_popup: flag("focus_in_popup").unwrap_or(false),
     })
 }
 
@@ -282,13 +369,15 @@ impl TourHandle {
         self.prefs.read().guided
     }
 
-    /// THE ONE START. The Help menu, the command palette, the switch and the offer all call this.
-    /// It asks the page what owns the screen, and a reason prompt, an overlay or a dialog refuses
-    /// it, with the reason (like the palette and the stacked view are refused). Otherwise the
-    /// walkthrough starts at step 1, the switch turns on, and the popup takes the keyboard.
-    pub(crate) fn start(self) {
+    /// THE ONE START. The Help menu, the command palette, the switch and the offer all call this,
+    /// saying where the request came from. It asks the page what owns the screen, and a reason
+    /// prompt, the viewer or the stack, a dialog or the palette refuses it, with the reason (like
+    /// the palette and the stacked view are refused); only the palette's own line may start it
+    /// with the palette open. Otherwise the walkthrough starts at step 1, the switch turns on,
+    /// and the popup takes the keyboard.
+    pub(crate) fn start(self, source: StartSource) {
         spawn(async move {
-            let gate = read_gate().await;
+            let gate = read_gate(source).await;
             self.start_with_gate(gate);
         });
     }
@@ -370,23 +459,39 @@ impl TourHandle {
     }
 }
 
-/// Remember one word.
-fn persist(key: &str, value: &str) {
-    let _ = dioxus::document::eval(&write_pref_js(key, value));
+/// Set once the first storage write failure has been logged.
+static WRITE_FAILURE_LOGGED: AtomicBool = AtomicBool::new(false);
+
+/// Whether to log a storage write failure now: the first one only.
+fn first_write_failure(logged: &AtomicBool) -> bool {
+    !logged.swap(true, Ordering::Relaxed)
 }
 
-/// What the page says owns the screen. A page that does not answer is taken to have nothing up.
-async fn read_gate() -> TourGate {
+/// Remember one word. A failed write (storage blocked or full) changes nothing the user sees; it
+/// is logged once.
+fn persist(key: &str, value: &str) {
+    let js = write_pref_js(key, value);
+    let key = key.to_string();
+    spawn(async move {
+        let mut ev = dioxus::document::eval(&js);
+        if let Ok(false) = ev.recv::<bool>().await {
+            if first_write_failure(&WRITE_FAILURE_LOGGED) {
+                eprintln!(
+                    "[camerata-ui] walkthrough: could not save `{key}` to the app's storage; the setting will not be remembered (this is logged once per process)"
+                );
+            }
+        }
+    });
+}
+
+/// What the page says owns the screen, for a start from `source`. A page that does not answer is
+/// taken to have nothing up.
+async fn read_gate(source: StartSource) -> TourGate {
     let mut ev = dioxus::document::eval(&gate_js());
     let Ok(v) = ev.recv::<serde_json::Value>().await else {
         return TourGate::Open;
     };
-    let flag = |k: &str| {
-        v.get(k)
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false)
-    };
-    tour_gate(flag("reason"), flag("overlay"), flag("modal"))
+    parse_gate(&v, source)
 }
 
 // ── The Help menu ────────────────────────────────────────────────────────────────────────
@@ -399,7 +504,7 @@ pub(crate) fn HelpMenuListener() -> Element {
     dioxus::desktop::use_muda_event_handler(move |event| {
         if event.id().0 == camerata_ui::desktop_chrome::HELP_START_WALKTHROUGH_ID {
             if let Some(handle) = handle {
-                handle.start();
+                handle.start(StartSource::Elsewhere);
             }
         }
     });
@@ -429,7 +534,7 @@ pub(crate) fn GuidedSwitch() -> Element {
                     if on {
                         handle.exit(false);
                     } else {
-                        handle.start();
+                        handle.start(StartSource::Elsewhere);
                     }
                 },
                 span { class: "tour-switch-knob" }
@@ -472,7 +577,7 @@ pub(crate) fn WalkthroughOffer(projects: Option<usize>) -> Element {
                 button {
                     class: "btn-run",
                     r#type: "button",
-                    onclick: move |_| handle.start(),
+                    onclick: move |_| handle.start(StartSource::Elsewhere),
                     "Guide me"
                 }
             }
@@ -482,13 +587,17 @@ pub(crate) fn WalkthroughOffer(projects: Option<usize>) -> Element {
 
 // ── The popup ────────────────────────────────────────────────────────────────────────────
 
-/// What the popup looks like for the current look at the page.
+/// What the popup looks like for the latest look at the page.
+///
+/// After a step change the latest look was taken for the previous step's control until the next
+/// look arrives (a fraction of a second). The popup keeps its mode and place through that gap, so
+/// it does not blink out and back, and the new step's text is drawn in it. With no look at all
+/// there is nothing to place it by, so nothing is drawn.
 fn mode_of(tour: &Tour, probe: Option<&Probe>) -> PopupMode {
-    let Some(step) = tour.step() else {
+    if tour.step().is_none() {
         return PopupMode::Hidden;
-    };
-    // A look for another step is stale: wait for the next.
-    let Some(probe) = probe.filter(|p| p.target == step.target) else {
+    }
+    let Some(probe) = probe else {
         return PopupMode::Hidden;
     };
     popup_mode(true, probe.gate, probe.rect.is_some())
@@ -502,7 +611,7 @@ pub(crate) fn WalkthroughHost() -> Element {
         return rsx! {};
     };
     let tour = handle.tour;
-    let mut probe = use_signal(|| Option::<Probe>::None);
+    let probe = use_signal(|| Option::<Probe>::None);
 
     // Read what was remembered.
     use_future(move || async move {
@@ -518,43 +627,70 @@ pub(crate) fn WalkthroughHost() -> Element {
         handle.apply_loaded(prefs);
     });
 
-    // Look at the page while it runs.
-    use_future(move || async move {
-        let mut last_step: Option<&'static str> = None;
-        let mut again_now = false;
-        loop {
-            if !again_now {
-                tokio::time::sleep(Duration::from_millis(PROBE_MS)).await;
-            }
-            again_now = false;
-            let Some(step) = tour.peek().step() else {
-                last_step = None;
+    // Look at the page while it runs. Restarts only when the walkthrough turns on or off (the
+    // memo changes on nothing else), so while it is off nothing wakes at all.
+    let running = use_memo(move || tour.read().is_active());
+    let _looking = use_resource(move || {
+        let on = running();
+        async move {
+            let mut probe = probe;
+            if !on {
+                // Off: switch the page's listeners off and empty them, and clear the last look.
+                let _ = dioxus::document::eval(end_js());
                 if probe.peek().is_some() {
                     probe.set(None);
                 }
-                continue;
-            };
-            let scroll = last_step != Some(step.id);
-            last_step = Some(step.id);
-            let mut ev = dioxus::document::eval(&probe_js(step.target, scroll));
-            let Ok(raw) = ev.recv::<serde_json::Value>().await else {
-                continue;
-            };
-            let Some(seen) = parse_probe(&raw) else {
-                continue;
-            };
-            let before = tour.peek().step().map(|s| s.id);
-            let mut writable = tour;
-            let moved = apply_probe(&mut writable.write(), &seen);
-            if seen.esc && seen.gate.is_open() && tour.peek().is_active() {
-                handle.exit(true);
-                continue;
+                return;
             }
-            if moved || tour.peek().step().map(|s| s.id) != before {
-                // The step changed: look again at once, for the new control.
-                again_now = true;
+            // On: nothing recorded before this moment counts.
+            let _ = dioxus::document::eval(&begin_js());
+            let mut scrolled_for: Option<&'static str> = None;
+            let mut again_now = false;
+            let mut refocus = false;
+            loop {
+                if !again_now {
+                    tokio::time::sleep(Duration::from_millis(PROBE_MS)).await;
+                }
+                again_now = false;
+                let Some(step) = tour.peek().step() else {
+                    return;
+                };
+                let scroll = scrolled_for != Some(step.id);
+                let mut ev = dioxus::document::eval(&probe_js(step.target, scroll));
+                let Ok(raw) = ev.recv::<serde_json::Value>().await else {
+                    continue;
+                };
+                let Some(seen) = parse_probe(&raw) else {
+                    continue;
+                };
+                // The page scrolls only when nothing owns the screen; ask again until it could.
+                if seen.gate.is_open() && seen.rect.is_some() {
+                    scrolled_for = Some(step.id);
+                }
+                // The step change of the last look has been drawn by now: put the keyboard back
+                // in the popup if that change dropped it.
+                if refocus {
+                    refocus = false;
+                    let _ = dioxus::document::eval(&refocus_popup_js());
+                }
+                let before = step.id;
+                let mut writable = tour;
+                let moved = apply_probe(&mut writable.write(), &seen);
+                if seen.esc && seen.gate.is_open() && tour.peek().is_active() {
+                    handle.exit(true);
+                    return;
+                }
+                let changed = moved || tour.peek().step().map(|s| s.id) != Some(before);
+                if changed {
+                    // The step changed: look again at once, for the new control.
+                    again_now = true;
+                    refocus = refocus_after(true, seen.focus_in_popup);
+                }
+                // Only a look that differs from the last one is news.
+                if probe.peek().as_ref() != Some(&seen) {
+                    probe.set(Some(seen));
+                }
             }
-            probe.set(Some(seen));
         }
     });
 
@@ -573,7 +709,7 @@ pub(crate) fn WalkthroughHost() -> Element {
     let (Some(step), Some((n, m))) = (snapshot.step(), snapshot.position()) else {
         return rsx! {};
     };
-    let current = probe.read().clone().filter(|p| p.target == step.target);
+    let current = probe.read().clone();
     let mode = mode();
     // Read out when the step changes or the popup comes back; empty while hidden so it is never
     // read over a dialog.
@@ -676,7 +812,7 @@ pub(crate) fn WalkthroughHost() -> Element {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use camerata_ui_core::walkthrough::target;
+    use camerata_ui_core::walkthrough::{target, STEPS};
     use serde_json::json;
 
     fn sent(overrides: serde_json::Value) -> serde_json::Value {
@@ -712,8 +848,13 @@ mod tests {
         ] {
             assert!(js.contains(field), "{field}");
         }
-        assert!(js.contains("if (true && outside)"), "{js}");
-        assert!(probe_js("x", false).contains("if (false && outside)"));
+        // Scrolls only on request, and never behind a reason prompt, an overlay or a dialog.
+        assert!(
+            js.contains("if (true && outside && !(reason || overlay || modal))"),
+            "{js}"
+        );
+        assert!(probe_js("x", false).contains("if (false && outside"));
+        assert!(js.contains("focus_in_popup:"), "{js}");
     }
 
     #[test]
@@ -725,6 +866,110 @@ mod tests {
         // Installed once, in the capture phase.
         assert!(js.contains("__camerataTourInstalled"));
         assert_eq!(js.matches("}, true);").count(), 2);
+    }
+
+    #[test]
+    fn both_listeners_record_only_while_a_walkthrough_is_running_and_the_clicks_are_capped() {
+        let js = install_script();
+        // The first line of each handler is the switch.
+        assert_eq!(
+            js.matches("if (!window.__camerataTourActive) return;")
+                .count(),
+            2,
+            "{js}"
+        );
+        assert!(js.contains(&format!(
+            "window.__camerataTourClicks.length < {MAX_RECORDED_CLICKS}"
+        )));
+        // Starting empties what was held and switches on; ending empties and switches off.
+        let begin = begin_js();
+        assert!(begin.contains("__camerataTourInstalled"), "installs first");
+        assert!(begin.contains("window.__camerataTourClicks = [];"));
+        assert!(begin.contains("window.__camerataTourEsc = false;"));
+        assert!(begin.ends_with("window.__camerataTourActive = true;"));
+        assert!(end_js().contains("window.__camerataTourActive = false;"));
+        assert!(end_js().contains("window.__camerataTourClicks = [];"));
+        assert!(end_js().contains("window.__camerataTourEsc = false;"));
+    }
+
+    /// Run a script in node, when node is installed. `None` (the test then does not run its
+    /// behavioural half) when it is not; the string checks beside each such test still run.
+    fn node(script: &str) -> Option<serde_json::Value> {
+        let probe = std::process::Command::new("node")
+            .arg("--version")
+            .output()
+            .ok()?;
+        if !probe.status.success() {
+            return None;
+        }
+        let out = std::process::Command::new("node")
+            .arg("-e")
+            .arg(script)
+            .output()
+            .expect("node runs");
+        assert!(
+            out.status.success(),
+            "node failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        Some(serde_json::from_slice(&out.stdout).expect("the script printed json"))
+    }
+
+    #[test]
+    fn an_esc_and_clicks_recorded_between_walkthroughs_have_no_effect_on_the_next_start() {
+        let script = format!(
+            r#"var handlers = {{}};
+global.window = global;
+global.document = {{
+  addEventListener: function (t, f) {{ handlers[t] = f; }},
+  querySelector: function () {{ return null; }},
+  activeElement: null
+}};
+var click = function (id) {{
+  handlers.click({{ target: {{ closest: function () {{ return {{ getAttribute: function () {{ return id; }} }}; }} }} }});
+}};
+var esc = function () {{ handlers.keydown({{ key: "Escape" }}); }};
+var held = function () {{ return {{ clicks: window.__camerataTourClicks.length, esc: window.__camerataTourEsc }}; }};
+var out = {{}};
+
+// The page has just loaded: the listeners are installed (by a first start), then it ends.
+{begin}
+{end}
+// A stray click and Esc between walkthroughs record nothing.
+click("repo-add"); click("settings"); esc();
+out.idle = held();
+// And the next start begins empty, whatever happened before.
+{begin}
+out.after_start = held();
+// While running they record, and the clicks stop at the cap.
+click("settings"); esc();
+out.running = held();
+for (var i = 0; i < 200; i++) click("repo-add");
+out.capped = window.__camerataTourClicks.length;
+// Ending throws away what was held.
+{end}
+out.after_end = held();
+console.log(JSON.stringify(out));"#,
+            begin = begin_js(),
+            end = end_js()
+        );
+        let Some(out) = node(&script) else {
+            eprintln!("node is not installed: the behavioural half of this test was skipped");
+            return;
+        };
+        assert_eq!(out["idle"], json!({ "clicks": 0, "esc": false }), "{out}");
+        assert_eq!(
+            out["after_start"],
+            json!({ "clicks": 0, "esc": false }),
+            "{out}"
+        );
+        assert_eq!(out["running"], json!({ "clicks": 1, "esc": true }), "{out}");
+        assert_eq!(out["capped"], json!(MAX_RECORDED_CLICKS), "{out}");
+        assert_eq!(
+            out["after_end"],
+            json!({ "clicks": 0, "esc": false }),
+            "{out}"
+        );
     }
 
     #[test]
@@ -750,17 +995,34 @@ mod tests {
     }
 
     #[test]
-    fn the_start_gate_does_not_count_the_palette_that_is_running_the_line() {
+    fn the_start_gate_reports_the_palette_apart_from_the_viewer_and_the_stack() {
         let js = gate_js();
-        // The overlay flag is the viewer and the stack only; the palette appears in the dialog
-        // flag solely as an exclusion.
         assert!(
             js.contains("overlay: !!document.querySelector(\".cv-overlay\")"),
             "{js}"
         );
+        assert!(
+            js.contains("palette: !!document.querySelector(\".pal-overlay\")"),
+            "{js}"
+        );
+        // A dialog is anything else: the palette is excluded from that flag.
         assert!(js.contains(":not(.pal-overlay)"), "{js}");
-        assert!(js.contains(".cv-overlay"));
         assert!(js.contains(REASON_SELECTOR));
+    }
+
+    #[test]
+    fn only_the_palettes_own_line_starts_the_walkthrough_with_the_palette_open() {
+        let open = json!({ "reason": false, "overlay": false, "palette": true, "modal": false });
+        assert_eq!(parse_gate(&open, StartSource::Elsewhere), TourGate::Overlay);
+        assert_eq!(parse_gate(&open, StartSource::Palette), TourGate::Open);
+        // The viewer and the stack refuse every source.
+        let viewer = json!({ "overlay": true, "palette": true });
+        assert_eq!(parse_gate(&viewer, StartSource::Palette), TourGate::Overlay);
+        // A page that says nothing is taken to have nothing up.
+        assert_eq!(
+            parse_gate(&json!({}), StartSource::Elsewhere),
+            TourGate::Open
+        );
     }
 
     #[test]
@@ -771,6 +1033,16 @@ mod tests {
         assert!(w.contains("\"camerata.tour.guided\""));
         assert!(w.contains("\"true\""));
         assert!(w.contains("try {"), "storage may be unavailable");
+        // It says whether the write was kept, so a failure can be logged.
+        assert!(w.contains("dioxus.send(true)") && w.contains("dioxus.send(false)"));
+    }
+
+    #[test]
+    fn a_storage_write_failure_is_logged_once() {
+        let logged = AtomicBool::new(false);
+        assert!(first_write_failure(&logged), "the first is logged");
+        assert!(!first_write_failure(&logged), "the second is not");
+        assert!(!first_write_failure(&logged));
     }
 
     #[test]
@@ -780,12 +1052,75 @@ mod tests {
     }
 
     #[test]
-    fn the_keyboard_goes_back_to_the_control_or_the_first_thing_inside_it() {
+    fn the_keyboard_goes_back_to_the_control_and_never_to_something_inside_it() {
         let js = focus_control_js(target::REPO_ADD);
         assert!(js.contains("\"repo-add\""));
-        assert!(js.contains("el.matches(focusable) ? el : el.querySelector(focusable)"));
-        assert!(js.contains("to.focus()"));
+        // Nothing is looked up inside the control, so nothing inside it can be focused.
+        assert!(!js.contains("querySelector(focusable"), "{js}");
+        assert_eq!(js.matches("querySelector").count(), 1, "{js}");
+        assert!(js.contains("el.focus()"));
         assert!(focus_popup_js().contains(POPUP_ID));
+    }
+
+    #[test]
+    fn a_step_change_that_dropped_the_keyboard_out_of_the_popup_puts_it_back() {
+        assert!(refocus_after(true, true));
+        assert!(!refocus_after(true, false), "the keyboard was elsewhere");
+        assert!(!refocus_after(false, true), "the step did not change");
+        let js = refocus_popup_js();
+        assert!(js.contains(POPUP_ID));
+        assert!(js.contains("!p.contains(document.activeElement)"));
+        assert!(js.contains(".tour-next"));
+    }
+
+    #[test]
+    fn closing_on_any_step_leaves_the_keyboard_on_the_control_never_on_a_button_inside_it() {
+        // For every step's target: a block that holds a button (like the review queue's toolbar,
+        // whose first button is Confirm). The script must focus the block, and looking inside it
+        // throws. A control that takes focus itself gets it.
+        let mut cases = String::new();
+        for step in &STEPS {
+            cases.push_str(&format!(
+                r#"(function () {{
+  var focused = null;
+  var make = function (takesFocus) {{
+    return {{
+      matches: function () {{ return takesFocus; }},
+      hasAttribute: function () {{ return false; }},
+      setAttribute: function (k, v) {{ this.attr = k + "=" + v; }},
+      focus: function () {{ focused = this; }},
+      querySelector: function () {{ throw new Error("looked inside"); }}
+    }};
+  }};
+  var block = make(false);
+  var control = make(true);
+  var current = block;
+  global.document = {{ querySelector: function () {{ return current; }} }};
+  {script}
+  var onBlock = focused === block && block.attr === "tabindex=-1";
+  focused = null; current = control;
+  {script}
+  results.push({{ target: {target:?}, onBlock: onBlock, onControl: focused === control && !control.attr }});
+}})();
+"#,
+                script = focus_control_js(step.target),
+                target = step.target
+            ));
+        }
+        let script = format!(
+            "var results = [];
+{cases}console.log(JSON.stringify(results));"
+        );
+        let Some(out) = node(&script) else {
+            eprintln!("node is not installed: the behavioural half of this test was skipped");
+            return;
+        };
+        let rows = out.as_array().expect("one row per step");
+        assert_eq!(rows.len(), STEPS.len());
+        for row in rows {
+            assert_eq!(row["onBlock"], json!(true), "{row}");
+            assert_eq!(row["onControl"], json!(true), "{row}");
+        }
     }
 
     // ── what the page said ───────────────────────────────────────────────────────────────
@@ -863,13 +1198,34 @@ mod tests {
     }
 
     #[test]
-    fn nothing_is_drawn_until_the_page_has_been_looked_at_for_this_step() {
+    fn nothing_is_drawn_until_the_page_has_been_looked_at() {
         let tour = tour_on_step("backend");
         assert_eq!(mode_of(&tour, None), PopupMode::Hidden);
-        let stale = look(target::REPO_ADD, true, json!({}));
-        assert_eq!(mode_of(&tour, Some(&stale)), PopupMode::Hidden);
         let fresh = look(target::SETTINGS, true, json!({}));
         assert_eq!(mode_of(&tour, Some(&fresh)), PopupMode::Pointing);
+    }
+
+    #[test]
+    fn a_step_change_keeps_the_popup_in_place_until_the_next_look_arrives() {
+        // A harness probe sequence: look, click that advances the step, the (stale) look still
+        // held, the fresh look for the new control.
+        let mut tour = tour_on_step("backend");
+        let first = look(target::SETTINGS, true, json!({}));
+        assert_eq!(mode_of(&tour, Some(&first)), PopupMode::Pointing);
+
+        let mut clicked = first.clone();
+        clicked.clicks = vec![target::SETTINGS.to_string()];
+        assert!(apply_probe(&mut tour, &clicked));
+        assert_eq!(tour.step().map(|s| s.id), Some("rules"));
+        // The look held is still the previous step's: the popup does not blink out.
+        assert_eq!(mode_of(&tour, Some(&first)), PopupMode::Pointing);
+
+        // The fresh look says the new control is not on screen: directions, in the same popup.
+        let fresh = look(target::RULES, false, json!({}));
+        assert_eq!(mode_of(&tour, Some(&fresh)), PopupMode::Directions);
+        // And a dialog that opened in the gap hides it, as ever.
+        let gated = look(target::RULES, true, json!({ "modal": true }));
+        assert_eq!(mode_of(&tour, Some(&gated)), PopupMode::Hidden);
     }
 
     #[test]
@@ -1019,6 +1375,35 @@ mod tests {
         assert!(html.contains("active=false"), "{html}");
         assert!(html.contains("guided=false"), "{html}");
         assert!(html.contains("Finish or cancel the reason first"), "{html}");
+    }
+
+    #[test]
+    fn the_help_menu_cannot_start_it_under_an_open_palette_but_the_palettes_own_line_can() {
+        fn from_help() -> Element {
+            let handle = provide_tour();
+            let open = json!({ "palette": true });
+            let started =
+                use_hook(|| handle.start_with_gate(parse_gate(&open, StartSource::Elsewhere)));
+            let toasts = handle.toasts.read();
+            let said = toasts
+                .iter()
+                .map(|t| t.message.clone())
+                .collect::<Vec<_>>()
+                .join("|");
+            rsx! { p { "started={started} active={handle.is_active()} said={said}" } }
+        }
+        fn from_palette() -> Element {
+            let handle = provide_tour();
+            let open = json!({ "palette": true });
+            let started =
+                use_hook(|| handle.start_with_gate(parse_gate(&open, StartSource::Palette)));
+            rsx! { p { "started={started} active={handle.is_active()}" } }
+        }
+        let html = render(from_help);
+        assert!(html.contains("started=false active=false"), "{html}");
+        assert!(html.contains("command palette first"), "{html}");
+        let html = render(from_palette);
+        assert!(html.contains("started=true active=true"), "{html}");
     }
 
     #[test]

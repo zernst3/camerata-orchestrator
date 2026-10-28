@@ -70,7 +70,8 @@ pub enum Advance {
     Next,
     /// The user clicked the step's own control.
     Click,
-    /// This control appeared on screen (it was not there a moment ago): the user did the thing.
+    /// This control is on screen: it appeared (it was not there a moment ago), or it was already
+    /// there at the first look after the tour started. Either way the user has done the thing.
     Appears(&'static str),
 }
 
@@ -270,8 +271,8 @@ pub struct Tour {
     active: bool,
     index: usize,
     /// The controls on screen at the last look, so that "appeared" means "was not there before".
-    /// `None` until the first look after the tour started (what is already on screen is not an
-    /// appearance).
+    /// `None` until the first look after the tour started; on that look a control that is already
+    /// there satisfies an `Advance::Appears` step (see [`Tour::observe`]).
     seen: Option<BTreeSet<String>>,
 }
 
@@ -358,18 +359,29 @@ impl Tour {
     }
 
     /// A look at the screen: `present` is every `data-tour` id on it now. Advances when the
-    /// current step waits for a control that was not on screen at the last look and is now.
+    /// current step waits for a control (`Advance::Appears`) and that control is satisfied:
+    ///
+    /// - it was not on screen at the last look and is now (the user did the thing), or
+    /// - this is the FIRST look since the tour started and it is already there (the tour was
+    ///   started with the thing already done, for example from inside an open project, so the
+    ///   step has nothing left to wait for).
+    ///
+    /// Only that first look counts a control that is already there. After it, a control that
+    /// stays on screen is not an appearance, so going Back to such a step does not skip it again.
     /// Answers whether the tour moved on.
     pub fn observe(&mut self, present: &BTreeSet<String>) -> bool {
         let Some(step) = self.step() else {
             return false;
         };
-        let appeared = match (&self.seen, step.advance) {
-            (Some(before), Advance::Appears(id)) => present.contains(id) && !before.contains(id),
+        let satisfied = match step.advance {
+            Advance::Appears(id) => match &self.seen {
+                Some(before) => present.contains(id) && !before.contains(id),
+                None => present.contains(id),
+            },
             _ => false,
         };
         self.seen = Some(present.clone());
-        if appeared {
+        if satisfied {
             return self.go_next() != Progress::Idle;
         }
         false
@@ -426,6 +438,32 @@ impl TourGate {
             Self::Modal => Some("Close the open dialog first, then start the walkthrough."),
         }
     }
+}
+
+/// Where a request to start the walkthrough came from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StartSource {
+    /// The command palette's own "Start walkthrough" line. The palette is open (it is running the
+    /// line) and closes itself, so its overlay is not a reason to refuse.
+    Palette,
+    /// Anything else: the Help menu, the switch, the first-launch offer. An open palette is an
+    /// overlay like any other, and starting under it would put the popup behind a layer that
+    /// still owns the keyboard.
+    Elsewhere,
+}
+
+/// The gate for STARTING the walkthrough, from what the page holds. `viewer_or_stack` is the
+/// code viewer or the stacked view; `palette` is the command palette. Only the palette's own line
+/// may start it with the palette open.
+pub fn start_gate(
+    reason_prompt: bool,
+    viewer_or_stack: bool,
+    palette: bool,
+    modal: bool,
+    source: StartSource,
+) -> TourGate {
+    let palette_blocks = palette && source != StartSource::Palette;
+    tour_gate(reason_prompt, viewer_or_stack || palette_blocks, modal)
 }
 
 /// What the popup does right now.
@@ -733,7 +771,7 @@ mod tests {
     fn walking_every_step_in_order_fires_each_trigger_and_finishes() {
         let mut tour = Tour::new();
         tour.start();
-        // The first look (the app as it stands) is not an appearance.
+        // The first look: no project is open yet, so nothing there to satisfy step 1.
         let mut seen = BTreeSet::new();
         tour.observe(&seen);
         for (i, step) in STEPS.iter().enumerate() {
@@ -782,33 +820,57 @@ mod tests {
         assert_eq!(tour.step(), Some(step));
     }
 
-    #[test]
-    fn a_control_already_on_screen_is_not_an_appearance() {
-        let waiting = STEPS
+    fn waiting_control() -> &'static str {
+        STEPS
             .iter()
             .find_map(|s| match s.advance {
                 Advance::Appears(id) => Some(id),
                 _ => None,
             })
-            .expect("an appears step exists");
+            .expect("an appears step exists")
+    }
+
+    #[test]
+    fn a_tour_started_with_the_thing_already_done_skips_that_step_on_the_first_look() {
+        let waiting = waiting_control();
         let mut tour = Tour::new();
         tour.start();
-        while tour
-            .step()
-            .is_some_and(|s| !matches!(s.advance, Advance::Appears(_)))
-        {
-            tour.go_next();
-        }
-        let step = tour.step().expect("on the appears step");
-        // It is on screen from the first look, and stays there.
+        assert_eq!(tour.position(), Some((1, STEPS.len())));
+        // Started inside an open project: the control is there from the first look.
+        assert!(tour.observe(&ids(&[waiting])));
+        assert_eq!(tour.position(), Some((2, STEPS.len())));
+    }
+
+    #[test]
+    fn only_the_first_look_counts_a_control_that_is_already_there() {
+        let waiting = waiting_control();
         let here = ids(&[waiting]);
+        let mut tour = Tour::new();
+        tour.start();
+        // The first look finds nothing; the control then stays on screen: not an appearance.
+        assert!(!tour.observe(&ids(&[])));
+        assert!(!tour.observe(&ids(&[])));
+        // It comes up: that is the user doing the thing.
+        assert!(tour.observe(&here));
+        // Going Back to the step does not skip it again while the control just sits there.
+        assert_eq!(tour.back(), Progress::Moved);
         assert!(!tour.observe(&here));
         assert!(!tour.observe(&here));
-        assert_eq!(tour.step(), Some(step));
-        // It goes away and comes back: that one is an appearance.
+        assert_eq!(tour.position(), Some((1, STEPS.len())));
+        // It goes away and comes back: an appearance.
         assert!(!tour.observe(&ids(&[])));
         assert!(tour.observe(&here));
-        assert_ne!(tour.step(), Some(step));
+    }
+
+    #[test]
+    fn a_restart_counts_its_first_look_again() {
+        let waiting = waiting_control();
+        let mut tour = Tour::new();
+        tour.start();
+        tour.observe(&ids(&[]));
+        tour.exit();
+        tour.start();
+        assert!(tour.observe(&ids(&[waiting])));
     }
 
     #[test]
@@ -889,6 +951,40 @@ mod tests {
             PopupMode::Directions
         );
         assert_eq!(popup_mode(false, TourGate::Open, true), PopupMode::Hidden);
+    }
+
+    #[test]
+    fn only_the_palettes_own_line_may_start_it_with_the_palette_open() {
+        use StartSource::{Elsewhere, Palette};
+        assert_eq!(
+            start_gate(false, false, true, false, Palette),
+            TourGate::Open
+        );
+        for gate in [
+            start_gate(false, false, true, false, Elsewhere),
+            start_gate(false, true, true, false, Palette),
+        ] {
+            assert_eq!(gate, TourGate::Overlay);
+        }
+        // Everything else is refused for every source, in the usual order.
+        for source in [Palette, Elsewhere] {
+            assert_eq!(
+                start_gate(true, true, true, true, source),
+                TourGate::ReasonPrompt
+            );
+            assert_eq!(
+                start_gate(false, true, false, true, source),
+                TourGate::Overlay
+            );
+            assert_eq!(
+                start_gate(false, false, false, true, source),
+                TourGate::Modal
+            );
+            assert_eq!(
+                start_gate(false, false, false, false, source),
+                TourGate::Open
+            );
+        }
     }
 
     // ── placement ────────────────────────────────────────────────────────────────────────

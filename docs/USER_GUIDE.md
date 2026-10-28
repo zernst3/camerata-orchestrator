@@ -202,7 +202,9 @@ never clicks, types or decides anything for you.
 
 **How it behaves**
 - Most steps move on by themselves when you do the thing (open a project, press the audit button).
-  **Next** skips ahead, and is how the steps that only explain are passed. **Back** goes back.
+  If you start it with the thing already done (from inside an open project, step 1 is already
+  satisfied), it skips that step. **Next** skips ahead, and is how the steps that only explain are
+  passed. **Back** goes back.
 - If the control is not on screen (you are on another page, or the inspection has not run yet), the
   popup says how to get there instead of pointing at nothing.
 - **Esc** exits, as does **Exit** (and **Done** on the last step); exiting also turns the switch off.
@@ -210,9 +212,14 @@ never clicks, types or decides anything for you.
   is open, or while you are typing in a field.
 - It gets out of the way: while a reason prompt, the code viewer, the stacked view, the command
   palette or any dialog is open, the popup is hidden, and it comes back when they close. Starting
-  the walkthrough is refused (with a note saying why) while any of those is open.
+  the walkthrough is refused (with a note saying why) while any of those is open. Only the
+  palette's own **Start walkthrough** line can start it with the palette open (it closes the
+  palette itself); the Help menu cannot.
 - Keyboard and screen readers: starting it moves the keyboard into the popup, each step is
-  announced, and closing it puts the keyboard back on the control it was pointing at.
+  announced, and closing it puts the keyboard back on the control it was pointing at (on a bar or
+  a block, the block itself, never on a button inside it, so a stray Enter cannot decide a
+  finding). The popup only listens for clicks and Esc while it is running, so a key pressed
+  between walkthroughs does nothing to the next one.
 
 **What it covers (twelve steps).** Create or open a project; add the client repository; the client
 name; the model backend and where the key is saved; the stack rules; the line count and cost

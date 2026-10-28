@@ -24,7 +24,9 @@ use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use super::scan::{AiReviewBlockedBanner, OnboardView, ScanJobFailedBanner, ScanResults};
-use super::{CockpitNav, CockpitScreen, CockpitView, ProjectsHome, ScanReportView};
+use super::{
+    CockpitNav, CockpitScreen, CockpitView, HomeNav, HomeView, ProjectsHome, ScanReportView,
+};
 use crate::walkthrough::{apply_probe, Probe};
 
 /// Every `data-tour` id in some rendered html.
@@ -227,6 +229,7 @@ fn probe(ids: &[&str], clicks: &[&str]) -> Probe {
         gate: TourGate::Open,
         clicks: clicks.iter().map(|s| (*s).to_string()).collect(),
         esc: false,
+        focus_in_popup: false,
     }
 }
 
@@ -307,4 +310,17 @@ fn the_offer_is_on_the_projects_home_once_the_settings_are_read_and_there_are_no
     }
     let html = render(VirtualDom::new(screen));
     assert!(!html.contains("Want a guided first inspection?"), "{html}");
+}
+
+/// The Settings tab on the projects home (before any project is open) carries no id: the backend
+/// step is about the one inside a project, and a click on the home one must not advance it.
+#[test]
+fn the_settings_tab_on_the_projects_home_carries_no_tour_id() {
+    fn home_nav() -> Element {
+        let home_view = use_signal(|| HomeView::Projects);
+        rsx! { HomeNav { home_view } }
+    }
+    let html = render(VirtualDom::new(home_nav));
+    assert!(html.contains("Settings"), "{html}");
+    assert!(tour_ids(&html).is_empty(), "{html}");
 }
