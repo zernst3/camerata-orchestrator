@@ -167,7 +167,6 @@ a credential value; refer to it by its variable name and line.";
 /// architectural checkers keep reading the RAW set (they must still FIND the secret); only what
 /// leaves the machine is redacted. Honors the `model_prompt_redaction` flag (default ON), which is
 /// read from the environment only, never from a config file in a client repo.
-#[allow(dead_code)] // wired into the model entry points in the next commit
 pub(crate) fn files_for_model(files: &[(String, String)]) -> Vec<(String, String)> {
     files_for_model_with(
         files,
@@ -178,7 +177,6 @@ pub(crate) fn files_for_model(files: &[(String, String)]) -> Vec<(String, String
 /// [`files_for_model`] with the flag decided by the caller (the pure, testable core). When
 /// `enabled` is false the raw set is returned and a warning is logged: raw client code is
 /// leaving the machine.
-#[allow(dead_code)] // wired into the model entry points in the next commit
 pub(crate) fn files_for_model_with(
     files: &[(String, String)],
     enabled: bool,

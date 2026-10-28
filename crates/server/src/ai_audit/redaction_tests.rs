@@ -304,6 +304,38 @@ async fn fix_specific_prompt_carries_no_secret_value_and_forbids_repeating_one()
     );
 }
 
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn fix_specific_entry_point_redacts_raw_files_before_the_model_reads_them() {
+    // The caller hands over the RAW scanned files, as `onboard` does. The entry point itself
+    // must route them through `files_for_model` before building the context window.
+    let p = secret();
+    let mut finding = raw_finding(&p, 3);
+    finding.fix_specific = None;
+    crate::onboard::redact::redact_finding(&mut finding);
+    let raw_files = vec![(".env".to_string(), format!("# top\n\n{}\n", p.text))];
+    let stub = Stub::new(r#"{"fixes":[]}"#);
+    let _ = generate_fix_specifics(
+        &stub,
+        "acme/app",
+        vec![finding],
+        &raw_files,
+        None,
+        None,
+        None,
+    )
+    .await;
+    let sent = stub.everything_sent();
+    assert!(
+        !sent.contains(&p.value),
+        "generate_fix_specifics sent the raw file to the model"
+    );
+    assert!(
+        sent.contains("sb_secret_…"),
+        "the redacted form is what the model sees"
+    );
+}
+
 // ---- model-prompt redaction (section 5): every builder, end to end ------------------------
 
 /// A repo whose `.env` holds the planted secret on line 3 and whose source quotes it again.
