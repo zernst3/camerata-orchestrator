@@ -3448,13 +3448,18 @@ and its `detect`, `eol` and `nvd` modules). The dependency audit cannot see the 
 packages run on, so a second deterministic pass reads the versions a repository declares: Dockerfile
 `FROM` lines, `.nvmrc` and `.node-version`, `engines.node`, `.python-version`, `runtime.txt`,
 `requires-python`, `require.php`, `.ruby-version` and the Gemfile `ruby` line, `go.mod`,
-`global.json` and `TargetFramework`, `.tool-versions`, and framework versions from
+`global.json` and `TargetFramework`, `.tool-versions` and framework versions from
 lockfiles (Next.js, React, Express, Django, Rails, Laravel, Spring Boot). Only the image the final
 stage of a Dockerfile is built on is a declaration (an earlier build stage is `Version::Excluded` and
-listed under Coverage), and a lockfile framework counts only when the manifest in the same folder
-lists it as a direct, non-dev dependency (`package.json` `dependencies`, `composer.json` `require`, a
-Gemfile `gem` outside development and test groups, `pyproject.toml` or a Pipfile, a Gradle build
-file); anything else is `Excluded` too. Folders named `test`, `tests`, `__tests__`, `examples`,
+listed under Coverage, and so is a final image that is itself a build argument such as
+`FROM ${BASE}`, because its product cannot be named), and a lockfile framework counts only when the
+manifest in the same folder lists it as a direct, non-dev dependency (`package.json`
+`dependencies`, read from the workspace `package.json` files too when the root lists `workspaces`
+or a `pnpm-workspace.yaml` does; `composer.json` `require`; a Gemfile `gem` outside development and
+test groups; `pyproject.toml` or a Pipfile; a Gradle build file with an `implementation`, `api`,
+`compile` or `runtimeOnly` dependency on `org.springframework.boot`, or that plugin applied, comments
+and test configurations ignored); anything else is `Excluded` too. A JavaScript framework listed
+only under `optionalDependencies` or only under `peerDependencies` is excluded with that reason. Folders named `test`, `tests`, `__tests__`, `examples`,
 `samples`, `docs`, `e2e`, `fixtures` and `testdata` are not read. Rust is not read at all: Rust
 supports only its newest release, so every pinned toolchain would be a finding. Each declaration records
 its file and line. A declaration is exact (three or more numeric parts), a release line (`18`,

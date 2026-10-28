@@ -2016,3 +2016,219 @@ fn spring_boot_does_not_count_from_a_test_configuration_a_comment_or_a_string() 
     let mixed = "dependencies {\n    testImplementation 'org.springframework.boot:spring-boot-starter-test'\n    // old\n    implementation 'org.springframework.boot:spring-boot-starter'\n}\n";
     assert!(!boot_is_excluded("build.gradle", mixed));
 }
+
+/// The reason each JavaScript framework declaration read from a folder was left out, or `None`
+/// if it counts.
+fn framework_reasons(dir: &tempfile::TempDir) -> Vec<(Product, Option<String>)> {
+    detect::detect_declarations(dir.path())
+        .declarations
+        .into_iter()
+        .filter(|d| matches!(d.product, Product::Next | Product::React | Product::Express))
+        .map(|d| (d.product, excluded_reason(&d)))
+        .collect()
+}
+
+const LOCK_REACT: &str = "{\n  \"packages\": {\n    \"node_modules/react\": {\n      \"version\": \"18.2.0\"\n    }\n  }\n}\n";
+const NOT_DIRECT_TEXT: &str = "it is not a direct, non-dev dependency of the project";
+
+#[test]
+fn a_framework_in_dependencies_counts_whatever_else_lists_it() {
+    for package in [
+        "{\"dependencies\": {\"react\": \"^18\"}}",
+        "{\"dependencies\": {\"react\": \"^18\"}, \"devDependencies\": {\"react\": \"^18\"}}",
+        "{\"dependencies\": {\"react\": \"^18\"}, \"peerDependencies\": {\"react\": \">=17\"}}",
+        "{\"dependencies\": {\"react\": \"^18\"}, \"optionalDependencies\": {\"react\": \"^18\"}}",
+    ] {
+        let dir = repo(&[("package.json", package), ("package-lock.json", LOCK_REACT)]);
+        assert_eq!(
+            framework_reasons(&dir),
+            vec![(Product::React, None)],
+            "{package}"
+        );
+    }
+}
+
+#[test]
+fn a_peer_only_or_optional_only_framework_is_left_out_for_its_own_true_reason() {
+    let peer = repo(&[
+        (
+            "package.json",
+            "{\"peerDependencies\": {\"react\": \">=17\"}, \"devDependencies\": {\"react\": \"^18\"}}",
+        ),
+        ("package-lock.json", LOCK_REACT),
+    ]);
+    let got = framework_reasons(&peer);
+    assert_eq!(got.len(), 1, "{got:?}");
+    assert!(
+        got[0]
+            .1
+            .as_deref()
+            .is_some_and(|w| w.contains("a peer dependency")),
+        "{got:?}"
+    );
+    let optional = repo(&[
+        (
+            "package.json",
+            "{\"optionalDependencies\": {\"react\": \"^18\"}}",
+        ),
+        ("package-lock.json", LOCK_REACT),
+    ]);
+    let got = framework_reasons(&optional);
+    assert_eq!(got.len(), 1, "{got:?}");
+    assert!(
+        got[0]
+            .1
+            .as_deref()
+            .is_some_and(|w| w.contains("an optional dependency")),
+        "{got:?}"
+    );
+    // A dev-only framework keeps the general reason.
+    let dev = repo(&[
+        (
+            "package.json",
+            "{\"devDependencies\": {\"react\": \"^18\"}}",
+        ),
+        ("package-lock.json", LOCK_REACT),
+    ]);
+    assert_eq!(
+        framework_reasons(&dev),
+        vec![(Product::React, Some(NOT_DIRECT_TEXT.to_string()))]
+    );
+}
+
+#[tokio::test]
+async fn a_peer_only_framework_is_listed_under_coverage_with_its_reason() {
+    let dir = repo(&[
+        (
+            "package.json",
+            "{\"peerDependencies\": {\"react\": \">=17\"}}",
+        ),
+        ("package-lock.json", LOCK_REACT),
+    ]);
+    let audit = run(&dir, &Fixture::online(), None).await;
+    let text = notes_text(&audit);
+    assert!(text.contains("a peer dependency"), "{text}");
+    assert!(text.contains("package-lock.json"), "{text}");
+}
+
+#[test]
+fn a_workspace_package_json_is_read_for_the_direct_gate() {
+    let web = (
+        "packages/web/package.json",
+        "{\"dependencies\": {\"react\": \"^18\"}}",
+    );
+    // The root names the workspaces as an array.
+    let array = repo(&[
+        (
+            "package.json",
+            "{\"private\": true, \"workspaces\": [\"packages/*\"]}",
+        ),
+        web,
+        ("package-lock.json", LOCK_REACT),
+    ]);
+    assert_eq!(framework_reasons(&array), vec![(Product::React, None)]);
+    // Or as an object with a packages list.
+    let object = repo(&[
+        (
+            "package.json",
+            "{\"workspaces\": {\"packages\": [\"packages/web\"]}}",
+        ),
+        web,
+        ("package-lock.json", LOCK_REACT),
+    ]);
+    assert_eq!(framework_reasons(&object), vec![(Product::React, None)]);
+    // pnpm keeps the list in its own file, with exclusions.
+    let pnpm_lock = "packages:\n  /react@18.2.0:\n    resolution: {}\n";
+    let pnpm = repo(&[
+        ("package.json", "{\"private\": true}"),
+        (
+            "pnpm-workspace.yaml",
+            "packages:\n  - 'apps/**'\n  - '!apps/legacy'\n",
+        ),
+        (
+            "apps/site/package.json",
+            "{\"dependencies\": {\"react\": \"^18\"}}",
+        ),
+        ("pnpm-lock.yaml", pnpm_lock),
+    ]);
+    assert_eq!(framework_reasons(&pnpm), vec![(Product::React, None)]);
+    let negated = repo(&[
+        ("package.json", "{\"private\": true}"),
+        (
+            "pnpm-workspace.yaml",
+            "packages:\n  - 'apps/*'\n  - '!apps/legacy'\n",
+        ),
+        (
+            "apps/legacy/package.json",
+            "{\"dependencies\": {\"react\": \"^18\"}}",
+        ),
+        ("pnpm-lock.yaml", pnpm_lock),
+    ]);
+    assert_eq!(
+        framework_reasons(&negated),
+        vec![(Product::React, Some(NOT_DIRECT_TEXT.to_string()))]
+    );
+}
+
+#[test]
+fn a_workspace_does_not_make_a_dev_only_or_unlisted_package_direct() {
+    let dev_only = repo(&[
+        ("package.json", "{\"workspaces\": [\"packages/*\"]}"),
+        (
+            "packages/web/package.json",
+            "{\"devDependencies\": {\"react\": \"^18\"}}",
+        ),
+        ("package-lock.json", LOCK_REACT),
+    ]);
+    assert_eq!(
+        framework_reasons(&dev_only),
+        vec![(Product::React, Some(NOT_DIRECT_TEXT.to_string()))]
+    );
+    // A package outside the listed workspaces is not read.
+    let outside = repo(&[
+        ("package.json", "{\"workspaces\": [\"packages/*\"]}"),
+        (
+            "tools/web/package.json",
+            "{\"dependencies\": {\"react\": \"^18\"}}",
+        ),
+        ("package-lock.json", LOCK_REACT),
+    ]);
+    assert_eq!(
+        framework_reasons(&outside),
+        vec![(Product::React, Some(NOT_DIRECT_TEXT.to_string()))]
+    );
+    // Without a workspaces list, a nested package.json is not consulted either.
+    let none = repo(&[
+        ("package.json", "{}"),
+        (
+            "packages/web/package.json",
+            "{\"dependencies\": {\"react\": \"^18\"}}",
+        ),
+        ("package-lock.json", LOCK_REACT),
+    ]);
+    assert_eq!(
+        framework_reasons(&none),
+        vec![(Product::React, Some(NOT_DIRECT_TEXT.to_string()))]
+    );
+    // The best answer across the workspaces wins: optional beats peer.
+    let mixed = repo(&[
+        ("package.json", "{\"workspaces\": [\"packages/*\"]}"),
+        (
+            "packages/a/package.json",
+            "{\"peerDependencies\": {\"react\": \">=17\"}}",
+        ),
+        (
+            "packages/b/package.json",
+            "{\"optionalDependencies\": {\"react\": \"^18\"}}",
+        ),
+        ("package-lock.json", LOCK_REACT),
+    ]);
+    let got = framework_reasons(&mixed);
+    assert!(
+        got[0]
+            .1
+            .as_deref()
+            .is_some_and(|w| w.contains("an optional dependency")),
+        "{got:?}"
+    );
+}

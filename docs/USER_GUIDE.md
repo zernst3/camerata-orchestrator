@@ -1913,9 +1913,12 @@ known vulnerability is rated by its highest CVSS score, and raised to critical w
 vulnerability as known exploited. A version that is a range or a moving tag (`>=18`, `node:latest`)
 is never guessed: the Coverage section lists it as not checked, and a runtime declared without a
 patch version is checked for end of life but not for vulnerabilities. In a Dockerfile only the image
-the final stage is built on counts, because an earlier build stage never ships. A framework counts
-only when your project file beside the lockfile lists it as a direct, non-dev dependency; one that
-is only pulled in by something else, or only used in development, is listed as not checked. If either source cannot be
+the final stage is built on counts, because an earlier build stage never ships; a final image that is
+itself a build argument (`FROM ${BASE}`) cannot be named, so it is listed as not checked. A framework counts
+only when your project file beside the lockfile lists it as a direct, non-dev dependency (in a
+workspace project, the `package.json` of a listed workspace package counts); one that
+is only pulled in by something else, only used in development, or only an optional or peer
+dependency, is listed as not checked. If either source cannot be
 reached, Coverage says "Runtime end-of-life data unavailable in this scan" or "Runtime vulnerability
 data unavailable in this scan", and the report makes no claim about what was not checked. What a
 repository declares is not proof of what runs in production.
