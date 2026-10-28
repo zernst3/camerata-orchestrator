@@ -88,7 +88,7 @@ fn findings_json_and_the_csv_name_the_inspection_a_row_was_carried_from() {
     let carried = rows.iter().find(|r| r["path"] == "src/old.rs").unwrap();
     assert_eq!(carried["carried_from"], "0123456789abcdef");
     let fresh = rows.iter().find(|r| r["path"] == "src/new.rs").unwrap();
-    assert!(fresh.get("carried_from").is_none(), "{fresh}");
+    assert_eq!(fresh["carried_from"], "", "{fresh}");
 
     let csvs = crate::xlsx_export::build_csv_exports(&report, &HashMap::new(), None, &empty_opts())
         .unwrap();

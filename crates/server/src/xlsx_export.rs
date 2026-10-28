@@ -199,12 +199,11 @@ pub struct FindingRow {
     kind: camerata_api_types::audit::KindOnWire,
     /// M2/M8: what moved this row's severity and why, as finished sentences (for example
     /// "Severity lowered from high to info: no file or line was identified for this
-    /// finding."). Left out of `findings.json` and the CSV when nothing moved it.
-    #[serde(skip_serializing_if = "String::is_empty")]
+    /// finding."). Empty when nothing moved it. Always present, so every row carries the same
+    /// keys.
     severity_adjustments: String,
     /// H11: the commit of the earlier inspection this row was carried forward from, when this
-    /// run re-audited only the changed files. Left out when the row was found this run.
-    #[serde(skip_serializing_if = "String::is_empty")]
+    /// run re-audited only the changed files. Empty when the row was found this run.
     carried_from: String,
 }
 

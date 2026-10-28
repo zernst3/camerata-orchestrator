@@ -468,7 +468,7 @@ fn count_text(row: &Value, key: &str) -> String {
 
 // ── Per-dataset worksheet projections ─────────────────────────────────────────────────────
 
-const FINDING_HEADERS: [&str; 26] = [
+const FINDING_HEADERS: [&str; 28] = [
     "Severity",
     "Headline",
     "Repo",
@@ -495,9 +495,11 @@ const FINDING_HEADERS: [&str; 26] = [
     "Kind",
     "Sites",
     "Also found at",
+    "Severity adjustments",
+    "Carried from",
 ];
 
-const FINDING_RENDERED: [&str; 24] = [
+const FINDING_RENDERED: [&str; 26] = [
     "severity",
     "headline",
     "repo",
@@ -522,6 +524,8 @@ const FINDING_RENDERED: [&str; 24] = [
     "fix_specific",
     "fix",
     "kind",
+    "severity_adjustments",
+    "carried_from",
 ];
 
 /// Keys of a findings-style row that no findings-sheet COLUMN carries one-to-one:
@@ -549,7 +553,7 @@ const FINDING_EXTRA_KEYS: [&str; 12] = [
 
 /// Keys every findings-style row carries regardless of kind (everything except the flattened
 /// kind payload).
-const FINDING_BASE_KEYS: [&str; 28] = [
+const FINDING_BASE_KEYS: [&str; 30] = [
     "severity",
     "headline",
     "repo",
@@ -576,6 +580,8 @@ const FINDING_BASE_KEYS: [&str; 28] = [
     "kind",
     "also_locations",
     "site_count",
+    "severity_adjustments",
+    "carried_from",
     "is_fp",
     "fp_reason",
 ];
@@ -616,7 +622,7 @@ fn yes_or_blank(row: &Value, key: &str) -> String {
     }
 }
 
-/// The 26 cells a findings-style worksheet row must show for `row`; a False Positives row adds
+/// The 28 cells a findings-style worksheet row must show for `row`; a False Positives row adds
 /// the "FP Reason" cell (and shows a blank Action, since a false positive has no matrix cell).
 fn finding_cells(row: &Value, false_positive: bool) -> Vec<String> {
     let mut cells = vec![
@@ -650,6 +656,8 @@ fn finding_cells(row: &Value, false_positive: bool) -> Vec<String> {
         text(row, "kind"),
         text(row, "site_count"),
         locations_text(row),
+        text(row, "severity_adjustments"),
+        text(row, "carried_from"),
     ];
     if false_positive {
         cells.push(text(row, "fp_reason"));

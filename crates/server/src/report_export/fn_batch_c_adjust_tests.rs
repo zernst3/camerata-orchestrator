@@ -126,7 +126,7 @@ fn findings_json_and_the_csv_carry_the_adjustment_only_when_there_is_one() {
         .iter()
         .find(|r| r["rule_id"] == "SEC-NO-HARDCODED-SECRETS-1")
         .unwrap();
-    assert!(plain.get("severity_adjustments").is_none(), "{plain}");
+    assert_eq!(plain["severity_adjustments"], "", "{plain}");
 
     let csvs = crate::xlsx_export::build_csv_exports(
         &report,
