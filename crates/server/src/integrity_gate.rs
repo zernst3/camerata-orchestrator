@@ -745,6 +745,10 @@ pub fn render(verdict: &IntegrityVerdict) -> String {
     out
 }
 
+/// Killing tests for the cargo-mutants survivors of 2026-10-28 (docs/MUTATION_TESTING.md).
+#[cfg(test)]
+mod mutation_tests;
+
 #[cfg(test)]
 mod tests {
     use super::*;
