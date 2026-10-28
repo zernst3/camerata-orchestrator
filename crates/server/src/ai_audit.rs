@@ -2711,6 +2711,19 @@ const FIX_BATCH_SIZE: usize = 25;
 /// like `FIX_BATCH_SIZE`.
 const ALTERNATIVES_BATCH_SIZE: usize = 25;
 
+/// The text of each finding that a calibration or fix prompt frames: path, quoted code, detail and
+/// the captured object names and values. A delimiter token is drawn to avoid all of it.
+fn finding_evidence_texts(findings: &[Finding]) -> Vec<String> {
+    findings
+        .iter()
+        .flat_map(|f| {
+            [f.path.clone(), f.snippet.clone(), f.detail.clone()]
+                .into_iter()
+                .chain(f.captures.iter().flat_map(|(k, v)| [k.clone(), v.clone()]))
+        })
+        .collect()
+}
+
 /// Run the skeptic pass over a repo's AI findings (a fresh, reasoning-based perspective —
 /// deliberately NOT re-sent the whole digest, so it judges exploitability/context, not
 /// code minutiae). Graceful: on any model failure the findings pass through unchanged.
@@ -2757,8 +2770,12 @@ pub async fn verify_findings(
     if findings.is_empty() {
         return (findings, Vec::new());
     }
-    // One delimiter token for every calibration batch of this call (see `crate::prompt_frame`).
-    let nonce = crate::prompt_frame::FrameNonce::generate();
+    // One delimiter token for every calibration batch of this call (see `crate::prompt_frame`),
+    // drawn so that it occurs in none of the evidence it will frame.
+    let evidence = finding_evidence_texts(&findings);
+    let nonce = crate::prompt_frame::FrameNonce::generate_avoiding(
+        &evidence.iter().map(String::as_str).collect::<Vec<_>>(),
+    );
     let system = crate::prompt_frame::with_untrusted_clause(verify_system_prompt(), &nonce);
     // Split into bounded chunks (see `CALIBRATION_BATCH_SIZE`'s doc comment) — each is an
     // independent streamed call with LOCAL indices `0..chunk.len()`, so a failure in one
@@ -4463,8 +4480,12 @@ pub async fn generate_fix_specifics(
     }
     let mut ledger = FixLedger::default();
 
-    // One delimiter token for every round, regeneration rounds included (see `crate::prompt_frame`).
-    let nonce = crate::prompt_frame::FrameNonce::generate();
+    // One delimiter token for every round, regeneration rounds included (see `crate::prompt_frame`),
+    // drawn so that it occurs in none of the evidence or files it will frame.
+    let evidence = finding_evidence_texts(&findings);
+    let mut avoid: Vec<&str> = evidence.iter().map(String::as_str).collect();
+    avoid.extend(files.iter().flat_map(|(p, c)| [p.as_str(), c.as_str()]));
+    let nonce = crate::prompt_frame::FrameNonce::generate_avoiding(&avoid);
     let system = crate::prompt_frame::with_untrusted_clause(fix_specific_system_prompt(), &nonce);
     // The subset of `indices` still needing a valid fix this round; shrinks as findings
     // pass their self-check or exhaust retries. Original-index -> rejection reason, fed
@@ -4818,7 +4839,7 @@ pub fn representative_scan_sample(
     }
     let model_files = crate::onboard::redact::files_for_model(files);
     // A token of the real length, so the counted size is the real size.
-    let nonce = crate::prompt_frame::FrameNonce::generate();
+    let nonce = crate::prompt_frame::FrameNonce::generate_avoiding_files(&[&model_files]);
     let repo_map = build_repo_map(&model_files, &nonce);
     let chunks = chunk_files(&model_files, CHUNK_DIGEST_CHARS);
     let first_chunk = chunks.first()?;
@@ -8851,7 +8872,11 @@ pub async fn audit_repo(
     let mut stage_samples: Vec<crate::scan_ledger::StageSample> = Vec::new();
     // The delimiter token for every model call of this audit (alternatives, scan and resolution
     // passes). One per run, so the passes keep sharing their cached prefix; see `crate::prompt_frame`.
-    let nonce = crate::prompt_frame::FrameNonce::generate();
+    // Drawn so that it occurs in no path or file body the run frames (the repo map's set included).
+    let nonce = crate::prompt_frame::FrameNonce::generate_avoiding_files(&[
+        files,
+        map_files.unwrap_or(files),
+    ]);
     // Cross-file context for every chunk (which dirs are which layer, where types live). On an
     // incremental scan this is built from the whole repo, not just the changed files.
     let repo_map = build_repo_map(map_files.unwrap_or(files), &nonce);
@@ -10280,7 +10305,7 @@ pub async fn run_deep_tier(
     let model_files = crate::onboard::redact::files_for_model(files);
     let files = model_files.as_slice();
     // One delimiter token for all three lenses (see `crate::prompt_frame`).
-    let nonce = crate::prompt_frame::FrameNonce::generate();
+    let nonce = crate::prompt_frame::FrameNonce::generate_avoiding_files(&[files]);
     let repo_map = build_repo_map(files, &nonce);
     // One whole-repo digest for the two single-pass prose lenses (capped at MAX_DIGEST_CHARS).
     let digest = build_digest(files, &nonce);

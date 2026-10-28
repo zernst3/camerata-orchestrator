@@ -25,6 +25,9 @@ pub struct FrameNonce(String);
 /// Bytes of OS randomness in a [`FrameNonce`] (128 bits).
 pub const NONCE_BYTES: usize = 16;
 
+/// Most tokens [`FrameNonce::generate_avoiding`] draws before it gives up.
+pub const MAX_NONCE_DRAWS: usize = 8;
+
 impl FrameNonce {
     /// A fresh token from the OS random source.
     ///
@@ -38,6 +41,48 @@ impl FrameNonce {
         getrandom::getrandom(&mut bytes)
             .expect("the operating system random source is unavailable; refusing to frame client code with a predictable delimiter");
         Self(bytes.iter().map(|b| format!("{b:02x}")).collect())
+    }
+
+    /// A fresh token that occurs in none of `inputs`, the texts the run will frame (file paths and
+    /// bodies, quoted evidence). A random 128-bit token almost never occurs in text written before
+    /// it existed, so the redraw is belt and braces: it makes "the content cannot contain the
+    /// delimiter" true by construction instead of by probability.
+    ///
+    /// # Panics
+    ///
+    /// After [`MAX_NONCE_DRAWS`] consecutive draws that all occur in `inputs`, which no real input
+    /// can cause: a failing random source is the only explanation, and carrying on would frame
+    /// client code with a delimiter the client's own text can print.
+    pub fn generate_avoiding(inputs: &[&str]) -> Self {
+        Self::draw_avoiding(inputs, Self::generate)
+    }
+
+    /// [`Self::generate_avoiding`] over the paths and bodies of file sets (the files a run frames,
+    /// and the repo-map set when it differs).
+    pub fn generate_avoiding_files(sets: &[&[(String, String)]]) -> Self {
+        Self::generate_avoiding(&Self::file_texts(sets))
+    }
+
+    /// The path and body of every file in `sets`, as the texts a token must avoid.
+    fn file_texts<'a>(sets: &[&'a [(String, String)]]) -> Vec<&'a str> {
+        sets.iter()
+            .flat_map(|files| files.iter())
+            .flat_map(|(path, body)| [path.as_str(), body.as_str()])
+            .collect()
+    }
+
+    /// The bounded redraw behind [`Self::generate_avoiding`], with the draw injected so a test can
+    /// force a collision.
+    fn draw_avoiding(inputs: &[&str], mut draw: impl FnMut() -> Self) -> Self {
+        for _ in 0..MAX_NONCE_DRAWS {
+            let candidate = draw();
+            if !inputs.iter().any(|text| text.contains(candidate.as_str())) {
+                return candidate;
+            }
+        }
+        panic!(
+            "the delimiter token occurred in the text to be framed on {MAX_NONCE_DRAWS} draws in a row; refusing to frame client code with it"
+        );
     }
 
     /// A fixed token, for tests that compare framed text byte for byte.
@@ -97,6 +142,64 @@ pub fn with_untrusted_clause(system: String, nonce: &FrameNonce) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_token_that_occurs_in_a_framed_input_is_drawn_again() {
+        let mut draws = vec![FrameNonce::fixed("aaaa"), FrameNonce::fixed("bbbb")].into_iter();
+        let n = FrameNonce::draw_avoiding(&["a file that holds aaaa inside"], || {
+            draws.next().expect("a second draw")
+        });
+        assert_eq!(n.as_str(), "bbbb");
+    }
+
+    #[test]
+    fn every_input_is_checked_not_only_the_first() {
+        let mut draws = vec![FrameNonce::fixed("cccc"), FrameNonce::fixed("dddd")].into_iter();
+        let n = FrameNonce::draw_avoiding(&["clean", "also clean", "has cccc in it"], || {
+            draws.next().expect("a second draw")
+        });
+        assert_eq!(n.as_str(), "dddd");
+    }
+
+    #[test]
+    fn a_clean_first_draw_is_kept_and_drawn_once() {
+        let mut calls = 0;
+        let n = FrameNonce::draw_avoiding(&["nothing here"], || {
+            calls += 1;
+            FrameNonce::fixed("eeee")
+        });
+        assert_eq!((n.as_str(), calls), ("eeee", 1));
+    }
+
+    #[test]
+    #[should_panic(expected = "occurred in the text to be framed")]
+    fn the_redraw_is_bounded() {
+        let mut calls = 0;
+        let _ = FrameNonce::draw_avoiding(&["ffff"], || {
+            calls += 1;
+            assert!(calls <= MAX_NONCE_DRAWS, "drew more than the bound");
+            FrameNonce::fixed("ffff")
+        });
+    }
+
+    #[test]
+    fn a_real_draw_avoiding_some_text_is_absent_from_all_of_it() {
+        let texts = ["alpha", "beta 0123456789abcdef", "gamma"];
+        let n = FrameNonce::generate_avoiding(&texts);
+        assert!(texts.iter().all(|t| !t.contains(n.as_str())));
+        assert_eq!(n.as_str().len(), NONCE_BYTES * 2);
+    }
+
+    #[test]
+    fn avoiding_files_covers_paths_and_contents() {
+        let a = vec![("src/gggg.rs".to_string(), String::new())];
+        let b = vec![("src/b.rs".to_string(), "// hhhh".to_string())];
+        let texts = FrameNonce::file_texts(&[&a, &b]);
+        assert!(texts.iter().any(|t| t.contains("gggg")), "paths are checked");
+        assert!(texts.iter().any(|t| t.contains("hhhh")), "contents are checked");
+        let n = FrameNonce::generate_avoiding_files(&[&a, &b]);
+        assert!(texts.iter().all(|t| !t.contains(n.as_str())));
+    }
 
     #[test]
     fn a_generated_nonce_is_128_bits_of_hex_and_differs_per_draw() {
