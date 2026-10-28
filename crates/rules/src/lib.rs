@@ -422,8 +422,9 @@ pub enum Verification {
     /// [`Rule::is_auto_recommended`] returns `true` for
     /// `Grounded | Verified | Policy` (see its body), so a `policy` rule is
     /// pre-checked in the onboarding proposal and IS selected by an unattended
-    /// scan via `camerata_cli::inspect_cmd::curated_rule_selection`. 21 corpus
-    /// rules carry this value and all 21 arm.
+    /// scan via `camerata_cli::inspect_cmd::curated_rule_selection`. Every corpus
+    /// rule carrying this value arms (the count moves as rules gain outside
+    /// sources; `req_w17_every_policy_rule_in_the_corpus_arms` enforces it).
     ///
     /// W17 corrected a stale claim here. This comment used to read "kept out of
     /// the armed ruleset like `draft`, but labeled honestly rather than as

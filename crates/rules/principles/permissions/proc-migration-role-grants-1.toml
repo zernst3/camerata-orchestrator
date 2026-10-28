@@ -1,5 +1,5 @@
 id = "PROC-MIGRATION-ROLE-GRANTS-1"
-version = 2
+version = 3
 title = "Adding a permission seeds its role grants in the same migration"
 domain = "permissions"
 layer = "universal"
@@ -11,7 +11,7 @@ verification = "policy"
 
 [[sources]]
 url = "CONVENTIONS.md"
-title = "CONVENTIONS.md — §PROC-CI-MIGRATION-HYGIENE-1 + SQL-AUDIT-COLUMNS-1 domain (migration grant pattern)"
+title = "Project policy: a migration that adds a permission also grants it to the roles that need it"
 
 [decision]
 question = "When a migration adds a new permission, where and when do the role grants for it get written?"

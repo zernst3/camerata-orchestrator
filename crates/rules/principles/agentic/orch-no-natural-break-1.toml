@@ -1,5 +1,5 @@
 id = "ORCH-NO-NATURAL-BREAK-1"
-version = 2
+version = 3
 title = "Never stop on a \"natural break\""
 domain = "agentic"
 layer = "universal"
@@ -11,7 +11,7 @@ verification = "policy"
 
 [[sources]]
 url = "AGENTS.md"
-title = "AGENTS.md — ORCH-NO-NATURAL-BREAK-1 (never stop on a natural break)"
+title = "Project policy: an autonomous run stops only at a budget or time cap, a real escalation, an empty queue or an unrecoverable error"
 
 [decision]
 question = "When an agent finishes a chunk of work or reaches a milestone with budget remaining, what does it do?"

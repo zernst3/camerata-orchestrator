@@ -1,5 +1,5 @@
 id = "UI-SHARED-PRIMITIVE-1"
-version = 2
+version = 3
 title = "A UI mechanism such as a spinner, a retry control, an outside-click dismiss or a scroll lock is built once as a shared hook or component and used wherever it is needed, never hand-written again in each component"
 domain = "ui"
 layer = "universal"
@@ -11,27 +11,32 @@ inspectable = true
 # fix the others miss), not a live fault in current behaviour.
 max_severity = "low"
 default = true
-# `policy`, not `grounded`: the convention that a repeated UI mechanism lives in one shared hook
-# or component is deliberate project policy, and no external authority states the cross-file,
-# reviewed form specified here. Related controls (not citations, and deliberately not in
-# `[[sources]]`): the existing per-subject rules UI-IMAGE-COMPONENT-1 and UI-UTC-DATES-1, which
-# this generalizes from one named subject to any repeated mechanism, and token clone detectors
-# such as jscpd, which report repeated markup without asking whether it is a behaviour. Only the
-# owner sets `verified`.
-verification = "policy"
+# `grounded`: the React documentation states the principle for the only framework this check
+# reads, that logic several components repeat is extracted into one custom Hook and reused. The
+# cross-file, reviewed form specified here is this project's own. Related controls (not
+# citations, and deliberately not in `[[sources]]`): the existing per-subject rules
+# UI-IMAGE-COMPONENT-1 and UI-UTC-DATES-1, which this generalizes from one named subject to any
+# repeated mechanism, and token clone detectors such as jscpd, which report repeated markup
+# without asking whether it is a behaviour.
+# Only the owner sets `verified`.
+verification = "grounded"
 qualifies = "A deterministic search followed by a reviewed assessment of the listed code, so the result is a judgment on top of a mechanical search and not a purely mechanical check. It reads TypeScript, TSX and JavaScript or JSX files that belong to a package whose nearest package.json depends on react, preact, next, react-native or expo; Vue, Svelte, Angular, Solid and Qwik templates, Rust view macros and stylesheets are not read. The search looks for a stretch of at least 40 tokens shared by two or more files, with variable names, strings, class names and literal values set aside, that sits in a UI unit (a JSX element, the callback of useEffect, useLayoutEffect, useCallback, useMemo or useImperativeHandle, a custom hook named use followed by a capital letter, or a component that renders JSX) and contains a mechanism: a conditional, an event handler attribute such as onClick, a use call, addEventListener or removeEventListener, a ref.current access, setTimeout or requestAnimationFrame, or a use of document or window. Static markup with no behaviour is never reported, and neither is a stretch that is only one use of a single imported component with fewer than 40 tokens around it. A mechanism present in more than 40 places is treated as a convention and not reported. Each candidate is then assessed on the listed code alone: is it one UI mechanism hand-written in each component (a spinner, a retry control, a menu host, a fade latch, an empty state, a focus trap, an outside-click dismiss, a scroll lock), as opposed to unrelated markup that happens to share a shape? Only a candidate assessed as the same mechanism is reported, and one the assessment is unsure about is not. Labels, class names and event names are set aside in the search, and the finding names the strings that differ between the copies, and any other place where they differ. Test, story, generated, vendored and minified files are not read. A class component against a hook, or a mechanism split between a component and a separate hook file, is not seen. Candidates beyond the 160 most significant in one scan are counted and disclosed but not assessed. When the assessment cannot run (no model available), candidates are reported as not assessed, never as clean. A scan that finds no candidate reports nothing and does not claim that no mechanism is hand-written twice."
 
 [[sources]]
+url = "https://react.dev/learn/reusing-logic-with-custom-hooks"
+title = "React documentation: Reusing Logic with Custom Hooks (logic that several components repeat is extracted into one custom Hook and reused)"
+
+[[sources]]
 url = "docs/design/2026-10-21_w29-detector-implementation.md"
-title = "Design: the W29 detector layer, UI-SHARED-PRIMITIVE-1: the algorithm and its traps"
+title = "Design notes: how the check finds a UI mechanism hand-written in several components, and the cases it must not report"
 
 [[sources]]
 url = "CORPUS_WORK_ORDER_CONSISTENCY_RULES.md"
-title = "Corpus work order: consistency rules, section 6: a UI mechanism is a shared primitive"
+title = "Project policy: a UI mechanism is built once as a shared hook or component"
 
 [[sources]]
 url = "docs/OVERNIGHT_DECISIONS.md"
-title = "Decisions log, DECISIONS MADE, 2026-10-21: the clone detector and the three rules built on it are in V1 scope"
+title = "Decision record: the repeated-code detector and the three rules built on it ship in the first release"
 
 [decision]
 question = "Where does the project build a UI mechanism, such as a spinner, a retry control or an outside-click dismiss, that several components need?"
