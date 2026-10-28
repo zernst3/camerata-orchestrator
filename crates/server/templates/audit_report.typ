@@ -416,6 +416,12 @@
         #text(size: 8pt, fill: ink_faint)[#note]
       ]
     ]
+    // A credential another repo of the project also flags under the same name. Display only:
+    // each service's row stays its own.
+    #if site.same_credential_note != "" [
+      #linebreak()
+      #text(size: 8pt, fill: ink_faint)[#site.same_credential_note]
+    ]
   ])
 }
 
@@ -453,10 +459,16 @@
 // character count reads as noise to a non-engineer reader next to a real line-count figure.
 #let code_volume_label(cv) = {
   let base = thousands(cv.lines) + " " + plural(cv.lines, "line", "lines") + " of code"
-  if cv.by_language.len() == 0 {
+  let with_languages = if cv.by_language.len() == 0 {
     base
   } else {
     base + " (" + cv.by_language.map(l => l.language + ": " + thousands(l.lines)).join(", ") + ")"
+  }
+  // A project of several repos also says how large each one is. Empty for one repo.
+  if cv.per_repo.len() == 0 {
+    with_languages
+  } else {
+    with_languages + ". By repo: " + cv.per_repo.map(r => r.repo + ": " + thousands(r.lines)).join(", ")
   }
 }
 #let code_volume_rows = if d.cover.code_volume != none {
@@ -769,6 +781,44 @@
   ]
 ]
 
+// ── Patterns across services ──────────────────────────────────────────────────────────
+// Present only for a project of more than one repo. An observation after the findings: no
+// severity glyph, no chip, in no total (`report_export::PatternsAcrossServicesJson`). A cell
+// that is not applicable or not reviewed is printed as such, never as clean.
+#if d.patterns_across_services != none [
+  #pagebreak()
+  #section("Observations", [Patterns across services])
+  #text(size: 9pt, style: "italic", fill: ink_faint)[#d.patterns_across_services.note]
+  #v(6pt)
+  #if d.patterns_across_services.rows.len() == 0 [
+    No rule was found violated in one service and clean in another.
+  ] else [
+    #for row in d.patterns_across_services.rows [
+      #block(breakable: false, below: 10pt)[
+        #text(weight: 600, fill: ink)[#row.title]
+        #v(2pt)
+        #text(size: 9.5pt)[#row.statement]
+        #v(3pt)
+        #table(
+          columns: (auto, 1fr),
+          stroke: table_stroke,
+          inset: (x: 5pt, y: 4pt),
+          table.header(th[Service], th[Result]),
+          ..row.cells.map(cell => (
+            [#cell.repo],
+            [#cell.label],
+          )).flatten()
+        )
+      ]
+    ]
+    #for theme in d.patterns_across_services.themes [
+      #block(below: 6pt)[
+        #text(weight: 600, fill: ink)[#theme.name]: #theme.note
+      ]
+    ]
+  ]
+]
+
 #pagebreak()
 
 // ── 6 + 7. What's healthy + Dependency snapshot (S1: share a page — each was ~85-90% ──
@@ -782,7 +832,7 @@
     - No known vulnerable dependencies detected in this scan.
   ]
   #for r in d.whats_healthy.rules [
-    - *#r.rule_id*: #r.title #if r.citation.kind == "grounded" [#text(fill: ink_faint, size: 8.5pt)[(#r.citation.label)]]
+    - *#r.rule_id*: #r.title #if r.citation.kind == "grounded" [#text(fill: ink_faint, size: 8.5pt)[(#r.citation.label)]]#if r.clean_in.len() > 0 [ #text(fill: ink_faint, size: 8.5pt)[Clean in #r.clean_in.join(", ")#if r.not_applicable_in.len() > 0 [; not applicable in #r.not_applicable_in.join(", ")].]]
   ]
   #if d.whats_healthy.further_clean_count > 0 [
     #text(size: 8.5pt, fill: ink_faint)[#str(d.whats_healthy.further_clean_count) further #plural(d.whats_healthy.further_clean_count, "rule", "rules") verified clean this run.]

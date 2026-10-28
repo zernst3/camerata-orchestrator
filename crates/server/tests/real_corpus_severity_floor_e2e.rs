@@ -81,6 +81,8 @@ fn report_with(findings: Vec<Finding>, audited_rule_ids: Vec<&str>) -> ScanRepor
     ScanReport {
         repos_not_inspected: Vec::new(),
         recommendations_by_repo: Vec::new(),
+        patterns_across_services: Default::default(),
+        volume_by_repo: Default::default(),
         repos: vec!["owner/repo".to_string()],
         stacks: Vec::new(),
         files_scanned: 10,

@@ -34,8 +34,8 @@ pub use archive::{
 pub use consistency::{
     compare_csv_to_json, count_reconciliation_problems, dataset_parity_problems,
     dataset_set_problems, marking_problems, package_stem, parse_readme_provenance,
-    pdf_count_reconciliation_problems, pdf_marking_problems, row_parity, verify_manifest,
-    verify_readme_provenance, ReadmeProvenance,
+    patterns_section_problems, pdf_count_reconciliation_problems, pdf_marking_problems, row_parity,
+    verify_manifest, verify_readme_provenance, ReadmeProvenance,
 };
 pub use report::{CheckId, CheckOutcome, GateFailure, GateReport, Problem};
 
@@ -77,7 +77,7 @@ pub async fn build_product_package(
     corpus: Option<&camerata_rules::RuleSet>,
     options: &ReportOptions,
 ) -> anyhow::Result<ProductPackage> {
-    let stem = crate::report_filename_stem(report);
+    let stem = crate::report_filename_stem_for(report, &options.project_title);
     build_product_package_with_stem(report, dispositions, corpus, options, &stem).await
 }
 
@@ -394,6 +394,9 @@ mod tests;
 
 #[cfg(test)]
 mod triage_log_tests;
+
+#[cfg(test)]
+mod patterns_tests;
 
 // The enforcement of "the review timer and the per-row reviewed record are INTERNAL ONLY".
 #[cfg(test)]

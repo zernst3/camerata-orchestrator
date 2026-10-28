@@ -37,6 +37,8 @@ pub fn build_report(
         recommendations: std::collections::HashMap::new(),
         repos_not_inspected: Vec::new(),
         recommendations_by_repo: Vec::new(),
+        patterns_across_services: Default::default(),
+        volume_by_repo: Default::default(),
         failed_passes: Vec::new(),
         ledger: crate::scan_ledger::ScanLedger::new(),
     }
