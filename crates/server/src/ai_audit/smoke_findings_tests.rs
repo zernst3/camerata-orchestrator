@@ -562,15 +562,17 @@ fn a_placeholder_word_inside_a_secret_shaped_value_keeps_its_rating_outside_exam
     assert_eq!(out[0].severity, "low", "{out:?}");
 }
 
-/// A value that is wholly a template token is a placeholder in any file.
+/// A value that is wholly an unfilled template token, an empty string or a mask leaks nothing,
+/// so it is a placeholder in any file.
 #[test]
 fn a_value_that_is_wholly_a_template_token_is_lowered_in_any_file() {
     for snippet in [
         "SUPABASE_KEY=${SUPABASE_KEY}",
         "API_KEY=<your-key>",
+        "API_KEY=[YOUR-API-KEY]",
         "api_key = \"{{ api_key }}\"",
-        "password = \"changeme\"",
         "password = \"xxxxxxxxxxxx\"",
+        "password = \"********\"",
         "API_KEY=\"\"",
         "API_KEY=",
     ] {
@@ -579,6 +581,50 @@ fn a_value_that_is_wholly_a_template_token_is_lowered_in_any_file() {
             let out = merge_semantic_groups(vec![row], &[]);
             assert_eq!(out[0].severity, "low", "{snippet} in {path}: {out:?}");
         }
+    }
+}
+
+/// A literal weak word (`password`, `changeme`, `secret`, `token`) is a real default credential
+/// an attacker tries first, not an unfilled template: outside an example file it keeps its
+/// rating. Inside an example file it is lowered like any other example value.
+#[test]
+fn a_weak_default_word_outside_an_example_file_keeps_its_rating() {
+    for snippet in [
+        "DB_PASSWORD=password",
+        "ADMIN_PASSWORD=changeme",
+        "JWT_SECRET=secret",
+        "API_TOKEN=token",
+        "password = \"changeme\"",
+        "DATABASE_URL=postgres://admin:password@db:5432/app",
+    ] {
+        for path in [".env.production", "docker-compose.yml", "src/config.ts"] {
+            let row = secret_row("SEC-NO-HARDCODED-SECRETS-1", path, snippet);
+            let out = merge_semantic_groups(vec![row], &[]);
+            assert_eq!(out[0].severity, "critical", "{snippet} in {path}: {out:?}");
+            assert!(
+                crate::severity_bounds::recorded_adjustments(&out[0]).is_empty(),
+                "{snippet} in {path}"
+            );
+        }
+        let example = secret_row("SEC-NO-HARDCODED-SECRETS-1", ".env.example", snippet);
+        let out = merge_semantic_groups(vec![example], &[]);
+        assert_eq!(out[0].severity, "low", "{snippet} in .env.example: {out:?}");
+    }
+}
+
+/// Brackets around a value do not make it a template: a quoted list of values is a list of
+/// values (`["s3cr3t"]`), and so is a bracketed value with a quote or a comma inside it.
+#[test]
+fn a_bracketed_list_of_values_is_not_a_template() {
+    for snippet in [
+        "passwords = [\"s3cr3tP@ssw0rd!!\"]",
+        "\"password\": [\"hunter2hunter2hunter2\"]",
+        "API_KEYS=[s3cr3tP@ssw0rd!!, hunter2hunter2]",
+        "password: <\"s3cr3tP@ssw0rd!!\">",
+    ] {
+        let row = secret_row("SEC-NO-HARDCODED-SECRETS-1", "src/config.ts", snippet);
+        let out = merge_semantic_groups(vec![row], &[]);
+        assert_eq!(out[0].severity, "critical", "{snippet}: {out:?}");
     }
 }
 

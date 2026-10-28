@@ -7111,8 +7111,9 @@ fn is_secret_rule(rule_id: &str) -> bool {
     rule_id == SECRET_FILE_RULE || !camerata_secrets::shapes_for_rule(rule_id).is_empty()
 }
 
-/// Whether `path` names an example, sample or template file: `.env.example`, `.env.sample` or
-/// anything ending `.example`.
+/// Whether `path` names an example or sample file: `.env.example`, `.env.sample` or anything
+/// ending `.example`. Deliberately narrow: a `templates/prod.env` or `config.template.ts` may be
+/// the file a deployment actually loads, so a name alone does not make it an example.
 fn is_example_file_path(path: &str) -> bool {
     let name = path
         .rsplit(['/', '\\'])
@@ -7122,9 +7123,31 @@ fn is_example_file_path(path: &str) -> bool {
     name == ".env.example" || name == ".env.sample" || name.ends_with(".example")
 }
 
-/// Whether one assigned value (the text after `=` or `:` on a line) is wholly a template token and
-/// so no credential: empty, a closed template (`${VAR}`, `{{ var }}`, `<your-key>`, `[KEY]`), a
-/// stand-in word (`changeme`, `password`, `secret`, `token`) or a run of filler (`xxxx`, `****`).
+/// Whether `value` (quotes and whitespace trimmed) is one of the literal weak words a default
+/// configuration ships with (`password`, `changeme`, `secret`, `token`). These are real default
+/// credentials an attacker tries first, not unfilled templates: they are placeholders only inside
+/// an example file, which [`is_example_file_path`] already covers.
+fn is_weak_default_word(value: &str) -> bool {
+    let value = value
+        .trim()
+        .trim_matches(|c: char| matches!(c, '"' | '\'' | '`'));
+    [
+        "password",
+        "secret",
+        "token",
+        "changeme",
+        "change_me",
+        "change-me",
+    ]
+    .iter()
+    .any(|word| value.eq_ignore_ascii_case(word))
+}
+
+/// Whether one assigned value (the text after `=` or `:` on a line) is wholly an unfilled template
+/// token and so leaks no credential: empty, a closed template (`${VAR}`, `{{ var }}`,
+/// `<your-key>`, `[KEY]`) or a run of filler (`xxxx`, `****`). A bracketed value with a quote or a
+/// comma inside it is a list of values (`["s3cr3t"]`), not a template. A literal weak word
+/// (`changeme`) is NOT a template: see [`is_weak_default_word`].
 fn assigned_value_is_template(raw: &str) -> bool {
     let value = raw
         .trim()
@@ -7132,20 +7155,19 @@ fn assigned_value_is_template(raw: &str) -> bool {
     let closed = |open: &str, close: char| {
         value.len() > open.len() && value.starts_with(open) && value.ends_with(close)
     };
+    let single_token = || !value.contains(['"', '\'', '`', ',']);
     value.is_empty()
         || closed("${", '}')
         || closed("{{", '}')
-        || closed("<", '>')
-        || closed("[", ']')
-        || ["password", "secret", "token", "changeme", "change_me"]
-            .iter()
-            .any(|word| value.eq_ignore_ascii_case(word))
+        || (closed("<", '>') && single_token())
+        || (closed("[", ']') && single_token())
         || (value.chars().count() >= 3 && value.chars().all(|c| matches!(c, 'x' | 'X' | '*')))
 }
 
-/// Whether the value `snippet` cites is wholly a template token, in any file: either every
-/// secret-shaped match the secrets crate finds is a template token, or (when it finds none) every
-/// line assigns a template, an empty string or filler. A placeholder WORD inside a value that is
+/// Whether the value `snippet` cites is wholly an unfilled template token, in any file: either
+/// every secret-shaped match the secrets crate finds is a template token (and none is a literal
+/// weak word, which the crate also files under that twin), or (when it finds none) every line
+/// assigns a template, an empty string or filler. A placeholder WORD inside a value that is
 /// otherwise secret-shaped (`sb_secret_FAKE_...`) is not this: it proves nothing outside an
 /// example file. A snippet with no assignment at all is not a template.
 fn snippet_value_is_template(snippet: &str) -> bool {
@@ -7153,7 +7175,7 @@ fn snippet_value_is_template(snippet: &str) -> bool {
     let found = camerata_secrets::detect_all(snippet);
     if !found.is_empty() {
         return found.iter().all(|m| match m.twin {
-            Some(Twin::TemplateToken) => true,
+            Some(Twin::TemplateToken) => !is_weak_default_word(&snippet[m.value.clone()]),
             // A placeholder word makes the value a template only when the value is nothing but
             // filler (`xxxxxxxx`); a word inside a longer secret-shaped value is not.
             Some(Twin::PlaceholderWord(_)) => assigned_value_is_template(&snippet[m.value.clone()]),
@@ -7183,7 +7205,7 @@ fn snippet_holds_real_secret(snippet: &str) -> bool {
 }
 
 /// Whether `f` is a secret row about a placeholder: a secret rule whose row cites no real value
-/// and either (a) sits in an example, sample or template file, or (b) whose value is wholly a
+/// and either (a) sits in an example or sample file, or (b) whose value is wholly an unfilled
 /// template token wherever it sits. A placeholder word inside an otherwise secret-shaped value
 /// outside an example file keeps its rating: the word is not proof the value is fake.
 fn is_placeholder_secret_row(f: &Finding) -> bool {
