@@ -80,6 +80,11 @@ pub mod extract;
 /// and the "Pass 4b-2 landed" note.
 pub mod import_boundary_checker;
 
+/// Token-efficiency rank 8: the deterministic candidate-site locators a rule's `candidates`
+/// block names (statement filters over the SQL splitter in [`supabase::splitter`]). See
+/// `candidates.rs`.
+pub mod candidates;
+
 /// Supabase-stack checkers built on the [`arch_checker`] seam: migration-timeline replay for
 /// Row Level Security and `SECURITY DEFINER` search_path hygiene. See `supabase/mod.rs`.
 pub mod supabase;

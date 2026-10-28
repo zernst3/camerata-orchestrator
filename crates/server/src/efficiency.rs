@@ -116,6 +116,11 @@ efficiency_measures! {
     /// the files it can apply to, in real-time and batch mode alike. Off: `applies_to` is
     /// ignored entirely and routing is by rule-id language prefix only (the pre-rank-7 behavior).
     applies_to_routing => "rules that declare where they apply are sent only with matching files",
+    /// Rank 8: a rule that declares `candidates` (a deterministic locator) is sent only the sites
+    /// the locator finds in a chunk, with context, plus the repo map. A chunk the locator cannot
+    /// fully read sends the rule the whole files, as before. Off: `candidates` is ignored
+    /// entirely and every prompt is the rank-7 prompt.
+    candidates_prefilter => "rules that name a candidate locator are sent only the matched sites",
 }
 
 impl EfficiencyConfig {

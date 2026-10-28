@@ -23,6 +23,9 @@ use thiserror::Error;
 pub mod applies_to;
 pub use applies_to::AppliesTo;
 
+pub mod candidates;
+pub use candidates::{CandidateLocator, Candidates};
+
 mod lock;
 pub use lock::{
     check_lock, corpus_lock_path, corpus_version, CorpusLock, LockEntry, LockError, LockProblem,
@@ -751,6 +754,13 @@ struct RuleToml {
     /// or a glob form the matcher does not implement, fails the file's load. See [`Rule::applies_to`].
     #[serde(default)]
     applies_to: Option<AppliesTo>,
+    /// Token-efficiency rank 8: the deterministic locator that finds this rule's candidate sites,
+    /// so the scan sends the rule those sites with context instead of whole files
+    /// (`candidates = { locator = "sql_routines" }`). Absent means whole files. Validated at load
+    /// by `Candidates`' `Deserialize`: an unknown locator or key fails the file's load. See
+    /// [`Rule::candidates`].
+    #[serde(default)]
+    candidates: Option<Candidates>,
     /// W17 (gotcha 8, half resolved): `tag` is GONE. It was authored on all 417 corpus rules,
     /// read by nothing, and W14 declared it here as accepted-but-unconsumed so
     /// [`corpus_files_with_unknown_fields`] could treat every OTHER unrecognized rule-level key
@@ -1172,6 +1182,13 @@ pub struct Rule {
     /// be determined is sent too: routing must never cost a finding). Part of
     /// [`Rule::content_hash`], so scoping a rule is a revision of it.
     pub applies_to: Option<AppliesTo>,
+    /// Token-efficiency rank 8: the locator that finds this rule's candidate sites. `None` (the
+    /// default) means the scan sends the rule whole files, exactly as before. When set, the scan
+    /// sends the rule only the sites the locator finds in a chunk (with context) plus the repo
+    /// map; a chunk the locator cannot fully read (an error, a timeout, a file it cannot parse)
+    /// gets the whole files instead. Part of [`Rule::content_hash`], so adding a locator is a
+    /// revision of the rule.
+    pub candidates: Option<Candidates>,
 }
 
 /// P7 (`docs/plans/2026-09-29_codebase-inspection-hardening.md`): a GENERAL mechanism for a
@@ -1527,6 +1544,7 @@ pub fn bare_rule(id: &str, domain: &str) -> Rule {
         version: None,
         last_reviewed: None,
         applies_to: None,
+        candidates: None,
     }
 }
 
@@ -1590,6 +1608,7 @@ pub fn ruleset_with_unauthored_rule(rule_id: &str) -> RuleSet {
         version: None,
         last_reviewed: None,
         applies_to: None,
+        candidates: None,
     };
     let mut set = RuleSet::default();
     set.push(rule);
@@ -1865,6 +1884,7 @@ async fn load_one(path: &Path, corpus_dir: &Path) -> Result<Rule, RulesError> {
         version: raw.version,
         last_reviewed: raw.last_reviewed.filter(|s| !s.trim().is_empty()),
         applies_to: raw.applies_to,
+        candidates: raw.candidates,
     })
 }
 
@@ -2264,6 +2284,8 @@ const RULE_LEVEL_FIELDS: &[&str] = &[
     "last_reviewed",
     // Token-efficiency rank 7: where the rule can apply (routing metadata).
     "applies_to",
+    // Token-efficiency rank 8: where in a file the rule's subject sits (prompt metadata).
+    "candidates",
     // Accepted, unconsumed (gotcha 8), established 2026-10-11. `tag` was here too until W17
     // deleted it from the schema AND from all 417 files; do not re-add it.
     "layer",
@@ -3376,6 +3398,7 @@ mod tests {
             version: None,
             last_reviewed: None,
             applies_to: None,
+            candidates: None,
         }
     }
 
@@ -3481,6 +3504,7 @@ mod tests {
             version: raw.version,
             last_reviewed: raw.last_reviewed.filter(|s| !s.trim().is_empty()),
             applies_to: raw.applies_to,
+            candidates: raw.candidates,
         }
     }
 
@@ -7082,6 +7106,44 @@ mod tests {
             assert!(
                 set.get_by_id("SCOPED-TEST-1").is_none(),
                 "`{bad}` must not load as a rule that silently matches nothing"
+            );
+            assert_eq!(errors.len(), 1, "`{bad}` must be reported: {errors:?}");
+        }
+    }
+
+    // ── candidates (token-efficiency rank 8) ──────────────────────────────────
+
+    #[tokio::test]
+    async fn a_rule_without_candidates_is_sent_whole_files() {
+        let (set, errors) = load_with_extra("").await;
+        assert!(errors.is_empty(), "{errors:?}");
+        assert!(set.get_by_id("SCOPED-TEST-1").unwrap().candidates.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_declared_candidates_block_loads_onto_the_rule() {
+        let (set, errors) = load_with_extra(r#"candidates = { locator = "sql_policies" }"#).await;
+        assert!(errors.is_empty(), "{errors:?}");
+        let c = set
+            .get_by_id("SCOPED-TEST-1")
+            .unwrap()
+            .candidates
+            .expect("declared");
+        assert_eq!(c.locator, CandidateLocator::SqlPolicies);
+    }
+
+    #[tokio::test]
+    async fn a_malformed_candidates_block_fails_the_rules_load() {
+        for bad in [
+            r#"candidates = { locator = "tree_sitter" }"#,
+            r#"candidates = { locator = "sql_routines", context = 3 }"#,
+            r#"candidates = {}"#,
+            r#"candidates = "sql_routines""#,
+        ] {
+            let (set, errors) = load_with_extra(bad).await;
+            assert!(
+                set.get_by_id("SCOPED-TEST-1").is_none(),
+                "`{bad}` must not load as a rule whose locator silently finds nothing"
             );
             assert_eq!(errors.len(), 1, "`{bad}` must be reported: {errors:?}");
         }

@@ -44,7 +44,7 @@
 
 use std::collections::BTreeMap;
 
-use camerata_rules::AppliesTo;
+use camerata_rules::{AppliesTo, Candidates};
 
 /// One rule as the audit passes and the router see it: the id and chosen directive the prompt is
 /// built from, plus the routing metadata the corpus declares for it. Passed through `audit_repo`,
@@ -58,6 +58,10 @@ pub struct AuditRule {
     pub directive: String,
     /// The rule's declared scope (`applies_to` in its TOML). `None` = every file.
     pub applies_to: Option<AppliesTo>,
+    /// The rule's declared candidate locator (`candidates` in its TOML, token-efficiency rank 8).
+    /// `None` = the rule is sent whole files. Read by the audit's candidate prefilter, not by the
+    /// router: it changes what a chunk's prompt shows the rule, never which files it is routed.
+    pub candidates: Option<Candidates>,
 }
 
 impl AuditRule {
@@ -67,6 +71,7 @@ impl AuditRule {
             id: id.into(),
             directive: directive.into(),
             applies_to: None,
+            candidates: None,
         }
     }
 
@@ -74,6 +79,13 @@ impl AuditRule {
     #[must_use]
     pub fn with_applies_to(mut self, applies_to: Option<AppliesTo>) -> Self {
         self.applies_to = applies_to;
+        self
+    }
+
+    /// The same rule carrying `candidates`.
+    #[must_use]
+    pub fn with_candidates(mut self, candidates: Option<Candidates>) -> Self {
+        self.candidates = candidates;
         self
     }
 
@@ -95,9 +107,9 @@ pub fn rules_from_pairs(pairs: &[(String, String)]) -> Vec<AuditRule> {
     pairs.iter().cloned().map(AuditRule::from).collect()
 }
 
-/// Rules from `(id, directive)` pairs, each carrying the `applies_to` the loaded `corpus` declares
-/// for it. A rule the corpus does not know (or no corpus at all) gets no declared scope, i.e.
-/// every file: the safe fallback.
+/// Rules from `(id, directive)` pairs, each carrying the `applies_to` and `candidates` the loaded
+/// `corpus` declares for it. A rule the corpus does not know (or no corpus at all) gets neither,
+/// i.e. every file, whole: the safe fallback.
 pub fn audit_rules(
     pairs: &[(String, String)],
     corpus: Option<&camerata_rules::RuleSet>,
@@ -105,13 +117,13 @@ pub fn audit_rules(
     pairs
         .iter()
         .map(|(id, directive)| {
-            let applies_to = corpus
-                .and_then(|c| {
-                    c.get_by_id(id)
-                        .or_else(|| c.get_by_id(&id.to_ascii_uppercase()))
-                })
-                .and_then(|rule| rule.applies_to.clone());
-            AuditRule::new(id.clone(), directive.clone()).with_applies_to(applies_to)
+            let rule = corpus.and_then(|c| {
+                c.get_by_id(id)
+                    .or_else(|| c.get_by_id(&id.to_ascii_uppercase()))
+            });
+            AuditRule::new(id.clone(), directive.clone())
+                .with_applies_to(rule.and_then(|r| r.applies_to.clone()))
+                .with_candidates(rule.and_then(|r| r.candidates))
         })
         .collect()
 }
