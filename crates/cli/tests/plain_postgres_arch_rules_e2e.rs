@@ -148,6 +148,7 @@ async fn plain_postgres_repo_fires_both_rules_through_camerata_inspect_end_to_en
         verbose: false,
         max_cost_usd: None,
         efficiency: Vec::new(),
+        consensus: false,
     };
 
     let outcome = run_inspect_with_key_presence(args, false)

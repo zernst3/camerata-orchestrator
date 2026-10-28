@@ -360,6 +360,7 @@ pub async fn run_repeatability_with(
         incremental: false,
         cap_usd: cap,
         exact,
+        consensus: false,
     });
     let mut text = pf.text.clone();
     match pf.estimate_usd {
@@ -390,6 +391,8 @@ pub async fn run_repeatability_with(
         efficiency,
         max_cost_usd: Some(per_run),
         estimate_hint_usd: pf.estimate_usd,
+        // Repeatability measures the drift of the default configuration.
+        consensus: false,
     };
     let ids: Vec<&str> = selected.iter().map(|r| r.id.as_str()).collect();
     let models =

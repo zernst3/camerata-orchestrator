@@ -2198,27 +2198,33 @@ pub async fn audit_repos_with_llm_controlled(
                             );
                         }
                     } else {
-                        match crate::ai_audit::audit_repo(
-                            llm,
-                            spec,
-                            &part.changed,
-                            &semantic,
-                            &alternatives,
-                            // `forced` is always empty on the main scan — nothing is
-                            // operator-forced here; that's exclusively the targeted
-                            // `rescan-alternatives` endpoint's job.
-                            &std::collections::HashMap::new(),
-                            model,
-                            calibration_model,
-                            mode,
-                            thorough,
-                            feedback,
-                            job,
-                            Some(&meter),
-                            Some(&files),
-                        )
-                        .await
-                        {
+                        // `forced` is always empty on the main scan — nothing is
+                        // operator-forced here; that's exclusively the targeted
+                        // `rescan-alternatives` endpoint's job.
+                        let no_forced = std::collections::HashMap::new();
+                        // H5: with the consensus option on, the whole audit runs three times
+                        // and only what two runs agree on comes back (see `crate::consensus`).
+                        let audited =
+                            crate::consensus::run_audit_passes(spec, controls.consensus, || {
+                                crate::ai_audit::audit_repo(
+                                    llm,
+                                    spec,
+                                    &part.changed,
+                                    &semantic,
+                                    &alternatives,
+                                    &no_forced,
+                                    model,
+                                    calibration_model,
+                                    mode,
+                                    thorough,
+                                    feedback,
+                                    job,
+                                    Some(&meter),
+                                    Some(&files),
+                                )
+                            })
+                            .await;
+                        match audited {
                             Ok((
                                 ai_findings,
                                 _ai_rules,

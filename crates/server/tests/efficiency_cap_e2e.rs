@@ -135,6 +135,7 @@ fn controls(cap: Option<f64>, efficiency: EfficiencyConfig) -> RunControls {
         efficiency,
         max_cost_usd: cap,
         estimate_hint_usd: None,
+        consensus: false,
     }
 }
 

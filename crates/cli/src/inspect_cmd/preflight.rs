@@ -23,6 +23,9 @@ pub struct PreflightInputs<'a> {
     pub cap_usd: Option<f64>,
     /// The exact size of one scan pass, when the API backend could count it.
     pub exact: Option<ExactSample>,
+    /// The three-pass consensus option is on: the whole AI audit runs
+    /// `camerata_server::consensus::CONSENSUS_PASSES` times.
+    pub consensus: bool,
 }
 
 /// The wording, and the number the batch spend-cap gate is given.
@@ -85,7 +88,13 @@ pub fn build(inputs: &PreflightInputs<'_>) -> Preflight {
             dollars += d;
             passes += p;
         }
-        (tokens, dollars, passes)
+        // Consensus runs the whole AI audit several times over the same inputs.
+        let runs = if inputs.consensus {
+            camerata_server::consensus::CONSENSUS_PASSES
+        } else {
+            1
+        };
+        (tokens * runs as u64, dollars * runs as f64, passes * runs)
     });
 
     let mut out = String::new();
@@ -144,6 +153,16 @@ pub fn build(inputs: &PreflightInputs<'_>) -> Preflight {
             )
             .ok();
         }
+    }
+    if inputs.consensus {
+        writeln!(
+            out,
+            "  consensus: on. The AI audit runs {} times and keeps what {} runs agree on; the \
+             figures above include every run.",
+            camerata_server::consensus::CONSENSUS_PASSES,
+            camerata_server::consensus::CONSENSUS_QUORUM
+        )
+        .ok();
     }
     if inputs.incremental {
         writeln!(
@@ -216,7 +235,21 @@ mod tests {
             incremental: false,
             cap_usd: cap,
             exact: None,
+            consensus: false,
         }
+    }
+
+    #[test]
+    fn consensus_triples_the_estimate_and_says_so() {
+        let repos = [repo(400_000, 30)];
+        let single = build(&inputs(&repos, None));
+        let mut on = inputs(&repos, None);
+        on.consensus = true;
+        let triple = build(&on);
+        let (one, three) = (single.estimate_usd.unwrap(), triple.estimate_usd.unwrap());
+        assert!((three - 3.0 * one).abs() < 1e-9, "{one} x3 != {three}");
+        assert!(triple.text.contains("consensus: on"), "{}", triple.text);
+        assert!(!single.text.contains("consensus"), "{}", single.text);
     }
 
     #[test]

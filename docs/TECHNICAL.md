@@ -2826,7 +2826,7 @@ cargo run -p camerata -- repeatability --repo <PATH> --max-cost-usd <USD> [--for
 
 It runs the same Phases 1 to 3 as `camerata inspect` (stack detection, the
 curated rule selection, the corpus, `audit_repos` with the deterministic floor
-and the AI review) twice, applies the corpus severity bounds to each run, and
+and the AI review) twice, applies the corpus severity bounds to each run and
 compares the two finding sets with `camerata_server::repeatability::diff_runs`:
 counts by tier (`deterministic`, `ai`, `preview`), by rule and by severity in
 each run, plus every finding one run reported and the other did not. Findings
@@ -2850,7 +2850,7 @@ stops part way turns coverage into apparent drift. Nothing is written to disk.
 
 **Output and exit code.** Text by default, `--format json` for the same data
 as JSON (`RepeatabilityOutcome`). A run is incomplete when the AI review
-failed, the spend limit stopped anything, or a pass that can change which
+failed, the spend limit stopped anything or a pass that can change which
 findings exist failed; only the effort-estimate and fix-text stages are
 treated as unable to (`FINDING_NEUTRAL_PASSES`), so an unknown failure flags
 the comparison. Every failed pass is listed either way. Exit 0 when both runs
@@ -2860,6 +2860,59 @@ refusal.
 `crates/cli/tests/repeatability_e2e.rs` drives the whole command with a fake
 completer whose answers drift between runs; it is never run against a live
 model in CI.
+
+#### Drift reduction: temperature, input order and the consensus option
+
+Three measures make two runs of the same scan agree more often. The first two
+are always on; the third is an option for client work and is off by default.
+
+**Temperature 0 where the model accepts it.** `LlmRequest` carries an optional
+`temperature`. It is put on the wire (the Messages body and a batch item) only
+when the model's catalog request shape accepts sampling parameters
+(`camerata_llm::model_registry::accepts_sampling_params`, which presumes an
+unknown model strict), and `conform_messages_body` still runs last. Every
+current Claude model in the catalog is strict, so for them nothing is sent and
+the "a call site sent something this model rejects" warning never fires; the
+legacy and any future permissive model gets temperature 0. The passes that
+decide which findings exist ask for `ai_audit::AUDIT_TEMPERATURE` (0): the scan
+passes (real time and batch), the alternatives choice, calibration and the deep
+security pass. Fix text and the prose lenses keep the provider default because
+they word findings rather than choose them. The CLI backend (`claude -p` has no
+temperature flag) and OpenRouter ignore the field.
+
+**One canonical input order.** `ai_audit::audit_repo` sorts the model-facing
+files and the repo-map files by path and the rules by id before building any
+prompt, so the same files and rules always produce the same prompts whatever
+order the caller handed them in (a reversed order used to reorder both the
+digest and the rule list). The gitignore-aware repo walk
+(`onboard::files::read_local_repo_files`) sorts by file name, so neither the file list nor the `HARD_CAP_FILES` cut on a
+very large repo depends on the filesystem's directory order. The fallback walk for a directory with no `.git`
+is unchanged; its prompts are still ordered by `audit_repo`.
+
+**Three-pass consensus (`camerata inspect --consensus`, off by default).** With
+`RunControls::consensus` on, `audit_repos` runs each repo's whole AI audit
+(`audit_repo`: scan passes, alternatives, calibration and fixes) three times in
+sequence through `consensus::run_audit_passes` and keeps a finding only when at
+least two audits reported it, matched by the same `finding_match_key`
+`camerata repeatability` uses; repeats are counted, so a site two audits saw
+twice is kept twice. Proposed rules and alternative recommendations come from
+the first audit that answered, so every kept finding was judged against one
+set of options. The vote is recorded as a `consensus` ledger stage whose
+removed rows are accounted as agreeing copies (`deduped`) or
+`consensus_minority_dropped`, so the integrity gate reconciles. An audit that
+errors is disclosed as a failed pass ("consensus audit N of 3") and the vote
+runs over the audits that answered: two must still agree and a lone answer
+stands and says so. If none answers, the error is returned as a single audit's
+would be. It costs about three times the AI spend (the pre-flight estimate
+triples and says so; the spend limit is checked between the audits as between
+any passes) and it trades recall for stability: a real issue the model notices
+one time in three is dropped. Use it for a client deliverable where a finding
+that comes and goes between runs does more harm than one that is missed. The
+desktop app does not expose it.
+
+Tests: `ai_audit::drift_tests`, `llm::temperature_tests`,
+`onboard::files::tests::the_gitignore_aware_walk_returns_files_in_path_order`,
+`consensus::tests` and `crates/server/tests/consensus_e2e.rs`.
 
 The ZIP holds four entries, and they are deliberately not three views of the same
 thing:

@@ -177,6 +177,12 @@ enum Command {
         /// label_after_prefix, batch_long_cache, result_cache, truncation_retry, fix_prefilter.
         #[arg(long = "efficiency", value_name = "NAME=on|off")]
         efficiency: Vec<String>,
+        /// Three-pass consensus for client work: run the AI audit three times and keep only the
+        /// findings at least two runs report. Off by default. About three times the AI cost
+        /// (the pre-flight estimate includes it), and a finding only one run in three notices is
+        /// dropped.
+        #[arg(long)]
+        consensus: bool,
     },
 
     /// Measure run-to-run drift: run the full AI pass twice over `--repo` with every answer
@@ -419,6 +425,7 @@ async fn main() -> anyhow::Result<()> {
             verbose,
             max_cost_usd,
             efficiency,
+            consensus,
         } => {
             run_inspect_cmd(InspectArgs {
                 repo,
@@ -431,6 +438,7 @@ async fn main() -> anyhow::Result<()> {
                 verbose,
                 max_cost_usd,
                 efficiency,
+                consensus,
             })
             .await
         }
@@ -949,6 +957,7 @@ mod cli_parse_tests {
                 verbose,
                 max_cost_usd,
                 efficiency,
+                consensus,
             } => {
                 assert_eq!(repo, PathBuf::from("/tmp/r"));
                 assert_eq!(export, PathBuf::from("/tmp/o.zip"));
@@ -960,9 +969,27 @@ mod cli_parse_tests {
                 assert!(!verbose);
                 assert!(max_cost_usd.is_none(), "no cap unless asked for");
                 assert!(efficiency.is_empty());
+                assert!(!consensus, "consensus is off unless asked for");
             }
             other => panic!("expected Command::Inspect, got a different variant: {other:?}"),
         }
+        let cli = Cli::try_parse_from([
+            "camerata",
+            "inspect",
+            "--repo",
+            "/tmp/r",
+            "--export",
+            "/tmp/o.zip",
+            "--consensus",
+        ])
+        .expect("must parse");
+        assert!(matches!(
+            cli.command,
+            Command::Inspect {
+                consensus: true,
+                ..
+            }
+        ));
     }
 
     #[test]

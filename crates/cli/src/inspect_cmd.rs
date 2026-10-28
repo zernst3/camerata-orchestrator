@@ -95,6 +95,9 @@ pub struct InspectArgs {
     /// `--efficiency name=on|off` entries (applied over `CAMERATA_EFFICIENCY`). See
     /// [`camerata_server::efficiency`].
     pub efficiency: Vec<String>,
+    /// `--consensus`: run the AI audit three times and keep what two runs agree on (see
+    /// [`camerata_server::consensus`]). Off by default.
+    pub consensus: bool,
 }
 
 impl InspectArgs {
@@ -116,6 +119,7 @@ impl InspectArgs {
             efficiency,
             max_cost_usd,
             estimate_hint_usd: None,
+            consensus: self.consensus,
         })
     }
 }
@@ -691,6 +695,7 @@ pub async fn run_inspect_pipeline_with(
             incremental: incremental_prior.is_some(),
             cap_usd: controls.max_cost_usd,
             exact,
+            consensus: controls.consensus,
         });
         (seams.preflight_sink)(&pf.text);
         controls.estimate_hint_usd = pf.estimate_usd;
@@ -1169,6 +1174,7 @@ mod tests {
             verbose: false,
             max_cost_usd: None,
             efficiency: Vec::new(),
+            consensus: false,
         }
     }
 

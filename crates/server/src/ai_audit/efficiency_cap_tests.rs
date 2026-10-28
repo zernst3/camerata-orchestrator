@@ -83,6 +83,7 @@ fn meter(efficiency: EfficiencyConfig, cap: Option<f64>) -> UsageMeter {
         efficiency,
         max_cost_usd: cap,
         estimate_hint_usd: None,
+        consensus: false,
     })
 }
 
@@ -370,6 +371,7 @@ fn with_cap(cap: f64, hint: Option<f64>) -> UsageMeter {
         efficiency: EfficiencyConfig::default(),
         max_cost_usd: Some(cap),
         estimate_hint_usd: hint,
+        consensus: false,
     })
 }
 
@@ -477,6 +479,7 @@ async fn a_batch_the_cap_refuses_is_never_submitted_and_every_pair_is_not_run() 
         efficiency: EfficiencyConfig::default(),
         max_cost_usd: Some(1.0),
         estimate_hint_usd: Some(50.0),
+        consensus: false,
     });
     let files = vec![("a.rs".to_string(), "fn a() {}".to_string())];
     let chunks: Vec<&[(String, String)]> = vec![files.as_slice()];

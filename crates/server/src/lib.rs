@@ -42,6 +42,8 @@ pub mod clarify_resume;
 pub mod client_provenance;
 pub mod client_source;
 pub mod connections;
+/// H5: the three-pass consensus option (off by default).
+pub mod consensus;
 mod corpus_freshness;
 /// `POST /api/apps` (Part 2 of the Rust-fullstack scaffolder): drives
 /// `camerata-scaffold`, creates + pushes the GitHub repo, and registers the

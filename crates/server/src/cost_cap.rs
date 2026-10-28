@@ -65,6 +65,9 @@ pub struct RunControls {
     /// decide whether a non-cancellable batch may be submitted (a real-time run is capped on
     /// actual spend alone).
     pub estimate_hint_usd: Option<f64>,
+    /// H5: the three-pass consensus option (`crate::consensus`). Off by default: about three
+    /// times the AI spend, and a finding only one pass in three reports is dropped.
+    pub consensus: bool,
 }
 
 impl RunControls {
