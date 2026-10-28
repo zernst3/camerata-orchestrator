@@ -1,5 +1,5 @@
 id = "CICD-PRIVILEGED-DEPLOY-GATE-1"
-version = 1
+version = 2
 title = "A production-impacting job (deploy, prod database migration, infra apply) requires a protected environment with required reviewers, never an unconditional push-triggered run"
 domain = "ci-cd"
 layer = "universal"
@@ -46,16 +46,7 @@ suite, building an artifact) that have no comparable blast radius if something g
 [[option]]
 id = "protected-environment-with-required-reviewers"
 label = "Privileged jobs target a GitHub Environment (or platform equivalent) configured with required reviewers; the platform itself blocks the run until approved"
-directive = """
-Every job that deploys to production, runs a migration against a production database, or applies infrastructure
-changes to a production target is defined against a named environment in the CI platform (a GitHub Environment or
-equivalent), and that environment has a required-reviewers protection rule actually configured in the platform's
-own settings (not merely referenced in the workflow YAML with no protection rule attached). The job's trigger (a
-tag push, a release-branch push) may still fire automatically per ARCH-TRIGGER-ENV-1's mapping, but the job itself
-pauses at the environment boundary until a designated reviewer approves that specific run. Non-privileged jobs
-(linting, test execution, building an artifact, deploying to a dev/preview environment) are explicitly NOT required
-to carry this gate — scoping it to genuinely privileged actions is what keeps the control affordable to maintain.
-"""
+directive = "Every job that deploys to production, runs a migration against a production database, or applies infrastructure changes to a production target is defined against a named environment in the CI platform (a GitHub Environment or equivalent), and that environment has a required-reviewers protection rule actually configured in the platform's own settings (not merely referenced in the workflow YAML with no protection rule attached). The job's trigger (a tag push, a release-branch push) may still fire automatically per ARCH-TRIGGER-ENV-1's mapping, but the job itself pauses at the environment boundary until a designated reviewer approves that specific run. Non-privileged jobs (linting, test execution, building an artifact, deploying to a dev/preview environment) are explicitly NOT required to carry this gate: scoping it to genuinely privileged actions is what keeps the control affordable to maintain."
 remediation = """
 Define (or confirm) a named environment in the CI platform for this privileged job's target (production, or a
 production database/infrastructure target), and configure a required-reviewers protection rule on that environment

@@ -59,11 +59,42 @@ fn canned_finding_json() -> String {
     )
 }
 
+/// The `terse_output` measure asks a second question after the scan: the full explanation of each
+/// surviving finding. This stub answers it with the canned finding's own `detail` (what the scan
+/// "wrote" in full), and answers every other call with the canned scan response, as before.
+fn answer(req: &LlmRequest, canned: String) -> String {
+    let is_regeneration = req
+        .system
+        .as_deref()
+        .is_some_and(|s| s.starts_with("You write the full explanation"));
+    if !is_regeneration {
+        return canned;
+    }
+    let scan: serde_json::Value = serde_json::from_str(&canned).expect("the canned scan response");
+    let finding = &scan["findings"][0];
+    // The block header the prompt addresses the finding by: `[<id>] rule ... - <path>:<line>`.
+    let header = req
+        .prompt
+        .lines()
+        .find(|l| l.starts_with('[') && l.contains("] rule "))
+        .expect("the regeneration prompt addresses the finding by an id");
+    let id = &header[1..header.find(']').expect("a closing bracket")];
+    let place = header.rsplit(" \u{2014} ").next().expect("a location");
+    let (path, line) = place.rsplit_once(':').expect("path:line");
+    serde_json::json!({"details": [{
+        "id": id,
+        "path": path,
+        "line": line.parse::<u64>().expect("a line number"),
+        "detail": finding["detail"],
+    }]})
+    .to_string()
+}
+
 #[async_trait]
 impl LlmPort for StubModel {
-    async fn complete(&self, _req: LlmRequest) -> anyhow::Result<LlmResponse> {
+    async fn complete(&self, req: LlmRequest) -> anyhow::Result<LlmResponse> {
         Ok(LlmResponse {
-            text: canned_finding_json(),
+            text: answer(&req, canned_finding_json()),
             model: "stub".to_string(),
             backend: "stub".to_string(),
             cost_usd: None,
@@ -78,12 +109,12 @@ impl LlmPort for StubModel {
 
     async fn complete_streaming(
         &self,
-        _req: LlmRequest,
+        req: LlmRequest,
         on_delta: &mut (dyn for<'a> FnMut(&'a str) + Send),
     ) -> anyhow::Result<LlmResponse> {
-        let text = canned_finding_json();
-        on_delta(&text);
-        self.complete(LlmRequest::new("")).await
+        let response = self.complete(req).await?;
+        on_delta(&response.text);
+        Ok(response)
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -191,7 +222,7 @@ async fn config_gated_rule_with_no_architecture_config_gets_an_accurate_note_and
         &stub,
         "acme/api",
         &files,
-        &selected,
+        &camerata_server::scan_routing::rules_from_pairs(&selected),
         &[], // alternatives
         &HashMap::new(),
         None, // model
@@ -200,7 +231,9 @@ async fn config_gated_rule_with_no_architecture_config_gets_an_accurate_note_and
         false, // thorough
         None,  // feedback
         None,  // job
-        None,  // meter
+        // A meter, so the default `terse_output` path (a short scan detail, the full one
+        // regenerated afterwards) is what this test drives; the stub answers both calls.
+        Some(&ai_audit::UsageMeter::default()),
         Some(&files),
     )
     .await

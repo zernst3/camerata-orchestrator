@@ -3,6 +3,56 @@
 Deferred work and known gaps not yet scheduled. Newest intent at the top. UI-only
 follow-ups live in `UI_BACKLOG.md`; this file is for engine + cross-cutting items.
 
+## Ownership: no producer for `Generated` / `Vendored` (2026-10-28, NOT BUILT, reason recorded)
+
+`Ownership::Generated` and `Ownership::Vendored` exist (`camerata_api_types::audit::Ownership`, with
+their client actions in `crates/server/src/ownership.rs`), but nothing assigns them
+(`PlatformManaged` is dormant by design). Checked against the existing file-filter knowledge; a
+producer is not small and certain, so none was added:
+
+1. The scan never audits those files. `onboard/files.rs` prunes vendor directories (`vendor`,
+   `node_modules`, and the rest of its denylist) and generated code (`GENERATED_NOISE_SUFFIXES`,
+   `GENERATED_NOISE_DIRS`), admitting generated code only as reference text, and
+   `scan_tools::is_in_repo_scope` drops external-tool rows on generated files and `dist/`. A
+   producer keyed on those same markers would match only rows the pipeline already removes: dead
+   code with no real scan to test it against.
+2. The one row that survives is an external tool's finding under a vendor directory, which
+   `is_in_repo_scope` keeps. Classifying it needs a path input to `ownership_of`, which today
+   derives only from `rule_id` and `captures`; that signature change touches both exporters
+   (`report_export`, `xlsx_export`).
+3. A wrong `Vendored` or `Generated` call moves a client-owned finding out of the action tiers and
+   the remediation budget: a silent under-report. A path heuristic alone (a directory named
+   `vendor`, a `generated` segment) cannot tell first-party code that sits there from real
+   vendored or generated output.
+
+Revisit when a real scan reports a finding inside such a path: the producer should then read a
+detector-set capture (as `platform_schema` does), not guess from the path.
+
+## C5-6: the generic "the affected table" fix filler (2026-10-28, OPEN, product polish)
+
+Until now tracked only in the `#[ignore]` reason on
+`fix_fields_can_fall_back_to_the_generic_affected_noun_phrase` (`crates/server/src/report_export.rs`).
+When a detector captured no concrete object name for a rule's `<table>`-style remediation token,
+`generic_placeholder_filler` renders "the affected table". That is filled text, never a raw or
+dangling placeholder, so it is not a correctness bug, but it reads as boilerplate next to an
+otherwise specific Fix line. Decision needed: omit the sentence when the token has no capture, or
+require every AUDIT_RULES floor checker to populate its own `captures` (several already do, see
+`onboard::audit::enrich_secret_context`). Once decided, the ignored test is the gate: un-ignore it
+with the chosen behaviour.
+
+## `camerata-check` reads the corpus from disk for its severity bounds (2026-10-28, OPEN)
+
+The CI gate now applies the corpus's severity bounds (`camerata_rules::severity_bounds`, the same
+implementation the scan and the exports use), reading the corpus at run time from
+`camerata_rules::corpus_path()`. A binary built from a checkout finds the bundled corpus. A binary
+vendored into a CI image without `crates/rules/principles` (and without `CAMERATA_CORPUS_PATH`)
+falls back to the bounds that need no authored rule, reports `corpus_bounds_applied: false`, and can
+fail a build on a finding the corpus caps at `low` (ARCH-DEAD-CODE-1 stays at the checker's
+`medium`). Fix when a release-binary pipeline exists: embed the bounds (rule id, `min_severity`,
+`max_severity`, `deviation_ceiling`) at build time. Not built now: a build script that generates a
+table from the corpus is a new build-time pattern and needs an owner's call. Documented for users in
+`USER_GUIDE.md` section 14 and `crates/camerata-check/README.md`.
+
 ## Live model-list fetch from Anthropic /v1/models (hybrid) (2026-06-22)
 
 The UI's model picker is fed by the hardcoded `MODELS` const in `llm.rs` (id + label + per-Mtok

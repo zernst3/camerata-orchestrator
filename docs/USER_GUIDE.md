@@ -396,6 +396,19 @@ fresh scan starts a new session; a crash mid-scan just re-runs the scan).
      (seconds to minutes, up to 24h on very large scans). Best when latency is acceptable in
      exchange for cost.
 
+   **Release note: Batch is now the default on the API backend.** When you do not pick a mode, a scan
+   on the API backend runs as a Message Batch (half price); on the CLI (subscription) backend it still
+   runs in real time and says so once. Choose Parallel or Sequential, or pass `--realtime`, to force
+   real time. A scan started as a plain foreground request (no background job) always runs in real
+   time and says so in its notes, because a batch can run for hours and a foreground request has
+   nowhere to record the batch id; start it as a background job to use batches. If the results of an
+   accepted batch cannot be retrieved, the affected passes are reported as failed with the batch id,
+   and the batch is never submitted a second time. The `batch_default=off` efficiency switch restores
+   the previous behavior (real time unless Batch is chosen). **A scan mode Camerata does not
+   recognize is now an error** (naming the valid choices) instead of silently running the default
+   mode; check any script or saved setting that passes a mode other than `parallel`, `sequential`,
+   `batch` or `auto`.
+
    **What the five finding kinds mean.** Every row carries a `kind`, and it tells you what sort of
    statement the row is making. This replaced a binary model in which a row was a violation or it was
    not, and the change matters because three of the five kinds say nothing is wrong:
@@ -837,7 +850,7 @@ Two tables:
 - **Project rules** — the rules the project has selected, in one table, **filterable by repo** (a repo
   single-select), with project-level rules shown too. Click a rule to switch its chosen option; remove
   a rule from a repo. Edits persist to the project's ruleset.
-- **All rules** - the full corpus (**437 rules across 22 domains** as of 2026-10-27: Rust,
+- **All rules** - the full corpus (**440 rules across 22 domains** as of 2026-10-27: Rust,
   Python, Go, JS/TS and its frameworks, Java/Spring, C#/ASP.NET, Ruby/Rails, SQL, fullstack, plus the
   always-on security floor and the agentic governance rules), viewable even when unassigned. Each row
   shows **which repos it's applied to**, with **"Add to repo"** (add a rule to any repo it's not yet
@@ -870,7 +883,7 @@ meant a client report could open its healthy list with a rule about how *Camerat
 agents, presented as a verified property of *their* codebase.
 
 Those rules now carry a flag (`inspectable = false`) that separates the two roles. **26 of the
-437 corpus rules are emit-only.** For you, that means:
+440 corpus rules are emit-only.** For you, that means:
 
 - They are still proposed, still selectable, and still written verbatim into the repo's
   `AGENTS.md` / `CONVENTIONS.md`. As governance directives they are unchanged.
@@ -1794,9 +1807,15 @@ listed as such and never counted as clean.
 Every saving the product applies is on by default and can be switched off for one run, to find out
 whether it caused a cost or behavior change: `--efficiency warm_schedule=off` (repeatable), or
 `CAMERATA_EFFICIENCY=warm_schedule=off,result_cache=off`. The measures are `warm_schedule`,
-`label_after_prefix`, `batch_long_cache`, `result_cache`, `truncation_retry` and `fix_prefilter`
-(what each does is in TECHNICAL.md). A misspelled name is an error. Every run prints which measures
-were on.
+`label_after_prefix`, `batch_long_cache`, `result_cache`, `truncation_retry`,
+`fix_prefilter`, `fix_on_haiku`, `terse_output`, `batch_default` and `applies_to_routing` (what each does is in
+TECHNICAL.md). `applies_to_routing` sends a rule that declares where it applies (for example, only
+SQL files) just those files; switch it off if a run seems to have missed something a rule should
+have caught. A misspelled name is an error. Every run prints which measures were on. With
+`terse_output` on, the scan writes one-sentence explanations and a separate step
+writes the full explanation for each finding that survives the merge; a finding whose full
+explanation could not be written stays in the report with `[detail incomplete]` after its short
+one, and the report lists the step as incomplete.
 
 To size a repo before quoting it, run `cargo run -p camerata -- count <PATH>` (add `--json` for
 machine-readable output). It uses no model and no network, reads the repo through the inspection's
@@ -2117,6 +2136,33 @@ authoritative source, only the derived output.
 After editing `.camerata/checks.toml`, regenerate the CI workflow by clicking the **Regenerate CI
 workflow** button in the Rules view (or calling `POST /api/projects/active/generate-ci-workflow`).
 The workflow is derived entirely from the manifest, so regenerating it is always safe to repeat.
+
+### `camerata-check` severities and which findings fail the build
+
+`camerata-check` reports each finding at the same severity your Camerata report shows. It runs
+the checker's severity through the rule corpus's severity bounds (a rule's minimum severity, its
+maximum severity, the deviation ceiling, and the rule that a finding with no location is
+informational), using the same implementation the inspection and its exports use. For example,
+ARCH-DEAD-CODE-1 is capped at `low` by the corpus, so the CI gate reports it at `low`.
+
+Which deterministic findings fail the build:
+
+| Severity after the bounds | Default run | `--strict` |
+|---|---|---|
+| `critical`, `high`, `medium` | fails the build (exit 1) | fails the build |
+| `low`, `info` | advisory: reported, exit 0 | fails the build |
+
+The bar is one constant (`FAIL_AT_SEVERITY = "medium"` in `crates/camerata-check/src/lib.rs`).
+The reasoning: a low-severity consistency finding is worth seeing on every pull request, but it
+should not block a merge. Needs-review findings never fail a default run, whatever their
+severity. The human output tags an advisory finding `deterministic, advisory`; the JSON output
+carries `blocking_count`, the number of findings that failed the build.
+
+The corpus is read from the bundled rules, or from the directory in `CAMERATA_CORPUS_PATH`. If
+it cannot be loaded, the gate still runs and still applies the bounds that need no rule, but a
+finding keeps the checker's own severity, the JSON says `"corpus_bounds_applied": false`, and the
+human output says so. When you vendor a built binary into a CI image, also copy the corpus
+(`crates/rules/principles`) and set `CAMERATA_CORPUS_PATH`.
 
 ### `camerata-check --strict` and Firebase rules kept in the console
 

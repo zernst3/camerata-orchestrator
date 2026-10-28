@@ -144,10 +144,16 @@ enum Command {
         /// explicitly); the same compliance-safety setting a project's `backend` field carries.
         #[arg(long, default_value = "api", value_parser = parse_backend)]
         backend: ProjectBackend,
-        /// Use the Anthropic Message Batches path (~50% cheaper; latency is not returned
+        /// Force the Anthropic Message Batches path (~50% cheaper; latency is not returned
         /// until the whole batch completes). Requires `--backend api` plus a configured key.
-        #[arg(long)]
+        /// On the API backend this is already the default unless `batch_default` is switched
+        /// off (`--efficiency batch_default=off`).
+        #[arg(long, conflicts_with = "realtime")]
         batch: bool,
+        /// Force real-time (parallel) calls instead of a Message Batch: results as each pass
+        /// finishes, at the full price.
+        #[arg(long)]
+        realtime: bool,
         /// Model override for the audit pass. Defaults to the project-less model floor.
         #[arg(long)]
         model: Option<String>,
@@ -176,7 +182,8 @@ enum Command {
         /// Switch a token-efficiency measure `on` or `off` for this run, e.g.
         /// `--efficiency warm_schedule=off`. Repeatable; wins over `CAMERATA_EFFICIENCY`. Every
         /// measure is on by default; the run states which were on. Measures: warm_schedule,
-        /// label_after_prefix, batch_long_cache, result_cache, truncation_retry, fix_prefilter.
+        /// label_after_prefix, batch_long_cache, result_cache, truncation_retry, fix_prefilter,
+        /// fix_on_haiku, terse_output, batch_default, applies_to_routing.
         #[arg(long = "efficiency", value_name = "NAME=on|off")]
         efficiency: Vec<String>,
     },
@@ -394,6 +401,7 @@ async fn main() -> anyhow::Result<()> {
             export,
             backend,
             batch,
+            realtime,
             model,
             calibration_model,
             fix_model,
@@ -407,6 +415,7 @@ async fn main() -> anyhow::Result<()> {
                 export,
                 backend,
                 batch,
+                realtime,
                 model,
                 calibration_model,
                 fix_model,
@@ -896,6 +905,7 @@ mod cli_parse_tests {
                 export,
                 backend,
                 batch,
+                realtime,
                 model,
                 calibration_model,
                 fix_model,
@@ -907,7 +917,8 @@ mod cli_parse_tests {
                 assert_eq!(repo, PathBuf::from("/tmp/r"));
                 assert_eq!(export, PathBuf::from("/tmp/o.zip"));
                 assert_eq!(backend, ProjectBackend::Api);
-                assert!(!batch);
+                assert!(!batch, "no mode forced: the run's default applies");
+                assert!(!realtime);
                 assert!(model.is_none());
                 assert!(calibration_model.is_none());
                 assert!(fix_model.is_none(), "no fix model unless asked for");
@@ -993,6 +1004,33 @@ mod cli_parse_tests {
             }
             other => panic!("expected Command::Inspect, got a different variant: {other:?}"),
         }
+    }
+
+    #[test]
+    fn inspect_parses_realtime_and_refuses_it_together_with_batch() {
+        let base = [
+            "camerata",
+            "inspect",
+            "--repo",
+            "/tmp/r",
+            "--export",
+            "/tmp/o.zip",
+        ];
+        let cli =
+            Cli::try_parse_from(base.iter().copied().chain(["--realtime"])).expect("must parse");
+        match cli.command {
+            Command::Inspect {
+                batch, realtime, ..
+            } => {
+                assert!(realtime);
+                assert!(!batch);
+            }
+            other => panic!("expected Command::Inspect, got a different variant: {other:?}"),
+        }
+        assert!(
+            Cli::try_parse_from(base.iter().copied().chain(["--realtime", "--batch"])).is_err(),
+            "forcing both modes at once is a usage error"
+        );
     }
 
     #[test]

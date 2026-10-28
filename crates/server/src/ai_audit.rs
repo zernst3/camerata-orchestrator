@@ -148,7 +148,7 @@ fn failed_pass_rows(repo: &str, answered: usize, failures: &[PassFailure]) -> Ve
             reason: format!(
                 "{} ({answered} of {total} passes in this round answered; the findings this \
                  pass would have produced are missing)",
-                f.error
+                batch_mode::disclosable_error(&f.error)
             ),
         })
         .collect()
@@ -581,6 +581,7 @@ async fn admit_stage<'a>(
 /// Stage names as the failed-pass list shows them (also the spend-cap record's keys).
 pub const STAGE_ALTERNATIVES: &str = "rule-alternative recommendations";
 pub const STAGE_CALIBRATION: &str = "calibration (verification and hour estimates)";
+pub const STAGE_DETAIL: &str = "detail regeneration";
 pub const STAGE_FIX: &str = "fix-specific generation";
 pub const STAGE_CLONE_JUDGE: &str = "clone-advisory judge";
 pub const STAGE_DEEP: &str = "deep compliance tier";
@@ -617,6 +618,24 @@ fn batch_estimate_usd(
     Some(dollars)
 }
 
+/// Whether the `terse_output` measure applies to a call site that may have no meter.
+///
+/// Unlike the other measures this one is OFF without a meter. It asks the model for less and
+/// then spends a second stage to get the rest back; that stage must be metered (the spend limit,
+/// the telemetry row and the operator's opt-out all live on the meter), so a path with no meter
+/// runs the scan exactly as it ran before rank 4. [`warn_terse_needs_meter`] says so once.
+pub fn terse_output_of(meter: Option<&UsageMeter>) -> bool {
+    meter.is_some_and(|m| m.efficiency().terse_output)
+}
+
+/// The note for a path that has no meter: `terse_output` would have applied, and did not.
+fn warn_terse_needs_meter(repo: &str) {
+    eprintln!(
+        "[camerata-server] {repo}: terse_output needs a run meter (spend limit, telemetry, \
+         opt-out), and this path has none; scanning with the full detail instead"
+    );
+}
+
 /// The efficiency switches in force for a call site that may have no meter (every measure on).
 pub fn efficiency_of(meter: Option<&UsageMeter>) -> crate::efficiency::EfficiencyConfig {
     meter.map(UsageMeter::efficiency).unwrap_or_default()
@@ -647,6 +666,11 @@ impl UsageMeter {
     /// [`crate::stage_telemetry::FixOutcome`]).
     pub fn record_fix_outcome(&self, outcome: crate::stage_telemetry::FixOutcome) {
         self.stages.record_fix_outcome(outcome);
+    }
+
+    /// Record how many (chunk, rule) pairs the rule router skipped for one repo.
+    pub fn record_routing(&self, pairs_total: u64, pairs_skipped: u64) {
+        self.stages.record_routing(pairs_total, pairs_skipped);
     }
 
     /// The per-stage telemetry so far, joined to the scan's counted-line total.
@@ -901,9 +925,34 @@ pub fn build_digest(files: &[(String, String)]) -> String {
 pub const AUDIT_PROMPT_SCHEMA_VERSION: u32 = 1;
 
 /// The system prompt: what to look for, what NOT to (the mechanical tier is already
-/// covered), and the STRICT JSON schema to return.
+/// covered), and the STRICT JSON schema to return. This is the prompt with the `terse_output`
+/// measure OFF (the long `detail`, `proposed_rules` on every pass); [`audit_system_prompt_with`]
+/// is the one implementation and takes the switch.
 pub fn audit_system_prompt() -> String {
-    r#"You are a senior software architect performing a CONFORMANCE audit of an existing codebase for Camerata.
+    audit_system_prompt_with(false)
+}
+
+/// The separator [`parse_ai_findings`] puts between a finding's one-line `title` and its
+/// `detail` when it builds `Finding::detail`. The post-merge detail regeneration splits on the
+/// same constant to keep the headline and replace the explanation, so the two cannot drift.
+pub(crate) const HEADLINE_SEP: &str = " — ";
+
+/// [`audit_system_prompt`] with the `terse_output` switch explicit.
+///
+/// OFF (`terse == false`): byte-identical to the prompt before rank 4 (the incremental cache's
+/// pin test hashes it). ON: the output schema asks for a ONE-sentence `detail` and carries no
+/// `proposed_rules` array; the advisory pass adds that array back through its own instruction
+/// line ([`pass_task_line`]), which sits in the uncached suffix.
+///
+/// # Why one prompt for every pass, and not a second one for the non-advisory passes
+///
+/// The system prompt leads the prompt-cache prefix. If the advisory pass (a chunk's first
+/// rule-batch) and its sibling passes carried different system prompts, the siblings could not
+/// read the cache entry the advisory pass wrote (the whole `warm_schedule` saving) because the
+/// first block of the prefix would differ. So the terse prompt is the same for all passes and
+/// the one difference between them lives in the instruction line.
+pub fn audit_system_prompt_with(terse: bool) -> String {
+    let base = r#"You are a senior software architect performing a CONFORMANCE audit of an existing codebase for Camerata.
 
 The user message lists the rules the project has ADOPTED, each as `- [RULE-ID] directive`. Your job is to check the code against EACH adopted rule and report EVERY place the code violates it.
 
@@ -970,7 +1019,62 @@ Return ONLY a JSON object, no prose, no markdown fences, in EXACTLY this shape:
 }
 If the code genuinely conforms everywhere, return {"findings": [], "proposed_rules": [], "needs_files": []}. Every finding must point at real code at a real line."#
         .to_string()
-        + crate::onboard::redact::MODEL_REDACTION_NOTICE
+        + crate::onboard::redact::MODEL_REDACTION_NOTICE;
+    if !terse {
+        return base;
+    }
+    let base = replace_expected(
+        &base,
+        r#""detail": "why it's a problem and what the fix direction is","#,
+        r#""detail": "ONE sentence, at most 25 words: why this code violates the rule, naming any other file or symbol the judgment depends on","#,
+    );
+    let base = replace_expected(&base, AUDIT_PROPOSED_RULES_SCHEMA, "");
+    let base = replace_expected(
+        &base,
+        r#"return {"findings": [], "proposed_rules": [], "needs_files": []}."#,
+        r#"return {"findings": [], "needs_files": []}."#,
+    );
+    replace_expected(
+        &base,
+        AUDIT_OUTPUT_SHAPE_LEAD,
+        &format!("{TERSE_DETAIL_PARAGRAPH}\n\n{AUDIT_OUTPUT_SHAPE_LEAD}"),
+    )
+}
+
+/// The sentence that opens the output-shape section of both scan system prompts. The terse
+/// variants insert their short-detail paragraph in front of it.
+const AUDIT_OUTPUT_SHAPE_LEAD: &str =
+    "Return ONLY a JSON object, no prose, no markdown fences, in EXACTLY this shape:";
+
+/// The `proposed_rules` array of the full output schema, exactly as it appears in
+/// [`audit_system_prompt`] (the terse prompt removes it).
+const AUDIT_PROPOSED_RULES_SCHEMA: &str = r#"  "proposed_rules": [
+    {
+      "name": "short-kebab-name (only for issues NOT covered by an adopted rule)",
+      "title": "the rule to enforce going forward",
+      "rationale": "why this rule, grounded in the findings",
+      "severity": "critical|high|medium|low",
+      "enforcement": "mechanical|review"
+    }
+  ],
+"#;
+
+/// What the terse scan prompts tell the model about `detail`. The full explanation is written
+/// later, for the findings that survive the merge, from the title, this sentence and the code
+/// around the line, so everything the judgment rests on has to be in those three places.
+const TERSE_DETAIL_PARAGRAPH: &str = "SHORT DETAIL. Write `detail` as ONE sentence of at most 25 words: the specific reason this code violates the rule, naming every OTHER file or symbol the judgment depends on (a flag read in another file, the helper whose body decides it). If the case is borderline, begin the sentence with \"Borderline:\". Do not write fix advice or background: a separate step writes the full explanation, for the findings that survive deduplication, from your title, this sentence and the code around the line. So whatever makes this a violation must be in the title, in `code`, or in this one sentence.";
+
+/// The instruction an ADVISORY pass adds to its line under `terse_output`, restoring the
+/// `proposed_rules` array the terse system prompt left out. Later passes are told not to report
+/// novel issues, so they have nothing to propose and never see this.
+const ADVISORY_PROPOSED_RULES_INSTRUCTION: &str = "In THIS pass only, ALSO add a top-level `proposed_rules` array to your JSON, one entry per genuinely novel issue you flagged: [{\"name\": \"short-kebab-name\", \"title\": \"the rule to enforce going forward\", \"rationale\": \"why this rule, grounded in the findings\", \"severity\": \"critical|high|medium|low\", \"enforcement\": \"mechanical|review\"}]. Use an empty array when you propose none.";
+
+/// `text` with the first `from` replaced by `to`. The tests pin that each replacement applies;
+/// a miss here would silently leave the full prompt in place, which only costs the saving,
+/// never correctness.
+fn replace_expected(text: &str, from: &str, to: &str) -> String {
+    debug_assert!(text.contains(from), "terse prompt: missing `{from}`");
+    text.replacen(from, to, 1)
 }
 
 /// Pull the first balanced-looking JSON object out of a model response (tolerates
@@ -1125,7 +1229,13 @@ pub fn parse_ai_findings(
                 "low" => "low",
                 _ => "medium",
             };
-            let title = f["title"].as_str().unwrap_or("").trim().to_string();
+            // The title is the headline of `Finding::detail`, split off again by the detail
+            // regeneration at the FIRST `HEADLINE_SEP`, so the title itself must never hold one.
+            let title = f["title"]
+                .as_str()
+                .unwrap_or("")
+                .trim()
+                .replace(HEADLINE_SEP, " - ");
             let code = f["code"].as_str().unwrap_or("").trim().to_string();
             let detail = f["detail"].as_str().unwrap_or("").trim().to_string();
             if title.is_empty() && detail.is_empty() && code.is_empty() {
@@ -1137,7 +1247,7 @@ pub fn parse_ai_findings(
             // detail so the human still sees the one-line statement.
             let snippet = if code.is_empty() { title.clone() } else { code };
             let detail = match (title.is_empty(), detail.is_empty()) {
-                (false, false) => format!("{title} — {detail}"),
+                (false, false) => format!("{title}{HEADLINE_SEP}{detail}"),
                 (false, true) => title.clone(),
                 _ => detail,
             };
@@ -3603,6 +3713,29 @@ fn fix_evidence_blob(f: &Finding, files: &[(String, String)]) -> String {
     )
 }
 
+/// The first line of a finding's block in an aggregate-stage prompt (fix generation, detail
+/// regeneration): the label the reply addresses it by, then its rule, severity and location.
+fn finding_block_header(label: &str, f: &Finding) -> String {
+    format!(
+        "[{label}] rule {} — severity {} — {}:{}\n",
+        f.rule_id, f.severity, f.path, f.line
+    )
+}
+
+/// The "Captured objects" line of a finding's block, or nothing when it captured none.
+fn captured_objects_line(f: &Finding) -> String {
+    if f.captures.is_empty() {
+        return String::new();
+    }
+    let caps = f
+        .captures
+        .iter()
+        .map(|(k, v)| format!("{k}={v}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("Captured objects: {caps}\n")
+}
+
 /// Build the per-finding prompt body for a fix-generation round. `findings` are the
 /// findings THIS round is asking about (batch-local order); `feedback`, when present for a
 /// batch-local position, is a one-line note on why that finding's PRIOR attempt was
@@ -3615,10 +3748,7 @@ fn build_fix_specific_block(
 ) -> String {
     let mut out = String::new();
     for (i, f) in findings.iter().enumerate() {
-        out.push_str(&format!(
-            "[{i}] rule {} — severity {} — {}:{}\n",
-            f.rule_id, f.severity, f.path, f.line
-        ));
+        out.push_str(&finding_block_header(&i.to_string(), f));
         if !f.snippet.is_empty() {
             out.push_str(&format!(
                 "Snippet: {}\n",
@@ -3629,15 +3759,7 @@ fn build_fix_specific_block(
             "Detail: {}\n",
             camerata_secrets::redact_str(&f.detail)
         ));
-        if !f.captures.is_empty() {
-            let caps = f
-                .captures
-                .iter()
-                .map(|(k, v)| format!("{k}={v}"))
-                .collect::<Vec<_>>()
-                .join(", ");
-            out.push_str(&format!("Captured objects: {caps}\n"));
-        }
+        out.push_str(&captured_objects_line(f));
         let context = fix_context_window(files, &f.path, f.line, 8);
         if !context.is_empty() {
             out.push_str(&format!("Surrounding code:\n{context}"));
@@ -4494,23 +4616,21 @@ fn build_pass_prompt_with(
     (prompt, cache_breakpoints)
 }
 
-/// The prompt-cache TTL a batch item asks for under `eff`: 1 hour with `batch_long_cache` on
-/// (the default), else the 5-minute cache.
-fn batch_cache_ttl(eff: crate::efficiency::EfficiencyConfig) -> crate::llm::CacheTtl {
-    if eff.batch_long_cache {
-        crate::llm::BATCH_CACHE_TTL
-    } else {
-        crate::llm::CacheTtl::FiveMinutes
-    }
-}
-
 /// The instruction line that closes a scan pass's prompt. ONE definition for the real-time
 /// passes, the batch items and the pre-flight sample, so the three can never disagree about what
 /// a pass asks. `advisory` adds the "also flag other genuine issues" task (first rule-batch of a
-/// chunk only).
-fn pass_task_line(advisory: bool, bi: usize, n_b: usize) -> String {
+/// chunk only). `terse` is the `terse_output` switch: the terse system prompt carries no
+/// `proposed_rules` array, so the advisory line (the only pass that may propose rules) adds it
+/// back here, in the uncached suffix, where it cannot disturb the shared cache prefix. With
+/// `terse` off the line is exactly what it always was.
+fn pass_task_line(advisory: bool, bi: usize, n_b: usize, terse: bool) -> String {
     if advisory {
-        format!("── Check the code above against the ADOPTED rules below (batch {}/{n_b}); ALSO flag any other genuine issues NOT covered by an adopted rule. Use the REPO MAP for cross-file context. ──", bi + 1)
+        let line = format!("── Check the code above against the ADOPTED rules below (batch {}/{n_b}); ALSO flag any other genuine issues NOT covered by an adopted rule. Use the REPO MAP for cross-file context. ──", bi + 1);
+        if terse {
+            format!("{line}\n{ADVISORY_PROPOSED_RULES_INSTRUCTION}")
+        } else {
+            line
+        }
     } else {
         format!("── Check the code above against ONLY the ADOPTED rules below (batch {}/{n_b}). Do NOT report issues outside these rules — a separate pass already covers novel findings. Use the REPO MAP for cross-file context. ──", bi + 1)
     }
@@ -4519,9 +4639,9 @@ fn pass_task_line(advisory: bool, bi: usize, n_b: usize) -> String {
 /// The request the exact-token sample counts for a pass whose prompt and cache layout are
 /// already built: the audit system prompt plus the prompt, split at the same breakpoints the
 /// real call uses. ONE builder for the batch path's sample and the pre-flight sample.
-fn sample_count_request(prompt: &str, cache_breakpoints: &[usize]) -> LlmRequest {
+fn sample_count_request(prompt: &str, cache_breakpoints: &[usize], terse: bool) -> LlmRequest {
     LlmRequest::new(prompt.to_string())
-        .with_system(audit_system_prompt())
+        .with_system(audit_system_prompt_with(terse))
         .with_cache_breakpoints(cache_breakpoints.to_vec())
 }
 
@@ -4550,7 +4670,7 @@ pub fn representative_scan_sample(
     let repo_map = build_repo_map(&model_files);
     let chunks = chunk_files(&model_files, CHUNK_DIGEST_CHARS);
     let first_chunk = chunks.first()?;
-    let (_, batch_size) = mode.tuning();
+    let (_, batch_size) = mode.tuning(efficiency);
     let empty: &[(String, String)] = &[];
     let batches: Vec<&[(String, String)]> = if selected.is_empty() {
         vec![empty]
@@ -4567,11 +4687,11 @@ pub fn representative_scan_sample(
         chunks.len(),
         &digest,
         batches.len(),
-        &pass_task_line(true, 0, batches.len()),
+        &pass_task_line(true, 0, batches.len(), efficiency.terse_output),
         &build_rules_block(batches[0]),
     );
     Some(ScanSample {
-        request: sample_count_request(&prompt, &bps),
+        request: sample_count_request(&prompt, &bps, efficiency.terse_output),
         passes: chunks.len() * batches.len(),
     })
 }
@@ -4598,7 +4718,7 @@ async fn audit_pass(
     meter: Option<&UsageMeter>,
 ) -> anyhow::Result<(Vec<Finding>, Vec<ProposedRule>, Vec<String>)> {
     let mut req = LlmRequest::new(prompt)
-        .with_system(audit_system_prompt())
+        .with_system(audit_system_prompt_with(terse_output_of(meter)))
         .with_max_tokens(8192);
     if let Some(m) = audit_model {
         req = req.with_model(m.to_string());
@@ -4606,7 +4726,7 @@ async fn audit_pass(
     if !cache_breakpoints.is_empty() {
         req = req.with_cache_breakpoints(cache_breakpoints);
     }
-    let mut resp = match send_audit_request(llm, req.clone(), feedback, session).await {
+    let resp = match send_audit_request(llm, req.clone(), feedback, session).await {
         Ok(r) => r,
         Err(e) => {
             meter_failed(meter, Stage::ScanPass, &e);
@@ -4616,13 +4736,31 @@ async fn audit_pass(
     if let Some(m) = meter {
         m.record_stage(Stage::ScanPass, &resp);
     }
-    // TRUNCATION-ONLY RETRY. A reply cut off at `max_tokens` is the one failure a repeat can
-    // recover: the same request with a higher cap returns the whole answer, where the cut-off
-    // one parses to nothing and the chunk's findings are lost. Any OTHER unusable reply (a
-    // complete answer that is simply not JSON) is NOT retried: the same prompt at the same cap
-    // tends to return the same thing and the spend is paid again. At most one retry, and a retry
-    // that itself fails leaves the pass exactly as it was before this existed: the first
-    // response, parsed as it always was.
+    let resp = retry_truncated_scan_reply(llm, &req, resp, feedback, session, meter).await;
+    let (f, p) = parse_ai_findings(repo, &resp.text, adopted);
+    let needs = parse_needs_files(&resp.text);
+    Ok((f, p, needs))
+}
+
+/// TRUNCATION-ONLY RETRY, the one function every scan pass uses: a real-time pass from
+/// [`audit_pass`] and a batch item from [`run_passes_batch`] alike. `resp` is the reply `req`
+/// got, already recorded on the meter.
+///
+/// A reply cut off at `max_tokens` is the one failure a repeat can recover: the same request
+/// with a higher cap returns the whole answer, where the cut-off one parses to nothing and the
+/// chunk's findings are lost. Any OTHER unusable reply (a complete answer that is simply not
+/// JSON) is NOT retried: the same prompt at the same cap tends to return the same thing and the
+/// spend is paid again. At most one retry, sent in real time, and a retry that itself fails
+/// leaves the pass exactly as it was before this existed: the first response, parsed as it
+/// always was. Returns the reply the pass should use.
+async fn retry_truncated_scan_reply(
+    llm: &dyn LlmPort,
+    req: &LlmRequest,
+    mut resp: crate::llm::LlmResponse,
+    feedback: Option<(&crate::transcript::TranscriptStore, &str)>,
+    session: &str,
+    meter: Option<&UsageMeter>,
+) -> crate::llm::LlmResponse {
     let mut wasted_counted = false;
     if resp.truncated && efficiency_of(meter).truncation_retry {
         if let Some(m) = meter {
@@ -4633,7 +4771,14 @@ async fn audit_pass(
             .max_tokens
             .saturating_mul(2)
             .min(AGGREGATE_MAX_TOKENS_CEILING);
-        match send_audit_request(llm, req.with_max_tokens(retry_cap), feedback, session).await {
+        match send_audit_request(
+            llm,
+            req.clone().with_max_tokens(retry_cap),
+            feedback,
+            session,
+        )
+        .await
+        {
             Ok(retry) => {
                 if let Some(m) = meter {
                     m.record_stage(Stage::ScanPass, &retry);
@@ -4652,9 +4797,7 @@ async fn audit_pass(
             m.record_wasted(Stage::ScanPass, &resp);
         }
     }
-    let (f, p) = parse_ai_findings(repo, &resp.text, adopted);
-    let needs = parse_needs_files(&resp.text);
-    Ok((f, p, needs))
+    resp
 }
 
 /// One scan-pass request: streamed into the transcript when feedback is present, else bounded
@@ -4745,34 +4888,39 @@ fn build_repo_map(files: &[(String, String)]) -> String {
          directories are repositories vs services vs controllers, where a named type lives):\n",
     );
     for (path, content) in files {
-        let syms = extract_public_symbols(content);
-        if syms.is_empty() {
-            out.push_str(&format!("  {path}\n"));
-        } else {
-            out.push_str(&format!("  {path}  [{}]\n", syms.join(", ")));
-        }
+        out.push_str(&repo_map_line(path, content));
     }
     out.push('\n');
     out
+}
+
+/// One file's line of the repo map: its path and the public symbols it defines. ONE definition
+/// for the map every scan pass reads and for the detail regeneration's view of a file the
+/// finding names.
+fn repo_map_line(path: &str, content: &str) -> String {
+    let syms = extract_public_symbols(content);
+    if syms.is_empty() {
+        format!("  {path}\n")
+    } else {
+        format!("  {path}  [{}]\n", syms.join(", "))
+    }
 }
 
 /// Max concurrent LLM calls + rules-per-batch for the parallel mode. Tunable.
 const PARALLEL_CONCURRENCY: usize = 6;
 const RULE_BATCH_SIZE: usize = 15;
 
-/// Rules-per-batch for `ScanMode::Batch`.
+/// Rules-per-batch for `ScanMode::Batch` with `batch_default` on (rank 2): the same 15 rules per
+/// prompt the parallel path uses, which is the prompt shape the fixtures were graded on. One
+/// prompt per chunk holding EVERY rule shares one 8192-token output cap across all of them, so a
+/// chunk with many violations truncates (SPIKE_TOKEN_EFFICIENCY_RESULTS.md, item 1).
 ///
-/// The Batch path compiles ALL (chunk × rule-batch) pairs into a SINGLE Anthropic
-/// Message Batch and lets the API schedule them — there is no per-item concurrency
-/// cost for splitting into finer batches. Using `RULE_BATCH_SIZE` (15) from the
-/// parallel path was a design mismatch (BUG-6): smaller batches add BatchItems but
-/// don't reduce latency; a LARGER batch keeps more adopted rules visible together in
-/// one prompt context, which improves coherence and reduces cross-batch re-flagging.
-///
-/// Set to `usize::MAX` so each chunk becomes a SINGLE BatchItem containing all rules.
-/// This can be overridden at runtime via the `CAMERATA_BATCH_RULE_BATCH_SIZE` env var
-/// (parsed as `usize`; falls back to this constant when absent or unparseable).
-const BATCH_RULE_BATCH_SIZE: usize = usize::MAX;
+/// `CAMERATA_BATCH_RULE_BATCH_SIZE` (a `usize`) overrides it at runtime in either switch state.
+const BATCH_RULE_BATCH_SIZE: usize = RULE_BATCH_SIZE;
+
+/// Rules-per-batch for `ScanMode::Batch` with `batch_default` off: every rule in ONE item per
+/// chunk, the pre-rank-2 shape (BUG-6).
+const LEGACY_BATCH_RULE_BATCH_SIZE: usize = usize::MAX;
 
 /// How the semantic (LLM) audit executes — the SPEED/SCALE knob, orthogonal to model tier
 /// (quality) and rule selection (coverage). The free deterministic floor is unaffected; it
@@ -4799,38 +4947,51 @@ pub enum ScanMode {
 }
 
 impl ScanMode {
-    /// Returns `(max_concurrent_calls, rules_per_batch)`.
+    /// The values [`Self::parse`] accepts, for its error message. `auto` (or nothing) asks for
+    /// the run's default, which [`resolve_scan_mode`] decides.
+    pub const WIRE_VALUES: &'static [&'static str] = &["auto", "parallel", "sequential", "batch"];
+
+    /// Returns `(max_concurrent_calls, rules_per_batch)` under the run's efficiency switches.
     ///
-    /// For real-time modes (`Sequential`, `Parallel`) this controls actual API
-    /// parallelism. For `Batch` mode the concurrency value is unused (all items are
-    /// submitted in one Anthropic Message Batch); only `rules_per_batch` matters and
-    /// it should be LARGE so each BatchItem includes all adopted rules for maximum
-    /// coherence (BUG-6: using `RULE_BATCH_SIZE = 15` was a design mismatch — it
-    /// fragmented Batch items without any latency benefit).
+    /// For real-time modes (`Sequential`, `Parallel`) this controls actual API parallelism. For
+    /// `Batch` the concurrency value is unused (the API schedules the items); only
+    /// `rules_per_batch` matters: [`BATCH_RULE_BATCH_SIZE`] with `batch_default` on,
+    /// [`LEGACY_BATCH_RULE_BATCH_SIZE`] with it off.
     ///
     /// `CAMERATA_BATCH_RULE_BATCH_SIZE` overrides the Batch rule batch size at runtime.
-    fn tuning(self) -> (usize, usize) {
+    fn tuning(self, eff: crate::efficiency::EfficiencyConfig) -> (usize, usize) {
         match self {
             ScanMode::Sequential => (1, usize::MAX),
             ScanMode::Parallel => (PARALLEL_CONCURRENCY, RULE_BATCH_SIZE),
             ScanMode::Batch => {
-                // Batch mode: all rules in one item per chunk is the efficient default;
-                // the env var allows the operator to cap it (e.g. for very large rule sets
-                // where a single prompt would exceed the model's context window).
+                let default = if eff.batch_default {
+                    BATCH_RULE_BATCH_SIZE
+                } else {
+                    LEGACY_BATCH_RULE_BATCH_SIZE
+                };
                 let batch_rule_size = std::env::var("CAMERATA_BATCH_RULE_BATCH_SIZE")
                     .ok()
                     .and_then(|v| v.parse::<usize>().ok())
-                    .unwrap_or(BATCH_RULE_BATCH_SIZE);
+                    .unwrap_or(default);
                 (PARALLEL_CONCURRENCY, batch_rule_size)
             }
         }
     }
-    /// Parse the wire value; unknown / empty → Parallel (the efficient default floor).
-    pub fn parse(s: Option<&str>) -> Self {
+
+    /// Parse the wire value. `Ok(None)` = no mode was asked for (absent, blank or `auto`), so
+    /// the run's default applies ([`resolve_scan_mode`]). An unknown value is an ERROR naming
+    /// the choices, never a silent fallback: a typo such as `batchh` must not quietly run the
+    /// scan at twice the price.
+    pub fn parse(s: Option<&str>) -> Result<Option<Self>, String> {
         match s.map(|v| v.trim().to_ascii_lowercase()).as_deref() {
-            Some("sequential") => ScanMode::Sequential,
-            Some("batch") => ScanMode::Batch,
-            _ => ScanMode::Parallel,
+            None | Some("") | Some("auto") => Ok(None),
+            Some("parallel") => Ok(Some(ScanMode::Parallel)),
+            Some("sequential") => Ok(Some(ScanMode::Sequential)),
+            Some("batch") => Ok(Some(ScanMode::Batch)),
+            Some(other) => Err(format!(
+                "unknown scan mode `{other}`; the scan modes are: {}",
+                Self::WIRE_VALUES.join(", ")
+            )),
         }
     }
 }
@@ -4928,7 +5089,7 @@ async fn run_passes(
             // cross-cutting All group keeps advisory enabled so novel issues are surfaced
             // exactly once — against every file — with no per-language re-flagging.
             let advisory = !advisory_disabled && bi == 0;
-            let task_line = pass_task_line(advisory, bi, n_b);
+            let task_line = pass_task_line(advisory, bi, n_b, terse_output_of(meter));
             // PROMPT ORDER IS CACHE-AWARE, with the SHARED content leading, then the
             // PER-CHUNK content, then the PER-BATCH (varying) content trailing — built by
             // `build_pass_prompt` (shared verbatim with `run_passes_batch` so the two
@@ -5092,26 +5253,35 @@ where
 }
 
 /// Batch execution mode (#61): compile ALL (chunk × rule-batch) pairs into Anthropic Message
-/// Batch items, submit in ONE request, poll to completion, then reassemble by `custom_id`.
+/// Batch items, submit, poll to completion, then reassemble by `custom_id`.
 ///
 /// ADVANTAGES vs. parallel: 50% discount on all input + output tokens; no per-call
 /// rate-limit pressure; the API schedules + parallelizes internally. TRADE-OFF: latency is
 /// asynchronous — the batch typically completes in seconds to a few minutes for small scans,
-/// but up to 24h for very large ones. Best suited for large/multi-repo scans where total
-/// cost matters more than wall-clock time.
+/// but up to 24h for very large ones.
 ///
-/// CAP ENFORCEMENT: the Anthropic batch API accepts up to 100k requests and 256MB body.
-/// When `chunks.len() * batches.len() > 100_000`, this function splits into sub-batches,
-/// submits them sequentially, and unions the results. The 256MB size cap is not checked
-/// per-item (each Camerata item is typically 5-50KB; 100k items is the binding constraint
-/// in practice). Exceeding the cap logs a warning and falls back gracefully.
+/// CAP ENFORCEMENT: the Anthropic batch API accepts up to 100k requests per batch;
+/// [`batch_mode::submit_round`] splits larger work into sub-batches.
 ///
-/// FALLBACK: if the `api` backend / key is not available, the function returns an error so
-/// the caller can fall back to parallel mode. The job's `batch_id` field is set on submit
-/// and cleared on finish.
+/// RANK 2 (`batch_default` on; off reproduces the pre-rank-2 path exactly):
+///
+/// * RESUBMISSION RULE: every item that errored, expired or is missing from the results is
+///   resubmitted ONCE, all of them together in one follow-up batch (never real time: the
+///   follow-up keeps the discount and passes through the same spend gate as the first
+///   submission). An item that fails again is a [`PassFailure`], the same shape a failed
+///   real-time pass gets, so the export says the inspection is incomplete.
+/// * A failed submit fails only that sub-batch's items (nothing was accepted, so they are
+///   resubmitted like any other failure) instead of discarding replies already paid for. A
+///   failed poll or fetch AFTER a successful submit is retried a bounded number of times and,
+///   if it still fails, disclosed as failed passes naming the batch id; the batch is never
+///   resubmitted, because it may still be running and billed.
+/// * An item cut off at the output limit gets [`retry_truncated_scan_reply`], the real-time
+///   passes' own truncation retry (sent in real time, admitted under the spend limit).
+///
+/// FALLBACK: without an API key this returns an error so the caller can say so.
 #[allow(clippy::too_many_arguments)]
 async fn run_passes_batch(
-    llm: &crate::llm::Llm,
+    llm: &dyn batch_mode::BatchApi,
     repo: &str,
     repo_map: &str,
     adopted: &std::collections::HashSet<String>,
@@ -5127,14 +5297,11 @@ async fn run_passes_batch(
     // findings when called from a language-scoped routing group.
     advisory_disabled: bool,
 ) -> anyhow::Result<PassesOut> {
-    use crate::llm::{build_batch_item, reassemble_batch_results, LlmRequest};
+    use batch_mode::{submit_round, BatchWork, ItemFailure, RoundContext};
 
-    // Rank 3 `batch_long_cache`: ON asks for the 1-hour cache (items outlive the 5-minute one).
-    // The same TTL prices the results.
     let eff = efficiency_of(meter);
-    let batch_ttl = batch_cache_ttl(eff);
 
-    if llm.api_key().is_none() {
+    if !llm.has_api_key() {
         anyhow::bail!(
             "batch mode requires the Api backend with an Anthropic API key; \
              switch this project's backend to Api and add an Anthropic API key in the app \
@@ -5148,29 +5315,20 @@ async fn run_passes_batch(
     let n_c = chunks.len();
     let n_b = batches.len();
 
-    // Build the full cartesian product of (chunk, rule-batch) items.
-    let mut items = Vec::with_capacity(n_c * n_b);
-    // Retain the (ci, bi, prompt, cache_breakpoints) tuples so we can parse results.
-    let mut work_meta: Vec<(usize, usize, String, Vec<usize>)> = Vec::with_capacity(n_c * n_b);
-
+    // The full cartesian product of (chunk, rule-batch) items, each with the request it sends.
+    let mut work: Vec<BatchWork> = Vec::with_capacity(n_c * n_b);
     for (ci, digest) in digests.iter().enumerate() {
         for (bi, batch) in batches.iter().enumerate() {
             let rb = build_rules_block(batch);
             // BUG-AI-1: mirror run_passes semantics — advisory fires only on bi==0 AND
-            // only when advisory_disabled is false. Without this check, every language-scoped
-            // batch group would re-run the novel-issue pass on its first batch, reproducing
-            // duplicate novel findings for each language group (the problem advisory_disabled
-            // was introduced to prevent in the parallel path).
+            // only when advisory_disabled is false.
             let advisory = !advisory_disabled && bi == 0;
-            let task_line = pass_task_line(advisory, bi, n_b);
-            // Same `build_pass_prompt` builder as `run_passes` — see the extensive comment
-            // there and on `cache_breakpoints_for_pass`. In BATCH mode this matters even
-            // more: the default `BATCH_RULE_BATCH_SIZE = usize::MAX` puts every rule in ONE
-            // rule-batch (`n_b == 1`), so `cache_breakpoints_for_pass` drops the
-            // chunk-segment breakpoint entirely (it would be written once and never
-            // re-read, paying a pure ~1.25x write premium for zero benefit) and keeps only
-            // the repo-map breakpoint, which DOES re-read across this batch submission's
-            // other chunks.
+            let task_line = pass_task_line(advisory, bi, n_b, terse_output_of(meter));
+            // Same `build_pass_prompt` builder as `run_passes` — see the comment there and on
+            // `cache_breakpoints_for_pass`. With one rule-batch per chunk (`batch_default` off,
+            // or a small rule set) the chunk-segment breakpoint is dropped (it would be written
+            // once and never re-read) and only the repo-map breakpoint stays, which re-reads
+            // across the submission's other chunks.
             let (prompt, cache_bps) = build_pass_prompt_with(
                 eff.label_after_prefix,
                 repo,
@@ -5183,167 +5341,223 @@ async fn run_passes_batch(
                 &task_line,
                 &rb,
             );
-
-            let custom_id = format!("c{ci}-b{bi}");
-            let req = {
-                let mut r = LlmRequest::new(prompt.clone())
-                    .with_system(audit_system_prompt())
-                    .with_max_tokens(8192)
-                    .with_model(model.clone())
-                    .with_cache_breakpoints(cache_bps.clone());
-                // audit_model overrides the default; already folded into `model` above.
-                let _ = &mut r; // avoid unused_mut lint
-                r
-            };
-            items.push(build_batch_item(&custom_id, &req, &model, batch_ttl));
-            work_meta.push((ci, bi, prompt, cache_bps));
+            let req = LlmRequest::new(prompt)
+                .with_system(audit_system_prompt_with(terse_output_of(meter)))
+                .with_max_tokens(8192)
+                .with_model(model.clone())
+                .with_cache_breakpoints(cache_bps);
+            work.push(BatchWork {
+                custom_id: format!("c{ci}-b{bi}"),
+                ci,
+                bi,
+                req,
+            });
         }
     }
 
-    // GAP-4 (compliance-audit housekeeping): best-effort EXACT pre-audit input-token count
-    // for the first (chunk, rule-batch) pair, via `count_tokens` (free — Anthropic does not
-    // bill this endpoint). This is a precision upgrade over the char-based heuristic
-    // estimate (`camerata_ui_core::scan::estimate_audit_cost`) the UI shows before the scan
-    // starts. Logged only for now (the heuristic estimate remains the persisted/displayed
-    // number) — gracefully skipped on ANY failure (no key, network error, non-2xx) via
-    // `exact_input_token_count`'s `Option` return, since a precise quote is a nice-to-have,
-    // never a reason to fail or stall the audit itself.
+    // GAP-4: best-effort EXACT input-token count for the first (chunk, rule-batch) pair, via
+    // `count_tokens` (free; Anthropic does not bill it). Logged, and used for the spend gate's
+    // projection. Skipped gracefully on any failure.
     //
     // SPEND CAP (batch): a submitted batch cannot be cancelled cheaply, so the cap is checked
-    // BEFORE every submission. The sample is only counted when the spend so far plus the
-    // caller's pre-flight estimate (no network needed) has not already refused the run.
+    // BEFORE every submission (`submit_round`), the resubmission included. The sample is only
+    // counted when the spend so far plus the caller's pre-flight estimate (no network needed)
+    // has not already refused the run.
     let hint_refuses = meter.is_some_and(|m| m.batch_refusal_reason(Some(0.0)).is_some());
     let mut per_item_usd: Option<f64> = None;
     if !hint_refuses {
-        if let Some((ci0, bi0, prompt0, cache_bps0)) = work_meta.first() {
-            let sample_req = sample_count_request(prompt0, cache_bps0);
-            if let Some(exact) = crate::llm::exact_input_token_count(llm, &sample_req, &model).await
-            {
+        if let Some(first) = work.first() {
+            let sample_req = sample_count_request(
+                &first.req.prompt,
+                &first.req.cache_breakpoints,
+                terse_output_of(meter),
+            );
+            if let Some(exact) = llm.count_input_tokens(&sample_req, &model).await {
                 eprintln!(
-                    "[camerata-server] batch mode: exact input-token count for chunk {ci0} rule-batch \
-                     {bi0} = {exact} tokens (via count_tokens; {} total (chunk,batch) pairs this run)",
-                    work_meta.len()
+                    "[camerata-server] batch mode: exact input-token count for chunk {} rule-batch \
+                     {} = {exact} tokens (via count_tokens; {} total (chunk,batch) pairs this run)",
+                    first.ci,
+                    first.bi,
+                    work.len()
                 );
                 // One item's input side at the batch price, sized like the sample and with no
                 // cache credit: a projection of what a submission commits, not a quote (output
-                // is not projected).
+                // is not projected). No cache write is projected, so the TTL does not move it.
                 per_item_usd = crate::llm::input_cost_usd(
                     &model,
                     exact,
-                    crate::llm::PriceBasis::batch(batch_ttl),
+                    crate::llm::PriceBasis::batch(crate::llm::BATCH_CACHE_TTL),
                 );
             }
         }
         // No exact projection (the count failed, or the model is unpriced): fall back to the
         // shared estimator, spread over the items. Still `None` when it cannot price either,
         // and the gate then refuses rather than guessing.
-        if per_item_usd.is_none() && !work_meta.is_empty() {
-            per_item_usd = batch_estimate_usd(&model, chunks, batches)
-                .map(|total| total / work_meta.len() as f64);
+        if per_item_usd.is_none() && !work.is_empty() {
+            per_item_usd =
+                batch_estimate_usd(&model, chunks, batches).map(|total| total / work.len() as f64);
         }
     }
-    let mut refused_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     // Tell the job the total pass count so the progress bar can be pre-seeded.
-    let total = items.len();
     if let Some((jstore, jid)) = job {
-        jstore.add_total(jid, total);
+        jstore.add_total(jid, work.len());
     }
 
-    // CAP ENFORCEMENT: split into sub-batches of 100k items each.
-    const BATCH_CAP: usize = 100_000;
-    let sub_batches: Vec<_> = items.chunks(BATCH_CAP).collect();
-    if sub_batches.len() > 1 {
-        eprintln!(
-            "[camerata-server] batch mode: {} items exceed the 100k cap — splitting into {} sub-batches",
-            total,
-            sub_batches.len()
-        );
-    }
+    let ctx = RoundContext {
+        api: llm,
+        repo,
+        label,
+        model: &model,
+        n_c,
+        n_b,
+        batches,
+        job,
+        meter,
+        per_item_usd,
+        fatal_errors: !eff.batch_default,
+    };
+    let all: Vec<&BatchWork> = work.iter().collect();
+    let mut round = submit_round(&ctx, &all).await?;
 
-    // Submit all sub-batches (sequentially — the API is async so there's no rate-limit
-    // pressure; we just need the batch_id from each one).
-    // Every sub-batch's outcomes: the answers, the per-item reasons for items that came back
-    // without one (errored, expired, or a model refusal, so a failure names the real cause
-    // instead of "missing"), and the usage of failed items that were nevertheless billed.
-    let mut all_results = crate::llm::BatchResults::default();
-    for (sub_idx, sub_items) in sub_batches.iter().enumerate() {
-        // Checked again for every sub-batch: the spend of the ones before it is known by now.
-        if let Some(m) = meter {
-            if let Some(why) =
-                m.batch_refusal_reason(per_item_usd.map(|p| p * sub_items.len() as f64))
-            {
-                eprintln!("[camerata-server] {why}");
-                m.record_note(why);
-                let first = sub_idx * BATCH_CAP;
-                for (ci, bi, _prompt, _bps) in &work_meta[first..first + sub_items.len()] {
-                    refused_ids.insert(format!("c{ci}-b{bi}"));
-                    m.record_not_run(crate::cost_cap::NotRunPass {
-                        repo: repo.to_string(),
-                        group: label.to_string(),
-                        chunk: ci + 1,
-                        n_chunks: n_c,
-                        rule_batch: bi + 1,
-                        n_rule_batches: n_b,
-                        rule_ids: batches[*bi].iter().map(|(id, _)| id.clone()).collect(),
-                    });
+    // RESUBMISSION (rank 2): every item that came back without a reply goes out once more, all
+    // together in one follow-up batch. Only an item the API ANSWERED with an error (or left out
+    // of its results) is resubmitted: a sub-batch whose poll or fetch failed after a successful
+    // submit is NOT (see `submit_round`), because its items may still be running and paid for.
+    if eff.batch_default {
+        let failed: Vec<&BatchWork> = work
+            .iter()
+            .filter(|w| !round.refused.contains(&w.custom_id))
+            .filter(|w| match round.results.get(&w.custom_id) {
+                Some(Ok(_)) => false,
+                Some(Err(failure)) => failure.resubmittable,
+                // Left out of the results the API returned.
+                None => true,
+            })
+            .collect();
+        if !failed.is_empty() {
+            eprintln!(
+                "[camerata-server] batch mode: {} item(s) errored, expired or went missing; \
+                 resubmitting them once in a follow-up batch",
+                failed.len()
+            );
+            let mut retry = submit_round(&ctx, &failed).await?;
+            for w in &failed {
+                let first = match round.results.get(&w.custom_id) {
+                    Some(Err(first)) => first.reason.clone(),
+                    _ => "missing from the batch results".to_string(),
+                };
+                if retry.refused.contains(&w.custom_id) {
+                    // The follow-up was refused by the spend limit: the item is NOT RUN on the
+                    // meter (the cap's own disclosure), and this note says it had already
+                    // failed once, so the gap is not read as a pass that never started.
+                    if let Some(m) = meter {
+                        m.record_note(format!(
+                            "batch item {} (chunk {}, rule-batch {}) failed in the first \
+                             submission ({first}) and its resubmission was not run: the spend \
+                             limit was reached",
+                            w.custom_id,
+                            w.ci + 1,
+                            w.bi + 1
+                        ));
+                    }
+                    continue;
                 }
-                continue;
-            }
-        }
-        let submit_result = llm.submit_batch(sub_items.to_vec()).await?;
-        let batch_id = submit_result.batch_id;
-        eprintln!(
-            "[camerata-server] batch mode: sub-batch {}/{} submitted as {batch_id} ({} items)",
-            sub_idx + 1,
-            sub_batches.len(),
-            sub_items.len(),
-        );
-        // Record the batch id on the job so the UI can surface it.
-        if let Some((jstore, jid)) = job {
-            jstore.set_batch_id(jid, &batch_id);
-        }
-
-        // Poll until the batch is done. The Anthropic spec recommends >= 1s between polls;
-        // we use 10s to be gentle. `CAMERATA_BATCH_POLL_SECS` overrides.
-        let poll_secs = std::env::var("CAMERATA_BATCH_POLL_SECS")
-            .ok()
-            .and_then(|s| s.trim().parse::<u64>().ok())
-            .filter(|n| *n > 0)
-            .unwrap_or(10);
-        poll_batch_until_ended(
-            || llm.poll_batch_status(&batch_id),
-            std::time::Duration::from_secs(poll_secs),
-            MAX_CONSECUTIVE_POLL_FAILURES,
-            |status| {
-                eprintln!(
-                    "[camerata-server] batch {batch_id}: status={} (processing={}, succeeded={}, errored={})",
-                    status.processing_status,
-                    status.request_counts.processing,
-                    status.request_counts.succeeded,
-                    status.request_counts.errored,
+                let again = match retry.results.remove(&w.custom_id) {
+                    Some(Ok(resp)) => {
+                        round.results.insert(w.custom_id.clone(), Ok(resp));
+                        continue;
+                    }
+                    Some(Err(again)) => again.reason,
+                    None => "missing from the batch results again".to_string(),
+                };
+                round.results.insert(
+                    w.custom_id.clone(),
+                    Err(ItemFailure {
+                        reason: format!("{first}; resubmitted once and failed again: {again}"),
+                        resubmittable: false,
+                    }),
                 );
-            },
-        )
-        .await?;
-
-        // Fetch + parse results.
-        let rows = llm.fetch_batch_results(&batch_id, batch_ttl).await?;
-        all_results.extend(reassemble_batch_results(rows));
+            }
+            round.refused.extend(retry.refused);
+        }
     }
 
-    // Reassemble: look up each (ci, bi) pair's response by its deterministic custom_id.
-    let pairs: Vec<(usize, usize)> = work_meta.iter().map(|(ci, bi, _, _)| (*ci, *bi)).collect();
+    // Each reply goes through the scan pass's own post-processing. With `batch_default` on a
+    // reply cut off at the output limit gets the shared truncation retry, sent in real time
+    // and admitted under the spend limit like a real-time pass; these run concurrently.
+    let mut replies: Vec<(&BatchWork, crate::llm::LlmResponse)> = Vec::new();
+    let mut results = crate::llm::BatchResults::default();
+    for w in &work {
+        if round.refused.contains(&w.custom_id) {
+            continue;
+        }
+        match round.results.remove(&w.custom_id) {
+            Some(Ok(resp)) => replies.push((w, resp)),
+            Some(Err(why)) => {
+                results.errors.insert(w.custom_id.clone(), why.reason);
+            }
+            // Not in the results at all: `reassemble_batch_passes` reports it as missing.
+            None => {}
+        }
+    }
+    let replies: Vec<(&BatchWork, crate::llm::LlmResponse)> = if eff.batch_default {
+        use futures::stream::StreamExt;
+        let realtime = llm.realtime();
+        // Collected first so the stream's type names no closure (a `Send` bound on the spawned
+        // scan future cannot be proven through a borrowing closure inside the combinator).
+        let retries: Vec<_> = replies
+            .into_iter()
+            .map(|(w, resp)| async move {
+                if !(resp.truncated && eff.truncation_retry) {
+                    return (w, resp);
+                }
+                // SPEND CAP: the retry is one more real-time call. Refused, the cut-off reply is
+                // used as it came (and counted as wasted), exactly as with the retry switched off.
+                let _permit = match admit_pass(meter).await {
+                    Ok(permit) => permit,
+                    Err(CapReached) => {
+                        if let Some(m) = meter {
+                            m.record_wasted(Stage::ScanPass, &resp);
+                            m.record_note(format!(
+                                "the truncation retry of batch item {} was not run: the spend \
+                             limit was reached",
+                                w.custom_id
+                            ));
+                        }
+                        return (w, resp);
+                    }
+                };
+                let session = format!("audit-{repo}-batch-{}", w.custom_id);
+                let resp =
+                    retry_truncated_scan_reply(realtime, &w.req, resp, None, &session, meter).await;
+                (w, resp)
+            })
+            .collect();
+        futures::stream::iter(retries)
+            .buffer_unordered(PARALLEL_CONCURRENCY)
+            .collect()
+            .await
+    } else {
+        replies
+    };
+    for (w, resp) in replies {
+        results.responses.insert(w.custom_id.clone(), resp);
+    }
+
+    // The replies were metered as they arrived (`submit_round`, so the resubmission's spend gate
+    // counted them), so the shared reassembly gets no meter: recording again would bill twice.
+    let pairs: Vec<(usize, usize)> = work.iter().map(|w| (w.ci, w.bi)).collect();
     Ok(reassemble_batch_passes(
         repo,
         label,
         n_c,
         n_b,
         &pairs,
-        &all_results,
-        &refused_ids,
+        &results,
+        &round.refused,
         adopted,
-        meter,
+        None,
         job,
     ))
 }
@@ -5352,7 +5566,8 @@ async fn run_passes_batch(
 /// rule-batch) pair's answer is parsed, and each pair WITHOUT one becomes a [`PassFailure`]
 /// carrying the per-item reason the API gave (`errors`), so a model refusal reads as a refusal
 /// rather than a generic "missing from results". Pure apart from the optional meter/job sinks,
-/// so the failure naming is unit-testable without a live batch.
+/// so the failure naming is unit-testable without a live batch. `meter` records each reply and
+/// each billed failure; a caller that already metered them as they arrived passes `None`.
 #[allow(clippy::too_many_arguments)]
 fn reassemble_batch_passes(
     repo: &str,
@@ -7302,19 +7517,212 @@ fn strip_headline_cross_references(mut findings: Vec<Finding>) -> Vec<Finding> {
     findings
 }
 
+/// One route group's share of a scan, ready to run: the files its scope covers (re-chunked on
+/// their own, so a chunk only holds files its rules can apply to), its rules, and how the
+/// advisory pass is wired for it.
+///
+/// [`routed_units`] is the ONE place that decides which (chunk, rule) pairs a scan sends. The
+/// real-time path ([`run_routed_passes`]), the batch path ([`run_routed_passes_batch`]) and the
+/// routing telemetry all read it, so they cannot send different pairs.
+struct RoutedUnit {
+    /// Index of the group in the route plan (stable session-id component).
+    index: usize,
+    /// `pass[<lang>]`, `pass[<declared scope>]` or `pass[all]`.
+    label: String,
+    /// What to tell the report when this group matched no file.
+    empty_note: String,
+    /// The files this group's scope covers.
+    files: Vec<(String, String)>,
+    /// The group's `(id, directive)` pairs, in plan order.
+    rules: Vec<(String, String)>,
+    /// True for a scoped group when a cross-cutting `All` group also runs this scan; see
+    /// [`routed_units`].
+    advisory_disabled: bool,
+}
+
+/// Turn a route plan into the units that run. Every group of the plan becomes a unit (a group
+/// that matched no file has empty `files`; the caller records it, see [`runnable_units`]).
+///
+/// # Advisory wiring (W2)
+///
+/// The advisory "flag novel issues beyond the adopted rules" pass must fire exactly once per
+/// file chunk. A scoped group (id-prefix language or declared `applies_to`) disables it ONLY when
+/// a cross-cutting `All` group ALSO runs this scan: that group already sees every file, so
+/// advisory in a scoped group too would re-flag the same novel issue under a second invented
+/// name. When there is no `All` group at all (every selected rule is scoped), nothing else would
+/// ever ask "is there anything wrong beyond the listed rules?", so every scoped group keeps
+/// advisory on. Id-prefix language groups are mutually exclusive by file, so that never
+/// duplicates; two DECLARED scopes can overlap on a file, in which case that file's advisory
+/// runs once per overlapping group and the duplicates collapse in the cross-chunk dedup and
+/// location merge. That costs a few repeated advisory tokens in an unusual selection (every
+/// cross-cutting rule scoped); the alternative, dropping advisory for a file, would lose findings.
+fn routed_units(
+    files: &[(String, String)],
+    route_plan: &crate::scan_routing::RoutePlan,
+) -> Vec<RoutedUnit> {
+    use crate::scan_routing::Scope;
+    let has_all_group = route_plan
+        .groups
+        .iter()
+        .any(|g| matches!(g.scope, Scope::All));
+    route_plan
+        .groups
+        .iter()
+        .enumerate()
+        .map(|(index, group)| {
+            let (label, empty_note) = match &group.scope {
+                Scope::Language(lang) => (
+                    format!("pass[{lang}]"),
+                    format!("no {lang} files matched this scan's file set"),
+                ),
+                Scope::Declared { language, .. } => (
+                    format!(
+                        "pass[{}]",
+                        language.map_or_else(|| "scoped".to_string(), str::to_string)
+                    ),
+                    "no file in this scan's file set is one this rule applies to".to_string(),
+                ),
+                Scope::All => (
+                    "pass[all]".to_string(),
+                    "no files matched this scan's file set".to_string(),
+                ),
+            };
+            RoutedUnit {
+                index,
+                label,
+                empty_note,
+                files: crate::scan_routing::files_in_scope(files, &group.scope),
+                rules: group.rule_pairs(),
+                advisory_disabled: has_all_group && !matches!(group.scope, Scope::All),
+            }
+        })
+        .collect()
+}
+
+/// The units that actually run: [`routed_units`] without the groups that matched no file.
+///
+/// Pass-1 W3 (A5.6, `NotAssessed`): a group that matched ZERO files was ARMED but nothing was
+/// ever judged against it. Each of its rules is pushed to `skipped_rules` for the caller
+/// (`audit_repo`) to turn into one honest `not_assessed` row, rather than leaving "never
+/// evaluated" indistinguishable from "assessed and clean". Real-time and batch mode both go
+/// through here, so both disclose the same skipped rules.
+///
+/// Also records the routing telemetry (how many (chunk, rule) pairs routing did not send) when
+/// there is a `meter`.
+fn runnable_units(
+    files: &[(String, String)],
+    route_plan: &crate::scan_routing::RoutePlan,
+    meter: Option<&UsageMeter>,
+    skipped_rules: &mut Vec<(String, String)>,
+) -> Vec<RoutedUnit> {
+    let units = routed_units(files, route_plan);
+    if let Some(m) = meter {
+        // (chunk, rule) pairs: what an un-routed scan would send (every rule with every chunk)
+        // against what the units send (each group's rules with that group's own chunks).
+        let n_rules: usize = units.iter().map(|u| u.rules.len()).sum();
+        let total = chunk_files(files, CHUNK_DIGEST_CHARS).len() * n_rules;
+        let sent: usize = units
+            .iter()
+            .map(|u| chunk_files(&u.files, CHUNK_DIGEST_CHARS).len() * u.rules.len())
+            .sum();
+        m.record_routing(total as u64, total.saturating_sub(sent) as u64);
+    }
+    let mut runnable = Vec::with_capacity(units.len());
+    for unit in units {
+        if unit.files.is_empty() {
+            skipped_rules.extend(
+                unit.rules
+                    .iter()
+                    .map(|(id, _)| (id.clone(), unit.empty_note.clone())),
+            );
+        } else {
+            runnable.push(unit);
+        }
+    }
+    runnable
+}
+
+/// The units a Message Batch scan submits, one Message Batch each.
+///
+/// With `applies_to_routing` ON these are exactly the real-time path's [`runnable_units`], so
+/// batch and real-time send the same (chunk, rule) pairs. With it OFF this is the batch scan as
+/// it was before routing reached batch mode: ONE submission of every rule against every file,
+/// labelled `pass`, advisory on. The switch therefore isolates routing completely: OFF in batch
+/// mode is "no routing at all", not "language routing only".
+fn batch_units(
+    files: &[(String, String)],
+    selected: &[crate::scan_routing::AuditRule],
+    route_plan: &crate::scan_routing::RoutePlan,
+    applies_to_routing: bool,
+    meter: Option<&UsageMeter>,
+    skipped_rules: &mut Vec<(String, String)>,
+) -> Vec<RoutedUnit> {
+    if applies_to_routing {
+        return runnable_units(files, route_plan, meter, skipped_rules);
+    }
+    vec![RoutedUnit {
+        index: 0,
+        label: "pass".to_string(),
+        empty_note: String::new(),
+        files: files.to_vec(),
+        rules: crate::scan_routing::rule_pairs(selected),
+        advisory_disabled: false,
+    }]
+}
+
+/// Drop the "armed but nothing matched" disclosures that the scan's file set cannot support.
+///
+/// `runnable_units` reports a rule whose group matched no file in `files`. On an INCREMENTAL scan
+/// `files` is only the changed files, so a rule whose matching files exist in the repo but did
+/// not change this time would be reported as never assessed, while its earlier findings are
+/// carried forward. A rule is only reported when the FULL file set (`full_files`) has no match
+/// either.
+fn drop_skips_with_matches_in_full_set(
+    skipped_rules: &mut Vec<(String, String)>,
+    route_plan: &crate::scan_routing::RoutePlan,
+    full_files: &[(String, String)],
+) {
+    let covered: std::collections::HashSet<String> = route_plan
+        .groups
+        .iter()
+        .filter(|g| {
+            full_files
+                .iter()
+                .any(|(p, c)| crate::scan_routing::file_in_scope(p, c, &g.scope))
+        })
+        .flat_map(|g| g.rules.iter().map(|r| r.id.to_ascii_uppercase()))
+        .collect();
+    skipped_rules.retain(|(id, _)| !covered.contains(&id.to_ascii_uppercase()));
+}
+
+/// The `(chunk, rule)` pairs a scan sends, as `(chunk's file paths, rule id)`, for a unit list.
+#[cfg(test)]
+fn pair_set_of(units: &[RoutedUnit]) -> std::collections::BTreeSet<(Vec<String>, String)> {
+    units
+        .iter()
+        .flat_map(|u| {
+            let chunk_paths: Vec<Vec<String>> = chunk_files(&u.files, CHUNK_DIGEST_CHARS)
+                .iter()
+                .map(|c| c.iter().map(|(p, _)| p.clone()).collect())
+                .collect();
+            u.rules.iter().flat_map(move |(id, _)| {
+                chunk_paths
+                    .iter()
+                    .map(move |paths| (paths.clone(), id.clone()))
+                    .collect::<Vec<_>>()
+            })
+        })
+        .collect()
+}
+
 /// Run the real-time audit passes with rule-routing applied.
 ///
-/// Groups `selected` rules by [`crate::scan_routing::Scope`] using the pre-computed
-/// `route_plan`, then for each group:
+/// Runs each [`RoutedUnit`] of `route_plan` (see [`runnable_units`] and [`routed_units`]):
 ///
-/// - Filters `files` to only the files that group's scope covers.
-/// - Chunks those filtered files for context-window sizing.
-/// - Runs [`run_passes`] over the group's rules, with `advisory_disabled = true` for a
-///   language-specific group ONLY when a cross-cutting `All` group ALSO runs this scan (so the
-///   "flag novel issues" pass fires exactly once per file chunk there, instead of once per
-///   group × chunk). When no `All` group exists at all (a purely language-scoped rule
-///   selection), every language group keeps advisory enabled instead — see the `has_all_group`
-///   doc comment in this function's body for why that never duplicates a finding (W2).
+/// - The unit's files are chunked for context-window sizing.
+/// - [`run_passes`] runs over the unit's rules, with `advisory_disabled` as [`routed_units`]
+///   decides it (so the "flag novel issues" pass fires exactly once per file chunk when a
+///   cross-cutting `All` group exists).
 ///
 /// When routing produces no savings (all rules are cross-cutting, or only one group), this
 /// degenerates to the previous single-group behavior with no overhead.
@@ -7325,7 +7733,7 @@ async fn run_routed_passes(
     llm: &dyn LlmPort,
     repo: &str,
     files: &[(String, String)],
-    selected: &[(String, String)],
+    selected: &[crate::scan_routing::AuditRule],
     route_plan: &crate::scan_routing::RoutePlan,
     repo_map: &str,
     adopted: &std::collections::HashSet<String>,
@@ -7341,12 +7749,10 @@ async fn run_routed_passes(
     // rather than leaving "never evaluated" indistinguishable from "assessed and clean".
     skipped_rules: &mut Vec<(String, String)>,
 ) -> PassesOut {
-    use crate::scan_routing::Scope;
-
     // When there are no rules (free-form audit), skip routing and run one pass over all files.
     if selected.is_empty() {
         let chunks = chunk_files(files, CHUNK_DIGEST_CHARS);
-        let empty_batch: &[(String, String)] = selected;
+        let empty_batch: &[(String, String)] = &[];
         let batches: Vec<&[(String, String)]> = vec![empty_batch];
         if let Some((jstore, jid)) = job {
             jstore.add_total(jid, chunks.len() * batches.len());
@@ -7370,28 +7776,15 @@ async fn run_routed_passes(
         .await;
     }
 
+    let units = runnable_units(files, route_plan, meter, skipped_rules);
+
     // Pre-seed the job's total pass count across ALL route groups so the progress bar is
-    // accurate from the start. We need to compute chunk counts per group first.
-    //
-    // For each group: count its files → chunk count × batch count = pass count.
-    let total_pass_count: usize = route_plan
-        .groups
+    // accurate from the start: per group, chunk count x rule-batch count.
+    let total_pass_count: usize = units
         .iter()
-        .map(|g| {
-            // Filter files to this group's scope.
-            let group_files: Vec<&(String, String)> = files
-                .iter()
-                .filter(|(path, _)| crate::scan_routing::file_in_scope(path, &g.scope))
-                .collect();
-            // The group's rules split into batches.
-            let n_batches = g.rules.chunks(batch_size.max(1)).count().max(1);
-            // chunk_files needs owned slices; approximate chunk count from raw sizes.
-            let total_sz: usize = group_files
-                .iter()
-                .map(|(p, c)| p.len() + c.len() + 32)
-                .sum();
-            let n_chunks = (total_sz / CHUNK_DIGEST_CHARS).max(1);
-            n_chunks * n_batches
+        .map(|u| {
+            chunk_files(&u.files, CHUNK_DIGEST_CHARS).len()
+                * u.rules.chunks(batch_size.max(1)).count().max(1)
         })
         .sum();
     // Only seed when > 0 (empty groups are no-ops and contribute 0 passes).
@@ -7407,69 +7800,10 @@ async fn run_routed_passes(
     let mut total_ok: usize = 0;
     let mut failures: Vec<PassFailure> = Vec::new();
 
-    // W2 (closes a real zero-row semantic-tier defect, previously documented as an accepted
-    // "known limitation" in `routing_single_language_repo_with_language_rules`): a project whose
-    // SELECTED rule set is entirely language-scoped (e.g. only `RUST-*` rules — no `ARCH-*`/
-    // `SEC-*`/other cross-cutting rule) produces a `route_plan` with NO `Scope::All` group at
-    // all. The old unconditional `!matches!(group.scope, Scope::All)` then disabled advisory in
-    // EVERY group, which means the "ALSO flag any other genuine issues NOT covered by an adopted
-    // rule" instruction (the model's one and only backstop for issues no selected rule names —
-    // see `audit_system_prompt`'s doc comment) was never sent to the model AT ALL for that scan.
-    // That is the silent-collapse mechanism: a repo scanned with a language-only rule selection
-    // gets zero chance at any novel/security finding outside those rules, indistinguishable from
-    // "the model looked and found nothing."
-    //
-    // Fix: advisory is disabled for a language group ONLY when a SEPARATE cross-cutting All
-    // group also exists to run it (the original duplicate-novel-finding concern this flag
-    // exists for). When there is no All group, every language group keeps advisory enabled
-    // instead — safe to do because `Scope::Language` groups are mutually exclusive by
-    // construction (`scan_routing::file_language` maps each file to AT MOST one language), so no
-    // file can receive the advisory instruction from more than one group.
-    let has_all_group = route_plan
-        .groups
-        .iter()
-        .any(|g| matches!(g.scope, Scope::All));
-
-    for (gi, group) in route_plan.groups.iter().enumerate() {
-        // The advisory pass is suppressed in a language-specific group only when a cross-cutting
-        // All group ALSO runs this scan — that All group already sees every file, so re-running
-        // advisory per language group would produce duplicate novel findings for every file
-        // (every language file is also an All-group file). When there is no All group, nothing
-        // else will ever ask "is there anything wrong beyond the listed rules?", so each
-        // (mutually exclusive) language group runs it itself — see the `has_all_group` doc
-        // comment above.
-        let advisory_disabled = has_all_group && !matches!(group.scope, Scope::All);
-
-        // Materialize the owned file list for this group's scope.
-        let group_files: Vec<(String, String)> = files
-            .iter()
-            .filter(|(path, _)| crate::scan_routing::file_in_scope(path, &group.scope))
-            .cloned()
-            .collect();
-
-        if group_files.is_empty() {
-            // No files match this language group in this repo — nothing was audited for these
-            // rules. W3: record each armed rule so the caller emits a `not_assessed` honesty
-            // row (A5.6) instead of silently skipping.
-            let note = match &group.scope {
-                Scope::Language(lang) => {
-                    format!("no {lang} files matched this scan's file set")
-                }
-                Scope::All => "no files matched this scan's file set".to_string(),
-            };
-            skipped_rules.extend(group.rules.iter().map(|(id, _)| (id.clone(), note.clone())));
-            continue;
-        }
-
-        let chunks = chunk_files(&group_files, CHUNK_DIGEST_CHARS);
-        let group_rules: &[(String, String)] = &group.rules;
-        let batches: Vec<&[(String, String)]> = group_rules.chunks(batch_size.max(1)).collect();
-
-        let scope_label = match &group.scope {
-            Scope::Language(lang) => format!("pass[{lang}]"),
-            Scope::All => "pass[all]".to_string(),
-        };
-        let session_prefix = format!("audit-{repo}-g{gi}");
+    for unit in &units {
+        let chunks = chunk_files(&unit.files, CHUNK_DIGEST_CHARS);
+        let batches: Vec<&[(String, String)]> = unit.rules.chunks(batch_size.max(1)).collect();
+        let session_prefix = format!("audit-{repo}-g{}", unit.index);
 
         // NOTE: job total was pre-seeded above; do NOT call add_total again per group, as that
         // would double-count. run_passes calls inc_done per completed pass, which is correct.
@@ -7485,10 +7819,10 @@ async fn run_routed_passes(
             &chunks,
             &batches,
             concurrency,
-            &scope_label,
+            &unit.label,
             &session_prefix,
             meter,
-            advisory_disabled,
+            unit.advisory_disabled,
         )
         .await;
 
@@ -7506,6 +7840,93 @@ async fn run_routed_passes(
         total_ok,
         failures,
     )
+}
+
+/// [`run_routed_passes`] for Message Batch mode: with `applies_to_routing` on, the same
+/// [`runnable_units`], so batch mode sends exactly the (chunk, rule) pairs real-time mode does;
+/// with it off, the unrouted batch scan ([`batch_units`]). Each route group is submitted as its own
+/// Message Batch, one after the other (so the spend cap sees the cost of the earlier groups
+/// before it admits the next, and a group's `advisory_disabled` is honoured per group, which is
+/// what [`run_passes_batch`]'s own parameter is for).
+///
+/// A batch error on any group aborts the whole call, exactly as the single batch did before.
+#[allow(clippy::too_many_arguments)]
+async fn run_routed_passes_batch(
+    llm: &dyn batch_mode::BatchApi,
+    repo: &str,
+    files: &[(String, String)],
+    selected: &[crate::scan_routing::AuditRule],
+    route_plan: &crate::scan_routing::RoutePlan,
+    repo_map: &str,
+    adopted: &std::collections::HashSet<String>,
+    audit_model: Option<&str>,
+    job: Option<(&crate::jobs::JobStore, &str)>,
+    batch_size: usize,
+    meter: Option<&UsageMeter>,
+    skipped_rules: &mut Vec<(String, String)>,
+) -> anyhow::Result<PassesOut> {
+    if selected.is_empty() {
+        let chunks = chunk_files(files, CHUNK_DIGEST_CHARS);
+        let empty_batch: &[(String, String)] = &[];
+        return run_passes_batch(
+            llm,
+            repo,
+            repo_map,
+            adopted,
+            audit_model,
+            job,
+            &chunks,
+            &[empty_batch],
+            "pass",
+            meter,
+            false,
+        )
+        .await;
+    }
+
+    let units = batch_units(
+        files,
+        selected,
+        route_plan,
+        efficiency_of(meter).applies_to_routing,
+        meter,
+        skipped_rules,
+    );
+    let mut all_findings: Vec<Finding> = Vec::new();
+    let mut all_proposed: Vec<ProposedRule> = Vec::new();
+    let mut all_requested: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut total_ok: usize = 0;
+    let mut failures: Vec<PassFailure> = Vec::new();
+    for unit in &units {
+        let chunks = chunk_files(&unit.files, CHUNK_DIGEST_CHARS);
+        let batches: Vec<&[(String, String)]> = unit.rules.chunks(batch_size.max(1)).collect();
+        let (gf, gp, gr, gok, ge) = run_passes_batch(
+            llm,
+            repo,
+            repo_map,
+            adopted,
+            audit_model,
+            job,
+            &chunks,
+            &batches,
+            &unit.label,
+            meter,
+            unit.advisory_disabled,
+        )
+        .await?;
+        all_findings.extend(gf);
+        all_proposed.extend(gp);
+        all_requested.extend(gr);
+        total_ok += gok;
+        failures.extend(ge);
+    }
+    Ok((
+        all_findings,
+        all_proposed,
+        all_requested,
+        total_ok,
+        failures,
+    ))
 }
 
 /// D7 — strip the corpus's `Rejected:` AUTHORING token from prose about to reach a client.
@@ -7585,7 +8006,7 @@ fn strip_authoring_token(why: &str) -> String {
 ///   that one shape to `info` rather than asserting an unverifiable "high" with nothing to
 ///   point at.
 fn apply_alternative_decision(
-    effective_selected: &mut [(String, String)],
+    effective_selected: &mut [crate::scan_routing::AuditRule],
     repo: &str,
     rule_id: &str,
     option: &RuleOptionView,
@@ -7595,9 +8016,9 @@ fn apply_alternative_decision(
     if !option.violates {
         if let Some(entry) = effective_selected
             .iter_mut()
-            .find(|(id, _)| id.eq_ignore_ascii_case(rule_id))
+            .find(|r| r.id.eq_ignore_ascii_case(rule_id))
         {
-            entry.1 = option.directive.clone();
+            entry.directive = option.directive.clone();
         }
         return None;
     }
@@ -7984,17 +8405,28 @@ pub(crate) fn not_assessed_findings(repo: &str, skipped: &[(String, String)]) ->
 /// Net: novel findings appear exactly once per file chunk that belongs to any group, language-
 /// scoped rules skip unmatched files, and no finding is missed.
 ///
+/// ### Declared scope (`applies_to`)
+///
+/// A rule may also declare `applies_to` in its TOML (file globs and languages). With the
+/// `applies_to_routing` efficiency switch on, such a rule is grouped under its declared scope
+/// (intersected with its id-prefix language, if any) and sent only with the files that scope
+/// covers; a file whose language cannot be determined still gets it. With the switch off the
+/// field is ignored and only the id-prefix routing above applies.
+///
 /// ### Batch mode
 ///
-/// The Batch execution path ([`run_passes_batch`]) does not yet apply per-rule routing — it
-/// submits every rule against every file as a single Anthropic Message Batch. Routing for the
-/// batch path is a follow-up (tracked in `docs/decisions/2026-06-20_rule_routing_wiring.md`).
+/// The Batch execution path honours the SAME plan: [`run_routed_passes_batch`] reads the same
+/// [`runnable_units`] as the real-time path and submits one Message Batch per route group, so
+/// both modes send the same (chunk, rule) pairs.
 #[allow(clippy::too_many_arguments)]
 pub async fn audit_repo(
     llm: &dyn LlmPort,
     repo: &str,
     files: &[(String, String)],
-    selected: &[(String, String)],
+    // The rules to audit, with the routing metadata the corpus declares for each
+    // (`AuditRule::applies_to`). Rule metadata, not `(id, directive)` pairs, so the next piece
+    // of per-rule routing metadata is one more field on `AuditRule` and not a signature change.
+    selected: &[crate::scan_routing::AuditRule],
     // MULTI-OPTION semantic rules present in `selected` for this repo (built by the caller
     // from the loaded corpus — see `onboard::build_rule_alternatives`). Empty when this
     // project/repo has no multi-option semantic rules selected, or when the caller is a
@@ -8044,10 +8476,8 @@ pub async fn audit_repo(
     let repo_map = build_repo_map(map_files.unwrap_or(files));
     // Key findings to the adopted rule ids (so a violation shows under e.g.
     // ARCH-STRICT-LAYERING-1, not an invented AI- name).
-    let adopted: std::collections::HashSet<String> = selected
-        .iter()
-        .map(|(id, _)| id.to_ascii_uppercase())
-        .collect();
+    let adopted: std::collections::HashSet<String> =
+        selected.iter().map(|r| r.id.to_ascii_uppercase()).collect();
     // Model selection: the USER's per-audit choice wins; else CAMERATA_AUDIT_MODEL; else default.
     let audit_model = model.map(str::to_string).or_else(|| {
         std::env::var("CAMERATA_AUDIT_MODEL")
@@ -8083,7 +8513,7 @@ pub async fn audit_repo(
     // always relative to ONE chosen alternative" (the design doc's coherence principle) without
     // any cross-chunk coordination. See `recommend_alternatives`'s doc comment for the chunk-0
     // grounding tradeoff.
-    let mut effective_selected: Vec<(String, String)> = selected.to_vec();
+    let mut effective_selected: Vec<crate::scan_routing::AuditRule> = selected.to_vec();
     let mut recommendations: Vec<RuleRecommendation> = Vec::new();
     // W6: any pass that fails/times out for this repo, captured so the export can disclose it
     // explicitly instead of only logging to stderr. See `FailedPass`'s doc comment.
@@ -8186,8 +8616,7 @@ pub async fn audit_repo(
                             // drop it from the directive set the violation passes actually
                             // check, so it emits ZERO findings instead of checking violations
                             // against a convention nothing in the repo established.
-                            effective_selected
-                                .retain(|(id, _)| !id.eq_ignore_ascii_case(&a.rule_id));
+                            effective_selected.retain(|r| !r.id.eq_ignore_ascii_case(&a.rule_id));
                             continue;
                         }
                         if rec.no_convention {
@@ -8200,8 +8629,7 @@ pub async fn audit_repo(
                             // finding the model free-associates under it anyway, and exactly
                             // ONE informational `no_convention` row is synthesized from this
                             // recommendation (see `no_convention_findings`).
-                            effective_selected
-                                .retain(|(id, _)| !id.eq_ignore_ascii_case(&a.rule_id));
+                            effective_selected.retain(|r| !r.id.eq_ignore_ascii_case(&a.rule_id));
                             continue;
                         }
                         if let Some(opt) =
@@ -8239,19 +8667,22 @@ pub async fn audit_repo(
     // Mode is the speed/scale knob: Sequential = 1 call per chunk with all rules; Parallel =
     // rule-batches × file-chunks run concurrently; Batch = one Anthropic Message Batch at
     // 50% discount, reassembled by custom_id.
-    let (concurrency, batch_size) = mode.tuning();
+    let (concurrency, batch_size) = mode.tuning(efficiency_of(meter));
 
     // Pass-1 W3 (A5.6): rules whose routing group matched zero files — see
-    // `run_routed_passes`'s `skipped_rules` doc comment. The Batch execution path applies no
-    // per-rule routing yet (every rule runs against every file), so it can never skip a rule
-    // this way and contributes nothing here — a documented asymmetry, not a gap.
+    // `run_routed_passes`'s `skipped_rules` doc comment. Real-time and batch mode both fill it
+    // (they share `runnable_units`), so both disclose the same skipped rules.
     let mut skipped_rules: Vec<(String, String)> = Vec::new();
 
     // ── Rule-routing plan ───────────────────────────────────────────────────────────
-    // Group `effective_selected` rules by scope so each language group only audits its own
-    // files. The plan is computed even for Batch mode (so the savings estimate is available),
-    // but the Batch execution path does not yet apply the routing (see doc comment above).
-    let route_plan = crate::scan_routing::plan_routes(&effective_selected, files);
+    // Group `effective_selected` rules by scope so each group only audits the files its scope
+    // covers: the rule id's language prefix, and (with the `applies_to_routing` switch on) the
+    // rule's declared `applies_to`. Real-time and batch mode execute the SAME plan.
+    let route_plan = crate::scan_routing::plan_routes(
+        &effective_selected,
+        files,
+        efficiency_of(meter).applies_to_routing,
+    );
     if route_plan.saved_fraction() > 0.0 {
         eprintln!(
             "[camerata-server] rule-routing: {:.0}% input reduction for {repo} ({} groups, {} rules routed)",
@@ -8264,42 +8695,42 @@ pub async fn audit_repo(
     // ── Dispatch to the appropriate execution engine ─────────────────────────────────
     let (mut all_findings, mut all_proposed, requested, ok_passes, pass_failures) =
         if mode == ScanMode::Batch {
-            // Batch path: submit all (chunk × rule-batch) pairs as one Message Batch, poll to
-            // completion, reassemble by custom_id. The job's add_total is called inside
-            // run_passes_batch (it knows the full item count before any network I/O).
-            // NOTE: the Batch path audits every rule against every file (no per-rule routing yet).
-            let chunks = chunk_files(files, CHUNK_DIGEST_CHARS);
-            let batches: Vec<&[(String, String)]> = if effective_selected.is_empty() {
-                vec![&effective_selected]
-            } else {
-                effective_selected.chunks(batch_size.max(1)).collect()
-            };
+            // Batch path: submit every route group's (chunk × rule-batch) pairs as a Message
+            // Batch, poll to completion, reassemble by custom_id. The job's add_total is called
+            // inside run_passes_batch (it knows the full item count before any network I/O).
+            //
             // The Message-Batches path is concrete-only (API-key-gated; `submit_batch` et al.
             // are not part of the minimal `LlmPort` seam), so recover the concrete `&Llm` via
             // the `as_any` downcast. In production this is always a real `Llm`, so the downcast
             // always succeeds and the behavior is unchanged. A non-`Llm` completer (a test stub)
             // can only drive the non-batch real-time path; batch mode is not reachable for it.
-            let llm_concrete = llm.as_any().downcast_ref::<Llm>().ok_or_else(|| {
-                anyhow::anyhow!(
-                    "batch mode requires the concrete Llm client (the Message-Batches API is not \
-                 part of the LlmPort seam); use parallel/sequential mode with a custom completer"
-                )
-            })?;
-            run_passes_batch(
-                llm_concrete,
+            // A `BatchSeam` (a test double carrying its own `BatchApi`) is the one other
+            // completer that can drive the batch path.
+            let batch_api: &dyn batch_mode::BatchApi =
+                if let Some(seam) = llm.as_any().downcast_ref::<batch_mode::BatchSeam>() {
+                    seam.api()
+                } else {
+                    llm.as_any().downcast_ref::<Llm>().ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "batch mode requires the concrete Llm client (the Message-Batches \
+                             API is not part of the LlmPort seam); use parallel/sequential mode \
+                             with a custom completer"
+                        )
+                    })?
+                };
+            run_routed_passes_batch(
+                batch_api,
                 repo,
+                files,
+                &effective_selected,
+                &route_plan,
                 &repo_map,
                 &adopted,
                 audit_model.as_deref(),
                 job,
-                &chunks,
-                &batches,
-                "pass",
+                batch_size,
                 meter,
-                // Batch mode does not yet apply per-rule routing (all rules vs all files), so
-                // the Scope::All advisory semantics apply: advisory is enabled (not disabled).
-                // If batch mode ever gains routing, pass the group's advisory_disabled flag here.
-                false,
+                &mut skipped_rules,
             )
             .await?
         } else {
@@ -8327,6 +8758,14 @@ pub async fn audit_repo(
             )
             .await
         };
+
+    // A rule is only "not assessed" when the WHOLE repo has no file in its scope: on an
+    // incremental scan `files` is just the changed files.
+    drop_skips_with_matches_in_full_set(
+        &mut skipped_rules,
+        &route_plan,
+        map_files.unwrap_or(files),
+    );
 
     // Every pass failed -> surface the error so the caller notes the AI audit was skipped
     // (the deterministic findings still return independently). Each pass already finalized
@@ -8364,10 +8803,11 @@ pub async fn audit_repo(
         .cloned()
         .collect();
     if !resolution.is_empty() {
-        let batches_res: Vec<&[(String, String)]> = if effective_selected.is_empty() {
-            vec![&effective_selected]
+        let effective_pairs = crate::scan_routing::rule_pairs(&effective_selected);
+        let batches_res: Vec<&[(String, String)]> = if effective_pairs.is_empty() {
+            vec![&effective_pairs]
         } else {
-            effective_selected.chunks(batch_size.max(1)).collect()
+            effective_pairs.chunks(batch_size.max(1)).collect()
         };
         let res_chunks = chunk_files(&resolution, CHUNK_DIGEST_CHARS);
         // BUG-4 fix: in Batch mode, run_passes_batch already called add_total with the
@@ -8460,6 +8900,33 @@ pub async fn audit_repo(
         });
         let mut seen_p = std::collections::HashSet::new();
         all_proposed.retain(|p| seen_p.insert(p.id.clone()));
+    }
+
+    // RANK 4 `terse_output`: the scan asked for a one-sentence `detail`; the survivors of the
+    // first merge get their full detail written NOW, before calibration, because calibration
+    // (its prompt, the precondition check, the D5 floor and D6 ceiling), the cross-family merge
+    // that runs after this function and the fix self-check all decide from the explanation.
+    // `merge_by_location` above reads no `detail`, so it ran on the short one. A finding whose
+    // detail could not be written stays, marked, and is reported as a failed pass. See
+    // `detail_regen`'s module comment for the per-consumer table.
+    if meter.is_none() {
+        warn_terse_needs_meter(repo);
+    }
+    if terse_output_of(meter) {
+        // The whole redacted file set, not just the files this run scanned: on an incremental
+        // run `files` is only the changed ones, and a statement can name any file of the repo.
+        let (regenerated, regen_failed) = regenerate_full_details(
+            llm,
+            repo,
+            std::mem::take(&mut all_findings),
+            map_files.unwrap_or(files),
+            &crate::scan_routing::rule_pairs(&effective_selected),
+            audit_model.as_deref(),
+            meter,
+        )
+        .await;
+        all_findings = regenerated;
+        failed_passes.extend(regen_failed);
     }
 
     // Calibration pass over ALL aggregated findings: recalibrate severity + flag
@@ -8895,7 +9362,15 @@ If you genuinely cannot assess anything, return {"summary":"…","gaps":[]}."#
 /// [`parse_ai_findings`] parses it directly and the UI renders security findings in the
 /// familiar table. Deterministic-floor concerns are excluded (they are already covered).
 pub fn deep_security_system_prompt() -> String {
-    r#"You are a senior application-security engineer performing a DEEP SECURITY AUDIT of a codebase for Camerata.
+    deep_security_system_prompt_with(false)
+}
+
+/// [`deep_security_system_prompt`] with the `terse_output` switch explicit; the same rule as
+/// [`audit_system_prompt_with`]: OFF is byte-identical to the prompt before rank 4, ON asks for
+/// a one-sentence `detail` and drops the (always empty, never read) `proposed_rules` array. The
+/// lens's survivors get their full detail regenerated after its location merge.
+pub fn deep_security_system_prompt_with(terse: bool) -> String {
+    let base = r#"You are a senior application-security engineer performing a DEEP SECURITY AUDIT of a codebase for Camerata.
 
 This is DEEPER than the always-on deterministic floor (which already finds hardcoded secrets, raw SQL string concatenation, secrets-in-URLs, and path-escape writes — DO NOT re-report those). Go beyond line-level lint and reason about:
 - AUTHORIZATION: write/mutation/delete paths with no authz check; horizontal/vertical privilege gaps; missing ownership checks on resources; admin actions reachable without role checks.
@@ -8921,7 +9396,26 @@ Return ONLY a JSON object, no prose, no markdown fences, in EXACTLY this shape:
 }
 If the code is genuinely clean, return {"findings":[],"proposed_rules":[],"needs_files":[]}."#
         .to_string()
-        + crate::onboard::redact::MODEL_REDACTION_NOTICE
+        + crate::onboard::redact::MODEL_REDACTION_NOTICE;
+    if !terse {
+        return base;
+    }
+    let base = replace_expected(
+        &base,
+        r#""detail":"why it's exploitable and the fix direction"}"#,
+        r#""detail":"ONE sentence, at most 25 words: why this is exploitable, naming any other file or symbol it depends on"}"#,
+    );
+    let base = replace_expected(&base, "  \"proposed_rules\": [],\n", "");
+    let base = replace_expected(
+        &base,
+        r#"return {"findings":[],"proposed_rules":[],"needs_files":[]}."#,
+        r#"return {"findings":[],"needs_files":[]}."#,
+    );
+    replace_expected(
+        &base,
+        AUDIT_OUTPUT_SHAPE_LEAD,
+        &format!("{TERSE_DETAIL_PARAGRAPH}\n\n{AUDIT_OUTPUT_SHAPE_LEAD}"),
+    )
 }
 
 /// SYSTEM PROMPT — threat-model lens.
@@ -9167,7 +9661,7 @@ async fn run_security_lens(
     }
     // The security lens has no adopted-rule corpus — it is a free-form security read — so it
     // runs as a single empty batch per chunk (one pass each), like the no-rules audit path.
-    let (concurrency, _batch_size) = mode.tuning();
+    let (concurrency, _batch_size) = mode.tuning(efficiency_of(meter));
     let chunks = chunk_files(files, CHUNK_DIGEST_CHARS);
     let empty_batch: &[(String, String)] = &[];
     let batches: Vec<&[(String, String)]> = vec![empty_batch];
@@ -9192,11 +9686,24 @@ async fn run_security_lens(
     let mut seen = std::collections::HashSet::new();
     findings.retain(|f| seen.insert((f.path.clone(), f.line, f.rule_id.clone())));
     let findings = merge_by_location(findings, files);
+    // `terse_output`: the lens asked for a one-sentence `detail`; write the full one for the
+    // survivors. A lens finding that could not get one keeps the short detail plus the
+    // incomplete marker, and the lens reports it in its `error` note (the deep tier's own
+    // failed-pass path), so it is never dropped and never silently short.
+    let mut lens_notes: Vec<String> = Vec::new();
+    let findings = if terse_output_of(meter) {
+        let (findings, failed) =
+            regenerate_full_details(llm, repo, findings, files, &[], audit_model, meter).await;
+        lens_notes.extend(failed.iter().map(|f| format!("{}: {}", f.pass, f.reason)));
+        findings
+    } else {
+        findings
+    };
     result.security_findings = findings;
     // A failed (or refused) security pass must not read as "no security findings": say so on
     // the lens result, the same field the other lenses use when they fail.
     if !sec_failures.is_empty() {
-        result.error = Some(format!(
+        lens_notes.push(format!(
             "{} of {} security pass(es) failed, so findings from them are missing: {}",
             sec_failures.len(),
             sec_ok + sec_failures.len(),
@@ -9206,6 +9713,9 @@ async fn run_security_lens(
                 .collect::<Vec<_>>()
                 .join("; ")
         ));
+    }
+    if !lens_notes.is_empty() {
+        result.error = Some(lens_notes.join("; "));
     }
     result
 }
@@ -9272,7 +9782,7 @@ async fn run_security_passes(
                 // The security lens swaps in its own system prompt; everything else mirrors
                 // `audit_pass` (streaming + meter + robust parse).
                 let mut req = LlmRequest::new(prompt)
-                    .with_system(deep_security_system_prompt())
+                    .with_system(deep_security_system_prompt_with(terse_output_of(meter)))
                     .with_max_tokens(8192);
                 if let Some(m) = audit_model {
                     req = req.with_model(m.to_string());
@@ -9430,6 +9940,17 @@ pub async fn run_deep_tier(
     }
 }
 
+pub(crate) mod detail_regen;
+use detail_regen::regenerate_full_details;
+
+#[cfg(test)]
+mod detail_regen_tests;
+
+mod batch_mode;
+pub use batch_mode::{
+    resolve_scan_mode, BatchApi, BatchSeam, ScanModeChoice, CLI_BACKEND_REALTIME_NOTICE,
+};
+
 #[cfg(test)]
 mod redaction_tests;
 
@@ -9447,6 +9968,12 @@ mod efficiency_cap_tests;
 
 #[cfg(test)]
 mod fix_model_tests;
+
+#[cfg(test)]
+mod batch_default_tests;
+
+#[cfg(test)]
+mod applies_to_routing_tests;
 
 #[cfg(test)]
 mod tests {
@@ -12893,22 +13420,13 @@ mod tests {
             ),
         ];
         let rules = vec![
-            (
-                "RUST-ENTITIES-1".to_string(),
-                "Rust entities rule".to_string(),
-            ),
-            ("REACT-HOOKS-1".to_string(), "React hooks rule".to_string()),
-            (
-                "ARCH-STRICT-LAYERING-1".to_string(),
-                "Layering rule".to_string(),
-            ),
-            (
-                "SEC-NO-RAW-SQL-1".to_string(),
-                "No raw SQL rule".to_string(),
-            ),
+            crate::scan_routing::AuditRule::new("RUST-ENTITIES-1", "Rust entities rule"),
+            crate::scan_routing::AuditRule::new("REACT-HOOKS-1", "React hooks rule"),
+            crate::scan_routing::AuditRule::new("ARCH-STRICT-LAYERING-1", "Layering rule"),
+            crate::scan_routing::AuditRule::new("SEC-NO-RAW-SQL-1", "No raw SQL rule"),
         ];
 
-        let plan = plan_routes(&rules, &files);
+        let plan = plan_routes(&rules, &files, true);
 
         // Should have 3 groups: rust, web, and All.
         assert_eq!(
@@ -12938,11 +13456,11 @@ mod tests {
         // Rust group: only .rs files should be in scope.
         let rust_g = rust_group.unwrap();
         assert_eq!(rust_g.rules.len(), 1);
-        assert_eq!(rust_g.rules[0].0, "RUST-ENTITIES-1");
+        assert_eq!(rust_g.rules[0].id, "RUST-ENTITIES-1");
 
         // Verify file_in_scope correctly filters for each group.
         for (path, _) in &files {
-            let in_rust = crate::scan_routing::file_in_scope(path, &rust_g.scope);
+            let in_rust = crate::scan_routing::file_in_scope(path, "", &rust_g.scope);
             let expected_in_rust = path.ends_with(".rs");
             assert_eq!(
                 in_rust, expected_in_rust,
@@ -12953,7 +13471,7 @@ mod tests {
         // Web group: only .tsx files should be in scope.
         let web_g = web_group.unwrap();
         for (path, _) in &files {
-            let in_web = crate::scan_routing::file_in_scope(path, &web_g.scope);
+            let in_web = crate::scan_routing::file_in_scope(path, "", &web_g.scope);
             let expected_in_web = path.ends_with(".tsx")
                 || path.ends_with(".ts")
                 || path.ends_with(".js")
@@ -12970,7 +13488,7 @@ mod tests {
         );
         for (path, _) in &files {
             assert!(
-                crate::scan_routing::file_in_scope(path, &all_g.scope),
+                crate::scan_routing::file_in_scope(path, "", &all_g.scope),
                 "{path} must be in scope for the All group"
             );
         }
@@ -12995,11 +13513,11 @@ mod tests {
             ("schema.sql".to_string(), "SELECT 1;".to_string()),
         ];
         let rules = vec![
-            ("RUST-1".to_string(), "d".to_string()),
-            ("TS-1".to_string(), "d".to_string()),
-            ("ARCH-1".to_string(), "d".to_string()),
+            crate::scan_routing::AuditRule::new("RUST-1", "d"),
+            crate::scan_routing::AuditRule::new("TS-1", "d"),
+            crate::scan_routing::AuditRule::new("ARCH-1", "d"),
         ];
-        let plan = plan_routes(&rules, &files);
+        let plan = plan_routes(&rules, &files, true);
 
         // The advisory_disabled flag is true for language groups, false for All.
         // This mirrors the check in run_routed_passes.
@@ -13018,6 +13536,9 @@ mod tests {
                         "{lang} language group must have advisory disabled (advisory_disabled=true)"
                     );
                 }
+                Scope::Declared { .. } => {
+                    unreachable!("no rule in this fixture declares applies_to")
+                }
             }
         }
     }
@@ -13033,8 +13554,8 @@ mod tests {
             ("app.ts".to_string(), "const x = 1;".to_string()),
         ];
         // Empty rules slice.
-        let rules: Vec<(String, String)> = vec![];
-        let plan = plan_routes(&rules, &files);
+        let rules: Vec<crate::scan_routing::AuditRule> = vec![];
+        let plan = plan_routes(&rules, &files, true);
 
         // No rules → no groups: the free-form path handles this specially in run_routed_passes.
         assert_eq!(plan.groups.len(), 0, "empty rules → no route groups");
@@ -13052,10 +13573,10 @@ mod tests {
             ("app.ts".to_string(), "const x = 1;".to_string()),
         ];
         let rules = vec![
-            ("ARCH-1".to_string(), "d".to_string()),
-            ("SEC-1".to_string(), "d".to_string()),
+            crate::scan_routing::AuditRule::new("ARCH-1", "d"),
+            crate::scan_routing::AuditRule::new("SEC-1", "d"),
         ];
-        let plan = plan_routes(&rules, &files);
+        let plan = plan_routes(&rules, &files, true);
 
         assert_eq!(plan.groups.len(), 1, "all cross-cutting → single All group");
         assert_eq!(plan.groups[0].scope, Scope::All);
@@ -13077,10 +13598,10 @@ mod tests {
             ("src/b.rs".to_string(), "pub fn b() {}".to_string()),
         ];
         let rules = vec![
-            ("RUST-1".to_string(), "d".to_string()),
-            ("RUST-2".to_string(), "d".to_string()),
+            crate::scan_routing::AuditRule::new("RUST-1", "d"),
+            crate::scan_routing::AuditRule::new("RUST-2", "d"),
         ];
-        let plan = plan_routes(&rules, &files);
+        let plan = plan_routes(&rules, &files, true);
 
         // Only one group — the rust language group.
         assert_eq!(plan.groups.len(), 1);
@@ -13125,10 +13646,10 @@ mod tests {
             ("web/app.ts".to_string(), "export const x = 1;".to_string()),
         ];
         let rules = vec![
-            ("RUST-1".to_string(), "d".to_string()),
-            ("TS-1".to_string(), "d".to_string()),
+            crate::scan_routing::AuditRule::new("RUST-1", "d"),
+            crate::scan_routing::AuditRule::new("TS-1", "d"),
         ];
-        let plan = plan_routes(&rules, &files);
+        let plan = plan_routes(&rules, &files, true);
 
         assert_eq!(
             plan.groups.len(),
@@ -13310,31 +13831,31 @@ mod tests {
 
     // ── BUG-6 regression: ScanMode::Batch uses larger rule batch size ─────────────
 
-    /// Before BUG-6 fix: `ScanMode::Batch` returned `RULE_BATCH_SIZE` (15) from
-    /// `tuning()`, fragmenting Batch items unnecessarily (the Batch path submits all
-    /// items at once — there is no latency benefit to smaller rule batches). After the
-    /// fix, `ScanMode::Batch` returns `BATCH_RULE_BATCH_SIZE` (usize::MAX by default),
-    /// so each chunk becomes a single BatchItem with all adopted rules in one context.
+    /// BUG-6 kept for `batch_default` off: every rule in one item per chunk, larger than the
+    /// parallel rule-batch. With `batch_default` on (rank 2) Batch uses the parallel path's 15,
+    /// the graded prompt shape. (The `CAMERATA_BATCH_RULE_BATCH_SIZE` override is not set in
+    /// the test environment, so the constants apply.)
     #[test]
-    fn bug6_batch_mode_uses_larger_rule_batch_size_than_parallel() {
-        let (_, parallel_batch_size) = ScanMode::Parallel.tuning();
-        let (_, batch_batch_size) = ScanMode::Batch.tuning();
-
-        // The Batch rule batch size must be LARGER than the Parallel one (BUG-6 fix).
-        // PARALLEL = 15; BATCH = usize::MAX (or the env-var override, but the env var
-        // is not set in the test environment so the constant applies).
-        assert!(
-            batch_batch_size > parallel_batch_size,
-            "ScanMode::Batch rule batch size ({batch_batch_size}) must be larger than \
-             ScanMode::Parallel ({parallel_batch_size}) — BUG-6: batching all rules per \
-             chunk improves coherence in async Batch mode where concurrency is irrelevant"
+    fn batch_rule_batch_size_is_fifteen_with_batch_default_on_and_all_rules_off() {
+        let on = crate::efficiency::EfficiencyConfig::default();
+        let mut off = on;
+        off.batch_default = false;
+        let (_, parallel_batch_size) = ScanMode::Parallel.tuning(on);
+        assert_eq!(ScanMode::Batch.tuning(on).1, 15);
+        assert_eq!(ScanMode::Batch.tuning(on).1, parallel_batch_size);
+        assert_eq!(ScanMode::Batch.tuning(off).1, usize::MAX);
+        assert_eq!(
+            ScanMode::Parallel.tuning(off),
+            ScanMode::Parallel.tuning(on),
+            "the switch changes only the batch shape"
         );
     }
 
     /// Sequential mode must keep its existing tuning (1 concurrent call, all rules at once).
     #[test]
     fn bug6_sequential_mode_tuning_unchanged() {
-        let (concurrency, batch_size) = ScanMode::Sequential.tuning();
+        let (concurrency, batch_size) =
+            ScanMode::Sequential.tuning(crate::efficiency::EfficiencyConfig::default());
         assert_eq!(concurrency, 1, "sequential must be single-threaded");
         assert_eq!(
             batch_size,
@@ -13754,7 +14275,7 @@ mod tests {
             &stub,
             "acme/app",
             &files,
-            &selected,
+            &crate::scan_routing::rules_from_pairs(&selected),
             &[],
             &std::collections::HashMap::new(),
             None,
@@ -14012,7 +14533,7 @@ mod tests {
             &llm,
             "me/api",
             &files,
-            &selected,
+            &crate::scan_routing::rules_from_pairs(&selected),
             &[], // alternatives (none — no multi-option rules in this test)
             &std::collections::HashMap::new(), // forced
             None, // model
@@ -14052,7 +14573,7 @@ mod tests {
             &llm,
             "me/api",
             &files,
-            &selected,
+            &crate::scan_routing::rules_from_pairs(&selected),
             &[],
             &std::collections::HashMap::new(),
             None,
@@ -14142,7 +14663,7 @@ mod tests {
             &llm,
             "me/api",
             &files,
-            &selected,
+            &crate::scan_routing::rules_from_pairs(&selected),
             &[],
             &std::collections::HashMap::new(),
             None,
@@ -14185,7 +14706,7 @@ mod tests {
             &llm,
             "me/api",
             &files,
-            &selected,
+            &crate::scan_routing::rules_from_pairs(&selected),
             &[],
             &std::collections::HashMap::new(),
             None,
@@ -14359,7 +14880,7 @@ mod tests {
             &llm,
             "me/api",
             &files,
-            &selected,
+            &crate::scan_routing::rules_from_pairs(&selected),
             &[],
             &std::collections::HashMap::new(),
             None,
@@ -14403,7 +14924,7 @@ mod tests {
             &llm,
             "me/api",
             &files,
-            &selected,
+            &crate::scan_routing::rules_from_pairs(&selected),
             &[],
             &std::collections::HashMap::new(),
             None,
@@ -14941,7 +15462,7 @@ mod tests {
             &llm,
             "me/api",
             &files,
-            &selected,
+            &crate::scan_routing::rules_from_pairs(&selected),
             &alternatives,
             &std::collections::HashMap::new(), // forced — none, this is the "ask the model" path
             None,
@@ -15001,7 +15522,7 @@ mod tests {
             &llm,
             "me/api",
             &files,
-            &selected,
+            &crate::scan_routing::rules_from_pairs(&selected),
             &alternatives,
             &std::collections::HashMap::new(),
             None,
@@ -15056,7 +15577,7 @@ mod tests {
             &llm,
             "me/api",
             &files,
-            &selected,
+            &crate::scan_routing::rules_from_pairs(&selected),
             &alternatives,
             &forced,
             None,
@@ -15107,7 +15628,7 @@ mod tests {
             &llm,
             "me/api",
             &files,
-            &selected,
+            &crate::scan_routing::rules_from_pairs(&selected),
             &alternatives,
             &forced,
             None,
@@ -15182,7 +15703,7 @@ mod tests {
             &llm,
             "me/api",
             &files,
-            &selected,
+            &crate::scan_routing::rules_from_pairs(&selected),
             &alternatives,
             &std::collections::HashMap::new(),
             None,
@@ -15246,8 +15767,10 @@ mod tests {
     /// returned.
     #[test]
     fn req_a5_4_violates_option_does_not_rewrite_directive_and_emits_a_finding() {
-        let mut effective_selected =
-            vec![("MULTI-RULE-1".to_string(), "Do it the A way.".to_string())];
+        let mut effective_selected = vec![crate::scan_routing::AuditRule::new(
+            "MULTI-RULE-1",
+            "Do it the A way.",
+        )];
         let alt = two_option_alternatives_opt_b_violates("MULTI-RULE-1", Some("opt-a"));
         let opt_b = alt.options.iter().find(|o| o.id == "opt-b").unwrap();
         assert!(
@@ -15265,7 +15788,7 @@ mod tests {
         );
 
         assert_eq!(
-            effective_selected[0].1, "Do it the A way.",
+            effective_selected[0].directive, "Do it the A way.",
             "a violates option must NEVER rewrite the rule's effective directive"
         );
         let f = finding.expect("a violates option must emit a finding");
@@ -15360,7 +15883,10 @@ mod tests {
             .expect("the rule must still have a non-degenerate option")
             .directive
             .clone();
-        let mut effective_selected = vec![(RULE_ID.to_string(), correct_directive.clone())];
+        let mut effective_selected = vec![crate::scan_routing::AuditRule::new(
+            RULE_ID,
+            correct_directive.clone(),
+        )];
         let rejected_view = RuleOptionView {
             id: rejected.id.clone(),
             label: rejected.label.clone(),
@@ -15379,7 +15905,7 @@ mod tests {
         );
 
         assert_eq!(
-            effective_selected[0].1, correct_directive,
+            effective_selected[0].directive, correct_directive,
             "the degenerate option must NEVER become this project's effective directive — \
              that is how an unsanitized upload path got adopted as a convention"
         );
@@ -15441,8 +15967,10 @@ mod tests {
     /// would also break the ordinary, non-defect multi-option case.
     #[test]
     fn req_a5_4_non_violates_option_rewrites_directive_and_emits_no_defect() {
-        let mut effective_selected =
-            vec![("MULTI-RULE-1".to_string(), "Do it the A way.".to_string())];
+        let mut effective_selected = vec![crate::scan_routing::AuditRule::new(
+            "MULTI-RULE-1",
+            "Do it the A way.",
+        )];
         let alt = two_option_alternatives("MULTI-RULE-1", Some("opt-a"));
         let opt_b = alt.options.iter().find(|o| o.id == "opt-b").unwrap();
         assert!(
@@ -15460,7 +15988,7 @@ mod tests {
         );
 
         assert_eq!(
-            effective_selected[0].1, "Do it the B way.",
+            effective_selected[0].directive, "Do it the B way.",
             "a genuine alternative DOES rewrite the directive, same as before this fix"
         );
         assert!(
@@ -15508,7 +16036,7 @@ mod tests {
             &llm,
             "me/api",
             &files,
-            &selected,
+            &crate::scan_routing::rules_from_pairs(&selected),
             &alternatives,
             &std::collections::HashMap::new(),
             None,
@@ -15977,7 +16505,7 @@ mod tests {
             &llm,
             "me/api",
             &files,
-            &selected,
+            &crate::scan_routing::rules_from_pairs(&selected),
             &alternatives,
             &std::collections::HashMap::new(),
             None,
@@ -16051,7 +16579,7 @@ mod tests {
             &llm,
             "me/api",
             &files,
-            &selected,
+            &crate::scan_routing::rules_from_pairs(&selected),
             &alternatives,
             &std::collections::HashMap::new(),
             None,
@@ -16101,7 +16629,7 @@ mod tests {
             &llm,
             "me/api",
             &files,
-            &selected,
+            &crate::scan_routing::rules_from_pairs(&selected),
             &[],
             &std::collections::HashMap::new(),
             None,

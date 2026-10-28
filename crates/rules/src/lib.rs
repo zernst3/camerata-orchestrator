@@ -20,6 +20,9 @@ use camerata_core::RuleId;
 use serde::Deserialize;
 use thiserror::Error;
 
+pub mod applies_to;
+pub use applies_to::AppliesTo;
+
 mod lock;
 pub use lock::{
     check_lock, corpus_lock_path, corpus_version, CorpusLock, LockEntry, LockError, LockProblem,
@@ -27,6 +30,7 @@ pub use lock::{
 };
 
 mod freshness;
+pub mod severity_bounds;
 pub use freshness::{
     client_rules_last_reviewed, confirm_domain, confirm_in_text, corpus_freshness_path,
     days_from_civil, effective_review_date, format_staleness_nag, parse_ymd, CorpusFreshness,
@@ -740,6 +744,12 @@ struct RuleToml {
     /// domain sweeps. Optional. See [`Rule::last_reviewed`].
     #[serde(default)]
     last_reviewed: Option<String>,
+    /// Token-efficiency rank 7: which files this rule can apply to, so the scan sends it only
+    /// with those (`applies_to = { paths = ["**/*.sql"], languages = ["rust"] }`). Absent means
+    /// every file. Validated at load by `AppliesTo`'s `Deserialize`: an unknown language or key,
+    /// or a glob form the matcher does not implement, fails the file's load. See [`Rule::applies_to`].
+    #[serde(default)]
+    applies_to: Option<AppliesTo>,
     /// W17 (gotcha 8, half resolved): `tag` is GONE. It was authored on all 417 corpus rules,
     /// read by nothing, and W14 declared it here as accepted-but-unconsumed so
     /// [`corpus_files_with_unknown_fields`] could treat every OTHER unrecognized rule-level key
@@ -800,7 +810,8 @@ struct StackExceptionToml {
 
 #[derive(Debug, Deserialize)]
 struct DecisionToml {
-    /// The decision this rule frames (e.g. "What position does the project take on …?").
+    /// The decision this rule frames, asked of the client's code (e.g. "How does the API
+    /// deduplicate retried mutations?"). See `docs/RULE_AUTHORING.md`, `[decision].question`.
     #[serde(default)]
     question: Option<String>,
     #[serde(default)]
@@ -1153,6 +1164,13 @@ pub struct Rule {
     /// of the two, see [`effective_review_date`]). Excluded from [`Rule::content_hash`]: a review
     /// is not a change to the rule.
     pub last_reviewed: Option<String>,
+    /// Token-efficiency rank 7: the files this rule can apply to. `None` (the default, and the
+    /// state of every rule that has not been scoped) means every file, so the scan routes it
+    /// exactly as before. When set, the scan sends the rule only with files that match one of
+    /// the declared globs or are in one of the declared languages (a file whose language cannot
+    /// be determined is sent too: routing must never cost a finding). Part of
+    /// [`Rule::content_hash`], so scoping a rule is a revision of it.
+    pub applies_to: Option<AppliesTo>,
 }
 
 /// P7 (`docs/plans/2026-09-29_codebase-inspection-hardening.md`): a GENERAL mechanism for a
@@ -1507,6 +1525,7 @@ pub fn bare_rule(id: &str, domain: &str) -> Rule {
         current_recommendation: None,
         version: None,
         last_reviewed: None,
+        applies_to: None,
     }
 }
 
@@ -1569,6 +1588,7 @@ pub fn ruleset_with_unauthored_rule(rule_id: &str) -> RuleSet {
         current_recommendation: None,
         version: None,
         last_reviewed: None,
+        applies_to: None,
     };
     let mut set = RuleSet::default();
     set.push(rule);
@@ -1838,6 +1858,7 @@ async fn load_one(path: &Path, corpus_dir: &Path) -> Result<Rule, RulesError> {
         current_recommendation: raw.current_recommendation.filter(|s| !s.trim().is_empty()),
         version: raw.version,
         last_reviewed: raw.last_reviewed.filter(|s| !s.trim().is_empty()),
+        applies_to: raw.applies_to,
     })
 }
 
@@ -2235,6 +2256,8 @@ const RULE_LEVEL_FIELDS: &[&str] = &[
     // per-rule review date.
     "version",
     "last_reviewed",
+    // Token-efficiency rank 7: where the rule can apply (routing metadata).
+    "applies_to",
     // Accepted, unconsumed (gotcha 8), established 2026-10-11. `tag` was here too until W17
     // deleted it from the schema AND from all 417 files; do not re-add it.
     "layer",
@@ -3346,6 +3369,7 @@ mod tests {
             current_recommendation: None,
             version: None,
             last_reviewed: None,
+            applies_to: None,
         }
     }
 
@@ -3436,6 +3460,7 @@ mod tests {
             current_recommendation: raw.current_recommendation.filter(|s| !s.trim().is_empty()),
             version: raw.version,
             last_reviewed: raw.last_reviewed.filter(|s| !s.trim().is_empty()),
+            applies_to: raw.applies_to,
         }
     }
 
@@ -6195,6 +6220,9 @@ mod tests {
             "ARCH-WEBHOOK-SIGNATURE-VERIFICATION-1",
             "ARCH-NO-PAN-STORAGE-1",
             "SUPABASE-AUTH-USERS-EXPOSED-1",
+            // "either shape means the secret reaches every visitor's browser, which is the
+            // single most severe finding class this audit produces" (default option `why`).
+            "SUPABASE-KEY-SERVICE-ROLE-CLIENT-1",
             "SUPABASE-RLS-DISABLED-NOT-RESTORED-1",
             "SUPABASE-RLS-POLICY-DISABLED-1",
             "SUPABASE-RLS-USER-METADATA-1",
@@ -6687,7 +6715,7 @@ mod tests {
         // Held rules whose OWN prose names a severity for their OWN flagged condition, with the
         // construction transcribed. Every entry is quoted in
         // `req_w8_named_rules_carry_the_floors_their_prose_authored`'s comments.
-        const TRANSCRIBED_FROM_OWN_PROSE: [&str; 17] = [
+        const TRANSCRIBED_FROM_OWN_PROSE: [&str; 18] = [
             "SQL-PRIVILEGED-WRITE-AUDIT-1",
             "SUPABASE-AUTH-EMAIL-CONFIRMATION-1",
             "SUPABASE-AUTH-GETSESSION-SERVER-1",
@@ -6697,6 +6725,11 @@ mod tests {
             "SUPABASE-FUNC-DYNAMIC-SQL-INJECTION-1",
             "SUPABASE-FUNC-PRIVILEGED-NO-AUTHZ-1",
             "SUPABASE-FUNC-SEARCH-PATH-1",
+            // Item 19 (2026-10-28), corpus-audit Group 1 note: "no severity bound while its
+            // prose says 'unconditionally critical' twice". That prose was later revoiced; the
+            // default option's `why` still names the severity: "the single most severe finding
+            // class this audit produces".
+            "SUPABASE-KEY-SERVICE-ROLE-CLIENT-1",
             "SUPABASE-RLS-DISABLED-NOT-RESTORED-1",
             "SUPABASE-RLS-INITPLAN-1",
             "SUPABASE-RLS-NO-POLICY-1",
@@ -6975,5 +7008,62 @@ mod tests {
             "a held rule's ceiling is authorized only as INHERITANCE from a spine rule that \
              carries the ceiling itself; these exemptions have no origin: {originless:?}"
         );
+    }
+
+    // ── applies_to (token-efficiency rank 7) ──────────────────────────────────
+
+    /// Write one rule file with `extra` top-level TOML lines and load the folder leniently.
+    async fn load_with_extra(extra: &str) -> (RuleSet, Vec<(PathBuf, RulesError)>) {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path().join("universal");
+        std::fs::create_dir_all(&dir).expect("create dirs");
+        std::fs::write(
+            dir.join("scoped.toml"),
+            format!(
+                "id = \"SCOPED-TEST-1\"\ntitle = \"Scoped\"\nenforcement = \"prose\"\n{extra}\n"
+            ),
+        )
+        .expect("write toml");
+        load_corpus_lenient(tmp.path()).await
+    }
+
+    #[tokio::test]
+    async fn a_rule_without_applies_to_applies_everywhere() {
+        let (set, errors) = load_with_extra("").await;
+        assert!(errors.is_empty(), "{errors:?}");
+        assert!(set.get_by_id("SCOPED-TEST-1").unwrap().applies_to.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_declared_applies_to_loads_onto_the_rule() {
+        let (set, errors) =
+            load_with_extra(r#"applies_to = { paths = ["**/*.sql"], languages = ["rust"] }"#).await;
+        assert!(errors.is_empty(), "{errors:?}");
+        let a = set
+            .get_by_id("SCOPED-TEST-1")
+            .unwrap()
+            .applies_to
+            .clone()
+            .expect("declared");
+        assert_eq!(a.paths, vec!["**/*.sql"]);
+        assert_eq!(a.languages, vec!["rust"]);
+    }
+
+    #[tokio::test]
+    async fn an_unknown_applies_to_value_fails_the_rules_load() {
+        for bad in [
+            r#"applies_to = { languages = ["cobol"] }"#,
+            r#"applies_to = { frameworks = ["next"] }"#,
+            r#"applies_to = { paths = ["src/*.{sql,toml}"] }"#,
+            r#"applies_to = {}"#,
+            r#"applies_to = "sql""#,
+        ] {
+            let (set, errors) = load_with_extra(bad).await;
+            assert!(
+                set.get_by_id("SCOPED-TEST-1").is_none(),
+                "`{bad}` must not load as a rule that silently matches nothing"
+            );
+            assert_eq!(errors.len(), 1, "`{bad}` must be reported: {errors:?}");
+        }
     }
 }

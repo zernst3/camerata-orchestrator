@@ -106,6 +106,7 @@ async fn deterministic_only_inspect_runs_end_to_end_and_writes_a_valid_zip() {
         // gate, not a test-only bypass. See this file's own doc comment.
         backend: ProjectBackend::Api,
         batch: false,
+        realtime: false,
         model: None,
         calibration_model: None,
         fix_model: None,
@@ -225,6 +226,7 @@ async fn headless_inspect_discloses_when_the_commodity_taint_pass_does_not_run()
         export: export_path.clone(),
         backend: ProjectBackend::Api,
         batch: false,
+        realtime: false,
         model: None,
         calibration_model: None,
         fix_model: None,

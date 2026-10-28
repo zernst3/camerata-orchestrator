@@ -1,11 +1,15 @@
 id = "CICD-LEAST-PRIVILEGE-TOKEN-1"
-version = 1
+version = 3
 title = "The CI job token's default permissions are scoped to least privilege explicitly, never left at the platform's broad default"
 domain = "ci-cd"
 layer = "universal"
 enforcement = "mechanical"
 kind = "defect"
 inspectable = true
+# Token-efficiency rank 7: where this rule can apply, so the scan sends it only with these files.
+# CI workflow rule: the subject is pipeline definition files, which each CI system reads only from
+# these places.
+applies_to = { paths = [".github/**", "**/action.yml", "**/action.yaml", ".gitea/**", ".forgejo/**", "**/.gitlab-ci.yml", ".gitlab/**", "**/azure-pipelines*.yml", "**/azure-pipelines*.yaml", ".circleci/**", "**/bitbucket-pipelines.yml", ".buildkite/**", "**/.drone.yml", ".woodpecker/**", "**/Jenkinsfile"] }
 default = true
 verification = "grounded"
 qualifies = "Deterministically checkable by scanning workflow files for the presence (or absence) of a top-level `permissions:` block, and — where present — whether it sets `contents: write` or broader scopes a given job's steps do not actually need. A workflow with NO `permissions:` key at all inherits the repository's or organization's configured default for the automatic GITHUB_TOKEN, which on many repositories (particularly older ones, or ones that have not explicitly tightened the organization default) is read/write access to most scopes. Conformance holds when every workflow (or, more granularly, every job) sets an explicit `permissions:` block granting only the scopes its own steps use, defaulting the rest to `read` or none; it fails when no `permissions:` key is present and the repository/organization default has not been independently confirmed to already be least-privilege, or when a broader scope than a job's steps require is explicitly granted."

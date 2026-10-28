@@ -1,5 +1,5 @@
 id = "RUST-SQLX-TRANSACTIONS-MULTI-WRITE-1"
-version = 1
+version = 2
 title = "Wrap multiple writes in an explicit transaction to ensure atomicity"
 domain = "rust:sqlx"
 layer = "framework"
@@ -24,7 +24,7 @@ default = true
 verification = "grounded"
 
 [decision]
-question = "What position does the project take on: Transactions for multi-write operations?"
+question = "How are operations that write to several tables kept atomic?"
 default = "use-explicit-transactions"
 why = "A transaction groups multiple SQL statements and ensures all succeed or all fail together (atomicity). When an operation logically requires multiple writes to different tables (e.g., insert a user, insert their profile, and update a summary table), these writes should be in a single transaction. If one write fails, the transaction rolls back and all writes are undone. If writes are not transactional and one fails after another succeeds, the database is left in a partial state with dangling references or stale data. When a single write is sufficient, a transaction is unnecessary and adds overhead. The rule is: any operation that touches multiple tables or requires multiple statements to maintain consistency uses an explicit transaction. Single-statement operations use implicit transactions."
 

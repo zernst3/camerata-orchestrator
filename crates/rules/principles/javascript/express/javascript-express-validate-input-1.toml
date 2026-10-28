@@ -1,5 +1,5 @@
 id = "JAVASCRIPT-EXPRESS-VALIDATE-INPUT-1"
-version = 1
+version = 2
 title = "Request input is validated at the boundary before use"
 domain = "javascript:express"
 layer = "framework"
@@ -14,7 +14,7 @@ url = "https://expressjs.com/en/advanced/best-practice-security.html"
 title = "Express.js — Production best practices: Security — Do not trust user input"
 
 [decision]
-question = "What position does the project take on: Request input is validated at the boundary before use?"
+question = "How is incoming request data checked before Express handlers use it?"
 default = "request-input-is-validated-at-the-boundary-before-use"
 why = "Everything on the request object that comes from the client (req.body, req.params, req.query, headers) is untyped, untrusted input that the client fully controls. Reaching into it directly and passing the values downstream means the handler operates on data whose shape it only assumed: a missing field becomes undefined that flows into a query, a string arrives where a number was expected, an array shows up where a scalar was, or a hostile payload reaches a database or template. Validating and parsing the input at the boundary (with a schema validator such as zod, joi, or express-validator) converts untrusted input into a known, typed shape exactly once, at the edge, and rejects malformed requests with a 400 before any business logic runs. The payoff is twofold: every layer past the boundary can trust the data, and the rejection is a clean client error instead of a 500 from somewhere deep in the stack (or, worse, a successful operation on malformed data). Trusting the request shape because the frontend 'always sends it correctly' ignores that the server's clients are not only its own frontend; the boundary is the one place the assumption can actually be enforced, and skipping it pushes the failure inward to where it is most expensive and least clearly attributable."
 

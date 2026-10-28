@@ -145,3 +145,51 @@ fn the_system_prompt_is_pinned_to_the_prompt_schema_version() {
         "the audit system prompt changed: bump AUDIT_PROMPT_SCHEMA_VERSION and update this pin"
     );
 }
+
+/// Rank 4: `terse_output` changes what the model is asked, so a baseline written under the
+/// other setting is not reused. A key stored before the field existed reads as `false`, which
+/// is what those findings were produced under.
+#[test]
+fn the_terse_output_setting_is_part_of_the_question() {
+    let rules = [rule("ARCH-A-1", "do A")];
+    let stored_off = key(MODEL, None, &rules);
+    let m = manifest_under("fp", &stored_off);
+    assert!(m.is_reusable_baseline("fp", &key(MODEL, None, &rules)));
+    assert!(!m.is_reusable_baseline("fp", &key(MODEL, None, &rules).with_terse_output(true)));
+
+    let m_on = manifest_under("fp", &key(MODEL, None, &rules).with_terse_output(true));
+    assert!(m_on.is_reusable_baseline("fp", &key(MODEL, None, &rules).with_terse_output(true)));
+    assert!(!m_on.is_reusable_baseline("fp", &key(MODEL, None, &rules)));
+
+    // A key persisted before the field existed.
+    let legacy: AiScanKey = serde_json::from_str(
+        r#"{"audit_model":"claude-sonnet-5","calibration_model":"","prompt_schema_version":1,"directives_fingerprint":"x"}"#,
+    )
+    .unwrap();
+    assert!(!legacy.terse_output);
+}
+
+/// The terse-output prompts are the other half of the question a `terse_output` finding
+/// answered: the terse scan system prompt, the deep security lens's, and the prompt that writes
+/// the full detail afterwards. Editing any of them without bumping
+/// [`crate::ai_audit::AUDIT_PROMPT_SCHEMA_VERSION`] would reuse answers to the old prompt, so
+/// they are pinned the same way: change one, bump the version, update the numbers here.
+#[test]
+fn the_terse_prompts_are_pinned_to_the_prompt_schema_version() {
+    let hash = |text: String| format!("{:016x}", crate::suppression::fnv1a(&text));
+    assert_eq!(
+        (
+            crate::ai_audit::AUDIT_PROMPT_SCHEMA_VERSION,
+            hash(crate::ai_audit::audit_system_prompt_with(true)).as_str(),
+            hash(crate::ai_audit::deep_security_system_prompt_with(true)).as_str(),
+            hash(crate::ai_audit::detail_regen::detail_regen_system_prompt()).as_str(),
+        ),
+        (
+            1,
+            "5bc27c39facb8c9d",
+            "fb0d0667d9ea0281",
+            "019f11a358b9dc0f"
+        ),
+        "a terse-output prompt changed: bump AUDIT_PROMPT_SCHEMA_VERSION and update this pin"
+    );
+}

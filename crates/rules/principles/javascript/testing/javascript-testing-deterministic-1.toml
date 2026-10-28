@@ -1,5 +1,5 @@
 id = "JAVASCRIPT-TESTING-DETERMINISTIC-1"
-version = 1
+version = 2
 title = "Tests are deterministic: clocks, timers, and random values are controlled; no real I/O or network calls in unit tests"
 domain = "javascript:testing"
 layer = "language"
@@ -31,7 +31,7 @@ title = "eslint-plugin-jest — no-done-callback rule (recommended)"
 linter = "jest: no-done-callback"
 
 [decision]
-question = "What position does the project take on: how should tests handle time, randomness, and external I/O to stay deterministic?"
+question = "How do tests control time, randomness, and external I/O so their results are repeatable?"
 default = "tests-are-deterministic-clocks-timers-and-randoms-are-controlled"
 why = "A test is only valuable if it produces the same result on every run. A test that depends on real wall-clock time will pass or fail depending on machine speed and scheduler scheduling, a test that calls a live network endpoint will fail whenever the endpoint is slow or unreachable, and a test that uses Math.random() without seeding will produce arbitrary outputs. These sources of non-determinism — collectively called flakiness — are the leading cause of test suite credibility collapse: once a suite has a known flaky test, developers start ignoring red CI runs, and the entire safety net degrades. Jest provides jest.useFakeTimers() to replace setTimeout, setInterval, Date.now, and performance.now with controllable implementations that do not advance unless the test explicitly advances them (jest.advanceTimersByTime(ms), jest.runAllTimers()), eliminating the scheduler lottery entirely. Real I/O is eliminated by mocking at boundaries (see JAVASCRIPT-TESTING-MOCK-AT-BOUNDARIES-1). The expect-expect rule ensures a test with zero assertions cannot silently pass, and no-conditional-expect ensures assertions cannot be unreachable via a conditional path."
 

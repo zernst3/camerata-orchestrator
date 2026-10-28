@@ -1812,6 +1812,7 @@ mod tests {
             current_recommendation: None,
             version: None,
             last_reviewed: None,
+            applies_to: None,
             verification: Verification::Grounded,
             sources: linters
                 .iter()
@@ -3051,6 +3052,58 @@ mod tests {
     /// Helper: build a repo root path for scoping tests.
     fn repo(path: &str) -> std::path::PathBuf {
         std::path::PathBuf::from(path)
+    }
+
+    /// The symlink fix, against a REAL symlinked root (not a synthetic path): a tool reports the
+    /// canonical path while the caller passes the symlinked root (macOS `/var` vs
+    /// `/private/var`), or the other way round. Both must be kept, the path-shape exclusions must
+    /// still apply after resolution, and a symlink inside the repo that points OUT of it must not
+    /// smuggle an outside file in.
+    #[cfg(unix)]
+    #[test]
+    fn scope_compares_canonical_forms_under_a_real_symlinked_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let real = tmp.path().join("real-repo");
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(real.join("src")).unwrap();
+        std::fs::create_dir_all(real.join("target/debug")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(real.join("src/a.rs"), "fn a() {}\n").unwrap();
+        std::fs::write(real.join("target/debug/b.rs"), "fn b() {}\n").unwrap();
+        std::fs::write(outside.join("c.rs"), "fn c() {}\n").unwrap();
+        let link = tmp.path().join("linked-repo");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        std::os::unix::fs::symlink(&outside, real.join("escape")).unwrap();
+        let real_c = real.canonicalize().unwrap();
+
+        // Symlinked root, canonical finding path: the case that used to drop a whole tool tier.
+        let canonical_file = real_c.join("src/a.rs");
+        assert!(is_in_repo_scope(&link, &canonical_file.to_string_lossy()));
+        // Canonical root, finding reported through the symlink.
+        assert!(is_in_repo_scope(
+            &real_c,
+            &link.join("src/a.rs").to_string_lossy()
+        ));
+        // A repo-relative path under a symlinked root.
+        assert!(is_in_repo_scope(&link, "src/a.rs"));
+        // The exclusions still apply to the resolved path.
+        assert!(!is_in_repo_scope(
+            &link,
+            &real_c.join("target/debug/b.rs").to_string_lossy()
+        ));
+        // A link inside the repo that resolves outside it is outside the repo.
+        assert!(!is_in_repo_scope(
+            &link,
+            &link.join("escape/c.rs").to_string_lossy()
+        ));
+        assert!(!is_in_repo_scope(
+            &link,
+            &outside
+                .canonicalize()
+                .unwrap()
+                .join("c.rs")
+                .to_string_lossy()
+        ));
     }
 
     /// Rust stdlib paths emitted by clippy (absolute, outside any repo) are dropped.

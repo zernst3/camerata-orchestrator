@@ -1,5 +1,5 @@
 id = "ORCH-PRECISION-RECALL-1"
-version = 1
+version = 2
 title = "Autonomous detection defaults to recall, precision-tuning is a per-signal opt-in"
 domain = "agentic"
 layer = "universal"
@@ -32,11 +32,11 @@ id = "default-to-precision-opt-specific-signals-into-broader-recall"
 violates = true
 label = "default to precision, opt specific signals into broader recall"
 directive = "detection signals in autonomous routines default to precision tuning: only strong-tier signals trigger a pause, weaker borderline cases pass without halting, and missed real issues are accepted as the cost of fewer interruptions"
-why = "Defaulting to precision is defensible when the routine has very high opportunity cost from pauses, but it is risky when missed issues compound silently across subsequent runs, which is exactly the dynamic the recall-default exists to prevent."
+why = "Missed issues compound silently across subsequent runs, which is exactly the dynamic a recall default exists to prevent. A precision default is defensible only when pauses carry a very high opportunity cost."
 
 [[option]]
 id = "no-tuning-accept-default-signal-sensitivity"
 violates = true
 label = "no tuning, accept default signal sensitivity"
 directive = "detection signals in autonomous routines are not tuned at all; the routine accepts whatever recall and precision the detection step naturally produces with no per-signal calibration"
-why = "No tuning works at small scale but becomes unworkable as routine volume grows: the un-tuned mix produces neither reliable catching power nor a predictable noise floor."
+why = "As routine volume grows, the un-tuned mix gives neither reliable catching power nor a predictable noise floor. Leaving signals untuned works only at small scale."

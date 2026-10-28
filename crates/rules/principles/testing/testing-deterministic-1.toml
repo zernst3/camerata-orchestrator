@@ -1,5 +1,5 @@
 id = "TESTING-DETERMINISTIC-1"
-version = 1
+version = 2
 title = "Tests are deterministic: same code always produces the same pass/fail outcome"
 domain = "testing"
 layer = "universal"
@@ -47,4 +47,4 @@ id = "quarantine-flaky"
 violates = true
 label = "Quarantine known-flaky tests outside the main suite rather than fixing them"
 directive = "Tag or move tests known to be flaky into a separate quarantine suite that does not block CI; run it separately with relaxed expectations."
-why = "Keeps the main suite green without fixing root causes, which is useful as a short-term triage measure. The cost is that quarantined tests accumulate: the quarantine suite grows, nobody fixes the root causes because the main suite is green, and the tests that most likely cover recently-broken behavior stop blocking CI."
+why = "Quarantined tests accumulate: nobody fixes the root causes because the main suite is green, and the tests most likely to cover recently broken behavior stop blocking CI. Quarantine is useful only as short-term triage."

@@ -1,5 +1,5 @@
 id = "RUST-SQLX-COMPILE-CHECKED-QUERIES-1"
-version = 1
+version = 2
 title = "Use the sqlx::query! macro for compile-time SQL validation; never use format! to build SQL strings"
 domain = "rust:sqlx"
 layer = "framework"
@@ -10,7 +10,7 @@ default = true
 verification = "grounded"
 
 [decision]
-question = "What position does the project take on: Compile-checked SQL queries?"
+question = "How are SQL statements built and checked against the database schema before they run?"
 default = "use-sqlx-query-macro"
 why = "sqlx::query! is a compile-time macro that checks SQL syntax and column names against the live database schema at build time. If the SQL is invalid or refers to a non-existent column, the build fails immediately. This catches errors before deployment. Using format! or string concatenation to build SQL strings bypasses this check. When SQL is built dynamically at runtime, typos in column names, missing joins, or SQL injection vulnerabilities can slip past the compiler. sqlx::query! also binds parameters via ? placeholders and macro argument substitution, which prevents SQL injection. If a query must be truly dynamic (e.g., filtering by different columns based on user input), the valid column names are validated in Rust code before being interpolated, not interpolated directly into the SQL string. The rule is: all queries use sqlx::query! unless the query is so dynamic that it cannot be validated at compile time; in that case, the dynamic parts are validated and parameterized explicitly."
 

@@ -100,6 +100,22 @@ efficiency_measures! {
     /// [`crate::ai_audit::FIX_STAGE_HAIKU_MODEL`] at effort [`crate::ai_audit::FIX_STAGE_EFFORT`].
     /// Off: it runs on the calibration model, else the scan model (the pre-rank-10 choice).
     fix_on_haiku => "the fix stage runs on Haiku unless a fix model is set",
+    /// Rank 4: scan passes ask for a one-sentence `detail` and no `proposed_rules` (the advisory
+    /// pass keeps them), and the full `detail` is regenerated once, after the first merge and
+    /// before calibration, for the findings that survived. Off: the scan prompts and the
+    /// pipeline are exactly what they were before rank 4.
+    terse_output => "scan passes write a short detail; the full detail is regenerated for the findings that survive the merge",
+    /// Rank 2: on the API backend a scan runs as a Message Batch unless real time is forced,
+    /// errored or expired batch items are resubmitted once in a follow-up batch, a batch item
+    /// cut off at the output limit gets the real-time truncation retry, batch rule-batches hold
+    /// 15 rules, and the batch cache TTL is the cheaper one by the price arithmetic. Off: batch
+    /// is opt-in again and runs exactly as before rank 2 (one submission, all rules per item,
+    /// the `batch_long_cache` TTL).
+    batch_default => "on the API backend scans run as a Message Batch, with failed items resubmitted once",
+    /// Rank 7: a rule that declares `applies_to` (file globs and languages) is sent only with
+    /// the files it can apply to, in real-time and batch mode alike. Off: `applies_to` is
+    /// ignored entirely and routing is by rule-id language prefix only (the pre-rank-7 behavior).
+    applies_to_routing => "rules that declare where they apply are sent only with matching files",
 }
 
 impl EfficiencyConfig {

@@ -1,5 +1,5 @@
 id = "ARCH-IAC-1"
-version = 1
+version = 2
 title = "Infrastructure as code, per-environment isolation"
 domain = "iac"
 layer = "universal"
@@ -22,7 +22,7 @@ url = "https://cheatsheetseries.owasp.org/cheatsheets/Secrets_Management_Cheat_S
 title = "OWASP Secrets Management Cheat Sheet"
 
 [decision]
-question = "What position does the project take on: Infrastructure as code, per-environment isolation?"
+question = "How is infrastructure provisioned for each environment, and where do its credentials live?"
 default = "infrastructure-as-code-per-environment-isolation"
 why = "Reproducible environments, centralized rotation, no credential sprawl. Provisioning infrastructure manually through a cloud console produces silent drift between environments with no audit trail or reproducibility, and storing secrets directly in the repository or CI configuration sprawls credentials across artifacts the team cannot fully enumerate and persists them in git history even after rotation; the next 'who has this key' question has no good answer either way. These are two distinct failure modes — one about how infrastructure changes are made, the other about where credentials live — and a project can have either without the other."
 

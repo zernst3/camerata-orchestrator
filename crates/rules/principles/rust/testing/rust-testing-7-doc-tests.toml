@@ -1,5 +1,5 @@
 id = "RUST-TESTING-7"
-version = 1
+version = 2
 title = "Public API items have doc-tests in their /// comments that serve as runnable usage examples"
 domain = "rust:testing"
 layer = "language"
@@ -22,7 +22,7 @@ url = "https://doc.rust-lang.org/rustdoc/write-documentation/documentation-tests
 title = "The Rustdoc Book — Documentation Tests (attributes: should_panic, no_run, compile_fail, ignore)"
 
 [decision]
-question = "What position does the project take on: are doc-tests required for public API items?"
+question = "How are usage examples for public API items documented and kept compiling?"
 default = "doc-tests-on-public-api-items"
 why = "Rust's toolchain compiles and runs code blocks in /// documentation comments as first-class tests during cargo test. A doc-test that is wrong (wrong return type, stale method name, impossible example) fails the build — meaning documentation comments that contain code are always kept in sync with the implementation. This property is unique to doc-tests: a prose comment becomes stale silently, but a doc-test comment fails the build when the code it documents changes incompatibly. The Rust Book (Ch 14.2) and Rust By Example (Doc Testing) treat this as the canonical way to write examples for public API items. Doc-tests are not appropriate for private items (they cannot access them) or for complex multi-step scenarios better suited to an examples/ or tests/ file. A doc-test should show the simplest useful invocation of the item; it is documentation first and a regression test second. Lines prefixed with # are compiled but not rendered in rustdoc output, which allows boilerplate setup/teardown to be hidden without losing the executable guarantee."
 
@@ -40,11 +40,11 @@ id = "examples-dir-only-no-doc-tests"
 violates = true
 label = "Usage examples live in examples/ only; doc-tests are optional"
 directive = "Usage examples for public API items live in the examples/ directory as standalone runnable programs, not in /// comment code blocks. Doc-tests in comments are optional and not enforced."
-why = "examples/ programs are richer and can express multi-step workflows, but they do not enforce that the documentation comment stays in sync with the API: prose /// comments can become stale silently after a signature change, because there is no build-time check that the comment's example is still correct the way a doc-test code block is."
+why = "Prose /// comments can go stale silently after a signature change, because nothing checks at build time that a comment's example is still correct the way a doc-test code block is. examples/ programs can express richer multi-step workflows, but they do not keep the documentation in sync."
 
 [[option]]
 id = "no-examples-prose-doc-only"
 violates = true
 label = "Documentation comments are prose only; no code examples required"
 directive = "Public API items are documented with prose /// comments. No code examples are required in either documentation comments or the examples/ directory."
-why = "Minimal investment but leaves consumers with no executable demonstration of usage and loses the build-time sync guarantee entirely: when the implementation changes, prose-only documentation can silently describe an API that no longer exists, and consumers discover the mismatch only when they try to use the code."
+why = "Consumers get no executable demonstration of usage and the build-time sync guarantee is lost entirely: when the implementation changes, prose-only documentation can silently describe an API that no longer exists, and consumers find out only when they try to use it."

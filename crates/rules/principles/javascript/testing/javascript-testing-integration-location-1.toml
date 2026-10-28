@@ -1,5 +1,5 @@
 id = "JAVASCRIPT-TESTING-INTEGRATION-LOCATION-1"
-version = 1
+version = 2
 title = "Integration tests live in a dedicated __tests__/integration/ or tests/integration/ directory, not co-located"
 domain = "javascript:testing"
 layer = "language"
@@ -23,7 +23,7 @@ url = "https://vitest.dev/config/include"
 title = "Vitest configuration — include/exclude for project-level splits"
 
 [decision]
-question = "What position does the project take on: where do integration tests live?"
+question = "Where do integration test files live relative to unit tests and source code?"
 default = "integration-tests-live-in-dedicated-integration-directory"
 why = "An integration test exercises multiple modules working together (e.g. a service + repository + real database), so it cannot be associated with any single source file. Placing such tests next to a source file implies false ownership and misleads readers into thinking the test is scoped to that module. A dedicated tests/integration/ (or __tests__/integration/) directory makes the distinction explicit, allows the CI pipeline to run unit tests (fast, no external dependencies) and integration tests (slower, requires infra) in separate steps using testPathIgnorePatterns or distinct Jest project configurations, and signals clearly that the cost model of running these tests differs."
 

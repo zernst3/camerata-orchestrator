@@ -1892,25 +1892,73 @@ so the model can cite accurate line numbers.
 This gives every chunk architectural context (which dirs are repositories vs.
 services) without needing every file body.
 
-**Scan modes.** The audit picker offers THREE choices, but they are two orthogonal
-dimensions — the `ScanMode` enum has only two variants (the batching algorithm), and
-"Background job" is a separate EXECUTION dimension (foreground vs detached), not a third
-`ScanMode`. This is the common point of confusion.
+**Scan modes.** Two orthogonal dimensions: the `ScanMode` enum (how the LLM calls are made)
+and, in the app, "Background job" (foreground vs detached execution, not a `ScanMode`).
 
-`ScanMode` (`ai_audit.rs`) — how the LLM calls are batched; `tuning()` returns
+`ScanMode` (`ai_audit.rs`); `tuning(efficiency)` returns
 `(max_concurrent_calls, rules_per_batch)`:
-- `Sequential` — `(1, usize::MAX)`: one call per file-chunk with ALL rules at once,
-  chunks one after another. Simplest, gentlest on rate limits — the debug/fallback floor.
-- `Parallel` (default) — `(PARALLEL_CONCURRENCY=6, RULE_BATCH_SIZE=15)`: rule-batches ×
+- `Sequential`: `(1, usize::MAX)`, one call per file-chunk with ALL rules at once,
+  chunks one after another. Simplest, gentlest on rate limits; the debug/fallback floor.
+- `Parallel`: `(PARALLEL_CONCURRENCY=6, RULE_BATCH_SIZE=15)`, rule-batches x
   file-chunks run concurrently (capped). Wall-clock is the slowest batch, not the sum.
+- `Batch`: every (chunk, rule-batch) pair is an item of an Anthropic Message Batch, half
+  price on every token, results when the batch ends. 15 rules per item
+  (`BATCH_RULE_BATCH_SIZE`, the graded parallel shape); `CAMERATA_BATCH_RULE_BATCH_SIZE`
+  overrides it. With `batch_default` off, all rules go in one item per chunk (the pre-rank-2
+  shape).
 
-The picker's third option, **"Background job"**, runs the audit (Parallel batching)
-SERVER-SIDE as a detached `JobStore` job instead of inline in the request: the UI gets a
-job id and polls `JobState` (status / done / total / live `findings` preview / final
-`report`), so the architect can leave and watch findings stream in. Best for huge /
-multi-repo scans where a foreground request would be long-lived. Foreground Parallel and
-Sequential block until the audit returns. `from_wire("sequential") -> Sequential`, else
-`Parallel`; the "job" choice selects detached execution and still uses Parallel batching.
+**Which mode a run uses** (`resolve_scan_mode`, rank 2). A mode forced by the caller always
+wins: `camerata inspect --batch` or `--realtime`, or the app's picker set to Parallel,
+Sequential or Batch. Otherwise (neither flag, or the picker's "Default", which sends
+`auto`): on the API backend the scan is a `Batch`; on the CLI backend (a `claude`
+subprocess, no batches endpoint) it is `Parallel` and the run says so once (the CLI prints
+`CLI_BACKEND_REALTIME_NOTICE` before the scan, the app adds it to the scan notes); with
+`batch_default` off it is `Parallel` (batch is opt-in, as before rank 2). `ScanMode::parse`
+accepts `auto`, `parallel`, `sequential` and `batch` (blank or absent means `auto`); any
+other value is an error naming the choices, never a silent fallback (the app returns it as
+the scan's error, the background job fails with it). The SYNCHRONOUS desktop endpoint
+(`onboard_audit`, no job) never runs a batch, whatever the mode resolved to: it runs in real
+time and adds `SYNCHRONOUS_SCAN_REALTIME_NOTICE` to the scan notes once, because a batch can
+run for hours and that request has no job to record the batch id on; batch runs on the job
+path, where `JobStore::set_batch_id` records it. "Background job" sends `auto` and runs
+detached: the UI gets a job id and polls `JobState` (status / done / total / live `findings`
+preview / final `report`). The cockpit's estimate prices `auto` and `job` as batch on the
+API backend and parallel on the CLI backend (`camerata_ui_core::scan::estimate_mode`).
+
+**Batch mode, made safe to be the default** (`run_passes_batch` and
+`ai_audit/batch_mode.rs`; all of it behind `batch_default`):
+- **Resubmission rule.** Every item that errored, expired or is missing from the results the
+  API returned is resubmitted ONCE, all such items together in ONE follow-up batch (never real
+  time: the follow-up keeps the discount and passes the same spend check as the first
+  submission). Only a failed SUBMIT (nothing was accepted) fails just that sub-batch's items and
+  lets them be resubmitted. A poll or fetch that fails AFTER a successful submit is retried a
+  bounded number of times (`POST_SUBMIT_ATTEMPTS`); if it still fails, the batch is never
+  submitted again (it may still be running and billed, and a second copy would be outside the
+  cap's sight and orphan the id): its items are failed passes whose reason names the batch id,
+  and a meter note says the batch was not resubmitted. An item that fails again is a failed
+  scan pass. A follow-up the spend limit refuses is NOT RUN on the meter, and a note records
+  that the item had already failed once.
+- **Failed scan passes** (real-time and batch alike, one shape: `PassFailure`, turned into
+  `FailedPass` rows by `failed_pass_rows`). A real-time pass whose call errored, or a batch item
+  that failed twice, is returned by the pass runner and becomes a `FailedPass` ("audit {group}
+  c/n · rules b/m", with how many passes in the round answered), which reaches the export's
+  failed-pass disclosure (executive summary and methodology) and the `camerata inspect` FAILED
+  PASSES block. The reason carries only the provider error's TYPE and MESSAGE
+  (`batch_mode::disclosable_error`), never a response body. When every pass failed the repo is
+  reported as "AI audit skipped" instead (unchanged).
+- **Truncation retry.** A batch item that stopped on `max_tokens` goes through
+  `retry_truncated_scan_reply`, the same function a real-time pass uses (one retry at twice
+  the output cap, sent in real time, admitted under the spend limit; `truncation_retry=off`
+  still turns it off).
+- **Cache TTL rule** (`batch_mode::batch_cache_ttl`, per submission): 1 hour from two items
+  up, 5 minutes for a single item. That is what the price comparison reduces to, per token of
+  the cached prefix every item of a submission shares (the repo map), at the multipliers
+  `PriceBasis` bills at: 5 minutes costs `n x 1.25` on the assumption (a worst case, not a
+  measurement) that the entry expired before each next item; 1 hour costs one write and
+  `n - 1` reads, `2 + 0.1 (n - 1)`; the second is cheaper exactly when `n >= 2`. A test
+  recomputes the comparison from the live multipliers so a price change that moves the
+  threshold fails there. `batch_long_cache=off` forces 5 minutes; `batch_default=off` keeps the 1-hour
+  batch TTL of rank 3. Each row is priced at the TTL its submission asked for.
 
 **Resolution round:** passes may defer a judgment by returning `needs_files`. A
 single bounded resolution round re-runs those requested files together. The
@@ -2567,9 +2615,11 @@ being allowed to default - the content-rule floor and the reason-less-waiver row
 - `conventions_observed_findings` ships one row per decided non-`violates` rule
   with zero trace of a violation: no own row, no `also_matches` demotion, no
   absorbed site.
-- `run_routed_passes` reports every armed rule whose routing group matched zero
-  files, and `audit_repo` synthesises one `NotAssessed` row each. The Batch path
-  applies no routing, so it cannot skip a rule this way.
+- `run_routed_passes` and `run_routed_passes_batch` (both read `runnable_units`)
+  report every armed rule whose routing group matched zero files, and
+  `audit_repo` synthesises one `NotAssessed` row each. A rule scoped by
+  `applies_to` is reported the same way when no file in the scan matches its
+  scope.
 
 Each synthesised emission records its own ADDITION-side ledger stage
 (`convention-observed-emission`, `no-convention-emission`,
@@ -2678,9 +2728,11 @@ cargo run -p camerata -- inspect --repo <PATH> --export <OUT.zip>
 ```
 
 Flags: `--backend cli|api` (the same compliance-safety setting a project's
-`backend` field carries; `cli` is the default), `--batch` (the Anthropic Message
-Batches path, roughly 50% cheaper, latency not returned until the whole batch
-completes, requires `--backend api`), `--model` and `--calibration-model`
+`backend` field carries; `api` is the default), `--batch` (force the Anthropic
+Message Batches path, roughly 50% cheaper, latency not returned until the whole
+batch completes, requires `--backend api`; on the API backend this is already the
+default unless `batch_default` is off), `--realtime` (force real-time parallel calls;
+exclusive with `--batch`), `--model` and `--calibration-model`
 overrides, `--full` to ignore the on-disk incremental-scan cache, `--verbose`
 to print the ledger's per-rule detail alongside the default concise summary,
 `--max-cost-usd <USD>` (the spend limit) and `--efficiency <name>=on|off`
@@ -2708,6 +2760,9 @@ one line to the `efficiency_measures!` list and reads
 | `truncation_retry` | rank 6: a reply cut off at the output limit is retried once | the cut-off reply is used as it came |
 | `fix_prefilter` | rank 6: findings with no code context skip the fix model when the rule has an authored fix | they go to the fix model |
 | `fix_on_haiku` | rank 10: with no fix model set, the fix stage runs on `claude-haiku-5-5` at effort `low` | the fix stage runs on the calibration model, else the scan model, with no effort sent (the pre-rank-10 request) |
+| `terse_output` | rank 4: scan passes write a one-sentence `detail` and no `proposed_rules` (the advisory pass keeps them); the full `detail` is regenerated for the findings that survive the first merge | the scan prompts and the pipeline are exactly what they were before rank 4 |
+| `batch_default` | rank 2: on the API backend a scan with no forced mode runs as a Message Batch; failed items are resubmitted once; a cut-off item gets the truncation retry; 15 rules per item; the batch cache TTL by the price arithmetic (see "Scan modes") | batch is opt-in and runs exactly as before rank 2: one submission, all rules per item, the rank-3 TTL, no resubmission and no truncation retry (a failed batch item is still disclosed as a failed pass) |
+| `applies_to_routing` | rank 7: a rule that declares `applies_to` is sent only with the files it can apply to; batch mode is routed like real-time | `applies_to` is ignored, real-time routes by rule-id language prefix only, and batch mode is the old single unrouted batch (every rule with every file) |
 
 Set with `CAMERATA_EFFICIENCY=name=off,other=off` or `camerata inspect --efficiency
 name=off` (repeatable; the flag wins). An unknown name or a malformed entry is an
@@ -2719,6 +2774,64 @@ telemetry snapshot and printed above its table, and printed in the `camerata ins
 summary, so any two runs can be compared knowing what differed. The key rank 5 fix
 (the AI findings are keyed by model, prompt version and rule wording) is a
 correctness fix, not a switch.
+
+**Rule routing and `applies_to`** (`crates/server/src/scan_routing.rs`,
+`crates/rules/src/applies_to.rs`). The rule router sends each rule only with the
+files it can apply to. Two sources of scope, both decided per FILE before
+chunking (a group's files are re-chunked on their own, so a chunk only holds
+files its rules can apply to):
+
+- the rule id's language prefix (`RUST-`, `REACT-`, ...): always on;
+- the rule's declared `applies_to` in its TOML, honoured only with
+  `applies_to_routing` on: `applies_to = { paths = ["**/*.sql"], languages =
+  ["rust"], contains_any = ["create policy"] }`. `paths` are repo-relative globs
+  (`*` inside one segment, a whole `**` segment; nothing else is accepted),
+  `languages` come from the closed list
+  `camerata_rules::applies_to::ROUTING_LANGUAGES`, and `contains_any` are
+  case-insensitive substrings: a file whose text contains one is in scope
+  whatever its path (this is how a rule about SQL statements still reaches SQL
+  embedded in a TypeScript, Python or Ruby migration; the router reads file text
+  the scan already holds). A file is in scope when it matches ANY listed glob
+  (case-insensitive), is in ANY listed language, or contains ANY marker, and a
+  file whose language cannot be determined counts as in scope for the language
+  part: an unknown or ambiguous attribute SENDS the rule. A rule with both an id
+  prefix and `applies_to` needs both to hold. Absent `applies_to` means every
+  file, so unscoped rules behave exactly as before.
+
+Validation is at corpus load and is loud: an unknown language, an unknown key,
+an empty scope, or a glob using unsupported syntax (`?`, `[..]`, `{..}`, `!`, an
+absolute or `..` path) fails that rule's file (`RulesError::TomlParse`), never a
+scope that silently matches nothing. `applies_to` is part of `Rule::content_hash`,
+so scoping a rule is a revision of it (version bump, `camerata corpus lock`).
+
+`AuditRule { id, directive, applies_to }` is the rule metadata `audit_repo`,
+`plan_routes` and `run_routed_passes` pass around (not `(id, directive)` pairs),
+so a further per-rule routing field is one more field on it. Rules in the same
+scope share a group. `routed_units` turns the plan into the units that run and is
+the ONE place that decides which (chunk, rule) pairs a scan sends: the real-time
+path (`run_routed_passes`), the batch path (`run_routed_passes_batch`, one Message
+Batch per route group, submitted in turn so the spend cap sees earlier groups'
+cost; with the switch OFF, `batch_units` returns the old single unrouted batch, so
+OFF isolates routing completely) and the routing telemetry all read it. A group
+that matches no file is not dropped: its rules come back as `NotAssessed` rows,
+unless the full repo (`map_files`; on an incremental scan `files` is only the
+changed files) has a file in the rule's scope. The ledger records such a rule as
+not run, with the reason, never as fired or run clean
+(`split_fired_and_not_assessed`). The incremental-scan cache key
+(`rules_fingerprint_with_content`) includes each rule's corpus content hash, so
+editing a rule (its scope included) forces a full rescan. The advisory "flag novel
+issues" pass is disabled in a scoped group only when a cross-cutting `All` group
+also runs; when every selected rule is scoped, each scoped group keeps it, and the
+rare duplicate (two declared scopes overlapping on a file) collapses in the
+cross-chunk dedup and location merge.
+
+Telemetry: the per-stage table prints `rule routing: N of M (chunk, rule) pairs
+not sent`, where M is every rule with every chunk and N is what routing (id
+prefix, plus `applies_to` when on) did not send; compare a run with
+`--efficiency applies_to_routing=off` to see the saving `applies_to` itself buys.
+It is operator-only, like the rest of the table. The corpus rules that declare
+`applies_to` are pinned by `crates/server/tests/applies_to_corpus.rs`: adding a
+scope to another rule fails that test until the rule is reviewed.
 
 The controls travel on the run's `UsageMeter` (`UsageMeter::with_controls`), which
 every model-calling stage already receives, so no stage signature grew. The
@@ -2789,8 +2902,9 @@ caller states how the call was billed (`PriceBasis { batch, cache_ttl }`) and th
 function applies the published ratios: cache read 0.1x input, cache write 1.25x
 (5-minute TTL) or 2x (1-hour TTL), and a Message Batch item 0.5x on everything.
 Real-time calls use `CacheTtl::from_env()`, the TTL the request carried; batch rows
-are priced at the TTL the batch was submitted with (`BATCH_CACHE_TTL` unless
-`batch_long_cache` is off). Per-model cache-read prices are a later change to the
+are priced at the TTL their submission asked for (rank 2's TTL rule under "Scan
+modes"; `BATCH_CACHE_TTL` with `batch_default` off, 5 minutes with `batch_long_cache`
+off). Per-model cache-read prices are a later change to the
 model registry; the 0.1x here is the default.
 
 **Pre-flight estimate** (`camerata inspect`, before the first model call). The
@@ -2815,8 +2929,8 @@ against a runaway bill, not a saving, so it fails loudly:
   under the limit at once). An admitted pass always finishes (its truncation retry
   included), so nothing is cut off mid-response. A refused pass is recorded as a
   `NotRunPass`; the job's progress counts it as NOT RUN, never as done.
-- Later stages (alternative recommendation, calibration, fix generation, the clone
-  judge, the deep tier) are blocked (`stage_blocked`) once spend has reached the
+- Later stages (alternative recommendation, detail regeneration, calibration, fix
+  generation, the clone judge, the deep tier) are blocked (`stage_blocked`) once spend has reached the
   limit AND once the limit has already stopped anything (a refused pass or an
   earlier stage): nothing starts after the limit has bitten. Inside calibration,
   fix generation and the deep tier each batch or call is admitted separately
@@ -2848,7 +2962,10 @@ against a runaway bill, not a saving, so it fails loudly:
   NO projection can be made at all, the submission is refused with a note saying
   the limit could not be enforced (a limit that silently does nothing is worse than
   a refused run). A submitted batch is not cancelled, so the check cannot be later.
-  A refused batch records every pair as not run.
+  A refused batch records every pair as not run. The resubmission batch of failed
+  items (rank 2) is a submission like any other and is checked the same way, after the
+  first round's spend has been counted; the real-time truncation retry of a batch item
+  is admitted like a real-time pass.
 - **Reporting.** The ledger carries a `CostCapRecord` (limit, spend, the not-run
   pairs and stages, notes). `CostCapRecord::failed_passes` turns it into the
   existing failed-pass list, one entry per (repo, group, chunk) naming its
@@ -2873,6 +2990,141 @@ against a runaway bill, not a saving, so it fails loudly:
   limit stop, a failed pass, a skipped stage), with the list and a compact form beside
   the export button; the job progress counts refused passes as NOT RUN, not done; and
   the server adds an "INCOMPLETE" note to the report message.
+
+**Terse scan output (`terse_output`, rank 4)**. Two parts behind one switch.
+
+1. *Safe part.* The scan's output schema carries no `proposed_rules` array. Only the
+   advisory pass (a chunk's first rule-batch, the one told to flag issues no adopted rule
+   covers) can propose a rule, so it gets the array back through its own instruction line
+   (`pass_task_line`), which sits in the uncached suffix. The system prompt
+   (`audit_system_prompt_with(true)`) is ONE string for every pass of the scan, not one
+   for advisory passes and another for the rest: the system prompt leads the cache
+   prefix, so two different ones would stop the sibling passes reading the entry the
+   first pass wrote (the whole `warm_schedule` saving). `parse_ai_findings` is unchanged
+   and still accepts a response with `proposed_rules` and a long `detail`; a test pins
+   both formats. The deep-tier security lens (`deep_security_system_prompt_with`) drops
+   its always-empty, never-read `proposed_rules` and follows part 2.
+2. *Protected part.* The scan asks for a `detail` of one sentence, at most 25 words,
+   naming every other file or symbol the judgment depends on, beginning "Borderline:"
+   when the case is borderline (the prompt still says recall over precision). After
+   `merge_by_location` and before calibration, `audit_repo` calls
+   `detail_regen::regenerate_full_details`, which writes the full `detail` of the
+   findings that survived, in batches of 25 (one call per batch, `Stage::DetailRegeneration`,
+   shown as "detail" in the telemetry table, `STAGE_DETAIL` for the spend limit and for the
+   failed-pass name). The headline (the scan's `title`, before the first `HEADLINE_SEP`; the
+   parser keeps the title free of one) is kept and only the explanation after it is replaced.
+   The call sees the rule's directive, the short statement, the snippet, the captures, six
+   lines of code either side of the finding and, for every file or symbol the headline or
+   statement names, a bounded excerpt (the first match per token, three lines either side, at
+   most 20 lines per finding) with that file's repo-map line, resolved in the WHOLE redacted
+   file set of the repo (`map_files.unwrap_or(files)`), so on an incremental run a file that
+   was not rescanned is still shown. It runs on the scan model. Nothing in `onboard.rs`
+   changed for this except one line in the cache key.
+   **Without a meter the measure is off.** `terse_output_of(meter)` is false for a path that
+   passes no `UsageMeter` (the spend limit, the telemetry row and the operator's opt-out all
+   live on the meter), so such a path scans exactly as before rank 4 and says so on stderr.
+   The rescan-alternatives endpoint builds a meter from the environment
+   (`RunControls::from_env`) so `CAMERATA_EFFICIENCY=terse_output=off` reaches it.
+
+**The reply is not trusted.** The regenerated text feeds severity decisions, so each entry is
+accepted on its own and only when all of these hold (`detail_regen::accept_entry`, tests in
+`detail_regen_tests.rs`):
+
+- It is addressed by an opaque id (six hex digits of a hash of the finding's place in the run,
+  not its position) and echoes the finding's path and line. A reply numbered from 1, a reply
+  in another order, an id the batch does not have, an id used twice, a wrong echo: none of
+  these can land a text on a neighbour; the entry is simply not written.
+- Every path or identifier the short statement names (a token with `/`, `::`, `_`, a file
+  extension or CamelCase) appears in the text, spelled as given.
+- It makes no exploit precondition (`mentions_exploit_precondition`, the phrase list
+  calibration's raise-block and the D5 cap already use; one list) that neither the short
+  statement nor the code shown makes. An invented "requires a valid session" would stop
+  calibration raising a critical on a claim nobody made. The check can reject a harmless
+  "depends on", which costs a marker and not a wrong severity; the sweep reports the rate.
+- A statement that begins "Borderline:" keeps it: the text gets "Borderline: " put back at the
+  front when it lost it.
+
+An entry that fails is treated exactly like one the model left out: it stays pending, the
+repeat round runs it again in a batch of half the size (13), and what is still unwritten
+then gets the marker. A reply cut off at the output limit is discarded whole, counted as
+waste in the telemetry, and repeated the same way.
+
+**Who reads `detail`, and on which text.** `detail` is evidence text for several
+consumers. Each one's choice, and the test that pins it (all in
+`ai_audit/detail_regen_tests.rs`):
+
+| Consumer | Runs on | Why | Test |
+|---|---|---|---|
+| `merge_by_location` (exact `(path, line)` merge, `primary_rank`) | short | reads path, line, snippet, rule id, severity; never `detail`, so it decides identically on either | `merge_by_location_reads_no_detail_so_it_runs_on_the_short_one` |
+| calibration prompt (`verify_findings`) and `apply_verdicts` precondition check | full | the verdict (severity, confidence, needs-review) is judged from the explanation; the one-sentence statement drops the reasoning the verdict rests on | `audit_repo_hands_calibration_and_everything_after_it_the_full_detail` |
+| D5 severity floor and D6 ceiling (`calibration_floor_scan_text`) | full | phrase tables scan the detail; "unauthenticated" in the explanation raises a finding to a critical floor, absent from a one-sentence statement | `calibration_and_the_severity_floor_read_detail_so_they_run_on_the_full_one` |
+| `merge_semantic_groups` (`semantic_pair_merges`: prose overlap, object veto, captured objects) | full | the signals are word overlap and the objects named in the prose; on one sentence two real duplicates share too little to merge, and two different objects are not named for the veto | `the_semantic_merge_decision_differs_between_short_and_full_so_it_runs_on_the_full_one`, `the_object_veto_reads_detail_so_it_runs_on_the_full_one` |
+| `fix_evidence_blob` (the fix self-check's grounding set) | full | a fix may name anything the explanation names; the blob must be what the model saw | `the_fix_evidence_blob_carries_the_detail_so_the_fix_stage_sees_the_full_one` |
+
+The placement follows from the table: regeneration is the earliest point where "the
+survivors" is known and the latest point before the first consumer that needs the full
+text. Calibration, the cross-family merge (which runs in `onboard.rs`, after `audit_repo`
+returns) and the fix stage all receive the full text without any change to them. The cost
+of that placement is that a finding the cross-family merge later absorbs was already
+regenerated. That waste is expected to be small (the first merge already collapsed the
+same-location duplicates), but it is not measured; the sweep's `cross-family-merge` row
+counts show it.
+
+**Never short, never dropped.** A finding whose regeneration did not happen (the call
+failed twice, the model left it out or failed a check twice, or the spend limit stopped the
+step) keeps the
+scan's one-sentence detail, gets the visible marker `[detail incomplete]` appended, and
+the run records a `FailedPass` named "detail regeneration" with the count. That is the
+existing failed-pass path, so the export's methodology and summary disclose it (the
+export test below reads it from the JSON). In the deep tier the marker is on the finding
+and the lens's `error` note carries the same text. `tests/terse_output_export_e2e.rs` pins
+both ends through `audit_repo`, `merge_semantic_groups` and `build_report_json`: with
+regeneration working, the full text is in the export and the one-sentence statement is
+nowhere; with it down, the finding is in the export with the marker beside the short
+detail and the disclosure in the report. The marker is two words on purpose: it enters
+`description_overlap_score`, and a longer string shared by two failed findings would raise
+their overlap. The job's live preview (`JobStore::add_findings`, polled by the app while a
+scan runs) shows the short detail until the scan ends; the export is built from the final
+report only.
+
+**Cost arithmetic** (rank 9's `input_cost_usd` and the registry list price, Sonnet 5 at
+$3 in and $15 out per million tokens). Batched against one call per finding, for 140
+survivors, with about 425 tokens of system prompt, 350 tokens of evidence and 100 tokens
+of output per finding: a call per finding repeats the system prompt and frame 140 times,
+about 815 input tokens each, $0.0039 per finding and $0.55 in all; 6 batches of 25 repeat
+it 6 times, $0.37 in all. Output is identical either way. Batching is about a third
+cheaper on this step and makes 6 calls instead of 140; the price is that a failed batch
+leaves 25 findings to the repeat round (and, if that fails, to the marker), which the
+failure path covers. `batching_beats_one_call_per_finding` pins the input arithmetic.
+The whole-measure economics are NOT a given: with an assumed 100-token full detail and a
+35-token short one, the scan saves about $0.001 per raw row and the regeneration costs
+about $0.0026 per survivor, so on detail alone the measure pays only where raw rows
+outnumber survivors by roughly 2.7 to 1 or more (the
+location merge collapsing one defect reported under several rule names is where that
+comes from). Dropping `proposed_rules` from non-advisory passes is a saving regardless.
+Whether the scan's output is dominated by `detail` at all is unmeasured; the per-stage
+telemetry (scan "out" tokens against the new "detail" row) is how the API sweep decides.
+
+**Prompt pins.** The terse scan prompt, the deep security lens's terse prompt and the
+regeneration prompt are hashed next to `AUDIT_PROMPT_SCHEMA_VERSION` in
+`scan_cache::ai_key_tests::the_terse_prompts_are_pinned_to_the_prompt_schema_version`, so
+editing one fails until the version is bumped and the pin updated.
+
+**Cache key.** `AiScanKey` gained `terse_output` (absent in a key stored before it, read
+as false): findings written under the other setting answered a different question, so a
+baseline from one setting is not reused under the other. This is what lets the sweep flip
+the switch without `--full`. `AUDIT_PROMPT_SCHEMA_VERSION` is unchanged because
+`audit_system_prompt()` (the OFF form) is byte-identical; the pin test still holds.
+
+**What the API sweep must compare** (switch on against the sweep5b grades, per fixture):
+recall per fixture and the decoy numbers (a borderline finding the one-sentence rule
+suppressed would show as lost recall); the duplicate-merge counts at `ai-location-merge`
+and `cross-family-merge` (rows in, rows out, `also_matches` sizes), since the cross-family
+merge decides on the regenerated text; the calibration verdict distribution (severity
+moves, `needs-review` share, floor and ceiling rationales fired); the share of findings
+carrying `[detail incomplete]` (it should be zero; a high rate means the grounding or
+precondition checks are rejecting good text); and the cost split, scan output tokens
+and the "detail" stage against the previous run's scan output.
 
 The ZIP holds four entries, and they are deliberately not three views of the same
 thing:

@@ -1,5 +1,5 @@
 id = "RUST-TESTING-4"
-version = 1
+version = 2
 title = "Test bodies follow Arrange-Act-Assert (AAA): setup, execute, then assert — in that order"
 domain = "rust:testing"
 layer = "language"
@@ -18,7 +18,7 @@ url = "https://doc.rust-lang.org/rust-by-example/testing/unit_testing.html"
 title = "Rust By Example — Unit Testing (setup / execute / assert pattern)"
 
 [decision]
-question = "What position does the project take on: how is the body of a Rust test function structured?"
+question = "How is the body of a test structured?"
 default = "arrange-act-assert-in-order"
 why = "The Rust Book (Ch 11.1) describes the canonical three-phase test body — 'set up any needed data or state', 'run the code you want to test', and 'assert that the results are what you expect' — which corresponds directly to the Arrange-Act-Assert pattern. Structuring every test this way produces a consistent reading experience: a reviewer can immediately identify what is being set up, what is being exercised, and what is being verified. Mixing setup, execution, and assertions throughout a single test body makes it harder to identify the boundary between 'given' and 'when', blurs what the test is actually verifying, and makes the root cause of a failure less obvious. Inline comments (// Arrange, // Act, // Assert) are optional in short tests but helpful in tests where the phases are not visually obvious. A test should have exactly one Act (one call to the unit under test); a test with multiple Act-then-Assert sequences is actually multiple tests collapsed into one and should be split."
 
@@ -36,7 +36,7 @@ id = "free-form-test-body"
 violates = true
 label = "Free-form test body with no enforced phase structure"
 directive = "Test bodies may interleave setup, execution, and assertion in whatever order the test author finds clearest for the specific case."
-why = "Lower friction for trivial tests but produces inconsistent structure at scale: a reviewer reading many tests in a codebase with free-form bodies must re-derive the 'given' and 'when' boundaries each time, and the root cause of a failure is harder to attribute when setup, execution, and assertions are interleaved."
+why = "At scale, structure becomes inconsistent: a reviewer must re-derive the 'given' and 'when' boundaries in every test, and a failure's root cause is harder to attribute when setup, execution, and assertions are interleaved. Free-form bodies lower friction only for trivial tests."
 
 [[option]]
 id = "given-when-then-bdd"

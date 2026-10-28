@@ -1,5 +1,5 @@
 id = "ARCH-RESOURCE-LIFECYCLE-1"
-version = 1
+version = 2
 title = "The app reaps every subprocess it spawns and cleans every temp artifact it writes"
 domain = "universal"
 layer = "universal"
@@ -23,7 +23,7 @@ url = "https://docs.rs/tokio/latest/tokio/process/struct.Command.html#method.kil
 title = "tokio::process::Command::kill_on_drop"
 
 [decision]
-question = "What position does the project take on: the app reaps every subprocess it spawns and cleans every temp artifact it writes?"
+question = "How does the application ensure that subprocesses it spawns are reaped and temp files it writes are removed?"
 default = "the-app-owns-its-subprocess-and-temp-artifact-lifecycle"
 why = "An app that spawns helper processes (scanners, linters, build tools, CLIs) and writes temporary scratch owns their lifecycle — the OS will not clean up for it. A child whose spawning future is dropped on timeout or cancel keeps running unless the spawn opted into kill-on-drop, so without an explicit disposition the default outcome is orphaned processes that accumulate across runs. Temporary files and directories that are not RAII-cleaned accumulate on disk for the same reason. Leaving subprocess and temp lifecycle implicit makes the failure invisible until processes pile up or the disk fills, and reclaiming them then needs manual intervention."
 

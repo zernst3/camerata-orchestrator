@@ -1,5 +1,5 @@
 id = "ARCH-TOKEN-REFRESH-ROTATION-1"
-version = 1
+version = 2
 title = "Access tokens are short-lived; a long-lived session is maintained by a rotating refresh token whose reuse is detected and revokes the whole token family"
 domain = "permissions"
 layer = "universal"
@@ -55,15 +55,7 @@ session.
 [[option]]
 id = "short-access-token-rotating-refresh-with-reuse-detection"
 label = "Access tokens expire in minutes; refresh tokens rotate on every use and reuse of a spent one revokes the whole token family"
-directive = """
-Access tokens are issued with a short expiry (minutes, not hours or days) and are not individually revocable —
-their short lifetime is the entire revocation mechanism, so no blocklist is needed for them specifically. A longer-
-lived refresh token is exchanged for a new access token (and a new refresh token) at each refresh; the refresh token
-just used is immediately invalidated server-side as part of that same exchange, never reusable afterward. If an
-already-invalidated refresh token is ever presented again, the server treats this as evidence of token theft (the
-legitimate chain of rotation has branched) and revokes every token in that token's family, forcing full
-re-authentication, rather than silently accepting or silently rejecting the single reused token.
-"""
+directive = "Access tokens are issued with a short expiry (minutes, not hours or days) and are not individually revocable: their short lifetime is the entire revocation mechanism, so no blocklist is needed for them specifically. A longer-lived refresh token is exchanged for a new access token (and a new refresh token) at each refresh; the refresh token just used is immediately invalidated server-side as part of that same exchange, never reusable afterward. If an already-invalidated refresh token is ever presented again, the server treats this as evidence of token theft (the legitimate chain of rotation has branched) and revokes every token in that token's family, forcing full re-authentication, rather than silently accepting or silently rejecting the single reused token."
 remediation = """
 Shorten the access token's expiry to a short window (minutes) and remove any reliance on individually revoking
 access tokens before their natural expiry. Add rotation to the refresh-token exchange: each use issues a brand-new

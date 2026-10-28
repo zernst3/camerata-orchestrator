@@ -1,5 +1,5 @@
 id = "ARCH-SERVER-AUTHZ-1"
-version = 1
+version = 2
 title = "Authorization on the server; UI renders permission hints"
 domain = "permissions"
 layer = "universal"
@@ -19,7 +19,7 @@ url = "https://owasp.org/www-project-application-security-verification-standard/
 title = "OWASP Application Security Verification Standard (ASVS) — V4 Access Control"
 
 [decision]
-question = "What position does the project take on: Authorization on the server; UI renders permission hints?"
+question = "Where are authorization decisions made, and how does the UI learn what the user may do?"
 default = "authorization-on-the-server-ui-renders-permission-hints"
 why = "UI can't drift from server enforcement when both read the same server-computed truth; avoids leaking RBAC internals to the browser. Client-side permission introspection lets the UI drift from server enforcement (the two evolve independently and eventually disagree), and it leaks the project's RBAC internals to the browser, where they become part of the public attack surface."
 
