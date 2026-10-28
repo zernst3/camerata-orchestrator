@@ -293,6 +293,12 @@ pub struct DecisionRecord {
     /// cannot stamp provenance does not 422 the whole decision set.
     #[serde(default)]
     pub provenance: RevisionProvenance,
+    /// One-line descriptions of the options, in the order: the recommended or chosen option
+    /// first, then `alternatives_considered`. Empty when unknown (hand-typed decisions and
+    /// records written before this field existed). Consumers use it only when its length
+    /// matches the option count.
+    #[serde(default)]
+    pub option_descriptions: Vec<String>,
 }
 
 impl DecisionRecord {
@@ -316,7 +322,15 @@ impl DecisionRecord {
             alternatives_considered,
             outcome: DecisionOutcome::Pending,
             provenance: RevisionProvenance::new(RevisionActor::Ai, at),
+            option_descriptions: Vec::new(),
         }
+    }
+
+    /// Return a copy carrying the options' one-line descriptions (see
+    /// [`DecisionRecord::option_descriptions`] for the order).
+    pub fn with_option_descriptions(mut self, descriptions: Vec<String>) -> Self {
+        self.option_descriptions = descriptions;
+        self
     }
 
     /// Return a copy with the outcome set to `Approved` and provenance
@@ -341,6 +355,77 @@ impl DecisionRecord {
     pub fn needs_review(&self) -> bool {
         self.outcome.needs_review()
     }
+}
+
+// ---------------------------------------------------------------------------
+// Decision slug and the rationale format shared by the server and the console
+// ---------------------------------------------------------------------------
+
+/// Kebab-case, ASCII slug of a decision label, used in the
+/// `"{story_id}/decision/{slug}"` artifact id. Runs of anything that is not an ASCII
+/// letter or digit become one hyphen; the ends are trimmed; nothing usable gives
+/// `"decision"`. Shared by the server (which files AI proposals) and the console
+/// (which files hand-typed decisions) so both produce the same id for the same label.
+pub fn slugify_decision_label(label: &str) -> String {
+    let mut out = String::with_capacity(label.len());
+    let mut prev_dash = false;
+    for ch in label.chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+            prev_dash = false;
+        } else if !prev_dash && !out.is_empty() {
+            out.push('-');
+            prev_dash = true;
+        }
+    }
+    let trimmed = out.trim_matches('-');
+    if trimmed.is_empty() {
+        "decision".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+/// The prefix an AI-proposed decision's rationale starts with. `DecisionRecord` has no
+/// field for the recommended option, so the record carries it here and the console reads
+/// it back with [`parse_recommended_rationale`]. The non-recommended options live in
+/// `alternatives_considered`.
+const RECOMMENDED_PREFIX: &str = "Recommended: ";
+
+/// Build the rationale of an AI-proposed decision: `"Recommended: {recommended}. {rationale}"`.
+/// The recommended label is read back up to its first `". "` (or a final `"."`), so a label
+/// that itself contains a full stop followed by a space is shown cut short in the console.
+pub fn recommended_rationale(recommended: &str, rationale: &str) -> String {
+    format!(
+        "{RECOMMENDED_PREFIX}{}. {}",
+        recommended.trim(),
+        rationale.trim()
+    )
+    .trim_end()
+    .to_string()
+}
+
+/// Split a rationale written by [`recommended_rationale`] into `(recommended, body)`.
+/// `None` for any other text (a hand-typed decision), an empty label, or a blank one.
+pub fn parse_recommended_rationale(rationale: &str) -> Option<(String, String)> {
+    let rest = rationale.strip_prefix(RECOMMENDED_PREFIX)?;
+    let (label, body) = match rest.find(". ") {
+        Some(i) => (&rest[..i], &rest[i + 2..]),
+        None => (rest.strip_suffix('.')?, ""),
+    };
+    let label = label.trim();
+    if label.is_empty() {
+        return None;
+    }
+    Some((label.to_string(), body.trim().to_string()))
+}
+
+/// The rationale of a decision the architect settled on an option other than the
+/// recommended one: `"Chosen: {option}. {architect text}"`.
+pub fn chosen_rationale(option: &str, architect_text: &str) -> String {
+    format!("Chosen: {}. {}", option.trim(), architect_text.trim())
+        .trim_end()
+        .to_string()
 }
 
 // ---------------------------------------------------------------------------
@@ -887,5 +972,107 @@ mod tests {
         )
         .approve(t);
         assert!(decisions_approved_for_development(&[no_tradeoffs]));
+    }
+
+    // -----------------------------------------------------------------------
+    // Gap 9: slug and the "Recommended:" rationale format shared with the UI
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn slugify_decision_label_is_kebab_case_ascii_and_stable() {
+        assert_eq!(
+            slugify_decision_label("Session storage: cookies or JWT"),
+            "session-storage-cookies-or-jwt"
+        );
+        // Runs of punctuation and spaces collapse to one hyphen; edges are trimmed.
+        assert_eq!(
+            slugify_decision_label("  --Hello,   World!!  "),
+            "hello-world"
+        );
+        // Non-ASCII letters are separators, never kept.
+        assert_eq!(slugify_decision_label("Caf\u{e9} au lait"), "caf-au-lait");
+        // Nothing usable falls back to a fixed slug.
+        assert_eq!(slugify_decision_label("???"), "decision");
+        assert_eq!(slugify_decision_label(""), "decision");
+        // Stable: slugging a slug changes nothing.
+        let once = slugify_decision_label("Auth strategy: JWT vs session");
+        assert_eq!(slugify_decision_label(&once), once);
+    }
+
+    #[test]
+    fn ai_proposed_records_start_pending_with_ai_provenance() {
+        let t = Utc::now();
+        let d = DecisionRecord::ai_proposed(
+            "acme/api#4",
+            "acme/api#4/decision/session-storage",
+            "Session storage",
+            "Where do sessions live?",
+            recommended_rationale("Cookies", "Reads src/auth.rs, which already sets cookies."),
+            vec!["JWT".to_string()],
+            t,
+        );
+        assert_eq!(d.outcome, DecisionOutcome::Pending);
+        assert!(d.needs_review());
+        assert_eq!(d.provenance.actor, RevisionActor::Ai);
+        assert_eq!(d.provenance.at, t);
+        // A pending record never satisfies the development gate.
+        assert!(!decisions_approved_for_development(&[d]));
+    }
+
+    #[test]
+    fn recommended_rationale_round_trips_through_the_parser() {
+        let r = recommended_rationale("Cookies", "Reads src/auth.rs. Cookies are already set.");
+        assert_eq!(
+            r,
+            "Recommended: Cookies. Reads src/auth.rs. Cookies are already set."
+        );
+        assert_eq!(
+            parse_recommended_rationale(&r),
+            Some((
+                "Cookies".to_string(),
+                "Reads src/auth.rs. Cookies are already set.".to_string()
+            ))
+        );
+        // An empty body leaves no trailing space and still parses.
+        let bare = recommended_rationale("Cookies", "");
+        assert_eq!(bare, "Recommended: Cookies.");
+        assert_eq!(
+            parse_recommended_rationale(&bare),
+            Some(("Cookies".to_string(), String::new()))
+        );
+    }
+
+    #[test]
+    fn parse_recommended_rationale_rejects_hand_written_text() {
+        assert_eq!(parse_recommended_rationale("Chose JWT: stateless."), None);
+        assert_eq!(parse_recommended_rationale(""), None);
+        assert_eq!(parse_recommended_rationale("Recommended: ."), None);
+        assert_eq!(parse_recommended_rationale("Recommended:  . body"), None);
+    }
+
+    #[test]
+    fn chosen_rationale_names_the_chosen_option_and_the_architect_text() {
+        assert_eq!(
+            chosen_rationale("JWT", "We run stateless workers."),
+            "Chosen: JWT. We run stateless workers."
+        );
+        assert_eq!(chosen_rationale("JWT", "  "), "Chosen: JWT.");
+    }
+
+    #[test]
+    fn option_descriptions_default_empty_on_old_records_and_round_trip() {
+        // A record written before the field existed still loads.
+        let old = r#"{"artifact_id":"S/decision/x","story_id":"S","label":"L","question":"Q",
+            "rationale":"R","alternatives_considered":[],"outcome":{"state":"pending"}}"#;
+        let d: DecisionRecord = serde_json::from_str(old).unwrap();
+        assert!(d.option_descriptions.is_empty());
+        // ai_proposed does not set it; the builder does, and it survives a round trip.
+        let t = Utc::now();
+        let d = DecisionRecord::ai_proposed("S", "S/decision/x", "L", "Q", "R", vec![], t)
+            .with_option_descriptions(vec!["one".to_string(), "two".to_string()]);
+        let back: DecisionRecord =
+            serde_json::from_str(&serde_json::to_string(&d).unwrap()).unwrap();
+        assert_eq!(back.option_descriptions, vec!["one", "two"]);
+        assert_eq!(back, d);
     }
 }

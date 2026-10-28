@@ -15,6 +15,7 @@ fn l3_prompt_diff_is_redacted() {
         rules_prose: "No secrets in the repo.",
         diff: &diff,
         model: "m",
+        earlier_findings: &[],
     };
     let prompt = build_l3_prompt(&input);
     assert!(

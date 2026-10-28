@@ -223,7 +223,7 @@ pub(super) async fn save_intake_context(story_id: &str, context: &str) -> bool {
 /// The message a server refusal carries: its `reason` (else its `error`), or `fallback` plus the
 /// HTTP status when the body has neither. What the console shows when a save is refused (400
 /// invalid branch name, 409 repository outside the active project) instead of failing silently.
-async fn rejection_message(resp: reqwest::Response, fallback: &str) -> String {
+pub(super) async fn rejection_message(resp: reqwest::Response, fallback: &str) -> String {
     let status = resp.status();
     let body = resp.json::<serde_json::Value>().await.ok();
     body.as_ref()
@@ -1004,6 +1004,10 @@ pub(super) struct UowView {
     pub gate_provenance: Option<GateProvenanceView>,
     #[serde(default)]
     pub sign_off: Option<SignOffView>,
+    /// The Layer-3 reviewer findings recorded for this unit (gap 4). An open HIGH or MEDIUM one
+    /// blocks sign-off until it is fixed or accepted with a reason.
+    #[serde(default)]
+    pub review_findings: Vec<super::review_findings::RecordedReviewFindingView>,
     /// The persisted Intake state (#105): free-text context + repo/branch scope (R6).
     #[serde(default)]
     pub intake: IntakeStateView,
@@ -2267,6 +2271,10 @@ pub(super) struct DecisionRecordView {
     pub outcome: DecisionOutcomeView,
     #[serde(default)]
     pub provenance: RevisionProvenanceView,
+    /// One-line option descriptions (recommended or chosen first, then the alternatives).
+    /// Carried so posting the whole list back does not erase them.
+    #[serde(default)]
+    pub option_descriptions: Vec<String>,
 }
 
 /// The `GET /api/uow/:id/investigation` envelope.
@@ -5360,6 +5368,14 @@ pub(super) fn DevelopmentPhaseView(
     let mut bug_report = use_signal(String::new);
     let mut bug_fix_running = use_signal(|| false);
 
+    // The Layer-3 reviewer findings recorded on the unit (empty until a review has run).
+    let review_findings: Vec<super::review_findings::RecordedReviewFindingView> = uow_for_stage
+        .read()
+        .clone()
+        .flatten()
+        .map(|u| u.review_findings)
+        .unwrap_or_default();
+
     // ── Layer-2 results (displayed after a dev run completes — no button) ─────────
     // TODO(#105): fetch real Layer-2 bounce results from the run's provenance endpoint
     let layer2_results: Option<String> = uow_for_stage
@@ -5819,6 +5835,9 @@ pub(super) fn DevelopmentPhaseView(
                 // TODO(#105): integrate live Layer-2 bounce stream and Layer-3 opt-in agentic
                 // code reviewer (R7); both run with / parallel to Layer-2.
             }
+
+            // ── Layer-3 reviewer findings (gap 4): rendered only when the unit has some ───
+            super::review_findings::ReviewFindingsSection { story_id: story_id.clone(), findings: review_findings, uow_refresh }
 
             // ── §8: Ship panel (§5.7) — per in-scope repo ───────────────────────
             // One Ship row per in-scope repo. The fan-out guarantees each repo's branch
@@ -7161,13 +7180,28 @@ pub(super) fn DecisionsReviewPanel(
             // ── Decisions ──────────────────────────────────────────────────────
             div { class: "uow-decisions",
                 p { class: "uow-field-label", "Decisions ({decisions.len()})" }
+                p { class: "section-hint",
+                    "The investigation proposes decisions. Approve, change or reject each one. Development starts only when every decision is approved."
+                }
                 if decisions.is_empty() {
                     p { class: "section-hint",
                         "No decisions recorded yet. The development gate requires at least one APPROVED decision. Add one below."
                     }
                 }
                 for (i, d) in decisions.iter().enumerate() {
-                    {
+                    if super::decision_cards::proposed_decision_vm(d).is_some() {
+                        super::decision_cards::ProposedDecisionCard {
+                            // Keyed on the rationale too, so a new pass that changes the
+                            // recommendation remounts the card with a fresh preselection.
+                            key: "{d.artifact_id}|{d.rationale}",
+                            story_id: story_id.clone(),
+                            decisions: decisions.clone(),
+                            index: i,
+                            busy,
+                            local_refresh,
+                        }
+                    } else {
+                        {
                         let (olabel, ocss) = (d.outcome.label(), d.outcome.css());
                         let decisions_for_approve = decisions.clone();
                         let decisions_for_reject = decisions.clone();
@@ -7179,15 +7213,29 @@ pub(super) fn DecisionsReviewPanel(
                                     span { class: "uow-decision-label", "{d.label}" }
                                     span { class: "wi-state {ocss}", "{olabel}" }
                                 }
-                                if !d.question.is_empty() {
-                                    p { class: "uow-decision-q", "Q: {d.question}" }
-                                }
-                                if !d.rationale.is_empty() {
-                                    p { class: "uow-decision-rationale", "{d.rationale}" }
-                                }
+                                // A decision the architect has ruled on collapses to its one-line
+                                // outcome; the question and reasoning stay one click away.
                                 if let DecisionOutcomeView::Rejected { reason } = &d.outcome {
                                     if !reason.is_empty() {
                                         p { class: "uow-decision-reject-reason", "Rejected: {reason}" }
+                                    }
+                                }
+                                if matches!(d.outcome, DecisionOutcomeView::Pending) {
+                                    if !d.question.is_empty() {
+                                        p { class: "uow-decision-q", "Q: {d.question}" }
+                                    }
+                                    if !d.rationale.is_empty() {
+                                        p { class: "uow-decision-rationale", "{d.rationale}" }
+                                    }
+                                } else if !d.question.is_empty() || !d.rationale.is_empty() {
+                                    details { class: "uow-decision-details",
+                                        summary { "Details" }
+                                        if !d.question.is_empty() {
+                                            p { class: "uow-decision-q", "Q: {d.question}" }
+                                        }
+                                        if !d.rationale.is_empty() {
+                                            p { class: "uow-decision-rationale", "{d.rationale}" }
+                                        }
                                     }
                                 }
                                 div { class: "uow-decision-actions",
@@ -7250,6 +7298,7 @@ pub(super) fn DecisionsReviewPanel(
                                 }
                             }
                         }
+                        }
                     }
                 }
 
@@ -7299,6 +7348,7 @@ pub(super) fn DecisionsReviewPanel(
                                     question: new_question().trim().to_string(),
                                     rationale: new_rationale().trim().to_string(),
                                     alternatives_considered: Vec::new(),
+                                    option_descriptions: Vec::new(),
                                     outcome: DecisionOutcomeView::Approved,
                                     // Stamp a real provenance: an empty {actor:"",at:""} fails to
                                     // deserialize server-side (actor enum + DateTime), which 422'd
@@ -7420,23 +7470,8 @@ pub(super) fn DecisionsReviewPanel(
 /// kebab-case slug for a decision label (alnum runs → hyphens, lowercased, trimmed).
 /// Mirrors the `"{story_id}/decision/{slug}"` artifact-id convention. Pure + testable.
 pub(super) fn slugify_decision_label(label: &str) -> String {
-    let mut out = String::with_capacity(label.len());
-    let mut prev_dash = false;
-    for ch in label.chars() {
-        if ch.is_ascii_alphanumeric() {
-            out.push(ch.to_ascii_lowercase());
-            prev_dash = false;
-        } else if !prev_dash && !out.is_empty() {
-            out.push('-');
-            prev_dash = true;
-        }
-    }
-    let trimmed = out.trim_matches('-').to_string();
-    if trimmed.is_empty() {
-        "decision".to_string()
-    } else {
-        trimmed
-    }
+    // One implementation, shared with the server (which files the AI proposals).
+    camerata_worktracker::investigation::slugify_decision_label(label)
 }
 
 /// Whether the note-review requirement is satisfied for the readiness hint. When the
@@ -8202,6 +8237,7 @@ mod bff_tests {
             question: String::new(),
             rationale: rationale.to_string(),
             alternatives_considered: vec![],
+            option_descriptions: Vec::new(),
             outcome,
             provenance: RevisionProvenanceView::default(),
         };
@@ -9351,6 +9387,7 @@ mod bff_tests {
             question: "Which backend?".into(),
             rationale: "fast".into(),
             alternatives_considered: vec!["sql".into()],
+            option_descriptions: Vec::new(),
             outcome: DecisionOutcomeView::Approved,
             provenance: RevisionProvenanceView::default(),
         }];

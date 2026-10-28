@@ -71,6 +71,7 @@ fn rich_source_project(store: &ProjectStore) -> Project {
             proj.l3_review = L3ReviewConfig {
                 enabled: true,
                 model: "EXPORT-L3".to_string(),
+                ..Default::default()
             };
             // vision_enabled.
             proj.vision_enabled = true;

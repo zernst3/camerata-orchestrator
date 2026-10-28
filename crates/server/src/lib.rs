@@ -1602,6 +1602,10 @@ pub fn router(state: AppState) -> Router {
         // ── Governed-development lifecycle (Pillar 2) ─────────────────────────
         .route("/api/uow/:story_id/decisions", post(uow_set_decisions))
         .route(
+            "/api/uow/:story_id/review-findings/:index/accept",
+            post(uow_accept_review_finding),
+        )
+        .route(
             "/api/uow/:story_id/investigation",
             get(uow_get_investigation),
         )
@@ -2462,6 +2466,11 @@ async fn spawn_brownfield_dev_run(
                 rules_prose,
                 model: l3_model,
                 llm,
+                on_error: proj.l3_review.on_error,
+                fix_rounds: proj
+                    .l3_review
+                    .fix_rounds
+                    .min(camerata_api_types::project::MAX_L3_FIX_ROUNDS),
             })
         })
     };
@@ -3627,6 +3636,25 @@ async fn sign_off_run(
         // The waiver is also recorded as a history entry by `uow.sign_off` (it appends
         // the full note text, which includes the waiver reason).
         let _ = waive; // acknowledged above; used below when building the effective note.
+    }
+
+    // ── Reviewer-finding sign-off gate (gap 4) ───────────────────────────────
+    // A HIGH or MEDIUM Layer-3 reviewer finding that is still open blocks sign-off. Unlike the
+    // critical-finding gate it has no waiver: the way past is to fix the finding or to accept
+    // it with a reason (`POST /api/uow/:id/review-findings/:index/accept`). LOW never blocks.
+    let open_review_findings = current_uow.open_blocking_review_findings();
+    if open_review_findings > 0 {
+        return Ok((
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": "sign-off blocked by open reviewer findings",
+                "reason": format!(
+                    "{open_review_findings} reviewer finding(s) are still open. Fix them or record a decision on each before signing off."
+                ),
+                "blocked": true,
+            })),
+        )
+            .into_response());
     }
 
     // Build the effective note, folding in the waiver reason when present.
@@ -5127,6 +5155,15 @@ struct SetL3ReviewReq {
     /// The model id for the L3 reviewer. Empty string = use the balanced tier fallback.
     #[serde(default)]
     model: String,
+    /// What a run does when the reviewer cannot run. Absent keeps the project's current value.
+    #[serde(default)]
+    on_error: Option<crate::project::ReviewOnError>,
+    /// Extra implementer passes after a bounce. Absent keeps the project's current value.
+    #[serde(default)]
+    fix_rounds: Option<u8>,
+    /// The reviewer's model tier when no model is pinned. Absent keeps the current value.
+    #[serde(default)]
+    tier: Option<crate::project::ReviewTier>,
 }
 
 /// `POST /api/projects/:id/l3-review` — update the per-project L3 agentic code-review
@@ -5141,9 +5178,22 @@ async fn set_l3_review_handler(
     Path(id): Path<String>,
     Json(req): Json<SetL3ReviewReq>,
 ) -> Json<serde_json::Value> {
+    // The three reviewer-policy fields are optional on the wire, so a client that only knows
+    // `{ enabled, model }` never resets them: an absent field keeps the stored value.
+    let current = state
+        .projects
+        .get(&id)
+        .map(|p| p.l3_review)
+        .unwrap_or_default();
     let config = crate::project::L3ReviewConfig {
         enabled: req.enabled,
         model: req.model.trim().to_string(),
+        on_error: req.on_error.unwrap_or(current.on_error),
+        fix_rounds: req
+            .fix_rounds
+            .unwrap_or(current.fix_rounds)
+            .min(camerata_api_types::project::MAX_L3_FIX_ROUNDS),
+        tier: req.tier.unwrap_or(current.tier),
     };
     match state.projects.set_l3_review(&id, config) {
         Some(p) => Json(serde_json::json!({ "ok": true, "project": p })),
@@ -5264,7 +5314,15 @@ async fn apply_model_profile(
         if let Some(ref a) = assignments {
             p.tier_map = a.tier_map.clone();
             p.step_models = a.step_models.clone();
-            p.l3_review = a.l3_review.clone();
+            // A profile assigns the reviewer's on/off and model. The reviewer POLICY (fail
+            // closed, fix rounds, tier) is the architect's own choice and is kept.
+            let policy = p.l3_review.clone();
+            p.l3_review = crate::project::L3ReviewConfig {
+                on_error: policy.on_error,
+                fix_rounds: policy.fix_rounds,
+                tier: policy.tier,
+                ..a.l3_review.clone()
+            };
         }
     });
 
@@ -15356,6 +15414,112 @@ async fn uow_set_decisions(
     Json(state.uow.set_decisions(&story_id, decisions))
 }
 
+/// Body for `POST /api/uow/:story_id/review-findings/:index/accept`.
+#[derive(serde::Deserialize)]
+struct AcceptReviewFindingReq {
+    /// Why the finding is acceptable as is. Required and non-blank.
+    #[serde(default)]
+    reason: String,
+}
+
+/// A short lowercase slug of `text` for a decision artifact id (letters and digits, dashes
+/// between, at most 40 characters).
+fn decision_slug(text: &str) -> String {
+    let mut slug = String::new();
+    for c in text.chars() {
+        if c.is_ascii_alphanumeric() {
+            slug.push(c.to_ascii_lowercase());
+        } else if !slug.ends_with('-') && !slug.is_empty() {
+            slug.push('-');
+        }
+    }
+    slug.truncate(40);
+    slug.trim_end_matches('-').to_string()
+}
+
+/// `POST /api/uow/:story_id/review-findings/:index/accept` body `{ "reason": "..." }`: the
+/// architect accepts one Open Layer-3 reviewer finding as is. The reason is required. The
+/// finding becomes `Accepted`, the unit's history gets a line, and an Approved decision record
+/// is written through `set_decisions` so the acceptance is in the decision history the next run
+/// reads. 400 for a blank reason, 404 for an unknown unit or index, 409 when the finding is
+/// already fixed or accepted.
+async fn uow_accept_review_finding(
+    State(state): State<AppState>,
+    Path((story_id, index)): Path<(String, usize)>,
+    Json(req): Json<AcceptReviewFindingReq>,
+) -> Response {
+    use crate::uow::AcceptReviewFindingError;
+    let reason = req.reason.trim();
+    if reason.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "reason required",
+                "reason": "Say why this finding is acceptable as is. A reason is required to accept a reviewer finding.",
+            })),
+        )
+            .into_response();
+    }
+    let accepted = match state
+        .uow
+        .accept_review_finding(&story_id, index, "architect", reason)
+    {
+        Ok(f) => f,
+        Err(AcceptReviewFindingError::NotFound) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({
+                    "error": "no such finding",
+                    "reason": "That reviewer finding does not exist on this unit.",
+                })),
+            )
+                .into_response();
+        }
+        Err(AcceptReviewFindingError::NotOpen) => {
+            return (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({
+                    "error": "finding not open",
+                    "reason": "That reviewer finding is already fixed or accepted.",
+                })),
+            )
+                .into_response();
+        }
+    };
+    state.uow.append_history(
+        &story_id,
+        "review_finding_accepted",
+        &format!(
+            "Reviewer finding accepted: {}. Reason: {reason}",
+            accepted.title
+        ),
+    );
+    // The acceptance is also a decision, so the decision history the run reads carries it.
+    let label = format!("Reviewer finding accepted: {}", accepted.title);
+    let record = camerata_worktracker::investigation::DecisionRecord::ai_proposed(
+        story_id.clone(),
+        format!(
+            "{story_id}/decision/reviewer-accepted-{index}-{}",
+            decision_slug(&accepted.title)
+        ),
+        label,
+        // A finding recorded without a scenario still gives the decision a question.
+        if accepted.scenario.trim().is_empty() {
+            accepted.title.clone()
+        } else {
+            accepted.scenario.clone()
+        },
+        reason.to_string(),
+        Vec::new(),
+        chrono::Utc::now(),
+    )
+    .approve(chrono::Utc::now());
+    let mut decisions = state.uow.decisions_for(&story_id);
+    decisions.push(record);
+    state.uow.set_decisions(&story_id, decisions);
+    Json(state.uow.get_or_create(&story_id)).into_response()
+}
+
 /// The decisions-review payload for a story (`GET /api/uow/:story_id/investigation`): the
 /// investigation note (or `None` when none has been recorded) and the current decision
 /// records. Powers the cockpit's decisions-review surface so the architect can read the
@@ -22691,6 +22855,7 @@ mod tests {
             alternatives_considered: vec![],
             outcome: DecisionOutcome::Approved,
             provenance: RevisionProvenance::new(RevisionActor::Ai, chrono::Utc::now()),
+            option_descriptions: vec![],
         };
         uow.set_decisions(story, vec![decision]);
         uow.begin_investigation(story).expect("→ Investigating");

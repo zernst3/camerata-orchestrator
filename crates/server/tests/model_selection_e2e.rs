@@ -448,6 +448,7 @@ fn scope3_l3_model_returns_pinned_then_falls_back_to_balanced() {
             L3ReviewConfig {
                 enabled: true,
                 model: "L3-pinned-id".to_string(),
+                ..Default::default()
             },
         )
         .unwrap();
@@ -460,6 +461,7 @@ fn scope3_l3_model_returns_pinned_then_falls_back_to_balanced() {
             L3ReviewConfig {
                 enabled: true,
                 model: "   ".to_string(),
+                ..Default::default()
             },
         )
         .unwrap();
