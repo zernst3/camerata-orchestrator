@@ -74,6 +74,13 @@ H. By 08:30: morning summary at the top of `docs/OVERNIGHT_DECISIONS.md`; the PR
 
 ## Status log (newest first)
 
+- 00:10 (Oct 28 local 00:10 = 04:10 UTC): false-negative hunt (cloud) delivered: 12 HIGH, 26
+  MEDIUM, 22 LOW on base 7bc10573 (before tonight's merges; some are already fixed by rank 2's
+  batch truncation retry and H4's malformed-JSON retry). Report saved to
+  scratchpad/fn_audit.md (it belongs in camerata-internal, not the public tree). Plan: once the
+  integration and cloud branches land, a Fable pass marks which items still hold on the merged
+  branch, then Sonnet builders fix the remaining HIGHs by area. Reviews started for hygiene,
+  sources and boards.
 - 00:20: README split (cloud) reviewed: counts and links verified; 2 HIGH (README claims every
   finding is reviewed before a deliverable, but `camerata inspect` exports untriaged; linked docs
   still say 417 and the count test skips them), 5 MEDIUM. Brief queued
