@@ -9997,6 +9997,15 @@ async fn run_security_passes(
                     if let Some(m) = meter {
                         m.record_stage(Stage::DeepTier, &resp);
                     }
+                    // A complete reply that holds no JSON is a FAILED pass, never "no findings":
+                    // parsing it would return an empty list indistinguishable from a clean
+                    // chunk. (No retry here: the deep tier is a single opt-in pass per chunk.)
+                    if !resp.truncated && scan_output_is_malformed(&resp.text) {
+                        if let Some(m) = meter {
+                            m.record_wasted(Stage::DeepTier, &resp);
+                        }
+                        anyhow::bail!("{}", malformed_reply_reason(1));
+                    }
                     let (f, p) = parse_ai_findings(repo, &resp.text, adopted);
                     let needs = parse_needs_files(&resp.text);
                     Ok((f, p, needs))
@@ -10025,10 +10034,10 @@ async fn run_security_passes(
                 requested.extend(needs);
                 ok += 1;
             }
-            Err(e) => failures.push(PassFailure::named(
-                format!("deep security {}/{n_c}", ci + 1),
-                &e,
-            )),
+            Err(e) => failures.push(
+                PassFailure::named(format!("deep security {}/{n_c}", ci + 1), &e)
+                    .with_files(chunks[ci].len()),
+            ),
         }
     }
     let _ = n_b; // single batch; kept for parity/readability with run_passes.

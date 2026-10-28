@@ -3,6 +3,25 @@
 Deferred work and known gaps not yet scheduled. Newest intent at the top. UI-only
 follow-ups live in `UI_BACKLOG.md`; this file is for engine + cross-cutting items.
 
+## Coverage: a reply still cut off after its one retry parses as zero findings (2026-10-28, OPEN)
+
+A scan reply cut off at the output limit gets one retry at a higher cap (`retry_unusable_scan_reply`
+in `crates/server/src/ai_audit.rs`). If that retry is also cut off, the reply is parsed as it came:
+a cut-off reply that still holds a complete JSON object yields its findings, and one that does not
+parses to nothing, with no failed pass recorded. Only a complete reply that is not JSON is a failed
+pass (the malformed-reply retry). The same holds for the deep security tier, which does not retry.
+Fix: treat a reply that is still truncated and holds no readable JSON as a failed pass naming its
+files, like the malformed case. Not done here because a truncated reply with partial valid JSON
+needs a decision on whether the findings it did return are kept.
+
+## Coverage: non-UTF-8 and metadata-failed files are skipped silently (2026-10-28, OPEN)
+
+The Coverage section lists files skipped for size and files past the file cap. Two other ways a
+file is not read are not listed: a file whose bytes are not valid UTF-8, and a file whose
+metadata cannot be read (`onboard/files.rs`). Both are dropped without a path, so a scan that
+could not read a file reports no gap. Fix: add two reasons to `scan_ledger::SkipReason`
+(`NotUtf8`, `Unreadable`) and push them through the same bounded list as the other two.
+
 ## Ownership: no producer for `Generated` / `Vendored` (2026-10-28, NOT BUILT, reason recorded)
 
 `Ownership::Generated` and `Ownership::Vendored` exist (`camerata_api_types::audit::Ownership`, with

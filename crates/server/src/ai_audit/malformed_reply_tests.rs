@@ -202,6 +202,44 @@ async fn a_truncation_retry_is_not_sent_when_it_would_pass_the_spend_limit() {
     );
 }
 
+// ── The deep security tier: a malformed reply is a failed pass here too ──────────────────────
+
+async fn deep_security(llm: &ScriptedLlm, n_files: usize) -> PassesOut {
+    let files: Vec<(String, String)> = (0..n_files)
+        .map(|i| (format!("f{i}.rs"), format!("fn f{i}() {{}}")))
+        .collect();
+    let chunks: Vec<&[(String, String)]> = vec![files.as_slice()];
+    let batches: Vec<&[(String, String)]> = Vec::new();
+    let adopted: std::collections::HashSet<String> = ["RULE-0".to_string()].into();
+    run_security_passes(
+        llm, REPO, REPO_MAP, &adopted, None, None, &chunks, &batches, 1, None,
+    )
+    .await
+}
+
+#[tokio::test]
+async fn a_malformed_deep_security_reply_is_a_failed_pass_not_zero_findings() {
+    let llm = ScriptedLlm::new(&[(MALFORMED, false)]);
+    let (findings, _p, _r, ok, failures) = deep_security(&llm, 4).await;
+    assert_eq!(ok, 0, "a malformed reply must never count as answered");
+    assert!(findings.is_empty());
+    assert_eq!(failures.len(), 1, "{failures:?}");
+    assert!(
+        failures[0].error.contains("not valid JSON"),
+        "{}",
+        failures[0].error
+    );
+    assert_eq!(failures[0].files, 4, "names the files it did not review");
+}
+
+#[tokio::test]
+async fn a_well_formed_deep_security_reply_still_answers() {
+    let llm = ScriptedLlm::new(&[(ONE_FINDING, false)]);
+    let (findings, _p, _r, ok, failures) = deep_security(&llm, 1).await;
+    assert!(failures.is_empty(), "{failures:?}");
+    assert_eq!((ok, findings.len()), (1, 1));
+}
+
 /// Anti-vacuity: with room under the limit the same script is retried as before.
 #[tokio::test]
 async fn a_malformed_retry_is_sent_when_the_spend_limit_has_room() {
