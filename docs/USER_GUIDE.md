@@ -1584,8 +1584,10 @@ exact input size of one scan pass, counted by the API for free. A repeat run on 
 reuses the previous findings and costs less than the estimate.
 
 To put a ceiling on a run, add `--max-cost-usd 25`. The run stops BETWEEN passes once its actual
-spend reaches the limit; it never cuts a pass off halfway. It can finish up to one pass over the
-limit, because passes run side by side. When the limit stops a run:
+spend reaches the limit; it never cuts a pass off halfway. The limit is checked before each scan pass,
+each calibration or fix batch and each deep-tier call starts, and once the limit has stopped anything no
+later stage starts. Calls already started finish, so a run can end about one pass over the limit (a pass
+can include one retry of a reply that was cut off). When the limit stops a run:
 
 - the final report says so, and lists the passes that were NOT RUN (also shown under FAILED PASSES);
 - the export is still written but is marked incomplete: its report lists the passes that did not run,
@@ -1596,6 +1598,10 @@ limit, because passes run side by side. When the limit stops a run:
 With `--batch` the limit is checked BEFORE the batch is submitted (a submitted batch cannot be
 cancelled cheaply); if the estimate would pass the limit, nothing is submitted and every pass is
 reported as not run. The desktop app has the same control as "Spend limit (USD)" in the scan settings.
+When any pass or stage did not run, for any reason (the limit, or a failure), the app's results screen
+shows an "Incomplete" banner listing them, a short reminder beside the export button, and the progress
+line counts them as NOT RUN rather than done. A rule that was checked on only part of the code is
+listed as such and never counted as clean.
 
 Every saving the product applies is on by default and can be switched off for one run, to find out
 whether it caused a cost or behavior change: `--efficiency warm_schedule=off` (repeatable), or

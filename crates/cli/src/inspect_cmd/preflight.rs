@@ -157,7 +157,8 @@ pub fn build(inputs: &PreflightInputs<'_>) -> Preflight {
             writeln!(
                 out,
                 "  spend limit: ${cap:.2}. The run stops between passes once actual spend reaches it \
-                 and says what was not run; it can finish up to one pass over the limit."
+                 and says what was not run; passes already started finish, so it can end about one \
+                 pass over the limit."
             )
             .ok();
             if let Some((_, dollars, _)) = estimate {
@@ -263,7 +264,7 @@ mod tests {
         let repos = [repo(400_000, 30)];
         let p = build(&inputs(&repos, Some(0.01)));
         assert!(p.text.contains("spend limit: $0.01"), "{}", p.text);
-        assert!(p.text.contains("one pass over the limit"));
+        assert!(p.text.contains("about one pass over the limit"));
         assert!(p.text.contains("WARNING"), "{}", p.text);
         let roomy = build(&inputs(&repos, Some(10_000.0))).text;
         assert!(!roomy.contains("WARNING"), "{roomy}");

@@ -246,6 +246,8 @@ pub struct UsageMeter {
     controls: crate::cost_cap::RunControls,
     /// The cap's mutable record: passes in flight, and what the cap stopped.
     budget: std::sync::Mutex<crate::cost_cap::BudgetState>,
+    /// Wakes passes waiting for the first reported cost (see [`Self::admit`]).
+    admission: tokio::sync::Notify,
 }
 
 /// Why a pass was not admitted.
@@ -260,9 +262,22 @@ pub struct PassPermit<'a> {
 
 impl Drop for PassPermit<'_> {
     fn drop(&mut self) {
-        let mut budget = self.meter.budget();
-        budget.in_flight = budget.in_flight.saturating_sub(1);
+        {
+            let mut budget = self.meter.budget();
+            budget.in_flight = budget.in_flight.saturating_sub(1);
+        }
+        self.meter.admission.notify_waiters();
     }
+}
+
+/// The answer to one admission attempt.
+enum Admission<'a> {
+    Admitted(PassPermit<'a>),
+    /// The cap forbids another pass.
+    CapReached,
+    /// No call has reported a cost yet and a pass is already in flight, so there is nothing to
+    /// reserve against: wait for it.
+    Wait,
 }
 
 impl UsageMeter {
@@ -303,20 +318,49 @@ impl UsageMeter {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    /// Ask to start one scan pass. Admitted only while `spent + in_flight * reserve < cap`
-    /// (see the overshoot bound in [`crate::cost_cap`]); with no cap, always admitted. The
-    /// check and the in-flight count move together under one lock, so two passes cannot both
-    /// claim the last slot.
-    pub fn admit(&self) -> Result<PassPermit<'_>, CapReached> {
+    /// One admission attempt. Admitted only while `spent + in_flight * reserve < cap` (see the
+    /// overshoot bound in [`crate::cost_cap`]); with no cap, always admitted. The check and the
+    /// in-flight count move together under one lock, so two passes cannot both claim the last
+    /// slot.
+    fn try_admit(&self) -> Admission<'_> {
         let mut budget = self.budget();
         if let Some(cap) = self.controls.max_cost_usd {
-            let reserve = self.max_call_micro_usd.load(Ordering::Relaxed) as f64 / 1_000_000.0;
+            let reserve_micro = self.max_call_micro_usd.load(Ordering::Relaxed);
+            // Until one call has reported a cost there is nothing to reserve against, so only
+            // ONE pass may be in flight: a cap must never be a number that concurrent passes
+            // can all slip under at once (warm_schedule off, a free first call, ...).
+            if reserve_micro == 0 && budget.in_flight >= 1 {
+                return if self.spent_usd() >= cap {
+                    Admission::CapReached
+                } else {
+                    Admission::Wait
+                };
+            }
+            let reserve = reserve_micro as f64 / 1_000_000.0;
             if self.spent_usd() + budget.in_flight as f64 * reserve >= cap {
-                return Err(CapReached);
+                return Admission::CapReached;
             }
         }
         budget.in_flight += 1;
-        Ok(PassPermit { meter: self })
+        Admission::Admitted(PassPermit { meter: self })
+    }
+
+    /// Ask to start one scan pass. Waits (without spending anything) while the only thing
+    /// standing in the way is that no cost is known yet; refuses with [`CapReached`] when the
+    /// cap forbids the pass. An admitted pass holds its permit until it is dropped.
+    pub async fn admit(&self) -> Result<PassPermit<'_>, CapReached> {
+        loop {
+            // Register for wake-ups BEFORE checking, so a release between the check and the
+            // wait is not missed.
+            let woken = self.admission.notified();
+            tokio::pin!(woken);
+            woken.as_mut().enable();
+            match self.try_admit() {
+                Admission::Admitted(permit) => return Ok(permit),
+                Admission::CapReached => return Err(CapReached),
+                Admission::Wait => woken.await,
+            }
+        }
     }
 
     /// Record a scan pass the cap refused.
@@ -324,13 +368,22 @@ impl UsageMeter {
         self.budget().not_run_passes.push(pass);
     }
 
-    /// Stage boundary check: true (and the stage is recorded as NOT RUN) when the cap is
-    /// already reached, so the caller skips the stage. `stage` is the name the failed-pass
-    /// list shows.
-    pub fn stage_blocked(&self, repo: &str, stage: &str) -> bool {
-        if !self.cap_reached() {
-            return false;
+    /// [`Self::admit`] for one call of a stage that is not a scan pass (a calibration batch, a
+    /// fix batch, a deep-tier call). A refusal records the stage as stopped PART WAY, because
+    /// the stage's earlier calls ran.
+    pub async fn admit_for_stage(
+        &self,
+        repo: &str,
+        stage: &str,
+    ) -> Result<PassPermit<'_>, CapReached> {
+        let permit = self.admit().await;
+        if permit.is_err() {
+            self.record_stage_not_run(repo, stage, true);
         }
+        permit
+    }
+
+    fn record_stage_not_run(&self, repo: &str, stage: &str, partial: bool) {
         let mut budget = self.budget();
         if !budget
             .not_run_stages
@@ -340,8 +393,29 @@ impl UsageMeter {
             budget.not_run_stages.push(crate::cost_cap::NotRunStage {
                 repo: repo.to_string(),
                 stage: stage.to_string(),
+                partial,
             });
         }
+    }
+
+    /// Stage boundary check: true (and the stage is recorded as NOT RUN) when the stage must
+    /// not start, so the caller skips it. `stage` is the name the failed-pass list shows.
+    ///
+    /// A stage is blocked once spend has reached the cap, AND once the cap has already stopped
+    /// anything (a refused scan pass, or an earlier stage): after the cap has bitten, nothing
+    /// later may start, which is what keeps the overshoot bounded.
+    pub fn stage_blocked(&self, repo: &str, stage: &str) -> bool {
+        let Some(_) = self.controls.max_cost_usd else {
+            return false;
+        };
+        let already_stopped = {
+            let budget = self.budget();
+            !budget.not_run_passes.is_empty() || !budget.not_run_stages.is_empty()
+        };
+        if !self.cap_reached() && !already_stopped {
+            return false;
+        }
+        self.record_stage_not_run(repo, stage, false);
         true
     }
 
@@ -350,10 +424,29 @@ impl UsageMeter {
     /// `projected_usd` is the caller's projection of what this submission commits (its exact
     /// input tokens at the batch price); the pre-flight estimate of the whole run, when the
     /// caller supplied one, can raise it. Pure: [`Self::record_note`] keeps the reason.
-    pub fn batch_refusal_reason(&self, projected_usd: f64) -> Option<String> {
+    ///
+    /// `projected_usd` is `None` when the caller could not project the batch at all. With a cap
+    /// set and no projection from anywhere, the cap cannot be enforced, so the submission is
+    /// REFUSED and says so: a limit that silently does nothing is the worst outcome. The
+    /// pre-flight estimate covers the whole run, so only what remains of it (estimate minus
+    /// spend, floored at zero) is counted against each submission.
+    pub fn batch_refusal_reason(&self, projected_usd: Option<f64>) -> Option<String> {
         let cap = self.controls.max_cost_usd?;
         let spent = self.spent_usd();
-        let projected = projected_usd.max(self.controls.estimate_hint_usd.unwrap_or(0.0));
+        let remaining_estimate = self
+            .controls
+            .estimate_hint_usd
+            .map(|hint| (hint - spent).max(0.0));
+        let projected = match (projected_usd, remaining_estimate) {
+            (None, None) => {
+                return Some(format!(
+                    "batch NOT submitted: the ${cap:.2} limit could not be enforced, because \
+                     neither the exact token count nor the estimate could project this batch's \
+                     cost, and a submitted batch cannot be cancelled cheaply"
+                ));
+            }
+            (a, b) => a.unwrap_or(0.0).max(b.unwrap_or(0.0)),
+        };
         if spent + projected <= cap {
             return None;
         }
@@ -381,6 +474,66 @@ impl UsageMeter {
             notes: budget.notes.clone(),
         })
     }
+}
+
+/// [`UsageMeter::admit`] for a call site that may have no meter (no meter: always admitted, no
+/// permit).
+async fn admit_pass(meter: Option<&UsageMeter>) -> Result<Option<PassPermit<'_>>, CapReached> {
+    match meter {
+        Some(m) => m.admit().await.map(Some),
+        None => Ok(None),
+    }
+}
+
+/// [`UsageMeter::admit_for_stage`] for a call site that may have no meter.
+async fn admit_stage<'a>(
+    meter: Option<&'a UsageMeter>,
+    repo: &str,
+    stage: &str,
+) -> Result<Option<PassPermit<'a>>, CapReached> {
+    match meter {
+        Some(m) => m.admit_for_stage(repo, stage).await.map(Some),
+        None => Ok(None),
+    }
+}
+
+/// Stage names as the failed-pass list shows them (also the spend-cap record's keys).
+pub const STAGE_ALTERNATIVES: &str = "rule-alternative recommendations";
+pub const STAGE_CALIBRATION: &str = "calibration (verification and hour estimates)";
+pub const STAGE_FIX: &str = "fix-specific generation";
+pub const STAGE_CLONE_JUDGE: &str = "clone-advisory judge";
+pub const STAGE_DEEP: &str = "deep compliance tier";
+
+/// The shared estimator's whole-run dollars for a batch scan over `chunks` and `batches`, priced
+/// at `model` (scan and calibration alike). The fallback projection for the batch spend-cap gate
+/// when the exact token count is unavailable; `None` when the model has no list price.
+fn batch_estimate_usd(
+    model: &str,
+    chunks: &[&[(String, String)]],
+    batches: &[&[(String, String)]],
+) -> Option<f64> {
+    let price = crate::llm::models().into_iter().find(|m| m.id == model)?;
+    let code_chars: usize = chunks
+        .iter()
+        .flat_map(|c| c.iter())
+        .map(|(_, content)| content.len())
+        .sum();
+    let rules: usize = batches.iter().map(|b| b.len()).sum();
+    let (_tokens, dollars, _passes) = camerata_ui_core::scan::estimate_audit_cost(
+        code_chars,
+        rules,
+        "batch",
+        price.price_in,
+        price.price_out,
+        price.price_in,
+        price.price_out,
+        false,
+        false,
+        false,
+        crate::llm::ProjectBackend::Api,
+        0,
+    );
+    Some(dollars)
 }
 
 /// The efficiency switches in force for a call site that may have no meter (every measure on).
@@ -428,7 +581,10 @@ impl UsageMeter {
         if let Some(c) = r.cost_usd {
             let micro = (c * 1_000_000.0) as u64;
             self.cost_micro_usd.fetch_add(micro, Ordering::Relaxed);
-            self.max_call_micro_usd.fetch_max(micro, Ordering::Relaxed);
+            let before = self.max_call_micro_usd.fetch_max(micro, Ordering::Relaxed);
+            if before == 0 && micro > 0 {
+                self.admission.notify_waiters();
+            }
             self.cost_calls.fetch_add(1, Ordering::Relaxed);
         }
         // Cache breakdowns are additive across calls (each call contributes its own share
@@ -2245,6 +2401,16 @@ pub async fn verify_findings(
     let mut calibrated: Vec<Finding> = Vec::with_capacity(findings.len());
 
     for (chunk_idx, chunk) in owned_chunks.into_iter().enumerate() {
+        // SPEND CAP, between batches: once the cap is reached the remaining batches do not run.
+        // Their findings pass through exactly as the scan produced them (none dropped) and the
+        // stage is recorded as stopped part way.
+        let _permit = match admit_stage(meter, repo, STAGE_CALIBRATION).await {
+            Err(CapReached) => {
+                calibrated.extend(chunk);
+                continue;
+            }
+            Ok(permit) => permit,
+        };
         let chunk_len = chunk.len();
         let mut prompt = format!("Repository: {repo}\n");
         // Proportionality signal (#51, Bug 4 §2b): ALWAYS given now (was thorough-only) — a
@@ -3515,6 +3681,16 @@ async fn run_fix_specifics_round(
     // chunk (the whole set) when `batch_size >= pending.len()`, so the request/self-check
     // shape below is unchanged from before this fix in that case.
     for batch in pending.chunks(batch_size.max(1)) {
+        // SPEND CAP, between batches: a batch the cap refuses is re-queued like a failed one
+        // (so its findings still reach the authored-remediation fallback) and the stage is
+        // recorded as stopped part way.
+        let _permit = match admit_stage(meter, repo, STAGE_FIX).await {
+            Err(CapReached) => {
+                still_pending.extend(batch.iter().copied());
+                continue;
+            }
+            Ok(permit) => permit,
+        };
         let prompt = {
             let refs: Vec<&Finding> = batch.iter().map(|&i| &findings[i]).collect();
             let local_feedback: std::collections::HashMap<usize, String> = batch
@@ -4426,8 +4602,8 @@ async fn run_passes(
             // SPEND CAP: asked before anything is built or sent, and held until the pass
             // (its truncation retry included) has finished, so a pass is never cut off
             // mid-response. A refused pass is recorded as NOT RUN, never skipped silently.
-            let _permit = match meter.map(UsageMeter::admit) {
-                Some(Err(CapReached)) => {
+            let _permit = match admit_pass(meter).await {
+                Err(CapReached) => {
                     if let Some(m) = meter {
                         m.record_not_run(crate::cost_cap::NotRunPass {
                             repo: repo.to_string(),
@@ -4440,12 +4616,11 @@ async fn run_passes(
                         });
                     }
                     if let Some((jstore, jid)) = job {
-                        jstore.inc_done(jid, 1);
+                        jstore.inc_not_run(jid, 1);
                     }
                     return (ci, bi, None);
                 }
-                Some(Ok(permit)) => Some(permit),
-                None => None,
+                Ok(permit) => permit,
             };
             let rb = build_rules_block(batch);
             // ADVISORY RUNS ONCE PER CHUNK, not once per rule-batch. The "flag novel
@@ -4751,8 +4926,8 @@ async fn run_passes_batch(
     // SPEND CAP (batch): a submitted batch cannot be cancelled cheaply, so the cap is checked
     // BEFORE every submission. The sample is only counted when the spend so far plus the
     // caller's pre-flight estimate (no network needed) has not already refused the run.
-    let hint_refuses = meter.is_some_and(|m| m.batch_refusal_reason(0.0).is_some());
-    let mut per_item_usd: f64 = 0.0;
+    let hint_refuses = meter.is_some_and(|m| m.batch_refusal_reason(Some(0.0)).is_some());
+    let mut per_item_usd: Option<f64> = None;
     if !hint_refuses {
         if let Some((ci0, bi0, prompt0, cache_bps0)) = work_meta.first() {
             let sample_req = sample_count_request(prompt0, cache_bps0);
@@ -4770,9 +4945,15 @@ async fn run_passes_batch(
                     &model,
                     exact,
                     crate::llm::PriceBasis::batch(batch_ttl),
-                )
-                .unwrap_or(0.0);
+                );
             }
+        }
+        // No exact projection (the count failed, or the model is unpriced): fall back to the
+        // shared estimator, spread over the items. Still `None` when it cannot price either,
+        // and the gate then refuses rather than guessing.
+        if per_item_usd.is_none() && !work_meta.is_empty() {
+            per_item_usd = batch_estimate_usd(&model, chunks, batches)
+                .map(|total| total / work_meta.len() as f64);
         }
     }
     let mut refused_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -4801,7 +4982,9 @@ async fn run_passes_batch(
     for (sub_idx, sub_items) in sub_batches.iter().enumerate() {
         // Checked again for every sub-batch: the spend of the ones before it is known by now.
         if let Some(m) = meter {
-            if let Some(why) = m.batch_refusal_reason(per_item_usd * sub_items.len() as f64) {
+            if let Some(why) =
+                m.batch_refusal_reason(per_item_usd.map(|p| p * sub_items.len() as f64))
+            {
                 eprintln!("[camerata-server] {why}");
                 m.record_note(why);
                 let first = sub_idx * BATCH_CAP;
@@ -4874,7 +5057,7 @@ async fn run_passes_batch(
         if refused_ids.contains(&custom_id) {
             // Refused by the spend cap before submission: recorded as NOT RUN on the meter.
             if let Some((jstore, jid)) = job {
-                jstore.inc_done(jid, 1);
+                jstore.inc_not_run(jid, 1);
             }
             continue;
         }
@@ -7656,7 +7839,7 @@ pub async fn audit_repo(
         // SPEND CAP: a stage that would start after the cap was reached is skipped and recorded
         // as NOT RUN; its rules keep their pre-existing directive, as when the pass fails.
         let alternatives_blocked = !ask_alts.is_empty()
-            && meter.is_some_and(|m| m.stage_blocked(repo, "rule-alternative recommendations"));
+            && meter.is_some_and(|m| m.stage_blocked(repo, STAGE_ALTERNATIVES));
         if !ask_alts.is_empty() && !alternatives_blocked {
             match recommend_alternatives(
                 llm,
@@ -7955,8 +8138,7 @@ pub async fn audit_repo(
     // shrinks N, so this round is now faster too.)
     let pre_calibration_len = all_findings.len();
     let verified = if all_findings.is_empty()
-        || meter
-            .is_some_and(|m| m.stage_blocked(repo, "calibration (verification and hour estimates)"))
+        || meter.is_some_and(|m| m.stage_blocked(repo, STAGE_CALIBRATION))
     {
         // Nothing to calibrate, or the spend cap was reached (recorded as NOT RUN): the
         // findings go on exactly as the scan produced them, none dropped.
@@ -8545,6 +8727,17 @@ async fn run_prose_lens(
         "Repository: {repo}\n\n{repo_map}{digest}\n\n── {} for the code above. Return the JSON described in the system prompt. ──",
         lens.title()
     );
+    // SPEND CAP: a lens is one call, admitted like a scan pass; refused, it is reported on the
+    // lens result and recorded as the deep tier stopped part way.
+    let _permit = match admit_stage(meter, repo, STAGE_DEEP).await {
+        Err(CapReached) => {
+            let mut result = DeepLensResult::empty(lens);
+            result.error =
+                Some("not run: the spend limit set for this run was reached".to_string());
+            return result;
+        }
+        Ok(permit) => permit,
+    };
     let session = format!("deep-{}-{repo}", lens.id());
     if let Some((store, key)) = feedback {
         store.register(
@@ -8700,6 +8893,18 @@ async fn run_security_passes(
         .map(|ci| {
             let digest = &digests[ci];
             async move {
+                // SPEND CAP: each deep-security pass is admitted like a scan pass.
+                let _permit = match admit_stage(meter, repo, STAGE_DEEP).await {
+                    Err(CapReached) => {
+                        return (
+                            ci,
+                            Err(anyhow::anyhow!(
+                                "not run: the spend limit set for this run was reached"
+                            )),
+                        );
+                    }
+                    Ok(permit) => permit,
+                };
                 let prompt = format!(
                     "Repository: {repo} (security pass {}/{n_c})\n\n{repo_map}{digest}\n\n── Perform a DEEP SECURITY AUDIT of the code above. Use the REPO MAP for cross-file context. Return the JSON described in the system prompt. ──",
                     ci + 1,

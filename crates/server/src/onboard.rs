@@ -2017,8 +2017,8 @@ pub async fn audit_repos_with_llm_controlled(
                         let judge_model = clone_advisory::resolve_clone_judge_model(None);
                         // SPEND CAP: the judge is a stage like any other; past the cap it does not
                         // start and is recorded as NOT RUN.
-                        let clone_blocked =
-                            run_ai_review && meter.stage_blocked(spec, "clone-advisory judge");
+                        let clone_blocked = run_ai_review
+                            && meter.stage_blocked(spec, crate::ai_audit::STAGE_CLONE_JUDGE);
                         let unavailable = if clone_blocked {
                             "the spend limit set for this run was reached before the judge ran"
                                 .to_string()
@@ -2247,20 +2247,21 @@ pub async fn audit_repos_with_llm_controlled(
                                 // SPEND CAP: a rule the cap left unchecked on part of the code
                                 // is NOT recorded as having run, so the integrity ledger cannot
                                 // read "ran, found nothing" for code that was never looked at.
-                                let unchecked = meter
-                                    .cost_cap_record()
-                                    .map(|c| c.unchecked_rule_ids(spec))
-                                    .unwrap_or_default();
+                                let cap_record = meter.cost_cap_record();
                                 for (rid, _) in &semantic {
                                     let emitted = ai_counts.remove(rid).unwrap_or(0);
-                                    if unchecked.contains(rid) {
+                                    let coverage = cap_record
+                                        .as_ref()
+                                        .map(|c| c.rule_coverage(spec, rid))
+                                        .unwrap_or(crate::cost_cap::RuleCoverage::Complete);
+                                    if coverage == crate::cost_cap::RuleCoverage::NotRun {
                                         pipeline_ledger.record_rule(
                                             rid.clone(),
                                             crate::scan_ledger::RuleTier::Semantic,
                                             false,
                                             Some(
-                                                "not run on all of the code: the spend limit set \
-                                                 for this run was reached"
+                                                "not run: the spend limit set for this run was \
+                                                 reached before any pass checked it"
                                                     .to_string(),
                                             ),
                                             0,
@@ -2276,6 +2277,14 @@ pub async fn audit_repos_with_llm_controlled(
                                         files.len(),
                                         emitted,
                                     );
+                                    if coverage == crate::cost_cap::RuleCoverage::Partial {
+                                        pipeline_ledger.note_partial_rule(
+                                            rid,
+                                            "checked on part of the code only: the spend limit \
+                                             set for this run was reached before the rest was \
+                                             checked",
+                                        );
+                                    }
                                 }
                                 for (rid, emitted) in ai_counts {
                                     pipeline_ledger.record_rule(
@@ -2413,7 +2422,7 @@ pub async fn audit_repos_with_llm_controlled(
                 // invisible to the actual-vs-estimated readout.
                 if run_ai_review
                     && !repo_findings.is_empty()
-                    && !meter.stage_blocked(spec, "fix-specific generation")
+                    && !meter.stage_blocked(spec, crate::ai_audit::STAGE_FIX)
                 {
                     let (fixed_findings, fix_failed_passes) =
                         crate::ai_audit::generate_fix_specifics(
@@ -2454,7 +2463,7 @@ pub async fn audit_repos_with_llm_controlled(
     let deep_report = if run_ai_review && deep && !deep_inputs.is_empty() {
         let mut per_repo = Vec::new();
         for (spec, files) in &deep_inputs {
-            if meter.stage_blocked(spec, "deep compliance tier") {
+            if meter.stage_blocked(spec, crate::ai_audit::STAGE_DEEP) {
                 continue;
             }
             let dr = crate::ai_audit::run_deep_tier(
@@ -2550,6 +2559,14 @@ pub async fn audit_repos_with_llm_controlled(
     // incomplete pass uses, and the amounts stay on the operator ledger.
     if let Some(cap) = meter.cost_cap_record() {
         all_failed_passes.extend(cap.failed_passes());
+        if cap.stopped_the_run() {
+            notes.push(format!(
+                "INCOMPLETE: the spend limit stopped this scan; {} scan pass(es) and {} stage(s) \
+                 did not run (see the list of passes that did not run)",
+                cap.not_run_passes.len(),
+                cap.not_run_stages.len()
+            ));
+        }
         report.ledger.record_cost_cap(cap);
     }
     // Operator telemetry: the per-stage split of the spend, joined to the SAME counted-line

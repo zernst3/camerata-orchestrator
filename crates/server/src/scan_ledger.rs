@@ -168,6 +168,14 @@ pub struct RuleLedgerEntry {
     /// genuinely looked, found nothing" case).
     #[serde(default)]
     pub not_applicable: bool,
+    /// Set when the rule ran on SOME of the code and the scan was stopped before it ran on the
+    /// rest (today: the spend limit). The rule did run (`ran` is true, its findings are real),
+    /// but it was NOT checked everywhere, so it is never [`Self::verified_clean`], the
+    /// integrity gate fails on it as incomplete coverage, and the export lists it with this
+    /// reason. Distinct from `ran == false`, which means it did not run at all. Set via
+    /// [`ScanLedger::note_partial_rule`].
+    #[serde(default)]
+    pub partial_reason: Option<String>,
 }
 
 impl RuleLedgerEntry {
@@ -181,7 +189,10 @@ impl RuleLedgerEntry {
     /// whole W2 pass exists to close (a `not_applicable` determination must never be
     /// indistinguishable from a rule that genuinely ran and found nothing to report).
     pub fn verified_clean(&self) -> bool {
-        self.ran && self.findings_emitted == 0 && !self.not_applicable
+        self.ran
+            && self.findings_emitted == 0
+            && !self.not_applicable
+            && self.partial_reason.is_none()
     }
 }
 
@@ -753,8 +764,18 @@ impl ScanLedger {
                 findings_emitted,
                 coverage_note,
                 not_applicable,
+                partial_reason: None,
             });
         self.rules.get(&rule_id).expect("just inserted")
+    }
+
+    /// Mark a rule that [`Self::record_rule`] already recorded as having run on only PART of the
+    /// code (see [`RuleLedgerEntry::partial_reason`]). The first reason is kept. A rule the
+    /// ledger has no entry for is ignored: there is nothing to qualify.
+    pub fn note_partial_rule(&mut self, rule_id: &str, reason: impl Into<String>) {
+        if let Some(entry) = self.rules.get_mut(rule_id) {
+            entry.partial_reason.get_or_insert_with(|| reason.into());
+        }
     }
 
     /// W13 — record a rule whose CORPUS FILE could not be parsed, so the rule never entered
@@ -840,6 +861,7 @@ impl ScanLedger {
                         findings_emitted: 0,
                         coverage_note: Some(CORPUS_LOAD_FAILED_NOTE.to_string()),
                         not_applicable: false,
+                        partial_reason: None,
                     },
                 );
             }
@@ -966,6 +988,7 @@ impl ScanLedger {
                 findings_emitted,
                 coverage_note,
                 not_applicable,
+                partial_reason: None,
             },
         );
         self.rules.get(&rule_id).expect("just inserted")
@@ -1007,17 +1030,21 @@ impl ScanLedger {
         ids
     }
 
-    /// Rule ids that did NOT run this scan, each with its reason — the "excluded from this
-    /// audit" section. Sorted by rule id for stable output.
+    /// Rule ids that did NOT run this scan, or ran on only part of the code, each with its
+    /// reason — the "excluded from this audit" section. Sorted by rule id for stable output.
     pub fn excluded_rules(&self) -> Vec<(&str, &str)> {
         let mut out: Vec<(&str, &str)> = self
             .rules
             .values()
-            .filter(|r| !r.ran)
+            .filter(|r| !r.ran || r.partial_reason.is_some())
             .map(|r| {
                 (
                     r.rule_id.as_str(),
-                    r.skip_reason.as_deref().unwrap_or("did not run this scan"),
+                    // A rule that ran on part of the code is listed with WHY it is incomplete.
+                    r.partial_reason
+                        .as_deref()
+                        .or(r.skip_reason.as_deref())
+                        .unwrap_or("did not run this scan"),
                 )
             })
             .collect();

@@ -1119,7 +1119,8 @@ fn render_cost_cap(cap: &camerata_server::cost_cap::CostCapRecord) -> String {
         write!(
             out,
             " -- REACHED. This inspection is INCOMPLETE: {} scan pass(es) and {} stage(s) were NOT RUN \
-             (listed under FAILED PASSES). A run can finish up to one pass over the limit.",
+             (listed under FAILED PASSES). Passes already started finish, so a run can end about one pass \
+             over the limit.",
             cap.not_run_passes.len(),
             cap.not_run_stages.len()
         )

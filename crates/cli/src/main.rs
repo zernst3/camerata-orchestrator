@@ -163,9 +163,12 @@ enum Command {
         #[arg(long)]
         verbose: bool,
         /// Stop the run, between passes, once actual spend reaches this many US dollars. A run
-        /// that stops early lists every pass it did not run, marks its export incomplete and
-        /// exits non-zero (4). It can finish up to one pass over the limit. In batch mode the
-        /// limit is checked before the batch is submitted.
+        /// that stops early lists every pass and stage it did not run, marks its export incomplete
+        /// and exits non-zero (4). The limit is checked before each scan pass, calibration or
+        /// fix batch and deep-tier call starts; one that has started always finishes, and once
+        /// the limit has stopped anything no later stage starts. So a run can end about one pass
+        /// over the limit (a pass can include one retry). In batch mode the limit is checked
+        /// before the batch is submitted.
         #[arg(long = "max-cost-usd", value_name = "USD")]
         max_cost_usd: Option<f64>,
         /// Switch a token-efficiency measure `on` or `off` for this run, e.g.

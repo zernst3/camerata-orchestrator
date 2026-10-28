@@ -365,28 +365,107 @@ fn a_stage_that_would_start_past_the_cap_is_blocked_and_recorded_once() {
 
 // ── batch mode: the cap is checked before submitting ────────────────────────────────────────
 
+fn with_cap(cap: f64, hint: Option<f64>) -> UsageMeter {
+    UsageMeter::with_controls(RunControls {
+        efficiency: EfficiencyConfig::default(),
+        max_cost_usd: Some(cap),
+        estimate_hint_usd: hint,
+    })
+}
+
+fn spend(meter: &UsageMeter, dollars: f64) {
+    meter.record_stage(
+        Stage::ScanPass,
+        &LlmResponse {
+            text: String::new(),
+            model: "m".into(),
+            backend: "api".into(),
+            cost_usd: Some(dollars),
+            input_tokens: Some(1),
+            output_tokens: Some(1),
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+            or_cache_discount: None,
+            truncated: false,
+        },
+    );
+}
+
 #[test]
 fn the_batch_gate_refuses_when_spend_plus_projection_would_pass_the_cap() {
-    let with = |cap, hint| {
-        UsageMeter::with_controls(RunControls {
-            efficiency: EfficiencyConfig::default(),
-            max_cost_usd: Some(cap),
-            estimate_hint_usd: hint,
-        })
-    };
     // Nothing spent: the projection alone decides.
-    assert!(with(5.0, None).batch_refusal_reason(4.0).is_none());
-    assert!(with(5.0, None).batch_refusal_reason(6.0).is_some());
+    assert!(with_cap(5.0, None)
+        .batch_refusal_reason(Some(4.0))
+        .is_none());
+    assert!(with_cap(5.0, None)
+        .batch_refusal_reason(Some(6.0))
+        .is_some());
     // The pre-flight estimate raises a low projection.
-    assert!(with(5.0, Some(9.0)).batch_refusal_reason(0.0).is_some());
-    assert!(with(5.0, Some(3.0)).batch_refusal_reason(0.0).is_none());
-    // No cap: never refuses.
-    assert!(UsageMeter::default().batch_refusal_reason(1e9).is_none());
-    let why = with(5.0, None).batch_refusal_reason(6.0).unwrap();
+    assert!(with_cap(5.0, Some(9.0))
+        .batch_refusal_reason(Some(0.0))
+        .is_some());
+    assert!(with_cap(5.0, Some(3.0))
+        .batch_refusal_reason(Some(0.0))
+        .is_none());
+    // No cap: never refuses, even with no projection.
+    assert!(UsageMeter::default()
+        .batch_refusal_reason(Some(1e9))
+        .is_none());
+    assert!(UsageMeter::default().batch_refusal_reason(None).is_none());
+    let why = with_cap(5.0, None).batch_refusal_reason(Some(6.0)).unwrap();
     assert!(
         why.contains("NOT submitted") && why.contains("cannot be cancelled"),
         "{why}"
     );
+}
+
+#[test]
+fn a_batch_with_no_projection_at_all_is_refused_and_says_the_limit_could_not_be_enforced() {
+    // Cap set, the exact count failed, the estimator could not price it, no hint: refuse.
+    let why = with_cap(5.0, None)
+        .batch_refusal_reason(None)
+        .expect("a limit that cannot be enforced must not silently allow the spend");
+    assert!(
+        why.contains("could not be enforced") && why.contains("NOT submitted"),
+        "{why}"
+    );
+    // Any one projection source is enough to decide.
+    assert!(with_cap(5.0, Some(1.0))
+        .batch_refusal_reason(None)
+        .is_none());
+    assert!(with_cap(5.0, Some(50.0))
+        .batch_refusal_reason(None)
+        .is_some());
+}
+
+#[test]
+fn the_whole_run_estimate_is_charged_only_for_what_remains_of_it() {
+    // A $8 whole-run estimate under a $10 cap. After $7 is spent, only $1 of the estimate
+    // remains, so a second sub-batch is not refused as if the whole $8 were still to come.
+    let meter = with_cap(10.0, Some(8.0));
+    assert!(
+        meter.batch_refusal_reason(Some(0.0)).is_none(),
+        "first submission"
+    );
+    spend(&meter, 7.0);
+    assert!(
+        meter.batch_refusal_reason(Some(0.0)).is_none(),
+        "7 spent + 1 remaining estimate fits"
+    );
+    // Once the estimate is used up it contributes nothing; a real projection still counts.
+    spend(&meter, 2.0);
+    assert!(meter.batch_refusal_reason(Some(0.5)).is_none());
+    assert!(meter.batch_refusal_reason(Some(1.5)).is_some());
+}
+
+#[test]
+fn the_batch_fallback_estimate_prices_a_known_model_and_gives_up_on_an_unknown_one() {
+    let files = vec![("a.rs".to_string(), "fn a() {}\n".repeat(2_000))];
+    let chunks: Vec<&[(String, String)]> = vec![files.as_slice()];
+    let rules = vec![("R-1".to_string(), "d".to_string())];
+    let batches: Vec<&[(String, String)]> = vec![rules.as_slice()];
+    assert!(batch_estimate_usd("claude-sonnet-5", &chunks, &batches).is_some_and(|d| d > 0.0));
+    assert!(batch_estimate_usd("no-such-model", &chunks, &batches).is_none());
 }
 
 #[tokio::test]
@@ -436,4 +515,159 @@ async fn a_batch_the_cap_refuses_is_never_submitted_and_every_pair_is_not_run() 
         record.notes
     );
     assert_eq!(meter.spent_usd(), 0.0);
+}
+
+// ── later stages cannot overshoot without bound ─────────────────────────────────────────────
+
+#[test]
+fn once_a_pass_was_refused_every_later_stage_is_blocked_even_below_the_cap() {
+    let meter = with_cap(100.0, None);
+    spend(&meter, 1.0);
+    assert!(
+        !meter.stage_blocked("o/r", STAGE_CALIBRATION),
+        "nothing stopped yet"
+    );
+    meter.record_not_run(crate::cost_cap::NotRunPass {
+        repo: "o/r".into(),
+        group: "pass[all]".into(),
+        chunk: 1,
+        n_chunks: 1,
+        rule_batch: 1,
+        n_rule_batches: 1,
+        rule_ids: vec!["R-1".into()],
+    });
+    for stage in [STAGE_ALTERNATIVES, STAGE_CALIBRATION, STAGE_FIX, STAGE_DEEP] {
+        assert!(meter.stage_blocked("o/r", stage), "{stage} must not start");
+    }
+    let record = meter.cost_cap_record().unwrap();
+    assert_eq!(record.not_run_stages.len(), 4);
+    assert!(record.not_run_stages.iter().all(|s| !s.partial));
+}
+
+fn many_findings(n: usize) -> Vec<Finding> {
+    (0..n)
+        .map(|i| Finding {
+            repo: "o/r".to_string(),
+            path: format!("f{i}.rs"),
+            line: 3,
+            rule_id: "ARCH-1".to_string(),
+            severity: "high".to_string(),
+            snippet: format!("snippet {i}"),
+            detail: "detail".to_string(),
+            ..Finding::default()
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn calibration_stops_between_batches_and_passes_the_rest_through_unchanged() {
+    // 100 findings = 3 calibration batches of 40/40/20. $1 per call against a $0.5 cap: the
+    // first batch is admitted (nothing spent), the other two are not.
+    let llm = StubLlm::new(1.0);
+    let meter = meter(EfficiencyConfig::default(), Some(0.5));
+    let findings = many_findings(100);
+    let (out, _failed) = verify_findings(
+        &llm,
+        "o/r",
+        findings,
+        None,
+        None,
+        Some(&meter),
+        false,
+        "A repo.",
+    )
+    .await;
+    assert_eq!(llm.calls(), 1, "only the first calibration batch ran");
+    assert_eq!(out.len(), 100, "no finding is dropped");
+    let record = meter.cost_cap_record().unwrap();
+    assert_eq!(record.not_run_stages.len(), 1);
+    assert_eq!(record.not_run_stages[0].stage, STAGE_CALIBRATION);
+    assert!(
+        record.not_run_stages[0].partial,
+        "it started and was stopped part way"
+    );
+    assert!(record.failed_passes()[0]
+        .reason
+        .contains("NOT RUN (in part)"));
+}
+
+#[tokio::test]
+async fn fix_generation_stops_between_batches() {
+    // 60 findings with code around them = 3 fix batches per round. The first call is admitted,
+    // then the cap is reached: no further batch is sent in this round or any retry round.
+    let llm = StubLlm::new(1.0);
+    let meter = meter(EfficiencyConfig::default(), Some(0.5));
+    let files: Vec<(String, String)> = (0..60)
+        .map(|i| {
+            (
+                format!("f{i}.rs"),
+                "fn a() {}\nfn b() {}\nfn c() {}\n".to_string(),
+            )
+        })
+        .collect();
+    let (out, _failed) = generate_fix_specifics(
+        &llm,
+        "o/r",
+        many_findings(60),
+        &files,
+        None,
+        Some(&meter),
+        None,
+    )
+    .await;
+    assert_eq!(llm.calls(), 1, "no batch after the cap was reached");
+    assert_eq!(out.len(), 60, "no finding is dropped");
+    let record = meter.cost_cap_record().unwrap();
+    assert!(record
+        .not_run_stages
+        .iter()
+        .any(|s| s.stage == STAGE_FIX && s.partial));
+}
+
+// ── no cost known yet: exactly one pass in flight (warm_schedule off) ───────────────────────
+
+#[tokio::test]
+async fn with_a_cap_and_warm_schedule_off_only_one_pass_is_in_flight_until_a_cost_is_known() {
+    let started_before_first_end = |events: &[(&'static str, usize)]| {
+        let first_end = events.iter().position(|e| e.0 == "end").unwrap();
+        events[..first_end]
+            .iter()
+            .filter(|e| e.0 == "start")
+            .count()
+    };
+    // A generous cap: nothing is refused, but the first wave is a single pass.
+    let llm = StubLlm::new(0.01);
+    let capped = meter(off("warm_schedule"), Some(100.0));
+    assert_eq!(
+        scan(&llm, 6, 6, &capped).await,
+        6,
+        "a roomy cap loses nothing"
+    );
+    assert_eq!(started_before_first_end(&llm.events.lock().unwrap()), 1);
+    assert!(!capped.cost_cap_record().unwrap().stopped_the_run());
+
+    // And with no cap the unscheduled path is unchanged (all dispatched together).
+    let llm = StubLlm::new(0.01);
+    let uncapped = meter(off("warm_schedule"), None);
+    assert_eq!(scan(&llm, 6, 6, &uncapped).await, 6);
+    assert_eq!(started_before_first_end(&llm.events.lock().unwrap()), 6);
+}
+
+#[tokio::test]
+async fn the_overshoot_bound_holds_with_warm_schedule_off_too() {
+    const PASS: f64 = 1.0;
+    const TOTAL: usize = 24;
+    for cap in [0.4, 2.5, 7.3] {
+        let llm = StubLlm::new(PASS);
+        let meter = meter(off("warm_schedule"), Some(cap));
+        let ok = scan(&llm, TOTAL, 6, &meter).await;
+        let record = meter.cost_cap_record().unwrap();
+        assert_eq!(ok + record.not_run_passes.len(), TOTAL, "cap {cap}");
+        assert!(
+            meter.spent_usd() < cap + PASS + 1e-9,
+            "cap {cap}: {}",
+            meter.spent_usd()
+        );
+        assert!(ok >= 1);
+    }
 }

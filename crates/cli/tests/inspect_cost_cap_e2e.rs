@@ -67,6 +67,26 @@ fn typst_on_path() -> bool {
         .is_some()
 }
 
+/// Whether the export can be built here. These tests are the only end-to-end proof that a capped
+/// run's export says it is incomplete, so a missing `typst` must never read as a pass: under CI
+/// (the `CI` environment variable is set) it FAILS the test; locally it prints a loud banner on
+/// stderr and skips.
+fn typst_available(test: &str) -> bool {
+    if typst_on_path() {
+        return true;
+    }
+    assert!(
+        std::env::var_os("CI").is_none(),
+        "{test}: `typst` is not on PATH, and this test cannot run without it. Install typst in \
+         the CI image; a silent skip would hide a broken capped-run export."
+    );
+    eprintln!(
+        "\n*** SKIPPED {test}: `typst` is not on PATH, so the capped-run export was NOT \
+         exercised. Install typst (brew install typst) to run it. ***\n"
+    );
+    false
+}
+
 fn stage_fixture(dest: &Path) {
     let root =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../server/tests/fixtures/e2e_report_repo");
@@ -166,8 +186,7 @@ fn zip_entry(path: &Path, name: &str) -> String {
 #[tokio::test]
 #[serial_test::serial(process_env)]
 async fn the_estimate_is_printed_before_the_first_model_call() {
-    if !typst_on_path() {
-        eprintln!("skipping: typst not on PATH");
+    if !typst_available("the_estimate_is_printed_before_the_first_model_call") {
         return;
     }
     let _env = camerata_test_env::EnvGuard::set("CAMERATA_DISABLE_DEP_AUDIT", "1");
@@ -201,8 +220,9 @@ async fn the_estimate_is_printed_before_the_first_model_call() {
 #[tokio::test]
 #[serial_test::serial(process_env)]
 async fn a_capped_run_is_loud_incomplete_and_never_leaks_a_dollar_figure_into_the_export() {
-    if !typst_on_path() {
-        eprintln!("skipping: typst not on PATH");
+    if !typst_available(
+        "a_capped_run_is_loud_incomplete_and_never_leaks_a_dollar_figure_into_the_export",
+    ) {
         return;
     }
     let _env = camerata_test_env::EnvGuard::set("CAMERATA_DISABLE_DEP_AUDIT", "1");
@@ -248,8 +268,7 @@ async fn a_capped_run_is_loud_incomplete_and_never_leaks_a_dollar_figure_into_th
 #[tokio::test]
 #[serial_test::serial(process_env)]
 async fn an_uncapped_exports_manifest_says_the_run_was_not_capped() {
-    if !typst_on_path() {
-        eprintln!("skipping: typst not on PATH");
+    if !typst_available("an_uncapped_exports_manifest_says_the_run_was_not_capped") {
         return;
     }
     let _env = camerata_test_env::EnvGuard::set("CAMERATA_DISABLE_DEP_AUDIT", "1");

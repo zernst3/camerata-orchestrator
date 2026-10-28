@@ -15,8 +15,13 @@
 //!   truncation retry included. A pass that was refused is recorded as [`NotRunPass`] and
 //!   reported as NOT RUN.
 //! * **Later stages** (alternative recommendation, calibration, fix generation, the clone judge,
-//!   the deep tier) check the cap at their boundary
-//!   ([`crate::ai_audit::UsageMeter::stage_blocked`]) and are recorded as [`NotRunStage`].
+//!   the deep tier) check the cap before they start
+//!   ([`crate::ai_audit::UsageMeter::stage_blocked`]) and are recorded as [`NotRunStage`]. A
+//!   stage is blocked once spend reaches the cap AND once the cap has already stopped anything,
+//!   so nothing starts after the cap has bitten. Inside calibration, fix generation and the
+//!   deep tier each batch or call is admitted separately
+//!   ([`crate::ai_audit::UsageMeter::admit_for_stage`]); the remainder of a stage that is
+//!   stopped part way is recorded as `partial`, and its findings pass through unchanged.
 //! * **Message Batches** cannot be cancelled cheaply once submitted, so the cap is checked
 //!   BEFORE a submission, against a projection (see
 //!   [`crate::ai_audit::UsageMeter::refuse_batch_submission`]). A batch that was submitted runs
@@ -25,12 +30,23 @@
 //! # The overshoot bound
 //!
 //! Passes run concurrently, so the money a pass will cost is not known when the next one is
-//! admitted. A pass is admitted only while `spent + in_flight * reserve < cap`, where `reserve`
-//! is the most any single call has cost so far. If every pass costs about the same, the final
-//! total is therefore at most **one pass's cost over the cap**: the pass that crosses the line.
-//! A pass that is larger than every pass before it can add the difference. The first pass of a
-//! run is always admitted (nothing has been spent), so a cap smaller than one pass still lets
-//! that one pass finish.
+//! admitted. A pass (or a calibration or fix batch, or a deep-tier call) is admitted only while
+//! `spent + in_flight * reserve < cap`, where `reserve` is the most any single CALL has cost so
+//! far. Until one call has reported a cost there is nothing to reserve against, so exactly one
+//! pass is admitted and the others wait for it.
+//!
+//! If every call costs about the same, the final total is at most **one pass's cost over the
+//! cap**: the pass that crosses the line. Three things make it larger, and they are the real
+//! bound, not a footnote:
+//!
+//! * the reserve is per CALL and a pass can be two calls (a reply cut off at the output limit
+//!   is retried once at a higher limit, inside the same admitted pass), so a retried pass can
+//!   cost about twice the reserve;
+//! * a call larger than every call before it adds the difference;
+//! * thorough calibration runs three calls per batch under one admission.
+//!
+//! The first pass of a run is always admitted (nothing has been spent), so a cap smaller than
+//! one pass still lets that one pass finish.
 
 use serde::{Deserialize, Serialize};
 
@@ -90,12 +106,28 @@ pub struct NotRunPass {
     pub rule_ids: Vec<String>,
 }
 
-/// A whole stage that did not run because the cap was reached.
+/// A stage that did not run, or did not finish, because of the cap.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NotRunStage {
     pub repo: String,
     /// The name the failed-pass list shows (the same names the stages use when they fail).
     pub stage: String,
+    /// True when the stage started and the cap stopped it part way (the remainder did not
+    /// run); false when it never started.
+    #[serde(default)]
+    pub partial: bool,
+}
+
+/// How much of a rule's checking the cap left undone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuleCoverage {
+    /// Every pass that carries the rule ran.
+    Complete,
+    /// Some passes that carry the rule ran and some did not: it was checked on part of the
+    /// code only. Never "clean".
+    Partial,
+    /// No pass that carries the rule ran.
+    NotRun,
 }
 
 /// What the cap did, as the operator ledger records it. Dollar figures live HERE and in the CLI
@@ -174,21 +206,40 @@ impl CostCapRecord {
             out.push(crate::ai_audit::FailedPass {
                 repo: stage.repo.clone(),
                 pass: stage.stage.clone(),
-                reason: "NOT RUN: the spend limit set for this run was reached before this \
-                         stage started. This inspection is incomplete."
-                    .to_string(),
+                reason: if stage.partial {
+                    "NOT RUN (in part): the spend limit set for this run was reached while \
+                     this stage was running, so the rest of it did not run. This inspection \
+                     is incomplete."
+                } else {
+                    "NOT RUN: the spend limit set for this run was reached before this \
+                     stage started. This inspection is incomplete."
+                }
+                .to_string(),
             });
         }
         out
     }
 
-    /// Every rule id that was left unchecked on some part of the code.
-    pub fn unchecked_rule_ids(&self, repo: &str) -> std::collections::BTreeSet<String> {
-        self.not_run_passes
+    /// How much of `rule_id`'s checking on `repo` the cap left undone. A rule is `NotRun` only
+    /// when every chunk of its routing group was refused; a rule refused on some chunks, or
+    /// only in the resolution round, is `Partial`.
+    pub fn rule_coverage(&self, repo: &str, rule_id: &str) -> RuleCoverage {
+        let mine: Vec<&NotRunPass> = self
+            .not_run_passes
             .iter()
-            .filter(|p| p.repo == repo)
-            .flat_map(|p| p.rule_ids.iter().cloned())
-            .collect()
+            .filter(|p| p.repo == repo && p.rule_ids.iter().any(|r| r == rule_id))
+            .collect();
+        if mine.is_empty() {
+            return RuleCoverage::Complete;
+        }
+        let main = mine.iter().filter(|p| p.group != "resolution");
+        let refused_chunks: std::collections::BTreeSet<(&str, usize)> =
+            main.clone().map(|p| (p.group.as_str(), p.chunk)).collect();
+        let n_chunks = main.map(|p| p.n_chunks).max();
+        match n_chunks {
+            Some(n) if refused_chunks.len() >= n => RuleCoverage::NotRun,
+            _ => RuleCoverage::Partial,
+        }
     }
 }
 
@@ -238,6 +289,7 @@ mod tests {
             not_run_stages: vec![NotRunStage {
                 repo: "acme/api".into(),
                 stage: "calibration".into(),
+                partial: false,
             }],
             notes: vec![],
         };
@@ -261,6 +313,68 @@ mod tests {
             assert!(fp.reason.contains("incomplete"), "{}", fp.reason);
             assert!(!fp.reason.contains('$') && !fp.reason.contains("12.34"));
         }
+    }
+
+    #[test]
+    fn a_stage_stopped_part_way_says_so() {
+        let record = CostCapRecord {
+            cap_usd: 1.0,
+            spent_usd: 2.0,
+            not_run_stages: vec![NotRunStage {
+                repo: "r".into(),
+                stage: "calibration".into(),
+                partial: true,
+            }],
+            ..CostCapRecord::default()
+        };
+        let failed = record.failed_passes();
+        assert!(
+            failed[0].reason.contains("NOT RUN (in part)"),
+            "{}",
+            failed[0].reason
+        );
+        assert!(record.stopped_the_run());
+    }
+
+    #[test]
+    fn rule_coverage_separates_not_run_from_partly_run() {
+        // 3 chunks in the group; the rule's batch was refused on chunks 2 and 3 only.
+        let mut record = CostCapRecord {
+            cap_usd: 1.0,
+            spent_usd: 2.0,
+            not_run_passes: vec![pass(2, 1, &["A-1"]), pass(3, 1, &["A-1", "B-1"])],
+            ..CostCapRecord::default()
+        };
+        assert_eq!(
+            record.rule_coverage("acme/api", "A-1"),
+            RuleCoverage::Partial
+        );
+        assert_eq!(
+            record.rule_coverage("acme/api", "Z-9"),
+            RuleCoverage::Complete
+        );
+        assert_eq!(
+            record.rule_coverage("other/repo", "A-1"),
+            RuleCoverage::Complete
+        );
+        // Refused on all three chunks: not run at all.
+        record.not_run_passes.push(pass(1, 1, &["A-1"]));
+        assert_eq!(
+            record.rule_coverage("acme/api", "A-1"),
+            RuleCoverage::NotRun
+        );
+        assert_eq!(
+            record.rule_coverage("acme/api", "B-1"),
+            RuleCoverage::Partial
+        );
+        // Refused only in the resolution round: partial.
+        let mut resolution = pass(1, 1, &["C-1"]);
+        resolution.group = "resolution".into();
+        record.not_run_passes.push(resolution);
+        assert_eq!(
+            record.rule_coverage("acme/api", "C-1"),
+            RuleCoverage::Partial
+        );
     }
 
     #[test]

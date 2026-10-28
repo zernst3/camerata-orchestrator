@@ -351,3 +351,154 @@ async fn a_later_repo_after_the_cap_is_reached_runs_nothing_and_is_recorded() {
         .iter()
         .any(|f| f.repo == "acme/two" && f.reason.contains("NOT RUN")));
 }
+
+/// Three ~150K-character files = two chunks (350K per chunk); 15 rules = one rule-batch.
+fn stage_two_chunk_repo(dest: &Path) {
+    std::fs::create_dir_all(dest.join("src")).unwrap();
+    for f in 0..3 {
+        let body: String = (0..6_000)
+            .map(|i| format!("export const v{f}_{i} = {i};\n"))
+            .collect();
+        std::fs::write(dest.join(format!("src/big{f}.ts")), body).unwrap();
+    }
+    let g = |args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .current_dir(dest)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}");
+    };
+    g(&["init", "-q", "-b", "main"]);
+    g(&["config", "user.email", "cap-e2e@camerata.local"]);
+    g(&["config", "user.name", "Cap E2E"]);
+    g(&["add", "."]);
+    g(&["commit", "-q", "-m", "fixture"]);
+}
+
+#[tokio::test]
+async fn a_rule_checked_on_one_chunk_of_two_is_partial_incomplete_coverage_not_a_contradiction() {
+    let dir = tempfile::tempdir().unwrap();
+    stage_two_chunk_repo(dir.path());
+    let sources = vec![("acme/shop".to_string(), dir.path().to_path_buf())];
+    let rules: Vec<SelectedRule> = selected().into_iter().take(15).collect();
+    let llm = Stub::new(1.0);
+    let (report, _m) = onboard::audit_repos_with_llm_controlled(
+        &llm,
+        &sources,
+        &rules,
+        Vec::new(),
+        None,
+        None,
+        ScanMode::Parallel,
+        false,
+        None,
+        None,
+        None,
+        false,
+        false,
+        true,
+        true,
+        BackendResolution::Api,
+        None,
+        &HashMap::new(),
+        controls(Some(0.5), EfficiencyConfig::default()),
+    )
+    .await;
+
+    // Chunk 1 ran ($1 spent, past the $0.50 limit); chunk 2 was refused.
+    assert_eq!(llm.calls(), 1);
+    let cap = report.ledger.cost_cap().unwrap();
+    assert_eq!(cap.not_run_passes.len(), 1);
+    assert_eq!(cap.not_run_passes[0].chunk, 2);
+
+    let id = "ARCH-CAP-TEST-00-1";
+    let entry = report.ledger.rule(id).unwrap();
+    assert!(entry.ran, "it did run, on the first chunk");
+    assert!(entry.partial_reason.is_some(), "{entry:?}");
+    assert!(
+        !entry.verified_clean(),
+        "never clean: half the code was not checked"
+    );
+    assert!(
+        report
+            .ledger
+            .excluded_rules()
+            .iter()
+            .any(|(r, why)| *r == id && why.contains("part of the code")),
+        "listed with its reason: {:?}",
+        report.ledger.excluded_rules()
+    );
+
+    // The integrity gate fails it as incomplete coverage (its own code), not as a skip.
+    let verdict = camerata_server::integrity_gate::evaluate(
+        &report.ledger,
+        &camerata_server::integrity_gate::IntegrityGateOptions {
+            required_tiers: Vec::new(),
+            require_semantic_tier: false,
+            require_recorded_model: false,
+        },
+    );
+    assert!(
+        verdict
+            .failures
+            .iter()
+            .any(|f| f.code == "partial_coverage" && f.detail.contains(id)),
+        "{:?}",
+        verdict.failures
+    );
+    assert!(!verdict
+        .failures
+        .iter()
+        .any(|f| f.code == "unjustified_skip" && f.detail.contains(id)));
+}
+
+#[tokio::test]
+async fn the_job_counts_refused_passes_as_not_run_never_as_done() {
+    let dir = tempfile::tempdir().unwrap();
+    stage_repo(dir.path());
+    let sources = vec![("acme/shop".to_string(), dir.path().to_path_buf())];
+    let jobs = camerata_server::jobs::JobStore::new();
+    let jid = jobs.create("audit", None);
+    let llm = Stub::new(1.0);
+    let (report, _m) = onboard::audit_repos_with_llm_controlled(
+        &llm,
+        &sources,
+        &selected(),
+        Vec::new(),
+        None,
+        None,
+        ScanMode::Parallel,
+        false,
+        None,
+        Some((&jobs, &jid)),
+        None,
+        false,
+        false,
+        true,
+        true,
+        BackendResolution::Api,
+        None,
+        &HashMap::new(),
+        controls(Some(2.5), EfficiencyConfig::default()),
+    )
+    .await;
+
+    // Six rule-batches: three ran, three were refused.
+    let state = jobs.get(&jid).unwrap();
+    assert_eq!(state.not_run, 3, "{state:?}");
+    assert_eq!(state.total, 6);
+    assert!(
+        state.done + state.not_run <= state.total && state.done < state.total,
+        "a stopped scan must never read as complete: done {} of {}",
+        state.done,
+        state.total
+    );
+    // The report itself says it is incomplete, in words, for the desktop app's message line.
+    let message = report.message.as_deref().unwrap_or("");
+    assert!(message.contains("INCOMPLETE"), "{message}");
+    assert!(
+        !message.contains('$'),
+        "no dollar figure in the client-visible message"
+    );
+}

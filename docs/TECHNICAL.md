@@ -2680,30 +2680,49 @@ against a runaway bill, not a saving, so it fails loudly:
 - Before each (chunk, rule-batch) pass starts, the run asks
   `UsageMeter::admit`. A pass is admitted only while
   `spent + in_flight * reserve < cap`, where `reserve` is the most any single call
-  has cost so far. An admitted pass always finishes (its truncation retry
+  has cost so far; until one call has reported a cost, exactly one pass is
+  admitted and the rest wait (so `warm_schedule=off` cannot let every pass slip
+  under the limit at once). An admitted pass always finishes (its truncation retry
   included), so nothing is cut off mid-response. A refused pass is recorded as a
-  `NotRunPass`.
+  `NotRunPass`; the job's progress counts it as NOT RUN, never as done.
 - Later stages (alternative recommendation, calibration, fix generation, the clone
-  judge, the deep tier) check at their boundary (`stage_blocked`) and are recorded
-  as not run. Findings the scan produced are never dropped; they continue
-  uncalibrated.
-- **Overshoot bound.** If passes cost about the same, the run ends at most ONE
-  pass's cost over the limit (the pass that crosses it). A pass larger than every
-  earlier pass can add the difference. The first pass is always admitted, so a
+  judge, the deep tier) are blocked (`stage_blocked`) once spend has reached the
+  limit AND once the limit has already stopped anything (a refused pass or an
+  earlier stage): nothing starts after the limit has bitten. Inside calibration,
+  fix generation and the deep tier each batch or call is admitted separately
+  (`admit_for_stage`); the remainder of a stage stopped part way is recorded as a
+  partial stage. Findings the scan produced are never dropped; they continue
+  uncalibrated, and findings still awaiting a fix fall back to the rule's authored
+  remediation.
+- **Overshoot bound.** If every call costs about the same, the run ends at most ONE
+  pass's cost over the limit (the pass that crosses it). The honest bound is wider
+  than that in three ways: the reserve is per call while a pass can be two calls (a
+  truncation retry), so a retried pass can cost about twice the reserve; a call
+  larger than every earlier call adds the difference; and thorough calibration runs
+  three calls per batch under one admission. The first pass is always admitted, so a
   limit smaller than one pass still lets that pass finish. The limit must be a
   positive finite number; the server treats an unreadable one as the tightest
-  possible limit, never as none.
+  possible limit, never as none. One known gap: a model that reports no cost for a
+  call (an unpriced model) adds nothing to the spend the limit counts.
 - **Batch mode** checks before every submission (`batch_refusal_reason`), against
-  spend so far plus the larger of the pre-flight estimate and the exact-token input
-  projection at the batch price. A submitted batch is not cancelled, so the check
-  cannot be later. A refused batch records every pair as not run.
+  spend so far plus the larger of (a) what remains of the pre-flight estimate
+  (estimate minus spend, floored at zero, so later sub-batches are not charged the
+  whole-run estimate again) and (b) the exact-token input projection at the batch
+  price, or, if the token count is unavailable, the shared estimator's figure. If
+  NO projection can be made at all, the submission is refused with a note saying
+  the limit could not be enforced (a limit that silently does nothing is worse than
+  a refused run). A submitted batch is not cancelled, so the check cannot be later.
+  A refused batch records every pair as not run.
 - **Reporting.** The ledger carries a `CostCapRecord` (limit, spend, the not-run
   pairs and stages, notes). `CostCapRecord::failed_passes` turns it into the
   existing failed-pass list, one entry per (repo, group, chunk) naming its
   rule-batches, text "NOT RUN ... This inspection is incomplete" with no dollar
-  figure, so it reaches the client report like any other incomplete pass. A rule left
-  unchecked on part of the code is recorded in the rule ledger as not run, never as
-  "ran, found nothing". `camerata inspect` prints the limit block and exits **4**
+  figure, so it reaches the client report like any other incomplete pass. A rule
+  no pass checked is recorded in the rule ledger as not run; a rule checked on only
+  part of the code is recorded as run with a `partial_reason`, which is never
+  "verified clean", is listed in the export's rules-not-run section with that
+  reason, and fails the integrity gate as `partial_coverage` (incomplete coverage,
+  not a contradiction: its findings are real). `camerata inspect` prints the limit block and exits **4**
   after writing the (incomplete) export.
 - **Export.** The manifest's `inspection` block gains one boolean,
   `cost_cap_reached` (always present), and the README gains one line
@@ -2713,7 +2732,11 @@ against a runaway bill, not a saving, so it fails loudly:
   record change nothing in `report.json` or `findings.json`.
 - **Desktop app.** The scan settings have a "Spend limit (USD)" field (blank = none),
   sent as `max_cost_usd` on the audit request. A value that is not a positive number
-  stops the scan from starting and says why.
+  stops the scan from starting and says why. The results screen shows an
+  `IncompletePassesBanner` whenever the report's `failed_passes` is non-empty (a spend
+  limit stop, a failed pass, a skipped stage), with the list and a compact form beside
+  the export button; the job progress counts refused passes as NOT RUN, not done; and
+  the server adds an "INCOMPLETE" note to the report message.
 
 The ZIP holds four entries, and they are deliberately not three views of the same
 thing:
