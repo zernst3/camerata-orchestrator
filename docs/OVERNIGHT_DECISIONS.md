@@ -1,7 +1,49 @@
 # Overnight autonomous run — decisions needed + progress log
 
 > ## ▶ RESUME HERE (paused 2026-10-26 at Zach's request, after code viewer step 4)
-> **CURRENT (newest first; older entries below are history):** 2026-10-27 (Zach): **PRIORITY
+> **CURRENT (newest first; older entries below are history):** 2026-10-27 (Opus): Camerata's
+> fallback model defaults (`crates/ui/src/cockpit.rs` ~353-361: Haiku 4.5, Sonnet 5, Opus 5) move
+> to the current generation (Haiku 5.5, Sonnet 5.5, Opus 5.5) AFTER the API sweep; the sweep stays
+> pinned to `claude-sonnet-5` so its results compare with sweep5b. Camerata uses no Fable model by
+> default and sends `tool_choice: auto` everywhere; the per-model request shapes only guard the
+> models a user can pick. 2026-10-27 (Opus): 22f Part A
+> BUILT (`camerata corpus check-sources`, new crate `camerata-source-check`, sidecar
+> `crates/rules/CORPUS_SOURCE_HASHES.json`). Decisions: hash only cited anchors (whole pages are
+> noise); a changed section stays flagged until accepted explicitly (`--accept`), never silently
+> re-baselined; confidence lowered for dead sources and unaccepted changes, and for 100 days after
+> an accepted change. Live smoke run: 619 URLs, 10 dead (docs.rs sqlx, ruff, FastAPI among them),
+> 15 cited anchors not found; source URL repairs queued with the corpus text work (22g), not done
+> ad hoc. Wave 1 (ranks 2, 4, 7, 10) moves to cloud sessions on `wip/rank9-base` so the Mac keeps
+> four local builders; the spike docs now live in `docs/plans/2026-10-25_spike-token-efficiency*`.
+> 2026-10-27 (Opus): viewer 7d
+> (command palette) BUILT, in Fable review. Decisions: bulk and selection-based writes stay out of
+> the palette (a mistyped filter must never be one Enter from a bulk write); Ctrl/Cmd+K must work
+> anywhere on the results screen, done by extending the timer's existing document bridge (no second
+> bridge). 7c (advisory findings grouped by corpus rule) is BLOCKED on a server field: calibration
+> sets `mapped_rule_id` (closest adopted rule) for every advisory finding, keeps the model's own
+> id as `model_rule_id`, falls back to `category`; built after ranks 4 and 7 merge (same
+> calibration code), then the small UI change. 2026-10-27 (Opus): three more
+> cloud builders on branches `cloud/w27-pdf` (W27 PDF + confidentiality + 22c + 22d + export
+> gates 2/6/7; owns export code), `cloud/w29-wave-d` (Wave D + 22e; Fable reviews locally before
+> merge since cloud sessions cannot run Fable), `cloud/item21` (2b follow-ups). Decision:
+> `camerata-check` treats low-severity consistency findings as advisory (exit 0); medium and above
+> fail the build; one constant. 2026-10-27 (Zach, standing
+> approval): Opus decides and acts without asking, including commit and push; record each decision
+> here with its reason. Ask Zach only for truly irreversible actions or deletion of real work or
+> data (throwaway builds and worktrees are fine). 2026-10-27 (Zach): W27 PDF brand
+> assets supplied: the Cantus Works website draft is the style guide (not final, but the final
+> site will closely match). Extracted to `docs/design/2026-10-27_pdf-brand-guide.md` with the logo
+> marks in `docs/design/brand/`. W27 is no longer blocked on assets. Font decided (Zach): Inter for
+> text, JetBrains Mono for code (SF fonts cannot be embedded). Cloud
+> builders now run alongside local ones (first: KEV/EPSS on branch `cloud/kev-epss`).
+> 2026-10-27 (Opus, wave plan):
+> Zach re-saved the Anthropic key (Keychain entry verified, app reports it set) and set the $100
+> Console limit; he is moving to the 20x plan, so the remaining ranks build in parallel. After
+> rank 9 merges (it adds `EfficiencyConfig`), wave 1 = ranks 2, 4, 7, 10 at once; rank 8 after
+> rank 7 merges (same `Rule` struct, `run_routed_passes`, corpus lock). Routing inside batch mode
+> moves from rank 2 to rank 7 (same dispatch block). Rank 2 and rank 10 defaults ship ON before
+> grading because the API sweep grades them before any client run; any recall loss there flips
+> the switch off. Then: **PRIORITY
 > CHANGE: finish ALL token-efficiency work first, then test it on the API** with the $100 credit
 > (expires 2026-11-02). Zach's GO on the protected ranks 4 (terse scan output; calibration and
 > merge inputs), 7 (routing on `applies_to`; corpus field), 8 (deterministic `candidates`

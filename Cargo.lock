@@ -691,6 +691,7 @@ dependencies = [
  "camerata-rules",
  "camerata-secrets",
  "camerata-server",
+ "camerata-source-check",
  "camerata-test-env",
  "camerata-ui-core",
  "camerata-worktracker",
@@ -1094,6 +1095,23 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "zip 8.6.0",
+]
+
+[[package]]
+name = "camerata-source-check"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "camerata-rules",
+ "futures",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "wiremock",
 ]
 
 [[package]]

@@ -1455,6 +1455,20 @@ pub enum PaneCommand {
     OpenStack,
 }
 
+impl PaneCommand {
+    /// The command that decides the focused row as `state`: apply it now, or ask for the reason
+    /// first when the state requires one. THE one place that split is made: the hotkeys, the
+    /// pane's buttons and the command palette all build their command here, so a state that
+    /// starts requiring a reason cannot be applied reasonless by one door and prompted by another.
+    pub fn decide(state: TriageState) -> Self {
+        if state.requires_reason() {
+            Self::PromptFor(state)
+        } else {
+            Self::Dispose(state)
+        }
+    }
+}
+
 /// The single-key hotkey for a disposition, or `None` for a state that has none.
 ///
 /// `C` / `I` / `T` / `F`, exactly the owner's four. `Unresolved` has none deliberately: it is
@@ -1533,11 +1547,7 @@ pub fn pane_command(focus: PaneFocus, key: &str, mods: KeyMods) -> Option<PaneCo
     let state = TriageState::all()
         .into_iter()
         .find(|s| state_hotkey(*s) == Some(pressed.as_str()))?;
-    Some(if state.requires_reason() {
-        PaneCommand::PromptFor(state)
-    } else {
-        PaneCommand::Dispose(state)
-    })
+    Some(PaneCommand::decide(state))
 }
 
 /// What the pane's focus state becomes when the DOM reports `incoming`, given whether the pane's

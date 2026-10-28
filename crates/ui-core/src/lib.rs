@@ -16,6 +16,7 @@ pub mod govdev;
 pub mod lenient;
 pub mod models;
 pub mod order_preset;
+pub mod palette;
 pub mod pane_context;
 pub mod progress;
 pub mod provider_safety;

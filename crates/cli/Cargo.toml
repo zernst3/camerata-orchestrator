@@ -27,6 +27,7 @@ camerata-gateway = { path = "../gateway" }
 camerata-agent = { path = "../agent" }
 camerata-checks = { path = "../checks" }
 camerata-rules = { path = "../rules" }
+camerata-source-check = { path = "../source-check" }
 camerata-fleet = { path = "../fleet" }
 camerata-worktracker = { path = "../worktracker" }
 camerata-maintenance = { path = "../maintenance" }

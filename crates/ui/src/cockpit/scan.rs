@@ -680,6 +680,10 @@ pub(super) use camerata_ui_core::triage::{deviation_groups, rule_group_label, De
 // Q5's "only fire while the detail pane holds focus" clause lives in `pane_command`), and the
 // five-second undo. This layer owns the focus signal, the keydown wiring and the rsx; it owns
 // none of the rules.
+use camerata_ui_core::palette::{
+    entries as palette_entries, palette_gate, stale_note, PaletteAction, PaletteContext,
+    PaletteEntry,
+};
 pub(super) use camerata_ui_core::triage::{
     deviation_headline, next_pane_focus, pane_command, pane_keys_armed, site_count, state_hotkey,
     KeyMods, MergedSiteView, PaneCommand, PaneFocus, RowCursor, UndoEntry, UndoOutcome,
@@ -2726,12 +2730,18 @@ pub(super) fn QueueReasonPrompt(
     on_reason: Callback<String>,
     on_commit: Callback<()>,
     on_cancel: Callback<()>,
+    /// The DOM id of the reason field, so a refused command can put the keyboard back in it. Each
+    /// place that mounts the prompt gives its own, because the stacked view's prompt can be up
+    /// while the Queue's is.
+    #[props(default = QUEUE_REASON_ID.to_string())]
+    input_id: String,
 ) -> Element {
     let heading = bulk_reason_heading(prompt.state, prompt.count());
     rsx! {
         div { class: "queue-reason-prompt",
             label { class: "rule-modal-label", "{heading}" }
             textarea {
+                id: "{input_id}",
                 class: "addressee-input queue-reason-input",
                 rows: "2",
                 autofocus: true,
@@ -3187,6 +3197,12 @@ pub(super) fn RuleHubModal(
         }
     }
 }
+
+/// The DOM id of the pane's reason field (the on-demand prompt `I` and `F` raise).
+pub(super) const PANE_REASON_ID: &str = "camerata-pane-reason";
+
+/// The DOM id of the Queue's own toolbar reason field.
+pub(super) const QUEUE_REASON_ID: &str = "camerata-queue-reason";
 
 /// The DOM id of the docked detail pane's focusable region.
 ///
@@ -3696,6 +3712,7 @@ pub(super) fn FindingDetailPane(
                             "Reason for \u{201c}{state.label()}\u{201d} (required)"
                         }
                         textarea {
+                            id: "{PANE_REASON_ID}",
                             class: "addressee-input pane-reason-input",
                             rows: "2",
                             autofocus: true,
@@ -3836,6 +3853,8 @@ pub(super) fn FindingsTable(
     on_open_stats: Callback<()>,
 ) -> Element {
     let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
+    // Whether the progress strip (and so the timer's two controls) is drawn above the table.
+    let has_counts = counts.is_some();
     // Every queue row, before this table's triage-state filter: the viewer's gutter marks the
     // decided findings of a file too, so it needs the whole set.
     //
@@ -4038,12 +4057,14 @@ pub(super) fn FindingsTable(
     let focused_finding: Option<FindingView> = focused_key(&cursor.read(), &visible_keys())
         .and_then(|k| key_to_row_id.get(&k))
         .and_then(|rid| id_map.get(rid).cloned());
-    // A second handle on the focused row for the "Full detail" callback: `focused_finding`
-    // is move-captured by `apply_disposition` below.
+    // A second handle on the focused row for the "Full detail" callback, and a third for the
+    // rule-hub door in the pane's header (the palette calls the same two). Each `move` closure
+    // owns its own copy; there is no shared borrow to hand round.
     let focused_for_modal = focused_finding.clone();
-    // And a third, for the rule-hub door in the pane's header. Each `move` closure owns its
-    // own copy; there is no shared borrow to hand round.
     let focused_for_hub = focused_finding.clone();
+    // And one for the palette, which needs to know whether a row is focused and whether it can be
+    // stacked when it opens.
+    let focused_for_palette = focused_finding.clone();
     // And a fourth and fifth, for the code viewer: the finding it is handed, and the finding
     // its "enclosing block" fallback opens in the modal.
     let focused_for_viewer_modal = focused_finding.clone();
@@ -4148,7 +4169,6 @@ pub(super) fn FindingsTable(
         .as_ref()
         .and_then(|f| prior_decisions(&all_rows, &dispositions.read(), f));
     let prior_for_keys = focused_prior.clone();
-    let prior_for_buttons = focused_prior.clone();
 
     // APPLY one disposition to the focused row, arm the undo, and advance the cursor.
     //
@@ -4591,6 +4611,181 @@ pub(super) fn FindingsTable(
             "B stacks the rows of a deviation or defect group. Focus one of its rows first.",
         ),
     });
+    // ── EVERY PANE COMMAND, ONE FUNCTION ─────────────────────────────────────────────────
+    //
+    // What a pane command DOES. The pane's keys, its buttons and the command palette all run it,
+    // so a command means the same thing from every door and there is no second description to
+    // drift: the keys build the command with `pane_command`, the buttons with
+    // `PaneCommand::decide` or the command named, and the palette carries the same value.
+    let run_pane_command = use_callback(move |cmd: PaneCommand| match cmd {
+        PaneCommand::MoveFocus(dir) => {
+            let next = cursor.peek().moved(&visible_keys(), dir);
+            cursor.set(next);
+        }
+        PaneCommand::OpenCode => viewer_open.set(true),
+        PaneCommand::OpenStack => open_stack_from_pane.call(()),
+        PaneCommand::Dispose(state) => {
+            apply_disposition.call((state, String::new()));
+        }
+        PaneCommand::PromptFor(state) => {
+            // `I` and `F` OPEN the reason prompt; they never dispose. The export reads those
+            // reasons, and a keystroke is not a licence to drop them. Opening it also moves
+            // focus into the prompt, which disarms the keys for exactly as long as the curator
+            // is typing.
+            //
+            // Decision memory (B.5) only chooses what the field STARTS with. The reviewer
+            // still presses Enter, and what is stored is what the field holds then.
+            prompt.set(Some(state));
+            prompt_reason.set(prefill_reason(prior_for_keys.as_ref(), state));
+            pane_focus.set(PaneFocus::ReasonPrompt);
+        }
+    });
+    // The pane's "Full detail" button, and the palette's line for it.
+    let open_detail = use_callback(move |()| {
+        if let Some(f) = focused_for_modal.clone() {
+            detail_finding.set(Some(f));
+        }
+    });
+    // The pane's rule id button (the Rule Hub), and the palette's line for it.
+    let open_hub_for_focused = use_callback(move |()| {
+        if let Some(f) = focused_for_hub.clone() {
+            on_open_hub.call(RuleHubRequest {
+                repo: f.repo.clone(),
+                rule_id: f.rule_id.clone(),
+            });
+        }
+    });
+    // The Order select's change, and the palette's lines for the cuts.
+    let set_order = use_callback(move |p: OrderPreset| {
+        let mut order_preset = order_preset;
+        order_preset.set(p);
+    });
+
+    // ── THE COMMAND PALETTE (work order B.8) ─────────────────────────────────────────────
+    //
+    // One list over the review actions above and below, opened with Ctrl+K / Cmd+K or the
+    // toolbar's "Commands" button. It adds no action: `run_palette_action` is a match onto the
+    // functions the buttons and keys already call. Hosted at the results root (`palette.rs`),
+    // like the other overlays, and registered below.
+    let palette_slot = try_use_context::<super::palette::PaletteSlot>();
+    let mut palette_open = use_signal(|| Option::<super::palette::PaletteOpen>::None);
+    let mut palette_serial = use_signal(|| 0u64);
+    // THE GATE, read from the live state: refused while ANY reason prompt is open (the pane's or
+    // the toolbar's, exactly like `stack_focus`), while the viewer or the stack is up over the
+    // Queue, and while any dialog is up. The dialogs are read two ways: this table knows the
+    // full-detail view and the Rule Hub by their state, and the review bridge reports what the
+    // DOM holds (`dom_modal`: any `.rule-modal-overlay`) when the chord is pressed, which also
+    // catches the review-time view and any dialog added later. One closure, used by opening and
+    // by running, so they cannot disagree.
+    let hub_ctx = try_use_context::<super::viewer::ViewerHubOpen>();
+    let palette_gate_now = move |dom_modal: bool| {
+        let known_dialog =
+            detail_finding.peek().is_some() || hub_ctx.is_some_and(|h| h.0.peek().is_some());
+        palette_gate(
+            prompt.peek().is_some() || toolbar_prompt.peek().is_some(),
+            *viewer_open.peek() || stack_open.peek().is_some(),
+            dom_modal || known_dialog,
+        )
+    };
+    // What the entries depend on, now. Used to build the list when the palette opens and again
+    // when a line is run, to see whether the line still means what it said.
+    let review_for_ctx = review.clone();
+    let palette_context = use_callback(move |()| -> PaletteContext {
+        // The timer's two controls live in the strip, which is drawn only with both a tally and
+        // a timer: the palette offers them under the same condition.
+        let strip = if has_counts {
+            review_for_ctx.as_ref()
+        } else {
+            None
+        };
+        PaletteContext {
+            has_focus: focused_for_palette.is_some(),
+            stackable: focused_for_palette.as_ref().is_some_and(is_stackable),
+            can_undo: undo_banner_of(&undo_entry.peek(), *now_ms.peek()).is_some(),
+            order: *order_preset.peek(),
+            timer_button: strip.map(|r| r.timer_button().to_string()),
+            has_stats: strip.is_some(),
+        }
+    });
+    // A refused run leaves the keyboard where it belongs: in the reason prompt that refused it,
+    // never on the pane (whose next key would drop the half-written reason).
+    let focus_open_prompt = move || {
+        if prompt.peek().is_some() {
+            super::viewer::focus_element(PANE_REASON_ID);
+        } else if toolbar_prompt.peek().is_some() {
+            super::viewer::focus_element(QUEUE_REASON_ID);
+        }
+    };
+    let review_palette = review.clone();
+    // Run one line. Answers `true` only when its action ran.
+    let run_palette_action = use_callback(move |entry: PaletteEntry| -> bool {
+        if let Some(why) = palette_gate_now(false).refusal() {
+            crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, why);
+            focus_open_prompt();
+            return false;
+        }
+        // The list was built when the palette opened. If what a line named is gone, or it now
+        // says something else (the timer paused itself), say so rather than do nothing or the
+        // opposite.
+        if let Some(note) = stale_note(&entry, &palette_entries(&palette_context.call(()))) {
+            crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, note);
+            super::palette::restore_focus();
+            return false;
+        }
+        match entry.action {
+            PaletteAction::Pane(cmd) => run_pane_command.call(cmd),
+            PaletteAction::Undo => undo_action.call(()),
+            PaletteAction::OpenHub => open_hub_for_focused.call(()),
+            PaletteAction::FullDetail => open_detail.call(()),
+            PaletteAction::SetOrder(p) => set_order.call(p),
+            // The strip's Pause / Resume button calls this same method.
+            PaletteAction::ToggleTimer => {
+                if let Some(review) = &review_palette {
+                    review.toggle();
+                }
+            }
+            PaletteAction::OpenStats => on_open_stats.call(()),
+        }
+        true
+    });
+    // Ctrl+K / Cmd+K, and the Commands button: open the palette, or close it when it is open (and
+    // give the keyboard back). `dom_modal` is what the page reported about dialogs at the press.
+    let toggle_palette = use_callback(move |dom_modal: bool| {
+        if palette_open.peek().is_some() {
+            palette_open.set(None);
+            super::palette::restore_focus();
+            return;
+        }
+        if let Some(why) = palette_gate_now(dom_modal).refusal() {
+            crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, why);
+            return;
+        }
+        super::palette::remember_focus();
+        let id = *palette_serial.peek() + 1;
+        palette_serial.set(id);
+        palette_open.set(Some(super::palette::PaletteOpen {
+            id,
+            entries: palette_entries(&palette_context.call(())),
+        }));
+    });
+    {
+        let link = use_hook(|| super::palette::PaletteLink {
+            open: palette_open,
+            on_run: run_palette_action,
+            on_chord: toggle_palette,
+        });
+        use_effect(move || {
+            if let Some(mut slot) = palette_slot {
+                slot.0.set(Some(link.clone()));
+            }
+        });
+        use_drop(move || {
+            if let Some(mut slot) = palette_slot {
+                slot.0.set(None);
+            }
+        });
+    }
+
     // The viewer, opened on a card: aim the Queue's one cursor at the finding, open the groups
     // that hide it, and open the viewer. A card whose row was decided has left the table, so
     // there is nothing for the viewer to land on, and the curator is told how to get it back.
@@ -4734,6 +4929,9 @@ pub(super) fn FindingsTable(
         // Everything the reviewer works in (strip, toolbar, table, pane) is one review surface:
         // key and click activity inside it is what the review timer counts (the bridge in
         // `review.rs` checks for this attribute). `display: contents` keeps it out of the layout.
+        //
+        // (The palette's Ctrl+K / Cmd+K is not heard here: the review bridge hears it at the
+        // document, so it works anywhere on the results screen. See `review.rs`.)
         div { style: "display: contents", "data-review-surface": "true",
         // REMOVED, design §9.5: the two-swatch findings key ("Security findings
         // (deterministic, stop-the-line)" / "Architectural findings (everything else)").
@@ -4871,6 +5069,13 @@ pub(super) fn FindingsTable(
                 },
                 "Export CSV"
             }
+            button {
+                class: "btn-edit-sm",
+                id: super::palette::PALETTE_BUTTON_ID,
+                title: "Open the command palette: every review action in one filtered list (Ctrl+K or Cmd+K).",
+                onclick: move |_| toggle_palette.call(false),
+                "Commands"
+            }
         }
         // `clear_sort` drops the whole sort list in one act, which is why the bar's button
         // exists rather than relying on chorale's third click: a plain click cycles ONE column
@@ -4883,10 +5088,7 @@ pub(super) fn FindingsTable(
             order: queue_order(order_preset(), &active_sort(), &order_columns),
             on_reset: Callback::new(move |()| handle.clear_sort()),
             preset: order_preset(),
-            on_preset: Callback::new(move |p: OrderPreset| {
-                let mut order_preset = order_preset;
-                order_preset.set(p);
-            }),
+            on_preset: set_order,
         }
         // The rule-level deviation decisions, one row per group. Renders nothing when the
         // view holds no deviations.
@@ -5041,30 +5243,8 @@ pub(super) fn FindingsTable(
             // textarea inches away cannot have its `c` read as a Confirm.
             on_key: Callback::new(move |(key, mods): (String, KeyMods)| {
                 let here = *pane_focus.peek();
-                match pane_command(here, &key, mods) {
-                    Some(PaneCommand::MoveFocus(dir)) => {
-                        let next = cursor.peek().moved(&visible_keys(), dir);
-                        cursor.set(next);
-                    }
-                    Some(PaneCommand::OpenCode) => viewer_open.set(true),
-                    Some(PaneCommand::OpenStack) => open_stack_from_pane.call(()),
-                    Some(PaneCommand::Dispose(state)) => {
-                        apply_disposition.call((state, String::new()));
-                    }
-                    Some(PaneCommand::PromptFor(state)) => {
-                        // `I` and `F` OPEN the reason prompt; they never dispose. The
-                        // export reads those reasons, and a keystroke is not a licence to
-                        // drop them. Opening it also moves focus into the prompt, which
-                        // disarms the keys for exactly as long as the curator is typing.
-                        //
-                        // Decision memory (B.5) only chooses what the field STARTS with. The
-                        // reviewer still presses Enter, and what is stored is what the field
-                        // holds then.
-                        prompt.set(Some(state));
-                        prompt_reason.set(prefill_reason(prior_for_keys.as_ref(), state));
-                        pane_focus.set(PaneFocus::ReasonPrompt);
-                    }
-                    None => {}
+                if let Some(cmd) = pane_command(here, &key, mods) {
+                    run_pane_command.call(cmd);
                 }
             }),
             on_focus: Callback::new(move |f: PaneFocus| {
@@ -5098,31 +5278,14 @@ pub(super) fn FindingsTable(
             }),
             on_prompt_cancel: cancel_pane_prompt,
             on_undo: undo_action,
+            // The pane's own buttons. A reason-carrying state opens the prompt first, exactly as
+            // its key does: the same command, built by the same `decide`.
             on_dispose: Callback::new(move |state: TriageState| {
-                // The pane's own buttons. A reason-carrying state opens the prompt first,
-                // exactly as its key does — one path, two triggers.
-                if state.requires_reason() {
-                    prompt.set(Some(state));
-                    prompt_reason.set(prefill_reason(prior_for_buttons.as_ref(), state));
-                    pane_focus.set(PaneFocus::ReasonPrompt);
-                } else {
-                    apply_disposition.call((state, String::new()));
-                }
+                run_pane_command.call(PaneCommand::decide(state));
             }),
-            on_open_detail: Callback::new(move |()| {
-                if let Some(f) = focused_for_modal.clone() {
-                    detail_finding.set(Some(f));
-                }
-            }),
-            on_open_hub: Callback::new(move |()| {
-                if let Some(f) = focused_for_hub.clone() {
-                    on_open_hub.call(RuleHubRequest {
-                        repo: f.repo.clone(),
-                        rule_id: f.rule_id.clone(),
-                    });
-                }
-            }),
-            on_open_code: Callback::new(move |()| viewer_open.set(true)),
+            on_open_detail: open_detail,
+            on_open_hub: open_hub_for_focused,
+            on_open_code: Callback::new(move |()| run_pane_command.call(PaneCommand::OpenCode)),
             on_open_stack: open_stack_from_pane,
             context: pane_context,
             previously: focused_prior.as_ref().map(PriorDecision::chip_text),
@@ -7521,6 +7684,7 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
     use_context_provider(|| super::viewer::ViewerSlot(Signal::new(None)));
     // The same for the stacked group view (work order B.2).
     use_context_provider(|| super::stack::StackSlot(Signal::new(None)));
+    use_context_provider(|| super::palette::PaletteSlot(Signal::new(None)));
 
     // rule id -> what it enforces (the chosen/default alternative's directive, else
     // the rule title), for the findings-table rule-id hover.
@@ -7852,6 +8016,9 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
         // THE STACKED GROUP VIEW (work order B.2), hosted here for the same reason. It is a
         // layer UNDER the code viewer (lower z-index, and first in the DOM so order agrees).
         super::stack::StackRoot {}
+        // THE COMMAND PALETTE (work order B.8), hosted here for the same reason. It is refused
+        // while the viewer or the stack is up, so it never opens over them.
+        super::palette::PaletteRoot {}
         // THE CODE VIEWER, hosted here for the same reason: it is a full-window overlay.
         super::viewer::ViewerRoot {}
         // THE RULE HUB (design §8). Hosted at the same root and for the same reason: it is an

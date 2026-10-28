@@ -6828,4 +6828,28 @@ textarea.uow-decision-input { resize: vertical; min-height: 60px; }
 .finding-ctx-door { margin: 6px 0; }
 .pane-code-link { cursor: pointer; background: transparent; }
 .pane-code-link:hover { border-color: var(--accent); color: var(--ink); }
+
+/* The review command palette (cockpit/palette.rs; WORK_ORDER_REVIEW_SPEED.md B.8). It opens only
+   over the Queue (the viewer and the stacked view refuse it), so it sits below both, at 1080;
+   `.rule-modal-overlay` carries the backdrop and 1100, so the selector is doubled to beat it. */
+.rule-modal-overlay.pal-overlay { z-index: 1080; align-items: flex-start; padding-top: 12vh; }
+.pal-panel {
+  width: min(560px, 100%); max-height: 70vh; display: flex; flex-direction: column;
+  background: #1d1913; border: 1px solid var(--line); border-radius: var(--r-md);
+  box-shadow: var(--shadow-pop); overflow: hidden;
+}
+.pal-input { width: 100%; box-sizing: border-box; border: 0; border-bottom: 1px solid var(--line); border-radius: 0; padding: 12px 14px; font-size: 14px; }
+.pal-list { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 4px 0; }
+.pal-row {
+  display: flex; align-items: center; gap: 12px; padding: 7px 14px; cursor: pointer; color: var(--ink);
+}
+.pal-row:hover { background: var(--accent-wash); }
+.pal-row-sel { background: var(--accent-wash); box-shadow: inset 3px 0 0 var(--accent); }
+.pal-label { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+.pal-hint {
+  flex: 0 0 auto; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px;
+  color: var(--ink-soft); border: 1px solid var(--line); border-radius: 4px; padding: 1px 6px;
+}
+.pal-empty { margin: 0; padding: 10px 14px; color: var(--ink-soft); }
+.pal-keys { margin: 0; padding: 6px 14px; font-size: 11px; color: var(--ink-faint); border-top: 1px solid var(--line); }
 "#;
