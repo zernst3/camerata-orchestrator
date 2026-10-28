@@ -16,7 +16,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
-use camerata_api_types::uow::{validate_branch_name, FindingsSource};
+use camerata_api_types::uow::{validate_branch_name, FindingsSource, SourceFinding};
 use serde::{Deserialize, Serialize};
 
 /// One eligible finding. Gap 6 builds these from the report's `Finding`s.
@@ -93,6 +93,11 @@ pub struct PlannedUnit {
     pub area: Option<String>,
     /// Sorted by path then line.
     pub findings: Vec<PlanFinding>,
+    /// Findings a shared-fix group absorbed (they sit at the same location as one of `findings`
+    /// under another rule). The unit closes them too, so the caller keeps them traceable.
+    /// Sorted by path, then line, then key.
+    #[serde(default)]
+    pub merged: Vec<PlanFinding>,
     /// The worst finding's severity.
     pub severity: String,
     /// Indexes into [`RemediationPlan::units`], all smaller than this unit's own index.
@@ -119,13 +124,16 @@ pub fn plan(
     let mut notes = Vec::new();
     let mut units = Vec::new();
     for (repo, repo_findings) in partition_by_repo(findings) {
-        let repo_findings = if options.group_shared_fix {
+        let (repo_findings, mut absorbed) = if options.group_shared_fix {
             collapse_shared_fix(repo_findings, &mut notes)
         } else {
-            repo_findings
+            (repo_findings, BTreeMap::new())
         };
         for (rule, group) in group_by_rule(repo_findings) {
-            units.extend(split_group(&repo, &rule, group, options, &mut notes));
+            for mut unit in split_group(&repo, &rule, group, options, &mut notes) {
+                unit.merged = take_absorbed(&unit.findings, &mut absorbed);
+                units.push(unit);
+            }
         }
     }
     order_units(&mut units);
@@ -154,7 +162,11 @@ fn partition_by_repo(findings: Vec<PlanFinding>) -> BTreeMap<String, Vec<PlanFin
 /// keeps the rule with the worst severity as its primary (ties: alphabetical id) and names every
 /// rule involved, including rules the scanner folded into `also_matches`. The findings under
 /// the other rules at that location are absorbed into it.
-fn collapse_shared_fix(findings: Vec<PlanFinding>, notes: &mut Vec<String>) -> Vec<PlanFinding> {
+fn collapse_shared_fix(
+    findings: Vec<PlanFinding>,
+    notes: &mut Vec<String>,
+) -> (Vec<PlanFinding>, Absorbed) {
+    let mut absorbed: Absorbed = BTreeMap::new();
     let mut by_location: BTreeMap<(String, usize), Vec<PlanFinding>> = BTreeMap::new();
     for f in findings {
         by_location
@@ -189,16 +201,36 @@ fn collapse_shared_fix(findings: Vec<PlanFinding>, notes: &mut Vec<String>) -> V
             .filter(|r| **r != primary)
             .cloned()
             .collect();
-        for mut f in group.into_iter().filter(|f| f.rule_id == primary) {
-            f.also_matches = others.clone();
-            out.push(f);
+        for mut f in group {
+            if f.rule_id == primary {
+                f.also_matches = others.clone();
+                out.push(f);
+            } else {
+                absorbed.entry((path.clone(), line)).or_default().push(f);
+            }
         }
         notes.push(format!(
             "{path}:{line} violates {} rules; one unit covers them.",
             involved.len()
         ));
     }
-    out
+    (out, absorbed)
+}
+
+/// The findings step 2 absorbed, by `(path, line)` (one repository at a time).
+type Absorbed = BTreeMap<(String, usize), Vec<PlanFinding>>;
+
+/// The absorbed findings that belong with `kept`: those at a location a kept finding sits at.
+/// Taking them out of the map means each lands on exactly one unit.
+fn take_absorbed(kept: &[PlanFinding], absorbed: &mut Absorbed) -> Vec<PlanFinding> {
+    let mut merged = Vec::new();
+    for f in kept {
+        if let Some(found) = absorbed.remove(&(f.path.clone(), f.line)) {
+            merged.extend(found);
+        }
+    }
+    merged.sort_by(|a, b| (&a.path, a.line, &a.key).cmp(&(&b.path, b.line, &b.key)));
+    merged
 }
 
 /// Step 3. One group per primary rule (Zach's default: one unit of work per violated rule).
@@ -345,6 +377,7 @@ fn build_unit(
         area,
         findings,
         severity,
+        merged: Vec::new(),
         depends_on: Vec::new(),
         branch: String::new(),
         title: String::new(),
@@ -482,6 +515,10 @@ pub struct PrContext {
     pub story_id: Option<String>,
     /// The units this one should land after, as `(uow-N, title)`, resolved by the caller.
     pub depends_on: Vec<(String, String)>,
+    /// The unit's merged findings (`PlannedUnit::merged`, as `SourceFinding`s). They are listed
+    /// in the table beside the finding at the same location, so the PR names every finding it
+    /// closes.
+    pub merged: Vec<SourceFinding>,
 }
 
 /// The traceable PR body with no caller context.
@@ -531,7 +568,7 @@ pub fn pr_body_with(
 
     out.push_str("\n## Findings closed\n");
     let mut repos: Vec<&str> = Vec::new();
-    for f in &source.findings {
+    for f in source.findings.iter().chain(context.merged.iter()) {
         if !repos.contains(&f.repo.as_str()) {
             repos.push(f.repo.as_str());
         }
@@ -564,20 +601,33 @@ pub fn pr_body_with(
         }
         out.push_str("| # | File | Line | Rule | Severity | Finding |\n");
         out.push_str("| --- | --- | --- | --- | --- | --- |\n");
+        // A merged finding is listed straight after the first finding at its location.
+        let mut placed = vec![false; context.merged.len()];
         for f in source.findings.iter().filter(|f| f.repo == *repo) {
             number += 1;
-            out.push_str(&format!(
-                "| {number} | {} | {} | {} | {} | {} |\n",
-                table_cell(&f.path),
-                f.line,
-                table_cell(&f.rule_id),
-                table_cell(&f.severity),
-                table_cell(&f.fingerprint)
-            ));
+            push_row(&mut out, number, f, None);
+            for (m, done) in context.merged.iter().zip(placed.iter_mut()) {
+                if !*done && m.repo == f.repo && m.path == f.path && m.line == f.line {
+                    *done = true;
+                    number += 1;
+                    push_row(&mut out, number, m, Some("merged into the row above"));
+                }
+            }
+        }
+        for (m, done) in context.merged.iter().zip(placed.iter()) {
+            if !*done && m.repo == *repo {
+                number += 1;
+                push_row(
+                    &mut out,
+                    number,
+                    m,
+                    Some("merged into another finding of this PR"),
+                );
+            }
         }
     }
 
-    let n = source.findings.len();
+    let n = source.findings.len() + context.merged.len();
     let noun = if n == 1 { "finding" } else { "findings" };
     out.push_str(&format!(
         "\n{n} {noun}. A finding counts as closed when the next delta retest no longer reports it.\n"
@@ -599,6 +649,21 @@ pub fn pr_body_with(
     out
 }
 
+/// One table row. The note, when there is one, follows the fingerprint in the last cell.
+fn push_row(out: &mut String, number: usize, f: &SourceFinding, note: Option<&str>) {
+    let finding = match note {
+        Some(note) => format!("{} ({note})", table_cell(&f.fingerprint)),
+        None => table_cell(&f.fingerprint),
+    };
+    out.push_str(&format!(
+        "| {number} | {} | {} | {} | {} | {finding} |\n",
+        table_cell(&f.path),
+        f.line,
+        table_cell(&f.rule_id),
+        table_cell(&f.severity),
+    ));
+}
+
 /// One Markdown table cell: a pipe or a line break in the text cannot break the row.
 fn table_cell(text: &str) -> String {
     text.replace('|', "\\|").replace(['\r', '\n'], " ")
@@ -608,7 +673,7 @@ fn table_cell(text: &str) -> String {
 mod tests {
     use super::*;
     use camerata_api_types::fingerprint::fingerprint;
-    use camerata_api_types::uow::{AuditedCommit, SourceFinding};
+    use camerata_api_types::uow::AuditedCommit;
 
     fn pf(repo: &str, path: &str, line: usize, rule: &str, sev: &str) -> PlanFinding {
         let snippet = format!("let secret_{rule}_{line} = \"hunter2\";");
@@ -1044,6 +1109,7 @@ Inspection insp-proj-1700000000-ab12cd; o/a at 0123abcd.\n\
         let ctx = PrContext {
             story_id: Some("story-77".to_string()),
             depends_on: vec![("uow-12".to_string(), "Fix SEC-9".to_string())],
+            merged: Vec::new(),
         };
         let with = pr_body_with(&src, &body_rules(), &ctx);
         assert!(
@@ -1217,5 +1283,125 @@ Inspection insp-proj-1700000000-ab12cd; o/a at 0123abcd.\n\
         let two = plan(reversed, &HashMap::new(), &PlanOptions::default());
         assert_eq!(one.units, two.units);
         assert_eq!(one.notes, two.notes);
+    }
+
+    /// Three findings at one location under two rules: A (critical) once and B (medium) twice.
+    fn three_at_one_location() -> Vec<PlanFinding> {
+        let a = pf("o/a", "src/auth.rs", 10, "A-RULE", "critical");
+        let b1 = pf("o/a", "src/auth.rs", 10, "B-RULE", "medium");
+        let mut b2 = pf("o/a", "src/auth.rs", 10, "B-RULE", "medium");
+        b2.snippet = "another offending expression".to_string();
+        b2.key = format!("o/a\0B-RULE\0src/auth.rs\x0010\0{}", b2.snippet);
+        b2.fingerprint = fingerprint("B-RULE", &b2.snippet);
+        vec![a, b1, b2]
+    }
+
+    #[test]
+    fn findings_absorbed_by_a_shared_fix_stay_on_the_unit_as_merged() {
+        let input = three_at_one_location();
+        let want: BTreeSet<(String, String)> = input
+            .iter()
+            .map(|f| (f.key.clone(), f.fingerprint.clone()))
+            .collect();
+        assert_eq!(want.len(), 3, "the three findings are distinct");
+        let p = plan(input, &HashMap::new(), &PlanOptions::default());
+        assert_eq!(p.units.len(), 1);
+        let u = &p.units[0];
+        assert_eq!(u.findings.len(), 1);
+        assert_eq!(u.findings[0].rule_id, "A-RULE");
+        assert_eq!(u.merged.len(), 2);
+        assert!(u.merged.iter().all(|f| f.rule_id == "B-RULE"));
+        let got: BTreeSet<(String, String)> = u
+            .findings
+            .iter()
+            .chain(u.merged.iter())
+            .map(|f| (f.key.clone(), f.fingerprint.clone()))
+            .collect();
+        assert_eq!(
+            got, want,
+            "findings plus merged hold all three keys and fingerprints"
+        );
+
+        // With grouping off nothing is absorbed, so nothing is merged.
+        let off = PlanOptions {
+            group_shared_fix: false,
+            ..PlanOptions::default()
+        };
+        let p = plan(three_at_one_location(), &HashMap::new(), &off);
+        assert!(p.units.iter().all(|u| u.merged.is_empty()));
+        assert_eq!(p.units.iter().map(|u| u.findings.len()).sum::<usize>(), 3);
+    }
+
+    #[test]
+    fn merged_findings_follow_their_location_into_the_directory_part() {
+        let mut input = three_at_one_location();
+        // A-RULE is big enough to split: 21 files in src/ and 21 in tests/.
+        for i in 0..21 {
+            input.push(pf("o/a", &format!("src/s{i}.rs"), 1, "A-RULE", "critical"));
+            input.push(pf(
+                "o/a",
+                &format!("tests/t{i}.rs"),
+                1,
+                "A-RULE",
+                "critical",
+            ));
+        }
+        let p = plan(input, &HashMap::new(), &PlanOptions::default());
+        let with_merged: Vec<&PlannedUnit> =
+            p.units.iter().filter(|u| !u.merged.is_empty()).collect();
+        assert_eq!(
+            with_merged.len(),
+            1,
+            "the absorbed findings are on exactly one unit"
+        );
+        assert_eq!(with_merged[0].area.as_deref(), Some("src"));
+        assert_eq!(with_merged[0].merged.len(), 2);
+    }
+
+    #[test]
+    fn the_pr_body_lists_merged_findings_next_to_the_finding_they_were_merged_into() {
+        let main = sf("src/auth.rs", 10, "A-RULE", "critical");
+        let m1 = sf("src/auth.rs", 10, "B-RULE", "medium");
+        let m2 = sf("src/auth.rs", 10, "B-RULE-2", "medium");
+        let src = FindingsSource {
+            inspection_id: "insp-x".to_string(),
+            audited: vec![AuditedCommit {
+                repo: "o/a".to_string(),
+                sha: Some("abc123".to_string()),
+            }],
+            rule_ids: vec!["A-RULE".to_string(), "B-RULE".to_string()],
+            findings: vec![main.clone(), sf("src/other.rs", 3, "A-RULE", "high")],
+            ..Default::default()
+        };
+        let ctx = PrContext {
+            merged: vec![m1.clone(), m2.clone()],
+            ..PrContext::default()
+        };
+        let body = pr_body_with(&src, &HashMap::new(), &ctx);
+        for f in [&main, &m1, &m2] {
+            assert!(
+                body.contains(&f.fingerprint),
+                "missing {} in\n{body}",
+                f.fingerprint
+            );
+        }
+        let lines: Vec<&str> = body.lines().collect();
+        let at = lines
+            .iter()
+            .position(|l| l.contains(&main.fingerprint))
+            .expect("main row");
+        assert!(lines[at + 1].contains(&m1.fingerprint), "{body}");
+        assert!(
+            lines[at + 1].contains("merged into the row above"),
+            "{body}"
+        );
+        assert!(lines[at + 2].contains(&m2.fingerprint), "{body}");
+        assert!(lines[at + 3].contains("src/other.rs"), "{body}");
+        assert!(
+            body.contains("\n4 findings."),
+            "merged findings count: {body}"
+        );
+        assert!(!body.contains(&m1.snippet), "still no snippets");
+        assert!(!body.contains('\u{2014}'));
     }
 }
