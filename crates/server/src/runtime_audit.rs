@@ -89,6 +89,7 @@ pub const NVD_BUDGET: Duration = Duration::from_secs(75);
 pub const LEDGER_STAGE: &str = "runtime-audit-merge";
 
 const REASON_NOTHING_DECLARED: &str = "no runtime or framework version was found in the repository";
+const REASON_ALL_EXCLUDED: &str = "every version found was excluded (see Coverage)";
 const REASON_NO_EXACT_RUNTIME: &str =
     "no runtime version was declared with a patch release, which a vulnerability lookup needs";
 const REASON_DISABLED: &str = "the dependency audit was disabled for this run";
@@ -617,8 +618,18 @@ pub async fn audit_runtimes(
         feeds_by_product.insert(product, state);
     }
     let eol_stamp = if products.is_empty() {
+        // Versions that were read and then left out are not the same as versions never found.
+        let every_one_excluded = !found.is_empty()
+            && found
+                .iter()
+                .all(|f| matches!(f.decl.version, Version::Excluded(_)));
         FeedStamp::NotChecked {
-            reason: REASON_NOTHING_DECLARED.to_string(),
+            reason: if every_one_excluded {
+                REASON_ALL_EXCLUDED
+            } else {
+                REASON_NOTHING_DECLARED
+            }
+            .to_string(),
         }
     } else {
         eol_tally.stamp(day_string(now))

@@ -1352,8 +1352,8 @@ async fn nginx_is_looked_up_under_both_vendors_and_the_answers_are_merged() {
 #[tokio::test]
 async fn a_cve_matched_only_by_a_version_range_is_returned() {
     // CVE-2024-21892 is listed against Node.js 18.0.0 up to (excluding) 18.19.1 and has no entry
-    // for 18.17.0 itself: NVD matches the version against the range. The recorded fixture holds
-    // the live answer for this CPE, configuration included.
+    // for 18.17.0 itself: NVD matches the version against the range. The recorded fixture is a
+    // reduced copy of that record (configuration included), not the full live answer for the CPE.
     let doc: serde_json::Value = serde_json::from_str(NVD_NODE_18_17_0).unwrap();
     let record = doc["vulnerabilities"]
         .as_array()
@@ -2230,5 +2230,38 @@ fn a_workspace_does_not_make_a_dev_only_or_unlisted_package_direct() {
             .as_deref()
             .is_some_and(|w| w.contains("an optional dependency")),
         "{got:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_build_argument_image_reaches_coverage_and_the_stamp_says_why() {
+    let dir = repo(&[("Dockerfile", "ARG BASE\nFROM ${BASE}\nRUN true\n")]);
+    let fetcher = Fixture::online();
+    let audit = run(&dir, &fetcher, None).await;
+    assert!(audit.findings.is_empty(), "{:?}", audit.findings);
+    let text = notes_text(&audit);
+    assert!(
+        text.contains("Not checked, because the image is a build argument"),
+        "{text}"
+    );
+    assert!(text.contains("`${BASE}` in Dockerfile line 2"), "{text}");
+    assert_eq!(fetcher.calls().len(), 0, "{:?}", fetcher.calls());
+    // Every declaration was left out, which is not the same as finding none.
+    let FeedStamp::NotChecked { reason } = &audit.eol else {
+        panic!("expected a not-checked stamp, got {:?}", audit.eol);
+    };
+    assert_eq!(reason, "every version found was excluded (see Coverage)");
+}
+
+#[tokio::test]
+async fn a_repository_with_nothing_declared_keeps_the_nothing_found_reason() {
+    let dir = repo(&[("README.md", "hello\n")]);
+    let audit = run(&dir, &Fixture::online(), None).await;
+    let FeedStamp::NotChecked { reason } = &audit.eol else {
+        panic!("expected a not-checked stamp, got {:?}", audit.eol);
+    };
+    assert_eq!(
+        reason,
+        "no runtime or framework version was found in the repository"
     );
 }
