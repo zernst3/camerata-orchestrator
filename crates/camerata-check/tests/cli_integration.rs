@@ -33,8 +33,15 @@ fn server_fixture(name: &str) -> PathBuf {
         .join(name)
 }
 
+/// The binary, pointed explicitly at this repo's bundled rule corpus, so the corpus severity
+/// bounds a run applies do not depend on the developer's `CAMERATA_CORPUS_PATH`.
 fn bin() -> Command {
-    Command::cargo_bin("camerata-check").expect("camerata-check binary must build")
+    let mut cmd = Command::cargo_bin("camerata-check").expect("camerata-check binary must build");
+    cmd.env(
+        "CAMERATA_CORPUS_PATH",
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../rules/principles"),
+    );
+    cmd
 }
 
 /// The config-gated rule ids: checkers that consult `.camerata/architecture.toml` and abstain
@@ -173,6 +180,51 @@ fn ci_gate_reports_dead_code_for_an_orphaned_file() {
         "exactly the orphan must be reported, not the entry point or its import: {stdout}"
     );
     assert_eq!(dead[0]["file"], "src/orphan.ts", "{stdout}");
+    // The corpus caps ARCH-DEAD-CODE-1 at `low`; the gate reports it there, as the scan and the
+    // client's report do, and a low finding is advisory (exit 0), never a failed build.
+    assert_eq!(value["corpus_bounds_applied"], true, "{stdout}");
+    assert_eq!(dead[0]["severity"], "low", "{stdout}");
+    assert_eq!(value["blocking_count"], 0, "{stdout}");
+    assert_eq!(output.status.code(), Some(0), "{stdout}");
+}
+
+/// Without a loadable corpus the gate cannot know a rule's authored bounds: it keeps the
+/// checker's severity, says the corpus bounds were not applied, and the human output tells the
+/// reader how to point it at the corpus.
+#[test]
+fn ci_gate_without_a_corpus_says_its_bounds_were_not_applied() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir_all(tmp.path().join("src")).unwrap();
+    std::fs::write(
+        tmp.path().join("package.json"),
+        r#"{"private":true,"main":"src/app.ts"}"#,
+    )
+    .unwrap();
+    std::fs::write(tmp.path().join("src/app.ts"), "export const app = 1;\n").unwrap();
+    std::fs::write(
+        tmp.path().join("src/orphan.ts"),
+        "export const orphan = 1;\n",
+    )
+    .unwrap();
+    let missing = tmp.path().join("no-corpus-here");
+
+    let output = bin()
+        .env("CAMERATA_CORPUS_PATH", &missing)
+        .arg(tmp.path())
+        .arg("--format")
+        .arg("json")
+        .output()
+        .expect("must run");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let value: serde_json::Value =
+        serde_json::from_str(&stdout).expect("stdout must be valid JSON");
+    assert_eq!(value["corpus_bounds_applied"], false, "{stdout}");
+
+    bin()
+        .env("CAMERATA_CORPUS_PATH", &missing)
+        .arg(tmp.path())
+        .assert()
+        .stdout(predicate::str::contains("CAMERATA_CORPUS_PATH"));
 }
 
 // ── React Hooks lint config gap runs in the CI gate (scan tier and CI only) ──

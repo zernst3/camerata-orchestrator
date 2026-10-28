@@ -538,196 +538,51 @@ pub(crate) fn bucket_title(bucket: &str) -> &'static str {
 /// exactly once per finding (computed alongside its disposition in `build_report_json`'s
 /// partition loop) rather than matching `finding.severity.as_str()` ad hoc in each section.
 pub(crate) fn normalize_severity(raw: &str) -> String {
-    match raw.to_ascii_lowercase().as_str() {
-        "critical" => "critical".to_string(),
-        "high" => "high".to_string(),
-        "medium" => "medium".to_string(),
-        // `info` is a real, distinct tier (Bug 4): a convention-to-consider, ranked BELOW
-        // `low`. It must survive normalization rather than collapsing into `low`, or an
-        // informational stance note would silently re-enter the plan/low action tier.
-        "info" => "info".to_string(),
-        _ => "low".to_string(),
-    }
+    camerata_rules::severity_bounds::normalize_severity(raw)
 }
 
-/// E2 (`docs/plans/2026-10-09_audit-findings-tracker.md`): clamp `severity` DOWN to `rule_id`'s
-/// corpus-declared [`camerata_rules::Rule::max_severity`], when one is declared and `severity`
-/// currently ranks ABOVE it (a lower [`severity_rank`] number is more severe, so "above the
-/// ceiling" means `severity_rank(severity) < severity_rank(ceiling)`). Never RAISES a severity
-/// that already ranks at or below the ceiling — this is a ceiling, not a floor, and applying it
-/// is always safe regardless of how `severity` got to its current value (a model's own
-/// judgment, the D5 severity floor, the D6/D7 severity ceiling rules — ALL of those run
-/// upstream, inside `ai_audit.rs`, before a finding ever reaches this export layer; this is the
-/// LAST clamp, applied once per finding at the single choke-point every exporter (the PDF's
-/// `build_report_json`, the xlsx/`findings.json` `partition_rows`) already shares for severity
-/// normalization, so "no report may exceed it" holds for every artifact, not just one).
-///
-/// `rule_id` is resolved through [`corpus_rule_for`] (not a bare `corpus.get_by_id`), so an
-/// external-tool/preview finding whose `rule_id` is the TOOL's own id (e.g. a Semgrep rule
-/// name) still resolves to the grounded corpus rule that may carry a ceiling. Absent corpus,
-/// absent rule, or absent `max_severity` all degrade to a no-op — the overwhelming majority of
-/// findings have no ceiling to apply.
+// The four severity bounds (E2 `max_severity`, W8 `min_severity`, A5.2 `deviation_ceiling`,
+// C4-R1 unlocated) and their order live in `camerata_rules::severity_bounds`, shared with the
+// `camerata-check` CI gate; the exporters apply them through
+// `crate::severity_bounds::bounded_severity`. The three adapters below keep this module's
+// unit tests pinned to the same chain, resolving the rule through [`corpus_rule_for`].
+
+#[cfg(test)]
 pub(crate) fn clamp_to_rule_max_severity(
     severity: String,
     rule_id: &str,
     corpus: Option<&camerata_rules::RuleSet>,
 ) -> String {
-    let Some(rule) = corpus_rule_for(rule_id, corpus) else {
-        return severity;
-    };
-    let Some(raw_ceiling) = rule.max_severity.as_deref() else {
-        return severity;
-    };
-    let ceiling = normalize_severity(raw_ceiling);
-    if severity_rank(&severity) < severity_rank(&ceiling) {
-        ceiling
-    } else {
-        severity
-    }
+    camerata_rules::severity_bounds::clamp_to_max_severity(
+        severity,
+        corpus_rule_for(rule_id, corpus),
+    )
 }
 
-/// W8 / W5-Q2 (`docs/plans/2026-10-09_audit-findings-tracker.md`): RAISE `severity` UP to
-/// `f`'s corpus-declared [`camerata_rules::Rule::min_severity`], when one is declared and
-/// `severity` currently ranks BELOW it. The exact structural mirror of
-/// [`clamp_to_rule_max_severity`], built because the owner ruled that a rule's prose statement
-/// of a single severity is a FLOOR:
-///
-/// > **"Floor, it's the minimum rating."**
-///
-/// Never LOWERS a severity that already ranks at or above the floor — this is a floor, not a
-/// ceiling. Absent corpus, absent rule, or absent `min_severity` all degrade to a no-op, which
-/// is the overwhelming majority of findings. `rule_id` is resolved through [`corpus_rule_for`]
-/// for the same reason the ceiling does it: an external-tool/preview finding carrying the
-/// TOOL's own id must still reach the grounded corpus rule that may carry a floor.
-///
-/// # Two preconditions, both deliberate — a floor is not as safe as a ceiling
-///
-/// A ceiling can only lower a severity, so it is safe to apply unconditionally. A floor RAISES
-/// one, so an over-broad floor is a false alarm shipped to a client. Two guards bound it:
-///
-/// 1. **An ACCUSING kind, explicitly present.** The floor applies only when
-///    [`camerata_api_types::audit::FindingKind`] is present and NOT informational — i.e.
-///    `Defect` or `Deviation`. A `ConventionObserved` / `NoConvention` / `NotAssessed` row says
-///    something is FINE (or was not evaluated) and "always ship at `info` severity" by W3's
-///    design; raising one to `high` would both lie to the client and, via
-///    [`is_informational`]'s severity test, re-route it into an action bucket. An ABSENT kind
-///    is excluded too, under W3's standing honesty rule that nothing may silently default to
-///    `Defect` — the same reason [`clamp_deviation_severity`] refuses to assume an unkinded row
-///    is a deviation.
-/// 2. **A real location.** A finding with BOTH an empty `path` and `line == 0` established
-///    nothing concrete to rate, and [`downgrade_unlocated_above_informational`] (C4-R1) exists
-///    to force exactly that shape to `info`. Declining the floor there, rather than relying on
-///    running before C4-R1, makes the floor ORDER-INDEPENDENT with respect to that safety net:
-///    it cannot undo it from any position in the chain.
-///
-/// # Where this sits relative to the ceiling
-///
-/// Applied at the same export choke-points as the ceiling (the PDF's `build_report_json`
-/// partition, the xlsx/`findings.json` `partition_rows`), so every artifact agrees — but
-/// FIRST in that chain, so `max_severity` and the A5.2 deviation ceiling both still get the
-/// last word. The corpus-load gate (`camerata_rules::rules_with_invalid_severity_floor`)
-/// rejects a `min_severity` ranking above the same rule's `max_severity`, so the two can never
-/// state an unsatisfiable pair; with that guaranteed, floor-then-ceiling always lands inside
-/// `[min_severity, max_severity]`.
+#[cfg(test)]
 pub(crate) fn raise_to_rule_min_severity(
     severity: String,
     f: &Finding,
     corpus: Option<&camerata_rules::RuleSet>,
 ) -> String {
-    match &f.kind {
-        Some(kind) if !kind.is_informational() => {}
-        // Informational, or no kind at all — see precondition 1 above.
-        _ => return severity,
-    }
-    if f.path.is_empty() && f.line == 0 {
-        // Nothing concrete to rate — see precondition 2 above.
-        return severity;
-    }
-    let Some(rule) = corpus_rule_for(&f.rule_id, corpus) else {
-        return severity;
-    };
-    let Some(raw_floor) = rule.min_severity.as_deref() else {
-        return severity;
-    };
-    let floor = normalize_severity(raw_floor);
-    if severity_rank(&severity) > severity_rank(&floor) {
-        floor
-    } else {
-        severity
-    }
+    camerata_rules::severity_bounds::raise_to_min_severity(
+        severity,
+        f,
+        corpus_rule_for(&f.rule_id, corpus),
+    )
 }
 
-/// A5.2 (`docs/plans/2026-10-09_audit-findings-tracker.md`): the severity ceiling for a
-/// CONSISTENCY DEVIATION. The default a deviation may never exceed, absent an authored
-/// per-rule escape hatch — the owner's driver is FORWARD DRIFT COST ("consistency issues
-/// would be a problem moving forward with new features moreso than the existing code"), so
-/// the default cap sits at `medium`, and a rule whose decision domain genuinely compounds
-/// (where drift is expensive) raises it by AUTHORING `deviation_ceiling = "high"` in the
-/// corpus — an authoring-time structured field, never a prose-scanning runtime heuristic.
-pub(crate) const DEVIATION_DEFAULT_CEILING: &str = "medium";
-
-/// A5.2: clamp a [`camerata_api_types::audit::FindingKind::Deviation`] row's severity DOWN
-/// to its rule's authored `deviation_ceiling`, defaulting to
-/// [`DEVIATION_DEFAULT_CEILING`] when the rule authors none. A no-op for every other kind
-/// (a Defect under the same rule is untouched) and for a row with no kind at all (a
-/// legacy/unspecified row is NOT assumed to be a deviation). Like
-/// [`clamp_to_rule_max_severity`] this is a ceiling, never a floor — it cannot raise — and
-/// it is applied at the same export choke-points (the PDF's `build_report_json` partition
-/// and the xlsx/`findings.json` `partition_rows`), so every artifact agrees. The kind is a
-/// STRUCTURED field set at emission (`ai_audit::assign_deviation_kinds`); nothing here
-/// inspects prose.
+#[cfg(test)]
 pub(crate) fn clamp_deviation_severity(
     severity: String,
     f: &Finding,
     corpus: Option<&camerata_rules::RuleSet>,
 ) -> String {
-    if !matches!(
-        f.kind,
-        Some(camerata_api_types::audit::FindingKind::Deviation(_))
-    ) {
-        return severity;
-    }
-    let ceiling = corpus_rule_for(&f.rule_id, corpus)
-        .and_then(|r| r.deviation_ceiling.as_deref())
-        .map(normalize_severity)
-        .unwrap_or_else(|| DEVIATION_DEFAULT_CEILING.to_string());
-    if severity_rank(&severity) < severity_rank(&ceiling) {
-        ceiling
-    } else {
-        severity
-    }
-}
-
-/// C4-R1: the pipeline-wide null-location safety net. No finding above `informational` (any
-/// normalized severity other than `"info"`) may ship with BOTH an empty `path` AND `line == 0`
-/// — that combination means nothing concrete was ever established for the location this
-/// finding supposedly cites, which reads as "deterministic rule asserting a falsehood" rather
-/// than a real, actionable defect. This was discovered via a Supabase RLS checker over-firing
-/// at `critical` with an empty path/line-0 "last established" fact (see
-/// `camerata_checks::supabase::rls_checker`'s own C4-R1 fix, which now avoids triggering this
-/// at the source by citing a real policy location) — but the invariant is enforced HERE, at the
-/// single place every checker's findings funnel through before bucketing, so any OTHER
-/// checker/producer that ever ships an unlocated above-informational finding is caught too,
-/// not just this one rule.
-///
-/// Downgrades the SEVERITY only (to `"info"`, so `is_informational` routes it to the
-/// `informational` appendix exactly like any other info-tier finding) — never drops the
-/// finding. A client should still see "something was flagged, but the scan couldn't pin down
-/// where," rather than losing the observation entirely (the over-tell rule, applied here at the
-/// pipeline-integrity level rather than a triage-confidence one).
-///
-/// This is a property of the FINDING (an unlocated finding is not actionable at its stated
-/// severity), not of how one artifact presents it, so it lives in the shared bound chain
-/// ([`crate::severity_bounds::bounded_severity`]: floor, then this, then the ceilings) and every
-/// surface applies it: the live scan, the PDF, and the workbook / CSV / JSON / `findings.json`.
-/// Until 2026-10-21 only the PDF did, so one unlocated finding read `info` in the PDF and `high`
-/// everywhere else.
-pub(crate) fn downgrade_unlocated_above_informational(severity: String, f: &Finding) -> String {
-    if severity != "info" && f.path.is_empty() && f.line == 0 {
-        "info".to_string()
-    } else {
-        severity
-    }
+    camerata_rules::severity_bounds::clamp_deviation_severity(
+        severity,
+        f,
+        corpus_rule_for(&f.rule_id, corpus),
+    )
 }
 
 /// Real pluralization for a count + noun pair (`"1 site"` / `"3 sites"`), replacing the
@@ -2860,12 +2715,7 @@ pub(crate) fn is_action_row_missing_an_estimate(
 /// severity-based sort in this module; `xlsx_export::severity_rank` (same crate) delegates
 /// here rather than keeping its own copy, so the two artifacts' tie-breaks can never drift.
 pub(crate) fn severity_rank(sev: &str) -> u8 {
-    match sev {
-        "critical" => 0,
-        "high" => 1,
-        "medium" => 2,
-        _ => 3,
-    }
+    camerata_rules::severity_bounds::severity_rank(sev)
 }
 
 /// C4-P4 (residual defect 5): bucket rank for ordering the "Curated findings" section — action
