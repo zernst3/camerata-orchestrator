@@ -914,7 +914,7 @@ impl ScanReport {
     }
 
     /// THE sealing point (Pass-1 W1 — see
-    /// `docs/plans/2026-10-09_audit-findings-tracker.md`, requirement C1: "every row the
+    /// the audit findings tracker, requirement C1: "every row the
     /// engine produces reaches the reader; nothing may be added to the report after the point
     /// where the row set is final"). Consumes `self` — the ONLY way to produce a
     /// [`SealedReport`]. Call this exactly once, as the LAST step of a scan pipeline, strictly
@@ -4332,7 +4332,7 @@ mod tests {
         );
     }
 
-    /// W1 (docs/plans/2026-09-30_cycle2-queue-hardening.md): SUPABASE-FUNC-SEARCH-PATH-1 must
+    /// W1 (the cycle-2 queue-hardening notes): SUPABASE-FUNC-SEARCH-PATH-1 must
     /// arm for a PLAIN Postgres repo too — a SECURITY DEFINER function without a pinned
     /// search_path is exploitable regardless of whether the repo uses Supabase at all. Before
     /// the `extra_domains` fix, this repo (hand-written `.sql`, no `supabase/` layout, no

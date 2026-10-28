@@ -4178,7 +4178,7 @@ pub(super) enum OversightMode {
     #[default]
     Interactive,
     /// Dialogs are emitted to a triage backlog; answered later (routines).
-    // dead_code: the routines follow-on (docs/plans/2026-06-25_uow-3phase-redesign.md section 8)
+    // dead_code: the routines follow-on (the UoW three-phase redesign notes section 8)
     // is not built yet; phases already take an `OversightMode` so it can be wired in.
     #[allow(dead_code)]
     Batched,

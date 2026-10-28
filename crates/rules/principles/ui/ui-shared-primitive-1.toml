@@ -1,5 +1,5 @@
 id = "UI-SHARED-PRIMITIVE-1"
-version = 4
+version = 5
 title = "A UI mechanism such as a spinner, a retry control, an outside-click dismiss or a scroll lock is built once as a shared hook or component and used wherever it is needed, never hand-written again in each component"
 domain = "ui"
 layer = "universal"
@@ -35,7 +35,7 @@ url = "CORPUS_WORK_ORDER_CONSISTENCY_RULES.md"
 title = "Project policy: a UI mechanism is built once as a shared hook or component"
 
 [[sources]]
-url = "docs/OVERNIGHT_DECISIONS.md"
+url = "docs/decisions/2026-10-28_consistency_rules_scope.md"
 title = "Decision record: the repeated-code detector and the three rules built on it ship in the first release"
 
 [decision]

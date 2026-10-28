@@ -75,7 +75,7 @@ jobs:
 
       # Gate 3: SELF-MEASUREMENT (W6 / I1 + I2). Runs BEFORE the full suite, deliberately.
       #
-      # Every defect on docs/plans/2026-10-09_audit-findings-tracker.md was found by paying
+      # Every defect on the audit findings tracker was found by paying
       # for an external graded run against benchmark repos while this very suite stayed green.
       # The engine had elaborate honesty machinery and no self-measurement machinery. These
       # are the checks that would have caught them: artifact parity across the PDF, the

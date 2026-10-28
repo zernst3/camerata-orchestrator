@@ -139,5 +139,5 @@ the cockpit banner), strictly operator-only and never in a client artifact. Auth
 - **Layering / runtime stack:** `ARCHITECTURE.md`.
 - **Rule schema + authoring:** `RULE_AUTHORING.md`, `RULES_REFERENCE.md`.
 - **In-flight design:** `docs/design/` (e.g. the machine-readable exports, the ownership/unfixable
-  class, the corpus staleness check) and `docs/plans/` (the remediation sequence, W29).
-- **What happened recently / decisions:** `docs/OVERNIGHT_DECISIONS.md`, `docs/decisions/`.
+  class, the corpus staleness check). The remediation sequence and W29 plans are private working notes.
+- **What happened recently / decisions:** `docs/decisions/`.

@@ -2006,7 +2006,7 @@ fn openai_tool_to_anthropic(tool: &Value) -> Option<Value> {
 /// tool constraints. This is THE system prompt for every OpenRouter/API in-process loop — the
 /// path open-weight models arrive through — so it is the single highest-impact insertion point
 /// for the operating protocol. See the hardened rewrite 3.5 in
-/// `docs/plans/2026-07-05_prompt-hardening-and-governance-kernel.md`.
+/// the prompt-hardening and governance-kernel notes.
 ///
 /// `model` pins the kernel's per-tier addendum (`kernel_for(model)`); an empty model falls back
 /// to the base [`camerata_app_core::GOVERNANCE_KERNEL`] with no addendum.

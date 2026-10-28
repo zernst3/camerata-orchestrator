@@ -216,7 +216,7 @@ pub struct ProjectRuleset {
 
 /// One work-item TYPE in a project's hierarchy schema (e.g. `"Epic"`, `"Story"`, or a custom
 /// `"Spike"`). GitHub has no native "Epic"; a type is just a freetext name that the GitHub adapter
-/// maps to a `type:<name>` label. See `docs/plans/2026-06-30_epic-design-page.md` §3.
+/// maps to a `type:<name>` label. See the epic design page notes §3.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WorkType {
     /// The type name (e.g. `"Feature"`). Freetext; custom types use any non-empty string.
@@ -244,7 +244,7 @@ pub struct TypeRelation {
 /// parent→child nesting rules between them. Saved on the [`Project`] and portable (travels with
 /// export). It is effectively Camerata's own, per-project, relationship-aware alternative to GitHub
 /// Issue Types (per-project not org-locked, freetext + custom types, and it encodes hierarchy
-/// RELATIONS that Issue Types do not). See `docs/plans/2026-06-30_epic-design-page.md` §3.
+/// RELATIONS that Issue Types do not). See the epic design page notes §3.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct HierarchySchema {
     /// The work-item types available in this project (built-in palette + custom).
@@ -426,7 +426,7 @@ pub struct Project {
     /// portable (travels with the project export). Serde default seeds [`default_hierarchy_schema`]
     /// (the common Scrum ladder) for projects persisted before this field existed — no migration
     /// required; an explicitly-saved empty schema stays empty. See
-    /// `docs/plans/2026-06-30_epic-design-page.md`.
+    /// the epic design page notes.
     #[serde(default = "default_hierarchy_schema")]
     pub hierarchy_schema: HierarchySchema,
     /// The backend this project's AI calls use — the source of truth for EVERY project-scoped

@@ -16,7 +16,7 @@ pinned by a test, the test is named; where it is not, it is a measurement and wi
 
 Scope note: this document describes the schema and the engine. It deliberately does not
 snapshot the per-rule classification values of rules still on the owner's A5.7 reclassification
-hold (`docs/plans/2026-10-09_rule-kind-classification.md`). The `kind` distribution on
+hold (the rule-kind classification notes, private working notes). The `kind` distribution on
 2026-10-14 was `decision` 154, `defect` 152, `default_with_exceptions` 110,
 `decision_with_floor` 1. The authoritative count is always the TOMLs:
 `git grep -h '^kind = ' -- crates/rules/principles | sort | uniq -c`.
@@ -1489,7 +1489,7 @@ closed** by gates or by W13's failure routing.
 2. **`default = false` with `kind = "default_with_exceptions"` is NOT a contradiction.**
    The first edition of this document asserted it was, and recommended a build gate for it.
    **Both were wrong and are retracted** (owner's correction of 2026-10-11,
-   `docs/plans/2026-10-09_audit-findings-tracker.md`). `default` governs ONBOARDING ADOPTION
+   recorded in the audit findings tracker, private working notes). `default` governs ONBOARDING ADOPTION
    ("does this rule ship an adopted default option, or must the architect choose?") while
    `kind` governs OPTION SEMANTICS. They are orthogonal. `default = false` is a first-class
    documented authoring choice, typically paired with `opt_in_only = true` for a rule whose

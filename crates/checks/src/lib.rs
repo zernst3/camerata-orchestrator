@@ -126,7 +126,7 @@ pub mod strict_layering_call_checker;
 /// `docs/design/2026-07-27_ast-extractor-layer.md` §4 Group D.
 pub mod resource_lifecycle_checker;
 
-/// D2 (`docs/plans/2026-09-29_codebase-inspection-hardening.md`) — lexical (comment-aware)
+/// D2 (the codebase-inspection hardening notes) — lexical (comment-aware)
 /// detection of `SEC-NO-WEAK-TOKEN-RANDOMNESS-1`: a general-purpose PRNG (`Math.random`,
 /// Python's `random.*`, `rand()`, `new Random()`) feeding a value whose surrounding identifier
 /// marks it as a security credential (token/secret/password/session/nonce/CSRF/OTP/reset-code/
@@ -140,7 +140,7 @@ pub mod weak_randomness_checker;
 /// comments and strings only. See `crates/rules/principles/universal/sec-no-ai-reviewer-instructions-1.toml`.
 pub mod ai_reviewer_injection_checker;
 
-/// D3 (`docs/plans/2026-09-29_codebase-inspection-hardening.md`) — lexical (comment-aware)
+/// D3 (the codebase-inspection hardening notes) — lexical (comment-aware)
 /// detection of `SEC-NO-QUERY-GRAMMAR-INJECTION-1`: user-controlled data concatenated or
 /// interpolated into a query/filter GRAMMAR string — PostgREST `.or()`/`.filter()`, a raw SQL
 /// string issued via `.query()`/`.execute()`/`.raw()`, a MongoDB `$where` clause, or an LDAP

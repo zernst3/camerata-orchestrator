@@ -1,5 +1,5 @@
 id = "ARCH-DEAD-CODE-1"
-version = 3
+version = 4
 title = "Every source file is used: another file imports it, a framework or tool loads it by convention or a comment records how it is loaded"
 domain = "universal"
 layer = "universal"
@@ -36,7 +36,7 @@ url = "CORPUS_WORK_ORDER_CONSISTENCY_RULES.md"
 title = "Project policy: every source file is used"
 
 [[sources]]
-url = "docs/OVERNIGHT_DECISIONS.md"
+url = "docs/decisions/2026-10-28_consistency_rules_scope.md"
 title = "Decision record: the check works on whole files; unused individual exports are a separate rule"
 
 [decision]

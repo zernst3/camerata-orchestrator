@@ -1,6 +1,6 @@
 //! `GovernanceEventDto` — a pure-serde mirror of `camerata_persistence::GovernanceEvent`'s
 //! wire shape (Phase H3, the read path over the Phase H1/H2 governance-event audit
-//! trail; see `docs/plans/2026-07-01_backend-headless-core.md`).
+//! trail; see the backend headless-core notes).
 //!
 //! This crate must NOT depend on `camerata-persistence` (api-types is the
 //! dependency-free serde leaf every adapter builds on — see the crate-level docs), so

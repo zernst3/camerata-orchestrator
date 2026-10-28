@@ -5,7 +5,7 @@
 
 ## Context
 
-The Fable 5 audit (`docs/ARCH_AUDIT_2026-07-04_fable5-complete.md`) found four HTTP-layer
+The Fable 5 audit (private working notes) found four HTTP-layer
 correctness defects in the server crate. They are independent but share a theme: a request
 handler doing the wrong thing at the boundary (wrong status, a write on a read, a process-global
 mutation, or an unscoped lookup).

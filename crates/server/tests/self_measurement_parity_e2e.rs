@@ -4,7 +4,7 @@
 //! > these? The in-repo suite cannot see them by construction. The engine has elaborate
 //! > HONESTY machinery (ledgers, FailedPass) and no **SELF-MEASUREMENT** machinery.
 //! >
-//! > — the independent Fable review, `docs/plans/2026-10-09_audit-findings-tracker.md`
+//! > — the independent Fable review, the audit findings tracker
 //!
 //! Every defect on that tracker — architecture rules silenced, rows injected into the PDF
 //! only, `findings.json` contradicting itself, a merge losing rows, a whole tool tier never

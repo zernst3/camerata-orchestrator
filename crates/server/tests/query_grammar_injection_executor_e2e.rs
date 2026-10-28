@@ -2,7 +2,7 @@
 //! END-TO-END: the deterministic `SEC-NO-QUERY-GRAMMAR-INJECTION-1` checker
 //! (`QueryGrammarInjectionChecker`), wired into the brownfield SCAN, and proven to reach the
 //! CURATED finding set — AND proven NOT to be hedged/downgraded by a co-present, CLEAN Row
-//! Level Security setup. See `docs/plans/2026-09-29_codebase-inspection-hardening.md`, D3.
+//! Level Security setup. See the codebase-inspection hardening notes, D3.
 //!
 //! D3's problem statement: a PostgREST `.or()` filter built by string-interpolating
 //! request-derived input was previously written up as "validate and type the param" —

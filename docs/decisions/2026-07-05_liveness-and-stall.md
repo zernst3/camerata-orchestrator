@@ -5,7 +5,7 @@
 
 ## Context
 
-The Fable 5 audit (`docs/ARCH_AUDIT_2026-07-04_fable5-complete.md`) found two paired run-engine
+The Fable 5 audit (private working notes) found two paired run-engine
 liveness defects, stacked on Batch 3's bounce-loop / concurrency work (`fix/lifecycle-loop`,
 `2026-07-05_lifecycle-loop-and-concurrency.md`).
 

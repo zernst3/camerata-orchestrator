@@ -27,7 +27,7 @@
 //! sorted/ordered iteration). This type does not sort for you; it only guarantees that, given
 //! stable layer inputs, the rendered prefix is byte-stable and its length is reported exactly.
 //!
-//! Source: `docs/plans/2026-07-05_prompt-hardening-and-governance-kernel.md` (the phase-2
+//! Source: the prompt-hardening and governance-kernel notes (the phase-2
 //! cache-layering section) and the scratch design note folded into it.
 
 /// The separator between adjacent layers in a rendered prompt. A blank line keeps the layers

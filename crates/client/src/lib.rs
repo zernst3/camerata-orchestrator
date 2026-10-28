@@ -1,6 +1,6 @@
 //! `camerata-client` — a typed HTTP client over the running BFF's (`camerata-server`)
 //! `/api/*` routes, typed against `camerata-api-types` DTOs (Phase D of the DTO
-//! extraction, see `docs/plans/2026-07-01_backend-headless-core.md`).
+//! extraction, see the backend headless-core notes).
 //!
 //! This is the shared adapter both the MCP server (Phase E) and the HTTP CLI (Phase F)
 //! call — it depends ONLY on `camerata-api-types` (the pure-serde wire leaf) plus

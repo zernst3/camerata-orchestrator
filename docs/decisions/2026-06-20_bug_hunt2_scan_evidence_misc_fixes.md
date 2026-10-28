@@ -2,7 +2,7 @@
 
 **Date:** 2026-06-20
 **Branch:** fix2/scan-evidence-misc
-**Source audit:** `docs/audits/2026-06-20_waves45_bug_hunt.md`
+**Source audit:** the waves 4-5 bug-hunt audit (private working notes)
 **Files changed:**
 - `crates/server/src/ai_audit.rs`
 - `crates/server/src/evidence.rs`

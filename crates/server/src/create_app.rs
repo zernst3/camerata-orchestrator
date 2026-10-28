@@ -1,5 +1,5 @@
 //! `POST /api/apps` — Part 2 of the Rust-fullstack scaffolder
-//! (`docs/plans/2026-07-09_product-owner-head-vibe-mode.md`): make `camerata-scaffold`
+//! (the product-owner vibe-mode design notes): make `camerata-scaffold`
 //! (Part 1) invokable, and auto-create the GitHub repo for the scaffolded app.
 //!
 //! Flow ([`run_create_app`]):

@@ -1,7 +1,7 @@
 //! The orchestrator TURN: `handle_turn` drives one change-request round-trip for an
 //! EXISTING scaffolded project, end to end.
 //!
-//! See `docs/plans/2026-07-09_product-owner-head-vibe-mode.md`, the
+//! See the product-owner vibe-mode design notes, the
 //! "Architect-orchestrator design (decided 2026-07-10)" section. This module is the
 //! crate's own doc's promised "later phase": "The orchestrator LOOP that calls
 //! [`crate::classify`] on every proposed action, drives the fleet, and records the

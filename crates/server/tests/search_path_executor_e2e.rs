@@ -1,7 +1,7 @@
 #![allow(clippy::unwrap_used)]
 //! END-TO-END: the deterministic `SUPABASE-FUNC-SEARCH-PATH-1` checker, wired into the
 //! brownfield SCAN, and proven to reach the CURATED finding set. See
-//! `docs/plans/2026-09-29_codebase-inspection-hardening.md`, D1.
+//! the codebase-inspection hardening notes, D1.
 //!
 //! D1 was filed as a REGRESSION: a `SECURITY DEFINER` plpgsql function with no pinned
 //! `search_path` (next to a sibling that IS `SECURITY INVOKER` with `search_path` pinned)

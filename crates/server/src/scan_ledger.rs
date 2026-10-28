@@ -1598,7 +1598,7 @@ mod tests {
     }
 
     // ── Pass-1 W2 (A5.4): "judged not applicable" is its own outcome ───────────────────────
-    // (`docs/plans/2026-10-09_audit-findings-tracker.md`)
+    // (the audit findings tracker)
 
     /// req_a5_4: a rule recorded with `ran && findings_emitted == 0` AFTER
     /// `note_not_applicable_rule` was queued for it is NEVER verified-clean / healthy — this is
@@ -1727,7 +1727,7 @@ mod tests {
     }
 
     // ── req_c1: additions are accounted exactly as deletions already are ───────────────────
-    // (docs/plans/2026-10-09_audit-findings-tracker.md, requirement C1 — the ledger used to be
+    // (the audit findings tracker, requirement C1 — the ledger used to be
     // able to represent ONLY a stage that shrinks the row set; a stage that APPENDS findings
     // (the scan-time external-tool preview merge, the evidence-of-violation gate) had no bucket
     // at all, so the two real defects this fixes ran entirely outside the ledger's view. These

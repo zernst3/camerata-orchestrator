@@ -1,5 +1,5 @@
 //! `camerata-api-types` — the pure-serde wire-contract leaf crate (Phase A of the DTO
-//! extraction, see `docs/plans/2026-07-01_backend-headless-core.md`).
+//! extraction, see the backend headless-core notes).
 //!
 //! This crate holds the DTO/domain-serde shapes shared across the backend layers, with
 //! NO dependency on any other camerata-* crate (only `serde`, `serde_json`, `chrono`,
