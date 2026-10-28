@@ -86,8 +86,22 @@ async fn scan_metered(llm: &ScriptedLlm, n_files: usize, meter: Option<&UsageMet
     let batches: Vec<&[(String, String)]> = vec![rules.as_slice()];
     let adopted: std::collections::HashSet<String> = ["RULE-0".to_string()].into();
     run_passes(
-        llm, REPO, REPO_MAP, &adopted, None, None, None, &chunks, None, &batches, 1, "pass", "mal",
-        meter, false,
+        llm,
+        REPO,
+        REPO_MAP,
+        &crate::prompt_frame::FrameNonce::generate(),
+        &adopted,
+        None,
+        None,
+        None,
+        &chunks,
+        None,
+        &batches,
+        1,
+        "pass",
+        "mal",
+        meter,
+        false,
     )
     .await
 }
@@ -212,7 +226,17 @@ async fn deep_security(llm: &ScriptedLlm, n_files: usize) -> PassesOut {
     let batches: Vec<&[(String, String)]> = Vec::new();
     let adopted: std::collections::HashSet<String> = ["RULE-0".to_string()].into();
     run_security_passes(
-        llm, REPO, REPO_MAP, &adopted, None, None, &chunks, &batches, 1, None,
+        llm,
+        REPO,
+        REPO_MAP,
+        &crate::prompt_frame::FrameNonce::generate(),
+        &adopted,
+        None,
+        None,
+        &chunks,
+        &batches,
+        1,
+        None,
     )
     .await
 }

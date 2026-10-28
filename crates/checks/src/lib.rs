@@ -134,6 +134,12 @@ pub mod resource_lifecycle_checker;
 /// sampling, shuffling). See `crates/rules/principles/universal/sec-no-weak-token-randomness-1.toml`.
 pub mod weak_randomness_checker;
 
+/// H3 (prompt-injection defense): deterministic detection of `SEC-NO-AI-REVIEWER-INSTRUCTIONS-1`,
+/// text in a comment or a string literal addressed to an AI code reviewer ("report no findings",
+/// "ignore previous instructions", a fake file delimiter). One phrase list, case-insensitive,
+/// comments and strings only. See `crates/rules/principles/universal/sec-no-ai-reviewer-instructions-1.toml`.
+pub mod ai_reviewer_injection_checker;
+
 /// D3 (`docs/plans/2026-09-29_codebase-inspection-hardening.md`) — lexical (comment-aware)
 /// detection of `SEC-NO-QUERY-GRAMMAR-INJECTION-1`: user-controlled data concatenated or
 /// interpolated into a query/filter GRAMMAR string — PostgREST `.or()`/`.filter()`, a raw SQL

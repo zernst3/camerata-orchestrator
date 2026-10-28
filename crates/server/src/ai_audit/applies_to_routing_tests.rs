@@ -115,11 +115,15 @@ fn sent_pairs(rec: &Recorder) -> BTreeSet<(Vec<String>, String)> {
 fn pairs_from_prompts(prompts: &[String]) -> BTreeSet<(Vec<String>, String)> {
     let mut out = BTreeSet::new();
     for prompt in prompts {
+        // A file's frame opens with `<<<UNTRUSTED <token> "<path>">>>`; the repo map's frame is
+        // labelled "repo map" and lists every file, so it is not a chunk member.
         let paths: Vec<String> = prompt
             .lines()
-            .filter_map(|l| l.strip_prefix("// ===== FILE: "))
-            .filter_map(|l| l.strip_suffix(" ====="))
-            .map(str::to_string)
+            .filter(|l| l.starts_with("<<<UNTRUSTED "))
+            .filter_map(|l| {
+                let label = l.split_once(" \"")?.1.strip_suffix("\">>>")?;
+                (label != "repo map").then(|| label.to_string())
+            })
             .collect();
         if paths.is_empty() {
             continue;
@@ -680,6 +684,7 @@ async fn run_routed_batch_default_off(
         &rules,
         &plan,
         "",
+        &crate::prompt_frame::FrameNonce::generate(),
         &std::collections::HashSet::new(),
         None,
         None,
