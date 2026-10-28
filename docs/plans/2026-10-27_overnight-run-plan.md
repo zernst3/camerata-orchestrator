@@ -89,6 +89,33 @@ H. By 08:30: morning summary at the top of `docs/OVERNIGHT_DECISIONS.md`; the PR
 
 ## Status log (newest first)
 
+- 07:20: GATE GREEN on client-lock, citations, the comma sweep, the corpus-digest speedup and the fake-CLI warm-up: 9,694 passed, 0 failed; path check clean; pushed.
+- 06:55: gate on client-lock + citations + comma sweep + speedup: 9,691 passed, 3 failed, not
+  pushed (the local sample template copy, and two llm timing tests). Root cause of the timing
+  flakes found: macOS security-checks a newly written executable on its first run (2.2s
+  measured, then instant), and every test writes a fresh fake claude. The test helper now runs
+  each fake once with an exit-at-once switch, so the timed run measures Camerata (llm 260 of 260,
+  three runs under load). The gate script now runs the personal-path check and refreshes the
+  local sample template before testing. Gate re-running.
+- 06:40: false-negative batch C (exporters and dependency audit: whole-repo AI failure disclosed, merged sites shown in the PDF, severity adjustments shown, CVSS vectors parsed, 'no known vulnerable dependencies' only when the audit ran) started; its prerequisites are merged.
+- 06:35: GATE GREEN on gap 4 + gap 9: 9,616 passed, 0 failed; pushed. Merged client-lock,
+  citations, the comma sweep and the corpus-digest speedup. Found and fixed during the merge:
+  `camerata repeatability` (from citations) ran two full AI passes over client code with no
+  client-lock check; it now refuses the cli backend and non-Anthropic models unless --internal,
+  before any estimate or model call (test first). GitHub CI failed on the last two pushes: the
+  personal-path gate caught a literal home-path prefix in a PR-planner test (fixed in 5679dedc;
+  the strict frontier job is informational). The local gate script will run the path check
+  before it pushes. Full gate running; injection merge and findings-to-units (2c) builders
+  started.
+- 06:12: citations (H5) merged and fixed in its worktree (llm, server, cli 3,915 passed): keyword-matched citations labelled a related standard, camerata repeatability, temperature 0 on Haiku 4.5 documented, opt-in consensus. Merges after the running gate with client-lock, the comma sweep and the speedup.
+- 06:05: the 24-minute gate test now takes 3.7s: every report build re-hashed all 440 rules to stamp the corpus version (about 1,800 times in that test). RuleSet now caches the digest, cleared by push, its only mutator (fields are private; checked). A real speedup for every report build, not only tests. Merges after the running gate.
+- 05:58: comma restores done: 39 put back in 34 rules (net 848 serial commas removed), punctuation-only re-checked, the corpus test reads a final verb item as a clause join. Merges after the running gate with client-lock.
+- 05:45: client-lock follow-ups done: investigation, branch-update and PR-feedback runs with no
+  active project are refused; the chat refuses the cli backend on a client engagement (no
+  automatic switch exists, so it refuses rather than reroutes). Merges after the running gate.
+  Needs Zach: the chat backend defaults to cli, and every saved project becomes a client
+  engagement on upgrade, so after this lands the chat is refused until he switches the chat
+  backend to the API or turns the client-engagement flag off for his own projects.
 - 05:36: GATE GREEN on corpus cleanup, coverage, PR planner and PDF polish: 9,542 passed, 0 failed; pushed. Merged gap 4 (reviewer contract) and gap 9 (investigation decisions); workspace clippy clean; gate next.
 - 05:40: Fable read all 887 comma removals: list removals clean; about 35 verb-phrase removals restored for clarity (a comma that closed a clause or kept 'and + verb' from attaching to the wrong subject). Builder applying them.
 - 05:30: serial-comma sweep done: 887 commas removed in 321 rules (punctuation only, checked by a before/after parse), a corpus test now blocks the list pattern; 114 clause joins and asides kept. Fable spot-checking the prose before merge.
