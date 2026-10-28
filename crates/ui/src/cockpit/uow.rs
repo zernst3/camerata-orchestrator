@@ -2271,6 +2271,10 @@ pub(super) struct DecisionRecordView {
     pub outcome: DecisionOutcomeView,
     #[serde(default)]
     pub provenance: RevisionProvenanceView,
+    /// One-line option descriptions (recommended or chosen first, then the alternatives).
+    /// Carried so posting the whole list back does not erase them.
+    #[serde(default)]
+    pub option_descriptions: Vec<String>,
 }
 
 /// The `GET /api/uow/:id/investigation` envelope.
@@ -7176,13 +7180,28 @@ pub(super) fn DecisionsReviewPanel(
             // ── Decisions ──────────────────────────────────────────────────────
             div { class: "uow-decisions",
                 p { class: "uow-field-label", "Decisions ({decisions.len()})" }
+                p { class: "section-hint",
+                    "The investigation proposes decisions. Approve, change or reject each one. Development starts only when every decision is approved."
+                }
                 if decisions.is_empty() {
                     p { class: "section-hint",
                         "No decisions recorded yet. The development gate requires at least one APPROVED decision. Add one below."
                     }
                 }
                 for (i, d) in decisions.iter().enumerate() {
-                    {
+                    if super::decision_cards::proposed_decision_vm(d).is_some() {
+                        super::decision_cards::ProposedDecisionCard {
+                            // Keyed on the rationale too, so a new pass that changes the
+                            // recommendation remounts the card with a fresh preselection.
+                            key: "{d.artifact_id}|{d.rationale}",
+                            story_id: story_id.clone(),
+                            decisions: decisions.clone(),
+                            index: i,
+                            busy,
+                            local_refresh,
+                        }
+                    } else {
+                        {
                         let (olabel, ocss) = (d.outcome.label(), d.outcome.css());
                         let decisions_for_approve = decisions.clone();
                         let decisions_for_reject = decisions.clone();
@@ -7194,15 +7213,29 @@ pub(super) fn DecisionsReviewPanel(
                                     span { class: "uow-decision-label", "{d.label}" }
                                     span { class: "wi-state {ocss}", "{olabel}" }
                                 }
-                                if !d.question.is_empty() {
-                                    p { class: "uow-decision-q", "Q: {d.question}" }
-                                }
-                                if !d.rationale.is_empty() {
-                                    p { class: "uow-decision-rationale", "{d.rationale}" }
-                                }
+                                // A decision the architect has ruled on collapses to its one-line
+                                // outcome; the question and reasoning stay one click away.
                                 if let DecisionOutcomeView::Rejected { reason } = &d.outcome {
                                     if !reason.is_empty() {
                                         p { class: "uow-decision-reject-reason", "Rejected: {reason}" }
+                                    }
+                                }
+                                if matches!(d.outcome, DecisionOutcomeView::Pending) {
+                                    if !d.question.is_empty() {
+                                        p { class: "uow-decision-q", "Q: {d.question}" }
+                                    }
+                                    if !d.rationale.is_empty() {
+                                        p { class: "uow-decision-rationale", "{d.rationale}" }
+                                    }
+                                } else if !d.question.is_empty() || !d.rationale.is_empty() {
+                                    details { class: "uow-decision-details",
+                                        summary { "Details" }
+                                        if !d.question.is_empty() {
+                                            p { class: "uow-decision-q", "Q: {d.question}" }
+                                        }
+                                        if !d.rationale.is_empty() {
+                                            p { class: "uow-decision-rationale", "{d.rationale}" }
+                                        }
                                     }
                                 }
                                 div { class: "uow-decision-actions",
@@ -7265,6 +7298,7 @@ pub(super) fn DecisionsReviewPanel(
                                 }
                             }
                         }
+                        }
                     }
                 }
 
@@ -7314,6 +7348,7 @@ pub(super) fn DecisionsReviewPanel(
                                     question: new_question().trim().to_string(),
                                     rationale: new_rationale().trim().to_string(),
                                     alternatives_considered: Vec::new(),
+                                    option_descriptions: Vec::new(),
                                     outcome: DecisionOutcomeView::Approved,
                                     // Stamp a real provenance: an empty {actor:"",at:""} fails to
                                     // deserialize server-side (actor enum + DateTime), which 422'd
@@ -7435,23 +7470,8 @@ pub(super) fn DecisionsReviewPanel(
 /// kebab-case slug for a decision label (alnum runs → hyphens, lowercased, trimmed).
 /// Mirrors the `"{story_id}/decision/{slug}"` artifact-id convention. Pure + testable.
 pub(super) fn slugify_decision_label(label: &str) -> String {
-    let mut out = String::with_capacity(label.len());
-    let mut prev_dash = false;
-    for ch in label.chars() {
-        if ch.is_ascii_alphanumeric() {
-            out.push(ch.to_ascii_lowercase());
-            prev_dash = false;
-        } else if !prev_dash && !out.is_empty() {
-            out.push('-');
-            prev_dash = true;
-        }
-    }
-    let trimmed = out.trim_matches('-').to_string();
-    if trimmed.is_empty() {
-        "decision".to_string()
-    } else {
-        trimmed
-    }
+    // One implementation, shared with the server (which files the AI proposals).
+    camerata_worktracker::investigation::slugify_decision_label(label)
 }
 
 /// Whether the note-review requirement is satisfied for the readiness hint. When the
@@ -8217,6 +8237,7 @@ mod bff_tests {
             question: String::new(),
             rationale: rationale.to_string(),
             alternatives_considered: vec![],
+            option_descriptions: Vec::new(),
             outcome,
             provenance: RevisionProvenanceView::default(),
         };
@@ -9366,6 +9387,7 @@ mod bff_tests {
             question: "Which backend?".into(),
             rationale: "fast".into(),
             alternatives_considered: vec!["sql".into()],
+            option_descriptions: Vec::new(),
             outcome: DecisionOutcomeView::Approved,
             provenance: RevisionProvenanceView::default(),
         }];

@@ -3378,6 +3378,7 @@ fn DocsView() -> Element {
     }
 }
 
+mod decision_cards;
 mod freshness;
 pub mod live_run;
 mod palette;

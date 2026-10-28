@@ -22851,6 +22851,7 @@ mod tests {
             alternatives_considered: vec![],
             outcome: DecisionOutcome::Approved,
             provenance: RevisionProvenance::new(RevisionActor::Ai, chrono::Utc::now()),
+            option_descriptions: vec![],
         };
         uow.set_decisions(story, vec![decision]);
         uow.begin_investigation(story).expect("→ Investigating");
