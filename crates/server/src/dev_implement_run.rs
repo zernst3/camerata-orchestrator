@@ -132,7 +132,9 @@ pub(crate) fn read_memory_proposals(session_dir: &std::path::Path) -> Vec<Memory
 /// `tracing::warn!`-logged and swallowed, never surfacing to the run.
 /// Why a governed dev run must not start on `project` with `model` under the client-engagement
 /// lock ([`crate::client_lock`]), or `None` when it may: the backend and model must pass the
-/// lock.
+/// lock, and since the dev loop builds and tests the repository (its layer-2 checks execute the
+/// repository's own code), a client engagement also needs the operator's opt-in to run client
+/// tooling.
 pub(crate) fn dev_loop_client_lock_refusal(
     project: &crate::project::Project,
     model: &str,
@@ -145,6 +147,17 @@ pub(crate) fn dev_loop_client_lock_refusal(
             "{why} In this project's Settings, set the backend to API and the model to a Claude \
              model, or turn off Client engagement if this is your own development."
         ));
+    }
+    if !crate::client_lock::client_tooling_allowed(
+        project.client_engagement,
+        project.client_tooling_opt_in,
+    ) {
+        return Some(
+            "This is a client engagement, and the dev loop builds and tests the client's code \
+             (its checks run the repository's own build, tests and scripts). Opt in to running \
+             client tooling in this project's Settings to allow it. Nothing was run."
+                .to_string(),
+        );
     }
     None
 }
@@ -1244,7 +1257,9 @@ pub async fn execute_dev_implement_run(
     let run_project = project_id.as_deref().and_then(|id| projects.get(id));
     let backend = run_project.as_ref().map(|p| p.backend).unwrap_or_default();
     // The client-engagement lock (`crate::client_lock`): a client engagement's dev loop runs only
-    // on the Anthropic API with an Anthropic model.
+    // on the Anthropic API with an Anthropic model, and because it builds and tests the client's
+    // code (the layer-2 checks below run the repository's own `cargo test`, `npm` scripts and
+    // `.camerata/checks.toml` commands), only with the operator's opt-in to run client tooling.
     if let Some(why) = run_project
         .as_ref()
         .and_then(|p| dev_loop_client_lock_refusal(p, &model))
@@ -2165,6 +2180,18 @@ mod tests {
         )
         .expect("an OpenRouter model is refused");
         assert!(or.contains("`deepseek/deepseek-chat`"), "{or}");
+    }
+
+    #[test]
+    fn a_client_dev_loop_needs_the_tooling_opt_in_because_it_runs_the_client_code() {
+        let why =
+            dev_loop_client_lock_refusal(&lock_project("api", true, false), "claude-sonnet-5")
+                .expect("no opt-in: refused");
+        assert!(why.contains("Opt in to running client tooling"), "{why}");
+        assert_eq!(
+            dev_loop_client_lock_refusal(&lock_project("api", true, true), "claude-sonnet-5"),
+            None
+        );
     }
 
     #[test]

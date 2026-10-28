@@ -1446,6 +1446,17 @@ pub(crate) fn tool_coverage_disclosures(notes: &[crate::onboard::CoverageNote]) 
             } else if tool == crate::FIREBASE_SCOPE_COVERAGE_TOOL {
                 // Not a tool either: the one written statement of what Firebase coverage is.
                 crate::FIREBASE_SCOPE_SENTENCE.to_string()
+            } else if tool == crate::scan_tools::CLIENT_TOOLING_NOTE_TOOL {
+                // Not a tool either, and not a failure: the client's own tooling RAN, with the
+                // operator's opt-in. The note's own (client-voice) text says so.
+                client_tooling_text(notes, tool)
+            } else if notes
+                .iter()
+                .any(|n| n.tool == tool && crate::scan_tools::is_client_tooling_skip(n))
+            {
+                // Withheld on purpose (a client engagement with no opt-in), not a tool failure:
+                // the note's own text names the step and why.
+                client_tooling_text(notes, tool)
             } else if tool == crate::RULE_CORPUS_COVERAGE_TOOL {
                 // Also not a tool name: these notes mean "a rule file in the library could
                 // not be read, so that rule was never applied".
@@ -1462,6 +1473,20 @@ pub(crate) fn tool_coverage_disclosures(notes: &[crate::onboard::CoverageNote]) 
             }
         })
         .collect()
+}
+
+/// The client-tooling notes for `tool`, in order and deduplicated, as one disclosure line.
+fn client_tooling_text(notes: &[crate::onboard::CoverageNote], tool: &str) -> String {
+    let mut seen: Vec<&str> = Vec::new();
+    for n in notes.iter().filter(|n| n.tool == tool) {
+        if (tool == crate::scan_tools::CLIENT_TOOLING_NOTE_TOOL
+            || crate::scan_tools::is_client_tooling_skip(n))
+            && !seen.contains(&n.message.as_str())
+        {
+            seen.push(n.message.as_str());
+        }
+    }
+    seen.join(" ")
 }
 
 fn failed_pass_disclosures(failed_passes: &[crate::ai_audit::FailedPass]) -> Vec<String> {
@@ -5073,6 +5098,34 @@ pub async fn compile_pdf_from_data(data_json: &str) -> anyhow::Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
 
+    /// H2: a client-tooling note is not a tool failure. The opt-in note and the skip note each
+    /// reach the report in their own words, never as "the ... checks did not fully run".
+    #[test]
+    fn client_tooling_notes_reach_the_report_in_their_own_words() {
+        let notes = vec![
+            crate::onboard::CoverageNote {
+                tool: "clippy".to_string(),
+                message: crate::scan_tools::client_tooling_skipped_message("cargo clippy", 2),
+            },
+            crate::onboard::CoverageNote {
+                tool: crate::scan_tools::CLIENT_TOOLING_NOTE_TOOL.to_string(),
+                message: "cargo clippy ran with the operator's opt-in to run this repository's \
+                          own tooling."
+                    .to_string(),
+            },
+        ];
+        let lines = tool_coverage_disclosures(&notes);
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert!(lines.iter().any(|l| l.contains("was not run")), "{lines:?}");
+        assert!(
+            lines.iter().any(|l| l.contains("opt-in to run")),
+            "{lines:?}"
+        );
+        assert!(
+            !lines.iter().any(|l| l.contains("did not fully run")),
+            "{lines:?}"
+        );
+    }
 
     use super::*;
     use crate::onboard::{AuditedRef, CoverageNote, LanguageVolume, ScanProvenance};

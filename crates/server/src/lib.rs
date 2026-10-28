@@ -6076,7 +6076,15 @@ async fn onboard_audit(
         // Gated on the deterministic selection — deselecting deterministic scans skips it too.
         // (No job here, so no live deterministic progress on the synchronous path.)
         if run_deterministic {
-            merge_scan_preview(&mut report, &sources, &preview_rules, corpus.as_ref(), None).await;
+            merge_scan_preview(
+                &mut report,
+                &sources,
+                &preview_rules,
+                corpus.as_ref(),
+                None,
+                project_client_tooling(active_project.as_ref()),
+            )
+            .await;
         }
 
         // ── Always-on dep-audit (osv-scanner) — runs LAST, hard-bounded ──────────────
@@ -6682,6 +6690,9 @@ pub async fn merge_scan_preview(
     // on the synchronous path. When set, each preview tool registers + streams running → done
     // with its findings count, mirroring the floor's progress.
     job: Option<(&crate::jobs::JobStore, &str)>,
+    // Whether a preview tool that executes the repository's code (`cargo clippy`) may run: the
+    // engagement's client-tooling decision (see `crate::client_lock`).
+    tooling: crate::client_lock::ClientTooling,
 ) {
     // Every tool NAME this call actually attempted to invoke, across every repo in `sources`
     // (regardless of whether each attempt then succeeded or failed) — fed to
@@ -6728,6 +6739,7 @@ pub async fn merge_scan_preview(
                     &lookup,
                     Some(&present_languages),
                     job,
+                    tooling,
                 )
                 .await;
                 tools_attempted.extend(attempted);
@@ -7134,6 +7146,7 @@ pub(crate) async fn start_audit_job(
     let (sources, mut notes) = resolve_local_sources(&state, &repos);
     notes.extend(options.extra_notes);
     let delta = options.delta;
+    let client_tooling = project_client_tooling(active_project.as_ref());
     // Moved into the spawned task, which records the engagement in the scan's ledger.
     let engagement_project = active_project.clone();
     let job_id = state.jobs.create("audit", project_id.clone());
@@ -7290,6 +7303,7 @@ pub(crate) async fn start_audit_job(
                     &preview_rules,
                     corpus.as_ref(),
                     Some((&body_jobs, &body_jid)),
+                    client_tooling,
                 )
                 .await;
             }
@@ -26275,7 +26289,15 @@ mod tests {
         )
         .await;
         report.excluded_mechanical_rules = excluded_mechanical;
-        merge_scan_preview(&mut report, &sources, &preview_rules, Some(&corpus), None).await;
+        merge_scan_preview(
+            &mut report,
+            &sources,
+            &preview_rules,
+            Some(&corpus),
+            None,
+            crate::client_lock::ClientTooling::INTERNAL,
+        )
+        .await;
 
         let entry = report
             .ledger

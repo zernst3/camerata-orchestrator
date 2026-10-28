@@ -809,6 +809,7 @@ pub async fn run_inspect_pipeline_with(
         &preview_rules,
         corpus.as_ref(),
         None,
+        args.client_tooling(),
     )
     .await;
     // Pass-1 W1 seal fix: one ledger stage entry for this loop's net additions — mirrors
