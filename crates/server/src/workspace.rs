@@ -1115,7 +1115,13 @@ pub async fn resolve_uow_worktree(
     workspace_root: Option<&str>,
     repo: &str,
     branch: &str,
+    project_repos: Option<&[String]>,
 ) -> Option<PathBuf> {
+    // A repository outside the active project gets no worktree, whichever path asked for it
+    // (run, multi-repo setup, Ship, PR flows): the same check as the run and the branch record.
+    if !crate::run_target::repo_in_project(repo, project_repos) {
+        return None;
+    }
     let clone = resolve_repo_dir(override_path, workspace_root, repo)?;
     if !is_git_repo(&clone) {
         return None;
@@ -2960,6 +2966,7 @@ mod tests {
             None,
             "acme/api",
             "camerata/story-1",
+            None,
         )
         .await
         .expect("resolves a worktree from the override clone");
@@ -2970,9 +2977,57 @@ mod tests {
         assert_eq!(branch_of(&resolved).await, "camerata/story-1");
 
         // An unresolved repo (no override, no workspace root) yields None.
-        let none = resolve_uow_worktree(None, None, "acme/api", "b").await;
+        let none = resolve_uow_worktree(None, None, "acme/api", "b", None).await;
         assert!(none.is_none());
 
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// `resolve_uow_worktree` refuses a repository outside the active project's list and makes
+    /// no worktree for it; a listed repository (any letter case) and a project with no list
+    /// resolve as before.
+    #[tokio::test]
+    async fn resolve_uow_worktree_refuses_a_repo_outside_the_active_project() {
+        let base = std::env::temp_dir().join(format!("cam-wt-member-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let clone = base.join("my-checkout");
+        init_repo_with_commit(&clone);
+        let override_path = clone.to_string_lossy().into_owned();
+        let project = vec!["other/web".to_string(), "other/db".to_string()];
+
+        let refused = resolve_uow_worktree(
+            Some(&override_path),
+            None,
+            "acme/api",
+            "camerata/story-1",
+            Some(&project),
+        )
+        .await;
+        assert!(refused.is_none(), "{refused:?}");
+        assert!(
+            !worktrees_root(&clone).exists(),
+            "a refused repo gets no worktree directory"
+        );
+
+        let own = vec!["Acme/API".to_string()];
+        assert!(resolve_uow_worktree(
+            Some(&override_path),
+            None,
+            "acme/api",
+            "camerata/story-1",
+            Some(&own),
+        )
+        .await
+        .is_some());
+        assert!(resolve_uow_worktree(
+            Some(&override_path),
+            None,
+            "acme/api",
+            "camerata/story-2",
+            Some(&[]),
+        )
+        .await
+        .is_some());
         let _ = std::fs::remove_dir_all(&base);
     }
 

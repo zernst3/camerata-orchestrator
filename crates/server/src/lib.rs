@@ -2518,6 +2518,7 @@ async fn spawn_brownfield_dev_run(
                     workspace_root.as_deref(),
                     &scope.repo,
                     &scope_branch,
+                    active_project_repos(state).as_deref(),
                 )
                 .await
                 {
@@ -14159,6 +14160,12 @@ async fn uow_set_intake_context(
     Json(state.uow.set_intake_context(&story_id, &req.context))
 }
 
+/// The active project's repositories (`None` with no active project), for the membership
+/// check every worktree resolution goes through.
+pub(crate) fn active_project_repos(state: &AppState) -> Option<Vec<String>> {
+    state.projects.active().map(|p| p.repos)
+}
+
 #[derive(serde::Deserialize)]
 struct UowIntakeReposReq {
     /// The full in-scope repo/branch set (replaces the prior scope). Out-of-scope repos
@@ -14181,6 +14188,26 @@ async fn uow_set_intake_repos(
             if let Err(reason) = camerata_api_types::uow::validate_branch_name(name) {
                 return invalid_branch_response(format!("Repo `{}`: {reason}", scope.repo));
             }
+        }
+    }
+    // Every in-scope repository must belong to the active project (the same check as the run
+    // and the branch record), so a scope cannot pull another project's clones into this unit.
+    let project_repos = active_project_repos(&state);
+    for scope in &req.repos {
+        if let Some(reason) = crate::run_target::scope_membership_refusal(
+            &story_id,
+            &scope.repo,
+            project_repos.as_deref(),
+        ) {
+            return (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({
+                    "error": "repository not in the active project",
+                    "reason": reason,
+                    "story_id": story_id,
+                })),
+            )
+                .into_response();
         }
     }
     Json(state.uow.set_intake_repos(&story_id, req.repos)).into_response()
@@ -14277,6 +14304,7 @@ async fn uow_intake_ship(
                 workspace_root.as_deref(),
                 &scope.repo,
                 &scope_branch,
+                active_project_repos(&state).as_deref(),
             )
             .await
             {
@@ -14403,6 +14431,7 @@ async fn uow_intake_ship(
         workspace_root.as_deref(),
         &repo,
         &branch,
+        active_project_repos(&state).as_deref(),
     )
     .await
     else {
@@ -15716,6 +15745,7 @@ async fn uow_update_branch(
         workspace_root.as_deref(),
         &repo,
         &target_branch,
+        active_project_repos(&state).as_deref(),
     )
     .await
     else {
@@ -15841,6 +15871,7 @@ async fn uow_pr_open(
         workspace_root.as_deref(),
         &repo,
         &branch,
+        active_project_repos(&state).as_deref(),
     )
     .await
     else {
@@ -16053,6 +16084,7 @@ async fn uow_pr_resolve(
         workspace_root.as_deref(),
         &repo,
         &target_branch,
+        active_project_repos(&state).as_deref(),
     )
     .await
     else {

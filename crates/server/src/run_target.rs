@@ -201,26 +201,66 @@ pub(crate) fn record_run_branch(store: &crate::uow::UowStore, story_id: &str, br
     store.append_history(story_id, "branch", &text);
 }
 
+/// Is `repo` allowed in the active project? True when the project lists no repositories (it
+/// imposes no list) or when `repo` is one of them. Names compare case-insensitively, as the
+/// hosting service treats them. The ONE membership test: the run, the branch record, the
+/// Intake scope and the worktree resolver all go through it.
+pub(crate) fn repo_in_project(repo: &str, project_repos: Option<&[String]>) -> bool {
+    match project_repos.filter(|r| !r.is_empty()) {
+        None => true,
+        Some(list) => list.iter().any(|r| r.eq_ignore_ascii_case(repo)),
+    }
+}
+
+/// The refusal text when `repo` is not in the active project, or `None` when it is. `subject`
+/// says what is being refused (it opens the sentence).
+pub(crate) fn repo_membership_refusal(
+    subject: &str,
+    repo: &str,
+    story_id: &str,
+    project_repos: Option<&[String]>,
+) -> Option<String> {
+    if repo_in_project(repo, project_repos) {
+        return None;
+    }
+    let list = project_repos.unwrap_or_default().join(", ");
+    Some(format!(
+        "{subject} `{repo}`, which is not one of the active project's repositories ({list}). \
+         Switch to the project that owns it, or add `{repo}` to this project, then try again. \
+         (Unit `{story_id}`.)"
+    ))
+}
+
 /// Why a unit of work may not run (or have a branch recorded) in the active project: its
 /// repository, named in its id (`OWNER/REPO#N`), is not one of the project's repositories.
-/// `None` when the unit belongs to the project, when the project lists no repositories (it
-/// imposes no list) or when the id names no repository (callers refuse that on their own).
-/// Repository names compare case-insensitively, as the hosting service treats them.
+/// `None` when the unit belongs to the project, when the project lists no repositories or when
+/// the id names no repository (callers refuse that on their own).
 pub(crate) fn project_membership_refusal(
     story_id: &str,
     project_repos: Option<&[String]>,
 ) -> Option<String> {
-    let project_repos = project_repos.filter(|r| !r.is_empty())?;
     let (repo, _) = story_id.rsplit_once('#')?;
-    if project_repos.iter().any(|r| r.eq_ignore_ascii_case(repo)) {
-        return None;
-    }
-    Some(format!(
-        "This unit of work belongs to `{repo}`, which is not one of the active project's \
-         repositories ({}). Switch to the project that owns it, or add `{repo}` to this \
-         project, then try again. (Unit `{story_id}`.)",
-        project_repos.join(", ")
-    ))
+    repo_membership_refusal(
+        "This unit of work belongs to",
+        repo,
+        story_id,
+        project_repos,
+    )
+}
+
+/// The same check for a repository in the unit's Intake scope (multi-repo work): a scope
+/// naming a repository outside the active project is refused.
+pub(crate) fn scope_membership_refusal(
+    story_id: &str,
+    repo: &str,
+    project_repos: Option<&[String]>,
+) -> Option<String> {
+    repo_membership_refusal(
+        "This unit's Repos in scope include",
+        repo,
+        story_id,
+        project_repos,
+    )
 }
 
 /// [`plan_run_target`] against the live state: the active project and the configured paths.
@@ -1022,5 +1062,91 @@ mod http_tests {
             super::unit_branch_for_repo(&uow, STORY, "acme/api").as_deref(),
             Some("feature/b")
         );
+    }
+
+    /// The Intake scope gets the same project check as the run and the branch record: a repo
+    /// of another project cannot be scoped into this unit, and nothing is recorded.
+    #[tokio::test]
+    async fn the_intake_scope_refuses_a_repo_outside_the_active_project() {
+        let state = state_with_project();
+        let resp = post(
+            &state,
+            &format!("/api/uow/{STORY_SEG}/intake/repos"),
+            serde_json::json!({ "repos": [
+                { "repo": "acme/api", "branch": { "mode": "existing", "branch_name": "feature/x" } },
+                { "repo": "other/web", "branch": { "mode": "existing", "branch_name": "feature/x" } }
+            ]}),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        let json: serde_json::Value =
+            serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap();
+        let reason = json["reason"].as_str().unwrap_or_default();
+        assert!(
+            reason.contains("`other/web`")
+                && reason.contains("not one of the active project's repositories"),
+            "{reason}"
+        );
+        assert!(
+            state.uow.get_or_create(STORY).intake.repos.is_empty(),
+            "a refused scope records nothing"
+        );
+
+        // Repos of the project are accepted (any letter case).
+        let resp = post(
+            &state,
+            &format!("/api/uow/{STORY_SEG}/intake/repos"),
+            serde_json::json!({ "repos": [
+                { "repo": "acme/api", "branch": { "mode": "existing", "branch_name": "feature/x" } }
+            ]}),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    /// Multi-repo setup resolves a worktree per scoped repo; a scope that already holds a repo
+    /// outside the project (saved before the check existed) gets no worktree for it.
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn multi_repo_setup_makes_no_worktree_for_a_repo_outside_the_project() {
+        let _live = camerata_test_env::EnvGuard::set("CAMERATA_LIVE_BUILD", "1");
+        let _token = camerata_test_env::EnvGuard::remove("CAMERATA_GITHUB_TOKEN");
+        let own = tempfile::tempdir().unwrap();
+        crate::test_git::init_repo(own.path(), &[("README.md", "fixture\n")]);
+        let foreign = tempfile::tempdir().unwrap();
+        crate::test_git::init_repo(foreign.path(), &[("README.md", "fixture\n")]);
+        let state = state_with_project();
+        state
+            .settings
+            .set_repo_path("acme/api", Some(own.path().display().to_string()));
+        state
+            .settings
+            .set_repo_path("other/web", Some(foreign.path().display().to_string()));
+        let scope = |repo: &str| crate::uow::RepoScope {
+            repo: repo.to_string(),
+            branch: crate::uow::BranchMode::Existing {
+                branch_name: "feature/x".to_string(),
+            },
+        };
+        state
+            .uow
+            .set_intake_repos(STORY, vec![scope("acme/api"), scope("other/web")]);
+
+        let resp = post(
+            &state,
+            &format!("/api/stories/{STORY_SEG}/run"),
+            serde_json::json!({}),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let own_trees = crate::test_git::git(own.path(), &["worktree", "list"]);
+        assert!(own_trees.contains("[feature/x]"), "{own_trees}");
+        let foreign_trees = crate::test_git::git(foreign.path(), &["worktree", "list"]);
+        assert!(
+            !foreign_trees.contains("feature/x"),
+            "no worktree in a repo outside the project: {foreign_trees}"
+        );
+        assert!(!foreign.path().join(".camerata-worktrees").exists());
     }
 }
