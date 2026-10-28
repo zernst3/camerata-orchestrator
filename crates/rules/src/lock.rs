@@ -54,8 +54,8 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::{
-    AppliesTo, EscalationSeverity, EscalationSpec, Rule, RuleOption, RuleSet, RuleSource,
-    StackException, VerifiedProvenance,
+    AppliesTo, Candidates, EscalationSeverity, EscalationSpec, Rule, RuleOption, RuleSet,
+    RuleSource, StackException, VerifiedProvenance,
 };
 
 /// Prefix of every rule content hash: `sha256:<64 lowercase hex>`. A stored hash WITHOUT this
@@ -282,6 +282,13 @@ fn canon_applies_to(applies_to: &AppliesTo) -> Canon {
     o.build()
 }
 
+fn canon_candidates(candidates: &Candidates) -> Canon {
+    let Candidates { locator } = candidates;
+    let mut o = ObjBuilder::default();
+    o.always("locator", locator.name());
+    o.build()
+}
+
 fn canon_stack_exception(exception: &StackException) -> Canon {
     let StackException {
         framework,
@@ -329,6 +336,7 @@ impl Rule {
             superseded_since,
             current_recommendation,
             applies_to,
+            candidates,
             // Bookkeeping about the rule, not part of it: bumping the version or recording a
             // review must not change the hash the version is checked against.
             version: _,
@@ -370,6 +378,9 @@ impl Rule {
         o.opt_text("current_recommendation", current_recommendation);
         if let Some(a) = applies_to {
             o.nested("applies_to", canon_applies_to(a));
+        }
+        if let Some(c) = candidates {
+            o.nested("candidates", canon_candidates(c));
         }
 
         let mut out = String::new();

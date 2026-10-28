@@ -1794,10 +1794,12 @@ listed as such and never counted as clean.
 Every saving the product applies is on by default and can be switched off for one run, to find out
 whether it caused a cost or behavior change: `--efficiency warm_schedule=off` (repeatable), or
 `CAMERATA_EFFICIENCY=warm_schedule=off,result_cache=off`. The measures are `warm_schedule`,
-`label_after_prefix`, `batch_long_cache`, `result_cache`, `truncation_retry`, `fix_prefilter` and
-`applies_to_routing` (what each does is in TECHNICAL.md). `applies_to_routing` sends a rule that
-declares where it applies (for example, only SQL files) just those files; switch it off if a run
-seems to have missed something a rule should have caught. A misspelled name is an error. Every run prints which measures
+`label_after_prefix`, `batch_long_cache`, `result_cache`, `truncation_retry`, `fix_prefilter`,
+`applies_to_routing` and `candidates_prefilter` (what each does is in TECHNICAL.md).
+`applies_to_routing` sends a rule that declares where it applies (for example, only SQL files) just
+those files; `candidates_prefilter` sends some SQL rules only the statements they can be about (for
+example, only function definitions) instead of whole files. Switch either off if a run seems to have
+missed something a rule should have caught. A misspelled name is an error. Every run prints which measures
 were on.
 
 To size a repo before quoting it, run `cargo run -p camerata -- count <PATH>` (add `--json` for

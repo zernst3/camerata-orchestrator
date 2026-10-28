@@ -2639,6 +2639,7 @@ one line to the `efficiency_measures!` list and reads
 | `truncation_retry` | rank 6: a reply cut off at the output limit is retried once | the cut-off reply is used as it came |
 | `fix_prefilter` | rank 6: findings with no code context skip the fix model when the rule has an authored fix | they go to the fix model |
 | `applies_to_routing` | rank 7: a rule that declares `applies_to` is sent only with the files it can apply to, in real-time and batch mode | `applies_to` is ignored entirely; routing is by rule-id language prefix only |
+| `candidates_prefilter` | rank 8: a rule that declares `candidates` is sent only the sites its locator finds in a chunk, with 8 lines of context, plus the repo map | `candidates` is ignored entirely; every prompt is the rank-7 prompt |
 
 Set with `CAMERATA_EFFICIENCY=name=off,other=off` or `camerata inspect --efficiency
 name=off` (repeatable; the flag wins). An unknown name or a malformed entry is an
@@ -2696,6 +2697,47 @@ prefix, plus `applies_to` when on) did not send; compare a run with
 It is operator-only, like the rest of the table. The corpus rules that declare
 `applies_to` are pinned by `crates/server/tests/applies_to_corpus.rs`: adding a
 scope to another rule fails that test until the rule is reviewed.
+
+**Candidate prefilter and `candidates`** (`crates/server/src/ai_audit/candidate_passes.rs`,
+`crates/checks/src/candidates.rs`, `crates/rules/src/candidates.rs`). Routing decides
+which files a rule is sent; `candidates` decides what a chunk of those files looks
+like to it. A rule declares a deterministic locator, `candidates = { locator =
+"sql_routines" }`, from the closed list `camerata_rules::CANDIDATE_LOCATORS`
+(`sql_routines`, `sql_policies`, `sql_policies_and_routines`, `sql_tables`). Each
+locator is a statement filter over the SQL statement splitter the Supabase checkers
+use (`supabase::splitter`), so a site is a whole top-level statement (a function
+arrives with its whole dollar-quoted body), and the filter is a keyword mention, not
+a judgment, so it is wide. With `candidates_prefilter` on, per (chunk, locator):
+
+- every file parses and has sites: the rule leaves the chunk's whole-file prompt and
+  gets a candidate prompt (`pass[...] candidates[<locator>]`): the repo map, then each
+  site with 8 lines of context and the file's real line numbers, then every file the
+  locator does not read (any non-`.sql` file, e.g. `supabase/config.toml`) in full.
+  The advisory pass never runs on it;
+- the locator errors, panics, takes longer than 20s, or a `.sql` file does not parse
+  (a string, quoted identifier, dollar quote or block comment open at end of file,
+  `split_statements_strict`): the rule stays in the chunk's whole-file prompt, which
+  is exactly the switch-off prompt, and the fallback is recorded;
+- the candidate section would be more than half the whole digest (a chunk mostly of
+  files the locator cannot read): the rule stays in the whole-file prompt;
+- every file was read and none has a site: no pass is sent for the rule there.
+
+Rules sharing a locator share one candidate prompt per chunk. A chunk whose every
+rule was narrowed still gets its whole-file advisory pass when its group runs
+advisory. `plan_pass_sets` is the one planner; `run_routed_passes` and
+`run_routed_passes_batch` both run its pass sets, so real-time and batch mode send
+the same prompts. Validation is at corpus load (unknown locator or key: the rule's
+file fails), and `candidates` is part of `Rule::content_hash`. The rules that
+declare it are pinned, each with a synthetic violating fixture whose violating line
+its locator must return, by `crates/server/tests/candidates_corpus.rs`.
+
+Telemetry: the per-stage table prints `candidate prefilter: N rules, X of Y digest
+bytes not sent`, then one line per rule (chunks narrowed, without sites, not
+narrowed, fallen back; bytes saved) and one line per fallback naming the repo,
+group, chunk, locator and reason. Operator-only. The bytes are what each rule's
+prompts no longer carry; the bill falls when a group loses a whole rule-batch
+(real-time mode, 15 rules per batch), so read the per-stage token rows alongside
+them.
 
 The controls travel on the run's `UsageMeter` (`UsageMeter::with_controls`), which
 every model-calling stage already receives, so no stage signature grew. The

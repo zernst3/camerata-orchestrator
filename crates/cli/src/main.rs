@@ -175,7 +175,7 @@ enum Command {
         /// `--efficiency warm_schedule=off`. Repeatable; wins over `CAMERATA_EFFICIENCY`. Every
         /// measure is on by default; the run states which were on. Measures: warm_schedule,
         /// label_after_prefix, batch_long_cache, result_cache, truncation_retry, fix_prefilter,
-        /// applies_to_routing.
+        /// applies_to_routing, candidates_prefilter.
         #[arg(long = "efficiency", value_name = "NAME=on|off")]
         efficiency: Vec<String>,
     },

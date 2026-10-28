@@ -1813,6 +1813,7 @@ mod tests {
             version: None,
             last_reviewed: None,
             applies_to: None,
+            candidates: None,
             verification: Verification::Grounded,
             sources: linters
                 .iter()

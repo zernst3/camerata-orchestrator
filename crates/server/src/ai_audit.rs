@@ -567,6 +567,24 @@ impl UsageMeter {
         self.stages.record_routing(pairs_total, pairs_skipped);
     }
 
+    /// Record one (chunk, rule) decision of the candidate prefilter (rank 8).
+    pub fn record_candidate(
+        &self,
+        rule_id: &str,
+        locator: &str,
+        outcome: crate::stage_telemetry::CandidateOutcome,
+        whole_bytes: u64,
+        sent_bytes: u64,
+    ) {
+        self.stages
+            .record_candidate(rule_id, locator, outcome, whole_bytes, sent_bytes);
+    }
+
+    /// Record one chunk's candidate-prefilter fallback to whole files (rank 8).
+    pub fn record_candidate_fallback(&self, fallback: crate::stage_telemetry::CandidateFallback) {
+        self.stages.record_candidate_fallback(fallback);
+    }
+
     /// The per-stage telemetry so far, joined to the scan's counted-line total.
     pub fn stage_telemetry(&self, counted_lines: usize) -> StageTelemetry {
         let mut telemetry = self.stages.snapshot(counted_lines);
@@ -695,11 +713,32 @@ const CHUNK_DIGEST_CHARS: usize = 350_000;
 /// this the digest had no line markers and the model estimated by counting (and drifted —
 /// 3 of 4 findings on the testbed cited the wrong line).
 fn number_lines(content: &str) -> String {
+    number_lines_from(content.lines(), 1)
+}
+
+/// [`number_lines`] for a run of lines that starts at line `first` of its file (a candidate
+/// excerpt keeps the file's real line numbers).
+fn number_lines_from<'a>(lines: impl Iterator<Item = &'a str>, first: usize) -> String {
     let mut s = String::new();
-    for (i, line) in content.lines().enumerate() {
-        s.push_str(&format!("{:>4}| {}\n", i + 1, line));
+    for (i, line) in lines.enumerate() {
+        s.push_str(&format!("{:>4}| {}\n", i + first, line));
     }
     s
+}
+
+/// The digests a pass call sends: `digests_override` when a candidate pass set supplies them
+/// (rank 8), else each chunk's whole-file [`build_digest`].
+fn pass_digests(
+    chunks: &[&[(String, String)]],
+    digests_override: Option<&[String]>,
+) -> Vec<String> {
+    match digests_override {
+        Some(d) => {
+            debug_assert_eq!(d.len(), chunks.len(), "one candidate digest per chunk");
+            d.to_vec()
+        }
+        None => chunks.iter().map(|c| build_digest(c)).collect(),
+    }
 }
 
 /// Build a single code digest from the repo's files, capped at [`MAX_DIGEST_CHARS`].
@@ -4562,6 +4601,9 @@ async fn run_passes(
     feedback: Option<(&crate::transcript::TranscriptStore, &str)>,
     job: Option<(&crate::jobs::JobStore, &str)>,
     chunks: &[&[(String, String)]],
+    // Rank 8: the candidate digests that replace the chunks' whole-file digests (one per chunk),
+    // for a candidate pass set (`candidate_passes`); `None` builds the whole-file digests.
+    digests_override: Option<&[String]>,
     batches: &[&[(String, String)]],
     concurrency: usize,
     label: &str,
@@ -4575,7 +4617,7 @@ async fn run_passes(
     usize,
     Option<anyhow::Error>,
 ) {
-    let digests: Vec<String> = chunks.iter().map(|c| build_digest(c)).collect();
+    let digests: Vec<String> = pass_digests(chunks, digests_override);
     let n_c = chunks.len();
     let n_b = batches.len();
     // Chunk-major work order, scheduled WARM-THEN-FAN-OUT: a chunk is one cache-prefix group
@@ -4831,6 +4873,8 @@ async fn run_passes_batch(
     audit_model: Option<&str>,
     job: Option<(&crate::jobs::JobStore, &str)>,
     chunks: &[&[(String, String)]],
+    // Rank 8: as `run_passes`' `digests_override`.
+    digests_override: Option<&[String]>,
     batches: &[&[(String, String)]],
     label: &str,
     meter: Option<&UsageMeter>,
@@ -4863,7 +4907,7 @@ async fn run_passes_batch(
 
     let model = resolve_audit_model(audit_model);
 
-    let digests: Vec<String> = chunks.iter().map(|c| build_digest(c)).collect();
+    let digests: Vec<String> = pass_digests(chunks, digests_override);
     let n_c = chunks.len();
     let n_b = batches.len();
 
@@ -7165,6 +7209,8 @@ async fn run_routed_passes(
     // for the caller (`audit_repo`) to synthesize one honest `not_assessed` row per rule,
     // rather than leaving "never evaluated" indistinguishable from "assessed and clean".
     skipped_rules: &mut Vec<(String, String)>,
+    // Rank 8: the candidate locators and their time limit (production in `audit_repo`).
+    candidate_env: candidate_passes::CandidateEnv,
 ) -> (
     Vec<Finding>,
     Vec<ProposedRule>,
@@ -7189,6 +7235,7 @@ async fn run_routed_passes(
             feedback,
             job,
             &chunks,
+            None,
             &batches,
             concurrency,
             "pass",
@@ -7200,15 +7247,23 @@ async fn run_routed_passes(
     }
 
     let units = runnable_units(files, route_plan, meter, skipped_rules);
+    // Rank 8: what each unit's chunks look like to its rules (whole files, or candidate sites).
+    let pass_sets = candidate_passes::plan_pass_sets(
+        &units,
+        selected,
+        repo,
+        efficiency_of(meter).candidates_prefilter,
+        candidate_env,
+        meter,
+    )
+    .await;
 
     // Pre-seed the job's total pass count across ALL route groups so the progress bar is
-    // accurate from the start: per group, chunk count x rule-batch count.
-    let total_pass_count: usize = units
+    // accurate from the start: per pass set, chunk count x rule-batch count.
+    let total_pass_count: usize = pass_sets
         .iter()
-        .map(|u| {
-            chunk_files(&u.files, CHUNK_DIGEST_CHARS).len()
-                * u.rules.chunks(batch_size.max(1)).count().max(1)
-        })
+        .flatten()
+        .map(|set| set.pass_count(batch_size))
         .sum();
     // Only seed when > 0 (empty groups are no-ops and contribute 0 passes).
     if total_pass_count > 0 {
@@ -7223,38 +7278,40 @@ async fn run_routed_passes(
     let mut total_ok: usize = 0;
     let mut last_err: Option<anyhow::Error> = None;
 
-    for unit in &units {
-        let chunks = chunk_files(&unit.files, CHUNK_DIGEST_CHARS);
-        let batches: Vec<&[(String, String)]> = unit.rules.chunks(batch_size.max(1)).collect();
-        let session_prefix = format!("audit-{repo}-g{}", unit.index);
+    for (unit, sets) in units.iter().zip(&pass_sets) {
+        let unit_chunks = chunk_files(&unit.files, CHUNK_DIGEST_CHARS);
+        for set in sets {
+            let chunks = set.chunks_of(&unit_chunks);
+            let batches = set.batches(batch_size);
 
-        // NOTE: job total was pre-seeded above; do NOT call add_total again per group, as that
-        // would double-count. run_passes calls inc_done per completed pass, which is correct.
+            // NOTE: job total was pre-seeded above; do NOT call add_total again per group, as
+            // that would double-count. run_passes calls inc_done per completed pass.
+            let (gf, gp, gr, gok, ge) = run_passes(
+                llm,
+                repo,
+                repo_map,
+                adopted,
+                audit_model,
+                feedback,
+                job,
+                &chunks,
+                set.digests.as_deref(),
+                &batches,
+                concurrency,
+                &set.label,
+                &set.session_prefix,
+                meter,
+                set.advisory_disabled,
+            )
+            .await;
 
-        let (gf, gp, gr, gok, ge) = run_passes(
-            llm,
-            repo,
-            repo_map,
-            adopted,
-            audit_model,
-            feedback,
-            job,
-            &chunks,
-            &batches,
-            concurrency,
-            &unit.label,
-            &session_prefix,
-            meter,
-            unit.advisory_disabled,
-        )
-        .await;
-
-        all_findings.extend(gf);
-        all_proposed.extend(gp);
-        all_requested.extend(gr);
-        total_ok += gok;
-        if ge.is_some() {
-            last_err = ge;
+            all_findings.extend(gf);
+            all_proposed.extend(gp);
+            all_requested.extend(gr);
+            total_ok += gok;
+            if ge.is_some() {
+                last_err = ge;
+            }
         }
     }
 
@@ -7288,6 +7345,7 @@ async fn run_routed_passes_batch(
     batch_size: usize,
     meter: Option<&UsageMeter>,
     skipped_rules: &mut Vec<(String, String)>,
+    candidate_env: candidate_passes::CandidateEnv,
 ) -> anyhow::Result<(
     Vec<Finding>,
     Vec<ProposedRule>,
@@ -7306,6 +7364,7 @@ async fn run_routed_passes_batch(
             audit_model,
             job,
             &chunks,
+            None,
             &[empty_batch],
             "pass",
             meter,
@@ -7315,34 +7374,47 @@ async fn run_routed_passes_batch(
     }
 
     let units = runnable_units(files, route_plan, meter, skipped_rules);
+    let pass_sets = candidate_passes::plan_pass_sets(
+        &units,
+        selected,
+        repo,
+        efficiency_of(meter).candidates_prefilter,
+        candidate_env,
+        meter,
+    )
+    .await;
     let mut all_findings: Vec<Finding> = Vec::new();
     let mut all_proposed: Vec<ProposedRule> = Vec::new();
     let mut all_requested: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut total_ok: usize = 0;
     let mut last_err: Option<anyhow::Error> = None;
-    for unit in &units {
-        let chunks = chunk_files(&unit.files, CHUNK_DIGEST_CHARS);
-        let batches: Vec<&[(String, String)]> = unit.rules.chunks(batch_size.max(1)).collect();
-        let (gf, gp, gr, gok, ge) = run_passes_batch(
-            llm,
-            repo,
-            repo_map,
-            adopted,
-            audit_model,
-            job,
-            &chunks,
-            &batches,
-            &unit.label,
-            meter,
-            unit.advisory_disabled,
-        )
-        .await?;
-        all_findings.extend(gf);
-        all_proposed.extend(gp);
-        all_requested.extend(gr);
-        total_ok += gok;
-        if ge.is_some() {
-            last_err = ge;
+    for (unit, sets) in units.iter().zip(&pass_sets) {
+        let unit_chunks = chunk_files(&unit.files, CHUNK_DIGEST_CHARS);
+        for set in sets {
+            let chunks = set.chunks_of(&unit_chunks);
+            let batches = set.batches(batch_size);
+            let (gf, gp, gr, gok, ge) = run_passes_batch(
+                llm,
+                repo,
+                repo_map,
+                adopted,
+                audit_model,
+                job,
+                &chunks,
+                set.digests.as_deref(),
+                &batches,
+                &set.label,
+                meter,
+                set.advisory_disabled,
+            )
+            .await?;
+            all_findings.extend(gf);
+            all_proposed.extend(gp);
+            all_requested.extend(gr);
+            total_ok += gok;
+            if ge.is_some() {
+                last_err = ge;
+            }
         }
     }
     Ok((
@@ -8148,6 +8220,7 @@ pub async fn audit_repo(
                 batch_size,
                 meter,
                 &mut skipped_rules,
+                candidate_passes::CandidateEnv::production(),
             )
             .await?
         } else {
@@ -8172,6 +8245,7 @@ pub async fn audit_repo(
                 batch_size,
                 meter,
                 &mut skipped_rules,
+                candidate_passes::CandidateEnv::production(),
             )
             .await
         };
@@ -8239,6 +8313,7 @@ pub async fn audit_repo(
             feedback,
             job,
             &res_chunks,
+            None,
             &batches_res,
             res_concurrency,
             "resolution",
@@ -9260,6 +9335,11 @@ mod efficiency_cap_tests;
 
 #[cfg(test)]
 mod applies_to_routing_tests;
+
+mod candidate_passes;
+
+#[cfg(test)]
+mod candidate_prefilter_tests;
 
 #[cfg(test)]
 mod tests {
@@ -13669,6 +13749,7 @@ mod tests {
             None,
             None,
             &chunks,
+            None,
             &batches,
             4,
             "parallel",
@@ -13775,6 +13856,7 @@ mod tests {
             None,
             None,
             &chunks,
+            None,
             &batches,
             4,
             "parallel",

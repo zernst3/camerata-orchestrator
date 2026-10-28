@@ -1,11 +1,16 @@
 id = "SQL-MONEY-FLOAT-1"
-version = 1
+version = 2
 title = "Money and currency amounts are stored as numeric/decimal, never as a floating-point type"
 domain = "sql"
 layer = "universal"
 enforcement = "mechanical"
 kind = "defect"
 inspectable = true
+# Token-efficiency rank 8: the deterministic locator that finds this rule's candidate sites, so
+# the scan sends it those statements with context instead of whole files. Every SQL statement that
+# can be its subject is a site (a column type is declared in a CREATE or ALTER TABLE, TYPE or DOMAIN statement); a file the locator cannot parse, or a non-SQL file, is still
+# sent whole.
+candidates = { locator = "sql_tables" }
 # Severity floor, transcribed from this rule's own prose: "Flag as high severity: 'Your
 # `<table>.<column>` column stores a dollar amount as floating ...'".
 min_severity = "high"

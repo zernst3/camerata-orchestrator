@@ -1,5 +1,5 @@
 id = "SUPABASE-RLS-PERMISSIVE-TRUE-1"
-version = 2
+version = 3
 title = "A policy with USING (true) / WITH CHECK (true) targeting anon or public is a hole shaped like a policy"
 domain = "supabase:rls"
 layer = "platform"
@@ -9,6 +9,11 @@ inspectable = true
 # Token-efficiency rank 7: where this rule can apply, so the scan sends it only with these
 # files. SQL statement rule: it is about CREATE POLICY / FUNCTION / VIEW / TABLE statements in SQL files (plus supabase/config.toml, which names the API-exposed schemas); no other file kind holds the subject.
 applies_to = { paths = ["**/*.sql", "**/supabase/config.toml"] }
+# Token-efficiency rank 8: the deterministic locator that finds this rule's candidate sites, so
+# the scan sends it those statements with context instead of whole files. Every SQL statement that
+# can be its subject is a site (the true predicate and the TO roles are facts of one CREATE or ALTER POLICY statement); a file the locator cannot parse, or a non-SQL file, is still
+# sent whole.
+candidates = { locator = "sql_policies" }
 # Severity ceiling. Rationale: public read access under a true predicate is a routine, often
 # intentional pattern (catalogs, published posts, reference tables), so this rule can never reach
 # critical — a uniform critical would alarm identically on a products table and an open write

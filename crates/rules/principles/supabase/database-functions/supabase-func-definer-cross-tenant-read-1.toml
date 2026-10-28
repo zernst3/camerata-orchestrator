@@ -1,5 +1,5 @@
 id = "SUPABASE-FUNC-DEFINER-CROSS-TENANT-READ-1"
-version = 2
+version = 3
 title = "A SECURITY DEFINER function that returns rows filtered only by its own caller-supplied parameter, and is granted EXECUTE to anon/public/authenticated, must check that id against the caller's identity"
 domain = "supabase:database-functions"
 # General Postgres/PostgREST, not just Supabase: a SECURITY DEFINER function that reads data
@@ -18,6 +18,11 @@ inspectable = true
 # Token-efficiency rank 7: where this rule can apply, so the scan sends it only with these
 # files. SQL statement rule: it is about CREATE POLICY / FUNCTION / VIEW / TABLE statements in SQL files (plus supabase/config.toml, which names the API-exposed schemas); no other file kind holds the subject.
 applies_to = { paths = ["**/*.sql", "**/supabase/config.toml"] }
+# Token-efficiency rank 8: the deterministic locator that finds this rule's candidate sites, so
+# the scan sends it those statements with context instead of whole files. Every SQL statement that
+# can be its subject is a site (the DEFINER clause, the parameter filter, the identity check (and any helper function it calls) and the GRANT EXECUTE are all routine statements); a file the locator cannot parse, or a non-SQL file, is still
+# sent whole.
+candidates = { locator = "sql_routines" }
 # Severity floor. Rationale: this is IDOR inside the database — a broadly-granted SECURITY DEFINER
 # read whose filtering id comes from the caller, with the RLS that would have constrained it
 # bypassed by the DEFINER privileges. Any caller matching the grant substitutes another tenant's

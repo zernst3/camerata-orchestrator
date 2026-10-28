@@ -99,6 +99,7 @@ fn full_rule() -> Rule {
         camerata_rules::AppliesTo::new(vec!["**/*.sql".to_string()], vec!["rust".to_string()])
             .expect("a valid scope"),
     );
+    r.candidates = Some(camerata_rules::Candidates::new("sql_routines").expect("a valid locator"));
     r.version = Some(4);
     r.last_reviewed = Some("2026-10-01".to_string());
     r
@@ -230,6 +231,7 @@ fn every_field_of_the_rule_except_version_and_last_reviewed_changes_the_hash() {
         superseded_since: _,
         current_recommendation: _,
         applies_to: _,
+        candidates: _,
         version: _,
         last_reviewed: _,
     } = full_rule();
@@ -303,6 +305,10 @@ fn every_field_of_the_rule_except_version_and_last_reviewed_changes_the_hash() {
             }
         }),
         ("applies_to (removed)", |r| r.applies_to = None),
+        ("candidates.locator", |r| {
+            r.candidates = Some(camerata_rules::Candidates::new("sql_tables").expect("valid"))
+        }),
+        ("candidates (removed)", |r| r.candidates = None),
         ("option.id", |r| r.options[0].id.push('X')),
         ("option.label", |r| r.options[0].label.push('X')),
         ("option.directive", |r| r.options[0].directive.push('X')),

@@ -1,5 +1,5 @@
 id = "SUPABASE-FUNC-DYNAMIC-SQL-INJECTION-1"
-version = 2
+version = 3
 title = "A database function must not EXECUTE a dynamically-assembled query string built via non-quoting interpolation (|| concatenation or format()'s %s)"
 domain = "supabase:database-functions"
 # General Postgres, not just Supabase: a plpgsql function that EXECUTEs a dynamically-built query
@@ -20,6 +20,11 @@ inspectable = true
 # Token-efficiency rank 7: where this rule can apply, so the scan sends it only with these
 # files. SQL statement rule: it is about CREATE POLICY / FUNCTION / VIEW / TABLE statements in SQL files (plus supabase/config.toml, which names the API-exposed schemas); no other file kind holds the subject.
 applies_to = { paths = ["**/*.sql", "**/supabase/config.toml"] }
+# Token-efficiency rank 8: the deterministic locator that finds this rule's candidate sites, so
+# the scan sends it those statements with context instead of whole files. Every SQL statement that
+# can be its subject is a site (the EXECUTE and its string assembly live in a function (or DO block) body; the GRANT EXECUTE that raises severity is a routine statement too); a file the locator cannot parse, or a non-SQL file, is still
+# sent whole.
+candidates = { locator = "sql_routines" }
 # Severity floor. Rationale: an attacker-controlled value flowing into an EXECUTE'd string built
 # without escaping is SQL injection inside the database (CWE-89), invisible to any checker that
 # only reads application-language source. High is the minimum, and deliberately no ceiling: the
