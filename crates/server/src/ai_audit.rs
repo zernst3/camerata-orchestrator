@@ -248,6 +248,11 @@ pub struct UsageMeter {
     budget: std::sync::Mutex<crate::cost_cap::BudgetState>,
     /// Wakes passes waiting for the first reported cost (see [`Self::admit`]).
     admission: tokio::sync::Notify,
+    /// Scan passes that failed (a real-time pass whose call errored, a batch item that still
+    /// failed after its resubmission), kept here so `audit_repo` can disclose them as
+    /// [`FailedPass`]es without every pass runner's signature growing. See
+    /// [`Self::record_failed_scan_pass`].
+    failed_scan_passes: std::sync::Mutex<Vec<FailedPass>>,
 }
 
 /// Why a pass was not admitted.
@@ -455,6 +460,26 @@ impl UsageMeter {
              the ${cap:.2} limit, and a submitted batch cannot be cancelled cheaply, so the \
              limit is checked before submitting"
         ))
+    }
+
+    /// Record a scan pass that ran and failed, so the export says so rather than reading the
+    /// missing findings as "nothing found".
+    pub fn record_failed_scan_pass(&self, pass: FailedPass) {
+        self.failed_scan_passes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(pass);
+    }
+
+    /// Take every failed scan pass recorded for `repo` (a meter may serve several repos).
+    pub fn take_failed_scan_passes(&self, repo: &str) -> Vec<FailedPass> {
+        let mut all = self
+            .failed_scan_passes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (mine, rest): (Vec<_>, Vec<_>) = all.drain(..).partition(|p| p.repo == repo);
+        *all = rest;
+        mine
     }
 
     /// Keep an operator-facing note on the cap's record (a refused batch submission).
@@ -4204,16 +4229,6 @@ fn build_pass_prompt_with(
     (prompt, cache_breakpoints)
 }
 
-/// The prompt-cache TTL a batch item asks for under `eff`: 1 hour with `batch_long_cache` on
-/// (the default), else the 5-minute cache.
-fn batch_cache_ttl(eff: crate::efficiency::EfficiencyConfig) -> crate::llm::CacheTtl {
-    if eff.batch_long_cache {
-        crate::llm::BATCH_CACHE_TTL
-    } else {
-        crate::llm::CacheTtl::FiveMinutes
-    }
-}
-
 /// The instruction line that closes a scan pass's prompt. ONE definition for the real-time
 /// passes, the batch items and the pre-flight sample, so the three can never disagree about what
 /// a pass asks. `advisory` adds the "also flag other genuine issues" task (first rule-batch of a
@@ -4260,7 +4275,7 @@ pub fn representative_scan_sample(
     let repo_map = build_repo_map(&model_files);
     let chunks = chunk_files(&model_files, CHUNK_DIGEST_CHARS);
     let first_chunk = chunks.first()?;
-    let (_, batch_size) = mode.tuning();
+    let (_, batch_size) = mode.tuning(efficiency);
     let empty: &[(String, String)] = &[];
     let batches: Vec<&[(String, String)]> = if selected.is_empty() {
         vec![empty]
@@ -4316,17 +4331,35 @@ async fn audit_pass(
     if !cache_breakpoints.is_empty() {
         req = req.with_cache_breakpoints(cache_breakpoints);
     }
-    let mut resp = send_audit_request(llm, req.clone(), feedback, session).await?;
+    let resp = send_audit_request(llm, req.clone(), feedback, session).await?;
     if let Some(m) = meter {
         m.record_stage(Stage::ScanPass, &resp);
     }
-    // TRUNCATION-ONLY RETRY. A reply cut off at `max_tokens` is the one failure a repeat can
-    // recover: the same request with a higher cap returns the whole answer, where the cut-off
-    // one parses to nothing and the chunk's findings are lost. Any OTHER unusable reply (a
-    // complete answer that is simply not JSON) is NOT retried: the same prompt at the same cap
-    // tends to return the same thing and the spend is paid again. At most one retry, and a retry
-    // that itself fails leaves the pass exactly as it was before this existed: the first
-    // response, parsed as it always was.
+    let resp = retry_truncated_scan_reply(llm, &req, resp, feedback, session, meter).await;
+    let (f, p) = parse_ai_findings(repo, &resp.text, adopted);
+    let needs = parse_needs_files(&resp.text);
+    Ok((f, p, needs))
+}
+
+/// TRUNCATION-ONLY RETRY, the one function every scan pass uses: a real-time pass from
+/// [`audit_pass`] and a batch item from [`run_passes_batch`] alike. `resp` is the reply `req`
+/// got, already recorded on the meter.
+///
+/// A reply cut off at `max_tokens` is the one failure a repeat can recover: the same request
+/// with a higher cap returns the whole answer, where the cut-off one parses to nothing and the
+/// chunk's findings are lost. Any OTHER unusable reply (a complete answer that is simply not
+/// JSON) is NOT retried: the same prompt at the same cap tends to return the same thing and the
+/// spend is paid again. At most one retry, sent in real time, and a retry that itself fails
+/// leaves the pass exactly as it was before this existed: the first response, parsed as it
+/// always was. Returns the reply the pass should use.
+async fn retry_truncated_scan_reply(
+    llm: &dyn LlmPort,
+    req: &LlmRequest,
+    mut resp: crate::llm::LlmResponse,
+    feedback: Option<(&crate::transcript::TranscriptStore, &str)>,
+    session: &str,
+    meter: Option<&UsageMeter>,
+) -> crate::llm::LlmResponse {
     let mut wasted_counted = false;
     if resp.truncated && efficiency_of(meter).truncation_retry {
         if let Some(m) = meter {
@@ -4337,8 +4370,13 @@ async fn audit_pass(
             .max_tokens
             .saturating_mul(2)
             .min(AGGREGATE_MAX_TOKENS_CEILING);
-        if let Ok(retry) =
-            send_audit_request(llm, req.with_max_tokens(retry_cap), feedback, session).await
+        if let Ok(retry) = send_audit_request(
+            llm,
+            req.clone().with_max_tokens(retry_cap),
+            feedback,
+            session,
+        )
+        .await
         {
             if let Some(m) = meter {
                 m.record_stage(Stage::ScanPass, &retry);
@@ -4354,9 +4392,7 @@ async fn audit_pass(
             m.record_wasted(Stage::ScanPass, &resp);
         }
     }
-    let (f, p) = parse_ai_findings(repo, &resp.text, adopted);
-    let needs = parse_needs_files(&resp.text);
-    Ok((f, p, needs))
+    resp
 }
 
 /// One scan-pass request: streamed into the transcript when feedback is present, else bounded
@@ -4462,19 +4498,17 @@ fn build_repo_map(files: &[(String, String)]) -> String {
 const PARALLEL_CONCURRENCY: usize = 6;
 const RULE_BATCH_SIZE: usize = 15;
 
-/// Rules-per-batch for `ScanMode::Batch`.
+/// Rules-per-batch for `ScanMode::Batch` with `batch_default` on (rank 2): the same 15 rules per
+/// prompt the parallel path uses, which is the prompt shape the fixtures were graded on. One
+/// prompt per chunk holding EVERY rule shares one 8192-token output cap across all of them, so a
+/// chunk with many violations truncates (SPIKE_TOKEN_EFFICIENCY_RESULTS.md, item 1).
 ///
-/// The Batch path compiles ALL (chunk × rule-batch) pairs into a SINGLE Anthropic
-/// Message Batch and lets the API schedule them — there is no per-item concurrency
-/// cost for splitting into finer batches. Using `RULE_BATCH_SIZE` (15) from the
-/// parallel path was a design mismatch (BUG-6): smaller batches add BatchItems but
-/// don't reduce latency; a LARGER batch keeps more adopted rules visible together in
-/// one prompt context, which improves coherence and reduces cross-batch re-flagging.
-///
-/// Set to `usize::MAX` so each chunk becomes a SINGLE BatchItem containing all rules.
-/// This can be overridden at runtime via the `CAMERATA_BATCH_RULE_BATCH_SIZE` env var
-/// (parsed as `usize`; falls back to this constant when absent or unparseable).
-const BATCH_RULE_BATCH_SIZE: usize = usize::MAX;
+/// `CAMERATA_BATCH_RULE_BATCH_SIZE` (a `usize`) overrides it at runtime in either switch state.
+const BATCH_RULE_BATCH_SIZE: usize = RULE_BATCH_SIZE;
+
+/// Rules-per-batch for `ScanMode::Batch` with `batch_default` off: every rule in ONE item per
+/// chunk, the pre-rank-2 shape (BUG-6).
+const LEGACY_BATCH_RULE_BATCH_SIZE: usize = usize::MAX;
 
 /// How the semantic (LLM) audit executes — the SPEED/SCALE knob, orthogonal to model tier
 /// (quality) and rule selection (coverage). The free deterministic floor is unaffected; it
@@ -4501,38 +4535,51 @@ pub enum ScanMode {
 }
 
 impl ScanMode {
-    /// Returns `(max_concurrent_calls, rules_per_batch)`.
+    /// The values [`Self::parse`] accepts, for its error message. `auto` (or nothing) asks for
+    /// the run's default, which [`resolve_scan_mode`] decides.
+    pub const WIRE_VALUES: &'static [&'static str] = &["auto", "parallel", "sequential", "batch"];
+
+    /// Returns `(max_concurrent_calls, rules_per_batch)` under the run's efficiency switches.
     ///
-    /// For real-time modes (`Sequential`, `Parallel`) this controls actual API
-    /// parallelism. For `Batch` mode the concurrency value is unused (all items are
-    /// submitted in one Anthropic Message Batch); only `rules_per_batch` matters and
-    /// it should be LARGE so each BatchItem includes all adopted rules for maximum
-    /// coherence (BUG-6: using `RULE_BATCH_SIZE = 15` was a design mismatch — it
-    /// fragmented Batch items without any latency benefit).
+    /// For real-time modes (`Sequential`, `Parallel`) this controls actual API parallelism. For
+    /// `Batch` the concurrency value is unused (the API schedules the items); only
+    /// `rules_per_batch` matters: [`BATCH_RULE_BATCH_SIZE`] with `batch_default` on,
+    /// [`LEGACY_BATCH_RULE_BATCH_SIZE`] with it off.
     ///
     /// `CAMERATA_BATCH_RULE_BATCH_SIZE` overrides the Batch rule batch size at runtime.
-    fn tuning(self) -> (usize, usize) {
+    fn tuning(self, eff: crate::efficiency::EfficiencyConfig) -> (usize, usize) {
         match self {
             ScanMode::Sequential => (1, usize::MAX),
             ScanMode::Parallel => (PARALLEL_CONCURRENCY, RULE_BATCH_SIZE),
             ScanMode::Batch => {
-                // Batch mode: all rules in one item per chunk is the efficient default;
-                // the env var allows the operator to cap it (e.g. for very large rule sets
-                // where a single prompt would exceed the model's context window).
+                let default = if eff.batch_default {
+                    BATCH_RULE_BATCH_SIZE
+                } else {
+                    LEGACY_BATCH_RULE_BATCH_SIZE
+                };
                 let batch_rule_size = std::env::var("CAMERATA_BATCH_RULE_BATCH_SIZE")
                     .ok()
                     .and_then(|v| v.parse::<usize>().ok())
-                    .unwrap_or(BATCH_RULE_BATCH_SIZE);
+                    .unwrap_or(default);
                 (PARALLEL_CONCURRENCY, batch_rule_size)
             }
         }
     }
-    /// Parse the wire value; unknown / empty → Parallel (the efficient default floor).
-    pub fn parse(s: Option<&str>) -> Self {
+
+    /// Parse the wire value. `Ok(None)` = no mode was asked for (absent, blank or `auto`), so
+    /// the run's default applies ([`resolve_scan_mode`]). An unknown value is an ERROR naming
+    /// the choices, never a silent fallback: a typo such as `batchh` must not quietly run the
+    /// scan at twice the price.
+    pub fn parse(s: Option<&str>) -> Result<Option<Self>, String> {
         match s.map(|v| v.trim().to_ascii_lowercase()).as_deref() {
-            Some("sequential") => ScanMode::Sequential,
-            Some("batch") => ScanMode::Batch,
-            _ => ScanMode::Parallel,
+            None | Some("") | Some("auto") => Ok(None),
+            Some("parallel") => Ok(Some(ScanMode::Parallel)),
+            Some("sequential") => Ok(Some(ScanMode::Sequential)),
+            Some("batch") => Ok(Some(ScanMode::Batch)),
+            Some(other) => Err(format!(
+                "unknown scan mode `{other}`; the scan modes are: {}",
+                Self::WIRE_VALUES.join(", ")
+            )),
         }
     }
 }
@@ -4722,7 +4769,7 @@ async fn run_passes(
     let mut requested = std::collections::HashSet::new();
     let mut ok = 0usize;
     let mut last_err = None;
-    for (_ci, _bi, r) in results {
+    for (ci, bi, r) in results {
         match r {
             Some(Ok((f, p, needs))) => {
                 findings.extend(f);
@@ -4730,7 +4777,24 @@ async fn run_passes(
                 requested.extend(needs);
                 ok += 1;
             }
-            Some(Err(e)) => last_err = Some(e),
+            Some(Err(e)) => {
+                // Never a silent gap: the pass ran and failed, so the rules it carried were not
+                // checked against this chunk. `audit_repo` discloses it as a failed pass (the
+                // same shape a batch item that failed twice gets).
+                if let Some(m) = meter {
+                    m.record_failed_scan_pass(batch_mode::failed_scan_pass(
+                        repo,
+                        label,
+                        ci,
+                        n_c,
+                        bi,
+                        n_b,
+                        batches[bi].len(),
+                        &format!("{e:#}"),
+                    ));
+                }
+                last_err = Some(e);
+            }
             // Refused by the spend cap: already recorded as NOT RUN on the meter.
             None => {}
         }
@@ -4800,26 +4864,33 @@ where
 }
 
 /// Batch execution mode (#61): compile ALL (chunk × rule-batch) pairs into Anthropic Message
-/// Batch items, submit in ONE request, poll to completion, then reassemble by `custom_id`.
+/// Batch items, submit, poll to completion, then reassemble by `custom_id`.
 ///
 /// ADVANTAGES vs. parallel: 50% discount on all input + output tokens; no per-call
 /// rate-limit pressure; the API schedules + parallelizes internally. TRADE-OFF: latency is
 /// asynchronous — the batch typically completes in seconds to a few minutes for small scans,
-/// but up to 24h for very large ones. Best suited for large/multi-repo scans where total
-/// cost matters more than wall-clock time.
+/// but up to 24h for very large ones.
 ///
-/// CAP ENFORCEMENT: the Anthropic batch API accepts up to 100k requests and 256MB body.
-/// When `chunks.len() * batches.len() > 100_000`, this function splits into sub-batches,
-/// submits them sequentially, and unions the results. The 256MB size cap is not checked
-/// per-item (each Camerata item is typically 5-50KB; 100k items is the binding constraint
-/// in practice). Exceeding the cap logs a warning and falls back gracefully.
+/// CAP ENFORCEMENT: the Anthropic batch API accepts up to 100k requests per batch;
+/// [`batch_mode::submit_round`] splits larger work into sub-batches.
 ///
-/// FALLBACK: if the `api` backend / key is not available, the function returns an error so
-/// the caller can fall back to parallel mode. The job's `batch_id` field is set on submit
-/// and cleared on finish.
+/// RANK 2 (`batch_default` on; off reproduces the pre-rank-2 path exactly):
+///
+/// * RESUBMISSION RULE: every item that errored, expired or is missing from the results is
+///   resubmitted ONCE, all of them together in one follow-up batch (never real time: the
+///   follow-up keeps the discount and passes through the same spend gate as the first
+///   submission). An item that fails again is disclosed as a failed scan pass
+///   ([`batch_mode::failed_scan_pass`], the same shape a failed real-time pass gets), so the
+///   export says the inspection is incomplete.
+/// * A failed submit, poll or fetch fails only that sub-batch's items (resubmitted like any
+///   other failure) instead of discarding replies already paid for.
+/// * An item cut off at the output limit gets [`retry_truncated_scan_reply`], the real-time
+///   passes' own truncation retry (sent in real time, admitted under the spend limit).
+///
+/// FALLBACK: without an API key this returns an error so the caller can say so.
 #[allow(clippy::too_many_arguments)]
 async fn run_passes_batch(
-    llm: &crate::llm::Llm,
+    llm: &dyn batch_mode::BatchApi,
     repo: &str,
     repo_map: &str,
     adopted: &std::collections::HashSet<String>,
@@ -4841,14 +4912,11 @@ async fn run_passes_batch(
     usize,
     Option<anyhow::Error>,
 )> {
-    use crate::llm::{build_batch_item, reassemble_batch_results, LlmRequest};
+    use batch_mode::{submit_round, BatchWork, RoundContext};
 
-    // Rank 3 `batch_long_cache`: ON asks for the 1-hour cache (items outlive the 5-minute one).
-    // The same TTL prices the results.
     let eff = efficiency_of(meter);
-    let batch_ttl = batch_cache_ttl(eff);
 
-    if llm.api_key().is_none() {
+    if !llm.has_api_key() {
         anyhow::bail!(
             "batch mode requires the Api backend with an Anthropic API key; \
              switch this project's backend to Api and add an Anthropic API key in the app \
@@ -4862,29 +4930,20 @@ async fn run_passes_batch(
     let n_c = chunks.len();
     let n_b = batches.len();
 
-    // Build the full cartesian product of (chunk, rule-batch) items.
-    let mut items = Vec::with_capacity(n_c * n_b);
-    // Retain the (ci, bi, prompt, cache_breakpoints) tuples so we can parse results.
-    let mut work_meta: Vec<(usize, usize, String, Vec<usize>)> = Vec::with_capacity(n_c * n_b);
-
+    // The full cartesian product of (chunk, rule-batch) items, each with the request it sends.
+    let mut work: Vec<BatchWork> = Vec::with_capacity(n_c * n_b);
     for (ci, digest) in digests.iter().enumerate() {
         for (bi, batch) in batches.iter().enumerate() {
             let rb = build_rules_block(batch);
             // BUG-AI-1: mirror run_passes semantics — advisory fires only on bi==0 AND
-            // only when advisory_disabled is false. Without this check, every language-scoped
-            // batch group would re-run the novel-issue pass on its first batch, reproducing
-            // duplicate novel findings for each language group (the problem advisory_disabled
-            // was introduced to prevent in the parallel path).
+            // only when advisory_disabled is false.
             let advisory = !advisory_disabled && bi == 0;
             let task_line = pass_task_line(advisory, bi, n_b);
-            // Same `build_pass_prompt` builder as `run_passes` — see the extensive comment
-            // there and on `cache_breakpoints_for_pass`. In BATCH mode this matters even
-            // more: the default `BATCH_RULE_BATCH_SIZE = usize::MAX` puts every rule in ONE
-            // rule-batch (`n_b == 1`), so `cache_breakpoints_for_pass` drops the
-            // chunk-segment breakpoint entirely (it would be written once and never
-            // re-read, paying a pure ~1.25x write premium for zero benefit) and keeps only
-            // the repo-map breakpoint, which DOES re-read across this batch submission's
-            // other chunks.
+            // Same `build_pass_prompt` builder as `run_passes` — see the comment there and on
+            // `cache_breakpoints_for_pass`. With one rule-batch per chunk (`batch_default` off,
+            // or a small rule set) the chunk-segment breakpoint is dropped (it would be written
+            // once and never re-read) and only the repo-map breakpoint stays, which re-reads
+            // across the submission's other chunks.
             let (prompt, cache_bps) = build_pass_prompt_with(
                 eff.label_after_prefix,
                 repo,
@@ -4897,199 +4956,218 @@ async fn run_passes_batch(
                 &task_line,
                 &rb,
             );
-
-            let custom_id = format!("c{ci}-b{bi}");
-            let req = {
-                let mut r = LlmRequest::new(prompt.clone())
-                    .with_system(audit_system_prompt())
-                    .with_max_tokens(8192)
-                    .with_model(model.clone())
-                    .with_cache_breakpoints(cache_bps.clone());
-                // audit_model overrides the default; already folded into `model` above.
-                let _ = &mut r; // avoid unused_mut lint
-                r
-            };
-            items.push(build_batch_item(&custom_id, &req, &model, batch_ttl));
-            work_meta.push((ci, bi, prompt, cache_bps));
+            let req = LlmRequest::new(prompt)
+                .with_system(audit_system_prompt())
+                .with_max_tokens(8192)
+                .with_model(model.clone())
+                .with_cache_breakpoints(cache_bps);
+            work.push(BatchWork {
+                custom_id: format!("c{ci}-b{bi}"),
+                ci,
+                bi,
+                req,
+            });
         }
     }
 
-    // GAP-4 (compliance-audit housekeeping): best-effort EXACT pre-audit input-token count
-    // for the first (chunk, rule-batch) pair, via `count_tokens` (free — Anthropic does not
-    // bill this endpoint). This is a precision upgrade over the char-based heuristic
-    // estimate (`camerata_ui_core::scan::estimate_audit_cost`) the UI shows before the scan
-    // starts. Logged only for now (the heuristic estimate remains the persisted/displayed
-    // number) — gracefully skipped on ANY failure (no key, network error, non-2xx) via
-    // `exact_input_token_count`'s `Option` return, since a precise quote is a nice-to-have,
-    // never a reason to fail or stall the audit itself.
+    // GAP-4: best-effort EXACT input-token count for the first (chunk, rule-batch) pair, via
+    // `count_tokens` (free; Anthropic does not bill it). Logged, and used for the spend gate's
+    // projection. Skipped gracefully on any failure.
     //
     // SPEND CAP (batch): a submitted batch cannot be cancelled cheaply, so the cap is checked
-    // BEFORE every submission. The sample is only counted when the spend so far plus the
-    // caller's pre-flight estimate (no network needed) has not already refused the run.
+    // BEFORE every submission (`submit_round`), the resubmission included. The sample is only
+    // counted when the spend so far plus the caller's pre-flight estimate (no network needed)
+    // has not already refused the run.
     let hint_refuses = meter.is_some_and(|m| m.batch_refusal_reason(Some(0.0)).is_some());
     let mut per_item_usd: Option<f64> = None;
     if !hint_refuses {
-        if let Some((ci0, bi0, prompt0, cache_bps0)) = work_meta.first() {
-            let sample_req = sample_count_request(prompt0, cache_bps0);
-            if let Some(exact) = crate::llm::exact_input_token_count(llm, &sample_req, &model).await
-            {
+        if let Some(first) = work.first() {
+            let sample_req = sample_count_request(&first.req.prompt, &first.req.cache_breakpoints);
+            if let Some(exact) = llm.count_input_tokens(&sample_req, &model).await {
                 eprintln!(
-                    "[camerata-server] batch mode: exact input-token count for chunk {ci0} rule-batch \
-                     {bi0} = {exact} tokens (via count_tokens; {} total (chunk,batch) pairs this run)",
-                    work_meta.len()
+                    "[camerata-server] batch mode: exact input-token count for chunk {} rule-batch \
+                     {} = {exact} tokens (via count_tokens; {} total (chunk,batch) pairs this run)",
+                    first.ci,
+                    first.bi,
+                    work.len()
                 );
                 // One item's input side at the batch price, sized like the sample and with no
                 // cache credit: a projection of what a submission commits, not a quote (output
-                // is not projected).
+                // is not projected). No cache write is projected, so the TTL does not move it.
                 per_item_usd = crate::llm::input_cost_usd(
                     &model,
                     exact,
-                    crate::llm::PriceBasis::batch(batch_ttl),
+                    crate::llm::PriceBasis::batch(crate::llm::BATCH_CACHE_TTL),
                 );
             }
         }
         // No exact projection (the count failed, or the model is unpriced): fall back to the
         // shared estimator, spread over the items. Still `None` when it cannot price either,
         // and the gate then refuses rather than guessing.
-        if per_item_usd.is_none() && !work_meta.is_empty() {
-            per_item_usd = batch_estimate_usd(&model, chunks, batches)
-                .map(|total| total / work_meta.len() as f64);
+        if per_item_usd.is_none() && !work.is_empty() {
+            per_item_usd =
+                batch_estimate_usd(&model, chunks, batches).map(|total| total / work.len() as f64);
         }
     }
-    let mut refused_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     // Tell the job the total pass count so the progress bar can be pre-seeded.
-    let total = items.len();
     if let Some((jstore, jid)) = job {
-        jstore.add_total(jid, total);
+        jstore.add_total(jid, work.len());
     }
 
-    // CAP ENFORCEMENT: split into sub-batches of 100k items each.
-    const BATCH_CAP: usize = 100_000;
-    let sub_batches: Vec<_> = items.chunks(BATCH_CAP).collect();
-    if sub_batches.len() > 1 {
-        eprintln!(
-            "[camerata-server] batch mode: {} items exceed the 100k cap — splitting into {} sub-batches",
-            total,
-            sub_batches.len()
-        );
-    }
+    let ctx = RoundContext {
+        api: llm,
+        repo,
+        label,
+        model: &model,
+        n_c,
+        n_b,
+        batches,
+        job,
+        meter,
+        per_item_usd,
+        fatal_errors: !eff.batch_default,
+    };
+    let all: Vec<&BatchWork> = work.iter().collect();
+    let mut round = submit_round(&ctx, &all).await?;
 
-    // Submit all sub-batches (sequentially — the API is async so there's no rate-limit
-    // pressure; we just need the batch_id from each one).
-    let mut all_responses: std::collections::HashMap<String, crate::llm::LlmResponse> =
-        std::collections::HashMap::new();
-    for (sub_idx, sub_items) in sub_batches.iter().enumerate() {
-        // Checked again for every sub-batch: the spend of the ones before it is known by now.
-        if let Some(m) = meter {
-            if let Some(why) =
-                m.batch_refusal_reason(per_item_usd.map(|p| p * sub_items.len() as f64))
-            {
-                eprintln!("[camerata-server] {why}");
-                m.record_note(why);
-                let first = sub_idx * BATCH_CAP;
-                for (ci, bi, _prompt, _bps) in &work_meta[first..first + sub_items.len()] {
-                    refused_ids.insert(format!("c{ci}-b{bi}"));
-                    m.record_not_run(crate::cost_cap::NotRunPass {
-                        repo: repo.to_string(),
-                        group: label.to_string(),
-                        chunk: ci + 1,
-                        n_chunks: n_c,
-                        rule_batch: bi + 1,
-                        n_rule_batches: n_b,
-                        rule_ids: batches[*bi].iter().map(|(id, _)| id.clone()).collect(),
-                    });
-                }
-                continue;
+    // RESUBMISSION (rank 2): every item that came back without a reply goes out once more, all
+    // together in one follow-up batch.
+    if eff.batch_default {
+        let failed: Vec<&BatchWork> = work
+            .iter()
+            .filter(|w| matches!(round.results.get(&w.custom_id), Some(Err(_)) | None))
+            .filter(|w| !round.refused.contains(&w.custom_id))
+            .collect();
+        if !failed.is_empty() {
+            eprintln!(
+                "[camerata-server] batch mode: {} item(s) errored, expired or went missing; \
+                 resubmitting them once in a follow-up batch",
+                failed.len()
+            );
+            let retry = submit_round(&ctx, &failed).await?;
+            round.refused.extend(retry.refused);
+            for (id, outcome) in retry.results {
+                let outcome = outcome.map_err(|again| {
+                    let first = match round.results.get(&id) {
+                        Some(Err(first)) => first.clone(),
+                        _ => "no reply".to_string(),
+                    };
+                    format!("{first}; resubmitted once and failed again: {again}")
+                });
+                round.results.insert(id, outcome);
             }
         }
-        let submit_result = llm.submit_batch(sub_items.to_vec()).await?;
-        let batch_id = submit_result.batch_id;
-        eprintln!(
-            "[camerata-server] batch mode: sub-batch {}/{} submitted as {batch_id} ({} items)",
-            sub_idx + 1,
-            sub_batches.len(),
-            sub_items.len(),
-        );
-        // Record the batch id on the job so the UI can surface it.
-        if let Some((jstore, jid)) = job {
-            jstore.set_batch_id(jid, &batch_id);
-        }
-
-        // Poll until the batch is done. The Anthropic spec recommends >= 1s between polls;
-        // we use 10s to be gentle. `CAMERATA_BATCH_POLL_SECS` overrides.
-        let poll_secs = std::env::var("CAMERATA_BATCH_POLL_SECS")
-            .ok()
-            .and_then(|s| s.trim().parse::<u64>().ok())
-            .filter(|n| *n > 0)
-            .unwrap_or(10);
-        poll_batch_until_ended(
-            || llm.poll_batch_status(&batch_id),
-            std::time::Duration::from_secs(poll_secs),
-            MAX_CONSECUTIVE_POLL_FAILURES,
-            |status| {
-                eprintln!(
-                    "[camerata-server] batch {batch_id}: status={} (processing={}, succeeded={}, errored={})",
-                    status.processing_status,
-                    status.request_counts.processing,
-                    status.request_counts.succeeded,
-                    status.request_counts.errored,
-                );
-            },
-        )
-        .await?;
-
-        // Fetch + parse results.
-        let rows = llm.fetch_batch_results(&batch_id, batch_ttl).await?;
-        let sub_map = reassemble_batch_results(rows);
-        all_responses.extend(sub_map);
     }
 
-    // Reassemble: look up each (ci, bi) pair's response by its deterministic custom_id.
-    let mut findings = Vec::new();
-    let mut proposed = Vec::new();
-    let mut requested = std::collections::HashSet::new();
-    let mut ok = 0usize;
-    let mut last_err: Option<anyhow::Error> = None;
-
-    for (ci, bi, _prompt, _cache_bps) in &work_meta {
-        let custom_id = format!("c{ci}-b{bi}");
-        if refused_ids.contains(&custom_id) {
+    // Each reply goes through the scan pass's own post-processing. With `batch_default` on a
+    // reply cut off at the output limit gets the shared truncation retry, sent in real time
+    // and admitted under the spend limit like a real-time pass; these run concurrently.
+    let mut replies: Vec<(&BatchWork, crate::llm::LlmResponse)> = Vec::new();
+    let mut failures: Vec<(&BatchWork, String)> = Vec::new();
+    for w in &work {
+        if round.refused.contains(&w.custom_id) {
             // Refused by the spend cap before submission: recorded as NOT RUN on the meter.
             if let Some((jstore, jid)) = job {
                 jstore.inc_not_run(jid, 1);
             }
             continue;
         }
-        match all_responses.get(&custom_id) {
-            Some(resp) => {
-                if let Some(m) = meter {
-                    m.record_stage(Stage::ScanPass, resp);
+        match round.results.remove(&w.custom_id) {
+            Some(Ok(resp)) => replies.push((w, resp)),
+            Some(Err(why)) => failures.push((w, why)),
+            None => failures.push((w, "batch item missing from the batch results".to_string())),
+        }
+    }
+    let mut replies: Vec<(&BatchWork, crate::llm::LlmResponse)> = if eff.batch_default {
+        use futures::stream::StreamExt;
+        let realtime = llm.realtime();
+        // Collected first so the stream's type names no closure (a `Send` bound on the spawned
+        // scan future cannot be proven through a borrowing closure inside the combinator).
+        let retries: Vec<_> = replies
+            .into_iter()
+            .map(|(w, resp)| async move {
+                if !(resp.truncated && eff.truncation_retry) {
+                    return (w, resp);
                 }
-                let (f, p) = parse_ai_findings(repo, &resp.text, adopted);
-                let needs = parse_needs_files(&resp.text);
-                findings.extend(f.clone());
-                proposed.extend(p);
-                requested.extend(needs);
-                // Stream findings into the job for incremental preview.
-                if let Some((jstore, jid)) = job {
-                    jstore.add_findings(jid, f);
-                    jstore.inc_done(jid, 1);
-                }
-                ok += 1;
+                // SPEND CAP: the retry is one more real-time call. Refused, the cut-off reply is
+                // used as it came (and counted as wasted), exactly as with the retry switched off.
+                let _permit = match admit_pass(meter).await {
+                    Ok(permit) => permit,
+                    Err(CapReached) => {
+                        if let Some(m) = meter {
+                            m.record_wasted(Stage::ScanPass, &resp);
+                            m.record_note(format!(
+                                "the truncation retry of batch item {} was not run: the spend \
+                             limit was reached",
+                                w.custom_id
+                            ));
+                        }
+                        return (w, resp);
+                    }
+                };
+                let session = format!("audit-{repo}-batch-{}", w.custom_id);
+                let resp =
+                    retry_truncated_scan_reply(realtime, &w.req, resp, None, &session, meter).await;
+                (w, resp)
+            })
+            .collect();
+        futures::stream::iter(retries)
+            .buffer_unordered(PARALLEL_CONCURRENCY)
+            .collect()
+            .await
+    } else {
+        replies
+    };
+    // Back in (chunk, rule-batch) order, so the findings order does not depend on which retry
+    // finished first.
+    replies.sort_by_key(|(w, _)| (w.ci, w.bi));
+
+    let mut findings = Vec::new();
+    let mut proposed = Vec::new();
+    let mut requested = std::collections::HashSet::new();
+    let mut ok = 0usize;
+    let mut last_err: Option<anyhow::Error> = None;
+    for (_w, resp) in &replies {
+        let (f, p) = parse_ai_findings(repo, &resp.text, adopted);
+        let needs = parse_needs_files(&resp.text);
+        findings.extend(f.clone());
+        proposed.extend(p);
+        requested.extend(needs);
+        // Stream findings into the job for incremental preview.
+        if let Some((jstore, jid)) = job {
+            jstore.add_findings(jid, f);
+            jstore.inc_done(jid, 1);
+        }
+        ok += 1;
+    }
+    for (w, why) in failures {
+        let e = anyhow::anyhow!(
+            "batch item {} failed (chunk {}, rule-batch {}): {why}",
+            w.custom_id,
+            w.ci,
+            w.bi
+        );
+        eprintln!("[camerata-server] {e}");
+        // Rank 2: never a silent gap. Off: the pre-rank-2 log line and `last_err` only.
+        if eff.batch_default {
+            if let Some(m) = meter {
+                m.record_failed_scan_pass(batch_mode::failed_scan_pass(
+                    repo,
+                    label,
+                    w.ci,
+                    n_c,
+                    w.bi,
+                    n_b,
+                    batches[w.bi].len(),
+                    &why,
+                ));
             }
-            None => {
-                // The item failed or was not in the result set.
-                let e = anyhow::anyhow!(
-                    "batch item {custom_id} missing from results (chunk {ci}, rule-batch {bi})"
-                );
-                eprintln!("[camerata-server] {e}");
-                last_err = Some(e);
-                // Still count as done so the progress bar can reach 100%.
-                if let Some((jstore, jid)) = job {
-                    jstore.inc_done(jid, 1);
-                }
-            }
+        }
+        last_err = Some(e);
+        // Still count as done so the progress bar can reach 100%.
+        if let Some((jstore, jid)) = job {
+            jstore.inc_done(jid, 1);
         }
     }
 
@@ -7917,7 +7995,7 @@ pub async fn audit_repo(
     // Mode is the speed/scale knob: Sequential = 1 call per chunk with all rules; Parallel =
     // rule-batches × file-chunks run concurrently; Batch = one Anthropic Message Batch at
     // 50% discount, reassembled by custom_id.
-    let (concurrency, batch_size) = mode.tuning();
+    let (concurrency, batch_size) = mode.tuning(efficiency_of(meter));
 
     // Pass-1 W3 (A5.6): rules whose routing group matched zero files — see
     // `run_routed_passes`'s `skipped_rules` doc comment. The Batch execution path applies no
@@ -8011,6 +8089,11 @@ pub async fn audit_repo(
     // its own transcript status, so the UI spinner stops regardless.
     if ok_passes == 0 {
         if let Some(e) = last_err {
+            // The caller records every rule of this repo as not run with this error, so the
+            // per-pass failures recorded on the meter add nothing: drop them.
+            if let Some(m) = meter {
+                m.take_failed_scan_passes(repo);
+            }
             return Err(e);
         }
     }
@@ -8319,6 +8402,12 @@ pub async fn audit_repo(
             rows_out,
             accounting: acc,
         });
+    }
+    // Scan passes that ran and failed (real-time or batch, the resolution round included): each
+    // is disclosed, so the export states the inspection is incomplete instead of reading the
+    // missing findings as "nothing found".
+    if let Some(m) = meter {
+        failed_passes.extend(m.take_failed_scan_passes(repo));
     }
     Ok((
         verified,
@@ -8828,7 +8917,7 @@ async fn run_security_lens(
     }
     // The security lens has no adopted-rule corpus — it is a free-form security read — so it
     // runs as a single empty batch per chunk (one pass each), like the no-rules audit path.
-    let (concurrency, _batch_size) = mode.tuning();
+    let (concurrency, _batch_size) = mode.tuning(efficiency_of(meter));
     let chunks = chunk_files(files, CHUNK_DIGEST_CHARS);
     let empty_batch: &[(String, String)] = &[];
     let batches: Vec<&[(String, String)]> = vec![empty_batch];
@@ -9072,6 +9161,9 @@ pub async fn run_deep_tier(
     }
 }
 
+mod batch_mode;
+pub use batch_mode::{resolve_scan_mode, ScanModeChoice, CLI_BACKEND_REALTIME_NOTICE};
+
 #[cfg(test)]
 mod redaction_tests;
 
@@ -9086,6 +9178,9 @@ mod retry_tests;
 
 #[cfg(test)]
 mod efficiency_cap_tests;
+
+#[cfg(test)]
+mod batch_default_tests;
 
 #[cfg(test)]
 mod tests {
@@ -12949,31 +13044,31 @@ mod tests {
 
     // ── BUG-6 regression: ScanMode::Batch uses larger rule batch size ─────────────
 
-    /// Before BUG-6 fix: `ScanMode::Batch` returned `RULE_BATCH_SIZE` (15) from
-    /// `tuning()`, fragmenting Batch items unnecessarily (the Batch path submits all
-    /// items at once — there is no latency benefit to smaller rule batches). After the
-    /// fix, `ScanMode::Batch` returns `BATCH_RULE_BATCH_SIZE` (usize::MAX by default),
-    /// so each chunk becomes a single BatchItem with all adopted rules in one context.
+    /// BUG-6 kept for `batch_default` off: every rule in one item per chunk, larger than the
+    /// parallel rule-batch. With `batch_default` on (rank 2) Batch uses the parallel path's 15,
+    /// the graded prompt shape. (The `CAMERATA_BATCH_RULE_BATCH_SIZE` override is not set in
+    /// the test environment, so the constants apply.)
     #[test]
-    fn bug6_batch_mode_uses_larger_rule_batch_size_than_parallel() {
-        let (_, parallel_batch_size) = ScanMode::Parallel.tuning();
-        let (_, batch_batch_size) = ScanMode::Batch.tuning();
-
-        // The Batch rule batch size must be LARGER than the Parallel one (BUG-6 fix).
-        // PARALLEL = 15; BATCH = usize::MAX (or the env-var override, but the env var
-        // is not set in the test environment so the constant applies).
-        assert!(
-            batch_batch_size > parallel_batch_size,
-            "ScanMode::Batch rule batch size ({batch_batch_size}) must be larger than \
-             ScanMode::Parallel ({parallel_batch_size}) — BUG-6: batching all rules per \
-             chunk improves coherence in async Batch mode where concurrency is irrelevant"
+    fn batch_rule_batch_size_is_fifteen_with_batch_default_on_and_all_rules_off() {
+        let on = crate::efficiency::EfficiencyConfig::default();
+        let mut off = on;
+        off.batch_default = false;
+        let (_, parallel_batch_size) = ScanMode::Parallel.tuning(on);
+        assert_eq!(ScanMode::Batch.tuning(on).1, 15);
+        assert_eq!(ScanMode::Batch.tuning(on).1, parallel_batch_size);
+        assert_eq!(ScanMode::Batch.tuning(off).1, usize::MAX);
+        assert_eq!(
+            ScanMode::Parallel.tuning(off),
+            ScanMode::Parallel.tuning(on),
+            "the switch changes only the batch shape"
         );
     }
 
     /// Sequential mode must keep its existing tuning (1 concurrent call, all rules at once).
     #[test]
     fn bug6_sequential_mode_tuning_unchanged() {
-        let (concurrency, batch_size) = ScanMode::Sequential.tuning();
+        let (concurrency, batch_size) =
+            ScanMode::Sequential.tuning(crate::efficiency::EfficiencyConfig::default());
         assert_eq!(concurrency, 1, "sequential must be single-threaded");
         assert_eq!(
             batch_size,

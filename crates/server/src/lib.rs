@@ -5880,8 +5880,19 @@ async fn onboard_audit(
         r.message = Some("No repos to audit.".to_string());
         return Json(r);
     }
+    // An unknown scan mode is refused before anything runs (never a silent fallback).
+    let requested_mode = match crate::ai_audit::ScanMode::parse(req.mode.as_deref()) {
+        Ok(m) => m,
+        Err(e) => {
+            let mut r = crate::onboard::ScanReport::gated(&repos);
+            r.gated = false;
+            r.ai_error = Some(e.clone());
+            r.message = Some(e);
+            return Json(r);
+        }
+    };
     // Local-first: the audit reads the repos' local working trees, not GitHub.
-    let (sources, notes) = resolve_local_sources(&state, &repos);
+    let (sources, mut notes) = resolve_local_sources(&state, &repos);
     let selected: Vec<crate::onboard::SelectedRule> = req
         .rules
         .into_iter()
@@ -5917,7 +5928,6 @@ async fn onboard_audit(
         crate::project::StepKind::Calibration,
         req.calibration_model.as_deref(),
     ));
-    let mode = crate::ai_audit::ScanMode::parse(req.mode.as_deref());
     // Scan-type selector: resolve the two flags (both-false coerces to both-true).
     let (run_ai_review, run_deterministic, _coerced) =
         effective_scan_modes(req.run_ai_review, req.run_deterministic);
@@ -5942,6 +5952,13 @@ async fn onboard_audit(
     // `backend` setting and whether an Anthropic key is present. See
     // `resolve_backend_for_project`'s doc comment.
     let backend_resolution = resolve_backend_for_project(&state, active_project.as_ref());
+    // Rank 2: with no mode forced, the API backend runs the scan as a Message Batch.
+    let mode = scan_mode_for_run(
+        requested_mode,
+        &backend_resolution,
+        run_controls.efficiency,
+        &mut notes,
+    );
 
     // PANIC GUARD: this handler has no background job to fail into (unlike
     // `onboard_audit_start`'s spawned task) — a bare panic anywhere in the pipeline below
@@ -6923,6 +6940,22 @@ pub(crate) fn finding_grounds_to(f: &crate::onboard::Finding, rule_id: &str) -> 
         .any(|m| m == rule_id || external_tool_floor_category(m) == Some(rule_id))
 }
 
+/// The scan mode a desktop scan runs in ([`crate::ai_audit::resolve_scan_mode`]), with the one
+/// notice the resolution may carry (the CLI backend cannot batch) added to the scan's notes.
+fn scan_mode_for_run(
+    requested: Option<crate::ai_audit::ScanMode>,
+    backend: &crate::llm::BackendResolution,
+    efficiency: crate::efficiency::EfficiencyConfig,
+    notes: &mut Vec<String>,
+) -> crate::ai_audit::ScanMode {
+    let choice = crate::ai_audit::resolve_scan_mode(requested, backend, efficiency);
+    if let Some(notice) = choice.notice {
+        eprintln!("[camerata-server] {notice}");
+        notes.push(notice);
+    }
+    choice.mode
+}
+
 /// Mode 3 — START an async audit JOB. Spawns the same audit in the background and returns a
 /// job id IMMEDIATELY, so the request never blocks for the (possibly many-minute) run. The
 /// UI polls `GET /api/onboard/audit/job/:id` for progress + incremental findings, then the
@@ -7024,7 +7057,7 @@ pub(crate) async fn start_audit_job(
         crate::project::StepKind::Calibration,
         req.calibration_model.as_deref(),
     ));
-    let mode = crate::ai_audit::ScanMode::parse(req.mode.as_deref());
+    let requested_mode = crate::ai_audit::ScanMode::parse(req.mode.as_deref());
     let thorough = req.thorough;
     let deep = req.deep;
     // Scan-type selector: resolve the two flags (both-false coerces to both-true).
@@ -7050,6 +7083,20 @@ pub(crate) async fn start_audit_job(
     // handler) from this project's `backend` setting and key presence, then moved into the
     // spawned task below.
     let backend_resolution = resolve_backend_for_project(&state, active_project.as_ref());
+    // An unknown scan mode fails the job before anything runs (never a silent fallback); with
+    // no mode forced, the API backend runs the scan as a Message Batch (rank 2).
+    let mode = match requested_mode {
+        Ok(requested) => scan_mode_for_run(
+            requested,
+            &backend_resolution,
+            run_controls.efficiency,
+            &mut notes,
+        ),
+        Err(e) => {
+            state.jobs.fail(&job_id, e);
+            return job_id;
+        }
+    };
     // Audit-integrated alternative recommendation: this project's persisted chosen options,
     // computed up front (like `backend_resolution`) and moved into the spawned task below.
     let chosen_options = active_project

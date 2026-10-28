@@ -124,6 +124,8 @@ fn args(repo: &Path, export: &Path, cap: Option<f64>) -> InspectArgs {
         export: export.to_path_buf(),
         backend: ProjectBackend::Api,
         batch: false,
+        // The cap on the real-time path: a scripted model has no batches endpoint.
+        realtime: true,
         model: None,
         calibration_model: None,
         full: true,
