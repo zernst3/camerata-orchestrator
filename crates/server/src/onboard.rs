@@ -116,11 +116,14 @@ const BOOKKEEPING_CAPTURE_KEYS: &[&str] = &[
 /// move).
 #[derive(Debug, Default)]
 struct BookkeepingCaptures {
-    held: std::collections::HashMap<(String, String, String, String), Vec<(String, String)>>,
+    held: std::collections::HashMap<RowIdentity, Vec<(String, String)>>,
 }
 
+/// What identifies a row across the merge stages: repo, path, rule id and snippet.
+type RowIdentity = (String, String, String, String);
+
 impl BookkeepingCaptures {
-    fn key(f: &Finding) -> (String, String, String, String) {
+    fn key(f: &Finding) -> RowIdentity {
         (
             f.repo.clone(),
             f.path.clone(),
