@@ -2492,26 +2492,29 @@ pub(super) fn StepModelsEditor(project: ProjectView) -> Element {
     // The (step-key, human label, current model id, tooltip hint, unset label) tuples, in
     // display order. Only a step with an unset label may be left with no model.
     let sm = &project.step_models;
-    let rows: Vec<(&'static str, &'static str, String, &'static str, Option<&'static str>)> = vec![
+    let fix_hint = format!(
+        "Writes one concrete fix per finding after calibration. Default: {}, or the calibration model when the fix_on_haiku efficiency measure is off.",
+        camerata_api_types::project::fix_stage_haiku_display_name()
+    );
+    let rows: Vec<(&'static str, &'static str, String, String, Option<&'static str>)> = vec![
         ("audit", "Audit", sm.audit.clone(),
-            "Onboarding scan that proposes governance rules for this project.", None),
+            "Onboarding scan that proposes governance rules for this project.".to_string(), None),
         ("calibration", "Calibration", sm.calibration.clone(),
-            "Onboarding calibration: fine-tunes the proposed rule set to the project's actual patterns.", None),
+            "Onboarding calibration: fine-tunes the proposed rule set to the project's actual patterns.".to_string(), None),
         ("fix", "Fix", sm.fix.clone(),
-            "Writes one concrete fix per finding after calibration. Default: Claude Haiku 5.5, or the calibration model when the fix_on_haiku efficiency measure is off.",
-            Some("Default")),
+            fix_hint, Some("Default")),
         // NOTE: Research chat (the global assistant) is intentionally NOT listed here. Its model
         // is now an APP-LEVEL (cross-project) setting — see the "Chat assistant model" selector in
         // the cross-project Settings section. The `step_models.research_chat` field is retained for
         // back-compat but is no longer surfaced per-project nor used to resolve the chat model.
         ("story_authoring", "Story authoring", sm.story_authoring.clone(),
-            "The author-a-story screen: structures requirements into a governed work item.", None),
+            "The author-a-story screen: structures requirements into a governed work item.".to_string(), None),
         ("decomposition", "Decomposition", sm.decomposition.clone(),
-            "Splits a story or issue into sub-issues for parallel fleet execution.", None),
+            "Splits a story or issue into sub-issues for parallel fleet execution.".to_string(), None),
         ("escalation", "Escalation", sm.escalation.clone(),
-            "Restates your escalation answer as a resume directive the fleet can act on.", None),
+            "Restates your escalation answer as a resume directive the fleet can act on.".to_string(), None),
         ("clarification", "Clarification", sm.clarification.clone(),
-            "Generates the investigation clarification questions sent to the requester.", None),
+            "Generates the investigation clarification questions sent to the requester.".to_string(), None),
     ];
 
     rsx! {
@@ -2552,7 +2555,7 @@ pub(super) fn StepModelRow(
     step_key: &'static str,
     label: &'static str,
     current: String,
-    hint: &'static str,
+    hint: String,
     unset_label: Option<&'static str>,
     models: Option<AuditModelsResp>,
 ) -> Element {

@@ -126,9 +126,9 @@ fn args(repo: &Path, export: &Path, cap: Option<f64>) -> InspectArgs {
         batch: false,
         model: None,
         calibration_model: None,
-        // A spend limit needs every model priced, and the fix stage's default (Haiku 5.5) has no
-        // list price until the model registry carries it: a capped run names a priced fix model.
-        fix_model: cap.map(|_| camerata_server::llm::DEFAULT_MODEL.to_string()),
+        // No fix model: a capped run takes the fix stage's default (Haiku 5.5), which the model
+        // registry prices, so the limit is enforceable and the run is admitted.
+        fix_model: None,
         full: true,
         verbose: false,
         max_cost_usd: cap,
@@ -232,6 +232,12 @@ async fn a_capped_run_is_loud_incomplete_and_never_leaks_a_dollar_figure_into_th
     // Every call costs $1 against a $1.50 limit: the first call or two run, the rest cannot.
     let (outcome, events, export, _dir) = run(Some(1.5), 1.0).await;
 
+    // Admitted: the default fix model is priced, so the limit is enforceable and the run started
+    // (it was not refused before the first model call).
+    assert!(
+        events.iter().any(|e| e == "model call"),
+        "the capped default run was admitted: {events:?}"
+    );
     assert!(outcome.cost_capped(), "the limit stopped the run");
     assert_ne!(EXIT_COST_CAPPED, 0);
     let cap = outcome.cost_cap.as_ref().unwrap();

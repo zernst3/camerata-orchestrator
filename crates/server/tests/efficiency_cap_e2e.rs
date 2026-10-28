@@ -135,10 +135,9 @@ fn controls(cap: Option<f64>, efficiency: EfficiencyConfig) -> RunControls {
         efficiency,
         max_cost_usd: cap,
         estimate_hint_usd: None,
-        // A spend limit needs every model priced, and the fix stage's default (Haiku 5.5) has no
-        // list price until the model registry carries it: a capped run here names a priced fix
-        // model so it is not refused before it starts.
-        fix_model: cap.map(|_| camerata_server::llm::DEFAULT_MODEL.to_string()),
+        // No fix model: a capped run takes the fix stage's default (Haiku 5.5), which the model
+        // registry prices.
+        fix_model: None,
     }
 }
 
@@ -310,6 +309,35 @@ async fn a_scan_under_its_cap_is_complete() {
         .iter()
         .all(|f| !f.reason.contains("NOT RUN")));
     assert!(report.ledger.rule("ARCH-CAP-TEST-89-1").unwrap().ran);
+}
+
+/// Rank 10: a spend-limited run with NO fix model set is admitted. The fix stage's default model
+/// (Haiku 5.5) is priced in the model registry, so the limit is enforceable and nothing refuses
+/// the run before it starts.
+#[tokio::test]
+async fn a_capped_default_run_is_admitted_because_the_default_fix_model_is_priced() {
+    let dir = tempfile::tempdir().unwrap();
+    stage_repo(dir.path());
+    let llm = Stub::new(0.01);
+    let (report, _m) = scan(
+        &llm,
+        dir.path(),
+        None,
+        controls(Some(50.0), EfficiencyConfig::default()),
+    )
+    .await;
+    assert!(
+        report.ai_blocked_reason.is_none() && !report.blocked,
+        "refused: {:?}",
+        report.ai_blocked_reason
+    );
+    assert!(llm.calls() > 0, "the run started");
+    assert!(
+        camerata_server::llm::models()
+            .iter()
+            .any(|m| m.id == camerata_server::ai_audit::FIX_STAGE_HAIKU_MODEL),
+        "the default fix model is in the priced catalog"
+    );
 }
 
 #[tokio::test]

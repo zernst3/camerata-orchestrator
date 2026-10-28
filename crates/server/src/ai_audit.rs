@@ -3475,10 +3475,9 @@ async fn recommend_alternatives(
 const MAX_FIX_REGENERATIONS: usize = 2;
 
 /// Rank 10: the model the fix stage runs on when no fix model is set and the `fix_on_haiku`
-/// efficiency measure is on (the default). The fix call is short, narrow, evidence-bound prose
-/// and every answer is checked by the self-check below, so it is the stage where a cheaper model
-/// costs the least quality. Named once; nothing else spells this id.
-pub const FIX_STAGE_HAIKU_MODEL: &str = "claude-haiku-5-5";
+/// efficiency measure is on (the default). Defined in `camerata-api-types` beside
+/// [`DEFAULT_MODEL`] (the cockpit and the CLI print its name); re-exported here for the server.
+pub use camerata_api_types::project::FIX_STAGE_HAIKU_MODEL;
 
 /// Rank 10: the `output_config.effort` the fix call sends when it runs on
 /// [`FIX_STAGE_HAIKU_MODEL`]. That model thinks adaptively at `medium` unless told otherwise;
@@ -3513,16 +3512,14 @@ pub fn resolve_fix_model<'a>(
     calibration_model.or(model)
 }
 
-/// The effort the fix call asks for: [`FIX_STAGE_EFFORT`] when the call runs on
-/// [`FIX_STAGE_HAIKU_MODEL`] with `fix_on_haiku` on, otherwise none (the request is what it was
-/// before rank 10). Gated on the model, not on the switch alone, because not every model accepts
-/// an effort setting and an explicit fix model may be one that rejects it.
-pub fn fix_effort(
-    fix_model: Option<&str>,
-    efficiency: crate::efficiency::EfficiencyConfig,
-) -> Option<&'static str> {
-    (efficiency.fix_on_haiku && fix_model == Some(FIX_STAGE_HAIKU_MODEL))
-        .then_some(FIX_STAGE_EFFORT)
+/// The effort the fix call asks for. ONE rule: [`FIX_STAGE_EFFORT`] whenever the fix model is
+/// [`FIX_STAGE_HAIKU_MODEL`], whether it got there by default (`fix_on_haiku` on) or because
+/// the operator picked it explicitly (with the switch on or off); any other model gets none and
+/// keeps the request it always had. Gated on the model, not the switch, because the effort is a
+/// property of how Haiku 5.5 behaves (it thinks at `medium` unless told) and not every model
+/// accepts an effort setting, so an explicit non-Haiku pick must not receive it.
+pub fn fix_effort(fix_model: Option<&str>) -> Option<&'static str> {
+    (fix_model == Some(FIX_STAGE_HAIKU_MODEL)).then_some(FIX_STAGE_EFFORT)
 }
 
 /// SYSTEM PROMPT for the fix-specific generation pass. Deliberately narrow: this pass does
@@ -3855,6 +3852,77 @@ pub(crate) fn fix_leaks_methodology(fix: &str) -> Option<String> {
         .map(|p| p.to_string())
 }
 
+/// Why a finding never got a response from the fix model on its last attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FixMiss {
+    /// The spend limit refused the batch the finding was in; no call was made.
+    CapStopped,
+    /// The call was made and failed in transport (timeout, HTTP error, dropped stream).
+    TransportFailed,
+}
+
+/// What happened to each finding sent through the fix rounds, kept per finding so the give-up
+/// rate counts only what it means: a finding the model ANSWERED (at least one call returned and
+/// was parsed) and still produced no fix that passed the self-check. A finding that was never
+/// answered (the spend limit stopped it, or every call failed in transport) is not a model
+/// give-up and is reported as its own figure. Filled by [`run_fix_specifics_round`], summed into
+/// a [`crate::stage_telemetry::FixOutcome`] by [`FixLedger::outcome`].
+#[derive(Default)]
+struct FixLedger {
+    /// Findings a call was actually made for, at least once.
+    sent: std::collections::HashSet<usize>,
+    /// Findings whose call returned a response that was parsed, at least once.
+    answered: std::collections::HashSet<usize>,
+    /// For a finding that missed its latest attempt without an answer: why.
+    last_miss: std::collections::HashMap<usize, FixMiss>,
+}
+
+impl FixLedger {
+    fn miss(&mut self, batch: &[usize], why: FixMiss) {
+        for &i in batch {
+            self.last_miss.insert(i, why);
+        }
+    }
+
+    /// A call is about to be made for `batch`.
+    fn sent(&mut self, batch: &[usize]) {
+        self.sent.extend(batch.iter().copied());
+    }
+
+    /// A call for `batch` returned a response.
+    fn answered(&mut self, batch: &[usize]) {
+        self.answered.extend(batch.iter().copied());
+        for i in batch {
+            self.last_miss.remove(i);
+        }
+    }
+
+    /// The run's tally once the rounds are over, given the findings still `pending` (no fix that
+    /// passed the self-check) and how many the pre-filter handled with no model call.
+    fn outcome(
+        &self,
+        pending: &[usize],
+        authored_without_model: usize,
+    ) -> crate::stage_telemetry::FixOutcome {
+        let mut out = crate::stage_telemetry::FixOutcome {
+            sent_to_model: self.sent.len() as u64,
+            answered: self.answered.len() as u64,
+            authored_without_model: authored_without_model as u64,
+            ..Default::default()
+        };
+        for i in pending {
+            if self.answered.contains(i) {
+                out.gave_up += 1;
+            } else if self.last_miss.get(i) == Some(&FixMiss::CapStopped) {
+                out.cap_stopped += 1;
+            } else {
+                out.transport_failed += 1;
+            }
+        }
+        out
+    }
+}
+
 /// One ROUND of the fix-specific generation loop (C6-B3.4 extracted this out of
 /// [`generate_fix_specifics`] so a normal `FIX_BATCH_SIZE`-batched round and the final
 /// single-finding retry share IDENTICAL request-building, streaming, and self-check logic —
@@ -3875,6 +3943,7 @@ async fn run_fix_specifics_round(
     feedback: &mut std::collections::HashMap<usize, String>,
     pending: &[usize],
     batch_size: usize,
+    ledger: &mut FixLedger,
 ) -> Vec<usize> {
     let mut still_pending = Vec::new();
     // Bounded chunks (see `FIX_BATCH_SIZE`'s doc comment) — each is an independent streamed
@@ -3888,6 +3957,7 @@ async fn run_fix_specifics_round(
         // recorded as stopped part way.
         let _permit = match admit_stage(meter, repo, STAGE_FIX).await {
             Err(CapReached) => {
+                ledger.miss(batch, FixMiss::CapStopped);
                 still_pending.extend(batch.iter().copied());
                 continue;
             }
@@ -3911,7 +3981,7 @@ async fn run_fix_specifics_round(
         if let Some(m) = fix_model {
             req = req.with_model(m.to_string());
         }
-        if let Some(effort) = fix_effort(fix_model, efficiency_of(meter)) {
+        if let Some(effort) = fix_effort(fix_model) {
             req = req.with_effort(effort);
         }
         // Routed through the STREAMING transport (not the flat `complete`) so a large
@@ -3919,6 +3989,7 @@ async fn run_fix_specifics_round(
         // non-reset 300s deadline. `on_delta` is a no-op: this pass has no live
         // transcript sink to feed.
         let mut on_delta = |_: &str| {};
+        ledger.sent(batch);
         let resp = match llm.complete_streaming(req, &mut on_delta).await {
             Ok(r) => r,
             // Transport/timeout failure: nothing to validate for this chunk this round.
@@ -3927,10 +3998,12 @@ async fn run_fix_specifics_round(
             // failure never re-queues findings OUTSIDE this chunk.
             Err(e) => {
                 meter_failed(meter, Stage::FixGeneration, &e);
+                ledger.miss(batch, FixMiss::TransportFailed);
                 still_pending.extend(batch.iter().copied());
                 continue;
             }
         };
+        ledger.answered(batch);
         if let Some(m) = meter {
             m.record_stage(Stage::FixGeneration, &resp);
         }
@@ -4121,18 +4194,15 @@ pub async fn generate_fix_specifics(
              remediation with no model call."
         );
     }
-    // Telemetry: the denominator of the fix give-up rate is what is sent to the fix model here;
-    // the give-ups are added after the last round below.
-    if let Some(m) = meter {
-        m.record_fix_outcome(crate::stage_telemetry::FixOutcome {
-            sent_to_model: indices.len() as u64,
-            gave_up: 0,
-            authored_without_model: authored_directly as u64,
-        });
-    }
+    // Telemetry: what became of each finding is tallied per finding (`FixLedger`) and recorded
+    // once after the last round. When nothing is left for the model, only the pre-filter's count.
     if indices.is_empty() {
+        if let Some(m) = meter {
+            m.record_fix_outcome(FixLedger::default().outcome(&[], authored_directly));
+        }
         return (findings, Vec::new());
     }
+    let mut ledger = FixLedger::default();
 
     let system = fix_specific_system_prompt();
     // The subset of `indices` still needing a valid fix this round; shrinks as findings
@@ -4157,6 +4227,7 @@ pub async fn generate_fix_specifics(
             &mut feedback,
             &pending,
             FIX_BATCH_SIZE,
+            &mut ledger,
         )
         .await;
     }
@@ -4177,6 +4248,7 @@ pub async fn generate_fix_specifics(
             &mut feedback,
             &pending,
             1,
+            &mut ledger,
         )
         .await;
     }
@@ -4190,10 +4262,7 @@ pub async fn generate_fix_specifics(
     // as `None`; `report_export::is_action_row_missing_a_fix` is what re-routes THAT case to
     // `"held"` rather than shipping an action-bucket row with no fix text anywhere.
     if let Some(m) = meter {
-        m.record_fix_outcome(crate::stage_telemetry::FixOutcome {
-            gave_up: pending.len() as u64,
-            ..Default::default()
-        });
+        m.record_fix_outcome(ledger.outcome(&pending, authored_directly));
     }
     let mut failed_passes = Vec::new();
     if !pending.is_empty() {

@@ -2793,6 +2793,20 @@ mod tests {
         assert_eq!(d["thinking"], disabled());
     }
 
+    /// The fix stage's default model is in the catalog, priced, and the name the cockpit and CLI
+    /// derive from its id is the registry's own display name with the vendor prefix.
+    #[test]
+    fn the_fix_stage_default_model_is_catalogued_and_named_consistently() {
+        let id = camerata_api_types::project::FIX_STAGE_HAIKU_MODEL;
+        let entry =
+            registry_entry_for(id).expect("the fix stage's default model is in the registry");
+        assert!(entry.price_in > 0.0 && entry.price_out > 0.0);
+        assert_eq!(
+            camerata_api_types::project::fix_stage_haiku_display_name(),
+            format!("Claude {}", entry.display)
+        );
+    }
+
     /// Haiku 5.5 accepts `thinking: disabled` at effort high (the effort we set) but not above.
     #[test]
     fn haiku_5_5_keeps_disabled_thinking_only_up_to_high_effort() {

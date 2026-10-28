@@ -1834,7 +1834,12 @@ pub struct BatchMessage {
 /// effort is treated as none. The one place a request's effort reaches a wire body (real-time
 /// and batch alike).
 fn apply_request_effort(req: &LlmRequest, body: &mut serde_json::Value) {
-    if let Some(effort) = req.effort.as_deref().map(str::trim).filter(|e| !e.is_empty()) {
+    if let Some(effort) = req
+        .effort
+        .as_deref()
+        .map(str::trim)
+        .filter(|e| !e.is_empty())
+    {
         body["output_config"] = serde_json::json!({ "effort": effort });
     }
 }

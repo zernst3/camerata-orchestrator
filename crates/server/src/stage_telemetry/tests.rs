@@ -250,10 +250,16 @@ fn calls_are_counted_per_model_and_the_fix_tally_sums() {
     meter.record(Stage::FixGeneration, &on("claude-haiku-5-5"));
     meter.record(Stage::FixGeneration, &on("claude-haiku-5-5"));
     meter.record(Stage::FixGeneration, &on("claude-sonnet-5"));
-    for (sent, gave_up, authored) in [(4, 1, 2), (6, 2, 0)] {
+    // (sent, answered, gave_up, cap_stopped, transport_failed, authored)
+    for (sent, answered, gave_up, cap, transport, authored) in
+        [(4, 3, 1, 1, 0, 2), (6, 5, 2, 0, 1, 0)]
+    {
         meter.record_fix_outcome(FixOutcome {
             sent_to_model: sent,
+            answered,
             gave_up,
+            cap_stopped: cap,
+            transport_failed: transport,
             authored_without_model: authored,
         });
     }
@@ -274,19 +280,29 @@ fn calls_are_counted_per_model_and_the_fix_tally_sums() {
     assert_eq!(
         (
             outcome.sent_to_model,
+            outcome.answered,
             outcome.gave_up,
+            outcome.cap_stopped,
+            outcome.transport_failed,
             outcome.authored_without_model
         ),
-        (10, 3, 2)
+        (10, 8, 3, 1, 1, 2)
     );
-    assert_eq!(outcome.give_up_rate(), Some(0.3));
+    assert_eq!(
+        outcome.give_up_rate(),
+        Some(3.0 / 8.0),
+        "the rate is over the findings the model answered, not over those sent"
+    );
     let table = t.render_table();
     assert!(
         table.contains("fix model: claude-haiku-5-5 x2, claude-sonnet-5 x1"),
         "{table}"
     );
     assert!(
-        table.contains("fix give-up rate: 30.0% (3 of 10 sent to the fix model; 2 used"),
+        table.contains(
+            "fix give-up rate: 37.5% (3 of 8 answered by the fix model; 2 not answered: 1 \
+             stopped by the spend limit, 1 failed in transport; 2 used"
+        ),
         "{table}"
     );
 
@@ -294,5 +310,36 @@ fn calls_are_counted_per_model_and_the_fix_tally_sums() {
         StageMeter::default().snapshot(0).fix_outcome,
         None,
         "no fix stage, no tally"
+    );
+}
+
+/// The CLI backend echoes the model it was asked for and never reports what served the call, so
+/// its calls are counted, and printed, as the REQUESTED model; the API's are the served model.
+#[test]
+fn cli_calls_are_counted_as_the_requested_model() {
+    let meter = StageMeter::default();
+    let on = |model: &str, backend: &str| LlmResponse {
+        model: model.to_string(),
+        backend: backend.to_string(),
+        ..resp(10, 1, 0, 0, Some(0.01))
+    };
+    meter.record(Stage::FixGeneration, &on("claude-haiku-5-5", "cli"));
+    meter.record(Stage::FixGeneration, &on("claude-haiku-5-5", "cli"));
+    meter.record(Stage::FixGeneration, &on("claude-haiku-5-5", "api"));
+    let t = meter.snapshot(0);
+    let fix = &t
+        .stages
+        .iter()
+        .find(|s| s.stage == Stage::FixGeneration)
+        .unwrap()
+        .usage;
+    assert_eq!(fix.models.get("claude-haiku-5-5 (requested)"), Some(&2));
+    assert_eq!(fix.models.get("claude-haiku-5-5"), Some(&1));
+    assert_eq!(fix.models.values().sum::<u64>(), fix.calls);
+    assert!(
+        t.render_table()
+            .contains("fix model: claude-haiku-5-5 x1, claude-haiku-5-5 (requested) x2"),
+        "{}",
+        t.render_table()
     );
 }

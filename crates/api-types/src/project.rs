@@ -16,6 +16,45 @@ use serde::{Deserialize, Serialize};
 /// per call or via `CAMERATA_LLM_MODEL`.
 pub const DEFAULT_MODEL: &str = "claude-sonnet-5";
 
+/// The model the fix stage runs on when no fix model is set and the `fix_on_haiku` efficiency
+/// measure is on (the default). The fix call is short, narrow, evidence-bound prose and every
+/// answer is checked by the self-check, so it is the stage where a cheaper model costs the least
+/// quality. Named once, here beside [`DEFAULT_MODEL`]: the server resolves it
+/// (`camerata_server::ai_audit::resolve_fix_model`) and the cockpit hint and the CLI help print
+/// its name through [`model_display_name`].
+pub const FIX_STAGE_HAIKU_MODEL: &str = "claude-haiku-5-5";
+
+/// A model id as a person reads it: `claude-haiku-5-5` is `Claude Haiku 5.5`. Words are
+/// capitalized and an all-digit run becomes a dotted version; an id that does not follow the
+/// `claude-<family>-<major>-<minor>` shape comes back unchanged apart from capitalization.
+pub fn model_display_name(id: &str) -> String {
+    let mut words: Vec<String> = Vec::new();
+    let mut version: Vec<&str> = Vec::new();
+    let flush = |version: &mut Vec<&str>, words: &mut Vec<String>| {
+        if !version.is_empty() {
+            words.push(version.join("."));
+            version.clear();
+        }
+    };
+    for part in id.split('-').filter(|p| !p.is_empty()) {
+        if part.chars().all(|c| c.is_ascii_digit()) {
+            version.push(part);
+        } else {
+            flush(&mut version, &mut words);
+            let mut chars = part.chars();
+            let head = chars.next().map(|c| c.to_ascii_uppercase());
+            words.push(head.into_iter().chain(chars).collect());
+        }
+    }
+    flush(&mut version, &mut words);
+    words.join(" ")
+}
+
+/// What the fix stage runs on by default, for display (`Claude Haiku 5.5`).
+pub fn fix_stage_haiku_display_name() -> String {
+    model_display_name(FIX_STAGE_HAIKU_MODEL)
+}
+
 /// serde default for each [`StepModels`] field — the shipped [`DEFAULT_MODEL`]. Used so a
 /// project JSON written before a given step field existed deserializes to the default
 /// rather than failing (mirrors [`default_max_iterations`] in `camerata_app_core::project`).
@@ -166,5 +205,18 @@ impl Default for StepModels {
             escalation: DEFAULT_MODEL.to_string(),
             clarification: DEFAULT_MODEL.to_string(),
         }
+    }
+}
+
+#[cfg(test)]
+mod fix_stage_model_name_tests {
+    use super::*;
+
+    #[test]
+    fn a_model_id_is_displayed_as_family_and_dotted_version() {
+        assert_eq!(model_display_name("claude-haiku-5-5"), "Claude Haiku 5.5");
+        assert_eq!(model_display_name("claude-sonnet-5"), "Claude Sonnet 5");
+        assert_eq!(model_display_name("claude-fable-5-1"), "Claude Fable 5.1");
+        assert_eq!(fix_stage_haiku_display_name(), "Claude Haiku 5.5");
     }
 }

@@ -5886,7 +5886,7 @@ async fn onboard_audit(
     State(state): State<AppState>,
     Json(req): Json<AuditReq>,
 ) -> Json<crate::onboard::ScanReport> {
-    let run_controls = req.run_controls(fix_step_model(&state));
+    let run_controls = req.run_controls_for(&state);
     let repos: Vec<String> = req
         .repos
         .into_iter()
@@ -6968,6 +6968,13 @@ impl AuditReq {
             ..crate::cost_cap::RunControls::from_env()
         }
     }
+
+    /// [`Self::run_controls`] for the app's active project: its fix step model (unset unless the
+    /// operator picked one) is what the run's fix stage is told. The one place the project's
+    /// fix setting becomes run controls; both audit entry points come through it.
+    fn run_controls_for(&self, state: &AppState) -> crate::cost_cap::RunControls {
+        self.run_controls(fix_step_model(state))
+    }
 }
 
 /// How a started audit job differs from the plain "scan" the UI's scan button starts. Every
@@ -7004,7 +7011,7 @@ pub(crate) async fn start_audit_job(
     options: AuditJobOptions,
 ) -> String {
     let state = state.clone();
-    let run_controls = req.run_controls(fix_step_model(&state));
+    let run_controls = req.run_controls_for(&state);
     let repos: Vec<String> = req
         .repos
         .into_iter()
@@ -27046,6 +27053,76 @@ mod tests {
                 .fix_model
                 .as_deref(),
             Some("claude-opus-5")
+        );
+    }
+
+    /// Rank 10, the wiring the desktop audit takes: the active project's fix step model becomes
+    /// the run's fix model through the same function both audit entry points call
+    /// (`AuditReq::run_controls_for`), and from there the model the fix stage resolves. Not a
+    /// hand-built `RunControls`: the project is set through its store, as the settings screen's
+    /// `POST /step-models` does.
+    #[test]
+    fn the_projects_fix_model_reaches_the_audit_runs_controls() {
+        let state = AppState::seeded();
+        let project = state
+            .projects()
+            .create("Fix wiring", vec!["me/repo".to_string()])
+            .expect("create active project");
+        let req: AuditReq = serde_json::from_value(serde_json::json!({})).unwrap();
+        let resolved = |state: &AppState| {
+            let controls = req.run_controls_for(state);
+            let fix_model = controls
+                .fix_model_for(Some("scan-model"), Some("calibration-model"))
+                .map(str::to_string);
+            (controls.fix_model.clone(), fix_model)
+        };
+
+        // New project: no fix model, so the switch decides (Haiku by default).
+        assert_eq!(
+            resolved(&state),
+            (
+                None,
+                Some(crate::ai_audit::FIX_STAGE_HAIKU_MODEL.to_string())
+            )
+        );
+
+        // The operator picks a model for the fix step: it is the run's fix model.
+        state
+            .projects()
+            .set_step_model(
+                &project.id,
+                crate::project::StepKind::Fix,
+                "claude-opus-5".to_string(),
+            )
+            .unwrap();
+        assert_eq!(
+            resolved(&state),
+            (
+                Some("claude-opus-5".to_string()),
+                Some("claude-opus-5".to_string())
+            )
+        );
+
+        // Cleared back to Default (a blank id): unset again.
+        state
+            .projects()
+            .set_step_model(&project.id, crate::project::StepKind::Fix, String::new())
+            .unwrap();
+        assert_eq!(
+            resolved(&state),
+            (
+                None,
+                Some(crate::ai_audit::FIX_STAGE_HAIKU_MODEL.to_string())
+            )
+        );
+
+        // No active project at all: nothing set.
+        assert_eq!(
+            resolved(&AppState::seeded()),
+            (
+                None,
+                Some(crate::ai_audit::FIX_STAGE_HAIKU_MODEL.to_string())
+            )
         );
     }
 

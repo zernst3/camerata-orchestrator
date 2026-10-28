@@ -2735,16 +2735,17 @@ is the stage where a cheaper model risks the least. Its model is decided in one 
    the desktop app's helper-agent model list or `POST /api/projects/:id/step-models`
    with `step: "fix"`) or `camerata inspect --fix-model`. It travels on
    `RunControls::fix_model`. Blank means unset;
-2. with `fix_on_haiku` on (the default): `FIX_STAGE_HAIKU_MODEL` (`claude-haiku-5-5`);
+2. with `fix_on_haiku` on (the default): `FIX_STAGE_HAIKU_MODEL` (`claude-haiku-5-5`,
+   defined in `camerata-api-types` beside `DEFAULT_MODEL`; the cockpit hint and the
+   `--fix-model` help print its display name derived from that constant);
 3. with it off: `calibration_model.or(model)`, exactly the pre-rank-10 choice.
 
 Unlike the other steps, `StepModels::fix` is empty on a new project and a model
 profile never sets it: a seeded model id would read as an explicit choice and silently
 override the switch. The spend-limit check (`models_the_run_will_use`) resolves the
 fix model through the same function, so the model checked for a price is the model
-called. Until the model registry prices `claude-haiku-5-5`, a run with a spend limit
-and no explicit fix model is refused before it starts, naming that model; set a priced
-fix model or switch `fix_on_haiku` off to run capped in the meantime.
+called. `claude-haiku-5-5` is priced in the model registry, so a spend-limited run with
+no explicit fix model is admitted and its fix spend is counted at Haiku 5.5 rates.
 
 The model is a parameter of `generate_fix_specifics` and `run_fix_specifics_round`
 (`fix_model`), never read from the environment inside them. **Effort:** Haiku 5.5
@@ -2753,21 +2754,34 @@ call sets `output_config.effort` explicitly: `FIX_STAGE_EFFORT` = `low`. The tas
 narrow and bounded by the evidence in the prompt, and the self-check plus the
 bounded retries catch a weak answer, so the lowest effort is the starting point; raise
 it only if the live sweep's give-up rate or fix-quality sample says the fixes need
-more. Effort is sent only when the call runs on `FIX_STAGE_HAIKU_MODEL` with the
-switch on (`ai_audit::fix_effort`): an explicit fix model may be one that rejects the
-field, and switch off reproduces the old request byte for byte. `LlmRequest::effort`
-reaches the real-time Messages API body only (`api_message_body`); the CLI backend
-and the Message Batches path do not send it. The no-code pre-filter
+more. One rule (`ai_audit::fix_effort`): the fix call uses `low` whenever the fix
+model is `FIX_STAGE_HAIKU_MODEL`, whether it got there by default or by an explicit
+pick, with `fix_on_haiku` on or off; any other fix model gets no effort, because the
+setting is a property of Haiku 5.5 and not every model accepts it. `LlmRequest::effort`
+is written into `output_config.effort` by `apply_request_effort` BEFORE
+`conform_messages_body`, which keeps a caller-chosen effort and only fills the model's
+default (`high` on Haiku 5.5) when none is present. Both the real-time body
+(`messages_request_body`) and the Message Batches item (`build_batch_item`) take it
+through that one helper; the CLI backend does not send it. The no-code pre-filter
 (`fix_prefilter`) and the scan's truncation retry are unchanged on the Haiku path.
 
 **Fix telemetry** (operator only). Every stage's `StageUsage::models` counts calls per
-model id (the model each response reports), so the table prints `fix model:
-claude-haiku-5-5 x12` under the stage rows. `StageTelemetry::fix_outcome`
-(`FixOutcome`) sums, over every repo in the run, the findings sent to the fix model,
-the ones it gave up on (no fix passed the self-check after every retry, so the rule's
-authored remediation shipped instead), and the ones the pre-filter handled with no
-model call; the table prints `fix give-up rate: 7.5% (3 of 40 sent to the fix model;
-...)`. Both are on the operator ledger, never in the client export.
+model id, so the table prints `fix model: claude-haiku-5-5 x12` under the stage rows.
+The API backend reports the model that served each call; the CLI backend does not (its
+response carries the id it was asked for), so CLI calls are keyed `<id> (requested)`
+and the table reads `fix model: claude-haiku-5-5 (requested) x12`. `StageTelemetry::fix_outcome`
+(`FixOutcome`) is tallied per finding and summed over every repo in the run:
+`sent_to_model` (findings a call was actually made for; a finding the spend limit
+refused every batch for is not counted), `answered` (of those, findings that received
+at least one parsed response), `gave_up` (of the answered, findings with no fix that
+passed the self-check after every retry, so the rule's authored remediation shipped
+instead), `cap_stopped` and `transport_failed` (findings left without a fix and never
+answered: stopped by the spend limit, or every call failed in transport), and
+`authored_without_model` (the pre-filter's count). The give-up rate is `gave_up /
+answered`, so a stage cut short by the limit or by a flaky network does not read as a
+quality signal about the model. The table prints `fix give-up rate: 7.5% (3 of 40
+answered by the fix model; 2 not answered: 1 stopped by the spend limit, 1 failed in
+transport; ...)`. Both are on the operator ledger, never in the client export.
 
 **Cost arithmetic** (`camerata_llm::llm::compute_cost_usd`, the one function every
 dollar figure comes from: the printed cost, the telemetry, the spend limit). The
