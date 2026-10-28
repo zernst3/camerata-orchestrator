@@ -472,6 +472,11 @@ fn live_state(clone: &Path) -> AppState {
     state
         .projects
         .set_backend(&project.id, crate::llm::ProjectBackend::Cli);
+    // The `cli` backend is the maintainer's own development setup; a client engagement refuses it.
+    state
+        .projects
+        .set_client_engagement(&project.id, false, false)
+        .unwrap();
     state
         .settings
         .set_repo_path("acme/api", Some(clone.display().to_string()));

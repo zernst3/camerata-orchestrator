@@ -427,6 +427,26 @@ impl AppState {
         ))
     }
 
+    /// The client-engagement lock for a step whose model id comes from the request (the routine
+    /// prompt draft, the escalation review chat, the chat), checked against the ACTIVE project.
+    /// [`AppState::llm_for_project`] is handed no model and so cannot check one: without this a
+    /// non-Anthropic id would be routed to OpenRouter by `build_completer`. A blank id is the
+    /// server default (a Claude model) and passes; with no active project there is no client
+    /// code in the step's context and nothing is refused.
+    pub fn client_lock_step_model_refusal(&self, model: &str) -> Option<String> {
+        let model = model.trim();
+        if model.is_empty() {
+            return None;
+        }
+        let p = self.projects.active()?;
+        crate::client_lock::refusal(
+            p.client_engagement,
+            p.backend,
+            &[("this step".to_string(), model.to_string())],
+        )
+        .map(|why| format!("{why} {APP_CLIENT_LOCK_FIX}"))
+    }
+
     /// The `Llm` for the project-less CHAT assistant: [`AppState::llm_for_project`] with no
     /// project, so `settings.chat_backend` decides.
     pub fn chat_llm(&self) -> Result<crate::llm::Llm, String> {
@@ -10495,6 +10515,11 @@ async fn draft_routine_prompt(
     let Ok(llm) = state.step_llm() else {
         return scaffold();
     };
+    // A client engagement never sends client context to a non-Anthropic model: the form gets
+    // the scaffold and no model is called.
+    if state.client_lock_step_model_refusal(&req.model).is_some() {
+        return scaffold();
+    }
     let llm = std::sync::Arc::new(llm);
     let completer = crate::llm::build_completer(
         &req.model,
@@ -10670,6 +10695,9 @@ async fn chat_escalation(
     // (the chat setting when there is none), not on the keyless CLI floor; `Api` with no key
     // refuses rather than downgrading.
     let chat_llm = state.step_llm().map_err(backend_refused)?;
+    if let Some(why) = state.client_lock_step_model_refusal(&req.model) {
+        return Err(backend_refused(why));
+    }
     let completer = crate::llm::build_completer(
         &req.model,
         &state.model_registry,
@@ -11218,6 +11246,9 @@ async fn chat(
     // The Anthropic side runs on the transport chosen in Settings (Chat backend), with the key
     // resolved now; `Api` with no key refuses rather than silently downgrading to the CLI.
     let chat_llm = state.chat_llm().map_err(backend_refused)?;
+    if let Some(why) = state.client_lock_step_model_refusal(&model) {
+        return Err(backend_refused(why));
+    }
     let completer = crate::llm::build_completer(
         &model,
         &state.model_registry,
@@ -11296,8 +11327,9 @@ const APP_CLIENT_LOCK_FIX: &str = "In this project's Settings, set the backend t
 
 /// The client-engagement lock ([`crate::client_lock::refusal`]) for a scan of `project` with
 /// these (already resolved) models: the refusal text with the app's fix appended, or `None` when
-/// the scan may run. A project-less scan is not a client engagement (there is no setup to carry
-/// the flag), matching `resolve_backend_for_project`'s project-less floor.
+/// the scan may run. A scan with NO project is refused: there is no inspection setup to say it is
+/// not client work, so it is a client engagement with no opt-in (the lock is default-on), and the
+/// project-less backend floors to `Cli`, which that lock refuses anyway.
 fn client_lock_refusal_for_scan(
     project: Option<&crate::project::Project>,
     model: Option<&str>,
@@ -11305,7 +11337,15 @@ fn client_lock_refusal_for_scan(
     deep: bool,
     fix_model: Option<&str>,
 ) -> Option<String> {
-    let project = project?;
+    let Some(project) = project else {
+        return Some(
+            "There is no active project, and a scan without one is treated as a client \
+             engagement, which runs only on the Anthropic API with Anthropic models. Create or \
+             select a project first (in its Settings, turn off Client engagement if this is your \
+             own development and not client work). Nothing was read and no model was called."
+                .to_string(),
+        );
+    };
     let models =
         crate::client_lock::models_a_scan_may_use(model, calibration_model, deep, fix_model);
     crate::client_lock::refusal(project.client_engagement, project.backend, &models)
@@ -29588,6 +29628,139 @@ mod tests {
             .expect_err("cli is refused for client work");
         assert!(refusal.contains("`cli` backend"), "{refusal}");
         assert!(refusal.contains("Client engagement"), "{refusal}");
+    }
+
+    /// H2 review: the model steps that take a model id from the request (the routine prompt
+    /// draft, the escalation review chat, the chat) check it against the active project's lock.
+    /// `llm_for_project` cannot (it is handed no model), so on a client engagement a non-Anthropic
+    /// id would otherwise reach OpenRouter. A blank id means the server default (a Claude model)
+    /// and passes; a project that is not a client engagement is never refused.
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn a_client_engagement_refuses_a_non_anthropic_model_on_request_model_steps() {
+        let _env = camerata_test_env::EnvGuard::set("ANTHROPIC_API_KEY", "sk-test-not-real");
+        let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
+        let p = state.projects.create("Client", vec![]).unwrap();
+        state
+            .projects
+            .set_backend(&p.id, crate::project::ProjectBackend::Api)
+            .unwrap();
+        assert!(p.client_engagement, "a new project is a client engagement");
+
+        // The shared check.
+        let why = state
+            .client_lock_step_model_refusal("deepseek/deepseek-chat")
+            .expect("an OpenRouter id is refused on a client engagement");
+        assert!(why.contains("`deepseek/deepseek-chat`"), "{why}");
+        assert_eq!(state.client_lock_step_model_refusal(""), None);
+        assert_eq!(state.client_lock_step_model_refusal("  "), None);
+        assert_eq!(
+            state.client_lock_step_model_refusal("claude-sonnet-5"),
+            None
+        );
+
+        // Each site.
+        let app = router(state.clone());
+        let esc = state.escalations.raise(
+            crate::escalation::RaiseEscalationReq {
+                subject_kind: crate::escalation::SubjectKind::Uow,
+                checkpoint_id: None,
+                routine_id: "routine-1".to_string(),
+                reason: "r".to_string(),
+                stopped_for: "s".to_string(),
+                suggestions: vec![],
+                raw_context: String::new(),
+            },
+            "Add login",
+        );
+        let post = |uri: String, body: &'static str| {
+            let app = app.clone();
+            async move {
+                app.oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(uri)
+                        .header("content-type", "application/json")
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+            }
+        };
+        let chat = post(
+            "/api/chat".to_string(),
+            r#"{"prompt":"hi","model":"deepseek/deepseek-chat"}"#,
+        )
+        .await;
+        assert_eq!(chat.status(), StatusCode::CONFLICT, "the chat");
+        assert!(body_json(chat).await["error"]
+            .as_str()
+            .unwrap()
+            .contains("`deepseek/deepseek-chat`"));
+        let review = post(
+            format!("/api/escalations/{}/chat", esc.id),
+            r#"{"message":"hi","model":"qwen/qwen3-coder:free"}"#,
+        )
+        .await;
+        assert_eq!(review.status(), StatusCode::CONFLICT, "the review chat");
+        assert!(body_json(review).await["error"]
+            .as_str()
+            .unwrap()
+            .contains("`qwen/qwen3-coder:free`"));
+        // The draft has no error channel: a refused model gets the deterministic scaffold and no
+        // model call is made.
+        let draft = post(
+            "/api/routines/draft-prompt".to_string(),
+            r#"{"intent":"tidy the docs","scope":"read","model":"deepseek/deepseek-chat"}"#,
+        )
+        .await;
+        assert_eq!(draft.status(), StatusCode::OK);
+        assert_eq!(body_json(draft).await["authored_by"], "scaffold");
+
+        // Not a client engagement: never refused.
+        state
+            .projects
+            .set_client_engagement(&p.id, false, false)
+            .unwrap();
+        assert_eq!(
+            state.client_lock_step_model_refusal("deepseek/deepseek-chat"),
+            None
+        );
+    }
+
+    /// H2 review: a scan with no active project is not waved through. There is no inspection
+    /// setup to say it is not client work, so it is a client engagement with no opt-in (the lock
+    /// is default-on), and it is refused before any repository is read.
+    #[tokio::test]
+    async fn a_scan_with_no_active_project_is_refused_as_a_client_engagement() {
+        let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
+        assert!(state.projects.active().is_none());
+        let why = client_lock_refusal_for_scan(None, None, None, false, None)
+            .expect("no project means a client engagement");
+        assert!(why.contains("no active project"), "{why}");
+
+        let req = || AuditReq {
+            repos: vec!["acme/never-read".to_string()],
+            ..serde_json::from_value(serde_json::json!({ "repos": [] })).unwrap()
+        };
+        let Json(report) = onboard_audit(State(state.clone()), Json(req())).await;
+        assert!(report.blocked, "{:?}", report.message);
+        assert!(report
+            .message
+            .as_deref()
+            .unwrap()
+            .contains("no active project"));
+        assert_eq!(report.files_scanned, 0);
+
+        let job_id = start_audit_job(&state, req(), AuditJobOptions::default()).await;
+        let job = state.jobs.get(&job_id).expect("the job exists");
+        assert_eq!(job.status, "failed", "{:?}", job.message);
+        assert!(job
+            .message
+            .as_deref()
+            .unwrap_or_default()
+            .contains("no active project"));
     }
 
     /// H2: a client engagement's audit on the cli backend, or with an OpenRouter audit model, is

@@ -163,7 +163,7 @@ fn the_models_that_ran_and_the_engagement_flag_reach_the_manifest_and_readme() {
             crate::ModelRecord::anthropic(crate::llm::ProjectBackend::Api)
                 .with_client_engagement(true),
         ),
-        ..ReportOptions::default()
+        ..client_options()
     };
     let json = build_report_json(&sealed, &HashMap::new(), None, &options);
     let data = render_data_json(&json).expect("data.json renders");

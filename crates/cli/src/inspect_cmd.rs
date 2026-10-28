@@ -939,13 +939,8 @@ pub async fn run_inspect_pipeline_with(
     // ── Phase 5: export — the exact `export_product` HTTP handler's assembly ───────────
     // `release_product_export` is the release gate: it returns bytes only when every check
     // passed, and `std::fs::write` below runs only on `Ok`, so a blocked export is never on disk.
-    let released = release_product_export(
-        &report,
-        corpus.as_ref(),
-        Some(model_record),
-        &args.client,
-    )
-    .await?;
+    let released =
+        release_product_export(&report, corpus.as_ref(), Some(model_record), &args.client).await?;
     let zip_bytes = released.bytes;
     let release_gate = format!(
         "release gate: passed ({} checks)",
