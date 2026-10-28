@@ -1,5 +1,5 @@
 id = "ARCH-SERVER-CLIENT-PROJECTION-1"
-version = 1
+version = 2
 title = "Server-rendered output and hydration payloads carry only the client-facing projected fields, never a full raw row, internal id, or token"
 domain = "fullstack"
 layer = "universal"
@@ -50,15 +50,7 @@ never appears in the network tab as a traditional XHR.
 [[option]]
 id = "project-explicit-client-shape-before-crossing-the-boundary"
 label = "Define an explicit client-facing projection and apply it before the value crosses the server/client boundary"
-directive = """
-Every value that crosses from server-side data fetching (a Server Component, an SSR loader, a traditional
-server-rendered template) into client-visible output (a Client Component prop, hydration state, server-rendered
-markup including data attributes and inline JSON state) is first passed through an explicit projection — a
-dedicated type, a select-list, or a mapping function — that names exactly the fields the client view needs. The raw
-query result or ORM entity is never passed through directly, even when the current UI only renders a subset of it:
-the projection is enforced at the point data leaves server-only code, not left to the rendering layer's choice of
-what to display.
-"""
+directive = "Every value that crosses from server-side data fetching (a Server Component, an SSR loader, a traditional server-rendered template) into client-visible output (a Client Component prop, hydration state, server-rendered markup including data attributes and inline JSON state) is first passed through an explicit projection (a dedicated type, a select-list or a mapping function) that names exactly the fields the client view needs. The raw query result or ORM entity is never passed through directly, even when the current UI only renders a subset of it: the projection is enforced at the point data leaves server-only code, not left to the rendering layer's choice of what to display."
 remediation = """
 Add an explicit projection type or mapping function for this resource's client-facing shape, and change the server
 component/loader/data-fetching function to apply it to the query result before passing the value as a prop, into

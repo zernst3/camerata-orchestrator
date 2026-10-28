@@ -1,5 +1,5 @@
 id = "UI-IMAGE-COMPONENT-1"
-version = 1
+version = 2
 title = "Images render through a single project-level component, not framework primitives directly"
 domain = "ui"
 layer = "universal"
@@ -20,7 +20,7 @@ url = "https://web.dev/articles/optimize-cls"
 title = "web.dev — Optimize Cumulative Layout Shift"
 
 [decision]
-question = "What position does the project take on: Images render through a single project-level component, not framework primitives directly?"
+question = "How do UI components render images?"
 default = "images-render-through-a-single-project-level-component"
 why = "Image delivery carries several policy decisions baked in: which CDN URL pattern, which transform parameters, which formats to negotiate, default sizes and breakpoints, lazy-loading thresholds, fallback behavior, accessibility defaults. Letting every call site reach for the raw framework primitive spreads those decisions across the codebase and makes them impossible to evolve without touching every file. Centralizing them in one component means changing CDN strategy, adding AVIF support, or fixing an accessibility default is a single-file change. Using the framework image primitive everywhere leaves delivery policy implicit and spread across the codebase, so any future strategy change is a codebase-wide refactor. Using raw HTML img elements or native equivalents loses framework-provided lazy loading, responsive variants, and format negotiation, and produces measurable cumulative-layout-shift and bandwidth regressions. Wrapping the primitive in a helper used by some teams and not others makes the rule a culture rather than a contract, and new code drifts back to the raw primitive whenever an author has not internalized the rule."
 

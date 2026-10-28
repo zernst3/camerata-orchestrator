@@ -1,5 +1,5 @@
 id = "ARCH-NO-LEAKY-ERROR-DETAILS-1"
-version = 1
+version = 2
 title = "Error responses never surface raw database error text, exception stack traces, or internal file paths, regardless of the envelope shape"
 domain = "api-layer"
 layer = "universal"
@@ -46,17 +46,7 @@ ever having been a candidate for the HTTP response body.
 [[option]]
 id = "sanitize-error-content-regardless-of-envelope-shape"
 label = "Map the exception's type to a pre-written client-safe message; route the raw exception's full detail only to server-side logging, never the response body"
-directive = """
-The error-handling layer maps a caught exception to a response using the exception's TYPE/CODE (a validation error,
-a not-found error, a generic internal error), never by forwarding the exception's own `.message`, `.stack`,
-`.detail`, or `.hint` text into the response body. Each error type has a pre-written, reviewed, client-safe message
-baked into the handler itself. The exception's full raw detail (message, stack, driver-specific fields) is logged
-server-side (structured logging, an APM/error-tracking tool) with a correlation id that is also returned in the
-response, so a developer can look up the full detail by that id without the detail itself ever having been a
-candidate for the HTTP response. This holds in every environment, not only production — a staging or locally-run
-build is not exempt, because sanitization at the response layer has no legitimate downside even where leaking
-would be 'merely' embarrassing rather than a genuine production incident.
-"""
+directive = "The error-handling layer maps a caught exception to a response using the exception's TYPE/CODE (a validation error, a not-found error, a generic internal error), never by forwarding the exception's own `.message`, `.stack`, `.detail`, or `.hint` text into the response body. Each error type has a pre-written, reviewed, client-safe message baked into the handler itself. The exception's full raw detail (message, stack, driver-specific fields) is logged server-side (structured logging, an APM/error-tracking tool) with a correlation id that is also returned in the response, so a developer can look up the full detail by that id without the detail itself ever having been a candidate for the HTTP response. This holds in every environment, not only production: a staging or locally-run build is not exempt, because sanitization at the response layer has no legitimate downside even where leaking would be 'merely' embarrassing rather than a genuine production incident."
 remediation = """
 Change the error-handling layer to map the exception's type/code to a pre-written, client-safe message instead of
 forwarding the exception's own message, stack trace, or database driver detail into the response body. Log the raw

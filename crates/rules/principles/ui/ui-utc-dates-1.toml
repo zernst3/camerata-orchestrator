@@ -1,5 +1,5 @@
 id = "UI-UTC-DATES-1"
-version = 1
+version = 3
 title = "Store timestamps in UTC, centralize rendering in one helper, and display in the user's local timezone"
 domain = "ui"
 layer = "universal"
@@ -10,8 +10,18 @@ default = true
 verification = "policy"
 qualifies = "Deterministically checkable, but no off-the-shelf linter rule enforces it: it requires a custom AST/static-analysis CI gate — a project-configured ESLint no-restricted-syntax / no-restricted-properties rule (or stack equivalent) that forbids platform locale-aware date formatting in feature code (toLocaleString, toLocaleDateString, Intl.DateTimeFormat without an explicit timeZone resolution, strftime with no timezone) and routes all date rendering through the single project-level helper. no-restricted-syntax is a generic AST-matcher with no built-in rule-id for this; the patterns and the helper exemption are hand-written per project, so it is a bespoke check rather than a citable off-the-shelf rule. Conformance holds when that gate runs in CI and a feature file formatting a date inline without the helper fails the build; it fails when no rule blocks inline formatting and call sites can format dates with an implicit timezone."
 
+
+[[sources]]
+url = "https://www.rfc-editor.org/rfc/rfc3339#section-4.1"
+title = "RFC 3339: Date and Time on the Internet: Timestamps, section 4.1 (Coordinated Universal Time)"
+relevance = "Supports storing and transmitting timestamps in UTC: section 4.1 states that true interoperability is best achieved by using UTC, because local daylight-saving rules change unpredictably. RFC 9557 later refined how the Z offset is read; the section 4.1 recommendation is unchanged. Says nothing about where rendering logic lives; the single-helper requirement is this project's policy."
+
+[[sources]]
+url = "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Intl/DateTimeFormat"
+title = "MDN Web Docs: Intl.DateTimeFormat"
+relevance = "Documents the locale-aware formatting API and its timeZone option, the mechanism a central display helper uses to convert a stored UTC value to the viewer's local time (or to keep it in UTC for the display-everything-in-utc option)."
 [decision]
-question = "What position does the project take on: how are dates stored, formatted, and displayed?"
+question = "How are timestamps stored, and where and in which timezone are they rendered for users?"
 default = "store-utc-render-local-centralized-formatting"
 why = "Two separate decisions are easy to conflate here: (1) where formatting logic lives, and (2) what timezone is shown to the user. On (1), centralizing all date rendering behind one project-level helper is unambiguously good regardless of the timezone policy: it means a future timezone or locale policy change is one edit, not many, and it is the mechanism that makes (2) enforceable at all. On (2), the standard, well-established pattern is to STORE timestamps in UTC (in the database and over the API) as the one unambiguous source of truth, but RENDER them converted to the viewing user's local timezone in the UI — a consumer expects to see '3:00 PM', not '19:00 UTC'. Storing in UTC while always displaying in UTC conflates the storage guarantee with the display policy and produces a UI that reads wrong to ordinary users; UTC-only display is a legitimate, narrower choice for admin/ops tooling and log viewers where the audience spans timezones and unambiguous absolute time matters more than local readability, but it is the wrong default for consumer-facing product surfaces. Formatting dates inline at each call site lets every site drift on timezone handling, and the mismatch is invisible until SSR fires a hydration warning or a user notices a wrong displayed time. Rendering dates client-only via a post-mount effect loses SSR for that content and shifts the rendering cost to client paint; layout shift becomes the new failure mode. Relying on the platform to pick a timezone means the default-locale behavior varies by browser, OS, region, and even browser version, so the rule's outcome becomes 'whatever the platform happened to decide today' rather than a deliberate choice."
 

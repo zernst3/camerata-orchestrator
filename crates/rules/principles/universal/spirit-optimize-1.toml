@@ -1,5 +1,5 @@
 id = "SPIRIT-OPTIMIZE-1"
-version = 1
+version = 2
 title = "Optimization by default"
 domain = "universal"
 layer = "universal"
@@ -14,7 +14,7 @@ url = "AGENTS.md"
 title = "AGENTS.md — SPIRIT-OPTIMIZE-1 (optimization by default)"
 
 [decision]
-question = "What position does the project take on: Optimization by default?"
+question = "When are performant patterns such as parallel async, caching, and indexing introduced into new code?"
 default = "optimization-by-default"
 why = "When AI carries the cost of writing the performant version, the Knuth-era 'premature optimization' calculus flips: the optimization is now nearly free and prevents the firefighting that reactive perf work costs later (5x+). Reactive optimization after problems surface is the known-expensive negative case: by the time a perf problem is observable to users or operators, the bad pattern has usually been copied across the codebase and the cleanup has to follow it everywhere, at far higher cost than baking the performant pattern in from day one."
 

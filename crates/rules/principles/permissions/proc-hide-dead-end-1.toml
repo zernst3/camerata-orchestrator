@@ -1,5 +1,5 @@
 id = "PROC-HIDE-DEAD-END-1"
-version = 1
+version = 2
 title = "Hide dead-end affordances"
 domain = "permissions"
 layer = "universal"
@@ -18,7 +18,7 @@ url = "https://www.smashingmagazine.com/2024/05/hidden-vs-disabled-ux/"
 title = "Smashing Magazine — Hidden vs. Disabled In UX (2024)"
 
 [decision]
-question = "What position does the project take on: Hide dead-end affordances?"
+question = "What does the UI do with an action the current user lacks permission to perform?"
 default = "hide-dead-end-affordances"
 why = "The logical extension of 'a missing permission is a config task': the code's job is to not offer what the user can't do. Rendering every action regardless of the user's permissions and relying on the endpoint to reject unauthorized attempts produces a 403 then error-page redirect on click, and that redirect IS the bug the rule exists to prevent; it's a poor user experience and reveals which capabilities exist without granting them."
 

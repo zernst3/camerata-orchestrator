@@ -1,5 +1,5 @@
 id = "ARCH-PAYMENT-RECONCILIATION-1"
-version = 1
+version = 2
 title = "Local order/payment state is kept in sync with the provider's own record via webhook-driven updates or a periodic reconciliation pass, not assumed from a single synchronous response"
 domain = "api-layer"
 layer = "universal"
@@ -44,15 +44,7 @@ rule targets is the complete ABSENCE of either one, not the specific implementat
 [[option]]
 id = "webhook-or-scheduled-reconciliation"
 label = "Maintain local state via webhook-driven updates, a scheduled reconciliation job against the provider's API, or both"
-directive = """
-Local order, payment, and subscription state is kept in sync with the provider's own authoritative record through
-at least one correction path beyond the initial synchronous charge response: either (a) a webhook endpoint that
-updates local state in response to provider-emitted events covering the states the application tracks (success,
-failure, refund, dispute, subscription renewal/cancellation, as applicable), or (b) a scheduled job that
-periodically queries the provider's API for the current status of locally-open or pending payment records and
-corrects any mismatch. At least one such mechanism exists and covers the states the application actually tracks, so
-the local record is never left to diverge silently from the provider's state after the charge call returns.
-"""
+directive = "Local order, payment, and subscription state is kept in sync with the provider's own authoritative record through at least one correction path beyond the initial synchronous charge response: either (a) a webhook endpoint that updates local state in response to provider-emitted events covering the states the application tracks (success, failure, refund, dispute, subscription renewal/cancellation, as applicable), or (b) a scheduled job that periodically queries the provider's API for the current status of locally-open or pending payment records and corrects any mismatch. At least one such mechanism exists and covers the states the application actually tracks, so the local record is never left to diverge silently from the provider's state after the charge call returns."
 remediation = """
 Add a webhook endpoint (verified per ARCH-WEBHOOK-SIGNATURE-VERIFICATION-1) that subscribes to the provider's
 relevant event types for the payment/order states this application tracks, and updates local state as the event

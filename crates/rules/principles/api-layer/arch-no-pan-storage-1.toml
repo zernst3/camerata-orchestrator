@@ -1,5 +1,5 @@
 id = "ARCH-NO-PAN-STORAGE-1"
-version = 1
+version = 2
 title = "Full card numbers (PAN), CVV/CVC, and raw magnetic-stripe/track data are never stored, logged, or persisted by the application"
 domain = "api-layer"
 layer = "universal"
@@ -45,14 +45,7 @@ in the traditional sense yet with the value now sitting in a log aggregator inde
 [[option]]
 id = "never-touch-raw-card-data-tokenize-at-the-provider"
 label = "Capture card details only through the provider's hosted fields or client-side tokenization; the application server never receives a raw PAN/CVV/track value"
-directive = """
-Card details are captured only through the payment provider's hosted input fields (e.g. Stripe Elements, Braintree
-Drop-in) or a client-side tokenization SDK, so the application's own server never receives a raw card number (PAN),
-CVV/CVC, or magnetic-stripe/track data — it handles only the provider-issued token or payment-method id. No
-request-body field, variable, database column, serialized payload, or log statement anywhere in the application
-ever holds a full card number, security code, or raw track data; the card is captured in the customer's browser by
-the provider and tokenized before it can reach application code.
-"""
+directive = "Card details are captured only through the payment provider's hosted input fields (e.g. Stripe Elements, Braintree Drop-in) or a client-side tokenization SDK, so the application's own server never receives a raw card number (PAN), CVV/CVC, or magnetic-stripe/track data; it handles only the provider-issued token or payment-method id. No request-body field, variable, database column, serialized payload, or log statement anywhere in the application ever holds a full card number, security code, or raw track data; the card is captured in the customer's browser by the provider and tokenized before it can reach application code."
 remediation = """
 Replace any custom card-input form or server-side field that reads a raw card number, CVV, or track data with the
 payment provider's hosted input fields (e.g. Stripe Elements, Braintree Drop-in) or client-side tokenization SDK,

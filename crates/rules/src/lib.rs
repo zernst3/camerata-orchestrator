@@ -810,7 +810,8 @@ struct StackExceptionToml {
 
 #[derive(Debug, Deserialize)]
 struct DecisionToml {
-    /// The decision this rule frames (e.g. "What position does the project take on …?").
+    /// The decision this rule frames, asked of the client's code (e.g. "How does the API
+    /// deduplicate retried mutations?"). See `docs/RULE_AUTHORING.md`, `[decision].question`.
     #[serde(default)]
     question: Option<String>,
     #[serde(default)]
@@ -6219,6 +6220,9 @@ mod tests {
             "ARCH-WEBHOOK-SIGNATURE-VERIFICATION-1",
             "ARCH-NO-PAN-STORAGE-1",
             "SUPABASE-AUTH-USERS-EXPOSED-1",
+            // "either shape means the secret reaches every visitor's browser, which is the
+            // single most severe finding class this audit produces" (default option `why`).
+            "SUPABASE-KEY-SERVICE-ROLE-CLIENT-1",
             "SUPABASE-RLS-DISABLED-NOT-RESTORED-1",
             "SUPABASE-RLS-POLICY-DISABLED-1",
             "SUPABASE-RLS-USER-METADATA-1",
@@ -6711,7 +6715,7 @@ mod tests {
         // Held rules whose OWN prose names a severity for their OWN flagged condition, with the
         // construction transcribed. Every entry is quoted in
         // `req_w8_named_rules_carry_the_floors_their_prose_authored`'s comments.
-        const TRANSCRIBED_FROM_OWN_PROSE: [&str; 17] = [
+        const TRANSCRIBED_FROM_OWN_PROSE: [&str; 18] = [
             "SQL-PRIVILEGED-WRITE-AUDIT-1",
             "SUPABASE-AUTH-EMAIL-CONFIRMATION-1",
             "SUPABASE-AUTH-GETSESSION-SERVER-1",
@@ -6721,6 +6725,11 @@ mod tests {
             "SUPABASE-FUNC-DYNAMIC-SQL-INJECTION-1",
             "SUPABASE-FUNC-PRIVILEGED-NO-AUTHZ-1",
             "SUPABASE-FUNC-SEARCH-PATH-1",
+            // Item 19 (2026-10-28), corpus-audit Group 1 note: "no severity bound while its
+            // prose says 'unconditionally critical' twice". That prose was later revoiced; the
+            // default option's `why` still names the severity: "the single most severe finding
+            // class this audit produces".
+            "SUPABASE-KEY-SERVICE-ROLE-CLIENT-1",
             "SUPABASE-RLS-DISABLED-NOT-RESTORED-1",
             "SUPABASE-RLS-INITPLAN-1",
             "SUPABASE-RLS-NO-POLICY-1",

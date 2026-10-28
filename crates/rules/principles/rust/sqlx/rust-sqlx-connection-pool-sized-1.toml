@@ -1,5 +1,5 @@
 id = "RUST-SQLX-CONNECTION-POOL-SIZED-1"
-version = 1
+version = 2
 title = "Use a connection pool with explicit size configuration and reuse connections"
 domain = "rust:sqlx"
 layer = "framework"
@@ -10,7 +10,7 @@ default = true
 verification = "grounded"
 
 [decision]
-question = "What position does the project take on: Connection pool sizing?"
+question = "How is the database connection pool sized and configured?"
 default = "configure-sized-connection-pool"
 why = "A database connection is expensive to create (involves a network round trip, authentication, and resource allocation on the server). Creating a new connection for every query is wasteful. A connection pool maintains a set of open connections and reuses them across queries. When a query needs a connection, it borrows one from the pool; when done, it returns it. sqlx provides PgPoolOptions to configure the pool size (min_connections, max_connections, acquire timeout, idle timeout, and test-on-acquire). Sizing the pool is NOT a matter of matching expected request concurrency one-to-one: a pool should generally be much smaller than the number of concurrent requests it serves, because excess concurrent requests should queue briefly at acquire() rather than each getting a dedicated connection. Databases, Postgres in particular, perform worse as the number of concurrent connections grows large: each connection carries a memory and process/thread cost on the server, and high connection counts increase context-switching and lock contention, often making the database slower overall than a smaller pool with some queuing would be. A commonly cited rule of thumb (the same principle underlies HikariCP's pool-sizing guidance for Java, even though it targets a different ecosystem) is to size the pool around the number of available CPU cores times a small multiplier, up to a few dozen connections, and only grow it after observing actual saturation (requests waiting on acquire() under real load), not by projecting expected request concurrency directly onto pool size. Configuring the pool explicitly (not just using defaults) still matters for setting a sane max_connections ceiling, acquire timeout, and idle timeout, but 'size the pool to match concurrent requests' is the anti-pattern to avoid."
 

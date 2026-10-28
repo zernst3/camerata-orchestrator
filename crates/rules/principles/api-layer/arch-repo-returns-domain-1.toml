@@ -1,5 +1,5 @@
 id = "ARCH-REPO-RETURNS-DOMAIN-1"
-version = 1
+version = 2
 title = "Repositories return domain types, never persistence representations"
 domain = "api-layer"
 layer = "universal"
@@ -18,7 +18,7 @@ url = "https://martinfowler.com/eaaCatalog/repository.html"
 title = "Martin Fowler — Patterns of Enterprise Application Architecture: Repository"
 
 [decision]
-question = "What position does the project take on: Repositories return domain types, never persistence representations?"
+question = "What types do repositories return to their callers?"
 default = "repositories-return-domain-types-never-persistence-representations"
 why = "Keeping the persistence representation an infrastructure detail is what makes the domain layer survive persistence-library changes. A schema migration, an ORM upgrade, or a switch to a different storage engine should not require recompiling business logic or rewriting service signatures. When repositories leak persistence types upward, every consumer becomes coupled to the storage library, and the cost of any library change cascades through unrelated code. Exposing the persistence library's row or entity type directly from repository methods is cheaper to write at first but turns every persistence upgrade into a domain-wide refactor, and lazy-loading or session-scoped behavior leaks into business code. Returning a thin wrapper over the persistence type that adds helper methods looks lightweight but still couples consumers to the underlying library's lifecycle, fetch semantics, and inheritance shape. Returning persistence types from some repositories and domain types from others depending on what is convenient loses the architectural property: reviewers cannot tell at a call site whether they are receiving a domain type or a persistence type, so the boundary's value disappears."
 
@@ -43,7 +43,7 @@ id = "repository-methods-return-a-thin-wrapper-over-th"
 violates = true
 label = "Thin wrapper over persistence"
 directive = "repository methods return a thin wrapper over the persistence type that exposes additional helper methods on top of the underlying library's row representation, lifecycle, and fetch semantics"
-why = "A thin wrapper looks lightweight but still couples consumers to the underlying library's lifecycle, fetch semantics, and inheritance shape, so it does not actually decouple the domain from persistence."
+why = "Consumers stay coupled to the underlying library's lifecycle, fetch semantics, and inheritance shape, so the domain is not actually decoupled from persistence, even though the wrapper looks lightweight."
 
 [[option]]
 id = "repository-methods-return-persistence-types-from"

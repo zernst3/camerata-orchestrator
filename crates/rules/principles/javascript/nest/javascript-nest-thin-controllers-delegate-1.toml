@@ -1,5 +1,5 @@
 id = "JAVASCRIPT-NEST-THIN-CONTROLLERS-DELEGATE-1"
-version = 1
+version = 2
 title = "Controllers stay thin; business logic and data access live in services"
 domain = "javascript:nest"
 layer = "framework"
@@ -24,7 +24,7 @@ url = "https://docs.nestjs.com/providers"
 title = "NestJS Docs — Providers: services encapsulate business logic"
 
 [decision]
-question = "What position does the project take on: Controllers stay thin?"
+question = "Where do business logic and data access live relative to NestJS controllers?"
 default = "thin-controllers-delegate-to-services"
 why = "A controller's job is to handle an HTTP request: extract parameters and body, call a service, and translate the result into a response. When business rules or data access move into the controller itself, the logic becomes reachable only through an HTTP request and cannot be unit-tested or reused by a cron job, a CLI, or another route without spinning up the web layer. The same rule, duplicated into a second controller, drifts out of sync. And the controller mixes transport concerns with domain concerns. Keeping controllers thin and delegating to services makes business logic independently testable, reusable across entry points, and changeable without touching routing. This separation mirrors layering in the REST and GraphQL worlds: the API layer handles protocol, the service and repository layers own the rules and the data."
 

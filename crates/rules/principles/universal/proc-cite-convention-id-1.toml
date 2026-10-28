@@ -1,5 +1,5 @@
 id = "PROC-CITE-CONVENTION-ID-1"
-version = 1
+version = 2
 title = "Cite the convention ID in commit messages and PR descriptions"
 domain = "universal"
 layer = "universal"
@@ -14,7 +14,7 @@ url = "CONVENTIONS.md"
 title = "CONVENTIONS.md — §PROC-CITE-CONVENTION-ID-1 + preamble (cite rule IDs in commit body)"
 
 [decision]
-question = "What position does the project take on: Cite the convention ID in commit messages and PR descriptions?"
+question = "Where do commit messages and PR descriptions record which convention a change applies?"
 default = "cite-the-convention-id-in-commit-messages-and-pr"
 why = "Makes drift detection and review fast. A reviewer reading a PR sees immediately which rule the change is enacting and can challenge the application on its merits without having to first reconstruct intent. Later, when someone needs to trace how a pattern got established, a single grep on the convention ID surfaces every prior application of it across the repository's history. Omitting citation in commits forces slow archaeology when a pattern needs to be traced and turns reviewers into detectives asking 'is this following X or contradicting it?' instead of seeing the answer in the commit body. Citing only in PR descriptions works for the PR-review pass but breaks down once the change is merged and someone is reading commit history on a branch later, where the PR description is one click further away. Citing in code comments instead of commits couples the citation to the source location forever, even after the convention evolves and the comment goes stale, and means the citation moves around with refactors rather than staying anchored to the change that applied the rule."
 

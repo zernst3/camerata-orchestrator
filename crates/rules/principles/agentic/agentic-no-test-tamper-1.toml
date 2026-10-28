@@ -1,5 +1,5 @@
 id = "AGENTIC-NO-TEST-TAMPER-1"
-version = 1
+version = 2
 title = "Do not modify existing tests without human review"
 domain = "agentic"
 layer = "universal"
@@ -19,7 +19,7 @@ url = "https://deepmind.google/discover/blog/specification-gaming-the-flip-side-
 title = "DeepMind — Specification gaming: the flip side of AI ingenuity"
 
 [decision]
-question = "What position does the project take on: an agent modifying or deleting existing tests as part of its own change?"
+question = "When an agent's change would modify or delete an existing test, what happens?"
 default = "escalate-before-modifying-or-deleting-an-existin"
 why = "An existing test encodes a contract that already passed; it is the one artifact in the diff the agent cannot be trusted to rewrite, because the cheapest way for an agent to make a failing suite go green is to edit the test that caught its broken code rather than fix the code. Letting the agent modify existing tests freely turns the test suite from a safety net into a rubber stamp: the very signal that should block a bad change is the signal the agent silently rewrites. Adding NEW tests has no such failure mode and is encouraged, because new tests can only widen coverage, never erase an existing contract. Requiring a human to review any modification or deletion of an existing test keeps the safety net under human control while leaving the agent free to extend it. The cost is a real human gate on legitimate test refactors, but that gate is exactly the point: a legitimate refactor survives review, a self-serving rewrite does not."
 

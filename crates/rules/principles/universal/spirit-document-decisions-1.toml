@@ -1,5 +1,5 @@
 id = "SPIRIT-DOC-DECISIONS-1"
-version = 1
+version = 2
 title = "Document decisions immediately"
 domain = "universal"
 layer = "universal"
@@ -18,7 +18,7 @@ url = "https://www.cognitect.com/blog/2011/11/15/documenting-architecture-decisi
 title = "Michael Nygard — Documenting Architecture Decisions (the source of the ADR pattern; the 'immediately' strengthening beyond ADR-on-drift is project-specific)"
 
 [decision]
-question = "What position does the project take on: Document decisions immediately?"
+question = "When are decisions written down in a durable artifact?"
 default = "document-decisions-immediately"
 why = "Decisions made only in conversation evaporate; agents cannot cite them and humans re-derive them. A multi-actor, multi-session system depends on durable artifacts, not memory. Batching documentation into a later pass reliably causes drift and re-litigation, because memory fades faster than the documentation pass arrives, so by the time the batched pass runs the decisions have already been silently re-derived or contradicted in subsequent work."
 

@@ -1,5 +1,5 @@
 id = "ARCH-FETCH-THEN-AUTHORIZE-1"
-version = 1
+version = 2
 title = "Authorization reads the fetched resource and produces an authorized-typed value"
 domain = "permissions"
 layer = "universal"
@@ -44,7 +44,7 @@ id = "checks-in-business-logic"
 violates = true
 label = "ad hoc checks inside business logic"
 directive = "Business logic fetches the resource and performs authorization checks inline wherever a decision is needed, without a dedicated authorization step or an authorized-typed value."
-why = "Works but scatters the policy across every code path, making it easy to omit a check on one branch and hard to audit."
+why = "The policy is scattered across every code path, so a check is easy to omit on one branch and hard to audit, even though each individual check works."
 
 [[option]]
 id = "request-only-authz"

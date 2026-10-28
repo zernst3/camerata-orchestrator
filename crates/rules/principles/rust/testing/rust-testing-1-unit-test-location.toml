@@ -1,5 +1,5 @@
 id = "RUST-TESTING-1"
-version = 1
+version = 2
 title = "Unit tests live in a #[cfg(test)] mod tests block in the same file as the code under test"
 domain = "rust:testing"
 layer = "language"
@@ -22,7 +22,7 @@ url = "https://doc.rust-lang.org/reference/attributes/testing.html"
 title = "The Rust Reference — Testing Attributes (#[test], #[cfg(test)])"
 
 [decision]
-question = "What position does the project take on: where do unit tests live in a Rust crate?"
+question = "Where do unit tests live relative to the code they test?"
 default = "cfg-test-mod-tests-inline-in-source-file"
 why = "The Rust Book (Ch 11.3) and Rust By Example codify the inline #[cfg(test)] mod tests pattern as the canonical Rust convention for unit tests. Placing tests in the same file as the code allows the test module to import private items via 'use super::*;', which is the primary reason unit tests are colocated with production code in Rust rather than a separate file. The #[cfg(test)] attribute ensures the test module is excluded from normal compilation and from the final binary, so colocating tests does not bloat production artifacts. A separate unit-test file (e.g., src/foo_test.rs) is possible but loses access to private items without extra indirection and diverges from the language-wide convention the entire ecosystem expects. A tests/ top-level directory is reserved for integration tests that exercise only the public API."
 

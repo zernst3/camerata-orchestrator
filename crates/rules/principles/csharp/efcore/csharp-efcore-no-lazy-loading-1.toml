@@ -1,5 +1,5 @@
 id = "CSHARP-EFCORE-NO-LAZY-LOADING-1"
-version = 1
+version = 2
 title = "Lazy loading is disabled; all navigation property access is intentional and explicit"
 domain = "csharp:efcore"
 layer = "library"
@@ -10,7 +10,7 @@ default = true
 
 verification = "grounded"
 [decision]
-question = "What position does the project take on: Lazy loading is disabled; all navigation property access is intentional and explicit?"
+question = "How does EF Core code decide when entity navigation properties are loaded?"
 default = "lazy-loading-disabled"
 why = "Lazy loading is EF Core's automatic database-query-on-navigation-access feature: when an entity's navigation property is accessed and the relationship has not been loaded, EF Core issues a SELECT to load it transparently. The transparency is the problem. From the caller's perspective, accessing entity.Orders looks like reading a C# property. The actual cost — a round-trip to the database — is invisible at the call site. In a loop (for each user in users, read user.Orders), this invisibility produces the N+1 pattern at the cost of a syntax that looks like a simple property access. The silent database query also requires the DbContext to still be alive when the navigation is accessed; accessing a lazy-loaded navigation on an entity after the DbContext has been disposed throws an InvalidOperationException. Disabling lazy loading makes every navigation property access that has not been explicitly loaded return null or an empty collection, which is a loud, immediate signal that the relationship was not loaded — the failure mode that surfaces the missing Include in a test or in dev, not in production under load. With lazy loading disabled, all data loading is explicit and visible at the query site."
 

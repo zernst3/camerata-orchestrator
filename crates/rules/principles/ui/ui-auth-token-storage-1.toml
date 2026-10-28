@@ -1,5 +1,5 @@
 id = "UI-AUTH-TOKEN-STORAGE-1"
-version = 1
+version = 2
 title = "Session and auth tokens never live in JS-accessible storage (localStorage, sessionStorage, IndexedDB, a non-HttpOnly cookie); they live in an HttpOnly, Secure, SameSite cookie"
 domain = "ui"
 layer = "universal"
@@ -49,17 +49,7 @@ between requests, a distinct storage-location question from how it travels in an
 [[option]]
 id = "httponly-secure-samesite-cookie-only"
 label = "Session/auth/refresh tokens live only in an HttpOnly, Secure, SameSite cookie set by the server"
-directive = """
-Access tokens, refresh tokens, and session identifiers are set only via a server response's Set-Cookie header
-carrying the HttpOnly attribute (so no client-side JavaScript, including a compromised third-party script, can read
-the value even under XSS), the Secure attribute (sent only over HTTPS), and an explicit SameSite value (Lax for
-most applications, Strict where the UX cost is acceptable, with any cross-site requirement handled by a
-CSRF-token-plus-SameSite=None combination rather than omitting SameSite). No client-side code ever calls
-localStorage.setItem, sessionStorage.setItem, or an IndexedDB write with a token value, and no cookie carrying a
-credential is ever set via document.cookie (which cannot carry HttpOnly). If a client-visible value is genuinely
-needed (a non-sensitive flag indicating "is logged in," for UI branching only, with no capability of its own), it
-is an inert boolean/flag, never the token or a value derived from it that could be replayed.
-"""
+directive = "Access tokens, refresh tokens, and session identifiers are set only via a server response's Set-Cookie header carrying the HttpOnly attribute (so no client-side JavaScript, including a compromised third-party script, can read the value even under XSS), the Secure attribute (sent only over HTTPS), and an explicit SameSite value (Lax for most applications, Strict where the UX cost is acceptable, with any cross-site requirement handled by a CSRF-token-plus-SameSite=None combination rather than omitting SameSite). No client-side code ever calls localStorage.setItem, sessionStorage.setItem, or an IndexedDB write with a token value, and no cookie carrying a credential is ever set via document.cookie (which cannot carry HttpOnly). If a client-visible value is genuinely needed (a non-sensitive flag indicating \"is logged in,\" for UI branching only, with no capability of its own), it is an inert boolean/flag, never the token or a value derived from it that could be replayed."
 remediation = """
 Move the session/auth/refresh token out of localStorage, sessionStorage, IndexedDB, or a non-HttpOnly cookie, and
 set it instead via the server's Set-Cookie response header with HttpOnly, Secure, and an explicit SameSite

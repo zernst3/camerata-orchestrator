@@ -1,5 +1,5 @@
 id = "JAVASCRIPT-REDUX-NO-EFFECTS-IN-REDUCERS-1"
-version = 1
+version = 2
 title = "Reducers are pure; side effects live in thunks or middleware"
 domain = "javascript:redux"
 layer = "library"
@@ -14,7 +14,7 @@ url = "https://redux.js.org/style-guide/#reducers-must-not-have-side-effects"
 title = "Redux Style Guide — Reducers Must Not Have Side Effects (Priority A: Essential)"
 
 [decision]
-question = "What position does the project take on: Reducers are pure; side effects live in thunks or middleware?"
+question = "Where do side effects such as API calls and random value generation happen relative to Redux reducers?"
 default = "reducers-are-pure-side-effects-live-in-thunks-or"
 why = "A reducer is required to be a pure function of (state, action): same inputs produce the same output, with no side effects and no dependence on anything outside its arguments. The whole framework leans on this. Reducers are re-run during time-travel and action replay, so any side effect inside one (an API call, a dispatch, reading the clock, generating a random id, writing to storage) fires again on every replay, producing duplicate requests and non-reproducible state. A reducer that calls an async API also cannot return the result synchronously, so it tends to return stale or undefined state and wire the real update through a back channel, defeating the single-source-of-truth model. Side effects belong in the layer built for them: thunks (createAsyncThunk / RTK Query) or custom middleware, which sit between dispatch and the reducer, perform the I/O, and dispatch plain result actions that the pure reducer folds into state. Doing the fetch inside the reducer because that is where the triggering action arrives couples the state transition to the effect and makes both untestable in isolation; splitting them keeps the reducer a trivially testable pure function and puts the effect somewhere it runs exactly once."
 

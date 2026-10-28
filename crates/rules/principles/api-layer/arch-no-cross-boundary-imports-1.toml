@@ -1,5 +1,5 @@
 id = "ARCH-NO-CROSS-BOUNDARY-IMPORTS-1"
-version = 1
+version = 2
 title = "No cross-boundary imports — modules import only their declared dependencies"
 domain = "api-layer"
 layer = "universal"
@@ -19,9 +19,9 @@ url = "https://blog.cleancoder.com/uncle-bob/2012/08/13/the-clean-architecture.h
 title = "Robert C. Martin — The Clean Architecture (the Dependency Rule)"
 
 [decision]
-question = "What position does the project take on: No cross-boundary imports — modules import only their declared dependencies?"
+question = "How do modules limit which layers and siblings they import from?"
 default = "modules-import-only-across-declared-allowed-boundaries"
-why = "Architecture lives or dies by its dependency direction. Once a single forbidden import lands (a domain type reaching into the web framework, a feature reaching into a sibling's internals) the boundary is gone and every later change is free to lean on the leak. An AST/import-graph check holds the direction mechanically, so the architecture diagram and the actual module graph never drift apart. Relying on review to police imports fails because a forbidden `use` line is one of the easiest things to miss in a large diff. This rule enforces the same layering as `arch-strict-layering-1` and `arch-handler-no-db-1`, but at the import-graph level rather than the call-site level: it catches a forbidden dependency even before any call is made across it (a handler module importing a repository module, whether or not it ends up calling anything in it). The three-way split between the umbrella principle and its two AST-checkable instances is deliberate — see `docs/decisions/2026-06-19_ast_architectural_rule_tier.md`."
+why = "Architecture lives or dies by its dependency direction. Once a single forbidden import lands (a domain type reaching into the web framework, a feature reaching into a sibling's internals) the boundary is gone and every later change is free to lean on the leak. An AST/import-graph check holds the direction mechanically, so the architecture diagram and the actual module graph never drift apart. Relying on review to police imports fails because a forbidden `use` line is one of the easiest things to miss in a large diff. This rule enforces the same layering as `arch-strict-layering-1` and `arch-handler-no-db-1`, but at the import-graph level rather than the call-site level: it catches a forbidden dependency even before any call is made across it (a handler module importing a repository module, whether or not it ends up calling anything in it). The three-way split between the umbrella principle and its two AST-checkable instances is deliberate: the umbrella principle states the architectural intent, and each AST-checkable instance is a specific check that can be enforced independently."
 
 [[option]]
 id = "modules-import-only-across-declared-allowed-boundaries"
@@ -38,4 +38,4 @@ id = "modules-may-import-any-other-module"
 violates = true
 label = "Unrestricted module imports"
 directive = "modules may import any other module freely, with no import-boundary check and no declared dependency direction"
-why = "A defensible alternative the project considered: it removes friction for small codebases, but offers no mechanism to stop architectural erosion as the codebase grows."
+why = "Nothing stops architectural erosion as the codebase grows: any module can reach into any other, so boundaries exist only by habit. Unrestricted imports remove friction only while the codebase is small."
