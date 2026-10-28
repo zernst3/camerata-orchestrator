@@ -4886,11 +4886,12 @@ async fn rescan_alternatives_handler(
                 (a.rule_id.clone(), directive)
             })
             .collect();
+        let audit_rules = crate::scan_routing::audit_rules(&selected_pairs, Some(&corpus));
         match crate::ai_audit::audit_repo(
             &llm,
             spec,
             &files,
-            &selected_pairs,
+            &audit_rules,
             &alt_slice,
             &forced,
             audit_model.as_deref(),

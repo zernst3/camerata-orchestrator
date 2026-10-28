@@ -1,11 +1,15 @@
 id = "SUPABASE-AUTH-SESSION-LIFETIME-1"
-version = 1
+version = 3
 title = "JWT expiry and refresh-token rotation are tuned deliberately for the project's risk profile, not left at whichever default was never revisited"
 domain = "supabase:auth"
 layer = "platform"
 enforcement = "structured"
 kind = "defect"
 inspectable = true
+# Token-efficiency rank 7: where this rule can apply, so the scan sends it only with these files.
+# Config rule: the subject is a value in supabase/config.toml (or the Terraform that sets it); a
+# finding needs the value to be present and wrong.
+applies_to = { paths = ["**/supabase/config.toml", "**/*.tf", "**/*.hcl"] }
 # Severity floor. Rationale: with rotation off, nothing in the system ever invalidates a leaked
 # refresh token — it mints new access tokens indefinitely, CWE-613 with no bound at all. That is
 # the branch the floor is set for. The jwt_expiry side is a risk-profile judgement with no single

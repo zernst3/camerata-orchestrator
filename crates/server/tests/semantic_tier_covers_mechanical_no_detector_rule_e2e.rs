@@ -201,7 +201,7 @@ async fn mechanical_rule_with_no_detector_is_evaluated_and_fires_via_the_semanti
         &stub,
         "acme/payments",
         &files,
-        &selected,
+        &camerata_server::scan_routing::rules_from_pairs(&selected),
         &[], // alternatives
         &HashMap::new(),
         None, // model

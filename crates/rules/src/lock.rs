@@ -54,8 +54,8 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::{
-    EscalationSeverity, EscalationSpec, Rule, RuleOption, RuleSet, RuleSource, StackException,
-    VerifiedProvenance,
+    AppliesTo, EscalationSeverity, EscalationSpec, Rule, RuleOption, RuleSet, RuleSource,
+    StackException, VerifiedProvenance,
 };
 
 /// Prefix of every rule content hash: `sha256:<64 lowercase hex>`. A stored hash WITHOUT this
@@ -274,6 +274,27 @@ fn canon_verified(verified: &VerifiedProvenance) -> Canon {
     o.build()
 }
 
+fn canon_applies_to(applies_to: &AppliesTo) -> Canon {
+    let AppliesTo {
+        paths,
+        languages,
+        contains_any,
+    } = applies_to;
+    // Sorted and de-duplicated: the three lists are unordered sets, so reordering an entry is
+    // not a change to the rule and must not move its hash (a version bump would be spurious).
+    let sorted = |values: &[String]| {
+        let mut v = values.to_vec();
+        v.sort_unstable();
+        v.dedup();
+        v
+    };
+    let mut o = ObjBuilder::default();
+    o.strings("paths", &sorted(paths));
+    o.strings("languages", &sorted(languages));
+    o.strings("contains_any", &sorted(contains_any));
+    o.build()
+}
+
 fn canon_stack_exception(exception: &StackException) -> Canon {
     let StackException {
         framework,
@@ -320,6 +341,7 @@ impl Rule {
             asvs,
             superseded_since,
             current_recommendation,
+            applies_to,
             // Bookkeeping about the rule, not part of it: bumping the version or recording a
             // review must not change the hash the version is checked against.
             version: _,
@@ -359,6 +381,9 @@ impl Rule {
         o.strings("asvs", asvs);
         o.opt_text("superseded_since", superseded_since);
         o.opt_text("current_recommendation", current_recommendation);
+        if let Some(a) = applies_to {
+            o.nested("applies_to", canon_applies_to(a));
+        }
 
         let mut out = String::new();
         o.build().render(&mut out);

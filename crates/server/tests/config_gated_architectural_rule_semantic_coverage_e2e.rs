@@ -222,7 +222,7 @@ async fn config_gated_rule_with_no_architecture_config_gets_an_accurate_note_and
         &stub,
         "acme/api",
         &files,
-        &selected,
+        &camerata_server::scan_routing::rules_from_pairs(&selected),
         &[], // alternatives
         &HashMap::new(),
         None, // model

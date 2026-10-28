@@ -56,7 +56,7 @@ fn violating_option_and_convention_rows_redact_evidence_and_reasoning() {
         why: "w".to_string(),
         violates: true,
     };
-    let mut selected = vec![("ARCH-X-1".to_string(), "d".to_string())];
+    let mut selected = vec![crate::scan_routing::AuditRule::new("ARCH-X-1", "d")];
     let evidence = format!(".env:3 {}", p.text);
     let reasoning = format!("because {}", p.value);
     let violating = apply_alternative_decision(
@@ -369,7 +369,7 @@ async fn audit_repo_passes_alternatives_and_calibration_prompts_contain_no_secre
         &stub,
         "acme/app",
         &leaky_repo(&p),
-        &selected,
+        &crate::scan_routing::rules_from_pairs(&selected),
         &two_options(),
         &std::collections::HashMap::new(),
         None,
@@ -447,7 +447,7 @@ async fn model_prompt_redaction_flag_off_sends_raw_and_warns() {
         &stub,
         "acme/app",
         &leaky_repo(&p),
-        &selected,
+        &crate::scan_routing::rules_from_pairs(&selected),
         &[],
         &std::collections::HashMap::new(),
         None,

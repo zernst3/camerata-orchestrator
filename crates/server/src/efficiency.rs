@@ -112,6 +112,10 @@ efficiency_measures! {
     /// is opt-in again and runs exactly as before rank 2 (one submission, all rules per item,
     /// the `batch_long_cache` TTL).
     batch_default => "on the API backend scans run as a Message Batch, with failed items resubmitted once",
+    /// Rank 7: a rule that declares `applies_to` (file globs and languages) is sent only with
+    /// the files it can apply to, in real-time and batch mode alike. Off: `applies_to` is
+    /// ignored entirely and routing is by rule-id language prefix only (the pre-rank-7 behavior).
+    applies_to_routing => "rules that declare where they apply are sent only with matching files",
 }
 
 impl EfficiencyConfig {

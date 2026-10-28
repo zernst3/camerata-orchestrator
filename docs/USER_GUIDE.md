@@ -1807,9 +1807,12 @@ listed as such and never counted as clean.
 Every saving the product applies is on by default and can be switched off for one run, to find out
 whether it caused a cost or behavior change: `--efficiency warm_schedule=off` (repeatable), or
 `CAMERATA_EFFICIENCY=warm_schedule=off,result_cache=off`. The measures are `warm_schedule`,
-`label_after_prefix`, `batch_long_cache`, `result_cache`, `truncation_retry`, `fix_prefilter` and
-`terse_output` (what each does is in TECHNICAL.md). A misspelled name is an error. Every run prints which measures
-were on. With `terse_output` on, the scan writes one-sentence explanations and a separate step
+`label_after_prefix`, `batch_long_cache`, `result_cache`, `truncation_retry`,
+`fix_prefilter`, `fix_on_haiku`, `terse_output`, `batch_default` and `applies_to_routing` (what each does is in
+TECHNICAL.md). `applies_to_routing` sends a rule that declares where it applies (for example, only
+SQL files) just those files; switch it off if a run seems to have missed something a rule should
+have caught. A misspelled name is an error. Every run prints which measures were on. With
+`terse_output` on, the scan writes one-sentence explanations and a separate step
 writes the full explanation for each finding that survives the merge; a finding whose full
 explanation could not be written stays in the report with `[detail incomplete]` after its short
 one, and the report lists the step as incomplete.

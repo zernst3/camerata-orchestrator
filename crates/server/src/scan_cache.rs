@@ -169,11 +169,24 @@ pub struct ScanManifest {
 /// Fingerprint the selected rule set (ids + their repo bindings) so a change to the selection
 /// invalidates the incremental cache. Order-independent: ids and bindings are sorted first.
 pub fn rules_fingerprint<'a>(rules: impl Iterator<Item = (&'a str, &'a [String])>) -> String {
+    rules_fingerprint_with_content(rules.map(|(id, repos)| (id, repos, None)))
+}
+
+/// [`rules_fingerprint`] with each rule's corpus content hash (`Rule::content_hash`) folded in,
+/// so a change to a rule's own content (its scope, options, wording) changes the fingerprint and
+/// forces a full rescan, not only a change to WHICH rules are selected. `None` for a rule the
+/// corpus does not know (or no corpus), which fingerprints as before.
+pub fn rules_fingerprint_with_content<'a>(
+    rules: impl Iterator<Item = (&'a str, &'a [String], Option<String>)>,
+) -> String {
     let mut parts: Vec<String> = rules
-        .map(|(id, repos)| {
+        .map(|(id, repos, content_hash)| {
             let mut r: Vec<&str> = repos.iter().map(String::as_str).collect();
             r.sort_unstable();
-            format!("{}@{}", id, r.join(","))
+            match content_hash {
+                Some(hash) => format!("{}@{}#{}", id, r.join(","), hash),
+                None => format!("{}@{}", id, r.join(",")),
+            }
         })
         .collect();
     parts.sort_unstable();
@@ -731,6 +744,23 @@ mod tests {
         let mut b = ManifestBuilder::new();
         b.record_repo("me/api", &files, &[finding("Me/Api", "a.rs", "ARCH-1")]);
         assert_eq!(b.finish().findings.len(), 1);
+    }
+
+    #[test]
+    fn rules_fingerprint_changes_when_a_rules_content_hash_changes() {
+        let repos: &[String] = &[];
+        let with = |hash: Option<&str>| {
+            rules_fingerprint_with_content(
+                [("ARCH-1", repos, hash.map(str::to_string))].into_iter(),
+            )
+        };
+        assert_ne!(with(Some("sha256:a")), with(Some("sha256:b")));
+        assert_ne!(with(Some("sha256:a")), with(None));
+        assert_eq!(
+            with(None),
+            rules_fingerprint([("ARCH-1", repos)].into_iter()),
+            "a rule with no known content fingerprints as before"
+        );
     }
 
     #[test]

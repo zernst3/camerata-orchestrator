@@ -1,11 +1,16 @@
 id = "SUPABASE-AUTH-USERS-EXPOSED-1"
-version = 1
+version = 3
 title = "auth.users must never be exposed to anon/authenticated via a view, materialized view, or grant in an exposed schema"
 domain = "supabase:auth"
 layer = "platform"
 enforcement = "structured"
 kind = "defect"
 inspectable = true
+# Token-efficiency rank 7: where this rule can apply, so the scan sends it only with these files.
+# SQL statement rule: the subject is CREATE POLICY / FUNCTION / VIEW / TABLE statements. They live in
+# SQL files and migration folders, and also inside TypeORM / Knex / Alembic / Rails / sqlx migrations in
+# other languages, which the `contains_any` markers catch wherever the file sits.
+applies_to = { paths = ["**/*.sql", "**/migrations/**", "**/migrate/**", "**/migration/**", "**/db/**", "**/database/**", "**/schema/**", "**/schemas/**", "**/seeds/**", "**/*seed*", "**/alembic/**", "**/supabase/**", "**/*.psql", "**/*.pgsql", "**/*.ddl"], contains_any = ["create policy", "alter policy", "drop policy", "row level security", "security definer", "security invoker", "create or replace function", "create function", "create or replace procedure", "create procedure", "create view", "create or replace view", "create materialized view", "grant ", "alter table", "storage.objects", "auth.users", "search_path"] }
 # Severity floor. Rationale: there is no partial-exposure form of this defect. auth.users holds
 # every account's email, phone and metadata, so ANY reference to it from an API-exposed object is
 # a full account-directory leak through PostgREST — and the correct pattern (a curated

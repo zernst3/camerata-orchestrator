@@ -2615,9 +2615,11 @@ being allowed to default - the content-rule floor and the reason-less-waiver row
 - `conventions_observed_findings` ships one row per decided non-`violates` rule
   with zero trace of a violation: no own row, no `also_matches` demotion, no
   absorbed site.
-- `run_routed_passes` reports every armed rule whose routing group matched zero
-  files, and `audit_repo` synthesises one `NotAssessed` row each. The Batch path
-  applies no routing, so it cannot skip a rule this way.
+- `run_routed_passes` and `run_routed_passes_batch` (both read `runnable_units`)
+  report every armed rule whose routing group matched zero files, and
+  `audit_repo` synthesises one `NotAssessed` row each. A rule scoped by
+  `applies_to` is reported the same way when no file in the scan matches its
+  scope.
 
 Each synthesised emission records its own ADDITION-side ledger stage
 (`convention-observed-emission`, `no-convention-emission`,
@@ -2760,6 +2762,7 @@ one line to the `efficiency_measures!` list and reads
 | `fix_on_haiku` | rank 10: with no fix model set, the fix stage runs on `claude-haiku-5-5` at effort `low` | the fix stage runs on the calibration model, else the scan model, with no effort sent (the pre-rank-10 request) |
 | `terse_output` | rank 4: scan passes write a one-sentence `detail` and no `proposed_rules` (the advisory pass keeps them); the full `detail` is regenerated for the findings that survive the first merge | the scan prompts and the pipeline are exactly what they were before rank 4 |
 | `batch_default` | rank 2: on the API backend a scan with no forced mode runs as a Message Batch; failed items are resubmitted once; a cut-off item gets the truncation retry; 15 rules per item; the batch cache TTL by the price arithmetic (see "Scan modes") | batch is opt-in and runs exactly as before rank 2: one submission, all rules per item, the rank-3 TTL, no resubmission and no truncation retry (a failed batch item is still disclosed as a failed pass) |
+| `applies_to_routing` | rank 7: a rule that declares `applies_to` is sent only with the files it can apply to; batch mode is routed like real-time | `applies_to` is ignored, real-time routes by rule-id language prefix only, and batch mode is the old single unrouted batch (every rule with every file) |
 
 Set with `CAMERATA_EFFICIENCY=name=off,other=off` or `camerata inspect --efficiency
 name=off` (repeatable; the flag wins). An unknown name or a malformed entry is an
@@ -2771,6 +2774,64 @@ telemetry snapshot and printed above its table, and printed in the `camerata ins
 summary, so any two runs can be compared knowing what differed. The key rank 5 fix
 (the AI findings are keyed by model, prompt version and rule wording) is a
 correctness fix, not a switch.
+
+**Rule routing and `applies_to`** (`crates/server/src/scan_routing.rs`,
+`crates/rules/src/applies_to.rs`). The rule router sends each rule only with the
+files it can apply to. Two sources of scope, both decided per FILE before
+chunking (a group's files are re-chunked on their own, so a chunk only holds
+files its rules can apply to):
+
+- the rule id's language prefix (`RUST-`, `REACT-`, ...): always on;
+- the rule's declared `applies_to` in its TOML, honoured only with
+  `applies_to_routing` on: `applies_to = { paths = ["**/*.sql"], languages =
+  ["rust"], contains_any = ["create policy"] }`. `paths` are repo-relative globs
+  (`*` inside one segment, a whole `**` segment; nothing else is accepted),
+  `languages` come from the closed list
+  `camerata_rules::applies_to::ROUTING_LANGUAGES`, and `contains_any` are
+  case-insensitive substrings: a file whose text contains one is in scope
+  whatever its path (this is how a rule about SQL statements still reaches SQL
+  embedded in a TypeScript, Python or Ruby migration; the router reads file text
+  the scan already holds). A file is in scope when it matches ANY listed glob
+  (case-insensitive), is in ANY listed language, or contains ANY marker, and a
+  file whose language cannot be determined counts as in scope for the language
+  part: an unknown or ambiguous attribute SENDS the rule. A rule with both an id
+  prefix and `applies_to` needs both to hold. Absent `applies_to` means every
+  file, so unscoped rules behave exactly as before.
+
+Validation is at corpus load and is loud: an unknown language, an unknown key,
+an empty scope, or a glob using unsupported syntax (`?`, `[..]`, `{..}`, `!`, an
+absolute or `..` path) fails that rule's file (`RulesError::TomlParse`), never a
+scope that silently matches nothing. `applies_to` is part of `Rule::content_hash`,
+so scoping a rule is a revision of it (version bump, `camerata corpus lock`).
+
+`AuditRule { id, directive, applies_to }` is the rule metadata `audit_repo`,
+`plan_routes` and `run_routed_passes` pass around (not `(id, directive)` pairs),
+so a further per-rule routing field is one more field on it. Rules in the same
+scope share a group. `routed_units` turns the plan into the units that run and is
+the ONE place that decides which (chunk, rule) pairs a scan sends: the real-time
+path (`run_routed_passes`), the batch path (`run_routed_passes_batch`, one Message
+Batch per route group, submitted in turn so the spend cap sees earlier groups'
+cost; with the switch OFF, `batch_units` returns the old single unrouted batch, so
+OFF isolates routing completely) and the routing telemetry all read it. A group
+that matches no file is not dropped: its rules come back as `NotAssessed` rows,
+unless the full repo (`map_files`; on an incremental scan `files` is only the
+changed files) has a file in the rule's scope. The ledger records such a rule as
+not run, with the reason, never as fired or run clean
+(`split_fired_and_not_assessed`). The incremental-scan cache key
+(`rules_fingerprint_with_content`) includes each rule's corpus content hash, so
+editing a rule (its scope included) forces a full rescan. The advisory "flag novel
+issues" pass is disabled in a scoped group only when a cross-cutting `All` group
+also runs; when every selected rule is scoped, each scoped group keeps it, and the
+rare duplicate (two declared scopes overlapping on a file) collapses in the
+cross-chunk dedup and location merge.
+
+Telemetry: the per-stage table prints `rule routing: N of M (chunk, rule) pairs
+not sent`, where M is every rule with every chunk and N is what routing (id
+prefix, plus `applies_to` when on) did not send; compare a run with
+`--efficiency applies_to_routing=off` to see the saving `applies_to` itself buys.
+It is operator-only, like the rest of the table. The corpus rules that declare
+`applies_to` are pinned by `crates/server/tests/applies_to_corpus.rs`: adding a
+scope to another rule fails that test until the rule is reviewed.
 
 The controls travel on the run's `UsageMeter` (`UsageMeter::with_controls`), which
 every model-calling stage already receives, so no stage signature grew. The

@@ -668,6 +668,11 @@ impl UsageMeter {
         self.stages.record_fix_outcome(outcome);
     }
 
+    /// Record how many (chunk, rule) pairs the rule router skipped for one repo.
+    pub fn record_routing(&self, pairs_total: u64, pairs_skipped: u64) {
+        self.stages.record_routing(pairs_total, pairs_skipped);
+    }
+
     /// The per-stage telemetry so far, joined to the scan's counted-line total.
     pub fn stage_telemetry(&self, counted_lines: usize) -> StageTelemetry {
         let mut telemetry = self.stages.snapshot(counted_lines);
@@ -7508,19 +7513,212 @@ fn strip_headline_cross_references(mut findings: Vec<Finding>) -> Vec<Finding> {
     findings
 }
 
+/// One route group's share of a scan, ready to run: the files its scope covers (re-chunked on
+/// their own, so a chunk only holds files its rules can apply to), its rules, and how the
+/// advisory pass is wired for it.
+///
+/// [`routed_units`] is the ONE place that decides which (chunk, rule) pairs a scan sends. The
+/// real-time path ([`run_routed_passes`]), the batch path ([`run_routed_passes_batch`]) and the
+/// routing telemetry all read it, so they cannot send different pairs.
+struct RoutedUnit {
+    /// Index of the group in the route plan (stable session-id component).
+    index: usize,
+    /// `pass[<lang>]`, `pass[<declared scope>]` or `pass[all]`.
+    label: String,
+    /// What to tell the report when this group matched no file.
+    empty_note: String,
+    /// The files this group's scope covers.
+    files: Vec<(String, String)>,
+    /// The group's `(id, directive)` pairs, in plan order.
+    rules: Vec<(String, String)>,
+    /// True for a scoped group when a cross-cutting `All` group also runs this scan; see
+    /// [`routed_units`].
+    advisory_disabled: bool,
+}
+
+/// Turn a route plan into the units that run. Every group of the plan becomes a unit (a group
+/// that matched no file has empty `files`; the caller records it, see [`runnable_units`]).
+///
+/// # Advisory wiring (W2)
+///
+/// The advisory "flag novel issues beyond the adopted rules" pass must fire exactly once per
+/// file chunk. A scoped group (id-prefix language or declared `applies_to`) disables it ONLY when
+/// a cross-cutting `All` group ALSO runs this scan: that group already sees every file, so
+/// advisory in a scoped group too would re-flag the same novel issue under a second invented
+/// name. When there is no `All` group at all (every selected rule is scoped), nothing else would
+/// ever ask "is there anything wrong beyond the listed rules?", so every scoped group keeps
+/// advisory on. Id-prefix language groups are mutually exclusive by file, so that never
+/// duplicates; two DECLARED scopes can overlap on a file, in which case that file's advisory
+/// runs once per overlapping group and the duplicates collapse in the cross-chunk dedup and
+/// location merge. That costs a few repeated advisory tokens in an unusual selection (every
+/// cross-cutting rule scoped); the alternative, dropping advisory for a file, would lose findings.
+fn routed_units(
+    files: &[(String, String)],
+    route_plan: &crate::scan_routing::RoutePlan,
+) -> Vec<RoutedUnit> {
+    use crate::scan_routing::Scope;
+    let has_all_group = route_plan
+        .groups
+        .iter()
+        .any(|g| matches!(g.scope, Scope::All));
+    route_plan
+        .groups
+        .iter()
+        .enumerate()
+        .map(|(index, group)| {
+            let (label, empty_note) = match &group.scope {
+                Scope::Language(lang) => (
+                    format!("pass[{lang}]"),
+                    format!("no {lang} files matched this scan's file set"),
+                ),
+                Scope::Declared { language, .. } => (
+                    format!(
+                        "pass[{}]",
+                        language.map_or_else(|| "scoped".to_string(), str::to_string)
+                    ),
+                    "no file in this scan's file set is one this rule applies to".to_string(),
+                ),
+                Scope::All => (
+                    "pass[all]".to_string(),
+                    "no files matched this scan's file set".to_string(),
+                ),
+            };
+            RoutedUnit {
+                index,
+                label,
+                empty_note,
+                files: crate::scan_routing::files_in_scope(files, &group.scope),
+                rules: group.rule_pairs(),
+                advisory_disabled: has_all_group && !matches!(group.scope, Scope::All),
+            }
+        })
+        .collect()
+}
+
+/// The units that actually run: [`routed_units`] without the groups that matched no file.
+///
+/// Pass-1 W3 (A5.6, `NotAssessed`): a group that matched ZERO files was ARMED but nothing was
+/// ever judged against it. Each of its rules is pushed to `skipped_rules` for the caller
+/// (`audit_repo`) to turn into one honest `not_assessed` row, rather than leaving "never
+/// evaluated" indistinguishable from "assessed and clean". Real-time and batch mode both go
+/// through here, so both disclose the same skipped rules.
+///
+/// Also records the routing telemetry (how many (chunk, rule) pairs routing did not send) when
+/// there is a `meter`.
+fn runnable_units(
+    files: &[(String, String)],
+    route_plan: &crate::scan_routing::RoutePlan,
+    meter: Option<&UsageMeter>,
+    skipped_rules: &mut Vec<(String, String)>,
+) -> Vec<RoutedUnit> {
+    let units = routed_units(files, route_plan);
+    if let Some(m) = meter {
+        // (chunk, rule) pairs: what an un-routed scan would send (every rule with every chunk)
+        // against what the units send (each group's rules with that group's own chunks).
+        let n_rules: usize = units.iter().map(|u| u.rules.len()).sum();
+        let total = chunk_files(files, CHUNK_DIGEST_CHARS).len() * n_rules;
+        let sent: usize = units
+            .iter()
+            .map(|u| chunk_files(&u.files, CHUNK_DIGEST_CHARS).len() * u.rules.len())
+            .sum();
+        m.record_routing(total as u64, total.saturating_sub(sent) as u64);
+    }
+    let mut runnable = Vec::with_capacity(units.len());
+    for unit in units {
+        if unit.files.is_empty() {
+            skipped_rules.extend(
+                unit.rules
+                    .iter()
+                    .map(|(id, _)| (id.clone(), unit.empty_note.clone())),
+            );
+        } else {
+            runnable.push(unit);
+        }
+    }
+    runnable
+}
+
+/// The units a Message Batch scan submits, one Message Batch each.
+///
+/// With `applies_to_routing` ON these are exactly the real-time path's [`runnable_units`], so
+/// batch and real-time send the same (chunk, rule) pairs. With it OFF this is the batch scan as
+/// it was before routing reached batch mode: ONE submission of every rule against every file,
+/// labelled `pass`, advisory on. The switch therefore isolates routing completely: OFF in batch
+/// mode is "no routing at all", not "language routing only".
+fn batch_units(
+    files: &[(String, String)],
+    selected: &[crate::scan_routing::AuditRule],
+    route_plan: &crate::scan_routing::RoutePlan,
+    applies_to_routing: bool,
+    meter: Option<&UsageMeter>,
+    skipped_rules: &mut Vec<(String, String)>,
+) -> Vec<RoutedUnit> {
+    if applies_to_routing {
+        return runnable_units(files, route_plan, meter, skipped_rules);
+    }
+    vec![RoutedUnit {
+        index: 0,
+        label: "pass".to_string(),
+        empty_note: String::new(),
+        files: files.to_vec(),
+        rules: crate::scan_routing::rule_pairs(selected),
+        advisory_disabled: false,
+    }]
+}
+
+/// Drop the "armed but nothing matched" disclosures that the scan's file set cannot support.
+///
+/// `runnable_units` reports a rule whose group matched no file in `files`. On an INCREMENTAL scan
+/// `files` is only the changed files, so a rule whose matching files exist in the repo but did
+/// not change this time would be reported as never assessed, while its earlier findings are
+/// carried forward. A rule is only reported when the FULL file set (`full_files`) has no match
+/// either.
+fn drop_skips_with_matches_in_full_set(
+    skipped_rules: &mut Vec<(String, String)>,
+    route_plan: &crate::scan_routing::RoutePlan,
+    full_files: &[(String, String)],
+) {
+    let covered: std::collections::HashSet<String> = route_plan
+        .groups
+        .iter()
+        .filter(|g| {
+            full_files
+                .iter()
+                .any(|(p, c)| crate::scan_routing::file_in_scope(p, c, &g.scope))
+        })
+        .flat_map(|g| g.rules.iter().map(|r| r.id.to_ascii_uppercase()))
+        .collect();
+    skipped_rules.retain(|(id, _)| !covered.contains(&id.to_ascii_uppercase()));
+}
+
+/// The `(chunk, rule)` pairs a scan sends, as `(chunk's file paths, rule id)`, for a unit list.
+#[cfg(test)]
+fn pair_set_of(units: &[RoutedUnit]) -> std::collections::BTreeSet<(Vec<String>, String)> {
+    units
+        .iter()
+        .flat_map(|u| {
+            let chunk_paths: Vec<Vec<String>> = chunk_files(&u.files, CHUNK_DIGEST_CHARS)
+                .iter()
+                .map(|c| c.iter().map(|(p, _)| p.clone()).collect())
+                .collect();
+            u.rules.iter().flat_map(move |(id, _)| {
+                chunk_paths
+                    .iter()
+                    .map(move |paths| (paths.clone(), id.clone()))
+                    .collect::<Vec<_>>()
+            })
+        })
+        .collect()
+}
+
 /// Run the real-time audit passes with rule-routing applied.
 ///
-/// Groups `selected` rules by [`crate::scan_routing::Scope`] using the pre-computed
-/// `route_plan`, then for each group:
+/// Runs each [`RoutedUnit`] of `route_plan` (see [`runnable_units`] and [`routed_units`]):
 ///
-/// - Filters `files` to only the files that group's scope covers.
-/// - Chunks those filtered files for context-window sizing.
-/// - Runs [`run_passes`] over the group's rules, with `advisory_disabled = true` for a
-///   language-specific group ONLY when a cross-cutting `All` group ALSO runs this scan (so the
-///   "flag novel issues" pass fires exactly once per file chunk there, instead of once per
-///   group × chunk). When no `All` group exists at all (a purely language-scoped rule
-///   selection), every language group keeps advisory enabled instead — see the `has_all_group`
-///   doc comment in this function's body for why that never duplicates a finding (W2).
+/// - The unit's files are chunked for context-window sizing.
+/// - [`run_passes`] runs over the unit's rules, with `advisory_disabled` as [`routed_units`]
+///   decides it (so the "flag novel issues" pass fires exactly once per file chunk when a
+///   cross-cutting `All` group exists).
 ///
 /// When routing produces no savings (all rules are cross-cutting, or only one group), this
 /// degenerates to the previous single-group behavior with no overhead.
@@ -7531,7 +7729,7 @@ async fn run_routed_passes(
     llm: &dyn LlmPort,
     repo: &str,
     files: &[(String, String)],
-    selected: &[(String, String)],
+    selected: &[crate::scan_routing::AuditRule],
     route_plan: &crate::scan_routing::RoutePlan,
     repo_map: &str,
     adopted: &std::collections::HashSet<String>,
@@ -7547,12 +7745,11 @@ async fn run_routed_passes(
     // rather than leaving "never evaluated" indistinguishable from "assessed and clean".
     skipped_rules: &mut Vec<(String, String)>,
 ) -> PassesOut {
-    use crate::scan_routing::Scope;
 
     // When there are no rules (free-form audit), skip routing and run one pass over all files.
     if selected.is_empty() {
         let chunks = chunk_files(files, CHUNK_DIGEST_CHARS);
-        let empty_batch: &[(String, String)] = selected;
+        let empty_batch: &[(String, String)] = &[];
         let batches: Vec<&[(String, String)]> = vec![empty_batch];
         if let Some((jstore, jid)) = job {
             jstore.add_total(jid, chunks.len() * batches.len());
@@ -7576,28 +7773,15 @@ async fn run_routed_passes(
         .await;
     }
 
+    let units = runnable_units(files, route_plan, meter, skipped_rules);
+
     // Pre-seed the job's total pass count across ALL route groups so the progress bar is
-    // accurate from the start. We need to compute chunk counts per group first.
-    //
-    // For each group: count its files → chunk count × batch count = pass count.
-    let total_pass_count: usize = route_plan
-        .groups
+    // accurate from the start: per group, chunk count x rule-batch count.
+    let total_pass_count: usize = units
         .iter()
-        .map(|g| {
-            // Filter files to this group's scope.
-            let group_files: Vec<&(String, String)> = files
-                .iter()
-                .filter(|(path, _)| crate::scan_routing::file_in_scope(path, &g.scope))
-                .collect();
-            // The group's rules split into batches.
-            let n_batches = g.rules.chunks(batch_size.max(1)).count().max(1);
-            // chunk_files needs owned slices; approximate chunk count from raw sizes.
-            let total_sz: usize = group_files
-                .iter()
-                .map(|(p, c)| p.len() + c.len() + 32)
-                .sum();
-            let n_chunks = (total_sz / CHUNK_DIGEST_CHARS).max(1);
-            n_chunks * n_batches
+        .map(|u| {
+            chunk_files(&u.files, CHUNK_DIGEST_CHARS).len()
+                * u.rules.chunks(batch_size.max(1)).count().max(1)
         })
         .sum();
     // Only seed when > 0 (empty groups are no-ops and contribute 0 passes).
@@ -7613,69 +7797,10 @@ async fn run_routed_passes(
     let mut total_ok: usize = 0;
     let mut failures: Vec<PassFailure> = Vec::new();
 
-    // W2 (closes a real zero-row semantic-tier defect, previously documented as an accepted
-    // "known limitation" in `routing_single_language_repo_with_language_rules`): a project whose
-    // SELECTED rule set is entirely language-scoped (e.g. only `RUST-*` rules — no `ARCH-*`/
-    // `SEC-*`/other cross-cutting rule) produces a `route_plan` with NO `Scope::All` group at
-    // all. The old unconditional `!matches!(group.scope, Scope::All)` then disabled advisory in
-    // EVERY group, which means the "ALSO flag any other genuine issues NOT covered by an adopted
-    // rule" instruction (the model's one and only backstop for issues no selected rule names —
-    // see `audit_system_prompt`'s doc comment) was never sent to the model AT ALL for that scan.
-    // That is the silent-collapse mechanism: a repo scanned with a language-only rule selection
-    // gets zero chance at any novel/security finding outside those rules, indistinguishable from
-    // "the model looked and found nothing."
-    //
-    // Fix: advisory is disabled for a language group ONLY when a SEPARATE cross-cutting All
-    // group also exists to run it (the original duplicate-novel-finding concern this flag
-    // exists for). When there is no All group, every language group keeps advisory enabled
-    // instead — safe to do because `Scope::Language` groups are mutually exclusive by
-    // construction (`scan_routing::file_language` maps each file to AT MOST one language), so no
-    // file can receive the advisory instruction from more than one group.
-    let has_all_group = route_plan
-        .groups
-        .iter()
-        .any(|g| matches!(g.scope, Scope::All));
-
-    for (gi, group) in route_plan.groups.iter().enumerate() {
-        // The advisory pass is suppressed in a language-specific group only when a cross-cutting
-        // All group ALSO runs this scan — that All group already sees every file, so re-running
-        // advisory per language group would produce duplicate novel findings for every file
-        // (every language file is also an All-group file). When there is no All group, nothing
-        // else will ever ask "is there anything wrong beyond the listed rules?", so each
-        // (mutually exclusive) language group runs it itself — see the `has_all_group` doc
-        // comment above.
-        let advisory_disabled = has_all_group && !matches!(group.scope, Scope::All);
-
-        // Materialize the owned file list for this group's scope.
-        let group_files: Vec<(String, String)> = files
-            .iter()
-            .filter(|(path, _)| crate::scan_routing::file_in_scope(path, &group.scope))
-            .cloned()
-            .collect();
-
-        if group_files.is_empty() {
-            // No files match this language group in this repo — nothing was audited for these
-            // rules. W3: record each armed rule so the caller emits a `not_assessed` honesty
-            // row (A5.6) instead of silently skipping.
-            let note = match &group.scope {
-                Scope::Language(lang) => {
-                    format!("no {lang} files matched this scan's file set")
-                }
-                Scope::All => "no files matched this scan's file set".to_string(),
-            };
-            skipped_rules.extend(group.rules.iter().map(|(id, _)| (id.clone(), note.clone())));
-            continue;
-        }
-
-        let chunks = chunk_files(&group_files, CHUNK_DIGEST_CHARS);
-        let group_rules: &[(String, String)] = &group.rules;
-        let batches: Vec<&[(String, String)]> = group_rules.chunks(batch_size.max(1)).collect();
-
-        let scope_label = match &group.scope {
-            Scope::Language(lang) => format!("pass[{lang}]"),
-            Scope::All => "pass[all]".to_string(),
-        };
-        let session_prefix = format!("audit-{repo}-g{gi}");
+    for unit in &units {
+        let chunks = chunk_files(&unit.files, CHUNK_DIGEST_CHARS);
+        let batches: Vec<&[(String, String)]> = unit.rules.chunks(batch_size.max(1)).collect();
+        let session_prefix = format!("audit-{repo}-g{}", unit.index);
 
         // NOTE: job total was pre-seeded above; do NOT call add_total again per group, as that
         // would double-count. run_passes calls inc_done per completed pass, which is correct.
@@ -7691,10 +7816,10 @@ async fn run_routed_passes(
             &chunks,
             &batches,
             concurrency,
-            &scope_label,
+            &unit.label,
             &session_prefix,
             meter,
-            advisory_disabled,
+            unit.advisory_disabled,
         )
         .await;
 
@@ -7712,6 +7837,93 @@ async fn run_routed_passes(
         total_ok,
         failures,
     )
+}
+
+/// [`run_routed_passes`] for Message Batch mode: with `applies_to_routing` on, the same
+/// [`runnable_units`], so batch mode sends exactly the (chunk, rule) pairs real-time mode does;
+/// with it off, the unrouted batch scan ([`batch_units`]). Each route group is submitted as its own
+/// Message Batch, one after the other (so the spend cap sees the cost of the earlier groups
+/// before it admits the next, and a group's `advisory_disabled` is honoured per group, which is
+/// what [`run_passes_batch`]'s own parameter is for).
+///
+/// A batch error on any group aborts the whole call, exactly as the single batch did before.
+#[allow(clippy::too_many_arguments)]
+async fn run_routed_passes_batch(
+    llm: &dyn batch_mode::BatchApi,
+    repo: &str,
+    files: &[(String, String)],
+    selected: &[crate::scan_routing::AuditRule],
+    route_plan: &crate::scan_routing::RoutePlan,
+    repo_map: &str,
+    adopted: &std::collections::HashSet<String>,
+    audit_model: Option<&str>,
+    job: Option<(&crate::jobs::JobStore, &str)>,
+    batch_size: usize,
+    meter: Option<&UsageMeter>,
+    skipped_rules: &mut Vec<(String, String)>,
+) -> anyhow::Result<PassesOut> {
+    if selected.is_empty() {
+        let chunks = chunk_files(files, CHUNK_DIGEST_CHARS);
+        let empty_batch: &[(String, String)] = &[];
+        return run_passes_batch(
+            llm,
+            repo,
+            repo_map,
+            adopted,
+            audit_model,
+            job,
+            &chunks,
+            &[empty_batch],
+            "pass",
+            meter,
+            false,
+        )
+        .await;
+    }
+
+    let units = batch_units(
+        files,
+        selected,
+        route_plan,
+        efficiency_of(meter).applies_to_routing,
+        meter,
+        skipped_rules,
+    );
+    let mut all_findings: Vec<Finding> = Vec::new();
+    let mut all_proposed: Vec<ProposedRule> = Vec::new();
+    let mut all_requested: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut total_ok: usize = 0;
+    let mut failures: Vec<PassFailure> = Vec::new();
+    for unit in &units {
+        let chunks = chunk_files(&unit.files, CHUNK_DIGEST_CHARS);
+        let batches: Vec<&[(String, String)]> = unit.rules.chunks(batch_size.max(1)).collect();
+        let (gf, gp, gr, gok, ge) = run_passes_batch(
+            llm,
+            repo,
+            repo_map,
+            adopted,
+            audit_model,
+            job,
+            &chunks,
+            &batches,
+            &unit.label,
+            meter,
+            unit.advisory_disabled,
+        )
+        .await?;
+        all_findings.extend(gf);
+        all_proposed.extend(gp);
+        all_requested.extend(gr);
+        total_ok += gok;
+        failures.extend(ge);
+    }
+    Ok((
+        all_findings,
+        all_proposed,
+        all_requested,
+        total_ok,
+        failures,
+    ))
 }
 
 /// D7 — strip the corpus's `Rejected:` AUTHORING token from prose about to reach a client.
@@ -7791,7 +8003,7 @@ fn strip_authoring_token(why: &str) -> String {
 ///   that one shape to `info` rather than asserting an unverifiable "high" with nothing to
 ///   point at.
 fn apply_alternative_decision(
-    effective_selected: &mut [(String, String)],
+    effective_selected: &mut [crate::scan_routing::AuditRule],
     repo: &str,
     rule_id: &str,
     option: &RuleOptionView,
@@ -7801,9 +8013,9 @@ fn apply_alternative_decision(
     if !option.violates {
         if let Some(entry) = effective_selected
             .iter_mut()
-            .find(|(id, _)| id.eq_ignore_ascii_case(rule_id))
+            .find(|r| r.id.eq_ignore_ascii_case(rule_id))
         {
-            entry.1 = option.directive.clone();
+            entry.directive = option.directive.clone();
         }
         return None;
     }
@@ -8190,17 +8402,28 @@ pub(crate) fn not_assessed_findings(repo: &str, skipped: &[(String, String)]) ->
 /// Net: novel findings appear exactly once per file chunk that belongs to any group, language-
 /// scoped rules skip unmatched files, and no finding is missed.
 ///
+/// ### Declared scope (`applies_to`)
+///
+/// A rule may also declare `applies_to` in its TOML (file globs and languages). With the
+/// `applies_to_routing` efficiency switch on, such a rule is grouped under its declared scope
+/// (intersected with its id-prefix language, if any) and sent only with the files that scope
+/// covers; a file whose language cannot be determined still gets it. With the switch off the
+/// field is ignored and only the id-prefix routing above applies.
+///
 /// ### Batch mode
 ///
-/// The Batch execution path ([`run_passes_batch`]) does not yet apply per-rule routing — it
-/// submits every rule against every file as a single Anthropic Message Batch. Routing for the
-/// batch path is a follow-up (tracked in `docs/decisions/2026-06-20_rule_routing_wiring.md`).
+/// The Batch execution path honours the SAME plan: [`run_routed_passes_batch`] reads the same
+/// [`runnable_units`] as the real-time path and submits one Message Batch per route group, so
+/// both modes send the same (chunk, rule) pairs.
 #[allow(clippy::too_many_arguments)]
 pub async fn audit_repo(
     llm: &dyn LlmPort,
     repo: &str,
     files: &[(String, String)],
-    selected: &[(String, String)],
+    // The rules to audit, with the routing metadata the corpus declares for each
+    // (`AuditRule::applies_to`). Rule metadata, not `(id, directive)` pairs, so the next piece
+    // of per-rule routing metadata is one more field on `AuditRule` and not a signature change.
+    selected: &[crate::scan_routing::AuditRule],
     // MULTI-OPTION semantic rules present in `selected` for this repo (built by the caller
     // from the loaded corpus — see `onboard::build_rule_alternatives`). Empty when this
     // project/repo has no multi-option semantic rules selected, or when the caller is a
@@ -8250,10 +8473,8 @@ pub async fn audit_repo(
     let repo_map = build_repo_map(map_files.unwrap_or(files));
     // Key findings to the adopted rule ids (so a violation shows under e.g.
     // ARCH-STRICT-LAYERING-1, not an invented AI- name).
-    let adopted: std::collections::HashSet<String> = selected
-        .iter()
-        .map(|(id, _)| id.to_ascii_uppercase())
-        .collect();
+    let adopted: std::collections::HashSet<String> =
+        selected.iter().map(|r| r.id.to_ascii_uppercase()).collect();
     // Model selection: the USER's per-audit choice wins; else CAMERATA_AUDIT_MODEL; else default.
     let audit_model = model.map(str::to_string).or_else(|| {
         std::env::var("CAMERATA_AUDIT_MODEL")
@@ -8289,7 +8510,7 @@ pub async fn audit_repo(
     // always relative to ONE chosen alternative" (the design doc's coherence principle) without
     // any cross-chunk coordination. See `recommend_alternatives`'s doc comment for the chunk-0
     // grounding tradeoff.
-    let mut effective_selected: Vec<(String, String)> = selected.to_vec();
+    let mut effective_selected: Vec<crate::scan_routing::AuditRule> = selected.to_vec();
     let mut recommendations: Vec<RuleRecommendation> = Vec::new();
     // W6: any pass that fails/times out for this repo, captured so the export can disclose it
     // explicitly instead of only logging to stderr. See `FailedPass`'s doc comment.
@@ -8392,8 +8613,7 @@ pub async fn audit_repo(
                             // drop it from the directive set the violation passes actually
                             // check, so it emits ZERO findings instead of checking violations
                             // against a convention nothing in the repo established.
-                            effective_selected
-                                .retain(|(id, _)| !id.eq_ignore_ascii_case(&a.rule_id));
+                            effective_selected.retain(|r| !r.id.eq_ignore_ascii_case(&a.rule_id));
                             continue;
                         }
                         if rec.no_convention {
@@ -8406,8 +8626,7 @@ pub async fn audit_repo(
                             // finding the model free-associates under it anyway, and exactly
                             // ONE informational `no_convention` row is synthesized from this
                             // recommendation (see `no_convention_findings`).
-                            effective_selected
-                                .retain(|(id, _)| !id.eq_ignore_ascii_case(&a.rule_id));
+                            effective_selected.retain(|r| !r.id.eq_ignore_ascii_case(&a.rule_id));
                             continue;
                         }
                         if let Some(opt) =
@@ -8448,16 +8667,19 @@ pub async fn audit_repo(
     let (concurrency, batch_size) = mode.tuning(efficiency_of(meter));
 
     // Pass-1 W3 (A5.6): rules whose routing group matched zero files — see
-    // `run_routed_passes`'s `skipped_rules` doc comment. The Batch execution path applies no
-    // per-rule routing yet (every rule runs against every file), so it can never skip a rule
-    // this way and contributes nothing here — a documented asymmetry, not a gap.
+    // `run_routed_passes`'s `skipped_rules` doc comment. Real-time and batch mode both fill it
+    // (they share `runnable_units`), so both disclose the same skipped rules.
     let mut skipped_rules: Vec<(String, String)> = Vec::new();
 
     // ── Rule-routing plan ───────────────────────────────────────────────────────────
-    // Group `effective_selected` rules by scope so each language group only audits its own
-    // files. The plan is computed even for Batch mode (so the savings estimate is available),
-    // but the Batch execution path does not yet apply the routing (see doc comment above).
-    let route_plan = crate::scan_routing::plan_routes(&effective_selected, files);
+    // Group `effective_selected` rules by scope so each group only audits the files its scope
+    // covers: the rule id's language prefix, and (with the `applies_to_routing` switch on) the
+    // rule's declared `applies_to`. Real-time and batch mode execute the SAME plan.
+    let route_plan = crate::scan_routing::plan_routes(
+        &effective_selected,
+        files,
+        efficiency_of(meter).applies_to_routing,
+    );
     if route_plan.saved_fraction() > 0.0 {
         eprintln!(
             "[camerata-server] rule-routing: {:.0}% input reduction for {repo} ({} groups, {} rules routed)",
@@ -8470,16 +8692,10 @@ pub async fn audit_repo(
     // ── Dispatch to the appropriate execution engine ─────────────────────────────────
     let (mut all_findings, mut all_proposed, requested, ok_passes, pass_failures) =
         if mode == ScanMode::Batch {
-            // Batch path: submit all (chunk × rule-batch) pairs as one Message Batch, poll to
-            // completion, reassemble by custom_id. The job's add_total is called inside
-            // run_passes_batch (it knows the full item count before any network I/O).
-            // NOTE: the Batch path audits every rule against every file (no per-rule routing yet).
-            let chunks = chunk_files(files, CHUNK_DIGEST_CHARS);
-            let batches: Vec<&[(String, String)]> = if effective_selected.is_empty() {
-                vec![&effective_selected]
-            } else {
-                effective_selected.chunks(batch_size.max(1)).collect()
-            };
+            // Batch path: submit every route group's (chunk × rule-batch) pairs as a Message
+            // Batch, poll to completion, reassemble by custom_id. The job's add_total is called
+            // inside run_passes_batch (it knows the full item count before any network I/O).
+            //
             // The Message-Batches path is concrete-only (API-key-gated; `submit_batch` et al.
             // are not part of the minimal `LlmPort` seam), so recover the concrete `&Llm` via
             // the `as_any` downcast. In production this is always a real `Llm`, so the downcast
@@ -8499,21 +8715,19 @@ pub async fn audit_repo(
                         )
                     })?
                 };
-            run_passes_batch(
+            run_routed_passes_batch(
                 batch_api,
                 repo,
+                files,
+                &effective_selected,
+                &route_plan,
                 &repo_map,
                 &adopted,
                 audit_model.as_deref(),
                 job,
-                &chunks,
-                &batches,
-                "pass",
+                batch_size,
                 meter,
-                // Batch mode does not yet apply per-rule routing (all rules vs all files), so
-                // the Scope::All advisory semantics apply: advisory is enabled (not disabled).
-                // If batch mode ever gains routing, pass the group's advisory_disabled flag here.
-                false,
+                &mut skipped_rules,
             )
             .await?
         } else {
@@ -8541,6 +8755,14 @@ pub async fn audit_repo(
             )
             .await
         };
+
+    // A rule is only "not assessed" when the WHOLE repo has no file in its scope: on an
+    // incremental scan `files` is just the changed files.
+    drop_skips_with_matches_in_full_set(
+        &mut skipped_rules,
+        &route_plan,
+        map_files.unwrap_or(files),
+    );
 
     // Every pass failed -> surface the error so the caller notes the AI audit was skipped
     // (the deterministic findings still return independently). Each pass already finalized
@@ -8578,10 +8800,11 @@ pub async fn audit_repo(
         .cloned()
         .collect();
     if !resolution.is_empty() {
-        let batches_res: Vec<&[(String, String)]> = if effective_selected.is_empty() {
-            vec![&effective_selected]
+        let effective_pairs = crate::scan_routing::rule_pairs(&effective_selected);
+        let batches_res: Vec<&[(String, String)]> = if effective_pairs.is_empty() {
+            vec![&effective_pairs]
         } else {
-            effective_selected.chunks(batch_size.max(1)).collect()
+            effective_pairs.chunks(batch_size.max(1)).collect()
         };
         let res_chunks = chunk_files(&resolution, CHUNK_DIGEST_CHARS);
         // BUG-4 fix: in Batch mode, run_passes_batch already called add_total with the
@@ -8694,7 +8917,7 @@ pub async fn audit_repo(
             repo,
             std::mem::take(&mut all_findings),
             map_files.unwrap_or(files),
-            &effective_selected,
+            &crate::scan_routing::rule_pairs(&effective_selected),
             audit_model.as_deref(),
             meter,
         )
@@ -9745,6 +9968,9 @@ mod fix_model_tests;
 
 #[cfg(test)]
 mod batch_default_tests;
+
+#[cfg(test)]
+mod applies_to_routing_tests;
 
 #[cfg(test)]
 mod tests {
@@ -13191,22 +13417,13 @@ mod tests {
             ),
         ];
         let rules = vec![
-            (
-                "RUST-ENTITIES-1".to_string(),
-                "Rust entities rule".to_string(),
-            ),
-            ("REACT-HOOKS-1".to_string(), "React hooks rule".to_string()),
-            (
-                "ARCH-STRICT-LAYERING-1".to_string(),
-                "Layering rule".to_string(),
-            ),
-            (
-                "SEC-NO-RAW-SQL-1".to_string(),
-                "No raw SQL rule".to_string(),
-            ),
+            crate::scan_routing::AuditRule::new("RUST-ENTITIES-1", "Rust entities rule"),
+            crate::scan_routing::AuditRule::new("REACT-HOOKS-1", "React hooks rule"),
+            crate::scan_routing::AuditRule::new("ARCH-STRICT-LAYERING-1", "Layering rule"),
+            crate::scan_routing::AuditRule::new("SEC-NO-RAW-SQL-1", "No raw SQL rule"),
         ];
 
-        let plan = plan_routes(&rules, &files);
+        let plan = plan_routes(&rules, &files, true);
 
         // Should have 3 groups: rust, web, and All.
         assert_eq!(
@@ -13236,11 +13453,11 @@ mod tests {
         // Rust group: only .rs files should be in scope.
         let rust_g = rust_group.unwrap();
         assert_eq!(rust_g.rules.len(), 1);
-        assert_eq!(rust_g.rules[0].0, "RUST-ENTITIES-1");
+        assert_eq!(rust_g.rules[0].id, "RUST-ENTITIES-1");
 
         // Verify file_in_scope correctly filters for each group.
         for (path, _) in &files {
-            let in_rust = crate::scan_routing::file_in_scope(path, &rust_g.scope);
+            let in_rust = crate::scan_routing::file_in_scope(path, "", &rust_g.scope);
             let expected_in_rust = path.ends_with(".rs");
             assert_eq!(
                 in_rust, expected_in_rust,
@@ -13251,7 +13468,7 @@ mod tests {
         // Web group: only .tsx files should be in scope.
         let web_g = web_group.unwrap();
         for (path, _) in &files {
-            let in_web = crate::scan_routing::file_in_scope(path, &web_g.scope);
+            let in_web = crate::scan_routing::file_in_scope(path, "", &web_g.scope);
             let expected_in_web = path.ends_with(".tsx")
                 || path.ends_with(".ts")
                 || path.ends_with(".js")
@@ -13268,7 +13485,7 @@ mod tests {
         );
         for (path, _) in &files {
             assert!(
-                crate::scan_routing::file_in_scope(path, &all_g.scope),
+                crate::scan_routing::file_in_scope(path, "", &all_g.scope),
                 "{path} must be in scope for the All group"
             );
         }
@@ -13293,11 +13510,11 @@ mod tests {
             ("schema.sql".to_string(), "SELECT 1;".to_string()),
         ];
         let rules = vec![
-            ("RUST-1".to_string(), "d".to_string()),
-            ("TS-1".to_string(), "d".to_string()),
-            ("ARCH-1".to_string(), "d".to_string()),
+            crate::scan_routing::AuditRule::new("RUST-1", "d"),
+            crate::scan_routing::AuditRule::new("TS-1", "d"),
+            crate::scan_routing::AuditRule::new("ARCH-1", "d"),
         ];
-        let plan = plan_routes(&rules, &files);
+        let plan = plan_routes(&rules, &files, true);
 
         // The advisory_disabled flag is true for language groups, false for All.
         // This mirrors the check in run_routed_passes.
@@ -13316,6 +13533,9 @@ mod tests {
                         "{lang} language group must have advisory disabled (advisory_disabled=true)"
                     );
                 }
+                Scope::Declared { .. } => {
+                    unreachable!("no rule in this fixture declares applies_to")
+                }
             }
         }
     }
@@ -13331,8 +13551,8 @@ mod tests {
             ("app.ts".to_string(), "const x = 1;".to_string()),
         ];
         // Empty rules slice.
-        let rules: Vec<(String, String)> = vec![];
-        let plan = plan_routes(&rules, &files);
+        let rules: Vec<crate::scan_routing::AuditRule> = vec![];
+        let plan = plan_routes(&rules, &files, true);
 
         // No rules → no groups: the free-form path handles this specially in run_routed_passes.
         assert_eq!(plan.groups.len(), 0, "empty rules → no route groups");
@@ -13350,10 +13570,10 @@ mod tests {
             ("app.ts".to_string(), "const x = 1;".to_string()),
         ];
         let rules = vec![
-            ("ARCH-1".to_string(), "d".to_string()),
-            ("SEC-1".to_string(), "d".to_string()),
+            crate::scan_routing::AuditRule::new("ARCH-1", "d"),
+            crate::scan_routing::AuditRule::new("SEC-1", "d"),
         ];
-        let plan = plan_routes(&rules, &files);
+        let plan = plan_routes(&rules, &files, true);
 
         assert_eq!(plan.groups.len(), 1, "all cross-cutting → single All group");
         assert_eq!(plan.groups[0].scope, Scope::All);
@@ -13375,10 +13595,10 @@ mod tests {
             ("src/b.rs".to_string(), "pub fn b() {}".to_string()),
         ];
         let rules = vec![
-            ("RUST-1".to_string(), "d".to_string()),
-            ("RUST-2".to_string(), "d".to_string()),
+            crate::scan_routing::AuditRule::new("RUST-1", "d"),
+            crate::scan_routing::AuditRule::new("RUST-2", "d"),
         ];
-        let plan = plan_routes(&rules, &files);
+        let plan = plan_routes(&rules, &files, true);
 
         // Only one group — the rust language group.
         assert_eq!(plan.groups.len(), 1);
@@ -13423,10 +13643,10 @@ mod tests {
             ("web/app.ts".to_string(), "export const x = 1;".to_string()),
         ];
         let rules = vec![
-            ("RUST-1".to_string(), "d".to_string()),
-            ("TS-1".to_string(), "d".to_string()),
+            crate::scan_routing::AuditRule::new("RUST-1", "d"),
+            crate::scan_routing::AuditRule::new("TS-1", "d"),
         ];
-        let plan = plan_routes(&rules, &files);
+        let plan = plan_routes(&rules, &files, true);
 
         assert_eq!(
             plan.groups.len(),
@@ -14052,7 +14272,7 @@ mod tests {
             &stub,
             "acme/app",
             &files,
-            &selected,
+            &crate::scan_routing::rules_from_pairs(&selected),
             &[],
             &std::collections::HashMap::new(),
             None,
@@ -14310,7 +14530,7 @@ mod tests {
             &llm,
             "me/api",
             &files,
-            &selected,
+            &crate::scan_routing::rules_from_pairs(&selected),
             &[], // alternatives (none — no multi-option rules in this test)
             &std::collections::HashMap::new(), // forced
             None, // model
@@ -14350,7 +14570,7 @@ mod tests {
             &llm,
             "me/api",
             &files,
-            &selected,
+            &crate::scan_routing::rules_from_pairs(&selected),
             &[],
             &std::collections::HashMap::new(),
             None,
@@ -14440,7 +14660,7 @@ mod tests {
             &llm,
             "me/api",
             &files,
-            &selected,
+            &crate::scan_routing::rules_from_pairs(&selected),
             &[],
             &std::collections::HashMap::new(),
             None,
@@ -14483,7 +14703,7 @@ mod tests {
             &llm,
             "me/api",
             &files,
-            &selected,
+            &crate::scan_routing::rules_from_pairs(&selected),
             &[],
             &std::collections::HashMap::new(),
             None,
@@ -14657,7 +14877,7 @@ mod tests {
             &llm,
             "me/api",
             &files,
-            &selected,
+            &crate::scan_routing::rules_from_pairs(&selected),
             &[],
             &std::collections::HashMap::new(),
             None,
@@ -14701,7 +14921,7 @@ mod tests {
             &llm,
             "me/api",
             &files,
-            &selected,
+            &crate::scan_routing::rules_from_pairs(&selected),
             &[],
             &std::collections::HashMap::new(),
             None,
@@ -15239,7 +15459,7 @@ mod tests {
             &llm,
             "me/api",
             &files,
-            &selected,
+            &crate::scan_routing::rules_from_pairs(&selected),
             &alternatives,
             &std::collections::HashMap::new(), // forced — none, this is the "ask the model" path
             None,
@@ -15299,7 +15519,7 @@ mod tests {
             &llm,
             "me/api",
             &files,
-            &selected,
+            &crate::scan_routing::rules_from_pairs(&selected),
             &alternatives,
             &std::collections::HashMap::new(),
             None,
@@ -15354,7 +15574,7 @@ mod tests {
             &llm,
             "me/api",
             &files,
-            &selected,
+            &crate::scan_routing::rules_from_pairs(&selected),
             &alternatives,
             &forced,
             None,
@@ -15405,7 +15625,7 @@ mod tests {
             &llm,
             "me/api",
             &files,
-            &selected,
+            &crate::scan_routing::rules_from_pairs(&selected),
             &alternatives,
             &forced,
             None,
@@ -15480,7 +15700,7 @@ mod tests {
             &llm,
             "me/api",
             &files,
-            &selected,
+            &crate::scan_routing::rules_from_pairs(&selected),
             &alternatives,
             &std::collections::HashMap::new(),
             None,
@@ -15544,8 +15764,10 @@ mod tests {
     /// returned.
     #[test]
     fn req_a5_4_violates_option_does_not_rewrite_directive_and_emits_a_finding() {
-        let mut effective_selected =
-            vec![("MULTI-RULE-1".to_string(), "Do it the A way.".to_string())];
+        let mut effective_selected = vec![crate::scan_routing::AuditRule::new(
+            "MULTI-RULE-1",
+            "Do it the A way.",
+        )];
         let alt = two_option_alternatives_opt_b_violates("MULTI-RULE-1", Some("opt-a"));
         let opt_b = alt.options.iter().find(|o| o.id == "opt-b").unwrap();
         assert!(
@@ -15563,7 +15785,7 @@ mod tests {
         );
 
         assert_eq!(
-            effective_selected[0].1, "Do it the A way.",
+            effective_selected[0].directive, "Do it the A way.",
             "a violates option must NEVER rewrite the rule's effective directive"
         );
         let f = finding.expect("a violates option must emit a finding");
@@ -15658,7 +15880,10 @@ mod tests {
             .expect("the rule must still have a non-degenerate option")
             .directive
             .clone();
-        let mut effective_selected = vec![(RULE_ID.to_string(), correct_directive.clone())];
+        let mut effective_selected = vec![crate::scan_routing::AuditRule::new(
+            RULE_ID,
+            correct_directive.clone(),
+        )];
         let rejected_view = RuleOptionView {
             id: rejected.id.clone(),
             label: rejected.label.clone(),
@@ -15677,7 +15902,7 @@ mod tests {
         );
 
         assert_eq!(
-            effective_selected[0].1, correct_directive,
+            effective_selected[0].directive, correct_directive,
             "the degenerate option must NEVER become this project's effective directive — \
              that is how an unsanitized upload path got adopted as a convention"
         );
@@ -15739,8 +15964,10 @@ mod tests {
     /// would also break the ordinary, non-defect multi-option case.
     #[test]
     fn req_a5_4_non_violates_option_rewrites_directive_and_emits_no_defect() {
-        let mut effective_selected =
-            vec![("MULTI-RULE-1".to_string(), "Do it the A way.".to_string())];
+        let mut effective_selected = vec![crate::scan_routing::AuditRule::new(
+            "MULTI-RULE-1",
+            "Do it the A way.",
+        )];
         let alt = two_option_alternatives("MULTI-RULE-1", Some("opt-a"));
         let opt_b = alt.options.iter().find(|o| o.id == "opt-b").unwrap();
         assert!(
@@ -15758,7 +15985,7 @@ mod tests {
         );
 
         assert_eq!(
-            effective_selected[0].1, "Do it the B way.",
+            effective_selected[0].directive, "Do it the B way.",
             "a genuine alternative DOES rewrite the directive, same as before this fix"
         );
         assert!(
@@ -15806,7 +16033,7 @@ mod tests {
             &llm,
             "me/api",
             &files,
-            &selected,
+            &crate::scan_routing::rules_from_pairs(&selected),
             &alternatives,
             &std::collections::HashMap::new(),
             None,
@@ -16275,7 +16502,7 @@ mod tests {
             &llm,
             "me/api",
             &files,
-            &selected,
+            &crate::scan_routing::rules_from_pairs(&selected),
             &alternatives,
             &std::collections::HashMap::new(),
             None,
@@ -16349,7 +16576,7 @@ mod tests {
             &llm,
             "me/api",
             &files,
-            &selected,
+            &crate::scan_routing::rules_from_pairs(&selected),
             &alternatives,
             &std::collections::HashMap::new(),
             None,
@@ -16399,7 +16626,7 @@ mod tests {
             &llm,
             "me/api",
             &files,
-            &selected,
+            &crate::scan_routing::rules_from_pairs(&selected),
             &[],
             &std::collections::HashMap::new(),
             None,

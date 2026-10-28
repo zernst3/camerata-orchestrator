@@ -274,6 +274,7 @@ severity bounds - REF section 2).
 | `enforcement` | ENGINE + OPERATOR (placement string) | required; unknown value drops the whole FILE on the lenient path | 3.3 |
 | `domain` (in-file) | NOBODY (folder-derived domain wins; mismatch only warns) | folder decides regardless | 3.4 |
 | `extra_domains` | ENGINE (proposal match only) | empty; folder domain alone matches | 3.5 |
+| `applies_to` | ENGINE (scan routing only: which files the rule is sent with) | every file; an unknown language, key or glob form is a load error | - |
 | `kind` | ENGINE (never reaches any client artifact) | build gate `rules_missing_kind` | 3.6 |
 | `inspectable` | ENGINE (scan-set narrowing only) | build gate; runtime fallback `true` | 3.6a |
 | `default` | ENGINE (gate on `[decision].default`) | `false`: architect must choose | 3.7 |

@@ -20,6 +20,9 @@ use camerata_core::RuleId;
 use serde::Deserialize;
 use thiserror::Error;
 
+pub mod applies_to;
+pub use applies_to::AppliesTo;
+
 mod lock;
 pub use lock::{
     check_lock, corpus_lock_path, corpus_version, CorpusLock, LockEntry, LockError, LockProblem,
@@ -741,6 +744,12 @@ struct RuleToml {
     /// domain sweeps. Optional. See [`Rule::last_reviewed`].
     #[serde(default)]
     last_reviewed: Option<String>,
+    /// Token-efficiency rank 7: which files this rule can apply to, so the scan sends it only
+    /// with those (`applies_to = { paths = ["**/*.sql"], languages = ["rust"] }`). Absent means
+    /// every file. Validated at load by `AppliesTo`'s `Deserialize`: an unknown language or key,
+    /// or a glob form the matcher does not implement, fails the file's load. See [`Rule::applies_to`].
+    #[serde(default)]
+    applies_to: Option<AppliesTo>,
     /// W17 (gotcha 8, half resolved): `tag` is GONE. It was authored on all 417 corpus rules,
     /// read by nothing, and W14 declared it here as accepted-but-unconsumed so
     /// [`corpus_files_with_unknown_fields`] could treat every OTHER unrecognized rule-level key
@@ -1154,6 +1163,13 @@ pub struct Rule {
     /// of the two, see [`effective_review_date`]). Excluded from [`Rule::content_hash`]: a review
     /// is not a change to the rule.
     pub last_reviewed: Option<String>,
+    /// Token-efficiency rank 7: the files this rule can apply to. `None` (the default, and the
+    /// state of every rule that has not been scoped) means every file, so the scan routes it
+    /// exactly as before. When set, the scan sends the rule only with files that match one of
+    /// the declared globs or are in one of the declared languages (a file whose language cannot
+    /// be determined is sent too: routing must never cost a finding). Part of
+    /// [`Rule::content_hash`], so scoping a rule is a revision of it.
+    pub applies_to: Option<AppliesTo>,
 }
 
 /// P7 (`docs/plans/2026-09-29_codebase-inspection-hardening.md`): a GENERAL mechanism for a
@@ -1508,6 +1524,7 @@ pub fn bare_rule(id: &str, domain: &str) -> Rule {
         current_recommendation: None,
         version: None,
         last_reviewed: None,
+        applies_to: None,
     }
 }
 
@@ -1570,6 +1587,7 @@ pub fn ruleset_with_unauthored_rule(rule_id: &str) -> RuleSet {
         current_recommendation: None,
         version: None,
         last_reviewed: None,
+        applies_to: None,
     };
     let mut set = RuleSet::default();
     set.push(rule);
@@ -1839,6 +1857,7 @@ async fn load_one(path: &Path, corpus_dir: &Path) -> Result<Rule, RulesError> {
         current_recommendation: raw.current_recommendation.filter(|s| !s.trim().is_empty()),
         version: raw.version,
         last_reviewed: raw.last_reviewed.filter(|s| !s.trim().is_empty()),
+        applies_to: raw.applies_to,
     })
 }
 
@@ -2236,6 +2255,8 @@ const RULE_LEVEL_FIELDS: &[&str] = &[
     // per-rule review date.
     "version",
     "last_reviewed",
+    // Token-efficiency rank 7: where the rule can apply (routing metadata).
+    "applies_to",
     // Accepted, unconsumed (gotcha 8), established 2026-10-11. `tag` was here too until W17
     // deleted it from the schema AND from all 417 files; do not re-add it.
     "layer",
@@ -3347,6 +3368,7 @@ mod tests {
             current_recommendation: None,
             version: None,
             last_reviewed: None,
+            applies_to: None,
         }
     }
 
@@ -3437,6 +3459,7 @@ mod tests {
             current_recommendation: raw.current_recommendation.filter(|s| !s.trim().is_empty()),
             version: raw.version,
             last_reviewed: raw.last_reviewed.filter(|s| !s.trim().is_empty()),
+            applies_to: raw.applies_to,
         }
     }
 
@@ -6976,5 +6999,62 @@ mod tests {
             "a held rule's ceiling is authorized only as INHERITANCE from a spine rule that \
              carries the ceiling itself; these exemptions have no origin: {originless:?}"
         );
+    }
+
+    // ── applies_to (token-efficiency rank 7) ──────────────────────────────────
+
+    /// Write one rule file with `extra` top-level TOML lines and load the folder leniently.
+    async fn load_with_extra(extra: &str) -> (RuleSet, Vec<(PathBuf, RulesError)>) {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path().join("universal");
+        std::fs::create_dir_all(&dir).expect("create dirs");
+        std::fs::write(
+            dir.join("scoped.toml"),
+            format!(
+                "id = \"SCOPED-TEST-1\"\ntitle = \"Scoped\"\nenforcement = \"prose\"\n{extra}\n"
+            ),
+        )
+        .expect("write toml");
+        load_corpus_lenient(tmp.path()).await
+    }
+
+    #[tokio::test]
+    async fn a_rule_without_applies_to_applies_everywhere() {
+        let (set, errors) = load_with_extra("").await;
+        assert!(errors.is_empty(), "{errors:?}");
+        assert!(set.get_by_id("SCOPED-TEST-1").unwrap().applies_to.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_declared_applies_to_loads_onto_the_rule() {
+        let (set, errors) =
+            load_with_extra(r#"applies_to = { paths = ["**/*.sql"], languages = ["rust"] }"#).await;
+        assert!(errors.is_empty(), "{errors:?}");
+        let a = set
+            .get_by_id("SCOPED-TEST-1")
+            .unwrap()
+            .applies_to
+            .clone()
+            .expect("declared");
+        assert_eq!(a.paths, vec!["**/*.sql"]);
+        assert_eq!(a.languages, vec!["rust"]);
+    }
+
+    #[tokio::test]
+    async fn an_unknown_applies_to_value_fails_the_rules_load() {
+        for bad in [
+            r#"applies_to = { languages = ["cobol"] }"#,
+            r#"applies_to = { frameworks = ["next"] }"#,
+            r#"applies_to = { paths = ["src/*.{sql,toml}"] }"#,
+            r#"applies_to = {}"#,
+            r#"applies_to = "sql""#,
+        ] {
+            let (set, errors) = load_with_extra(bad).await;
+            assert!(
+                set.get_by_id("SCOPED-TEST-1").is_none(),
+                "`{bad}` must not load as a rule that silently matches nothing"
+            );
+            assert_eq!(errors.len(), 1, "`{bad}` must be reported: {errors:?}");
+        }
     }
 }
