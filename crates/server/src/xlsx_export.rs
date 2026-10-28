@@ -183,6 +183,11 @@ pub struct FindingRow {
     /// Serialized into `findings.json` and rendered in the workbook's "Also found at"
     /// column, so every absorbed site is observable in the detail artifacts.
     also_locations: Vec<crate::onboard::MergedLocation>,
+    /// The row's own place from the RAW finding (the `snippet` above is capped for the
+    /// workbook, which would tell a line-0 row apart from its own absorbed member wrongly).
+    /// Not exported.
+    #[serde(skip)]
+    place: crate::onboard::SitePlace,
     /// Pass-1 W7 (C5): the total number of distinct evidence sites this row represents —
     /// its own `path:line` plus every absorbed `also_locations` entry. `1` for an un-merged
     /// row. The single number that makes "one row, N sites" impossible to misread as "one
@@ -488,6 +493,7 @@ fn partition_rows(
             is_fp,
             fp_reason,
             also_locations: f.also_locations.clone(),
+            place: f.place(),
             site_count: f.distinct_site_count(),
             kind: camerata_api_types::audit::KindOnWire(f.kind.clone()),
             severity_adjustments: crate::severity_bounds::severity_adjustment_lines(f, corpus)
@@ -704,8 +710,9 @@ fn site_locations(row: &FindingRow) -> Vec<String> {
         out.push(format!("{}:{}", row.path, row.line));
     }
     // Only members at a DIFFERENT place are sites; the rest are "also flagged" notes.
-    let own = crate::onboard::site_place(&row.repo, &row.path, row.line, &row.snippet);
-    for l in crate::report_export::split_absorbed(own, &row.also_locations).other_sites {
+    for l in
+        crate::report_export::split_absorbed(row.place.clone(), &row.also_locations).other_sites
+    {
         if l.consequence {
             out.push(format!("{}:{} (also affected)", l.path, l.line));
         } else {
@@ -718,8 +725,7 @@ fn site_locations(row: &FindingRow) -> Vec<String> {
 /// The "Also flagged here as <headline> (<severity>)" notes of a row: members absorbed at a
 /// place already named, which are not other sites.
 fn flagged_here_notes(row: &FindingRow) -> Vec<String> {
-    let own = crate::onboard::site_place(&row.repo, &row.path, row.line, &row.snippet);
-    crate::report_export::split_absorbed(own.clone(), &row.also_locations)
+    crate::report_export::split_absorbed(row.place.clone(), &row.also_locations)
         .same_place
         .into_iter()
         .map(|(l, at_own)| crate::report_export::flagged_sentence(l, at_own, None))
@@ -5488,6 +5494,37 @@ mod tests {
         assert!(
             shared.contains("Also flagged here as Any user can read any invoice (critical)"),
             "the note is in the workbook"
+        );
+    }
+
+    /// A line-0 row with a snippet longer than the workbook cap and an absorbed member quoting
+    /// the same raw snippet are the same place; the workbook cap must not tell them apart.
+    #[test]
+    fn a_long_snippet_row_and_its_same_place_member_are_one_site_in_the_workbook() {
+        let long = "x".repeat(WORKBOOK_SNIPPET_MAX_CHARS + 500);
+        let mut f = finding("SEC-NO-RAW-SQL-CONCAT-1", "src/orders.rs", 0, "medium");
+        f.snippet = long.clone();
+        f.also_locations = vec![crate::onboard::MergedLocation::site(
+            f.repo.clone(),
+            "src/orders.rs",
+            0,
+            "AI-INVENTED-1",
+            long,
+            false,
+        )
+        .with_rating("critical", "Second view of the same place")];
+        let report = report_with(vec![f], vec!["SEC-NO-RAW-SQL-CONCAT-1"]);
+        let sealed = report.seal();
+        let json =
+            crate::report_export::build_report_json(&sealed, &HashMap::new(), None, &empty_opts());
+        let export = build_findings_export(&sealed, &HashMap::new(), None, &json, &HashMap::new());
+        let row = serde_json::to_value(&export.findings[0]).unwrap();
+        assert_eq!(row["site_count"], 1, "{row}");
+        let xlsx = build_workbook(&sealed, &HashMap::new(), None, &empty_opts()).unwrap();
+        let shared = read_zip_entry(&xlsx, "xl/sharedStrings.xml");
+        assert!(
+            shared.contains("Also flagged here as Second view of the same place (critical)"),
+            "the same-place member is a note, not a second site"
         );
     }
 

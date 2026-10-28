@@ -6238,6 +6238,13 @@ async fn run_passes_batch(
             .into_iter()
             .map(|(w, resp)| async move {
                 if !(resp.truncated && eff.truncation_retry) {
+                    // No retry for this reply (complete but not JSON, or cut off with the
+                    // retry switched off): it bought nothing, and the telemetry says so.
+                    if resp.truncated || scan_output_is_malformed(&resp.text) {
+                        if let Some(m) = meter {
+                            m.record_wasted(Stage::ScanPass, &resp);
+                        }
+                    }
                     return (w, resp);
                 }
                 // SPEND CAP: the retry is one more real-time call. Refused, the cut-off reply is
@@ -6281,9 +6288,9 @@ async fn run_passes_batch(
     // counted them), so the shared reassembly gets no meter: recording again would bill twice.
     let pairs: Vec<(usize, usize)> = work.iter().map(|w| (w.ci, w.bi)).collect();
     let chunk_files: Vec<usize> = chunks.iter().map(|c| c.len()).collect();
-    // Every reply was staged as it arrived, so the reassembly stages nothing. A reply that came
-    // back unusable is counted wasted here unless the batch_default retry step already did (it
-    // counts the reply it ends with); only the legacy path, which has no retry, needs it.
+    // Every reply was staged as it arrived, so the reassembly stages nothing. With batch_default
+    // on, every unusable reply was already counted wasted above: by the retry step, or by the
+    // branch that sends no retry. Only the legacy path, which has neither, needs it here.
     let wasted_meter = if eff.batch_default { None } else { meter };
     Ok(reassemble_batch_passes(
         repo,
@@ -6774,11 +6781,13 @@ pub(crate) fn record_severity_adjustment(f: &mut Finding, from: &str, to: &str, 
 
 /// The one-line headline of a finding: its title (the text before the first `HEADLINE_SEP` in
 /// `detail`), or the start of its detail when it carries no title. Capped.
-fn finding_headline(f: &Finding) -> String {
+pub(crate) fn finding_headline(f: &Finding) -> String {
     let head = match f.detail.split_once(HEADLINE_SEP) {
         Some((title, _)) => title.trim(),
         None => f.detail.trim(),
     };
+    // Model text reaches client prose through this headline: no em dashes.
+    let head = head.replace(" \u{2014} ", " - ").replace('\u{2014}', "-");
     let one_line: String = head.split_whitespace().collect::<Vec<_>>().join(" ");
     if one_line.chars().count() > 160 {
         one_line.chars().take(157).collect::<String>() + "..."
@@ -6929,14 +6938,20 @@ fn dedup_snippet_key(snippet: &str) -> String {
 }
 
 /// Whether two normalized snippets name the same code: equal, or one is inside the other (a
-/// chunk quoting the whole statement and another only the call in it). An empty snippet matches
-/// only another empty one.
+/// chunk quoting the whole statement and another only the call in it) when the shorter has at
+/// least [`MIN_CONTAINED_SNIPPET`] characters. An empty snippet matches only another empty one.
 fn same_snippet(a: &str, b: &str) -> bool {
-    if a.is_empty() || b.is_empty() {
+    if a.is_empty() || b.is_empty() || a == b {
         return a == b;
     }
-    a == b || a.contains(b) || b.contains(a)
+    // Containment counts only for a substantial shorter snippet: a short token such as `id`
+    // sits inside almost any line and proves nothing.
+    let (short, long) = if a.len() <= b.len() { (a, b) } else { (b, a) };
+    short.chars().count() >= MIN_CONTAINED_SNIPPET && long.contains(short)
 }
+
+/// Shortest normalized snippet that may match by being contained in another (M5).
+const MIN_CONTAINED_SNIPPET: usize = 12;
 
 /// Drop the repeats of one finding reported by several passes, keyed on
 /// `(path, line, rule id)` plus the snippet (M5): two findings are repeats when their

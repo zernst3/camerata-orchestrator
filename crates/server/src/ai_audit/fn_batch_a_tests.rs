@@ -1057,3 +1057,54 @@ fn bookkeeping_does_not_stop_the_object_backfill() {
         f.captures
     );
 }
+
+// ── review round 3 ──────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn a_short_snippet_inside_a_longer_one_is_not_a_repeat() {
+    let mut a = finding("AI-X-1", "low", "first");
+    a.line = 0;
+    a.snippet = "id".to_string();
+    let mut b = finding("AI-X-1", "high", "second");
+    b.line = 0;
+    b.snippet = "let user_id = req.query.id".to_string();
+    let mut all = vec![a, b];
+    dedup_findings_keep_max_severity(&mut all);
+    assert_eq!(all.len(), 2, "{all:?}");
+    // A substantial contained snippet still is.
+    assert!(same_snippet(
+        "format!(\"select 1\")",
+        "let q = format!(\"select 1\");"
+    ));
+    assert!(!same_snippet("id", "let user_id = req.query.id"));
+}
+
+#[test]
+fn two_line_zero_findings_with_no_snippet_are_two_places() {
+    let mut a = finding("AI-X-1", "high", "Missing owner check");
+    a.line = 0;
+    a.snippet = String::new();
+    let mut b = finding("AI-Y-2", "high", "No rate limit");
+    b.line = 0;
+    b.snippet = String::new();
+    assert_ne!(a.place(), b.place());
+    a.also_locations = vec![absorbed_site(&b)];
+    assert_eq!(a.distinct_site_count(), 2);
+    // The same finding absorbed into itself is one place.
+    let mut c = finding("AI-X-1", "high", "Missing owner check");
+    c.line = 0;
+    c.snippet = String::new();
+    c.also_locations = vec![absorbed_site(&c.clone())];
+    assert_eq!(c.distinct_site_count(), 1);
+}
+
+#[test]
+fn an_em_dash_in_a_model_headline_never_reaches_the_flagged_here_note() {
+    let mut f = finding("AI-X-1", "critical", "Owner\u{2014}check missing");
+    f.line = 3;
+    let site = absorbed_site(&f);
+    assert_eq!(site.headline, "Owner-check missing");
+    let note = crate::report_export::flagged_sentence(&site, true, None);
+    assert!(!note.contains('\u{2014}'), "{note}");
+    assert_eq!(note, "Also flagged here as Owner-check missing (critical)");
+}

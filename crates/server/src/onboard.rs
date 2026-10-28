@@ -357,32 +357,48 @@ impl MergedLocation {
 
     /// Where this site is, for counting distinct places.
     pub fn place(&self) -> SitePlace {
-        site_place(&self.repo, &self.path, self.line, &self.snippet)
+        site_place(
+            &self.repo,
+            &self.path,
+            self.line,
+            &self.snippet,
+            &site_identity(&self.rule_id, &self.headline),
+        )
     }
 }
 
 /// The identity of a place in the code: repo, path and line. A finding with no line (0) has no
-/// place of its own beyond the file, so its snippet tells two apart.
+/// place of its own beyond the file, so its snippet tells two apart, and with no snippet either
+/// its own identity (rule id and headline) does.
 pub type SitePlace = (String, String, usize, String);
 
-/// See [`SitePlace`].
-pub fn site_place(repo: &str, path: &str, line: usize, snippet: &str) -> SitePlace {
-    (
-        repo.to_string(),
-        path.to_string(),
-        line,
-        if line == 0 {
-            snippet.trim().to_string()
-        } else {
-            String::new()
-        },
-    )
+/// A finding's own identity for telling two apart when neither a line nor a snippet does.
+pub fn site_identity(rule_id: &str, headline: &str) -> String {
+    format!("{rule_id}|{}", headline.trim())
+}
+
+/// See [`SitePlace`]. `identity` is [`site_identity`] of the finding.
+pub fn site_place(repo: &str, path: &str, line: usize, snippet: &str, identity: &str) -> SitePlace {
+    let discriminator = if line != 0 {
+        String::new()
+    } else if snippet.trim().is_empty() {
+        identity.to_string()
+    } else {
+        snippet.trim().to_string()
+    };
+    (repo.to_string(), path.to_string(), line, discriminator)
 }
 
 impl Finding {
     /// This finding's own place in the code.
     pub fn place(&self) -> SitePlace {
-        site_place(&self.repo, &self.path, self.line, &self.snippet)
+        site_place(
+            &self.repo,
+            &self.path,
+            self.line,
+            &self.snippet,
+            &site_identity(&self.rule_id, &crate::ai_audit::finding_headline(self)),
+        )
     }
 
     /// How many DISTINCT places this row stands for: its own plus every absorbed site at a
