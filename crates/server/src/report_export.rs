@@ -1136,9 +1136,13 @@ pub struct CuratedSiteJson {
     /// artifacts describe the same site multiplicity. Before W7 this reached NO artifact:
     /// a row representing three detected sites exported as one line at one `path:line`, so
     /// an over-merge was observationally identical to a detection miss (tracker C5). The
-    /// template does not render it yet (the PDF is the summary — Pass 3 owns presentation);
-    /// the data is here so it CAN, and so the report JSON is complete.
+    /// template renders it from [`Self::also_sites`], which adds the rule titles; this field
+    /// keeps the verbatim records so the report JSON is complete.
     pub also_locations: Vec<crate::onboard::MergedLocation>,
+    /// H6: the same absorbed sites, ready to print: location plus the human title of the rule
+    /// each was flagged under (never the raw rule id). The PDF renders these as "Also found at".
+    /// Empty for an un-merged row.
+    pub also_sites: Vec<AlsoSiteJson>,
     /// Pass-1 W7 (C5): total distinct evidence sites this row represents — its own
     /// `path:line` plus every `also_locations` entry. `1` for an un-merged row.
     pub site_count: usize,
@@ -1147,6 +1151,38 @@ pub struct CuratedSiteJson {
     /// too (the PDF renders what it already renders; Pass 2/3 own presentation).
     #[serde(flatten)]
     pub kind: camerata_api_types::audit::KindOnWire,
+}
+
+/// H6: one absorbed evidence site as the PDF prints it.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct AlsoSiteJson {
+    pub repo: String,
+    pub path: String,
+    pub line: usize,
+    /// The corpus title of the rule this site was flagged under; `None` when the id has no
+    /// corpus entry (an AI-invented id), so a raw id is never printed.
+    pub title: Option<String>,
+    /// True for a site that is only a consequence of the row's root cause.
+    pub consequence: bool,
+}
+
+/// H6: the absorbed sites of `f`, titled from the corpus.
+pub(crate) fn also_sites_for(
+    f: &Finding,
+    corpus: Option<&camerata_rules::RuleSet>,
+) -> Vec<AlsoSiteJson> {
+    f.also_locations
+        .iter()
+        .map(|l| AlsoSiteJson {
+            repo: l.repo.clone(),
+            path: l.path.clone(),
+            line: l.line,
+            title: corpus
+                .and_then(|c| c.get_by_id(&l.rule_id))
+                .map(|r| r.title.clone()),
+            consequence: l.consequence,
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -4440,6 +4476,7 @@ pub fn build_report_json(
                     fix_for_this_finding: specific_fix,
                     // W7 (C5): the absorbed sites, verbatim — see the field's doc comment.
                     also_locations: f.also_locations.clone(),
+                    also_sites: also_sites_for(f, corpus),
                     site_count: 1 + f.also_locations.len(),
                     kind: camerata_api_types::audit::KindOnWire(f.kind.clone()),
                 }
@@ -4524,6 +4561,15 @@ pub fn build_report_json(
                 .entry(category_for(also_id, corpus))
                 .or_default()
                 .insert(also_id.clone());
+        }
+        // H6: a rule that survived only as an absorbed site (`also_locations`) fired just as
+        // genuinely as one demoted into `also_matches`; counting it clean in its own category
+        // was the same false statement one channel over.
+        for site in &f.also_locations {
+            matched_rule_ids_by_category
+                .entry(category_for(&site.rule_id, corpus))
+                .or_default()
+                .insert(site.rule_id.clone());
         }
     }
     let mut scorecard_rows: Vec<CategoryRowJson> = Vec::new();
@@ -5308,6 +5354,9 @@ mod engine_identity_tests;
 
 #[cfg(test)]
 mod fix_text_tests;
+
+#[cfg(test)]
+mod fn_batch_c_sites_tests;
 
 #[cfg(test)]
 mod fn_batch_c_tests;

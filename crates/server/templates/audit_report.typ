@@ -383,6 +383,23 @@
       #linebreak()
       #text(size: 8pt, fill: ink_faint)[Also violates: #site.also_matches_titles.join(", ")]
     ]
+    // H6: every site a merge folded into this row, so a row that stands for several places
+    // says so. The first ten are named; the rest are counted and point to the workbook, which
+    // lists them all.
+    #if site.also_sites.len() > 0 [
+      #linebreak()
+      #text(size: 8pt, fill: ink_faint)[Also found at #str(site.also_sites.len()) other #plural(site.also_sites.len(), "site", "sites"):]
+      #for also in site.also_sites.slice(0, calc.min(site.also_sites.len(), 10)) [
+        #linebreak()
+        #text(font: mono, size: 8pt, fill: ink_faint)[#also.repo / #breakable(also.path, n: 60), line #str(also.line)]
+        #if also.title != none [#text(size: 8pt, fill: ink_faint)[(#also.title)]]
+        #if also.consequence [#text(size: 8pt, fill: ink_faint)[(also affected)]]
+      ]
+      #if site.also_sites.len() > 10 [
+        #linebreak()
+        #text(size: 8pt, fill: ink_faint)[and #str(site.also_sites.len() - 10) more, listed in full in the workbook and findings.json]
+      ]
+    ]
   ])
 }
 
