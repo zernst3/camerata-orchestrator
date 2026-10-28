@@ -27,6 +27,7 @@ pub use lock::{
 };
 
 mod freshness;
+pub mod severity_bounds;
 pub use freshness::{
     client_rules_last_reviewed, confirm_domain, confirm_in_text, corpus_freshness_path,
     days_from_civil, effective_review_date, format_staleness_nag, parse_ymd, CorpusFreshness,

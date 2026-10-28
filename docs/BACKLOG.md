@@ -3,6 +3,19 @@
 Deferred work and known gaps not yet scheduled. Newest intent at the top. UI-only
 follow-ups live in `UI_BACKLOG.md`; this file is for engine + cross-cutting items.
 
+## `camerata-check` reads the corpus from disk for its severity bounds (2026-10-28, OPEN)
+
+The CI gate now applies the corpus's severity bounds (`camerata_rules::severity_bounds`, the same
+implementation the scan and the exports use), reading the corpus at run time from
+`camerata_rules::corpus_path()`. A binary built from a checkout finds the bundled corpus. A binary
+vendored into a CI image without `crates/rules/principles` (and without `CAMERATA_CORPUS_PATH`)
+falls back to the bounds that need no authored rule, reports `corpus_bounds_applied: false`, and can
+fail a build on a finding the corpus caps at `low` (ARCH-DEAD-CODE-1 stays at the checker's
+`medium`). Fix when a release-binary pipeline exists: embed the bounds (rule id, `min_severity`,
+`max_severity`, `deviation_ceiling`) at build time. Not built now: a build script that generates a
+table from the corpus is a new build-time pattern and needs an owner's call. Documented for users in
+`USER_GUIDE.md` section 14 and `crates/camerata-check/README.md`.
+
 ## Live model-list fetch from Anthropic /v1/models (hybrid) (2026-06-22)
 
 The UI's model picker is fed by the hardcoded `MODELS` const in `llm.rs` (id + label + per-Mtok

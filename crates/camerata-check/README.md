@@ -59,8 +59,23 @@ camerata-check [PATH] [--format human|json] [--config PATH] [--rule-id ID]... [-
 
 | Code | Meaning |
 |---|---|
-| `0` | Clean (or `--strict` is off and only needs-review findings exist). |
-| `1` | At least one deterministic violation found (or, with `--strict`, any violation at all). |
+| `0` | Clean, or `--strict` is off and every finding is needs-review or advisory (deterministic but below `medium`). |
+| `1` | At least one deterministic violation at `medium` or above (or, with `--strict`, any violation at all). |
+
+### Severity: the corpus bounds, then the fail bar
+
+Each violation's severity is the checker's own run through the corpus severity bounds
+(`camerata_rules::severity_bounds`, the same implementation the Camerata scan and exports
+use), so the gate reports a finding at the severity the client's report shows (ARCH-DEAD-CODE-1
+at `low`, its corpus ceiling). A deterministic violation below `FAIL_AT_SEVERITY` (`medium`) is
+advisory: reported, counted in `deterministic_count`, but not in `blocking_count`, and exit
+code 0 without `--strict`.
+
+The corpus is read from `camerata_rules::corpus_path()`: the bundled `crates/rules/principles`
+of the checkout the binary was built from, or `CAMERATA_CORPUS_PATH`. If it cannot be loaded,
+the bounds that need no rule (an unlocated finding is `info`) still apply,
+`corpus_bounds_applied` is `false`, and the human output says so. A vendored binary therefore
+needs the corpus copied alongside it and `CAMERATA_CORPUS_PATH` set.
 | `2` | The run itself failed — e.g. an explicit `--config` path that doesn't exist. |
 
 ## JSON schema
@@ -83,8 +98,10 @@ camerata-check [PATH] [--format human|json] [--config PATH] [--rule-id ID]... [-
     }
   ],
   "deterministic_count": 1,
+  "blocking_count": 1,
   "needs_review_count": 0,
-  "clean": false
+  "clean": false,
+  "corpus_bounds_applied": true
 }
 ```
 

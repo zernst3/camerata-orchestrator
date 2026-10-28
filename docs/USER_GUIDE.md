@@ -2107,6 +2107,33 @@ After editing `.camerata/checks.toml`, regenerate the CI workflow by clicking th
 workflow** button in the Rules view (or calling `POST /api/projects/active/generate-ci-workflow`).
 The workflow is derived entirely from the manifest, so regenerating it is always safe to repeat.
 
+### `camerata-check` severities and which findings fail the build
+
+`camerata-check` reports each finding at the same severity your Camerata report shows. It runs
+the checker's severity through the rule corpus's severity bounds (a rule's minimum severity, its
+maximum severity, the deviation ceiling, and the rule that a finding with no location is
+informational), using the same implementation the inspection and its exports use. For example,
+ARCH-DEAD-CODE-1 is capped at `low` by the corpus, so the CI gate reports it at `low`.
+
+Which deterministic findings fail the build:
+
+| Severity after the bounds | Default run | `--strict` |
+|---|---|---|
+| `critical`, `high`, `medium` | fails the build (exit 1) | fails the build |
+| `low`, `info` | advisory: reported, exit 0 | fails the build |
+
+The bar is one constant (`FAIL_AT_SEVERITY = "medium"` in `crates/camerata-check/src/lib.rs`).
+The reasoning: a low-severity consistency finding is worth seeing on every pull request, but it
+should not block a merge. Needs-review findings never fail a default run, whatever their
+severity. The human output tags an advisory finding `deterministic, advisory`; the JSON output
+carries `blocking_count`, the number of findings that failed the build.
+
+The corpus is read from the bundled rules, or from the directory in `CAMERATA_CORPUS_PATH`. If
+it cannot be loaded, the gate still runs and still applies the bounds that need no rule, but a
+finding keeps the checker's own severity, the JSON says `"corpus_bounds_applied": false`, and the
+human output says so. When you vendor a built binary into a CI image, also copy the corpus
+(`crates/rules/principles`) and set `CAMERATA_CORPUS_PATH`.
+
 ### `camerata-check --strict` and Firebase rules kept in the console
 
 `camerata-check --strict` fails when a Firebase project's security rules live only in the
