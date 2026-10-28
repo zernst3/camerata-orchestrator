@@ -2847,6 +2847,7 @@ pub(super) fn ProgressStrip(
             if let Some(open) = on_open_stats {
                 button {
                     class: "btn-edit-sm progress-stats-btn",
+                    "data-tour": camerata_ui_core::walkthrough::target::REVIEW_TIME,
                     title: "Internal review-time stats. Never part of an export.",
                     onclick: move |_| open.call(()),
                     "Review time"
@@ -4668,6 +4669,8 @@ pub(super) fn FindingsTable(
     // functions the buttons and keys already call. Hosted at the results root (`palette.rs`),
     // like the other overlays, and registered below.
     let palette_slot = try_use_context::<super::palette::PaletteSlot>();
+    // The inspection walkthrough, for the palette's "Start walkthrough" line.
+    let tour_handle = try_use_context::<crate::walkthrough::TourHandle>();
     let mut palette_open = use_signal(|| Option::<super::palette::PaletteOpen>::None);
     let mut palette_serial = use_signal(|| 0u64);
     // THE GATE, read from the live state: refused while ANY reason prompt is open (the pane's or
@@ -4745,6 +4748,14 @@ pub(super) fn FindingsTable(
                 }
             }
             PaletteAction::OpenStats => on_open_stats.call(()),
+            // The Help menu's "Start walkthrough" calls this same function. It asks the page
+            // for a reason prompt, an overlay or a dialog itself and refuses under one.
+            PaletteAction::StartWalkthrough => {
+                if let Some(tour) = tour_handle {
+                    // Only this line may start it while the palette (which is running it) is open.
+                    tour.start(camerata_ui_core::walkthrough::StartSource::Palette);
+                }
+            }
         }
         true
     });
@@ -4963,7 +4974,10 @@ pub(super) fn FindingsTable(
                 ProgressStrip { counts }
             }
         }
-        div { class: "findings-toolbar",
+        div {
+            class: "findings-toolbar",
+            // The walkthrough points here for the review queue (the decisions live in this bar).
+            "data-tour": camerata_ui_core::walkthrough::target::REVIEW_QUEUE,
             // View-specific triage actions. A move writes the new disposition for each
             // selected finding and drops it from this table; it reappears under its target
             // table on the next switch. Backend commit happens later, at Process.
@@ -5072,6 +5086,7 @@ pub(super) fn FindingsTable(
             button {
                 class: "btn-edit-sm",
                 id: super::palette::PALETTE_BUTTON_ID,
+                "data-tour": camerata_ui_core::walkthrough::target::SPEED_TOOLS,
                 title: "Open the command palette: every review action in one filtered list (Ctrl+K or Cmd+K).",
                 onclick: move |_| toggle_palette.call(false),
                 "Commands"
@@ -5526,6 +5541,8 @@ pub(super) fn OnboardView(connection: Option<ProviderView>) -> Element {
             div { class: "onboard-head",
                 p { class: "onboard-title", "Onboard repos into governance" }
                 p { class: "onboard-sub", "Bring a repo new to Camerata under the gate. This sets up the REPO's rules and CI enforcement — separate from a story's Investigation phase, which refines one piece of work." }
+                // The inspection's start screen carries the "Guided inspection" switch.
+                crate::walkthrough::GuidedSwitch {}
             }
 
             // Path chooser.
@@ -5597,6 +5614,7 @@ pub(super) fn OnboardView(connection: Option<ProviderView>) -> Element {
                     }
                     button {
                         class: "btn-edit-sm onboard-browse",
+                        "data-tour": camerata_ui_core::walkthrough::target::REPO_ADD,
                         onclick: move |_| {
                             spawn(async move {
                                 match detect_local_repo().await {
@@ -6650,7 +6668,9 @@ pub(super) fn RuleAlternativesPanel(
 pub(super) fn ScanJobFailedBanner(message: Option<String>) -> Element {
     rsx! {
         if let Some(msg) = message {
-            div { class: "onboard-gate scan-job-failed-banner",
+            div {
+                class: "onboard-gate scan-job-failed-banner",
+                "data-tour": camerata_ui_core::walkthrough::target::FAILED_PASSES,
                 span { class: "onboard-gate-dot" }
                 div {
                     p { class: "onboard-gate-h", "Scan failed" }
@@ -6740,7 +6760,9 @@ pub(super) fn AiReviewBlockedBanner(
 ) -> Element {
     rsx! {
         if let Some(reason) = ai_blocked_reason {
-            div { class: "onboard-gate ai-review-blocked-banner",
+            div {
+                class: "onboard-gate ai-review-blocked-banner",
+                "data-tour": camerata_ui_core::walkthrough::target::FAILED_PASSES,
                 span { class: "onboard-gate-dot" }
                 div {
                     p { class: "onboard-gate-h", "AI review did not run" }
@@ -6751,7 +6773,9 @@ pub(super) fn AiReviewBlockedBanner(
                 }
             }
         } else if let Some(err) = ai_error {
-            div { class: "onboard-gate ai-review-error-banner",
+            div {
+                class: "onboard-gate ai-review-error-banner",
+                "data-tour": camerata_ui_core::walkthrough::target::FAILED_PASSES,
                 span { class: "onboard-gate-dot" }
                 div {
                     p { class: "onboard-gate-h", "AI review failed" }
@@ -8361,7 +8385,12 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
             }
 
             // ── Phase 1 result: the proposed ruleset to pick from ──────────────
-            p { class: "scan-section-h", "Step 1 — proposed starter ruleset" }
+            p {
+                class: "scan-section-h",
+                // The walkthrough points here for the stack rules.
+                "data-tour": camerata_ui_core::walkthrough::target::RULES,
+                "Step 1 — proposed starter ruleset"
+            }
             p { class: "scan-section-sub", "Camerata mapped the stack and proposes these rules. Pick the ones to enforce and choose alternatives; you own the final set (arming generates the governance PR)." }
             p { class: "scan-section-sub", "Click a rule row to read its full context and choose its alternative." }
             // Per-repo view switch (multi-repo only): pick which repo's recommended-rule
@@ -8793,7 +8822,9 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                         // ACTUAL, once the audit finished and the backend reported usage.
                         let actual = audited.as_ref().and_then(|a| a.actual_usage.clone()).filter(|u| u.calls > 0);
                         rsx! {
-                            div { class: "audit-cost",
+                            div {
+                                class: "audit-cost",
+                                "data-tour": camerata_ui_core::walkthrough::target::COST_ESTIMATE,
                                 if let Some(u) = actual {
                                     {
                                         let act_toks = u.input_tokens + u.output_tokens;
@@ -9610,7 +9641,11 @@ pub(super) fn AuditReportExportPanel(
                  export (some findings still Unresolved) is fine."
             }
             div { class: "audit-export-fields",
-                div { class: "audit-model-row",
+                div {
+                    class: "audit-model-row",
+                    // The walkthrough's client-name step points here until the inspection-setup
+                    // field lands (then re-point `target::CLIENT_NAME` at that one).
+                    "data-tour": camerata_ui_core::walkthrough::target::CLIENT_NAME,
                     label { class: "audit-model-label", "Client name" }
                     input {
                         class: "audit-export-input",
@@ -9650,6 +9685,7 @@ pub(super) fn AuditReportExportPanel(
             }
             button {
                 class: "btn-run",
+                "data-tour": camerata_ui_core::walkthrough::target::EXPORT_PACKAGE,
                 disabled: loading(),
                 onclick: move |_| {
                     let pid = project_id.clone();

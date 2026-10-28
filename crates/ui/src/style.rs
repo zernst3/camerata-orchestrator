@@ -6852,4 +6852,57 @@ textarea.uow-decision-input { resize: vertical; min-height: 60px; }
 }
 .pal-empty { margin: 0; padding: 10px 14px; color: var(--ink-soft); }
 .pal-keys { margin: 0; padding: 6px 14px; font-size: 11px; color: var(--ink-faint); border-top: 1px solid var(--line); }
+
+/* The inspection walkthrough (walkthrough.rs; docs/design/2026-10-27_inspection-walkthrough.md). The
+   popup and its highlight are fixed layers under the dialogs (1100) and the palette (1080): while
+   one of those is open the host does not draw them at all. The ring never takes a click. */
+.tour-ring {
+  position: fixed; z-index: 1040; pointer-events: none; border-radius: var(--r-sm);
+  box-shadow: 0 0 0 2px var(--accent), 0 0 0 6px var(--accent-wash), 0 0 18px rgba(202,138,4,0.35);
+}
+.tour-pop {
+  position: fixed; z-index: 1041; width: 340px; max-width: calc(100vw - 24px); box-sizing: border-box;
+  background: #1d1913; border: 1px solid var(--accent); border-radius: var(--r-md);
+  box-shadow: var(--shadow-pop); padding: 12px 14px; color: var(--ink);
+}
+.tour-pop:focus { outline: 2px solid var(--accent-ink); outline-offset: 2px; }
+.tour-corner { right: 24px; bottom: 24px; }
+.tour-arrow {
+  position: absolute; width: 12px; height: 12px; background: #1d1913; transform: rotate(45deg);
+  margin-left: -6px;
+}
+.tour-below .tour-arrow { top: -7px; border-left: 1px solid var(--accent); border-top: 1px solid var(--accent); }
+.tour-above .tour-arrow { bottom: -7px; border-right: 1px solid var(--accent); border-bottom: 1px solid var(--accent); }
+.tour-head { margin-bottom: 4px; }
+.tour-count { font-size: 11px; letter-spacing: 0.04em; text-transform: uppercase; color: var(--ink-soft); }
+.tour-title { margin: 0 0 4px; font-size: 14px; font-weight: 600; color: var(--ink); }
+.tour-body { margin: 0 0 8px; font-size: 13px; line-height: 1.45; color: var(--ink-soft); }
+.tour-how { margin: 0 0 8px; font-size: 12px; line-height: 1.4; color: var(--accent); }
+.tour-actions { display: flex; align-items: center; gap: 8px; }
+.tour-spacer { flex: 1 1 auto; }
+.tour-sr {
+  position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden;
+  clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+}
+.tour-switch-row { display: flex; align-items: center; gap: 10px; margin-top: 8px; }
+.tour-switch {
+  position: relative; width: 36px; height: 20px; padding: 0; border-radius: 10px; cursor: pointer;
+  background: var(--line); border: 1px solid var(--line);
+}
+.tour-switch-knob {
+  position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; border-radius: 50%;
+  background: var(--ink-soft); transition: left 0.15s var(--ease);
+}
+.tour-switch-on { background: var(--accent-wash); border-color: var(--accent); }
+.tour-switch-on .tour-switch-knob { left: 18px; background: var(--accent); }
+.tour-switch:focus-visible { outline: 2px solid var(--accent-ink); outline-offset: 2px; }
+.tour-switch-label { font-size: 13px; color: var(--ink); }
+.tour-switch-hint { font-size: 12px; color: var(--ink-faint); }
+.tour-offer {
+  margin: 0 0 16px; padding: 12px 14px; border: 1px solid var(--accent); border-radius: var(--r-md);
+  background: var(--accent-wash);
+}
+.tour-offer-q { margin: 0 0 2px; font-size: 14px; font-weight: 600; color: var(--ink); }
+.tour-offer-sub { margin: 0 0 8px; font-size: 13px; color: var(--ink-soft); }
+.tour-offer-actions { display: flex; gap: 8px; justify-content: flex-end; }
 "#;
