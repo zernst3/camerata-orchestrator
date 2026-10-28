@@ -4837,6 +4837,8 @@ async fn rescan_alternatives_handler(
         .unwrap_or(true)
     };
 
+    let rescan_meter =
+        crate::ai_audit::UsageMeter::with_controls(crate::cost_cap::RunControls::from_env());
     let mut all_findings: Vec<crate::onboard::Finding> = Vec::new();
     let mut all_recs: std::collections::HashMap<String, crate::ai_audit::RuleRecommendation> =
         std::collections::HashMap::new();
@@ -4897,7 +4899,10 @@ async fn rescan_alternatives_handler(
             false,
             Some((&state.transcripts, SCAN_AUDIT_KEY)),
             None,
-            None,
+            // A meter carries the efficiency switches from the environment (so
+            // `CAMERATA_EFFICIENCY=terse_output=off` reaches this endpoint too). Without one the
+            // terse scan output stays off: its detail regeneration must be metered.
+            Some(&rescan_meter),
             None,
         )
         .await

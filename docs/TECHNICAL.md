@@ -2708,6 +2708,7 @@ one line to the `efficiency_measures!` list and reads
 | `truncation_retry` | rank 6: a reply cut off at the output limit is retried once | the cut-off reply is used as it came |
 | `fix_prefilter` | rank 6: findings with no code context skip the fix model when the rule has an authored fix | they go to the fix model |
 | `fix_on_haiku` | rank 10: with no fix model set, the fix stage runs on `claude-haiku-5-5` at effort `low` | the fix stage runs on the calibration model, else the scan model, with no effort sent (the pre-rank-10 request) |
+| `terse_output` | rank 4: scan passes write a one-sentence `detail` and no `proposed_rules` (the advisory pass keeps them); the full `detail` is regenerated for the findings that survive the first merge | the scan prompts and the pipeline are exactly what they were before rank 4 |
 
 Set with `CAMERATA_EFFICIENCY=name=off,other=off` or `camerata inspect --efficiency
 name=off` (repeatable; the flag wins). An unknown name or a malformed entry is an
@@ -2815,8 +2816,8 @@ against a runaway bill, not a saving, so it fails loudly:
   under the limit at once). An admitted pass always finishes (its truncation retry
   included), so nothing is cut off mid-response. A refused pass is recorded as a
   `NotRunPass`; the job's progress counts it as NOT RUN, never as done.
-- Later stages (alternative recommendation, calibration, fix generation, the clone
-  judge, the deep tier) are blocked (`stage_blocked`) once spend has reached the
+- Later stages (alternative recommendation, detail regeneration, calibration, fix
+  generation, the clone judge, the deep tier) are blocked (`stage_blocked`) once spend has reached the
   limit AND once the limit has already stopped anything (a refused pass or an
   earlier stage): nothing starts after the limit has bitten. Inside calibration,
   fix generation and the deep tier each batch or call is admitted separately
@@ -2873,6 +2874,141 @@ against a runaway bill, not a saving, so it fails loudly:
   limit stop, a failed pass, a skipped stage), with the list and a compact form beside
   the export button; the job progress counts refused passes as NOT RUN, not done; and
   the server adds an "INCOMPLETE" note to the report message.
+
+**Terse scan output (`terse_output`, rank 4)**. Two parts behind one switch.
+
+1. *Safe part.* The scan's output schema carries no `proposed_rules` array. Only the
+   advisory pass (a chunk's first rule-batch, the one told to flag issues no adopted rule
+   covers) can propose a rule, so it gets the array back through its own instruction line
+   (`pass_task_line`), which sits in the uncached suffix. The system prompt
+   (`audit_system_prompt_with(true)`) is ONE string for every pass of the scan, not one
+   for advisory passes and another for the rest: the system prompt leads the cache
+   prefix, so two different ones would stop the sibling passes reading the entry the
+   first pass wrote (the whole `warm_schedule` saving). `parse_ai_findings` is unchanged
+   and still accepts a response with `proposed_rules` and a long `detail`; a test pins
+   both formats. The deep-tier security lens (`deep_security_system_prompt_with`) drops
+   its always-empty, never-read `proposed_rules` and follows part 2.
+2. *Protected part.* The scan asks for a `detail` of one sentence, at most 25 words,
+   naming every other file or symbol the judgment depends on, beginning "Borderline:"
+   when the case is borderline (the prompt still says recall over precision). After
+   `merge_by_location` and before calibration, `audit_repo` calls
+   `detail_regen::regenerate_full_details`, which writes the full `detail` of the
+   findings that survived, in batches of 25 (one call per batch, `Stage::DetailRegeneration`,
+   shown as "detail" in the telemetry table, `STAGE_DETAIL` for the spend limit and for the
+   failed-pass name). The headline (the scan's `title`, before the first `HEADLINE_SEP`; the
+   parser keeps the title free of one) is kept and only the explanation after it is replaced.
+   The call sees the rule's directive, the short statement, the snippet, the captures, six
+   lines of code either side of the finding and, for every file or symbol the headline or
+   statement names, a bounded excerpt (the first match per token, three lines either side, at
+   most 20 lines per finding) with that file's repo-map line, resolved in the WHOLE redacted
+   file set of the repo (`map_files.unwrap_or(files)`), so on an incremental run a file that
+   was not rescanned is still shown. It runs on the scan model. Nothing in `onboard.rs`
+   changed for this except one line in the cache key.
+   **Without a meter the measure is off.** `terse_output_of(meter)` is false for a path that
+   passes no `UsageMeter` (the spend limit, the telemetry row and the operator's opt-out all
+   live on the meter), so such a path scans exactly as before rank 4 and says so on stderr.
+   The rescan-alternatives endpoint builds a meter from the environment
+   (`RunControls::from_env`) so `CAMERATA_EFFICIENCY=terse_output=off` reaches it.
+
+**The reply is not trusted.** The regenerated text feeds severity decisions, so each entry is
+accepted on its own and only when all of these hold (`detail_regen::accept_entry`, tests in
+`detail_regen_tests.rs`):
+
+- It is addressed by an opaque id (six hex digits of a hash of the finding's place in the run,
+  not its position) and echoes the finding's path and line. A reply numbered from 1, a reply
+  in another order, an id the batch does not have, an id used twice, a wrong echo: none of
+  these can land a text on a neighbour; the entry is simply not written.
+- Every path or identifier the short statement names (a token with `/`, `::`, `_`, a file
+  extension or CamelCase) appears in the text, spelled as given.
+- It makes no exploit precondition (`mentions_exploit_precondition`, the phrase list
+  calibration's raise-block and the D5 cap already use; one list) that neither the short
+  statement nor the code shown makes. An invented "requires a valid session" would stop
+  calibration raising a critical on a claim nobody made. The check can reject a harmless
+  "depends on", which costs a marker and not a wrong severity; the sweep reports the rate.
+- A statement that begins "Borderline:" keeps it: the text gets "Borderline: " put back at the
+  front when it lost it.
+
+An entry that fails is treated exactly like one the model left out: it stays pending, the
+repeat round runs it again in a batch of half the size (13), and what is still unwritten
+then gets the marker. A reply cut off at the output limit is discarded whole, counted as
+waste in the telemetry, and repeated the same way.
+
+**Who reads `detail`, and on which text.** `detail` is evidence text for several
+consumers. Each one's choice, and the test that pins it (all in
+`ai_audit/detail_regen_tests.rs`):
+
+| Consumer | Runs on | Why | Test |
+|---|---|---|---|
+| `merge_by_location` (exact `(path, line)` merge, `primary_rank`) | short | reads path, line, snippet, rule id, severity; never `detail`, so it decides identically on either | `merge_by_location_reads_no_detail_so_it_runs_on_the_short_one` |
+| calibration prompt (`verify_findings`) and `apply_verdicts` precondition check | full | the verdict (severity, confidence, needs-review) is judged from the explanation; the one-sentence statement drops the reasoning the verdict rests on | `audit_repo_hands_calibration_and_everything_after_it_the_full_detail` |
+| D5 severity floor and D6 ceiling (`calibration_floor_scan_text`) | full | phrase tables scan the detail; "unauthenticated" in the explanation raises a finding to a critical floor, absent from a one-sentence statement | `calibration_and_the_severity_floor_read_detail_so_they_run_on_the_full_one` |
+| `merge_semantic_groups` (`semantic_pair_merges`: prose overlap, object veto, captured objects) | full | the signals are word overlap and the objects named in the prose; on one sentence two real duplicates share too little to merge, and two different objects are not named for the veto | `the_semantic_merge_decision_differs_between_short_and_full_so_it_runs_on_the_full_one`, `the_object_veto_reads_detail_so_it_runs_on_the_full_one` |
+| `fix_evidence_blob` (the fix self-check's grounding set) | full | a fix may name anything the explanation names; the blob must be what the model saw | `the_fix_evidence_blob_carries_the_detail_so_the_fix_stage_sees_the_full_one` |
+
+The placement follows from the table: regeneration is the earliest point where "the
+survivors" is known and the latest point before the first consumer that needs the full
+text. Calibration, the cross-family merge (which runs in `onboard.rs`, after `audit_repo`
+returns) and the fix stage all receive the full text without any change to them. The cost
+of that placement is that a finding the cross-family merge later absorbs was already
+regenerated. That waste is expected to be small (the first merge already collapsed the
+same-location duplicates), but it is not measured; the sweep's `cross-family-merge` row
+counts show it.
+
+**Never short, never dropped.** A finding whose regeneration did not happen (the call
+failed twice, the model left it out or failed a check twice, or the spend limit stopped the
+step) keeps the
+scan's one-sentence detail, gets the visible marker `[detail incomplete]` appended, and
+the run records a `FailedPass` named "detail regeneration" with the count. That is the
+existing failed-pass path, so the export's methodology and summary disclose it (the
+export test below reads it from the JSON). In the deep tier the marker is on the finding
+and the lens's `error` note carries the same text. `tests/terse_output_export_e2e.rs` pins
+both ends through `audit_repo`, `merge_semantic_groups` and `build_report_json`: with
+regeneration working, the full text is in the export and the one-sentence statement is
+nowhere; with it down, the finding is in the export with the marker beside the short
+detail and the disclosure in the report. The marker is two words on purpose: it enters
+`description_overlap_score`, and a longer string shared by two failed findings would raise
+their overlap. The job's live preview (`JobStore::add_findings`, polled by the app while a
+scan runs) shows the short detail until the scan ends; the export is built from the final
+report only.
+
+**Cost arithmetic** (rank 9's `input_cost_usd` and the registry list price, Sonnet 5 at
+$3 in and $15 out per million tokens). Batched against one call per finding, for 140
+survivors, with about 425 tokens of system prompt, 350 tokens of evidence and 100 tokens
+of output per finding: a call per finding repeats the system prompt and frame 140 times,
+about 815 input tokens each, $0.0039 per finding and $0.55 in all; 6 batches of 25 repeat
+it 6 times, $0.37 in all. Output is identical either way. Batching is about a third
+cheaper on this step and makes 6 calls instead of 140; the price is that a failed batch
+leaves 25 findings to the repeat round (and, if that fails, to the marker), which the
+failure path covers. `batching_beats_one_call_per_finding` pins the input arithmetic.
+The whole-measure economics are NOT a given: with an assumed 100-token full detail and a
+35-token short one, the scan saves about $0.001 per raw row and the regeneration costs
+about $0.0026 per survivor, so on detail alone the measure pays only where raw rows
+outnumber survivors by roughly 2.7 to 1 or more (the
+location merge collapsing one defect reported under several rule names is where that
+comes from). Dropping `proposed_rules` from non-advisory passes is a saving regardless.
+Whether the scan's output is dominated by `detail` at all is unmeasured; the per-stage
+telemetry (scan "out" tokens against the new "detail" row) is how the API sweep decides.
+
+**Prompt pins.** The terse scan prompt, the deep security lens's terse prompt and the
+regeneration prompt are hashed next to `AUDIT_PROMPT_SCHEMA_VERSION` in
+`scan_cache::ai_key_tests::the_terse_prompts_are_pinned_to_the_prompt_schema_version`, so
+editing one fails until the version is bumped and the pin updated.
+
+**Cache key.** `AiScanKey` gained `terse_output` (absent in a key stored before it, read
+as false): findings written under the other setting answered a different question, so a
+baseline from one setting is not reused under the other. This is what lets the sweep flip
+the switch without `--full`. `AUDIT_PROMPT_SCHEMA_VERSION` is unchanged because
+`audit_system_prompt()` (the OFF form) is byte-identical; the pin test still holds.
+
+**What the API sweep must compare** (switch on against the sweep5b grades, per fixture):
+recall per fixture and the decoy numbers (a borderline finding the one-sentence rule
+suppressed would show as lost recall); the duplicate-merge counts at `ai-location-merge`
+and `cross-family-merge` (rows in, rows out, `also_matches` sizes), since the cross-family
+merge decides on the regenerated text; the calibration verdict distribution (severity
+moves, `needs-review` share, floor and ceiling rationales fired); the share of findings
+carrying `[detail incomplete]` (it should be zero; a high rate means the grounding or
+precondition checks are rejecting good text); and the cost split, scan output tokens
+and the "detail" stage against the previous run's scan output.
 
 The ZIP holds four entries, and they are deliberately not three views of the same
 thing:

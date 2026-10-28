@@ -148,6 +148,7 @@ async fn the_ledger_and_the_telemetry_state_which_measures_were_on() {
     let mut efficiency = EfficiencyConfig::default();
     efficiency.set("warm_schedule", false).unwrap();
     efficiency.set("fix_prefilter", false).unwrap();
+    efficiency.set("terse_output", false).unwrap();
 
     let (report, _m) = scan(
         &Stub::new(0.01),
@@ -163,6 +164,7 @@ async fn the_ledger_and_the_telemetry_state_which_measures_were_on() {
     let table = telemetry.render_table();
     assert!(table.contains("warm_schedule=off"), "{table}");
     assert!(table.contains("fix_prefilter=off"), "{table}");
+    assert!(table.contains("terse_output=off"), "{table}");
     assert!(table.contains("result_cache=on"), "{table}");
 
     // The ledger is persisted as JSON; the set survives the round trip.

@@ -100,6 +100,11 @@ efficiency_measures! {
     /// [`crate::ai_audit::FIX_STAGE_HAIKU_MODEL`] at effort [`crate::ai_audit::FIX_STAGE_EFFORT`].
     /// Off: it runs on the calibration model, else the scan model (the pre-rank-10 choice).
     fix_on_haiku => "the fix stage runs on Haiku unless a fix model is set",
+    /// Rank 4: scan passes ask for a one-sentence `detail` and no `proposed_rules` (the advisory
+    /// pass keeps them), and the full `detail` is regenerated once, after the first merge and
+    /// before calibration, for the findings that survived. Off: the scan prompts and the
+    /// pipeline are exactly what they were before rank 4.
+    terse_output => "scan passes write a short detail; the full detail is regenerated for the findings that survive the merge",
 }
 
 impl EfficiencyConfig {

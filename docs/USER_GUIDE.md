@@ -1794,9 +1794,12 @@ listed as such and never counted as clean.
 Every saving the product applies is on by default and can be switched off for one run, to find out
 whether it caused a cost or behavior change: `--efficiency warm_schedule=off` (repeatable), or
 `CAMERATA_EFFICIENCY=warm_schedule=off,result_cache=off`. The measures are `warm_schedule`,
-`label_after_prefix`, `batch_long_cache`, `result_cache`, `truncation_retry` and `fix_prefilter`
-(what each does is in TECHNICAL.md). A misspelled name is an error. Every run prints which measures
-were on.
+`label_after_prefix`, `batch_long_cache`, `result_cache`, `truncation_retry`, `fix_prefilter` and
+`terse_output` (what each does is in TECHNICAL.md). A misspelled name is an error. Every run prints which measures
+were on. With `terse_output` on, the scan writes one-sentence explanations and a separate step
+writes the full explanation for each finding that survives the merge; a finding whose full
+explanation could not be written stays in the report with `[detail incomplete]` after its short
+one, and the report lists the step as incomplete.
 
 To size a repo before quoting it, run `cargo run -p camerata -- count <PATH>` (add `--json` for
 machine-readable output). It uses no model and no network, reads the repo through the inspection's
