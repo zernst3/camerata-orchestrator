@@ -929,8 +929,11 @@ fn a_deep_mention_only_chain_is_resolved_in_linear_time() {
     let got = flagged(&pairs);
     let elapsed = started.elapsed();
     assert_eq!(got, ["src/stranded_end.ts"]);
+    // The bound guards against a quadratic fixed point (one full rescan per round), which at this
+    // depth takes minutes. It is generous because the suite often runs on a loaded machine, where
+    // the linear version has been seen at just over 3s.
     assert!(
-        elapsed < std::time::Duration::from_secs(3),
+        elapsed < std::time::Duration::from_secs(30),
         "a {N}-deep mention chain took {elapsed:?}"
     );
 }
