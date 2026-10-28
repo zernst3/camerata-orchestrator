@@ -32,7 +32,11 @@ jobs:
       - name: Install typst (pinned)
         run: ./scripts/ci-install-typst.sh
 
-      - uses: dtolnay/rust-toolchain@stable
+      # Pinned, not floating: the gate must mean the same thing on every run. On `stable`
+      # (1.99) clippy reports `double_must_use` on every `#[async_trait]` trait and rustc
+      # reports a redundant glob import as unused, neither of which 1.95 does. Bump this
+      # deliberately, together with whatever the new toolchain flags.
+      - uses: dtolnay/rust-toolchain@1.95.0
         with:
           components: rustfmt, clippy
 
