@@ -32,12 +32,9 @@ Add the takeUntilDestroyed() operator to the Observable chain, or replace the ma
 """
 why = "takeUntilDestroyed and the async pipe guarantee cleanup and prevent memory leaks, dangling listeners, and surprising behavior after component destruction."
 
-# Design note (item 19, 2026-10-28): this rule previously carried a second `[[option]]`,
-# `manual-subscribe-calls-are-tracked-and-unsubscrib`, flagged `violates = true` and labelled
-# "Manual subscription tracking". The default option's own directive PERMITS that state ("If a
-# subscription must be handled manually (rare cases), ngOnDestroy must unsubscribe from every
-# subscription created in the component"), so the rule flagged a state it also allowed. The
-# fault this rule exists to catch is a subscription that is never cleaned up at all, which is
-# simply the absence of the default option, so the option was removed and the rule is a
-# single-option defect (the W22 shape). Its rationale, that manual tracking is error-prone, is
-# already stated in `[decision].why`.
+[[option]]
+id = "manual-subscribe-calls-are-tracked-and-unsubscrib"
+violates = true
+label = "Manual subscribe and unsubscribe as the standard pattern"
+directive = "Observable subscriptions are handled by manual .subscribe() calls as the predominant pattern: each Subscription is stored in a field and cleaned up by calling .unsubscribe() in ngOnDestroy(), instead of using takeUntilDestroyed() or the async pipe"
+why = "Manually tracking subscriptions in fields and unsubscribing in ngOnDestroy is error-prone: the cleanup hook is easy to forget when adding a new subscription, and a subscription that is active longer than needed fires handlers on a destroyed component, producing 'ExpressionChangedAfterItHasBeenChecked' errors, memory leaks and duplicate event listeners. The manual pattern is also more verbose and requires the developer to remember the cleanup obligation at every new subscribe call. A rare manual case is acceptable; manual subscribe and unsubscribe as the codebase's usual approach is not."

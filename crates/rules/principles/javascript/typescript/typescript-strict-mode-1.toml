@@ -15,7 +15,7 @@ url = "https://www.typescriptlang.org/tsconfig#strict"
 title = "TypeScript tsconfig reference — strict option"
 
 [decision]
-question = "Is the TypeScript compiler configured with strict mode on in every tsconfig?"
+question = "How is the TypeScript compiler's strict mode configured across the tsconfig files?"
 default = "the-compiler-runs-in-strict-mode"
 why = "The single most consequential of the strict flags is strictNullChecks: with it off, null and undefined are assignable to every type, so the type system silently tolerates exactly the null-dereference bugs (the canonical 'cannot read property of undefined') that are most common and most expensive at runtime, and the compiler reports nothing. noImplicitAny closes the other large hole, where an un-annotated parameter becomes any and disables checking for everything downstream of it. Running with strict off, or cherry-picking the flags, buys a smaller initial diff at the cost of a type system that claims to verify code it does not actually verify; the gaps are invisible until a null flows into a field at runtime, and retrofitting strict onto a large untyped-by-default codebase later is far more expensive than starting strict and never accumulating the debt."
 

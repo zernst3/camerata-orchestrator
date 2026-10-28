@@ -633,8 +633,8 @@ Stated here as authoring rules; mechanics and citations in the reference.
    no NoConvention row. The rule is checked against its resolved option's directive and nothing
    else. The same exclusion applies to `kind = "defect"` rules, to gate-armed rules, and to the
    `ORCH-`/`SPIRIT-`/`PROC-` families. This is the most consequential interaction in the schema
-   because nothing fails when you get it wrong: as of 2026-10-28, 44 non-defect CI-tier rules
-   carry two or more options and 19 of them carry `violates` flags that can never fire. So,
+   because nothing fails when you get it wrong: a non-defect CI-tier rule that carries two or
+   more options can carry `violates` flags that never fire. So,
    before authoring alternatives or a `violates` flag, check the tier. If the alternatives must
    be decided per repository, the rule is `prose` or `structured`; if the rule really is CI-tier,
    its options are architect choices made at onboarding, and a fault you need reported must be
