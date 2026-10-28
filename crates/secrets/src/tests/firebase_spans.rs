@@ -181,3 +181,61 @@ fn window_edges_inside_a_multibyte_character_are_moved_to_a_boundary() {
         assert!(!redact(&text).text.contains(&key));
     }
 }
+
+// ---- strings, comments and words the span scanner must read exactly ------------------------
+
+#[test]
+fn an_unterminated_string_or_object_runs_to_the_window_edge_without_overrunning_it() {
+    let key = google_key(225);
+    assert_google_secret(&format!("const maps = {{ apiKey: \"{key}\""), &key);
+    assert_google_secret(
+        &format!("const maps = {{ apiKey: \"{key}\", note: \"never closed"),
+        &key,
+    );
+    assert_google_secret(
+        &format!("const maps = {{ apiKey: \"{key}\", /* never closed"),
+        &key,
+    );
+}
+
+#[test]
+fn an_escaped_quote_does_not_end_a_string_early() {
+    assert_firebase_twin(&firebase_config_with(
+        &google_key(226),
+        r#"note: "a \" } b","#,
+    ));
+}
+
+#[test]
+fn a_block_comment_after_the_maps_key_ends_at_its_own_closer() {
+    let maps = google_key(227);
+    let text = format!(
+        "const maps = {{ apiKey: \"{maps}\" /* a note */ }};\n{}",
+        js_config(&google_key(228))
+    );
+    assert_google_secret(&text, &maps);
+}
+
+#[test]
+fn a_star_inside_a_block_comment_does_not_end_it() {
+    assert_firebase_twin(&firebase_config_with(&google_key(229), "/* a * } */"));
+}
+
+#[test]
+fn a_sibling_name_inside_a_longer_identifier_is_not_a_sibling() {
+    let key = google_key(230);
+    assert_google_secret(
+        &format!(
+            "const c = {{ apiKey: \"{key}\", appIdentity: \"x\", projectIdentifier: \"y\", myprojectId: \"z\" }};"
+        ),
+        &key,
+    );
+}
+
+#[test]
+fn a_sibling_at_the_very_start_of_the_window_counts() {
+    assert_firebase_twin(&format!(
+        "PROJECT_ID=x\nFIREBASE_API_KEY={}\n",
+        google_key(231)
+    ));
+}

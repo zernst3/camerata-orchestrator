@@ -8,6 +8,7 @@ mod json_walk;
 mod redaction;
 mod rules;
 mod source_hygiene;
+mod twin_boundaries;
 mod twins;
 mod vendors;
 
