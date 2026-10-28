@@ -25,6 +25,8 @@ tokio = { workspace = true, features = ["time", "io-util", "sync"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
+# One-shot warning when a request carried fields its model rejects (see `conform_messages_body`).
+tracing = { workspace = true }
 # Object-safe async trait for the `LlmPort` completion seam.
 async-trait = { workspace = true }
 # HTTP transport for the Anthropic Messages/Batches APIs + the OpenRouter

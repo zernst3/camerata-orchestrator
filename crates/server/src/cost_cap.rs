@@ -148,10 +148,9 @@ impl RunControls {
     /// no limit set this is always `None`: nothing changes for an uncapped run.
     pub fn refuse_if_cap_unenforceable(&self, models: &[(String, String)]) -> Option<String> {
         self.max_cost_usd?;
-        let priced = crate::llm::models();
         let unpriced: Vec<String> = models
             .iter()
-            .filter(|(_, model)| !priced.iter().any(|p| p.id == *model))
+            .filter(|(_, model)| !crate::llm::is_priced(model))
             .map(|(roles, model)| format!("`{model}` (used for {roles})"))
             .collect();
         if unpriced.is_empty() {

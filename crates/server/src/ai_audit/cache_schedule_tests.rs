@@ -303,7 +303,7 @@ async fn scan(llm: &CacheModelLlm, n_chunks: usize, n_batches: usize, concurrenc
         false,
     )
     .await;
-    assert!(err.is_none(), "{err:?}");
+    assert!(err.is_empty(), "{err:?}");
     assert_eq!(ok, n_chunks * n_batches);
 }
 

@@ -117,7 +117,7 @@ async fn scan(llm: &StubLlm, n_batches: usize, concurrency: usize, meter: &Usage
         false,
     )
     .await;
-    assert!(err.is_none(), "{err:?}");
+    assert!(err.is_empty(), "{err:?}");
     ok
 }
 
@@ -503,7 +503,7 @@ async fn a_batch_the_cap_refuses_is_never_submitted_and_every_pair_is_not_run() 
 
     assert!(findings.is_empty() && ok == 0, "nothing ran");
     assert!(
-        err.is_none(),
+        err.is_empty(),
         "a refused item is NOT RUN, not an error: {err:?}"
     );
     let record = meter.cost_cap_record().unwrap();

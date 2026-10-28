@@ -34,7 +34,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::llm::{models, LlmResponse};
+use crate::llm::LlmResponse;
 
 /// Per-model accumulated usage, surfaced as the `by_model` breakdown.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, PartialEq)]
@@ -153,13 +153,27 @@ impl UsageLedger {
         if let Some(c) = r.cost_usd {
             return c;
         }
-        let list = models();
-        let Some(info) = list.iter().find(|m| m.id == model_id) else {
-            return 0.0;
+        // The SAME function the response parser prices through (cache reads, cache writes,
+        // the long-prompt tier, the batch discount), so the ledger never disagrees with a
+        // call's own reported cost. Missing token fields count as zero; a model the registry
+        // cannot price counts as $0.
+        let basis = if r.backend == "api/batch" {
+            crate::llm::PriceBasis::batch(crate::llm::BATCH_CACHE_TTL)
+        } else {
+            crate::llm::PriceBasis::realtime()
         };
-        let input = r.input_tokens.unwrap_or(0) as f64;
-        let output = r.output_tokens.unwrap_or(0) as f64;
-        (input * info.price_in + output * info.price_out) / 1_000_000.0
+        crate::llm::usage_cost_usd(
+            model_id,
+            &crate::llm::CallUsage {
+                input: Some(r.input_tokens.unwrap_or(0)),
+                output: Some(r.output_tokens.unwrap_or(0)),
+                cache_read: r.cache_read_input_tokens,
+                cache_creation: r.cache_creation_input_tokens,
+                cache_creation_1h: None,
+            },
+            basis,
+        )
+        .unwrap_or(0.0)
     }
 
     /// Fold one completed call's usage into the cumulative ledger and CLEAR the rate-limit
@@ -371,7 +385,7 @@ mod tests {
             "claude-sonnet-5",
             &anthropic_resp("claude-sonnet-5", 100, 100, 0.0018),
         );
-        // sonnet pricing 3/15: 1M in + 1M out -> 3 + 15 = 18.0.
+        // sonnet pricing 2/10: 1M in + 1M out -> 2 + 10 = 12.0.
         l.record(
             "claude-sonnet-5",
             &gemini_shape_resp("claude-sonnet-5", 1_000_000, 1_000_000),
@@ -379,9 +393,9 @@ mod tests {
         let s = l.snapshot();
         assert_eq!(s.calls, 2);
         assert_eq!(s.input_tokens, 1_000_100);
-        // 0.0018 (reported) + 18.0 (derived) = 18.0018.
+        // 0.0018 (reported) + 12.0 (derived) = 12.0018.
         assert!(
-            (s.total_cost_usd - 18.0018).abs() < 1e-6,
+            (s.total_cost_usd - 12.0018).abs() < 1e-6,
             "got {}",
             s.total_cost_usd
         );

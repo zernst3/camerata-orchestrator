@@ -442,6 +442,17 @@ _Doc step (standing): update `OVERVIEW.md` + the relevant deep doc before markin
   heartbeat, diagnostics_for `||`; fold into the V2 dev-time parity audit), cosmetic
   (LayerConflict Display, describe_path boundary, clone_rules skip_count).
 
+- **CLI-backend refusal signal is unverified against a live refusal (added 2026-10-27, model
+  registry work).** The API paths treat `stop_reason: "refusal"` (HTTP 200, no content) as a
+  failed pass. The CLI backend (`claude -p`, `cli_result_text` in `crates/llm/src/llm.rs`) now
+  treats a `result` event whose `stop_reason` is `"refusal"` the same way: the installed CLI
+  (2.1.285) declares a `stop_reason` field on its `result` message and documents the refusal stop
+  reason, but no live refusal has been captured, so whether the CLI populates that field with
+  `"refusal"` on a refused turn is unconfirmed. Until one is captured (a unit test with a scripted
+  `result` event exists), a refusal that the CLI renders as prose with `stop_reason` null reads as
+  an ordinary answer. Do NOT add a text heuristic; capture a real refusal, then pin its exact
+  shape in a test.
+
 ### 2c. Item 22: implementer-handoff items not yet built (added 2026-10-24, Zach)
 
 From `_workspace/brownfield-audits/IMPLEMENTER_HANDOFF_2026-10-24.md`. Its header said these were
