@@ -363,3 +363,7 @@ mod tests;
 // The enforcement of "the review timer and the per-row reviewed record are INTERNAL ONLY".
 #[cfg(test)]
 mod internal_only_tests;
+
+/// Killing tests for the cargo-mutants survivors of 2026-10-28 (docs/MUTATION_TESTING.md).
+#[cfg(test)]
+mod mutation_tests;
