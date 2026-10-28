@@ -166,7 +166,11 @@ fn report_with_a_huge_skip_list() -> crate::onboard::ScanReport {
     );
     let mut list = crate::scan_ledger::SkippedFileList::default();
     for i in 0..2_500 {
-        list.push("owner/repo", format!("big/{i:05}.json"), SkipReason::Oversize);
+        list.push(
+            "owner/repo",
+            format!("big/{i:05}.json"),
+            SkipReason::Oversize,
+        );
     }
     for i in 0..1_200 {
         list.push(
@@ -272,6 +276,9 @@ async fn the_pdf_says_and_k_more() {
     // The PDF names the first 100, then points to the sheet for the rest it holds.
     assert!(text.contains("big/00000.json"), "{text}");
     assert!(!text.contains("big/00100.json"), "the PDF list is bounded");
-    assert!(text.contains("more skipped files, listed in full"), "{text}");
+    assert!(
+        text.contains("more skipped files, listed in full"),
+        "{text}"
+    );
     assert!(text.contains("and 1700 more skipped files"), "{text}");
 }

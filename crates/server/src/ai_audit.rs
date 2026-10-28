@@ -5688,9 +5688,10 @@ async fn run_passes_batch(
                 let session = format!("audit-{repo}-batch-{}", w.custom_id);
                 // A batch item gets the truncation retry only: a reply that is complete but not
                 // JSON is reported by the reassembly as a failed pass naming its files.
-                let resp = retry_unusable_scan_reply(realtime, &w.req, resp, None, &session, meter, 0)
-                    .await
-                    .resp;
+                let resp =
+                    retry_unusable_scan_reply(realtime, &w.req, resp, None, &session, meter, 0)
+                        .await
+                        .resp;
                 (w, resp)
             })
             .collect();

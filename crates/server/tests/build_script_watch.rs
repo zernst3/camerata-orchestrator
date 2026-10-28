@@ -28,7 +28,8 @@ fn a_checkout_on_a_branch_watches_head_and_that_branchs_ref_only() {
     write(&git.join("refs/heads/other/topic"), "cccc\n");
     write(&git.join("packed-refs"), "# pack-refs\n");
 
-    let watched = build_script::watched_paths(&git, &git, "ref: refs/heads/feat/export\n", &on_disk);
+    let watched =
+        build_script::watched_paths(&git, &git, "ref: refs/heads/feat/export\n", &on_disk);
     assert_eq!(
         watched,
         vec![git.join("HEAD"), git.join("refs/heads/feat/export")]
@@ -71,7 +72,8 @@ fn a_packed_only_branch_watches_packed_refs_and_its_own_directory() {
     write(&git.join("HEAD"), "ref: refs/heads/feat/export\n");
     write(&git.join("packed-refs"), "aaaa refs/heads/feat/export\n");
     fs::create_dir_all(git.join("refs/heads/feat")).unwrap();
-    let watched = build_script::watched_paths(&git, &git, "ref: refs/heads/feat/export\n", &on_disk);
+    let watched =
+        build_script::watched_paths(&git, &git, "ref: refs/heads/feat/export\n", &on_disk);
     assert_eq!(
         watched,
         vec![
