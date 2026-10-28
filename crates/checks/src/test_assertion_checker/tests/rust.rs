@@ -122,3 +122,75 @@ fn f() { let _ = std::mem::size_of::<u8>(); }
 fn functions_without_a_test_attribute_are_not_tests() {
     assert!(one("fn test_like() {}\n#[cfg(test)]\nfn helper() {}\n").is_empty());
 }
+
+#[test]
+fn safe_twin_a_method_the_file_does_not_define_may_be_a_helper() {
+    // `trybuild` checks the compile result inside `pass` / `compile_fail`.
+    let src = "#[test]\nfn ui() {\n    let t = trybuild::TestCases::new();\n    t.pass(\"tests/ui/pass.rs\");\n}\n";
+    assert!(one(src).is_empty());
+}
+
+#[test]
+fn safe_twin_a_same_file_method_that_asserts_is_followed() {
+    let src = "\
+struct Harness;
+impl Harness {
+    fn new() -> Self { Harness }
+    fn run(&self) { assert_eq!(1, 1); }
+}
+
+#[test]
+fn drives_the_harness() {
+    Harness::new().run();
+}
+";
+    assert!(one(src).is_empty());
+}
+
+#[test]
+fn a_same_file_method_that_does_not_assert_and_std_methods_do_not_count() {
+    let src = "\
+struct Harness;
+impl Harness {
+    fn new() -> Self { Harness }
+    fn run(&self) -> u32 { 1 }
+}
+
+#[test]
+fn quiet() {
+    let _ = Harness::new().run();
+}
+
+#[test]
+fn std_only() {
+    let v = vec![3, 1, 2];
+    let _ = v.iter().map(|x| x + 1).collect::<Vec<_>>();
+}
+";
+    assert_eq!(one(src), vec!["quiet", "std_only"]);
+}
+
+#[test]
+fn safe_twin_a_compile_only_test_is_a_smoke_test() {
+    for body in [
+        "let _: fn(u32) -> u32 = total;",
+        "let _: &dyn Render = &Widget;",
+        "fn is_send<T: Send>() {}\n    is_send::<Order>();",
+    ] {
+        let src = format!("#[test]\nfn compiles() {{\n    {body}\n}}\n");
+        assert!(one(&src).is_empty(), "{body}");
+    }
+}
+
+#[test]
+fn a_generic_function_with_a_body_is_not_a_bound_check() {
+    let src = "\
+fn build<T: Default>() -> T { T::default() }
+
+#[test]
+fn builds() {
+    let _ = build::<u32>();
+}
+";
+    assert_eq!(one(src), vec!["builds"]);
+}

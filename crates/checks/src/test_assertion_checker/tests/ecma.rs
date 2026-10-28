@@ -13,8 +13,9 @@ import { render } from '@testing-library/react';
 import { total } from '../src/orders';
 
 it('is empty', () => {});
-test('renders without crashing', () => {
+test('clicks without crashing', () => {
   render(<App />);
+  fireEvent.click(screen.queryByText('go'));
 });
 test('computes a total', async function () {
   const t = await total([1, 2]);
@@ -22,7 +23,7 @@ test('computes a total', async function () {
 ";
     assert_eq!(
         one(src),
-        vec!["is empty", "renders without crashing", "computes a total"]
+        vec!["is empty", "clicks without crashing", "computes a total"]
     );
 }
 
@@ -116,11 +117,10 @@ fn an_aliased_assertion_import_is_an_assertion() {
 fn an_assertion_in_a_shared_hook_covers_every_test() {
     let src = "\
 afterEach(() => { expect(console.error).not.toHaveBeenCalled(); });
-it('renders', () => { render(<App />); });
+it('renders', () => { run(); });
 ";
     assert!(one(src).is_empty());
-    let setup_only =
-        "beforeEach(() => { reset(); });\nit('renders', () => { render(<App />); });\n";
+    let setup_only = "beforeEach(() => { reset(); });\nit('renders', () => { run(); });\n";
     assert_eq!(one(setup_only), vec!["renders"]);
 }
 
@@ -175,7 +175,7 @@ fn a_same_file_helper_that_asserts_is_an_assertion() {
 function confirm(node) { expect(node).toBeTruthy(); }
 const renderIt = (ui) => { const r = render(ui); confirm(r); };
 it('a', () => { renderIt(<App />); });
-const plain = () => render(<App />);
+const plain = () => run(<App />);
 it('b', () => { plain(); });
 ";
     assert_eq!(one(src), vec!["b"]);
@@ -234,4 +234,52 @@ describe('b', () => {
     // Which `prepare` each test calls is a scope question this check does not answer, so a
     // name that might reach an assertion counts as one.
     assert!(one(src).is_empty());
+}
+
+#[test]
+fn safe_twin_a_render_only_test_is_a_smoke_test() {
+    for body in [
+        "render(<App />);",
+        "const { container } = render(<App />);",
+        "mount(<App />);",
+        "const wrapper = shallow(<App />);",
+        "rtl.render(<App />);",
+    ] {
+        let src = format!("it('renders without crashing', () => {{ {body} }});\n");
+        assert!(one(&src).is_empty(), "{body}");
+    }
+    // Rendering plus another action is still unchecked.
+    let acts = "it('clicks', () => { render(<App />); fireEvent.click(button); });\n";
+    assert_eq!(one(acts), vec!["clicks"]);
+}
+
+#[test]
+fn safe_twin_a_helper_from_a_relative_module_in_a_test_folder_may_assert() {
+    let src = "import { runScenario } from './scenarios';\nit('a', () => { runScenario(); });\n";
+    for path in [
+        "tests/orders.test.ts",
+        "src/__tests__/orders.test.ts",
+        "test/orders.test.js",
+    ] {
+        assert!(reported(path, src).is_empty(), "{path}");
+    }
+    // Production code beside the test is not a helper module.
+    let code = "import { total } from './orders';\nit('a', () => { total(1); });\n";
+    assert_eq!(reported("src/orders.test.ts", code), vec!["a"]);
+}
+
+#[test]
+fn safe_twin_commonjs_requires_are_imports() {
+    for src in [
+        "const helpers = require('./helpers');\nit('a', () => { helpers.run(x); });\n",
+        "const { run } = require('./helpers');\nit('a', () => { run(x); });\n",
+        "const { run: go } = require('../test-utils');\nit('a', () => { go(x); });\n",
+        "const run = require('./helpers').run;\nit('a', () => { run(x); });\n",
+        "const assert = require('assert');\nit('a', () => { assert.equal(1, 1); });\n",
+    ] {
+        assert!(one(src).is_empty(), "{src}");
+    }
+    // A required production module is not a helper.
+    let code = "const { total } = require('../src/orders');\nit('a', () => { total(1); });\n";
+    assert_eq!(one(code), vec!["a"]);
 }

@@ -6,6 +6,13 @@
 //! `done`, Playwright fixtures can all assert), when it sits in a skipped `describe`, when `it` or
 //! `test` is declared in the file or imported from anywhere but a test framework, and when any
 //! shared hook (`beforeEach`, `afterEach`, `beforeAll`, `afterAll`, `before`, `after`) asserts.
+//!
+//! Imports are read from `import` statements and from CommonJS `require` declarations. A relative
+//! specifier is resolved against the test file's folder before it is judged to be a test-support
+//! module, so `./scenarios` in `tests/` is the support module `tests/scenarios`.
+//!
+//! A test whose only calls render a component (`render(<App />)`, `mount(..)`, `shallow(..)`) is
+//! a smoke test: it fails when the render throws, and is not reported.
 
 use std::collections::{HashMap, HashSet};
 
@@ -71,6 +78,16 @@ const SKIPPED_SUITES: &[&str] = &[
 /// (Cypress's `cy`, WebdriverIO's `browser` and `$`, Detox's `element`, Selenium's `driver`).
 const E2E_DRIVERS: &[&str] = &["cy", "browser", "page", "$", "$$", "element", "driver"];
 
+/// Calls that only render a component. A test made of nothing else is a smoke test, which fails
+/// when the render throws.
+const RENDER_CALLS: &[&str] = &[
+    "render",
+    "mount",
+    "shallow",
+    "renderToString",
+    "renderToStaticMarkup",
+];
+
 /// Calls that check something without an assertion word in their name: Testing Library's
 /// `waitFor` (retries until its callback stops throwing), Jasmine and Jest's `fail`, Mocha's
 /// `done`.
@@ -80,7 +97,7 @@ pub(super) fn check(path: &str, source: &str) -> Vec<Finding> {
     let Some(tree) = parse_path(path, source) else {
         return Vec::new();
     };
-    let file = File::read(&tree, source);
+    let file = File::read(path, &tree, source);
     let Some(test_names) = file.test_names() else {
         return Vec::new();
     };
@@ -104,6 +121,8 @@ pub(super) fn check(path: &str, source: &str) -> Vec<Finding> {
 /// What the file binds: its imports, its function declarations, and which names it declares.
 struct File<'t, 's> {
     source: &'s str,
+    /// The test file's own path, which relative specifiers resolve against.
+    path: &'s str,
     /// Local name → module specifier, for named, default and namespace imports.
     imports: HashMap<String, String>,
     /// Local name → the original exported name, for named imports.
@@ -116,7 +135,7 @@ struct File<'t, 's> {
 }
 
 impl<'t, 's> File<'t, 's> {
-    fn read(tree: &'t Tree, source: &'s str) -> Self {
+    fn read(path: &'s str, tree: &'t Tree, source: &'s str) -> Self {
         let mut imports = HashMap::new();
         let mut imported_as = HashMap::new();
         for (local, binding) in import_bindings(tree, source) {
@@ -127,6 +146,10 @@ impl<'t, 's> File<'t, 's> {
             imports.insert(local, specifier);
         }
         let root = tree.root_node();
+        for (local, original, specifier) in required_bindings(root, source) {
+            imported_as.insert(local.clone(), original);
+            imports.insert(local, specifier);
+        }
         let mut functions: HashMap<String, Vec<Node<'t>>> = HashMap::new();
         let mut declared = HashSet::new();
         for node in descendants(root) {
@@ -154,6 +177,7 @@ impl<'t, 's> File<'t, 's> {
         }
         Self {
             source,
+            path,
             imports,
             imported_as,
             functions,
@@ -220,7 +244,8 @@ impl<'t, 's> File<'t, 's> {
             let original = self.imported_as.get(root_name).map_or("", String::as_str);
             return ASSERTION_MODULES.contains(&specifier.as_str())
                 || names_an_assertion(original)
-                || (!is_package(specifier) && is_support_module(specifier));
+                || (!is_package(specifier)
+                    && is_support_module(&resolve_specifier(self.path, specifier)));
         }
         if callee.kind() == "identifier" && depth > 0 {
             if let Some(bodies) = self.functions.get(root_name) {
@@ -242,6 +267,98 @@ fn is_throwing_query(name: &str) -> bool {
 /// or an alias into the repository (`./helpers`, `@/test-utils`, `~/support`).
 fn is_package(specifier: &str) -> bool {
     !specifier.starts_with(['.', '/', '~', '#']) && !specifier.starts_with("@/")
+}
+
+/// A relative specifier resolved against the folder of the file that imports it
+/// (`tests/orders.test.ts` + `./scenarios` gives `tests/scenarios`); any other specifier as is.
+fn resolve_specifier(from: &str, specifier: &str) -> String {
+    if !specifier.starts_with('.') {
+        return specifier.to_string();
+    }
+    let mut parts: Vec<&str> = from.split('/').collect();
+    parts.pop();
+    for segment in specifier.split('/') {
+        match segment {
+            "." | "" => {}
+            ".." => {
+                parts.pop();
+            }
+            other => parts.push(other),
+        }
+    }
+    parts.join("/")
+}
+
+/// The bindings of `const x = require('m')`, `const { a, b: c } = require('m')` and
+/// `const x = require('m').y`, as (local name, exported name, specifier).
+fn required_bindings(root: Node<'_>, source: &str) -> Vec<(String, String, String)> {
+    let mut out = Vec::new();
+    for declarator in descendants(root) {
+        if declarator.kind() != "variable_declarator" {
+            continue;
+        }
+        let (Some(pattern), Some(value)) = (
+            declarator.child_by_field_name("name"),
+            declarator.child_by_field_name("value"),
+        ) else {
+            continue;
+        };
+        let Some(specifier) = required_specifier(value, source) else {
+            continue;
+        };
+        match pattern.kind() {
+            "identifier" => {
+                let name = text(pattern, source).to_string();
+                out.push((name.clone(), name, specifier));
+            }
+            "object_pattern" => {
+                for member in named_children(pattern) {
+                    match member.kind() {
+                        "shorthand_property_identifier_pattern" => {
+                            let name = text(member, source).to_string();
+                            out.push((name.clone(), name, specifier.clone()));
+                        }
+                        "pair_pattern" => {
+                            let key = member.child_by_field_name("key");
+                            let local = member
+                                .child_by_field_name("value")
+                                .filter(|v| v.kind() == "identifier");
+                            if let (Some(key), Some(local)) = (key, local) {
+                                out.push((
+                                    text(local, source).to_string(),
+                                    text(key, source).to_string(),
+                                    specifier.clone(),
+                                ));
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// `m` for `require('m')`, `require('m').y` and `(await? require('m'))`-style wrappers.
+fn required_specifier(value: Node<'_>, source: &str) -> Option<String> {
+    let mut current = value;
+    loop {
+        match current.kind() {
+            "member_expression" => current = current.child_by_field_name("object")?,
+            "parenthesized_expression" => current = current.named_child(0)?,
+            "call_expression" => break,
+            _ => return None,
+        }
+    }
+    let callee = current.child_by_field_name("function")?;
+    if callee.kind() != "identifier" || text(callee, source) != "require" {
+        return None;
+    }
+    let args = named_children(current.child_by_field_name("arguments")?);
+    let first = args.first().filter(|a| a.kind() == "string")?;
+    Some(text(*first, source).trim_matches(['"', '\'']).to_string())
 }
 
 /// The leftmost identifier of a callee chain: `expect` in `expect(x).not.toBe`, `h` in `h.check`.
@@ -313,7 +430,7 @@ fn test_without_assertion(
         return None;
     }
     let body = callback.child_by_field_name("body")?;
-    if file.asserts(body, HELPER_DEPTH) {
+    if file.asserts(body, HELPER_DEPTH) || only_renders(body, file.source) {
         return None;
     }
     let empty = body.kind() == "statement_block" && named_children(body).is_empty();
@@ -326,6 +443,29 @@ fn test_without_assertion(
             .to_string(),
         message: message(&subject, empty),
     })
+}
+
+/// Whether every call in `body` renders a component and there is at least one: the test is a
+/// smoke test that fails when the render throws.
+fn only_renders(body: Node<'_>, source: &str) -> bool {
+    let calls: Vec<Node<'_>> = descendants(body)
+        .into_iter()
+        .filter(|n| n.kind() == "call_expression")
+        .collect();
+    !calls.is_empty()
+        && calls.iter().all(|call| {
+            let Some(callee) = call.child_by_field_name("function") else {
+                return false;
+            };
+            let name = match callee.kind() {
+                "identifier" => text(callee, source),
+                "member_expression" => callee
+                    .child_by_field_name("property")
+                    .map_or("", |p| text(p, source)),
+                _ => "",
+            };
+            RENDER_CALLS.contains(&name)
+        })
 }
 
 /// A test title as quoted in a message, cut at 80 characters.
@@ -360,10 +500,25 @@ mod unit {
     use super::*;
 
     #[test]
+    fn relative_specifiers_resolve_against_the_importing_folder() {
+        assert_eq!(
+            resolve_specifier("tests/a.test.ts", "./scenarios"),
+            "tests/scenarios"
+        );
+        assert_eq!(
+            resolve_specifier("src/__tests__/a.test.ts", "../orders"),
+            "src/orders"
+        );
+        assert_eq!(resolve_specifier("a.test.ts", "./helpers"), "helpers");
+        assert_eq!(resolve_specifier("src/a.test.ts", "react"), "react");
+        assert_eq!(resolve_specifier("src/a.test.ts", "@/testing"), "@/testing");
+    }
+
+    #[test]
     fn a_framework_import_keeps_the_test_names_and_a_local_one_drops_them() {
         let read = |src: &str| {
             let tree = parse_path("a.test.ts", src).expect("parses");
-            File::read(&tree, src).test_names().is_some()
+            File::read("a.test.ts", &tree, src).test_names().is_some()
         };
         assert!(read("import { it, test } from 'vitest';\n"));
         assert!(read("const x = 1;\n"));

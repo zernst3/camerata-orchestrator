@@ -199,6 +199,43 @@ fn a_setter_passed_to_a_child_has_unknown_writers() {
 }
 
 #[test]
+fn safe_twin_a_flag_setter_escaping_through_object_shorthand_has_unknown_writers() {
+    // `{ isError, setIsError }` hands the setter to every caller of the hook.
+    let src = FETCHER.replace(
+        "  return { isLoading, isError, load };",
+        "  return { isLoading, isError, load, setIsError };",
+    );
+    assert!(one("src/useOrders.ts", &src).is_empty());
+    // A destructuring pattern naming the setter re-declares it: unknown writers as well.
+    let src = FETCHER.replace(
+        "  return { isLoading, isError, load };",
+        "  const helper = ({ setIsError }) => setIsError(true);\n  return { isLoading, isError, load, helper };",
+    );
+    assert!(one("src/useOrders.ts", &src).is_empty());
+}
+
+#[test]
+fn safe_twin_a_derived_state_setter_escaping_through_shorthand_has_unknown_writers() {
+    let hook = PROFILE.replace(
+        "  return <h1>{fullName}</h1>;",
+        "  return { fullName, setFullName };",
+    );
+    assert!(one("src/Profile.jsx", &hook).is_empty());
+    let handle = "\
+import { useEffect, useImperativeHandle, useState } from 'react';
+export function Profile({ first, last }, ref) {
+  const [fullName, setFullName] = useState('');
+  useEffect(() => {
+    setFullName(first + ' ' + last);
+  }, [first, last]);
+  useImperativeHandle(ref, () => ({ setFullName }));
+  return <h1>{fullName}</h1>;
+}
+";
+    assert!(one("src/Profile.jsx", handle).is_empty());
+}
+
+#[test]
 fn a_shadowed_setter_is_skipped() {
     let src = FETCHER.replace(
         "  return { isLoading, isError, load };",

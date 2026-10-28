@@ -147,9 +147,9 @@ fn violation(path: &str, component: &Component<'_>, members: &[&Flag]) -> ArchVi
     let declared: Vec<String> = members.iter().map(|f| f.line.to_string()).collect();
     let first = members.first().map_or(0, |f| f.line);
     let message = format!(
-        "{} (boolean state in {}, declared on lines {}) are one status stored in {} variables: \
-         every place that sets one of them to `true` sets the others to `false` in the same \
-         block (lines {}). Two flags that must never be true together can still be set that way \
+        "{} (boolean state in {}, declared on lines {}) are written as if they were one status \
+         stored in {} variables: every place that sets one of them to `true` sets the others to \
+         `false` in the same block (lines {}). Two flags that must never be true together can still be set that way \
          by the next change that forgets one setter, and every reader has to know the rule that \
          links them. Keep one state variable for the status, for example a union such as \
          `'idle' | 'loading' | 'error'`, and derive each boolean from it during render.",

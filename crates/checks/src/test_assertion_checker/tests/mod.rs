@@ -49,7 +49,7 @@ fn checker_contract() {
 fn a_finding_names_the_test_and_states_the_fact() {
     let vs = run(&[(
         "src/app.test.js",
-        "test('renders without crashing', () => {\n  render(<App />);\n});\n",
+        "test('clicks without crashing', () => {\n  render(<App />);\n  fireEvent.click(go);\n});\n",
     )]);
     assert_eq!(vs.len(), 1, "{vs:#?}");
     let v = &vs[0];
@@ -57,10 +57,10 @@ fn a_finding_names_the_test_and_states_the_fact() {
     assert_eq!(v.grade, ViolationGrade::Defect);
     assert_eq!(v.severity, SEVERITY_MEDIUM);
     assert_eq!(v.line, 1);
-    assert_eq!(v.object.as_deref(), Some("renders without crashing"));
+    assert_eq!(v.object.as_deref(), Some("clicks without crashing"));
     assert!(
         v.message
-            .starts_with("The test \"renders without crashing\" (line 1) has no assertion"),
+            .starts_with("The test \"clicks without crashing\" (line 1) has no assertion"),
         "{}",
         v.message
     );

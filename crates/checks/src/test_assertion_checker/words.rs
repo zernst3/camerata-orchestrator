@@ -9,6 +9,10 @@ const ASSERTING_WORDS: &[&str] = &[
     "fail", "raise", "throw", "warns",
 ];
 
+/// Whole names that check something without an assertion word in them: nose's `eq_` and `ok_`,
+/// pytest-assume's `assume`.
+const ASSERTING_NAMES: &[&str] = &["eq_", "ok_", "assume"];
+
 /// Lowercase substrings of a module path that mark it as a place for test helpers.
 const SUPPORT_WORDS: &[&str] = &[
     "test", "spec", "helper", "support", "fixture", "util", "common", "harness", "mock", "setup",
@@ -18,7 +22,7 @@ const SUPPORT_WORDS: &[&str] = &[
 /// Whether a called name (the last segment of a path or member chain) reads as a check.
 pub(super) fn names_an_assertion(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
-    ASSERTING_WORDS.iter().any(|w| lower.contains(w))
+    ASSERTING_NAMES.contains(&lower.as_str()) || ASSERTING_WORDS.iter().any(|w| lower.contains(w))
 }
 
 /// Whether a module path or specifier names a test-support place.
@@ -61,10 +65,21 @@ mod tests {
             "shouldRender",
             "pytest_raises",
             "toThrow",
+            "eq_",
+            "ok_",
+            "assume",
         ] {
             assert!(names_an_assertion(name), "{name}");
         }
-        for name in ["render", "click", "fetch", "new", "build"] {
+        for name in [
+            "render",
+            "click",
+            "fetch",
+            "new",
+            "build",
+            "book_order",
+            "assumed",
+        ] {
             assert!(!names_an_assertion(name), "{name}");
         }
     }

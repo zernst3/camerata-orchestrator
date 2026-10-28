@@ -247,3 +247,32 @@ def test_c(plain):
     let names: Vec<_> = vs.iter().filter_map(|v| v.object.as_deref()).collect();
     assert_eq!(names, vec!["test_c"]);
 }
+
+#[test]
+fn safe_twin_a_wildcard_import_from_a_helper_module_may_supply_the_callee() {
+    for module in [".helpers", "tests.utils", "..support"] {
+        let src = format!("from {module} import *\n\n\ndef test_a():\n    check_order(order)\n");
+        assert!(one(&src).is_empty(), "{module}");
+    }
+    // A star import of a production module supplies no helper.
+    let src = "from myapp.orders import *\n\n\ndef test_a():\n    total([1])\n";
+    assert_eq!(one(src), vec!["test_a"]);
+    // A star import from a test framework neither.
+    let src = "from unittest.mock import *\n\n\ndef test_a():\n    total([1])\n";
+    assert_eq!(one(src), vec!["test_a"]);
+}
+
+#[test]
+fn nose_pytest_assume_and_sure_checks_are_assertions() {
+    for body in [
+        "eq_(total([1]), 1)",
+        "ok_(total([1]))",
+        "assume(total([1]) == 1)",
+        "(total([1])).should.equal(1)",
+        "total([1]).should.be.equal(1)",
+        "total([1]).should.be.true",
+    ] {
+        let src = format!("def test_a():\n    {body}\n");
+        assert!(one(&src).is_empty(), "{body}");
+    }
+}

@@ -275,6 +275,16 @@ pub(super) fn setter_calls<'t>(
 ) -> Option<Vec<Node<'t>>> {
     let mut calls = Vec::new();
     for node in descendants(component.node) {
+        // `{ items, setItems }` names the setter without an `identifier` node: it escapes the
+        // component (returned from a hook, exposed through `useImperativeHandle`), so its
+        // writers are unknown.
+        if matches!(
+            node.kind(),
+            "shorthand_property_identifier" | "shorthand_property_identifier_pattern"
+        ) && text(node, source) == state.setter
+        {
+            return None;
+        }
         if node.kind() != "identifier" || text(node, source) != state.setter {
             continue;
         }

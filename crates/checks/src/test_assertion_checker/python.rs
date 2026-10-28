@@ -281,6 +281,8 @@ struct Module<'t, 's> {
     asserting_fixtures: Option<&'s HashSet<String>>,
     /// Local name → module path (`.helpers`, `tests.utils`).
     imports: HashMap<String, String>,
+    /// Modules imported with `from m import *`: any bare name may come from one.
+    wildcards: Vec<String>,
     /// Module-level functions by name (several when a name is defined more than once).
     functions: HashMap<&'s str, Vec<Node<'t>>>,
 }
@@ -288,12 +290,19 @@ struct Module<'t, 's> {
 impl<'t, 's> Module<'t, 's> {
     fn read(root: Node<'t>, source: &'s str) -> Self {
         let mut imports = HashMap::new();
+        let mut wildcards = Vec::new();
         for statement in named_children(root) {
             match statement.kind() {
                 "import_from_statement" => {
                     let module = statement
                         .child_by_field_name("module_name")
                         .map_or("", |m| text(m, source));
+                    if named_children(statement)
+                        .iter()
+                        .any(|c| c.kind() == "wildcard_import")
+                    {
+                        wildcards.push(module.to_string());
+                    }
                     let mut cursor = statement.walk();
                     for name in statement.children_by_field_name("name", &mut cursor) {
                         imports.insert(local_name(name, source), module.to_string());
@@ -332,6 +341,7 @@ impl<'t, 's> Module<'t, 's> {
             source,
             asserting_fixtures: None,
             imports,
+            wildcards,
             functions,
         }
     }
@@ -386,6 +396,10 @@ impl<'t, 's> Module<'t, 's> {
     ) -> bool {
         descendants(node).into_iter().any(|n| match n.kind() {
             "assert_statement" | "raise_statement" => true,
+            // `x.should.be.true`: sure's chain needs no call.
+            "attribute" => n
+                .child_by_field_name("attribute")
+                .is_some_and(|a| is_should_segment(text(a, self.source))),
             "call" => self.call_asserts(n, methods, depth),
             _ => false,
         })
@@ -402,7 +416,8 @@ impl<'t, 's> Module<'t, 's> {
         };
         let full = text(callee, self.source);
         let last = full.rsplit('.').next().unwrap_or(full);
-        if names_an_assertion(last) {
+        // `(1).should.equal(1)`: sure's `should` chain, the call itself is named `equal`.
+        if names_an_assertion(last) || full.split('.').any(is_should_segment) {
             return true;
         }
         let root = full.split('.').next().unwrap_or(full);
@@ -419,24 +434,38 @@ impl<'t, 's> Module<'t, 's> {
             };
         }
         if let Some(module) = self.imports.get(root) {
-            // The test frameworks themselves are not helper modules: `mock.patch(...)` sets up,
-            // and their asserting calls (`pytest.raises`) are caught by name above.
-            let framework = ["unittest", "pytest"]
-                .iter()
-                .any(|f| module == f || module.starts_with(&format!("{f}.")));
-            return !framework && (module.starts_with('.') || is_support_module(module));
+            return is_helper_module(module);
         }
-        if callee.kind() == "identifier" && depth > 0 {
+        if callee.kind() == "identifier" {
             if let Some(helpers) = self.functions.get(root) {
-                return helpers.iter().any(|helper| {
-                    helper
-                        .child_by_field_name("body")
-                        .is_some_and(|b| self.asserts(b, methods, depth - 1))
-                });
+                return depth > 0
+                    && helpers.iter().any(|helper| {
+                        helper
+                            .child_by_field_name("body")
+                            .is_some_and(|b| self.asserts(b, methods, depth - 1))
+                    });
             }
+            // `from .helpers import *` then `check_order(o)`: a bare name nothing in the module
+            // binds may come from the star import of a relative or support module.
+            return self.wildcards.iter().any(|m| is_helper_module(m));
         }
         false
     }
+}
+
+/// A relative module or one named like test support, other than the test frameworks themselves
+/// (`mock.patch(...)` sets up, and their asserting calls such as `pytest.raises` are caught by
+/// name).
+fn is_helper_module(module: &str) -> bool {
+    let framework = ["unittest", "pytest"]
+        .iter()
+        .any(|f| module == *f || module.starts_with(&format!("{f}.")));
+    !framework && (module.starts_with('.') || is_support_module(module))
+}
+
+/// `should` or `should(..)`, a segment of sure's `x.should.equal(y)` chain.
+fn is_should_segment(segment: &str) -> bool {
+    segment.trim().split('(').next() == Some("should")
 }
 
 /// `x` for `x` or `y as x`.
