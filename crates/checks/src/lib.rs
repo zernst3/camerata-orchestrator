@@ -175,6 +175,28 @@ pub mod clone_rules;
 /// `crates/rules/principles/javascript/react/ui-react-hooks-lint-1.toml`.
 pub mod react_hooks_lint_checker;
 
+/// `UI-STATE-SHAPE-1` (W29 Wave D, `docs/design/2026-10-21_w29-detector-implementation.md`):
+/// React state shaped so one fact is stored twice. Proves two shapes deterministically
+/// (boolean flags that are pairwise exclusive by construction; state whose only writer is an
+/// effect copying a pure expression of its dependencies) and leaves the rest of the rule to the
+/// semantic pass. See `crates/rules/principles/ui/ui-state-shape-1.toml`.
+pub mod state_shape_checker;
+
+/// `STYLE-NEEDLESS-COMPLEXITY-1` (W29 Wave D, `docs/design/2026-10-21_w29-detector-implementation.md`):
+/// a negated conditional (`!x ? a : b`, which is `x ? b : a` written backwards), and a TSX
+/// component prop declared optional that every call site passes with a defined value. Call
+/// sites are found through [`one_import_path_checker`]'s re-export graph, and a component any
+/// of whose references cannot be accounted for is skipped. See
+/// `crates/rules/principles/javascript/style-needless-complexity-1.toml`.
+pub mod needless_complexity_checker;
+
+/// `TESTING-MEANINGFUL-ASSERTION-1` (master sequence 22e, with W29 Wave D,
+/// `docs/design/2026-10-21_w29-detector-implementation.md`): a test whose body holds no
+/// assertion at all, in JavaScript and TypeScript, Python and Rust test code. "Asserts only a
+/// stub" is a judgment left to the semantic pass. See
+/// `crates/rules/principles/testing/testing-meaningful-assertion-1.toml`.
+pub mod test_assertion_checker;
+
 /// The Layer-2 (Governed Development write-time gate) executor for [`arch_checker`]'s
 /// checker registry — "Plug point B" in
 /// `docs/design/2026-07-26_architectural-executor-feasibility.md` §2.3. Composed into

@@ -315,6 +315,9 @@ pub fn all_checkers() -> Vec<Box<dyn ArchChecker>> {
         Box::new(crate::shared_constant_checker::SharedConstantChecker),
         Box::new(crate::dead_code_checker::DeadCodeChecker),
         Box::new(crate::react_hooks_lint_checker::ReactHooksLintChecker),
+        Box::new(crate::state_shape_checker::StateShapeChecker),
+        Box::new(crate::needless_complexity_checker::NeedlessComplexityChecker),
+        Box::new(crate::test_assertion_checker::TestAssertionChecker),
         Box::new(crate::firebase::FirebaseRulesChecker::default()),
         Box::new(crate::firebase::FirebaseFunctionsChecker),
         Box::new(crate::firebase::FirebaseAdminSdkClientChecker),
@@ -601,6 +604,7 @@ mod tests {
             "ARCH-SHARED-CONSTANT-1",
             "ARCH-DEAD-CODE-1",
             "UI-REACT-HOOKS-LINT-1",
+            "STYLE-NEEDLESS-COMPLEXITY-1",
         ] {
             assert!(
                 ids.contains(expected),
@@ -638,6 +642,21 @@ mod tests {
             !ids.contains("ARCH-RESOURCE-LIFECYCLE-1"),
             "ARCH-RESOURCE-LIFECYCLE-1 must stay LLM-advisory-eligible per D3: {ids:?}"
         );
+        // W29 Wave D: the deterministic edge of a rule whose judgment half the semantic pass
+        // still reads.
+        assert!(
+            !ids.contains("UI-STATE-SHAPE-1"),
+            "UI-STATE-SHAPE-1 must stay LLM-advisory-eligible: {ids:?}"
+        );
+        assert!(any_registered_checker_answers("UI-STATE-SHAPE-1"));
+        // 22e: "asserts only a stub" is the judgment half the semantic pass keeps.
+        assert!(
+            !ids.contains("TESTING-MEANINGFUL-ASSERTION-1"),
+            "TESTING-MEANINGFUL-ASSERTION-1 must stay LLM-advisory-eligible: {ids:?}"
+        );
+        assert!(any_registered_checker_answers(
+            "TESTING-MEANINGFUL-ASSERTION-1"
+        ));
         // But the checker IS registered and DOES answer the rule id (just excluded from
         // this particular subtraction set).
         let all_ids: std::collections::HashSet<&str> = all_checkers()

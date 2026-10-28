@@ -173,12 +173,23 @@ struct Module {
 
 type Memo = HashMap<(String, String), Canon>;
 
-struct Model {
+/// The repository's ECMAScript re-export graph. Also the import graph STYLE-NEEDLESS-COMPLEXITY-1
+/// follows to a component's call sites ([`Model::origin`]).
+pub(crate) struct Model {
     modules: HashMap<String, Module>,
 }
 
 impl Model {
-    fn build(files: &[(String, String)], resolver: &EcmaResolver<'_>) -> Self {
+    /// The file and name that really define `name` as exported by `file`, followed through
+    /// re-exports; `None` when the name is absent there or its origin is uncertain.
+    pub(crate) fn origin(&self, file: &str, name: &str) -> Option<(String, String)> {
+        match self.canonicalize(file, name, &mut Vec::new(), &mut Memo::new()) {
+            Canon::Found(found) => Some((found.origin_file, found.origin_name)),
+            Canon::Absent | Canon::Uncertain => None,
+        }
+    }
+
+    pub(crate) fn build(files: &[(String, String)], resolver: &EcmaResolver<'_>) -> Self {
         let emitted = crate::extract::paths::emitted_js_paths(files);
         let mut modules = HashMap::new();
         for (path, content) in files {

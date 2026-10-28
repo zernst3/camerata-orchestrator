@@ -1,0 +1,56 @@
+id = "STYLE-NEEDLESS-COMPLEXITY-1"
+version = 1
+title = "Code says what it means directly: a conditional is not negated just to swap its branches, and a component prop that every caller supplies is not declared optional"
+domain = "javascript"
+layer = "language"
+enforcement = "architectural"
+kind = "defect"
+inspectable = true
+# Severity ceiling, transcribed from the rule's own framing: both shapes cost readability and
+# carry dead handling for a case nobody produces; neither changes what the code does today. The
+# deterministic check emits at medium (a checker never emits low directly); this ceiling brings
+# the exported finding down to low.
+max_severity = "low"
+default = true
+# `grounded` for the first shape: ESLint's core `no-negated-condition` rule states it (its
+# documentation is the citation; no `linter` annotation, because this rule is answered by the
+# repository-wide checker, not routed to the provisioned ESLint tier, and the ESLint rule also
+# flags `!==` comparisons and `if` statements, which this rule deliberately leaves alone). The
+# second shape (an optional prop every caller passes) has no linter equivalent; it is a W29
+# work-order item, checked across files through the import graph. Only the owner sets `verified`.
+verification = "grounded"
+qualifies = "Deterministically checkable, with no judgment involved, and deliberately narrow. Two shapes are reported in JavaScript and TypeScript source: (1) a conditional expression written on one line whose condition is `!` applied to a name, a property read, a subscript or a call, whose branches are not conditionals and not both true and false literals, and which is not itself a branch of another conditional (`!ready ? 'wait' : 'go'` is `ready ? 'go' : 'wait'`); (2) in a TSX component (a function or arrow whose name starts with a capital letter, that renders JSX and takes one parameter typed by an inline object type or by a same-file interface or object type alias that is not exported, not generic and used nowhere else), a member declared optional, other than `children` and other than one given a default in the parameter's destructuring, that every place rendering the component passes with a value that cannot be undefined: an attribute with no value, a string, number, boolean, template, null, object, array, function or JSX value, or a name the calling file declares once as a function or as a constant holding one of those. Call sites are found through the repository's import graph, following re-exports, in production, test and story files alike, and at least two are required. Not reported: a comparison (`a !== b ? x : y`), a double negation, a negated condition inside a chain of conditionals, a conditional spread over several lines (the guard-first form, which can read better as written), a TypeScript non-null assertion, conditional types, `if` statements, and test, story, fixture, generated, vendored and minified files for the first shape; for the second, any component in a package whose manifest declares entry points (`main`, `module`, `exports`, `types`, `typings`, `browser` or `bin`) or that has no manifest, any call site that spreads props or passes a value that may be undefined, and any component referenced other than as a JSX tag anywhere (as a value, inside a type, through a namespace import, a dynamic import or a computed load), named by an MDX, Vue, Svelte or Astro file or by a file the check does not parse, or imported somewhere through a path the check cannot resolve. Only conditional expressions are covered; a negated `if`/`else` is not reported. The first shape matches the documented behavior of ESLint's `no-negated-condition` rule restricted to conditional expressions on a single negated operand; no off-the-shelf linter rule reports the second."
+
+[[sources]]
+url = "https://eslint.org/docs/latest/rules/no-negated-condition"
+title = "ESLint rule documentation: no-negated-condition"
+
+[[sources]]
+url = "https://www.typescriptlang.org/docs/handbook/2/objects.html#optional-properties"
+title = "TypeScript Handbook: Object Types, optional properties"
+
+[[sources]]
+url = "docs/design/2026-10-21_w29-detector-implementation.md"
+title = "Design: the W29 detector layer, Wave D, STYLE-NEEDLESS-COMPLEXITY-1"
+
+[decision]
+question = "Does the code state its conditions and its component props in the most direct form?"
+default = "conditions-and-props-say-what-they-mean"
+why = "A conditional that negates its test only to put the branches in a different order makes every reader undo the negation to see which branch runs when the condition holds, and it is the easiest place to read a branch backwards during a change. An optional prop that every caller supplies makes the component handle a missing value that never arrives: the fallback code and the `undefined` in the prop's type are kept for nothing, and they hide the fact that the prop is required from the next person who renders the component."
+
+[[option]]
+id = "conditions-and-props-say-what-they-mean"
+label = "Conditions are not negated just to swap branches, and props every caller supplies are required"
+directive = "Write a conditional expression on its positive condition: `ready ? 'go' : 'wait'`, not `!ready ? 'wait' : 'go'`. Keep a negated form only where it reads better, such as a guard that handles the empty case first over several lines. Declare a component prop optional only when some caller genuinely omits it; when every caller supplies it, declare it required and remove the fallback for the missing value."
+remediation = """
+For a negated conditional: remove the `!` and swap the two branches, as the finding shows. For an optional prop: remove the `?` from the prop in the props type, delete the fallback the component uses for the missing value (a default, a `??` or an `undefined` check), and run the type checker, which confirms that every call site already passes it.
+"""
+effort = "low"
+why = "Each fix is a local edit the type checker verifies. Afterwards the condition reads the way it runs, and the props type tells the next caller that the prop is required."
+
+[[option]]
+id = "conditions-and-props-carry-needless-indirection"
+violates = true
+label = "Conditions are negated to swap their branches, or props every caller supplies are declared optional"
+directive = "Conditional expressions may negate their condition to choose the order of the branches, and component props may be declared optional even when every caller supplies them."
+why = "A negated conditional makes every reader undo the negation before seeing which branch runs, and it is easy to read backwards during a change. An optional prop that every caller supplies keeps fallback code and an `undefined` in its type for a case that never happens, and tells the next caller the prop can be left out when the component was only ever used with it."
