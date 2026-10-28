@@ -3839,7 +3839,13 @@ pub(crate) fn normalize_requested_path(raw: &str) -> String {
 /// whose defining pattern lives entirely in a later chunk may get a less-informed pick; this
 /// is a disclosed limitation, not a silent one.
 ///
-/// Returns `Ok(vec![])` when `alternatives` is empty (nothing to decide — no call made).
+/// Returns `Ok((vec![], None))` when `alternatives` is empty (nothing to decide — no call made).
+///
+/// A reply cut off at the output limit is not read as "no answer". The entries that closed before
+/// the cut are kept ([`salvage_alternative_answers`]); the rules it never reached are asked again
+/// ONCE as a smaller batch; a rule still unanswered then gets no entry (it keeps its default
+/// directive) and the second value of the result is the plain-words reason the caller records
+/// as a pass, naming those rules. `None` when every rule was decided.
 #[allow(clippy::too_many_arguments)]
 async fn recommend_alternatives(
     llm: &dyn LlmPort,
@@ -3851,9 +3857,9 @@ async fn recommend_alternatives(
     audit_model: Option<&str>,
     feedback: Option<(&crate::transcript::TranscriptStore, &str)>,
     meter: Option<&UsageMeter>,
-) -> anyhow::Result<Vec<RuleRecommendation>> {
+) -> anyhow::Result<(Vec<RuleRecommendation>, Option<String>)> {
     if alternatives.is_empty() {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), None));
     }
     let repo_map = build_repo_map(map_files, nonce);
     let file_chunks = chunk_files(files, CHUNK_DIGEST_CHARS);
@@ -3882,10 +3888,15 @@ async fn recommend_alternatives(
         alternatives.chunks(ALTERNATIVES_BATCH_SIZE).collect();
     let n_chunks = rule_chunks.len();
     let mut recommendations = Vec::with_capacity(alternatives.len());
+    let mut gaps = AlternativesGaps::default();
 
     for (chunk_idx, alt_chunk) in rule_chunks.into_iter().enumerate() {
         // The best answer so far for each rule of this batch, in the batch's order.
         let mut best: Vec<Option<RuleRecommendation>> = vec![None; alt_chunk.len()];
+        // Rules whose MOST RECENT ask (a first send and its smaller retry included) got no
+        // answer because the reply was cut off at the output limit.
+        let mut unanswered_ids: std::collections::BTreeSet<String> =
+            std::collections::BTreeSet::new();
         for (digest_idx, digest) in digests.iter().enumerate() {
             let pending: Vec<RuleAlternatives> = alt_chunk
                 .iter()
@@ -3900,10 +3911,6 @@ async fn recommend_alternatives(
             if digest_idx > 0 && meter.is_some_and(UsageMeter::retry_blocked) {
                 break;
             }
-            let prompt = format!(
-                "Repository: {repo}\n\n{repo_map}{digest}\n\n{}",
-                build_alternatives_block(&pending)
-            );
             // Single-call runs keep the EXACT session id + role this function always used
             // (`audit-{repo}-alternatives`); the `-bN` suffix + batch label only appears once
             // there's more than one chunk, and `-dN` once a rule is asked on a further digest.
@@ -3915,74 +3922,111 @@ async fn recommend_alternatives(
             if digest_idx > 0 {
                 session.push_str(&format!("-d{digest_idx}"));
             }
-            if let Some((store, key)) = feedback {
-                store.register(
-                    key,
-                    crate::transcript::AgentTranscript {
-                        session_id: session.clone(),
-                        role: format!(
-                            "recommending {} alternative(s) — {repo}{}{}",
-                            pending.len(),
-                            if n_chunks > 1 {
-                                format!(" (batch {}/{n_chunks})", chunk_idx + 1)
-                            } else {
-                                String::new()
-                            },
-                            if digest_idx > 0 {
-                                format!(" (file chunk {}/{})", digest_idx + 1, digests.len())
-                            } else {
-                                String::new()
-                            }
-                        ),
-                        prompt: prompt.clone(),
-                        output: String::new(),
-                        status: "running".to_string(),
-                    },
-                );
-            }
-            let mut req = LlmRequest::new(prompt)
-                .with_system(crate::prompt_frame::with_untrusted_clause(
-                    alternatives_system_prompt(),
-                    nonce,
-                ))
-                .with_max_tokens(4096)
-                .with_temperature(AUDIT_TEMPERATURE);
-            if let Some(m) = audit_model {
-                req = req.with_model(m.to_string());
-            }
-            // Routed through the STREAMING transport EVEN WHEN there is no live transcript to
-            // feed (`feedback = None`) - the CLI leg's heartbeat resets on any progress and
-            // SALVAGES partial output on a late kill, instead of the flat non-streaming path's
-            // fixed 300s deadline with no partial credit for a near-complete run.
-            let resp_result = if let Some((store, key)) = feedback {
-                let mut on_delta = |t: &str| store.append_output_raw(key, &session, t);
-                llm.complete_streaming(req, &mut on_delta).await
-            } else {
-                let mut on_delta = |_: &str| {};
-                llm.complete_streaming(req, &mut on_delta).await
-            };
-            if let Some((store, key)) = feedback {
-                store.set_status(
-                    key,
-                    &session,
-                    if resp_result.is_ok() {
-                        "done"
-                    } else {
-                        "blocked"
-                    },
-                );
-            }
-            let resp = match resp_result {
-                Ok(r) => r,
-                Err(e) => {
-                    meter_failed(meter, Stage::Alternatives, &e);
-                    return Err(e);
+            let role = format!(
+                "recommending {} alternative(s) — {repo}{}{}",
+                pending.len(),
+                if n_chunks > 1 {
+                    format!(" (batch {}/{n_chunks})", chunk_idx + 1)
+                } else {
+                    String::new()
+                },
+                if digest_idx > 0 {
+                    format!(" (file chunk {}/{})", digest_idx + 1, digests.len())
+                } else {
+                    String::new()
                 }
+            );
+            let ask = AlternativesAsk {
+                llm,
+                repo,
+                repo_map: &repo_map,
+                digest,
+                nonce,
+                audit_model,
+                feedback,
+                meter,
             };
-            if let Some(m) = meter {
-                m.record_stage(Stage::Alternatives, &resp);
+            let resp = ask.send(&pending, &session, &role).await?;
+            let (mut answered, unanswered) = if resp.truncated {
+                // A reply cut off at the output limit: the entries that closed before the cut
+                // are answers; the rest were never reached.
+                gaps.attempts = gaps.attempts.max(1);
+                let (recs, rest) = salvage_alternative_answers(&resp.text, &pending);
+                if recs.is_empty() {
+                    if let Some(m) = meter {
+                        m.record_wasted(Stage::Alternatives, &resp);
+                    }
+                }
+                (recs, rest)
+            } else {
+                (
+                    parse_alternative_recommendations(&resp.text, &pending),
+                    Vec::new(),
+                )
+            };
+            let mut still_unanswered: Vec<RuleAlternatives> = Vec::new();
+            if !unanswered.is_empty() {
+                // ONE retry of what the cut-off reply left out, as a smaller batch: the rules not
+                // yet answered, and when the first reply answered none of them, half of the
+                // batch at a time, so the retry is never the same size as the send that failed.
+                let why_not = if !efficiency_of(meter).truncation_retry {
+                    Some("the retry of a cut-off reply is switched off".to_string())
+                } else {
+                    None
+                };
+                let sizes = if unanswered.len() == pending.len() && unanswered.len() > 1 {
+                    unanswered.len().div_ceil(2)
+                } else {
+                    unanswered.len()
+                };
+                for (n, group) in unanswered.chunks(sizes).enumerate() {
+                    if let Some(why) = &why_not {
+                        gaps.retry_note.get_or_insert_with(|| why.clone());
+                        still_unanswered.extend_from_slice(group);
+                        continue;
+                    }
+                    if meter.is_some_and(UsageMeter::retry_blocked) {
+                        gaps.retry_note
+                            .get_or_insert_with(|| SPEND_LIMIT_BEFORE_RETRY.to_string());
+                        still_unanswered.extend_from_slice(group);
+                        continue;
+                    }
+                    gaps.attempts = gaps.attempts.max(2);
+                    let retry_session = format!("{session}-r{n}");
+                    let retry_role = format!(
+                        "recommending {} alternative(s) — {repo} (retry of a cut-off reply)",
+                        group.len()
+                    );
+                    match ask.send(group, &retry_session, &retry_role).await {
+                        Ok(retry) if retry.truncated => {
+                            let (recs, rest) = salvage_alternative_answers(&retry.text, group);
+                            if recs.is_empty() {
+                                if let Some(m) = meter {
+                                    m.record_wasted(Stage::Alternatives, &retry);
+                                }
+                            }
+                            answered.extend(recs);
+                            still_unanswered.extend(rest);
+                        }
+                        Ok(retry) => {
+                            answered.extend(parse_alternative_recommendations(&retry.text, group));
+                        }
+                        // The failed call is already on the meter; the answers so far stand.
+                        Err(e) => {
+                            gaps.retry_note
+                                .get_or_insert_with(|| format!("the retry did not complete: {e}"));
+                            still_unanswered.extend_from_slice(group);
+                        }
+                    }
+                }
             }
-            for rec in parse_alternative_recommendations(&resp.text, &pending) {
+            for a in &pending {
+                unanswered_ids.remove(&a.rule_id);
+            }
+            for a in &still_unanswered {
+                unanswered_ids.insert(a.rule_id.clone());
+            }
+            for rec in answered {
                 if let Some(at) = alt_chunk.iter().position(|a| a.rule_id == rec.rule_id) {
                     // The first answer is kept unless a later digest finds the rule applicable.
                     if best[at]
@@ -3991,6 +4035,24 @@ async fn recommend_alternatives(
                     {
                         best[at] = Some(rec);
                     }
+                }
+            }
+        }
+        // A rule whose last ask was cut off and never answered keeps its default directive (it has
+        // no entry here); one that an earlier file chunk did answer keeps that answer, and says it
+        // was judged on fewer chunks.
+        for (a, b) in alt_chunk.iter().zip(best.iter_mut()) {
+            if !unanswered_ids.contains(&a.rule_id) {
+                continue;
+            }
+            match b {
+                None => gaps.undecided.push(a.rule_id.clone()),
+                Some(rec) => {
+                    rec.recommendation_reasoning.push_str(
+                        " A reply for a later file chunk was cut off, so this was judged on fewer \
+                         file chunks.",
+                    );
+                    gaps.partial.push(a.rule_id.clone());
                 }
             }
         }
@@ -4005,7 +4067,199 @@ async fn recommend_alternatives(
         }
         recommendations.extend(best.into_iter().flatten());
     }
-    Ok(recommendations)
+    Ok((recommendations, gaps.reason()))
+}
+
+/// What the recommendation pass could not settle because a reply was cut off at the output limit
+/// and the one smaller retry did not finish the job. Plain data; [`Self::reason`] words it.
+#[derive(Default)]
+struct AlternativesGaps {
+    /// Rules no reply answered. They keep their default directive.
+    undecided: Vec<String>,
+    /// Rules an earlier file chunk answered whose later-chunk reply was cut off.
+    partial: Vec<String>,
+    /// The most sends one rule batch needed (the first, then the retry).
+    attempts: usize,
+    /// Why the retry was not sent or did not complete, when that is the case.
+    retry_note: Option<String>,
+}
+
+impl AlternativesGaps {
+    /// The sentence the run records for what was left undecided, or `None` when nothing was. No
+    /// failure wording: the rules named keep their default directive and the sentence says so.
+    fn reason(&self) -> Option<String> {
+        if self.undecided.is_empty() && self.partial.is_empty() {
+            return None;
+        }
+        let list = |ids: &[String]| {
+            const SHOWN: usize = 8;
+            let mut out = ids
+                .iter()
+                .take(SHOWN)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ");
+            if ids.len() > SHOWN {
+                out.push_str(&format!(" and {} more", ids.len() - SHOWN));
+            }
+            out
+        };
+        let plural = |n: usize| if n == 1 { "rule" } else { "rules" };
+        let mut text = format!(
+            "the model's reply deciding which option each rule follows was cut off at the output \
+             limit after {} attempt{}",
+            self.attempts.max(1),
+            if self.attempts <= 1 { "" } else { "s" }
+        );
+        if let Some(note) = &self.retry_note {
+            text.push_str(&format!(" ({note})"));
+        }
+        if !self.undecided.is_empty() {
+            text.push_str(&format!(
+                "; {} {} ({}) keep their default directive",
+                self.undecided.len(),
+                plural(self.undecided.len()),
+                list(&self.undecided)
+            ));
+        }
+        if !self.partial.is_empty() {
+            text.push_str(&format!(
+                "; {} {} ({}) judged on fewer file chunks than the repo has",
+                self.partial.len(),
+                plural(self.partial.len()),
+                list(&self.partial)
+            ));
+        }
+        Some(text)
+    }
+}
+
+/// The inputs every call of the recommendation pass shares, so the first send and a retry build
+/// the same request.
+struct AlternativesAsk<'a> {
+    llm: &'a dyn LlmPort,
+    repo: &'a str,
+    repo_map: &'a str,
+    digest: &'a str,
+    nonce: &'a crate::prompt_frame::FrameNonce,
+    audit_model: Option<&'a str>,
+    feedback: Option<(&'a crate::transcript::TranscriptStore, &'a str)>,
+    meter: Option<&'a UsageMeter>,
+}
+
+impl AlternativesAsk<'_> {
+    /// One call asking for `rules`. A transport error is recorded on the meter and returned; a
+    /// reply (cut off or not) is recorded as the alternatives stage's and returned for the caller
+    /// to read.
+    async fn send(
+        &self,
+        rules: &[RuleAlternatives],
+        session: &str,
+        role: &str,
+    ) -> anyhow::Result<crate::llm::LlmResponse> {
+        let Self {
+            llm,
+            repo,
+            repo_map,
+            digest,
+            nonce,
+            audit_model,
+            feedback,
+            meter,
+        } = *self;
+        let prompt = format!(
+            "Repository: {repo}\n\n{repo_map}{digest}\n\n{}",
+            build_alternatives_block(rules)
+        );
+        if let Some((store, key)) = feedback {
+            store.register(
+                key,
+                crate::transcript::AgentTranscript {
+                    session_id: session.to_string(),
+                    role: role.to_string(),
+                    prompt: prompt.clone(),
+                    output: String::new(),
+                    status: "running".to_string(),
+                },
+            );
+        }
+        let mut req = LlmRequest::new(prompt)
+            .with_system(crate::prompt_frame::with_untrusted_clause(
+                alternatives_system_prompt(),
+                nonce,
+            ))
+            .with_max_tokens(4096)
+            .with_temperature(AUDIT_TEMPERATURE);
+        if let Some(m) = audit_model {
+            req = req.with_model(m.to_string());
+        }
+        // Routed through the STREAMING transport EVEN WHEN there is no live transcript to
+        // feed (`feedback = None`) - the CLI leg's heartbeat resets on any progress and
+        // SALVAGES partial output on a late kill, instead of the flat non-streaming path's
+        // fixed 300s deadline with no partial credit for a near-complete run.
+        let resp_result = if let Some((store, key)) = feedback {
+            let mut on_delta = |t: &str| store.append_output_raw(key, session, t);
+            llm.complete_streaming(req, &mut on_delta).await
+        } else {
+            let mut on_delta = |_: &str| {};
+            llm.complete_streaming(req, &mut on_delta).await
+        };
+        if let Some((store, key)) = feedback {
+            store.set_status(
+                key,
+                session,
+                if resp_result.is_ok() {
+                    "done"
+                } else {
+                    "blocked"
+                },
+            );
+        }
+        let resp = match resp_result {
+            Ok(r) => r,
+            Err(e) => {
+                meter_failed(meter, Stage::Alternatives, &e);
+                return Err(e);
+            }
+        };
+        if let Some(m) = meter {
+            m.record_stage(Stage::Alternatives, &resp);
+        }
+        Ok(resp)
+    }
+}
+
+/// What a cut-off recommendation reply still answers: the recommendations for the rules in
+/// `pending` whose entry closed before the cut (read by the same brace-balanced walker the scan
+/// uses, [`complete_array_objects`]), and the rules it never reached. A rule the reply did not
+/// reach gets NO entry here (not the fallback answer a whole reply's omission gets): the caller
+/// asks again or leaves the rule at its default directive and says so.
+fn salvage_alternative_answers(
+    text: &str,
+    pending: &[RuleAlternatives],
+) -> (Vec<RuleRecommendation>, Vec<RuleAlternatives>) {
+    let mut kept: Vec<&str> = Vec::new();
+    let mut answered: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for object in complete_array_objects(text, "recommendations") {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(object) else {
+            continue;
+        };
+        let Some(id) = v["rule_id"].as_str().map(str::trim) else {
+            continue;
+        };
+        if pending.iter().any(|a| a.rule_id == id) && answered.insert(id.to_string()) {
+            kept.push(object);
+        }
+    }
+    let (done, rest): (Vec<RuleAlternatives>, Vec<RuleAlternatives>) = pending
+        .iter()
+        .cloned()
+        .partition(|a| answered.contains(&a.rule_id));
+    if kept.is_empty() {
+        return (Vec::new(), rest);
+    }
+    let synthetic = format!("{{\"recommendations\":[{}]}}", kept.join(","));
+    (parse_alternative_recommendations(&synthetic, &done), rest)
 }
 
 // ════════════════════════════════════════════════════════════════════════════════════
@@ -5314,15 +5568,29 @@ fn salvage_complete_findings(
     text: &str,
     adopted: &std::collections::HashSet<String>,
 ) -> (Vec<Finding>, Vec<ProposedRule>) {
-    let none = || (Vec::new(), Vec::new());
-    // Anchored at the JSON object: prose before the first `{` that happens to say "findings" is
-    // not the key, and the key must open the object or follow a comma.
+    let valid = complete_array_objects(text, "findings");
+    if valid.is_empty() {
+        return (Vec::new(), Vec::new());
+    }
+    let synthetic = format!("{{\"findings\":[{}]}}", valid.join(","));
+    parse_ai_findings(repo, &synthetic, adopted)
+}
+
+/// The brace-balanced walker behind [`salvage_complete_findings`], keyed so another stage whose
+/// reply is cut off can use it (the alternatives stage reads `recommendations`): every COMPLETE
+/// `{...}` object of the array under `key` that closed before the cut, in order, each one valid
+/// JSON. The unfinished last object and anything after it are not guessed at.
+fn complete_array_objects<'a>(text: &'a str, key: &str) -> Vec<&'a str> {
+    let none = Vec::new;
+    // Anchored at the JSON object: prose before the first `{` that happens to say the key is not
+    // the key, and the key must open the object or follow a comma.
     let Some(obj_start) = text.find('{') else {
         return none();
     };
     let json = &text[obj_start..];
+    let quoted = format!("\"{key}\"");
     let Some(key) = json
-        .match_indices("\"findings\"")
+        .match_indices(quoted.as_str())
         .map(|(i, _)| i)
         .find(|&i| {
             json[..i]
@@ -5334,7 +5602,7 @@ fn salvage_complete_findings(
     else {
         return none();
     };
-    let after = &json[key + "\"findings\"".len()..];
+    let after = &json[key + quoted.len()..];
     let Some(open) = after.find('[') else {
         return none();
     };
@@ -5390,15 +5658,10 @@ fn salvage_complete_findings(
     }
     // One object at a time: a complete-looking object that is not valid JSON is skipped on its
     // own and does not cost the others.
-    let valid: Vec<&str> = objects
+    objects
         .into_iter()
         .filter(|o| serde_json::from_str::<serde_json::Value>(o).is_ok())
-        .collect();
-    if valid.is_empty() {
-        return none();
-    }
-    let synthetic = format!("{{\"findings\":[{}]}}", valid.join(","));
-    parse_ai_findings(repo, &synthetic, adopted)
+        .collect()
 }
 
 /// Why a pass failed when its spend limit stopped a retry the reply needed (the reply was cut
@@ -9724,7 +9987,17 @@ pub async fn audit_repo(
             )
             .await
             {
-                Ok(recs) => {
+                Ok((recs, unfinished)) => {
+                    // Rules a cut-off reply never reached keep their default directive (they
+                    // have no entry in `recs`); the run says so rather than saying nothing.
+                    if let Some(reason) = unfinished {
+                        failed_passes.push(FailedPass {
+                            repo: repo.to_string(),
+                            pass: "rule-alternative recommendations".to_string(),
+                            reason,
+                            files_not_reviewed: 0,
+                        });
+                    }
                     for rec in &recs {
                         let Some(a) = ask_alts.iter().find(|a| a.rule_id == rec.rule_id) else {
                             continue;
@@ -11211,6 +11484,9 @@ mod malformed_reply_tests;
 
 #[cfg(test)]
 mod fn_batch_a_tests;
+
+#[cfg(test)]
+mod smoke_findings_tests;
 
 #[cfg(test)]
 mod drift_tests;
