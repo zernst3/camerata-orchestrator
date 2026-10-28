@@ -51,6 +51,19 @@ async fn corpus() -> Option<RuleSet> {
 /// pipeline-config rules, all of which stay scannable here.
 const EMIT_ONLY_RULES: &[(&str, &str)] = &[
     (
+        "SEC-NO-END-OF-LIFE-RUNTIME-1",
+        "Its findings come from a dedicated deterministic pass over the versions a repository \
+         declares, checked against endoflife.date, never from the rule-scan loop or the AI pass; \
+         a rule-scan result would be a verified-clean claim about a feed that pass may not have \
+         reached.",
+    ),
+    (
+        "SEC-NO-KNOWN-VULNERABLE-RUNTIME-1",
+        "Its findings come from a dedicated deterministic pass that looks declared runtime \
+         versions up in the NVD, never from the rule-scan loop or the AI pass; a rule-scan result \
+         would be a verified-clean claim about a feed that pass may not have reached.",
+    ),
+    (
         "AGENTIC-NO-TEST-TAMPER-1",
         "Its real detector inspects an agent's unified diff inside Camerata's own pipeline and \
          never runs during a client scan; the rule's own `qualifies` says the in-repo layer-4 \

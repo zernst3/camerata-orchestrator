@@ -567,12 +567,20 @@ role.
     its universe. **This one is an inference from the ledger answer plus the function's input
     type; no test asserts it directly.**
 
+- **The two runtime rules (2026-10-28).** `SEC-NO-END-OF-LIFE-RUNTIME-1` and
+  `SEC-NO-KNOWN-VULNERABLE-RUNTIME-1` are `inspectable = false` for the same reason as the rest of
+  this list (the rule-scan loop and the AI pass cannot assess them) but, unlike the rest, they DO
+  appear in findings: a dedicated deterministic pass (`crates/server/src/runtime_audit.rs`) reads
+  declared runtime versions and raises their findings after the rule scan, the same way the
+  dependency audit raises `DEP-AUDIT-1`. They get no ledger entry and so can never be "verified
+  clean". `EMIT_ONLY_RULES` below therefore holds 28 entries, not 26.
+
 - **Population.** 26 rules were `inspectable = false` on 2026-10-14, and every rule declares the
   field. By folder: `agentic/` 16, `process/` 4, `universal/` 4, `ci-cd/` 1, `permissions/` 1.
   Note the spread - `PROC-*` ids appear in three different directories and the `SPIRIT-*` and
   `ORCH-*` families are MIXED, which is exactly why a lexical prefix rule could not have done
   this job and the flag had to be per-rule. The population is pinned **by id list**, not by a
-  number: `EMIT_ONLY_RULES` (`crates/rules/tests/w16_inspectable_gate.rs:52`, 26 `(id, reason)`
+  number: `EMIT_ONLY_RULES` (`crates/rules/tests/w16_inspectable_gate.rs:52`, 28 `(id, reason)`
   entries) and `req_w16_the_emit_only_population_is_pinned` (`:366`). Its complement
   `DELIBERATELY_SCANNABLE` (`:182`, 11 ids including `SPIRIT-FILE-SIZE-1`,
   `PROC-PR-CONCURRENCY-1` and `PROC-HIDE-DEAD-END-1`) is pinned at `:393`, and the two are

@@ -1,0 +1,338 @@
+{
+ "resultsPerPage": 4,
+ "startIndex": 0,
+ "totalResults": 4,
+ "format": "NVD_CVE",
+ "version": "2.0",
+ "timestamp": "2026-10-28T15:28:32.401",
+ "vulnerabilities": [
+  {
+   "cve": {
+    "id": "CVE-2023-32006",
+    "vulnStatus": "Modified",
+    "published": "2023-08-15T16:15:11.460",
+    "descriptions": [
+     {
+      "lang": "en",
+      "value": "The use of `module.constructor.createRequire()` can bypass the policy mechanism and require modules outside of the policy.json definition for a given module.\n\nThis vulnerability affects all users using the experimental policy mechanism in all active release lines: 16.x, 18.x, and, 20.x.\n\nPlease note that at the time this CVE was issued, the policy is an experimental feature of Node.js."
+     }
+    ],
+    "metrics": {
+     "cvssMetricV31": [
+      {
+       "source": "nvd@nist.gov",
+       "type": "Primary",
+       "cvssData": {
+        "version": "3.1",
+        "vectorString": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
+        "baseScore": 8.8,
+        "baseSeverity": "HIGH",
+        "attackVector": "NETWORK",
+        "attackComplexity": "LOW",
+        "privilegesRequired": "LOW",
+        "userInteraction": "NONE",
+        "scope": "UNCHANGED",
+        "confidentialityImpact": "HIGH",
+        "integrityImpact": "HIGH",
+        "availabilityImpact": "HIGH"
+       },
+       "exploitabilityScore": 2.8,
+       "impactScore": 5.9
+      },
+      {
+       "source": "134c704f-9b21-4f2e-91b3-4a467353bcc0",
+       "type": "Secondary",
+       "cvssData": {
+        "version": "3.1",
+        "vectorString": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
+        "baseScore": 8.8,
+        "baseSeverity": "HIGH",
+        "attackVector": "NETWORK",
+        "attackComplexity": "LOW",
+        "privilegesRequired": "LOW",
+        "userInteraction": "NONE",
+        "scope": "UNCHANGED",
+        "confidentialityImpact": "HIGH",
+        "integrityImpact": "HIGH",
+        "availabilityImpact": "HIGH"
+       },
+       "exploitabilityScore": 2.8,
+       "impactScore": 5.9
+      }
+     ]
+    },
+    "configurations": [
+     {
+      "nodes": [
+       {
+        "operator": "OR",
+        "negate": false,
+        "cpeMatch": [
+         {
+          "vulnerable": true,
+          "criteria": "cpe:2.3:a:nodejs:node.js:*:*:*:*:-:*:*:*",
+          "versionStartIncluding": "16.0.0",
+          "versionEndIncluding": "16.20.1",
+          "matchCriteriaId": "F7394398-D1FA-4786-B962-7D0FFF50DB2D"
+         },
+         {
+          "vulnerable": true,
+          "criteria": "cpe:2.3:a:nodejs:node.js:*:*:*:*:-:*:*:*",
+          "versionStartIncluding": "18.0.0",
+          "versionEndIncluding": "18.17.0",
+          "matchCriteriaId": "7DAF267F-6FDD-4914-B37E-181B91BF8B64"
+         },
+         {
+          "vulnerable": true,
+          "criteria": "cpe:2.3:a:nodejs:node.js:*:*:*:*:-:*:*:*",
+          "versionStartIncluding": "20.0.0",
+          "versionEndIncluding": "20.5.0",
+          "matchCriteriaId": "145E971E-F0AF-49A7-8A9C-3AAFE01C076B"
+         }
+        ]
+       }
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "cve": {
+    "id": "CVE-2023-44487",
+    "vulnStatus": "Analyzed",
+    "published": "2023-10-10T14:15:10.883",
+    "descriptions": [
+     {
+      "lang": "en",
+      "value": "The HTTP/2 protocol allows a denial of service (server resource consumption) because request cancellation can reset many streams quickly, as exploited in the wild in August through October 2023."
+     }
+    ],
+    "metrics": {
+     "cvssMetricV31": [
+      {
+       "source": "nvd@nist.gov",
+       "type": "Primary",
+       "cvssData": {
+        "version": "3.1",
+        "vectorString": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
+        "baseScore": 7.5,
+        "baseSeverity": "HIGH",
+        "attackVector": "NETWORK",
+        "attackComplexity": "LOW",
+        "privilegesRequired": "NONE",
+        "userInteraction": "NONE",
+        "scope": "UNCHANGED",
+        "confidentialityImpact": "NONE",
+        "integrityImpact": "NONE",
+        "availabilityImpact": "HIGH"
+       },
+       "exploitabilityScore": 3.9,
+       "impactScore": 3.6
+      },
+      {
+       "source": "134c704f-9b21-4f2e-91b3-4a467353bcc0",
+       "type": "Secondary",
+       "cvssData": {
+        "version": "3.1",
+        "vectorString": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
+        "baseScore": 7.5,
+        "baseSeverity": "HIGH",
+        "attackVector": "NETWORK",
+        "attackComplexity": "LOW",
+        "privilegesRequired": "NONE",
+        "userInteraction": "NONE",
+        "scope": "UNCHANGED",
+        "confidentialityImpact": "NONE",
+        "integrityImpact": "NONE",
+        "availabilityImpact": "HIGH"
+       },
+       "exploitabilityScore": 3.9,
+       "impactScore": 3.6
+      }
+     ]
+    },
+    "configurations": [
+     {
+      "nodes": [
+       {
+        "operator": "OR",
+        "negate": false,
+        "cpeMatch": [
+         {
+          "vulnerable": true,
+          "criteria": "cpe:2.3:a:nodejs:node.js:*:*:*:*:*:*:*:*",
+          "versionStartIncluding": "18.0.0",
+          "versionEndExcluding": "18.18.2",
+          "matchCriteriaId": "94BAB9EB-1527-4D9A-BADE-0708579536CF"
+         },
+         {
+          "vulnerable": true,
+          "criteria": "cpe:2.3:a:nodejs:node.js:*:*:*:*:*:*:*:*",
+          "versionStartIncluding": "20.0.0",
+          "versionEndExcluding": "20.8.1",
+          "matchCriteriaId": "69843DE4-4721-4F0A-A9B7-0F6DF5AAA388"
+         }
+        ]
+       }
+      ]
+     }
+    ],
+    "cisaExploitAdd": "2023-10-10"
+   }
+  },
+  {
+   "cve": {
+    "id": "CVE-2024-21892",
+    "vulnStatus": "Modified",
+    "published": "2024-02-20T02:15:50.567",
+    "descriptions": [
+     {
+      "lang": "en",
+      "value": "On Linux, Node.js ignores certain environment variables if those may have been set by an unprivileged user while the process is running with elevated privileges with the only exception of CAP_NET_BIND_SERVICE.\nDue to a bug in the implementation of this exception, Node.js incorrectly applies this exception even when certain other capabilities have been set.\nThis allows unprivileged users to inject code that inherits the process's elevated privileges."
+     }
+    ],
+    "metrics": {
+     "cvssMetricV31": [
+      {
+       "source": "nvd@nist.gov",
+       "type": "Primary",
+       "cvssData": {
+        "version": "3.1",
+        "vectorString": "CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
+        "baseScore": 7.8,
+        "baseSeverity": "HIGH",
+        "attackVector": "LOCAL",
+        "attackComplexity": "LOW",
+        "privilegesRequired": "LOW",
+        "userInteraction": "NONE",
+        "scope": "UNCHANGED",
+        "confidentialityImpact": "HIGH",
+        "integrityImpact": "HIGH",
+        "availabilityImpact": "HIGH"
+       },
+       "exploitabilityScore": 1.8,
+       "impactScore": 5.9
+      }
+     ],
+     "cvssMetricV30": [
+      {
+       "source": "support@hackerone.com",
+       "type": "Secondary",
+       "cvssData": {
+        "version": "3.0",
+        "vectorString": "CVSS:3.0/AV:L/AC:H/PR:L/UI:N/S:C/C:H/I:H/A:N",
+        "baseScore": 7.5,
+        "baseSeverity": "HIGH",
+        "attackVector": "LOCAL",
+        "attackComplexity": "HIGH",
+        "privilegesRequired": "LOW",
+        "userInteraction": "NONE",
+        "scope": "CHANGED",
+        "confidentialityImpact": "HIGH",
+        "integrityImpact": "HIGH",
+        "availabilityImpact": "NONE"
+       },
+       "exploitabilityScore": 1.1,
+       "impactScore": 5.8
+      }
+     ]
+    },
+    "configurations": [
+     {
+      "nodes": [
+       {
+        "operator": "OR",
+        "negate": false,
+        "cpeMatch": [
+         {
+          "vulnerable": true,
+          "criteria": "cpe:2.3:a:nodejs:node.js:*:*:*:*:*:*:*:*",
+          "versionStartIncluding": "18.0.0",
+          "versionEndExcluding": "18.19.1",
+          "matchCriteriaId": "D2FD72E7-64E4-4F5C-B39D-3DBB87CF8675"
+         },
+         {
+          "vulnerable": true,
+          "criteria": "cpe:2.3:a:nodejs:node.js:*:*:*:*:*:*:*:*",
+          "versionStartIncluding": "20.0.0",
+          "versionEndExcluding": "20.11.1",
+          "matchCriteriaId": "1C20DA8F-2F0C-4323-B67D-8ADF50D5983A"
+         },
+         {
+          "vulnerable": true,
+          "criteria": "cpe:2.3:a:nodejs:node.js:*:*:*:*:*:*:*:*",
+          "versionStartIncluding": "21.0.0",
+          "versionEndExcluding": "21.6.2",
+          "matchCriteriaId": "211B62F4-4CC3-41CA-91FA-E14C5AC0335A"
+         }
+        ]
+       }
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "cve": {
+    "id": "CVE-2026-21711",
+    "vulnStatus": "Analyzed",
+    "published": "2026-03-30T20:16:19.260",
+    "descriptions": [
+     {
+      "lang": "en",
+      "value": "A flaw in Node.js Permission Model network enforcement leaves Unix Domain Socket (UDS) server operations without the required permission checks, while all comparable network paths correctly enforce them.\r\n\r\nAs a result, code running under `--permission` without `--allow-net` can create and expose local IPC endpoints, allowing communication with other processes on the same host outside of the intended network restriction boundary.\r\n\r\nThis vulnerability affects Node.js **25.x** processes using the Permission Model where `--allow-net` is intentionally omitted to restrict network access. Note that `--allow-net` is currently an experimental feature."
+     }
+    ],
+    "metrics": {
+     "cvssMetricV30": [
+      {
+       "source": "support@hackerone.com",
+       "type": "Secondary",
+       "cvssData": {
+        "version": "3.0",
+        "vectorString": "CVSS:3.0/AV:L/AC:L/PR:L/UI:N/S:U/C:L/I:L/A:L",
+        "baseScore": 5.3,
+        "baseSeverity": "MEDIUM",
+        "attackVector": "LOCAL",
+        "attackComplexity": "LOW",
+        "privilegesRequired": "LOW",
+        "userInteraction": "NONE",
+        "scope": "UNCHANGED",
+        "confidentialityImpact": "LOW",
+        "integrityImpact": "LOW",
+        "availabilityImpact": "LOW"
+       },
+       "exploitabilityScore": 1.8,
+       "impactScore": 3.4
+      }
+     ]
+    },
+    "configurations": [
+     {
+      "nodes": [
+       {
+        "operator": "OR",
+        "negate": false,
+        "cpeMatch": [
+         {
+          "vulnerable": true,
+          "criteria": "cpe:2.3:a:nodejs:node.js:*:*:*:*:-:*:*:*",
+          "versionEndExcluding": "20.0.0",
+          "matchCriteriaId": "D7398F67-CF80-47B5-A737-568F3280E999"
+         },
+         {
+          "vulnerable": true,
+          "criteria": "cpe:2.3:a:nodejs:node.js:*:*:*:*:-:*:*:*",
+          "versionStartIncluding": "25.0.0",
+          "versionEndIncluding": "25.8.1",
+          "matchCriteriaId": "89D03065-041A-4A59-95C4-B2AE7EE36439"
+         }
+        ]
+       }
+      ]
+     }
+    ]
+   }
+  }
+ ]
+}

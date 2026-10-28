@@ -103,6 +103,7 @@ pub mod review_agent;
 pub mod routine;
 pub mod run;
 mod run_target;
+pub mod runtime_audit;
 pub mod scan_cache;
 pub mod scan_routing;
 pub mod scan_tools;
@@ -6345,6 +6346,11 @@ async fn onboard_audit(
             // Pass-1 W1 seal fix: snapshotted so the whole loop's net additions get ONE ledger
             // stage entry (a no-op when every repo's dep-audit found nothing new) — see
             // `crate::scan_ledger::record_addition_stage`'s doc comment.
+            // Runtime and framework end of life and known runtime vulnerabilities: the rows join
+            // the enrichment range below, so a known-exploited runtime vulnerability is labelled
+            // and floored exactly like a dependency one.
+            let runtime_rows_in = report.findings.len();
+            crate::runtime_audit::run_runtime_audit(&mut report, &sources).await;
             let dep_audit_rows_in = report.findings.len();
             let mut osv_runs: Vec<crate::vuln_intel::OsvRun> = Vec::new();
             for (spec, dir) in &sources {
@@ -6378,12 +6384,8 @@ async fn onboard_audit(
             // ORDER: this MUST stay before `apply_scan_severity_bounds` below. The KEV floor to
             // critical is written first and the corpus bounds get the last word; see
             // `vuln_intel::apply` and `tests/vuln_intel_call_order.rs`.
-            crate::vuln_intel::enrich_dependency_findings(
-                &mut report,
-                dep_audit_rows_in,
-                &osv_runs,
-            )
-            .await;
+            crate::vuln_intel::enrich_dependency_findings(&mut report, runtime_rows_in, &osv_runs)
+                .await;
             crate::scan_ledger::record_addition_stage(
                 &mut report.ledger,
                 "dependency-audit-merge",
@@ -7651,6 +7653,9 @@ pub(crate) async fn start_audit_job(
                 let dep_audit_timeout = Duration::from_secs(60);
                 // Pass-1 W1 seal fix: see the identical comment in `onboard_audit`'s synchronous
                 // path — one ledger stage entry for the whole loop's net additions.
+                // Runtime end of life and runtime vulnerabilities (see `onboard_audit`).
+                let runtime_rows_in = report.findings.len();
+                crate::runtime_audit::run_runtime_audit(&mut report, &sources).await;
                 let dep_audit_rows_in = report.findings.len();
                 let mut osv_runs: Vec<crate::vuln_intel::OsvRun> = Vec::new();
                 for (spec, dir) in &sources {
@@ -7689,13 +7694,12 @@ pub(crate) async fn start_audit_job(
                 // which a feed counts as failed (cache, or not checked) and the rows are released.
                 crate::vuln_intel::enrich_dependency_findings(
                     &mut report,
-                    dep_audit_rows_in,
+                    runtime_rows_in,
                     &osv_runs,
                 )
                 .await;
-                if report.findings.len() > dep_audit_rows_in {
-                    body_jobs
-                        .add_findings(&body_jid, report.findings[dep_audit_rows_in..].to_vec());
+                if report.findings.len() > runtime_rows_in {
+                    body_jobs.add_findings(&body_jid, report.findings[runtime_rows_in..].to_vec());
                 }
                 crate::scan_ledger::record_addition_stage(
                     &mut report.ledger,

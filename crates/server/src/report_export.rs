@@ -1712,6 +1712,10 @@ pub(crate) fn tool_coverage_disclosures(notes: &[crate::onboard::CoverageNote]) 
                 // Withheld on purpose (a client engagement with no opt-in), not a tool failure:
                 // the note's own text names the step and why.
                 client_tooling_text(notes, tool)
+            } else if crate::runtime_audit::is_runtime_note_tool(tool) {
+                // Not a tool either: the runtime end-of-life and runtime vulnerability pass. Its
+                // notes are already written for the reader and name what was not checked.
+                every_note_text(notes, tool)
             } else if tool == crate::RULE_CORPUS_COVERAGE_TOOL {
                 // Also not a tool name: these notes mean "a rule file in the library could
                 // not be read, so that rule was never applied".
@@ -1728,6 +1732,18 @@ pub(crate) fn tool_coverage_disclosures(notes: &[crate::onboard::CoverageNote]) 
             }
         })
         .collect()
+}
+
+/// Every note for `tool`, in order and deduplicated, as one disclosure line. For passes whose
+/// notes are already client-voice sentences (the runtime end-of-life and vulnerability pass).
+fn every_note_text(notes: &[crate::onboard::CoverageNote], tool: &str) -> String {
+    let mut seen: Vec<&str> = Vec::new();
+    for n in notes.iter().filter(|n| n.tool == tool) {
+        if !seen.contains(&n.message.as_str()) {
+            seen.push(n.message.as_str());
+        }
+    }
+    seen.join(" ")
 }
 
 /// The client-tooling notes for `tool`, in order and deduplicated, as one disclosure line.
