@@ -218,8 +218,8 @@ fn fixture_path_is_none_when_neither_env_var_is_set() {
 
 /// Make a directory that passes the fixture validation: a git repo marker and the key file.
 fn make_valid_fixture(root: &Path) {
-    std::fs::create_dir_all(root.join(".git")).unwrap();
-    std::fs::write(root.join("GROUND_TRUTH.md"), "x").unwrap();
+    std::fs::create_dir_all(root.join(".git")).expect("temp fixture setup");
+    std::fs::write(root.join("GROUND_TRUTH.md"), "x").expect("temp fixture setup");
 }
 
 #[test]
@@ -230,7 +230,7 @@ fn unset_fixture_variables_are_a_visible_skip_not_a_failure() {
 
 #[test]
 fn a_valid_fixture_directory_is_ready() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = tempfile::tempdir().expect("temp fixture setup");
     make_valid_fixture(tmp.path());
     assert_eq!(
         resolve_fixture(Some(tmp.path().to_path_buf())),
@@ -240,7 +240,7 @@ fn a_valid_fixture_directory_is_ready() {
 
 #[test]
 fn a_set_but_missing_fixture_directory_is_misconfigured() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = tempfile::tempdir().expect("temp fixture setup");
     let missing = tmp.path().join("not-here");
     assert_eq!(
         resolve_fixture(Some(missing.clone())),
@@ -250,8 +250,8 @@ fn a_set_but_missing_fixture_directory_is_misconfigured() {
 
 #[test]
 fn a_set_directory_without_ground_truth_is_misconfigured() {
-    let tmp = tempfile::tempdir().unwrap();
-    std::fs::create_dir_all(tmp.path().join(".git")).unwrap();
+    let tmp = tempfile::tempdir().expect("temp fixture setup");
+    std::fs::create_dir_all(tmp.path().join(".git")).expect("temp fixture setup");
     assert_eq!(
         resolve_fixture(Some(tmp.path().to_path_buf())),
         FixtureResolution::Misconfigured(tmp.path().to_path_buf())
