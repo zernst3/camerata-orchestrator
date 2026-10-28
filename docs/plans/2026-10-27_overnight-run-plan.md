@@ -72,6 +72,21 @@ H. By 08:30: morning summary at the top of `docs/OVERNIGHT_DECISIONS.md`; the PR
    loss by turning that one switch off and rerunning the affected fixture.
 5. Record results in the spike results doc; switches that lose recall default to OFF.
 
+## Needs Zach (paused for sign-off; collected through the night)
+
+- `.claude/settings.json` is still tracked and holds his username, the private fixture folder,
+  benchmark repo names and answer-key file names. Proposed: keep only generic glob deny rules
+  (e.g. `**/*-ANSWER-KEY.md`, `**/GROUND_TRUTH.md`) in the tracked file and move the
+  machine-specific absolute-path rules to his user-level `~/.claude/settings.json` (the agent is
+  blocked from editing permission settings). The personal-path CI check excludes this file until
+  then.
+- `deny.toml` allows MPL-2.0 (file-level copyleft) for a few crates used unmodified; CI is green
+  with the exception in place. Confirm or reject.
+- Are the benchmark fixture names (tutorly, lumen, hearth, membersclub, faktura,
+  supabase-portal) private? They appear in about 20 public docs and tests (synthetic secret
+  shapes in release_gate_acceptance.rs). If private, a scrub pass follows.
+- Branch protection on `main` (D3), the release tag, the API sweep's Keychain approval.
+
 ## Status log (newest first)
 
 - 00:10 (Oct 28 local 00:10 = 04:10 UTC): false-negative hunt (cloud) delivered: 12 HIGH, 26
