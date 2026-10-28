@@ -81,7 +81,7 @@ fn words(text: &str) -> Vec<String> {
         if is_iso_date(core) {
             out.push("date".to_string());
         } else {
-            for piece in core.split(|c: char| c == '-' || c == '/' || c == '\u{2013}') {
+            for piece in core.split(['-', '/', '\u{2013}']) {
                 let w = piece
                     .trim_matches(|c: char| !c.is_alphanumeric() && c != '~' && c != '+')
                     .to_lowercase();
@@ -475,9 +475,15 @@ fn req_count_scanner_ignores_dates_and_numbered_list_items() {
             "count scanner read a date or list marker as a domain count in {text:?}"
         );
     }
-    let got = count_claims("As of 2026-10-27, the library holds 440 rules.", &["rule", "rules"]);
+    let got = count_claims(
+        "As of 2026-10-27, the library holds 440 rules.",
+        &["rule", "rules"],
+    );
     assert_eq!(got.first().map(|(n, _)| *n), Some(440), "{got:?}");
-    let got = count_claims("3. The library holds 440 rules across 22 domains", &["domains"]);
+    let got = count_claims(
+        "3. The library holds 440 rules across 22 domains",
+        &["domains"],
+    );
     assert_eq!(got.first().map(|(n, _)| *n), Some(22), "{got:?}");
     // The headline scanner must keep reading the shape through a trailing date.
     let got = headline_claims("(**417 rules across 20 domains** as of 2026-10-11)");
