@@ -4875,11 +4875,25 @@ printf '%s\n' '{"type":"result","is_error":false,"stop_reason":"refusal","result
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir).expect("create fake-claude dir");
             let bin = dir.join("claude");
+            // Every fake exits at once when CAMERATA_FAKE_WARM is set, and is run that way once
+            // here. macOS security-checks a newly written executable on its first run, which
+            // took over 2s on a loaded machine; uncounted, that check landed inside the 1s
+            // windows these tests measure and failed them with "(no output)". The timed run
+            // is now the second run, so the windows measure Camerata and not the OS scan.
+            let script = match script.split_once('\n') {
+                Some((shebang, rest)) => {
+                    format!("{shebang}\n[ -n \"$CAMERATA_FAKE_WARM\" ] && exit 0\n{rest}")
+                }
+                None => script.to_string(),
+            };
             let mut f = std::fs::File::create(&bin).expect("create fake claude");
             f.write_all(script.as_bytes()).expect("write fake claude");
             drop(f);
             std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755))
                 .expect("chmod fake claude");
+            let _ = std::process::Command::new(&bin)
+                .env("CAMERATA_FAKE_WARM", "1")
+                .status();
             Self { dir }
         }
     }
