@@ -69,6 +69,9 @@ pub struct RunControls {
     /// `camerata inspect --fix-model`). `None` or blank = not set: the fix stage then follows the
     /// `fix_on_haiku` measure. See [`crate::ai_audit::resolve_fix_model`].
     pub fix_model: Option<String>,
+    /// H5: the three-pass consensus option (`crate::consensus`). Off by default: about three
+    /// times the AI spend, and a finding only one pass in three reports is dropped.
+    pub consensus: bool,
 }
 
 impl RunControls {

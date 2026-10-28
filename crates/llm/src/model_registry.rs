@@ -282,6 +282,16 @@ const UNKNOWN_MODEL_SHAPE: RequestShapeSpec = RequestShapeSpec {
     effort: EffortPolicy::Omit,
 };
 
+/// Whether `model_id` accepts sampling parameters (`temperature`, `top_p`, `top_k`): false for
+/// a strict model and for an id the catalog does not know (presumed strict, like
+/// [`UNKNOWN_MODEL_SHAPE`]). Callers that WANT a temperature ask this first, so they never send
+/// a field [`conform_messages_body`] would have to strip.
+pub fn accepts_sampling_params(model_id: &str) -> bool {
+    !registry_entry_for(model_id)
+        .map_or(UNKNOWN_MODEL_SHAPE, |e| e.shape)
+        .strict_params
+}
+
 /// THE one place a Messages-API request body is made valid for its model. Every Anthropic
 /// `/v1/messages`, batch `params` and `count_tokens` body is passed through this just before
 /// it is sent; no call site tests a model id itself.

@@ -154,6 +154,7 @@ async fn plain_postgres_repo_fires_both_rules_through_camerata_inspect_end_to_en
         client: "Example Client Ltd".to_string(),
         client_engagement: true,
         run_client_tooling: false,
+        consensus: false,
     };
 
     let outcome = run_inspect_with_key_presence(args, false)

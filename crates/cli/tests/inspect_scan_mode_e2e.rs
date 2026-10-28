@@ -201,6 +201,7 @@ async fn run(backend: ProjectBackend, efficiency: Vec<String>) -> RunResult {
         // engagement refuses.
         client_engagement: false,
         run_client_tooling: false,
+        consensus: false,
     };
     // The export needs `typst`; either outcome is fine here (see the module doc).
     let _ = run_inspect_pipeline_with(

@@ -124,6 +124,7 @@ async fn deterministic_only_inspect_runs_end_to_end_and_writes_a_valid_zip() {
         client: "Example Client Ltd".to_string(),
         client_engagement: true,
         run_client_tooling: false,
+        consensus: false,
     };
 
     let outcome = run_inspect_with_key_presence(args, false)
@@ -281,6 +282,7 @@ async fn headless_inspect_discloses_when_the_commodity_taint_pass_does_not_run()
         client: "Example Client Ltd".to_string(),
         client_engagement: true,
         run_client_tooling: false,
+        consensus: false,
     };
 
     let outcome = run_inspect_with_key_presence(args, false).await;

@@ -261,6 +261,7 @@ fn meter(efficiency: EfficiencyConfig, cap: Option<f64>) -> UsageMeter {
         max_cost_usd: cap,
         estimate_hint_usd: None,
         fix_model: None,
+        consensus: false,
     })
 }
 

@@ -768,6 +768,13 @@ pub struct LlmRequest {
     /// field is not sent and the model uses its own default. Sent on the real-time API path
     /// only; the CLI backend and non-Anthropic vendors ignore it.
     pub effort: Option<String>,
+    /// H5: the sampling temperature to ask for, or `None` for the provider's default. Sent ONLY
+    /// to a model whose catalog shape accepts sampling parameters
+    /// ([`crate::model_registry::accepts_sampling_params`]); the strict models never receive
+    /// it (so it never trips `conform_messages_body`'s strip warning) and the one legacy model in
+    /// the catalog, Haiku 4.5, does. Ignored by the CLI
+    /// backend (`claude -p` has no temperature flag) and by OpenRouter.
+    pub temperature: Option<f32>,
 }
 
 impl LlmRequest {
@@ -782,6 +789,7 @@ impl LlmRequest {
             repo_read_dir: None,
             repo_read_extra_dirs: Vec::new(),
             effort: None,
+            temperature: None,
         }
     }
 
@@ -789,6 +797,19 @@ impl LlmRequest {
     pub fn with_effort(mut self, effort: impl Into<String>) -> Self {
         self.effort = Some(effort.into());
         self
+    }
+
+    /// Ask for sampling temperature `t` where the model accepts it (see [`Self::temperature`]).
+    pub fn with_temperature(mut self, t: f32) -> Self {
+        self.temperature = Some(t);
+        self
+    }
+
+    /// The temperature to put on the wire for `model`: [`Self::temperature`] when the model
+    /// accepts sampling parameters, else `None`.
+    fn temperature_for(&self, model: &str) -> Option<f32> {
+        self.temperature
+            .filter(|_| crate::model_registry::accepts_sampling_params(model))
     }
 
     /// Grant the CLI-backend model ON-DEMAND READ access to a local repo clone: it runs with
@@ -1836,6 +1857,10 @@ pub struct BatchItemParams {
     /// body.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output_config: Option<serde_json::Value>,
+    /// H5: the request's temperature, only for a model that accepts it (see
+    /// [`LlmRequest::temperature`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f32>,
 }
 
 /// One message in the `messages` array of a batch item.
@@ -1878,6 +1903,9 @@ fn messages_request_body(req: &LlmRequest, model: &str, cache_ttl: CacheTtl) -> 
         body["system"] = serde_json::json!(system);
     }
     apply_request_effort(req, &mut body);
+    if let Some(t) = req.temperature_for(model) {
+        body["temperature"] = serde_json::json!(t);
+    }
     crate::model_registry::conform_messages_body(model, &mut body);
     body
 }
@@ -1968,6 +1996,7 @@ pub fn build_batch_item(
                 content,
             }],
             output_config: shape.get("output_config").cloned(),
+            temperature: req.temperature_for(model),
         },
     }
 }
@@ -2867,6 +2896,9 @@ pub async fn call_with_fallback(
     }
     Err(last_err)
 }
+
+#[cfg(test)]
+mod temperature_tests;
 
 #[cfg(test)]
 mod tests {

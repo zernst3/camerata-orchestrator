@@ -38,7 +38,7 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-mod preflight;
+pub(crate) mod preflight;
 
 use camerata_server::ai_audit::{ActualUsage, FailedPass, ScanMode};
 use camerata_server::llm::{resolve_backend, BackendResolution, ProjectBackend};
@@ -117,6 +117,9 @@ pub struct InspectArgs {
     /// client's own code (today the `cargo clippy` scan preview, which builds the crate) in a
     /// client engagement. Recorded in the ledger and stated in the report either way.
     pub run_client_tooling: bool,
+    /// `--consensus`: run the AI audit three times and keep what two runs agree on (see
+    /// [`camerata_server::consensus`]). Off by default.
+    pub consensus: bool,
 }
 
 impl InspectArgs {
@@ -148,6 +151,7 @@ impl InspectArgs {
             max_cost_usd,
             estimate_hint_usd: None,
             fix_model: self.fix_model.clone(),
+            consensus: self.consensus,
         })
     }
 }
@@ -774,6 +778,7 @@ pub async fn run_inspect_pipeline_with(
             cap_usd: controls.max_cost_usd,
             exact,
             terse_output: controls.efficiency.terse_output,
+            consensus: controls.consensus,
         });
         (seams.preflight_sink)(&pf.text);
         controls.estimate_hint_usd = pf.estimate_usd;
@@ -1279,6 +1284,7 @@ mod tests {
             // The maintainer's own run: these tests exercise the `cli` backend's validation.
             client_engagement: false,
             run_client_tooling: false,
+            consensus: false,
         }
     }
 

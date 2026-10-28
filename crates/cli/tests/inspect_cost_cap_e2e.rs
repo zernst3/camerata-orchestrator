@@ -117,6 +117,7 @@ fn args(repo: &Path, export: &Path, cap: Option<f64>) -> InspectArgs {
         client: "Example Client Ltd".to_string(),
         client_engagement: true,
         run_client_tooling: false,
+        consensus: false,
     }
 }
 
