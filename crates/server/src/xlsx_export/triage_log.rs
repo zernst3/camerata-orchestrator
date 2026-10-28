@@ -227,7 +227,7 @@ pub(super) fn write_triage_log_sheet(
         1,
         0,
         "Per rule: what the AI pass proposed, what review kept, held or set aside, what it \
-         threw out, and why.",
+         threw out and why.",
     )?;
     const HEADER_ROW: u32 = 3;
     for (c, h) in COLUMNS.iter().enumerate() {
