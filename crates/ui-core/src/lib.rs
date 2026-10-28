@@ -35,3 +35,4 @@ pub(crate) mod test_support;
 pub mod triage;
 pub mod viewer;
 pub mod viewer_find;
+pub mod walkthrough;

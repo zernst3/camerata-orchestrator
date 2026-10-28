@@ -182,6 +182,48 @@ Repository Workspace · Settings · Docs**.
 
 ---
 
+## 2a. Guided inspection (the walkthrough)
+
+A short guided mode for the Inspection, from an empty app to an exported package. A small popup
+points at the real control on screen (with an arrow, and the control lightly highlighted), says in a
+sentence or two what it does, and shows "Step N of 12" with **Back**, **Next** and **Exit**. It
+never clicks, types or decides anything for you.
+
+**Turning it on**
+- The **Guided inspection** switch on the **Onboard repos** screen, where an inspection starts. On
+  means the walkthrough runs alongside the real flow; off hides it. The switch is remembered for
+  you on this computer (it is an app setting, not part of any project, so a project export never
+  carries it).
+- On a first launch with no projects, the Projects home offers it once: "Want a guided first
+  inspection?" **No thanks** is remembered and the offer is not made again; the switch stays
+  available.
+- **Start walkthrough** in the **Help** menu, or the same line in the command palette (Ctrl+K or
+  Cmd+K), starts it again from step 1 at any time.
+
+**How it behaves**
+- Most steps move on by themselves when you do the thing (open a project, press the audit button).
+  **Next** skips ahead, and is how the steps that only explain are passed. **Back** goes back.
+- If the control is not on screen (you are on another page, or the inspection has not run yet), the
+  popup says how to get there instead of pointing at nothing.
+- **Esc** exits, as does **Exit** (and **Done** on the last step); exiting also turns the switch off.
+  Esc is left alone while a reason prompt, the code viewer, the stacked view, the palette or a dialog
+  is open, or while you are typing in a field.
+- It gets out of the way: while a reason prompt, the code viewer, the stacked view, the command
+  palette or any dialog is open, the popup is hidden, and it comes back when they close. Starting
+  the walkthrough is refused (with a note saying why) while any of those is open.
+- Keyboard and screen readers: starting it moves the keyboard into the popup, each step is
+  announced, and closing it puts the keyboard back on the control it was pointing at.
+
+**What it covers (twelve steps).** Create or open a project; add the client repository; the client
+name; the model backend and where the key is saved; the stack rules; the line count and cost
+estimate; running the inspection; failed or skipped passes; the review queue and its four decisions;
+the speed tools (stacked review, the code viewer, the palette); review time; exporting the package.
+This first version covers the Inspection only. Where a step's own control does not exist yet (the
+client name field in the inspection setup, the spending cap), it points at the nearest control that
+does.
+
+---
+
 ## 3. Onboarding a repo (the main flow)
 
 Open **Onboard repos**. The flow: **detect stack → pick rules → scan the repo for violations (audit)
@@ -633,7 +675,8 @@ fresh scan starts a new session; a crash mid-scan just re-runs the scan).
    previous finding, **Open in the code viewer** (`O`), **Review this group stacked** (`B`, offered
    only on a deviation or defect row), the pane's **Full detail** and Rule Hub buttons, **Undo**
    (offered only while the five-second undo is live), the four **Order** cuts (the cut you are in
-   is not listed), the strip's **Pause** / **Resume** button and its **Review time** button. A
+   is not listed), the strip's **Pause** / **Resume** button and its **Review time** button, and
+   **Start walkthrough** (the Help menu's item; see §2a). A
    decision line has the same rules as its key: Confirm and Tech debt apply at once with the
    five-second undo, while Ignore and False positive open the reason prompt and write nothing
    until you commit a reason. A line whose control is not on screen is not listed, and a line is checked again at the
