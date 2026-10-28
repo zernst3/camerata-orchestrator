@@ -367,6 +367,7 @@ async fn regenerate_sample_report() {
             audited_rule_ids: audited_rule_ids.into_iter().map(String::from).collect(),
             camerata_version: "0.4.0".to_string(),
             osv_scanner_version: Some("1.9.0".to_string()),
+            vulnerability_data: None,
             started_at: "2026-07-26T15:30:00Z".to_string(),
             finished_at: "2026-07-26T15:42:00Z".to_string(),
             model_sessions: Vec::new(),

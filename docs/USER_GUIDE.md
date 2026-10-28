@@ -1830,6 +1830,17 @@ a row sits where its own columns mean something:
 | **False Positives** | Everything you dispositioned as a false positive, kept rather than deleted. |
 | **Coverage** | What was checked and with what result, which tools could not run, which rules did not run this scan, and the "not assessed" rows in their own "checks we could not complete" section. |
 
+**Known exploited and exploit probability on dependency findings.** Each vulnerable dependency is
+checked against two public feeds: the CISA Known Exploited Vulnerabilities (KEV) catalog and the
+FIRST.org EPSS exploit-probability scores. Matching is by CVE, including a CVE that a GitHub or
+RustSec advisory lists as an alias. A dependency on the KEV catalog is labelled "Known exploited" and
+raised to critical severity; a dependency with an EPSS score shows its probability of exploitation
+in the next 30 days and its percentile. The export's `README.txt` and `manifest.json` state how
+current each source was ("Vulnerability data (CISA KEV) as of 2026-10-27", likewise for EPSS and
+OSV). When a feed cannot be reached, the scan still completes, a cached copy up to 7 days old is
+used and named as cached, and with no usable copy the line says plainly that the feed was not
+checked, and no finding is labelled from it.
+
 The Coverage sheet opens with one plain summary sentence written for a client, and the Result column
 reads "Clean — nothing found" or "N sites found" rather than a bare integer. Two coverage honesty
 properties are worth knowing because they were both once wrong: a rule that found something and then

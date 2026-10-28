@@ -84,6 +84,11 @@ fn typst_on_path() -> bool {
 #[tokio::test]
 #[serial_test::serial(process_env)]
 async fn deterministic_only_inspect_runs_end_to_end_and_writes_a_valid_zip() {
+    // Test isolation: with the dependency audit disabled no osv-scanner run happens, so neither
+    // the CISA KEV nor the FIRST EPSS feed is fetched and nothing is written to the real user
+    // data dir's vuln-intel cache. (`vuln_intel::enrich_dependency_findings` honours the same
+    // variable.)
+    let _no_dep_audit = camerata_test_env::EnvGuard::set("CAMERATA_DISABLE_DEP_AUDIT", "1");
     if !typst_on_path() {
         eprintln!("skipping deterministic_only_inspect_runs_end_to_end_and_writes_a_valid_zip: typst not on PATH");
         return;

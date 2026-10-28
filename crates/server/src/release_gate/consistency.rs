@@ -397,6 +397,8 @@ pub struct ReadmeProvenance {
     pub release_checks: Option<Vec<String>>,
     /// The spend-limit line is present (the inspection was stopped by the operator's limit).
     pub cost_cap_reached: bool,
+    /// Every `Vulnerability data (<feed>) ...` stamp line, verbatim and in README order.
+    pub vulnerability_data: Vec<String>,
 }
 
 pub fn parse_readme_provenance(readme: &str) -> ReadmeProvenance {
@@ -425,6 +427,8 @@ pub fn parse_readme_provenance(readme: &str) -> ReadmeProvenance {
             p.model_backend = Some(v.to_string());
         } else if let Some(v) = line.strip_prefix("Model provider: ") {
             p.model_provider = Some(v.to_string());
+        } else if line.starts_with(crate::vuln_intel::README_PREFIX) {
+            p.vulnerability_data.push(line.to_string());
         } else if line == crate::COST_CAP_README_LINE {
             p.cost_cap_reached = true;
         } else if let Some(v) = line.strip_prefix("Release checks: ") {
@@ -514,6 +518,22 @@ pub fn verify_readme_provenance(readme: &str, manifest: &Value) -> Vec<Problem> 
             .unwrap_or(false)
     {
         mismatch("Spend limit");
+    }
+
+    // The vulnerability-data stamp: the README's stamp lines are exactly the manifest's
+    // `inspection.vulnerability_data.<feed>.stamp` values, in order. A package built before the
+    // stamp existed has neither, which agrees.
+    let manifest_stamps: Vec<String> = manifest["inspection"]["vulnerability_data"]
+        .as_object()
+        .map(|feeds| {
+            feeds
+                .values()
+                .filter_map(|feed| feed["stamp"].as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    if parsed.vulnerability_data != manifest_stamps {
+        mismatch("Vulnerability data");
     }
 
     // Generic: every non-null value in the manifest's inspection block is in the README.

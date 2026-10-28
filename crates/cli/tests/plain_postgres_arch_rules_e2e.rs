@@ -128,7 +128,13 @@ async fn plain_postgres_repo_selects_both_rules_via_the_real_curated_selection()
 /// corpus-documented" label an armed-but-uncited deterministic finding would carry) — this is
 /// exactly what the C3-3 real-path arming bug silently broke.
 #[tokio::test]
+#[serial_test::serial(process_env)]
 async fn plain_postgres_repo_fires_both_rules_through_camerata_inspect_end_to_end() {
+    // Test isolation: with the dependency audit disabled no osv-scanner run happens, so neither
+    // the CISA KEV nor the FIRST EPSS feed is fetched and nothing is written to the real user
+    // data dir's vuln-intel cache. (`vuln_intel::enrich_dependency_findings` honours the same
+    // variable.)
+    let _no_dep_audit = camerata_test_env::EnvGuard::set("CAMERATA_DISABLE_DEP_AUDIT", "1");
     let repo_dir = tempfile::tempdir().expect("create temp dir for the fixture repo");
     stage_git_repo(repo_dir.path(), &plain_postgres_files());
     let export_dir = tempfile::tempdir().expect("create temp dir for the export zip");

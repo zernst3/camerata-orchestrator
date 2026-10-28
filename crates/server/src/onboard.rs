@@ -654,6 +654,13 @@ pub struct ScanProvenance {
     /// deterministic floor (and therefore dep-audit) ran. `None` when
     /// `run_deterministic` was false (dep-audit never ran).
     pub osv_scanner_version: Option<String>,
+    /// "Vulnerability data as of": how current the CISA KEV, FIRST EPSS and OSV data behind the
+    /// dependency findings was, or plainly that a feed was not checked (see
+    /// [`crate::vuln_intel`]). `None` when no dependency audit ran (or the report predates the
+    /// stamp); the export then states every feed as not checked. `serde(default)` so a
+    /// previously persisted report still loads.
+    #[serde(default)]
+    pub vulnerability_data: Option<crate::vuln_intel::VulnDataStamp>,
     /// RFC3339 timestamp when this audit run started.
     pub started_at: String,
     /// RFC3339 timestamp when this audit run finished.
@@ -2660,6 +2667,7 @@ pub async fn audit_repos_with_llm_controlled(
         camerata_version: env!("CARGO_PKG_VERSION").to_string(),
         osv_scanner_version: run_deterministic
             .then(|| crate::tool_provisioning::OSV_SCANNER_VERSION.to_string()),
+        vulnerability_data: None,
         started_at,
         finished_at: chrono::Utc::now().to_rfc3339(),
         // Filled by [`audit_repos`], the one place that builds a real CLI `Llm`; an injected
@@ -6309,6 +6317,7 @@ mod tests {
             ],
             camerata_version: env!("CARGO_PKG_VERSION").to_string(),
             osv_scanner_version: Some("v1.9.2".to_string()),
+            vulnerability_data: None,
             started_at: "2026-07-23T00:00:00+00:00".to_string(),
             finished_at: "2026-07-23T00:05:00+00:00".to_string(),
             model_sessions: vec![crate::llm::ModelSession {

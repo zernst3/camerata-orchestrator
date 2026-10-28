@@ -2829,6 +2829,48 @@ thing:
   reused verbatim from the PDF's own `AuditReportJson` rather than re-derived.
 - **`README.txt`**, the orientation note.
 
+**Vulnerability intelligence on dependency rows** (`crates/server/src/vuln_intel.rs`). After the
+osv-scanner pass over every repo, `onboard_audit`, `onboard_audit_start` and `camerata inspect`
+each call `vuln_intel::enrich_dependency_findings` once over the rows that pass added (one
+implementation for the desktop app and the CLI). It fetches two deterministic feeds, nothing
+scraped: the CISA KEV catalog (JSON) and the FIRST.org EPSS API, queried by CVE in batches of
+100. Matching is by CVE: `dep_audit::parse_osv_json` records each advisory's own CVE id plus its
+CVE aliases in the `osv_cve_ids` capture, so a GHSA or RUSTSEC advisory matches through its alias.
+Only the advisory's own `aliases` list is read, and ids are compared upper-cased. **Owner decision
+(logged): a GHSA that aliases a KEV CVE counts as known exploited even when its package differs
+from the product KEV lists for that CVE.** KEV names a vendor and product, but OSV treats an
+advisory and its aliases as the same vulnerability, and matching on the vendor's free-text product
+name would miss real hits (the same flaw ships under many package names), so identity is the CVE
+alone.
+A KEV hit is labelled "Known exploited" in `detail` (capture `vuln_known_exploited`) and its
+severity is floored to `critical`; an EPSS score and percentile are appended to `detail` (captures
+`vuln_epss_*`). Each feed is fetched once per run and cached under `<data dir>/camerata/vuln-intel/`
+with its fetch time. A failed fetch falls back to a cache fetched within `MAX_CACHE_AGE_DAYS` (7);
+otherwise nothing is labelled from that feed, a `vulnerability-intel` coverage note is recorded,
+and the stamp says the feed was not checked. A body that downloads but is not believable counts as
+a failed fetch too: a KEV catalog that yields fewer than `KEV_MIN_ENTRIES` (100) usable rows (the
+real one has over a thousand), or an EPSS page whose rows all fail to parse, never becomes an
+empty catalog marked as checked. KEV and EPSS are fetched concurrently under one
+`ENRICHMENT_BUDGET` (45 s); a feed that has not answered by then is a failed fetch, which bounds
+how long a scan, and the live view of a background audit job (it receives the dependency rows only
+after enrichment), waits on the network. Cache files are written to a temp file and renamed, so a
+crash never leaves a torn cache. The EPSS cache is kept per CVE, each entry on its own clock, and
+a successful run merges into it (entries past the age limit are dropped), so an offline run for
+another project can use scores an earlier run fetched; the stamp is dated by the oldest entry it
+used. Every date derived from a fetch time is a UTC date and the stamp text says "UTC". When FIRST
+returns no rows at all, the EPSS line says plainly that no scores were published for these CVEs as
+of the request date (UTC) rather than presenting a score date that was never returned. Ordering:
+the enrichment runs before `apply_scan_severity_bounds`, which has the last word on severity, so
+the "Severity raised to critical" sentence stays true only while no rule governing `DEP-AUDIT-1`
+findings declares a `max_severity`; `vuln_intel/tests.rs` and `tests/vuln_intel_call_order.rs`
+pin both the order and the absence of such a ceiling. The stamp (`ScanProvenance::vulnerability_data`)
+carries, per feed (KEV `dateReleased`, the EPSS score date, the OSV query date), either "as of
+<date>" or "not checked (<reason>)". It reaches `README.txt` as `Vulnerability data (<feed>) ...`
+lines and `manifest.json` as `inspection.vulnerability_data.<feed>` (`status`, `as_of`, `stamp`);
+the release gate's README/manifest agreement check compares the two. A report with no stamp
+(no dependency audit, or persisted before the stamp existed) renders every feed as not checked.
+Tests use fixture feeds under `crates/server/tests/fixtures/vuln_intel/` and no network.
+
 **The workbook is partitioned by finding KIND**, which replaced a single flat
 findings sheet on 2026-10-11. A row renders where its own columns mean something,
 and in exactly one place. Worksheets, in the order `build_workbook` adds them:

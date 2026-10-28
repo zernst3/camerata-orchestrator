@@ -70,6 +70,7 @@ fn report_with_refs(refs: Vec<AuditedRef>, audited: &[&str]) -> ScanReport {
             audited_rule_ids: audited.iter().map(ToString::to_string).collect(),
             camerata_version: "0.0.0-test".to_string(),
             osv_scanner_version: None,
+            vulnerability_data: None,
             started_at: "2026-10-21T00:00:00Z".to_string(),
             finished_at: "2026-10-21T00:05:00Z".to_string(),
             model_sessions: Vec::new(),
