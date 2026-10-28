@@ -98,6 +98,9 @@ pub(crate) fn plan_run_target(
             ),
         };
     };
+    if let Some(reason) = project_membership_refusal(story_id, project_repos) {
+        return RunTarget::Refused { reason };
+    }
     if !scoped.is_empty() && !scoped.contains(&repo) {
         return RunTarget::Refused {
             reason: format!(
@@ -133,6 +136,28 @@ pub(crate) fn plan_run_target(
         branch: branch.to_string(),
         clone,
     }
+}
+
+/// Why a unit of work may not run (or have a branch recorded) in the active project: its
+/// repository, named in its id (`OWNER/REPO#N`), is not one of the project's repositories.
+/// `None` when the unit belongs to the project, when the project lists no repositories (it
+/// imposes no list) or when the id names no repository (callers refuse that on their own).
+/// Repository names compare case-insensitively, as the hosting service treats them.
+pub(crate) fn project_membership_refusal(
+    story_id: &str,
+    project_repos: Option<&[String]>,
+) -> Option<String> {
+    let project_repos = project_repos.filter(|r| !r.is_empty())?;
+    let (repo, _) = story_id.rsplit_once('#')?;
+    if project_repos.iter().any(|r| r.eq_ignore_ascii_case(repo)) {
+        return None;
+    }
+    Some(format!(
+        "This unit of work belongs to `{repo}`, which is not one of the active project's \
+         repositories ({}). Switch to the project that owns it, or add `{repo}` to this \
+         project, then try again. (Unit `{story_id}`.)",
+        project_repos.join(", ")
+    ))
 }
 
 /// [`plan_run_target`] against the live state: the active project and the configured paths.
@@ -306,6 +331,51 @@ mod tests {
             reason.contains("not among this unit's Repos in scope"),
             "{reason}"
         );
+    }
+
+    #[test]
+    fn an_issue_repository_outside_the_active_project_is_refused() {
+        let clone = git_clone_dir();
+        let path = clone.path().display().to_string();
+        // The unit's id names `acme/api`, but the active project only has other repositories.
+        let target = plan_run_target(
+            "acme/api#7",
+            &uow(Some("camerata/fix-7"), &[]),
+            Some(&repos(&["other/web", "other/db"])),
+            |_| Some(path.clone()),
+            None,
+        );
+        let RunTarget::Refused { reason } = target else {
+            panic!("expected a refusal, got {target:?}");
+        };
+        assert!(
+            reason.contains("not one of the active project's repositories"),
+            "{reason}"
+        );
+        assert!(
+            reason.contains("`acme/api`") && reason.contains("other/web"),
+            "{reason}"
+        );
+
+        // A repository of the project (any letter case, as GitHub treats them) is fine.
+        let ok = plan_run_target(
+            "Acme/API#7",
+            &uow(Some("camerata/fix-7"), &[]),
+            Some(&repos(&["acme/api"])),
+            |_| Some(path.clone()),
+            None,
+        );
+        assert!(matches!(ok, RunTarget::Repository { .. }), "{ok:?}");
+
+        // A project with no repositories imposes no list.
+        let none = plan_run_target(
+            "acme/api#7",
+            &uow(Some("camerata/fix-7"), &[]),
+            Some(&[]),
+            |_| Some(path.clone()),
+            None,
+        );
+        assert!(matches!(none, RunTarget::Repository { .. }), "{none:?}");
     }
 
     #[test]
@@ -630,5 +700,62 @@ mod http_tests {
             assert!(clone.path().join("README.md").exists());
             assert!(state.runs.active_run_for_story(STORY).is_none());
         }
+    }
+
+    /// A story id from ANOTHER project must neither get a branch recorded nor start a run in
+    /// this project: the unit's repository is not one of the active project's repositories.
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn a_unit_from_another_project_gets_no_branch_and_no_run() {
+        let _live = camerata_test_env::EnvGuard::set("CAMERATA_LIVE_BUILD", "1");
+        let clone = tempfile::tempdir().unwrap();
+        crate::test_git::init_repo(clone.path(), &[("README.md", "fixture\n")]);
+        let state = state_with_project();
+        state
+            .settings
+            .set_repo_path("other/web", Some(clone.path().display().to_string()));
+        let other = "other/web#3";
+        let other_seg = "other%2Fweb%233";
+        state
+            .uow
+            .set_branch(other, Some("camerata/other-3".to_string()));
+
+        let resp = post(
+            &state,
+            &format!("/api/stories/{other_seg}/run"),
+            serde_json::json!({}),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        let json: serde_json::Value =
+            serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap();
+        let reason = json["reason"].as_str().unwrap_or_default();
+        assert!(
+            reason.contains("not one of the active project's repositories"),
+            "{reason}"
+        );
+        assert!(state.runs.active_run_for_story(other).is_none());
+        let worktrees = crate::test_git::git(clone.path(), &["worktree", "list"]);
+        assert!(!worktrees.contains("camerata/other-3"), "{worktrees}");
+
+        // Setting a branch for it is refused too, and records nothing.
+        let fresh = "other/web#9";
+        let resp = post(
+            &state,
+            "/api/uow/other%2Fweb%239/branch",
+            serde_json::json!({ "branch": "camerata/other-9" }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        assert_eq!(state.uow.get_or_create(fresh).branch, None);
+
+        // A unit of the project's own repository is still accepted.
+        let resp = post(
+            &state,
+            &format!("/api/uow/{STORY_SEG}/branch"),
+            serde_json::json!({ "branch": "camerata/fix-7" }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 }

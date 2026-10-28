@@ -14078,6 +14078,23 @@ async fn uow_set_branch(
             return invalid_branch_response(reason);
         }
     }
+    // The unit must belong to the active project: a story id from another project is refused
+    // rather than given a branch in this project's repositories.
+    let project = state.projects.active();
+    if let Some(reason) = crate::run_target::project_membership_refusal(
+        &story_id,
+        project.as_ref().map(|p| p.repos.as_slice()),
+    ) {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": "unit not in the active project",
+                "reason": reason,
+                "story_id": story_id,
+            })),
+        )
+            .into_response();
+    }
     state.uow.set_branch(&story_id, req.branch);
     Json(state.uow.get_or_create(&story_id)).into_response()
 }
