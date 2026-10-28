@@ -96,8 +96,12 @@ fn full_rule() -> Rule {
     r.superseded_since = Some("2021".to_string());
     r.current_recommendation = Some("Use X instead.".to_string());
     r.applies_to = Some(
-        camerata_rules::AppliesTo::new(vec!["**/*.sql".to_string()], vec!["rust".to_string()])
-            .expect("a valid scope"),
+        camerata_rules::AppliesTo::new(
+            vec!["**/*.sql".to_string()],
+            vec!["rust".to_string()],
+            vec!["create policy".to_string()],
+        )
+        .expect("a valid scope"),
     );
     r.version = Some(4);
     r.last_reviewed = Some("2026-10-01".to_string());
@@ -302,6 +306,11 @@ fn every_field_of_the_rule_except_version_and_last_reviewed_changes_the_hash() {
                 a.languages.clear();
             }
         }),
+        ("applies_to.contains_any", |r| {
+            if let Some(a) = r.applies_to.as_mut() {
+                a.contains_any.clear();
+            }
+        }),
         ("applies_to (removed)", |r| r.applies_to = None),
         ("option.id", |r| r.options[0].id.push('X')),
         ("option.label", |r| r.options[0].label.push('X')),
@@ -332,6 +341,28 @@ fn every_field_of_the_rule_except_version_and_last_reviewed_changes_the_hash() {
             "changing `{name}` collided with another mutation's hash"
         );
     }
+}
+
+/// `applies_to` lists are sets: reordering or repeating an entry is not a change to the rule.
+#[test]
+fn applies_to_list_order_and_duplicates_do_not_change_the_hash() {
+    let base = full_rule().content_hash();
+    let mut r = full_rule();
+    if let Some(a) = r.applies_to.as_mut() {
+        a.paths = vec!["**/*.sql".to_string(), "**/*.sql".to_string()];
+        a.contains_any = vec!["create policy".to_string(), "create policy".to_string()];
+    }
+    assert_eq!(r.content_hash(), base);
+    let mut two = full_rule();
+    if let Some(a) = two.applies_to.as_mut() {
+        a.paths = vec!["b/**".to_string(), "a/**".to_string()];
+    }
+    let mut two_reversed = full_rule();
+    if let Some(a) = two_reversed.applies_to.as_mut() {
+        a.paths = vec!["a/**".to_string(), "b/**".to_string()];
+    }
+    assert_eq!(two.content_hash(), two_reversed.content_hash());
+    assert_ne!(two.content_hash(), base);
 }
 
 /// Field boundaries are unambiguous: moving text between adjacent fields is a change. A naive

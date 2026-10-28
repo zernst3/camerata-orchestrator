@@ -7035,16 +7035,12 @@ fn routed_units(
                     format!("pass[{lang}]"),
                     format!("no {lang} files matched this scan's file set"),
                 ),
-                Scope::Declared { language, applies } => (
+                Scope::Declared { language, .. } => (
                     format!(
                         "pass[{}]",
                         language.map_or_else(|| "scoped".to_string(), str::to_string)
                     ),
-                    format!(
-                        "no files matched the rule's declared scope (applies_to: {}) in this \
-                         scan's file set",
-                        applies.canonical_key()
-                    ),
+                    "no file in this scan's file set is one this rule applies to".to_string(),
                 ),
                 Scope::All => (
                     "pass[all]".to_string(),
@@ -7106,16 +7102,63 @@ fn runnable_units(
     runnable
 }
 
-/// The `(chunk, rule)` pairs a scan sends, as `(chunk's file paths, rule id)`: the observable
-/// product of [`runnable_units`] that the real-time and batch paths both execute. Used by the
-/// tests that pin "real-time and batch send the same pairs".
-#[cfg(test)]
-fn routed_pair_set(
+/// The units a Message Batch scan submits, one Message Batch each.
+///
+/// With `applies_to_routing` ON these are exactly the real-time path's [`runnable_units`], so
+/// batch and real-time send the same (chunk, rule) pairs. With it OFF this is the batch scan as
+/// it was before routing reached batch mode: ONE submission of every rule against every file,
+/// labelled `pass`, advisory on. The switch therefore isolates routing completely: OFF in batch
+/// mode is "no routing at all", not "language routing only".
+fn batch_units(
     files: &[(String, String)],
+    selected: &[crate::scan_routing::AuditRule],
     route_plan: &crate::scan_routing::RoutePlan,
-) -> std::collections::BTreeSet<(Vec<String>, String)> {
-    let mut skipped = Vec::new();
-    runnable_units(files, route_plan, None, &mut skipped)
+    applies_to_routing: bool,
+    meter: Option<&UsageMeter>,
+    skipped_rules: &mut Vec<(String, String)>,
+) -> Vec<RoutedUnit> {
+    if applies_to_routing {
+        return runnable_units(files, route_plan, meter, skipped_rules);
+    }
+    vec![RoutedUnit {
+        index: 0,
+        label: "pass".to_string(),
+        empty_note: String::new(),
+        files: files.to_vec(),
+        rules: crate::scan_routing::rule_pairs(selected),
+        advisory_disabled: false,
+    }]
+}
+
+/// Drop the "armed but nothing matched" disclosures that the scan's file set cannot support.
+///
+/// `runnable_units` reports a rule whose group matched no file in `files`. On an INCREMENTAL scan
+/// `files` is only the changed files, so a rule whose matching files exist in the repo but did
+/// not change this time would be reported as never assessed, while its earlier findings are
+/// carried forward. A rule is only reported when the FULL file set (`full_files`) has no match
+/// either.
+fn drop_skips_with_matches_in_full_set(
+    skipped_rules: &mut Vec<(String, String)>,
+    route_plan: &crate::scan_routing::RoutePlan,
+    full_files: &[(String, String)],
+) {
+    let covered: std::collections::HashSet<String> = route_plan
+        .groups
+        .iter()
+        .filter(|g| {
+            full_files
+                .iter()
+                .any(|(p, c)| crate::scan_routing::file_in_scope(p, c, &g.scope))
+        })
+        .flat_map(|g| g.rules.iter().map(|r| r.id.to_ascii_uppercase()))
+        .collect();
+    skipped_rules.retain(|(id, _)| !covered.contains(&id.to_ascii_uppercase()));
+}
+
+/// The `(chunk, rule)` pairs a scan sends, as `(chunk's file paths, rule id)`, for a unit list.
+#[cfg(test)]
+fn pair_set_of(units: &[RoutedUnit]) -> std::collections::BTreeSet<(Vec<String>, String)> {
+    units
         .iter()
         .flat_map(|u| {
             let chunk_paths: Vec<Vec<String>> = chunk_files(&u.files, CHUNK_DIGEST_CHARS)
@@ -7267,8 +7310,9 @@ async fn run_routed_passes(
     )
 }
 
-/// [`run_routed_passes`] for Message Batch mode: the same [`runnable_units`], so batch mode sends
-/// exactly the (chunk, rule) pairs real-time mode does. Each route group is submitted as its own
+/// [`run_routed_passes`] for Message Batch mode: with `applies_to_routing` on, the same
+/// [`runnable_units`], so batch mode sends exactly the (chunk, rule) pairs real-time mode does;
+/// with it off, the unrouted batch scan ([`batch_units`]). Each route group is submitted as its own
 /// Message Batch, one after the other (so the spend cap sees the cost of the earlier groups
 /// before it admits the next, and a group's `advisory_disabled` is honoured per group, which is
 /// what [`run_passes_batch`]'s own parameter is for).
@@ -7314,7 +7358,14 @@ async fn run_routed_passes_batch(
         .await;
     }
 
-    let units = runnable_units(files, route_plan, meter, skipped_rules);
+    let units = batch_units(
+        files,
+        selected,
+        route_plan,
+        efficiency_of(meter).applies_to_routing,
+        meter,
+        skipped_rules,
+    );
     let mut all_findings: Vec<Finding> = Vec::new();
     let mut all_proposed: Vec<ProposedRule> = Vec::new();
     let mut all_requested: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -8175,6 +8226,14 @@ pub async fn audit_repo(
             )
             .await
         };
+
+    // A rule is only "not assessed" when the WHOLE repo has no file in its scope: on an
+    // incremental scan `files` is just the changed files.
+    drop_skips_with_matches_in_full_set(
+        &mut skipped_rules,
+        &route_plan,
+        map_files.unwrap_or(files),
+    );
 
     // Every pass failed -> surface the error so the caller notes the AI audit was skipped
     // (the deterministic findings still return independently). Each pass already finalized
@@ -12746,7 +12805,7 @@ mod tests {
 
         // Verify file_in_scope correctly filters for each group.
         for (path, _) in &files {
-            let in_rust = crate::scan_routing::file_in_scope(path, &rust_g.scope);
+            let in_rust = crate::scan_routing::file_in_scope(path, "", &rust_g.scope);
             let expected_in_rust = path.ends_with(".rs");
             assert_eq!(
                 in_rust, expected_in_rust,
@@ -12757,7 +12816,7 @@ mod tests {
         // Web group: only .tsx files should be in scope.
         let web_g = web_group.unwrap();
         for (path, _) in &files {
-            let in_web = crate::scan_routing::file_in_scope(path, &web_g.scope);
+            let in_web = crate::scan_routing::file_in_scope(path, "", &web_g.scope);
             let expected_in_web = path.ends_with(".tsx")
                 || path.ends_with(".ts")
                 || path.ends_with(".js")
@@ -12774,7 +12833,7 @@ mod tests {
         );
         for (path, _) in &files {
             assert!(
-                crate::scan_routing::file_in_scope(path, &all_g.scope),
+                crate::scan_routing::file_in_scope(path, "", &all_g.scope),
                 "{path} must be in scope for the All group"
             );
         }

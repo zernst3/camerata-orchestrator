@@ -1139,6 +1139,31 @@ pub(crate) fn semantic_rule_ids_for_repo(
         .collect()
 }
 
+/// Split one repo's fresh AI findings into what the ledger needs: how many findings each rule
+/// FIRED (`NotAssessed` rows excluded, so an honesty row never counts as a detection) and which
+/// rules were NOT ASSESSED, with the reason. A rule in the second map was armed but nothing was
+/// judged against it.
+pub(crate) fn split_fired_and_not_assessed(
+    findings: &[Finding],
+) -> (
+    std::collections::HashMap<String, usize>,
+    std::collections::HashMap<String, String>,
+) {
+    use camerata_api_types::audit::FindingKind;
+    let mut fired: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut not_assessed: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    for f in findings {
+        match &f.kind {
+            Some(FindingKind::NotAssessed(n)) => {
+                not_assessed.insert(f.rule_id.clone(), n.reason_detail.clone());
+            }
+            _ => *fired.entry(f.rule_id.clone()).or_insert(0) += 1,
+        }
+    }
+    (fired, not_assessed)
+}
+
 /// Queue the honest disclosure for a rule that has a registered checker but got no credited
 /// deterministic verdict for this repo: "the scan was incomplete" when the checker was withheld
 /// for that reason, "config-gated" otherwise (the architecture config it needs is absent).
@@ -1579,9 +1604,18 @@ pub async fn audit_repos_with_llm_controlled(
     // (carried findings must always reflect the CURRENT rules). A prior manifest is only usable
     // if its rule fingerprint matches. Also stamped onto the report's provenance below (P1) so
     // the report states exactly which rule SET produced these findings.
-    let rules_fp = crate::scan_cache::rules_fingerprint(
-        selected.iter().map(|r| (r.id.as_str(), r.repos.as_slice())),
-    );
+    // Each rule's corpus content hash is part of it (when the corpus is loaded), so a corpus
+    // edit to a rule (its scope, its options) forces a full rescan rather than reusing findings
+    // produced under the old rule.
+    let rules_fp = crate::scan_cache::rules_fingerprint_with_content(selected.iter().map(|r| {
+        (
+            r.id.as_str(),
+            r.repos.as_slice(),
+            corpus
+                .and_then(|c| c.get_by_id(&r.id))
+                .map(camerata_rules::Rule::content_hash),
+        )
+    }));
     // The set ACTUALLY audited this run (NOT `proposed_rules`, which is only the starter-set
     // proposal) — powers the "what's healthy" (audited rules with zero findings) derivation.
     let audited_rule_ids: Vec<String> = selected.iter().map(|r| r.id.clone()).collect();
@@ -2241,11 +2275,8 @@ pub async fn audit_repos_with_llm_controlled(
                                 // "verified clean"). An AD HOC `AI-`-prefixed id the model
                                 // invented (never pre-declared — it only exists because it
                                 // fired) is recorded as its own new entry, same tier.
-                                let mut ai_counts: std::collections::HashMap<String, usize> =
-                                    std::collections::HashMap::new();
-                                for f in &ai_findings {
-                                    *ai_counts.entry(f.rule_id.clone()).or_insert(0) += 1;
-                                }
+                                let (mut ai_counts, not_assessed) =
+                                    split_fired_and_not_assessed(&ai_findings);
                                 // Pass-1 W2 (A5.4): a rule this repo's alternatives pass judged
                                 // NOT APPLICABLE (positive evidence the concern is absent here)
                                 // must be recorded as its OWN outcome, never folded into
@@ -2268,6 +2299,20 @@ pub async fn audit_repos_with_llm_controlled(
                                 // read "ran, found nothing" for code that was never looked at.
                                 let cap_record = meter.cost_cap_record();
                                 for (rid, _) in &semantic {
+                                    // A rule the router found no file for was never run: record
+                                    // it as not run with the reason, never as "ran, found
+                                    // nothing" (that would read as verified clean).
+                                    if let Some(note) = not_assessed.get(rid) {
+                                        pipeline_ledger.record_rule(
+                                            rid.clone(),
+                                            crate::scan_ledger::RuleTier::Semantic,
+                                            false,
+                                            Some(note.clone()),
+                                            0,
+                                            0,
+                                        );
+                                        continue;
+                                    }
                                     let emitted = ai_counts.remove(rid).unwrap_or(0);
                                     let coverage = cap_record
                                         .as_ref()
@@ -2795,6 +2840,31 @@ async fn capture_audited_ref(spec: &str, dir: &std::path::Path) -> AuditedRef {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A `NotAssessed` honesty row is not a detection: it must not count toward a rule's fired
+    /// total (which would record the rule as having run and found something), and the rule must
+    /// come back as not assessed with the reason.
+    #[test]
+    fn a_not_assessed_row_is_not_counted_as_a_detection() {
+        let rows = crate::ai_audit::not_assessed_findings(
+            "acme/app",
+            &[("SUPA-RLS-1".to_string(), "no file applies".to_string())],
+        );
+        let fired = Finding {
+            rule_id: "ARCH-1".to_string(),
+            ..Finding::default()
+        };
+        let mut findings = rows;
+        findings.push(fired.clone());
+        findings.push(fired);
+        let (counts, not_assessed) = split_fired_and_not_assessed(&findings);
+        assert_eq!(counts.get("ARCH-1"), Some(&2));
+        assert!(!counts.contains_key("SUPA-RLS-1"));
+        assert_eq!(
+            not_assessed.get("SUPA-RLS-1").map(String::as_str),
+            Some("no file applies")
+        );
+    }
 
     /// The audited ref carries the origin URL and the default branch, so the deletion record
     /// can name where the code came from and re-fetch can offer "latest from main".

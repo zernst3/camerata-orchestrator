@@ -1,5 +1,5 @@
 id = "SUPABASE-FUNC-DYNAMIC-SQL-INJECTION-1"
-version = 2
+version = 3
 title = "A database function must not EXECUTE a dynamically-assembled query string built via non-quoting interpolation (|| concatenation or format()'s %s)"
 domain = "supabase:database-functions"
 # General Postgres, not just Supabase: a plpgsql function that EXECUTEs a dynamically-built query
@@ -17,9 +17,11 @@ layer = "platform"
 enforcement = "architectural"
 kind = "defect"
 inspectable = true
-# Token-efficiency rank 7: where this rule can apply, so the scan sends it only with these
-# files. SQL statement rule: it is about CREATE POLICY / FUNCTION / VIEW / TABLE statements in SQL files (plus supabase/config.toml, which names the API-exposed schemas); no other file kind holds the subject.
-applies_to = { paths = ["**/*.sql", "**/supabase/config.toml"] }
+# Token-efficiency rank 7: where this rule can apply, so the scan sends it only with these files.
+# SQL statement rule: the subject is CREATE POLICY / FUNCTION / VIEW / TABLE statements. They live in
+# SQL files and migration folders, and also inside TypeORM / Knex / Alembic / Rails / sqlx migrations in
+# other languages, which the `contains_any` markers catch wherever the file sits.
+applies_to = { paths = ["**/*.sql", "**/migrations/**", "**/migrate/**", "**/migration/**", "**/db/**", "**/database/**", "**/schema/**", "**/schemas/**", "**/seeds/**", "**/*seed*", "**/alembic/**", "**/supabase/**", "**/*.psql", "**/*.pgsql", "**/*.ddl"], contains_any = ["create policy", "alter policy", "drop policy", "row level security", "security definer", "security invoker", "create or replace function", "create function", "create or replace procedure", "create procedure", "create view", "create or replace view", "create materialized view", "grant ", "alter table", "storage.objects", "auth.users", "search_path"] }
 # Severity floor. Rationale: an attacker-controlled value flowing into an EXECUTE'd string built
 # without escaping is SQL injection inside the database (CWE-89), invisible to any checker that
 # only reads application-language source. High is the minimum, and deliberately no ceiling: the

@@ -2638,7 +2638,7 @@ one line to the `efficiency_measures!` list and reads
 | `result_cache` | rank 5: unchanged files reuse the previous scan's AI findings | a full AI re-scan, like `--full` |
 | `truncation_retry` | rank 6: a reply cut off at the output limit is retried once | the cut-off reply is used as it came |
 | `fix_prefilter` | rank 6: findings with no code context skip the fix model when the rule has an authored fix | they go to the fix model |
-| `applies_to_routing` | rank 7: a rule that declares `applies_to` is sent only with the files it can apply to, in real-time and batch mode | `applies_to` is ignored entirely; routing is by rule-id language prefix only |
+| `applies_to_routing` | rank 7: a rule that declares `applies_to` is sent only with the files it can apply to; batch mode is routed like real-time | `applies_to` is ignored, real-time routes by rule-id language prefix only, and batch mode is the old single unrouted batch (every rule with every file) |
 
 Set with `CAMERATA_EFFICIENCY=name=off,other=off` or `camerata inspect --efficiency
 name=off` (repeatable; the flag wins). An unknown name or a malformed entry is an
@@ -2660,10 +2660,15 @@ files its rules can apply to):
 - the rule id's language prefix (`RUST-`, `REACT-`, ...): always on;
 - the rule's declared `applies_to` in its TOML, honoured only with
   `applies_to_routing` on: `applies_to = { paths = ["**/*.sql"], languages =
-  ["rust"] }`. `paths` are repo-relative globs (`*` inside one segment, a whole
-  `**` segment; nothing else is accepted), `languages` come from the closed list
-  `camerata_rules::applies_to::ROUTING_LANGUAGES`. A file is in scope when it
-  matches ANY listed glob (case-insensitive) or is in ANY listed language, and a
+  ["rust"], contains_any = ["create policy"] }`. `paths` are repo-relative globs
+  (`*` inside one segment, a whole `**` segment; nothing else is accepted),
+  `languages` come from the closed list
+  `camerata_rules::applies_to::ROUTING_LANGUAGES`, and `contains_any` are
+  case-insensitive substrings: a file whose text contains one is in scope
+  whatever its path (this is how a rule about SQL statements still reaches SQL
+  embedded in a TypeScript, Python or Ruby migration; the router reads file text
+  the scan already holds). A file is in scope when it matches ANY listed glob
+  (case-insensitive), is in ANY listed language, or contains ANY marker, and a
   file whose language cannot be determined counts as in scope for the language
   part: an unknown or ambiguous attribute SENDS the rule. A rule with both an id
   prefix and `applies_to` needs both to hold. Absent `applies_to` means every
@@ -2682,8 +2687,15 @@ scope share a group. `routed_units` turns the plan into the units that run and i
 the ONE place that decides which (chunk, rule) pairs a scan sends: the real-time
 path (`run_routed_passes`), the batch path (`run_routed_passes_batch`, one Message
 Batch per route group, submitted in turn so the spend cap sees earlier groups'
-cost) and the routing telemetry all read it. A group that matches no file is not
-dropped: its rules come back as `NotAssessed` rows. The advisory "flag novel
+cost; with the switch OFF, `batch_units` returns the old single unrouted batch, so
+OFF isolates routing completely) and the routing telemetry all read it. A group
+that matches no file is not dropped: its rules come back as `NotAssessed` rows,
+unless the full repo (`map_files`; on an incremental scan `files` is only the
+changed files) has a file in the rule's scope. The ledger records such a rule as
+not run, with the reason, never as fired or run clean
+(`split_fired_and_not_assessed`). The incremental-scan cache key
+(`rules_fingerprint_with_content`) includes each rule's corpus content hash, so
+editing a rule (its scope included) forces a full rescan. The advisory "flag novel
 issues" pass is disabled in a scoped group only when a cross-cutting `All` group
 also runs; when every selected rule is scoped, each scoped group keeps it, and the
 rare duplicate (two declared scopes overlapping on a file) collapses in the

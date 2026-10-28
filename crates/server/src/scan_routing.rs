@@ -225,11 +225,14 @@ pub fn scope_of(rule: &AuditRule, applies_to_routing: bool) -> Scope {
     }
 }
 
-/// Whether `path` is in a declared scope: it matches a declared glob, or it is in a declared
-/// language. A path whose language cannot be determined counts as in scope for the language
-/// part (an unknown attribute SENDS the rule); a scope that declares only `paths` has no language
-/// part, so an unmatched path is out.
-fn declared_scope_matches(path: &str, applies: &AppliesTo) -> bool {
+/// Whether a file is in a declared scope: its path matches a declared glob, or its text contains
+/// a declared marker, or it is in a declared language. A file whose language cannot be
+/// determined counts as in scope for the language part (an unknown attribute SENDS the rule); a
+/// scope that declares no `languages` has no language part, so an unmatched file is out.
+///
+/// The text check reads the file content the scan already holds; it is the last test tried, so a
+/// file the paths already admit is never lower-cased.
+fn declared_scope_matches(path: &str, content: &str, applies: &AppliesTo) -> bool {
     let lower = path.to_ascii_lowercase();
     if applies
         .paths
@@ -238,26 +241,34 @@ fn declared_scope_matches(path: &str, applies: &AppliesTo) -> bool {
     {
         return true;
     }
-    if applies.languages.is_empty() {
+    if !applies.languages.is_empty() {
+        match file_language(path) {
+            Some(lang) if applies.languages.iter().any(|l| l == lang) => return true,
+            None => return true,
+            Some(_) => {}
+        }
+    }
+    if applies.contains_any.is_empty() {
         return false;
     }
-    match file_language(path) {
-        Some(lang) => applies.languages.iter().any(|l| l == lang),
-        None => true,
-    }
+    let text = content.to_lowercase();
+    applies
+        .contains_any
+        .iter()
+        .any(|m| text.contains(m.as_str()))
 }
 
 /// Whether a file is in a rule's scope. [`Scope::All`] matches everything; a language scope
 /// matches only files of that language. Files of an UNKNOWN language (config/data — toml, json,
 /// sql, sh) are matched by [`Scope::All`] but NOT by any id-prefix language scope (a `RUST-` rule
 /// has no business in a `.sql` file). A declared scope follows [`declared_scope_matches`].
-pub fn file_in_scope(path: &str, scope: &Scope) -> bool {
+pub fn file_in_scope(path: &str, content: &str, scope: &Scope) -> bool {
     match scope {
         Scope::All => true,
         Scope::Language(lang) => file_language(path) == Some(lang),
         Scope::Declared { language, applies } => {
             language.is_none_or(|l| file_language(path) == Some(l))
-                && declared_scope_matches(path, applies)
+                && declared_scope_matches(path, content, applies)
         }
     }
 }
@@ -266,7 +277,7 @@ pub fn file_in_scope(path: &str, scope: &Scope) -> bool {
 pub fn files_in_scope(files: &[(String, String)], scope: &Scope) -> Vec<(String, String)> {
     files
         .iter()
-        .filter(|(p, _)| file_in_scope(p, scope))
+        .filter(|(p, c)| file_in_scope(p, c, scope))
         .cloned()
         .collect()
 }
@@ -280,7 +291,7 @@ pub fn files_for_rule<'a>(
     let scope = scope_of(rule, applies_to_routing);
     files
         .iter()
-        .filter(|(p, _)| file_in_scope(p, &scope))
+        .filter(|(p, c)| file_in_scope(p, c, &scope))
         .collect()
 }
 
@@ -361,7 +372,7 @@ pub fn plan_routes(
         .map(|g| {
             let group_chars: u64 = files
                 .iter()
-                .filter(|(p, _)| file_in_scope(p, &g.scope))
+                .filter(|(p, c)| file_in_scope(p, c, &g.scope))
                 .map(|(_, c)| c.len() as u64)
                 .sum();
             group_chars.saturating_mul(g.rules.len() as u64)
@@ -417,12 +428,12 @@ mod tests {
 
     #[test]
     fn file_in_scope_respects_language_and_all() {
-        assert!(file_in_scope("src/main.rs", &Scope::Language("rust")));
-        assert!(!file_in_scope("src/app.tsx", &Scope::Language("rust")));
-        assert!(!file_in_scope("schema.sql", &Scope::Language("rust")));
+        assert!(file_in_scope("src/main.rs", "", &Scope::Language("rust")));
+        assert!(!file_in_scope("src/app.tsx", "", &Scope::Language("rust")));
+        assert!(!file_in_scope("schema.sql", "", &Scope::Language("rust")));
         // All matches everything, including config/data files a language scope would skip.
-        assert!(file_in_scope("schema.sql", &Scope::All));
-        assert!(file_in_scope("src/main.rs", &Scope::All));
+        assert!(file_in_scope("schema.sql", "", &Scope::All));
+        assert!(file_in_scope("src/main.rs", "", &Scope::All));
     }
 
     #[test]
@@ -626,6 +637,7 @@ mod tests {
             AppliesTo::new(
                 paths.iter().map(|p| (*p).to_string()).collect(),
                 languages.iter().map(|l| (*l).to_string()).collect(),
+                vec![],
             )
             .unwrap(),
         ))
@@ -658,10 +670,10 @@ mod tests {
     #[test]
     fn a_declared_scope_is_a_union_of_paths_and_languages() {
         let rule = scoped("X-1", &["**/*.sql"], &["rust"]);
-        assert!(file_in_scope("a/b.sql", &scope_of(&rule, true)));
-        assert!(file_in_scope("a/b.rs", &scope_of(&rule, true)));
+        assert!(file_in_scope("a/b.sql", "", &scope_of(&rule, true)));
+        assert!(file_in_scope("a/b.rs", "", &scope_of(&rule, true)));
         assert!(
-            !file_in_scope("a/b.py", &scope_of(&rule, true)),
+            !file_in_scope("a/b.py", "", &scope_of(&rule, true)),
             "a file known to be another language, matching no glob, is out"
         );
     }
@@ -671,28 +683,28 @@ mod tests {
         let rule = scoped("X-1", &[], &["rust"]);
         for unknown in ["Makefile", "README.md", "config/app.yaml", ".env", ""] {
             assert!(
-                file_in_scope(unknown, &scope_of(&rule, true)),
+                file_in_scope(unknown, "", &scope_of(&rule, true)),
                 "`{unknown}` has no recognized language: the rule must be sent"
             );
         }
-        assert!(!file_in_scope("ui/app.tsx", &scope_of(&rule, true)));
+        assert!(!file_in_scope("ui/app.tsx", "", &scope_of(&rule, true)));
     }
 
     #[test]
     fn a_paths_only_scope_does_not_send_unmatched_unknown_files() {
         let rule = scoped("X-1", &["**/*.sql"], &[]);
-        assert!(!file_in_scope("README.md", &scope_of(&rule, true)));
-        assert!(!file_in_scope("Makefile", &scope_of(&rule, true)));
+        assert!(!file_in_scope("README.md", "", &scope_of(&rule, true)));
+        assert!(!file_in_scope("Makefile", "", &scope_of(&rule, true)));
     }
 
     #[test]
     fn the_id_prefix_language_and_the_declared_scope_both_must_hold() {
         let rule = scoped("RUST-X-1", &["crates/**"], &[]);
         let s = scope_of(&rule, true);
-        assert!(file_in_scope("crates/a/src/lib.rs", &s));
-        assert!(!file_in_scope("crates/a/Cargo.toml", &s), "not Rust");
+        assert!(file_in_scope("crates/a/src/lib.rs", "", &s));
+        assert!(!file_in_scope("crates/a/Cargo.toml", "", &s), "not Rust");
         assert!(
-            !file_in_scope("tools/x.rs", &s),
+            !file_in_scope("tools/x.rs", "", &s),
             "outside the declared path"
         );
     }
@@ -735,7 +747,8 @@ mod tests {
     fn audit_rules_carry_the_corpus_declared_scope_and_default_to_none() {
         let mut set = camerata_rules::RuleSet::default();
         let mut declared = camerata_rules::bare_rule("SUPA-RLS-1", "supabase:rls");
-        declared.applies_to = Some(AppliesTo::new(vec!["**/*.sql".into()], vec![]).unwrap());
+        declared.applies_to =
+            Some(AppliesTo::new(vec!["**/*.sql".into()], vec![], vec![]).unwrap());
         set.push(declared);
         set.push(camerata_rules::bare_rule("ARCH-1", "universal"));
         let pairs = vec![
@@ -753,5 +766,82 @@ mod tests {
         assert!(audit_rules(&pairs, None)
             .iter()
             .all(|r| r.applies_to.is_none()));
+    }
+
+    fn with_markers(id: &str, paths: &[&str], markers: &[&str]) -> AuditRule {
+        AuditRule::new(id, "d").with_applies_to(Some(
+            AppliesTo::new(
+                paths.iter().map(|p| (*p).to_string()).collect(),
+                vec![],
+                markers.iter().map(|m| (*m).to_string()).collect(),
+            )
+            .unwrap(),
+        ))
+    }
+
+    #[test]
+    fn a_content_marker_sends_the_rule_with_a_file_whatever_its_path_or_language() {
+        let rule = with_markers(
+            "SQL-1",
+            &["**/*.sql"],
+            &["create policy", "security definer"],
+        );
+        let s = scope_of(&rule, true);
+        // A TypeORM migration, a Rails migration and a Python RunSQL, none under a SQL path.
+        assert!(file_in_scope(
+            "src/data/setup.ts",
+            r#"await queryRunner.query("CREATE POLICY p ON t USING (true)")"#,
+            &s
+        ));
+        assert!(file_in_scope(
+            "lib/boot.rb",
+            "execute <<~SQL\n  create function f() returns int security definer\nSQL",
+            &s
+        ));
+        assert!(file_in_scope("x/y.py", "RunSQL('Create Policy p ...')", &s));
+        // The path alone still admits a file with no marker.
+        assert!(file_in_scope("db/1.sql", "select 1;", &s));
+        // Neither path nor marker: out.
+        assert!(!file_in_scope("src/app.tsx", "export const x = 1;", &s));
+    }
+
+    #[test]
+    fn a_marker_scope_alone_has_no_language_part_so_unmatched_unknown_files_are_out() {
+        let rule = with_markers("SQL-1", &[], &["create policy"]);
+        assert!(!file_in_scope("README.md", "hello", &scope_of(&rule, true)));
+        assert!(file_in_scope(
+            "README.md",
+            "see CREATE POLICY",
+            &scope_of(&rule, true)
+        ));
+    }
+
+    #[test]
+    fn content_markers_are_ignored_when_the_switch_is_off() {
+        let rule = with_markers("SQL-1", &[], &["create policy"]);
+        assert_eq!(scope_of(&rule, false), Scope::All);
+    }
+
+    #[test]
+    fn module_and_razor_extensions_resolve_to_their_languages() {
+        for (ext, lang) in [
+            ("mjs", "web"),
+            ("cjs", "web"),
+            ("mts", "web"),
+            ("cts", "web"),
+            ("cshtml", "csharp"),
+            ("razor", "csharp"),
+        ] {
+            assert_eq!(lang_for_extension(ext), Some(lang), "{ext}");
+        }
+        let react = r("REACT-1");
+        assert!(file_in_scope("src/x.mjs", "", &scope_of(&react, true)));
+        assert!(file_in_scope("src/x.cts", "", &scope_of(&react, true)));
+        let cs = r("CSHARP-X-1");
+        assert!(file_in_scope(
+            "Views/Home/Index.cshtml",
+            "",
+            &scope_of(&cs, true)
+        ));
     }
 }

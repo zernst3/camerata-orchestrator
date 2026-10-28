@@ -275,10 +275,23 @@ fn canon_verified(verified: &VerifiedProvenance) -> Canon {
 }
 
 fn canon_applies_to(applies_to: &AppliesTo) -> Canon {
-    let AppliesTo { paths, languages } = applies_to;
+    let AppliesTo {
+        paths,
+        languages,
+        contains_any,
+    } = applies_to;
+    // Sorted and de-duplicated: the three lists are unordered sets, so reordering an entry is
+    // not a change to the rule and must not move its hash (a version bump would be spurious).
+    let sorted = |values: &[String]| {
+        let mut v = values.to_vec();
+        v.sort_unstable();
+        v.dedup();
+        v
+    };
     let mut o = ObjBuilder::default();
-    o.strings("paths", paths);
-    o.strings("languages", languages);
+    o.strings("paths", &sorted(paths));
+    o.strings("languages", &sorted(languages));
+    o.strings("contains_any", &sorted(contains_any));
     o.build()
 }
 

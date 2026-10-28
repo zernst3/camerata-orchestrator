@@ -11,7 +11,7 @@
 //! # The shape
 //!
 //! ```toml
-//! applies_to = { paths = ["**/*.sql", "supabase/**"], languages = ["rust"] }
+//! applies_to = { paths = ["**/*.sql", "supabase/**"], languages = ["rust"], contains_any = ["create policy"] }
 //! ```
 //!
 //! * `paths`: repo-relative file globs. `*` matches within one path segment, a whole `**`
@@ -19,8 +19,13 @@
 //!   glob_match`; nothing else is supported, so nothing else is accepted).
 //! * `languages`: values from [`ROUTING_LANGUAGES`], the languages the scan recognises from a
 //!   file's extension.
-//! * A file matches when it matches ANY declared path OR is in ANY declared language (a union:
-//!   a rule is only ever sent to MORE files by adding an entry, never fewer).
+//! * `contains_any`: case-insensitive substrings. A file whose text contains ANY of them is in
+//!   scope whatever its path or language. This is how a rule about SQL statements still reaches
+//!   SQL embedded in a `.ts`, `.py` or `.rb` migration. The router reads the file text the scan
+//!   has already loaded; there is no extra I/O.
+//! * A file matches when it matches ANY declared path OR is in ANY declared language OR contains
+//!   ANY declared marker (a union: a rule is only ever sent to MORE files by adding an entry,
+//!   never fewer).
 //!
 //! An absent `applies_to` means every file, exactly as before this field existed.
 //!
@@ -45,19 +50,20 @@ pub const ROUTING_LANGUAGES: &[&str] = &[
 
 /// Map a file extension (lowercase, no dot) to its canonical language key, if known.
 ///
-/// `web` is the whole JS/TS/React ecosystem (they share frontend rules). Config and data
-/// extensions (toml, json, yaml, sql, sh) are not a routed language: they return `None`.
+/// `web` is the whole JS/TS/React ecosystem (they share frontend rules), module-flavoured
+/// extensions included. `csharp` includes Razor views. Config and data extensions (toml, json,
+/// yaml, sql, sh) are not a routed language: they return `None`.
 pub fn lang_for_extension(ext: &str) -> Option<&'static str> {
     Some(match ext {
         "rs" => "rust",
-        "ts" | "tsx" | "js" | "jsx" => "web",
+        "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs" | "mts" | "cts" => "web",
         "py" => "python",
         "go" => "go",
         "java" => "java",
         "kt" => "kotlin",
         "rb" => "ruby",
         "php" => "php",
-        "cs" => "csharp",
+        "cs" | "cshtml" | "razor" => "csharp",
         "swift" => "swift",
         "c" | "h" | "cpp" => "cpp",
         _ => return None,
@@ -72,18 +78,40 @@ pub struct AppliesTo {
     pub paths: Vec<String>,
     /// Language keys from [`ROUTING_LANGUAGES`], lowercase, in authored order.
     pub languages: Vec<String>,
+    /// Content markers, lowercase: a file whose text contains any of them is in scope.
+    pub contains_any: Vec<String>,
 }
 
 impl AppliesTo {
     /// Validate and build. `Err` is a message naming the offending value and the valid choices.
-    pub fn new(paths: Vec<String>, languages: Vec<String>) -> Result<Self, String> {
-        if paths.is_empty() && languages.is_empty() {
+    pub fn new(
+        paths: Vec<String>,
+        languages: Vec<String>,
+        contains_any: Vec<String>,
+    ) -> Result<Self, String> {
+        if paths.is_empty() && languages.is_empty() && contains_any.is_empty() {
             return Err(
-                "applies_to declares neither `paths` nor `languages`; omit the field to mean \
-                 every file"
+                "applies_to declares none of `paths`, `languages` or `contains_any`; \
+                 omit the field to mean every file"
                     .to_string(),
             );
         }
+        let contains_any = contains_any
+            .into_iter()
+            .map(|m| {
+                if m.trim().is_empty() {
+                    Err("applies_to contains_any has a blank marker".to_string())
+                } else if m.contains('\n') || m.contains('\r') {
+                    Err(format!(
+                        "applies_to contains_any marker `{}` spans lines; a marker is one line \
+                         of text",
+                        m.escape_debug()
+                    ))
+                } else {
+                    Ok(m.to_lowercase())
+                }
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         let paths = paths
             .into_iter()
             .map(|p| validate_glob(&p).map(|()| p))
@@ -102,7 +130,11 @@ impl AppliesTo {
                 }
             })
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(Self { paths, languages })
+        Ok(Self {
+            paths,
+            languages,
+            contains_any,
+        })
     }
 
     /// A canonical, order-independent key: two scopes with the same key route identically, so
@@ -114,10 +146,14 @@ impl AppliesTo {
         let mut languages: Vec<&str> = self.languages.iter().map(String::as_str).collect();
         languages.sort_unstable();
         languages.dedup();
+        let mut markers: Vec<&str> = self.contains_any.iter().map(String::as_str).collect();
+        markers.sort_unstable();
+        markers.dedup();
         format!(
-            "paths={};languages={}",
+            "paths={};languages={};contains_any={}",
             paths.join(","),
-            languages.join(",")
+            languages.join(","),
+            markers.join("\u{1f}")
         )
     }
 }
@@ -168,12 +204,14 @@ struct AppliesToToml {
     paths: Vec<String>,
     #[serde(default)]
     languages: Vec<String>,
+    #[serde(default)]
+    contains_any: Vec<String>,
 }
 
 impl<'de> Deserialize<'de> for AppliesTo {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let raw = AppliesToToml::deserialize(deserializer)?;
-        AppliesTo::new(raw.paths, raw.languages).map_err(de::Error::custom)
+        AppliesTo::new(raw.paths, raw.languages, raw.contains_any).map_err(de::Error::custom)
     }
 }
 
@@ -252,23 +290,48 @@ mod tests {
     }
 
     #[test]
+    fn contains_any_markers_are_lowercased_and_validated() {
+        let a = parse(r#"applies_to = { contains_any = ["CREATE Policy", "grant "] }"#).unwrap();
+        assert_eq!(a.contains_any, vec!["create policy", "grant "]);
+        assert!(a.paths.is_empty() && a.languages.is_empty());
+        assert!(parse(r#"applies_to = { contains_any = [] }"#).is_err());
+        assert!(parse(r#"applies_to = { contains_any = ["  "] }"#).is_err());
+        assert!(parse(r#"applies_to = { contains_any = ["a\nb"] }"#).is_err());
+    }
+
+    #[test]
+    fn contains_any_is_part_of_the_canonical_key() {
+        let a = AppliesTo::new(vec![], vec![], vec!["x".into(), "y".into()]).unwrap();
+        let b = AppliesTo::new(vec![], vec![], vec!["y".into(), "x".into()]).unwrap();
+        let c = AppliesTo::new(vec![], vec![], vec!["x".into()]).unwrap();
+        assert_eq!(a.canonical_key(), b.canonical_key());
+        assert_ne!(a.canonical_key(), c.canonical_key());
+    }
+
+    #[test]
     fn the_canonical_key_ignores_order_and_duplicates() {
-        let a = AppliesTo::new(vec!["b/**".into(), "a/**".into()], vec!["rust".into()]).unwrap();
+        let a = AppliesTo::new(
+            vec!["b/**".into(), "a/**".into()],
+            vec!["rust".into()],
+            vec![],
+        )
+        .unwrap();
         let b = AppliesTo::new(
             vec!["a/**".into(), "b/**".into(), "a/**".into()],
             vec!["rust".into()],
+            vec![],
         )
         .unwrap();
         assert_eq!(a.canonical_key(), b.canonical_key());
-        let c = AppliesTo::new(vec!["a/**".into()], vec!["rust".into()]).unwrap();
+        let c = AppliesTo::new(vec!["a/**".into()], vec!["rust".into()], vec![]).unwrap();
         assert_ne!(a.canonical_key(), c.canonical_key());
     }
 
     #[test]
     fn every_language_the_resolver_can_return_is_in_the_vocabulary() {
         for ext in [
-            "rs", "ts", "tsx", "js", "jsx", "py", "go", "java", "kt", "rb", "php", "cs", "swift",
-            "c", "h", "cpp",
+            "rs", "ts", "tsx", "js", "jsx", "mjs", "cjs", "mts", "cts", "py", "go", "java", "kt",
+            "rb", "php", "cs", "cshtml", "razor", "swift", "c", "h", "cpp",
         ] {
             let lang = lang_for_extension(ext).unwrap();
             assert!(ROUTING_LANGUAGES.contains(&lang), "{lang}");

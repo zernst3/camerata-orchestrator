@@ -66,10 +66,15 @@ fn files() -> Vec<(String, String)> {
 }
 
 fn scoped(id: &str, paths: &[&str], languages: &[&str]) -> AuditRule {
+    scoped_with(id, paths, languages, &[])
+}
+
+fn scoped_with(id: &str, paths: &[&str], languages: &[&str], contains: &[&str]) -> AuditRule {
     AuditRule::new(id, format!("directive of {id}")).with_applies_to(Some(
         AppliesTo::new(
             paths.iter().map(|p| p.to_string()).collect(),
             languages.iter().map(|l| l.to_string()).collect(),
+            contains.iter().map(|m| m.to_string()).collect(),
         )
         .unwrap(),
     ))
@@ -253,7 +258,7 @@ async fn real_time_sends_the_pairs_the_shared_route_plan_names_and_batch_reads_t
     ];
     for on in [true, false] {
         let plan = plan_routes(&rules, &files(), on);
-        let planned = routed_pair_set(&files(), &plan);
+        let planned = pair_set_of(&runnable_units(&files(), &plan, None, &mut Vec::new()));
         let (rec, _) = run(&rules, on).await;
         assert_eq!(
             sent_pairs(&rec),
@@ -273,7 +278,7 @@ fn a_scoped_group_that_matches_no_file_is_reported_not_assessed_not_dropped() {
     assert_eq!(units.len(), 1, "only the ARCH-1 group has files to run");
     assert_eq!(skipped.len(), 1);
     assert_eq!(skipped[0].0, "SUPA-RLS-1");
-    assert!(skipped[0].1.contains("applies_to"), "{}", skipped[0].1);
+    assert!(skipped[0].1.contains("applies to"), "{}", skipped[0].1);
 }
 
 #[test]
@@ -303,16 +308,22 @@ fn a_scoped_group_has_advisory_disabled_only_when_an_all_group_also_runs() {
 
 #[test]
 fn routing_records_how_many_pairs_it_skipped() {
-    // Three big non-SQL files (three chunks of the whole repo) and one small SQL file: the scoped
-    // rule is sent with one chunk instead of three.
+    // Three big TSX files (three chunks of the whole repo), then a small Rust file and a small
+    // SQL file in the last chunk. RUST-X-1 is routed by its id prefix whatever the switch says;
+    // SUPA-RLS-1 is routed by its declared scope only when the switch is on.
     let big = |p: &str| (p.to_string(), "x".repeat(200_000));
     let files = vec![
-        big("src/a.rs"),
-        big("src/b.rs"),
-        big("src/c.rs"),
+        big("src/a.tsx"),
+        big("src/b.tsx"),
+        big("src/c.tsx"),
+        file("src/main.rs"),
         file("db/1.sql"),
     ];
-    let rules = vec![plain("ARCH-1"), scoped("SUPA-RLS-1", &["**/*.sql"], &[])];
+    let rules = vec![
+        plain("ARCH-1"),
+        plain("RUST-X-1"),
+        scoped("SUPA-RLS-1", &["**/*.sql"], &[]),
+    ];
     let counts = |on: bool| {
         let plan = plan_routes(&rules, &files, on);
         let m = meter(on);
@@ -322,12 +333,131 @@ fn routing_records_how_many_pairs_it_skipped() {
     };
     let on = counts(true);
     let off = counts(false);
+    assert_eq!(on.pairs_total, 9, "3 chunks x 3 rules");
     assert_eq!(on.pairs_total, off.pairs_total, "same scan, same total");
-    assert_eq!(off.pairs_skipped, 0, "nothing routes with the switch off");
-    assert_eq!(on.pairs_total, 6, "3 chunks x 2 rules");
     assert_eq!(
-        on.pairs_skipped, 2,
-        "the SQL rule is sent with 1 of the 3 chunks"
+        off.pairs_skipped, 2,
+        "switch off: only the id-prefix rule routes (1 of 3 chunks)"
+    );
+    assert_eq!(
+        on.pairs_skipped, 4,
+        "switch on: the SQL rule also goes to 1 of 3 chunks"
+    );
+}
+
+#[test]
+fn batch_sends_the_real_time_pairs_when_on_and_every_pair_when_off() {
+    let rules = vec![
+        plain("ARCH-1"),
+        plain("RUST-X-1"),
+        scoped("SUPA-RLS-1", &["**/*.sql"], &[]),
+        scoped_with("SQL-EMBED-1", &[], &[], &["create policy"]),
+    ];
+    let mut files = files();
+    files.push((
+        "src/data/setup.ts".to_string(),
+        "await q('CREATE POLICY p ON t USING (true)')".to_string(),
+    ));
+
+    // ON: the batch units ARE the real-time units.
+    let plan = plan_routes(&rules, &files, true);
+    let real_time = pair_set_of(&runnable_units(&files, &plan, None, &mut Vec::new()));
+    let batch = pair_set_of(&batch_units(
+        &files,
+        &rules,
+        &plan,
+        true,
+        None,
+        &mut Vec::new(),
+    ));
+    assert_eq!(
+        batch, real_time,
+        "ON: batch and real-time send the same pairs"
+    );
+    let flat = rule_file_pairs(&batch);
+    assert!(
+        has(&flat, "src/data/setup.ts", "SQL-EMBED-1"),
+        "content marker"
+    );
+    assert!(!has(&flat, "src/app.tsx", "SUPA-RLS-1"));
+    assert!(!has(&flat, "src/app.tsx", "RUST-X-1"));
+
+    // OFF: one unrouted submission, every rule with every file, advisory on, label `pass`.
+    let plan_off = plan_routes(&rules, &files, false);
+    let units = batch_units(&files, &rules, &plan_off, false, None, &mut Vec::new());
+    assert_eq!(units.len(), 1);
+    assert_eq!(units[0].label, "pass");
+    assert!(!units[0].advisory_disabled);
+    assert_eq!(units[0].files.len(), files.len());
+    let off = pair_set_of(&units);
+    let all_chunks: Vec<Vec<String>> = chunk_files(&files, CHUNK_DIGEST_CHARS)
+        .iter()
+        .map(|c| c.iter().map(|(p, _)| p.clone()).collect())
+        .collect();
+    let expected: std::collections::BTreeSet<(Vec<String>, String)> = all_chunks
+        .iter()
+        .flat_map(|paths| rules.iter().map(move |r| (paths.clone(), r.id.clone())))
+        .collect();
+    assert_eq!(
+        off, expected,
+        "OFF: batch sends every rule with every chunk"
+    );
+}
+
+#[tokio::test]
+async fn an_incremental_scan_does_not_report_a_rule_not_assessed_when_the_full_repo_has_a_match() {
+    use camerata_api_types::audit::FindingKind;
+    let changed = vec![file("src/main.rs")];
+    let full = files(); // includes the .sql migration
+    let rules = vec![plain("ARCH-1"), scoped("SUPA-RLS-1", &["**/*.sql"], &[])];
+    let not_assessed = |findings: &[Finding]| {
+        findings
+            .iter()
+            .filter(|f| matches!(f.kind, Some(FindingKind::NotAssessed(_))))
+            .map(|f| f.rule_id.clone())
+            .collect::<Vec<_>>()
+    };
+    let go = |map_files: Option<Vec<(String, String)>>| {
+        let changed = changed.clone();
+        let rules = rules.clone();
+        async move {
+            let rec = Recorder::default();
+            let m = meter(true);
+            let (findings, ..) = audit_repo(
+                &rec,
+                REPO,
+                &changed,
+                &rules,
+                &[],
+                &std::collections::HashMap::new(),
+                None,
+                None,
+                ScanMode::Parallel,
+                false,
+                None,
+                None,
+                Some(&m),
+                map_files.as_deref(),
+            )
+            .await
+            .expect("stub answers");
+            findings
+        }
+    };
+    assert_eq!(
+        not_assessed(&go(None).await),
+        vec!["SUPA-RLS-1".to_string()],
+        "a full scan with no SQL anywhere: reported"
+    );
+    assert!(
+        not_assessed(&go(Some(full)).await).is_empty(),
+        "the repo has SQL (unchanged): not reported"
+    );
+    let no_sql = vec![file("src/main.rs"), file("README.md")];
+    assert_eq!(
+        not_assessed(&go(Some(no_sql)).await),
+        vec!["SUPA-RLS-1".to_string()],
+        "no SQL in the full set either: reported"
     );
 }
 
