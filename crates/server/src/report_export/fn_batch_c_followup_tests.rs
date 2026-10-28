@@ -151,9 +151,9 @@ fn only_real_osv_error_prefixes_are_quoted() {
 
 #[test]
 fn no_absolute_path_survives_in_client_text() {
-    let text = "Error during extraction: bad /Users/zach/work/repo/sub/yarn.lock (tooling \
-                /Users/zach/.local/share/camerata/osv/osv-scanner) and C:\\Users\\z\\x\\go.mod";
-    let out = scrub_local_paths(text, Path::new("/Users/zach/work/repo"));
+    let text = "Error during extraction: bad /Users/auditor/work/repo/sub/yarn.lock (tooling \
+                /Users/auditor/.local/share/camerata/osv/osv-scanner) and C:\\Users\\z\\x\\go.mod";
+    let out = scrub_local_paths(text, Path::new("/Users/auditor/work/repo"));
     assert!(!out.contains("/Users"), "{out}");
     assert!(!out.contains("C:\\"), "{out}");
     assert!(out.contains("./sub/yarn.lock"), "{out}");
