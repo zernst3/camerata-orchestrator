@@ -41,8 +41,8 @@ pub mod target {
     pub const SETTINGS: &str = "settings";
     /// The proposed stack rules.
     pub const RULES: &str = "rules";
-    /// The pre-run cost estimate.
-    pub const COST_ESTIMATE: &str = "cost-estimate";
+    /// The spend limit field in the scan settings (the optional hard stop on the run's AI spend).
+    pub const SPEND_LIMIT: &str = "spend-limit";
     /// The button that starts the inspection.
     pub const RUN_INSPECTION: &str = "run-inspection";
     /// The warning shown when a pass failed or did not run.
@@ -129,9 +129,10 @@ pub struct Step {
 /// export (Run, Export): closing the walkthrough there leaves the keyboard on the block around
 /// the button, so a reflex Enter cannot start it.
 ///
-/// Where a step's own control does not exist yet, it points at the closest one that does (the
-/// spending cap is described beside the cost estimate). Re-point the `target` here when the real
-/// control lands.
+/// Where a step's own control does not exist yet, it points at the closest one that does. Every
+/// step now points at its own control (the estimate step points at the spend limit field, the
+/// control the user acts on there; the estimate and the line count sit just below it and are
+/// described in the body).
 pub const STEPS: [Step; 12] = [
     Step {
         id: "project",
@@ -185,11 +186,11 @@ pub const STEPS: [Step; 12] = [
     },
     Step {
         id: "estimate",
-        target: target::COST_ESTIMATE,
+        target: target::SPEND_LIMIT,
         screen: Screen::Scan,
-        title: "Count and estimate",
-        body: "The line count is what the quote is priced on, and the estimate is the model cost of this run. Check both against your spending cap before you run.",
-        how_to_get_there: "Scan the repository first. The estimate appears above the run button.",
+        title: "Spend limit and estimate",
+        body: "Set a spend limit and the run stops between passes once it is reached. The estimate below is this run's model cost, and the line count is what the quote is priced on.",
+        how_to_get_there: "Scan the repository first. The spend limit is in the scan settings, above the client name and the estimate.",
         advance: Advance::Next,
         focus_on_exit: ExitFocus::Control,
     },

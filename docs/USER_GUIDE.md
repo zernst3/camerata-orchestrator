@@ -223,11 +223,11 @@ never clicks, types or decides anything for you.
   between walkthroughs does nothing to the next one.
 
 **What it covers (twelve steps).** Create or open a project; add the client repository; the client
-name; the model backend and where the key is saved; the stack rules; the line count and cost
-estimate; running the inspection; failed or skipped passes; the review queue and its four decisions;
-the speed tools (stacked review, the code viewer, the palette); review time; exporting the package.
-This first version covers the Inspection only. Where a step's own control does not exist yet (the
-spending cap), it points at the nearest control that does.
+name; the model backend and where the key is saved; the stack rules; the spend limit, with the line
+count and cost estimate just below it; running the inspection; failed or skipped passes; the review
+queue and its four decisions; the speed tools (stacked review, the code viewer, the palette); review
+time; exporting the package. This first version covers the Inspection only. Where a step's own
+control does not exist, it points at the nearest control that does.
 
 ---
 
