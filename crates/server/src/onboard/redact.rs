@@ -131,7 +131,12 @@ fn scrub_machine_paths(text: &str) -> String {
 /// deep tier's prose. Returns the number of values replaced.
 pub(crate) fn redact_report_text(report: &mut ScanReport) -> usize {
     let mut count = 0;
-    for rec in report.recommendations.values_mut() {
+    // The by-rule view and the per-(rule, repo) list carry the same kinds of text.
+    for rec in report
+        .recommendations
+        .values_mut()
+        .chain(report.recommendations_by_repo.iter_mut())
+    {
         count += redact_option(&mut rec.evidence);
         count += redact_string(&mut rec.recommendation_reasoning);
         for option in &mut rec.observed_options {

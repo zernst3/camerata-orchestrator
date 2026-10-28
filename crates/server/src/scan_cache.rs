@@ -445,8 +445,26 @@ impl ManifestBuilder {
     /// apply to it after this scan. `ai_findings` must already be the post-merge AI set for the
     /// repo (fresh ∪ carried); deterministic-floor findings should NOT be passed here.
     pub fn record_repo(&mut self, repo: &str, files: &[(String, String)], ai_findings: &[Finding]) {
+        self.record_repo_except(repo, files, ai_findings, &std::collections::HashSet::new());
+    }
+
+    /// [`Self::record_repo`] leaving out the files in `unreviewed`: files the AI pass did not
+    /// review (the spend limit stopped it first, or the review failed). A file with no
+    /// fingerprint is new to the next scan, which audits it; a recorded one would be carried on
+    /// as unchanged and clean. A repo with every file unreviewed is still recorded, with no
+    /// files, so the manifest knows the repo was met.
+    pub fn record_repo_except(
+        &mut self,
+        repo: &str,
+        files: &[(String, String)],
+        ai_findings: &[Finding],
+        unreviewed: &std::collections::HashSet<String>,
+    ) {
         let entry = self.files.entry(repo.to_string()).or_default();
         for (path, content) in files {
+            if unreviewed.contains(path) {
+                continue;
+            }
             entry.insert(path.clone(), content_fingerprint(content));
         }
         self.findings.extend(

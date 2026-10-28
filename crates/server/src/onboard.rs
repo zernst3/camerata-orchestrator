@@ -761,6 +761,66 @@ pub struct CoverageNote {
     pub tool: String,
     /// Human-readable explanation of why this tool/rule was skipped or failed.
     pub message: String,
+    /// The repo (`owner/repo`) the note is about, for a tool that ran once per repo. `None` for a
+    /// note about the whole scan, or one written before notes named their repo. A tool that
+    /// failed on one repo and ran on another is two facts; this is what keeps them apart when
+    /// the ledger is reconciled.
+    #[serde(default)]
+    pub repo: Option<String>,
+}
+
+/// The pass name a repo that could not be read is recorded under. Stable: a persisted report
+/// carries it.
+pub const REPOSITORY_READ_PASS: &str = "repository read";
+
+/// What a repo that could not be inspected leaves behind: see
+/// [`ScanReport::note_repo_not_inspected`]. Split into its three destinations so the scan loop,
+/// which holds them as separate locals, and the report method share one implementation.
+fn record_repo_not_inspected(
+    ledger: &mut crate::scan_ledger::ScanLedger,
+    failed_passes: &mut Vec<crate::ai_audit::FailedPass>,
+    not_inspected: &mut Vec<(String, String)>,
+    spec: &str,
+    reason: &str,
+    selected: &[SelectedRule],
+    corpus: Option<&camerata_rules::RuleSet>,
+) {
+    if not_inspected.iter().any(|(repo, _)| repo == spec) {
+        return;
+    }
+    not_inspected.push((spec.to_string(), reason.to_string()));
+    failed_passes.push(crate::ai_audit::FailedPass {
+        repo: spec.to_string(),
+        pass: REPOSITORY_READ_PASS.to_string(),
+        reason: reason.to_string(),
+        files_not_reviewed: 0,
+    });
+    // Every rule that would have run on this repo is on record as not run, so none of them can
+    // read as "checked, found nothing" for it, and the rules that did run on other repos are
+    // listed as incomplete with this repo named.
+    let skip = format!("{}: {reason}", crate::scan_ledger::REPO_UNREADABLE_MARKER);
+    for rid in AUDIT_RULES {
+        ledger.record_rule(
+            spec,
+            *rid,
+            crate::scan_ledger::RuleTier::Deterministic,
+            false,
+            Some(skip.clone()),
+            0,
+            0,
+        );
+    }
+    for rule in selected.iter().filter(|r| r.applies_to(spec)) {
+        if AUDIT_RULES.contains(&rule.id.as_str()) {
+            continue;
+        }
+        let tier = if is_ci_tier_rule(&rule.id, corpus) {
+            crate::scan_ledger::RuleTier::Architectural
+        } else {
+            crate::scan_ledger::RuleTier::Semantic
+        };
+        ledger.record_rule(spec, rule.id.clone(), tier, false, Some(skip.clone()), 0, 0);
+    }
 }
 
 /// The git identity of ONE audited source dir at the moment it was scanned: exactly
@@ -982,6 +1042,20 @@ pub struct ScanReport {
     /// `operator_chosen`. See `docs/design/2026-09-22_audit-integrated-alternatives.md`.
     #[serde(default)]
     pub recommendations: std::collections::HashMap<String, crate::ai_audit::RuleRecommendation>,
+    /// Every recommendation the scan made, one per (rule, repo): each names its repo, so a
+    /// convention one service follows is never stated for another. [`Self::recommendations`] is
+    /// the by-rule view kept for readers that want one entry per rule; this is the list a
+    /// report that speaks per repo reads. `#[serde(default)]` so an older report still loads.
+    #[serde(default)]
+    pub recommendations_by_repo: Vec<crate::ai_audit::RuleRecommendation>,
+    /// The repos the scan was asked to inspect and could not: `(repo, reason)`. A folder that
+    /// is gone, a repo whose files could not be read. Such a repo is also in
+    /// [`Self::failed_passes`] (pass `repository read`) and has not-run rows in the ledger, but
+    /// this is the one list that says the deliverable covers fewer repos than the project, and
+    /// the release gate refuses a package while it is not empty. Empty on a scan that read every
+    /// repo.
+    #[serde(default)]
+    pub repos_not_inspected: Vec<(String, String)>,
     /// W6: every audit pass that FAILED or timed out during this scan (e.g. the alternative-
     /// recommendation pass hitting the CLI hang timeout), never silently swallowed. The
     /// export (`report_export::build_report_json`) turns each entry into an explicit
@@ -1015,6 +1089,30 @@ impl ScanReport {
         self.ai_error.is_none()
             && self.failed_passes.iter().all(|f| f.files_not_reviewed == 0)
             && !self.ledger.is_cost_capped()
+            && self.repos_not_inspected.is_empty()
+    }
+
+    /// Record a repo the scan was asked to inspect and could not (a folder that is gone, files
+    /// that could not be read): a failed `repository read` pass, a not-run ledger row for every
+    /// rule that applies to it, and an entry in [`Self::repos_not_inspected`]. The repo is never
+    /// listed in [`Self::repos`], so nothing downstream reads it as inspected, and the release
+    /// gate refuses a package while the list is not empty.
+    pub fn note_repo_not_inspected(
+        &mut self,
+        spec: &str,
+        reason: &str,
+        selected: &[SelectedRule],
+        corpus: Option<&camerata_rules::RuleSet>,
+    ) {
+        record_repo_not_inspected(
+            &mut self.ledger,
+            &mut self.failed_passes,
+            &mut self.repos_not_inspected,
+            spec,
+            reason,
+            selected,
+            corpus,
+        );
     }
 
     /// Redact every finding and every report-level string in place; returns how many secret
@@ -1068,6 +1166,8 @@ impl ScanReport {
             coverage_notes: Vec::new(),
             provenance: ScanProvenance::default(),
             recommendations: std::collections::HashMap::new(),
+            repos_not_inspected: Vec::new(),
+            recommendations_by_repo: Vec::new(),
             failed_passes: Vec::new(),
             ledger: crate::scan_ledger::ScanLedger::new(),
         }
@@ -1103,6 +1203,8 @@ impl ScanReport {
             coverage_notes: Vec::new(),
             provenance: ScanProvenance::default(),
             recommendations: std::collections::HashMap::new(),
+            repos_not_inspected: Vec::new(),
+            recommendations_by_repo: Vec::new(),
             failed_passes: Vec::new(),
             ledger: crate::scan_ledger::ScanLedger::new(),
         }
@@ -1380,13 +1482,14 @@ pub(crate) fn split_fired_and_not_assessed(
 /// for that reason, "config-gated" otherwise (the architecture config it needs is absent).
 fn note_unanswered_checker_rule(
     ledger: &mut crate::scan_ledger::ScanLedger,
+    repo: &str,
     rule_id: &str,
     scan_incomplete: bool,
 ) {
     if scan_incomplete && architectural::is_withheld_on_incomplete_scan(rule_id) {
-        ledger.note_incomplete_scan_rule(rule_id);
+        ledger.note_incomplete_scan_rule(repo, rule_id);
     } else {
-        ledger.note_config_gated_rule(rule_id);
+        ledger.note_config_gated_rule(repo, rule_id);
     }
 }
 
@@ -1888,10 +1991,16 @@ pub async fn audit_repos_with_llm_controlled(
     // Per-rule alternative recommendations, accumulated across every repo this scan touches
     // (see `ScanReport::recommendations`'s doc comment for the last-repo-wins simplification
     // when a project-level rule is scanned in more than one repo).
-    let mut recommendations: std::collections::HashMap<
-        String,
+    // Kept per (rule, repo): each repo is assessed on its own, so the convention found in one
+    // repo is never overwritten by, or stated for, another.
+    let mut recommendations: std::collections::BTreeMap<
+        (String, String),
         crate::ai_audit::RuleRecommendation,
-    > = std::collections::HashMap::new();
+    > = std::collections::BTreeMap::new();
+    // Repos the scan could not read: see `ScanReport::repos_not_inspected`.
+    let mut repos_not_inspected: Vec<(String, String)> = Vec::new();
+    // How many repos had a whole-repo AI failure, beyond the first.
+    let mut ai_error_repos = 0usize;
     // W6: any pass that failed/timed out for a repo, across the whole scan — see
     // `ScanReport::failed_passes`'s doc comment. Never omitted from the export.
     let mut all_failed_passes: Vec<crate::ai_audit::FailedPass> = Vec::new();
@@ -1995,6 +2104,9 @@ pub async fn audit_repos_with_llm_controlled(
     // each repo against its own chosen rules ∪ the project-level set, never the whole
     // selection across the board.
 
+    // The tool progress shown for the job is keyed by repo and tool when there is more than one
+    // repo, so each repo's floor and architectural results are rows of their own.
+    let multi_repo = sources.len() > 1;
     for (spec, dir) in sources {
         let spec = spec.trim();
         if spec.is_empty() {
@@ -2166,7 +2278,10 @@ pub async fn audit_repos_with_llm_controlled(
                 let mut repo_findings = Vec::new();
                 if run_deterministic {
                     if let Some((jstore, jid)) = job {
-                        jstore.det_tool_running(jid, "floor");
+                        jstore.det_tool_running(
+                            jid,
+                            &crate::jobs::progress_tool_key(spec, "floor", multi_repo),
+                        );
                     }
                     let mut floor = audit_files(spec, &files);
                     floor.extend(audit::audit_unread_paths(spec, &unread_paths, &files));
@@ -2177,7 +2292,11 @@ pub async fn audit_repos_with_llm_controlled(
                     // in the impure orchestration layer, instead of `onboard::audit`.
                     attach_secret_history_capture(&mut floor, &repo_root_for_history).await;
                     if let Some((jstore, jid)) = job {
-                        jstore.det_tool_done(jid, "floor", floor.len());
+                        jstore.det_tool_done(
+                            jid,
+                            &crate::jobs::progress_tool_key(spec, "floor", multi_repo),
+                            floor.len(),
+                        );
                         jstore.add_findings(jid, floor.clone());
                     }
                     // W1: the content floor runs AUDIT_RULES unconditionally over every file
@@ -2187,6 +2306,7 @@ pub async fn audit_repos_with_llm_controlled(
                     for rid in AUDIT_RULES {
                         let emitted = floor.iter().filter(|f| f.rule_id == *rid).count();
                         pipeline_ledger.record_rule(
+                            spec,
                             *rid,
                             crate::scan_ledger::RuleTier::Deterministic,
                             true,
@@ -2211,7 +2331,10 @@ pub async fn audit_repos_with_llm_controlled(
                     // above) AND at least one of its `interest_globs` files exists — never a
                     // false "clean" on a repo with no `supabase/` directory.
                     if let Some((jstore, jid)) = job {
-                        jstore.det_tool_running(jid, "architectural");
+                        jstore.det_tool_running(
+                            jid,
+                            &crate::jobs::progress_tool_key(spec, "architectural", multi_repo),
+                        );
                     }
                     // Reference text (HTML, components, docs) is handed to the architectural
                     // tier ONLY, and only when an armed rule needs it: the AI digest and the
@@ -2224,7 +2347,11 @@ pub async fn audit_repos_with_llm_controlled(
                         architectural::architectural_input(&files, &reference_files, &arch_armed);
                     let arch = audit_architectural(spec, &arch_input, &arch_armed);
                     if let Some((jstore, jid)) = job {
-                        jstore.det_tool_done(jid, "architectural", arch.len());
+                        jstore.det_tool_done(
+                            jid,
+                            &crate::jobs::progress_tool_key(spec, "architectural", multi_repo),
+                            arch.len(),
+                        );
                         jstore.add_findings(jid, arch.clone());
                     }
                     // W1 / W4: classify every CI-tier (mechanical/architectural) rule SELECTED
@@ -2252,6 +2379,7 @@ pub async fn audit_repos_with_llm_controlled(
                         ) {
                             Some("arch_checker") => {
                                 pipeline_ledger.record_rule(
+                                    spec,
                                     *rid,
                                     crate::scan_ledger::RuleTier::Architectural,
                                     true,
@@ -2262,6 +2390,7 @@ pub async fn audit_repos_with_llm_controlled(
                             }
                             Some("gateway_rule_registry") => {
                                 pipeline_ledger.record_rule(
+                                    spec,
                                     *rid,
                                     crate::scan_ledger::RuleTier::Architectural,
                                     true,
@@ -2272,6 +2401,7 @@ pub async fn audit_repos_with_llm_controlled(
                             }
                             Some("semgrep") => {
                                 pipeline_ledger.record_rule(
+                                    spec,
                                     *rid,
                                     crate::scan_ledger::RuleTier::ExternalTool,
                                     true,
@@ -2282,6 +2412,7 @@ pub async fn audit_repos_with_llm_controlled(
                             }
                             Some("scan_preview_linter") => {
                                 pipeline_ledger.record_rule(
+                                    spec,
                                     *rid,
                                     crate::scan_ledger::RuleTier::ExternalTool,
                                     true,
@@ -2323,6 +2454,7 @@ pub async fn audit_repos_with_llm_controlled(
                                 ) {
                                     note_unanswered_checker_rule(
                                         &mut pipeline_ledger,
+                                        spec,
                                         rid,
                                         scan_incomplete,
                                     );
@@ -2372,7 +2504,7 @@ pub async fn audit_repos_with_llm_controlled(
                             feedback,
                         )
                         .await;
-                        clone_advisory::record_in_ledger(&mut pipeline_ledger, &outcome);
+                        clone_advisory::record_in_ledger(&mut pipeline_ledger, spec, &outcome);
                         if outcome.judge_model.is_some() {
                             clone_judge_model_used = outcome.judge_model.clone();
                         }
@@ -2391,6 +2523,7 @@ pub async fn audit_repos_with_llm_controlled(
                     // "verified clean" just because it was selected.
                     for rid in AUDIT_RULES {
                         pipeline_ledger.record_rule(
+                            spec,
                             *rid,
                             crate::scan_ledger::RuleTier::Deterministic,
                             false,
@@ -2421,6 +2554,7 @@ pub async fn audit_repos_with_llm_controlled(
                         .is_some();
                         if has_detector {
                             pipeline_ledger.record_rule(
+                                spec,
                                 *rid,
                                 crate::scan_ledger::RuleTier::Architectural,
                                 false,
@@ -2436,6 +2570,7 @@ pub async fn audit_repos_with_llm_controlled(
                             // were on, since the config it needs is absent for this repo.
                             note_unanswered_checker_rule(
                                 &mut pipeline_ledger,
+                                spec,
                                 rid,
                                 scan_incomplete,
                             );
@@ -2494,7 +2629,42 @@ pub async fn audit_repos_with_llm_controlled(
                 // findings (those are AI results from a prior run), no per-repo audit, no
                 // tokens. A deterministic-only scan therefore never touches the LLM.
                 let mut ai_for_repo: Vec<Finding> = Vec::new();
-                if run_ai_review {
+                // Set when none of this repo's files was reviewed by the AI pass (the spend limit
+                // had already stopped the run, or the whole review failed). The incremental cache
+                // must not record those files as audited.
+                let mut ai_all_unreviewed = false;
+                if run_ai_review && meter.repo_blocked(spec) {
+                    // The spend limit stopped the run before this repo: its model work is not
+                    // started (no digests built, no calls), its rules are on record as not run
+                    // and it is named as unfinished. Its token-free checks above still ran.
+                    ai_all_unreviewed = true;
+                    notes.push(format!(
+                        "{spec}: AI review not run (the spend limit set for this run was reached)"
+                    ));
+                    for (rid, _) in &semantic {
+                        pipeline_ledger.record_rule(
+                            spec,
+                            rid.clone(),
+                            crate::scan_ledger::RuleTier::Semantic,
+                            false,
+                            Some(
+                                "not run: the spend limit set for this run was reached before \
+                                 any pass checked it"
+                                    .to_string(),
+                            ),
+                            0,
+                            0,
+                        );
+                    }
+                    all_failed_passes.push(crate::ai_audit::FailedPass {
+                        repo: spec.to_string(),
+                        pass: crate::report_export::coverage_gaps::AI_REVIEW_ALL_PASSES.to_string(),
+                        reason: "NOT RUN: the spend limit set for this run was reached before \
+                                 this repository was reviewed. This inspection is incomplete."
+                            .to_string(),
+                        files_not_reviewed: files.len(),
+                    });
+                } else if run_ai_review {
                     // H11: every carried finding names the commit it was last found at, so a
                     // reader can tell it was not re-audited this run. A finding carried on from
                     // an earlier incremental run keeps the commit it was last actually audited at.
@@ -2529,6 +2699,7 @@ pub async fn audit_repos_with_llm_controlled(
                         for (rid, _) in &semantic {
                             let emitted = part.carried.iter().filter(|f| &f.rule_id == rid).count();
                             pipeline_ledger.record_rule(
+                                spec,
                                 rid.clone(),
                                 crate::scan_ledger::RuleTier::Semantic,
                                 true,
@@ -2608,6 +2779,7 @@ pub async fn audit_repos_with_llm_controlled(
                                 for rec in &repo_recs {
                                     if !rec.applicable {
                                         pipeline_ledger.note_not_applicable_rule(
+                                            spec,
                                             rec.rule_id.to_ascii_uppercase(),
                                         );
                                     }
@@ -2622,6 +2794,7 @@ pub async fn audit_repos_with_llm_controlled(
                                     // nothing" (that would read as verified clean).
                                     if let Some(note) = not_assessed.get(rid) {
                                         pipeline_ledger.record_rule(
+                                            spec,
                                             rid.clone(),
                                             crate::scan_ledger::RuleTier::Semantic,
                                             false,
@@ -2638,6 +2811,7 @@ pub async fn audit_repos_with_llm_controlled(
                                         .unwrap_or(crate::cost_cap::RuleCoverage::Complete);
                                     if coverage == crate::cost_cap::RuleCoverage::NotRun {
                                         pipeline_ledger.record_rule(
+                                            spec,
                                             rid.clone(),
                                             crate::scan_ledger::RuleTier::Semantic,
                                             false,
@@ -2652,6 +2826,7 @@ pub async fn audit_repos_with_llm_controlled(
                                         continue;
                                     }
                                     pipeline_ledger.record_rule(
+                                        spec,
                                         rid.clone(),
                                         crate::scan_ledger::RuleTier::Semantic,
                                         true,
@@ -2662,6 +2837,7 @@ pub async fn audit_repos_with_llm_controlled(
                                     if coverage == crate::cost_cap::RuleCoverage::Partial {
                                         pipeline_ledger.note_partial_rule(
                                             rid,
+                                            spec,
                                             "checked on part of the code only: the spend limit \
                                              set for this run was reached before the rest was \
                                              checked",
@@ -2670,6 +2846,7 @@ pub async fn audit_repos_with_llm_controlled(
                                 }
                                 for (rid, emitted) in ai_counts {
                                     pipeline_ledger.record_rule(
+                                        spec,
                                         rid,
                                         crate::scan_ledger::RuleTier::Semantic,
                                         true,
@@ -2711,6 +2888,7 @@ pub async fn audit_repos_with_llm_controlled(
                                     for rule in &group.rules {
                                         pipeline_ledger.note_scope_subset(
                                             &rule.id,
+                                            spec,
                                             evaluated,
                                             part.changed.len(),
                                             kind,
@@ -2719,8 +2897,10 @@ pub async fn audit_repos_with_llm_controlled(
                                     }
                                 }
                                 ai_for_repo.extend(ai_findings);
-                                for rec in repo_recs {
-                                    recommendations.insert(rec.rule_id.clone(), rec);
+                                for mut rec in repo_recs {
+                                    rec.repo = spec.to_string();
+                                    recommendations
+                                        .insert((rec.rule_id.clone(), spec.to_string()), rec);
                                 }
                                 // W6: a sub-pass (e.g. alternative recommendations) can fail
                                 // without failing the whole audit_repo call — never let that
@@ -2736,22 +2916,16 @@ pub async fn audit_repos_with_llm_controlled(
                                 // to "verified clean" via mere selection.
                                 for (rid, _) in &semantic {
                                     pipeline_ledger.record_rule(
+                                        spec,
                                         rid.clone(),
                                         crate::scan_ledger::RuleTier::Semantic,
                                         false,
                                         Some(format!(
-                                            "AI/semantic audit pass failed for this repo: {e}"
+                                            "{}: {e}",
+                                            crate::scan_ledger::AI_AUDIT_FAILED_MARKER
                                         )),
                                         0,
                                         0,
-                                    );
-                                    // H4: `record_rule` ORs `ran` across repos, so a rule that
-                                    // ran on another repo of this scan would otherwise read as
-                                    // "ran, found nothing" with this repo never reviewed.
-                                    pipeline_ledger.note_rule_not_run_for_repo(
-                                        rid,
-                                        spec,
-                                        &format!("the AI review failed ({e})"),
                                     );
                                 }
                                 // H4: a whole-repo failure is a failed pass over every file of
@@ -2765,9 +2939,12 @@ pub async fn audit_repos_with_llm_controlled(
                                     reason: e.to_string(),
                                     files_not_reviewed: files.len(),
                                 });
+                                ai_all_unreviewed = true;
                                 let msg = format!("{spec}: AI audit skipped ({e})");
                                 if first_ai_error.is_none() {
                                     first_ai_error = Some(msg.clone());
+                                } else {
+                                    ai_error_repos += 1;
                                 }
                                 notes.push(msg);
                             }
@@ -2784,6 +2961,7 @@ pub async fn audit_repos_with_llm_controlled(
                     );
                     for (rid, _) in &semantic {
                         pipeline_ledger.record_rule(
+                            spec,
                             rid.clone(),
                             crate::scan_ledger::RuleTier::Semantic,
                             false,
@@ -2805,7 +2983,26 @@ pub async fn audit_repos_with_llm_controlled(
 
                 // Record this repo into the fresh manifest: fingerprints of EVERY current file
                 // (so next run can tell what changed) + the repo's AI findings (carried ∪ fresh).
-                manifest_builder.record_repo(spec, &files, &ai_for_repo);
+                //
+                // A file the AI pass did not review is not recorded: the next scan then treats it
+                // as changed and audits it, instead of carrying it on as reviewed and clean. That
+                // is every file of a repo the spend limit never reached or whose review failed
+                // outright, and the files of each chunk the limit refused.
+                let unreviewed: std::collections::HashSet<String> = if ai_all_unreviewed {
+                    files.iter().map(|(path, _)| path.clone()).collect()
+                } else {
+                    meter
+                        .cost_cap_record()
+                        .map(|cap| {
+                            cap.unreviewed_files()
+                                .into_iter()
+                                .filter(|(repo, _)| repo == spec)
+                                .map(|(_, path)| path)
+                                .collect()
+                        })
+                        .unwrap_or_default()
+                };
+                manifest_builder.record_repo_except(spec, &files, &ai_for_repo, &unreviewed);
                 // A dirty tree is not the commit: recording HEAD would name a state that was not audited.
                 if let Some(sha) = audited_refs
                     .last()
@@ -2839,7 +3036,8 @@ pub async fn audit_repos_with_llm_controlled(
                         let mut acc = crate::scan_ledger::StageAccounting::default();
                         acc.other
                             .push(("stack_exception_excluded".to_string(), rows_in - rows_out));
-                        pipeline_ledger.record_stage(
+                        pipeline_ledger.record_stage_for_repo(
+                            spec,
                             "stack-exception-filter",
                             rows_in,
                             rows_out,
@@ -2866,7 +3064,13 @@ pub async fn audit_repos_with_llm_controlled(
                     crate::ai_audit::merge_semantic_groups(repo_findings, &files);
                 let rows_out = repo_findings.len();
                 let acc = account_location_merge(&pre_merge_findings, &repo_findings);
-                pipeline_ledger.record_stage("cross-family-merge", rows_in, rows_out, acc);
+                pipeline_ledger.record_stage_for_repo(
+                    spec,
+                    "cross-family-merge",
+                    rows_in,
+                    rows_out,
+                    acc,
+                );
                 classify_repo_findings(&mut repo_findings, spec, &files);
                 // Corpus-authored severity bounds (`min_severity` floor, `max_severity` ceiling,
                 // `deviation_ceiling`), applied to the LIVE findings so the triage view shows
@@ -2915,7 +3119,20 @@ pub async fn audit_repos_with_llm_controlled(
                     ));
                 }
             }
-            Err(e) => notes.push(format!("{spec}: audit failed ({e})")),
+            Err(e) => {
+                notes.push(format!("{spec}: audit failed ({e})"));
+                // A repo that cannot be read is not silently left out: it is a failed pass, a
+                // not-run row for every rule that applies to it, and a line on the report.
+                record_repo_not_inspected(
+                    &mut pipeline_ledger,
+                    &mut all_failed_passes,
+                    &mut repos_not_inspected,
+                    spec,
+                    &e.to_string(),
+                    selected,
+                    corpus,
+                );
+            }
         }
     }
 
@@ -2978,6 +3195,7 @@ pub async fn audit_repos_with_llm_controlled(
         .any(|s| s.frameworks.iter().any(|f| f == "Firebase"))
     {
         report.coverage_notes.push(CoverageNote {
+            repo: None,
             tool: crate::FIREBASE_SCOPE_COVERAGE_TOOL.to_string(),
             message: crate::FIREBASE_SCOPE_SENTENCE.to_string(),
         });
@@ -2992,7 +3210,16 @@ pub async fn audit_repos_with_llm_controlled(
     report.code_lines_by_language = finalize_language_breakdown(lang_lines_total);
     report.actual_usage = Some(meter.snapshot());
     report.deep = deep_report;
-    report.recommendations = recommendations;
+    // The by-rule view (the repo scanned last wins, as it always did) and the full list, one
+    // entry per (rule, repo), each naming its repo.
+    for repo in &report.repos {
+        for ((rule_id, rec_repo), rec) in &recommendations {
+            if rec_repo == repo {
+                report.recommendations.insert(rule_id.clone(), rec.clone());
+            }
+        }
+    }
+    report.recommendations_by_repo = recommendations.into_values().collect();
     // W1: fold every scan-time STAGE-level ledger integrity gap into the SAME existing
     // `FailedPass` disclosure mechanism `all_failed_passes` already uses — runtime never
     // refuses the export or drops a row; an unaccounted pipeline stage is recorded here so
@@ -3015,7 +3242,9 @@ pub async fn audit_repos_with_llm_controlled(
     // from a pile of per-rule `FailedPass` entries.
     let repo_label = report.repos.join(", ");
     for stage in pipeline_ledger.stages() {
-        if let Some(fp) = crate::scan_ledger::stage_disclosure(&repo_label, stage) {
+        // A stage that ran over one repo is disclosed against that repo, not the whole project.
+        let label = stage.disclosure_label(&repo_label);
+        if let Some(fp) = crate::scan_ledger::stage_disclosure(label, stage) {
             all_failed_passes.push(fp);
         }
     }
@@ -3061,7 +3290,14 @@ pub async fn audit_repos_with_llm_controlled(
     // local pass (the deterministic floor and friends) was requested and DID run, so this is
     // a real partial result, not "nothing ran at all".
     report.ai_blocked_reason = ai_blocked_reason;
-    report.ai_error = first_ai_error;
+    // The first failure is the structured error; the others are failed passes of their own (one
+    // per repo, listed in Coverage), and the count is said here so it is not read as one repo.
+    report.ai_error = first_ai_error.map(|first| match ai_error_repos {
+        0 => first,
+        1 => format!("{first} (and 1 other repository failed the same way)"),
+        n => format!("{first} (and {n} other repositories failed the same way)"),
+    });
+    report.repos_not_inspected = repos_not_inspected;
     // Fold the always-on dep-audit coverage notes into the report.  The scan-tools
     // preview notes are merged separately (via `merge_scan_preview` in lib.rs); both
     // sets land in `coverage_notes` so the UI sees them in one place.

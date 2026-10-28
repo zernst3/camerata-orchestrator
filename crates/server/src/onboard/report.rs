@@ -35,6 +35,8 @@ pub fn build_report(
         coverage_notes: Vec::new(),
         provenance: ScanProvenance::default(),
         recommendations: std::collections::HashMap::new(),
+        repos_not_inspected: Vec::new(),
+        recommendations_by_repo: Vec::new(),
         failed_passes: Vec::new(),
         ledger: crate::scan_ledger::ScanLedger::new(),
     }

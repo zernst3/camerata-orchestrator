@@ -79,28 +79,28 @@ fn scoped_scan() -> crate::onboard::ScanReport {
     // RUST-A-1 is language-scoped: all 10 files of repo one are Rust, 6 of the 40 in repo two.
     report
         .ledger
-        .record_rule("RUST-A-1", RuleTier::Semantic, true, None, 50, 0);
+        .record_rule("", "RUST-A-1", RuleTier::Semantic, true, None, 50, 0);
     report
         .ledger
-        .note_scope_subset("RUST-A-1", 10, 10, "language", false);
+        .note_scope_subset("RUST-A-1", "", 10, 10, "language", false);
     report
         .ledger
-        .note_scope_subset("RUST-A-1", 6, 40, "language", false);
+        .note_scope_subset("RUST-A-1", "", 6, 40, "language", false);
     // RUST-B-1 carries another coverage note already; the scope fact must not be dropped.
-    report.ledger.note_config_gated_rule("RUST-B-1");
+    report.ledger.note_config_gated_rule("", "RUST-B-1");
     report
         .ledger
-        .record_rule("RUST-B-1", RuleTier::Semantic, true, None, 50, 0);
+        .record_rule("", "RUST-B-1", RuleTier::Semantic, true, None, 50, 0);
     report
         .ledger
-        .note_scope_subset("RUST-B-1", 6, 40, "declared", false);
+        .note_scope_subset("RUST-B-1", "", 6, 40, "declared", false);
     // ARCH-C-1 looked at every file of both repos: nothing to say.
     report
         .ledger
-        .record_rule("ARCH-C-1", RuleTier::Semantic, true, None, 50, 0);
+        .record_rule("", "ARCH-C-1", RuleTier::Semantic, true, None, 50, 0);
     report
         .ledger
-        .note_scope_subset("ARCH-C-1", 40, 40, "declared", false);
+        .note_scope_subset("ARCH-C-1", "", 40, 40, "declared", false);
     report
 }
 
@@ -154,10 +154,10 @@ fn an_incremental_runs_scope_counts_say_they_are_over_the_changed_files() {
     let mut report = two_repo_scan();
     report
         .ledger
-        .record_rule("RUST-A-1", RuleTier::Semantic, true, None, 3, 0);
+        .record_rule("", "RUST-A-1", RuleTier::Semantic, true, None, 3, 0);
     report
         .ledger
-        .note_scope_subset("RUST-A-1", 2, 5, "language", true);
+        .note_scope_subset("RUST-A-1", "", 2, 5, "language", true);
     let gaps = coverage_gaps(&report);
     assert!(gaps.scope_limited_rules[0].changed_files_only);
     let note = gaps.scope_limited_note.as_deref().unwrap();
@@ -206,10 +206,10 @@ fn a_scan_whose_rules_all_saw_every_file_has_no_scope_line() {
     let mut report = two_repo_scan();
     report
         .ledger
-        .record_rule("ARCH-C-1", RuleTier::Semantic, true, None, 50, 0);
+        .record_rule("", "ARCH-C-1", RuleTier::Semantic, true, None, 50, 0);
     report
         .ledger
-        .note_scope_subset("ARCH-C-1", 40, 40, "declared", false);
+        .note_scope_subset("ARCH-C-1", "", 40, 40, "declared", false);
     let gaps = coverage_gaps(&report);
     assert!(gaps.scope_limited_rules.is_empty());
     assert!(gaps.scope_limited_note.is_none());

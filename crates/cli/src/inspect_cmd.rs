@@ -1040,7 +1040,8 @@ pub fn render_ledger_summary(
 
     writeln!(out, "\n== DETECTION FAMILIES ==").ok();
     for tier in RuleTier::all() {
-        let rules: Vec<&RuleLedgerEntry> = ledger.rules().filter(|r| r.tier == tier).collect();
+        let rules: Vec<&RuleLedgerEntry> =
+            ledger.rules_merged().filter(|r| r.tier == tier).collect();
         let ran = rules.iter().filter(|r| r.ran).count();
         let skipped = rules.len() - ran;
         let findings: usize = rules.iter().map(|r| r.findings_emitted).sum();
@@ -1131,13 +1132,20 @@ pub fn render_ledger_summary(
     }
 
     if verbose {
+        // One line per (rule, repo): a rule that ran on one repo and not on another is two
+        // lines, each naming its repo.
         let mut rules: Vec<&RuleLedgerEntry> = ledger.rules().collect();
-        rules.sort_by(|a, b| a.rule_id.cmp(&b.rule_id));
+        rules.sort_by(|a, b| (&a.rule_id, &a.repo).cmp(&(&b.rule_id, &b.repo)));
         writeln!(out, "\n== PER-RULE DETAIL ({}) ==", rules.len()).ok();
         for r in rules {
+            let repo = if r.repo.is_empty() {
+                String::new()
+            } else {
+                format!(" [{}]", r.repo)
+            };
             writeln!(
                 out,
-                "  {:<40} ran={:<5} files_evaluated={:<6} findings={}",
+                "  {:<40} ran={:<5} files_evaluated={:<6} findings={}{repo}",
                 r.rule_id, r.ran, r.files_evaluated, r.findings_emitted,
             )
             .ok();
@@ -1364,9 +1372,11 @@ mod tests {
             preflight: None,
             efficiency,
             cost_cap: Some(CostCapRecord {
+                repos_not_finished: Vec::new(),
                 cap_usd: 5.0,
                 spent_usd: 5.4,
                 not_run_passes: vec![NotRunPass {
+                    files: Vec::new(),
                     repo: "r".into(),
                     group: "pass[all]".into(),
                     chunk: 1,
@@ -1874,6 +1884,7 @@ mod tests {
     fn render_ledger_summary_clean_ledger_has_no_alarms() {
         let mut ledger = ScanLedger::new();
         ledger.record_rule(
+            "",
             "SEC-NO-HARDCODED-SECRETS-1",
             RuleTier::Deterministic,
             true,
@@ -1882,6 +1893,7 @@ mod tests {
             0,
         );
         ledger.record_rule(
+            "",
             "ARCH-STRICT-LAYERING-1",
             RuleTier::Architectural,
             true,
@@ -1890,6 +1902,7 @@ mod tests {
             0,
         );
         ledger.record_rule(
+            "",
             "SEC-NO-RAW-SQL-CONCAT-1",
             RuleTier::ExternalTool,
             true,
@@ -1897,7 +1910,7 @@ mod tests {
             8,
             0,
         );
-        ledger.record_rule("AI-SITE-DEFECT-1", RuleTier::Semantic, true, None, 3, 1);
+        ledger.record_rule("", "AI-SITE-DEFECT-1", RuleTier::Semantic, true, None, 3, 1);
         ledger.record_stage("cross-family-merge", 1, 1, StageAccounting::default());
 
         let text = render_ledger_summary(&ledger, &[], false);
@@ -1926,6 +1939,7 @@ mod tests {
         // Empty bucket: a positive disclosure, no alarm.
         let mut clean = ScanLedger::new();
         clean.record_rule(
+            "",
             "SEC-NO-RAW-SQL-CONCAT-1",
             RuleTier::Deterministic,
             true,
@@ -1994,6 +2008,7 @@ mod tests {
     fn render_ledger_summary_flags_a_family_with_zero_rules_recorded() {
         let mut ledger = ScanLedger::new();
         ledger.record_rule(
+            "",
             "SEC-NO-HARDCODED-SECRETS-1",
             RuleTier::Deterministic,
             true,
@@ -2023,6 +2038,7 @@ mod tests {
     fn render_ledger_summary_flags_a_family_whose_rules_all_failed_to_run() {
         let mut ledger = ScanLedger::new();
         ledger.record_rule(
+            "",
             "SEC-NO-RAW-SQL-CONCAT-1",
             RuleTier::ExternalTool,
             false,
@@ -2049,6 +2065,7 @@ mod tests {
     fn render_ledger_summary_renders_not_run_reasons() {
         let mut ledger = ScanLedger::new();
         ledger.record_rule(
+            "",
             "PYTHON-PARAMETERIZED-SQL-1",
             RuleTier::Architectural,
             false,
@@ -2057,6 +2074,7 @@ mod tests {
             0,
         );
         ledger.record_rule(
+            "",
             "SEC-NO-HARDCODED-SECRETS-1",
             RuleTier::Deterministic,
             false,
@@ -2105,6 +2123,7 @@ mod tests {
     fn render_ledger_summary_default_omits_per_rule_detail() {
         let mut ledger = ScanLedger::new();
         ledger.record_rule(
+            "",
             "SEC-NO-HARDCODED-SECRETS-1",
             RuleTier::Deterministic,
             true,

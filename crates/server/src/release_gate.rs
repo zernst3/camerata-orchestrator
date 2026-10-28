@@ -94,6 +94,8 @@ pub async fn build_product_package_with_stem(
     // with. Checked first, before anything is built or compiled. Callers surface the error's
     // message unchanged (it is a `report_export::ClientNameRequired`).
     crate::report_export::require_client_name(options)?;
+    // And no package for a report that covers fewer repos than the project holds.
+    crate::report_export::require_all_repos(report, options)?;
     let report_json =
         crate::report_export::build_report_json(report, dispositions, corpus, options);
     let data_json = crate::report_export::render_data_json(&report_json)?;

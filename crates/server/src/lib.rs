@@ -4877,6 +4877,10 @@ struct AlternativeOverride {
 /// Body for `POST /api/projects/:id/rescan-alternatives`.
 #[derive(serde::Deserialize)]
 struct RescanAlternativesReq {
+    /// Go ahead when some of the project's repos have no local clone. Without it the rescan is
+    /// refused and says which repos are missing.
+    #[serde(default)]
+    allow_partial: bool,
     #[serde(default)]
     overrides: Vec<AlternativeOverride>,
 }
@@ -5039,7 +5043,14 @@ async fn rescan_alternatives_handler(
         Some(state.usage_ledger.clone()),
     )
     .with_session_sink(model_sessions.clone());
-    let (sources, source_notes) = resolve_local_sources(&state, &project.repos);
+    let LocalSources {
+        sources,
+        notes: source_notes,
+        unresolved,
+    } = resolve_local_sources(&state, &project.repos);
+    if let Some(why) = partial_run_refusal(&unresolved, project.repos.len(), req.allow_partial) {
+        return Json(serde_json::json!({ "ok": false, "message": why }));
+    }
     run_notes.extend(source_notes);
 
     let audit_model = Some(step_model_or(&state, crate::project::StepKind::Audit, None));
@@ -5669,6 +5680,10 @@ struct ScanReq {
     /// Convenience single repo (folded into `repos`).
     #[serde(default)]
     repo: Option<String>,
+    /// Go ahead when some repos have no local clone; the report then lists them as not
+    /// inspected. Without it the scan is refused and says which repos are missing.
+    #[serde(default)]
+    allow_partial: bool,
 }
 
 /// Brownfield scan: audit a SET of existing repos against the content rules and
@@ -5681,13 +5696,9 @@ struct ScanReq {
 /// `<workspace_root>/<owner>/<repo>`. Repos with no local git clone are returned as NOTES
 /// (not sources) so the caller can surface "browse to the repo's folder" — onboarding reads
 /// code from disk, never from GitHub.
-fn resolve_local_sources(
-    state: &AppState,
-    repos: &[String],
-) -> (Vec<(String, std::path::PathBuf)>, Vec<String>) {
+pub(crate) fn resolve_local_sources(state: &AppState, repos: &[String]) -> LocalSources {
     let workspace_root = state.settings.workspace_root();
-    let mut sources = Vec::new();
-    let mut notes = Vec::new();
+    let mut resolved = LocalSources::default();
     for spec in repos {
         let spec = spec.trim();
         if spec.is_empty() {
@@ -5699,17 +5710,95 @@ fn resolve_local_sources(
             workspace_root.as_deref(),
             spec,
         ) {
-            Some(dir) if dir.join(".git").exists() => sources.push((spec.to_string(), dir)),
-            Some(dir) => notes.push(format!(
-                "{spec}: {} is not a local git clone — browse to the repo's folder",
-                dir.display()
-            )),
-            None => notes.push(format!(
-                "{spec}: no local folder set — browse to the repo's folder"
-            )),
+            Some(dir) if dir.join(".git").exists() => {
+                resolved.sources.push((spec.to_string(), dir));
+            }
+            Some(dir) => {
+                resolved.unresolved.push((
+                    spec.to_string(),
+                    format!("{} is not a local git clone", dir.display()),
+                ));
+            }
+            None => resolved
+                .unresolved
+                .push((spec.to_string(), "no local folder is set".to_string())),
         }
     }
-    (sources, notes)
+    resolved.notes = resolved
+        .unresolved
+        .iter()
+        .map(|(spec, why)| format!("{spec}: {why}, browse to the repo's folder"))
+        .collect();
+    resolved
+}
+
+/// What [`resolve_local_sources`] found: the repos with a local clone, and the ones without.
+#[derive(Default)]
+pub(crate) struct LocalSources {
+    /// `(spec, folder)` for every repo that has a local git clone.
+    pub sources: Vec<(String, std::path::PathBuf)>,
+    /// One note per repo that has none, in the words the scan message uses.
+    pub notes: Vec<String>,
+    /// `(spec, reason)` for every repo that has none. A run that goes ahead without them must
+    /// say so in its report; one that cannot is refused ([`partial_run_refusal`]).
+    pub unresolved: Vec<(String, String)>,
+}
+
+/// The refusal for a run that would inspect fewer repos than it was asked to, or `None` when
+/// every repo resolved or the caller said it accepts a partial run. A project of eleven repos
+/// must never produce a report for ten without anyone having said so: the default is to stop and
+/// name the repos, and `allow_partial` is the explicit way to go ahead and have the report list
+/// them as not inspected.
+fn partial_run_refusal(
+    unresolved: &[(String, String)],
+    total: usize,
+    allow_partial: bool,
+) -> Option<String> {
+    if unresolved.is_empty() || allow_partial {
+        return None;
+    }
+    let list = unresolved
+        .iter()
+        .map(|(spec, why)| format!("{spec} ({why})"))
+        .collect::<Vec<_>>()
+        .join("; ");
+    Some(format!(
+        "Cannot inspect {} of {total} repositories: {list}. Set the folder for each one, or run \
+         again with allow_partial to inspect the rest; the report then lists these as not inspected.",
+        unresolved.len()
+    ))
+}
+
+/// Record every repo that could not be resolved on `report` as a repo not inspected: a failed
+/// `repository read` pass, a not-run row for every rule selected for it, and an entry in
+/// [`crate::onboard::ScanReport::repos_not_inspected`]. Used by a run that went ahead without
+/// them (`allow_partial`).
+fn record_unresolved_repos(
+    report: &mut crate::onboard::ScanReport,
+    unresolved: &[(String, String)],
+    selected: &[crate::onboard::SelectedRule],
+    corpus: Option<&camerata_rules::RuleSet>,
+) {
+    for (spec, why) in unresolved {
+        report.note_repo_not_inspected(spec, why, selected, corpus);
+    }
+}
+
+/// [`record_unresolved_repos`] for a run that has just built its incremental manifest. The
+/// manifest was stamped complete or not before these repos were known, so it is corrected here,
+/// before it is stored: a manifest that says the AI review covered everything, from a run that
+/// never read a repo, would be reused as a complete baseline by the next scan.
+fn record_unresolved_repos_before_storing(
+    report: &mut crate::onboard::ScanReport,
+    manifest: &mut crate::scan_cache::ScanManifest,
+    unresolved: &[(String, String)],
+    selected: &[crate::onboard::SelectedRule],
+    corpus: Option<&camerata_rules::RuleSet>,
+) {
+    record_unresolved_repos(report, unresolved, selected, corpus);
+    if !report.ai_review_complete() {
+        manifest.ai_covered = false;
+    }
 }
 
 async fn onboard_scan(
@@ -5734,8 +5823,21 @@ async fn onboard_scan(
         .projects
         .active()
         .map(|p| state.source_ops.begin_scan(&p.id));
-    let (sources, notes) = resolve_local_sources(&state, &repos);
-    let report = crate::onboard::scan_repos(&sources, notes).await;
+    let LocalSources {
+        sources,
+        notes,
+        unresolved,
+    } = resolve_local_sources(&state, &repos);
+    if let Some(why) = partial_run_refusal(&unresolved, repos.len(), req.allow_partial) {
+        // The same shape a client-engagement refusal has (`blocked`, with the reason), which the
+        // desktop already renders as a refusal banner. A bare message on an otherwise empty
+        // report would show as a successful scan that found nothing.
+        return Json(client_lock_blocked_report(&repos, why));
+    }
+    let mut report = crate::onboard::scan_repos(&sources, notes).await;
+    for (spec, why) in &unresolved {
+        report.note_repo_not_inspected(spec, why, &[], None);
+    }
     // Populate the per-project last-scan store so the chat assistant sees deterministic
     // results immediately. The async audit path (`onboard_audit_start`) and the sync audit
     // (`onboard_audit`) already do this; without it here, a floor-only `/api/onboard/scan`
@@ -5765,6 +5867,11 @@ struct AuditRuleReq {
 
 #[derive(serde::Deserialize)]
 struct AuditReq {
+    /// Go ahead when some repos have no local clone; the report then lists them as not
+    /// inspected and the release gate refuses to package it. Without it the audit is refused
+    /// and says which repos are missing.
+    #[serde(default)]
+    allow_partial: bool,
     /// The scan settings' spend limit in US dollars (`camerata inspect --max-cost-usd`'s twin).
     /// `None` = no limit. The run stops between passes once actual spend reaches it and says
     /// what it did not run; see [`crate::cost_cap`].
@@ -6069,6 +6176,7 @@ pub fn record_corpus_load_failures(
         );
         report.ledger.record_corpus_load_failure(&failure.rule_id);
         report.coverage_notes.push(crate::onboard::CoverageNote {
+            repo: None,
             tool: RULE_CORPUS_COVERAGE_TOOL.to_string(),
             // Operator-facing detail. See this function's doc comment, point 3, for why this
             // text reaches the UI and the ledger but never a client artifact.
@@ -6195,7 +6303,17 @@ async fn onboard_audit(
         return Json(client_lock_blocked_report(&repos, why));
     }
     // Local-first: the audit reads the repos' local working trees, not GitHub.
-    let (sources, mut notes) = resolve_local_sources(&state, &repos);
+    let LocalSources {
+        sources,
+        mut notes,
+        unresolved,
+    } = resolve_local_sources(&state, &repos);
+    if let Some(why) = partial_run_refusal(&unresolved, repos.len(), req.allow_partial) {
+        // The same shape a client-engagement refusal has (`blocked`, with the reason), which the
+        // desktop already renders as a refusal banner. A bare message on an otherwise empty
+        // report would show as a successful scan that found nothing.
+        return Json(client_lock_blocked_report(&repos, why));
+    }
     let selected: Vec<crate::onboard::SelectedRule> = req
         .rules
         .into_iter()
@@ -6279,7 +6397,7 @@ async fn onboard_audit(
     // no stale/partially-mutated state a caller could see.
     use futures::FutureExt;
     let outcome = std::panic::AssertUnwindSafe(async move {
-        let (mut report, manifest) = crate::onboard::audit_repos_controlled(
+        let (mut report, mut manifest) = crate::onboard::audit_repos_controlled(
             state.credential_store.as_ref(),
             &sources,
             &selected,
@@ -6305,6 +6423,15 @@ async fn onboard_audit(
             run_controls,
         )
         .await;
+        // A repo that could not be read is on the report as not inspected, never just absent,
+        // and the manifest is corrected for it before it is stored.
+        record_unresolved_repos_before_storing(
+            &mut report,
+            &mut manifest,
+            &unresolved,
+            &selected,
+            corpus.as_ref(),
+        );
         // Persist the fresh manifest (even after a forced full scan) so the NEXT scan can be
         // incremental. Only when there's an active project to key it to.
         if let Some(id) = &project_id {
@@ -6361,6 +6488,7 @@ async fn onboard_audit(
                     Err(_elapsed) => (
                         Vec::new(),
                         Some(crate::onboard::CoverageNote {
+                            repo: None,
                             tool: "osv-scanner".to_string(),
                             message: format!(
                                 "dependency audit (osv-scanner) timed out after 60 s for {spec}"
@@ -6368,6 +6496,10 @@ async fn onboard_audit(
                         }),
                     ),
                 };
+                let dep_note = dep_note.map(|mut note| {
+                    note.repo.get_or_insert_with(|| spec.to_string());
+                    note
+                });
                 osv_runs.push(crate::vuln_intel::OsvRun::from_note(
                     spec,
                     dep_note.as_ref(),
@@ -6965,8 +7097,10 @@ pub async fn merge_scan_preview(
     // `reconcile_external_tool_ledger` so it can tell "the tool ran and found nothing" apart
     // from "the tool was never invoked this scan at all" (empty `preview_rules`/no corpus, or
     // no selected rule this scan routed to it). See `scan_tools::run_scan_tools`'s doc comment.
-    let mut tools_attempted: std::collections::HashSet<&'static str> =
-        std::collections::HashSet::new();
+    let mut tools_attempted: std::collections::HashMap<
+        String,
+        std::collections::HashSet<&'static str>,
+    > = std::collections::HashMap::new();
     // Pass-1 W1 seal fix: this pass runs AFTER `onboard::audit_repos`'s own merge stages and
     // strictly APPENDS findings — the exact "row-adding pass that ran outside the ledger's
     // view" shape this fixes (see `crate::scan_ledger::StageAccounting::added`'s doc comment).
@@ -7006,9 +7140,13 @@ pub async fn merge_scan_preview(
                     Some(&present_languages),
                     job,
                     tooling,
+                    sources.len() > 1,
                 )
                 .await;
-                tools_attempted.extend(attempted);
+                tools_attempted
+                    .entry(spec.clone())
+                    .or_default()
+                    .extend(attempted);
                 // Dedup preview findings that overlap the deterministic floor or other preview
                 // tools BEFORE appending. When two tools flag the same (repo, path, line) for a
                 // compatible security category, the higher-precedence finding is kept canonical
@@ -7112,38 +7250,66 @@ fn pass_label_for_tool(tool_name: &str) -> String {
     }
 }
 
+/// Which external tools were invoked for which repo. [`merge_scan_preview`] builds the per-repo
+/// map; the flat set is the shape callers had before the ledger was per repo, and answers for
+/// every repo at once.
+pub(crate) trait ToolsAttempted {
+    /// Whether `tool` was invoked for `repo`. An empty `repo` (an entry that names no repo) asks
+    /// whether it was invoked for any repo.
+    fn invoked(&self, repo: &str, tool: &str) -> bool;
+}
+
+impl ToolsAttempted for std::collections::HashSet<&str> {
+    fn invoked(&self, _repo: &str, tool: &str) -> bool {
+        self.contains(tool)
+    }
+}
+
+impl ToolsAttempted for std::collections::HashMap<String, std::collections::HashSet<&'static str>> {
+    fn invoked(&self, repo: &str, tool: &str) -> bool {
+        if repo.is_empty() {
+            self.values().any(|tools| tools.contains(tool))
+        } else {
+            self.get(repo).is_some_and(|tools| tools.contains(tool))
+        }
+    }
+}
+
+/// The repos named in a pass disclosure: the one repo an entry is about, or every repo of the
+/// scan for an entry that names none.
+fn repo_for_disclosure(report: &crate::onboard::ScanReport, repo: &str) -> String {
+    if repo.is_empty() {
+        report.repos.join(", ")
+    } else {
+        repo.to_string()
+    }
+}
+
 pub(crate) fn reconcile_external_tool_ledger(
     report: &mut crate::onboard::ScanReport,
-    tools_attempted: &std::collections::HashSet<&str>,
+    tools_attempted: &impl ToolsAttempted,
     corpus: Option<&camerata_rules::RuleSet>,
 ) {
-    // "unrouted" is a ROUTING gap (a selected rule with no tool to drive it at all), not a
-    // tool-execution failure — never treated as evidence the tool itself didn't run.
-    let failed_tools: std::collections::HashSet<&str> = report
-        .coverage_notes
-        .iter()
-        .filter(|n| n.tool != "unrouted")
-        .map(|n| n.tool.as_str())
-        .collect();
-
-    let external_tool_rule_ids: Vec<String> = report
+    // Decided per (rule, repo): a tool that failed or was never invoked on one repo says nothing
+    // about the rule on another repo, and a finding on one repo is no evidence for another.
+    let external: Vec<(String, String)> = report
         .ledger
         .rules()
         .filter(|r| r.tier == crate::scan_ledger::RuleTier::ExternalTool)
-        .map(|r| r.rule_id.clone())
+        .map(|r| (r.rule_id.clone(), r.repo.clone()))
         .collect();
 
-    for rule_id in external_tool_rule_ids {
+    for (rule_id, repo) in external {
         let emitted = report
             .findings
             .iter()
-            .filter(|f| finding_grounds_to(f, &rule_id))
+            .filter(|f| (repo.is_empty() || f.repo == repo) && finding_grounds_to(f, &rule_id))
             .count();
 
         if emitted > 0 {
             report
                 .ledger
-                .correct_rule_after_external_pass(rule_id, true, None, emitted);
+                .correct_rule_after_external_pass(&repo, rule_id, true, None, emitted);
             continue;
         }
 
@@ -7152,21 +7318,28 @@ pub(crate) fn reconcile_external_tool_ledger(
         let tool_name = external_tool_name_for_ledger_rule(&rule_id, corpus);
         let pass_label = pass_label_for_tool(tool_name);
 
-        if failed_tools.contains(tool_name) {
-            let reason = report
-                .coverage_notes
-                .iter()
-                .find(|n| n.tool == tool_name)
-                .map(|n| n.message.clone())
-                .unwrap_or_else(|| format!("{tool_name} did not run this scan"));
+        // A note for this tool that names this repo, or names no repo at all. "unrouted" is a
+        // ROUTING gap (a selected rule with no tool to drive it), never a tool-execution failure.
+        let failure = report
+            .coverage_notes
+            .iter()
+            .filter(|n| n.tool != "unrouted" && n.tool == tool_name)
+            .find(|n| match n.repo.as_deref() {
+                Some(note_repo) => repo.is_empty() || note_repo == repo,
+                None => true,
+            })
+            .map(|n| n.message.clone());
+
+        if let Some(reason) = failure {
             report.ledger.correct_rule_after_external_pass(
+                &repo,
                 rule_id.clone(),
                 false,
                 Some(format!("{pass_label} did not run: {reason}")),
                 0,
             );
             report.failed_passes.push(crate::ai_audit::FailedPass {
-                repo: report.repos.join(", "),
+                repo: repo_for_disclosure(report, &repo),
                 pass: pass_label.clone(),
                 reason: format!("{rule_id}: {pass_label} did not run: {reason}"),
                 files_not_reviewed: 0,
@@ -7174,21 +7347,26 @@ pub(crate) fn reconcile_external_tool_ledger(
             continue;
         }
 
-        if !tools_attempted.contains(tool_name) {
+        if !tools_attempted.invoked(&repo, tool_name) {
             // Outcome 3: a pass-level skip with no per-finding failure note to key off of.
+            let scope = if repo.is_empty() {
+                "any scanned repo".to_string()
+            } else {
+                repo.clone()
+            };
             let reason = format!(
-                "{tool_name} was never invoked for any scanned repo this scan (no selected \
-                 rule routed to it, no supported language was present, or the preview pass \
-                 did not run at all)"
+                "{tool_name} was never invoked for {scope} this scan (no selected rule routed to \
+                 it, no supported language was present, or the preview pass did not run at all)"
             );
             report.ledger.correct_rule_after_external_pass(
+                &repo,
                 rule_id.clone(),
                 false,
                 Some(format!("{pass_label} did not run: {reason}")),
                 0,
             );
             report.failed_passes.push(crate::ai_audit::FailedPass {
-                repo: report.repos.join(", "),
+                repo: repo_for_disclosure(report, &repo),
                 pass: pass_label.clone(),
                 reason: format!("{rule_id}: {pass_label} did not run: {reason}"),
                 files_not_reviewed: 0,
@@ -7199,7 +7377,7 @@ pub(crate) fn reconcile_external_tool_ledger(
         // Attempted, no hard failure, genuinely zero findings — a real clean result.
         report
             .ledger
-            .correct_rule_after_external_pass(rule_id, true, None, 0);
+            .correct_rule_after_external_pass(&repo, rule_id, true, None, 0);
     }
 
     // Grading-cycle fix (2026-10-07): the loop above only CORRECTS rule ids `onboard::
@@ -7211,11 +7389,12 @@ pub(crate) fn reconcile_external_tool_ledger(
     // selected at all, and so was NEVER pre-registered as `RuleTier::ExternalTool` in the
     // first place. Before this fix, such a finding shipped in the export while contributing
     // ZERO to every ledger total (`render_ledger_summary`'s per-family `findings_emitted`
-    // sum only ever iterates `ledger.rules()`, which never contained that id) — the exact
+    // sum only ever iterates the ledger's rules, which never contained that id) — the exact
     // "family reports findings=0 while preview rows ARE present in the export" defect.
     // This second pass discovers any such row and records it fresh, so the ledger's
     // per-family counts always equal the rows actually exported, never a strict subset of
-    // them keyed off selection alone.
+    // them keyed off selection alone. It is keyed by (rule, repo), so a repo the rule was
+    // tracked for does not hide a finding of the same rule in another repo.
     // Discovery is deliberately scoped to the GROUNDING MAPS only (`external_tool_floor_category`
     // — Semgrep's `semgrep_floor_category` plus ESLint's `eslint_floor_category`, each a
     // closed, well-known set) rather than trusting an untracked `f.rule_id`/`also_matches`
@@ -7227,10 +7406,8 @@ pub(crate) fn reconcile_external_tool_ledger(
     // `no-var`, `prefer-const` among them — so exactly the same "the tool ran its whole
     // baseline, not just the selected subset" shape Semgrep's whole-ruleset behavior already
     // required this discovery pass for applies to ESLint too.
-    let already_tracked: std::collections::HashSet<String> =
-        report.ledger.rules().map(|r| r.rule_id.clone()).collect();
-    let mut newly_discovered: std::collections::HashMap<String, usize> =
-        std::collections::HashMap::new();
+    let mut newly_discovered: std::collections::BTreeMap<(String, String), usize> =
+        std::collections::BTreeMap::new();
     for f in &report.findings {
         if !f.preview {
             continue;
@@ -7243,14 +7420,19 @@ pub(crate) fn reconcile_external_tool_ledger(
             std::iter::once(f.rule_id.as_str()).chain(f.also_matches.iter().map(String::as_str));
         for candidate in candidates {
             if let Some(grounded) = external_tool_floor_category(candidate) {
-                if !already_tracked.contains(grounded) {
-                    *newly_discovered.entry(grounded.to_string()).or_insert(0) += 1;
+                let tracked = report.ledger.rule_for_repo(grounded, &f.repo).is_some()
+                    || report.ledger.rule_for_repo(grounded, "").is_some();
+                if !tracked {
+                    *newly_discovered
+                        .entry((grounded.to_string(), f.repo.clone()))
+                        .or_insert(0) += 1;
                 }
             }
         }
     }
-    for (rule_id, emitted) in newly_discovered {
+    for ((rule_id, repo), emitted) in newly_discovered {
         report.ledger.record_rule(
+            &repo,
             rule_id,
             crate::scan_ledger::RuleTier::ExternalTool,
             true,
@@ -7460,7 +7642,16 @@ pub(crate) async fn start_audit_job(
         return job_id;
     }
     // Local-first: resolve each repo's local working tree up front (the spawned job owns them).
-    let (sources, mut notes) = resolve_local_sources(&state, &repos);
+    let LocalSources {
+        sources,
+        mut notes,
+        unresolved,
+    } = resolve_local_sources(&state, &repos);
+    if let Some(why) = partial_run_refusal(&unresolved, repos.len(), req.allow_partial) {
+        let job_id = state.jobs.create("audit", project_id);
+        state.jobs.fail(&job_id, why);
+        return job_id;
+    }
     notes.extend(options.extra_notes);
     let delta = options.delta;
     let client_tooling = project_client_tooling(active_project.as_ref());
@@ -7549,46 +7740,78 @@ pub(crate) async fn start_audit_job(
             // "1/2 tools" while the other two are still invisible.
             if run_deterministic {
                 let lookup = |id: &str| corpus.as_ref().and_then(|s| s.get_by_id(id));
-                // Derive the UNION of all languages present across every source repo.
-                // Stack-gating uses this union so the pre-declared tool count matches the
-                // tools that `merge_scan_preview` will actually run (which gates per-repo
-                // but adds to the same job). Using the union is conservative: a tool
-                // present in ANY repo stays in the denominator.
-                let mut union_languages = std::collections::HashSet::<String>::new();
-                for (_, dir) in &sources {
-                    let dir_clone = dir.clone();
-                    if let Ok(Ok(extracted)) = tokio::task::spawn_blocking(move || {
-                        crate::onboard::files::read_local_repo_files(&dir_clone)
-                    })
-                    .await
-                    {
-                        union_languages
-                            .extend(crate::scan_tools::languages_from_files(&extracted.files));
-                    }
-                }
-                let lang_gate = if union_languages.is_empty() {
-                    None
-                } else {
-                    Some(&union_languages)
-                };
-                let mut tool_ids: Vec<String> = vec!["floor".to_string()];
-                let preview_ids = crate::scan_tools::preview_tool_ids_for_rules(
-                    &preview_rules,
-                    &lookup,
-                    lang_gate,
-                );
-                tool_ids.extend(preview_ids);
                 let dep_audit_disabled = std::env::var(crate::dep_audit::DISABLE_ENV_VAR)
                     .map(|v| !v.is_empty())
                     .unwrap_or(false);
-                if !dep_audit_disabled {
-                    tool_ids.push("dep-audit".to_string());
+                if sources.len() > 1 {
+                    // Several repos: every repo gets its own rows (`owner/repo:tool`), declared
+                    // from that repo's own languages and the rules bound to it, so a tool that
+                    // will not run on a repo is not left waiting in the denominator.
+                    for (spec, dir) in &sources {
+                        let dir_clone = dir.clone();
+                        let languages = tokio::task::spawn_blocking(move || {
+                            crate::onboard::files::read_local_repo_files(&dir_clone)
+                                .map(|ex| crate::scan_tools::languages_from_files(&ex.files))
+                                .unwrap_or_default()
+                        })
+                        .await
+                        .unwrap_or_default();
+                        let for_repo: Vec<crate::onboard::SelectedRule> = preview_rules
+                            .iter()
+                            .filter(|r| r.applies_to(spec))
+                            .cloned()
+                            .collect();
+                        let mut tool_ids: Vec<String> = vec!["floor".to_string()];
+                        tool_ids.extend(crate::scan_tools::preview_tool_ids_for_rules(
+                            &for_repo,
+                            &lookup,
+                            (!languages.is_empty()).then_some(&languages),
+                        ));
+                        if !dep_audit_disabled {
+                            tool_ids.push("dep-audit".to_string());
+                        }
+                        let id_refs: Vec<&str> = tool_ids.iter().map(String::as_str).collect();
+                        body_jobs.declare_repo_tools(&body_jid, spec, &id_refs);
+                    }
+                } else {
+                    // Derive the UNION of all languages present across every source repo.
+                    // Stack-gating uses this union so the pre-declared tool count matches the
+                    // tools that `merge_scan_preview` will actually run (which gates per-repo
+                    // but adds to the same job). Using the union is conservative: a tool
+                    // present in ANY repo stays in the denominator.
+                    let mut union_languages = std::collections::HashSet::<String>::new();
+                    for (_, dir) in &sources {
+                        let dir_clone = dir.clone();
+                        if let Ok(Ok(extracted)) = tokio::task::spawn_blocking(move || {
+                            crate::onboard::files::read_local_repo_files(&dir_clone)
+                        })
+                        .await
+                        {
+                            union_languages
+                                .extend(crate::scan_tools::languages_from_files(&extracted.files));
+                        }
+                    }
+                    let lang_gate = if union_languages.is_empty() {
+                        None
+                    } else {
+                        Some(&union_languages)
+                    };
+                    let mut tool_ids: Vec<String> = vec!["floor".to_string()];
+                    let preview_ids = crate::scan_tools::preview_tool_ids_for_rules(
+                        &preview_rules,
+                        &lookup,
+                        lang_gate,
+                    );
+                    tool_ids.extend(preview_ids);
+                    if !dep_audit_disabled {
+                        tool_ids.push("dep-audit".to_string());
+                    }
+                    let id_refs: Vec<&str> = tool_ids.iter().map(String::as_str).collect();
+                    body_jobs.declare_tools(&body_jid, &id_refs);
                 }
-                let id_refs: Vec<&str> = tool_ids.iter().map(String::as_str).collect();
-                body_jobs.declare_tools(&body_jid, &id_refs);
             }
 
-            let (mut report, manifest) = crate::onboard::audit_repos_controlled(
+            let (mut report, mut manifest) = crate::onboard::audit_repos_controlled(
                 state.credential_store.as_ref(),
                 &sources,
                 &selected,
@@ -7611,6 +7834,15 @@ pub(crate) async fn start_audit_job(
                 run_controls,
             )
             .await;
+            // A repo that could not be read is on the report as not inspected, never just
+            // absent, and the manifest is corrected for it before it is stored.
+            record_unresolved_repos_before_storing(
+                &mut report,
+                &mut manifest,
+                &unresolved,
+                &selected,
+                corpus.as_ref(),
+            );
             // Persist the fresh manifest so the next scan can be incremental.
             if let Some(id) = &project_id {
                 scan_cache.put(id, manifest);
@@ -7666,6 +7898,7 @@ pub(crate) async fn start_audit_job(
                         Err(_elapsed) => (
                             Vec::new(),
                             Some(crate::onboard::CoverageNote {
+                                repo: None,
                                 tool: "osv-scanner".to_string(),
                                 message: format!(
                                     "dependency audit (osv-scanner) timed out after 60 s for {spec}"
@@ -7673,9 +7906,15 @@ pub(crate) async fn start_audit_job(
                             }),
                         ),
                     };
+                    let dep_note = dep_note.map(|mut note| {
+                        note.repo.get_or_insert_with(|| spec.to_string());
+                        note
+                    });
                     let dep_count = dep_findings.len();
-                    body_jobs.det_tool_running(&body_jid, "dep-audit");
-                    body_jobs.det_tool_done(&body_jid, "dep-audit", dep_count);
+                    let dep_key =
+                        crate::jobs::progress_tool_key(spec, "dep-audit", sources.len() > 1);
+                    body_jobs.det_tool_running(&body_jid, &dep_key);
+                    body_jobs.det_tool_done(&body_jid, &dep_key, dep_count);
                     osv_runs.push(crate::vuln_intel::OsvRun::from_note(
                         spec,
                         dep_note.as_ref(),
@@ -8827,7 +9066,7 @@ async fn project_suppressions(
         })
         .collect();
     // Local-first: the waiver registry reads each repo's local working tree, not GitHub.
-    let (sources, _notes) = resolve_local_sources(&state, &project.repos);
+    let sources = resolve_local_sources(&state, &project.repos).sources;
     // Read-only, as a GET must be: this used to fast-forward `git pull` every repo first, which
     // moved a checkout past the inspected commit just by opening a screen (and cannot work on a
     // detached HEAD, where a re-fetch at the inspected commit leaves the tree). The Workspace
@@ -8891,6 +9130,10 @@ async fn onboard_complete(State(state): State<AppState>) -> Json<serde_json::Val
     struct DraftScan {
         #[serde(default)]
         repos: Vec<String>,
+        /// Repos the scan could not read (`(repo, reason)`). They belong to the project all
+        /// the same, so completing onboarding keeps them rather than saving the survivors.
+        #[serde(default)]
+        repos_not_inspected: Vec<(String, String)>,
         #[serde(default)]
         proposed_rules: Vec<DraftRule>,
     }
@@ -8942,7 +9185,13 @@ async fn onboard_complete(State(state): State<AppState>) -> Json<serde_json::Val
                 _ => selections.push(sel),
             }
         }
-        (d.scan.repos, selections, cross_repo, process, d.custom)
+        let mut repos = d.scan.repos;
+        for (repo, _) in d.scan.repos_not_inspected {
+            if !repos.contains(&repo) {
+                repos.push(repo);
+            }
+        }
+        (repos, selections, cross_repo, process, d.custom)
     } else {
         (
             active.repos.clone(),
@@ -17677,6 +17926,11 @@ async fn export_audit_report(
     if let Err(e) = crate::report_export::require_client_name(&req.options) {
         return client_name_required_response(&e);
     }
+    // And no report for fewer repos than the project holds.
+    req.options.expected_repos = project.repos.clone();
+    if let Err(e) = crate::report_export::require_all_repos(&report, &req.options) {
+        return repositories_missing_response(&e);
+    }
 
     let json = crate::report_export::build_report_json(
         &report,
@@ -17829,6 +18083,8 @@ async fn export_product(
     // Confidentiality: the client name comes from the project's inspection setup. The package
     // assembly refuses a blank one (mapped to a 422 below).
     req.options.client_name = project.client_name.clone();
+    // The repos the project holds: the package assembly refuses a report that covers fewer.
+    req.options.expected_repos = project.repos.clone();
 
     // ONE assembly (`release_gate::build_product_package`) and ONE path to zip bytes
     // (`release_gate::release`), shared by this handler, `camerata inspect --export` and the
@@ -17850,6 +18106,9 @@ async fn export_product(
             }
             if let Some(missing) = e.downcast_ref::<crate::report_export::ClientNameRequired>() {
                 return client_name_required_response(missing);
+            }
+            if let Some(missing) = e.downcast_ref::<crate::report_export::RepositoriesMissing>() {
+                return repositories_missing_response(missing);
             }
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -17915,6 +18174,23 @@ fn client_name_required_response(missing: &crate::report_export::ClientNameRequi
             "ok": false,
             "gate": "client_name",
             "message": missing.to_string(),
+        })),
+    )
+        .into_response()
+}
+
+/// The 422 the export routes return when the report covers fewer repos than the project holds:
+/// `{ ok: false, gate: "repositories", message, repos }`.
+fn repositories_missing_response(missing: &crate::report_export::RepositoriesMissing) -> Response {
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+    (
+        StatusCode::UNPROCESSABLE_ENTITY,
+        Json(serde_json::json!({
+            "ok": false,
+            "gate": "repositories",
+            "message": missing.to_string(),
+            "repos": missing.repos,
         })),
     )
         .into_response()
@@ -18557,6 +18833,9 @@ impl From<anyhow::Error> for AppError {
 }
 
 // ── tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod lib_multirepo_tests;
 
 #[cfg(test)]
 mod tests {
@@ -19261,6 +19540,45 @@ mod tests {
         );
     }
 
+    /// A project with a repo that has no local folder is not rescanned for the repos that do:
+    /// the request is refused and names the repo, unless it says it accepts a partial run.
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn rescan_alternatives_refuses_a_project_with_a_repo_that_has_no_local_folder() {
+        let _env = camerata_test_env::EnvGuard::remove("ANTHROPIC_API_KEY");
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        let p = state
+            .projects
+            .create("Acme", vec!["me/api".to_string(), "me/web".to_string()])
+            .unwrap();
+        state
+            .projects
+            .set_backend(&p.id, crate::project::ProjectBackend::Cli);
+        state.projects.set_client_engagement(&p.id, false, false);
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/projects/{}/rescan-alternatives", p.id))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"overrides":[{"rule_id":"RUST-DOMAIN-7","chosen_option_id":"explicit-unitofwork-parameter-on-transactional-repository-methods"}]}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let json = body_json(resp).await;
+        assert_eq!(json["ok"], false, "{json:?}");
+        let message = json["message"].as_str().unwrap();
+        assert!(message.contains("2 of 2 repositories"), "{message}");
+        assert!(
+            message.contains("me/api") && message.contains("me/web"),
+            "{message}"
+        );
+    }
+
     /// A `Cli`-backend project's rescan is never blocked, regardless of key presence — no
     /// silent downgrade path exists anymore (the removed `CliFallbackWarn`), just a plain
     /// `Cli` resolution that proceeds straight to the (in this test env, failing) model call.
@@ -19290,7 +19608,7 @@ mod tests {
                     .uri(format!("/api/projects/{}/rescan-alternatives", p.id))
                     .header("content-type", "application/json")
                     .body(Body::from(
-                        r#"{"overrides":[{"rule_id":"RUST-DOMAIN-7","chosen_option_id":"explicit-unitofwork-parameter-on-transactional-repository-methods"}]}"#,
+                        r#"{"allow_partial":true,"overrides":[{"rule_id":"RUST-DOMAIN-7","chosen_option_id":"explicit-unitofwork-parameter-on-transactional-repository-methods"}]}"#,
                     ))
                     .unwrap(),
             )
@@ -19341,6 +19659,7 @@ mod tests {
                 (
                     rule_id.to_string(),
                     crate::ai_audit::RuleRecommendation {
+                        repo: String::new(),
                         rule_id: rule_id.to_string(),
                         recommended_option_id: option_id.to_string(),
                         recommendation_reasoning: "test reasoning".to_string(),
@@ -26590,6 +26909,7 @@ mod tests {
     #[test]
     fn render_scan_results_includes_coverage_notes() {
         let notes = vec![crate::onboard::CoverageNote {
+            repo: None,
             tool: "ruff".to_string(),
             message: "ruff not installed; Python rules skipped".to_string(),
         }];
@@ -26812,6 +27132,7 @@ mod tests {
     fn reconcile_marks_rule_ran_with_real_count_when_tool_succeeded() {
         let mut report = report_for_ledger_test();
         report.ledger.record_rule(
+            "",
             "SEC-NO-RAW-SQL-CONCAT-1",
             crate::scan_ledger::RuleTier::ExternalTool,
             true,
@@ -26845,6 +27166,7 @@ mod tests {
     fn reconcile_marks_rule_not_run_and_discloses_when_tool_absent() {
         let mut report = report_for_ledger_test();
         report.ledger.record_rule(
+            "",
             "SEC-NO-RAW-SQL-CONCAT-1",
             crate::scan_ledger::RuleTier::ExternalTool,
             true,
@@ -26853,6 +27175,7 @@ mod tests {
             0,
         );
         report.coverage_notes = vec![crate::onboard::CoverageNote {
+            repo: None,
             tool: "semgrep".to_string(),
             message:
                 "could not preview 1 rule(s) with semgrep: base interpreter not available: python3"
@@ -26921,6 +27244,7 @@ mod tests {
     fn reconcile_discovery_pass_never_double_counts_an_already_tracked_rule() {
         let mut report = report_for_ledger_test();
         report.ledger.record_rule(
+            "",
             "SEC-NO-RAW-SQL-CONCAT-1",
             crate::scan_ledger::RuleTier::ExternalTool,
             true,
@@ -26974,6 +27298,7 @@ mod tests {
     fn reconcile_marks_rule_not_run_when_tool_never_attempted_this_scan() {
         let mut report = report_for_ledger_test();
         report.ledger.record_rule(
+            "",
             "SEC-NO-RAW-SQL-CONCAT-1",
             crate::scan_ledger::RuleTier::ExternalTool,
             true,
@@ -27161,6 +27486,7 @@ mod tests {
     fn reconcile_does_not_treat_unrouted_note_as_tool_failure() {
         let mut report = report_for_ledger_test();
         report.ledger.record_rule(
+            "",
             "SEC-NO-RAW-SQL-CONCAT-1",
             crate::scan_ledger::RuleTier::ExternalTool,
             true,
@@ -27169,6 +27495,7 @@ mod tests {
             0,
         );
         report.coverage_notes = vec![crate::onboard::CoverageNote {
+            repo: None,
             tool: "unrouted".to_string(),
             message: "could not preview SOME-OTHER-RULE-1 — no scan-runnable tool wired"
                 .to_string(),
@@ -27195,6 +27522,7 @@ mod tests {
     fn reconcile_leaves_non_external_tool_entries_untouched() {
         let mut report = report_for_ledger_test();
         report.ledger.record_rule(
+            "",
             "SEC-NO-HARDCODED-SECRETS-1",
             crate::scan_ledger::RuleTier::Deterministic,
             true,
@@ -27236,6 +27564,7 @@ mod tests {
 
         let mut report = report_for_ledger_test();
         report.ledger.record_rule(
+            "",
             "JAVASCRIPT-REACT-EXHAUSTIVE-DEPS-1",
             crate::scan_ledger::RuleTier::ExternalTool,
             true,
@@ -27277,6 +27606,7 @@ mod tests {
 
         let mut report = report_for_ledger_test();
         report.ledger.record_rule(
+            "",
             "JAVASCRIPT-REACT-RULES-OF-HOOKS-1",
             crate::scan_ledger::RuleTier::ExternalTool,
             true,
@@ -27285,6 +27615,7 @@ mod tests {
             0,
         );
         report.coverage_notes = vec![crate::onboard::CoverageNote {
+            repo: None,
             tool: "eslint".to_string(),
             message: "could not preview 1 rule(s) with eslint: base interpreter not available: \
                       npm"
@@ -27324,6 +27655,7 @@ mod tests {
 
         let mut report = report_for_ledger_test();
         report.ledger.record_rule(
+            "",
             "JAVASCRIPT-REACT-EXHAUSTIVE-DEPS-1",
             crate::scan_ledger::RuleTier::ExternalTool,
             true,
@@ -27362,6 +27694,7 @@ mod tests {
     fn reconcile_without_corpus_keeps_original_semgrep_wording() {
         let mut report = report_for_ledger_test();
         report.ledger.record_rule(
+            "",
             "SEC-NO-RAW-SQL-CONCAT-1",
             crate::scan_ledger::RuleTier::ExternalTool,
             true,
@@ -27383,6 +27716,8 @@ mod tests {
     /// Helper: build a minimal ScanReport with one active finding.
     fn make_scan_report(rule_id: &str) -> crate::onboard::ScanReport {
         crate::onboard::ScanReport {
+            repos_not_inspected: Vec::new(),
+            recommendations_by_repo: Vec::new(),
             repos: vec!["owner/repo".to_string()],
             stacks: Vec::new(),
             files_scanned: 1,

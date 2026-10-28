@@ -117,6 +117,7 @@ pub fn is_client_tooling_skip(note: &CoverageNote) -> bool {
 /// The coverage note for `tool` skipped in a client engagement with no opt-in.
 fn client_tooling_skipped_note(tool: ScanTool, rules: usize) -> CoverageNote {
     CoverageNote {
+        repo: None,
         tool: tool.name().to_string(),
         message: client_tooling_skipped_message(tool_command(tool), rules),
     }
@@ -125,6 +126,7 @@ fn client_tooling_skipped_note(tool: ScanTool, rules: usize) -> CoverageNote {
 /// The coverage note for `tool` run in a client engagement because the operator opted in.
 fn client_tooling_ran_note(tool: ScanTool) -> CoverageNote {
     CoverageNote {
+        repo: None,
         tool: CLIENT_TOOLING_NOTE_TOOL.to_string(),
         message: format!(
             "{} ran with the operator's opt-in to run this repository's own tooling: compiling \
@@ -1453,6 +1455,7 @@ pub const DISABLE_SEMGREP_ENV_VAR: &str = "CAMERATA_DISABLE_SEMGREP";
 /// even invoked this scan" (ran = false + disclosure) — a distinction a `CoverageNote`
 /// alone cannot make, since a tool nothing routed to emits no note at all (see
 /// [`tool_for_rule`]'s doc comment for the exact wiring gap this closes).
+#[allow(clippy::too_many_arguments)] // one scan pass's inputs, read in the order the pass uses them
 pub async fn run_scan_tools<'r>(
     repo: &str,
     dir: &Path,
@@ -1464,7 +1467,11 @@ pub async fn run_scan_tools<'r>(
     // [`ScanTool::executes_repo_code`]). A skipped tool still counts as attempted and is
     // disclosed with a note keyed by its own name, so the ledger records it as not run.
     tooling: crate::client_lock::ClientTooling,
+    // True when the scan covers more than one repo. The job's tool progress is then keyed by
+    // repo and tool, so one repo's result for a tool is never written over another's.
+    multi_repo: bool,
 ) -> (Vec<Finding>, Vec<CoverageNote>, HashSet<&'static str>) {
+    let progress_key = |tool: &str| crate::jobs::progress_tool_key(repo, tool, multi_repo);
     let (by_tool, ungrouped) = group_by_tool(selected, lookup, present_languages);
     let attempted: HashSet<&'static str> = by_tool.keys().map(|t| t.name()).collect();
     let mut findings = Vec::new();
@@ -1474,10 +1481,10 @@ pub async fn run_scan_tools<'r>(
     // from the start (the UI shows the full set of tools queued, not one-at-a-time growth).
     if let Some((jstore, jid)) = progress {
         for tool in by_tool.keys() {
-            jstore.det_register_tool(jid, tool.name());
+            jstore.det_register_tool(jid, &progress_key(tool.name()));
         }
         if !ungrouped.is_empty() {
-            jstore.det_register_tool(jid, "unrouted");
+            jstore.det_register_tool(jid, &progress_key("unrouted"));
         }
     }
 
@@ -1485,11 +1492,12 @@ pub async fn run_scan_tools<'r>(
     // preview gap is visible rather than a silent clean.
     if let Some((jstore, jid)) = progress {
         if !ungrouped.is_empty() {
-            jstore.det_tool_running(jid, "unrouted");
+            jstore.det_tool_running(jid, &progress_key("unrouted"));
         }
     }
     for sr in &ungrouped {
         coverage_notes.push(CoverageNote {
+            repo: None,
             tool: "unrouted".to_string(),
             message: format!(
                 "Could not preview {} — no scan-runnable tool wired for its linter source; \
@@ -1500,7 +1508,7 @@ pub async fn run_scan_tools<'r>(
     }
     if let Some((jstore, jid)) = progress {
         if !ungrouped.is_empty() {
-            jstore.det_tool_done(jid, "unrouted", ungrouped.len());
+            jstore.det_tool_done(jid, &progress_key("unrouted"), ungrouped.len());
         }
     }
 
@@ -1518,7 +1526,7 @@ pub async fn run_scan_tools<'r>(
         if tool.executes_repo_code() && !tooling.allowed() {
             coverage_notes.push(client_tooling_skipped_note(tool, rules.len()));
             if let Some((jstore, jid)) = progress {
-                jstore.det_tool_done(jid, tool.name(), 0);
+                jstore.det_tool_done(jid, &progress_key(tool.name()), 0);
             }
             continue;
         }
@@ -1526,7 +1534,7 @@ pub async fn run_scan_tools<'r>(
             coverage_notes.push(client_tooling_ran_note(tool));
         }
         if let Some((jstore, jid)) = progress {
-            jstore.det_tool_running(jid, tool.name());
+            jstore.det_tool_running(jid, &progress_key(tool.name()));
         }
         let produced = match run_one_tool(repo, dir, tool, &rules, lookup, on_progress.clone())
             .await
@@ -1543,6 +1551,7 @@ pub async fn run_scan_tools<'r>(
             }
             Err(e) => {
                 coverage_notes.push(CoverageNote {
+ repo: None,
                     tool: tool.name().to_string(),
                     message: format!(
                         "Could not preview {} rule(s) with {}: {e}. It enforces once wired into CI.",
@@ -1554,7 +1563,15 @@ pub async fn run_scan_tools<'r>(
             }
         };
         if let Some((jstore, jid)) = progress {
-            jstore.det_tool_done(jid, tool.name(), produced);
+            jstore.det_tool_done(jid, &progress_key(tool.name()), produced);
+        }
+    }
+
+    // Every note names the repo it is about, so the ledger can tell a tool that failed on this
+    // repo from the same tool running on another.
+    for note in &mut coverage_notes {
+        if note.repo.is_none() {
+            note.repo = Some(repo.to_string());
         }
     }
 
@@ -1746,6 +1763,7 @@ async fn run_one_tool<'r>(
             let mut gaps: Vec<CoverageNote> = unresolvable
                 .iter()
                 .map(|(sel, pkg)| CoverageNote {
+                    repo: None,
                     tool: ScanTool::Eslint.name().to_string(),
                     message: format!(
                         "Could not preview the eslint rule `{sel}`: its plugin package \
@@ -1774,6 +1792,7 @@ async fn run_one_tool<'r>(
                     // valid JSON, no findings. Never leave it undisclosed.
                     if shape.read_nothing() {
                         gaps.push(CoverageNote {
+                            repo: None,
                             tool: ScanTool::Eslint.name().to_string(),
                             message: format!(
                                 "eslint could not PARSE any of the {} file(s) it read, so none \
@@ -2234,6 +2253,7 @@ mod tests {
             None,
             None,
             crate::client_lock::ClientTooling::INTERNAL,
+            false,
         )
         .await;
 
@@ -2311,6 +2331,7 @@ mod tests {
             None,
             None,
             crate::client_lock::ClientTooling::new(true, false),
+            false,
         )
         .await;
 
@@ -2323,6 +2344,11 @@ mod tests {
             .find(|n| n.tool == "clippy")
             .expect("the skip is disclosed");
         assert!(note.message.contains("was not run"), "{}", note.message);
+        // Every note names the repo it is about.
+        assert!(
+            notes.iter().all(|n| n.repo.as_deref() == Some("me/api")),
+            "{notes:?}"
+        );
         assert!(note.message.contains("build scripts"), "{}", note.message);
         assert!(
             !note.message.contains('\u{2014}'),
@@ -2364,6 +2390,7 @@ mod tests {
             None,
             None,
             crate::client_lock::ClientTooling::new(true, true),
+            false,
         )
         .await;
 
@@ -2936,6 +2963,7 @@ mod tests {
             None,
             None,
             crate::client_lock::ClientTooling::INTERNAL,
+            false,
         )
         .await;
         assert!(
@@ -3008,6 +3036,7 @@ mod tests {
             None,
             None,
             crate::client_lock::ClientTooling::INTERNAL,
+            false,
         )
         .await;
         assert!(
@@ -4360,6 +4389,7 @@ export function Thing({ id }) {
             None,
             None,
             crate::client_lock::ClientTooling::INTERNAL,
+            false,
         )
         .await;
 
@@ -4561,6 +4591,7 @@ export function Thing({ id }) {
             None,
             None,
             crate::client_lock::ClientTooling::INTERNAL,
+            false,
         )
         .await;
         assert!(attempted.contains("eslint"), "notes={notes:?}");
@@ -4729,5 +4760,32 @@ export function Thing({ id }) {
                  is the coverage C11 cost us entirely. findings={findings:?}"
             );
         }
+    }
+
+    /// Two repos running the same tool get a progress row each, keyed by repo and tool, so the
+    /// second repo's count never overwrites the first's.
+    #[test]
+    fn tool_progress_is_keyed_by_repo_when_there_is_more_than_one() {
+        let jobs = crate::jobs::JobStore::new();
+        let id = jobs.create("audit", None);
+        for (repo, found) in [("acme/one", 3usize), ("acme/two", 0)] {
+            let key = crate::jobs::progress_tool_key(repo, "eslint", true);
+            jobs.det_tool_running(&id, &key);
+            jobs.det_tool_done(&id, &key, found);
+        }
+        let progress = jobs.det_progress(&id).unwrap();
+        let rows: Vec<(&str, usize)> = progress
+            .tools
+            .iter()
+            .map(|t| (t.tool.as_str(), t.findings))
+            .collect();
+        assert_eq!(rows, vec![("acme/one:eslint", 3), ("acme/two:eslint", 0)]);
+        assert_eq!(progress.total, 2);
+        assert_eq!(progress.done, 2);
+        // One repo keeps the tool's own name.
+        assert_eq!(
+            crate::jobs::progress_tool_key("acme/one", "eslint", false),
+            "eslint"
+        );
     }
 }

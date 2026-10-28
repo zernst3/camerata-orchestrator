@@ -136,17 +136,28 @@ fn where_declared(d: &Declaration) -> String {
     format!("{} line {}", d.path, d.line)
 }
 
-fn describe(d: &Declaration) -> String {
-    format!(
+/// One declaration as a note names it. With more than one repo in the scan the repo leads the
+/// line: two repos can hold the same version in the same file at the same line, and a note that
+/// did not say which is which would list one of them twice or hide the other.
+fn describe(f: &Found) -> String {
+    let d = &f.decl;
+    let line = format!(
         "{} declared as `{}` in {}",
         d.product.label(),
         d.raw,
         where_declared(d)
-    )
+    );
+    if f.show_repo {
+        format!("{}: {line}", f.repo)
+    } else {
+        line
+    }
 }
 
 fn note(tool: &str, message: String) -> CoverageNote {
     CoverageNote {
+        // The feeds are checked once for the whole scan, so the note names no single repo.
+        repo: None,
         tool: tool.to_string(),
         message,
     }
@@ -513,6 +524,8 @@ fn severity_rank(severity: &str) -> u8 {
 struct Found {
     repo: String,
     decl: Declaration,
+    /// Name the repo in notes about this declaration: set when the scan covers several repos.
+    show_repo: bool,
 }
 
 /// Run the pass over `sources` (repo label and folder) against the feeds behind `fetcher`.
@@ -541,6 +554,7 @@ pub async fn audit_runtimes(
         found.extend(detected.declarations.into_iter().map(|decl| Found {
             repo: repo.clone(),
             decl,
+            show_repo: sources.len() > 1,
         }));
     }
     if !walk_stopped.is_empty() {
@@ -558,7 +572,7 @@ pub async fn audit_runtimes(
     let mut loose: Vec<String> = Vec::new();
     for f in &found {
         if let Version::Loose(why) = &f.decl.version {
-            let line = format!("{} ({why})", describe(&f.decl));
+            let line = format!("{} ({why})", describe(f));
             if !loose.contains(&line) {
                 loose.push(line);
             }
@@ -578,7 +592,7 @@ pub async fn audit_runtimes(
     let mut excluded: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for f in &found {
         if let Version::Excluded(why) = &f.decl.version {
-            let line = describe(&f.decl);
+            let line = describe(f);
             let list = excluded.entry(why.clone()).or_default();
             if !list.contains(&line) {
                 list.push(line);
@@ -654,8 +668,8 @@ pub async fn audit_runtimes(
                 .entry((f.repo.clone(), f.decl.product, cycle.cycle.clone()))
                 .or_default()
                 .push(&f.decl),
-            eol::CycleMatch::TooBroad => too_broad.push(describe(&f.decl)),
-            eol::CycleMatch::Unlisted => unlisted.push(describe(&f.decl)),
+            eol::CycleMatch::TooBroad => too_broad.push(describe(f)),
+            eol::CycleMatch::Unlisted => unlisted.push(describe(f)),
         }
     }
     if !unreadable.is_empty() {
@@ -720,7 +734,7 @@ pub async fn audit_runtimes(
                 .entry((f.repo.clone(), f.decl.product, v.clone()))
                 .or_default()
                 .push(&f.decl),
-            Version::Release(_) => release_only.push(describe(&f.decl)),
+            Version::Release(_) => release_only.push(describe(f)),
             Version::Loose(_) | Version::Excluded(_) => {}
         }
     }

@@ -675,6 +675,20 @@ async fn run_dep_audit_with_tooling(
     repo_dir: &Path,
     tooling_dir: &Path,
 ) -> (Vec<Finding>, Option<CoverageNote>) {
+    let (findings, mut note) = run_dep_audit_core(repo, repo_dir, tooling_dir).await;
+    // The note says which repo it is about, so a scan over several repos keeps one repo's
+    // dependency audit failure apart from another's.
+    if let Some(n) = note.as_mut() {
+        n.repo.get_or_insert_with(|| repo.to_string());
+    }
+    (findings, note)
+}
+
+async fn run_dep_audit_core(
+    repo: &str,
+    repo_dir: &Path,
+    tooling_dir: &Path,
+) -> (Vec<Finding>, Option<CoverageNote>) {
     // Fast-exit when the disable env var is set.  This is exclusively for test
     // isolation — see the `DISABLE_ENV_VAR` constant doc for the rationale.
     if std::env::var(DISABLE_ENV_VAR)
@@ -690,6 +704,7 @@ async fn run_dep_audit_with_tooling(
             return (
                 Vec::new(),
                 Some(CoverageNote {
+                    repo: None,
                     tool: TOOL_NAME.to_string(),
                     message: scrub_local_paths(
                         &format!("dependency audit (osv-scanner) did not run: {e}"),
@@ -727,6 +742,7 @@ async fn run_dep_audit_with_tooling(
             return (
                 Vec::new(),
                 Some(CoverageNote {
+                    repo: None,
                     tool: TOOL_NAME.to_string(),
                     message: scrub_local_paths(
                         &format!(
@@ -742,6 +758,7 @@ async fn run_dep_audit_with_tooling(
             return (
                 Vec::new(),
                 Some(CoverageNote {
+                    repo: None,
                     tool: TOOL_NAME.to_string(),
                     message: "dependency audit (osv-scanner) did not run: \
                               subprocess timed out after 120 s"
@@ -800,6 +817,7 @@ async fn run_dep_audit_with_tooling(
         return (
             Vec::new(),
             Some(CoverageNote {
+                repo: None,
                 tool: TOOL_NAME.to_string(),
                 message: note_msg,
             }),
@@ -818,6 +836,7 @@ async fn run_dep_audit_with_tooling(
                 repo_dir,
             );
             let note = message.map(|message| CoverageNote {
+                repo: None,
                 tool: TOOL_NAME.to_string(),
                 message,
             });
@@ -826,6 +845,7 @@ async fn run_dep_audit_with_tooling(
         Err(e) => (
             Vec::new(),
             Some(CoverageNote {
+                repo: None,
                 tool: TOOL_NAME.to_string(),
                 message: scrub_local_paths(
                     &format!("dependency audit (osv-scanner) could not parse output: {e}"),
@@ -878,6 +898,7 @@ pub async fn run_dep_audit(repo: &str, repo_dir: &Path) -> (Vec<Finding>, Option
             return (
                 Vec::new(),
                 Some(CoverageNote {
+                    repo: Some(repo.to_string()),
                     tool: TOOL_NAME.to_string(),
                     message: "dependency audit (osv-scanner) did not run: \
                               could not resolve Camerata data dir for tool provisioning"
@@ -1065,6 +1086,7 @@ mod tests {
         assert!(message.contains("did not run"), "{message}");
         assert!(!message.contains(NO_LOCKFILES), "{message}");
         let note = CoverageNote {
+            repo: None,
             tool: TOOL_NAME.to_string(),
             message,
         };
@@ -1295,6 +1317,11 @@ mod tests {
         // when it is present.
         if let Some(ref n) = note {
             assert_eq!(n.tool, "osv-scanner", "coverage note must name the tool");
+            assert_eq!(
+                n.repo.as_deref(),
+                Some("acme/test"),
+                "and the repo it is about"
+            );
             assert!(!n.message.is_empty(), "coverage note must have a message");
         }
         // Findings from a nonexistent repo dir are always empty.
@@ -1362,6 +1389,7 @@ mod tests {
         let (dep_findings, dep_note): (Vec<Finding>, Option<CoverageNote>) = (
             Vec::new(),
             Some(CoverageNote {
+                repo: None,
                 tool: TOOL_NAME.to_string(),
                 message: "dependency audit (osv-scanner) timed out after 60 s for acme/api"
                     .to_string(),

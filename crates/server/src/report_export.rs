@@ -104,6 +104,12 @@ pub struct ReportOptions {
     /// See `xlsx_export::triage_log`.
     #[serde(default)]
     pub triage_log: bool,
+    /// Every repo the project holds, in the project's order. Server-populated from the project,
+    /// never client-supplied (`serde(skip)`). The package assembly refuses a report that covers
+    /// fewer repos than this ([`require_all_repos`]); empty means the caller names no project
+    /// (a one-off inspection) and only the report's own `repos_not_inspected` is checked.
+    #[serde(skip)]
+    pub expected_repos: Vec<String>,
 }
 
 /// Env var that turns the optional triage log on for an export when set to `1` or `true`
@@ -1548,6 +1554,69 @@ impl std::fmt::Display for ClientNameRequired {
 }
 
 impl std::error::Error for ClientNameRequired {}
+
+/// Why an export refused to start: the report covers fewer repos than the project holds. Its
+/// `Display` is the plain message the operator sees (HTTP 422 body, CLI stderr).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepositoriesMissing {
+    /// The repos the report does not cover.
+    pub repos: Vec<String>,
+    message: String,
+}
+
+impl std::fmt::Display for RepositoriesMissing {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for RepositoriesMissing {}
+
+/// Refuse to package a report that covers fewer repos than the project holds. A deliverable for
+/// ten of eleven repos, read as the whole codebase, is worse than no deliverable: so a repo the
+/// scan could not inspect ([`crate::onboard::ScanReport::repos_not_inspected`]) and a project
+/// repo the report does not list at all both stop the export, naming the repos.
+pub fn require_all_repos(
+    report: &crate::onboard::ScanReport,
+    opts: &ReportOptions,
+) -> Result<(), RepositoriesMissing> {
+    let mut missing: Vec<String> = report
+        .repos_not_inspected
+        .iter()
+        .map(|(repo, _)| repo.clone())
+        .collect();
+    for repo in &opts.expected_repos {
+        if !report.repos.iter().any(|r| r == repo) && !missing.contains(repo) {
+            missing.push(repo.clone());
+        }
+    }
+    if missing.is_empty() {
+        return Ok(());
+    }
+    let total = opts
+        .expected_repos
+        .len()
+        .max(report.repos.len() + missing.len());
+    let reasons: Vec<String> = missing
+        .iter()
+        .map(
+            |repo| match report.repos_not_inspected.iter().find(|(r, _)| r == repo) {
+                Some((_, why)) => format!("{repo} ({why})"),
+                None => format!("{repo} (not in this inspection)"),
+            },
+        )
+        .collect();
+    Err(RepositoriesMissing {
+        message: format!(
+            "This report covers {} of {total} repositories, so it cannot be packaged as the \
+             inspection of the project. Not inspected: {}. Make each one readable and run the \
+             inspection again.",
+            total - missing.len(),
+            reasons.join("; ")
+        ),
+        repos: missing,
+    })
+}
 
 /// Check a client name as the inspection setup saves it: zero-width characters removed and
 /// trimmed ([`clean_client_name`]), at most [`CLIENT_NAME_MAX_CHARS`] characters, no line breaks
@@ -5106,7 +5175,7 @@ pub fn build_report_json(
     // methodology (38 bullets total, ~3 pages on a real export). The client gets exactly ONE
     // plain, factual sentence instead, and only when the count is nonzero.
     let no_wired_detector_count = report_ledger
-        .rules()
+        .rules_merged()
         .filter(|r| {
             !r.ran
                 && r.skip_reason
@@ -5582,10 +5651,12 @@ mod tests {
     fn client_tooling_notes_reach_the_report_in_their_own_words() {
         let notes = vec![
             crate::onboard::CoverageNote {
+                repo: None,
                 tool: "clippy".to_string(),
                 message: crate::scan_tools::client_tooling_skipped_message("cargo clippy", 2),
             },
             crate::onboard::CoverageNote {
+                repo: None,
                 tool: crate::scan_tools::CLIENT_TOOLING_NOTE_TOOL.to_string(),
                 message: "cargo clippy ran with the operator's opt-in to run this repository's \
                           own tooling."
@@ -5623,6 +5694,8 @@ mod tests {
 
     pub(super) fn report_with(findings: Vec<Finding>, audited_rule_ids: Vec<&str>) -> ScanReport {
         ScanReport {
+            repos_not_inspected: Vec::new(),
+            recommendations_by_repo: Vec::new(),
             repos: vec!["owner/repo".to_string()],
             stacks: Vec::new(),
             files_scanned: 10,
@@ -10432,10 +10505,12 @@ mod tests {
         let mut report = report_with(vec![], vec![]);
         report.coverage_notes = vec![
             CoverageNote {
+                repo: None,
                 tool: "osv-scanner".to_string(),
                 message: "dependency audit did not run: network unavailable".to_string(),
             },
             CoverageNote {
+                repo: None,
                 tool: "ruff".to_string(),
                 message: "ruff not installed".to_string(),
             },
@@ -10455,6 +10530,7 @@ mod tests {
         let mut report = report_with(vec![], vec![]);
         report.coverage_notes = vec![
             CoverageNote {
+                repo: None,
                 tool: "eslint".to_string(),
                 message: "Could not preview 12 rule(s) with eslint: spawn ENOENT at \
                           /internal/path/node_modules/.bin/eslint. It enforces once wired \
@@ -10462,10 +10538,12 @@ mod tests {
                     .to_string(),
             },
             CoverageNote {
+                repo: None,
                 tool: "eslint".to_string(),
                 message: "Could not preview 3 rule(s) with eslint: exit code 2.".to_string(),
             },
             CoverageNote {
+                repo: None,
                 tool: "osv-scanner".to_string(),
                 message: "dependency audit did not run: network unavailable".to_string(),
             },
@@ -10523,6 +10601,7 @@ mod tests {
         let mut report = report_with(vec![], vec![]);
         report.coverage_notes = vec![
             CoverageNote {
+                repo: None,
                 tool: crate::RULE_CORPUS_COVERAGE_TOOL.to_string(),
                 message: "/Users/auditor/corpus/supabase/rls/a.toml did not parse, so rule \
                           SUPABASE-RLS-ENABLED-1 was not loaded and did not run: TOML parse \
@@ -10530,6 +10609,7 @@ mod tests {
                     .to_string(),
             },
             CoverageNote {
+                repo: None,
                 tool: crate::RULE_CORPUS_COVERAGE_TOOL.to_string(),
                 message: "/Users/auditor/corpus/universal/b.toml did not parse, so rule \
                           SEC-NO-RAW-SQL-CONCAT-1 was not loaded and did not run: TOML parse \
@@ -10589,6 +10669,7 @@ mod tests {
     fn the_firebase_scope_sentence_reaches_the_summary_and_methodology_verbatim() {
         let mut report = report_with(vec![], vec![]);
         report.coverage_notes = vec![CoverageNote {
+            repo: None,
             tool: crate::FIREBASE_SCOPE_COVERAGE_TOOL.to_string(),
             message: "operator note".to_string(),
         }];
@@ -10621,6 +10702,7 @@ mod tests {
     fn req_w13_the_client_facing_corpus_load_line_pluralizes_correctly() {
         let mut report = report_with(vec![], vec![]);
         report.coverage_notes = vec![CoverageNote {
+            repo: None,
             tool: crate::RULE_CORPUS_COVERAGE_TOOL.to_string(),
             message: "x.toml did not parse".to_string(),
         }];
@@ -14061,6 +14143,8 @@ mod export_invariants_gate {
 
     fn report_with(findings: Vec<Finding>, audited_rule_ids: Vec<&str>) -> ScanReport {
         ScanReport {
+            repos_not_inspected: Vec::new(),
+            recommendations_by_repo: Vec::new(),
             repos: vec!["demo/portal".to_string()],
             stacks: Vec::new(),
             files_scanned: 40,
@@ -15186,6 +15270,7 @@ mod export_invariants_gate {
         let mut ledger = crate::scan_ledger::ScanLedger::new();
         // Genuinely ran, zero findings -> healthy.
         ledger.record_rule(
+            "",
             "SEC-NO-HARDCODED-SECRETS-1",
             crate::scan_ledger::RuleTier::Deterministic,
             true,
@@ -15196,6 +15281,7 @@ mod export_invariants_gate {
         // Genuinely ran AND fired (matches the one real Finding above) -> neither healthy nor
         // excluded.
         ledger.record_rule(
+            "",
             "ARCH-STRICT-LAYERING-1",
             crate::scan_ledger::RuleTier::Deterministic,
             true,
@@ -15206,6 +15292,7 @@ mod export_invariants_gate {
         // The W1-item-4 defect shape: declared mechanical, no wired detector -> excluded with
         // a reason, never healthy.
         ledger.record_rule(
+            "",
             "PYTHON-PARAMETERIZED-SQL-1",
             crate::scan_ledger::RuleTier::Deterministic,
             false,
@@ -15540,6 +15627,7 @@ mod export_invariants_gate {
         ];
         for rid in rule_ids {
             ledger.record_rule(
+                "",
                 rid,
                 crate::scan_ledger::RuleTier::Deterministic,
                 false,
@@ -15613,6 +15701,7 @@ mod export_invariants_gate {
         let mut report = report_with(Vec::new(), vec![]);
         let mut ledger = crate::scan_ledger::ScanLedger::new();
         ledger.record_rule(
+            "",
             "PYTHON-PARAMETERIZED-SQL-1",
             crate::scan_ledger::RuleTier::Deterministic,
             false,
@@ -15658,6 +15747,7 @@ mod export_invariants_gate {
             let mut report = report_with(Vec::new(), vec!["ARCH-EXPLICIT-TX-1"]);
             let mut ledger = crate::scan_ledger::ScanLedger::new();
             ledger.record_rule(
+                "",
                 "ARCH-EXPLICIT-TX-1",
                 crate::scan_ledger::RuleTier::Semantic,
                 true,
@@ -15669,6 +15759,7 @@ mod export_invariants_gate {
             report.recommendations.insert(
                 "ARCH-EXPLICIT-TX-1".to_string(),
                 crate::ai_audit::RuleRecommendation {
+                    repo: String::new(),
                     rule_id: "ARCH-EXPLICIT-TX-1".to_string(),
                     recommended_option_id: "some-option".to_string(),
                     recommendation_reasoning: "the model's pick".to_string(),
@@ -15732,6 +15823,7 @@ mod export_invariants_gate {
         let mut report = report_with(Vec::new(), vec!["ARCH-EXPLICIT-TX-1"]);
         let mut ledger = crate::scan_ledger::ScanLedger::new();
         ledger.record_rule(
+            "",
             "ARCH-EXPLICIT-TX-1",
             crate::scan_ledger::RuleTier::Semantic,
             true,
@@ -15743,6 +15835,7 @@ mod export_invariants_gate {
         report.recommendations.insert(
             "ARCH-EXPLICIT-TX-1".to_string(),
             crate::ai_audit::RuleRecommendation {
+                repo: String::new(),
                 rule_id: "ARCH-EXPLICIT-TX-1".to_string(),
                 recommended_option_id:
                     "services-own-the-transaction-lifecycle-repositories-receive-the-handle"
@@ -15793,6 +15886,7 @@ mod export_invariants_gate {
         let mut report = report_with(Vec::new(), vec!["SEC-NO-HARDCODED-SECRETS-1"]);
         let mut ledger = crate::scan_ledger::ScanLedger::new();
         ledger.record_rule(
+            "",
             "SEC-NO-HARDCODED-SECRETS-1",
             crate::scan_ledger::RuleTier::Deterministic,
             true,
@@ -16023,6 +16117,7 @@ mod export_invariants_gate {
 
         let mut ledger = crate::scan_ledger::ScanLedger::new();
         ledger.record_rule(
+            "",
             "SEC-NO-HARDCODED-SECRETS-1",
             crate::scan_ledger::RuleTier::Deterministic,
             true,
@@ -16031,6 +16126,7 @@ mod export_invariants_gate {
             1,
         );
         ledger.record_rule(
+            "",
             "SEC-NO-RAW-SQL-CONCAT-1",
             crate::scan_ledger::RuleTier::ExternalTool,
             true,
@@ -16040,6 +16136,7 @@ mod export_invariants_gate {
         );
         // The zero-finding, multi-option rule the evidence gate will flag.
         ledger.record_rule(
+            "",
             "ARCH-EXPLICIT-TX-1",
             crate::scan_ledger::RuleTier::Semantic,
             true,
@@ -16063,6 +16160,7 @@ mod export_invariants_gate {
         report.recommendations.insert(
             "ARCH-EXPLICIT-TX-1".to_string(),
             crate::ai_audit::RuleRecommendation {
+                repo: String::new(),
                 rule_id: "ARCH-EXPLICIT-TX-1".to_string(),
                 recommended_option_id: "some-option".to_string(),
                 recommendation_reasoning: "the model's pick".to_string(),

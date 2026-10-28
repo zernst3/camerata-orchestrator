@@ -545,6 +545,7 @@ fn once_a_pass_was_refused_every_later_stage_is_blocked_even_below_the_cap() {
         "nothing stopped yet"
     );
     meter.record_not_run(crate::cost_cap::NotRunPass {
+        files: Vec::new(),
         repo: "o/r".into(),
         group: "pass[all]".into(),
         chunk: 1,

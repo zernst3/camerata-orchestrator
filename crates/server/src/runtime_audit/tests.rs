@@ -1088,6 +1088,40 @@ async fn a_loose_version_is_listed_as_not_checked_and_never_guessed() {
 }
 
 #[tokio::test]
+async fn with_several_repos_a_not_checked_declaration_names_its_repo() {
+    let one = repo(&[("Dockerfile", "FROM node:latest\n")]);
+    let two = repo(&[("Dockerfile", "FROM node:latest\n")]);
+    let sources = vec![
+        ("acme/one".to_string(), one.path().to_path_buf()),
+        ("acme/two".to_string(), two.path().to_path_buf()),
+    ];
+    let audit = audit_runtimes(
+        &sources,
+        &Fixture::online(),
+        None,
+        now(),
+        &NvdPolicy::instant(),
+        Duration::from_secs(5),
+        Duration::from_secs(5),
+    )
+    .await;
+    let text = notes_text(&audit);
+    // Two repos hold the same line of the same file; the note must say which is which.
+    assert!(text.contains("acme/one: "), "{text}");
+    assert!(text.contains("acme/two: "), "{text}");
+    assert_eq!(
+        text.matches("`node:latest` in Dockerfile line 1").count(),
+        2,
+        "{text}"
+    );
+
+    // One repo: the note reads as it always did, with no repo name.
+    let single = run(&one, &Fixture::online(), None).await;
+    let text = notes_text(&single);
+    assert!(!text.contains("acme/app: "), "{text}");
+}
+
+#[tokio::test]
 async fn a_release_line_too_broad_or_unlisted_is_disclosed_not_guessed() {
     let dir = repo(&[
         (".python-version", "3\n"),

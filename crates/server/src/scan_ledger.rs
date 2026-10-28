@@ -30,7 +30,8 @@
 //! plan), which closes the SOURCE of the six-phantom-rule defect rather than just detecting
 //! its symptom at scan time.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::sync::OnceLock;
 
 use serde::{Deserialize, Serialize};
 
@@ -129,6 +130,14 @@ impl RuleTier {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuleLedgerEntry {
     pub rule_id: String,
+    /// The repo this entry is about (`owner/repo`), so a rule that ran on one repo of a scan and
+    /// did not run on another is two facts, never one. Empty for an entry that belongs to no
+    /// single repo: a rule whose file would not load, a ledger written before entries were
+    /// kept per repo, or a caller that scans one unnamed source. The entry the ledger hands
+    /// out by rule id alone ([`ScanLedger::rule`]) is the merged view across repos and has an
+    /// empty repo too.
+    #[serde(default)]
+    pub repo: String,
     pub tier: RuleTier,
     pub ran: bool,
     /// Why this rule did not run: "not armed for this repo", "no matching files", "tool
@@ -176,15 +185,15 @@ pub struct RuleLedgerEntry {
     /// [`ScanLedger::note_partial_rule`].
     #[serde(default)]
     pub partial_reason: Option<String>,
-    /// The repos of a multi-repo scan this rule was NOT run for, though it ran for others (a
-    /// repo whose whole AI review failed). `record_rule` ORs `ran` across repos, so without
-    /// this a rule that ran on one repo and failed on another read as "ran, found nothing".
-    /// Set via [`ScanLedger::note_rule_not_run_for_repo`], which also sets
-    /// [`Self::partial_reason`] so every existing reader treats the rule as incomplete.
+    /// On the merged view ([`ScanLedger::rule`]): the repos of a multi-repo scan this rule was
+    /// NOT run for, though it ran for others (a repo whose whole AI review failed, a repo that
+    /// could not be read). Derived from the per-repo entries, which is why it is also set on the
+    /// merged entry's [`Self::partial_reason`], so every reader treats the rule as incomplete.
+    /// A repo the rule was skipped for because the repo holds nothing the rule covers (no file in
+    /// its language) is not listed. Empty on a per-repo entry.
     #[serde(default)]
     pub repos_not_run: Vec<String>,
-    /// The reason the first repo in [`Self::repos_not_run`] failed, kept so the partial reason can
-    /// be rebuilt as repos are added without losing text another stage wrote beside it.
+    /// On the merged view: the reason the first repo in [`Self::repos_not_run`] was not run.
     #[serde(default)]
     pub not_run_reason: Option<String>,
     /// How many of the files its repos handed the audit this rule was checked against, when its
@@ -212,7 +221,62 @@ pub struct ScopeCoverage {
     pub changed_files_only: bool,
 }
 
+/// What one (rule, repo) cell says. The one definition every reader of the ledger shares: the
+/// merge below, the integrity gate and the patterns-across-services matrix.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CellState {
+    /// The rule ran on the repo and found something. `sites` is the number of findings emitted.
+    Violated { sites: usize },
+    /// The rule ran on the repo, found nothing and was checked everywhere on it. It does NOT
+    /// require files evaluated: a repo whose result was carried from an earlier inspection
+    /// (nothing changed, nothing re-read) ran the rule on zero fresh files and is still clean.
+    Clean,
+    /// The rule has nothing to check on the repo: its concern was judged absent there, or the
+    /// repo holds nothing in the rule's scope (no file in its language, not armed for it), or
+    /// the rule is not selected for the repo at all.
+    NotApplicable { reason: String },
+    /// The rule should have been checked on the repo and was not, or not everywhere: it did not
+    /// run, the spend limit stopped it, the review failed, the repo could not be read, or it
+    /// ran on part of the code only. Never to be read as clean.
+    NotReviewed { reason: String },
+}
+
 impl RuleLedgerEntry {
+    /// This entry's [`CellState`], decided in this order: findings first (a rule that found
+    /// something is violated whatever else is true of it), then a judged-not-applicable rule,
+    /// then a skip because the repo holds nothing the rule covers ([`is_out_of_scope_skip`]),
+    /// then every other way of not being checked (did not run, partial coverage), and clean
+    /// only after all of those are ruled out.
+    pub fn cell_state(&self) -> CellState {
+        if self.ran && self.findings_emitted > 0 {
+            return CellState::Violated {
+                sites: self.findings_emitted,
+            };
+        }
+        if self.not_applicable {
+            return CellState::NotApplicable {
+                reason: "judged not applicable: no evidence the concern exists here".to_string(),
+            };
+        }
+        if !self.ran {
+            let reason = self
+                .skip_reason
+                .clone()
+                .unwrap_or_else(|| "did not run this scan".to_string());
+            return if is_out_of_scope_skip(self.skip_reason.as_deref()) {
+                CellState::NotApplicable { reason }
+            } else {
+                CellState::NotReviewed { reason }
+            };
+        }
+        if let Some(why) = &self.partial_reason {
+            return CellState::NotReviewed {
+                reason: why.clone(),
+            };
+        }
+        CellState::Clean
+    }
+
     /// The one predicate every "what's healthy" / scorecard "Clean" derivation must use
     /// instead of inferring cleanliness from mere selection.
     ///
@@ -316,6 +380,12 @@ impl StageAccounting {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StageLedgerEntry {
     pub stage: String,
+    /// The repo this stage ran over, for a stage that runs once per repo (the merge and the
+    /// stack-exception filter). Empty for a stage that runs over the whole scan, or a ledger
+    /// written before stages named their repo. A disclosure for a stage that does not add up
+    /// names this repo, not the whole project.
+    #[serde(default)]
+    pub repo: String,
     pub rows_in: usize,
     pub rows_out: usize,
     pub merged_into: Vec<MergedRow>,
@@ -333,6 +403,16 @@ pub struct StageLedgerEntry {
 impl StageLedgerEntry {
     pub fn is_integral(&self) -> bool {
         self.unaccounted == 0
+    }
+
+    /// The repo label a disclosure for this stage carries: the repo the stage ran over, or
+    /// `fallback` (every repo of the scan, joined) for a stage that runs over the whole scan.
+    pub fn disclosure_label<'a>(&'a self, fallback: &'a str) -> &'a str {
+        if self.repo.is_empty() {
+            fallback
+        } else {
+            &self.repo
+        }
     }
 
     /// W2: the total of every NAMED REMOVAL-side disposition this entry recorded (merged +
@@ -365,7 +445,17 @@ impl StageLedgerEntry {
 /// into the report build (`report_export::build_report_json`). See the module doc comment.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ScanLedger {
-    rules: HashMap<String, RuleLedgerEntry>,
+    /// One entry per (rule id, repo): a rule that ran on one repo of a multi-repo scan and was
+    /// skipped on another is two entries, so neither can hide the other. Kept as a list on disk
+    /// (a tuple cannot be a JSON key); a ledger written before entries were per repo (a map of
+    /// rule id to entry) still loads, with every entry attributed to no repo.
+    #[serde(default, with = "rules_serde")]
+    rules: BTreeMap<(String, String), RuleLedgerEntry>,
+    /// The rules as one entry each, merged over their repos (see [`merge_rule_entries`]). Built
+    /// on first read and dropped by every method that changes `rules`, so the readers that want
+    /// the old, project-wide shape ([`Self::rule`], [`Self::healthy_rule_ids`], ...) borrow it.
+    #[serde(skip)]
+    merged: OnceLock<BTreeMap<String, RuleLedgerEntry>>,
     stages: Vec<StageLedgerEntry>,
     /// Rule ids queued for [`RuleLedgerEntry::coverage_note`] via
     /// [`Self::note_config_gated_rule`], consumed by every subsequent [`Self::record_rule`]
@@ -373,28 +463,28 @@ pub struct ScanLedger {
     /// `coverage_note` lives on its [`RuleLedgerEntry`] once recorded, so this queue is never
     /// meaningful to persist across a (de)serialize round-trip.
     #[serde(skip)]
-    config_gated_pending: BTreeSet<String>,
+    config_gated_pending: BTreeSet<(String, String)>,
     /// Rule ids queued for [`INCOMPLETE_SCAN_NOTE`] via [`Self::note_incomplete_scan_rule`],
     /// consumed exactly like `config_gated_pending`; the incomplete-scan note wins when both
     /// are queued. Transient scan-time plumbing only.
     #[serde(skip)]
-    incomplete_scan_pending: BTreeSet<String>,
+    incomplete_scan_pending: BTreeSet<(String, String)>,
     /// Rule ids queued for [`ADVISORY_UNAVAILABLE_NOTE`] via
     /// [`Self::note_advisory_unavailable_rule`]: a clone-based rule whose deterministic pass
     /// found candidates but whose reviewed judgment did not run. Transient scan-time plumbing.
     #[serde(skip)]
-    advisory_unavailable_pending: BTreeSet<String>,
+    advisory_unavailable_pending: BTreeSet<(String, String)>,
     /// Rule ids queued for [`ADVISORY_PARTIAL_NOTE`] via [`Self::note_advisory_partial_rule`]:
     /// a clone-based rule whose judgment ran but left candidates undecided. Transient.
     #[serde(skip)]
-    advisory_partial_pending: BTreeSet<String>,
+    advisory_partial_pending: BTreeSet<(String, String)>,
     /// Rule ids queued for [`RuleLedgerEntry::not_applicable`] via [`Self::
     /// note_not_applicable_rule`], consumed by every subsequent [`Self::record_rule`] call for
     /// the same id — same queue-then-settle shape as `config_gated_pending`, for the same
     /// reason (the rule's `ran` fact is settled later than the not-applicable determination).
     /// Transient scan-time plumbing only.
     #[serde(skip)]
-    not_applicable_pending: BTreeSet<String>,
+    not_applicable_pending: BTreeSet<(String, String)>,
     /// What this scan was actually FED. See [`ScanInputFacts`].
     #[serde(default)]
     input: ScanInputFacts,
@@ -720,6 +810,33 @@ impl ScanLedger {
         self.rules.is_empty() && self.stages.is_empty()
     }
 
+    /// Drop the merged view; every method that changes `rules` calls this.
+    fn invalidate_merged(&mut self) {
+        self.merged = OnceLock::new();
+    }
+
+    /// The rules merged over their repos, one entry per rule id. See [`merge_rule_entries`].
+    fn merged_rules(&self) -> &BTreeMap<String, RuleLedgerEntry> {
+        self.merged.get_or_init(|| {
+            let mut out: BTreeMap<String, RuleLedgerEntry> = BTreeMap::new();
+            // `rules` is ordered by rule id, then repo, so one rule's entries sit together.
+            let mut group: Vec<&RuleLedgerEntry> = Vec::new();
+            for entry in self.rules.values() {
+                if group.first().is_some_and(|g| g.rule_id != entry.rule_id) {
+                    let merged = merge_rule_entries(&group);
+                    out.insert(merged.rule_id.clone(), merged);
+                    group.clear();
+                }
+                group.push(entry);
+            }
+            if !group.is_empty() {
+                let merged = merge_rule_entries(&group);
+                out.insert(merged.rule_id.clone(), merged);
+            }
+            out
+        })
+    }
+
     /// Record what this scan was fed. See [`ScanInputFacts`].
     ///
     /// Called once, at the point the file collection and the model resolution are both
@@ -823,44 +940,49 @@ impl ScanLedger {
     /// [`CONFIG_GATED_NOTE`]. Called BEFORE the rule's `ran` fact is known (the semantic-phase
     /// recording further down `audit_repos`'s loop settles that), which is why this queues the
     /// note rather than writing it directly onto an entry that may not exist yet.
-    pub fn note_config_gated_rule(&mut self, rule_id: impl Into<String>) {
-        self.config_gated_pending.insert(rule_id.into());
+    pub fn note_config_gated_rule(&mut self, repo: &str, rule_id: impl Into<String>) {
+        self.config_gated_pending
+            .insert((repo.to_string(), rule_id.into()));
     }
 
     /// Queue the [`INCOMPLETE_SCAN_NOTE`] disclosure for a rule the scan WITHHELD because it
     /// reasons from the absence of a reference and the scan stopped at its file limit. Same
     /// queue-then-settle shape as [`Self::note_config_gated_rule`].
-    pub fn note_incomplete_scan_rule(&mut self, rule_id: impl Into<String>) {
-        self.incomplete_scan_pending.insert(rule_id.into());
+    pub fn note_incomplete_scan_rule(&mut self, repo: &str, rule_id: impl Into<String>) {
+        self.incomplete_scan_pending
+            .insert((repo.to_string(), rule_id.into()));
     }
 
     /// Queue the [`ADVISORY_UNAVAILABLE_NOTE`] disclosure for a clone-based rule (Wave C) whose
     /// deterministic pass found candidate sites but whose reviewed judgment did not run this
     /// scan (no model, deterministic-only, compliance block). Same queue-then-settle shape as
     /// [`Self::note_incomplete_scan_rule`].
-    pub fn note_advisory_unavailable_rule(&mut self, rule_id: impl Into<String>) {
-        self.advisory_unavailable_pending.insert(rule_id.into());
+    pub fn note_advisory_unavailable_rule(&mut self, repo: &str, rule_id: impl Into<String>) {
+        self.advisory_unavailable_pending
+            .insert((repo.to_string(), rule_id.into()));
     }
 
     /// Queue the [`ADVISORY_PARTIAL_NOTE`] disclosure for a clone-based rule whose judgment ran
     /// but left candidate sites undecided (over the per-scan limit, `unsure`, no verdict, or a
     /// failed batch).
-    pub fn note_advisory_partial_rule(&mut self, rule_id: impl Into<String>) {
-        self.advisory_partial_pending.insert(rule_id.into());
+    pub fn note_advisory_partial_rule(&mut self, repo: &str, rule_id: impl Into<String>) {
+        self.advisory_partial_pending
+            .insert((repo.to_string(), rule_id.into()));
     }
 
     /// The coverage note queued for `rule_id`. Precedence: the incomplete-scan note, then the
     /// advisory-unavailable note, then the advisory-partial note, then config-gated.
-    fn pending_coverage_note(&self, rule_id: &str) -> Option<String> {
-        if self.incomplete_scan_pending.contains(rule_id) {
+    fn pending_coverage_note(&self, repo: &str, rule_id: &str) -> Option<String> {
+        let key = (repo.to_string(), rule_id.to_string());
+        if self.incomplete_scan_pending.contains(&key) {
             Some(INCOMPLETE_SCAN_NOTE.to_string())
-        } else if self.advisory_unavailable_pending.contains(rule_id) {
+        } else if self.advisory_unavailable_pending.contains(&key) {
             Some(ADVISORY_UNAVAILABLE_NOTE.to_string())
-        } else if self.advisory_partial_pending.contains(rule_id) {
+        } else if self.advisory_partial_pending.contains(&key) {
             Some(ADVISORY_PARTIAL_NOTE.to_string())
         } else {
             self.config_gated_pending
-                .contains(rule_id)
+                .contains(&key)
                 .then(|| CONFIG_GATED_NOTE.to_string())
         }
     }
@@ -870,28 +992,32 @@ impl ScanLedger {
     /// queue-then-settle shape as [`Self::note_config_gated_rule`]. Called from `onboard::
     /// audit_repos`'s semantic-phase recording for every rule id a repo's `RuleRecommendation`
     /// marked `applicable == false`, BEFORE the rule's `ran` fact is known for this call.
-    pub fn note_not_applicable_rule(&mut self, rule_id: impl Into<String>) {
-        self.not_applicable_pending.insert(rule_id.into());
+    pub fn note_not_applicable_rule(&mut self, repo: &str, rule_id: impl Into<String>) {
+        self.not_applicable_pending
+            .insert((repo.to_string(), rule_id.into()));
     }
 
-    /// Record (or, for a rule already seen this scan — e.g. a multi-repo run — ACCUMULATE)
-    /// one rule's outcome. Accumulation rule: `ran` is OR'd (one repo running it is enough to
-    /// call it run), `skip_reason` is kept from the first not-run observation and cleared the
-    /// moment any repo actually ran it, and the usage counters sum across repos.
+    /// Record (or, for a rule already seen for this repo this scan, ACCUMULATE) one rule's
+    /// outcome for `repo`. The entry is kept per (rule, repo): a rule that ran on one repo and
+    /// was skipped on another is two entries, and the merged view ([`Self::rule`]) says so
+    /// instead of reading "ran". Accumulation within one repo: `ran` is OR'd, `skip_reason` is
+    /// kept from the first not-run observation and cleared the moment the rule actually ran
+    /// there, and the usage counters sum. `repo` is the spec the scan names the repo by
+    /// (`owner/repo`); pass `""` only for a source that has no name.
     ///
-    /// If [`Self::note_config_gated_rule`] was ever called for this `rule_id` (in this call or
-    /// an earlier one), the resulting entry's `coverage_note` is set to [`CONFIG_GATED_NOTE`]
-    /// and stays set regardless of `ran` — see [`RuleLedgerEntry::coverage_note`]'s doc comment
-    /// for why this is deliberately independent of the `ran`/`skip_reason` accumulation rules.
-    /// Likewise, if [`Self::note_not_applicable_rule`] was ever called for this `rule_id`, the
-    /// resulting entry's `not_applicable` is `true` and stays `true` for the rest of this scan
-    /// (OR-accumulated, same direction as `ran` — a determination that the concern is absent
-    /// from one repo in a multi-repo scan is still a genuine finding about THAT repo, and a
-    /// multi-repo scan's ledger is project-wide; this is a documented simplification, the same
-    /// one `ScanReport::recommendations`'s own doc comment already makes for the "last repo
-    /// wins" shape of the underlying recommendation).
+    /// If [`Self::note_config_gated_rule`] was ever called for this `(repo, rule_id)` (in this
+    /// call or an earlier one), the resulting entry's `coverage_note` is set to
+    /// [`CONFIG_GATED_NOTE`] and stays set regardless of `ran` — see
+    /// [`RuleLedgerEntry::coverage_note`]'s doc comment for why this is deliberately independent
+    /// of the `ran`/`skip_reason` accumulation rules. Likewise, if
+    /// [`Self::note_not_applicable_rule`] was ever called for it, the entry's `not_applicable` is
+    /// `true` and stays `true` for the rest of this scan. A determination that a rule's concern
+    /// is absent from one repo is a finding about THAT repo only: the merged view still never
+    /// reads such a rule as verified clean, but the other repos' entries are untouched.
+    #[allow(clippy::too_many_arguments)] // one flat ledger fact: the repo and rule, then what happened
     pub fn record_rule(
         &mut self,
+        repo: &str,
         rule_id: impl Into<String>,
         tier: RuleTier,
         ran: bool,
@@ -900,10 +1026,13 @@ impl ScanLedger {
         findings_emitted: usize,
     ) -> &RuleLedgerEntry {
         let rule_id = rule_id.into();
-        let coverage_note = self.pending_coverage_note(&rule_id);
-        let not_applicable = self.not_applicable_pending.contains(&rule_id);
+        let coverage_note = self.pending_coverage_note(repo, &rule_id);
+        let not_applicable = self
+            .not_applicable_pending
+            .contains(&(repo.to_string(), rule_id.clone()));
+        let key = (rule_id.clone(), repo.to_string());
         self.rules
-            .entry(rule_id.clone())
+            .entry(key.clone())
             .and_modify(|e| {
                 e.ran = e.ran || ran;
                 if e.ran {
@@ -920,6 +1049,7 @@ impl ScanLedger {
             })
             .or_insert(RuleLedgerEntry {
                 rule_id: rule_id.clone(),
+                repo: repo.to_string(),
                 tier,
                 ran,
                 skip_reason,
@@ -932,46 +1062,50 @@ impl ScanLedger {
                 not_run_reason: None,
                 scope_coverage: None,
             });
-        self.rules.get(&rule_id).expect("just inserted")
+        self.invalidate_merged();
+        self.rules.get(&key).expect("just inserted")
     }
 
-    /// Mark a rule that [`Self::record_rule`] already recorded as having run on only PART of the
-    /// code (see [`RuleLedgerEntry::partial_reason`]). Reasons from different stages are listed together. A rule the
-    /// ledger has no entry for is ignored: there is nothing to qualify.
-    pub fn note_partial_rule(&mut self, rule_id: &str, reason: impl Into<String>) {
-        if let Some(entry) = self.rules.get_mut(rule_id) {
-            let reason: String = reason.into();
-            match entry.partial_reason.as_mut() {
-                None => entry.partial_reason = Some(reason),
-                // A reason another stage already left (a repo whose review failed) stays, and
-                // this one is added after it; the same reason is never listed twice.
-                Some(existing) if !existing.contains(&reason) => {
-                    existing.push_str("; ");
-                    existing.push_str(&reason);
-                }
-                Some(_) => {}
+    /// Mark a rule that [`Self::record_rule`] already recorded for `repo` as having run on only
+    /// PART of that repo's code (see [`RuleLedgerEntry::partial_reason`]). Reasons from different
+    /// stages are listed together. A (rule, repo) the ledger has no entry for is ignored: there
+    /// is nothing to qualify.
+    pub fn note_partial_rule(&mut self, rule_id: &str, repo: &str, reason: impl Into<String>) {
+        let Some(entry) = self.rules.get_mut(&(rule_id.to_string(), repo.to_string())) else {
+            return;
+        };
+        let reason: String = reason.into();
+        match entry.partial_reason.as_mut() {
+            None => entry.partial_reason = Some(reason),
+            // The same reason is never listed twice.
+            Some(existing) if !existing.contains(&reason) => {
+                existing.push_str("; ");
+                existing.push_str(&reason);
             }
+            Some(_) => {}
         }
+        self.invalidate_merged();
     }
 
-    /// H10: record that `rule_id` was checked against `checked` of the `of` files one repo handed
+    /// H10: record that `rule_id` was checked against `checked` of the `of` files `repo` handed
     /// the audit, because its scope (the language its id names, or the `applies_to` it declares)
     /// holds the rest back. Call it for every repo the rule ran in, even when `checked == of`:
-    /// the counts are summed, so the total is over all repos and a repo where the rule saw every
-    /// file counts toward it. This is a disclosure, not a gap: a Rust rule has no business in a
-    /// `.ts` file, so the rule is still complete for what it covers and the integrity gate does
-    /// not fail it (that is what [`RuleLedgerEntry::partial_reason`] is for). Kept apart from
-    /// [`RuleLedgerEntry::coverage_note`], which another stage may already have set. The first
-    /// `kind` is kept.
+    /// the merged view sums the counts, so the total is over all repos and a repo where the rule
+    /// saw every file counts toward it. This is a disclosure, not a gap: a Rust rule has no
+    /// business in a `.ts` file, so the rule is still complete for what it covers and the
+    /// integrity gate does not fail it (that is what [`RuleLedgerEntry::partial_reason`] is for).
+    /// Kept apart from [`RuleLedgerEntry::coverage_note`], which another stage may already have
+    /// set. The first `kind` is kept.
     pub fn note_scope_subset(
         &mut self,
         rule_id: &str,
+        repo: &str,
         checked: usize,
         of: usize,
         kind: &str,
         changed_files_only: bool,
     ) {
-        let Some(entry) = self.rules.get_mut(rule_id) else {
+        let Some(entry) = self.rules.get_mut(&(rule_id.to_string(), repo.to_string())) else {
             return;
         };
         let scope = entry.scope_coverage.get_or_insert_with(|| ScopeCoverage {
@@ -983,13 +1117,13 @@ impl ScanLedger {
         scope.checked += checked;
         scope.of += of;
         scope.changed_files_only |= changed_files_only;
+        self.invalidate_merged();
     }
 
     /// The rules whose scope held files back, as `(rule id, coverage)`, sorted by rule id: the
     /// ones with `checked < of` once every repo is summed.
     pub fn scope_limited_rules(&self) -> Vec<(&str, &ScopeCoverage)> {
-        let mut out: Vec<(&str, &ScopeCoverage)> = self
-            .rules
+        self.merged_rules()
             .values()
             .filter_map(|r| {
                 r.scope_coverage
@@ -997,50 +1131,7 @@ impl ScanLedger {
                     .filter(|s| s.checked < s.of)
                     .map(|s| (r.rule_id.as_str(), s))
             })
-            .collect();
-        out.sort_by_key(|(id, _)| *id);
-        out
-    }
-
-    /// H4: record that `rule_id` was not run for `repo`, in a scan where it may have run for
-    /// other repos. Call it after the [`Self::record_rule`] call that recorded the rule as not
-    /// run for this repo. It names the repo on the entry and sets [`RuleLedgerEntry::partial_reason`]
-    /// to list every such repo with `reason` (the first reason is kept), so a rule that ran on one
-    /// repo and failed on another is incomplete coverage, never verified clean. A rule that
-    /// ran nowhere stays "not run" (its skip reason says why); this only adds the repo list.
-    pub fn note_rule_not_run_for_repo(&mut self, rule_id: &str, repo: &str, reason: &str) {
-        let Some(entry) = self.rules.get_mut(rule_id) else {
-            return;
-        };
-        // The text this method wrote last time, rebuilt from the fields it keeps, so it can be
-        // replaced exactly while whatever another stage added (the spend limit) stays.
-        let previous = entry
-            .not_run_reason
-            .as_deref()
-            .map(|why| format!("not run for {}: {why}", entry.repos_not_run.join(", ")));
-        if !entry.repos_not_run.iter().any(|r| r == repo) {
-            entry.repos_not_run.push(repo.to_string());
-        }
-        let why = entry
-            .not_run_reason
-            .get_or_insert_with(|| reason.to_string())
-            .clone();
-        let ours = format!("not run for {}: {why}", entry.repos_not_run.join(", "));
-        let existing = entry.partial_reason.take().unwrap_or_default();
-        let mut foreign = match previous {
-            Some(prev) => existing.replacen(&prev, "", 1),
-            None => existing,
-        };
-        // Taking our text out of the middle leaves its two separators side by side.
-        while foreign.contains("; ; ") {
-            foreign = foreign.replace("; ; ", "; ");
-        }
-        let foreign = foreign.trim_matches(|c| c == ';' || c == ' ');
-        entry.partial_reason = Some(if foreign.is_empty() {
-            ours
-        } else {
-            format!("{foreign}; {ours}")
-        });
+            .collect()
     }
 
     /// W13 — record a rule whose CORPUS FILE could not be parsed, so the rule never entered
@@ -1107,34 +1198,38 @@ impl ScanLedger {
     /// gate.
     pub fn record_corpus_load_failure(&mut self, rule_id: impl Into<String>) -> &RuleLedgerEntry {
         let rule_id = rule_id.into();
-        match self.rules.get_mut(&rule_id) {
-            Some(existing) => {
-                if !existing.ran {
-                    existing.skip_reason = Some(CORPUS_LOAD_FAILED_REASON.to_string());
-                }
-                existing.coverage_note = Some(CORPUS_LOAD_FAILED_NOTE.to_string());
+        // A rule file belongs to the project, not to a repo, so every repo's entry for the rule
+        // gets the same treatment; a rule no repo recorded gets one entry of its own.
+        let mut found = false;
+        for entry in self.rules.values_mut().filter(|e| e.rule_id == rule_id) {
+            found = true;
+            if !entry.ran {
+                entry.skip_reason = Some(CORPUS_LOAD_FAILED_REASON.to_string());
             }
-            None => {
-                self.rules.insert(
-                    rule_id.clone(),
-                    RuleLedgerEntry {
-                        rule_id: rule_id.clone(),
-                        tier: RuleTier::Unloaded,
-                        ran: false,
-                        skip_reason: Some(CORPUS_LOAD_FAILED_REASON.to_string()),
-                        files_evaluated: 0,
-                        findings_emitted: 0,
-                        coverage_note: Some(CORPUS_LOAD_FAILED_NOTE.to_string()),
-                        not_applicable: false,
-                        partial_reason: None,
-                        repos_not_run: Vec::new(),
-                        not_run_reason: None,
-                        scope_coverage: None,
-                    },
-                );
-            }
+            entry.coverage_note = Some(CORPUS_LOAD_FAILED_NOTE.to_string());
         }
-        self.rules.get(&rule_id).expect("just recorded")
+        if !found {
+            self.rules.insert(
+                (rule_id.clone(), String::new()),
+                RuleLedgerEntry {
+                    rule_id: rule_id.clone(),
+                    repo: String::new(),
+                    tier: RuleTier::Unloaded,
+                    ran: false,
+                    skip_reason: Some(CORPUS_LOAD_FAILED_REASON.to_string()),
+                    files_evaluated: 0,
+                    findings_emitted: 0,
+                    coverage_note: Some(CORPUS_LOAD_FAILED_NOTE.to_string()),
+                    not_applicable: false,
+                    partial_reason: None,
+                    repos_not_run: Vec::new(),
+                    not_run_reason: None,
+                    scope_coverage: None,
+                },
+            );
+        }
+        self.invalidate_merged();
+        self.rule(&rule_id).expect("just recorded")
     }
 
     /// Record one stage's row accounting, computing `unaccounted` as the remainder NOT
@@ -1155,6 +1250,19 @@ impl ScanLedger {
         rows_out: usize,
         accounting: StageAccounting,
     ) -> &StageLedgerEntry {
+        self.record_stage_for_repo("", stage, rows_in, rows_out, accounting)
+    }
+
+    /// [`Self::record_stage`] for a stage that ran over one repo's rows: the entry names the repo
+    /// so a stage that does not add up is disclosed against that repo, not the whole project.
+    pub fn record_stage_for_repo(
+        &mut self,
+        repo: &str,
+        stage: impl Into<String>,
+        rows_in: usize,
+        rows_out: usize,
+        accounting: StageAccounting,
+    ) -> &StageLedgerEntry {
         let lost = rows_in.saturating_sub(rows_out);
         let gained = rows_out.saturating_sub(rows_in);
         let accounted = accounting.accounted();
@@ -1164,6 +1272,7 @@ impl ScanLedger {
         let unaccounted = unaccounted_loss + unaccounted_gain;
         self.stages.push(StageLedgerEntry {
             stage: stage.into(),
+            repo: repo.to_string(),
             rows_in,
             rows_out,
             merged_into: accounting.merged_into,
@@ -1177,14 +1286,38 @@ impl ScanLedger {
         self.stages.last().expect("just pushed")
     }
 
+    /// Every per-repo entry, ordered by rule id and then repo. A rule scanned over three repos
+    /// appears three times. Readers that want one entry per rule use [`Self::rules_merged`].
     pub fn rules(&self) -> impl Iterator<Item = &RuleLedgerEntry> {
         self.rules.values()
+    }
+
+    /// One entry per rule id, merged over its repos, ordered by rule id: the project-wide shape
+    /// the ledger had before entries were kept per repo. See [`merge_rule_entries`] for how the
+    /// per-repo facts combine; the short version is that the merged entry says `ran` when any
+    /// repo ran the rule but names the repos that did not, and is never verified clean while
+    /// one of them is outstanding.
+    pub fn rules_merged(&self) -> impl Iterator<Item = &RuleLedgerEntry> {
+        self.merged_rules().values()
+    }
+
+    /// The distinct repos the ledger holds entries for, sorted. An entry with no repo is not
+    /// listed.
+    pub fn repos(&self) -> Vec<&str> {
+        let set: BTreeSet<&str> = self
+            .rules
+            .values()
+            .map(|e| e.repo.as_str())
+            .filter(|r| !r.is_empty())
+            .collect();
+        set.into_iter().collect()
     }
 
     /// Run `redact` over the free text of every rule entry (`skip_reason`, `coverage_note`, `partial_reason`) so no
     /// secret value is persisted in the ledger; `redact` returns how many values it replaced.
     pub(crate) fn redact_text(&mut self, redact: &mut dyn FnMut(&mut String) -> usize) -> usize {
         let mut count = 0;
+        self.invalidate_merged();
         for entry in self.rules.values_mut() {
             if let Some(reason) = entry.skip_reason.as_mut() {
                 count += redact(reason);
@@ -1196,6 +1329,11 @@ impl ScanLedger {
             // name a secret or a path on the machine that ran the scan. Both go before it ships.
             if let Some(why) = entry.partial_reason.as_mut() {
                 count += redact(why);
+                *why = crate::dep_audit::scrub_local_paths(why, std::path::Path::new(""));
+            }
+            // A failed AI review leaves the raw error text as the skip reason, and the merged
+            // view quotes it, so it gets the same treatment as the partial reason.
+            if let Some(why) = entry.skip_reason.as_mut() {
                 *why = crate::dep_audit::scrub_local_paths(why, std::path::Path::new(""));
             }
         }
@@ -1230,15 +1368,17 @@ impl ScanLedger {
     /// is config-gated today.
     pub fn correct_rule_after_external_pass(
         &mut self,
+        repo: &str,
         rule_id: impl Into<String>,
         ran: bool,
         skip_reason: Option<String>,
         findings_emitted: usize,
     ) -> &RuleLedgerEntry {
         let rule_id = rule_id.into();
+        let key = (rule_id.clone(), repo.to_string());
         let (tier, files_evaluated, existing_note, existing_not_applicable) = self
             .rules
-            .get(&rule_id)
+            .get(&key)
             .map(|e| {
                 (
                     e.tier,
@@ -1248,13 +1388,16 @@ impl ScanLedger {
                 )
             })
             .unwrap_or((RuleTier::ExternalTool, 0, None, false));
-        let coverage_note = existing_note.or_else(|| self.pending_coverage_note(&rule_id));
-        let not_applicable =
-            existing_not_applicable || self.not_applicable_pending.contains(&rule_id);
+        let coverage_note = existing_note.or_else(|| self.pending_coverage_note(repo, &rule_id));
+        let not_applicable = existing_not_applicable
+            || self
+                .not_applicable_pending
+                .contains(&(repo.to_string(), rule_id.clone()));
         self.rules.insert(
-            rule_id.clone(),
+            key.clone(),
             RuleLedgerEntry {
                 rule_id: rule_id.clone(),
+                repo: repo.to_string(),
                 tier,
                 ran,
                 skip_reason,
@@ -1268,11 +1411,36 @@ impl ScanLedger {
                 scope_coverage: None,
             },
         );
-        self.rules.get(&rule_id).expect("just inserted")
+        self.invalidate_merged();
+        self.rules.get(&key).expect("just inserted")
     }
 
+    /// The rule as one entry merged over its repos (see [`Self::rules_merged`]), or `None` when
+    /// no repo recorded it.
     pub fn rule(&self, rule_id: &str) -> Option<&RuleLedgerEntry> {
-        self.rules.get(rule_id)
+        self.merged_rules().get(rule_id)
+    }
+
+    /// The state of the (rule, repo) cell. A repo with no entry for the rule is
+    /// [`CellState::NotApplicable`] only when the rule does not apply to it
+    /// (`rule_applies_to_repo` is false: it is bound to other repos), and
+    /// [`CellState::NotReviewed`] when it does apply and nothing was recorded, since a missing
+    /// record never counts as clean. See [`RuleLedgerEntry::cell_state`].
+    pub fn cell_state(&self, rule_id: &str, repo: &str, rule_applies_to_repo: bool) -> CellState {
+        match self.rule_for_repo(rule_id, repo) {
+            Some(entry) => entry.cell_state(),
+            None if rule_applies_to_repo => CellState::NotReviewed {
+                reason: "nothing was recorded for this repo".to_string(),
+            },
+            None => CellState::NotApplicable {
+                reason: "the rule does not apply to this repo".to_string(),
+            },
+        }
+    }
+
+    /// The rule's entry for one repo. Use `""` for an entry that names no repo.
+    pub fn rule_for_repo(&self, rule_id: &str, repo: &str) -> Option<&RuleLedgerEntry> {
+        self.rules.get(&(rule_id.to_string(), repo.to_string()))
     }
 
     pub fn stages(&self) -> &[StageLedgerEntry] {
@@ -1289,14 +1457,11 @@ impl ScanLedger {
     /// Rule ids that genuinely ran and emitted zero findings — the ONLY honest definition of
     /// "verified clean" / "What's healthy". Sorted for stable output.
     pub fn healthy_rule_ids(&self) -> Vec<String> {
-        let mut ids: Vec<String> = self
-            .rules
+        self.merged_rules()
             .values()
             .filter(|r| r.verified_clean())
             .map(|r| r.rule_id.clone())
-            .collect();
-        ids.sort();
-        ids
+            .collect()
     }
 
     /// Pass-1 W2 (A5.4): rule ids judged NOT APPLICABLE to this codebase (positive evidence
@@ -1304,21 +1469,17 @@ impl ScanLedger {
     /// [`Self::healthy_rule_ids`] (which a `not_applicable` rule is EXCLUDED from — see
     /// [`RuleLedgerEntry::verified_clean`]). Sorted for stable output.
     pub fn not_applicable_rule_ids(&self) -> Vec<String> {
-        let mut ids: Vec<String> = self
-            .rules
+        self.merged_rules()
             .values()
             .filter(|r| r.not_applicable)
             .map(|r| r.rule_id.clone())
-            .collect();
-        ids.sort();
-        ids
+            .collect()
     }
 
     /// Rule ids that did NOT run this scan, or ran on only part of the code, each with its
     /// reason — the "excluded from this audit" section. Sorted by rule id for stable output.
     pub fn excluded_rules(&self) -> Vec<(&str, &str)> {
-        let mut out: Vec<(&str, &str)> = self
-            .rules
+        self.merged_rules()
             .values()
             .filter(|r| !r.ran || r.partial_reason.is_some())
             .map(|r| {
@@ -1331,9 +1492,7 @@ impl ScanLedger {
                         .unwrap_or("did not run this scan"),
                 )
             })
-            .collect();
-        out.sort_by_key(|(id, _)| *id);
-        out
+            .collect()
     }
 
     /// Every rule id that emitted at least one finding this scan — a category/scorecard
@@ -1341,7 +1500,7 @@ impl ScanLedger {
     /// finding survived as its own row or was folded into another row's `also_matches` by a
     /// later merge stage (findings are counted here at DETECTION time, before any merge).
     pub fn fired_rule_ids(&self) -> HashSet<String> {
-        self.rules
+        self.merged_rules()
             .values()
             .filter(|r| r.findings_emitted > 0)
             .map(|r| r.rule_id.clone())
@@ -1550,20 +1709,624 @@ impl ScanLedger {
     }
 }
 
+/// How [`ScanLedger`] keeps its per-repo rule entries on disk: as a list of entries, each
+/// carrying its repo. A ledger written before entries were per repo held a map of rule id to
+/// entry; it still loads, with every entry attributed to no repo.
+mod rules_serde {
+    use super::RuleLedgerEntry;
+    use serde::de::{MapAccess, SeqAccess, Visitor};
+    use serde::{Deserializer, Serializer};
+    use std::collections::BTreeMap;
+
+    pub fn serialize<S: Serializer>(
+        rules: &BTreeMap<(String, String), RuleLedgerEntry>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        serializer.collect_seq(rules.values())
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<BTreeMap<(String, String), RuleLedgerEntry>, D::Error> {
+        struct EntriesVisitor;
+
+        impl<'de> Visitor<'de> for EntriesVisitor {
+            type Value = BTreeMap<(String, String), RuleLedgerEntry>;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a list of rule ledger entries, or a map of rule id to entry")
+            }
+
+            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+                let mut out = BTreeMap::new();
+                while let Some(entry) = seq.next_element::<RuleLedgerEntry>()? {
+                    out.insert((entry.rule_id.clone(), entry.repo.clone()), entry);
+                }
+                Ok(out)
+            }
+
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+                let mut out = BTreeMap::new();
+                while let Some((rule_id, mut entry)) =
+                    map.next_entry::<String, RuleLedgerEntry>()?
+                {
+                    entry.repo = String::new();
+                    out.insert((rule_id, String::new()), entry);
+                }
+                Ok(out)
+            }
+        }
+
+        deserializer.deserialize_any(EntriesVisitor)
+    }
+}
+
+/// Whether a not-run reason says the repo holds nothing the rule covers (no file in its
+/// language, the rule is not armed for the repo) rather than that the check could not be made.
+/// A repo skipped for this reason does not count against a rule the other repos ran: there was
+/// nothing there to check. Anything not recognised counts as a gap, so a reason this function
+/// does not know can only make a rule look less covered, never more.
+pub(crate) fn is_out_of_scope_skip(reason: Option<&str>) -> bool {
+    let Some(reason) = reason else {
+        return false;
+    };
+    // A failure carries the text of the error that caused it, and that text can say anything,
+    // "not applicable" included. The marker the failure site wrote decides first.
+    if is_failure_reason(reason) {
+        return false;
+    }
+    let lower = reason.to_ascii_lowercase();
+    // The router's own notes for a language or declared scope that matched no file.
+    lower.contains("files matched this scan's file set")
+        || lower.contains("no file in this scan's file set")
+        || crate::integrity_gate::SkipClass::classify(Some(reason))
+            == crate::integrity_gate::SkipClass::NotApplicableToStack
+}
+
+/// The start of the skip reason written when a repo's whole AI review failed. The error text
+/// follows it, and is never read for meaning.
+pub const AI_AUDIT_FAILED_MARKER: &str = "AI/semantic audit pass failed for this repo";
+
+/// The start of the skip reason written for a repo that could not be read at all.
+pub const REPO_UNREADABLE_MARKER: &str = "repository could not be read";
+
+/// Whether a skip reason was written by a failure site, found by the marker it starts with.
+pub(crate) fn is_failure_reason(reason: &str) -> bool {
+    let reason = reason.trim_start();
+    reason.starts_with(AI_AUDIT_FAILED_MARKER) || reason.starts_with(REPO_UNREADABLE_MARKER)
+}
+
+/// The repo as a reader of a sentence would name it.
+fn repo_label(repo: &str) -> &str {
+    if repo.is_empty() {
+        "the project"
+    } else {
+        repo
+    }
+}
+
+/// Merge one rule's per-repo entries into the entry the project-wide readers see.
+///
+/// This is where "ran on one repo" stops reading as "ran". The merged entry is `ran` when any
+/// repo ran the rule (a rule that ran nowhere keeps its skip reason), but a repo that did not
+/// run it, for a reason other than having nothing to check, is named in `repos_not_run` and in
+/// `partial_reason`, so the merged entry is never [`RuleLedgerEntry::verified_clean`], the
+/// integrity gate fails it as incomplete coverage and the export lists it as excluded with the
+/// repos it missed. A repo the rule ran in and that found nothing, beside a repo with
+/// nothing the rule covers, is still clean. Counters sum; a coverage note, a not-applicable
+/// finding or a partial reason from any repo is kept.
+fn merge_rule_entries(entries: &[&RuleLedgerEntry]) -> RuleLedgerEntry {
+    let first = entries[0];
+    let any_ran = entries.iter().any(|e| e.ran);
+    let named_repos: BTreeSet<&str> = entries
+        .iter()
+        .map(|e| e.repo.as_str())
+        .filter(|r| !r.is_empty())
+        .collect();
+    let several = named_repos.len() > 1;
+    let tier = entries
+        .iter()
+        .find(|e| e.ran)
+        .map_or(first.tier, |e| e.tier);
+
+    // The repos the rule was not run for, when it ran for others.
+    let gaps: Vec<&&RuleLedgerEntry> = if any_ran {
+        entries
+            .iter()
+            .filter(|e| !e.ran && matches!(e.cell_state(), CellState::NotReviewed { .. }))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let skip_reason = if any_ran {
+        None
+    } else {
+        entries
+            .iter()
+            .find(|e| matches!(e.cell_state(), CellState::NotReviewed { .. }) && !e.ran)
+            .or_else(|| entries.iter().find(|e| e.skip_reason.is_some()))
+            .and_then(|e| e.skip_reason.clone())
+    };
+
+    let mut parts: Vec<String> = Vec::new();
+    for e in entries {
+        if let Some(why) = e.partial_reason.as_deref() {
+            let part = if several && !e.repo.is_empty() {
+                format!("{}: {why}", e.repo)
+            } else {
+                why.to_string()
+            };
+            if !parts.contains(&part) {
+                parts.push(part);
+            }
+        }
+    }
+    if !gaps.is_empty() {
+        let ran_on: Vec<&str> = entries
+            .iter()
+            .filter(|e| e.ran)
+            .map(|e| repo_label(&e.repo))
+            .collect();
+        // Repos that missed the rule for the same reason are listed together.
+        let mut by_reason: Vec<(String, Vec<&str>)> = Vec::new();
+        for e in &gaps {
+            let reason = e
+                .skip_reason
+                .clone()
+                .unwrap_or_else(|| "did not run this scan".to_string());
+            match by_reason.iter_mut().find(|(r, _)| *r == reason) {
+                Some((_, repos)) => repos.push(repo_label(&e.repo)),
+                None => by_reason.push((reason, vec![repo_label(&e.repo)])),
+            }
+        }
+        let missed = by_reason
+            .iter()
+            .map(|(reason, repos)| format!("not run for {}: {reason}", repos.join(", ")))
+            .collect::<Vec<_>>()
+            .join("; ");
+        parts.push(format!("checked on {} only; {missed}", ran_on.join(", ")));
+    }
+
+    let scope_coverage = entries
+        .iter()
+        .filter_map(|e| e.scope_coverage.as_ref())
+        .fold(None::<ScopeCoverage>, |acc, s| match acc {
+            None => Some(s.clone()),
+            Some(mut a) => {
+                a.checked += s.checked;
+                a.of += s.of;
+                a.changed_files_only |= s.changed_files_only;
+                Some(a)
+            }
+        });
+
+    RuleLedgerEntry {
+        rule_id: first.rule_id.clone(),
+        repo: String::new(),
+        tier,
+        ran: any_ran,
+        skip_reason,
+        files_evaluated: entries.iter().map(|e| e.files_evaluated).sum(),
+        findings_emitted: entries.iter().map(|e| e.findings_emitted).sum(),
+        coverage_note: entries.iter().find_map(|e| e.coverage_note.clone()),
+        not_applicable: {
+            // Judged not applicable only when every repo the rule applies to said so. A repo
+            // with nothing in the rule's scope does not count either way; one repo's judgment
+            // never speaks for another (each repo's own value stays on its entry).
+            let applying: Vec<&&RuleLedgerEntry> = entries
+                .iter()
+                .filter(|e| e.ran || !is_out_of_scope_skip(e.skip_reason.as_deref()))
+                .collect();
+            !applying.is_empty() && applying.iter().all(|e| e.not_applicable)
+        },
+        partial_reason: (!parts.is_empty()).then(|| parts.join("; ")),
+        repos_not_run: gaps
+            .iter()
+            .filter(|e| !e.repo.is_empty())
+            .map(|e| e.repo.clone())
+            .collect(),
+        not_run_reason: gaps.first().and_then(|e| e.skip_reason.clone()),
+        scope_coverage,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    // ── Batch B: partial_reason carries raw error text ───────────────────────────────────
+    // ── Per-repo rule entries ────────────────────────────────────────────────────────────
+    //
+    // A rule that ran on one repo and did not run on another is two facts. The merged view
+    // (what `rule`, `healthy_rule_ids` and `excluded_rules` read) must never turn them into "ran".
+
+    const RULE: &str = "ARCH-X-1";
+
+    fn ran(ledger: &mut ScanLedger, repo: &str, findings: usize) {
+        ledger.record_rule(repo, RULE, RuleTier::Semantic, true, None, 10, findings);
+    }
+
+    fn not_run(ledger: &mut ScanLedger, repo: &str, why: &str) {
+        ledger.record_rule(
+            repo,
+            RULE,
+            RuleTier::Semantic,
+            false,
+            Some(why.to_string()),
+            0,
+            0,
+        );
+    }
+
+    #[test]
+    fn a_rule_skipped_on_one_repo_and_clean_on_another_is_not_verified_clean() {
+        let mut ledger = ScanLedger::new();
+        ran(&mut ledger, "acme/one", 0);
+        not_run(
+            &mut ledger,
+            "acme/two",
+            "AI/semantic audit pass failed for this repo: timed out",
+        );
+        assert!(ledger.healthy_rule_ids().is_empty(), "not clean everywhere");
+        let merged = ledger.rule(RULE).unwrap();
+        assert!(merged.ran, "it did run on acme/one");
+        assert!(!merged.verified_clean());
+        assert_eq!(merged.repos_not_run, vec!["acme/two".to_string()]);
+        let why = merged.partial_reason.as_deref().unwrap();
+        assert!(why.contains("checked on acme/one only"), "{why}");
+        assert!(why.contains("not run for acme/two"), "{why}");
+        assert!(ledger.excluded_rules().iter().any(|(id, _)| *id == RULE));
+    }
+
+    #[test]
+    fn a_rule_clean_on_every_repo_is_verified_clean() {
+        let mut ledger = ScanLedger::new();
+        ran(&mut ledger, "acme/one", 0);
+        ran(&mut ledger, "acme/two", 0);
+        assert_eq!(ledger.healthy_rule_ids(), vec![RULE.to_string()]);
+    }
+
+    #[test]
+    fn a_repo_with_nothing_the_rule_covers_does_not_count_against_it() {
+        let mut ledger = ScanLedger::new();
+        ran(&mut ledger, "acme/rust", 0);
+        not_run(
+            &mut ledger,
+            "acme/web",
+            "no rust files matched this scan's file set",
+        );
+        assert_eq!(ledger.healthy_rule_ids(), vec![RULE.to_string()]);
+        assert!(ledger.rule(RULE).unwrap().repos_not_run.is_empty());
+    }
+
+    #[test]
+    fn one_repos_findings_do_not_hide_in_the_others_clean_run() {
+        let mut ledger = ScanLedger::new();
+        ran(&mut ledger, "acme/one", 0);
+        ran(&mut ledger, "acme/two", 3);
+        assert!(ledger.healthy_rule_ids().is_empty());
+        assert!(ledger.fired_rule_ids().contains(RULE));
+        assert_eq!(
+            ledger
+                .rule_for_repo(RULE, "acme/one")
+                .unwrap()
+                .findings_emitted,
+            0
+        );
+        assert_eq!(
+            ledger
+                .rule_for_repo(RULE, "acme/two")
+                .unwrap()
+                .findings_emitted,
+            3
+        );
+        assert_eq!(ledger.rule(RULE).unwrap().findings_emitted, 3);
+    }
+
+    #[test]
+    fn a_rule_not_run_on_any_repo_keeps_the_reason_that_is_a_failure() {
+        let mut ledger = ScanLedger::new();
+        not_run(
+            &mut ledger,
+            "acme/one",
+            "no rust files matched this scan's file set",
+        );
+        not_run(
+            &mut ledger,
+            "acme/two",
+            "AI/semantic audit pass failed for this repo: x",
+        );
+        let merged = ledger.rule(RULE).unwrap();
+        assert!(!merged.ran);
+        let reason = merged.skip_reason.as_deref().unwrap();
+        assert!(reason.contains("audit pass failed"), "{reason}");
+    }
+
+    #[test]
+    fn a_rule_judged_not_applicable_on_one_repo_only_keeps_each_repos_own_value() {
+        let mut ledger = ScanLedger::new();
+        ledger.note_not_applicable_rule("acme/one", RULE);
+        ran(&mut ledger, "acme/one", 0);
+        ran(&mut ledger, "acme/two", 0);
+        assert!(
+            ledger
+                .rule_for_repo(RULE, "acme/one")
+                .unwrap()
+                .not_applicable
+        );
+        assert!(
+            !ledger
+                .rule_for_repo(RULE, "acme/two")
+                .unwrap()
+                .not_applicable
+        );
+        // One repo's judgment does not speak for the other: the merged entry is not "not
+        // applicable", and the rule stands as checked and clean where it applies.
+        assert!(!ledger.rule(RULE).unwrap().not_applicable);
+        assert!(ledger.not_applicable_rule_ids().is_empty());
+        assert_eq!(ledger.healthy_rule_ids(), vec![RULE.to_string()]);
+    }
+
+    #[test]
+    fn a_rule_judged_not_applicable_on_every_repo_it_applies_to_is_not_applicable() {
+        let mut ledger = ScanLedger::new();
+        ledger.note_not_applicable_rule("acme/one", RULE);
+        ledger.note_not_applicable_rule("acme/two", RULE);
+        ran(&mut ledger, "acme/one", 0);
+        ran(&mut ledger, "acme/two", 0);
+        not_run(
+            &mut ledger,
+            "acme/web",
+            "no rust files matched this scan's file set",
+        );
+        assert!(ledger.rule(RULE).unwrap().not_applicable);
+        assert_eq!(ledger.not_applicable_rule_ids(), vec![RULE.to_string()]);
+        assert!(ledger.healthy_rule_ids().is_empty());
+    }
+
+    // ── the cell state every reader shares ────────────────────────────────────────────────
+
+    #[test]
+    fn a_cell_is_violated_clean_not_applicable_or_not_reviewed() {
+        let mut ledger = ScanLedger::new();
+        ran(&mut ledger, "acme/violated", 4);
+        ran(&mut ledger, "acme/clean", 0);
+        ledger.note_not_applicable_rule("acme/judged", RULE);
+        ran(&mut ledger, "acme/judged", 0);
+        not_run(
+            &mut ledger,
+            "acme/web",
+            "no rust files matched this scan's file set",
+        );
+        not_run(
+            &mut ledger,
+            "acme/failed",
+            "AI/semantic audit pass failed for this repo: x",
+        );
+        ran(&mut ledger, "acme/partial", 0);
+        ledger.note_partial_rule(RULE, "acme/partial", "checked on part of the code only");
+        let state = |repo: &str| ledger.cell_state(RULE, repo, true);
+        assert_eq!(state("acme/violated"), CellState::Violated { sites: 4 });
+        assert_eq!(state("acme/clean"), CellState::Clean);
+        assert!(matches!(
+            state("acme/judged"),
+            CellState::NotApplicable { .. }
+        ));
+        assert!(matches!(state("acme/web"), CellState::NotApplicable { .. }));
+        assert!(matches!(
+            state("acme/failed"),
+            CellState::NotReviewed { .. }
+        ));
+        assert!(matches!(
+            state("acme/partial"),
+            CellState::NotReviewed { .. }
+        ));
+    }
+
+    #[test]
+    fn a_fully_cached_repo_with_no_files_evaluated_is_still_clean() {
+        let mut ledger = ScanLedger::new();
+        ledger.record_rule("acme/one", RULE, RuleTier::Semantic, true, None, 0, 0);
+        assert_eq!(ledger.cell_state(RULE, "acme/one", true), CellState::Clean);
+    }
+
+    #[test]
+    fn a_repo_with_no_entry_is_not_applicable_only_when_the_rule_does_not_apply_to_it() {
+        let mut ledger = ScanLedger::new();
+        ran(&mut ledger, "acme/one", 0);
+        assert!(matches!(
+            ledger.cell_state(RULE, "acme/two", false),
+            CellState::NotApplicable { .. }
+        ));
+        assert!(matches!(
+            ledger.cell_state(RULE, "acme/two", true),
+            CellState::NotReviewed { .. }
+        ));
+    }
+
+    #[test]
+    fn findings_make_a_cell_violated_even_when_the_rule_was_partial() {
+        let mut ledger = ScanLedger::new();
+        ran(&mut ledger, "acme/one", 2);
+        ledger.note_partial_rule(RULE, "acme/one", "checked on part of the code only");
+        assert_eq!(
+            ledger.cell_state(RULE, "acme/one", true),
+            CellState::Violated { sites: 2 }
+        );
+    }
+
+    #[test]
+    fn error_text_that_says_not_applicable_does_not_turn_a_failure_into_a_scope_skip() {
+        let failure = format!(
+            "{AI_AUDIT_FAILED_MARKER}: the model replied that this rule is not applicable \
+             and no matching files were found"
+        );
+        assert!(!is_out_of_scope_skip(Some(&failure)));
+        let mut ledger = ScanLedger::new();
+        ran(&mut ledger, "acme/one", 0);
+        not_run(&mut ledger, "acme/two", &failure);
+        assert!(matches!(
+            ledger.cell_state(RULE, "acme/two", true),
+            CellState::NotReviewed { .. }
+        ));
+        let merged = ledger.rule(RULE).unwrap();
+        assert_eq!(merged.repos_not_run, vec!["acme/two".to_string()]);
+        assert!(ledger.healthy_rule_ids().is_empty());
+        let unreadable = format!("{REPO_UNREADABLE_MARKER}: no matching files");
+        assert!(!is_out_of_scope_skip(Some(&unreadable)));
+    }
+
+    #[test]
+    fn a_partial_reason_on_one_repo_names_that_repo_in_the_merged_entry() {
+        let mut ledger = ScanLedger::new();
+        ran(&mut ledger, "acme/one", 0);
+        ran(&mut ledger, "acme/two", 0);
+        ledger.note_partial_rule(RULE, "acme/two", "checked on part of the code only");
+        let merged = ledger.rule(RULE).unwrap();
+        assert_eq!(
+            merged.partial_reason.as_deref(),
+            Some("acme/two: checked on part of the code only")
+        );
+        assert!(ledger.healthy_rule_ids().is_empty());
+    }
+
+    #[test]
+    fn scope_counts_add_up_across_repos() {
+        let mut ledger = ScanLedger::new();
+        ran(&mut ledger, "acme/one", 0);
+        ran(&mut ledger, "acme/two", 0);
+        ledger.note_scope_subset(RULE, "acme/one", 6, 40, "language", false);
+        ledger.note_scope_subset(RULE, "acme/two", 10, 10, "language", true);
+        let scope = ledger.rule(RULE).unwrap().scope_coverage.clone().unwrap();
+        assert_eq!((scope.checked, scope.of), (16, 50));
+        assert!(scope.changed_files_only);
+    }
+
+    #[test]
+    fn config_gated_notes_are_kept_for_the_repo_they_were_raised_for() {
+        let mut ledger = ScanLedger::new();
+        ledger.note_config_gated_rule("acme/one", RULE);
+        ran(&mut ledger, "acme/one", 0);
+        ran(&mut ledger, "acme/two", 0);
+        assert!(ledger
+            .rule_for_repo(RULE, "acme/one")
+            .unwrap()
+            .coverage_note
+            .is_some());
+        assert!(ledger
+            .rule_for_repo(RULE, "acme/two")
+            .unwrap()
+            .coverage_note
+            .is_none());
+    }
+
+    #[test]
+    fn the_ledger_round_trips_through_json_and_loads_the_old_map_shape() {
+        let mut ledger = ScanLedger::new();
+        ran(&mut ledger, "acme/one", 1);
+        not_run(
+            &mut ledger,
+            "acme/two",
+            "AI/semantic audit pass failed for this repo: x",
+        );
+        let json = serde_json::to_string(&ledger).unwrap();
+        let back: ScanLedger = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.rules().count(), 2);
+        assert!(back.rule_for_repo(RULE, "acme/two").is_some());
+        assert!(!back.rule(RULE).unwrap().verified_clean());
+
+        // A ledger saved before entries were per repo: a map of rule id to entry.
+        let old = serde_json::json!({
+            "rules": {
+                "OLD-1": {
+                    "rule_id": "OLD-1", "tier": "semantic", "ran": true, "skip_reason": null,
+                    "files_evaluated": 4, "findings_emitted": 0
+                }
+            },
+            "stages": []
+        });
+        let loaded: ScanLedger = serde_json::from_value(old).unwrap();
+        let entry = loaded.rule("OLD-1").unwrap();
+        assert!(entry.ran && entry.repo.is_empty());
+        assert_eq!(loaded.healthy_rule_ids(), vec!["OLD-1".to_string()]);
+    }
+
+    #[test]
+    fn the_merged_view_follows_every_change_to_the_ledger() {
+        let mut ledger = ScanLedger::new();
+        ran(&mut ledger, "acme/one", 0);
+        // Read once so the merged view is built, then change the ledger.
+        assert_eq!(ledger.healthy_rule_ids().len(), 1);
+        not_run(
+            &mut ledger,
+            "acme/two",
+            "AI/semantic audit pass failed for this repo: x",
+        );
+        assert!(ledger.healthy_rule_ids().is_empty());
+        ledger.record_corpus_load_failure(RULE);
+        assert!(ledger
+            .rule(RULE)
+            .unwrap()
+            .coverage_note
+            .as_deref()
+            .unwrap()
+            .contains("could not be loaded"));
+    }
+
+    #[test]
+    fn a_stage_that_does_not_add_up_is_disclosed_against_its_own_repo() {
+        let mut ledger = ScanLedger::new();
+        ledger.record_stage_for_repo(
+            "acme/two",
+            "cross-family-merge",
+            5,
+            2,
+            StageAccounting::default(),
+        );
+        let stage = ledger.stages().last().unwrap();
+        let label = stage.disclosure_label("acme/one, acme/two");
+        assert_eq!(label, "acme/two");
+        let disclosure = stage_disclosure(label, stage).expect("it does not reconcile");
+        assert_eq!(disclosure.repo, "acme/two");
+        // A stage over the whole scan keeps the joined label.
+        ledger.record_stage("report-build-partition", 3, 1, StageAccounting::default());
+        let whole = ledger.stages().last().unwrap();
+        assert_eq!(
+            whole.disclosure_label("acme/one, acme/two"),
+            "acme/one, acme/two"
+        );
+    }
+
+    #[test]
+    fn a_stage_for_one_repo_names_that_repo() {
+        let mut ledger = ScanLedger::new();
+        let entry = ledger
+            .record_stage_for_repo(
+                "acme/one",
+                "cross-family-merge",
+                3,
+                1,
+                StageAccounting::default(),
+            )
+            .clone();
+        assert_eq!(entry.repo, "acme/one");
+        assert_eq!(entry.unaccounted, 2);
+        let whole = ledger
+            .record_stage("report-build-partition", 1, 1, StageAccounting::default())
+            .clone();
+        assert!(whole.repo.is_empty());
+    }
+
+    // ── Batch B: the failure text is redacted before it ships ────────────────────────────
 
     #[test]
     fn partial_reason_is_redacted_and_loses_local_paths_before_it_ships() {
         let mut ledger = ScanLedger::new();
-        ledger.record_rule("ARCH-X-1", RuleTier::Semantic, true, None, 1, 0);
-        ledger.note_rule_not_run_for_repo(
-            "ARCH-X-1",
-            "acme/web",
-            "the AI review failed (could not open /Users/auditor/clones/web/.env: token=SECRETVALUE)",
+        ran(&mut ledger, "acme/web", 0);
+        not_run(
+            &mut ledger,
+            "acme/api",
+            "AI/semantic audit pass failed for this repo: could not open \
+             /Users/auditor/clones/api/.env: token=SECRETVALUE",
         );
         let mut redact = |text: &mut String| {
             if text.contains("SECRETVALUE") {
@@ -1575,78 +2338,53 @@ mod tests {
         };
         let replaced = ledger.redact_text(&mut redact);
         assert_eq!(replaced, 1);
-        let why = ledger
-            .rule("ARCH-X-1")
-            .unwrap()
-            .partial_reason
-            .clone()
-            .unwrap();
+        let why = ledger.rule(RULE).unwrap().partial_reason.clone().unwrap();
         assert!(!why.contains("SECRETVALUE"), "{why}");
         assert!(!why.contains("/Users/auditor"), "{why}");
         assert!(why.contains(".env"), "the file name is kept: {why}");
-        assert!(why.contains("acme/web"), "{why}");
+        assert!(why.contains("acme/api"), "{why}");
     }
 
     #[test]
-    fn a_second_repo_failure_is_added_to_a_partial_reason_that_already_exists() {
+    fn repos_that_missed_a_rule_for_the_same_reason_are_listed_together() {
         let mut ledger = ScanLedger::new();
-        ledger.record_rule("ARCH-X-1", RuleTier::Semantic, true, None, 1, 0);
-        // Another stage already left a partial reason (the spend limit).
-        ledger.note_partial_rule("ARCH-X-1", "checked on part of the code only");
-        ledger.note_rule_not_run_for_repo("ARCH-X-1", "acme/one", "the AI review failed (one)");
-        ledger.note_rule_not_run_for_repo("ARCH-X-1", "acme/two", "the AI review failed (two)");
-        // A stage that runs after both adds its own reason once.
-        ledger.note_partial_rule("ARCH-X-1", "a later stage");
-        ledger.note_partial_rule("ARCH-X-1", "a later stage");
-        let why = ledger
-            .rule("ARCH-X-1")
-            .unwrap()
-            .partial_reason
-            .clone()
-            .unwrap();
+        ran(&mut ledger, "acme/one", 0);
+        not_run(
+            &mut ledger,
+            "acme/two",
+            "AI/semantic audit pass failed for this repo: a",
+        );
+        not_run(
+            &mut ledger,
+            "acme/three",
+            "AI/semantic audit pass failed for this repo: a",
+        );
+        let why = ledger.rule(RULE).unwrap().partial_reason.clone().unwrap();
+        assert_eq!(why.matches("not run for").count(), 1, "{why}");
+        assert!(why.contains("acme/three, acme/two"), "{why}");
+    }
+
+    #[test]
+    fn a_second_reason_is_added_beside_one_that_already_exists() {
+        let mut ledger = ScanLedger::new();
+        ran(&mut ledger, "acme/one", 0);
+        ledger.note_partial_rule(RULE, "acme/one", "checked on part of the code only");
+        not_run(
+            &mut ledger,
+            "acme/two",
+            "AI/semantic audit pass failed for this repo: a",
+        );
+        ledger.note_partial_rule(RULE, "acme/one", "a later stage");
+        ledger.note_partial_rule(RULE, "acme/one", "a later stage");
+        let why = ledger.rule(RULE).unwrap().partial_reason.clone().unwrap();
+        assert_eq!(why.matches("a later stage").count(), 1, "{why}");
         assert_eq!(
             why.matches("checked on part of the code only").count(),
             1,
             "{why}"
         );
-        assert_eq!(why.matches("a later stage").count(), 1, "{why}");
-        assert!(
-            why.contains("not run for acme/one, acme/two: the AI review failed (one)"),
-            "{why}"
-        );
-        // Adding a third repo rewrites only its own text.
-        ledger.note_rule_not_run_for_repo("ARCH-X-1", "acme/three", "the AI review failed (three)");
-        let why = ledger
-            .rule("ARCH-X-1")
-            .unwrap()
-            .partial_reason
-            .clone()
-            .unwrap();
-        assert!(why.contains("acme/one, acme/two, acme/three"), "{why}");
-        assert_eq!(why.matches("not run for").count(), 1, "{why}");
-        assert_eq!(why.matches("a later stage").count(), 1, "{why}");
-    }
-
-    #[test]
-    fn a_partial_reason_with_our_text_mid_string_keeps_clean_separators() {
-        let mut ledger = ScanLedger::new();
-        ledger.record_rule("ARCH-X-1", RuleTier::Semantic, true, None, 1, 0);
-        ledger.note_partial_rule("ARCH-X-1", "first stage");
-        ledger.note_rule_not_run_for_repo("ARCH-X-1", "acme/one", "the AI review failed (one)");
-        ledger.note_partial_rule("ARCH-X-1", "last stage");
-        // Our text is now between the other two; adding a repo takes it out and puts it back.
-        ledger.note_rule_not_run_for_repo("ARCH-X-1", "acme/two", "the AI review failed (two)");
-        let why = ledger
-            .rule("ARCH-X-1")
-            .unwrap()
-            .partial_reason
-            .clone()
-            .unwrap();
+        assert!(why.contains("not run for acme/two"), "{why}");
         assert!(!why.contains("; ;"), "{why}");
-        assert!(!why.starts_with(';') && !why.ends_with(';'), "{why}");
-        for part in ["first stage", "last stage", "acme/one, acme/two"] {
-            assert_eq!(why.matches(part).count(), 1, "{part} in {why}");
-        }
     }
 
     // ── req_a3: a tier family label names an ENGINE, never a rule family ─────────────────
@@ -1733,6 +2471,7 @@ mod tests {
     fn a_rule_that_ran_with_zero_findings_is_healthy() {
         let mut ledger = ScanLedger::new();
         ledger.record_rule(
+            "",
             "SEC-NO-HARDCODED-SECRETS-1",
             RuleTier::Deterministic,
             true,
@@ -1752,6 +2491,7 @@ mod tests {
     fn a_rule_that_did_not_run_is_excluded_with_a_reason_never_healthy() {
         let mut ledger = ScanLedger::new();
         ledger.record_rule(
+            "",
             "PYTHON-PARAMETERIZED-SQL-1",
             RuleTier::Deterministic,
             false,
@@ -1783,6 +2523,7 @@ mod tests {
         // The semantic-phase recording `onboard::audit_repos` makes once `audit_repo` returns:
         // one real finding for this id, at the Semantic tier.
         ledger.record_rule(
+            "",
             "RUBY-FROZEN-STRING-LITERAL-1",
             RuleTier::Semantic,
             true,
@@ -1820,6 +2561,7 @@ mod tests {
     ) {
         let mut ledger = ScanLedger::new();
         ledger.record_rule(
+            "",
             "RUBY-FROZEN-STRING-LITERAL-1",
             RuleTier::Semantic,
             true,
@@ -1842,6 +2584,7 @@ mod tests {
     fn a_rule_that_fired_is_never_healthy_and_counts_as_fired() {
         let mut ledger = ScanLedger::new();
         ledger.record_rule(
+            "",
             "ARCH-STRICT-LAYERING-1",
             RuleTier::Deterministic,
             true,
@@ -1863,7 +2606,7 @@ mod tests {
     fn a_merged_away_rule_still_counts_as_fired_never_healthy() {
         let mut ledger = ScanLedger::new();
         // Detected at the semantic tier before merge absorbs it into the deterministic primary.
-        ledger.record_rule("AI-SITE-DEFECT-1", RuleTier::Semantic, true, None, 3, 1);
+        ledger.record_rule("", "AI-SITE-DEFECT-1", RuleTier::Semantic, true, None, 3, 1);
         // The merge stage itself: one row in, one row out (absorbed into the primary).
         let mut acc = StageAccounting::default();
         acc.push_merge("AI-SITE-DEFECT-1", "SEC-DETERMINISTIC-SITE-1");
@@ -1893,8 +2636,9 @@ mod tests {
     #[test]
     fn req_a5_4_a_rule_judged_not_applicable_is_never_healthy_even_with_zero_findings() {
         let mut ledger = ScanLedger::new();
-        ledger.note_not_applicable_rule("ARCH-API-VERSIONING-1");
+        ledger.note_not_applicable_rule("", "ARCH-API-VERSIONING-1");
         ledger.record_rule(
+            "",
             "ARCH-API-VERSIONING-1",
             RuleTier::Semantic,
             true,
@@ -1936,6 +2680,7 @@ mod tests {
     fn req_a5_4_a_rule_never_judged_not_applicable_with_zero_findings_stays_healthy() {
         let mut ledger = ScanLedger::new();
         ledger.record_rule(
+            "",
             "ARCH-API-VERSIONING-1",
             RuleTier::Semantic,
             true,
@@ -1956,6 +2701,7 @@ mod tests {
     fn accumulates_across_repos_ran_wins_and_counters_sum() {
         let mut ledger = ScanLedger::new();
         ledger.record_rule(
+            "",
             "UI-UTC-DATES-1",
             RuleTier::Deterministic,
             false,
@@ -1963,7 +2709,15 @@ mod tests {
             0,
             0,
         );
-        ledger.record_rule("UI-UTC-DATES-1", RuleTier::Deterministic, true, None, 7, 1);
+        ledger.record_rule(
+            "",
+            "UI-UTC-DATES-1",
+            RuleTier::Deterministic,
+            true,
+            None,
+            7,
+            1,
+        );
         let entry = ledger.rule("UI-UTC-DATES-1").unwrap();
         assert!(
             entry.ran,
@@ -2077,6 +2831,7 @@ mod tests {
     fn semantic_tier_advisory_rows_reconcile_rows_out_plus_accounted_equals_rows_in() {
         let mut ledger = ScanLedger::new();
         ledger.record_rule(
+            "",
             "AI-CONFIG-HANDLER-DEFECT-1",
             RuleTier::Semantic,
             true,
@@ -2150,6 +2905,7 @@ mod tests {
     fn rule_disclosure_fires_only_for_the_no_detector_reason() {
         let mut ledger = ScanLedger::new();
         ledger.record_rule(
+            "",
             "RUBY-RAILS-NO-STRING-SQL-1",
             RuleTier::Deterministic,
             false,
@@ -2158,6 +2914,7 @@ mod tests {
             0,
         );
         ledger.record_rule(
+            "",
             "SEC-NO-HARDCODED-SECRETS-1",
             RuleTier::Deterministic,
             false,
@@ -2206,9 +2963,17 @@ mod tests {
     ) {
         let mut ledger = ScanLedger::new();
         // Deterministic phase: no detector channel for this repo, but a real checker exists.
-        ledger.note_config_gated_rule("ARCH-HANDLER-NO-DB-1");
+        ledger.note_config_gated_rule("", "ARCH-HANDLER-NO-DB-1");
         // Semantic phase settles it later: the model reviewed it and found nothing this run.
-        ledger.record_rule("ARCH-HANDLER-NO-DB-1", RuleTier::Semantic, true, None, 5, 0);
+        ledger.record_rule(
+            "",
+            "ARCH-HANDLER-NO-DB-1",
+            RuleTier::Semantic,
+            true,
+            None,
+            5,
+            0,
+        );
         let entry = ledger.rule("ARCH-HANDLER-NO-DB-1").expect("recorded");
         assert!(entry.ran, "the semantic pass genuinely reviewed it");
         assert_eq!(entry.tier, RuleTier::Semantic);
@@ -2235,8 +3000,9 @@ mod tests {
     #[test]
     fn a_config_gated_rule_the_model_flagged_is_fired_with_an_accurate_note_tier_stays_semantic() {
         let mut ledger = ScanLedger::new();
-        ledger.note_config_gated_rule("ARCH-STRICT-LAYERING-1");
+        ledger.note_config_gated_rule("", "ARCH-STRICT-LAYERING-1");
         ledger.record_rule(
+            "",
             "ARCH-STRICT-LAYERING-1",
             RuleTier::Semantic,
             true,
@@ -2255,9 +3021,10 @@ mod tests {
     fn a_config_gated_rule_never_reviewed_at_all_keeps_its_ordinary_skip_reason_and_the_note_but_is_not_a_no_detector_alarm(
     ) {
         let mut ledger = ScanLedger::new();
-        ledger.note_config_gated_rule("ARCH-API-DTOS-1");
+        ledger.note_config_gated_rule("", "ARCH-API-DTOS-1");
         // AI review was off this run too — the ONLY possible route also didn't run.
         ledger.record_rule(
+            "",
             "ARCH-API-DTOS-1",
             RuleTier::Semantic,
             false,
@@ -2295,12 +3062,13 @@ mod tests {
         // ordering explicitly rather than relying on the other tests' incidental sequencing.
         let mut ledger = ScanLedger::new();
         assert!(ledger.rule("ARCH-NO-CROSS-BOUNDARY-IMPORTS-1").is_none());
-        ledger.note_config_gated_rule("ARCH-NO-CROSS-BOUNDARY-IMPORTS-1");
+        ledger.note_config_gated_rule("", "ARCH-NO-CROSS-BOUNDARY-IMPORTS-1");
         assert!(
             ledger.rule("ARCH-NO-CROSS-BOUNDARY-IMPORTS-1").is_none(),
             "queuing a note must not fabricate an entry before the rule's real outcome is known"
         );
         ledger.record_rule(
+            "",
             "ARCH-NO-CROSS-BOUNDARY-IMPORTS-1",
             RuleTier::Semantic,
             true,
@@ -2326,8 +3094,8 @@ mod tests {
     fn none_of_the_four_config_gated_rules_ever_classify_as_no_wired_detector() {
         for id in CONFIG_GATED_FOUR {
             let mut ledger = ScanLedger::new();
-            ledger.note_config_gated_rule(id);
-            ledger.record_rule(id, RuleTier::Semantic, true, None, 4, 0);
+            ledger.note_config_gated_rule("", id);
+            ledger.record_rule("", id, RuleTier::Semantic, true, None, 4, 0);
             let entry = ledger
                 .rule(id)
                 .unwrap_or_else(|| panic!("{id} must be recorded"));
@@ -2357,6 +3125,7 @@ mod tests {
     fn resource_lifecycle_is_credited_directly_as_architectural_never_needs_a_config_gated_note() {
         let mut ledger = ScanLedger::new();
         ledger.record_rule(
+            "",
             "ARCH-RESOURCE-LIFECYCLE-1",
             RuleTier::Architectural,
             true,
@@ -2387,6 +3156,7 @@ mod tests {
         let mut ledger = ScanLedger::new();
         // A healthy rule beside it, so this is not passing merely because nothing is credited.
         ledger.record_rule(
+            "",
             "SEC-NO-RAW-SQL-CONCAT-1",
             RuleTier::Deterministic,
             true,
@@ -2491,6 +3261,7 @@ mod tests {
         let mut ledger = ScanLedger::new();
         // Exactly what `audit_repos` records for a selected rule on a no-AI-review scan.
         ledger.record_rule(
+            "",
             "SUPABASE-RLS-ENABLED-1",
             RuleTier::Semantic,
             false,
@@ -2529,6 +3300,7 @@ mod tests {
     fn req_w13_a_rule_that_ran_despite_a_broken_file_keeps_its_execution_facts() {
         let mut ledger = ScanLedger::new();
         ledger.record_rule(
+            "",
             "SEC-NO-RAW-SQL-CONCAT-1",
             RuleTier::Deterministic,
             true,
@@ -2598,9 +3370,9 @@ mod tests {
     #[test]
     fn an_incomplete_scan_note_is_distinct_from_the_config_gated_note_and_wins_over_it() {
         let mut ledger = ScanLedger::new();
-        ledger.note_config_gated_rule("ARCH-DEAD-CODE-1");
-        ledger.note_incomplete_scan_rule("ARCH-DEAD-CODE-1");
-        ledger.record_rule("ARCH-DEAD-CODE-1", RuleTier::Semantic, true, None, 5, 0);
+        ledger.note_config_gated_rule("", "ARCH-DEAD-CODE-1");
+        ledger.note_incomplete_scan_rule("", "ARCH-DEAD-CODE-1");
+        ledger.record_rule("", "ARCH-DEAD-CODE-1", RuleTier::Semantic, true, None, 5, 0);
         let entry = ledger.rule("ARCH-DEAD-CODE-1").expect("recorded");
         assert_eq!(entry.coverage_note.as_deref(), Some(INCOMPLETE_SCAN_NOTE));
         assert!(INCOMPLETE_SCAN_NOTE.contains("stopped at its file limit"));
@@ -2609,8 +3381,16 @@ mod tests {
 
         // A rule that only had the config-gated note keeps it.
         let mut other = ScanLedger::new();
-        other.note_config_gated_rule("ARCH-HANDLER-NO-DB-1");
-        other.record_rule("ARCH-HANDLER-NO-DB-1", RuleTier::Semantic, true, None, 5, 0);
+        other.note_config_gated_rule("", "ARCH-HANDLER-NO-DB-1");
+        other.record_rule(
+            "",
+            "ARCH-HANDLER-NO-DB-1",
+            RuleTier::Semantic,
+            true,
+            None,
+            5,
+            0,
+        );
         assert_eq!(
             other
                 .rule("ARCH-HANDLER-NO-DB-1")

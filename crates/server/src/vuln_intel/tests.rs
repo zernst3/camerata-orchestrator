@@ -492,6 +492,7 @@ async fn epss_requests_are_batched() {
 #[test]
 fn osv_run_classifies_dep_audit_notes() {
     let note = |m: &str| CoverageNote {
+        repo: None,
         tool: "osv-scanner".to_string(),
         message: m.to_string(),
     };

@@ -160,6 +160,8 @@ fn minimal_report(
     ledger: ScanLedger,
 ) -> ScanReport {
     ScanReport {
+        repos_not_inspected: Vec::new(),
+        recommendations_by_repo: Vec::new(),
         repos: vec!["acme/webhooks".to_string()],
         stacks: Vec::new(),
         files_scanned: 2,

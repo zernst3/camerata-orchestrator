@@ -205,6 +205,10 @@ pub struct NotRunPass {
     pub n_rule_batches: usize,
     /// The rules that were in this rule-batch and so were not checked against this chunk.
     pub rule_ids: Vec<String>,
+    /// The files of the chunk that was not checked (repo-relative paths). A file named here was
+    /// not reviewed by this pass, so the incremental cache must not record it as audited.
+    #[serde(default)]
+    pub files: Vec<String>,
 }
 
 /// A stage that did not run, or did not finish, because of the cap.
@@ -242,13 +246,39 @@ pub struct CostCapRecord {
     pub not_run_stages: Vec<NotRunStage>,
     /// Plain-language operator notes (a refused batch submission and its projection).
     pub notes: Vec<String>,
+    /// The repos the cap left unfinished: any repo with a pass or stage it refused, and any
+    /// repo the run reached after the cap had already stopped it (such a repo is not read at
+    /// all). In the order the run met them. A reader can tell which repos the inspection did
+    /// not finish without reading the pass list.
+    #[serde(default)]
+    pub repos_not_finished: Vec<String>,
 }
 
 impl CostCapRecord {
     /// True when the cap actually stopped something. A cap that was set but never reached
     /// leaves the run complete.
     pub fn stopped_the_run(&self) -> bool {
-        !self.not_run_passes.is_empty() || !self.not_run_stages.is_empty()
+        !self.not_run_passes.is_empty()
+            || !self.not_run_stages.is_empty()
+            || !self.repos_not_finished.is_empty()
+    }
+
+    /// The repos the cap left unfinished: those named in [`Self::repos_not_finished`] plus any
+    /// repo with a pass or stage that did not run, sorted.
+    pub fn unfinished_repos(&self) -> Vec<String> {
+        let mut repos: std::collections::BTreeSet<String> =
+            self.repos_not_finished.iter().cloned().collect();
+        repos.extend(self.not_run_passes.iter().map(|p| p.repo.clone()));
+        repos.extend(self.not_run_stages.iter().map(|s| s.repo.clone()));
+        repos.into_iter().collect()
+    }
+
+    /// The files whose scan pass did not run, as `(repo, path)`. These were not reviewed.
+    pub fn unreviewed_files(&self) -> std::collections::BTreeSet<(String, String)> {
+        self.not_run_passes
+            .iter()
+            .flat_map(|p| p.files.iter().map(|f| (p.repo.clone(), f.clone())))
+            .collect()
     }
 
     /// The failed-pass disclosures for everything the cap stopped. The text carries NO dollar
@@ -300,7 +330,9 @@ impl CostCapRecord {
                      code. This inspection is incomplete.",
                     first.n_rule_batches
                 ),
-                files_not_reviewed: 0,
+                // The files of this chunk were not checked by this pass. Counted so the
+                // incremental cache and the completeness check treat the repo as unreviewed.
+                files_not_reviewed: first.files.len(),
             });
             i = j;
         }
@@ -353,6 +385,9 @@ pub(crate) struct BudgetState {
     pub not_run_passes: Vec<NotRunPass>,
     pub not_run_stages: Vec<NotRunStage>,
     pub notes: Vec<String>,
+    /// Repos the run reached after the cap had already stopped it (see
+    /// [`CostCapRecord::repos_not_finished`]).
+    pub repos_not_finished: Vec<String>,
     /// A call's cost could not be determined (no reported dollar figure and no way to price its
     /// tokens) while a cap was set. The cap can no longer be enforced, so nothing further is
     /// admitted: refusing a pass that might have fit beats running past the limit unseen.
@@ -365,6 +400,7 @@ mod tests {
 
     fn pass(chunk: usize, batch: usize, rules: &[&str]) -> NotRunPass {
         NotRunPass {
+            files: Vec::new(),
             repo: "acme/api".into(),
             group: "pass[all]".into(),
             chunk,
@@ -514,6 +550,7 @@ mod tests {
     #[test]
     fn failed_passes_name_every_pair_once_per_chunk_and_carry_no_dollars() {
         let record = CostCapRecord {
+            repos_not_finished: Vec::new(),
             cap_usd: 12.34,
             spent_usd: 13.57,
             not_run_passes: vec![

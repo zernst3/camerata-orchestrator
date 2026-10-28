@@ -93,6 +93,7 @@ fn marking_one_advisory_a_false_positive_leaves_the_other_in_the_report() {
 
 fn osv_note(message: &str) -> CoverageNote {
     CoverageNote {
+        repo: None,
         tool: "osv-scanner".to_string(),
         message: message.to_string(),
     }

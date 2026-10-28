@@ -84,6 +84,7 @@ fn violating_option_and_convention_rows_redact_evidence_and_reasoning() {
         kind: None,
     }];
     let rec = RuleRecommendation {
+        repo: String::new(),
         rule_id: "ARCH-X-1".to_string(),
         recommended_option_id: "good".to_string(),
         recommendation_reasoning: reasoning.clone(),
@@ -96,6 +97,7 @@ fn violating_option_and_convention_rows_redact_evidence_and_reasoning() {
     assert!(!leaks(&convention[0], &p), "convention-observed row leaked");
 
     let no_conv_rec = RuleRecommendation {
+        repo: String::new(),
         rule_id: "ARCH-Y-1".to_string(),
         no_convention: true,
         recommendation_reasoning: reasoning,
