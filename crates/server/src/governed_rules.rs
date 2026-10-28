@@ -31,10 +31,16 @@ pub(crate) enum RuleSubsetSource {
         /// Selected rules bound to OTHER repositories of the project (their `repos` do not
         /// include this run's repository), so they are not applied here.
         other_repos: usize,
+        /// Rules the unit's own findings add on top of the selection (a unit created from an
+        /// inspection's findings, roadmap 2c). A rule both selected and a focus rule counts once,
+        /// in `selected`. Zero for every other unit.
+        focus: usize,
+        /// How many of the `focus` rules have a gateway arm and so deny at write time.
+        focus_enforced: usize,
     },
     /// No project selection: the bundled corpus's Rust/agentic slice, plus the enforced gate
-    /// rules.
-    CorpusFallback,
+    /// rules, plus the unit's focus rules (see `focus` above).
+    CorpusFallback { focus: usize, focus_enforced: usize },
 }
 
 impl RuleSubsetSource {
@@ -46,6 +52,8 @@ impl RuleSubsetSource {
                 selected,
                 inert,
                 other_repos,
+                focus,
+                focus_enforced,
             } => {
                 let enforced = selected.saturating_sub(inert.len());
                 let mut line = if *selected == 0 && *other_repos > 0 {
@@ -74,24 +82,46 @@ impl RuleSubsetSource {
                          are not applied here."
                     ));
                 }
+                line.push_str(&focus_sentence(*focus, *focus_enforced));
                 line
             }
-            Self::CorpusFallback => format!(
+            Self::CorpusFallback {
+                focus,
+                focus_enforced,
+            } => format!(
                 "Layer-1 rule subset: this project has no rule selection, so the built-in \
                  Rust/agentic corpus subset applies, plus the enforced gate rules \
-                 ({subset_len} in total). Select the project's rules to gate writes by them."
+                 ({subset_len} in total). Select the project's rules to gate writes by them.{}",
+                focus_sentence(*focus, *focus_enforced)
             ),
         }
     }
 }
 
+/// The sentence that names the rules a unit's findings added, or nothing when there are none.
+/// A focus rule without a gateway arm enforces nothing at Layer 1; the sentence says so.
+fn focus_sentence(focus: usize, focus_enforced: usize) -> String {
+    if focus == 0 {
+        return String::new();
+    }
+    format!(
+        " {focus} rule(s) come from the unit's findings; {focus_enforced} of them have a gateway \
+         arm and deny at write time, the rest are carried as grounding."
+    )
+}
+
 /// Build the governed role `role_name` for an agent working on `project`: the project's
 /// selected rules plus the enforced gate rules, or the corpus fallback when there is no
 /// selection. Errors only on the fallback path (the corpus failed to load).
+///
+/// `focus_rules` are the rule ids of the unit's own findings (empty for a unit that did not come
+/// from findings): they are appended after the selection, so a unit that must fix a rule the
+/// project did not select still carries it. The enforced gate rules stay first either way.
 pub(crate) async fn project_governed_role(
     role_name: &str,
     project: Option<&crate::project::Project>,
     repo: Option<&str>,
+    focus_rules: &[String],
 ) -> anyhow::Result<(Role, RuleSubsetSource)> {
     // The project's selections, resolved by the same resolver the inspection uses. A
     // selection's `repos` binds it to repositories (empty = project-level, applies to every
@@ -118,10 +148,38 @@ pub(crate) async fn project_governed_role(
     // A rule bound to another repo in one placement and to this one in another still applies.
     other_repos_ids.retain(|id| !seen.contains(id));
     let other_repos = other_repos_ids.len();
+    // The unit's own rules, beyond what the selection already carries.
+    let mut focus_added: Vec<RuleId> = Vec::new();
+    for id in focus_rules
+        .iter()
+        .map(|id| id.trim())
+        .filter(|id| !id.is_empty())
+    {
+        let id = RuleId(id.to_string());
+        if !seen.contains(&id.0) && !focus_added.contains(&id) {
+            focus_added.push(id);
+        }
+    }
+    let focus = focus_added.len();
+    let focus_enforced = focus_added
+        .iter()
+        .filter(|id| camerata_gateway::lookup_arm(&id.0).is_some())
+        .count();
     if resolved.is_empty() {
         log_fallback_once(project.map(|p| p.id.as_str()));
-        let role = camerata_fleet::governed_role(role_name).await?;
-        return Ok((role, RuleSubsetSource::CorpusFallback));
+        let mut role = camerata_fleet::governed_role(role_name).await?;
+        for id in focus_added {
+            if !role.rule_subset.contains(&id) {
+                role.rule_subset.push(id);
+            }
+        }
+        return Ok((
+            role,
+            RuleSubsetSource::CorpusFallback {
+                focus,
+                focus_enforced,
+            },
+        ));
     }
     let count = selected.len();
     // A selected rule with no gateway arm is carried but denies nothing at write time: name it.
@@ -130,12 +188,15 @@ pub(crate) async fn project_governed_role(
         .filter(|id| camerata_gateway::lookup_arm(&id.0).is_none())
         .map(|id| id.0.clone())
         .collect();
+    selected.extend(focus_added);
     Ok((
         camerata_fleet::governed_role_from_rules(role_name, selected),
         RuleSubsetSource::ProjectSelection {
             selected: count,
             inert,
             other_repos,
+            focus,
+            focus_enforced,
         },
     ))
 }
@@ -208,9 +269,10 @@ mod tests {
         assert!(camerata_gateway::lookup_arm("SUPABASE-RLS-ENABLED-1").is_none());
 
         let project = project_selecting(SQL_SUPABASE);
-        let (role, source) = project_governed_role("BrownfieldImplementer", Some(&project), None)
-            .await
-            .unwrap();
+        let (role, source) =
+            project_governed_role("BrownfieldImplementer", Some(&project), None, &[])
+                .await
+                .unwrap();
 
         assert_eq!(
             source,
@@ -221,6 +283,8 @@ mod tests {
                     "SUPABASE-RLS-ENABLED-1".to_string(),
                 ],
                 other_repos: 0,
+                focus: 0,
+                focus_enforced: 0,
             }
         );
         for id in SQL_SUPABASE {
@@ -288,10 +352,14 @@ mod tests {
             ("SEC-NO-RAW-SQL-CONCAT-1", &[]),
         ]);
 
-        let (db, db_source) =
-            project_governed_role("BrownfieldImplementer", Some(&project), Some("acme/db"))
-                .await
-                .unwrap();
+        let (db, db_source) = project_governed_role(
+            "BrownfieldImplementer",
+            Some(&project),
+            Some("acme/db"),
+            &[],
+        )
+        .await
+        .unwrap();
         assert!(carries(&db, "SUPABASE-RLS-ENABLED-1"));
         assert!(carries(&db, "SEC-NO-RAW-SQL-CONCAT-1"));
         assert!(!carries(&db, "SQL-PRIVILEGED-WRITE-AUDIT-1"));
@@ -301,6 +369,8 @@ mod tests {
                 selected: 2,
                 inert: vec!["SUPABASE-RLS-ENABLED-1".to_string()],
                 other_repos: 1,
+                focus: 0,
+                focus_enforced: 0,
             }
         );
         assert!(
@@ -311,18 +381,23 @@ mod tests {
             db_source.describe(db.rule_subset.len())
         );
 
-        let (web, _) =
-            project_governed_role("BrownfieldImplementer", Some(&project), Some("acme/web"))
-                .await
-                .unwrap();
+        let (web, _) = project_governed_role(
+            "BrownfieldImplementer",
+            Some(&project),
+            Some("acme/web"),
+            &[],
+        )
+        .await
+        .unwrap();
         assert!(carries(&web, "SQL-PRIVILEGED-WRITE-AUDIT-1"));
         assert!(carries(&web, "SEC-NO-RAW-SQL-CONCAT-1"));
         assert!(!carries(&web, "SUPABASE-RLS-ENABLED-1"));
 
         // With no repo to scope by, every selection applies.
-        let (all, source) = project_governed_role("BrownfieldImplementer", Some(&project), None)
-            .await
-            .unwrap();
+        let (all, source) =
+            project_governed_role("BrownfieldImplementer", Some(&project), None, &[])
+                .await
+                .unwrap();
         assert!(carries(&all, "SUPABASE-RLS-ENABLED-1"));
         assert!(carries(&all, "SQL-PRIVILEGED-WRITE-AUDIT-1"));
         assert!(matches!(
@@ -330,6 +405,8 @@ mod tests {
             RuleSubsetSource::ProjectSelection {
                 selected: 3,
                 other_repos: 0,
+                focus: 0,
+                focus_enforced: 0,
                 ..
             }
         ));
@@ -341,10 +418,14 @@ mod tests {
     async fn a_repo_that_none_of_the_selections_bind_to_gets_only_the_gate_rules() {
         let project = project_with_scoped_selections(&[("SUPABASE-RLS-ENABLED-1", &["acme/db"])]);
 
-        let (role, source) =
-            project_governed_role("BrownfieldImplementer", Some(&project), Some("acme/web"))
-                .await
-                .unwrap();
+        let (role, source) = project_governed_role(
+            "BrownfieldImplementer",
+            Some(&project),
+            Some("acme/web"),
+            &[],
+        )
+        .await
+        .unwrap();
 
         assert_eq!(
             source,
@@ -352,6 +433,8 @@ mod tests {
                 selected: 0,
                 inert: Vec::new(),
                 other_repos: 1,
+                focus: 0,
+                focus_enforced: 0,
             }
         );
         assert!(!carries(&role, "SUPABASE-RLS-ENABLED-1"));
@@ -369,7 +452,7 @@ mod tests {
     #[tokio::test]
     async fn the_sql_concat_denial_does_not_depend_on_the_selection() {
         let project = project_selecting(&["SUPABASE-RLS-ENABLED-1"]);
-        let (role, _) = project_governed_role("BrownfieldImplementer", Some(&project), None)
+        let (role, _) = project_governed_role("BrownfieldImplementer", Some(&project), None, &[])
             .await
             .unwrap();
         let decision = evaluate_call(
@@ -388,15 +471,18 @@ mod tests {
     #[tokio::test]
     async fn a_selection_of_only_enforced_rules_reports_no_inert_rules() {
         let project = project_selecting(&["SEC-NO-RAW-SQL-CONCAT-1"]);
-        let (role, source) = project_governed_role("BrownfieldImplementer", Some(&project), None)
-            .await
-            .unwrap();
+        let (role, source) =
+            project_governed_role("BrownfieldImplementer", Some(&project), None, &[])
+                .await
+                .unwrap();
         assert_eq!(
             source,
             RuleSubsetSource::ProjectSelection {
                 selected: 1,
                 inert: Vec::new(),
                 other_repos: 0,
+                focus: 0,
+                focus_enforced: 0,
             }
         );
         let line = source.describe(role.rule_subset.len());
@@ -407,7 +493,7 @@ mod tests {
     #[tokio::test]
     async fn the_enforced_gate_rules_stay_on_even_when_the_selection_omits_them() {
         let project = project_selecting(&["SUPABASE-RLS-ENABLED-1"]);
-        let (role, _) = project_governed_role("BrownfieldImplementer", Some(&project), None)
+        let (role, _) = project_governed_role("BrownfieldImplementer", Some(&project), None, &[])
             .await
             .unwrap();
         for gate_rule in enforced_gate_rules() {
@@ -426,19 +512,32 @@ mod tests {
     #[tokio::test]
     async fn no_selection_falls_back_to_the_previous_corpus_subset() {
         let project = project_selecting(&[]);
-        let (role, source) = project_governed_role("BrownfieldImplementer", Some(&project), None)
-            .await
-            .unwrap();
+        let (role, source) =
+            project_governed_role("BrownfieldImplementer", Some(&project), None, &[])
+                .await
+                .unwrap();
         let today = camerata_fleet::governed_role("BrownfieldImplementer")
             .await
             .unwrap();
-        assert_eq!(source, RuleSubsetSource::CorpusFallback);
+        assert_eq!(
+            source,
+            RuleSubsetSource::CorpusFallback {
+                focus: 0,
+                focus_enforced: 0
+            }
+        );
         assert_eq!(role.rule_subset, today.rule_subset);
 
-        let (role, source) = project_governed_role("BrownfieldImplementer", None, None)
+        let (role, source) = project_governed_role("BrownfieldImplementer", None, None, &[])
             .await
             .unwrap();
-        assert_eq!(source, RuleSubsetSource::CorpusFallback);
+        assert_eq!(
+            source,
+            RuleSubsetSource::CorpusFallback {
+                focus: 0,
+                focus_enforced: 0
+            }
+        );
         assert_eq!(role.rule_subset, today.rule_subset);
     }
 
@@ -456,10 +555,180 @@ mod tests {
                 selected: 2,
                 inert: vec!["SUPABASE-RLS-ENABLED-1".to_string()],
                 other_repos: 1,
+                focus: 0,
+                focus_enforced: 0,
             },
-            RuleSubsetSource::CorpusFallback,
+            RuleSubsetSource::CorpusFallback {
+                focus: 0,
+                focus_enforced: 0,
+            },
+            RuleSubsetSource::ProjectSelection {
+                selected: 2,
+                inert: vec![],
+                other_repos: 0,
+                focus: 2,
+                focus_enforced: 1,
+            },
         ] {
             assert!(!s.describe(9).contains('\u{2014}'));
         }
+    }
+
+    /// A unit created from inspection findings must satisfy the rules its findings violate, even
+    /// when the project did not select them. The focus rules join the Layer-1 subset, are counted
+    /// in the run's event, and the event is honest about which of them deny at write time.
+    #[tokio::test]
+    async fn a_unit_from_findings_runs_with_its_rules_in_the_layer_1_subset() {
+        // Premise: the focus rule is neither selected nor a gate rule, and has no gateway arm.
+        assert!(camerata_gateway::lookup_arm("SQL-PRIVILEGED-WRITE-AUDIT-1").is_none());
+        let project = project_selecting(&["SUPABASE-RLS-ENABLED-1"]);
+        let focus = vec!["SQL-PRIVILEGED-WRITE-AUDIT-1".to_string()];
+
+        let (without, _) = project_governed_role(
+            "BrownfieldImplementer",
+            Some(&project),
+            Some("acme/db"),
+            &[],
+        )
+        .await
+        .unwrap();
+        assert!(!without
+            .rule_subset
+            .contains(&RuleId("SQL-PRIVILEGED-WRITE-AUDIT-1".to_string())));
+
+        let (role, source) = project_governed_role(
+            "BrownfieldImplementer",
+            Some(&project),
+            Some("acme/db"),
+            &focus,
+        )
+        .await
+        .unwrap();
+        assert!(role
+            .rule_subset
+            .contains(&RuleId("SQL-PRIVILEGED-WRITE-AUDIT-1".to_string())));
+        assert!(role
+            .rule_subset
+            .contains(&RuleId("SUPABASE-RLS-ENABLED-1".to_string())));
+        let RuleSubsetSource::ProjectSelection {
+            selected,
+            focus,
+            focus_enforced,
+            ..
+        } = source.clone()
+        else {
+            panic!("a project with a selection: {source:?}");
+        };
+        assert_eq!((selected, focus, focus_enforced), (1, 1, 0));
+        let line = source.describe(role.rule_subset.len());
+        assert!(
+            line.contains(
+                "1 rule(s) come from the unit's findings; 0 of them have a gateway arm and \
+                 deny at write time, the rest are carried as grounding."
+            ),
+            "{line}"
+        );
+    }
+
+    /// A rule both selected and a focus rule counts once; a blank or repeated focus id adds
+    /// nothing.
+    #[tokio::test]
+    async fn a_focus_rule_that_is_also_selected_counts_once() {
+        let project = project_selecting(&["SUPABASE-RLS-ENABLED-1"]);
+        let focus = vec![
+            "SUPABASE-RLS-ENABLED-1".to_string(),
+            " ".to_string(),
+            "SQL-PRIVILEGED-WRITE-AUDIT-1".to_string(),
+            "SQL-PRIVILEGED-WRITE-AUDIT-1".to_string(),
+        ];
+        let (role, source) = project_governed_role(
+            "BrownfieldImplementer",
+            Some(&project),
+            Some("acme/db"),
+            &focus,
+        )
+        .await
+        .unwrap();
+        let count = |id: &str| role.rule_subset.iter().filter(|r| r.0 == id).count();
+        assert_eq!(count("SUPABASE-RLS-ENABLED-1"), 1);
+        assert_eq!(count("SQL-PRIVILEGED-WRITE-AUDIT-1"), 1);
+        let RuleSubsetSource::ProjectSelection { focus, .. } = source else {
+            panic!("a selection");
+        };
+        assert_eq!(
+            focus, 1,
+            "only the rule the selection lacked is a focus addition"
+        );
+    }
+
+    /// A focus rule that has a gateway arm denies the matching write, and the run event counts it
+    /// as enforced. Every armed rule is also an enforced gate rule (the gate list is derived from
+    /// the registry), so no armed rule can be only a focus rule: the focus rules a unit adds
+    /// beyond the gate are always grounding only.
+    #[tokio::test]
+    async fn an_armed_focus_rule_denies_at_write_time_and_is_counted_as_enforced() {
+        for entry in camerata_gateway::RULE_REGISTRY {
+            assert!(
+                enforced_gate_rules().iter().any(|r| r.0 == entry.id),
+                "{} has an arm, so it is always in the gate subset",
+                entry.id
+            );
+        }
+        let project = project_selecting(&["SUPABASE-RLS-ENABLED-1"]);
+        let (role, source) = project_governed_role(
+            "BrownfieldImplementer",
+            Some(&project),
+            Some("acme/db"),
+            &["SEC-NO-RAW-SQL-CONCAT-1".to_string()],
+        )
+        .await
+        .unwrap();
+        let decision = evaluate_call(
+            &role.rule_subset,
+            &write(
+                "db/queries.ts",
+                "const q = \"SELECT * FROM users WHERE id = \" + userId;",
+            ),
+        );
+        match decision {
+            Decision::Deny { rule, .. } => assert_eq!(rule.0, "SEC-NO-RAW-SQL-CONCAT-1"),
+            Decision::Allow => panic!("the focus rule must deny the write"),
+        }
+        let RuleSubsetSource::ProjectSelection {
+            focus,
+            focus_enforced,
+            ..
+        } = source
+        else {
+            panic!("a selection");
+        };
+        assert_eq!((focus, focus_enforced), (1, 1));
+    }
+
+    /// With no project selection the unit still gates on its own rules, on top of the corpus
+    /// fallback.
+    #[tokio::test]
+    async fn the_fallback_path_also_carries_the_focus_rules() {
+        let (role, source) = project_governed_role(
+            "BrownfieldImplementer",
+            None,
+            None,
+            &["SQL-PRIVILEGED-WRITE-AUDIT-1".to_string()],
+        )
+        .await
+        .unwrap();
+        assert!(role
+            .rule_subset
+            .contains(&RuleId("SQL-PRIVILEGED-WRITE-AUDIT-1".to_string())));
+        assert_eq!(
+            source,
+            RuleSubsetSource::CorpusFallback {
+                focus: 1,
+                focus_enforced: 0
+            }
+        );
+        assert!(source
+            .describe(role.rule_subset.len())
+            .contains("1 rule(s) come from"));
     }
 }

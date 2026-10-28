@@ -66,7 +66,9 @@ fn investigation_artifact_id(story_id: &str) -> String {
     format!("{story_id}/investigation")
 }
 
-pub use camerata_api_types::uow::{RecordedReviewFinding, ReviewFindingStatus};
+pub use camerata_api_types::uow::{
+    FindingsSource, RecordedReviewFinding, RetestEvidence, ReviewFindingStatus, UowSource,
+};
 
 /// Why [`UowStore::accept_review_finding`] refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -179,6 +181,15 @@ pub struct UnitOfWork {
     /// at sign-off (an open HIGH or MEDIUM blocks it). Empty until a review has run.
     #[serde(default)]
     pub review_findings: Vec<RecordedReviewFinding>,
+    /// Where this unit came from, when it was created from something other than a typed title
+    /// or a tracker item: today only an inspection's findings (roadmap 2c). `None` on every unit
+    /// created before this existed.
+    #[serde(default)]
+    pub source: Option<UowSource>,
+    /// What each delta retest found about this unit's source findings, oldest first. Kept
+    /// beside the unit, never inside the hash-sealed evidence record.
+    #[serde(default)]
+    pub retests: Vec<RetestEvidence>,
     /// The SOC-2 evidence record for the most recent completed governed run (issue #53).
     ///
     /// Assembled and attached by [`UowStore::attach_evidence`] when a run finishes.
@@ -405,6 +416,21 @@ impl UnitOfWork {
         }
         legacy_demo_number(&self.story_id)
             .map(str::to_string)
+            .unwrap_or_default()
+    }
+
+    /// The findings this unit was created from, when it came from an inspection.
+    pub fn findings_source(&self) -> Option<&FindingsSource> {
+        match self.source.as_ref()? {
+            UowSource::Findings(f) => Some(f),
+        }
+    }
+
+    /// The rule ids this unit must satisfy (the primary rule first); empty for every unit that
+    /// did not come from findings. They flow into the implementer's Layer 1 subset.
+    pub fn source_rule_ids(&self) -> Vec<String> {
+        self.findings_source()
+            .map(|f| f.rule_ids.clone())
             .unwrap_or_default()
     }
 
@@ -1361,6 +1387,37 @@ impl UowStore {
                 ..UnitOfWork::keyed(story_id)
             });
         uow.branch = branch;
+        uow.updated = Self::now_rfc3339();
+        drop(map);
+        self.flush();
+    }
+
+    /// Set (or clear) where a story's UoW came from. Creates the UoW if needed (the
+    /// [`Self::set_branch`] idiom).
+    pub fn set_source(&self, story_id: &str, source: Option<UowSource>) {
+        let mut map = self.mem.lock().expect("uow mutex poisoned");
+        let uow = map
+            .entry(story_id.to_string())
+            .or_insert_with(|| UnitOfWork::keyed(story_id));
+        uow.source = source;
+        uow.updated = Self::now_rfc3339();
+        drop(map);
+        self.flush();
+    }
+
+    /// Record one delta retest's verdict on a story's UoW and append a `retest` history entry
+    /// saying so (`history_text`). Creates the UoW if needed.
+    pub fn push_retest(&self, story_id: &str, evidence: RetestEvidence, history_text: &str) {
+        let mut map = self.mem.lock().expect("uow mutex poisoned");
+        let uow = map
+            .entry(story_id.to_string())
+            .or_insert_with(|| UnitOfWork::keyed(story_id));
+        uow.retests.push(evidence);
+        uow.history.push(HistoryEntry {
+            ts: Self::now_rfc3339(),
+            kind: "retest".to_string(),
+            text: history_text.to_string(),
+        });
         uow.updated = Self::now_rfc3339();
         drop(map);
         self.flush();
@@ -4957,5 +5014,54 @@ mod review_finding_tests {
     fn an_old_uow_json_without_review_findings_loads_empty() {
         let u: UnitOfWork = serde_json::from_str(r#"{"story_id":"S-4"}"#).unwrap();
         assert!(u.review_findings.is_empty());
+    }
+
+    // ── Findings source and retest evidence (roadmap 2c) ──────────────────────
+
+    fn findings_source(rules: &[&str]) -> camerata_api_types::uow::UowSource {
+        camerata_api_types::uow::UowSource::Findings(camerata_api_types::uow::FindingsSource {
+            inspection_id: "insp-1".into(),
+            rule_ids: rules.iter().map(|r| r.to_string()).collect(),
+            ..Default::default()
+        })
+    }
+
+    #[test]
+    fn source_fields_default_so_an_old_uow_json_loads() {
+        let u: UnitOfWork = serde_json::from_str(r#"{"story_id":"S-5"}"#).unwrap();
+        assert!(u.source.is_none());
+        assert!(u.retests.is_empty());
+        assert!(u.findings_source().is_none());
+        assert!(u.source_rule_ids().is_empty());
+    }
+
+    #[test]
+    fn set_source_stamps_the_unit_and_exposes_its_rule_ids() {
+        let store = UowStore::new();
+        let uow = store.create_native(Some("acme/api".into()), None).unwrap();
+        store.set_source(&uow.story_id, Some(findings_source(&["A-1", "B-2"])));
+        let got = store.get(&uow.story_id).unwrap();
+        assert_eq!(got.source_rule_ids(), vec!["A-1".to_string(), "B-2".into()]);
+        assert_eq!(got.findings_source().unwrap().inspection_id, "insp-1");
+        store.set_source(&uow.story_id, None);
+        assert!(store.get(&uow.story_id).unwrap().source.is_none());
+    }
+
+    #[test]
+    fn push_retest_appends_evidence_and_a_retest_history_entry() {
+        let store = UowStore::new();
+        let uow = store.create_native(Some("acme/api".into()), None).unwrap();
+        let ev = camerata_api_types::uow::RetestEvidence {
+            inspection_id: "insp-d".into(),
+            to_sha: "abc1234".into(),
+            resolved: vec!["fp-1".into()],
+            ..Default::default()
+        };
+        store.push_retest(&uow.story_id, ev.clone(), "Delta retest done.");
+        let got = store.get(&uow.story_id).unwrap();
+        assert_eq!(got.retests, vec![ev]);
+        let last = got.history.last().expect("a history entry");
+        assert_eq!(last.kind, "retest");
+        assert_eq!(last.text, "Delta retest done.");
     }
 }
