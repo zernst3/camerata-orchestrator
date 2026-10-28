@@ -82,6 +82,8 @@ pub mod preflight;
 pub mod project;
 pub mod provider;
 pub mod reconcile;
+/// H5: compare two runs of the same scan (`camerata repeatability`, the consensus option).
+pub mod repeatability;
 /// PDF audit-report export (brownfield audit hardening Pass B): `AuditReportJson` +
 /// `build_report_json` (pure serializer) + `compile_pdf` (Typst compile). See the
 /// module doc comment and `docs/design/2026-07-23_brownfield-audit-report.md`.

@@ -1846,7 +1846,7 @@ pub(crate) const RELATED_STANDARD_NOTE: &str = "A source marked \"related standa
 /// gates the P3 citation fallback/exclusion to ONLY AI-tier findings: a deterministic
 /// floor rule that happens to lack a corpus citation (a separate, pre-existing gap — e.g.
 /// `SEC-NO-RAW-SQL-CONCAT-1`, which has no TOML entry at all) is untouched by this gate.
-pub(crate) fn is_ai_tier(finding: &Finding) -> bool {
+pub fn is_ai_tier(finding: &Finding) -> bool {
     finding.rule_id.starts_with("AI-") || finding.confidence.is_some()
 }
 

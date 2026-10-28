@@ -2815,6 +2815,52 @@ against a runaway bill, not a saving, so it fails loudly:
   the export button; the job progress counts refused passes as NOT RUN, not done; and
   the server adds an "INCOMPLETE" note to the report message.
 
+#### Repeatability: measuring run-to-run drift
+
+A model is not a pure function, so two inspections of the same commit can
+disagree. `camerata repeatability` measures by how much:
+
+```
+cargo run -p camerata -- repeatability --repo <PATH> --max-cost-usd <USD> [--format text|json]
+```
+
+It runs the same Phases 1 to 3 as `camerata inspect` (stack detection, the
+curated rule selection, the corpus, `audit_repos` with the deterministic floor
+and the AI review) twice, applies the corpus severity bounds to each run, and
+compares the two finding sets with `camerata_server::repeatability::diff_runs`:
+counts by tier (`deterministic`, `ai`, `preview`), by rule and by severity in
+each run, plus every finding one run reported and the other did not. Findings
+are matched by `finding_match_key`: repo, path and the content fingerprint
+baselines use (rule id plus whitespace-collapsed snippet), so a finding quoted
+at a neighbouring line still matches; repeats are matched one for one. The
+deterministic floor is the control: its counts never change between runs.
+
+**Every answer cache is bypassed.** The incremental-scan manifest is never
+loaded (and never written), and `result_cache` is forced off whatever the
+flags or `CAMERATA_EFFICIENCY` say. The provider's prompt cache is left as
+configured: it stores the processed prompt prefix, not an answer, so it cannot
+make two runs agree.
+
+**Spend guards.** The pre-flight estimate is printed first, before any model
+call, with a line for the two runs together. The command then refuses without
+an explicit `--max-cost-usd`. The limit covers both runs and each run gets
+half, so the first cannot starve the second. When one run's estimate is above
+its half it refuses too, naming the limit that would be enough: a run the limit
+stops part way turns coverage into apparent drift. Nothing is written to disk.
+
+**Output and exit code.** Text by default, `--format json` for the same data
+as JSON (`RepeatabilityOutcome`). A run is incomplete when the AI review
+failed, the spend limit stopped anything, or a pass that can change which
+findings exist failed; only the effort-estimate and fix-text stages are
+treated as unable to (`FINDING_NEUTRAL_PASSES`), so an unknown failure flags
+the comparison. Every failed pass is listed either way. Exit 0 when both runs
+completed (whether or not they agree), 4 when either was incomplete, 1 on a
+refusal.
+
+`crates/cli/tests/repeatability_e2e.rs` drives the whole command with a fake
+completer whose answers drift between runs; it is never run against a live
+model in CI.
+
 The ZIP holds four entries, and they are deliberately not three views of the same
 thing:
 

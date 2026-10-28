@@ -38,7 +38,7 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-mod preflight;
+pub(crate) mod preflight;
 
 use camerata_server::ai_audit::{ActualUsage, FailedPass, ScanMode};
 use camerata_server::llm::{resolve_backend, BackendResolution, ProjectBackend};
