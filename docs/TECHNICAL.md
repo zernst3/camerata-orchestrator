@@ -3133,7 +3133,52 @@ thing:
   a PDF fault. `report_export::build_report_json` produces `AuditReportJson`;
   `compile_pdf` shells `typst compile` over
   `crates/server/templates/audit_report.typ`. No model call is made in the export
-  path, so it is deterministic and reproducible.
+  path, so it is deterministic and reproducible. Styling follows the W27 brand guide
+  (`docs/design/2026-10-27_pdf-brand-guide.md`): the colour, type and size tokens sit
+  at the top of the template. The fonts (Inter for text, JetBrains Mono for code, SIL
+  OFL, licence files beside them in `templates/fonts/`) and the two logo marks
+  (`docs/design/brand/`) are compiled into the binary (`TEMPLATE_ASSETS`), written next
+  to the template on every compile, and passed with `--font-path`, which Typst searches
+  before system fonts. The logo mark renders only when the resolved brand is the brand
+  kit's own (`BRAND_KIT_NAME`, `AuditReportJson::brand_mark`); another agency's brand
+  gets the text wordmark alone. A test compiles with system fonts ignored to prove the
+  bundle alone renders the report. Production does not ignore system fonts: a character the
+  bundled fonts lack (a CJK or emoji path or snippet) would otherwise be dropped from the
+  PDF, so installed fonts reach the output only for such a character.
+- **Confidentiality marking** (2026-10-24 decision): `report_export::confidentiality_marking`
+  is the one producer of "Confidential, prepared for <client> on <date>" (the scan date) and
+  the first page's handling note; the PDF prints them from `AuditReportJson::confidentiality`
+  and `xlsx_export::build_workbook` puts the same line in every sheet's footer. The client name
+  is `Project::client_name` (inspection setup, `POST /api/projects/:id/client-name`, not
+  carried by project import, and left blank in a project export file, so a client's name does
+  not travel in a backup); `validate_client_name` strips zero-width characters (one cleaned
+  string for the PDF, workbook and manifest) and refuses a name whose workbook footer would
+  pass Excel's 255-character limit, counting each `&` twice; the export routes fill `ReportOptions::client_name` from it
+  (`serde(skip)`, never client-supplied), and `require_client_name` refuses a blank one in
+  `build_product_package_with_stem` and the PDF-only route (HTTP 422, `gate: "client_name"`).
+  `camerata inspect` takes `--client`. The release gate scans sheet headers and footers for
+  secrets, and its `confidentiality marking` check holds every sheet footer to a line naming the
+  client and equal to the PDF's.
+- **`manifest.json` `inspection` block** (22c): beyond repos and commits, engine version,
+  corpus version, rules last reviewed (null until `CORPUS_FRESHNESS.toml` has a confirmed
+  date for every domain the scan used), model backend and provider, and the spend-limit flag,
+  it carries `client_name`, `corpus_rules_applied`, `counted_lines`, `excluded_noise_files`
+  and `excluded_noise_lines`. The counts come from the scan's own record: `audit_repos` reads
+  each repo through `read_local_repo_files` and `count::excluded_noise_lines`, the functions
+  `camerata count` uses, and stores `ScanReport::excluded_noise_lines` beside `code_lines` and
+  `files_excluded`, so the export never reads the repository. Filled in
+  `client_provenance::export_provenance_with`; the README renders each line and gate 7 parses
+  it back.
+- **Release gate check "severity and kind counts"** (22d): before this, the gate checked
+  row IDENTITY (PDF rows vs `findings.json`) and CSV vs JSON cell parity, but no count by
+  severity and kind. `release_gate::consistency::count_reconciliation_problems` (archive pass)
+  holds `csv/all-findings.csv`, the workbook's All Findings rows (for the kinds that sheet lists,
+  `xlsx_export::ALL_FINDINGS_SHEET_KINDS`), the Index "Statement types" counts
+  (`STATEMENT_TYPES`, the labels the writer uses) and the Index category Total row to
+  `json/all-findings.json`'s tally by `(severity, kind)`;
+  `pdf_count_reconciliation_problems` (in-memory release) does the same for the PDF's rendered
+  rows and its cover severity summary. A difference names the cell and both counts. The gate
+  now runs eight checks.
 - **`findings.xlsx`** is the DETAIL surface, and a missing row there IS a fault.
 - **`findings.json`** is the machine-readable data structure. It carries the WHOLE
   non-false-positive row set, every kind included, with `provenance` and `summary`

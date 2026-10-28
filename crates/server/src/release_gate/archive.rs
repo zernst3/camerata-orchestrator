@@ -193,3 +193,113 @@ pub fn xlsx_sheet_grid(xlsx: &[u8], sheet_name: &str) -> Result<Vec<Vec<String>>
     }
     Ok(grid)
 }
+
+/// One worksheet's header or footer, decoded into its three sections (Excel's `&L`, `&C`,
+/// `&R`) as the text a reader sees: `&&` becomes `&`, and the field and formatting codes
+/// (`&P` page, `&N` pages, a `&"font"` or a `&12` size) are dropped.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct XlsxHeaderFooter {
+    pub sheet: String,
+    /// `"header"` or `"footer"`.
+    pub part: &'static str,
+    pub left: String,
+    pub center: String,
+    pub right: String,
+}
+
+impl XlsxHeaderFooter {
+    /// The three sections, for a check that reads all of them (the secrets scan).
+    pub fn sections(&self) -> [&str; 3] {
+        [&self.left, &self.center, &self.right]
+    }
+}
+
+/// Decode an Excel header/footer string (already XML-unescaped) into its three sections.
+fn decode_header_footer(code: &str) -> (String, String, String) {
+    let mut sections = [String::new(), String::new(), String::new()];
+    // Text before any section code is centred, as Excel does.
+    let mut at = 1;
+    let mut chars = code.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '&' {
+            sections[at].push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('&') => sections[at].push('&'),
+            Some('L') => at = 0,
+            Some('C') => at = 1,
+            Some('R') => at = 2,
+            // `&"Font,Style"`: skip to the closing quote.
+            Some('"') => {
+                for skipped in chars.by_ref() {
+                    if skipped == '"' {
+                        break;
+                    }
+                }
+            }
+            // `&12`: a font size.
+            Some(d) if d.is_ascii_digit() => {
+                while chars.peek().is_some_and(char::is_ascii_digit) {
+                    chars.next();
+                }
+            }
+            // Any other single-letter code (`&P`, `&N`, `&D`, `&A`, ...) renders a field, not text.
+            _ => {}
+        }
+    }
+    let [left, center, right] = sections;
+    (left, center, right)
+}
+
+/// Every worksheet header and footer the workbook defines (`<oddHeader>`/`<oddFooter>`), by
+/// sheet. A sheet with neither contributes nothing.
+pub fn xlsx_header_footers(xlsx: &[u8]) -> Result<Vec<XlsxHeaderFooter>, String> {
+    let names = sheet_names(&part_text(xlsx, "xl/workbook.xml")?);
+    let mut out = Vec::new();
+    for (idx, sheet) in names.iter().enumerate() {
+        let xml = part_text(xlsx, &format!("xl/worksheets/sheet{}.xml", idx + 1))?;
+        for (part, tag) in [("header", "oddHeader"), ("footer", "oddFooter")] {
+            let open = format!("<{tag}>");
+            let close = format!("</{tag}>");
+            let Some(start) = xml.find(&open) else {
+                continue;
+            };
+            let body = &xml[start + open.len()..];
+            let Some(end) = body.find(&close) else {
+                continue;
+            };
+            let (left, center, right) = decode_header_footer(&unescape(&body[..end]));
+            out.push(XlsxHeaderFooter {
+                sheet: sheet.clone(),
+                part,
+                left,
+                center,
+                right,
+            });
+        }
+    }
+    Ok(out)
+}
+
+/// Every worksheet's name, in workbook order.
+pub fn xlsx_sheet_names(xlsx: &[u8]) -> Result<Vec<String>, String> {
+    Ok(sheet_names(&part_text(xlsx, "xl/workbook.xml")?))
+}
+
+#[cfg(test)]
+mod header_footer_tests {
+    use super::decode_header_footer;
+
+    #[test]
+    fn sections_codes_and_doubled_ampersands_decode_to_the_text_a_reader_sees() {
+        let (l, c, r) =
+            decode_header_footer("&LConfidential, prepared for Smith && Jones&RPage &P of &N");
+        assert_eq!(l, "Confidential, prepared for Smith & Jones");
+        assert_eq!(c, "");
+        assert_eq!(r, "Page  of ");
+        let (l, c, _) = decode_header_footer("plain &\"Arial,Bold\"&12centre&Lleft");
+        assert_eq!(c, "plain centre");
+        assert_eq!(l, "left");
+    }
+}

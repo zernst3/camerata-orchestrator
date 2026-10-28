@@ -11,7 +11,7 @@ use std::collections::HashSet;
 
 use serde_json::Value;
 
-use super::archive::{xlsx_cells, xlsx_strings};
+use super::archive::{xlsx_cells, xlsx_header_footers, xlsx_strings};
 use super::report::Problem;
 
 /// One problem per secret in `text`, located by `location` (and by line when `with_line`).
@@ -164,6 +164,30 @@ pub fn xlsx_problems(file: &str, bytes: &[u8]) -> Vec<Problem> {
             file,
             "workbook",
             format!("the workbook could not be read for the secrets check: {e}"),
+            None,
+        )),
+    }
+    // Sheet headers and footers (the confidentiality line) live in each sheet's XML, not in a
+    // cell or the shared-strings table, so they are read separately.
+    match xlsx_header_footers(bytes) {
+        Ok(parts) => {
+            for hf in parts {
+                for text in hf.sections() {
+                    problems.extend(scan_text(
+                        file,
+                        &format!("sheet {:?} {}", hf.sheet, hf.part),
+                        text,
+                        false,
+                    ));
+                }
+            }
+        }
+        Err(e) => problems.push(Problem::new(
+            file,
+            "workbook",
+            format!(
+                "the workbook's headers and footers could not be read for the secrets check: {e}"
+            ),
             None,
         )),
     }

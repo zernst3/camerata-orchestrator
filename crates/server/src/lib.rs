@@ -1274,6 +1274,7 @@ pub fn router(state: AppState) -> Router {
         // Designer (vision) band toggle: enable/disable the vision band for this project.
         .route("/api/projects/:id/vision-enabled", post(set_vision_enabled))
         .route("/api/projects/:id/product-brief", post(set_product_brief))
+        .route("/api/projects/:id/client-name", post(set_client_name))
         .route(
             "/api/projects/:id/operating-principles",
             post(set_operating_principles),
@@ -3966,6 +3967,11 @@ async fn export_project(
         .get(&id)
         .ok_or_else(|| AppError::not_found(anyhow::anyhow!("project not found: {id}")))?;
     let routines = state.routines.list_for_project(&id);
+    // A project export is a backup file that moves between machines, not a client deliverable,
+    // and a client's name should not travel in a file by default: it is left blank here (the
+    // stored project keeps it) and the operator sets it again for the engagement on import.
+    let mut project = project;
+    project.client_name.clear();
     Ok(Json(ProjectExportDoc { project, routines }))
 }
 
@@ -4409,6 +4415,34 @@ async fn set_product_brief(
 ) -> Json<serde_json::Value> {
     match state.projects.update(&id, |p| {
         p.product_brief = req.product_brief.trim().to_string();
+    }) {
+        Some(p) => Json(serde_json::json!({ "ok": true, "project": p })),
+        None => Json(serde_json::json!({ "ok": false, "message": "no such project" })),
+    }
+}
+
+/// Body for `POST /api/projects/:id/client-name`.
+#[derive(serde::Deserialize)]
+struct SetClientNameReq {
+    client_name: String,
+}
+
+/// `POST /api/projects/:id/client-name` — set who the inspection is for, part of the inspection
+/// setup saved with the project. Every export fills the confidentiality line from it
+/// (`Project::client_name`). Blank clears it (an export then refuses until it is set); a name
+/// that is too long or spans lines is refused with the reason
+/// (`report_export::validate_client_name`).
+async fn set_client_name(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<SetClientNameReq>,
+) -> Json<serde_json::Value> {
+    let name = match crate::report_export::validate_client_name(&req.client_name) {
+        Ok(name) => name,
+        Err(e) => return Json(serde_json::json!({ "ok": false, "message": e.to_string() })),
+    };
+    match state.projects.update(&id, |p| {
+        p.client_name = name;
     }) {
         Some(p) => Json(serde_json::json!({ "ok": true, "project": p })),
         None => Json(serde_json::json!({ "ok": false, "message": "no such project" })),
@@ -17139,6 +17173,12 @@ async fn export_audit_report(
     // `resolve_fix`'s chosen-option fallback (audit-integrated alternatives) — server-
     // populated, never client-supplied (see `ReportOptions::chosen_options`'s doc comment).
     req.options.chosen_options = project_chosen_options(&project);
+    // Confidentiality: the client name comes from the project's inspection setup, and a blank
+    // one blocks the export before anything is built.
+    req.options.client_name = project.client_name.clone();
+    if let Err(e) = crate::report_export::require_client_name(&req.options) {
+        return client_name_required_response(&e);
+    }
 
     let json = crate::report_export::build_report_json(
         &report,
@@ -17277,6 +17317,9 @@ async fn export_product(
     // The backend the project's scans ran on, recorded in the manifest and README. Server-
     // populated, never client-supplied.
     req.options.model = Some(ModelRecord::anthropic(project.backend));
+    // Confidentiality: the client name comes from the project's inspection setup. The package
+    // assembly refuses a blank one (mapped to a 422 below).
+    req.options.client_name = project.client_name.clone();
 
     // ONE assembly (`release_gate::build_product_package`) and ONE path to zip bytes
     // (`release_gate::release`), shared by this handler, `camerata inspect --export` and the
@@ -17295,6 +17338,9 @@ async fn export_product(
             // same blocked response as one from `release`.
             if let Some(failure) = crate::release_gate::gate_failure_of(&e) {
                 return release_blocked_response(failure);
+            }
+            if let Some(missing) = e.downcast_ref::<crate::report_export::ClientNameRequired>() {
+                return client_name_required_response(missing);
             }
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -17345,6 +17391,22 @@ async fn export_product(
             ),
         ],
         zip_bytes,
+    )
+        .into_response()
+}
+
+/// The 422 the export routes return when the inspection setup has no client name:
+/// `{ ok: false, gate: "client_name", message }`, the message saying where to enter it.
+fn client_name_required_response(missing: &crate::report_export::ClientNameRequired) -> Response {
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+    (
+        StatusCode::UNPROCESSABLE_ENTITY,
+        Json(serde_json::json!({
+            "ok": false,
+            "gate": "client_name",
+            "message": missing.to_string(),
+        })),
     )
         .into_response()
 }
@@ -17526,6 +17588,22 @@ pub struct ManifestProvenance {
     /// checked. `None` renders as every feed not checked (never an omitted line). Filled from
     /// `ScanProvenance::vulnerability_data`; rendered by [`crate::vuln_intel`].
     pub vulnerability_data: Option<crate::vuln_intel::VulnDataStamp>,
+    /// 22c: who the inspection was prepared for (the inspection setup's client name, the same
+    /// name the confidentiality marking prints). `None` only for a caller that set none.
+    pub client_name: Option<String>,
+    /// 22c: how many corpus rules the inspection applied (the distinct audited rule ids found
+    /// in the loaded corpus). `None` when no corpus was loaded.
+    pub corpus_rules_applied: Option<usize>,
+    /// 22c: the non-blank lines the inspection read, the figure `camerata count` reports and a
+    /// quote is priced on (same file filter, same line definition). `None` when the run read
+    /// no local files.
+    pub counted_lines: Option<usize>,
+    /// 22c: the files the noise filter excluded (build output, lockfiles, vendored and
+    /// generated code). `None` when the run read no local files.
+    pub excluded_noise_files: Option<usize>,
+    /// 22c: the non-blank lines in those excluded files. `None` for a run that did not record
+    /// it (a report from before 22c).
+    pub excluded_noise_lines: Option<usize>,
 }
 
 impl ManifestProvenance {
@@ -17588,6 +17666,11 @@ impl ManifestProvenance {
             "model_provider": self.model.as_ref().map(|m| &m.provider),
             "cost_cap_reached": self.cost_cap_reached,
             "vulnerability_data": crate::vuln_intel::manifest_json(self.vulnerability_data.as_ref()),
+            "client_name": self.client_name,
+            "corpus_rules_applied": self.corpus_rules_applied,
+            "counted_lines": self.counted_lines,
+            "excluded_noise_files": self.excluded_noise_files,
+            "excluded_noise_lines": self.excluded_noise_lines,
             "release_checks": Self::release_checks(),
         })
     }
@@ -17609,11 +17692,15 @@ impl ManifestProvenance {
     /// manifest.
     pub fn readme_lines(&self) -> String {
         let names: Vec<&str> = self.repos.iter().map(|r| r.name.as_str()).collect();
-        let mut out = format!(
+        let mut out = String::new();
+        if let Some(client) = &self.client_name {
+            out.push_str(&format!("Prepared for: {client}\n"));
+        }
+        out.push_str(&format!(
             "Repos inspected: {}\nGenerated: {}\n",
             names.join(", "),
             self.generated_at
-        );
+        ));
         for repo in &self.repos {
             if let Some(commit) = &repo.commit {
                 let note = if repo.dirty {
@@ -17630,6 +17717,20 @@ impl ManifestProvenance {
         }
         if let Some(reviewed) = &self.rules_last_reviewed {
             out.push_str(&format!("Rules last reviewed on {reviewed}\n"));
+        }
+        if let Some(applied) = self.corpus_rules_applied {
+            out.push_str(&format!("Corpus rules applied: {applied}\n"));
+        }
+        if let Some(lines) = self.counted_lines {
+            out.push_str(&format!("Counted lines: {lines}\n"));
+        }
+        if let Some(files) = self.excluded_noise_files {
+            match self.excluded_noise_lines {
+                Some(lines) => out.push_str(&format!(
+                    "Excluded as noise: {files} files, {lines} lines\n"
+                )),
+                None => out.push_str(&format!("Excluded as noise: {files} files\n")),
+            }
         }
         if let Some(model) = &self.model {
             out.push_str(&format!("Model backend: {}\n", model.backend));
@@ -19522,6 +19623,49 @@ mod tests {
         assert!(
             item.get("has_gate_provenance").is_none(),
             "stale boolean `has_gate_provenance` must be replaced by `gate_provenance`"
+        );
+    }
+
+    /// A project export is a backup file Zach moves between machines, not a client deliverable,
+    /// and a client's name should not travel in a file by default: the export carries every
+    /// project setting except the client name, which is left blank (and so is blank again on
+    /// import, where the operator sets it for that engagement).
+    #[tokio::test]
+    async fn a_project_export_file_does_not_carry_the_client_name() {
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        let p = state
+            .projects
+            .create("Acme", vec!["acme/portal".to_string()])
+            .expect("project created");
+        state
+            .projects
+            .update(&p.id, |p| p.client_name = "Example Client Ltd".to_string())
+            .expect("project updated");
+        let app = router(state.clone());
+
+        let exp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/projects/{}/export", p.id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(exp.status(), StatusCode::OK);
+        let doc = body_json(exp).await;
+        assert_eq!(doc["client_name"], "", "{doc}");
+        assert!(
+            !doc.to_string().contains("Example Client Ltd"),
+            "the client name must not appear anywhere in the export: {doc}"
+        );
+        // The rest of the project still travels.
+        assert_eq!(doc["name"], "Acme");
+        assert_eq!(doc["repos"][0], "acme/portal");
+        // The stored project is untouched: only the file is redacted.
+        assert_eq!(
+            state.projects.get(&p.id).expect("project").client_name,
+            "Example Client Ltd"
         );
     }
 
@@ -26584,6 +26728,7 @@ mod tests {
             files_scanned: 1,
             test_file_count: 0,
             files_excluded: 0,
+            excluded_noise_lines: None,
             code_chars: 100,
             code_lines: 10,
             code_lines_by_language: Vec::new(),
@@ -26674,12 +26819,7 @@ mod tests {
     /// gate) — the PDF-compile stage of the happy-path product-export test skips
     /// gracefully rather than hard-failing CI environments without Typst installed.
     fn typst_on_path() -> bool {
-        std::process::Command::new("typst")
-            .arg("--version")
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .is_some()
+        camerata_test_env::typst_on_path()
     }
 
     #[tokio::test]
@@ -26739,6 +26879,12 @@ mod tests {
             .projects
             .create("Acme", vec!["owner/repo".to_string()])
             .expect("project created");
+        let project = state
+            .projects
+            .update(&project.id, |p| {
+                p.client_name = "Example Client Ltd".to_string()
+            })
+            .expect("project exists");
         state.set_last_scan(
             project.id.clone(),
             make_scan_report("SEC-NO-HARDCODED-SECRETS-1"),
@@ -27130,6 +27276,12 @@ mod tests {
                 .projects
                 .create("Acme", vec!["owner/repo".to_string()])
                 .expect("project created");
+            let project = state
+                .projects
+                .update(&project.id, |p| {
+                    p.client_name = "Example Client Ltd".to_string()
+                })
+                .expect("project exists");
             state.set_last_scan(
                 project.id.clone(),
                 make_scan_report("SEC-NO-HARDCODED-SECRETS-1"),

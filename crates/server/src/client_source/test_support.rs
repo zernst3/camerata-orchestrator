@@ -78,6 +78,13 @@ pub(crate) fn fixture() -> Fx {
         .projects
         .set_backend(&project.id, crate::project::ProjectBackend::Cli)
         .expect("project exists");
+    // Every export needs the inspection setup's client name (synthetic).
+    let project = state
+        .projects
+        .update(&project.id, |p| {
+            p.client_name = "Example Client Ltd".to_string()
+        })
+        .expect("project exists");
     Fx {
         _tmp: tmp,
         root,

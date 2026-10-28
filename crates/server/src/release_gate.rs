@@ -10,7 +10,8 @@
 //! if any check finds a problem. A source-grep test pins that no other production code calls
 //! `build_product_zip(` or `compile_pdf_from_data(`.
 //!
-//! The checks, in order: secrets, dataset set, dataset parity, row parity, manifest, provenance
+//! The checks, in order: secrets, dataset set, dataset parity, row parity, severity and kind
+//! counts, confidentiality marking, manifest, provenance
 //! (see [`CheckId`]). The comparison logic lives in [`consistency`]; the export tests call those
 //! same functions, so the test and the runtime check cannot drift.
 
@@ -26,11 +27,15 @@ use crate::report_export::{AuditReportJson, DispositionWire, ReportOptions};
 use crate::xlsx_export::FindingsExport;
 use crate::ManifestProvenance;
 
-pub use archive::{read_zip_entries, xlsx_cells, xlsx_sheet_grid, xlsx_strings, XlsxCell};
+pub use archive::{
+    read_zip_entries, xlsx_cells, xlsx_header_footers, xlsx_sheet_grid, xlsx_sheet_names,
+    xlsx_strings, XlsxCell, XlsxHeaderFooter,
+};
 pub use consistency::{
-    compare_csv_to_json, dataset_parity_problems, dataset_set_problems, package_stem,
-    parse_readme_provenance, row_parity, verify_manifest, verify_readme_provenance,
-    ReadmeProvenance,
+    compare_csv_to_json, count_reconciliation_problems, dataset_parity_problems,
+    dataset_set_problems, marking_problems, package_stem, parse_readme_provenance,
+    pdf_count_reconciliation_problems, pdf_marking_problems, row_parity, verify_manifest,
+    verify_readme_provenance, ReadmeProvenance,
 };
 pub use report::{CheckId, CheckOutcome, GateFailure, GateReport, Problem};
 
@@ -85,6 +90,10 @@ pub async fn build_product_package_with_stem(
     options: &ReportOptions,
     stem: &str,
 ) -> anyhow::Result<ProductPackage> {
+    // Confidentiality (2026-10-24 decision): no package without a client name to mark it
+    // with. Checked first, before anything is built or compiled. Callers surface the error's
+    // message unchanged (it is a `report_export::ClientNameRequired`).
+    crate::report_export::require_client_name(options)?;
     let report_json =
         crate::report_export::build_report_json(report, dispositions, corpus, options);
     let data_json = crate::report_export::render_data_json(&report_json)?;
@@ -144,6 +153,8 @@ pub(crate) fn assemble_package(
     let mut provenance =
         crate::client_provenance::export_provenance(report, &report_json.cover, corpus);
     provenance.model = options.model.clone();
+    let client = crate::report_export::clean_client_name(&options.client_name);
+    provenance.client_name = (!client.is_empty()).then_some(client);
     let readme = crate::product_export_readme(stem, &provenance);
 
     Ok(ProductPackage {
@@ -249,6 +260,8 @@ pub fn audit_zip(zip_bytes: &[u8], pdf_text: Option<&str>) -> GateReport {
     );
     report.record(CheckId::DatasetSet, dataset_set_problems(&entries));
     report.record(CheckId::DatasetParity, dataset_parity_problems(&entries));
+    report.record(CheckId::Counts, count_reconciliation_problems(&entries));
+    report.record(CheckId::Marking, marking_problems(&entries));
     report.record(CheckId::Manifest, verify_manifest(&entries));
     report.record(CheckId::Provenance, provenance_problems(&entries));
     report.sorted()
@@ -322,6 +335,19 @@ pub fn release(package: ProductPackage) -> Result<ReleasedZip, ReleaseError> {
 
     let mut report = audit_zip(&bytes, None);
     report.record(CheckId::Secrets, pdf_data_problems(&package.data_json));
+    // The archive pass above held the workbook and the CSV to the JSON rows, and the sheet
+    // footers to each other; this pass also holds the PDF's rows, cover summary and
+    // confidentiality line to them.
+    if let Ok(entries) = read_zip_entries(&bytes) {
+        report.record(
+            CheckId::Counts,
+            pdf_count_reconciliation_problems(&entries, &package.report_json),
+        );
+        report.record(
+            CheckId::Marking,
+            pdf_marking_problems(&entries, &package.report_json.confidentiality.line),
+        );
+    }
     report.record(
         CheckId::RowParity,
         row_parity(&package.report_json, &package.findings_export),

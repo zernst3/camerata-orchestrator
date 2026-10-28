@@ -103,6 +103,11 @@ pub struct InspectArgs {
     /// `--efficiency name=on|off` entries (applied over `CAMERATA_EFFICIENCY`). See
     /// [`camerata_server::efficiency`].
     pub efficiency: Vec<String>,
+    /// `--client`: who the inspection is for, printed in the export's confidentiality line on
+    /// every page and sheet (the headless stand-in for a project's inspection-setup field).
+    /// Required and checked by [`validate_args`] before anything is read or spent, so a run
+    /// can never pay for an inspection whose export would then be refused.
+    pub client: String,
 }
 
 impl InspectArgs {
@@ -238,6 +243,12 @@ impl From<String> for InspectError {
 /// the app first, `ANTHROPIC_API_KEY` as the fallback; see [`api_key_present`]).
 pub fn validate_args(args: &InspectArgs, has_api_key: bool) -> Result<(), String> {
     args.run_controls()?;
+    let probe = ReportOptions {
+        client_name: args.client.clone(),
+        ..ReportOptions::default()
+    };
+    camerata_server::report_export::require_client_name(&probe)
+        .map_err(|e| format!("--client: {e}"))?;
     if !args.repo.is_dir() {
         return Err(format!(
             "--repo {} does not exist or is not a directory",
@@ -455,8 +466,9 @@ fn save_ledger(repo: &Path, ledger: &camerata_server::scan_ledger::ScanLedger) {
 pub async fn build_product_export_bytes(
     report: &camerata_server::onboard::SealedReport,
     corpus: Option<&camerata_rules::RuleSet>,
+    client: &str,
 ) -> Result<(String, Vec<u8>), InspectError> {
-    let released = release_product_export(report, corpus, None).await?;
+    let released = release_product_export(report, corpus, None, client).await?;
     Ok((released.stem, released.bytes))
 }
 
@@ -466,12 +478,14 @@ async fn release_product_export(
     report: &camerata_server::onboard::SealedReport,
     corpus: Option<&camerata_rules::RuleSet>,
     model: Option<camerata_server::ModelRecord>,
+    client: &str,
 ) -> Result<camerata_server::release_gate::ReleasedZip, InspectError> {
     let dispositions: HashMap<String, camerata_server::report_export::DispositionWire> =
         HashMap::new();
     let mut options = ReportOptions::default();
     options.apply_env_defaults();
     options.model = model;
+    options.client_name = client.to_string();
 
     let package = camerata_server::release_gate::build_product_package(
         report,
@@ -878,6 +892,7 @@ pub async fn run_inspect_pipeline_with(
         &report,
         corpus.as_ref(),
         Some(camerata_server::ModelRecord::anthropic(args.backend)),
+        &args.client,
     )
     .await?;
     let zip_bytes = released.bytes;
@@ -1214,6 +1229,7 @@ mod tests {
             verbose: false,
             max_cost_usd: None,
             efficiency: Vec::new(),
+            client: "Example Client Ltd".to_string(),
         }
     }
 
@@ -1416,6 +1432,19 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let args = base_args(dir.path().to_path_buf(), dir.path().to_path_buf());
         assert!(validate_args(&args, false).is_ok());
+    }
+
+    /// Confidentiality: a blank or multi-line `--client` is refused before anything is read or
+    /// spent, so a run never pays for an inspection whose export would then be refused.
+    #[test]
+    fn validate_args_rejects_a_blank_or_multi_line_client() {
+        let dir = tempfile::tempdir().unwrap();
+        for bad in ["", "   ", "Example\nClient"] {
+            let mut args = base_args(dir.path().to_path_buf(), dir.path().to_path_buf());
+            args.client = bad.to_string();
+            let err = validate_args(&args, false).expect_err("a bad --client is refused");
+            assert!(err.starts_with("--client: "), "{err}");
+        }
     }
 
     // ── the shared key resolver (the app-saved key is the key the CLI uses) ───────────

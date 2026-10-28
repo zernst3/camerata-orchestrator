@@ -130,8 +130,8 @@ pub struct Step {
 /// the button, so a reflex Enter cannot start it.
 ///
 /// Where a step's own control does not exist yet, it points at the closest one that does (the
-/// client name rides on the export panel's field; the spending cap is described beside the cost
-/// estimate). Re-point the `target` here when the real control lands.
+/// spending cap is described beside the cost estimate). Re-point the `target` here when the real
+/// control lands.
 pub const STEPS: [Step; 12] = [
     Step {
         id: "project",
@@ -158,8 +158,8 @@ pub const STEPS: [Step; 12] = [
         target: target::CLIENT_NAME,
         screen: Screen::Scan,
         title: "Client name and setup",
-        body: "The client name fills the confidentiality line on the report. Fill it in before you export.",
-        how_to_get_there: "Scan the repository first. The report fields appear below the results.",
+        body: "The client name fills the confidentiality line on every page of the report. Export stays blocked until it is set.",
+        how_to_get_there: "Scan the repository first. The client name field sits above the cost estimate.",
         advance: Advance::Next,
         focus_on_exit: ExitFocus::Control,
     },

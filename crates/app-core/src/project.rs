@@ -453,6 +453,13 @@ pub struct Project {
     /// `legacy_cli_active_key_is_ignored_and_backend_defaults_to_cli` for the migration test.
     #[serde(default)]
     pub backend: ProjectBackend,
+    /// Who the inspection is FOR: the client company named in every export's confidentiality
+    /// line ("Confidential, prepared for <client> on <date>") on every PDF page and every
+    /// workbook sheet (2026-10-24 decision). Part of the inspection setup saved with the
+    /// project, so every export fills it in without retyping; a blank name blocks the export.
+    /// Serde default = empty for projects persisted before this field existed (no migration).
+    #[serde(default)]
+    pub client_name: String,
 }
 
 /// One agent operating principle: a single imperative line the governed agent is held to (about
@@ -959,6 +966,7 @@ mod tests {
             memory: Vec::new(),
             hierarchy_schema: HierarchySchema::default(),
             backend: ProjectBackend::Cli,
+            client_name: String::new(),
             ruleset: ProjectRuleset {
                 selections: vec![sel("OLD-1")],
                 cross_repo: vec![],
@@ -999,6 +1007,7 @@ mod tests {
             memory: Vec::new(),
             hierarchy_schema: HierarchySchema::default(),
             backend: ProjectBackend::Cli,
+            client_name: String::new(),
             ruleset: ProjectRuleset {
                 selections,
                 cross_repo: vec![],
@@ -1094,6 +1103,7 @@ mod tests {
             memory: Vec::new(),
             hierarchy_schema: HierarchySchema::default(),
             backend: ProjectBackend::Cli,
+            client_name: String::new(),
             ruleset: ProjectRuleset {
                 selections: vec![],
                 cross_repo: vec![],
@@ -1178,6 +1188,7 @@ mod tests {
             memory: Vec::new(),
             hierarchy_schema: HierarchySchema::default(),
             backend: ProjectBackend::Cli,
+            client_name: String::new(),
             ruleset: ProjectRuleset {
                 custom: vec![custom("a", "A1"), custom("b", "B1")],
                 ..Default::default()
@@ -1220,6 +1231,7 @@ mod tests {
             memory: Vec::new(),
             hierarchy_schema: HierarchySchema::default(),
             backend: ProjectBackend::Cli,
+            client_name: String::new(),
             ruleset: ProjectRuleset {
                 custom: vec![custom("keep", "K"), custom("gone", "G")],
                 ..Default::default()
@@ -1255,6 +1267,7 @@ mod tests {
             memory: Vec::new(),
             hierarchy_schema: HierarchySchema::default(),
             backend: ProjectBackend::Cli,
+            client_name: String::new(),
             ruleset: ProjectRuleset::default(),
         };
         p.set_max_iterations(5);
@@ -1396,6 +1409,7 @@ mod tests {
             memory: Vec::new(),
             hierarchy_schema: HierarchySchema::default(),
             backend: ProjectBackend::Cli,
+            client_name: String::new(),
             ruleset: ProjectRuleset {
                 selections: vec![sel("R-1")],
                 cross_repo: vec![sel("INTEGRATION-API-CONTRACT-1")],
@@ -1463,6 +1477,7 @@ mod tests {
             memory: Vec::new(),
             hierarchy_schema: HierarchySchema::default(),
             backend: ProjectBackend::Cli,
+            client_name: String::new(),
             ruleset: ProjectRuleset::default(),
         };
         original.set_model_for_step(StepKind::Decomposition, "claude-opus-5".into());
@@ -1552,6 +1567,7 @@ mod tests {
             memory: Vec::new(),
             hierarchy_schema: HierarchySchema::default(),
             backend: ProjectBackend::Cli,
+            client_name: String::new(),
             ruleset: ProjectRuleset::default(),
         };
         let json = serde_json::to_string(&original).unwrap();
