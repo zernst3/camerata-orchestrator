@@ -1583,6 +1583,52 @@ fn a_package_with_every_kind_reconciles_by_severity_and_kind() {
         .contains(&"severity and kind counts"));
 }
 
+/// A clean codebase is the best case the product can report, and its tables have no rows. An empty
+/// table has no header to read the severity column from, so the reconciliation reads it as zero
+/// rows instead of refusing the export.
+#[test]
+fn a_scan_with_no_findings_reconciles_and_releases() {
+    let mut report = scan_report();
+    report.findings.clear();
+    let sealed = report.seal();
+    let options = client_options();
+    let json = build_report_json(&sealed, &HashMap::new(), None, &options);
+    let data = render_data_json(&json).expect("data.json renders");
+    let package = assemble_package(
+        &sealed,
+        &HashMap::new(),
+        None,
+        &options,
+        STEM,
+        (json, data, STAND_IN_PDF.to_vec()),
+    )
+    .expect("the package assembles");
+    let released = release(package).unwrap_or_else(|e| panic!("{e}"));
+    assert!(released
+        .report
+        .check_names()
+        .contains(&"severity and kind counts"));
+}
+
+/// An empty CSV is still checked against its JSON: rows in the JSON and none in the CSV is a
+/// disagreement, not a pass.
+#[test]
+fn an_emptied_csv_is_still_held_to_the_json_rows() {
+    let mut package = mixed_package();
+    for (path, bytes) in package.datasets.iter_mut() {
+        if path == "csv/all-findings.csv" {
+            bytes.clear();
+        }
+    }
+    let failure = blocked(package);
+    assert!(
+        count_problems(&failure)
+            .iter()
+            .any(|p| p.file == "csv/all-findings.csv" && p.location.starts_with("severity ")),
+        "{failure}"
+    );
+}
+
 /// The kind dimension is checked, not only totals: a PDF row relabelled from defect to deviation
 /// keeps every severity total equal and is still caught.
 #[test]

@@ -5190,6 +5190,24 @@ const TEMPLATE_ASSETS: [(&str, &[u8]); 7] = [
     ),
 ];
 
+/// Which fonts Typst may draw from. Production uses [`FontSources::BundledFirst`]; the
+/// embedding test uses [`FontSources::BundledOnly`] to prove the bundle alone renders the
+/// report on a machine with no Inter or JetBrains Mono installed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FontSources {
+    /// `--font-path fonts`: Typst searches the bundled files BEFORE system fonts, so Inter
+    /// and JetBrains Mono always come from the bundle, and a glyph neither has (a CJK path, an
+    /// emoji) still falls back to a system font instead of rendering as a missing box.
+    ///
+    /// Production stays on this, deliberately: every character the bundled fonts cover is drawn
+    /// from them on any machine, and forcing [`FontSources::BundledOnly`] would silently drop
+    /// the characters they lack (the multi-byte path test pins that a report keeps an accented,
+    /// CJK or emoji path and snippet). Installed fonts reach the output only for such a glyph.
+    BundledFirst,
+    /// `--font-path fonts --ignore-system-fonts`.
+    BundledOnly,
+}
+
 /// Compile `data_json` (from [`render_data_json`]) into a PDF via a bundled Typst template.
 /// Self-contained: the template
 /// text is embedded in the binary (`include_str!`), so no external file needs to ship
@@ -5200,13 +5218,8 @@ const TEMPLATE_ASSETS: [(&str, &[u8]); 7] = [
 /// cleanup on drop) with a 30s timeout, with `SOURCE_DATE_EPOCH` pinned to the report's own
 /// generation time (see [`creation_epoch`]). The template reads `data.json` via Typst's own
 /// `json()` builtin — no `--input` plumbing needed.
-///
-/// Fonts: the bundled Inter and JetBrains Mono ONLY (`--font-path fonts --ignore-system-fonts`).
-/// A client PDF must look the same whichever machine exports it, so it never draws from the
-/// exporting machine's installed fonts. A character the bundle lacks (a CJK file name, an
-/// emoji) falls back to the faces Typst itself embeds and may render as a missing-glyph box.
 pub async fn compile_pdf_from_data(data_json: &str) -> anyhow::Result<Vec<u8>> {
-    let (pdf, warnings) = run_typst(data_json).await?;
+    let (pdf, warnings) = run_typst(data_json, FontSources::BundledFirst).await?;
     if !warnings.trim().is_empty() {
         tracing::warn!(%warnings, "typst reported warnings while compiling the report");
     }
@@ -5214,7 +5227,7 @@ pub async fn compile_pdf_from_data(data_json: &str) -> anyhow::Result<Vec<u8>> {
 }
 
 /// The compile itself: the PDF bytes and Typst's stderr (its warnings, on success).
-async fn run_typst(data_json: &str) -> anyhow::Result<(Vec<u8>, String)> {
+async fn run_typst(data_json: &str, fonts: FontSources) -> anyhow::Result<(Vec<u8>, String)> {
     let tmp = tempfile::tempdir().context("could not create a temp dir for the PDF export")?;
     let data_path = tmp.path().join("data.json");
     let template_path = tmp.path().join("report.typ");
@@ -5247,8 +5260,10 @@ async fn run_typst(data_json: &str) -> anyhow::Result<(Vec<u8>, String)> {
         .arg(tmp.path())
         .arg("--font-path")
         .arg(tmp.path().join("fonts"))
-        .arg("--ignore-system-fonts")
         .kill_on_drop(true);
+    if fonts == FontSources::BundledOnly {
+        cmd.arg("--ignore-system-fonts");
+    }
     // Reproducibility: pin the PDF's creation timestamp instead of letting Typst read the wall
     // clock. Typst stamps that clock into FIVE places — the Info dict's `/CreationDate` and
     // `/ModDate`, the XMP packet's `xmp:CreateDate`, `xmp:ModifyDate`, `xmpMM:InstanceID` and
@@ -10704,9 +10719,12 @@ mod tests {
         let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &opts);
         assert!(json.brand_mark, "the kit's own brand renders the mark");
 
-        let (pdf, warnings) = run_typst(&render_data_json(&json).expect("serialize"))
-            .await
-            .expect("the report compiles from the bundled fonts alone");
+        let (pdf, warnings) = run_typst(
+            &render_data_json(&json).expect("serialize"),
+            FontSources::BundledOnly,
+        )
+        .await
+        .expect("the report compiles from the bundled fonts alone");
         assert!(
             !warnings.contains("unknown font family"),
             "a bundled family is missing: {warnings}"
@@ -10718,38 +10736,6 @@ mod tests {
                 "the PDF does not embed {face}"
             );
         }
-    }
-
-    /// A client PDF is compiled from the bundled fonts alone, so its look never depends on which
-    /// fonts the exporting machine has installed. Needs no real Typst: a recording stand-in
-    /// (scoped onto this task, never put on `PATH`) writes down the arguments it was run with.
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn a_client_pdf_is_compiled_with_system_fonts_ignored() {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = tempfile::tempdir().expect("tempdir");
-        let recorded = dir.path().join("arguments");
-        let script = dir.path().join("typst");
-        std::fs::write(
-            &script,
-            format!(
-                "#!/bin/sh\necho \"$@\" > '{}'\nexit 1\n",
-                recorded.display()
-            ),
-        )
-        .expect("write the stand-in typst");
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
-
-        let _ = TYPST_PROGRAM
-            .scope(script, compile_pdf_from_data("{}"))
-            .await;
-
-        let arguments = std::fs::read_to_string(&recorded).expect("the stand-in typst ran");
-        assert!(arguments.contains("--font-path"), "{arguments}");
-        assert!(
-            arguments.contains("--ignore-system-fonts"),
-            "installed fonts must not reach a client PDF: {arguments}"
-        );
     }
 
     /// Confidentiality (2026-10-24 decision): the marking names the client and the SCAN date

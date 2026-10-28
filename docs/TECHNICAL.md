@@ -2886,14 +2886,13 @@ thing:
   at the top of the template. The fonts (Inter for text, JetBrains Mono for code, SIL
   OFL, licence files beside them in `templates/fonts/`) and the two logo marks
   (`docs/design/brand/`) are compiled into the binary (`TEMPLATE_ASSETS`), written next
-  to the template on every compile, and passed with `--font-path fonts
-  --ignore-system-fonts`, so a client PDF never depends on the fonts installed on the
-  exporting machine (a character the bundle lacks falls back to Typst's own embedded faces
-  and may show as a missing-glyph box). The logo mark renders only when the resolved brand
-  is the brand kit's own (`BRAND_KIT_NAME`, `AuditReportJson::brand_mark`); another agency's
-  brand gets the text wordmark alone. A test compiles with system fonts ignored to prove the
-  bundle alone renders the report, and another records the arguments the production compile
-  passes.
+  to the template on every compile, and passed with `--font-path`, which Typst searches
+  before system fonts. The logo mark renders only when the resolved brand is the brand
+  kit's own (`BRAND_KIT_NAME`, `AuditReportJson::brand_mark`); another agency's brand
+  gets the text wordmark alone. A test compiles with system fonts ignored to prove the
+  bundle alone renders the report. Production does not ignore system fonts: a character the
+  bundled fonts lack (a CJK or emoji path or snippet) would otherwise be dropped from the
+  PDF, so installed fonts reach the output only for such a character.
 - **Confidentiality marking** (2026-10-24 decision): `report_export::confidentiality_marking`
   is the one producer of "Confidential, prepared for <client> on <date>" (the scan date) and
   the first page's handling note; the PDF prints them from `AuditReportJson::confidentiality`

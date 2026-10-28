@@ -2,8 +2,7 @@
 
 The PDF report embeds these fonts (W27, `docs/design/2026-10-27_pdf-brand-guide.md`). They are
 compiled into the server binary (`report_export::TEMPLATE_ASSETS`) and passed to Typst with
-`--font-path` together with `--ignore-system-fonts`, so a report never uses a font installed on
-the exporting machine.
+`--font-path`, which Typst searches before system fonts.
 
 | File | Family | Source |
 |---|---|---|

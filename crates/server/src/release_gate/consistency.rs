@@ -411,6 +411,12 @@ fn json_tally(entries: &Entries) -> Option<Result<Tally, Problem>> {
 fn csv_tally(bytes: &[u8]) -> Result<Tally, String> {
     let mut reader = csv::ReaderBuilder::new().from_reader(bytes);
     let headers = reader.headers().map_err(|e| e.to_string())?.clone();
+    // A table with no rows is written with no columns either (the header is the union of the
+    // rows' keys), so there is nothing to locate: it tallies as empty, and the JSON's rows are
+    // then held against that.
+    if headers.iter().all(str::is_empty) && reader.records().next().is_none() {
+        return Ok(Tally::new());
+    }
     let col = |name: &str| {
         headers
             .iter()
