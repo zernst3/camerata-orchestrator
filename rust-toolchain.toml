@@ -1,0 +1,7 @@
+# The one place the Rust toolchain is pinned. rustup reads it for local builds, and the CI
+# workflow reads the same `channel` line (see .github/workflows/ci.yml), so the two cannot
+# drift. Bump it deliberately, together with whatever the new toolchain's rustc and clippy
+# flag (1.99's clippy, for one, reports `double_must_use` on every `#[async_trait]` trait).
+[toolchain]
+channel = "1.95.0"
+components = ["rustfmt", "clippy"]

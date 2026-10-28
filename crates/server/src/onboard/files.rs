@@ -469,6 +469,18 @@ pub struct ExtractedRepo {
 }
 
 impl ExtractedRepo {
+    /// Put every list in path order. The directory walks list entries in whatever order the
+    /// filesystem returns them (sorted on APFS, hash order on ext4), and everything downstream
+    /// of this struct (the audit digest the model sees, finding order, which files survive a
+    /// cap) would otherwise depend on that. Sorting here makes the same tree produce the same
+    /// extraction on every filesystem.
+    fn sorted(mut self) -> Self {
+        self.files.sort_by(|a, b| a.0.cmp(&b.0));
+        self.reference_files.sort_by(|a, b| a.0.cmp(&b.0));
+        self.excluded_noise_paths.sort();
+        self
+    }
+
     /// How many ADMITTED files are Camerata's own artifacts ([`is_engine_artifact`]).
     ///
     /// Must be zero. Non-zero means the engine is about to audit its own output, which is the
@@ -539,6 +551,8 @@ fn read_local_repo_files_gitignore(
         .git_exclude(true)
         .ignore(true)
         .hidden(false)
+        // Walk in path order, so which files survive a cap is the same on every filesystem.
+        .sort_by_file_path(|a, b| a.cmp(b))
         .build();
 
     'walk: for result in walker {
@@ -652,7 +666,8 @@ fn read_local_repo_files_gitignore(
         reference_truncated: reference.truncated,
         excluded_noise: excluded_noise_paths.len(),
         excluded_noise_paths,
-    })
+    }
+    .sorted())
 }
 
 /// The full set of git-TRACKED file paths under `root` (relative, forward-slashed), via
@@ -694,7 +709,10 @@ fn read_local_repo_files_noise_denylist(
         let Ok(entries) = std::fs::read_dir(&dir) else {
             continue;
         };
-        for entry in entries.flatten() {
+        // Sorted by name, so which files survive a cap is the same on every filesystem.
+        let mut entries: Vec<_> = entries.flatten().collect();
+        entries.sort_by_key(std::fs::DirEntry::file_name);
+        for entry in entries {
             let p = entry.path();
             let Ok(ft) = entry.file_type() else { continue };
             // Path relative to the repo root, forward-slashed (matches tarball paths).
@@ -758,7 +776,8 @@ fn read_local_repo_files_noise_denylist(
         reference_truncated: reference.truncated,
         excluded_noise: excluded_noise_paths.len(),
         excluded_noise_paths,
-    })
+    }
+    .sorted())
 }
 
 #[cfg(test)]
@@ -1200,6 +1219,44 @@ mod tests {
             ),
         ]);
         assert_eq!(crate::ai_audit::build_digest(&extracted.files), expected);
+    }
+
+    /// A tree with enough files and directories, created in reverse order, that a scanner
+    /// returning filesystem order would differ from path order on at least one filesystem.
+    fn many_files_fixture(root: &std::path::Path) {
+        for dir in ["zeta", "alpha", "mid", "beta", "src/z", "src/a"] {
+            for i in (0..12).rev() {
+                write(root, &format!("{dir}/f{i:02}.ts"), "export {};\n");
+            }
+        }
+        write(root, "z-last.ts", "export {};\n");
+        write(root, "a-first.ts", "export {};\n");
+    }
+
+    fn expect_path_order(extracted: &ExtractedRepo) {
+        let order: Vec<&str> = extracted.files.iter().map(|(p, _)| p.as_str()).collect();
+        let mut sorted = order.clone();
+        sorted.sort_unstable();
+        assert_eq!(order.len(), 6 * 12 + 2, "every fixture file is admitted");
+        assert_eq!(
+            order, sorted,
+            "the scanner must return files in path order, not filesystem order"
+        );
+    }
+
+    #[test]
+    fn scan_returns_files_in_stable_sorted_order_in_a_non_git_tree() {
+        let dir = tempfile::tempdir().unwrap();
+        many_files_fixture(dir.path());
+        expect_path_order(&scan(dir.path()));
+    }
+
+    #[test]
+    fn scan_returns_files_in_stable_sorted_order_in_a_git_tree() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join(".git")).unwrap();
+        many_files_fixture(dir.path());
+        expect_path_order(&scan(dir.path()));
     }
 
     #[test]
