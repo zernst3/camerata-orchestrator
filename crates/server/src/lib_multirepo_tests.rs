@@ -189,6 +189,13 @@ mod refusal_routes {
 
     async fn post(uri: &str, body: &str) -> serde_json::Value {
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        // The maintainer's own project: without one a scan is treated as a client engagement
+        // and refused before any repo is looked at, which is a different refusal.
+        let p = state
+            .projects
+            .create("Acme", vec!["me/api".to_string()])
+            .unwrap();
+        state.projects.set_client_engagement(&p.id, false, false);
         let app = router(state);
         let resp = app
             .oneshot(
