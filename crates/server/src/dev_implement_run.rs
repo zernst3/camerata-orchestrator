@@ -2018,7 +2018,11 @@ pub async fn execute_dev_implement_run(
         .and_then(|pid| projects.get(pid))
         .map(|p| p.process_rule_config)
         .unwrap_or_default();
-    let numeric_id = uow.commit_reference_for(&story_id);
+    // A native unit's reference is `uow-<n>`, never a bare `#<n>` (which GitHub links to an
+    // unrelated issue or PR); the same config gates the message that was written for it.
+    let unit = uow.get_or_default(&story_id);
+    let vcs_config = crate::vcs_choke::config_for_unit(&vcs_config, &unit);
+    let numeric_id = unit.commit_reference();
     let commit_msg = crate::vcs_choke::compliant_machine_commit_message(
         &vcs_config,
         "feat",

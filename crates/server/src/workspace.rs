@@ -616,11 +616,16 @@ fn parse_owner_repo(url: &str) -> Option<String> {
 /// Resolve a repo's local folder (local-first, issue #33): a machine-local per-repo override
 /// path wins; otherwise fall back to the `<workspace_root>/<owner>/<repo>` convention. None
 /// when neither is available (no override and no workspace root) — that repo is unresolved.
+///
+/// `None` as well when `repo` is not an `OWNER/REPO` coordinate
+/// ([`camerata_api_types::uow::validate_repo_name`]): the repository name becomes a path under
+/// the workspace root, so `../../other` and the like never reach `join`.
 pub fn resolve_repo_dir(
     override_path: Option<&str>,
     workspace_root: Option<&str>,
     repo: &str,
 ) -> Option<PathBuf> {
+    camerata_api_types::uow::validate_repo_name(repo).ok()?;
     if let Some(p) = override_path.filter(|p| !p.trim().is_empty()) {
         return Some(PathBuf::from(p));
     }
@@ -1936,6 +1941,7 @@ pub async fn snapshot_worktree(dir: &Path, task: &str) -> anyhow::Result<Option<
 /// in `.git/config`). This is the user-triggered push from the UI; the server never
 /// calls this on its own.
 pub async fn push_branch(dir: &Path, repo: &str, branch: &str, token: &str) -> anyhow::Result<()> {
+    camerata_api_types::uow::validate_repo_name(repo).map_err(|e| anyhow::anyhow!(e))?;
     let out = git(Some(dir), &["push", &authed_url(repo, token), branch]).await?;
     if out.status.success() {
         return Ok(());
@@ -1950,6 +1956,7 @@ pub async fn pull_branch(
     branch: &str,
     token: &str,
 ) -> anyhow::Result<String> {
+    camerata_api_types::uow::validate_repo_name(repo).map_err(|e| anyhow::anyhow!(e))?;
     let out = git(
         Some(dir),
         &["pull", "--ff-only", &authed_url(repo, token), branch],
@@ -2072,6 +2079,7 @@ pub async fn open_pr_with_base(
 ) -> anyhow::Result<OpenedPr> {
     use camerata_worktracker::{HttpTransport, ReqwestTransport};
 
+    camerata_api_types::uow::validate_repo_name(repo).map_err(|e| anyhow::anyhow!(e))?;
     let (owner, _name) = repo
         .split_once('/')
         .ok_or_else(|| anyhow::anyhow!("repo must be owner/repo, got {repo}"))?;
@@ -2131,6 +2139,38 @@ pub async fn open_pr_with_base(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_repository_that_is_not_owner_slash_repo_resolves_to_no_directory() {
+        let root = "/work/root";
+        assert_eq!(
+            resolve_repo_dir(None, Some(root), "acme/api"),
+            Some(PathBuf::from("/work/root/acme/api"))
+        );
+        for bad in ["../../other", "..", "a/b/c", "acme/a pi", "/etc", "x"] {
+            assert_eq!(
+                resolve_repo_dir(None, Some(root), bad),
+                None,
+                "{bad:?} must not become a path under the workspace root"
+            );
+            assert_eq!(
+                resolve_repo_dir(Some("/configured/path"), Some(root), bad),
+                None,
+                "{bad:?} is refused even when a path override exists"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn push_and_pull_refuse_a_repository_that_is_not_owner_slash_repo() {
+        let dir = std::env::temp_dir();
+        for bad in ["../../other", "a/b/c", "acme/a pi"] {
+            let err = push_branch(&dir, bad, "main", "tok").await.unwrap_err();
+            assert!(err.to_string().contains("not a valid repository"), "{err}");
+            let err = pull_branch(&dir, bad, "main", "tok").await.unwrap_err();
+            assert!(err.to_string().contains("not a valid repository"), "{err}");
+        }
+    }
 
     #[test]
     fn repo_dir_nests_owner_and_repo_under_root() {

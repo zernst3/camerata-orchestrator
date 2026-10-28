@@ -1670,6 +1670,12 @@ pub fn router(state: AppState) -> Router {
             "/api/credentials/:name",
             post(set_credential).delete(delete_credential),
         )
+        // A request about an unknown native-shaped (`uow-...`) unit is a 404, never a write
+        // that creates a phantom unit.
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            crate::native_units::unknown_native_unit_gate,
+        ))
         .with_state(state)
 }
 
@@ -14204,6 +14210,7 @@ async fn uow_set_branch(
     let project = state.projects.active();
     if let Some(reason) = crate::run_target::project_membership_refusal(
         &story_id,
+        state.uow.repo_for(&story_id).as_deref(),
         project.as_ref().map(|p| p.repos.as_slice()),
     ) {
         return (
@@ -14302,6 +14309,18 @@ async fn uow_set_intake_repos(
             }
         }
     }
+    // A scoped repository becomes a directory under the workspace root and a push URL, so each
+    // one must be an `OWNER/REPO` coordinate (the one shared validator) before anything is
+    // recorded.
+    for scope in &req.repos {
+        if let Err(reason) = camerata_api_types::uow::validate_repo_name(&scope.repo) {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "invalid repository", "reason": reason })),
+            )
+                .into_response();
+        }
+    }
     // Every in-scope repository must belong to the active project (the same check as the run
     // and the branch record), so a scope cannot pull another project's clones into this unit.
     let project_repos = active_project_repos(&state);
@@ -14322,7 +14341,14 @@ async fn uow_set_intake_repos(
                 .into_response();
         }
     }
-    Json(state.uow.set_intake_repos(&story_id, req.repos)).into_response()
+    match state.uow.set_intake_repos(&story_id, req.repos) {
+        Ok(uow) => Json(uow).into_response(),
+        Err(reason) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "invalid repository", "reason": reason })),
+        )
+            .into_response(),
+    }
 }
 
 /// Per-repo Ship result for one in-scope repo. Part of the [`UowIntakeShipResponse`].
@@ -14395,7 +14421,10 @@ async fn uow_intake_ship(
 
     // GAP-2: Camerata authors these Ship PRs, so make their title/body COMPLIANT with the
     // project's active process rules and HARD-BLOCK gate them at each PR-open site.
-    let vcs_config = process_rule_config_for(&state, &active_project_id(&state));
+    let vcs_config = crate::vcs_choke::config_for_unit(
+        &process_rule_config_for(&state, &active_project_id(&state)),
+        &uow,
+    );
     let numeric_id = uow.commit_reference();
 
     // ── Multi-repo path: intake.repos has explicit selections ─────────────────
@@ -15988,7 +16017,10 @@ async fn uow_pr_open(
     // GAP-2 chokepoint. Camerata authors this PR's title + body, so it makes them COMPLIANT
     // with the project's active process rules and HARD-BLOCK gates them. A non-compliant
     // machine PR surfaces as an error here rather than opening an ungated PR.
-    let vcs_config = process_rule_config_for(&state, &active_project_id(&state));
+    let vcs_config = crate::vcs_choke::config_for_unit(
+        &process_rule_config_for(&state, &active_project_id(&state)),
+        &uow,
+    );
     let numeric_id = uow.commit_reference();
     let summary = uow
         .work_item

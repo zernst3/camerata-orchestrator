@@ -48,6 +48,13 @@ fn seg(id: &str) -> String {
         .replace('#', "%23")
 }
 
+/// `true` when `text` has a `#` directly followed by a digit anywhere.
+fn has_hash_number(text: &str) -> bool {
+    text.chars()
+        .zip(text.chars().skip(1))
+        .any(|(a, b)| a == '#' && b.is_ascii_digit())
+}
+
 fn state_with_project(repos: &[&str]) -> AppState {
     let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
     state
@@ -145,6 +152,188 @@ async fn a_native_unit_needs_a_title_and_one_of_the_projects_repositories() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
+}
+
+/// A repository that is not `OWNER/REPO` never reaches a path or a push URL: it is refused at
+/// creation whether or not the project lists repositories.
+#[tokio::test]
+async fn a_native_unit_refuses_a_repository_that_is_not_owner_slash_repo() {
+    for repos in [&["acme/api"][..], &[][..]] {
+        let state = state_with_project(repos);
+        let app = router(state.clone());
+        for bad in [
+            "../../other",
+            "..",
+            "a/b/c",
+            "acme/a pi",
+            "acme/",
+            "/etc/passwd",
+        ] {
+            let (status, body) = send(
+                &app,
+                "POST",
+                "/api/uow/native",
+                serde_json::json!({ "title": "T", "repo": bad }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{bad:?}: {body}");
+            assert!(
+                body["error"].as_str().unwrap().contains("OWNER/REPO"),
+                "{bad:?}: {body}"
+            );
+        }
+        assert!(state.uow.list().is_empty(), "nothing was created");
+    }
+}
+
+/// The Intake scope takes the same check, before the project-membership check.
+#[tokio::test]
+async fn the_intake_scope_refuses_a_repository_that_is_not_owner_slash_repo() {
+    let state = state_with_project(&[]);
+    let app = router(state.clone());
+    let (_, created) = send(
+        &app,
+        "POST",
+        "/api/uow/native",
+        serde_json::json!({ "title": "T", "repo": "acme/api" }),
+    )
+    .await;
+    let id = created["uow_id"].as_str().unwrap().to_string();
+    for bad in ["../../other", "a/b/c", "acme/a pi"] {
+        let (status, body) = send(
+            &app,
+            "POST",
+            &format!("/api/uow/{}/intake/repos", seg(&id)),
+            serde_json::json!({ "repos": [{ "repo": bad, "branch": { "mode": "new_from_base" } }] }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{bad:?}: {body}");
+        assert!(state.uow.get(&id).unwrap().intake.repos.is_empty());
+    }
+    let (status, _) = send(
+        &app,
+        "POST",
+        &format!("/api/uow/{}/intake/repos", seg(&id)),
+        serde_json::json!({ "repos": [{ "repo": "acme/api", "branch": { "mode": "new_from_base" } }] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+/// A write that names a native-shaped key the store never created is a 404 that creates
+/// nothing. Before, every `/api/uow/:id/*` write materialized a unit for any id.
+#[tokio::test]
+async fn a_write_for_an_unknown_native_key_creates_no_phantom_unit() {
+    let state = state_with_project(&["acme/api"]);
+    let app = router(state.clone());
+    let writes = [
+        (
+            "POST",
+            "/api/uow/uow-ghost-1/branch",
+            serde_json::json!({ "branch": "b" }),
+        ),
+        (
+            "POST",
+            "/api/uow/uow-ghost-1/status",
+            serde_json::json!({ "status": "in_progress" }),
+        ),
+        (
+            "POST",
+            "/api/uow/uow-ghost-1/history",
+            serde_json::json!({ "kind": "note", "text": "x" }),
+        ),
+        (
+            "POST",
+            "/api/uow/uow-ghost-1/intake/context",
+            serde_json::json!({ "context": "x" }),
+        ),
+        (
+            "POST",
+            "/api/uow/uow-ghost-1/intake/repos",
+            serde_json::json!({ "repos": [{ "repo": "acme/api", "branch": { "mode": "new_from_base" } }] }),
+        ),
+        (
+            "POST",
+            "/api/stories/uow-ghost-1/run",
+            serde_json::json!({}),
+        ),
+        // Percent-encoding does not get around it.
+        (
+            "POST",
+            "/api/uow/%75ow-ghost-1/branch",
+            serde_json::json!({ "branch": "b" }),
+        ),
+    ];
+    for (method, uri, body) in writes {
+        let (status, resp) = send(&app, method, uri, body).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{uri}: {resp}");
+    }
+    assert!(
+        state.uow.get("uow-ghost-1").is_none(),
+        "no unit was materialized for the unknown key"
+    );
+    assert!(state.uow.list().is_empty());
+
+    // A real native unit is written to normally.
+    let (_, created) = send(
+        &app,
+        "POST",
+        "/api/uow/native",
+        serde_json::json!({ "title": "T", "repo": "acme/api" }),
+    )
+    .await;
+    let id = created["uow_id"].as_str().unwrap().to_string();
+    let (status, _) = send(
+        &app,
+        "POST",
+        &format!("/api/uow/{}/history", seg(&id)),
+        serde_json::json!({ "kind": "note", "text": "hello" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Other key shapes keep their create-on-write behaviour (GitHub issue keys, demo ids).
+    let (status, _) = send(
+        &app,
+        "POST",
+        &format!("/api/uow/{}/history", seg("acme/api#9")),
+        serde_json::json!({ "kind": "note", "text": "hello" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+/// Native numbers are not reused after a delete, through the HTTP surface.
+#[tokio::test]
+async fn deleting_a_native_unit_does_not_free_its_number() {
+    let state = state_with_project(&["acme/api"]);
+    let app = router(state.clone());
+    let create = |title: &'static str| {
+        let app = app.clone();
+        async move {
+            send(
+                &app,
+                "POST",
+                "/api/uow/native",
+                serde_json::json!({ "title": title, "repo": "acme/api" }),
+            )
+            .await
+            .1
+        }
+    };
+    let first = create("one").await;
+    let second = create("two").await;
+    assert_eq!(first["native_number"], 1);
+    assert_eq!(second["native_number"], 2);
+    let (status, _) = send(
+        &app,
+        "DELETE",
+        &format!("/api/uow/{}", seg(second["uow_id"].as_str().unwrap())),
+        serde_json::Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(create("three").await["native_number"], 3);
 }
 
 // ── End to end through the run path with a fake agent ──────────────────────────────────
@@ -324,8 +513,13 @@ async fn a_native_unit_runs_end_to_end_with_a_fake_agent() {
     let message = git(clone.path(), &["log", "-1", "--format=%B", &branch]);
     assert!(message.starts_with("feat: implement story"), "{message}");
     assert!(
-        message.contains("Refs #1."),
-        "native number as the story ref: {message}"
+        message.contains("Refs uow-1."),
+        "native number as the story ref, in the form that links to nothing: {message}"
+    );
+    assert!(
+        !has_hash_number(&message),
+        "a native unit's commit must not carry a bare #<n> (GitHub links it to issue or PR n): \
+         {message}"
     );
     assert_eq!(
         git(clone.path(), &["show", &format!("{branch}:IMPLEMENTED.md")]),

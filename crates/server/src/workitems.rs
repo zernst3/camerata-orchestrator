@@ -441,12 +441,21 @@ mod tests {
             .contains("u64"));
     }
 
-    /// Unit keys are opaque outside this adapter: no other server source splits a key on `#`
-    /// to find a repository or an issue number. Every other site reads the unit's own fields.
+    /// Unit keys are opaque outside this adapter: no source in the workspace splits a key on
+    /// `#` to find a repository or an issue number, with any of `split`, `rsplit`, `splitn`,
+    /// `rsplitn`, `split_once`, `rsplit_once`, `find` or `rfind`, in code or in tests. Every
+    /// other site reads the unit's own fields (`UnitOfWork::repo`, `external_ref`).
+    ///
+    /// Scans every crate's `src` and `tests` folders except two whose `#` is not a unit key
+    /// (`checks`: comment markers in scanned source; `source-check`: URL fragments). This file
+    /// is the GitHub adapter and is exempt.
     #[test]
     fn unit_keys_are_split_on_hash_only_in_the_github_adapter() {
         fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
-            for entry in std::fs::read_dir(dir).unwrap() {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return;
+            };
+            for entry in entries {
                 let path = entry.unwrap().path();
                 if path.is_dir() {
                     walk(&path, out);
@@ -455,26 +464,61 @@ mod tests {
                 }
             }
         }
-        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let crates = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
         let mut files = Vec::new();
-        walk(&src, &mut files);
-        let patterns = [
-            concat!("rsplit_once(", "'#'", ")"),
-            concat!("split_once(", "'#'", ")"),
-            concat!("rfind(", "'#'", ")"),
-        ];
-        let offenders: Vec<String> = files
+        for krate in std::fs::read_dir(&crates).unwrap() {
+            let krate = krate.unwrap().path();
+            let name = krate.file_name().unwrap().to_string_lossy().into_owned();
+            if matches!(name.as_str(), "checks" | "source-check") {
+                continue;
+            }
+            walk(&krate.join("src"), &mut files);
+            walk(&krate.join("tests"), &mut files);
+        }
+        assert!(
+            files.len() > 100,
+            "the scan must actually see the workspace, saw {} files",
+            files.len()
+        );
+        let mut patterns: Vec<String> = Vec::new();
+        for method in [
+            "split",
+            "rsplit",
+            "split_once",
+            "rsplit_once",
+            "split_terminator",
+            "find",
+            "rfind",
+        ] {
+            for quote in ['\'', '"'] {
+                patterns.push(format!("{method}({quote}#{quote}"));
+            }
+        }
+        for method in ["splitn", "rsplitn"] {
+            for n in 1..=4 {
+                for quote in ['\'', '"'] {
+                    patterns.push(format!("{method}({n}, {quote}#{quote}"));
+                }
+            }
+        }
+        let mut offenders: Vec<String> = Vec::new();
+        for file in files
             .iter()
-            .filter(|f| !f.ends_with("workitems.rs"))
-            .filter(|f| {
-                let text = std::fs::read_to_string(f).unwrap();
-                patterns.iter().any(|p| text.contains(p))
-            })
-            .map(|f| f.display().to_string())
-            .collect();
+            .filter(|f| !f.ends_with("server/src/workitems.rs"))
+        {
+            let text = std::fs::read_to_string(file).unwrap();
+            for (n, line) in text.lines().enumerate() {
+                if line.trim_start().starts_with("//") {
+                    continue;
+                }
+                if patterns.iter().any(|p| line.contains(p.as_str())) {
+                    offenders.push(format!("{}:{}", file.display(), n + 1));
+                }
+            }
+        }
         assert!(
             offenders.is_empty(),
-            "split unit keys on `#` only in workitems.rs; found in: {offenders:?}"
+            "split unit keys on `#` only in workitems.rs; found at: {offenders:#?}"
         );
     }
 

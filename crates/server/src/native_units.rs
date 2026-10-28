@@ -9,9 +9,27 @@
 //! behind it so the governed run has a spec to read. From there it goes through the same
 //! intake, investigation, decision gate, run, branch and commit as an issue-backed unit.
 //! Push still needs a remote (and a token to push over HTTPS); nothing needs an issue.
+//!
+//! Push and PR need the unit's repository as `OWNER/REPO`: the push URL
+//! (`https://github.com/OWNER/REPO.git`), the PR API call and the local clone path under the
+//! workspace root are all built from it. The one shared validator
+//! ([`camerata_api_types::uow::validate_repo_name`]) checks that shape wherever a repository
+//! enters a unit (creation here, the Intake repo scope, a unit's repository fallback), so a
+//! name like `../../other`, one with whitespace or one with extra separators is refused with
+//! a 400 instead of reaching a path or a URL. A native unit with no repository can still be
+//! created; it picks one at Intake before it runs.
+//!
+//! A native unit's commits and PRs refer to it as `uow-<number>` (see
+//! [`crate::vcs_choke::config_for_unit`]), never `#<number>`: GitHub would link a bare `#3` to
+//! issue or pull request 3 of the repository.
+//!
+//! The store hands out `uow-` keys only through creation. A request that names an unknown
+//! `uow-` key ([`unknown_native_unit_gate`]) is answered 404 and creates nothing, so no
+//! number-less phantom unit can appear and be mistaken for a native one.
 
-use axum::extract::State;
+use axum::extract::{Request, State};
 use axum::http::StatusCode;
+use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use camerata_worktracker::{CanonicalStory, FeatureStatus};
@@ -56,9 +74,15 @@ pub(crate) async fn uow_native_create(
         .map(str::trim)
         .filter(|r| !r.is_empty())
         .map(str::to_string);
+    if let Some(repo) = repo.as_deref() {
+        if let Err(reason) = camerata_api_types::uow::validate_repo_name(repo) {
+            return bad(reason);
+        }
+    }
     let project = state.projects.active();
     if let (Some(repo), Some(p)) = (repo.as_deref(), project.as_ref()) {
-        if !p.repos.is_empty() && !p.repos.iter().any(|r| r == repo) {
+        // The same membership test the run, the branch record and the Intake scope use.
+        if !crate::run_target::repo_in_project(repo, Some(p.repos.as_slice())) {
             return bad(format!(
                 "`{repo}` is not one of this project's repositories ({})",
                 p.repos.join(", ")
@@ -66,7 +90,10 @@ pub(crate) async fn uow_native_create(
         }
     }
 
-    let uow = state.uow.create_native(repo, project.map(|p| p.id));
+    let uow = match state.uow.create_native(repo, project.map(|p| p.id)) {
+        Ok(uow) => uow,
+        Err(reason) => return bad(reason),
+    };
     let story = CanonicalStory {
         id: uow.story_id.clone(),
         // Native: tracked by Camerata itself, linked to no board.
@@ -91,6 +118,59 @@ pub(crate) async fn uow_native_create(
         "native_number": uow.native_number,
     }))
     .into_response()
+}
+
+/// The unit key a request path addresses: the segment after `/api/uow/` or `/api/stories/`,
+/// percent-decoded. `None` for any other path.
+fn unit_key_in_path(path: &str) -> Option<String> {
+    let rest = path
+        .strip_prefix("/api/uow/")
+        .or_else(|| path.strip_prefix("/api/stories/"))?;
+    let segment = rest.split('/').next()?;
+    if segment.is_empty() {
+        return None;
+    }
+    let bytes = segment.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let hex = |b: u8| (b as char).to_digit(16);
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let (Some(h), Some(l)) = (hex(bytes[i + 1]), hex(bytes[i + 2])) {
+                out.push((h * 16 + l) as u8);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    Some(String::from_utf8_lossy(&out).into_owned())
+}
+
+/// Middleware: a request about a unit whose key has the native shape (`uow-...`) but which the
+/// store never created is answered 404, whatever the method. Without this, a write such as
+/// `POST /api/uow/uow-guess/branch` would materialize a unit with that key (every store write
+/// creates a missing unit), a number-less look-alike of a native unit. Keys of other shapes
+/// keep their long-standing create-on-write behaviour.
+pub(crate) async fn unknown_native_unit_gate(
+    State(state): State<AppState>,
+    request: Request,
+    next: Next,
+) -> Response {
+    if let Some(key) = unit_key_in_path(request.uri().path()) {
+        if key.starts_with("uow-") && state.uow.get(&key).is_none() {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({
+                    "error": "no such unit of work",
+                    "story_id": key,
+                })),
+            )
+                .into_response();
+        }
+    }
+    next.run(request).await
 }
 
 #[cfg(test)]

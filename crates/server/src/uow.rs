@@ -279,6 +279,12 @@ pub struct UnitOfWork {
     pub updated: String,
 }
 
+/// The digits of a legacy demo story key: `story-<digits>` and nothing else.
+fn legacy_demo_number(key: &str) -> Option<&str> {
+    key.strip_prefix("story-")
+        .filter(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
+}
+
 impl UnitOfWork {
     /// A new unit keyed `story_id`, with every other field at its default except the tracker
     /// link a legacy GitHub issue key implies (see [`Self::adopt_legacy_github_key`]). Every
@@ -334,7 +340,19 @@ impl UnitOfWork {
             [only] if !only.repo.trim().is_empty() => Some(only.repo.as_str()),
             _ => None,
         };
-        own.or_else(tracked).or_else(sole_scoped)
+        let candidate = own.or_else(tracked).or_else(sole_scoped)?;
+        // The repository becomes a directory under the workspace root and a push URL, so a
+        // value that is not `OWNER/REPO` (from a hand-edited record, a tracker container or a
+        // scope) is treated as no repository at all.
+        camerata_api_types::uow::validate_repo_name(candidate).ok()?;
+        Some(candidate)
+    }
+
+    /// `true` for a NATIVE unit: Camerata tracks it itself (it has its own number and no
+    /// tracker item). A unit with only a `uow-` key and no number is not native; it is a
+    /// phantom the store never numbered.
+    pub fn is_native(&self) -> bool {
+        self.external_ref.is_none() && self.native_number.is_some()
     }
 
     /// Where this unit is tracked: the tracker item's provider, or [`Provider::Native`] when
@@ -356,21 +374,22 @@ impl UnitOfWork {
         })
     }
 
-    /// The numeric story-id reference written into Camerata's commit and PR messages:
-    /// [`Self::reference_number`], else the trailing digits of the key (a legacy demo id such
-    /// as `story-42`). Empty when there is none, which the commit gate reports when the
-    /// project requires a story id.
+    /// The numeric part of the story-id reference written into Camerata's commit and PR
+    /// messages: [`Self::reference_number`], else the digits of a legacy demo key
+    /// (`story-42`, and only that exact shape). Empty when there is none, which the commit
+    /// gate reports when the project requires a story id; a reference is never fabricated
+    /// from a key (a `uow-` key without a number, a draft key ending in digits).
+    ///
+    /// A native unit's number is NOT a tracker number, so it must not be written as `#<n>`:
+    /// GitHub would link that to issue or pull request `n`. Callers pair it with
+    /// [`crate::vcs_choke::config_for_unit`], which gives a native unit the `uow-<n>` form.
     pub fn commit_reference(&self) -> String {
         if let Some(n) = self.reference_number() {
             return n.to_string();
         }
-        let tail: Vec<char> = self
-            .story_id
-            .chars()
-            .rev()
-            .take_while(|c| c.is_ascii_digit())
-            .collect();
-        tail.into_iter().rev().collect()
+        legacy_demo_number(&self.story_id)
+            .map(str::to_string)
+            .unwrap_or_default()
     }
 
     /// `true` when this UoW has an evidence record with a critical scoped-scan finding
@@ -423,10 +442,24 @@ pub enum ReviewOutcome {
     NoNote,
 }
 
+/// The store file as written: the units plus the native-number counter. Older files held
+/// only the unit map; [`UowStore::try_at`] still reads them.
+#[derive(serde::Serialize)]
+struct StoreFileRef<'a> {
+    version: u32,
+    next_native_number: u64,
+    units: &'a HashMap<String, UnitOfWork>,
+}
+
 #[derive(Clone, Default)]
 pub struct UowStore {
     path: Option<Arc<PathBuf>>,
     mem: Arc<Mutex<HashMap<String, UnitOfWork>>>,
+    /// The next native unit number to hand out. Monotonic: it only ever goes up, so deleting
+    /// a native unit never frees its number for reuse (a commit or PR that already carries
+    /// `uow-<n>` keeps pointing at the same unit). Persisted in the store file next to the
+    /// units. Lock order: `mem` first, then this.
+    next_native: Arc<Mutex<u64>>,
     /// The central artifact store backing decision-record + investigation-note
     /// history. `None` for an in-memory store with no artifact backing (the inline
     /// `decisions` field is then authoritative).
@@ -456,25 +489,99 @@ impl UowStore {
     }
 
     /// Persist to (and rehydrate from) `path`.
+    ///
+    /// # Panics
+    ///
+    /// When the file exists but cannot be read or holds a record that does not parse
+    /// ([`Self::try_at`] reports it). The server refuses to start rather than load an empty
+    /// store: the next write would replace the file and silently delete every unit in it.
     pub fn at(path: PathBuf) -> Self {
-        let mut mem: HashMap<String, UnitOfWork> = if let Ok(s) = std::fs::read_to_string(&path) {
-            serde_json::from_str(&s).unwrap_or_default()
-        } else {
-            HashMap::new()
+        match Self::try_at(path) {
+            Ok(store) => store,
+            Err(e) => {
+                eprintln!("[camerata] refusing to start: {e}");
+                panic!("refusing to start: {e}");
+            }
+        }
+    }
+
+    /// Like [`Self::at`], reporting a bad store file instead of panicking. A missing file is
+    /// an empty store. A file that cannot be read, is not a JSON object, or holds a record
+    /// that does not deserialize is an `Err` naming every bad record; the file is left
+    /// untouched so it can be repaired by hand.
+    ///
+    /// The file holds either the current envelope (`version`, `next_native_number`, `units`)
+    /// or the legacy shape (the unit map itself), which still loads.
+    pub fn try_at(path: PathBuf) -> Result<Self, String> {
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(e) => return Err(format!("cannot read {}: {e}", path.display())),
         };
+        let mut mem: HashMap<String, UnitOfWork> = HashMap::new();
+        let mut stored_next = 0u64;
+        if !text.trim().is_empty() {
+            let value: serde_json::Value = serde_json::from_str(&text)
+                .map_err(|e| format!("{} is not valid JSON: {e}", path.display()))?;
+            let serde_json::Value::Object(top) = value else {
+                return Err(format!("{} is not a JSON object", path.display()));
+            };
+            let is_envelope = top.get("version").is_some()
+                && top.get("units").is_some_and(serde_json::Value::is_object);
+            let (records, next) = if is_envelope {
+                let units = match top.get("units") {
+                    Some(serde_json::Value::Object(units)) => units.clone(),
+                    _ => serde_json::Map::new(),
+                };
+                let next = top
+                    .get("next_native_number")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0);
+                (units, next)
+            } else {
+                (top, 0)
+            };
+            stored_next = next;
+            let mut bad: Vec<String> = Vec::new();
+            for (key, record) in records {
+                match serde_json::from_value::<UnitOfWork>(record) {
+                    Ok(uow) => {
+                        mem.insert(key, uow);
+                    }
+                    Err(e) => bad.push(format!("`{key}`: {e}")),
+                }
+            }
+            if !bad.is_empty() {
+                bad.sort();
+                return Err(format!(
+                    "{} holds {} record(s) that do not parse ({}). The file was not changed; \
+                     repair or remove those records and start again.",
+                    path.display(),
+                    bad.len(),
+                    bad.join("; ")
+                ));
+            }
+        }
         // Records written before units carried their own repository and tracker link get
         // them from their GitHub issue key (in memory; persisted on the next write).
         for uow in mem.values_mut() {
             uow.adopt_legacy_github_key();
         }
-        Self {
+        let highest = mem
+            .values()
+            .filter_map(|u| u.native_number)
+            .max()
+            .unwrap_or(0);
+        let next_native = stored_next.max(highest + 1).max(1);
+        Ok(Self {
             path: Some(Arc::new(path)),
             mem: Arc::new(Mutex::new(mem)),
+            next_native: Arc::new(Mutex::new(next_native)),
             artifacts: None,
             runtime: None,
             post_story_hook: None,
             workspace_root: None,
-        }
+        })
     }
 
     /// Attach a central [`ArtifactStore`] so decision records and investigation
@@ -724,7 +831,15 @@ impl UowStore {
     fn flush(&self) {
         let Some(p) = &self.path else { return };
         let Ok(map) = self.mem.lock() else { return };
-        if let Ok(s) = serde_json::to_string(&*map) {
+        let Ok(next) = self.next_native.lock() else {
+            return;
+        };
+        let file = StoreFileRef {
+            version: 2,
+            next_native_number: *next,
+            units: &map,
+        };
+        if let Ok(s) = serde_json::to_string(&file) {
             let _ = std::fs::write(p.as_ref(), s);
         }
     }
@@ -806,24 +921,40 @@ impl UowStore {
     }
 
     /// Create a NATIVE unit of work: tracked by Camerata itself, with no board and no tracker
-    /// item. The key is `uow-<token>`; the unit gets the next native number (one more than
-    /// the highest in the store), the repository it works in (`None` to pick it at Intake),
-    /// and the creating project. Persists immediately and returns the unit.
-    pub fn create_native(&self, repo: Option<String>, project_id: Option<String>) -> UnitOfWork {
+    /// item. The key is `uow-<token>`; the unit gets the next native number (a counter that
+    /// only goes up and is saved with the store, so a deleted unit's number is never handed
+    /// out again), the repository it works in (`None` to pick it at Intake), and the creating
+    /// project. Persists immediately and returns the unit.
+    ///
+    /// # Errors
+    ///
+    /// When `repo` is given but is not an `OWNER/REPO` coordinate
+    /// ([`camerata_api_types::uow::validate_repo_name`]); nothing is created.
+    pub fn create_native(
+        &self,
+        repo: Option<String>,
+        project_id: Option<String>,
+    ) -> Result<UnitOfWork, String> {
+        let repo = repo.map(|r| r.trim().to_string()).filter(|r| !r.is_empty());
+        if let Some(repo) = repo.as_deref() {
+            camerata_api_types::uow::validate_repo_name(repo)?;
+        }
         let id = format!("uow-{}", Self::next_draft_token());
         let now = Self::now_rfc3339();
         let uow = {
             let mut map = self.mem.lock().expect("uow mutex poisoned");
-            let next_number = map
+            let mut next = self.next_native.lock().expect("uow counter poisoned");
+            let highest = map
                 .values()
                 .filter_map(|u| u.native_number)
                 .max()
-                .unwrap_or(0)
-                + 1;
+                .unwrap_or(0);
+            let number = (*next).max(highest + 1).max(1);
+            *next = number + 1;
             let uow = UnitOfWork {
                 story_id: id.clone(),
-                repo: repo.filter(|r| !r.trim().is_empty()),
-                native_number: Some(next_number),
+                repo,
+                native_number: Some(number),
                 project_id,
                 updated: now,
                 ..Default::default()
@@ -832,7 +963,7 @@ impl UowStore {
             uow
         };
         self.flush();
-        uow
+        Ok(uow)
     }
 
     /// Create a blank DRAFT UoW with an empty authoring state and no work item.
@@ -1141,7 +1272,19 @@ impl UowStore {
     /// Replace the per-story repo/branch scope (R6). Out-of-scope repos are dropped from
     /// the in-scope set entirely (the absence of a repo IS its out-of-scope state). Creates
     /// the UoW if needed. Returns the updated UoW. Persists.
-    pub fn set_intake_repos(&self, story_id: &str, repos: Vec<RepoScope>) -> UnitOfWork {
+    ///
+    /// # Errors
+    ///
+    /// When any scoped repository is not an `OWNER/REPO` coordinate
+    /// ([`camerata_api_types::uow::validate_repo_name`]); nothing is recorded.
+    pub fn set_intake_repos(
+        &self,
+        story_id: &str,
+        repos: Vec<RepoScope>,
+    ) -> Result<UnitOfWork, String> {
+        for scope in &repos {
+            camerata_api_types::uow::validate_repo_name(&scope.repo)?;
+        }
         let now = Self::now_rfc3339();
         let updated = {
             let mut map = self.mem.lock().expect("uow mutex poisoned");
@@ -1155,7 +1298,7 @@ impl UowStore {
             uow.clone()
         };
         self.flush();
-        updated
+        Ok(updated)
     }
 
     /// Append one turn to the investigation/refinement agent chat transcript (3-phase
@@ -2154,9 +2297,15 @@ mod tests {
         store.append_history("acme/api#42", "note", "touch");
         let raw: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(raw["acme/api#42"]["repo"], "acme/api");
-        assert_eq!(raw["acme/api#42"]["external_ref"]["provider"], "github");
-        assert_eq!(raw["acme/api#42"]["external_ref"]["external_id"], "42");
+        assert_eq!(raw["units"]["acme/api#42"]["repo"], "acme/api");
+        assert_eq!(
+            raw["units"]["acme/api#42"]["external_ref"]["provider"],
+            "github"
+        );
+        assert_eq!(
+            raw["units"]["acme/api#42"]["external_ref"]["external_id"],
+            "42"
+        );
     }
 
     /// A unit created implicitly for a GitHub issue key (the from-work-item path) carries the
@@ -2175,8 +2324,10 @@ mod tests {
     #[test]
     fn create_native_assigns_key_number_and_repo_with_no_tracker() {
         let store = UowStore::new();
-        let a = store.create_native(Some("acme/api".to_string()), Some("p1".to_string()));
-        let b = store.create_native(None, Some("p1".to_string()));
+        let a = store
+            .create_native(Some("acme/api".to_string()), Some("p1".to_string()))
+            .unwrap();
+        let b = store.create_native(None, Some("p1".to_string())).unwrap();
         assert!(a.story_id.starts_with("uow-"), "native key: {}", a.story_id);
         assert_ne!(a.story_id, b.story_id);
         assert_eq!(a.provider(), Provider::Native);
@@ -2221,6 +2372,204 @@ mod tests {
         assert_eq!(uow.repo(), Some("tracked/repo"));
         uow.repo = Some("own/repo".to_string());
         assert_eq!(uow.repo(), Some("own/repo"));
+    }
+
+    // ── Review fixes: references, repositories, counter, loading ───────────────
+
+    /// A reference is never fabricated from a key: only a legacy demo key `story-<digits>`
+    /// yields its digits. A `uow-` key without a number (a phantom), a draft key and other
+    /// look-alikes yield nothing, so the commit gate reports the missing reference instead of
+    /// the unit quoting some other piece of work's number.
+    #[test]
+    fn commit_reference_is_never_fabricated_from_a_key() {
+        assert_eq!(UnitOfWork::keyed("story-9").commit_reference(), "9");
+        for key in [
+            "uow-3",
+            "uow-1a2b3c-7",
+            "uow-ghost",
+            "draft-12",
+            "CAM-99",
+            "S-1",
+            "story-",
+            "story-9x",
+            "xstory-9",
+            "acme/api#",
+        ] {
+            assert_eq!(
+                UnitOfWork::keyed(key).commit_reference(),
+                "",
+                "key {key:?} must not yield a reference"
+            );
+        }
+        // A phantom native-shaped unit (created by a stray write) is not native and has none.
+        let store = UowStore::new();
+        let phantom = store.get_or_create("uow-ghost-7");
+        assert!(!phantom.is_native());
+        assert_eq!(phantom.commit_reference(), "");
+        // A real native unit and a GitHub unit keep theirs.
+        let native = store.create_native(None, None).unwrap();
+        assert!(native.is_native());
+        assert_eq!(native.commit_reference(), "1");
+        assert_eq!(UnitOfWork::keyed("o/r#20").commit_reference(), "20");
+    }
+
+    /// Deleting a native unit never frees its number: the next unit gets a higher one.
+    #[test]
+    fn native_numbers_are_not_reused_after_a_delete() {
+        let store = UowStore::new();
+        let one = store.create_native(None, None).unwrap();
+        let two = store.create_native(None, None).unwrap();
+        assert_eq!((one.native_number, two.native_number), (Some(1), Some(2)));
+        assert!(store.delete(&two.story_id));
+        let three = store.create_native(None, None).unwrap();
+        assert_eq!(
+            three.native_number,
+            Some(3),
+            "the number of the deleted unit is not handed out again"
+        );
+        assert!(store.delete(&one.story_id));
+        assert!(store.delete(&three.story_id));
+        assert_eq!(
+            store.create_native(None, None).unwrap().native_number,
+            Some(4),
+            "even with the store empty the counter keeps going"
+        );
+    }
+
+    /// The counter is saved in the store file, so it survives a restart even when the unit
+    /// that held the highest number was deleted before it.
+    #[test]
+    fn the_native_counter_survives_a_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("uow.json");
+        let store = UowStore::at(path.clone());
+        let a = store.create_native(None, None).unwrap();
+        let b = store.create_native(None, None).unwrap();
+        assert_eq!((a.native_number, b.native_number), (Some(1), Some(2)));
+        assert!(store.delete(&b.story_id));
+
+        let reloaded = UowStore::at(path.clone());
+        assert_eq!(reloaded.list().len(), 1);
+        let c = reloaded.create_native(None, None).unwrap();
+        assert_eq!(c.native_number, Some(3), "2 was used before the restart");
+
+        // And the file holds the counter next to the units.
+        let raw: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(raw["next_native_number"], 4);
+        assert!(raw["units"].as_object().unwrap().contains_key(&a.story_id));
+    }
+
+    /// A store file written before the counter existed (the bare unit map) still loads, and
+    /// its counter starts above the highest native number in it.
+    #[test]
+    fn a_legacy_unit_map_file_loads_and_keeps_numbering_above_its_native_units() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("uow.json");
+        std::fs::write(
+            &path,
+            r#"{ "uow-a": { "story_id": "uow-a", "native_number": 5 },
+                 "story-1": { "story_id": "story-1" } }"#,
+        )
+        .unwrap();
+        let store = UowStore::at(path);
+        assert_eq!(store.list().len(), 2);
+        assert_eq!(
+            store.create_native(None, None).unwrap().native_number,
+            Some(6)
+        );
+    }
+
+    /// A record that does not parse stops the load with an error naming it, and the file is
+    /// left as it was. Before, the whole store loaded empty and the next write erased it.
+    #[test]
+    fn a_malformed_record_refuses_to_load_instead_of_emptying_the_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("uow.json");
+        let text = r#"{
+            "good/one#1": { "story_id": "good/one#1" },
+            "bad/two#2": { "story_id": "bad/two#2", "stage": "no-such-stage" },
+            "worse/three#3": 17
+        }"#;
+        std::fs::write(&path, text).unwrap();
+        let Err(err) = UowStore::try_at(path.clone()) else {
+            panic!("a malformed record must refuse the load");
+        };
+        assert!(err.contains("bad/two#2"), "{err}");
+        assert!(err.contains("worse/three#3"), "{err}");
+        assert!(!err.contains("good/one#1"), "only the bad records: {err}");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            text,
+            "the file is not touched"
+        );
+        // The server entry point refuses to start the same way.
+        let panicked = std::panic::catch_unwind(|| UowStore::at(path)).is_err();
+        assert!(panicked, "UowStore::at must refuse to start");
+
+        // Not JSON at all is refused too; a missing file is simply an empty store.
+        let junk = dir.path().join("junk.json");
+        std::fs::write(&junk, "{ not json").unwrap();
+        assert!(UowStore::try_at(junk).is_err());
+        assert!(UowStore::try_at(dir.path().join("absent.json"))
+            .unwrap()
+            .list()
+            .is_empty());
+    }
+
+    /// The repository fallback only ever yields an `OWNER/REPO` coordinate.
+    #[test]
+    fn the_repo_accessor_refuses_an_unsafe_repository() {
+        for bad in ["../../other", "..", "a/b/c", "acme/a pi", "/etc", "x"] {
+            let mut uow = UnitOfWork {
+                story_id: "uow-1".to_string(),
+                repo: Some(bad.to_string()),
+                native_number: Some(1),
+                ..Default::default()
+            };
+            assert_eq!(uow.repo(), None, "own repo {bad:?}");
+            uow.repo = None;
+            uow.intake.repos = vec![RepoScope {
+                repo: bad.to_string(),
+                branch: BranchMode::default(),
+            }];
+            assert_eq!(uow.repo(), None, "sole scoped repo {bad:?}");
+            uow.intake.repos.clear();
+            uow.external_ref = Some(crate::workitems::github_issue_ref(bad, 5));
+            assert_eq!(uow.repo(), None, "tracker container {bad:?}");
+        }
+    }
+
+    /// Creation and the Intake scope refuse an unsafe repository and record nothing.
+    #[test]
+    fn creation_and_the_scope_refuse_unsafe_repositories() {
+        let store = UowStore::new();
+        for bad in ["../../other", "a/b/c", "acme/a pi", "acme/..", "no-slash"] {
+            assert!(
+                store.create_native(Some(bad.to_string()), None).is_err(),
+                "create_native must refuse {bad:?}"
+            );
+        }
+        assert!(store.list().is_empty(), "a refused creation leaves nothing");
+
+        let unit = store.get_or_create("acme/api#7");
+        let scope = |repo: &str| RepoScope {
+            repo: repo.to_string(),
+            branch: BranchMode::default(),
+        };
+        assert!(store
+            .set_intake_repos(
+                &unit.story_id,
+                vec![scope("acme/api"), scope("../../other")]
+            )
+            .is_err());
+        assert!(
+            store.get("acme/api#7").unwrap().intake.repos.is_empty(),
+            "a refused scope records nothing, not even the valid entry"
+        );
+        assert!(store
+            .set_intake_repos(&unit.story_id, vec![scope("acme/api")])
+            .is_ok());
     }
 
     #[test]
@@ -3846,7 +4195,7 @@ mod concurrency_regression_tests {
                 },
             },
         ];
-        let uow = store.set_intake_repos("S-1", repos.clone());
+        let uow = store.set_intake_repos("S-1", repos.clone()).unwrap();
         assert_eq!(uow.intake.repos, repos);
         // The context is untouched by the repo write.
         assert_eq!(uow.intake.context, "extra context");

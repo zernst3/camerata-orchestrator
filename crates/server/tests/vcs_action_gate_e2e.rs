@@ -268,14 +268,17 @@ fn refinement1_generated_machine_commit_passes_hard_block() {
     });
 }
 
-/// A NATIVE unit (no board, no GitHub issue) gets a numeric reference of its own, so the
-/// machine commit Camerata writes for it passes the same HARD-BLOCK gate as an issue's.
+/// A NATIVE unit (no board, no GitHub issue) gets a reference of its own, `uow-<number>`, so
+/// the machine commit Camerata writes for it passes the same HARD-BLOCK gate as an issue's
+/// and never carries a bare `#<number>` (GitHub links that to an unrelated issue or PR).
 #[test]
 fn native_unit_machine_commit_passes_hard_block_with_no_issue() {
-    let cfg = enterprise_config();
     let store = UowStore::new();
-    let unit = store.create_native(Some("acme/widgets".to_string()), None);
-    let numeric = store.commit_reference_for(&unit.story_id);
+    let unit = store
+        .create_native(Some("acme/widgets".to_string()), None)
+        .unwrap();
+    let cfg = camerata_server::vcs_choke::config_for_unit(&enterprise_config(), &unit);
+    let numeric = unit.commit_reference();
     assert_eq!(numeric, "1", "the first native unit is number 1");
     let msg = compliant_machine_commit_message(
         &cfg,
@@ -289,6 +292,17 @@ fn native_unit_machine_commit_passes_hard_block_with_no_issue() {
     gated_commit(&cfg, &msg).unwrap_or_else(|e| {
         panic!("a native unit's machine commit must pass the gate: {e}\nmessage was:\n{msg}")
     });
+    assert!(msg.contains("uow-1"), "native reference token: {msg}");
+    assert!(
+        !msg.contains("#1"),
+        "no bare `#<n>` that GitHub would link to issue or PR 1: {msg}"
+    );
+    // The gate accepts only that token for the native unit: a bare `#1` message is blocked.
+    let bare = "feat: implement story\n\nServer-authored commit produced by Camerata. Refs #1.";
+    assert!(
+        gated_commit(&cfg, bare).is_err(),
+        "a native unit's gate does not accept the colliding `#<n>` form"
+    );
 }
 
 /// The inverse moat: if the run has no usable story id, the generated message cannot carry a
