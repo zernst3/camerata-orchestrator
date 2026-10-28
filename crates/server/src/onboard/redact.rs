@@ -118,6 +118,13 @@ pub(crate) fn redact_deep_report(deep: &mut crate::ai_audit::DeepReport) -> usiz
     count
 }
 
+/// `text` with every absolute local path cut down to its file name (the report is read by the
+/// client, who has no use for the auditor's directory layout). Repository-relative paths and
+/// URLs are left alone.
+fn scrub_machine_paths(text: &str) -> String {
+    crate::dep_audit::scrub_local_paths(text, std::path::Path::new(""))
+}
+
 /// Redact ScanReport-level text that bypasses `Finding`: the per-rule recommendations
 /// (`evidence`, `recommendation_reasoning`, observed option labels), coverage notes, failed
 /// passes, the AI error and block reason, the report message, the proposed rules' text, and the
@@ -134,11 +141,20 @@ pub(crate) fn redact_report_text(report: &mut ScanReport) -> usize {
     for note in &mut report.coverage_notes {
         count += redact_string(&mut note.message);
     }
+    // The failure text comes straight from a tool or the model service and is printed under
+    // Coverage, so a path on the machine that ran the scan goes too, after any secret does.
     for pass in &mut report.failed_passes {
         count += redact_string(&mut pass.reason);
+        pass.reason = scrub_machine_paths(&pass.reason);
     }
     count += redact_option(&mut report.ai_error);
     count += redact_option(&mut report.ai_blocked_reason);
+    for text in [&mut report.ai_error, &mut report.ai_blocked_reason]
+        .into_iter()
+        .flatten()
+    {
+        *text = scrub_machine_paths(text);
+    }
     count += redact_option(&mut report.message);
     for rule in &mut report.proposed_rules {
         count += redact_string(&mut rule.title);

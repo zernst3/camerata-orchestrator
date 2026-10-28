@@ -358,6 +358,24 @@ pub fn audit_files(repo: &str, files: &[(String, String)]) -> Vec<Finding> {
     findings
 }
 
+/// H9: the path-only floor rules over files the walk named but could not read (over the size
+/// limit, past the file limit, or not decodable as text). A rule whose verdict comes from the
+/// path alone (`SEC-NO-SECRET-FILE-1`: a `.p12`, a `.pem`, an `id_rsa`) needs no content, so
+/// skipping the read must not skip the rule. Content rules see an empty file and report nothing.
+/// `files` is the audited set, used only for the `.gitignore` coverage context.
+pub fn audit_unread_paths(
+    repo: &str,
+    paths: &[String],
+    files: &[(String, String)],
+) -> Vec<Finding> {
+    let mut findings: Vec<Finding> = paths
+        .iter()
+        .flat_map(|path| audit_content(repo, path, ""))
+        .collect();
+    enrich_secret_context(&mut findings, files);
+    findings
+}
+
 /// Whether a rule describes what CODE should look like (audit it against source) vs how
 /// the FLEET/TEAM operates (governance/process — arm it, but don't code-audit). The
 /// orchestration (`ORCH-`), meta-principle (`SPIRIT-`), and process (`PROC-`) families

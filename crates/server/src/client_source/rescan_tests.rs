@@ -633,3 +633,58 @@ fn synthetic_prior_fingerprints_equal_partition_fingerprints() {
          findings drop, and the floor finding is recomputed instead"
     );
 }
+
+/// H12: the delta carries a finding the MODEL produced even when it sits under a rule id the
+/// deterministic floor owns. The ledger holds that id as a deterministic rule (whichever tier ran
+/// first), so judging by the ledger dropped the model's finding from the delta; the finding's own
+/// recorded producer decides, and the floor's findings are still recomputed, never carried.
+#[test]
+fn an_ai_finding_under_a_floor_rule_id_survives_the_delta() {
+    use crate::onboard::{Finding, PRODUCED_TIER_CAPTURE};
+    use std::collections::HashSet;
+
+    const FLOOR_RULE: &str = "SEC-NO-HARDCODED-SECRETS-1";
+    let current: Vec<(String, String)> = vec![
+        ("model.rs".into(), "body".into()),
+        ("floor.rs".into(), "body".into()),
+        ("legacy.rs".into(), "body".into()),
+    ];
+    let changed: HashSet<String> = HashSet::new();
+    let mut report = super::test_support::report_at(REPO, &"a".repeat(40));
+    let finding = |path: &str, producer: Option<&str>| {
+        let mut f = Finding {
+            repo: REPO.to_string(),
+            path: path.to_string(),
+            rule_id: FLOOR_RULE.to_string(),
+            ..Finding::default()
+        };
+        if let Some(p) = producer {
+            f.captures
+                .insert(PRODUCED_TIER_CAPTURE.to_string(), p.to_string());
+        }
+        f
+    };
+    report.findings.push(finding("model.rs", Some("semantic")));
+    report
+        .findings
+        .push(finding("floor.rs", Some("deterministic")));
+    // Saved before the producer was recorded: judged by the ledger tier, as before.
+    report.findings.push(finding("legacy.rs", None));
+    report.ledger.record_rule(
+        FLOOR_RULE.to_string(),
+        crate::scan_ledger::RuleTier::Deterministic,
+        true,
+        None,
+        3,
+        3,
+    );
+    let entry = crate::inspections::InspectionEntry::from_report(
+        "p",
+        report,
+        crate::inspections::InspectionKind::Full,
+    );
+
+    let delta = super::rescan::repo_delta(REPO, &current, &changed, &entry);
+    let carried: Vec<&str> = delta.carried.iter().map(|f| f.path.as_str()).collect();
+    assert_eq!(carried, ["model.rs"], "{carried:?}");
+}
