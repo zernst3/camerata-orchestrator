@@ -1513,7 +1513,9 @@ async fn start_dev_run(
 ) -> StartRunOutcome {
     // The architect starting development confirms the unit's Intake repo: record its branch
     // so the run works in that repository (the server refuses a unit with none, with why).
-    uow::ensure_run_branch(story_id).await;
+    if let Err(message) = uow::ensure_run_branch(story_id).await {
+        return StartRunOutcome::Blocked(message);
+    }
     let body = dev_run_body(tier_map, skip_layer2);
     let resp = match reqwest::Client::new()
         .post(format!(
@@ -5645,6 +5647,60 @@ mod tests {
 
         let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
         let _ = super::start_dev_run("s-11", &TierMapView::default(), false).await;
+    }
+
+    /// When the server refuses the branch record (400 invalid name, 409 repo outside the
+    /// project), starting development surfaces ITS message as the blocked reason and does not
+    /// start a run that cannot work.
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn start_dev_run_surfaces_the_servers_branch_refusal_and_starts_no_run() {
+        use super::StartRunOutcome;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        for (status, reason) in [
+            (400u16, "`..` is not a valid branch name: it contains `..`."),
+            (
+                409u16,
+                "This unit of work belongs to `other/web`, which is not one of the active project's repositories.",
+            ),
+        ] {
+            let server = MockServer::start().await;
+            mount_uow(
+                &server,
+                "s-12",
+                None,
+                serde_json::json!([{ "repo": "acme/api",
+                    "branch": { "mode": "existing", "branch_name": ".." } }]),
+            )
+            .await;
+            Mock::given(method("POST"))
+                .and(path("/api/uow/s-12/branch"))
+                .respond_with(
+                    ResponseTemplate::new(status)
+                        .set_body_json(serde_json::json!({ "reason": reason })),
+                )
+                .expect(1)
+                .mount(&server)
+                .await;
+            Mock::given(method("POST"))
+                .and(path("/api/stories/s-12/run"))
+                .respond_with(
+                    ResponseTemplate::new(200).set_body_json(serde_json::json!({ "run_id": "r" })),
+                )
+                .expect(0)
+                .mount(&server)
+                .await;
+
+            let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
+            let outcome = super::start_dev_run("s-12", &TierMapView::default(), false).await;
+
+            match outcome {
+                StartRunOutcome::Blocked(message) => assert_eq!(message, reason),
+                _ => panic!("expected Blocked with the server's reason for HTTP {status}"),
+            }
+        }
     }
 
     /// `begin_investigation_run` POSTs {model} and returns Started with the run id.
