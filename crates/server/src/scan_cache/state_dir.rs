@@ -194,7 +194,7 @@ pub fn project_files_covering(state_dir: &Path, checkout: &Path) -> Vec<PathBuf>
         let Ok(listed) = serde_json::from_str::<Vec<String>>(&text) else {
             continue;
         };
-        if listed.iter().any(|p| *p == wanted) {
+        if listed.contains(&wanted) {
             let stem = name.trim_end_matches(".repos.json");
             out.push(state_dir.join(format!("{stem}.cache.json")));
             out.push(state_dir.join(format!("{stem}.ledger.json")));
