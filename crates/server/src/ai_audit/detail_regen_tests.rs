@@ -1480,12 +1480,13 @@ async fn a_third_round_of_one_writes_a_finding_the_larger_batches_could_not() {
 
 #[tokio::test]
 async fn the_third_round_is_still_bounded_by_the_spend_limit() {
-    // Each stub call costs $0.01; with the limit at $0.025 the stage is stopped after a few
-    // calls, not run through all of its rounds (three findings would be 1 + 1 + 3 calls).
+    // Each stub call costs $0.01. Three findings that are never written would be 1 + 1 + 3
+    // calls; with the limit at $0.03 the third call (the first single of round three) brings the
+    // spend to the limit, and the two singles after it are refused before they are sent.
     let llm = RoleLlm::new("{}", Regen::Garbage);
     let meter = UsageMeter::with_controls(RunControls {
         efficiency: EfficiencyConfig::default(),
-        max_cost_usd: Some(0.025),
+        max_cost_usd: Some(0.03),
         fix_model: None,
         consensus: false,
         estimate_hint_usd: None,
@@ -1501,10 +1502,10 @@ async fn the_third_round_is_still_bounded_by_the_spend_limit() {
         Some(&meter),
     )
     .await;
-    let calls = call_sizes(&llm).len();
-    assert!(
-        (1..=4).contains(&calls),
-        "the limit stopped the stage: {calls} calls"
+    assert_eq!(
+        call_sizes(&llm),
+        vec![3, 3, 1],
+        "the limit stopped the stage inside the third round"
     );
     assert!(out
         .iter()
@@ -1536,12 +1537,15 @@ async fn rejection_counts_by_reason_reach_the_operator_telemetry() {
     let r = rejections(&meter);
     assert_eq!((r.invented_precondition, r.total()), (3, 3), "{r:?}");
 
-    // An id that is not the batch's is a missing id.
+    // An id that is not the batch's is a missing id, charged to the finding the entry was meant
+    // for, which is then NOT also counted as left out: two findings over calls of 2, 2, 1 and 1
+    // are six attempts, so six counts, not twelve.
     let llm = RoleLlm::new(&terse_scan(2), Regen::OneIndexed);
     let meter = meter_with(EfficiencyConfig::default());
     let _ = audit(&llm, &meter).await;
+    assert_eq!(call_sizes(&llm), vec![2, 2, 1, 1]);
     let r = rejections(&meter);
-    assert!(r.missing_id >= 2, "{r:?}");
+    assert_eq!((r.missing_id, r.left_out, r.total()), (6, 0, 6), "{r:?}");
 
     // A finding the reply simply left out: once per round (the last of a batch is dropped, and a
     // batch of one is dropped whole).
@@ -1552,6 +1556,61 @@ async fn rejection_counts_by_reason_reach_the_operator_telemetry() {
     assert_eq!((r.left_out, r.total()), (3, 3), "{r:?}");
     let table = meter.stage_telemetry(0).render_table();
     assert!(table.contains("3 left out"), "{table}");
+}
+
+#[tokio::test]
+async fn an_id_used_twice_counts_once_for_the_finding_it_names() {
+    // The reply gives every finding two entries under the same id: neither is written, and the
+    // finding counts ONCE per attempt (one finding, three rounds, three counts), not once per
+    // entry. The client-facing total says the same.
+    struct Twice;
+    #[async_trait::async_trait]
+    impl LlmPort for Twice {
+        async fn complete(&self, req: LlmRequest) -> anyhow::Result<LlmResponse> {
+            let rows = asked(&req.prompt);
+            let mut entries: Vec<String> = Vec::new();
+            for (id, path, line) in &rows {
+                let e =
+                    format!(r#"{{"id":"{id}","path":"{path}","line":{line},"detail":"{FULL}"}}"#);
+                entries.push(e.clone());
+                entries.push(e);
+            }
+            Ok(stub_response(format!(
+                r#"{{"details":[{}]}}"#,
+                entries.join(",")
+            )))
+        }
+        async fn complete_streaming(
+            &self,
+            req: LlmRequest,
+            _on_delta: &mut (dyn for<'a> FnMut(&'a str) + Send),
+        ) -> anyhow::Result<LlmResponse> {
+            self.complete(req).await
+        }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+    }
+    let meter = meter_with(EfficiencyConfig::default());
+    let (out, failed) = regenerate_full_details(
+        &Twice,
+        REPO,
+        n_findings(1),
+        &files(),
+        &[],
+        &nonce(),
+        None,
+        Some(&meter),
+    )
+    .await;
+    assert!(out[0].detail.contains(DETAIL_INCOMPLETE_MARKER), "{out:?}");
+    let r = rejections(&meter);
+    assert_eq!((r.missing_id, r.total()), (3, 3), "{r:?}");
+    assert!(
+        failed[0].reason.contains("fell short 3 times"),
+        "{}",
+        failed[0].reason
+    );
 }
 
 #[tokio::test]

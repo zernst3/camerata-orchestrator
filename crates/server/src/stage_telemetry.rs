@@ -318,8 +318,10 @@ impl CandidateTelemetry {
 }
 
 /// Why the detail-regeneration stage (rank 4) did not write a finding's full explanation on an
-/// attempt, counted per attempt (a finding that fails three rounds counts three times). Operator
-/// telemetry only: the client export and the failed-pass reason carry at most the [`Self::total`].
+/// attempt, counted once per finding per attempt under one reason (a finding that fails three
+/// rounds counts three times; a reply that gives it two entries, or none, still counts once).
+/// Operator telemetry only: the client export and the failed-pass reason carry at most the
+/// [`Self::total`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DetailRejections {
     /// The entry echoed a path or line that is not the finding's.
@@ -328,7 +330,8 @@ pub struct DetailRejections {
     pub drops_named_token: u64,
     /// The text added an exploit precondition nobody had made.
     pub invented_precondition: u64,
-    /// An entry with no usable id or text, an id that is not the batch's, or an id used twice.
+    /// The finding's entry had no usable id or text, carried an id that is not the batch's or
+    /// shared its id with another entry.
     pub missing_id: u64,
     /// A finding whose entry was lost to a reply cut off at the output limit.
     pub truncated: u64,

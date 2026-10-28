@@ -628,7 +628,10 @@ async fn run_detail_round(
             }
         }
         let parsed = parse_detail_reply(&resp.text, resp.truncated);
-        rejections.missing_id += parsed.unusable as u64;
+        // Entries that name no finding of the batch (no usable id or text, or an id that is not
+        // the batch's). Each is charged below to one finding the reply did not answer, so a
+        // finding's attempt is counted once, under one reason.
+        let mut stray = parsed.unusable;
         let entries = parsed.entries;
         // An id the reply uses twice is ambiguous: neither entry is written.
         let used_twice: Vec<&str> = entries
@@ -639,15 +642,17 @@ async fn run_detail_round(
         let mut written = vec![false; batch.len()];
         // A finding some entry of the reply was addressed to (whatever became of it).
         let mut answered = vec![false; batch.len()];
+        // A finding whose id the reply used twice.
+        let mut ambiguous = vec![false; batch.len()];
         for entry in &entries {
             // An id that is not this batch's is ignored, never matched by position.
             let Some(pos) = ids.iter().position(|id| *id == entry.id) else {
-                rejections.missing_id += 1;
+                stray += 1;
                 continue;
             };
             answered[pos] = true;
             if used_twice.contains(&entry.id.as_str()) {
-                rejections.missing_id += 1;
+                ambiguous[pos] = true;
                 continue;
             }
             let idx = batch[pos];
@@ -663,8 +668,15 @@ async fn run_detail_round(
         }
         for (pos, &idx) in batch.iter().enumerate() {
             if !written[pos] {
-                if !answered[pos] {
-                    if resp.truncated {
+                // One count per finding per attempt. An entry that failed a check was counted
+                // above under its reason; the rest are counted here.
+                if ambiguous[pos] {
+                    rejections.missing_id += 1;
+                } else if !answered[pos] {
+                    if stray > 0 {
+                        stray -= 1;
+                        rejections.missing_id += 1;
+                    } else if resp.truncated {
                         rejections.truncated += 1;
                     } else {
                         rejections.left_out += 1;
