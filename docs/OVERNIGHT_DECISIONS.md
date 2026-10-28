@@ -1,7 +1,12 @@
 # Overnight autonomous run — decisions needed + progress log
 
 > ## ▶ RESUME HERE (paused 2026-10-26 at Zach's request, after code viewer step 4)
-> **CURRENT (newest first; older entries below are history):** 2026-10-27 (Opus): 22f Part A
+> **CURRENT (newest first; older entries below are history):** 2026-10-27 (Opus): Camerata's
+> fallback model defaults (`crates/ui/src/cockpit.rs` ~353-361: Haiku 4.5, Sonnet 5, Opus 5) move
+> to the current generation (Haiku 5.5, Sonnet 5.5, Opus 5.5) AFTER the API sweep; the sweep stays
+> pinned to `claude-sonnet-5` so its results compare with sweep5b. Camerata uses no Fable model by
+> default and sends `tool_choice: auto` everywhere; the per-model request shapes only guard the
+> models a user can pick. 2026-10-27 (Opus): 22f Part A
 > BUILT (`camerata corpus check-sources`, new crate `camerata-source-check`, sidecar
 > `crates/rules/CORPUS_SOURCE_HASHES.json`). Decisions: hash only cited anchors (whole pages are
 > noise); a changed section stays flagged until accepted explicitly (`--accept`), never silently
