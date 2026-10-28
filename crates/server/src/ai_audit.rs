@@ -2907,6 +2907,17 @@ pub(crate) fn scan_max_tokens(n_rules: usize) -> u32 {
         .max(camerata_ui_core::scan::SCAN_MAX_TOKENS_FLOOR)
 }
 
+/// `max_tokens` for one alternatives request asking about `n_rules` rules: the measured per-rule
+/// budget ([`camerata_ui_core::scan::ALTERNATIVES_OUTPUT_TOKENS_PER_RULE`], the figure the
+/// pre-flight estimate prices the stage from) through [`scaled_max_tokens`], so never below the
+/// flat 4096 the stage used before it scaled and never above the shared ceiling.
+pub(crate) fn alternatives_max_tokens(n_rules: usize) -> u32 {
+    scaled_max_tokens(
+        n_rules,
+        camerata_ui_core::scan::ALTERNATIVES_OUTPUT_TOKENS_PER_RULE,
+    )
+}
+
 /// Per-finding token estimate for the CALIBRATION pass's response — each verdict is a
 /// compact JSON object (`{"index","severity","confidence","reason"}`) with a one-sentence
 /// `reason`, so a modest per-item budget covers it comfortably.
@@ -4204,7 +4215,7 @@ impl AlternativesAsk<'_> {
                 alternatives_system_prompt(),
                 nonce,
             ))
-            .with_max_tokens(4096)
+            .with_max_tokens(alternatives_max_tokens(rules.len()))
             .with_temperature(AUDIT_TEMPERATURE);
         if let Some(m) = audit_model {
             req = req.with_model(m.to_string());

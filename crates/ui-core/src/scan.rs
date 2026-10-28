@@ -103,6 +103,16 @@ pub const REGEN_SCAN_TOKENS_PER_FINDING: f64 = 300.0;
 /// it, so the cap, the estimate and the measurement cannot drift apart.
 pub const SCAN_OUTPUT_TOKENS_PER_RULE: u32 = 640;
 
+/// The output budget of the alternatives (rule-recommendation) stage per rule in its batch, in
+/// tokens. Each entry carries the chosen option id, 1 to 3 sentences of reasoning, an evidence
+/// `file:line`, a site count and the observed options. MEASURED from the same smoke run: the stage
+/// made 2 calls and produced 8192 output tokens, every call stopped at the flat 4096 cap, and the
+/// smaller of its two batches held 9 rules. A 9-rule batch that fills 4096 tokens needs at least
+/// 456 per rule; 600 leaves headroom. The server sizes each request's `max_tokens` from this
+/// (`camerata_server::ai_audit::alternatives_max_tokens`) and the estimator prices the stage's
+/// output from it.
+pub const ALTERNATIVES_OUTPUT_TOKENS_PER_RULE: u32 = 600;
+
 /// The least a scan request is ever allowed to produce: the flat cap the scan used before it
 /// scaled with the rules in the batch. A batch of a few rules keeps exactly this.
 pub const SCAN_MAX_TOKENS_FLOOR: u32 = 8_192;
@@ -226,7 +236,6 @@ pub fn estimate_audit_cost(
     // full option set, and gets back one recommended option per rule.
     const REC_BASE_CHARS: usize = 6_000;
     const REC_CHARS_PER_RULE: usize = 600;
-    const REC_OUT_TOKENS_PER_RULE: f64 = 100.0;
     // Resolution round (`ai_audit.rs`'s "Resolution round"): a SINGLE bounded extra real-time
     // pass-group (never batched, regardless of scan mode) that re-audits the small handful of
     // files (typically 1-5) whose cross-file rule judgment an earlier pass deferred, against
@@ -329,7 +338,7 @@ pub fn estimate_audit_cost(
     let rec_calls = if multi_option_selected > 0 { 1 } else { 0 };
     let rec_chars = (REC_BASE_CHARS + REC_CHARS_PER_RULE * multi_option_selected) as f64;
     let rec_in = cacheable_pass_tokens(rec_chars, rec_calls);
-    let rec_out = REC_OUT_TOKENS_PER_RULE * multi_option_selected as f64;
+    let rec_out = f64::from(ALTERNATIVES_OUTPUT_TOKENS_PER_RULE) * multi_option_selected as f64;
 
     // ── Resolution round: one bounded real-time pass-group (no batch discount) over a small
     // deferred-file subset, against the full selected rule set (same rule-batch count as the
@@ -2269,6 +2278,38 @@ mod tests {
             (extra - 5.0 * f64::from(SCAN_OUTPUT_TOKENS_PER_RULE)).abs() < 1e-6,
             "five more rules priced at {extra} output tokens"
         );
+    }
+
+    /// The alternatives stage's output is priced from the same per-rule budget the server sizes
+    /// its request cap from: each further multi-option rule adds exactly that many output tokens.
+    #[test]
+    fn the_alternatives_output_estimate_follows_the_per_rule_budget() {
+        let output_tokens = |multi: usize| {
+            let (_, dollars, _) = estimate_audit_cost(
+                0,
+                0,
+                "parallel",
+                0.0,
+                1.0,
+                0.0,
+                0.0,
+                false,
+                false,
+                false,
+                ProjectBackend::Api,
+                multi,
+                false,
+            );
+            dollars * 1_000_000.0
+        };
+        let extra = output_tokens(10) - output_tokens(5);
+        assert!(
+            (extra - 5.0 * f64::from(ALTERNATIVES_OUTPUT_TOKENS_PER_RULE)).abs() < 1e-6,
+            "five more multi-option rules priced at {extra} output tokens"
+        );
+        const {
+            assert!(ALTERNATIVES_OUTPUT_TOKENS_PER_RULE >= 456);
+        }
     }
 
     /// The budget covers what the smoke run measured: 190323 scan output tokens over 20 answered

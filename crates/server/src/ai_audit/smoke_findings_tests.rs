@@ -314,6 +314,87 @@ async fn audit_repo_records_a_pass_for_rules_the_alternatives_reply_never_reache
     assert_eq!(rows[0].repo, REPO);
 }
 
+// ── 1b. The alternatives request's output cap scales with the rules in the batch ─────────────
+
+fn many_rules(n: usize) -> Vec<RuleAlternatives> {
+    (0..n).map(|i| alt(&format!("RULE-{i:02}"))).collect()
+}
+
+fn rule_names(n: usize) -> Vec<String> {
+    (0..n).map(|i| format!("RULE-{i:02}")).collect()
+}
+
+/// The `max_tokens` of every alternatives request the model saw.
+fn alternatives_caps(llm: &StageLlm) -> Vec<u32> {
+    let caps: Vec<u32> = llm
+        .seen
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|r| r.prompt.contains("Rules to decide"))
+        .map(|r| r.max_tokens)
+        .collect();
+    caps
+}
+
+#[test]
+fn the_alternatives_cap_is_the_per_rule_budget_with_the_old_flat_cap_as_its_floor() {
+    use camerata_ui_core::scan::ALTERNATIVES_OUTPUT_TOKENS_PER_RULE;
+    assert_eq!(
+        alternatives_max_tokens(1),
+        4_096,
+        "a small batch keeps today's cap"
+    );
+    assert_eq!(
+        alternatives_max_tokens(25),
+        25 * ALTERNATIVES_OUTPUT_TOKENS_PER_RULE,
+        "a full batch of 25 rules gets its measured budget"
+    );
+    assert!(alternatives_max_tokens(25) > 4_096);
+    assert_eq!(
+        alternatives_max_tokens(usize::MAX),
+        AGGREGATE_MAX_TOKENS_CEILING
+    );
+    let mut last = 0;
+    for n in 0..100 {
+        let cap = alternatives_max_tokens(n);
+        assert!(cap >= last, "never smaller for more rules");
+        last = cap;
+    }
+}
+
+#[tokio::test]
+async fn a_full_alternatives_batch_is_sent_with_its_scaled_cap_and_a_retry_with_its_own() {
+    let rules = many_rules(25);
+    let names = rule_names(25);
+    let all: Vec<&str> = names.iter().map(String::as_str).collect();
+    let llm = StageLlm::new(&[
+        (&cut_off(&[]), true),
+        (&reply(&all[..13]), false),
+        (&reply(&all[13..]), false),
+    ]);
+    let (recs, unfinished) = recommend(&llm, &rules).await;
+    assert_eq!((recs.len(), unfinished), (25, None));
+    assert_eq!(
+        alternatives_caps(&llm),
+        vec![
+            alternatives_max_tokens(25),
+            alternatives_max_tokens(13),
+            alternatives_max_tokens(12)
+        ],
+        "each send is capped for the rules it asks about"
+    );
+    assert!(alternatives_caps(&llm)[1] < alternatives_caps(&llm)[0]);
+}
+
+#[tokio::test]
+async fn a_small_alternatives_batch_keeps_the_floor() {
+    let llm = StageLlm::new(&[(&reply(&["RULE-A", "RULE-B"]), false)]);
+    let rules: Vec<RuleAlternatives> = ["RULE-A", "RULE-B"].iter().map(|r| alt(r)).collect();
+    recommend(&llm, &rules).await;
+    assert_eq!(alternatives_caps(&llm), vec![4_096]);
+}
+
 // ── 2. The scan's output cap scales with the rules in the batch ─────────────────────────────
 
 /// The `max_tokens` of every scan request a run of one chunk and one batch of `n_rules` rules sent.
