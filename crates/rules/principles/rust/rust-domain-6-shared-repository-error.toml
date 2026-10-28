@@ -1,5 +1,5 @@
 id = "RUST-DOMAIN-6"
-version = 1
+version = 2
 title = "Crate-boundary error types: typed enums organized by category or by aggregate"
 domain = "rust"
 layer = "language"
@@ -15,11 +15,11 @@ verification = "grounded"
 
 [[sources]]
 url = "https://rust-lang.github.io/api-guidelines/interoperability.html"
-title = "Rust API Guidelines — C-GOOD-ERR: Error types are meaningful and well-behaved"
+title = "Rust API Guidelines: C-GOOD-ERR: Error types are meaningful and well-behaved"
 
 [[sources]]
 url = "https://doc.rust-lang.org/book/ch09-02-recoverable-errors-with-result.html"
-title = "The Rust Book — Ch 9.2: Recoverable Errors with Result"
+title = "The Rust Book: Ch 9.2: Recoverable Errors with Result"
 
 [decision]
 question = "How does the project organize the typed error enums a crate exposes at its public boundary?"
@@ -61,7 +61,7 @@ directive = "the crate re-exports the underlying framework's or driver's error t
 remediation = """
 Remove the crate-owned error enum and re-export the underlying framework's or driver's error type directly from the crate's public API instead of mapping it at the boundary. Verify by confirming callers match on the driver's own error type, not a crate-specific wrapper.
 """
-why = "Breaks the boundary entirely: the crate's public surface inherits the framework's error semantics and breaks every caller every time the framework upgrades, defeating the purpose of having a crate boundary between them — a problem under any error organization."
+why = "Breaks the boundary entirely: the crate's public surface inherits the framework's error semantics and breaks every caller every time the framework upgrades, defeating the purpose of having a crate boundary between them: a problem under any error organization."
 
 [[option]]
 id = "the-crate-s-public-functions-return-box-of-dyn-e"
@@ -71,4 +71,4 @@ directive = "the crate's public functions return Box of dyn Error or anyhow Erro
 remediation = """
 Change the crate's public functions to return Box of dyn Error or anyhow::Error instead of a typed enum, removing the caller's ability to match on specific error variants. Verify by confirming the function signatures return the boxed/anyhow error type rather than a crate-specific typed enum.
 """
-why = "Eliminates exhaustive matching: consumers cannot recover specific failure modes and the type system stops helping with error handling, which is the entire reason a typed error enum exists at the boundary — independent of whether errors are grouped by category or by aggregate."
+why = "Eliminates exhaustive matching: consumers cannot recover specific failure modes and the type system stops helping with error handling, which is the entire reason a typed error enum exists at the boundary: independent of whether errors are grouped by category or by aggregate."

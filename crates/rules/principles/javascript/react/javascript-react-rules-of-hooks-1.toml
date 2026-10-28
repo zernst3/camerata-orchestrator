@@ -1,5 +1,5 @@
 id = "JAVASCRIPT-REACT-RULES-OF-HOOKS-1"
-version = 2
+version = 3
 title = "Hooks are called only at the top level of components or other hooks"
 domain = "javascript:react"
 layer = "framework"
@@ -12,12 +12,12 @@ verification = "grounded"
 
 [[sources]]
 url = "https://react.dev/reference/eslint-plugin-react-hooks/lints/rules-of-hooks"
-title = "React docs — rules-of-hooks lint rule"
+title = "React docs: rules-of-hooks lint rule"
 linter = "react-hooks: rules-of-hooks"
 
 [[sources]]
 url = "https://react.dev/reference/rules/rules-of-hooks"
-title = "React docs — Rules of Hooks"
+title = "React docs: Rules of Hooks"
 
 [decision]
 question = "Where in components and custom hooks are hooks called, and can any run conditionally or inside a loop?"

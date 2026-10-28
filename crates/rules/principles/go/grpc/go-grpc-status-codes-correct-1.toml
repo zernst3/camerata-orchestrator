@@ -1,5 +1,5 @@
 id = "GO-GRPC-STATUS-CODES-CORRECT-1"
-version = 1
+version = 2
 title = "gRPC status codes are used correctly: INTERNAL for unexpected errors, INVALID_ARGUMENT for validation failures, PERMISSION_DENIED for auth, NOT_FOUND for missing resources"
 domain = "go:grpc"
 layer = "framework"
@@ -33,7 +33,7 @@ verification = "grounded"
 
 [[sources]]
 url = "https://grpc.io/docs/guides/status-codes/"
-title = "gRPC — Status codes and their use in gRPC"
+title = "gRPC: Status codes and their use in gRPC"
 
 [decision]
 question = "How should gRPC status codes be assigned to different error conditions?"

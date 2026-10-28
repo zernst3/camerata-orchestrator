@@ -1,5 +1,5 @@
 id = "GO-GRPC-PROTO-GENERATED-IMMUTABLE-1"
-version = 1
+version = 2
 title = "Proto-generated code is not hand-edited; changes flow through .proto definitions and code generation, never direct edits to generated files"
 domain = "go:grpc"
 layer = "library"
@@ -11,7 +11,7 @@ verification = "grounded"
 
 [[sources]]
 url = "https://grpc.io/docs/languages/go/basics/"
-title = "gRPC — Basics tutorial (Go)"
+title = "gRPC: Basics tutorial (Go)"
 
 [decision]
 question = "How should proto-generated Go code be maintained?"

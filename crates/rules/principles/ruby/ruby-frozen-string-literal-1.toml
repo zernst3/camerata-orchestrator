@@ -1,5 +1,5 @@
 id = "RUBY-FROZEN-STRING-LITERAL-1"
-version = 1
+version = 2
 title = "All Ruby files declare frozen_string_literal: true to prevent accidental string mutations"
 domain = "ruby"
 layer = "language"
@@ -33,9 +33,9 @@ why = "Simplifies code that needs mutable strings but introduces subtle mutation
 
 [[sources]]
 url = "https://github.com/rubocop/rubocop/blob/master/lib/rubocop/cop/style/frozen_string_literal_comment.rb"
-title = "RuboCop — Style/FrozenStringLiteralComment cop source"
+title = "RuboCop: Style/FrozenStringLiteralComment cop source"
 linter = "RuboCop: Style/FrozenStringLiteralComment"
 
 [[sources]]
 url = "https://rubystyle.guide/#magic-comments"
-title = "Ruby Style Guide — Magic Comments"
+title = "Ruby Style Guide: Magic Comments"

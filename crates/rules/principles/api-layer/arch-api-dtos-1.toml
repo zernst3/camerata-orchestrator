@@ -1,5 +1,5 @@
 id = "ARCH-API-DTOS-1"
-version = 1
+version = 2
 title = "API wire types: dedicated DTOs, the domain types directly, or one shared model"
 domain = "api-layer"
 layer = "universal"
@@ -12,11 +12,11 @@ verification = "grounded"
 
 [[sources]]
 url = "https://martinfowler.com/eaaCatalog/dataTransferObject.html"
-title = "Martin Fowler — Patterns of Enterprise Application Architecture: Data Transfer Object"
+title = "Martin Fowler: Patterns of Enterprise Application Architecture: Data Transfer Object"
 
 [[sources]]
 url = "https://martinfowler.com/bliki/LocalDTO.html"
-title = "Martin Fowler — LocalDTO"
+title = "Martin Fowler: LocalDTO"
 
 [decision]
 question = "What types cross the API boundary: dedicated DTOs mapped to and from domain types, the domain types directly, or a single model shared between the wire and the domain?"

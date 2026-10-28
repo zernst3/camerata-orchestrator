@@ -1,5 +1,5 @@
 id = "JAVASCRIPT-EXPRESS-VALIDATE-INPUT-1"
-version = 2
+version = 3
 title = "Request input is validated at the boundary before use"
 domain = "javascript:express"
 layer = "framework"
@@ -11,7 +11,7 @@ verification = "grounded"
 
 [[sources]]
 url = "https://expressjs.com/en/advanced/best-practice-security.html"
-title = "Express.js — Production best practices: Security — Do not trust user input"
+title = "Express.js: Production best practices (Security: Do not trust user input)"
 
 [decision]
 question = "How is incoming request data checked before Express handlers use it?"

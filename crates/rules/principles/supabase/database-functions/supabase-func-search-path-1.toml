@@ -1,5 +1,5 @@
 id = "SUPABASE-FUNC-SEARCH-PATH-1"
-version = 4
+version = 5
 title = "A SECURITY DEFINER function must set search_path explicitly to prevent search-path hijacking"
 domain = "supabase:database-functions"
 # General Postgres, not just Supabase: a SECURITY DEFINER function without a pinned search_path is
@@ -36,11 +36,11 @@ qualifies = "Enforced by a multi-line statement scan over CREATE FUNCTION bodies
 
 [[sources]]
 url = "https://www.postgresql.org/docs/current/sql-createfunction.html#SQL-CREATEFUNCTION-SECURITY"
-title = "PostgreSQL docs — CREATE FUNCTION: Writing SECURITY DEFINER Functions Safely (search_path must exclude untrusted-writable schemas)"
+title = "PostgreSQL docs: CREATE FUNCTION: Writing SECURITY DEFINER Functions Safely (search_path must exclude untrusted-writable schemas)"
 
 [[sources]]
 url = "https://supabase.com/docs/guides/database/database-advisors?lint=0011_function_search_path_mutable"
-title = "Supabase Database Linter — 0011_function_search_path_mutable (\"Unsecured function search path\")"
+title = "Supabase Database Linter: 0011_function_search_path_mutable (\"Unsecured function search path\")"
 linter = "splinter: function_search_path_mutable"
 
 [decision]
@@ -106,4 +106,4 @@ id = "definer-function-without-pinned-search-path"
 violates = true
 label = "A SECURITY DEFINER function runs with no pinned search_path"
 directive = "A function declared SECURITY DEFINER carries no `SET search_path = <trusted schema>, pg_temp`, so an object created in a caller-writable schema can resolve with the definer's elevated privileges."
-why = "Rejected: without a pinned search_path a colliding object in a caller-writable schema executes with the definer's rights — the textbook search-path hijack. Functions that do not need elevation use SECURITY INVOKER instead."
+why = "Rejected: without a pinned search_path a colliding object in a caller-writable schema executes with the definer's rights: the textbook search-path hijack. Functions that do not need elevation use SECURITY INVOKER instead."

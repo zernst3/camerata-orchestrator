@@ -1,5 +1,5 @@
 id = "CSHARP-EFCORE-EXPLICIT-TRANSACTIONS-1"
-version = 2
+version = 3
 title = "Multi-write operations are wrapped in an explicit transaction; partial writes are not observable"
 domain = "csharp:efcore"
 layer = "library"
@@ -48,4 +48,4 @@ why = "Leaves the database in partial state if any call after the first fails; t
 
 [[sources]]
 url = "https://learn.microsoft.com/en-us/ef/core/saving/transactions"
-title = "Using Transactions — EF Core | Microsoft Learn"
+title = "Using Transactions: EF Core | Microsoft Learn"

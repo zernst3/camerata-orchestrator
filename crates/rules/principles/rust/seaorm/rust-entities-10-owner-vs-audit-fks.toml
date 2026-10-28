@@ -1,5 +1,5 @@
 id = "RUST-ENTITIES-10"
-version = 2
+version = 3
 title = "Owner + audit FKs to the same parent: belongs_to on child only; no reverse has_many for audit FKs"
 domain = "rust:seaorm"
 layer = "library"
@@ -35,8 +35,8 @@ id = "the-entity-stores-its-audit-relationships-create"
 violates = true
 label = "Audit relationships stored as plain Uuid columns"
 directive = "the entity stores its audit relationships (created_by, modified_by) as plain Uuid columns rather than as foreign keys to the parent entity"
-why = "Gives the file a diet but loses SeaORM's type-checked relation traversal (find_related, relation-driven joins) for those columns — that is a Rust-side navigation loss, not a database-enforcement loss: whether a deleted user can leave a dangling Uuid behind depends on the REFERENCES constraint (or lack of one) on that column in the migration, which is independent of whether an ORM relation is declared for it. Audit columns should still carry a real DB-level FK constraint even when the project chooses not to declare the corresponding ORM relation."
+why = "Gives the file a diet but loses SeaORM's type-checked relation traversal (find_related, relation-driven joins) for those columns: that is a Rust-side navigation loss, not a database-enforcement loss: whether a deleted user can leave a dangling Uuid behind depends on the REFERENCES constraint (or lack of one) on that column in the migration, which is independent of whether an ORM relation is declared for it. Audit columns should still carry a real DB-level FK constraint even when the project chooses not to declare the corresponding ORM relation."
 
 [[sources]]
 url = "https://www.sea-ql.org/SeaORM/docs/relation/one-to-many/"
-title = "SeaORM docs: One to Many — belongs_to and has_many relation patterns"
+title = "SeaORM docs: One to Many: belongs_to and has_many relation patterns"

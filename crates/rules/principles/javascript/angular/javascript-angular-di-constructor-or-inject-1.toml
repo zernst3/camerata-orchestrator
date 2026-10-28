@@ -1,5 +1,5 @@
 id = "JAVASCRIPT-ANGULAR-DI-CONSTRUCTOR-OR-INJECT-1"
-version = 2
+version = 3
 title = "Services are injected via inject() (preferred) or constructor parameters, never manually instantiated"
 domain = "javascript:angular"
 layer = "framework"
@@ -24,15 +24,15 @@ verification = "grounded"
 
 [[sources]]
 url = "https://angular.dev/guide/di"
-title = "Angular Dependency Injection Guide — inject() function"
+title = "Angular Dependency Injection Guide: inject() function"
 
 [[sources]]
 url = "https://angular.dev/style-guide"
-title = "Angular Style Guide — Prefer the inject function over constructor parameter injection"
+title = "Angular Style Guide: Prefer the inject function over constructor parameter injection"
 
 [[sources]]
 url = "https://github.com/angular-eslint/angular-eslint/blob/main/packages/eslint-plugin/src/rules/prefer-inject.ts"
-title = "angular-eslint — prefer-inject"
+title = "angular-eslint: prefer-inject"
 linter = "@angular-eslint/prefer-inject"
 
 [decision]

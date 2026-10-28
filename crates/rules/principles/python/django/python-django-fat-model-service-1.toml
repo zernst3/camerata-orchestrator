@@ -1,5 +1,5 @@
 id = "PYTHON-DJANGO-FAT-MODEL-SERVICE-1"
-version = 1
+version = 2
 title = "Business logic lives in model methods or a service layer, not in views"
 domain = "python:django"
 layer = "framework"
@@ -51,4 +51,4 @@ why = "Rejected: DRF serializers are validation and serialization adapters, so o
 
 [[sources]]
 url = "https://docs.djangoproject.com/en/6.0/misc/design-philosophies/"
-title = "Django Design Philosophies — Models include domain logic; views are simple"
+title = "Django Design Philosophies: Models include domain logic; views are simple"

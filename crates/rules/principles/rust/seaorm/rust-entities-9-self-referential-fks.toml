@@ -1,5 +1,5 @@
 id = "RUST-ENTITIES-9"
-version = 2
+version = 3
 title = "Self-referential FKs: single belongs_to + impl Related<Entity> for Entity"
 domain = "rust:seaorm"
 layer = "library"
@@ -37,4 +37,4 @@ why = "Mechanically possible but produces worse ergonomics: every caller that wa
 
 [[sources]]
 url = "https://www.sea-ql.org/SeaORM/docs/relation/complex-relations/"
-title = "SeaORM docs: Complex Relations — self-referential FKs with self_ref"
+title = "SeaORM docs: Complex Relations: self-referential FKs with self_ref"

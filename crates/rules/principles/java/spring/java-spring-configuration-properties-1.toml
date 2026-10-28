@@ -1,5 +1,5 @@
 id = "JAVA-SPRING-CONFIGURATION-PROPERTIES-1"
-version = 2
+version = 3
 title = "@ConfigurationProperties binds typed config POJOs; @Value on individual fields is reserved for simple single-value injections"
 domain = "java:spring"
 layer = "framework"
@@ -16,7 +16,7 @@ why = "@Value('${property.key}') injects a single environment property into a fi
 
 [[sources]]
 url = "https://docs.spring.io/spring-boot/reference/features/external-config.html#features.external-config.typesafe-configuration-properties"
-title = "Spring Boot Reference — Type-safe Configuration Properties (@ConfigurationProperties vs @Value)"
+title = "Spring Boot Reference: Type-safe Configuration Properties (@ConfigurationProperties vs @Value)"
 
 [[option]]
 id = "configuration-properties-for-grouped-config"

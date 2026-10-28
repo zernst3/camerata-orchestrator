@@ -1,5 +1,5 @@
 id = "UI-QUERY-LIBRARY-1"
-version = 2
+version = 3
 title = "All UI data fetches go through a query library, never ad-hoc fetch and store"
 domain = "ui"
 layer = "universal"
@@ -11,7 +11,7 @@ verification = "grounded"
 
 [[sources]]
 url = "https://tanstack.com/query/latest/docs/framework/react/overview"
-title = "TanStack Query — Overview (de-duplication, caching, stale-while-revalidate, and invalidation as the query library's job)"
+title = "TanStack Query: Overview (de-duplication, caching, stale-while-revalidate, and invalidation as the query library's job)"
 
 [decision]
 question = "How does the UI fetch, cache, and invalidate server data?"

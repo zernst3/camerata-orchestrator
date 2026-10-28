@@ -1,5 +1,5 @@
 id = "ARCH-HANDLER-NO-DB-1"
-version = 2
+version = 3
 title = "Handlers never touch the database directly"
 domain = "api-layer"
 layer = "universal"
@@ -12,11 +12,11 @@ verification = "grounded"
 
 [[sources]]
 url = "docs/decisions/2026-06-19_ast_architectural_rule_tier.md"
-title = "Decision: An AST-checkable architectural enforcement tier — worked example §ARCH-HANDLER-NO-DB-1"
+title = "Decision: An AST-checkable architectural enforcement tier: worked example §ARCH-HANDLER-NO-DB-1"
 
 [[sources]]
 url = "https://martinfowler.com/eaaCatalog/serviceLayer.html"
-title = "Martin Fowler — Patterns of Enterprise Application Architecture: Service Layer"
+title = "Martin Fowler: Patterns of Enterprise Application Architecture: Service Layer"
 
 [decision]
 question = "Do request handlers run database queries themselves, or do they go through another layer?"

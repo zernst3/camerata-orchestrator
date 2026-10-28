@@ -1,5 +1,5 @@
 id = "RUST-AXUM-MIDDLEWARE-TOWER-1"
-version = 2
+version = 3
 title = "Implement cross-cutting concerns as tower middleware, not inline in handlers"
 domain = "rust:axum"
 layer = "framework"
@@ -32,4 +32,4 @@ why = "A new route added by a contributor who forgets the inline concern becomes
 
 [[sources]]
 url = "https://docs.rs/axum/latest/axum/middleware/index.html"
-title = "axum::middleware — Tower middleware integration"
+title = "axum::middleware: Tower middleware integration"

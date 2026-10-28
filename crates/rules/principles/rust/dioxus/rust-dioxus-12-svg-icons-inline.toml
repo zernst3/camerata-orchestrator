@@ -1,5 +1,5 @@
 id = "RUST-DIOXUS-12"
-version = 2
+version = 3
 title = "Icons render as inline SVG from static string constants; no runtime icon-library fetches"
 domain = "rust:dioxus"
 layer = "framework"
@@ -11,7 +11,7 @@ verification = "grounded"
 
 [[sources]]
 url = "https://github.blog/engineering/architecture-optimization/delivering-octicons-with-svg/"
-title = "GitHub Engineering — Delivering Octicons with SVG"
+title = "GitHub Engineering: Delivering Octicons with SVG"
 relevance = "Authority note (author-facing): medium authority — a real, widely-cited case study for inline SVG icons over icon fonts/runtime fetches, not a formal standard"
 
 [decision]

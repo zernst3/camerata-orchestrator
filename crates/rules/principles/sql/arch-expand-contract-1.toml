@@ -1,5 +1,5 @@
 id = "ARCH-EXPAND-CONTRACT-1"
-version = 1
+version = 2
 title = "Expand-then-contract for breaking schema changes"
 domain = "sql"
 layer = "universal"
@@ -11,11 +11,11 @@ verification = "grounded"
 
 [[sources]]
 url = "https://martinfowler.com/bliki/ParallelChange.html"
-title = "Martin Fowler — Parallel Change (Expand/Migrate/Contract pattern)"
+title = "Martin Fowler: Parallel Change (Expand/Migrate/Contract pattern)"
 
 [[sources]]
 url = "https://martinfowler.com/articles/evodb.html"
-title = "Pramod Sadalage & Martin Fowler — Evolutionary Database Design (Transition Phase / parallel-change for schema refactorings)"
+title = "Pramod Sadalage & Martin Fowler: Evolutionary Database Design (Transition Phase / parallel-change for schema refactorings)"
 
 [decision]
 question = "What position does the project take on: Expand-then-contract for breaking schema changes?"

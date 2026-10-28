@@ -1,5 +1,5 @@
 id = "ARCH-HOT-READ-CACHE-1"
-version = 2
+version = 3
 title = "Hot reads sit behind a TTL cache with explicit write-side invalidation"
 domain = "api-layer"
 layer = "universal"
@@ -11,7 +11,7 @@ verification = "grounded"
 
 [[sources]]
 url = "https://learn.microsoft.com/en-us/azure/architecture/patterns/cache-aside"
-title = "Azure Architecture Center — Cache-Aside pattern"
+title = "Azure Architecture Center: Cache-Aside pattern"
 
 [decision]
 question = "How are frequently read data cached, and how do writes keep the cache correct?"

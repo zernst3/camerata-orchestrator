@@ -1,5 +1,5 @@
 id = "ARCH-TOKEN-REFRESH-ROTATION-1"
-version = 2
+version = 3
 title = "Access tokens are short-lived; a long-lived session is maintained by a rotating refresh token whose reuse is detected and revokes the whole token family"
 domain = "permissions"
 layer = "universal"
@@ -12,11 +12,11 @@ qualifies = "Deterministically checkable in principle (does an access token's ow
 
 [[sources]]
 url = "https://datatracker.ietf.org/doc/html/rfc6749#section-10.4"
-title = "RFC 6749 §10.4 (OAuth 2.0) — Refresh Token Rotation / handling of refresh tokens"
+title = "RFC 6749 §10.4 (OAuth 2.0): Refresh Token Rotation / handling of refresh tokens"
 
 [[sources]]
 url = "https://datatracker.ietf.org/doc/html/draft-ietf-oauth-security-topics"
-title = "IETF OAuth Security Best Current Practice — refresh token rotation and reuse detection as a mitigation for refresh token replay"
+title = "IETF OAuth Security Best Current Practice: refresh token rotation and reuse detection as a mitigation for refresh token replay"
 
 [[sources]]
 url = "https://cwe.mitre.org/data/definitions/613.html"
@@ -74,11 +74,11 @@ id = "single-long-lived-access-token-as-the-session"
 violates = true
 label = "Issue one long-lived access token per login and use it as the session for its full validity window, with no refresh/rotation mechanism"
 directive = "A single access token is issued at login with a long expiry (hours to weeks) and is used directly as the session credential for its entire lifetime, with no shorter-lived token, no refresh exchange, and no rotation."
-why = "Rejected: a long-lived token used this way is difficult to revoke before its natural expiry (many designs specifically avoid a server-side revocation list for statelessness), so a stolen copy remains fully valid for as long as the token's lifetime, with no mechanism that would ever surface the theft to the legitimate user — the attacker's use is indistinguishable from the legitimate user's own continued use, forever, until expiry."
+why = "Rejected: a long-lived token used this way is difficult to revoke before its natural expiry (many designs specifically avoid a server-side revocation list for statelessness), so a stolen copy remains fully valid for as long as the token's lifetime, with no mechanism that would ever surface the theft to the legitimate user: the attacker's use is indistinguishable from the legitimate user's own continued use, forever, until expiry."
 
 [[option]]
 id = "non-rotating-refresh-token-reused-indefinitely"
 violates = true
 label = "Use a short-lived access token with a longer-lived refresh token, but the same refresh token is reused across every refresh with no rotation"
 directive = "Access tokens are short-lived and exchanged periodically for new ones using a refresh token, but the SAME refresh token value is presented and accepted on every exchange, with no new refresh token issued and no invalidation of the one just used."
-why = "Rejected: this correctly bounds the access token's own exposure window but does nothing for the refresh token itself, which becomes the new long-lived, effectively-permanent credential in the attacker's place — a stolen refresh token remains valid and silently reusable by an attacker in parallel with the legitimate client's own use, for as long as the refresh token's own (typically much longer) lifetime, with the same 'no signal the legitimate user would ever see' problem this rule exists to close, just shifted one layer down."
+why = "Rejected: this correctly bounds the access token's own exposure window but does nothing for the refresh token itself, which becomes the new long-lived, effectively-permanent credential in the attacker's place: a stolen refresh token remains valid and silently reusable by an attacker in parallel with the legitimate client's own use, for as long as the refresh token's own (typically much longer) lifetime, with the same 'no signal the legitimate user would ever see' problem this rule exists to close, just shifted one layer down."

@@ -1,5 +1,5 @@
 id = "RUST-TESTING-7"
-version = 2
+version = 3
 title = "Public API items have doc-tests in their /// comments that serve as runnable usage examples"
 domain = "rust:testing"
 layer = "language"
@@ -11,15 +11,15 @@ verification = "grounded"
 
 [[sources]]
 url = "https://doc.rust-lang.org/rust-by-example/testing/doc_testing.html"
-title = "Rust By Example — Doc Testing (triple-backtick code blocks in /// comments are compiled and run by cargo test)"
+title = "Rust By Example: Doc Testing (triple-backtick code blocks in /// comments are compiled and run by cargo test)"
 
 [[sources]]
 url = "https://doc.rust-lang.org/book/ch14-02-publishing-to-crates-io.html#making-useful-documentation-comments"
-title = "The Rust Book — Ch 14.2: Documentation Comments (/// with code examples; cargo test runs them)"
+title = "The Rust Book: Ch 14.2: Documentation Comments (/// with code examples; cargo test runs them)"
 
 [[sources]]
 url = "https://doc.rust-lang.org/rustdoc/write-documentation/documentation-tests.html"
-title = "The Rustdoc Book — Documentation Tests (attributes: should_panic, no_run, compile_fail, ignore)"
+title = "The Rustdoc Book: Documentation Tests (attributes: should_panic, no_run, compile_fail, ignore)"
 
 [decision]
 question = "How are usage examples for public API items documented and kept compiling?"

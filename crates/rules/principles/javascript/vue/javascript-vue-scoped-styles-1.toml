@@ -1,5 +1,5 @@
 id = "JAVASCRIPT-VUE-SCOPED-STYLES-1"
-version = 2
+version = 3
 title = "Use scoped styles to encapsulate component styling and prevent CSS leaks"
 domain = "javascript:vue"
 layer = "framework"
@@ -11,11 +11,11 @@ verification = "grounded"
 
 [[sources]]
 url = "https://vuejs.org/style-guide/rules-essential#component-style-scoping"
-title = "Vue.js Style Guide Priority A — Component-Scoped Styling"
+title = "Vue.js Style Guide Priority A: Component-Scoped Styling"
 
 [[sources]]
 url = "https://eslint.vuejs.org/rules/enforce-style-attribute.html"
-title = "eslint-plugin-vue — vue/enforce-style-attribute"
+title = "eslint-plugin-vue: vue/enforce-style-attribute"
 linter = "eslint-plugin-vue: vue/enforce-style-attribute"
 
 [decision]

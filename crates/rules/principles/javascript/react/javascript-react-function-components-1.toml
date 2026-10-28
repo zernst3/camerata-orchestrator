@@ -1,5 +1,5 @@
 id = "JAVASCRIPT-REACT-FUNCTION-COMPONENTS-1"
-version = 1
+version = 2
 title = "React component style: function components with hooks, or class components"
 domain = "javascript:react"
 layer = "framework"
@@ -11,7 +11,7 @@ verification = "grounded"
 
 [[sources]]
 url = "https://react.dev/reference/react/Component"
-title = "React docs — Component (class): 'We recommend defining components as functions instead of classes'"
+title = "React docs: Component (class): 'We recommend defining components as functions instead of classes'"
 
 [decision]
 question = "What style does the project use to write React components: function components with hooks, or class components?"

@@ -1,5 +1,5 @@
 id = "SUPABASE-REALTIME-PAYLOAD-EXPOSURE-1"
-version = 1
+version = 2
 title = "A Postgres Changes or Broadcast payload must not fan out sensitive columns to every channel subscriber by default"
 domain = "supabase:realtime"
 layer = "platform"
@@ -16,7 +16,7 @@ qualifies = "Enforced by a scan over Postgres Changes subscriptions (`.on('postg
 
 [[sources]]
 url = "https://supabase.com/docs/guides/realtime/postgres-changes"
-title = "Supabase docs — Postgres Changes: 'By default each change event contains the full row. Use select to receive only a subset of columns instead'; every subscriber incurs its own authorization check per change, but the full row is what gets evaluated and sent absent a column-scoped select"
+title = "Supabase docs: Postgres Changes: 'By default each change event contains the full row. Use select to receive only a subset of columns instead'; every subscriber incurs its own authorization check per change, but the full row is what gets evaluated and sent absent a column-scoped select"
 
 [[sources]]
 url = "https://cwe.mitre.org/data/definitions/200.html"
@@ -55,7 +55,7 @@ reads it. The same discipline applies to hand-constructed Broadcast payloads: th
 built from an explicit allowlist of fields, not by serializing the whole row or entity.
 
 RLS decides WHO may subscribe to a change stream. It says nothing about WHICH COLUMNS of an
-authorized row reach them — a user correctly entitled to know that a document changed is not
+authorized row reach them: a user correctly entitled to know that a document changed is not
 necessarily someone who should see the owner's email, a billing field, or an internal note that
 rode along because the subscription was set up to watch one status column. The exposure happens at
 transmission, so filtering in the receiving client does not prevent it.
@@ -76,4 +76,4 @@ id = "broadcast-the-full-row-and-filter-sensitive-fields-client-side"
 violates = true
 label = "Realtime payloads carry the full row, with sensitive fields filtered out in the receiving client"
 directive = "Postgres Changes subscriptions keep the default full-row payload, or Broadcast sends the complete entity object, and the receiving client's own code decides which fields to display or discard after the data has arrived."
-why = "Rejected: by the time a client-side filter runs, the sensitive data has already been transmitted to and received by that client — a filter that only controls what's RENDERED does nothing to prevent the browser's network tab, a malicious or modified client, or a compromised extension from reading the full payload off the wire. The column-level exposure this rule targets happens at TRANSMISSION, not display, so a remediation scoped to the display layer leaves the actual defect (every subscriber receiving every column) fully intact."
+why = "Rejected: by the time a client-side filter runs, the sensitive data has already been transmitted to and received by that client: a filter that only controls what's RENDERED does nothing to prevent the browser's network tab, a malicious or modified client, or a compromised extension from reading the full payload off the wire. The column-level exposure this rule targets happens at TRANSMISSION, not display, so a remediation scoped to the display layer leaves the actual defect (every subscriber receiving every column) fully intact."

@@ -1,5 +1,5 @@
 id = "JAVA-SPRING-VALID-REQUEST-VALIDATION-1"
-version = 1
+version = 2
 title = "@Valid (or @Validated) is applied to @RequestBody and @RequestParam parameters to trigger Bean Validation before the method body runs"
 domain = "java:spring"
 layer = "framework"
@@ -17,7 +17,7 @@ why = "Spring MVC's @RequestBody binds the request JSON to a Java object but doe
 
 [[sources]]
 url = "https://docs.spring.io/spring-framework/reference/web/webmvc/mvc-controller/ann-validation.html"
-title = "Spring MVC Reference — Validation (@Valid / @Validated on @RequestBody triggers Bean Validation)"
+title = "Spring MVC Reference: Validation (@Valid / @Validated on @RequestBody triggers Bean Validation)"
 
 [[option]]
 id = "valid-annotation-on-request-body"

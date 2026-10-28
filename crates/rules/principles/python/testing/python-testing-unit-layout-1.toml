@@ -1,5 +1,5 @@
 id = "PYTHON-TESTING-UNIT-LAYOUT-1"
-version = 1
+version = 2
 title = "Unit tests live in a top-level tests/ directory mirroring the source tree"
 domain = "python:testing"
 layer = "language"
@@ -39,4 +39,4 @@ why = "Avoided: makes coverage reporting, CI filtering, and contributor orientat
 
 [[sources]]
 url = "https://docs.pytest.org/en/stable/explanation/goodpractices.html"
-title = "pytest — Good Integration Practices (Choosing a test layout)"
+title = "pytest: Good Integration Practices (Choosing a test layout)"

@@ -1,5 +1,5 @@
 id = "JAVA-LOGGING-STRUCTURED-1"
-version = 1
+version = 2
 title = "Logging is structured and machine-readable using a logging framework; no concatenated strings printed to stdout"
 domain = "java"
 layer = "language"
@@ -17,7 +17,7 @@ why = "Structured logging (using slf4j, Log4j, or similar) produces machine-read
 
 [[sources]]
 url = "https://pmd.github.io/pmd/pmd_rules_java_bestpractices.html#systemprintln"
-title = "PMD — SystemPrintln: References to System.out/err.print should use a logger"
+title = "PMD: SystemPrintln: References to System.out/err.print should use a logger"
 linter = "PMD: SystemPrintln"
 
 [[option]]

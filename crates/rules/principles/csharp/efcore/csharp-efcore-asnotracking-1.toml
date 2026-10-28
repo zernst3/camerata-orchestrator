@@ -1,5 +1,5 @@
 id = "CSHARP-EFCORE-ASNOTRACKING-1"
-version = 2
+version = 3
 title = "Read-only queries use AsNoTracking; change tracking is reserved for entities that will be mutated"
 domain = "csharp:efcore"
 layer = "library"
@@ -39,4 +39,4 @@ why = "Every entity returned by a read-only query gets a change-tracking snapsho
 
 [[sources]]
 url = "https://learn.microsoft.com/en-us/ef/core/querying/tracking"
-title = "Tracking vs. No-Tracking Queries — EF Core | Microsoft Learn"
+title = "Tracking vs. No-Tracking Queries: EF Core | Microsoft Learn"

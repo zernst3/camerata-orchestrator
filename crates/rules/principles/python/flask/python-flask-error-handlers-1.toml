@@ -1,5 +1,5 @@
 id = "PYTHON-FLASK-ERROR-HANDLERS-1"
-version = 1
+version = 2
 title = "Structured error responses are provided by registered error handlers, not ad-hoc try/except in route functions"
 domain = "python:flask"
 layer = "framework"
@@ -47,4 +47,4 @@ why = "Returns HTML to clients expecting JSON; leaks stack traces in debug mode;
 
 [[sources]]
 url = "https://flask.palletsprojects.com/en/stable/errorhandling/"
-title = "Flask docs — Handling Application Errors (errorhandler decorator, Blueprint error handlers)"
+title = "Flask docs: Handling Application Errors (errorhandler decorator, Blueprint error handlers)"

@@ -1,5 +1,5 @@
 id = "RUST-DIOXUS-6"
-version = 2
+version = 3
 title = "Async UI data goes through the resource hook; fire-and-forget work goes through spawn"
 domain = "rust:dioxus"
 layer = "framework"
@@ -46,8 +46,8 @@ why = "Premature complexity: the resource hook is sufficient for the common data
 
 [[sources]]
 url = "https://dioxuslabs.com/learn/0.6/essentials/async/"
-title = "Dioxus essentials: Async — use_resource for UI data, spawn for fire-and-forget"
+title = "Dioxus essentials: Async: use_resource for UI data, spawn for fire-and-forget"
 
 [[sources]]
 url = "https://dioxuslabs.com/learn/0.6/reference/use_resource"
-title = "Dioxus reference: use_resource — async hook with reactive dependencies"
+title = "Dioxus reference: use_resource: async hook with reactive dependencies"

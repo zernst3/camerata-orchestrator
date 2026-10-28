@@ -1,5 +1,5 @@
 id = "RUST-DIOXUS-14"
-version = 1
+version = 2
 title = "Where common UI elements come from: a shared primitives layer, per-feature elements, a third-party library, or inline markup"
 domain = "rust:dioxus"
 layer = "framework"
@@ -11,7 +11,7 @@ verification = "grounded"
 
 [[sources]]
 url = "https://atomicdesign.bradfrost.com/chapter-2/"
-title = "Brad Frost — Atomic Design, Chapter 2: Atomic Design Methodology"
+title = "Brad Frost: Atomic Design, Chapter 2: Atomic Design Methodology"
 relevance = "Authority note (author-facing): low-medium authority — a widely-adopted design methodology, not a formal standard; grounds the shared-primitives-composed-upward shape generally, not this project's specific option set"
 
 [decision]

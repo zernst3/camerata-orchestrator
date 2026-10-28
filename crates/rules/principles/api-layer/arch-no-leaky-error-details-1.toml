@@ -1,5 +1,5 @@
 id = "ARCH-NO-LEAKY-ERROR-DETAILS-1"
-version = 2
+version = 3
 title = "Error responses never surface raw database error text, exception stack traces, or internal file paths, regardless of the envelope shape"
 domain = "api-layer"
 layer = "universal"
@@ -71,4 +71,4 @@ id = "forward-raw-exception-message-unconditionally"
 violates = true
 label = "Forward the raw exception's message/stack/driver detail into the response body unconditionally, in every environment"
 directive = "A generic catch-all error handler serializes the caught exception's own message, stack trace, or database driver error text directly into the HTTP response body, with no environment check and no mapping to a pre-written message."
-why = "Rejected: this discloses internal schema details, filesystem paths, dependency versions, and exact SQL to any caller who can trigger an error, including unauthenticated callers at a public endpoint — it is reconnaissance handed to an attacker for free, and the information disclosed (table/column names, stack traces revealing library versions) is routinely useful for crafting a more targeted follow-up attack."
+why = "Rejected: this discloses internal schema details, filesystem paths, dependency versions, and exact SQL to any caller who can trigger an error, including unauthenticated callers at a public endpoint: it is reconnaissance handed to an attacker for free, and the information disclosed (table/column names, stack traces revealing library versions) is routinely useful for crafting a more targeted follow-up attack."

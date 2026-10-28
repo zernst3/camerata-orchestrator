@@ -1,5 +1,5 @@
 id = "ORCH-TRAINING-CUTOFF-1"
-version = 2
+version = 3
 title = "Training-data-limited decisions route to human review by category, not by confidence"
 domain = "agentic"
 layer = "universal"
@@ -7,15 +7,16 @@ enforcement = "prose"
 kind = "decision"
 inspectable = false
 default = true
-verification = "grounded"
+# `policy`, not `grounded`: the only outside source is rated low authority and supports the general training-data limitation risk; routing by category is this project's own policy.
+verification = "policy"
 
 [[sources]]
 url = "AGENTS.md"
-title = "AGENTS.md — ORCH-TRAINING-CUTOFF-1 (training-data-limited decisions route by category)"
+title = "AGENTS.md: ORCH-TRAINING-CUTOFF-1 (training-data-limited decisions route by category)"
 
 [[sources]]
 url = "https://genai.owasp.org/llm-top-10/"
-title = "OWASP Top 10 for LLM Applications — LLM09:2025 Misinformation"
+title = "OWASP Top 10 for LLM Applications: LLM09:2025 Misinformation"
 relevance = "Authority note (author-facing): low — supports the general training-data-limitation risk, not the category-routing mechanism"
 
 [decision]

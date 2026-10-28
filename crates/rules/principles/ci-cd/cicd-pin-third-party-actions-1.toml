@@ -1,5 +1,5 @@
 id = "CICD-PIN-THIRD-PARTY-ACTIONS-1"
-version = 3
+version = 4
 title = "Third-party CI actions are pinned to a full commit SHA, never a mutable tag or branch"
 domain = "ci-cd"
 layer = "universal"
@@ -16,7 +16,7 @@ qualifies = "Deterministically checkable by a regex scan over workflow `uses:` l
 
 [[sources]]
 url = "https://docs.github.com/en/actions/security-guides/security-hardening-for-github-actions#using-third-party-actions"
-title = "GitHub docs — Security hardening for GitHub Actions: 'you can increase the security of your workflows by specifying a full-length commit SHA rather than a tag' when referencing a third-party action"
+title = "GitHub docs: Security hardening for GitHub Actions: 'you can increase the security of your workflows by specifying a full-length commit SHA rather than a tag' when referencing a third-party action"
 
 [[sources]]
 url = "https://cwe.mitre.org/data/definitions/829.html"
@@ -24,12 +24,12 @@ title = "CWE-829: Inclusion of Functionality from Untrusted Control Sphere"
 
 [[sources]]
 url = "https://github.com/zizmorcore/zizmor"
-title = "zizmor — a static analysis tool for GitHub Actions workflows; its unpinned-uses audit flags tag/branch-referenced third-party actions"
+title = "zizmor: a static analysis tool for GitHub Actions workflows; its unpinned-uses audit flags tag/branch-referenced third-party actions"
 linter = "zizmor"
 
 [[sources]]
 url = "https://securitylab.github.com/resources/github-actions-building-blocks/"
-title = "GitHub Security Lab — GitHub Actions security best practices (pinning third-party actions to a full commit SHA)"
+title = "GitHub Security Lab: GitHub Actions security best practices (pinning third-party actions to a full commit SHA)"
 
 [decision]
 question = "Is every third-party action referenced in a workflow pinned to a full commit SHA, or can any of them be referenced by a mutable tag or branch name?"
@@ -84,4 +84,4 @@ id = "reference-actions-by-mutable-tag-or-branch"
 violates = true
 label = "Reference third-party actions by a version tag (e.g. @v4) or a branch name, relying on the maintainer not to re-point it maliciously"
 directive = "Workflow files reference third-party actions using a semantic-version tag or a branch name (e.g. uses: some-org/some-action@v4 or @main), accepting whatever commit that reference currently resolves to on each run."
-why = "Rejected: a tag or branch is mutable by the action's own maintainer at any time, and a workflow referencing it inherits whatever that reference resolves to on every subsequent run with no corresponding change in the consuming repository for a review process to catch. This is the exact mechanism several real supply-chain compromises of popular GitHub Actions have used — re-pointing a widely-trusted tag to a malicious commit reaches every consumer simultaneously and silently."
+why = "Rejected: a tag or branch is mutable by the action's own maintainer at any time, and a workflow referencing it inherits whatever that reference resolves to on every subsequent run with no corresponding change in the consuming repository for a review process to catch. This is the exact mechanism several real supply-chain compromises of popular GitHub Actions have used: re-pointing a widely-trusted tag to a malicious commit reaches every consumer simultaneously and silently."

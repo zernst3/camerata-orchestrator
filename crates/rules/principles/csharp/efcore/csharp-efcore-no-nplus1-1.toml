@@ -1,5 +1,5 @@
 id = "CSHARP-EFCORE-NO-NPLUS1-1"
-version = 2
+version = 3
 title = "Related data is loaded via Include/ThenInclude or projection; no lazy-loading and no N+1 loops"
 domain = "csharp:efcore"
 layer = "library"
@@ -39,4 +39,4 @@ why = "More explicit than lazy loading but still issues per-entity round-trips w
 
 [[sources]]
 url = "https://learn.microsoft.com/en-us/ef/core/performance/efficient-querying"
-title = "Efficient Querying — EF Core | Microsoft Learn"
+title = "Efficient Querying: EF Core | Microsoft Learn"

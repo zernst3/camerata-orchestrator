@@ -1,5 +1,5 @@
 id = "JAVASCRIPT-NEST-INTERCEPTORS-CROSS-CUTTING-1"
-version = 2
+version = 3
 title = "Use interceptors for cross-cutting concerns like logging, tracing, and response transformation"
 domain = "javascript:nest"
 layer = "framework"
@@ -11,7 +11,7 @@ verification = "grounded"
 
 [[sources]]
 url = "https://docs.nestjs.com/interceptors"
-title = "NestJS Docs — Interceptors: cross-cutting concerns"
+title = "NestJS Docs: Interceptors: cross-cutting concerns"
 
 [decision]
 question = "Where does cross-cutting logic such as logging, tracing, and response transformation live in the NestJS application?"

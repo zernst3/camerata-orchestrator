@@ -1,5 +1,5 @@
 id = "RUST-ENTITIES-12"
-version = 2
+version = 3
 title = "Postgres pgEnum columns map to typed Rust enums via DeriveActiveEnum"
 domain = "rust:seaorm"
 layer = "library"
@@ -37,8 +37,8 @@ why = "Premature extraction: most pgEnums have one consuming entity for most of 
 
 [[sources]]
 url = "https://docs.rs/sea-orm/latest/sea_orm/derive.DeriveActiveEnum.html"
-title = "sea_orm::DeriveActiveEnum — derive macro implementing ActiveEnum trait for enums"
+title = "sea_orm::DeriveActiveEnum: derive macro implementing ActiveEnum trait for enums"
 
 [[sources]]
 url = "https://www.sea-ql.org/SeaORM/docs/generate-entity/enumeration/"
-title = "SeaORM docs: Enumeration — DeriveActiveEnum and Postgres pgEnum mapping"
+title = "SeaORM docs: Enumeration: DeriveActiveEnum and Postgres pgEnum mapping"

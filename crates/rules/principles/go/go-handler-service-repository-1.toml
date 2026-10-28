@@ -1,5 +1,5 @@
 id = "GO-HANDLER-SERVICE-REPOSITORY-1"
-version = 1
+version = 2
 title = "Business logic is layered: HTTP handlers call services, services call repositories; no business logic in handlers"
 domain = "go"
 layer = "architecture"
@@ -23,15 +23,15 @@ verification = "policy"
 
 [[sources]]
 url = "https://grafana.com/blog/2024/02/09/how-i-write-http-services-in-go-after-13-years/"
-title = "Mat Ryer — How I write HTTP services in Go after 13 years"
+title = "Mat Ryer: How I write HTTP services in Go after 13 years"
 
 [[sources]]
 url = "https://www.gobeyond.dev/standard-package-layout/"
-title = "Ben Johnson — Standard Package Layout"
+title = "Ben Johnson: Standard Package Layout"
 
 [[sources]]
 url = "https://martinfowler.com/eaaCatalog/repository.html"
-title = "Martin Fowler — Repository (Patterns of Enterprise Application Architecture)"
+title = "Martin Fowler: Repository (Patterns of Enterprise Application Architecture)"
 
 [decision]
 question = "Where does business logic live relative to HTTP handlers and data access?"

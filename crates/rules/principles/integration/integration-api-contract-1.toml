@@ -1,5 +1,5 @@
 id = "INTEGRATION-API-CONTRACT-1"
-version = 1
+version = 2
 title = "Consumer endpoint calls match a producer route and shape"
 domain = "integration"
 layer = "universal"
@@ -30,7 +30,7 @@ title = "Integration gate: the generic reconciliation engine + per-stack extract
 
 [[sources]]
 url = "https://martinfowler.com/articles/consumerDrivenContracts.html"
-title = "Martin Fowler — Consumer-Driven Contracts: A Service Evolution Pattern"
+title = "Martin Fowler: Consumer-Driven Contracts: A Service Evolution Pattern"
 
 [decision]
 question = "How does the project verify that a consumer's endpoint calls match what the producer actually exposes across the agent seam?"
@@ -39,7 +39,7 @@ why = "A single story decomposed across agents (an API agent and a UI agent) can
 [[option]]
 id = "reconcile-consumer-calls-against-producer-routes"
 label = "Reconcile consumer endpoint calls against producer routes (deterministic)"
-directive = "Every endpoint a consumer calls resolves to a route the producer actually exposes, with a matching HTTP method and path and compatible request and response shapes — the consumer reads no response field the producer does not emit, sends none it does not accept, and handles no status code it never returns. This holds across the whole system end to end, because a consumer and the producer it calls commonly live in different components and a per-component check cannot see the seam."
+directive = "Every endpoint a consumer calls resolves to a route the producer actually exposes, with a matching HTTP method and path and compatible request and response shapes: the consumer reads no response field the producer does not emit, sends none it does not accept, and handles no status code it never returns. This holds across the whole system end to end, because a consumer and the producer it calls commonly live in different components and a per-component check cannot see the seam."
 remediation = """
 Fix the mismatched endpoint call: either add the missing route (or field) on the producer side, or correct the consumer to call the route and shape the producer actually exposes. If the mismatch is intentional (a known, deliberate design fork), add an inline waiver comment with a reason rather than leaving it unreconciled. Verify by re-running the integration gate's reconciliation on the assembled tree and confirming the specific consumer call now matches a produced route by method, path, and shape.
 """

@@ -1,5 +1,5 @@
 id = "ARCH-WEBHOOK-SIGNATURE-VERIFICATION-1"
-version = 2
+version = 3
 title = "A payment-provider webhook handler verifies the provider's signature on the raw request body before trusting the event"
 domain = "api-layer"
 layer = "universal"
@@ -17,7 +17,7 @@ qualifies = "Enforced by a scan over webhook route handlers (a route whose path 
 
 [[sources]]
 url = "https://docs.stripe.com/webhooks#verify-official-libraries"
-title = "Stripe — Webhooks: verify webhook signatures using the signing secret and the raw, unparsed request body before processing the event"
+title = "Stripe: Webhooks: verify webhook signatures using the signing secret and the raw, unparsed request body before processing the event"
 
 [[sources]]
 url = "https://cheatsheetseries.owasp.org/cheatsheets/REST_Security_Cheat_Sheet.html"
@@ -65,4 +65,4 @@ id = "trust-any-request-shaped-like-a-provider-event"
 violates = true
 label = "Process any request body shaped like a provider event, with no signature check"
 directive = "the webhook handler parses the request body into the provider's event shape and drives business logic (order status, subscription state, refund triggers) directly from it, with no verification that the request actually originated from the payment provider"
-why = "Rejected: a webhook URL with no signature check accepts a forged event from anyone who discovers it, with no payment ever having occurred — the handler cannot distinguish a genuine provider delivery from an attacker's hand-crafted POST, because the only thing distinguishing the two is the signature this option skips checking."
+why = "Rejected: a webhook URL with no signature check accepts a forged event from anyone who discovers it, with no payment ever having occurred: the handler cannot distinguish a genuine provider delivery from an attacker's hand-crafted POST, because the only thing distinguishing the two is the signature this option skips checking."

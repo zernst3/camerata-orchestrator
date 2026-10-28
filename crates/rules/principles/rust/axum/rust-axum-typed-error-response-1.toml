@@ -1,5 +1,5 @@
 id = "RUST-AXUM-TYPED-ERROR-RESPONSE-1"
-version = 2
+version = 3
 title = "Handlers return typed error types that implement IntoResponse, not raw HTTP responses"
 domain = "rust:axum"
 layer = "framework"
@@ -38,4 +38,4 @@ why = "The same error (for example, user not found) must be mapped to the same H
 
 [[sources]]
 url = "https://docs.rs/axum/latest/axum/response/index.html"
-title = "axum::response — IntoResponse trait and ErrorResponse type"
+title = "axum::response: IntoResponse trait and ErrorResponse type"

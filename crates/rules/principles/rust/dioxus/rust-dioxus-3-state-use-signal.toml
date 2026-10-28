@@ -1,5 +1,5 @@
 id = "RUST-DIOXUS-3"
-version = 2
+version = 3
 title = "Local component state is a Signal, read via call or read, written via set or with_mut"
 domain = "rust:dioxus"
 layer = "framework"
@@ -46,4 +46,4 @@ why = "An anti-pattern that acknowledges the rule was not followed: it re-render
 
 [[sources]]
 url = "https://dioxuslabs.com/learn/0.6/essentials/state/"
-title = "Dioxus essentials: State — use_signal, Signal, read, set, write"
+title = "Dioxus essentials: State: use_signal, Signal, read, set, write"

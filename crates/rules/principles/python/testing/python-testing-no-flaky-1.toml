@@ -1,5 +1,5 @@
 id = "PYTHON-TESTING-NO-FLAKY-1"
-version = 1
+version = 2
 title = "Tests are deterministic: no time, random, or external-state dependencies without explicit control"
 domain = "python:testing"
 layer = "language"
@@ -33,4 +33,4 @@ why = "Produces a suite that can and will fail for reasons unrelated to the code
 
 [[sources]]
 url = "https://docs.pytest.org/en/stable/explanation/flaky.html"
-title = "pytest — Flaky tests (definition, root causes, recommendations)"
+title = "pytest: Flaky tests (definition, root causes, recommendations)"

@@ -1,5 +1,5 @@
 id = "GO-WEB-HANDLER-TIMEOUTS-1"
-version = 1
+version = 2
 title = "Handlers have a per-route or per-group timeout; long-running operations move to background jobs or set explicit context deadlines"
 domain = "go:web"
 layer = "framework"
@@ -11,11 +11,11 @@ verification = "grounded"
 
 [[sources]]
 url = "https://pkg.go.dev/net/http#Server"
-title = "pkg.go.dev — net/http Server (ReadTimeout, WriteTimeout, IdleTimeout)"
+title = "pkg.go.dev: net/http Server (ReadTimeout, WriteTimeout, IdleTimeout)"
 
 [[sources]]
 url = "https://go.dev/wiki/CodeReviewComments#contexts"
-title = "Go Code Review Comments — Contexts"
+title = "Go Code Review Comments: Contexts"
 
 [decision]
 question = "How should timeouts be enforced on individual HTTP handlers?"

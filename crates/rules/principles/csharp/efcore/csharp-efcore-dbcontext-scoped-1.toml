@@ -1,5 +1,5 @@
 id = "CSHARP-EFCORE-DBCONTEXT-SCOPED-1"
-version = 1
+version = 2
 title = "DbContext is registered as Scoped (per-request); never Singleton"
 domain = "csharp:efcore"
 layer = "library"
@@ -40,4 +40,4 @@ why = "Breaks transaction scope: two injection sites within the same request rec
 
 [[sources]]
 url = "https://learn.microsoft.com/en-us/ef/core/dbcontext-configuration/"
-title = "DbContext Lifetime, Configuration, and Initialization — EF Core | Microsoft Learn"
+title = "DbContext Lifetime, Configuration, and Initialization: EF Core | Microsoft Learn"

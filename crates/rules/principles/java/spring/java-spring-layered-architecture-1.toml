@@ -1,5 +1,5 @@
 id = "JAVA-SPRING-LAYERED-ARCHITECTURE-1"
-version = 2
+version = 3
 title = "Spring components follow a strict layered hierarchy: @RestController calls @Service; @Service calls @Repository; no layer calls a higher layer"
 domain = "java:spring"
 layer = "framework"
@@ -22,11 +22,11 @@ why = "Spring's stereotype annotations (@RestController, @Service, @Repository) 
 
 [[sources]]
 url = "https://docs.spring.io/spring-framework/reference/core/beans/classpath-scanning.html"
-title = "Spring Framework Reference — Stereotype Annotations: @Controller, @Service, @Repository"
+title = "Spring Framework Reference: Stereotype Annotations: @Controller, @Service, @Repository"
 
 [[sources]]
 url = "https://docs.spring.io/spring-framework/reference/data-access/transaction/declarative/annotations.html"
-title = "Spring Framework Reference — Using @Transactional (service-layer placement)"
+title = "Spring Framework Reference: Using @Transactional (service-layer placement)"
 
 [[option]]
 id = "strict-layer-hierarchy"

@@ -1,5 +1,5 @@
 id = "SEC-NO-QUERY-GRAMMAR-INJECTION-1"
-version = 1
+version = 2
 title = "User-controlled data is never concatenated into a query/filter grammar string (PostgREST .or()/.filter(), a NoSQL operator string, an LDAP filter); it is passed as a bound argument"
 domain = "universal"
 layer = "universal"
@@ -20,7 +20,7 @@ title = "CWE-74: Improper Neutralization of Special Elements in Output Used by a
 
 [[sources]]
 url = "https://postgrest.org/en/stable/references/api/tables_views.html#operators"
-title = "PostgREST docs — Operators (the .or()/.filter() query-string grammar this rule targets)"
+title = "PostgREST docs: Operators (the .or()/.filter() query-string grammar this rule targets)"
 
 [decision]
 question = "Is user-controlled data string-concatenated into a query/filter GRAMMAR — a PostgREST .or()/.filter() expression, a NoSQL operator object built from a raw string, or an LDAP filter — rather than passed as a bound argument the client library escapes?"
@@ -45,7 +45,7 @@ directive = "Any filter or query expression accepting user-controlled data uses 
 remediation = """
 Rewrite the concatenated filter expression to use the client library's bound-argument methods
 (PostgREST/Supabase: .eq(column, value) chains instead of a string-built .or()/.filter()
-expression; escape reserved characters — commas, parentheses, wildcards — for any value that must
+expression; escape reserved characters (commas, parentheses, wildcards) for any value that must
 still flow into a grammar string). Verify by confirming a payload containing the grammar's own
 reserved characters (e.g. a comma or closing paren) no longer changes which rows the query returns.
 """

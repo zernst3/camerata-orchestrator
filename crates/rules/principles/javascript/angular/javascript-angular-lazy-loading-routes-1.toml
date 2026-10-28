@@ -1,5 +1,5 @@
 id = "JAVASCRIPT-ANGULAR-LAZY-LOADING-ROUTES-1"
-version = 2
+version = 3
 title = "Feature routes are lazy-loaded to reduce the initial bundle"
 domain = "javascript:angular"
 layer = "framework"
@@ -11,7 +11,7 @@ verification = "grounded"
 
 [[sources]]
 url = "https://angular.dev/guide/routing/define-routes"
-title = "Angular — Define routes (loadComponent / loadChildren for lazy-loaded routes)"
+title = "Angular: Define routes (loadComponent / loadChildren for lazy-loaded routes)"
 
 [decision]
 question = "How are Angular feature routes loaded into the application bundle?"
