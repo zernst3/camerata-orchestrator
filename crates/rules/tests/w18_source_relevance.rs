@@ -507,8 +507,9 @@ async fn req_w18_the_nineteen_migrated_annotations_are_loaded_from_the_corpus() 
     // Corpus text work (2026-10-28): sources added to replace a non-http or missing citation,
     // each carrying a note on what the source does and does not establish (for example, that a
     // cited page documents a mechanism while the rule's requirement is the project's own
-    // policy). Same author-facing use as the W25 moves. Rules: PROC-PR-CONCURRENCY-1 (2).
-    const CORPUS_TEXT_SOURCE_NOTES: usize = 2;
+    // policy). Same author-facing use as the W25 moves. Rules: PROC-PR-CONCURRENCY-1 (2),
+    // UI-UTC-DATES-1 (2), JAVASCRIPT-ANGULAR-SMART-PRESENTATIONAL-PATTERN-1 (1).
+    const CORPUS_TEXT_SOURCE_NOTES: usize = 5;
     let total: usize = set
         .iter()
         .map(|r| r.sources.iter().filter(|s| s.relevance.is_some()).count())

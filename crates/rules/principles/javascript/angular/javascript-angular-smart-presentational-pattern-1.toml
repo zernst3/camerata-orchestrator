@@ -1,5 +1,5 @@
 id = "JAVASCRIPT-ANGULAR-SMART-PRESENTATIONAL-PATTERN-1"
-version = 1
+version = 2
 title = "Components follow the smart (container) vs. presentational pattern"
 domain = "javascript:angular"
 layer = "framework"
@@ -9,6 +9,11 @@ inspectable = true
 default = true
 verification = "policy"
 
+
+[[sources]]
+url = "https://angular.dev/style-guide"
+title = "Angular style guide: Keep components and directives focused on presentation"
+relevance = "The official guide says code inside components should generally relate to the UI shown on the page, and logic that makes sense on its own should move to other files. That supports the presentational half of the pattern; the guide does not name the smart/presentational split itself, which remains this project's policy."
 [decision]
 question = "What position does the project take on: Components follow the smart (container) vs. presentational pattern?"
 default = "components-follow-the-smart-container-vs-presentational-pattern"
