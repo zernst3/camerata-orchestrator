@@ -1,5 +1,5 @@
 id = "ORCH-CONFLICTING-ROBUSTNESS-1"
-version = 2
+version = 3
 title = "Conflicting robustness is a real tradeoff, not a clear winner"
 domain = "agentic"
 layer = "universal"
@@ -11,7 +11,7 @@ verification = "policy"
 
 [[sources]]
 url = "AGENTS.md"
-title = "AGENTS.md — ORCH-CONFLICTING-ROBUSTNESS-1 (conflicting robustness is a real tradeoff)"
+title = "Project policy: when each option guards against a different failure, name both failures and let a person choose"
 
 [decision]
 question = "When two options are each robust against a different failure mode, how does an agent resolve the choice?"

@@ -1,5 +1,5 @@
 id = "ARCH-TRUNK-SYNC-1"
-version = 1
+version = 2
 title = "Single-source trunk sync"
 domain = "ci-cd"
 layer = "universal"
@@ -7,11 +7,15 @@ enforcement = "prose"
 kind = "decision"
 inspectable = true
 default = true
-verification = "policy"
+verification = "grounded"
+
+[[sources]]
+url = "https://git-scm.com/docs/gitworkflows"
+title = "Git documentation, gitworkflows: sets the direction of flow (fix on the oldest supported branch that needs it, then merge upwards); the once-after-ship cadence is this project's own policy"
 
 [[sources]]
 url = "CONVENTIONS.md"
-title = "CONVENTIONS.md — Branching & Release Flow section (release-branch changes sync to main ONCE post-prod-ship)"
+title = "Project policy: fixes made on a release branch return to trunk in one merge after the release ships"
 
 [decision]
 question = "How do release-line fixes get back to trunk?"

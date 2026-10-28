@@ -1,5 +1,5 @@
 id = "PROC-AUTO-MERGE-1"
-version = 1
+version = 2
 title = "Auto-merge tight, bot-authored PRs"
 domain = "ci-cd"
 layer = "universal"
@@ -7,11 +7,15 @@ enforcement = "prose"
 kind = "decision"
 inspectable = false
 default = false
-verification = "policy"
+verification = "grounded"
+
+[[sources]]
+url = "https://docs.github.com/en/code-security/tutorials/secure-your-dependencies/automate-dependabot-with-actions"
+title = "GitHub Docs: Automating Dependabot with GitHub Actions (enable auto-merge only for a chosen class of bot pull requests, such as patch updates)"
 
 [[sources]]
 url = "AGENTS.md"
-title = "AGENTS.md — referenced in brownfield onboarding context (auto-merge tight bot PRs)"
+title = "Project policy: bot pull requests that are single-purpose, follow conventions and touch no sensitive area may merge on green CI"
 
 [decision]
 question = "Which bot-authored PRs may self-merge?"
