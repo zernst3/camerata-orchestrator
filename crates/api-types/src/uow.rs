@@ -523,6 +523,57 @@ pub struct UowListResponse {
     pub uows: Vec<UowListItem>,
 }
 
+/// The findings a unit of work was created from (roadmap 2c). Declared here, ahead of the unit
+/// aggregate gaining its `source` field, because the remediation planner's traceable PR body
+/// (`camerata_server::remediation_plan::pr_body`) renders it.
+#[derive(Clone, Default, Serialize, Deserialize, Debug, PartialEq, Eq)]
+pub struct FindingsSource {
+    /// The inspection the findings were taken from (`InspectionEntry::id`).
+    pub inspection_id: String,
+    /// The commit the inspection read, per repository (`AuditedRef.repo`, `.sha`).
+    #[serde(default)]
+    pub audited: Vec<AuditedCommit>,
+    /// The rule ids this unit must satisfy, the primary rule first. One id in the common case;
+    /// several when one fix closes findings under several rules.
+    #[serde(default)]
+    pub rule_ids: Vec<String>,
+    /// The planner's area label when a rule was split by directory (`None` when not split).
+    #[serde(default)]
+    pub area: Option<String>,
+    /// Every finding this unit is expected to close.
+    #[serde(default)]
+    pub findings: Vec<SourceFinding>,
+    /// Unit ids (story ids) this unit should land after. Advisory: shown in the console and
+    /// named in the PR body, not enforced.
+    #[serde(default)]
+    pub depends_on: Vec<String>,
+}
+
+/// The commit an inspection read in one repository.
+#[derive(Clone, Default, Serialize, Deserialize, Debug, PartialEq, Eq)]
+pub struct AuditedCommit {
+    pub repo: String,
+    #[serde(default)]
+    pub sha: Option<String>,
+}
+
+/// One finding a unit is expected to close, with both identities.
+#[derive(Clone, Default, Serialize, Deserialize, Debug, PartialEq, Eq)]
+pub struct SourceFinding {
+    /// `report_export::finding_key` of the finding at plan time (exact identity).
+    pub key: String,
+    /// `fingerprint(rule_id, snippet)` (line-shift tolerant identity; what a retest matches on).
+    pub fingerprint: String,
+    pub repo: String,
+    pub path: String,
+    pub line: usize,
+    pub rule_id: String,
+    pub severity: String,
+    /// The snippet after `camerata_secrets::redact_str`. Never the raw line.
+    #[serde(default)]
+    pub snippet: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
