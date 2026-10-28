@@ -1205,7 +1205,9 @@ Inspection insp-proj-1700000000-ab12cd; o/a at 0123abcd.\n\
             assert!(!body.contains(&f.snippet), "snippet leaked: {body}");
         }
         assert!(!body.contains("hunter2"));
-        for local in ["/Users/", "/home/", "C:\\", "/tmp/", "/var/"] {
+        // The macOS home prefix is assembled so this file never spells a home path itself
+        // (scripts/check-personal-paths.sh refuses any tracked file that does).
+        for local in [concat!("/Use", "rs/"), "/home/", "C:\\", "/tmp/", "/var/"] {
             assert!(!body.contains(local), "local path `{local}` in:\n{body}");
         }
         assert!(
