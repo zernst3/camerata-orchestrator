@@ -30,15 +30,23 @@ use camerata_rules::{load_corpus, DEFAULT_CORPUS_PATH};
 
 /// Docs a reader lands on. Each is checked for stale counts; the README must also carry the
 /// canonical "N rules across M domains" sentence.
-const CHECKED_DOCS: &[&str] = &[
-    "README.md",
-    "docs/OVERVIEW.md",
+const CHECKED_DOCS: &[&str] = &["README.md", "docs/OVERVIEW.md"];
+
+/// Long technical docs the README links. They legitimately quote many SUBSET counts ("13
+/// rules in this folder", "7 Go testing rules"), so they are not held to the strict check
+/// above; they are held to the corpus-scale check: a count of 100 or more written directly
+/// before "rules", "rule files" or "TOMLs" is a statement about the whole corpus and must be
+/// the real number. Where a figure adds nothing, write "every rule" instead of a number.
+const CORPUS_SCALE_DOCS: &[&str] = &[
     "docs/RULES_REFERENCE.md",
     "docs/RULE_AUTHORING.md",
     "docs/ARCHITECTURE.md",
     "docs/TECHNICAL.md",
     "docs/ENFORCEMENT.md",
 ];
+
+/// The smallest number the corpus-scale check treats as a statement about the whole corpus.
+const CORPUS_SCALE_FLOOR: u64 = 100;
 
 /// Docs held to the exact sentence shapes only (see the module doc).
 const SENTENCE_CHECKED_DOCS: &[&str] = &["docs/USER_GUIDE.md"];
@@ -171,6 +179,28 @@ fn sentence_claims(text: &str) -> Vec<(u64, Option<u64>, String)> {
     out
 }
 
+/// Corpus-scale count claims: a number of [`CORPUS_SCALE_FLOOR`] or more written directly
+/// before "rule(s)", "TOMLs" or "files" (with an optional "corpus" or "TOML" between), as in
+/// "all 417 rules", "417 corpus rules", "417 rule files" or "over 417 files".
+fn corpus_scale_claims(text: &str) -> Vec<(u64, String)> {
+    let toks = words(text);
+    let mut out = Vec::new();
+    for (i, tok) in toks.iter().enumerate() {
+        let Some(n) = as_count(tok).filter(|n| *n >= CORPUS_SCALE_FLOOR) else {
+            continue;
+        };
+        let skip = usize::from(matches!(
+            toks.get(i + 1).map(String::as_str),
+            Some("corpus" | "toml")
+        ));
+        let noun = toks.get(i + 1 + skip).map(String::as_str);
+        if matches!(noun, Some("rule" | "rules" | "tomls" | "files")) {
+            out.push((n, toks[i..=i + 1 + skip].join(" ")));
+        }
+    }
+    out
+}
+
 /// Whether the repo-wide walk skips a directory: build output, vendored packages and every
 /// hidden directory (VCS internals, tool state, nested worktrees), except `.github`, whose
 /// templates a reader does see.
@@ -255,6 +285,19 @@ async fn req_docs_state_the_real_rule_and_domain_count() {
                 "README.md must state \"{canonical}\" verbatim (the headline count line). \
                  Update the rule-library line to read exactly that."
             ));
+        }
+    }
+
+    for doc in CORPUS_SCALE_DOCS {
+        let text = std::fs::read_to_string(repo_root().join(doc))
+            .unwrap_or_else(|e| panic!("cannot read {doc}: {e}"));
+        for (n, ctx) in corpus_scale_claims(&text) {
+            if n != rules as u64 {
+                problems.push(format!(
+                    "{doc}: says \"{ctx}\" but the corpus holds {rules} rules. \
+                     Change {n} to {rules}, or write \"every rule\" if the figure adds nothing."
+                ));
+            }
         }
     }
 
@@ -449,5 +492,44 @@ fn req_markdown_walk_skips_build_output_and_hidden_dirs_only() {
     }
     for walked in [".github", "docs", "crates", "tools"] {
         assert!(!is_skipped_dir(walked), "{walked} must be walked");
+    }
+}
+
+/// The corpus-scale scanner sees whole-corpus figures in every shape the technical docs use
+/// and stays silent on subset counts and unrelated large numbers.
+#[test]
+fn req_corpus_scale_scanner_sees_whole_corpus_figures_only() {
+    let seen = [
+        ("it was deleted from all 417 rules", 417),
+        ("a required boolean on all 417 corpus rules", 417),
+        ("measured against 417 rule files", 417),
+        ("zero offenders over 417 files", 417),
+        ("94 of 417 rules were in that state", 417),
+        ("deleted from all 417 TOML rules", 417),
+        ("a corpus of 1,200 rules", 1200),
+    ];
+    for (text, want) in seen {
+        let got = corpus_scale_claims(text);
+        assert_eq!(
+            got.first().map(|(n, _)| *n),
+            Some(want),
+            "corpus-scale scanner missed the figure in {text:?}"
+        );
+    }
+    let silent = [
+        "13 rules in this folder",
+        "7 Go testing rules",
+        "up to 160 per rule",
+        "about 3,000 community rules",
+        "the 1090 and the rule modal",
+        "the (#117) backend domain",
+        "as of 2026-10-27, rules load",
+        "a 94 percent figure",
+    ];
+    for text in silent {
+        assert!(
+            corpus_scale_claims(text).is_empty(),
+            "corpus-scale scanner matched something it must ignore: {text:?}"
+        );
     }
 }
