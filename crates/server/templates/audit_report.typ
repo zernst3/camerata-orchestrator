@@ -647,6 +647,10 @@
 // `brand_title` above) and never a substitute for the agency's own resolved brand.
 Scanned with Camerata v#or_na(d.cover.camerata_version). Inspection model: #or_na(d.cover.audit_model). Calibration model: #or_na(d.cover.calibration_model).
 
+// H4: the exact engine build and rule library behind this report, the same values the README,
+// manifest.json and findings.json state. Each line renders only when the value was recorded.
+#if d.cover.engine_commit != none [Engine commit: #raw(d.cover.engine_commit). ]#if d.cover.corpus_version != none [Rule library lock hash: #raw(d.cover.corpus_version).]
+
 // P5: this reconciling line must never claim a human "reviewed"/"dispositioned" a finding
 // unless `d.review_state == "reviewed"` (at least one finding this session carries an explicit
 // auditor disposition — see `report_export::ReviewState`'s doc comment). The two branches also

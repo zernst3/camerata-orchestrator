@@ -821,6 +821,15 @@ pub struct CoverJson {
     pub audit_model: Option<String>,
     pub calibration_model: Option<String>,
     pub camerata_version: String,
+    /// The git commit the exporting engine was built from ([`crate::ENGINE_COMMIT`]). `None`
+    /// for a build outside a git checkout. Rendered in the PDF methodology and carried in
+    /// `findings.json`'s `provenance`.
+    pub engine_commit: Option<String>,
+    /// The rule-library lock hash ([`camerata_rules::corpus_version`]: the digest over every
+    /// rule's id, version and content hash, exactly the content of `CORPUS_LOCK.toml`). The
+    /// same value as `manifest.json`'s `inspection.corpus_version` and the README's "Corpus
+    /// version" line. `None` when the export ran without a loaded corpus.
+    pub corpus_version: Option<String>,
     /// `%Y-%m-%d %H:%M UTC` (M5) — of when this PDF was generated (NOT the scan time —
     /// that's `audited_refs`/provenance; this is "as-of" for the export itself).
     pub generated_at: String,
@@ -4852,6 +4861,8 @@ pub fn build_report_json(
         audit_model: report.provenance.audit_model.clone(),
         calibration_model: report.provenance.calibration_model.clone(),
         camerata_version: report.provenance.camerata_version.clone(),
+        engine_commit: crate::ENGINE_COMMIT.map(str::to_string),
+        corpus_version: corpus.map(camerata_rules::corpus_version),
         // The SCAN time, not the wall clock at serialization — see `generated_at_label`.
         generated_at: generated_at_label(&report.provenance),
         client_name: opts.client_name.clone(),
@@ -5072,6 +5083,9 @@ pub use coverage_gaps::{CoverageGapsJson, SkippedFileJson};
 
 #[cfg(test)]
 mod coverage_gaps_tests;
+
+#[cfg(test)]
+mod engine_identity_tests;
 
 #[cfg(test)]
 mod tests {

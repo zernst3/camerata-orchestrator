@@ -17305,10 +17305,15 @@ impl ManifestProvenance {
     }
 
     /// Camerata's own version as the manifest and README both state it, so a finding can always
-    /// be traced to the engine that produced it. Derived from this crate's `CARGO_PKG_VERSION`,
-    /// never supplied by a caller, so it cannot drift from the binary that built the package.
+    /// be traced to the engine that produced it. Derived from this crate's `CARGO_PKG_VERSION`
+    /// and the git commit the binary was built from ([`ENGINE_COMMIT`]), never supplied by a
+    /// caller, so it cannot drift from the binary that built the package. A build outside a git
+    /// checkout records no commit, and the version then names the package version alone.
     pub fn engine_version(&self) -> String {
-        format!("camerata {}", env!("CARGO_PKG_VERSION"))
+        match ENGINE_COMMIT {
+            Some(commit) => format!("camerata {} (commit {commit})", env!("CARGO_PKG_VERSION")),
+            None => format!("camerata {}", env!("CARGO_PKG_VERSION")),
+        }
     }
 
     /// The `manifest.json` `inspection` block. An absent optional value is an explicit JSON
@@ -17391,6 +17396,12 @@ impl ManifestProvenance {
         out
     }
 }
+
+/// The git commit this binary was built from, recorded by `build.rs` (`CAMERATA_GIT_COMMIT`).
+/// `None` for a build outside a git checkout: an honest absence, never a placeholder. Stated in
+/// [`ManifestProvenance::engine_version`] (README and `manifest.json`) and in the report cover
+/// (`report_export::CoverJson::engine_commit`, which the PDF and `findings.json` render).
+pub const ENGINE_COMMIT: Option<&str> = option_env!("CAMERATA_GIT_COMMIT");
 
 /// The README line that states the inspection was stopped by the operator's spend limit. Printed
 /// only when [`ManifestProvenance::cost_cap_reached`] is true; the release gate parses it back.
