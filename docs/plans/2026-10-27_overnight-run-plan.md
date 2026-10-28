@@ -89,6 +89,10 @@ H. By 08:30: morning summary at the top of `docs/OVERNIGHT_DECISIONS.md`; the PR
 
 ## Status log (newest first)
 
+- 00:40: cloud citations (H5), coverage (H4), injection (H3) and rust199 finished; four Fable
+  reviews running. client-lock (H2) and mutants have pushed no commits after about 2 hours (the
+  cloud sessions are not visible from here; check them in the app in the morning). Disk at 44 GB
+  with four builders active; each finished builder's build folder is freed on completion.
 - 00:35: console gaps merged in its worktree with all 5 review fixes (4,980 tests); one shared
   branch validator, containment check before any worktree delete, project-membership refusal.
   Sent back for two leftovers (membership on Intake/multi-repo setup; show rejected branch errors
