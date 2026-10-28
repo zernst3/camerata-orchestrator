@@ -2198,11 +2198,13 @@ pub(crate) fn resolve_fix(
     if remediation.is_empty() {
         return None;
     }
-    Some(instantiate_remediation(
+    // The authored text is a TOML multi-line string: join its hard line wraps here, once, so no
+    // artifact ever sees a mid-sentence newline (see `fix_text`).
+    Some(fix_text::prepare(&instantiate_remediation(
         remediation,
         &finding.path,
         &finding.captures,
-    ))
+    )))
 }
 
 /// C5-8 (R7 amended): whether `finding` has ANY fix text available to show a client, if it
@@ -4280,6 +4282,11 @@ pub fn build_report_json(
                 } else {
                     base_headline
                 };
+                let specific_fix = f
+                    .fix_specific
+                    .as_deref()
+                    .map(fix_text::prepare)
+                    .filter(|s| !s.is_empty());
                 CuratedSiteJson {
                     repo: f.repo.clone(),
                     path: f.path.clone(),
@@ -4339,13 +4346,15 @@ pub fn build_report_json(
                     // information, never echoes the primary line back.
                     fix: {
                         let generic = resolve_fix(&rule_id, corpus, f, chosen_option_for_rule);
-                        if generic.as_deref() == f.fix_specific.as_deref() {
+                        if generic == specific_fix {
                             None
                         } else {
                             generic
                         }
                     },
-                    fix_for_this_finding: f.fix_specific.clone(),
+                    // The model's text gets the same wrap-joining as the authored text, so the
+                    // equality above compares like with like.
+                    fix_for_this_finding: specific_fix,
                     // W7 (C5): the absorbed sites, verbatim — see the field's doc comment.
                     also_locations: f.also_locations.clone(),
                     site_count: 1 + f.also_locations.len(),
@@ -5196,6 +5205,7 @@ async fn run_typst(data_json: &str, fonts: FontSources) -> anyhow::Result<(Vec<u
 }
 
 pub mod coverage_gaps;
+pub(crate) mod fix_text;
 pub use coverage_gaps::{CoverageGapsJson, SkippedFileJson};
 
 #[cfg(test)]
@@ -5203,6 +5213,9 @@ mod coverage_gaps_tests;
 
 #[cfg(test)]
 mod engine_identity_tests;
+
+#[cfg(test)]
+mod fix_text_tests;
 
 #[cfg(test)]
 mod tests {
@@ -12602,7 +12615,7 @@ mod tests {
             .find(r#"if site.fix_for_this_finding != none ["#)
             .expect("the primary branch must gate on fix_for_this_finding first");
         let fix_label_idx = template[primary_idx..]
-            .find(r#"[Fix: ]#site.fix_for_this_finding"#)
+            .find(r#"[Fix: ]#fix_body(site.fix_for_this_finding)"#)
             .expect("the PRIMARY Fix: line must render fix_for_this_finding, not fix");
         let secondary_idx = template[primary_idx..]
             .find("General guidance: ")
