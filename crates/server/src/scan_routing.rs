@@ -323,15 +323,12 @@ fn manifest_language(path: &str) -> Option<&'static str> {
         "Gemfile" => "ruby",
         "composer.json" => "php",
         "Package.swift" => "swift",
-        _ if basename.starts_with("application.") || basename.starts_with("application-") => {
-            if [".yml", ".yaml", ".properties"]
+        _ if (basename.starts_with("application.") || basename.starts_with("application-"))
+            && [".yml", ".yaml", ".properties"]
                 .iter()
-                .any(|ext| basename.ends_with(ext))
-            {
-                JVM_SCOPE
-            } else {
-                return None;
-            }
+                .any(|ext| basename.ends_with(ext)) =>
+        {
+            JVM_SCOPE
         }
         _ if basename.starts_with("requirements") && basename.ends_with(".txt") => "python",
         _ if basename.ends_with(".csproj") => "csharp",
