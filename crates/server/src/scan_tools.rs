@@ -1256,9 +1256,14 @@ pub fn is_in_repo_scope(repo_root: &Path, finding_path: &str) -> bool {
 /// directory is the client's checkout. The client never opted in, and it is one more copy of
 /// their tree's fingerprints on disk after "delete source" (the same class of defect as the old
 /// in-repo scan cache; docs/design/2026-10-24_delete-and-refetch-client-source.md, D1).
+///
+/// `--isolated`: ruff otherwise reads the client's own `pyproject.toml` / `ruff.toml`, which can
+/// change what the preview checks and which files it skips. Camerata's rule selection is the only
+/// configuration it should see.
 fn ruff_args(select: &str) -> Vec<String> {
     [
         "check",
+        "--isolated",
         "--no-cache",
         "--output-format",
         "json",
@@ -1827,6 +1832,10 @@ mod tests {
     fn ruff_args_pass_no_cache() {
         let args = ruff_args("E501,F401");
         assert!(args.iter().any(|a| a == "--no-cache"), "{args:?}");
+        // `--isolated`: ruff reads no configuration file from the client's repository
+        // (`pyproject.toml`, `ruff.toml`), so the repository cannot change what the preview
+        // checks, where it writes or which files it skips.
+        assert!(args.iter().any(|a| a == "--isolated"), "{args:?}");
         // The rest of the command is unchanged.
         assert_eq!(args[0], "check");
         assert!(args.windows(2).any(|w| w == ["--select", "E501,F401"]));
@@ -1846,7 +1855,8 @@ mod tests {
     }
 
     /// The behavioural proof for D1, when ruff is installed: a real run leaves no cache folder
-    /// in the scanned directory.
+    /// in the scanned directory. VACUOUS where `ruff` is not on PATH: it returns early and passes
+    /// without checking anything, so only `ruff_args_pass_no_cache` pins the flags there.
     #[tokio::test]
     async fn ruff_run_leaves_no_cache_directory_in_the_scanned_repo() {
         let Ok(probe) = tokio::process::Command::new("ruff")
@@ -2320,7 +2330,8 @@ mod tests {
     }
 
     /// With the operator's opt-in, clippy runs (the build script executes) and the report is
-    /// told that the repository's own code was executed.
+    /// told that the repository's own code was executed. VACUOUS where `cargo clippy` is not
+    /// installed: it prints SKIPPED and passes without checking anything.
     #[tokio::test]
     async fn an_opted_in_client_engagement_runs_clippy_and_says_so() {
         let cargo_clippy = std::process::Command::new("cargo")

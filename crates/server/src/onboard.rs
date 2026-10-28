@@ -2983,7 +2983,8 @@ mod tests {
 
     /// H2: a scanned repository's own git configuration can name a command git runs on
     /// `git status` (`core.fsmonitor`). Recording the inspected commit must never run it. The
-    /// control step proves this git honours the setting, so the assertion is not vacuous.
+    /// control step shows whether this git honours the setting: where it does not, the test
+    /// prints SKIPPED and the assertion above proves nothing on that machine.
     #[cfg(unix)]
     #[tokio::test]
     async fn recording_the_commit_never_runs_the_repositorys_fsmonitor_command() {

@@ -2309,23 +2309,20 @@ async fn revert_worktree(worktree_dir: &str, base_commit: Option<&str>) {
     // Drop the run's committed snapshots first: reset the branch back to the branch-point
     // commit so nothing the agent committed survives. Only when we actually have the base.
     if let Some(base) = base_commit.filter(|b| !b.trim().is_empty()) {
-        let _ = tokio::process::Command::new("git")
+        let _ = workspace::git_command(Some(dir), workspace::GitEnv::Isolated)
             .args(["reset", "--hard", base])
-            .current_dir(dir)
             .output()
             .await;
     } else {
         // No base commit recorded: discard tracked changes (uncommitted-only fallback).
-        let _ = tokio::process::Command::new("git")
+        let _ = workspace::git_command(Some(dir), workspace::GitEnv::Isolated)
             .args(["checkout", "--", "."])
-            .current_dir(dir)
             .output()
             .await;
     }
     // Remove any new untracked files the agent left behind (a reset --hard leaves these).
-    let _ = tokio::process::Command::new("git")
+    let _ = workspace::git_command(Some(dir), workspace::GitEnv::Isolated)
         .args(["clean", "-fd"])
-        .current_dir(dir)
         .output()
         .await;
 }
@@ -2564,9 +2561,8 @@ async fn spawn_brownfield_dev_run(
                 )
                 .await
                 {
-                    let base = tokio::process::Command::new("git")
+                    let base = workspace::git_command(Some(&wt_dir), workspace::GitEnv::Isolated)
                         .args(["rev-parse", "HEAD"])
-                        .current_dir(&wt_dir)
                         .output()
                         .await
                         .ok()
@@ -22324,6 +22320,52 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// H2 review: the dev loop's git calls go through `workspace::git_command`, which switches off
+    /// `core.fsmonitor`, so a repository whose own git configuration names a program never gets it
+    /// run by the revert (`reset --hard`, `clean`). Needs a git that honours `core.fsmonitor`: the
+    /// control step at the end prints SKIPPED when it does not, and the assertion above it then
+    /// proves nothing on that machine.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_dev_loop_revert_never_runs_the_repositorys_fsmonitor_command() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = tmp.path().join("wt");
+        let base_commit = crate::test_git::init_repo(&dir, &[("a.txt", "one\n")]);
+        std::fs::write(dir.join("b.txt"), "two\n").unwrap();
+        crate::test_git::commit_all(&dir, "camerata: snapshot iteration 0");
+        std::fs::write(dir.join("untracked.txt"), "x\n").unwrap();
+        let marker = tmp.path().join("fsmonitor-ran");
+        let hook = tmp.path().join("hook.sh");
+        std::fs::write(
+            &hook,
+            format!("#!/bin/sh\ntouch '{}'\nexit 1\n", marker.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::test_git::git(
+            &dir,
+            &["config", "core.fsmonitor", &hook.display().to_string()],
+        );
+
+        revert_worktree(&dir.to_string_lossy(), Some(&base_commit)).await;
+        assert!(
+            !marker.exists(),
+            "the repository's fsmonitor command ran during the revert"
+        );
+        assert!(!dir.join("untracked.txt").exists(), "the revert still ran");
+
+        // Control: plain `git status` in the same repository does run it.
+        let _ = std::process::Command::new("git")
+            .current_dir(&dir)
+            .args(["status", "--porcelain"])
+            .output()
+            .unwrap();
+        if !marker.exists() {
+            eprintln!("SKIPPED control: this git does not run core.fsmonitor hooks");
+        }
     }
 
     /// Without a base_commit (older checkpoints), revert_worktree falls back to the

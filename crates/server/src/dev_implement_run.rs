@@ -303,9 +303,8 @@ async fn worktree_diff_from_base(dir: &std::path::Path, base_commit: &str) -> St
     if base_commit.is_empty() {
         return String::new();
     }
-    match tokio::process::Command::new("git")
+    match crate::workspace::git_command(Some(dir), crate::workspace::GitEnv::Isolated)
         .args(["diff", &format!("{base_commit}..HEAD")])
-        .current_dir(dir)
         .output()
         .await
     {
@@ -1178,9 +1177,8 @@ pub async fn execute_dev_implement_run(
     // Capture the branch-point commit (HEAD before any agent work). This is the
     // base for `worktree_diff_from_base` — even after `commit_all`, we can diff
     // against this ref to see all changes introduced by the run.
-    let base_commit = tokio::process::Command::new("git")
+    let base_commit = crate::workspace::git_command(Some(&dir), crate::workspace::GitEnv::Isolated)
         .args(["rev-parse", "HEAD"])
-        .current_dir(&dir)
         .output()
         .await
         .ok()
@@ -3076,6 +3074,50 @@ mod tests {
         let diff = worktree_diff_from_base(&dir, "").await;
         assert!(diff.is_empty(), "empty base_commit must return empty diff");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// H2 review: the diff the dev loop collects goes through `workspace::git_command`, which
+    /// switches off `core.fsmonitor`, so a repository whose own git configuration names a program
+    /// never gets it run. The control step prints SKIPPED when this git does not honour
+    /// `core.fsmonitor`, in which case the assertion proves nothing on that machine.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn worktree_diff_from_base_never_runs_the_repositorys_fsmonitor_command() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = tmp.path().join("wt");
+        let base = crate::test_git::init_repo(&dir, &[("a.txt", "one\n")]);
+        crate::test_git::write_file(&dir, "b.txt", "two\n");
+        crate::test_git::commit_all(&dir, "work");
+        let marker = tmp.path().join("fsmonitor-ran");
+        let hook = tmp.path().join("hook.sh");
+        std::fs::write(
+            &hook,
+            format!("#!/bin/sh\ntouch '{}'\nexit 1\n", marker.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::test_git::git(
+            &dir,
+            &["config", "core.fsmonitor", &hook.display().to_string()],
+        );
+
+        let diff = worktree_diff_from_base(&dir, &base).await;
+        assert!(diff.contains("b.txt"), "the diff still ran: {diff}");
+        assert!(
+            !marker.exists(),
+            "the repository's fsmonitor command ran during the diff"
+        );
+
+        // Control: plain `git status` in the same repository does run it.
+        let _ = std::process::Command::new("git")
+            .current_dir(&dir)
+            .args(["status", "--porcelain"])
+            .output()
+            .unwrap();
+        if !marker.exists() {
+            eprintln!("SKIPPED control: this git does not run core.fsmonitor hooks");
+        }
     }
 
     /// In a real git repo, worktree_diff_from_base with the current HEAD returns an empty diff

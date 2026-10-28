@@ -3,6 +3,16 @@
 Deferred work and known gaps not yet scheduled. Newest intent at the top. UI-only
 follow-ups live in `UI_BACKLOG.md`; this file is for engine + cross-cutting items.
 
+## Data handling: no automatic retention limit on client code, caches or findings (2026-10-28, OPEN)
+
+`DATA_HANDLING.md` states that nothing deletes client code, caches or findings after a period of
+time, so a cloned checkout, the scan cache and the saved inspections stay until the operator runs
+**Delete source code from this machine** (or removes the folders by hand for `camerata inspect`).
+A contract that promises deletion after 30 days has nothing in the code behind it. Fix: an
+operator-set retention period that runs the same deletion (`client_source::delete`) for a
+repository whose last scan is older than the period, with its own record in the deletion log.
+Until it exists, no document or proposal may promise a retention period.
+
 ## Coverage: a reply still cut off after its one retry parses as zero findings (2026-10-28, OPEN)
 
 A scan reply cut off at the output limit gets one retry at a higher cap (`retry_unusable_scan_reply`
