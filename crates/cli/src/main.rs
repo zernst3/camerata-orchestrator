@@ -243,6 +243,40 @@ enum CorpusAction {
     /// REFUSES, writing nothing, when a rule changed without a `version` bump. Edit the rule,
     /// bump its `version`, run this, commit both.
     Lock,
+    /// Check every rule's cited sources (Part A of the corpus freshness routine): fetch each
+    /// `[[sources]]` URL, record ok / redirected / dead (or unreachable), and compare each cited
+    /// section's text hash with the last run. Prints a date-stamped report; changes no rule.
+    /// Writes only the sidecar crates/rules/CORPUS_SOURCE_HASHES.json (commit it afterward).
+    CheckSources {
+        /// Print the report as JSON instead of text.
+        #[arg(long)]
+        json: bool,
+        /// Write the report to this file instead of stdout.
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// The sidecar to read and update (default: crates/rules/CORPUS_SOURCE_HASHES.json).
+        #[arg(long)]
+        sidecar: Option<PathBuf>,
+        /// Do not write the sidecar back (dry run: nothing is recorded).
+        #[arg(long)]
+        no_save: bool,
+        /// Pause between two requests to the same host, in milliseconds.
+        #[arg(long, default_value_t = 1500)]
+        delay_ms: u64,
+        /// Accept a reviewed section change: `url#anchor=sha256:<hash>` with the hash the report
+        /// printed (refused if the page changed again since), or the bare `url#anchor`
+        /// (accepts whatever is pending now, with a warning). Repeatable. A changed section
+        /// stays listed on every run until accepted. Makes no requests; it only updates the
+        /// sidecar, recording who accepted and when.
+        #[arg(long, value_name = "URL", conflicts_with_all = ["accept_all", "no_save", "json", "out"])]
+        accept: Vec<String>,
+        /// Accept every unreviewed section change (use after reading the whole report).
+        #[arg(long, conflicts_with_all = ["no_save", "json", "out"])]
+        accept_all: bool,
+        /// Who is accepting, recorded in the sidecar (default: $USER).
+        #[arg(long, value_name = "NAME")]
+        by: Option<String>,
+    },
 }
 
 /// `--backend`'s `value_parser`: `ProjectBackend` lives in `camerata-api-types`, a foreign
@@ -375,6 +409,30 @@ async fn main() -> anyhow::Result<()> {
                 camerata::corpus_cmd::run_corpus_confirm(domain, date).await
             }
             CorpusAction::Lock => camerata::corpus_cmd::run_corpus_lock().await,
+            CorpusAction::CheckSources {
+                json,
+                out,
+                sidecar,
+                no_save,
+                delay_ms,
+                accept,
+                accept_all,
+                by,
+            } => {
+                camerata::corpus_sources_cmd::run_corpus_check_sources(
+                    camerata::corpus_sources_cmd::CheckSourcesArgs {
+                        json,
+                        out,
+                        sidecar,
+                        no_save,
+                        delay_ms,
+                        accept,
+                        accept_all,
+                        by,
+                    },
+                )
+                .await
+            }
         },
     }
 }

@@ -1,0 +1,25 @@
+[package]
+name = "camerata-source-check"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+version = "0.0.0"
+
+[lints]
+workspace = true
+
+[dependencies]
+camerata-rules = { path = "../rules" }
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+futures = { workspace = true }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+tokio = { workspace = true, features = ["time", "net"] }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { workspace = true, features = ["macros", "rt"] }
+wiremock = "0.6"
