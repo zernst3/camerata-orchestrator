@@ -517,6 +517,18 @@ pub fn evaluate(ledger: &ScanLedger, opts: &IntegrityGateOptions) -> IntegrityVe
 
     // ── 3. Per-rule skip justification (H1). ─────────────────────────────────────────────
     for rule in ledger.rules() {
+        // Incomplete coverage: the rule ran, but the scan was stopped (the spend limit) before it
+        // ran everywhere. Its findings are real and not a contradiction; what it cannot support
+        // is any claim that the rest of the code is clean, so the gate fails on it.
+        if let Some(why) = rule.partial_reason.as_deref().filter(|_| rule.ran) {
+            failures.push(IntegrityFailure {
+                code: "partial_coverage".to_string(),
+                detail: format!(
+                    "{} ran on only part of the code, so the scan is incomplete for it: {why}",
+                    rule.rule_id,
+                ),
+            });
+        }
         if rule.ran {
             // W13, case 3: a rule can RUN while its own corpus file is unparseable — the
             // always-on content floor keys on hardcoded rule IDS, not on corpus content. There

@@ -37,6 +37,9 @@ camerata-server = { path = "../server" }
 # through the same typed client the MCP adapter (Phase E) uses — never in-process calls
 # into camerata-server for these verbs.
 camerata-client = { path = "../client" }
+# The pre-flight estimate in `camerata inspect` reuses the cockpit's estimator (one estimator,
+# no second copy). ui-core is dioxus-free pure logic.
+camerata-ui-core = { path = "../ui-core" }
 camerata-api-types = { path = "../api-types" }
 pdf-extract = { version = "0.12", optional = true }
 anyhow.workspace = true

@@ -1029,8 +1029,24 @@ fn default_recommendation_applicable() -> bool {
     true
 }
 
+/// A pass or stage that failed or did not run (mirror of the server's `FailedPass`). Before this
+/// the desktop app dropped the whole list, so a scan the spend limit cut short, or a pass that
+/// failed, looked complete.
+#[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize, Default, Debug)]
+pub(super) struct FailedPassView {
+    #[serde(default)]
+    pub repo: String,
+    #[serde(default)]
+    pub pass: String,
+    #[serde(default)]
+    pub reason: String,
+}
+
 #[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize)]
 pub(super) struct ScanReportView {
+    /// Every pass or stage that failed or did not run. Non-empty means the scan is INCOMPLETE.
+    #[serde(default)]
+    pub failed_passes: Vec<FailedPassView>,
     #[serde(default)]
     pub repos: Vec<String>,
     #[serde(default)]
@@ -1258,6 +1274,7 @@ pub(super) async fn audit_against(
     deep: bool,
     run_ai_review: bool,
     run_deterministic: bool,
+    max_cost_usd: Option<f64>,
 ) -> Option<ScanReportView> {
     // Loading guard: the Bombe machine runs for the full audit round-trip.
     let _guard = crate::loading::LoadingGuard::new();
@@ -1275,6 +1292,7 @@ pub(super) async fn audit_against(
             "deep": deep,
             "run_ai_review": run_ai_review,
             "run_deterministic": run_deterministic,
+            "max_cost_usd": max_cost_usd,
         }))
         .send()
         .await
@@ -1715,6 +1733,9 @@ pub(super) struct JobStateView {
     pub done: usize,
     #[serde(default)]
     pub total: usize,
+    /// Passes refused (spend limit) that did not run; not part of `done`.
+    #[serde(default)]
+    pub not_run: usize,
     #[serde(default)]
     pub findings: Vec<FindingView>,
     /// Live deterministic-pass progress (floor + preview tools). Empty until a tool registers.
@@ -1764,6 +1785,7 @@ pub(super) async fn audit_job_start(
     deep: bool,
     run_ai_review: bool,
     run_deterministic: bool,
+    max_cost_usd: Option<f64>,
 ) -> Option<String> {
     let rule_json = audit_rules_json(rules);
     let v: serde_json::Value = reqwest::Client::new()
@@ -1779,6 +1801,7 @@ pub(super) async fn audit_job_start(
             "deep": deep,
             "run_ai_review": run_ai_review,
             "run_deterministic": run_deterministic,
+            "max_cost_usd": max_cost_usd,
         }))
         .send()
         .await
@@ -1842,7 +1865,7 @@ pub(super) async fn poll_job(
     jid: String,
     mut audit: Signal<Option<ScanReportView>>,
     mut auditing: Signal<bool>,
-    mut job_progress: Signal<Option<(usize, usize, usize)>>,
+    mut job_progress: Signal<Option<(usize, usize, usize, usize)>>,
     // Live DETERMINISTIC-pass progress (floor + preview tools), rendered by the
     // "Deterministic scan" component above the AI agent-activity drawer. `None` clears it.
     mut det_progress: Signal<Option<DetProgressView>>,
@@ -1865,7 +1888,12 @@ pub(super) async fn poll_job(
             Some(js) => {
                 misses = 0;
                 scan_idle_ms.set(js.idle_ms);
-                job_progress.set(Some((js.job.done, js.job.total, js.job.findings.len())));
+                job_progress.set(Some((
+                    js.job.done,
+                    js.job.total,
+                    js.job.findings.len(),
+                    js.job.not_run,
+                )));
                 // Surface the deterministic progress whenever any tool has registered, so the
                 // component appears the moment the floor starts (not only once findings land).
                 if js.job.deterministic.total > 0 {
@@ -6656,6 +6684,68 @@ pub(super) fn ScanJobFailedBanner(message: Option<String>) -> Element {
     }
 }
 
+/// The progress line under the bar. Passes the spend limit refused are named on their own and
+/// are NOT in `done`, so a stopped scan never reads as complete.
+pub(super) fn job_progress_label(
+    done: usize,
+    total: usize,
+    findings: usize,
+    not_run: usize,
+) -> String {
+    if not_run > 0 {
+        format!("{done}/{total} passes \u{b7} {not_run} NOT RUN (spend limit) \u{b7} {findings} finding(s) so far")
+    } else {
+        format!("{done}/{total} passes \u{b7} {findings} finding(s) so far")
+    }
+}
+
+/// The INCOMPLETE banner: renders whenever any pass or stage failed or did not run (a spend
+/// limit stop, a failed pass, a skipped stage) and nothing otherwise. Before this the desktop
+/// app showed no failed pass of any cause, so an incomplete scan read as a clean one.
+/// `compact` is the one-line form shown beside the export button, where the export will carry
+/// the same disclosure. Its own component so it is SSR-testable without `ScanResults`.
+#[component]
+pub(super) fn IncompletePassesBanner(failed_passes: Vec<FailedPassView>, compact: bool) -> Element {
+    if failed_passes.is_empty() {
+        return rsx! {};
+    }
+    let n = failed_passes.len();
+    let stopped_by_limit = failed_passes
+        .iter()
+        .any(|f| f.reason.contains("spend limit"));
+    if compact {
+        return rsx! {
+            div { class: "onboard-gate scan-incomplete-banner scan-incomplete-compact",
+                span { class: "onboard-gate-dot" }
+                p { class: "onboard-gate-b",
+                    "Incomplete: {n} pass(es) or stage(s) did not run. The export will say so."
+                }
+            }
+        };
+    }
+    rsx! {
+        div { class: "onboard-gate scan-incomplete-banner",
+            span { class: "onboard-gate-dot" }
+            div {
+                p { class: "onboard-gate-h", "Incomplete: {n} pass(es) or stage(s) did not run" }
+                if stopped_by_limit {
+                    p { class: "onboard-gate-b",
+                        "Stopped by the spend limit. The findings below cover only the part of the code and the rules that did run."
+                    }
+                }
+                ul { class: "scan-incomplete-list",
+                    for (i , f) in failed_passes.iter().enumerate() {
+                        li { key: "{i}", "{f.repo}: {f.pass} \u{2014} {f.reason}" }
+                    }
+                }
+                p { class: "onboard-gate-hint",
+                    "A clean result here does NOT mean the missing parts are clean. Raise the limit or re-run to cover them."
+                }
+            }
+        }
+    }
+}
+
 /// The compliance-gate fix's unmissable banner: renders when the audit's AI review either
 /// (a) did not run at all because the compliance backend gate was `Blocked` (`ai_blocked_reason`
 /// set), or (b) was requested but every pass failed with a real error (`ai_error` set). Renders
@@ -7453,6 +7543,9 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
     // (so re-scans are incremental — only changed files cost AI tokens). The first scan of a
     // project is full regardless (no cache yet).
     let mut audit_full_scan = use_signal(|| false);
+    // Spend limit (USD): blank = none. The run stops between passes once actual spend reaches
+    // it and lists what it did not run (the server twin of `camerata inspect --max-cost-usd`).
+    let mut audit_spend_limit = use_signal(String::new);
     // Deep compliance & security tier (#55): opt-in, the most expensive tier.
     // Runs three extra whole-repo passes (SOC-2 gap analysis, deep security audit,
     // threat model) after the standard audit and attaches the results as `report.deep`.
@@ -7471,7 +7564,7 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
     let feature_flags_res = use_resource(fetch_feature_flags);
     let feature_flags = feature_flags_res.read().clone().unwrap_or_default();
     // Live progress for an async job: (passes done, passes total, findings so far).
-    let mut job_progress = use_signal(|| Option::<(usize, usize, usize)>::None);
+    let mut job_progress = use_signal(|| Option::<(usize, usize, usize, usize)>::None);
     // Live DETERMINISTIC-pass progress (floor + preview tools), rendered above the AI
     // agent-activity drawer. Primary progress view in deterministic-only mode (no AI drawer).
     let mut det_progress = use_signal(|| Option::<DetProgressView>::None);
@@ -8379,6 +8472,15 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                             // Full scan forces a clean pass; otherwise the scan is incremental
                             // (only files changed since the last scan cost AI tokens).
                             let incremental = !audit_full_scan();
+                            // A spend limit that is not a positive number stops the scan from
+                            // starting (and says why) rather than silently running unlimited.
+                            let max_cost = match camerata_ui_core::scan::parse_spend_limit(&audit_spend_limit()) {
+                                Ok(v) => v,
+                                Err(msg) => {
+                                    job_failed_message.set(Some(msg));
+                                    return;
+                                }
+                            };
                             // Deterministic-only is fast, but its PROGRESS is only pollable on
                             // the async job path (the sync path holds one request and returns
                             // the final report). So route a deterministic-ONLY scan through the
@@ -8419,7 +8521,7 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                                 let loading_count = loading_count;
                                 spawn(async move {
                                     let _guard = crate::loading::LoadingGuard::from_count(loading_count);
-                                    let Some(jid) = audit_job_start(&repos, &rules, &model, &calib, "parallel", thorough, incremental, deep, ai, det).await else {
+                                    let Some(jid) = audit_job_start(&repos, &rules, &model, &calib, "parallel", thorough, incremental, deep, ai, det, max_cost).await else {
                                         auditing.set(false);
                                         job_failed_message.set(Some(
                                             "Could not start the background scan (the request \
@@ -8445,7 +8547,7 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                             } else {
                                 // Synchronous: hold the request until the (shorter) run finishes.
                                 spawn(async move {
-                                    let result = audit_against(&repos, &rules, &model, &calib, &mode, thorough, incremental, deep, ai, det).await;
+                                    let result = audit_against(&repos, &rules, &model, &calib, &mode, thorough, incremental, deep, ai, det, max_cost).await;
                                     if result.is_none() {
                                         // The sync request itself failed (network error, server
                                         // unreachable) — the server-side crash path already
@@ -8626,6 +8728,20 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                         "By default a re-scan is INCREMENTAL: only files whose content changed since the last scan of this project are sent to the AI, and findings for unchanged files are reused from cache — so re-running after a small edit costs a fraction of the tokens. The first scan of a project is always full (no cache yet). Tick this to ignore the cache and re-audit the whole codebase from scratch (e.g. after changing your rule selection, or to refresh every finding)."
                     }
                 }
+                // Spend limit: optional hard stop on the scan's AI spend, checked between passes.
+                div { class: "audit-model-row",
+                    label { class: "audit-model-label", "Spend limit (USD)" }
+                    input {
+                        r#type: "text",
+                        placeholder: "no limit",
+                        value: "{audit_spend_limit}",
+                        disabled: auditing(),
+                        oninput: move |e| audit_spend_limit.set(e.value()),
+                    }
+                    span { class: "audit-model-hint",
+                        "Optional. The scan stops between passes once its actual AI spend reaches this amount, lists every pass it did not run, and marks the result incomplete. Passes already started finish, so it can end about one pass over the limit. Leave blank for no limit."
+                    }
+                }
                 // Deep compliance & security tier (#55): opt-in, ADVISORY, expensive.
                 // Gated on the `soc2` feature flag — hidden entirely when soc2 is disabled
                 // (this is the SOC-2-headlined surface; set via .camerata/features.toml or
@@ -8780,7 +8896,7 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                 }
                 // Live progress for an async job: a determinate bar (it grows as repos are
                 // discovered) + a findings-so-far count, so a walk-away scan shows life.
-                if let Some((done, total, nf)) = job_progress() {
+                if let Some((done, total, nf, not_run)) = job_progress() {
                     {
                         let pct = (done * 100).checked_div(total).unwrap_or(0).min(100);
                         let n_repos = report.repos.len();
@@ -8789,7 +8905,7 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                                 div { class: "job-progress-track",
                                     div { class: "job-progress-fill", style: "width: {pct}%" }
                                 }
-                                span { class: "job-progress-label", "{done}/{total} passes · {nf} finding(s) so far" }
+                                span { class: "job-progress-label", "{job_progress_label(done, total, nf, not_run)}" }
                                 // Multi-repo scans run ONE repo at a time, and the pass
                                 // denominator grows as each repo is reached — so the agent
                                 // activity below shows only the repo currently running, not all
@@ -8892,6 +9008,12 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                 AiReviewBlockedBanner {
                     ai_blocked_reason: audited.as_ref().and_then(|a| a.ai_blocked_reason.clone()),
                     ai_error: audited.as_ref().and_then(|a| a.ai_error.clone()),
+                }
+                // Passes or stages that failed or did not run (spend limit, failures): the scan
+                // is INCOMPLETE and must say so wherever its results are read.
+                IncompletePassesBanner {
+                    failed_passes: audited.as_ref().map(|a| a.failed_passes.clone()).unwrap_or_default(),
+                    compact: false,
                 }
 
                 // PRIMARY axis: the kind switcher. Flipping it flips the action vocabulary too,
@@ -9167,6 +9289,10 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                 {
                     let pid_report = project_id.clone();
                     rsx! {
+                        IncompletePassesBanner {
+                            failed_passes: audited.as_ref().map(|a| a.failed_passes.clone()).unwrap_or_default(),
+                            compact: true,
+                        }
                         AuditReportExportPanel {
                             project_id: pid_report,
                             dispositions,
@@ -10879,6 +11005,7 @@ mod tests {
                 "deep": false,
                 "run_ai_review": true,
                 "run_deterministic": true,
+                "max_cost_usd": null,
             })))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "files_scanned": 4, "findings": [], "proposed_rules": [], "gated": false
@@ -10905,6 +11032,7 @@ mod tests {
             false,
             true,
             true,
+            None,
         )
         .await;
 
@@ -10975,6 +11103,7 @@ mod tests {
                 "deep": false,
                 "run_ai_review": true,
                 "run_deterministic": true,
+                "max_cost_usd": null,
             })))
             .respond_with(
                 ResponseTemplate::new(200)
@@ -11002,6 +11131,7 @@ mod tests {
             false,
             true,
             true,
+            None,
         )
         .await;
 
@@ -11838,6 +11968,135 @@ mod render_tests {
             !html.contains("onboard-gate"),
             "no banner markup at all on the happy path; html=\n{html}"
         );
+    }
+
+    // ── The INCOMPLETE banner: a scan with passes that did not run must never look complete ──
+
+    fn failed_pass(pass: &str, reason: &str) -> FailedPassView {
+        FailedPassView {
+            repo: "acme/api".to_string(),
+            pass: pass.to_string(),
+            reason: reason.to_string(),
+        }
+    }
+
+    fn incomplete_harness() -> Element {
+        rsx! {
+            IncompletePassesBanner {
+                failed_passes: vec![
+                    failed_pass(
+                        "scan pass pass[all] chunk 2/3",
+                        "NOT RUN: the spend limit set for this run was reached before rule-batch 2 of 4 ran",
+                    ),
+                    failed_pass("calibration (verification and hour estimates)", "NOT RUN (in part): the spend limit set for this run was reached"),
+                ],
+                compact: false,
+            }
+        }
+    }
+
+    #[test]
+    fn the_incomplete_banner_names_the_count_the_cause_and_every_pass() {
+        let mut vdom = VirtualDom::new(incomplete_harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        assert!(
+            html.contains("Incomplete: 2 pass(es) or stage(s) did not run"),
+            "{html}"
+        );
+        assert!(html.contains("Stopped by the spend limit"), "{html}");
+        assert!(html.contains("scan pass pass[all] chunk 2/3"), "{html}");
+        assert!(
+            html.contains("calibration (verification and hour estimates)"),
+            "{html}"
+        );
+        assert!(html.contains("NOT RUN"), "{html}");
+        assert!(
+            html.contains("does NOT mean the missing parts are clean"),
+            "{html}"
+        );
+    }
+
+    fn incomplete_compact_harness() -> Element {
+        rsx! {
+            IncompletePassesBanner {
+                failed_passes: vec![failed_pass("hour estimation", "no estimate returned")],
+                compact: true,
+            }
+        }
+    }
+
+    #[test]
+    fn the_compact_form_beside_export_says_the_export_will_carry_it_too() {
+        let mut vdom = VirtualDom::new(incomplete_compact_harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        assert!(
+            html.contains("Incomplete: 1 pass(es) or stage(s) did not run"),
+            "{html}"
+        );
+        assert!(html.contains("The export will say so"), "{html}");
+        // A failed pass of ANY cause shows, not only the spend limit.
+        assert!(!html.contains("Stopped by the spend limit"), "{html}");
+    }
+
+    fn incomplete_none_harness() -> Element {
+        rsx! {
+            IncompletePassesBanner { failed_passes: Vec::new(), compact: false }
+            IncompletePassesBanner { failed_passes: Vec::new(), compact: true }
+        }
+    }
+
+    #[test]
+    fn a_complete_scan_shows_no_incomplete_banner() {
+        let mut vdom = VirtualDom::new(incomplete_none_harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        assert!(
+            !html.contains("onboard-gate") && !html.contains("Incomplete"),
+            "{html}"
+        );
+    }
+
+    #[test]
+    fn the_report_view_keeps_the_failed_passes_the_server_sends() {
+        let report: ScanReportView = serde_json::from_value(serde_json::json!({
+            "files_scanned": 3, "findings": [], "proposed_rules": [], "gated": false,
+            "failed_passes": [
+                { "repo": "acme/api", "pass": "scan pass pass[all] chunk 1/1", "reason": "NOT RUN: the spend limit set for this run was reached" }
+            ],
+            "message": "INCOMPLETE: the spend limit stopped this scan; 1 scan pass(es) and 0 stage(s) did not run"
+        }))
+        .unwrap();
+        assert_eq!(report.failed_passes.len(), 1);
+        assert_eq!(
+            report.failed_passes[0].pass,
+            "scan pass pass[all] chunk 1/1"
+        );
+        assert!(report.message.as_deref().unwrap().starts_with("INCOMPLETE"));
+        // A report from before the field existed still loads, with nothing to show.
+        let old: ScanReportView = serde_json::from_value(serde_json::json!({
+            "files_scanned": 3, "findings": [], "proposed_rules": [], "gated": false
+        }))
+        .unwrap();
+        assert!(old.failed_passes.is_empty());
+    }
+
+    #[test]
+    fn progress_never_counts_a_refused_pass_as_done() {
+        assert_eq!(
+            job_progress_label(3, 6, 2, 0),
+            "3/6 passes \u{b7} 2 finding(s) so far"
+        );
+        let stopped = job_progress_label(3, 6, 2, 3);
+        assert!(stopped.starts_with("3/6 passes"), "{stopped}");
+        assert!(stopped.contains("3 NOT RUN (spend limit)"), "{stopped}");
+        // And the polled job carries the separate count.
+        let job: JobStateView = serde_json::from_value(serde_json::json!({
+            "status": "running", "done": 3, "total": 6, "not_run": 3
+        }))
+        .unwrap();
+        assert_eq!((job.done, job.not_run), (3, 3));
     }
 
     // ── Tier-1 render: ScanJobFailedBanner (background-job silent-death fix) ───────────────

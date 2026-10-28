@@ -395,6 +395,8 @@ pub struct ReadmeProvenance {
     pub model_provider: Option<String>,
     /// The checks named by the `Release checks:` line, when it says they all passed.
     pub release_checks: Option<Vec<String>>,
+    /// The spend-limit line is present (the inspection was stopped by the operator's limit).
+    pub cost_cap_reached: bool,
 }
 
 pub fn parse_readme_provenance(readme: &str) -> ReadmeProvenance {
@@ -423,6 +425,8 @@ pub fn parse_readme_provenance(readme: &str) -> ReadmeProvenance {
             p.model_backend = Some(v.to_string());
         } else if let Some(v) = line.strip_prefix("Model provider: ") {
             p.model_provider = Some(v.to_string());
+        } else if line == crate::COST_CAP_README_LINE {
+            p.cost_cap_reached = true;
         } else if let Some(v) = line.strip_prefix("Release checks: ") {
             p.release_checks = v
                 .strip_suffix(" (all passed)")
@@ -501,6 +505,15 @@ pub fn verify_readme_provenance(readme: &str, manifest: &Value) -> Vec<Problem> 
         });
     if parsed.release_checks != manifest_checks {
         mismatch("Release checks");
+    }
+    // The flag is always in the manifest (a missing key reads as not capped, never as an error:
+    // a package built before the flag existed is complete by definition).
+    if parsed.cost_cap_reached
+        != manifest["inspection"]["cost_cap_reached"]
+            .as_bool()
+            .unwrap_or(false)
+    {
+        mismatch("Spend limit");
     }
 
     // Generic: every non-null value in the manifest's inspection block is in the README.

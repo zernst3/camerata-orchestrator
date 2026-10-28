@@ -28,6 +28,29 @@ pub fn default_finding_status() -> String {
     "active".to_string()
 }
 
+/// Parse the scan settings' "spend limit" field (US dollars). Blank means no limit. A value
+/// that is not a positive number is an ERROR the caller must show, never silently "no limit":
+/// a typo must not remove the guard. A leading `$` and thousands commas are accepted.
+pub fn parse_spend_limit(text: &str) -> Result<Option<f64>, String> {
+    let cleaned: String = text
+        .trim()
+        .trim_start_matches('$')
+        .chars()
+        .filter(|c| *c != ',')
+        .collect();
+    if cleaned.is_empty() {
+        return Ok(None);
+    }
+    match cleaned.parse::<f64>() {
+        Ok(v) if v.is_finite() && v > 0.0 => Ok(Some(v)),
+        _ => Err(format!(
+            "The spend limit \"{}\" is not a positive dollar amount. Enter a number such as 25, \
+             or clear the field for no limit.",
+            text.trim()
+        )),
+    }
+}
+
 /// Estimate the token + dollar cost of a governed audit run over `code_chars` of code with
 /// `selected` rules, returning `(total_tokens, dollars, passes)`. PURE so the readout is
 /// unit-testable without rendering. Pricing is per-million-token model rates; the mode string
@@ -253,6 +276,18 @@ mod tests {
         assert_eq!(det_tool_label("clippy"), "clippy");
         // (the "ruff" passthrough case was a duplicate test in cockpit.rs; merged here.)
         assert_eq!(det_tool_label("ruff"), "ruff");
+    }
+
+    #[test]
+    fn spend_limit_blank_is_no_limit_and_a_bad_value_is_an_error_not_no_limit() {
+        assert_eq!(parse_spend_limit(""), Ok(None));
+        assert_eq!(parse_spend_limit("   "), Ok(None));
+        assert_eq!(parse_spend_limit("25"), Ok(Some(25.0)));
+        assert_eq!(parse_spend_limit(" $1,250.50 "), Ok(Some(1250.5)));
+        for bad in ["0", "-5", "abc", "NaN", "inf", "12 dollars"] {
+            let err = parse_spend_limit(bad).expect_err(bad);
+            assert!(err.contains("positive dollar amount"), "{err}");
+        }
     }
 
     #[test]

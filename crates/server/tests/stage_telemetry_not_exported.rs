@@ -125,3 +125,47 @@ fn a_ledger_written_before_telemetry_existed_still_loads() {
     let back: ScanLedger = serde_json::from_value(value).expect("a legacy ledger deserializes");
     assert!(back.stage_telemetry().is_none());
 }
+
+/// The efficiency set and the spend-cap record (dollar figures, NOT RUN lists) ride on the same
+/// operator ledger as the telemetry, so they obey the same rule: the client export is unchanged.
+#[test]
+fn recording_the_efficiency_set_and_a_cost_cap_changes_nothing_in_the_client_export() {
+    let mut capped = ScanLedger::new();
+    let mut efficiency = camerata_server::efficiency::EfficiencyConfig::default();
+    efficiency.set("warm_schedule", false).unwrap();
+    capped.record_efficiency(efficiency);
+    capped.record_cost_cap(camerata_server::cost_cap::CostCapRecord {
+        cap_usd: 7.77,
+        spent_usd: 8.88,
+        not_run_passes: vec![camerata_server::cost_cap::NotRunPass {
+            repo: "acme/portal".to_string(),
+            group: "pass[all]".to_string(),
+            chunk: 1,
+            n_chunks: 1,
+            rule_batch: 2,
+            n_rule_batches: 2,
+            rule_ids: vec!["ARCH-X-1".to_string()],
+        }],
+        not_run_stages: Vec::new(),
+        notes: vec!["batch NOT submitted".to_string()],
+    });
+    assert!(capped.is_cost_capped());
+
+    let (report_with, findings_with) = exported(report(capped));
+    let (report_without, findings_without) = exported(report(ScanLedger::new()));
+    assert_eq!(report_with, report_without, "report.json changed");
+    assert_eq!(findings_with, findings_without, "findings.json changed");
+    for term in [
+        "7.77",
+        "8.88",
+        "cost_cap",
+        "max_cost",
+        "efficiency",
+        "warm_schedule",
+    ] {
+        assert!(
+            !report_with.contains(term) && !findings_with.contains(term),
+            "`{term}` leaked into the client export"
+        );
+    }
+}

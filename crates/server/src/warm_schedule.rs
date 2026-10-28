@@ -113,5 +113,25 @@ where
     results
 }
 
+/// The pre-rank-3 schedule, kept behind the `warm_schedule` efficiency switch
+/// ([`crate::efficiency::EfficiencyConfig`]): `concurrency` jobs in flight at once in the given
+/// order, no warm-up, so a chunk's first rule-batches all go out together. Every job still runs
+/// exactly once; results come back in completion order.
+pub async fn run_unscheduled<T, R, F, Fut>(
+    jobs: Vec<ScheduledJob<T>>,
+    concurrency: usize,
+    run: F,
+) -> Vec<R>
+where
+    F: Fn(T) -> Fut,
+    Fut: Future<Output = R>,
+{
+    futures::stream::iter(jobs)
+        .map(|job| run(job.payload))
+        .buffer_unordered(concurrency.max(1))
+        .collect()
+        .await
+}
+
 #[cfg(test)]
 mod tests;

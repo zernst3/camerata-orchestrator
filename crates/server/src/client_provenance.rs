@@ -73,6 +73,7 @@ pub fn export_provenance_with(
     watermark: Option<&CorpusFreshness>,
 ) -> ManifestProvenance {
     let mut provenance = ManifestProvenance::from_cover(cover);
+    provenance.cost_cap_reached = report.ledger.is_cost_capped();
     provenance.corpus_version = corpus.map(corpus_version);
     provenance.rules_last_reviewed = match (watermark, rules_used_by_scan(report, corpus)) {
         (Some(watermark), Some(used)) => client_rules_last_reviewed(watermark, &used),

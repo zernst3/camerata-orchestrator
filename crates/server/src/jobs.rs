@@ -85,6 +85,10 @@ pub struct JobState {
     pub done: usize,
     /// Total passes known so far (grows as repos are fetched + chunked).
     pub total: usize,
+    /// Passes that were refused and did NOT run (the spend limit). Counted separately from
+    /// `done` so a stopped scan never reads as 100% complete.
+    #[serde(default)]
+    pub not_run: usize,
     /// Findings discovered so far — a live preview (pre-final calibration).
     pub findings: Vec<Finding>,
     /// Live progress of the DETERMINISTIC pass (the always-on floor + the scan-preview
@@ -194,6 +198,11 @@ impl JobStore {
     /// Mark `n` passes complete.
     pub fn inc_done(&self, id: &str, n: usize) {
         self.with(id, |j| j.done += n);
+    }
+
+    /// Record `n` passes that were refused and did not run. NOT counted in `done`.
+    pub fn inc_not_run(&self, id: &str, n: usize) {
+        self.with(id, |j| j.not_run += n);
     }
 
     /// Register (or, with `None`, clear) the rule corpus the job's scan runs against. From then

@@ -170,6 +170,7 @@ impl StageMeter {
         let stages = self.lock();
         StageTelemetry {
             counted_lines,
+            efficiency: None,
             stages: Stage::ALL
                 .iter()
                 .filter_map(|stage| {
@@ -212,6 +213,11 @@ pub struct StageTelemetry {
     pub counted_lines: usize,
     /// Only stages that made at least one call, in pipeline order.
     pub stages: Vec<StageRecord>,
+    /// Which efficiency measures were on for this run ([`crate::efficiency`]), so a cost figure
+    /// is never read without knowing what produced it. `None` for a record written before the
+    /// switches existed.
+    #[serde(default)]
+    pub efficiency: Option<crate::efficiency::EfficiencyConfig>,
 }
 
 impl StageTelemetry {
@@ -238,6 +244,9 @@ impl StageTelemetry {
             "== STAGE TELEMETRY (operator only; not part of the client export) =="
         )
         .ok();
+        if let Some(efficiency) = &self.efficiency {
+            writeln!(out, "  efficiency measures: {}", efficiency.render()).ok();
+        }
         if self.stages.is_empty() {
             writeln!(out, "  (no model call ran this scan)").ok();
             writeln!(out, "  counted lines: {}", self.counted_lines).ok();

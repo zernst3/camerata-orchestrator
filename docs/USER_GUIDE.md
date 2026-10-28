@@ -1754,8 +1754,49 @@ anywhere the run fails and tells you to add one, it never falls back to the Clau
 internal benchmark runs, and the export's `manifest.json` and `README.txt` record the backend and provider,
 for example `api` / `anthropic`), `--batch` (the Anthropic Message Batches path, roughly half the token cost, results
 arrive asynchronously, needs `--backend api`), `--model` / `--calibration-model`, `--full` to ignore
-the incremental-scan cache and rescan every file, and `--verbose` to print the per-rule coverage
-ledger rather than the concise summary.
+the incremental-scan cache and rescan every file, `--verbose` to print the per-rule coverage
+ledger rather than the concise summary, `--max-cost-usd` to cap the spend, and `--efficiency` to
+switch a saving off (both below).
+
+#### What a scan will cost, and how to cap it
+
+Before the first model call, `camerata inspect` prints a pre-flight ESTIMATE: about how many dollars,
+over how many model calls, and the basis it is built on (characters of code, number of rules, the
+models, the mode and backend). It is an estimate, not a quote. On the API backend it also prints the
+exact input size of one scan pass, counted by the API for free. A repeat run on an unchanged tree
+reuses the previous findings and costs less than the estimate.
+
+To put a ceiling on a run, add `--max-cost-usd 25`. The run stops BETWEEN passes once its actual
+spend reaches the limit; it never cuts a pass off halfway. The limit is checked before each scan pass,
+each calibration or fix batch and each deep-tier call starts, and once the limit has stopped anything no
+later stage starts. Calls already started finish, so a run can end about one pass over the limit (a pass
+can include one retry of a reply that was cut off). When the limit stops a run:
+
+- the final report says so, and lists the passes that were NOT RUN (also shown under FAILED PASSES);
+- the export is still written but is marked incomplete: its report lists the passes that did not run,
+  `manifest.json` says `"cost_cap_reached": true` and `README.txt` says so in one line. No dollar
+  figure is put in the export;
+- the command exits with status 4, so a script cannot mistake it for a complete inspection.
+
+A limit needs every model the run uses to have a known price. If the scan, calibration, fix, deep-tier
+or clone-judge model has none (a model outside the built-in price list), the run refuses to start,
+before any model call, and names the model, because the cost of its calls could not be counted against
+the limit. Without a limit such a model runs as before.
+
+With `--batch` the limit is checked BEFORE the batch is submitted (a submitted batch cannot be
+cancelled cheaply); if the estimate would pass the limit, nothing is submitted and every pass is
+reported as not run. The desktop app has the same control as "Spend limit (USD)" in the scan settings.
+When any pass or stage did not run, for any reason (the limit, or a failure), the app's results screen
+shows an "Incomplete" banner listing them, a short reminder beside the export button, and the progress
+line counts them as NOT RUN rather than done. A rule that was checked on only part of the code is
+listed as such and never counted as clean.
+
+Every saving the product applies is on by default and can be switched off for one run, to find out
+whether it caused a cost or behavior change: `--efficiency warm_schedule=off` (repeatable), or
+`CAMERATA_EFFICIENCY=warm_schedule=off,result_cache=off`. The measures are `warm_schedule`,
+`label_after_prefix`, `batch_long_cache`, `result_cache`, `truncation_retry` and `fix_prefilter`
+(what each does is in TECHNICAL.md). A misspelled name is an error. Every run prints which measures
+were on.
 
 To size a repo before quoting it, run `cargo run -p camerata -- count <PATH>` (add `--json` for
 machine-readable output). It uses no model and no network, reads the repo through the inspection's
