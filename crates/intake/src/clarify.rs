@@ -435,7 +435,7 @@ mod tests {
         async fn evaluate(&self, _form: &IntakeForm) -> Result<Intake, LeadEngineerError> {
             let remaining = self
                 .clarify_count
-                .fetch_update(
+                .try_update(
                     std::sync::atomic::Ordering::Relaxed,
                     std::sync::atomic::Ordering::Relaxed,
                     |v| if v > 0 { Some(v - 1) } else { None },

@@ -364,12 +364,10 @@ impl RunStore {
             // the run goes terminal between this and the check below, the retained permit
             // makes the subsequent `notified().await` return immediately.
             let notified = notify.notified();
-            if let Some(run) = self.get(id) {
-                if run.done {
-                    return Some(run);
-                }
-            } else {
-                return None;
+            // Unknown run id: nothing to await.
+            let run = self.get(id)?;
+            if run.done {
+                return Some(run);
             }
             match tokio::time::timeout(safety_timeout, notified).await {
                 Ok(()) => {
