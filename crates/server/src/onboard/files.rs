@@ -533,12 +533,15 @@ fn read_local_repo_files_gitignore(
 
     // hidden(false): we want to scan dotfiles like .env and .camerata/ — the `ignore`
     // crate would otherwise skip them by default.
+    // H5: path order, not the filesystem's directory order, so the same tree always yields the
+    // same file list and the same `HARD_CAP_FILES` cut on every machine.
     let walker = ignore::WalkBuilder::new(root)
         .git_ignore(true)
         .git_global(true)
         .git_exclude(true)
         .ignore(true)
         .hidden(false)
+        .sort_by_file_name(|a, b| a.cmp(b))
         .build();
 
     'walk: for result in walker {
@@ -782,6 +785,31 @@ mod tests {
         let mut v: Vec<String> = extracted.files.iter().map(|(p, _)| p.clone()).collect();
         v.sort();
         v
+    }
+
+    // ── H5: the walk returns files in path order ──────────────────────────────────
+
+    /// The walk decides which files make the `HARD_CAP_FILES` cut, so its order must not be
+    /// the filesystem's directory order (which differs between machines and file systems).
+    #[test]
+    fn the_gitignore_aware_walk_returns_files_in_path_order() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        assert!(std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(root)
+            .status()
+            .unwrap()
+            .success());
+        // Created in reverse order, across directories, so creation order is not path order.
+        for i in (0..40).rev() {
+            write(root, &format!("d{}/f{:02}.rs", i % 4, i), "fn f() {}\n");
+        }
+        let walked: Vec<String> = scan(root).files.into_iter().map(|(p, _)| p).collect();
+        assert_eq!(walked.len(), 40);
+        let mut sorted = walked.clone();
+        sorted.sort();
+        assert_eq!(walked, sorted);
     }
 
     // ── bin/ pruning: only .NET build output is noise ──────────────────────────
