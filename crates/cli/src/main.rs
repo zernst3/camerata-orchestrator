@@ -263,9 +263,11 @@ enum CorpusAction {
         /// Pause between two requests to the same host, in milliseconds.
         #[arg(long, default_value_t = 1500)]
         delay_ms: u64,
-        /// Accept a reviewed section change (the cited URL with its anchor). Repeatable. A
-        /// changed section stays listed on every run until accepted. Makes no requests; it
-        /// only updates the sidecar, recording who accepted and when.
+        /// Accept a reviewed section change: `url#anchor=sha256:<hash>` with the hash the report
+        /// printed (refused if the page changed again since), or the bare `url#anchor`
+        /// (accepts whatever is pending now, with a warning). Repeatable. A changed section
+        /// stays listed on every run until accepted. Makes no requests; it only updates the
+        /// sidecar, recording who accepted and when.
         #[arg(long, value_name = "URL", conflicts_with_all = ["accept_all", "no_save", "json", "out"])]
         accept: Vec<String>,
         /// Accept every unreviewed section change (use after reading the whole report).

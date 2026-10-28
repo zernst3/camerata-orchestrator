@@ -16,8 +16,8 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use camerata_rules::{corpus_path, load_corpus_lenient};
 use camerata_source_check::{
-    render_json, render_text, run_check, sidecar_path, AcceptTarget, CheckConfig, HttpFetcher,
-    SourceHashes,
+    render_json, render_text, run_check, sidecar_path, AcceptSpec, AcceptTarget, AcceptedChange,
+    CheckConfig, HttpFetcher, SidecarLock, SourceHashes,
 };
 
 /// Seconds a single request may take before the URL counts as unreachable.
@@ -61,14 +61,15 @@ fn accepter(by: Option<String>) -> String {
         .unwrap_or_else(|| "unknown".to_string())
 }
 
-/// The testable core of `--accept` / `--accept-all`: accept in the sidecar at `path` and save it.
-/// Makes no requests. Returns the accepted URLs.
+/// The testable core of `--accept` / `--accept-all`: take the sidecar lock, accept in the sidecar
+/// at `path`, and save it. Makes no requests. Returns what was accepted, hashes included.
 fn accept_in_sidecar(
     path: &std::path::Path,
     target: AcceptTarget<'_>,
     today: &str,
     by: &str,
-) -> Result<Vec<String>> {
+) -> Result<Vec<AcceptedChange>> {
+    let _lock = SidecarLock::acquire(path)?;
     let mut sidecar = SourceHashes::load(path)?;
     let accepted = sidecar.accept(target, today, by)?;
     if !accepted.is_empty() {
@@ -77,27 +78,64 @@ fn accept_in_sidecar(
     Ok(accepted)
 }
 
+/// What to do with the sidecar after a run.
+#[derive(Debug, PartialEq, Eq)]
+enum SaveDecision {
+    /// Write it.
+    Save,
+    /// The operator asked for a dry run.
+    SkipRequested,
+    /// Some rule files did not load, so their URLs would look "no longer cited" and the save
+    /// would erase their baselines and unreviewed changes. Nothing is written.
+    RefuseCorpusErrors(usize),
+}
+
+/// Decide whether the run may save the sidecar. A corpus that loaded with errors never may.
+fn save_decision(corpus_load_errors: usize, no_save: bool) -> SaveDecision {
+    if no_save {
+        SaveDecision::SkipRequested
+    } else if corpus_load_errors > 0 {
+        SaveDecision::RefuseCorpusErrors(corpus_load_errors)
+    } else {
+        SaveDecision::Save
+    }
+}
+
+/// `--accept` / `--accept-all`: record the acceptance and print what was accepted.
+fn run_accept(args: CheckSourcesArgs) -> Result<()> {
+    let path = args.sidecar.clone().unwrap_or_else(sidecar_path);
+    let specs: Vec<AcceptSpec> = args.accept.iter().map(|s| AcceptSpec::parse(s)).collect();
+    let target = if args.accept_all {
+        AcceptTarget::All
+    } else {
+        AcceptTarget::Urls(&specs)
+    };
+    let today = check_config(0).today;
+    let by = accepter(args.by);
+    let accepted = accept_in_sidecar(&path, target, &today, &by)?;
+    for change in &accepted {
+        println!("Accepted: {} ({})", change.url, change.hash);
+        if change.unpinned && !args.accept_all {
+            eprintln!(
+                "warning: no hash was given for {}, so the CURRENT pending text was accepted. \
+                 Use --accept \"<url>=<hash>\" with the hash from the report to accept only what \
+                 you reviewed.",
+                change.url
+            );
+        }
+    }
+    println!("{} change(s) accepted by {by} on {today}.", accepted.len());
+    if !accepted.is_empty() {
+        println!("Commit {} to record the acceptance.", path.display());
+    }
+    Ok(())
+}
+
 /// Run the check and print or write the report, or (with `--accept` / `--accept-all`) record
 /// the acceptance of reviewed changes and make no requests.
 pub async fn run_corpus_check_sources(args: CheckSourcesArgs) -> Result<()> {
     if args.accept_all || !args.accept.is_empty() {
-        let path = args.sidecar.unwrap_or_else(sidecar_path);
-        let target = if args.accept_all {
-            AcceptTarget::All
-        } else {
-            AcceptTarget::Urls(&args.accept)
-        };
-        let today = check_config(0).today;
-        let by = accepter(args.by);
-        let accepted = accept_in_sidecar(&path, target, &today, &by)?;
-        for url in &accepted {
-            println!("Accepted: {url}");
-        }
-        println!("{} change(s) accepted by {by} on {today}.", accepted.len());
-        if !accepted.is_empty() {
-            println!("Commit {} to record the acceptance.", path.display());
-        }
-        return Ok(());
+        return run_accept(args);
     }
 
     let (corpus, errors) = load_corpus_lenient(&corpus_path()).await;
@@ -107,8 +145,15 @@ pub async fn run_corpus_check_sources(args: CheckSourcesArgs) -> Result<()> {
             errors.len()
         );
     }
+    let decision = save_decision(errors.len(), args.no_save);
 
     let sidecar_file = args.sidecar.unwrap_or_else(sidecar_path);
+    // Hold the lock for the whole run when it will write, so a second run (or an accept) cannot
+    // interleave and silently overwrite this one. The sidecar is loaded AFTER the lock is taken.
+    let _lock = match decision {
+        SaveDecision::Save => Some(SidecarLock::acquire(&sidecar_file)?),
+        _ => None,
+    };
     let previous = SourceHashes::load(&sidecar_file)?;
     let fetcher = HttpFetcher::new(Duration::from_secs(REQUEST_TIMEOUT_SECS), &user_agent())?;
     let config = check_config(args.delay_ms);
@@ -129,14 +174,23 @@ pub async fn run_corpus_check_sources(args: CheckSourcesArgs) -> Result<()> {
         None => println!("{rendered}"),
     }
 
-    if args.no_save {
-        eprintln!("--no-save: sidecar left untouched.");
-    } else {
-        updated.save(&sidecar_file)?;
-        eprintln!(
-            "Sidecar updated: {}. Commit it to keep the baselines.",
-            sidecar_file.display()
-        );
+    match decision {
+        SaveDecision::Save => {
+            updated.save(&sidecar_file)?;
+            eprintln!(
+                "Sidecar updated: {}. Commit it to keep the baselines.",
+                sidecar_file.display()
+            );
+        }
+        SaveDecision::SkipRequested => eprintln!("--no-save: sidecar left untouched."),
+        SaveDecision::RefuseCorpusErrors(n) => {
+            anyhow::bail!(
+                "sidecar NOT saved: {n} corpus file(s) failed to load, so their cited URLs would \
+                 be treated as no longer cited and their baselines and unreviewed changes erased. \
+                 Fix the rule files and run again. The report above is still valid for the rules \
+                 that did load."
+            );
+        }
     }
     Ok(())
 }
@@ -178,9 +232,38 @@ mod tests {
                     first_seen: "2026-10-15".to_string(),
                 }),
                 accepted: None,
+                anchor_missing_since: None,
             },
         );
         s
+    }
+
+    #[test]
+    fn a_corpus_that_loaded_with_errors_never_saves_the_sidecar() {
+        assert_eq!(save_decision(0, false), SaveDecision::Save);
+        assert_eq!(save_decision(0, true), SaveDecision::SkipRequested);
+        assert_eq!(save_decision(3, false), SaveDecision::RefuseCorpusErrors(3));
+        // A dry run is a dry run whatever the corpus did.
+        assert_eq!(save_decision(3, true), SaveDecision::SkipRequested);
+    }
+
+    #[test]
+    fn an_accept_holds_the_lock_so_a_concurrent_one_fails_clearly() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("hashes.json");
+        sidecar_with_pending("https://docs.example/g#s")
+            .save(&path)
+            .expect("save");
+        let _held = SidecarLock::acquire(&path).expect("another run holds the lock");
+        let err = accept_in_sidecar(&path, AcceptTarget::All, "2026-11-01", "pat")
+            .expect_err("second holder");
+        assert!(err.to_string().contains("hashes.json.lock"), "{err}");
+        assert!(
+            SourceHashes::load(&path).expect("load").entries["https://docs.example/g#s"]
+                .pending
+                .is_some(),
+            "nothing was accepted"
+        );
     }
 
     #[test]
@@ -192,12 +275,17 @@ mod tests {
 
         let done = accept_in_sidecar(
             &path,
-            AcceptTarget::Urls(&[url.to_string()]),
+            AcceptTarget::Urls(&[AcceptSpec::parse(&format!("{url}=sha256:new"))]),
             "2026-11-01",
             "pat",
         )
         .expect("accept");
-        assert_eq!(done, vec![url.to_string()]);
+        assert_eq!(done.len(), 1);
+        assert_eq!(
+            (done[0].url.as_str(), done[0].hash.as_str()),
+            (url, "sha256:new")
+        );
+        assert!(!done[0].unpinned);
 
         let reloaded = SourceHashes::load(&path).expect("load");
         let record = &reloaded.entries[url];
@@ -220,7 +308,7 @@ mod tests {
         let before = std::fs::read_to_string(&path).expect("read");
         let err = accept_in_sidecar(
             &path,
-            AcceptTarget::Urls(&["https://docs.example/other#x".to_string()]),
+            AcceptTarget::Urls(&[AcceptSpec::unpinned("https://docs.example/other#x")]),
             "2026-11-01",
             "pat",
         )

@@ -52,27 +52,34 @@ pub fn source_confidence(
         let Some(record) = hashes.entries.get(url) else {
             continue;
         };
-        if rechecked_on.is_none_or(|oldest| record.last_checked.as_str() < oldest) {
-            rechecked_on = Some(&record.last_checked);
+        match rechecked_on {
+            Some(oldest) if record.last_checked.as_str() >= oldest => {}
+            _ => rechecked_on = Some(&record.last_checked),
         }
         if record.link == LinkState::Dead {
             reasons.push(format!("source link is dead: {url}"));
+        }
+        if let Some(since) = &record.anchor_missing_since {
+            // The page answers but no longer contains the cited section: as bad as a dead link.
+            reasons.push(format!("cited anchor not found since {since}: {url}"));
         }
         if record.pending.is_some() {
             // An unreviewed change lowers confidence however old it is.
             reasons.push(format!("cited section changed, not yet reviewed: {url}"));
         } else if let Some(accepted) = &record.accepted {
-            let recently_accepted = match (parse_ymd(&accepted.on), today_days) {
+            match (parse_ymd(&accepted.on), today_days) {
                 (Some((y, m, d)), Some(now)) => {
-                    now - days_from_civil(y, m, d) <= changed_window_days
+                    if now - days_from_civil(y, m, d) <= changed_window_days {
+                        reasons.push(format!(
+                            "cited section changed (accepted {}): {url}",
+                            accepted.on
+                        ));
+                    }
                 }
-                _ => false,
-            };
-            if recently_accepted {
-                reasons.push(format!(
-                    "cited section changed (accepted {}): {url}",
-                    accepted.on
-                ));
+                // A date we cannot read gives no basis to say the change aged out.
+                _ => reasons.push(format!(
+                    "cited section changed (accepted on an unreadable date): {url}"
+                )),
             }
         }
     }

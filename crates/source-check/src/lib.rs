@@ -22,17 +22,18 @@ mod section;
 mod sidecar;
 
 pub use check::{
-    run_check, CheckConfig, Counts, LinkFinding, MissingAnchor, RuleRef, SectionChange,
-    SourceCheckReport,
+    run_check, AnchorProblem, CheckConfig, Counts, LinkFinding, MissingAnchor, RuleRef,
+    SectionChange, SourceCheckReport,
 };
 pub use diff::{diff_sections, DiffLine, DiffOp};
 pub use export::{source_confidence, SourceConfidence, DEFAULT_CHANGED_WINDOW_DAYS};
-pub use fetch::{FetchOutcome, Fetcher, HttpFetcher};
+pub use fetch::{FetchOutcome, Fetcher, HttpFetcher, NetworkPolicy, DEFAULT_MAX_BODY_BYTES};
 pub use render::{render_json, render_text};
 pub use section::{
     extract_section, hash_text, normalise_whitespace, split_fragment, SectionLookup,
 };
 pub use sidecar::{
-    cap_excerpt, sidecar_path, AcceptTarget, Acceptance, LinkState, PendingChange, SourceHashes,
-    SourceRecord, EXCERPT_CAP_CHARS, SIDECAR_SCHEMA_VERSION,
+    cap_excerpt, sidecar_path, AcceptSpec, AcceptTarget, Acceptance, AcceptedChange, LinkState,
+    PendingChange, SidecarLock, SourceHashes, SourceRecord, EXCERPT_CAP_CHARS,
+    SIDECAR_SCHEMA_VERSION,
 };

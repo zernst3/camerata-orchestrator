@@ -73,15 +73,31 @@ pub struct SectionChange {
     /// True when the section is longer than the stored excerpt, so a change past the excerpt
     /// shows in the hash but not in the diff.
     pub beyond_excerpt: bool,
+    /// True when this run did NOT read the page's text (it was down, the anchor is gone, ...):
+    /// the change is carried over from an earlier run.
+    pub carried_over: bool,
 }
 
-/// A cited anchor the fetched page does not contain.
+/// Why a cited section could not be checked even though its page answered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AnchorProblem {
+    /// The page does not contain the anchor.
+    NotFound,
+    /// The page was larger than the download limit, so the anchor may be in the part not read.
+    /// Nothing was hashed.
+    PageTruncated,
+}
+
+/// A cited anchor that could not be found (or looked for) in the fetched page.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MissingAnchor {
     /// The cited URL, anchor included.
     pub url: String,
     /// The rules that cite it, sorted.
     pub rules: Vec<String>,
+    /// Why.
+    pub reason: AnchorProblem,
 }
 
 /// The numbers at the top of the report. URL counts are per distinct cited URL.
@@ -105,17 +121,24 @@ pub struct Counts {
     pub dead: usize,
     /// URLs that could not be reached this run (not a verdict on the page).
     pub unreachable: usize,
-    /// Cited URLs carrying an anchor whose section was looked up.
+    /// URLs the network policy refused to contact (nothing was requested).
+    pub refused: usize,
+    /// Cited URLs carrying an anchor ("cited sections"). Every one falls in exactly one of the
+    /// six categories below, so they add up to this number.
     pub sections_checked: usize,
-    /// Sections whose text matches the last run.
+    /// Page read, text matches the last accepted text.
     pub sections_unchanged: usize,
-    /// Sections whose text differs from the last accepted text and are not yet reviewed
-    /// (including ones carried over from earlier runs, or whose page did not answer this run).
+    /// Page read this run, text differs from the last accepted text, not yet reviewed.
     pub sections_changed: usize,
-    /// Sections seen for the first time (a baseline was recorded, nothing to compare).
+    /// Page read, first sight: a baseline was recorded, nothing to compare.
     pub sections_new_baseline: usize,
-    /// Anchors the fetched page did not contain.
+    /// Page read, anchor not in it (and no unreviewed change on record).
     pub sections_anchor_missing: usize,
+    /// An unreviewed change from an EARLIER run that this run could not re-read (the page was
+    /// down, the anchor is gone, the page was cut at the size limit). Still listed in the report.
+    pub sections_pending_carried: usize,
+    /// Page not read this run, or cut at the size limit, and nothing unreviewed on record.
+    pub sections_unverified: usize,
 }
 
 /// The full, date-stamped result of one run.
@@ -137,7 +160,10 @@ pub struct SourceCheckReport {
     pub redirected: Vec<LinkFinding>,
     /// URLs that could not be reached this run.
     pub unreachable: Vec<LinkFinding>,
-    /// Cited anchors missing from the fetched page (may be a JavaScript-rendered page).
+    /// URLs the network policy refused to contact (loopback, private, non-web scheme, ...).
+    pub refused: Vec<LinkFinding>,
+    /// Cited anchors missing from the fetched page (may be a JavaScript-rendered page), or not
+    /// checkable because the page was cut at the size limit.
     pub anchor_missing: Vec<MissingAnchor>,
 }
 
@@ -260,6 +286,9 @@ struct Judge<'a> {
     today: &'a str,
     report: SourceCheckReport,
     next: BTreeMap<String, SourceRecord>,
+    /// URLs whose change was observed by reading the page THIS run (the rest of the pending
+    /// changes are carried over from earlier runs).
+    fresh: BTreeSet<String>,
 }
 
 impl Judge<'_> {
@@ -267,40 +296,44 @@ impl Judge<'_> {
         let rules: Vec<String> = rules.iter().cloned().collect();
         let prev = self.prev.entries.get(url);
         let (_, fragment) = split_fragment(url);
-        let counts = &mut self.report.counts;
+        let finding = |state, detail: &str, final_url: Option<String>| LinkFinding {
+            url: url.to_string(),
+            state,
+            detail: detail.to_string(),
+            final_url,
+            rules: rules.clone(),
+        };
         match outcome {
             FetchOutcome::Unreachable { detail } => {
-                counts.unreachable += 1;
-                self.report.unreachable.push(LinkFinding {
-                    url: url.to_string(),
-                    state: LinkState::Unreachable,
-                    detail: detail.clone(),
-                    final_url: None,
-                    rules,
-                });
-                // Unknown this run: keep whatever the last definitive check recorded.
-                if let Some(prev) = prev {
-                    self.next.insert(url.to_string(), prev.clone());
-                }
+                self.report.counts.unreachable += 1;
+                self.report
+                    .unreachable
+                    .push(finding(LinkState::Unreachable, detail, None));
+                self.keep_prev(url, prev, fragment.is_some());
+            }
+            FetchOutcome::Refused { detail } => {
+                self.report.counts.refused += 1;
+                self.report
+                    .refused
+                    .push(finding(LinkState::Refused, detail, None));
+                self.keep_prev(url, prev, fragment.is_some());
             }
             FetchOutcome::Dead { detail } => {
-                counts.dead += 1;
-                self.report.dead.push(LinkFinding {
-                    url: url.to_string(),
-                    state: LinkState::Dead,
-                    detail: detail.clone(),
-                    final_url: None,
-                    rules,
-                });
-                // A page that is down today keeps its section baseline for when it returns.
+                self.report.counts.dead += 1;
+                self.report
+                    .dead
+                    .push(finding(LinkState::Dead, detail, None));
+                // A page that is down today keeps its section state for when it returns.
                 let mut record = blank_record(self.today, LinkState::Dead);
                 carry_section(&mut record, prev);
+                self.count_unread_section(fragment.is_some(), &record);
                 self.next.insert(url.to_string(), record);
             }
             FetchOutcome::Ok {
                 final_url,
                 redirected,
                 body,
+                truncated,
             } => {
                 let mut record = blank_record(
                     self.today,
@@ -311,24 +344,64 @@ impl Judge<'_> {
                     },
                 );
                 if *redirected {
-                    counts.redirected += 1;
+                    self.report.counts.redirected += 1;
                     record.redirected_to = Some(final_url.clone());
-                    self.report.redirected.push(LinkFinding {
-                        url: url.to_string(),
-                        state: LinkState::Redirected,
-                        detail: String::new(),
-                        final_url: Some(final_url.clone()),
-                        rules: rules.clone(),
-                    });
+                    self.report.redirected.push(finding(
+                        LinkState::Redirected,
+                        "",
+                        Some(final_url.clone()),
+                    ));
                 } else {
-                    counts.ok += 1;
+                    self.report.counts.ok += 1;
                 }
                 carry_section(&mut record, prev);
-                if let (Some(anchor), Some(body)) = (fragment, body) {
-                    self.judge_section(url, anchor, body, &rules, prev, &mut record);
+                if let Some(anchor) = fragment {
+                    match (body.as_deref(), *truncated) {
+                        (Some(body), false) => {
+                            self.judge_section(url, anchor, body, &rules, prev, &mut record);
+                        }
+                        _ => {
+                            // No body, or a body cut at the size limit: the section cannot be
+                            // verified either way, so nothing is hashed.
+                            if *truncated {
+                                self.report.anchor_missing.push(MissingAnchor {
+                                    url: url.to_string(),
+                                    rules: rules.clone(),
+                                    reason: AnchorProblem::PageTruncated,
+                                });
+                            }
+                            self.count_unread_section(true, &record);
+                        }
+                    }
                 }
                 self.next.insert(url.to_string(), record);
             }
+        }
+    }
+
+    /// The page gave no verdict this run: keep the last record untouched.
+    fn keep_prev(&mut self, url: &str, prev: Option<&SourceRecord>, has_fragment: bool) {
+        if let Some(prev) = prev {
+            self.count_unread_section(has_fragment, prev);
+            self.next.insert(url.to_string(), prev.clone());
+        } else if has_fragment {
+            self.report.counts.sections_checked += 1;
+            self.report.counts.sections_unverified += 1;
+        }
+    }
+
+    /// Count a cited section whose page text could not be read this run: an unreviewed change
+    /// already on record is carried over, anything else is simply unverified.
+    fn count_unread_section(&mut self, has_fragment: bool, record: &SourceRecord) {
+        if !has_fragment {
+            return;
+        }
+        let counts = &mut self.report.counts;
+        counts.sections_checked += 1;
+        if record.pending.is_some() {
+            counts.sections_pending_carried += 1;
+        } else {
+            counts.sections_unverified += 1;
         }
     }
 
@@ -341,16 +414,29 @@ impl Judge<'_> {
         prev: Option<&SourceRecord>,
         record: &mut SourceRecord,
     ) {
-        let counts = &mut self.report.counts;
-        counts.sections_checked += 1;
         let SectionLookup::Found(text) = extract_section(body, anchor) else {
-            counts.sections_anchor_missing += 1;
+            // The page answered but does not contain the anchor: remember since when, and keep
+            // the baseline and any pending change.
+            if record.anchor_missing_since.is_none() {
+                record.anchor_missing_since = Some(self.today.to_string());
+            }
             self.report.anchor_missing.push(MissingAnchor {
                 url: url.to_string(),
                 rules: rules.to_vec(),
+                reason: AnchorProblem::NotFound,
             });
-            return; // the old baseline stays in `record`
+            let counts = &mut self.report.counts;
+            counts.sections_checked += 1;
+            if record.pending.is_some() {
+                counts.sections_pending_carried += 1;
+            } else {
+                counts.sections_anchor_missing += 1;
+            }
+            return;
         };
+        record.anchor_missing_since = None;
+        let counts = &mut self.report.counts;
+        counts.sections_checked += 1;
         let new_hash = hash_text(&text);
         // `record` already carries the accepted baseline (and any pending change) from `prev`.
         match record.section_hash.clone() {
@@ -367,6 +453,8 @@ impl Judge<'_> {
             Some(_) => {
                 // Differs from the accepted baseline: record it as pending and leave the
                 // baseline alone. `run_check` lists it on the report.
+                counts.sections_changed += 1;
+                self.fresh.insert(url.to_string());
                 let first_seen = prev
                     .and_then(|p| p.pending.as_ref())
                     .map_or_else(|| self.today.to_string(), |p| p.first_seen.clone());
@@ -389,17 +477,21 @@ fn blank_record(today: &str, link: LinkState) -> SourceRecord {
         section_excerpt: None,
         pending: None,
         accepted: None,
+        anchor_missing_since: None,
     }
 }
 
-/// Carry the section review state (accepted baseline, pending change, acceptance) from the
-/// previous record, so a link problem or a missing anchor never erases it.
+/// Carry the section review state (accepted baseline, pending change, acceptance, vanished-anchor
+/// date) from the previous record, so a link problem or a missing anchor never erases it.
 fn carry_section(record: &mut SourceRecord, prev: Option<&SourceRecord>) {
     if let Some(prev) = prev {
         record.section_hash.clone_from(&prev.section_hash);
         record.section_excerpt.clone_from(&prev.section_excerpt);
         record.pending.clone_from(&prev.pending);
         record.accepted.clone_from(&prev.accepted);
+        record
+            .anchor_missing_since
+            .clone_from(&prev.anchor_missing_since);
     }
 }
 
@@ -441,6 +533,7 @@ pub async fn run_check(
             ..SourceCheckReport::default()
         },
         next: BTreeMap::new(),
+        fresh: BTreeSet::new(),
     };
     for (url, citing) in &collected.urls {
         let (page, _) = split_fragment(url);
@@ -454,7 +547,10 @@ pub async fn run_check(
     }
 
     let Judge {
-        mut report, next, ..
+        mut report,
+        next,
+        fresh,
+        ..
     } = judge;
     // Every section with an unreviewed change is listed, whether or not the page answered this
     // run: a change stays on the report until someone accepts it.
@@ -463,8 +559,8 @@ pub async fn run_check(
             continue;
         };
         let citing = collected.urls.get(url).map(|r| r.iter().cloned().collect());
-        report.counts.sections_changed += 1;
         report.changed.push(SectionChange {
+            carried_over: !fresh.contains(url),
             url: url.clone(),
             rules: citing.unwrap_or_default(),
             first_seen: pending.first_seen.clone(),
@@ -480,6 +576,7 @@ pub async fn run_check(
     report.dead.sort_by(|a, b| a.url.cmp(&b.url));
     report.redirected.sort_by(|a, b| a.url.cmp(&b.url));
     report.unreachable.sort_by(|a, b| a.url.cmp(&b.url));
+    report.refused.sort_by(|a, b| a.url.cmp(&b.url));
     report.changed.sort_by(|a, b| a.url.cmp(&b.url));
     report.anchor_missing.sort_by(|a, b| a.url.cmp(&b.url));
     let sidecar = SourceHashes {

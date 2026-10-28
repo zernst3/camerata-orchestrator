@@ -101,9 +101,7 @@ fn tokenize(html: &str) -> Vec<Token> {
             tokens.push(token);
             i = end;
             if let Some(name) = raw {
-                let close = format!("</{name}");
-                let lower_rest = html[i..].to_ascii_lowercase();
-                i = lower_rest.find(&close).map_or(bytes.len(), |p| i + p);
+                i = find_end_tag_ci(html, i, &name).unwrap_or(bytes.len());
             }
             text_start = i;
         } else {
@@ -209,7 +207,16 @@ fn decode_entities(text: &str) -> String {
                 "gt" => Some('>'),
                 "quot" => Some('"'),
                 "apos" => Some('\''),
-                "nbsp" => Some(' '),
+                // Typographic entities decode to the literal character, so a template change
+                // from `&mdash;` to a literal dash does not look like a content change.
+                "nbsp" => Some('\u{a0}'),
+                "mdash" => Some('\u{2014}'),
+                "ndash" => Some('\u{2013}'),
+                "lsquo" => Some('\u{2018}'),
+                "rsquo" => Some('\u{2019}'),
+                "ldquo" => Some('\u{201c}'),
+                "rdquo" => Some('\u{201d}'),
+                "hellip" => Some('\u{2026}'),
                 _ => entity
                     .strip_prefix('#')
                     .and_then(|num| {
@@ -326,6 +333,53 @@ fn heading_just_before(tokens: &[Token], at: usize) -> Option<usize> {
         .find(|&j| matches!(&tokens[j], Token::Start { name: n, .. } if n == name))
 }
 
+/// Index of the start tag of the heading that is still OPEN at token `at` (it encloses the
+/// marker), if any. Looks at the nearest heading tag before `at`: a start tag means open, an end
+/// tag means that heading already closed. Old GitHub and many doc generators put the anchor
+/// inside the heading: `<h2><a id="x" class="anchor"><svg/></a>Title</h2>`.
+fn enclosing_heading(tokens: &[Token], at: usize) -> Option<usize> {
+    (0..at).rev().find_map(|j| match &tokens[j] {
+        Token::Start { name, .. } if heading_level(name).is_some() => Some(Some(j)),
+        Token::End(name) if heading_level(name).is_some() => Some(None),
+        _ => None,
+    })?
+}
+
+/// Case-insensitive (ASCII) search for `</name` in `html` at or after byte `from`, without
+/// allocating a lowercased copy of the rest of the document.
+fn find_end_tag_ci(html: &str, from: usize, name: &str) -> Option<usize> {
+    let hay = html.as_bytes();
+    let needle_len = name.len() + 2;
+    if hay.len() < from + needle_len {
+        return None;
+    }
+    (from..=hay.len() - needle_len).find(|&p| {
+        hay[p] == b'<'
+            && hay[p + 1] == b'/'
+            && hay[p + 2..p + needle_len].eq_ignore_ascii_case(name.as_bytes())
+    })
+}
+
+/// Decode `%XX` escapes in a URL fragment (invalid escapes are kept literally).
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let hex = |b: u8| char::from(b).to_digit(16);
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let (Some(h), Some(l)) = (hex(bytes[i + 1]), hex(bytes[i + 2])) {
+                out.push((h * 16 + l) as u8);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 /// What looking up an anchor found.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SectionLookup {
@@ -344,12 +398,27 @@ pub enum SectionLookup {
 /// - any other element owns its own contents.
 pub fn extract_section(html: &str, anchor: &str) -> SectionLookup {
     let tokens = tokenize(html);
-    let prefixed = format!("user-content-{anchor}");
+    // A fragment may be percent-encoded; ids in the page are not. Try both spellings.
+    let decoded = percent_decode(anchor);
+    let wanted: Vec<String> = [anchor, decoded.as_str()]
+        .into_iter()
+        .flat_map(|a| [a.to_string(), format!("user-content-{a}")])
+        .collect();
     let hit = tokens.iter().position(|t| match t {
-        Token::Start { id, name_attr, .. } => [id, name_attr]
-            .into_iter()
-            .flatten()
-            .any(|v| v == anchor || *v == prefixed),
+        Token::Start {
+            name,
+            id,
+            name_attr,
+            ..
+        } => {
+            // `name=` names an anchor only on <a>; on <meta>, <input>, <form> it is something
+            // else entirely.
+            let names = if name == "a" { name_attr } else { &None };
+            [id, names]
+                .into_iter()
+                .flatten()
+                .any(|v| wanted.iter().any(|w| w == v))
+        }
         _ => false,
     });
     let Some(open) = hit else {
@@ -357,6 +426,12 @@ pub fn extract_section(html: &str, anchor: &str) -> SectionLookup {
     };
     let text = if let Some(level) = tokens[open].heading_level() {
         heading_section(&tokens, open, level)
+    } else if let Some(h) = enclosing_heading(&tokens, open) {
+        // The marker sits inside a heading: the section is that heading's.
+        tokens[h]
+            .heading_level()
+            .map(|l| heading_section(&tokens, h, l))
+            .unwrap_or_default()
     } else {
         let close = matching_end(&tokens, open);
         let own = visible_text(&tokens[open..=close]);
@@ -469,6 +544,97 @@ mod tests {
         assert_eq!(split_fragment("https://a/b#c"), ("https://a/b", Some("c")));
         assert_eq!(split_fragment("https://a/b#"), ("https://a/b", None));
         assert_eq!(split_fragment("https://a/b"), ("https://a/b", None));
+    }
+
+    #[test]
+    fn an_empty_anchor_inside_its_heading_uses_that_heading_not_the_next_one() {
+        // Old GitHub / many doc generators: the anchor wraps an icon inside the heading.
+        let html = "<h2><a id=\"user-content-first\" class=\"anchor\" href=\"#first\">\
+                    <svg class=\"octicon\"><path d=\"M0 0\"/></svg></a>First</h2><p>one</p>\
+                    <h2><a id=\"user-content-second\" class=\"anchor\"><svg></svg></a>Second</h2>\
+                    <p>two</p>";
+        assert_eq!(
+            extract_section(html, "first"),
+            SectionLookup::Found("First one".to_string())
+        );
+        assert_eq!(
+            extract_section(html, "second"),
+            SectionLookup::Found("Second two".to_string())
+        );
+        // Docusaurus puts the id on the heading and a hash-link anchor inside it.
+        let docusaurus = "<h2 class=\"anchor\" id=\"setup\">Setup<a class=\"hash-link\" \
+                          href=\"#setup\" title=\"Direct link\"></a></h2><p>steps</p><h2>Next</h2>";
+        assert_eq!(
+            extract_section(docusaurus, "setup"),
+            SectionLookup::Found("Setup steps".to_string())
+        );
+    }
+
+    #[test]
+    fn a_closed_heading_before_a_container_does_not_capture_it() {
+        let html = "<h2>Done</h2><div id=\"x\"><p>mine</p></div>";
+        assert_eq!(
+            extract_section(html, "x"),
+            SectionLookup::Found("mine".to_string())
+        );
+    }
+
+    #[test]
+    fn name_counts_as_an_anchor_only_on_an_anchor_tag() {
+        let html = "<meta name=\"idem\" content=\"x\"><form name=\"idem\"></form>\
+                    <input name=\"idem\"><h2>Other</h2><p>text</p>";
+        assert_eq!(extract_section(html, "idem"), SectionLookup::NotFound);
+        let with_anchor = "<a name=\"idem\"></a><h2>Real</h2><p>text</p>";
+        assert_eq!(
+            extract_section(with_anchor, "idem"),
+            SectionLookup::Found("Real text".to_string())
+        );
+    }
+
+    #[test]
+    fn percent_encoded_fragments_match_the_decoded_id() {
+        let html = "<h2 id=\"set up\">Set up</h2><p>go</p>";
+        assert_eq!(
+            extract_section(html, "set%20up"),
+            SectionLookup::Found("Set up go".to_string())
+        );
+        let accents = "<h2 id=\"café\">Café</h2><p>x</p>";
+        assert_eq!(
+            extract_section(accents, "caf%C3%A9"),
+            SectionLookup::Found("Café x".to_string())
+        );
+        assert_eq!(
+            percent_decode("100%"),
+            "100%",
+            "a stray percent stays literal"
+        );
+    }
+
+    #[test]
+    fn an_entity_and_its_literal_hash_the_same() {
+        let entity =
+            "<h2 id=a>T</h2><p>Use it&nbsp;now &mdash; it&rsquo;s &ldquo;fine&rdquo; &hellip; \
+                      a&ndash;b &lsquo;x&#8217; &#x2014;</p>";
+        let literal =
+            "<h2 id=a>T</h2><p>Use it now \u{2014} it\u{2019}s \u{201c}fine\u{201d} \u{2026} \
+                       a\u{2013}b \u{2018}x\u{2019} \u{2014}</p>";
+        let (SectionLookup::Found(a), SectionLookup::Found(b)) =
+            (extract_section(entity, "a"), extract_section(literal, "a"))
+        else {
+            panic!("both should be found");
+        };
+        assert_eq!(hash_text(&a), hash_text(&b));
+    }
+
+    #[test]
+    fn raw_text_tags_are_found_in_any_case_without_touching_the_rest() {
+        let html = "<h2 id=a>A</h2><SCRIPT>var x='<h2>';</SCRIPT><p>kept</p><Style>p{}</STYLE>";
+        assert_eq!(
+            extract_section(html, "a"),
+            SectionLookup::Found("A kept".to_string())
+        );
+        assert_eq!(find_end_tag_ci("xx</ScRiPt>", 0, "script"), Some(2));
+        assert_eq!(find_end_tag_ci("xx", 0, "script"), None);
     }
 
     #[test]

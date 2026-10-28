@@ -3,7 +3,7 @@
 
 use std::fmt::Write as _;
 
-use crate::check::{LinkFinding, RuleRef, SourceCheckReport};
+use crate::check::{AnchorProblem, LinkFinding, RuleRef, SourceCheckReport};
 use crate::diff::DiffOp;
 
 /// Longest diff segment shown in the text report; the JSON keeps it whole.
@@ -59,8 +59,8 @@ pub fn render_text(report: &SourceCheckReport) -> String {
     );
     let _ = writeln!(
         out,
-        "  Cited web URLs: {} (ok {}, redirected {}, dead {}, unreachable {})",
-        c.web_urls, c.ok, c.redirected, c.dead, c.unreachable
+        "  Cited web URLs: {} (ok {}, redirected {}, dead {}, unreachable {}, refused {})",
+        c.web_urls, c.ok, c.redirected, c.dead, c.unreachable, c.refused
     );
     let _ = writeln!(
         out,
@@ -69,13 +69,15 @@ pub fn render_text(report: &SourceCheckReport) -> String {
     );
     let _ = writeln!(
         out,
-        "  Cited sections: {} (unchanged {}, changed and not yet reviewed {}, new baseline {}, \
-         anchor not found {})",
+        "  Cited sections: {} (unchanged {}, changed and not yet reviewed {}, unreviewed from \
+         earlier runs and not re-read {}, new baseline {}, anchor not found {}, not verified {})",
         c.sections_checked,
         c.sections_unchanged,
         c.sections_changed,
+        c.sections_pending_carried,
         c.sections_new_baseline,
-        c.sections_anchor_missing
+        c.sections_anchor_missing,
+        c.sections_unverified
     );
 
     write_links(&mut out, "DEAD LINKS", &report.dead);
@@ -84,14 +86,29 @@ pub fn render_text(report: &SourceCheckReport) -> String {
         let _ = writeln!(
             out,
             "\nCHANGED SECTIONS, NOT YET REVIEWED ({}; listed every run until accepted with \
-             `camerata corpus check-sources --accept <url>` or `--accept-all`)",
+             `camerata corpus check-sources --accept <url>=<hash>` or `--accept-all`)",
             report.changed.len()
         );
         for ch in &report.changed {
             let _ = writeln!(out, "  {}", ch.url);
             let _ = writeln!(out, "    cited by: {}", ch.rules.join(", "));
             let _ = writeln!(out, "    first seen changed: {}", ch.first_seen);
-            let _ = writeln!(out, "    {} -> {}", ch.old_hash, ch.new_hash);
+            if ch.carried_over {
+                let _ = writeln!(
+                    out,
+                    "    (not re-read this run: carried over from an earlier run)"
+                );
+            }
+            let _ = writeln!(
+                out,
+                "    accepted text {} -> pending text {}",
+                ch.old_hash, ch.new_hash
+            );
+            let _ = writeln!(
+                out,
+                "    accept exactly this version: --accept \"{}={}\"",
+                ch.url, ch.new_hash
+            );
             if ch.diff.is_empty() {
                 let _ = writeln!(
                     out,
@@ -126,6 +143,11 @@ pub fn render_text(report: &SourceCheckReport) -> String {
     );
     write_links(
         &mut out,
+        "REFUSED BY THE NETWORK POLICY (nothing was requested; not a verdict on the page)",
+        &report.refused,
+    );
+    write_links(
+        &mut out,
         "REDIRECTED (update the cited URL)",
         &report.redirected,
     );
@@ -133,12 +155,20 @@ pub fn render_text(report: &SourceCheckReport) -> String {
     if !report.anchor_missing.is_empty() {
         let _ = writeln!(
             out,
-            "\nANCHOR NOT FOUND ({}; the page may build its content with JavaScript)",
+            "\nSECTION NOT CHECKED ({}; the anchor is missing, which may mean the page builds its \
+             content with JavaScript, or the page was too large to read in full)",
             report.anchor_missing.len()
         );
         for m in &report.anchor_missing {
             let _ = writeln!(out, "  {}", m.url);
             let _ = writeln!(out, "    cited by: {}", m.rules.join(", "));
+            let why = match m.reason {
+                AnchorProblem::NotFound => "anchor not found in the page",
+                AnchorProblem::PageTruncated => {
+                    "page larger than the download limit; nothing was hashed"
+                }
+            };
+            let _ = writeln!(out, "    {why}");
         }
     }
     write_rules(

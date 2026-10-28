@@ -10,9 +10,9 @@ use std::time::Duration;
 use async_trait::async_trait;
 use camerata_rules::{bare_rule, RuleSet, RuleSource};
 use camerata_source_check::{
-    render_json, render_text, run_check, source_confidence, AcceptTarget, CheckConfig, DiffOp,
-    FetchOutcome, Fetcher, HttpFetcher, LinkState, SourceCheckReport, SourceHashes,
-    DEFAULT_CHANGED_WINDOW_DAYS,
+    render_json, render_text, run_check, source_confidence, AcceptSpec, AcceptTarget,
+    AnchorProblem, CheckConfig, DiffOp, FetchOutcome, Fetcher, HttpFetcher, LinkState,
+    NetworkPolicy, SourceCheckReport, SourceHashes, DEFAULT_CHANGED_WINDOW_DAYS,
 };
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -53,6 +53,7 @@ fn ok_page(body: &str) -> FetchOutcome {
         final_url: String::new(),
         redirected: false,
         body: Some(body.to_string()),
+        truncated: false,
     }
 }
 
@@ -99,9 +100,12 @@ impl Fetcher for MapFetcher {
 // ---------------------------------------------------------------------------------------------
 
 fn http_fetcher(timeout_ms: u64) -> HttpFetcher {
-    HttpFetcher::new(
+    // The fake server is on 127.0.0.1, so the loopback relaxation is injected; every other
+    // private range and every local NAME stays refused.
+    HttpFetcher::with_policy(
         Duration::from_millis(timeout_ms),
         "camerata-source-check-test",
+        NetworkPolicy::allow_loopback(),
     )
     .unwrap()
 }
@@ -167,6 +171,7 @@ async fn http_ok_redirected_dead_and_unreachable_are_told_apart() {
             redirected,
             final_url,
             body,
+            ..
         } => {
             assert!(redirected);
             assert_eq!(final_url, format!("{base}/fine"));
@@ -174,7 +179,7 @@ async fn http_ok_redirected_dead_and_unreachable_are_told_apart() {
         }
         other => panic!("expected redirected ok, got {other:?}"),
     }
-    for p in ["/gone", "/removed", "/loop"] {
+    for p in ["/gone", "/removed"] {
         assert!(
             matches!(
                 f.fetch(&format!("{base}{p}"), false).await,
@@ -182,6 +187,11 @@ async fn http_ok_redirected_dead_and_unreachable_are_told_apart() {
             ),
             "{p} should be dead"
         );
+    }
+    // A redirect loop is what login, consent and bot-wall pages do: no verdict on the page.
+    match f.fetch(&format!("{base}/loop"), false).await {
+        FetchOutcome::Unreachable { detail } => assert_eq!(detail, "too many redirects"),
+        other => panic!("a redirect loop must be unreachable, got {other:?}"),
     }
     for p in ["/down", "/blocked", "/slow"] {
         assert!(
@@ -206,6 +216,124 @@ async fn a_refused_connection_is_unreachable_never_dead() {
     assert!(
         matches!(outcome, FetchOutcome::Unreachable { .. }),
         "got {outcome:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_public_page_redirecting_to_a_local_or_private_target_is_refused_not_dead() {
+    let server = MockServer::start().await;
+    // The first hop (127.0.0.1, allowed by the injected test policy) bounces to places a public
+    // page must never be able to send us.
+    for (route, target) in [
+        ("/to-localhost", "http://localhost:9/secret"),
+        ("/to-metadata", "http://169.254.169.254/latest/meta-data/"),
+        ("/to-private", "http://10.0.0.5/admin"),
+        ("/to-file", "file:///etc/passwd"),
+        ("/to-dotlocal", "http://printer.local/"),
+    ] {
+        Mock::given(method("GET"))
+            .and(path(route))
+            .respond_with(ResponseTemplate::new(302).insert_header("Location", target))
+            .mount(&server)
+            .await;
+    }
+    let f = http_fetcher(500);
+    for route in [
+        "/to-localhost",
+        "/to-metadata",
+        "/to-private",
+        "/to-file",
+        "/to-dotlocal",
+    ] {
+        match f.fetch(&format!("{}{route}", server.uri()), true).await {
+            FetchOutcome::Refused { detail } => {
+                assert!(!detail.is_empty(), "{route} must say why");
+            }
+            other => panic!("{route}: expected refused, got {other:?}"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn the_strict_default_refuses_a_loopback_url_before_any_request() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(0)
+        .mount(&server)
+        .await;
+    let strict =
+        HttpFetcher::new(Duration::from_millis(500), "camerata-source-check-test").unwrap();
+    let outcome = strict.fetch(&format!("{}/x", server.uri()), false).await;
+    assert!(
+        matches!(outcome, FetchOutcome::Refused { .. }),
+        "{outcome:?}"
+    );
+}
+
+#[tokio::test]
+async fn refused_urls_are_reported_apart_and_do_not_touch_the_sidecar() {
+    let set = rules(&[("R-LOCAL", &["http://10.0.0.5/docs#sec"])]);
+    let server_policy = HttpFetcher::new(Duration::from_millis(300), "t").unwrap();
+    let (report, sidecar) = run_check(
+        &set,
+        &server_policy,
+        &SourceHashes::default(),
+        &cfg("2026-10-27"),
+    )
+    .await;
+    assert_eq!(report.counts.refused, 1);
+    assert_eq!(report.counts.dead, 0);
+    assert_eq!(report.counts.unreachable, 0);
+    assert_eq!(report.refused[0].state, LinkState::Refused);
+    assert!(sidecar.entries.is_empty(), "no verdict, so no record");
+    assert!(render_text(&report).contains("REFUSED BY THE NETWORK POLICY"));
+}
+
+#[tokio::test]
+async fn a_body_cut_at_the_size_limit_is_flagged_truncated_and_never_hashed() {
+    let server = MockServer::start().await;
+    let big = format!("<h2 id=a>A</h2><p>{}</p>", "word ".repeat(2000));
+    Mock::given(method("GET"))
+        .and(path("/big"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(big))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/small"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("<h2 id=a>A</h2><p>x</p>"))
+        .mount(&server)
+        .await;
+    let f = http_fetcher(500).with_max_body_bytes(1000);
+    match f.fetch(&format!("{}/big", server.uri()), true).await {
+        FetchOutcome::Ok {
+            truncated, body, ..
+        } => {
+            assert!(truncated);
+            assert!(body.unwrap().len() <= 1000);
+        }
+        other => panic!("{other:?}"),
+    }
+    match f.fetch(&format!("{}/small", server.uri()), true).await {
+        FetchOutcome::Ok { truncated, .. } => assert!(!truncated),
+        other => panic!("{other:?}"),
+    }
+
+    // Through the checker: the cited section is not hashed and the sidecar gets no baseline.
+    let url = format!("{}/big#a", server.uri());
+    let set = rules(&[("R-BIG", &[url.as_str()])]);
+    let (report, sidecar) = run_check(&set, &f, &SourceHashes::default(), &cfg("2026-10-27")).await;
+    assert_eq!(report.counts.sections_checked, 1);
+    assert_eq!(report.counts.sections_unverified, 1);
+    assert_eq!(report.counts.sections_new_baseline, 0);
+    assert_eq!(
+        report.anchor_missing[0].reason,
+        AnchorProblem::PageTruncated
+    );
+    assert!(sidecar.entries[&url].section_hash.is_none());
+    assert!(
+        sidecar.entries[&url].anchor_missing_since.is_none(),
+        "truncation is not evidence the anchor vanished"
     );
 }
 
@@ -253,6 +381,7 @@ async fn report_counts_and_lists_cover_every_state() {
                 final_url: "https://moved.example/b".to_string(),
                 redirected: true,
                 body: None,
+                truncated: false,
             },
         ),
         (
@@ -277,6 +406,11 @@ async fn report_counts_and_lists_cover_every_state() {
     assert_eq!(c.web_urls, 4, "distinct cited web URLs");
     assert_eq!(c.internal_sources_skipped, 2);
     assert_eq!((c.ok, c.redirected, c.dead, c.unreachable), (1, 1, 1, 1));
+    assert_eq!(
+        c.ok + c.redirected + c.dead + c.unreachable + c.refused,
+        c.web_urls,
+        "the link counts add up to the cited URLs"
+    );
 
     assert_eq!(report.checked_on, "2026-10-27");
     assert_eq!(report.dead.len(), 1);
@@ -504,11 +638,87 @@ async fn a_change_stays_flagged_while_the_page_is_unreachable_or_the_anchor_is_g
         1,
         "still listed though the page did not answer"
     );
+    assert!(r.changed[0].carried_over);
+    // The counts add up: this one section is "unreviewed, not re-read", nothing else.
+    assert_eq!(r.counts.sections_checked, 1);
+    assert_eq!(r.counts.sections_pending_carried, 1);
+    assert_eq!(r.counts.sections_changed, 0);
+    assert!(render_text(&r).contains("carried over from an earlier run"));
 
     fetcher.set(GUIDE, ok_page("<h1>Rewritten</h1>"));
     let r = run_and_save(&set, &fetcher, &sidecar, "2027-02-05").await;
-    assert_eq!(r.counts.sections_anchor_missing, 1);
+    assert_eq!(r.anchor_missing.len(), 1, "listed as a missing anchor too");
+    assert_eq!(r.counts.sections_pending_carried, 1);
+    assert_eq!(
+        r.counts.sections_anchor_missing, 0,
+        "counted once, as carried"
+    );
     assert_eq!(r.changed.len(), 1);
+    assert!(r.changed[0].carried_over);
+    assert_eq!(
+        SourceHashes::load(&sidecar).unwrap().entries[CITED]
+            .anchor_missing_since
+            .as_deref(),
+        Some("2027-02-05")
+    );
+}
+
+#[tokio::test]
+async fn section_counts_always_add_up_to_the_cited_sections() {
+    // One of each outcome across five cited sections.
+    let set = rules(&[
+        ("R-UNCHANGED", &["https://a.example/p#s"]),
+        ("R-CHANGED", &["https://b.example/p#s"]),
+        ("R-NEW", &["https://c.example/p#s"]),
+        ("R-GONE", &["https://d.example/p#s"]),
+        ("R-DOWN", &["https://e.example/p#s"]),
+        ("R-PLAIN", &["https://f.example/p"]),
+    ]);
+    let page = |t: &str| ok_page(&format!("<h2 id=s>S</h2><p>{t}</p>"));
+    let fetcher = MapFetcher::new(&[
+        ("https://a.example/p", page("same.")),
+        ("https://b.example/p", page("before.")),
+        ("https://c.example/p", ok_page("<h2 id=other>x</h2>")),
+        ("https://d.example/p", page("there.")),
+        ("https://e.example/p", page("there.")),
+        ("https://f.example/p", ok_page("plain")),
+    ]);
+    let (_, s1) = run_check(&set, &fetcher, &SourceHashes::default(), &cfg("2026-10-01")).await;
+    fetcher.set("https://b.example/p", page("after."));
+    fetcher.set("https://c.example/p", page("now present."));
+    fetcher.set("https://d.example/p", ok_page("<h2 id=other>x</h2>"));
+    fetcher.set(
+        "https://e.example/p",
+        FetchOutcome::Unreachable {
+            detail: "timed out".to_string(),
+        },
+    );
+    let (r, _) = run_check(&set, &fetcher, &s1, &cfg("2026-11-01")).await;
+    let c = &r.counts;
+    assert_eq!(
+        c.sections_checked, 5,
+        "five cited anchors, the plain URL has none"
+    );
+    assert_eq!(
+        c.sections_unchanged
+            + c.sections_changed
+            + c.sections_pending_carried
+            + c.sections_new_baseline
+            + c.sections_anchor_missing
+            + c.sections_unverified,
+        c.sections_checked
+    );
+    assert_eq!(c.sections_unchanged, 1);
+    assert_eq!(c.sections_changed, 1);
+    assert_eq!(
+        c.sections_new_baseline, 1,
+        "c had no anchor at the first run"
+    );
+    assert_eq!(c.sections_anchor_missing, 1);
+    assert_eq!(
+        c.sections_unverified, 1,
+        "e is down and had nothing pending"
+    );
 }
 
 #[tokio::test]
@@ -551,12 +761,13 @@ async fn accepting_clears_the_flag_records_who_and_when_and_rebaselines() {
     let mut loaded = SourceHashes::load(&sidecar).unwrap();
     let done = loaded
         .accept(
-            AcceptTarget::Urls(&[CITED.to_string()]),
+            AcceptTarget::Urls(&[AcceptSpec::unpinned(CITED)]),
             "2027-01-02",
             "zach",
         )
         .unwrap();
-    assert_eq!(done, vec![CITED.to_string()]);
+    assert_eq!(done.len(), 1);
+    assert_eq!(done[0].url, CITED);
     loaded.save(&sidecar).unwrap();
 
     let record = SourceHashes::load(&sidecar).unwrap().entries[CITED].clone();
@@ -884,4 +1095,59 @@ async fn export_seam_lowers_confidence_for_dead_unreviewed_or_recently_accepted_
     );
     assert!(!unseen.lowered, "no record means no claim either way");
     assert_eq!(unseen.line(), None);
+}
+
+#[tokio::test]
+async fn a_vanished_anchor_lowers_confidence_until_it_returns() {
+    let set = rules(&[("R-IDEM", &[CITED])]);
+    let fetcher = MapFetcher::new(&[(GUIDE, ok_page(PAGE_V1))]);
+    let (_, s1) = run_check(&set, &fetcher, &SourceHashes::default(), &cfg("2026-10-01")).await;
+    let rule = set.get_by_id("R-IDEM").unwrap();
+    let conf =
+        |s: &SourceHashes| source_confidence(rule, s, "2026-10-27", DEFAULT_CHANGED_WINDOW_DAYS);
+    assert!(!conf(&s1).lowered);
+
+    fetcher.set(GUIDE, ok_page("<h1>Rewritten</h1>"));
+    let (_, s2) = run_check(&set, &fetcher, &s1, &cfg("2026-10-10")).await;
+    let gone = conf(&s2);
+    assert!(gone.lowered);
+    assert!(gone.reasons[0].contains("anchor not found since 2026-10-10"));
+
+    // Still missing on a later run: the "since" date does not move.
+    let (_, s3) = run_check(&set, &fetcher, &s2, &cfg("2026-10-20")).await;
+    assert_eq!(
+        s3.entries[CITED].anchor_missing_since.as_deref(),
+        Some("2026-10-10")
+    );
+
+    // The anchor comes back: the flag clears.
+    fetcher.set(GUIDE, ok_page(PAGE_V1));
+    let (_, s4) = run_check(&set, &fetcher, &s3, &cfg("2026-10-25")).await;
+    assert!(!conf(&s4).lowered);
+    assert!(s4.entries[CITED].anchor_missing_since.is_none());
+}
+
+#[tokio::test]
+async fn an_unreadable_accepted_date_counts_as_lowered_not_as_aged_out() {
+    let (set, _fetcher, _dir, sidecar) = pending_change_fixture().await;
+    let mut loaded = SourceHashes::load(&sidecar).unwrap();
+    loaded
+        .accept(AcceptTarget::All, "2026-12-02", "zach")
+        .unwrap();
+    loaded
+        .entries
+        .get_mut(CITED)
+        .unwrap()
+        .accepted
+        .as_mut()
+        .unwrap()
+        .on = "garbled".to_string();
+    let conf = source_confidence(
+        set.get_by_id("R-IDEM").unwrap(),
+        &loaded,
+        "2030-01-01",
+        DEFAULT_CHANGED_WINDOW_DAYS,
+    );
+    assert!(conf.lowered);
+    assert!(conf.reasons[0].contains("unreadable date"));
 }

@@ -1496,25 +1496,47 @@ camerata corpus check-sources --json --out report.json
 camerata corpus check-sources --no-save             # dry run: records nothing
 ```
 
-For every `[[sources]]` URL in every rule it records one of four outcomes:
+For every `[[sources]]` URL in every rule it records one of five outcomes:
 
 - **ok**: the page answered.
 - **redirected**: it answered after a redirect; the report shows where it lives now, so the rule's
   source can be updated.
-- **dead**: the server says the page is gone (404 or 410, or a redirect that never ends).
-- **unreachable**: no usable answer this run (timeout, refused connection, a 5xx, a bot wall). This is
-  never a verdict on the page; run again before acting on it.
+- **dead**: the server says the page is gone (404 or 410).
+- **unreachable**: no usable answer this run (timeout, refused connection, a 5xx, a 401/403/429, a bot
+  wall, or a redirect chain that never ends, which is what login and consent pages do). This is never a
+  verdict on the page; run again before acting on it.
+- **refused**: the tool's network policy would not contact it, and nothing was requested. Only public
+  http(s) addresses are allowed: no loopback, private, link-local or unique-local addresses, no
+  `.localhost` / `.local` / single-label names, no other schemes. This is checked on the URL, after
+  DNS resolution, and on every redirect hop, so a public page cannot bounce the check onto the
+  operator's own network.
 
 When a rule cites an anchor (`...#section`), the section's text is normalised, hashed, and compared with
 the last ACCEPTED text. A changed section is shown as removed and added sentences. A cited anchor the
-page no longer contains is listed separately (some pages build their content with JavaScript, so check
-before assuming the section was removed). Sources that are repo documents rather than web URLs are
-counted but not fetched. The report ends with the rules that have no source at all.
+page no longer contains is listed separately, and the sidecar records since when, so an export treats it
+like a dead link (some pages build their content with JavaScript, so check before assuming the section
+was removed). A page larger than 5 MiB is cut at that size; its sections are listed as not checked and
+nothing is hashed from a partial page. Sources that are repo documents rather than web URLs are counted
+but not fetched. The report ends with the rules that have no source at all. The section counts at the
+top add up: unchanged, changed, unreviewed from earlier runs and not re-read, new baseline, anchor not
+found, and not verified together equal the cited sections.
+
+Known limit: a "soft 404" (a page that answers 200 with a "not found" body, or redirects every missing
+page to a home page) looks like a healthy page here. A moved or emptied section still shows up as a
+missing anchor or a changed section, but a vanished page behind a soft 404 does not show up as dead.
+Part B is where that gets caught.
 
 The hashes live in the sidecar `crates/rules/CORPUS_SOURCE_HASHES.json`, never in a rule file. The first
 run only records baselines; changes show from the second run on. Commit the sidecar after a run so the
 next one has something to compare against. Requests are polite: one at a time per host, a pause between
 them (`--delay-ms`, default 1500), a timeout, and a user agent that names the tool.
+
+Safety rails on the sidecar: it is written atomically (a temp file in the same folder, fsynced, then
+renamed), so a crash leaves the old file or the new one. A run or an accept that will write takes a lock
+file `CORPUS_SOURCE_HASHES.json.lock` beside it; a second one fails with a message instead of overwriting
+the first. If a run crashed and left the lock behind, delete that file. If any rule file fails to load,
+the run still prints its report but refuses to save the sidecar (and exits with an error), because the
+missing rules' URLs would otherwise look "no longer cited" and lose their baselines and unreviewed changes.
 
 **A change does not clear itself.** The first run that sees a section differ records the new text as
 pending and keeps the old baseline, so the section is listed as "changed, not yet reviewed" on every
@@ -1522,10 +1544,16 @@ later run, even if nobody read the first report (and even on a run where the pag
 clears only when you accept it after reading the diff:
 
 ```
-camerata corpus check-sources --accept "https://example.com/guide#section"   # repeatable
-camerata corpus check-sources --accept-all                                   # after reviewing the whole report
-camerata corpus check-sources --accept-all --by "Zach"                       # name recorded (default: $USER)
+camerata corpus check-sources --accept "https://example.com/guide#section=sha256:<hash>"  # repeatable
+camerata corpus check-sources --accept "https://example.com/guide#section"                # unpinned, warns
+camerata corpus check-sources --accept-all                    # after reviewing the whole report
+camerata corpus check-sources --accept-all --by "Zach"        # name recorded (default: $USER)
 ```
+
+The report prints the pending hash for each change and a ready-to-paste `--accept "<url>=<hash>"` line.
+Use the pinned form: it is refused if the page changed again after you read the report, so you can only
+accept the text you reviewed. The bare form accepts whatever is pending at that moment and warns about
+it. `--accept-all` prints every hash it accepted. An accept is all or nothing.
 
 Accepting makes no requests. The pending text becomes the new baseline, and the sidecar records who
 accepted and on what date. Commit the sidecar afterward. If the page goes back to the accepted text on
