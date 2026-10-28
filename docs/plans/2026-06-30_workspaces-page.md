@@ -56,7 +56,7 @@ The work here is mostly **assembling** the above into one page rather than havin
 
 ```
   ┌── WORKSPACES ─────────────────────────────────────────────┐
-  │  workspace_root: /Users/…/repos   [change]                 │
+  │  workspace_root: /Users/auditor/repos   [change]                 │
   │                                                            │
   │  ┌─ repo: owner/repo ──────────────────────────────────┐   │
   │  │  ● healthy   on feature/x · 2 ahead   [dirty]        │   │

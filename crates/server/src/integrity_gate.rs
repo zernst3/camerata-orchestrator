@@ -1256,7 +1256,7 @@ mod tests {
     }
 
     /// A repository path may legitimately contain spaces, and the prose signals must not
-    /// fire on one. The hearth fixture itself lives under `Camerata tests/`, so this is the
+    /// fire on one. The hearth fixture itself lives under a folder whose name has a space, so this is the
     /// exact false positive that would have made the gate cry wolf on every real run.
     #[test]
     fn req_w21_path_hygiene_does_not_cry_wolf_on_ordinary_paths() {
@@ -1264,7 +1264,7 @@ mod tests {
         let h = PathHygiene::audit(
             [
                 "app/listings/[id]/page.tsx",
-                "Camerata tests/hearth/app/admin/page.tsx",
+                "client fixtures/hearth/app/admin/page.tsx",
                 "src/my-service/orders.rs",
                 "docs/decisions/2026-05-14-per-resource-permission-flags.md",
                 "a/very/deeply/nested/path/that/goes/on/for/quite/a/while/but/is/still/a/real/path/handler.ts",

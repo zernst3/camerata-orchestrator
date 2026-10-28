@@ -435,7 +435,7 @@ pub struct ScanInputFacts {
 /// in the field a client reads as one:
 ///
 /// - **32 absolute paths**, every one from the ESLint preview tier, of the form
-///   `/Users/<auditor>/Documents/Repos/.../app/admin/page.tsx`. That discloses the auditor's
+///   `/Users/auditor/Documents/Repos/.../app/admin/page.tsx`. That discloses the auditor's
 ///   username and directory habits, and it is useless to the client, who cannot open a path
 ///   rooted on a machine they have no access to.
 /// - **10 prose paths**, where an unparseable evidence citation put the whole sentence in the
@@ -488,7 +488,7 @@ impl PathHygiene {
     ///
     /// The prose signals are deliberately narrow and drawn from the measured defect rather
     /// than from what prose could look like in principle. A real repository path may contain
-    /// spaces (the hearth fixture lives under `Camerata tests/`), so spaces alone prove
+    /// spaces (the hearth fixture lives under a folder whose name has one), so spaces alone prove
     /// nothing; `" - "` is excluded too, despite the citation parser splitting on it, because
     /// a hyphen with spaces is plausible enough in a path that flagging it would cry wolf.
     /// What a path never contains is an em-dash note separator, a `, ` joining two locations,

@@ -1277,7 +1277,7 @@ mod tests {
             camerata_server::scan_cache::state_dir::STATE_DIR_ENV,
             state.path(),
         );
-        let repo = PathBuf::from("/Users/someone/clients/acme-platform");
+        let repo = PathBuf::from("/Users/auditor/clients/acme-platform");
         for path in [manifest_cache_path(&repo), ledger_path(&repo)] {
             assert!(
                 !path.starts_with(&repo),
@@ -1299,8 +1299,8 @@ mod tests {
     /// well as a correctness one).
     #[test]
     fn repo_state_key_is_stable_distinct_and_filesystem_safe() {
-        let a = PathBuf::from("/Users/someone/clients/acme-platform");
-        let b = PathBuf::from("/Users/someone/clients/other-client");
+        let a = PathBuf::from("/Users/auditor/clients/acme-platform");
+        let b = PathBuf::from("/Users/auditor/clients/other-client");
 
         assert_eq!(repo_state_key(&a), repo_state_key(&a), "must be stable");
         assert_ne!(

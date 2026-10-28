@@ -17945,14 +17945,14 @@ mod tests {
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
         state
             .settings
-            .set_repo_path("me/api", Some("/Users/z/Repos/api".to_string()));
+            .set_repo_path("me/api", Some("/Users/auditor/Repos/api".to_string()));
         let project = state
             .projects
             .create("P", vec!["me/api".to_string(), "me/other".to_string()])
             .unwrap();
         assert_eq!(
             effective_workspace_root(&state, &project).as_deref(),
-            Some("/Users/z/Repos")
+            Some("/Users/auditor/Repos")
         );
     }
 
@@ -17962,14 +17962,14 @@ mod tests {
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
         state
             .settings
-            .set_repo_path("me/second", Some("/Users/z/Repos/second".to_string()));
+            .set_repo_path("me/second", Some("/Users/auditor/Repos/second".to_string()));
         let project = state
             .projects
             .create("P", vec!["me/first".to_string(), "me/second".to_string()])
             .unwrap();
         assert_eq!(
             effective_workspace_root(&state, &project).as_deref(),
-            Some("/Users/z/Repos")
+            Some("/Users/auditor/Repos")
         );
     }
 
@@ -31406,7 +31406,7 @@ mod tests {
         let mut report = crate::onboard::ScanReport::gated(&["me/api".to_string()]);
         let failures = vec![CorpusLoadFailure {
             rule_id: "SUPABASE-RLS-ENABLED-1".to_string(),
-            path: std::path::PathBuf::from("/Users/someone/corpus/supabase/rls/x.toml"),
+            path: std::path::PathBuf::from("/Users/auditor/corpus/supabase/rls/x.toml"),
             error: "TOML parse error in x.toml: unknown variant `architectual`".to_string(),
         }];
 
@@ -31444,13 +31444,13 @@ mod tests {
         // 4. the operator detail: on the note (UI + ledger), never in the ledger's reason.
         let note = &report.coverage_notes[0].message;
         assert!(
-            note.contains("/Users/someone/corpus/supabase/rls/x.toml")
+            note.contains("/Users/auditor/corpus/supabase/rls/x.toml")
                 && note.contains("architectual"),
             "the operator must be able to find the file and the parse error: {note}"
         );
         let reason = entry.skip_reason.clone().unwrap_or_default();
         assert!(
-            !reason.contains("/Users/someone") && !reason.contains("architectual"),
+            !reason.contains("/Users/auditor") && !reason.contains("architectual"),
             "the client-facing reason must carry NEITHER the path nor the parser text: {reason}"
         );
     }

@@ -316,7 +316,15 @@ mod tests {
     #[serial_test::serial(process_env)]
     #[ignore]
     async fn spawns_a_real_dx_serve_and_reports_a_url() {
-        let app_dir = PathBuf::from("/Users/zacharyernst/Documents/Repos/itinerary-app");
+        // The Dioxus app lives with the other local fixtures, outside this public repository.
+        let Some(fixtures) = std::env::var_os("CAMERATA_FIXTURES_DIR") else {
+            eprintln!(
+                "skipping: set CAMERATA_FIXTURES_DIR to the folder holding the local fixtures \
+                 (this test serves the Dioxus app at itinerary-app/ inside it)"
+            );
+            return;
+        };
+        let app_dir = PathBuf::from(fixtures).join("itinerary-app");
         let cfg = PreviewLaunchConfig::new(app_dir, 8099);
         let server = PreviewServer::spawn(cfg).expect("dx serve should spawn");
         assert_eq!(server.url(), "http://127.0.0.1:8099/");
