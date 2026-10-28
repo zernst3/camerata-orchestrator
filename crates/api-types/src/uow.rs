@@ -635,9 +635,71 @@ pub struct SourceFinding {
     pub snippet: String,
 }
 
+/// Where a unit of work came from. `None` on every unit created before this existed and on
+/// units created from an issue or typed by hand.
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum UowSource {
+    /// Created from an inspection's findings (roadmap 2c).
+    Findings(FindingsSource),
+}
+
+impl UowSource {
+    /// The wire word for the kind of source (`"findings"`), for list badges.
+    #[must_use]
+    pub fn kind_str(&self) -> &'static str {
+        match self {
+            Self::Findings(_) => "findings",
+        }
+    }
+}
+
+/// One delta retest's verdict on a findings unit (roadmap 2c, last bullet).
+#[derive(Clone, Default, Serialize, Deserialize, Debug, PartialEq, Eq)]
+#[serde(default)]
+pub struct RetestEvidence {
+    /// The delta inspection that produced this (`InspectionEntry::id`, kind `DeltaRetest`).
+    pub inspection_id: String,
+    pub from_sha: String,
+    pub to_sha: String,
+    /// RFC 3339.
+    pub recorded: String,
+    /// Finding fingerprints absent from the retest report (gone at `to_sha`).
+    #[serde(default)]
+    pub resolved: Vec<String>,
+    /// Finding fingerprints still present (same repo, path, rule, fingerprint; any line).
+    #[serde(default)]
+    pub still_open: Vec<String>,
+    /// Fingerprints whose repository this retest did not cover.
+    #[serde(default)]
+    pub not_rechecked: Vec<String>,
+    /// The retest ran with a different rule selection than the base inspection
+    /// (`rules_fingerprint` differs), so "resolved" may mean "no longer selected".
+    #[serde(default)]
+    pub rules_changed: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn uow_source_is_tagged_and_retest_evidence_loads_from_partial_json() {
+        let src = UowSource::Findings(FindingsSource {
+            inspection_id: "insp-1".into(),
+            ..Default::default()
+        });
+        let json = serde_json::to_value(&src).expect("serialises");
+        assert_eq!(json["kind"], "findings");
+        assert_eq!(json["inspection_id"], "insp-1");
+        let back: UowSource = serde_json::from_value(json).expect("round trip");
+        assert_eq!(back, src);
+        assert_eq!(src.kind_str(), "findings");
+        let r: RetestEvidence =
+            serde_json::from_str(r#"{"inspection_id":"d1"}"#).expect("partial");
+        assert_eq!(r.inspection_id, "d1");
+        assert!(r.resolved.is_empty() && !r.rules_changed);
+    }
 
     #[test]
     fn findings_source_shapes_load_from_partial_json() {
