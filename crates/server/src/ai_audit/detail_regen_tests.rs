@@ -424,6 +424,7 @@ async fn every_pass_of_a_terse_scan_shares_one_system_prompt() {
         None,
         None,
         &chunks,
+        None,
         &batches,
         2,
         "pass[all]",

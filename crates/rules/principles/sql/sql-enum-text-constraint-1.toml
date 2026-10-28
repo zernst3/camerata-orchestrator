@@ -1,11 +1,16 @@
 id = "SQL-ENUM-TEXT-CONSTRAINT-1"
-version = 1
+version = 2
 title = "A column representing a closed set of values is constrained — a native enum, a CHECK list, or a lookup-table FK — never a bare, unconstrained text column"
 domain = "sql"
 layer = "universal"
 enforcement = "structured"
 kind = "default_with_exceptions"
 inspectable = true
+# Token-efficiency rank 8: the deterministic locator that finds this rule's candidate sites, so
+# the scan sends it those statements with context instead of whole files. Every SQL statement that
+# can be its subject is a site (the column, its CHECK, its enum type or domain, and its lookup-table FK are all table, type or domain statements); a file the locator cannot parse, or a non-SQL file, is still
+# sent whole.
+candidates = { locator = "sql_tables" }
 # Severity floor, transcribed from this rule's own prose: "Flag as medium severity: 'Your
 # <table>.<column> column ...'".
 min_severity = "medium"

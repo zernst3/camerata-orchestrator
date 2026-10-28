@@ -16,8 +16,8 @@ const REPO: &str = "acme/widgets";
 
 /// Answers `{}` to everything and keeps every prompt it was sent.
 #[derive(Default)]
-struct Recorder {
-    prompts: Mutex<Vec<String>>,
+pub(super) struct Recorder {
+    pub(super) prompts: Mutex<Vec<String>>,
 }
 
 #[async_trait::async_trait]

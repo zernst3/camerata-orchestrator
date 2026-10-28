@@ -1,5 +1,5 @@
 id = "SUPABASE-FUNC-SEARCH-PATH-1"
-version = 3
+version = 4
 title = "A SECURITY DEFINER function must set search_path explicitly to prevent search-path hijacking"
 domain = "supabase:database-functions"
 # General Postgres, not just Supabase: a SECURITY DEFINER function without a pinned search_path is
@@ -20,6 +20,11 @@ inspectable = true
 # SQL files and migration folders, and also inside TypeORM / Knex / Alembic / Rails / sqlx migrations in
 # other languages, which the `contains_any` markers catch wherever the file sits.
 applies_to = { paths = ["**/*.sql", "**/migrations/**", "**/migrate/**", "**/migration/**", "**/db/**", "**/database/**", "**/schema/**", "**/schemas/**", "**/seeds/**", "**/*seed*", "**/alembic/**", "**/supabase/**", "**/*.psql", "**/*.pgsql", "**/*.ddl"], contains_any = ["create policy", "alter policy", "drop policy", "row level security", "security definer", "security invoker", "create or replace function", "create function", "create or replace procedure", "create procedure", "create view", "create or replace view", "create materialized view", "grant ", "alter table", "storage.objects", "auth.users", "search_path"] }
+# Token-efficiency rank 8: the deterministic locator that finds this rule's candidate sites, so
+# the scan sends it those statements with context instead of whole files. Every SQL statement that
+# can be its subject is a site (a SECURITY DEFINER function and its search_path are facts of its CREATE or ALTER FUNCTION statement); a file the locator cannot parse, or a non-SQL file, is still
+# sent whole.
+candidates = { locator = "sql_routines" }
 # Severity floor. Rationale: an unpinned search_path on a SECURITY DEFINER function lets an
 # attacker create a colliding object in a schema they control and have it resolved and executed
 # with the definer's elevated privileges — the attack PostgreSQL's own CREATE FUNCTION security

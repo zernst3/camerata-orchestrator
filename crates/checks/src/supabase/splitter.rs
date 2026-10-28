@@ -22,16 +22,55 @@
 /// One SQL statement extracted from a file: whitespace-normalized text (comments stripped,
 /// runs of whitespace collapsed to a single space, still containing the real content of any
 /// string/quoted-identifier/dollar-quoted body verbatim) plus the 1-based line on which the
-/// statement's first non-comment, non-whitespace character appeared.
+/// statement's first non-comment, non-whitespace character appeared, and the 1-based line of
+/// its terminating `;` (for a final statement with no `;`, the file's last line).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SqlStatement {
     pub text: String,
     pub line: usize,
+    pub end_line: usize,
+}
+
+/// A construct [`split_statements_strict`] found still open at end of file: the file does not
+/// parse as SQL, so its statement boundaries past `line` are guesses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Unterminated {
+    /// What was left open.
+    pub construct: &'static str,
+    /// The 1-based line it opened on.
+    pub line: usize,
+}
+
+impl std::fmt::Display for Unterminated {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "unterminated {} opened on line {}",
+            self.construct, self.line
+        )
+    }
 }
 
 /// Split `sql` into top-level statements. See the module doc for the hardening contract:
 /// this function never panics, regardless of input.
 pub fn split_statements(sql: &str) -> Vec<SqlStatement> {
+    split_inner(sql).0
+}
+
+/// [`split_statements`] for a caller that must know the split is TRUSTWORTHY: `Err` when a
+/// string literal, quoted identifier, dollar-quoted body or block comment is still open at end
+/// of file. The lenient split runs such a construct to EOF and carries on; a caller that narrows
+/// what a reader sees by statement (the candidate-site locators) must instead treat the file as
+/// unparseable, because every boundary after the open construct is a guess. Never panics.
+pub fn split_statements_strict(sql: &str) -> Result<Vec<SqlStatement>, Unterminated> {
+    match split_inner(sql) {
+        (statements, None) => Ok(statements),
+        (_, Some(open)) => Err(open),
+    }
+}
+
+/// The one splitter: the statements, plus the first construct left open at EOF (if any).
+fn split_inner(sql: &str) -> (Vec<SqlStatement>, Option<Unterminated>) {
     // Normalize CRLF to LF up front so line counting and comment/string scanning never has
     // to special-case '\r' — a stray '\r' left in `cur` would otherwise leak into the
     // whitespace-normalized statement text.
@@ -43,6 +82,12 @@ pub fn split_statements(sql: &str) -> Vec<SqlStatement> {
     let mut out = Vec::new();
     let mut cur = String::new();
     let mut cur_start_line: Option<usize> = None;
+    let mut unterminated: Option<Unterminated> = None;
+    let mut open = |construct: &'static str, line: usize| {
+        if unterminated.is_none() {
+            unterminated = Some(Unterminated { construct, line });
+        }
+    };
 
     // Push a single normalizing space into `cur`, but only once a statement has actually
     // started and only if the accumulator doesn't already end in one — keeps multi-line
@@ -69,6 +114,7 @@ pub fn split_statements(sql: &str) -> Vec<SqlStatement> {
 
         // ── block comment (non-nesting; matches Postgres's own non-nesting default) ──
         if c == '/' && i + 1 < n && chars[i + 1] == '*' {
+            let comment_line = line;
             i += 2;
             while i < n && !(i + 1 < n && chars[i] == '*' && chars[i + 1] == '/') {
                 if chars[i] == '\n' {
@@ -81,6 +127,7 @@ pub fn split_statements(sql: &str) -> Vec<SqlStatement> {
             if i + 1 < n {
                 i += 2;
             } else {
+                open("block comment", comment_line);
                 i = n;
             }
             push_sep(&mut cur, cur_start_line.is_some());
@@ -92,11 +139,14 @@ pub fn split_statements(sql: &str) -> Vec<SqlStatement> {
             if cur_start_line.is_none() {
                 cur_start_line = Some(line);
             }
+            let open_line = line;
             cur.push(c);
             i += 1;
             loop {
                 if i >= n {
-                    break; // unterminated string: best-effort, run to EOF, never panic
+                    // unterminated string: best-effort, run to EOF, never panic
+                    open("string literal", open_line);
+                    break;
                 }
                 let ch = chars[i];
                 if ch == '\n' {
@@ -122,11 +172,14 @@ pub fn split_statements(sql: &str) -> Vec<SqlStatement> {
             if cur_start_line.is_none() {
                 cur_start_line = Some(line);
             }
+            let open_line = line;
             cur.push(c);
             i += 1;
             loop {
                 if i >= n {
-                    break; // unterminated identifier: best-effort, never panic
+                    // unterminated identifier: best-effort, never panic
+                    open("quoted identifier", open_line);
+                    break;
                 }
                 let ch = chars[i];
                 if ch == '\n' {
@@ -152,13 +205,16 @@ pub fn split_statements(sql: &str) -> Vec<SqlStatement> {
                 if cur_start_line.is_none() {
                     cur_start_line = Some(line);
                 }
+                let open_line = line;
                 for &ch in &chars[i..after_open] {
                     cur.push(ch);
                 }
                 i = after_open;
                 loop {
                     if i >= n {
-                        break; // unterminated dollar-quote: best-effort, run to EOF, never panic
+                        // unterminated dollar-quote: best-effort, run to EOF, never panic
+                        open("dollar-quoted body", open_line);
+                        break;
                     }
                     if chars[i] == '\n' {
                         line += 1;
@@ -188,7 +244,11 @@ pub fn split_statements(sql: &str) -> Vec<SqlStatement> {
             if let Some(start) = cur_start_line.take() {
                 let text = cur.trim().to_string();
                 if !text.is_empty() {
-                    out.push(SqlStatement { text, line: start });
+                    out.push(SqlStatement {
+                        text,
+                        line: start,
+                        end_line: line,
+                    });
                 }
             }
             cur.clear();
@@ -224,11 +284,15 @@ pub fn split_statements(sql: &str) -> Vec<SqlStatement> {
     if let Some(start) = cur_start_line {
         let text = cur.trim().to_string();
         if !text.is_empty() {
-            out.push(SqlStatement { text, line: start });
+            out.push(SqlStatement {
+                text,
+                line: start,
+                end_line: line,
+            });
         }
     }
 
-    out
+    (out, unterminated)
 }
 
 /// If `chars[i]` begins a valid dollar-quote tag (`$$` or `$tag$`, where `tag` is
@@ -268,6 +332,37 @@ pub(crate) fn parse_dollar_tag(chars: &[char], i: usize) -> Option<(String, usiz
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn end_line_is_the_terminators_line_and_eof_for_a_final_unterminated_statement() {
+        let sql =
+            "create table a (\n  id int\n);\ncreate function f() as $$\nselect 1;\n$$;\nselect 2";
+        let stmts = split_statements(sql);
+        let spans: Vec<(usize, usize)> = stmts.iter().map(|s| (s.line, s.end_line)).collect();
+        assert_eq!(spans, vec![(1, 3), (4, 6), (7, 7)]);
+    }
+
+    #[test]
+    fn strict_split_refuses_a_construct_left_open_at_eof_and_agrees_otherwise() {
+        let ok = "create table a (id int);\ncomment on table a is 'x;y';";
+        assert_eq!(split_statements_strict(ok), Ok(split_statements(ok)));
+        for (sql, construct, line) in [
+            (
+                "select 1;\ncreate function f() as $$ begin",
+                "dollar-quoted body",
+                2,
+            ),
+            ("select 'abc", "string literal", 1),
+            ("select \"abc", "quoted identifier", 1),
+            ("select 1;\n\n/* note", "block comment", 3),
+        ] {
+            assert_eq!(
+                split_statements_strict(sql),
+                Err(Unterminated { construct, line }),
+                "{sql}"
+            );
+        }
+    }
 
     #[test]
     fn splits_simple_statements() {
