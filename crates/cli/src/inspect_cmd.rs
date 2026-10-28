@@ -1925,6 +1925,7 @@ mod tests {
             pass: "commodity taint pass".to_string(),
             reason: "SEC-NO-RAW-SQL-CONCAT-1: commodity taint pass did not run: semgrep absent"
                 .to_string(),
+            files_not_reviewed: 0,
         }];
 
         let text = render_ledger_summary(&ledger, &failed_passes, false);

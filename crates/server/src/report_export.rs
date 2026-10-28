@@ -10568,6 +10568,7 @@ mod tests {
             repo: "acme/widgets".to_string(),
             pass: "rule-alternative recommendations".to_string(),
             reason: "Claude CLI timed out after 300s (no output).".to_string(),
+            files_not_reviewed: 0,
         }];
         let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
         assert_eq!(json.executive_summary.failed_passes.len(), 1);
@@ -12070,6 +12071,7 @@ mod tests {
             repo: "acme/widgets".to_string(),
             pass: "rule-alternative recommendations".to_string(),
             reason: "Claude CLI timed out after 300s (no output).".to_string(),
+            files_not_reviewed: 0,
         }];
         let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
 
@@ -12187,6 +12189,7 @@ mod tests {
             reason: "the calibration pass returned no usable remediation-effort estimate for \
                      any finding this run"
                 .to_string(),
+            files_not_reviewed: 0,
         }];
         let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
 

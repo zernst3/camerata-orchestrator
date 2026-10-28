@@ -721,6 +721,7 @@ fn a_billed_batch_refusal_counts_toward_the_cap() {
         1,
         1,
         &[(0, 0)],
+        &[1],
         &results,
         &std::collections::HashSet::new(),
         &std::collections::HashSet::new(),

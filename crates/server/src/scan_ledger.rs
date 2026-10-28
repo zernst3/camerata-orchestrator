@@ -1117,6 +1117,7 @@ pub fn stage_disclosure(
             stage.routed_informational,
             stage.deduped,
         ),
+        files_not_reviewed: 0,
     })
 }
 
@@ -1235,6 +1236,7 @@ pub fn rule_disclosure(
         repo: repo_label.to_string(),
         pass: "mechanical-enforcement coverage".to_string(),
         reason: format!("{} {}", rule.rule_id, reason),
+        files_not_reviewed: 0,
     })
 }
 

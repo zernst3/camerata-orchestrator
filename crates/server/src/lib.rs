@@ -6813,6 +6813,7 @@ pub(crate) fn reconcile_external_tool_ledger(
                 repo: report.repos.join(", "),
                 pass: pass_label.clone(),
                 reason: format!("{rule_id}: {pass_label} did not run: {reason}"),
+                files_not_reviewed: 0,
             });
             continue;
         }
@@ -6834,6 +6835,7 @@ pub(crate) fn reconcile_external_tool_ledger(
                 repo: report.repos.join(", "),
                 pass: pass_label.clone(),
                 reason: format!("{rule_id}: {pass_label} did not run: {reason}"),
+                files_not_reviewed: 0,
             });
             continue;
         }
