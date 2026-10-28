@@ -536,11 +536,61 @@ fn a_placeholder_only_row_is_never_critical() {
     assert!(out.iter().all(|f| f.severity != "critical"), "{out:?}");
 }
 
+/// A secret-shaped value with a placeholder word inside it (`FAKE_`), built at run time.
+fn word_in_value_line() -> String {
+    let body: String = (0..30).map(|i| char::from(b"aZ3kQ9mT"[i % 8])).collect();
+    format!("SUPABASE_SERVICE_ROLE_KEY=sb_secret_FAKE_{body}")
+}
+
+/// A placeholder WORD inside an otherwise secret-shaped value is not proof the value is fake:
+/// outside an example file the row keeps its rating (recall first); in an example file it is
+/// lowered.
 #[test]
-fn a_placeholder_value_outside_an_example_file_is_also_a_placeholder() {
-    let row = secret_row("SEC-NO-VENDOR-TOKEN-1", "config/dev.env", PLACEHOLDER_LINE);
-    let out = merge_semantic_groups(vec![row], &[]);
-    assert_ne!(out[0].severity, "critical", "{out:?}");
+fn a_placeholder_word_inside_a_secret_shaped_value_keeps_its_rating_outside_example_files() {
+    let line = word_in_value_line();
+    for path in [".env.production", "config/dev.env", "src/config.ts"] {
+        let row = secret_row("SEC-NO-VENDOR-TOKEN-1", path, &line);
+        let out = merge_semantic_groups(vec![row], &[]);
+        assert_eq!(out[0].severity, "critical", "{path}: {out:?}");
+        assert!(
+            crate::severity_bounds::recorded_adjustments(&out[0]).is_empty(),
+            "{path}"
+        );
+    }
+    let example = secret_row("SEC-NO-VENDOR-TOKEN-1", ".env.example", &line);
+    let out = merge_semantic_groups(vec![example], &[]);
+    assert_eq!(out[0].severity, "low", "{out:?}");
+}
+
+/// A value that is wholly a template token is a placeholder in any file.
+#[test]
+fn a_value_that_is_wholly_a_template_token_is_lowered_in_any_file() {
+    for snippet in [
+        "SUPABASE_KEY=${SUPABASE_KEY}",
+        "API_KEY=<your-key>",
+        "api_key = \"{{ api_key }}\"",
+        "password = \"changeme\"",
+        "password = \"xxxxxxxxxxxx\"",
+        "API_KEY=\"\"",
+        "API_KEY=",
+    ] {
+        for path in [".env.production", "src/config.ts", ".env.example"] {
+            let row = secret_row("SEC-NO-HARDCODED-SECRETS-1", path, snippet);
+            let out = merge_semantic_groups(vec![row], &[]);
+            assert_eq!(out[0].severity, "low", "{snippet} in {path}: {out:?}");
+        }
+    }
+}
+
+/// A row that cites no value at all outside an example file is NOT a template: the secret-file
+/// rule's row for a committed `.env.production` has no value to classify and keeps its rating.
+#[test]
+fn a_row_that_cites_no_value_outside_an_example_file_keeps_its_rating() {
+    for snippet in ["", "   "] {
+        let row = secret_row("SEC-NO-SECRET-FILE-1", ".env.production", snippet);
+        let out = merge_semantic_groups(vec![row], &[]);
+        assert_eq!(out[0].severity, "critical", "{snippet:?}: {out:?}");
+    }
 }
 
 #[test]
