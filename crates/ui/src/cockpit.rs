@@ -1460,8 +1460,9 @@ enum StartRunOutcome {
 /// `{ "tier_map": { "strongest": "<id>", "balanced": "<id>", "fast": "<id>" } }`.
 ///
 /// Returns [`StartRunOutcome::Started`] with the run id on success, or
-/// [`StartRunOutcome::Blocked`] (with the gate's reason) when the no-code-first gate
-/// refuses the start because the story's decisions are not all approved. A transport
+/// [`StartRunOutcome::Blocked`] (with the server's reason) when the no-code-first gate
+/// refuses the start because the story's decisions are not all approved, or the unit has
+/// no repository to work in (no Intake repo selected, no local clone). A transport
 /// or decode failure maps to [`StartRunOutcome::Failed`].
 /// Build the request body for a development run:
 /// `{ "tier_map": { "strongest": "<id>", "balanced": "<id>", "fast": "<id>" } }`,
@@ -1510,6 +1511,9 @@ async fn start_dev_run(
     tier_map: &TierMapView,
     skip_layer2: bool,
 ) -> StartRunOutcome {
+    // The architect starting development confirms the unit's Intake repo: record its branch
+    // so the run works in that repository (the server refuses a unit with none, with why).
+    uow::ensure_run_branch(story_id).await;
     let body = dev_run_body(tier_map, skip_layer2);
     let resp = match reqwest::Client::new()
         .post(format!(
@@ -5512,6 +5516,135 @@ mod tests {
             }
             _ => panic!("expected Blocked"),
         }
+    }
+
+    /// Mount `GET /api/uow/:id` returning a unit with `branch` and Intake `repos`.
+    async fn mount_uow(
+        server: &wiremock::MockServer,
+        story: &str,
+        branch: Option<&str>,
+        repos: serde_json::Value,
+    ) {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, ResponseTemplate};
+        Mock::given(method("GET"))
+            .and(path(format!("/api/uow/{story}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "story_id": story,
+                "branch": branch,
+                "intake": { "context": "", "repos": repos },
+            })))
+            .mount(server)
+            .await;
+    }
+
+    /// Gap 1: starting development records the unit's branch from its single Intake repo
+    /// (`POST /api/uow/:id/branch`) before the run starts, so the server's brownfield
+    /// implementer works in that repository instead of the greenfield scaffolder.
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn start_dev_run_records_the_intake_branch_before_starting() {
+        use super::StartRunOutcome;
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        mount_uow(
+            &server,
+            "s-9",
+            None,
+            serde_json::json!([{ "repo": "acme/api",
+                "branch": { "mode": "new_from_base", "base": "main", "new_name": "" } }]),
+        )
+        .await;
+        Mock::given(method("POST"))
+            .and(path("/api/uow/s-9/branch"))
+            .and(body_json(serde_json::json!({ "branch": "camerata/s-9" })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/stories/s-9/run"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "run_id": "run-9" })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
+        let outcome = super::start_dev_run("s-9", &TierMapView::default(), false).await;
+
+        assert!(matches!(outcome, StartRunOutcome::Started(ref id) if id == "run-9"));
+    }
+
+    /// Gap 1: a unit with no Intake repo records no branch, and the server's refusal reason
+    /// reaches the console as `Blocked(reason)` instead of a silent scaffold.
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn start_dev_run_without_an_intake_repo_surfaces_the_no_repository_reason() {
+        use super::StartRunOutcome;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        mount_uow(&server, "s-10", None, serde_json::json!([])).await;
+        Mock::given(method("POST"))
+            .and(path("/api/uow/s-10/branch"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/stories/s-10/run"))
+            .respond_with(ResponseTemplate::new(409).set_body_json(serde_json::json!({
+                "reason": "This unit of work has no repository selected."
+            })))
+            .mount(&server)
+            .await;
+
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
+        let outcome = super::start_dev_run("s-10", &TierMapView::default(), false).await;
+
+        match outcome {
+            StartRunOutcome::Blocked(reason) => assert!(reason.contains("no repository")),
+            _ => panic!("expected Blocked"),
+        }
+    }
+
+    /// A branch already recorded (an earlier run committed to it) is kept, not re-derived.
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn start_dev_run_keeps_an_already_recorded_branch() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        mount_uow(
+            &server,
+            "s-11",
+            Some("feature/earlier"),
+            serde_json::json!([{ "repo": "acme/api",
+                "branch": { "mode": "new_from_base", "base": "main", "new_name": "" } }]),
+        )
+        .await;
+        Mock::given(method("POST"))
+            .and(path("/api/uow/s-11/branch"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/stories/s-11/run"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "run_id": "r" })),
+            )
+            .mount(&server)
+            .await;
+
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
+        let _ = super::start_dev_run("s-11", &TierMapView::default(), false).await;
     }
 
     /// `begin_investigation_run` POSTs {model} and returns Started with the run id.
