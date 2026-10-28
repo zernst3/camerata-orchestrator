@@ -1,7 +1,18 @@
 # Overnight autonomous run — decisions needed + progress log
 
 > ## ▶ RESUME HERE (paused 2026-10-26 at Zach's request, after code viewer step 4)
-> **CURRENT (newest first; older entries below are history):** 2026-10-27 (Opus): Camerata's
+> **CURRENT (newest first; older entries below are history):** 2026-10-27 (Opus, from Fable
+> reviews of the cloud branches): (1) a checker-emitted `info` finding is an observation, not a
+> live defect, so the corpus `min_severity` floor never raises it (it was flooring the Supabase
+> platform-owned RLS note to critical). (2) The synchronous desktop audit endpoint never runs
+> batch mode (no persisted batch id there); it runs real-time and says so; batch runs only on the
+> job path. (3) A batch whose submit succeeded is never resubmitted after a poll/fetch failure;
+> its items are disclosed as failed with the batch id. (4) A GHSA that aliases a KEV CVE counts
+> as known exploited (OSV treats aliases as the same vulnerability). (5) Rank 7 routing: Supabase
+> SQL rules also go to every migration/db/schema path and to any file containing SQL markers
+> (`contains_any`), and routing OFF restores the old batch behaviour exactly. Cloud branches are
+> merged locally by Sonnet builders after Fable review (cloud sessions cannot receive fixes).
+> 2026-10-27 (Opus): Camerata's
 > fallback model defaults (`crates/ui/src/cockpit.rs` ~353-361: Haiku 4.5, Sonnet 5, Opus 5) move
 > to the current generation (Haiku 5.5, Sonnet 5.5, Opus 5.5) AFTER the API sweep; the sweep stays
 > pinned to `claude-sonnet-5` so its results compare with sweep5b. Camerata uses no Fable model by
