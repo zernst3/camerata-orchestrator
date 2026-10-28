@@ -399,7 +399,10 @@ fn the_coverage_sheet_places_every_section_after_the_last_without_overlap() {
         "semgrep timed out".to_string(),
         "eslint not installed".to_string(),
     ];
-    let not_run = vec![("SKIP-1".to_string(), "no wired detector".to_string())];
+    let not_run = vec![
+        ("SKIP-1".to_string(), "no wired detector".to_string()),
+        ("SKIP-2".to_string(), "tool failed".to_string()),
+    ];
     let not_assessed = vec![NotAssessedRow {
         rule_title: "Title of NA-1".to_string(),
         rule_id: "NA-1".to_string(),
@@ -433,7 +436,7 @@ fn the_coverage_sheet_places_every_section_after_the_last_without_overlap() {
     assert_eq!(col(6, 2), "1 site found");
     assert_eq!(col(6, 3), "Deterministic");
     assert_eq!(col(6, 5), "ONE-1");
-    let first_column: Vec<&str> = (7..=25).map(|r| col(r, 0)).collect();
+    let first_column: Vec<&str> = (7..=26).map(|r| col(r, 0)).collect();
     assert_eq!(
         first_column,
         vec![
@@ -456,6 +459,7 @@ fn the_coverage_sheet_places_every_section_after_the_last_without_overlap() {
             "Rules not run this scan",
             "Rule ID",
             "SKIP-1",
+            "SKIP-2",
         ]
     );
     assert_eq!((col(13, 1), col(13, 3)), ("Option B", "Yes"));
