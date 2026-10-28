@@ -133,7 +133,12 @@ async fn run_failing(cap: Option<f64>, fail_run: usize) -> Harness {
             model: None,
             calibration_model: None,
             max_cost_usd: cap,
-            efficiency: vec!["warm_schedule=off".to_string()],
+            // The scripted model answers every call with scan JSON, so the terse scan's extra
+            // full-explanation step (which needs its own reply shape) is switched off.
+            efficiency: vec![
+                "warm_schedule=off".to_string(),
+                "terse_output=off".to_string(),
+            ],
             format: OutputFormat::Text,
         },
         true,

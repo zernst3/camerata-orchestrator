@@ -132,6 +132,13 @@ async fn scan(consensus: bool) -> (ScanReport, usize) {
         &HashMap::new(),
         RunControls {
             consensus,
+            // The scripted model recognises the long-form scan prompt, so the terse scan (and
+            // the extra full-explanation step it brings) is switched off.
+            efficiency: {
+                let mut e = camerata_server::efficiency::EfficiencyConfig::default();
+                e.apply_entry("terse_output=off").unwrap();
+                e
+            },
             ..RunControls::default()
         },
     )

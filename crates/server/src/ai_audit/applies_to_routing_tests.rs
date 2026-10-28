@@ -54,15 +54,19 @@ fn file(path: &str) -> (String, String) {
     (path.to_string(), format!("// body of {path}\n"))
 }
 
-/// A polyglot repo: SQL migration, TSX, Rust, a markdown file, an extensionless file.
+/// A polyglot repo: SQL migration, TSX, Rust, a markdown file, an extensionless file. In
+/// path order, the canonical order `audit_repo` puts its files in (H5) before it plans routes,
+/// so a plan made here from these files is the plan the audit makes.
 fn files() -> Vec<(String, String)> {
-    vec![
+    let mut files = vec![
         file("supabase/migrations/1.sql"),
         file("src/app.tsx"),
         file("src/main.rs"),
         file("README.md"),
         file("Makefile"),
-    ]
+    ];
+    files.sort_by(|a, b| a.0.cmp(&b.0));
+    files
 }
 
 fn scoped(id: &str, paths: &[&str], languages: &[&str]) -> AuditRule {
