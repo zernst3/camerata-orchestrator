@@ -13,12 +13,13 @@ Every inspection is treated as a client engagement unless the operator says it i
 <!-- crates/server/src/project.rs: ProjectStore::create and import_or_overwrite set client_engagement: true -->
 <!-- crates/ui/src/cockpit/rules.rs: ClientEngagementEditor -->
 
-A client engagement refuses two things before any file is read or any model is called: the `cli` backend (the operator's own Claude Code subscription) and any model that is not an Anthropic model, which includes every model offered through OpenRouter. The run stops with a message that names what was refused.
+A client engagement refuses two things before any file is read or any model is called: the `cli` backend (the operator's own Claude Code subscription) and any model that is not an Anthropic model, which includes every model offered through OpenRouter. The run stops with a message that names what was refused. A scan started with no active project in the desktop app is treated as a client engagement and refused the same way.
 <!-- crates/server/src/client_lock.rs: refusal, is_anthropic_api_model, models_a_scan_may_use -->
 <!-- crates/cli/src/inspect_cmd.rs: validate_args calls require_client_lock first, before scan_repos reads any file -->
 <!-- crates/server/src/lib.rs: onboard_audit and start_audit_job call client_lock_refusal_for_scan before resolve_local_sources; rescan_alternatives_handler likewise; AppState::llm_for_project refuses the cli backend for a client engagement -->
 <!-- crates/server/src/dev_implement_run.rs: dev_loop_client_lock_refusal -->
-<!-- tests: crates/cli/tests/inspect_client_lock.rs; crates/server/src/lib.rs a_client_engagement_audit_is_refused_before_any_repository_is_read -->
+<!-- crates/server/src/lib.rs: client_lock_refusal_for_scan refuses a scan with no project ("no active project") -->
+<!-- tests: crates/cli/tests/inspect_client_lock.rs; crates/server/src/lib.rs a_client_engagement_audit_is_refused_before_any_repository_is_read, a_scan_with_no_active_project_is_refused_as_a_client_engagement -->
 
 Three of Camerata's development runs can only use the Claude Code subscription (investigating a story, updating a branch and resolving PR feedback), so a client engagement refuses them.
 <!-- crates/server/src/lib.rs: cli_only_run_client_lock_refusal, called by spawn_investigation_agent_run, uow_update_branch and uow_pr_resolve; test a_client_engagement_refuses_the_cli_only_runs -->
@@ -34,17 +35,21 @@ The backend, the provider and every model that ran are recorded in the export (`
 <!-- crates/server/src/report_export.rs: CoverJson::model_backend, audit_model, calibration_model; crates/server/templates/audit_report.typ methodology line -->
 <!-- crates/server/src/scan_ledger.rs: ScanLedger::record_engagement -->
 
-The chat assistant that is not tied to a project follows its own backend setting and is not part of an inspection.
-<!-- crates/server/src/lib.rs: AppState::chat_llm uses settings.chat_backend -->
+The chat assistant that is not tied to a project follows its own backend setting and is not part of an inspection. When a client engagement is the active project, the model chosen for the chat, for the escalation review chat and for drafting a routine prompt must also be an Anthropic model, or the request is refused.
+<!-- crates/server/src/lib.rs: AppState::chat_llm uses settings.chat_backend; AppState::client_lock_step_model_refusal, called by chat, chat_escalation and draft_routine_prompt; test a_client_engagement_refuses_a_non_anthropic_model_on_request_model_steps -->
 
-## Model calls have no tools
+## Inspection model calls have no tools
 
-A request to the model carries only a system prompt, the prompt text and output settings. It defines no tools, so the model can only answer with text: it cannot run commands, read files or reach the network on Camerata's behalf.
+A model call made during an inspection carries only a system prompt, the prompt text and output settings. It defines no tools, so the model can only answer with text: it cannot run commands, read files or reach the network on Camerata's behalf.
 <!-- crates/llm/src/llm.rs: LlmRequest has no tools field; messages_request_body and build_batch_item build model, max_tokens, system, messages (and output_config) only -->
 <!-- crates/llm/src/llm.rs test: api_request_bodies_never_carry_tools -->
 
 On the API, Camerata reads the files itself and places their text in the prompt. The setting that lets a model read a folder applies only to the `cli` backend, which client work does not use.
 <!-- crates/llm/src/llm.rs: LlmRequest::repo_read_dir, documented as a no-op on the API backend -->
+
+The opt-in development loop is the exception. It is off for a client engagement unless the operator opts in to running client tooling, and its agent is given the tools `Read`, `Glob`, `Grep` and `LS`, which read files on the operator's machine, plus a write tool that every rule gate checks first. It has no shell tool.
+<!-- crates/server/src/api_agent_driver.rs: module docs (Layer-1 invariants, Read tools), tool-name constants GATED_WRITE, TOOL_READ, TOOL_GLOB, TOOL_GREP, TOOL_LS; call_anthropic_with_tools and call_openrouter_with_tools send `tools` -->
+<!-- crates/server/src/dev_implement_run.rs: dev_loop_client_lock_refusal -->
 
 ## What is removed before code is sent
 
@@ -78,15 +83,30 @@ An inspection reads the client's code as data. Steps that would run it are skipp
 <!-- crates/server/src/client_lock.rs: client_tooling_allowed; EngagementRecord::client_tooling_opt_in and client_tooling_allowed -->
 <!-- tests: crates/server/src/scan_tools.rs a_client_engagement_skips_clippy_without_running_the_build_script, an_opted_in_client_engagement_runs_clippy_and_says_so -->
 
-The other preview tools do not run the repository's code: `ruff` and `semgrep` read it with Camerata's own rule selection, and `eslint` runs with Camerata's bundled configuration, so it never loads the repository's own `eslint.config` file.
-<!-- crates/server/src/scan_tools.rs: ScanTool::executes_repo_code docs; ruff_args, semgrep_args, eslint_args (--config <bundled>) -->
+The other preview tools do not run the repository's code. `ruff` runs with `--isolated`, so it reads none of the repository's configuration files. `semgrep` runs against Camerata's bundled rules with `--metrics=off`, so it sends no usage data to its vendor, and it applies the repository's own `.semgrepignore` file, which can exclude files from that pass. `eslint` runs with Camerata's bundled configuration, so it never loads the repository's own `eslint.config` file.
+<!-- crates/server/src/scan_tools.rs: ScanTool::executes_repo_code docs; ruff_args (--isolated, --no-cache), semgrep_args (--config <bundled rules>, --metrics=off), eslint_args (--config <bundled>); tests ruff_args_pass_no_cache, semgrep_args_disable_metrics -->
+<!-- .semgrepignore: semgrep's documented behaviour when run over the checkout (semgrep_args scans "."); not exercised by a test here -->
 
 Camerata's development loop (agents writing code, then running the repository's build and tests) refuses a client engagement unless the operator has opted in to running client tooling.
 <!-- crates/server/src/dev_implement_run.rs: dev_loop_client_lock_refusal -->
 
-Git commands Camerata runs inside a checkout switch off `core.fsmonitor`, a setting in a repository's own git configuration that names a program git would otherwise run.
-<!-- crates/server/src/workspace.rs: GIT_NO_REPO_COMMANDS, used by git_command; crates/server/src/onboard.rs capture_audited_ref and commits_touching_path; crates/server/src/onboard/files.rs git_tracked_files -->
-<!-- test: crates/server/src/onboard.rs recording_the_commit_never_runs_the_repositorys_fsmonitor_command -->
+Git commands Camerata runs inside a checkout switch off `core.fsmonitor`, a setting in a repository's own git configuration that names a program git would otherwise run. This covers the scan, the commit record and the development loop's diff and revert.
+<!-- crates/server/src/workspace.rs: GIT_NO_REPO_COMMANDS, used by git_command; crates/server/src/onboard.rs capture_audited_ref and commits_touching_path (the constant directly); crates/server/src/onboard/files.rs git_tracked_files (the constant directly); crates/server/src/lib.rs revert_worktree and the worktree base-commit capture, crates/server/src/dev_implement_run.rs worktree_diff_from_base and the base-commit capture (git_command) -->
+<!-- tests: crates/server/src/onboard.rs recording_the_commit_never_runs_the_repositorys_fsmonitor_command; crates/server/src/lib.rs the_dev_loop_revert_never_runs_the_repositorys_fsmonitor_command; crates/server/src/dev_implement_run.rs worktree_diff_from_base_never_runs_the_repositorys_fsmonitor_command. Each prints SKIPPED for a git that ignores core.fsmonitor -->
+
+## Other services
+
+Apart from the model API, an inspection contacts these services. None of them receives the client's source code.
+
+- **OSV.dev.** The dependency audit runs `osv-scanner`, which sends the names and versions of the repository's dependencies (no code) to OSV.dev to look up known vulnerabilities. Camerata passes it no offline option.
+- **CISA and FIRST.org.** The vulnerability enrichment of the dependency findings downloads the CISA catalog of known exploited vulnerabilities, which sends nothing from the inspection, and asks the FIRST.org EPSS service for the exploit probability of the CVE ids the dependency audit found, so FIRST.org receives those ids.
+- **Tool downloads.** Camerata fetches its own scan tools when they are first needed: `osv-scanner` from its GitHub releases, `semgrep` from the Python package index and the `eslint` packages from npm. These requests carry no client files.
+- **The git host.** Cloning a repository in the desktop app contacts the repository's host (GitHub) with the operator's token. `camerata inspect` reads a folder that is already on disk and does not clone.
+
+<!-- crates/server/src/dep_audit.rs: run_dep_audit_with_tooling runs `osv-scanner --format json -r <repo>` (no offline flag); osv-scanner v1.9.2 (tool_provisioning::OSV_SCANNER_VERSION) queries OSV.dev online by default, which is the tool's documented behaviour and is not exercised by a test here -->
+<!-- crates/server/src/vuln_intel.rs: KEV_URL (GET, no request data), EPSS_URL queried with ?cve=<ids>; fetch_epss -->
+<!-- crates/server/src/tool_provisioning.rs: OSV_RELEASE_BASE (github.com/google/osv-scanner releases), `pip install semgrep` into a private virtualenv, npm install for the eslint workspace -->
+<!-- crates/server/src/client_source/remote.rs and crates/server/src/workspace.rs: clone_or_pull; crates/cli/src/inspect_cmd.rs uses --repo in place -->
 
 ## Where clones and caches live
 
@@ -131,7 +151,7 @@ There is no delete command on the command line. After a `camerata inspect` run, 
 
 ## Retention
 
-There is no 30-day retention policy in the code. Nothing deletes client code, caches or findings after a period of time; they stay until the operator deletes them as described above.
+There is no 30-day retention policy in the code. Nothing deletes client code, caches or findings after a period of time; they stay until the operator deletes them as described above. An automatic retention limit is on the backlog (`docs/BACKLOG.md`).
 <!-- checked: no age-based deletion in crates/server/src/client_source/ (delete runs only on request) or anywhere in crates/ -->
 
 ## Prompt-injection posture
