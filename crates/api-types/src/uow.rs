@@ -270,6 +270,51 @@ pub fn validate_branch_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Check `repo` is an `OWNER/REPO` coordinate that is safe to use as a path under the
+/// workspace root and as a path in a push URL (`https://github.com/OWNER/REPO.git`).
+///
+/// The ONE validator for every place a repository name enters a unit of work: native unit
+/// creation, the Intake repo scope, a unit's repository fallback, and the workspace helpers
+/// that turn a repository into a directory or a remote URL. Exactly one `/` separates two
+/// non-empty segments; each segment is ASCII letters, digits, `-`, `_` or `.`, and is not `.`
+/// or `..`. Whitespace, extra separators, backslashes, `:`, `@`, `#` and the like are refused.
+/// This is the same shape as `camerata_worktracker::RepoCoord::parse` (this crate cannot
+/// depend on it) with the path-escaping characters closed off.
+///
+/// # Errors
+///
+/// A one-line reason naming what is wrong with the name.
+pub fn validate_repo_name(repo: &str) -> Result<(), String> {
+    let bad = |why: &str| {
+        Err(format!(
+            "`{}` is not a valid repository: {why}. Use the form OWNER/REPO.",
+            repo.escape_debug()
+        ))
+    };
+    if repo.len() > 201 {
+        return bad("it is too long");
+    }
+    let mut parts = repo.split('/');
+    let (Some(owner), Some(name), None) = (parts.next(), parts.next(), parts.next()) else {
+        return bad("it needs exactly one `/` between the owner and the repository");
+    };
+    for segment in [owner, name] {
+        if segment.is_empty() {
+            return bad("the owner or the repository is empty");
+        }
+        if segment == "." || segment == ".." {
+            return bad("a segment is `.` or `..`");
+        }
+        if let Some(c) = segment
+            .chars()
+            .find(|c| !(c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')))
+        {
+            return bad(&format!("it contains the character `{}`", c.escape_debug()));
+        }
+    }
+    Ok(())
+}
+
 /// The branch mode for one in-scope repo (R6): either work off an EXISTING branch in
 /// that repo, or create a NEW UoW-specific branch from a chosen base. Both are
 /// first-class options (3-phase doc §3, fleet doc R6).
@@ -572,6 +617,50 @@ mod tests {
                 "{good:?} must be accepted"
             );
         }
+    }
+
+    #[test]
+    fn repo_names_must_be_owner_slash_repo_and_never_escape() {
+        for good in [
+            "acme/api",
+            "Acme/API",
+            "a-b/c_d.e",
+            "zernst3/camerata-orchestrator",
+            "o/.github",
+        ] {
+            assert!(
+                validate_repo_name(good).is_ok(),
+                "{good:?} must be accepted"
+            );
+        }
+        for bad in [
+            "",
+            "api",
+            "/api",
+            "acme/",
+            "acme/api/extra",
+            "../../other",
+            "acme/..",
+            "../api",
+            "./api",
+            "acme/.",
+            "acme /api",
+            "acme/ api",
+            " acme/api",
+            "acme/api ",
+            "acme/a\tpi",
+            "acme\\api",
+            "acme/api\n",
+            "acme/api#7",
+            "acme:x/api",
+            "git@github.com/api",
+            "acme/api?x",
+            "acme//api",
+            "a\u{7f}/b",
+        ] {
+            assert!(validate_repo_name(bad).is_err(), "{bad:?} must be rejected");
+        }
+        assert!(validate_repo_name(&format!("{}/x", "a".repeat(300))).is_err());
     }
 
     #[test]

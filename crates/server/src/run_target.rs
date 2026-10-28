@@ -71,17 +71,19 @@ pub(crate) fn plan_run_target(
         };
     }
 
-    // Today a run's repository is the one named in the unit's id (`OWNER/REPO#N`).
-    let Some((repo, _)) = story_id.rsplit_once('#') else {
+    // The run's repository is the unit's own (`UnitOfWork::repo`): an issue's repository for a
+    // GitHub-sourced unit, the one it was created with or scoped to for a native unit. It is
+    // never read out of the unit's key.
+    let Some(repo) = uow.repo() else {
         return RunTarget::Refused {
             reason: format!(
-                "This unit of work (`{story_id}`) is not linked to a repository issue \
-                 (`OWNER/REPO#N`), so the run has no repository to work in. Publish it to an \
-                 issue first."
+                "This unit of work (`{story_id}`) names no valid OWNER/REPO repository, so the \
+                 run has no repository to work in. Select its repository under Intake, Repos \
+                 in scope, or publish it to an issue, then start development again."
             ),
         };
     };
-    if let Some(reason) = project_membership_refusal(story_id, project_repos) {
+    if let Some(reason) = project_membership_refusal(story_id, Some(repo), project_repos) {
         return RunTarget::Refused { reason };
     }
     if !scoped.is_empty() && !scoped.contains(&repo) {
@@ -169,13 +171,12 @@ pub(crate) fn scope_branch_for_repo(
 }
 
 /// The branch multi-repo worktree setup and Ship use for `repo`. For the unit's own
-/// repository (the one in its id) that is the unit's recorded branch, the one the run
+/// repository ([`UnitOfWork::repo`]) that is the unit's recorded branch, the one the run
 /// derived from the scope and committed to (so Ship pushes the branch that holds the work),
 /// falling back to the scope when nothing is recorded yet. For any other in-scope repository
 /// it is the scope's branch. `None` when `repo` is neither.
 pub(crate) fn unit_branch_for_repo(uow: &UnitOfWork, story_id: &str, repo: &str) -> Option<String> {
-    let own_repo = story_id.rsplit_once('#').map(|(r, _)| r) == Some(repo);
-    if own_repo {
+    if uow.repo() == Some(repo) {
         if let Some(recorded) = recorded_branch(uow) {
             return Some(recorded);
         }
@@ -232,17 +233,17 @@ pub(crate) fn repo_membership_refusal(
 }
 
 /// Why a unit of work may not run (or have a branch recorded) in the active project: its
-/// repository, named in its id (`OWNER/REPO#N`), is not one of the project's repositories.
-/// `None` when the unit belongs to the project, when the project lists no repositories or when
-/// the id names no repository (callers refuse that on their own).
+/// repository (`repo`, the unit's own [`UnitOfWork::repo`]) is not one of the project's
+/// repositories. `None` when the unit belongs to the project, when the project lists no
+/// repositories or when the unit names no repository (callers refuse that on their own).
 pub(crate) fn project_membership_refusal(
     story_id: &str,
+    repo: Option<&str>,
     project_repos: Option<&[String]>,
 ) -> Option<String> {
-    let (repo, _) = story_id.rsplit_once('#')?;
     repo_membership_refusal(
         "This unit of work belongs to",
-        repo,
+        repo?,
         story_id,
         project_repos,
     )
@@ -299,10 +300,10 @@ mod tests {
     use crate::uow::{BranchMode, RepoScope};
 
     fn uow(branch: Option<&str>, scoped: &[&str]) -> UnitOfWork {
+        // Keyed like an issue unit, so it carries `acme/api` as its own repository field.
         let mut u = UnitOfWork {
-            story_id: "acme/api#7".to_string(),
             branch: branch.map(str::to_string),
-            ..Default::default()
+            ..UnitOfWork::keyed("acme/api#7")
         };
         u.intake.repos = scoped
             .iter()
@@ -461,9 +462,11 @@ mod tests {
         );
 
         // A repository of the project (any letter case, as GitHub treats them) is fine.
+        let mut upper = uow(Some("camerata/fix-7"), &[]);
+        upper.repo = Some("Acme/API".to_string());
         let ok = plan_run_target(
             "Acme/API#7",
-            &uow(Some("camerata/fix-7"), &[]),
+            &upper,
             Some(&repos(&["acme/api"])),
             |_| Some(path.clone()),
             None,
@@ -649,10 +652,14 @@ mod tests {
     }
 
     #[test]
-    fn a_unit_not_linked_to_an_issue_is_refused() {
+    fn a_unit_that_names_no_repository_is_refused() {
+        let draft = UnitOfWork {
+            branch: Some("b".to_string()),
+            ..UnitOfWork::keyed("draft-1")
+        };
         let target = plan_run_target(
             "draft-1",
-            &uow(Some("b"), &[]),
+            &draft,
             Some(&repos(&["acme/api"])),
             |_| None,
             None,
@@ -660,10 +667,88 @@ mod tests {
         let RunTarget::Refused { reason } = target else {
             panic!("expected a refusal, got {target:?}");
         };
+        assert!(reason.contains("names no valid OWNER/REPO"), "{reason}");
+    }
+
+    /// The run's repository is the unit's own field, never read out of the story id passed in
+    /// beside it: a key that merely looks like `OWNER/REPO#N` for another repository, or like
+    /// nothing at all, changes nothing.
+    #[test]
+    fn the_repository_comes_from_the_unit_not_from_the_story_id() {
+        let clone = git_clone_dir();
+        let path = clone.path().display().to_string();
+        let native = UnitOfWork {
+            story_id: "uow-3".to_string(),
+            repo: Some("acme/api".to_string()),
+            native_number: Some(3),
+            branch: Some("camerata/uow-3".to_string()),
+            ..Default::default()
+        };
+        for key in ["uow-3", "evil/other#9", "no-separator", "a#b#c"] {
+            let target = plan_run_target(
+                key,
+                &native,
+                Some(&repos(&["acme/api"])),
+                |r| (r == "acme/api").then(|| path.clone()),
+                None,
+            );
+            assert_eq!(
+                target,
+                RunTarget::Repository {
+                    repo: "acme/api".to_string(),
+                    branch: "camerata/uow-3".to_string(),
+                    clone: clone.path().to_path_buf(),
+                },
+                "key {key:?}"
+            );
+        }
+    }
+
+    /// A native unit's repository gets the same project check as an issue's.
+    #[test]
+    fn a_native_unit_in_a_repository_outside_the_project_is_refused() {
+        let native = UnitOfWork {
+            story_id: "uow-3".to_string(),
+            repo: Some("acme/api".to_string()),
+            native_number: Some(3),
+            branch: Some("camerata/uow-3".to_string()),
+            ..Default::default()
+        };
+        let RunTarget::Refused { reason } = plan_run_target(
+            "uow-3",
+            &native,
+            Some(&repos(&["other/web"])),
+            |_| None,
+            None,
+        ) else {
+            panic!("expected a refusal");
+        };
         assert!(
-            reason.contains("not linked to a repository issue"),
+            reason.contains("not one of the active project's repositories"),
             "{reason}"
         );
+    }
+
+    /// A repository that is not `OWNER/REPO` (a hand-edited record, a stale scope) is no
+    /// repository: the run is refused before any path is built from it.
+    #[test]
+    fn a_unit_whose_repository_would_escape_the_workspace_is_refused() {
+        let clone = git_clone_dir();
+        let path = clone.path().display().to_string();
+        for bad in ["../../other", "..", "a/b/c", "acme/a pi", "/etc"] {
+            let native = UnitOfWork {
+                story_id: "uow-3".to_string(),
+                repo: Some(bad.to_string()),
+                native_number: Some(3),
+                branch: Some("camerata/uow-3".to_string()),
+                ..Default::default()
+            };
+            let target = plan_run_target("uow-3", &native, None, |_| Some(path.clone()), None);
+            assert!(
+                matches!(target, RunTarget::Refused { .. }),
+                "repo {bad:?} must not be run in: {target:?}"
+            );
+        }
     }
 
     #[test]
@@ -1130,7 +1215,8 @@ mod http_tests {
         };
         state
             .uow
-            .set_intake_repos(STORY, vec![scope("acme/api"), scope("other/web")]);
+            .set_intake_repos(STORY, vec![scope("acme/api"), scope("other/web")])
+            .unwrap();
 
         let resp = post(
             &state,
