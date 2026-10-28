@@ -63,6 +63,15 @@ pub struct InspectArgs {
     /// The repo's local working tree to inspect. Must exist and be a directory
     /// ([`validate_args`] checks eagerly).
     pub repo: PathBuf,
+    /// Further repos of the SAME project (`--repo` given more than once). They are inspected
+    /// together with [`Self::repo`]: one scan, one report, one cache, one ledger.
+    pub also_repos: Vec<PathBuf>,
+    /// `--repo-name OWNER/REPO`, one per repo in the order the repos were given (the first
+    /// names [`Self::repo`]). Empty is allowed only for a single repo, which is then named for
+    /// its folder as it always was. Each name goes through
+    /// [`camerata_api_types::uow::validate_repo_name`] and must be unique: the name tags every
+    /// finding and keys the incremental cache, so two repos sharing one would merge.
+    pub repo_names: Vec<String>,
     /// Where to write the product-export ZIP (PDF + xlsx + findings.json + README.txt). Its
     /// parent directory must already exist.
     pub export: PathBuf,
@@ -123,6 +132,95 @@ pub struct InspectArgs {
 }
 
 impl InspectArgs {
+    /// Every repo folder of the run, in the order given.
+    pub fn repo_dirs(&self) -> Vec<PathBuf> {
+        std::iter::once(self.repo.clone())
+            .chain(self.also_repos.iter().cloned())
+            .collect()
+    }
+
+    /// The `(name, folder)` sources the scan reads, validated: every folder exists, the names
+    /// are valid `OWNER/REPO` coordinates and unique, and no folder is given twice.
+    ///
+    /// One repo with no `--repo-name` keeps the old behaviour (named for its folder). Several
+    /// repos each need a `--repo-name`: a folder name is not a repository name, and two clients'
+    /// repos are routinely both called `api`.
+    pub fn resolve_sources(&self) -> Result<Vec<(String, PathBuf)>, String> {
+        let dirs = self.repo_dirs();
+        for dir in &dirs {
+            if !dir.is_dir() {
+                return Err(format!(
+                    "--repo {} does not exist or is not a directory",
+                    dir.display()
+                ));
+            }
+        }
+        if !self.repo_names.is_empty() && self.repo_names.len() != dirs.len() {
+            return Err(format!(
+                "--repo-name was given {} time(s) for {} --repo; give one name per repo, in the \
+                 same order as the repos",
+                self.repo_names.len(),
+                dirs.len()
+            ));
+        }
+        if dirs.len() > 1 && self.repo_names.is_empty() {
+            return Err(format!(
+                "{} repos were given with --repo, so each needs a --repo-name OWNER/REPO (a folder \
+                 name is not a repository name, and two repos can share one)",
+                dirs.len()
+            ));
+        }
+        let mut sources: Vec<(String, PathBuf)> = Vec::with_capacity(dirs.len());
+        for (i, dir) in dirs.iter().enumerate() {
+            let name = match self.repo_names.get(i) {
+                Some(name) => {
+                    camerata_api_types::uow::validate_repo_name(name)
+                        .map_err(|e| format!("--repo-name: {e}"))?;
+                    name.clone()
+                }
+                // A single unnamed repo: the folder's own name, as before.
+                None => dir
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("repo")
+                    .to_string(),
+            };
+            if let Some((_, other)) = sources.iter().find(|(n, _)| *n == name) {
+                return Err(format!(
+                    "--repo-name {name} is used for both {} and {}; each repo needs its own name",
+                    other.display(),
+                    dir.display()
+                ));
+            }
+            let canonical = dir.canonicalize().unwrap_or_else(|_| dir.clone());
+            if let Some((other, _)) = sources
+                .iter()
+                .find(|(_, d)| d.canonicalize().unwrap_or_else(|_| d.clone()) == canonical)
+            {
+                return Err(format!(
+                    "{} was given more than once (as {other} and as {name})",
+                    dir.display()
+                ));
+            }
+            sources.push((name, dir.clone()));
+        }
+        Ok(sources)
+    }
+
+    /// Where this run's incremental-scan cache and integrity ledger live: the single repo's own
+    /// pair (so every key already on disk stays valid), or ONE pair for the whole set of repos.
+    pub fn state_paths(&self) -> (PathBuf, PathBuf) {
+        let dirs = self.repo_dirs();
+        if dirs.len() == 1 {
+            (manifest_cache_path(&dirs[0]), ledger_path(&dirs[0]))
+        } else {
+            (
+                camerata_server::scan_cache::state_dir::project_manifest_cache_path(&dirs),
+                camerata_server::scan_cache::state_dir::project_ledger_path(&dirs),
+            )
+        }
+    }
+
     /// The client-tooling decision this run carries into the preview pass, the ledger and the
     /// report.
     pub fn client_tooling(&self) -> camerata_server::client_lock::ClientTooling {
@@ -272,12 +370,7 @@ pub fn validate_args(args: &InspectArgs, has_api_key: bool) -> Result<(), String
     };
     camerata_server::report_export::require_client_name(&probe)
         .map_err(|e| format!("--client: {e}"))?;
-    if !args.repo.is_dir() {
-        return Err(format!(
-            "--repo {} does not exist or is not a directory",
-            args.repo.display()
-        ));
-    }
+    args.resolve_sources()?;
     let export_dir: &Path = match args.export.parent() {
         Some(p) if !p.as_os_str().is_empty() => p,
         _ => Path::new("."),
@@ -417,14 +510,13 @@ fn clean_legacy_repo_file<T: serde::de::DeserializeOwned>(repo: &Path, basename:
 /// on the spot: a version 1 manifest holds findings stored before construction-time secret
 /// redaction, so it can hold a raw secret value, and "ignored" is not the same as "gone"
 /// (docs/design/2026-10-23_secret-redaction-and-release-gate.md, path E2).
-fn load_prior_manifest(repo: &Path) -> Option<ScanManifest> {
-    let path = manifest_cache_path(repo);
+fn load_prior_manifest(path: &Path) -> Option<ScanManifest> {
     let bytes = std::fs::read(&path).ok()?;
     let manifest: ScanManifest = serde_json::from_slice(&bytes).ok()?;
     if manifest.is_current() {
         return Some(manifest);
     }
-    match std::fs::remove_file(&path) {
+    match std::fs::remove_file(path) {
         Ok(()) => eprintln!(
             "camerata inspect: removed the incremental-scan cache at {} (written by an older              version; the next run does a full scan)",
             path.display()
@@ -439,18 +531,18 @@ fn load_prior_manifest(repo: &Path) -> Option<ScanManifest> {
 
 /// Best-effort save. Failing to persist the cache never fails the inspection itself — it just
 /// means the NEXT run does a full scan instead of an incremental one.
-fn save_manifest(repo: &Path, manifest: &ScanManifest) {
+fn save_manifest(path: &Path, manifest: &ScanManifest) {
     let Ok(bytes) = serde_json::to_vec_pretty(manifest) else {
         return;
     };
     // Best-effort: a failure here surfaces as the write error below, which is already
     // non-fatal (the next run does a full scan instead).
     let _ = std::fs::create_dir_all(camerata_state_dir());
-    if let Err(e) = std::fs::write(manifest_cache_path(repo), bytes) {
+    if let Err(e) = std::fs::write(path, bytes) {
         eprintln!(
             "camerata inspect: could not persist the incremental-scan cache at {}: {e} (the \
              next run will do a full scan instead)",
-            manifest_cache_path(repo).display()
+            path.display()
         );
     }
 }
@@ -471,7 +563,7 @@ fn save_manifest(repo: &Path, manifest: &ScanManifest) {
 /// inspection — but unlike the scan cache (whose absence costs one full re-scan) the absence
 /// of this file makes `camerata integrity-gate` exit `2` (gate unavailable) rather than `0`,
 /// so a silent write failure can never read as a passing gate.
-fn save_ledger(repo: &Path, ledger: &camerata_server::scan_ledger::ScanLedger) {
+fn save_ledger(path: &Path, ledger: &camerata_server::scan_ledger::ScanLedger) {
     let Ok(bytes) = serde_json::to_vec_pretty(ledger) else {
         return;
     };
@@ -485,11 +577,11 @@ fn save_ledger(repo: &Path, ledger: &camerata_server::scan_ledger::ScanLedger) {
         );
         return;
     }
-    if let Err(e) = std::fs::write(ledger_path(repo), bytes) {
+    if let Err(e) = std::fs::write(path, bytes) {
         eprintln!(
             "camerata inspect: could not persist the pipeline-integrity ledger at {}: {e} \
              (`camerata integrity-gate` will report itself unavailable rather than passing)",
-            ledger_path(repo).display()
+            path.display()
         );
     }
 }
@@ -651,15 +743,12 @@ pub async fn run_inspect_pipeline_with(
     validate_args(&args, has_api_key)?;
     let mut controls = args.run_controls()?;
 
-    // A headless run has no `owner/repo` spec — the scanned directory's own name stands in
-    // for it (tags every finding/provenance entry, same role `spec` plays in `resolve_local_sources`).
-    let repo_spec = args
-        .repo
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("repo")
-        .to_string();
-    let sources = vec![(repo_spec, args.repo.clone())];
+    // The `(name, folder)` sources: one per `--repo`, named by `--repo-name` (a lone repo with
+    // no name keeps its folder's name). The name tags every finding and provenance entry, the
+    // role `spec` plays in `resolve_local_sources`. Several repos are ONE project: one scan,
+    // one report, one cache and one ledger.
+    let sources = args.resolve_sources()?;
+    let (manifest_path, ledger_file) = args.state_paths();
 
     // ── Phase 1: stack detection + rule proposal ────────────────────────────────────────
     let scan = camerata_server::onboard::scan_repos(&sources, Vec::new()).await;
@@ -713,16 +802,18 @@ pub async fn run_inspect_pipeline_with(
     // before the scan so this run's file collection never sees them, independently of
     // `files::is_engine_artifact` — belt and braces on the defect that put 174,236 characters
     // of Camerata's own output into an audit prompt.
-    clean_legacy_repo_file::<ScanManifest>(&args.repo, ".camerata-scan-cache.json");
-    clean_legacy_repo_file::<camerata_server::scan_ledger::ScanLedger>(
-        &args.repo,
-        ".camerata-scan-ledger.json",
-    );
+    for dir in args.repo_dirs() {
+        clean_legacy_repo_file::<ScanManifest>(&dir, ".camerata-scan-cache.json");
+        clean_legacy_repo_file::<camerata_server::scan_ledger::ScanLedger>(
+            &dir,
+            ".camerata-scan-ledger.json",
+        );
+    }
 
     let incremental_prior = if args.full {
         None
     } else {
-        load_prior_manifest(&args.repo)
+        load_prior_manifest(&manifest_path)
     };
 
     // A spend limit needs every model priced; refuse before the estimate, before any model call.
@@ -747,6 +838,15 @@ pub async fn run_inspect_pipeline_with(
         let facts =
             camerata_server::preflight::gather_scan_facts(&sources, &selected, corpus.as_ref())
                 .await;
+        // A repo that cannot be read is a repo the inspection would silently leave out. Refuse
+        // before any model call, naming it, rather than price (and later run) a smaller job.
+        if let Some(bad) = facts.iter().find(|f| f.read_error.is_some()) {
+            return Err(InspectError::Failed(format!(
+                "could not read {}: {}",
+                bad.repo,
+                bad.read_error.as_deref().unwrap_or("unknown error")
+            )));
+        }
         // The exact size of one pass: API backend only, and never for a scripted model.
         let exact = if seams.llm.is_none() && matches!(backend_resolution, BackendResolution::Api) {
             let llm = camerata_server::onboard::build_llm(
@@ -843,7 +943,7 @@ pub async fn run_inspect_pipeline_with(
         }
     };
 
-    save_manifest(&args.repo, &manifest);
+    save_manifest(&manifest_path, &manifest);
     report.excluded_mechanical_rules = excluded_mechanical;
     // W13: mirrors `onboard_audit`/`onboard_audit_start`'s own call site in
     // `camerata_server::lib` exactly — every corpus file that would not parse is disclosed
@@ -933,7 +1033,7 @@ pub async fn run_inspect_pipeline_with(
             &model_record,
             args.client_tooling(),
         ));
-    save_ledger(&args.repo, &report.ledger);
+    save_ledger(&ledger_file, &report.ledger);
 
     // Pass-1 W1 seal fix: THE sealing point — every row-adding pass above has already run, and
     // every exporter the rest of this function calls now takes `&SealedReport`, never
@@ -962,7 +1062,7 @@ pub async fn run_inspect_pipeline_with(
         actual_usage: report.actual_usage.clone(),
         findings_count: report.findings.len(),
         ledger_summary,
-        ledger_path: ledger_path(&args.repo),
+        ledger_path: ledger_file,
         release_gate,
         stage_telemetry: report.ledger.stage_telemetry().cloned(),
         preflight: preflight_text,
@@ -1269,6 +1369,8 @@ mod tests {
     fn base_args(repo: PathBuf, export: PathBuf) -> InspectArgs {
         InspectArgs {
             repo,
+            also_repos: Vec::new(),
+            repo_names: Vec::new(),
             export,
             backend: ProjectBackend::Cli,
             batch: false,
@@ -1435,6 +1537,151 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let args = base_args(dir.path().to_path_buf(), PathBuf::from("out.zip"));
         assert!(validate_args(&args, false).is_ok());
+    }
+
+    // ── M11: several repos, one project ───────────────────────────────────────────────
+
+    /// Two folders, each with a `src/index.ts` (the same path in both repos).
+    fn two_repos() -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let root = tempfile::tempdir().unwrap();
+        let a = root.path().join("api");
+        let b = root.path().join("web");
+        for dir in [&a, &b] {
+            std::fs::create_dir_all(dir.join("src")).unwrap();
+            std::fs::write(dir.join("src/index.ts"), "export const x = 1;\n").unwrap();
+        }
+        (root, a, b)
+    }
+
+    fn multi(a: PathBuf, b: PathBuf, names: &[&str], export: PathBuf) -> InspectArgs {
+        let mut args = base_args(a, export);
+        args.also_repos = vec![b];
+        args.repo_names = names.iter().map(|n| n.to_string()).collect();
+        args
+    }
+
+    #[test]
+    fn a_lone_repo_without_a_name_is_still_named_for_its_folder() {
+        let (root, a, _) = two_repos();
+        let args = base_args(a.clone(), root.path().join("o.zip"));
+        assert_eq!(
+            args.resolve_sources().unwrap(),
+            vec![("api".to_string(), a)]
+        );
+        validate_args(&args, false).unwrap();
+    }
+
+    #[test]
+    fn several_repos_resolve_to_one_named_source_each() {
+        let (root, a, b) = two_repos();
+        let args = multi(
+            a.clone(),
+            b.clone(),
+            &["acme/api", "acme/web"],
+            root.path().join("o.zip"),
+        );
+        assert_eq!(
+            args.resolve_sources().unwrap(),
+            vec![("acme/api".to_string(), a), ("acme/web".to_string(), b)]
+        );
+        validate_args(&args, false).unwrap();
+    }
+
+    #[test]
+    fn several_repos_without_names_are_refused_with_the_fix() {
+        let (root, a, b) = two_repos();
+        let args = multi(a, b, &[], root.path().join("o.zip"));
+        let err = validate_args(&args, false).expect_err("a folder name is not a repo name");
+        assert!(err.contains("--repo-name OWNER/REPO"), "{err}");
+    }
+
+    #[test]
+    fn a_name_count_that_does_not_match_the_repo_count_is_refused() {
+        let (root, a, b) = two_repos();
+        let args = multi(a, b, &["acme/api"], root.path().join("o.zip"));
+        let err = validate_args(&args, false).expect_err("one name for two repos");
+        assert!(err.contains("one name per repo"), "{err}");
+    }
+
+    /// The names go through `validate_repo_name`: a folder-style name, a name with a space and a
+    /// path-escaping name are all refused, naming the flag.
+    #[test]
+    fn repo_names_are_validated_as_owner_slash_repo() {
+        let (root, a, b) = two_repos();
+        for bad in ["api", "acme/we b", "acme/../x", "acme/web/extra", ""] {
+            let args = multi(
+                a.clone(),
+                b.clone(),
+                &["acme/api", bad],
+                root.path().join("o.zip"),
+            );
+            let err = validate_args(&args, false).expect_err(bad);
+            assert!(err.contains("--repo-name"), "{bad}: {err}");
+        }
+    }
+
+    #[test]
+    fn two_repos_may_not_share_a_name_or_a_folder() {
+        let (root, a, b) = two_repos();
+        let same_name = multi(
+            a.clone(),
+            b,
+            &["acme/api", "acme/api"],
+            root.path().join("o.zip"),
+        );
+        let err = same_name.resolve_sources().expect_err("same name");
+        assert!(err.contains("needs its own name"), "{err}");
+        let same_dir = multi(
+            a.clone(),
+            a,
+            &["acme/api", "acme/web"],
+            root.path().join("o.zip"),
+        );
+        let err = same_dir.resolve_sources().expect_err("same folder");
+        assert!(err.contains("more than once"), "{err}");
+    }
+
+    #[test]
+    fn a_missing_second_repo_is_named() {
+        let (root, a, b) = two_repos();
+        let gone = b.join("nope");
+        let args = multi(
+            a,
+            gone.clone(),
+            &["acme/api", "acme/web"],
+            root.path().join("o.zip"),
+        );
+        let err = validate_args(&args, false).expect_err("missing second repo");
+        assert!(err.contains(&gone.display().to_string()), "{err}");
+    }
+
+    /// One project has ONE cache and ONE ledger, whatever order the repos were named in, and
+    /// they are not the files of either repo alone.
+    #[test]
+    fn several_repos_share_one_cache_and_one_ledger() {
+        let (root, a, b) = two_repos();
+        let ab = multi(
+            a.clone(),
+            b.clone(),
+            &["acme/api", "acme/web"],
+            root.path().join("o.zip"),
+        );
+        let ba = multi(
+            b.clone(),
+            a.clone(),
+            &["acme/web", "acme/api"],
+            root.path().join("o.zip"),
+        );
+        assert_eq!(ab.state_paths(), ba.state_paths());
+        let (cache, ledger) = ab.state_paths();
+        assert_ne!(cache, ledger);
+        let alone_a = base_args(a, root.path().join("o.zip")).state_paths();
+        let alone_b = base_args(b, root.path().join("o.zip")).state_paths();
+        assert_ne!(cache, alone_a.0);
+        assert_ne!(cache, alone_b.0);
+        // A single repo keeps the key it always had.
+        assert_eq!(alone_a.0, manifest_cache_path(&ab.repo));
+        assert_eq!(alone_a.1, ledger_path(&ab.repo));
     }
 
     #[test]

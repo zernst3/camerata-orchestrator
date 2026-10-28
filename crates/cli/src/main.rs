@@ -131,9 +131,15 @@ enum Command {
     /// export button produces to `--export`. No BFF, no UI — see
     /// `camerata::inspect_cmd`'s module doc comment.
     Inspect {
-        /// The repo's local working tree to inspect.
-        #[arg(long)]
-        repo: PathBuf,
+        /// The repo's local working tree to inspect. Repeat it to inspect several repos as ONE
+        /// project (one scan, one report, one cache); each then needs a `--repo-name`.
+        #[arg(long, required = true)]
+        repo: Vec<PathBuf>,
+        /// The repo's name as OWNER/REPO, one per `--repo` in the same order. It tags every
+        /// finding, so two repos that both have a `src/index.ts` stay apart. Required when more
+        /// than one `--repo` is given; a single repo is named for its folder when this is omitted.
+        #[arg(long = "repo-name", value_name = "OWNER/REPO")]
+        repo_name: Vec<String>,
         /// Where to write the product-export ZIP. Its parent directory must already exist.
         #[arg(long)]
         export: PathBuf,
@@ -457,6 +463,7 @@ async fn main() -> anyhow::Result<()> {
         }
         Command::Inspect {
             repo,
+            repo_name,
             export,
             backend,
             batch,
@@ -473,8 +480,13 @@ async fn main() -> anyhow::Result<()> {
             run_client_tooling,
             consensus,
         } => {
+            let mut repos = repo.into_iter();
+            // `required = true` guarantees at least one.
+            let first = repos.next().unwrap_or_default();
             run_inspect_cmd(InspectArgs {
-                repo,
+                repo: first,
+                also_repos: repos.collect(),
+                repo_names: repo_name,
                 export,
                 backend,
                 batch,

@@ -120,8 +120,8 @@ Apart from the model API, an inspection contacts these services. None of them re
 <!-- crates/server/src/app_dirs.rs: camerata_dir = data_dir()/camerata, CAMERATA_DATA_DIR override -->
 <!-- crates/server/src/client_source/storage.rs: DATA_DIR_ENTRIES and their Treatment -->
 
-**The command line's cache and ledger** live in `~/Library/Caches/camerata` on macOS and in `$XDG_CACHE_HOME/camerata` (or `~/.cache/camerata`) elsewhere, or under `CAMERATA_STATE_DIR` when that is set. They are never written into the scanned repository.
-<!-- crates/server/src/scan_cache/state_dir.rs: dir, dir_from -->
+**The command line's cache and ledger** live in `~/Library/Caches/camerata` on macOS and in `$XDG_CACHE_HOME/camerata` (or `~/.cache/camerata`) elsewhere, or under `CAMERATA_STATE_DIR` when that is set. They are never written into the scanned repository. A run over several repos (`--repo` given more than once) keeps one cache and one ledger for the whole set, named `project-<count>-<hash>`, instead of one pair per repo.
+<!-- crates/server/src/scan_cache/state_dir.rs: dir, dir_from, project_state_key -->
 
 **Tool binaries** (the linters Camerata provisions) live in their own folder and hold no client files.
 <!-- crates/server/src/client_source/storage.rs: ("tooling", Treatment::NoClientCode) -->
@@ -146,7 +146,7 @@ It writes a deletion record of what was removed, from where and when.
 It keeps, on purpose, any export already written and the findings with the lines of code they quote (`inspections/` and `onboarding-draft.json`), because they are the delivered product.
 <!-- crates/server/src/client_source/storage.rs: Treatment::Kept entries -->
 
-There is no delete command on the command line. After a `camerata inspect` run, the operator removes the inspected folder, the export and the command-line cache files for that folder themselves.
+There is no delete command on the command line. After a `camerata inspect` run, the operator removes the inspected folder, the export and the command-line cache files for that folder themselves. For a run over several repos the cache files are the `project-` pair, which hold every repo of that run, so they are removed once for the whole set.
 <!-- crates/cli/src/main.rs: Command has no delete or purge subcommand -->
 
 ## Retention

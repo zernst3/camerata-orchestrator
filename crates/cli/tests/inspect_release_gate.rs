@@ -70,6 +70,8 @@ async fn cli_inspect_export_exits_3_and_writes_nothing_when_blocked() {
     let export_path = export_dir.path().join("inspect.zip");
     let args = InspectArgs {
         repo: repo.path().to_path_buf(),
+        also_repos: Vec::new(),
+        repo_names: Vec::new(),
         export: export_path.clone(),
         backend: ProjectBackend::Api,
         batch: false,

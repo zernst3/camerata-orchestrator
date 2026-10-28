@@ -112,9 +112,70 @@ pub fn repo_state_files_in(state_dir: &Path, repo: &Path) -> [PathBuf; 2] {
     ]
 }
 
+/// The key of a PROJECT of several repositories inspected together: one cache and one ledger for
+/// the whole set, not one pair per repo. Shaped `project-<count>-<hash>`; the hash is FNV-1a over
+/// the repos' canonical paths in sorted order, so the order the repos were named in does not
+/// change it. One repo is NOT a project: use [`repo_state_key`] for that, so every key already
+/// on disk stays valid.
+pub fn project_state_key(repos: &[PathBuf]) -> String {
+    let mut paths: Vec<String> = repos
+        .iter()
+        .map(|r| {
+            r.canonicalize()
+                .unwrap_or_else(|_| r.clone())
+                .to_string_lossy()
+                .to_string()
+        })
+        .collect();
+    paths.sort();
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for path in &paths {
+        for byte in path.as_bytes().iter().chain(std::iter::once(&0u8)) {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(0x1000_0000_01b3);
+        }
+    }
+    format!("project-{}-{:08x}", paths.len(), hash as u32)
+}
+
+/// Where the incremental-scan manifest of a multi-repo project is cached ([`project_state_key`]).
+pub fn project_manifest_cache_path(repos: &[PathBuf]) -> PathBuf {
+    dir().join(format!("{}.cache.json", project_state_key(repos)))
+}
+
+/// Where the pipeline-integrity ledger of a multi-repo project is persisted.
+pub fn project_ledger_path(repos: &[PathBuf]) -> PathBuf {
+    dir().join(format!("{}.ledger.json", project_state_key(repos)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_project_key_ignores_the_order_the_repos_were_named_in_and_differs_from_a_repo_key() {
+        let a = PathBuf::from("/clients/acme/api");
+        let b = PathBuf::from("/clients/acme/web");
+        assert_eq!(
+            project_state_key(&[a.clone(), b.clone()]),
+            project_state_key(&[b.clone(), a.clone()])
+        );
+        assert_ne!(
+            project_state_key(&[a.clone(), b.clone()]),
+            project_state_key(&[a.clone()])
+        );
+        assert_ne!(
+            project_state_key(&[a.clone(), b.clone()]),
+            project_state_key(&[a.clone(), PathBuf::from("/clients/other/web")])
+        );
+        let key = project_state_key(&[a, b]);
+        assert!(key.starts_with("project-2-"), "{key}");
+        assert!(key.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'));
+        assert_ne!(
+            project_manifest_cache_path(&[PathBuf::from("/x/a"), PathBuf::from("/x/b")]),
+            project_ledger_path(&[PathBuf::from("/x/a"), PathBuf::from("/x/b")])
+        );
+    }
 
     #[test]
     fn the_override_replaces_the_platform_base_and_camerata_is_appended() {
