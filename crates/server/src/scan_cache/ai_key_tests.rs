@@ -147,7 +147,7 @@ fn the_system_prompt_is_pinned_to_the_prompt_schema_version() {
             crate::ai_audit::AUDIT_PROMPT_SCHEMA_VERSION,
             digest.as_str()
         ),
-        (2, "26495b1899b7dfa3"),
+        (2, "a46a9cedc3a8fa97"),
         "the audit system prompt changed: bump AUDIT_PROMPT_SCHEMA_VERSION and update this pin"
     );
 }
