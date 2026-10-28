@@ -8732,7 +8732,9 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                     }
                 }
                 // Spend limit: optional hard stop on the scan's AI spend, checked between passes.
-                div { class: "audit-model-row",
+                div {
+                    class: "audit-model-row",
+                    "data-tour": camerata_ui_core::walkthrough::target::SPEND_LIMIT,
                     label { class: "audit-model-label", "Spend limit (USD)" }
                     input {
                         r#type: "text",
@@ -8836,7 +8838,6 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                         rsx! {
                             div {
                                 class: "audit-cost",
-                                "data-tour": camerata_ui_core::walkthrough::target::COST_ESTIMATE,
                                 if let Some(u) = actual {
                                     {
                                         let act_toks = u.input_tokens + u.output_tokens;
