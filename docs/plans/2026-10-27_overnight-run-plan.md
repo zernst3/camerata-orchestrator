@@ -89,6 +89,10 @@ H. By 08:30: morning summary at the top of `docs/OVERNIGHT_DECISIONS.md`; the PR
 
 ## Status log (newest first)
 
+- 00:25 (04:23 UTC): GitHub CI GREEN on the working branch for the first time (run 40629518781,
+  "Camerata governs its own code" success). Disk 49 GB: all four active builders (W27, console,
+  integration, hygiene) hold 60 to 75 GB build folders each; no idle folder left to clear;
+  watching (the disk guard's tier 3 at 40 GB only touches idle repos).
 - 00:30: outside-standard sources (cloud) reviewed: no HIGH; grounded 410 -> 421 accurate (strict
   419 until two principle-level groundings are tightened). Brief queued
   (scratchpad/sources_merge_brief.md), runs after the integration merge. Follow-up noted: about
