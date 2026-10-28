@@ -1078,6 +1078,13 @@ impl ScanLedger {
         &self.stages
     }
 
+    /// Rows the scan dropped as repeats of another row at the same location, summed over every
+    /// stage that recorded a `deduped` count. These rows never reach review, so nothing
+    /// downstream (the triage log included) can count them.
+    pub fn deduped_total(&self) -> usize {
+        self.stages.iter().map(|s| s.deduped).sum()
+    }
+
     /// Rule ids that genuinely ran and emitted zero findings — the ONLY honest definition of
     /// "verified clean" / "What's healthy". Sorted for stable output.
     pub fn healthy_rule_ids(&self) -> Vec<String> {

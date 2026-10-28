@@ -20,6 +20,16 @@
 //!
 //! Rows the scan merged into another row at the same location appear on the surviving row's
 //! "Also violates" column, not here: the log is about review outcomes, not de-duplication.
+//!
+//! # The caption
+//!
+//! "Proposed by the AI pass" counts rows that REACHED review. Repeats the scan dropped before
+//! review (same path, line and rule) cannot be counted by anything downstream, so the log says
+//! how many there were: [`caption`], with the count from the scan ledger
+//! ([`crate::scan_ledger::ScanLedger::deduped_total`]). The sheet prints it under the title. The
+//! CSV is a plain table with a fixed header and carries no caption row (a text row would break
+//! every consumer that reads it as data), so this module doc and [`triage_log_csv`] are where
+//! the CSV's counting basis is stated.
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -195,7 +205,20 @@ fn set_aside_reason(
     }
 }
 
-/// The CSV bytes: the header, then one record per row. An empty log is the header alone.
+/// What "Proposed by the AI pass" counts, and what it leaves out: `deduped` is the scan
+/// ledger's count of rows merged into another at the same location before review. Printed on
+/// the workbook sheet; the CSV states the same basis here because it cannot carry a caption row.
+pub fn caption(deduped: usize) -> String {
+    format!(
+        "Rows that reached review; {deduped} {} merged into another at the same location \
+         {} not listed",
+        if deduped == 1 { "row" } else { "rows" },
+        if deduped == 1 { "is" } else { "are" },
+    )
+}
+
+/// The CSV bytes: the header, then one record per row. An empty log is the header alone. The
+/// counts are rows that reached review; see [`caption`] for the rows merged away before it.
 pub fn triage_log_csv(rows: &[TriageLogRow]) -> anyhow::Result<Vec<u8>> {
     let mut wtr = csv::WriterBuilder::new().from_writer(Vec::new());
     wtr.write_record(COLUMNS)?;
@@ -218,6 +241,7 @@ pub fn triage_log_csv(rows: &[TriageLogRow]) -> anyhow::Result<Vec<u8>> {
 pub(super) fn write_triage_log_sheet(
     wb: &mut rust_xlsxwriter::Workbook,
     rows: &[TriageLogRow],
+    deduped: usize,
     fmts: &super::Formats,
 ) -> Result<(), rust_xlsxwriter::XlsxError> {
     let ws = wb.add_worksheet();
@@ -229,6 +253,7 @@ pub(super) fn write_triage_log_sheet(
         "Per rule: what the AI pass proposed, what review kept, held or set aside, what it \
          threw out and why.",
     )?;
+    ws.write_string(2, 0, caption(deduped))?;
     const HEADER_ROW: u32 = 3;
     for (c, h) in COLUMNS.iter().enumerate() {
         ws.write_string_with_format(HEADER_ROW, c as u16, *h, &fmts.header)?;

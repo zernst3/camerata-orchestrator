@@ -2419,7 +2419,7 @@ pub fn build_workbook(
     // default; see `triage_log`.
     if triage_log::wanted(opts) {
         let log = triage_log::build_triage_log(report, dispositions, corpus, &opts.chosen_options);
-        triage_log::write_triage_log_sheet(&mut wb, &log, &fmts)
+        triage_log::write_triage_log_sheet(&mut wb, &log, report.ledger.deduped_total(), &fmts)
             .context("writing the Triage Log sheet")?;
     }
 

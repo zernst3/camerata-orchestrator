@@ -64,6 +64,11 @@ fn scenario() -> (
     crate::onboard::SealedReport,
     HashMap<String, DispositionWire>,
 ) {
+    let (report, dispositions) = scenario_report();
+    (report.seal(), dispositions)
+}
+
+fn scenario_report() -> (crate::onboard::ScanReport, HashMap<String, DispositionWire>) {
     let kept = ai_finding("SEC-NO-HARDCODED-SECRETS-1", 1, "high");
     let held = ai_finding("SEC-NO-HARDCODED-SECRETS-1", 2, "needs-review");
     let thrown = ai_finding("SEC-NO-HARDCODED-SECRETS-1", 3, "high");
@@ -77,7 +82,7 @@ fn scenario() -> (
         vec![kept, held, thrown, floor],
         vec!["SEC-NO-HARDCODED-SECRETS-1", "SEC-NO-RAW-SQL-CONCAT-1"],
     );
-    (report.seal(), dispositions)
+    (report, dispositions)
 }
 
 #[tokio::test]
@@ -191,4 +196,87 @@ fn the_env_switch_turns_the_triage_log_on_only_for_one_or_true() {
     assert!(!triage_log_env_on(Some("")));
     assert!(!triage_log_env_on(Some("0")));
     assert!(!triage_log_env_on(Some("yes")));
+}
+
+// ── The caption: the log counts rows that reached review, and says how many did not ──────────
+
+fn sealed_with_repeats_dropped(deduped: usize) -> crate::onboard::SealedReport {
+    let (mut report, _) = scenario_report();
+    report.ledger.record_stage(
+        "ai-location-merge",
+        10,
+        10 - deduped,
+        crate::scan_ledger::StageAccounting {
+            deduped,
+            ..Default::default()
+        },
+    );
+    report.seal()
+}
+
+#[test]
+fn the_caption_states_that_the_counts_are_rows_that_reached_review() {
+    assert_eq!(
+        triage_log::caption(7),
+        "Rows that reached review; 7 rows merged into another at the same location are not listed"
+    );
+    assert_eq!(
+        triage_log::caption(1),
+        "Rows that reached review; 1 row merged into another at the same location is not listed"
+    );
+    assert_eq!(
+        triage_log::caption(0),
+        "Rows that reached review; 0 rows merged into another at the same location are not listed"
+    );
+}
+
+#[tokio::test]
+async fn the_sheet_carries_the_caption_with_the_ledgers_deduped_count() {
+    let corpus = corpus().await;
+    let (_, dispositions) = scenario();
+    let report = sealed_with_repeats_dropped(4);
+    assert_eq!(report.ledger.deduped_total(), 4);
+    let options = ReportOptions {
+        triage_log: true,
+        ..ReportOptions::default()
+    };
+    let xlsx = build_workbook(&report, &dispositions, Some(&corpus), &options).unwrap();
+    let grid = crate::release_gate::xlsx_sheet_grid(&xlsx, TRIAGE_LOG_SHEET).expect("the sheet");
+    let flat: Vec<String> = grid.iter().flatten().cloned().collect();
+    assert!(
+        flat.iter().any(|c| c
+            == "Rows that reached review; 4 rows merged into another at the same location are not listed"),
+        "{flat:?}"
+    );
+}
+
+/// Every sheet, the Triage Log included, carries the confidentiality footer: the sheet is added
+/// before the footer loop runs.
+#[tokio::test]
+async fn every_sheet_including_the_triage_log_carries_the_footer() {
+    let corpus = corpus().await;
+    let (report, dispositions) = scenario();
+    let options = ReportOptions {
+        triage_log: true,
+        client_name: "Example Client Ltd".to_string(),
+        ..ReportOptions::default()
+    };
+    let xlsx = build_workbook(&report, &dispositions, Some(&corpus), &options).unwrap();
+    let sheets = crate::release_gate::xlsx_sheet_names(&xlsx).unwrap();
+    assert!(
+        sheets.iter().any(|s| s == TRIAGE_LOG_SHEET),
+        "anti-vacuity: the Triage Log sheet is present: {sheets:?}"
+    );
+    let footers = crate::release_gate::xlsx_header_footers(&xlsx).unwrap();
+    for sheet in &sheets {
+        let footer = footers
+            .iter()
+            .find(|f| f.part == "footer" && &f.sheet == sheet)
+            .unwrap_or_else(|| panic!("sheet {sheet:?} has no footer"));
+        assert!(
+            footer.left.contains("Example Client Ltd"),
+            "sheet {sheet:?}: {:?}",
+            footer.left
+        );
+    }
 }

@@ -29,16 +29,25 @@ fn package_with(options: &ReportOptions) -> ProductPackage {
     .expect("the package assembles")
 }
 
+/// A client engagement: the confidentiality marking names the client, so the gate's marking
+/// check (every PDF page and workbook sheet) has a real line to find.
+fn base_options() -> ReportOptions {
+    ReportOptions {
+        client_name: "Example Client Ltd".to_string(),
+        ..ReportOptions::default()
+    }
+}
+
 fn with_triage_log() -> ReportOptions {
     ReportOptions {
         triage_log: true,
-        ..ReportOptions::default()
+        ..base_options()
     }
 }
 
 #[test]
 fn a_package_carries_the_triage_log_only_when_asked_and_the_gate_clears_both() {
-    let default = package_with(&ReportOptions::default());
+    let default = package_with(&base_options());
     assert!(default.datasets.iter().all(|(p, _)| p != TRIAGE_LOG_CSV));
     release(default).expect("a package without the triage log clears the gate");
 
