@@ -3175,6 +3175,54 @@ green whatever the code does and inflates coverage, a real gap in the safety net
 running behavior. Grade `Defect`. Runs at write time (an agent writing a test with no assertion is
 exactly what the gate should bounce, and the fix is local).
 
+### Wave D and 22e build notes (2026-10-28): where the build completed or departed from the specs
+
+Built as `crates/checks/src/state_shape_checker/{mod,flags,derived,tests}.rs`,
+`needless_complexity_checker/{mod,ternary,optional_props,call_sites}.rs` with `tests/`, and
+`test_assertion_checker/{mod,words,ecma,python,rust}.rs` with `tests/`; a shared ECMAScript tree
+walker `extract/ecma_walk.rs`. Reused rather than copied: the clone detector's `classify_path` and
+a new `is_vendored_path` beside it, `one_import_path_checker::Model::origin` (the re-export
+canonicalisation, now `pub(crate)`), the dead-code checker's `Packages` (plus
+`declares_entry_points`, `is_external_specifier`) and `Conventions::framework_loads`, the
+ECMAScript `import_bindings`, and the Firebase `join_words`.
+
+- **UI-STATE-SHAPE-1.** Two traps found on real code and added: a copy named as lagging
+  (`prevValue`, `lastQuery`, `oldX`) and a plain mirror of one name into state that starts from a
+  different value (`useState(false)` + `setVisible(open)`, the CSS-transition trick) are never
+  reported, because the extra render can be the point. Smoke run on four public React
+  repositories: no finding; the two effect copies found by hand were editable copies with other
+  writers, which the setter guard keeps silent.
+- **STYLE-NEEDLESS-COMPLEXITY-1.** Added guards: a component file a framework's file-system
+  router loads (a Next.js `page`/`layout`, a Remix or TanStack route, Gatsby or Astro pages) is
+  never read, since the router is a caller no import shows; an import whose specifier does not
+  resolve and is not an external package (a declared dependency or a Node built-in, never one of
+  the repository's own workspace packages) and that imports one of the component's exported
+  names (any default import, for a default-exported component) makes the call sites unknowable,
+  and so does an unresolved namespace or dynamic import. Smoke run: 13 negated ternaries in
+  excalidraw and one optional prop in shadcn's taxonomy (`DashboardHeader.text`, passed at all six
+  call sites, still guarded by `{text && ...}`), all real.
+- **TESTING-MEANINGFUL-ASSERTION-1.**
+  - Python test modules are the ones the runners collect (`test*.py`, `*_test.py`), not every
+    file under a test folder (a helper module there is not collected).
+  - The `autouse` guard is narrowed to fixtures that might assert, and widened to every fixture a
+    test requests, transitively (a teardown assertion covers every test that requests the fixture
+    or a fixture built on it). The first version skipped every module under an `autouse` fixture,
+    which silenced requests and flask entirely; flask's `leak_detector` does assert on teardown
+    and still silences its suite, requests' environment-cleaning fixture does not.
+  - Rust has no import resolution here, so a call to a free function defined outside the file
+    counts as a possible helper (axum's `crate::run_ui_tests(...)` drives trybuild, which
+    asserts). Only constructors (`Some(x)`, `Ok(())`), associated functions of a type or a
+    primitive (`Router::new()`, `usize::from`), the standard library and `drop` are read as not
+    asserting.
+  - JavaScript end-to-end driver commands (`cy`, `browser`, `page`, `$`, `element`, `driver`) count
+    as assertions: they wait for the page and fail when it does not match. A helper name declared
+    more than once is followed into every declaration.
+  - Smoke run: 9 tests in requests, 5 in react-testing-library, 1 in ripgrep and 7 in this
+    repository, every one a test with no assertion. Several are deliberate "does not raise" or
+    "compiles" tests (`let _: Option<T> = None;`); the rule reports them as stated, since a test
+    that only shows code does not fail has no assertion. Whether such tests deserve an exemption
+    is an owner question.
+
 ## Scope note
 Dead-code, one-import-path, shared-constant, state-shape, needless-complexity are **deterministic**
 (no model, no token cost). Single-source/naming/shared-primitive add ONE shared clone pass and an

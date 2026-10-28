@@ -77,10 +77,12 @@ canonical-symbol algorithm.
    JSX + hook bodies; judgment "same mechanism." Safe twin: already-composed variants.
 
 ### Wave D — judgment-with-edge + the last deterministic
-7. **UI-STATE-SHAPE-1** (J, D edge) — one status, one variable. Deterministic candidates:
+7. **UI-STATE-SHAPE-1** (J, D edge) — one status, one variable. BUILT 2026-10-28 on
+   `cloud/w29-wave-d` (spec and build notes: the "Wave D and 22e" sections of the design doc). Deterministic candidates:
    `useState<boolean>` pairs set in one handler; `useEffect` bodies that only call a setter from
    props/state (derived-state-in-effect). Safe twin: independent booleans (genuinely separate).
-9. **STYLE-NEEDLESS-COMPLEXITY-1** (D) — negated ternaries / needless optional props. Detector:
+9. **STYLE-NEEDLESS-COMPLEXITY-1** (D) — negated ternaries / needless optional props. BUILT
+   2026-10-28 on `cloud/w29-wave-d`, together with 22e TESTING-MEANINGFUL-ASSERTION-1. Detector:
    tree-sitter (the call-site check needs the import graph from rule 1). Safe twin: a ternary that
    is genuinely clearer than the un-negated form.
 
