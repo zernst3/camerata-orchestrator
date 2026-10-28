@@ -1,5 +1,5 @@
 id = "JAVASCRIPT-ANGULAR-SUBSCRIPTION-CLEANUP-1"
-version = 2
+version = 3
 title = "Observable subscriptions are cleaned up using takeUntilDestroyed or the async pipe"
 domain = "javascript:angular"
 layer = "framework"
@@ -11,11 +11,11 @@ verification = "grounded"
 
 [[sources]]
 url = "https://angular.dev/ecosystem/rxjs-interop/take-until-destroyed"
-title = "Angular — Unsubscribing with takeUntilDestroyed"
+title = "Angular: Unsubscribing with takeUntilDestroyed"
 
 [[sources]]
 url = "https://github.com/angular-eslint/angular-eslint/blob/main/packages/eslint-plugin/README.md"
-title = "angular-eslint — no-implicit-take-until-destroyed (requires an explicit DestroyRef when takeUntilDestroyed() is called outside an injection context; it does not itself enforce that a subscription is cleaned up at all)"
+title = "angular-eslint: no-implicit-take-until-destroyed (requires an explicit DestroyRef when takeUntilDestroyed() is called outside an injection context; it does not itself enforce that a subscription is cleaned up at all)"
 linter = "@angular-eslint/no-implicit-take-until-destroyed"
 
 [decision]

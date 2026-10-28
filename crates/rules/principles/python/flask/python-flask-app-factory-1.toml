@@ -1,5 +1,5 @@
 id = "PYTHON-FLASK-APP-FACTORY-1"
-version = 1
+version = 2
 title = "Flask apps are created with an application factory and blueprints, not a module-level app instance"
 domain = "python:flask"
 layer = "framework"
@@ -37,8 +37,8 @@ why = "MethodView is a valid pattern for resource-oriented endpoints but does no
 
 [[sources]]
 url = "https://flask.palletsprojects.com/en/stable/patterns/appfactories/"
-title = "Flask docs — Application Factories (create_app pattern, testing with multiple instances)"
+title = "Flask docs: Application Factories (create_app pattern, testing with multiple instances)"
 
 [[sources]]
 url = "https://flask.palletsprojects.com/en/stable/blueprints/"
-title = "Flask docs — Modular Applications with Blueprints"
+title = "Flask docs: Modular Applications with Blueprints"

@@ -1,5 +1,5 @@
 id = "JAVA-TESTING-MOCK-BOUNDARIES-1"
-version = 1
+version = 2
 title = "Mocks are used only at architectural boundaries (external services, repositories, HTTP clients); concrete classes and value objects are never mocked"
 domain = "java:testing"
 layer = "language"
@@ -17,11 +17,11 @@ why = "Mocking a collaborator couples the test to the internal implementation (h
 
 [[sources]]
 url = "https://site.mockito.org/javadoc/current/org/mockito/Mockito.html"
-title = "Mockito Javadoc — Mockito class: 'please don't mock the List class; use a real instance instead' + RETURNS_DEEP_STUBS anti-pattern warning"
+title = "Mockito Javadoc: Mockito class: 'please don't mock the List class; use a real instance instead' + RETURNS_DEEP_STUBS anti-pattern warning"
 
 [[sources]]
 url = "https://javadoc.io/doc/org.mockito/mockito-core/latest/org/mockito/Mockito.html"
-title = "Mockito Core Javadoc (latest) — mocking guidelines and anti-patterns"
+title = "Mockito Core Javadoc (latest): mocking guidelines and anti-patterns"
 
 [[option]]
 id = "mock-only-external-boundaries"
@@ -35,7 +35,7 @@ why = "Mocks at boundaries make unit tests fast and deterministic; real instance
 [[option]]
 id = "mock-all-collaborators"
 label = "mock every collaborator regardless of type"
-directive = "Every dependency of the class under test — including concrete utility classes, collections, domain objects — is replaced with a Mockito mock."
+directive = "Every dependency of the class under test (including concrete utility classes, collections, domain objects) is replaced with a Mockito mock."
 why = "Couples tests to internal implementation rather than observable behavior. Any internal refactor breaks tests. Mockito explicitly warns against mocking concrete classes and value objects."
 
 [[option]]

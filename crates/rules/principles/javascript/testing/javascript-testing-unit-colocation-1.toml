@@ -1,5 +1,5 @@
 id = "JAVASCRIPT-TESTING-UNIT-COLOCATION-1"
-version = 2
+version = 3
 title = "Unit test files live next to the source file they test, named <module>.test.ts"
 domain = "javascript:testing"
 layer = "language"
@@ -12,12 +12,12 @@ verification = "grounded"
 
 [[sources]]
 url = "https://jestjs.io/docs/configuration#testmatch-arraystring"
-title = "Jest configuration — testMatch"
+title = "Jest configuration: testMatch"
 linter = "jest: testMatch default glob"
 
 [[sources]]
 url = "https://vitest.dev/config/include"
-title = "Vitest configuration — include default pattern"
+title = "Vitest configuration: include default pattern"
 linter = "vitest: include default glob"
 
 [decision]

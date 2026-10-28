@@ -1,5 +1,5 @@
 id = "CSHARP-TESTING-AAA-STRUCTURE-1"
-version = 1
+version = 2
 title = "Every test body follows Arrange-Act-Assert structure with one Act and one Assert per test"
 domain = "csharp:testing"
 layer = "language"
@@ -41,4 +41,4 @@ why = "Logic in tests introduces the risk of bugs in the test itself; a bug in t
 
 [[sources]]
 url = "https://learn.microsoft.com/en-us/dotnet/core/testing/unit-testing-best-practices"
-title = "Best practices for writing unit tests — Arrange your tests; Avoid multiple Act tasks; Avoid coding logic in unit tests"
+title = "Best practices for writing unit tests: Arrange your tests; Avoid multiple Act tasks; Avoid coding logic in unit tests"

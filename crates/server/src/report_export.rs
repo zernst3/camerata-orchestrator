@@ -98,7 +98,17 @@ pub struct ReportOptions {
     /// provenance. Server-populated, never client-supplied (`serde(skip)`).
     #[serde(skip)]
     pub model: Option<crate::ModelRecord>,
+    /// H4: also export the triage log (per rule, what the AI pass proposed, what review kept
+    /// and threw out, and why) as a workbook sheet and `csv/triage-log.csv`. OFF by default:
+    /// the export dialog (or `camerata inspect` via [`EXPORT_TRIAGE_LOG_ENV`]) asks for it.
+    /// See `xlsx_export::triage_log`.
+    #[serde(default)]
+    pub triage_log: bool,
 }
+
+/// Env var that turns the optional triage log on for an export when set to `1` or `true`
+/// (folded in by [`ReportOptions::apply_env_defaults`], like the brand). Unset means off.
+pub const EXPORT_TRIAGE_LOG_ENV: &str = "CAMERATA_EXPORT_TRIAGE_LOG";
 
 /// Env var carrying the STANDING default for [`ReportOptions::brand`] when the export dialog
 /// doesn't POST one. Brand-neutral name (not `CANTUS_*`) so a future Camerata licensee sets
@@ -184,7 +194,18 @@ impl ReportOptions {
             .unwrap_or_default();
         self.prepared_by =
             resolve_prepared_by(self, std::env::var(REPORT_PREPARED_BY_ENV).ok().as_deref());
+        self.triage_log = self.triage_log
+            || triage_log_env_on(std::env::var(EXPORT_TRIAGE_LOG_ENV).ok().as_deref());
     }
+}
+
+/// Whether the [`EXPORT_TRIAGE_LOG_ENV`] value turns the triage log on: `1` or `true` (any
+/// case), nothing else. Split out so it is testable without touching the process environment.
+pub(crate) fn triage_log_env_on(value: Option<&str>) -> bool {
+    value.is_some_and(|v| {
+        let v = v.trim();
+        v == "1" || v.eq_ignore_ascii_case("true")
+    })
 }
 
 /// C4-R3: zero-width and byte-order-mark code points. None of these carry any visual
@@ -691,6 +712,15 @@ pub struct CoverJson {
     pub audit_model: Option<String>,
     pub calibration_model: Option<String>,
     pub camerata_version: String,
+    /// The git commit the exporting engine was built from ([`crate::ENGINE_COMMIT`]). `None`
+    /// for a build outside a git checkout. Rendered in the PDF methodology and carried in
+    /// `findings.json`'s `provenance`.
+    pub engine_commit: Option<String>,
+    /// The rule-library lock hash ([`camerata_rules::corpus_version`]: the digest over every
+    /// rule's id, version and content hash, exactly the content of `CORPUS_LOCK.toml`). The
+    /// same value as `manifest.json`'s `inspection.corpus_version` and the README's "Corpus
+    /// version" line. `None` when the export ran without a loaded corpus.
+    pub corpus_version: Option<String>,
     /// `%Y-%m-%d %H:%M UTC` (M5) — of when this PDF was generated (NOT the scan time —
     /// that's `audited_refs`/provenance; this is "as-of" for the export itself).
     pub generated_at: String,
@@ -1258,6 +1288,9 @@ pub struct AuditReportJson {
     pub rules_not_run: Vec<ExcludedRuleJson>,
     pub dependency_snapshot: DependencySnapshotJson,
     pub methodology: MethodologyJson,
+    /// H4: what this scan did not cover, by pass and by path (see [`coverage_gaps`]). Rendered
+    /// in the PDF's Coverage block, the workbook's Coverage sheet and `findings.json`.
+    pub coverage_gaps: CoverageGapsJson,
     pub disclaimer: String,
 }
 
@@ -4866,6 +4899,8 @@ pub fn build_report_json(
         audit_model: report.provenance.audit_model.clone(),
         calibration_model: report.provenance.calibration_model.clone(),
         camerata_version: report.provenance.camerata_version.clone(),
+        engine_commit: crate::ENGINE_COMMIT.map(str::to_string),
+        corpus_version: corpus.map(camerata_rules::corpus_version),
         // The SCAN time, not the wall clock at serialization — see `generated_at_label`.
         generated_at: generated_at_label(&report.provenance),
         client_name: clean_client_name(&opts.client_name),
@@ -4949,6 +4984,7 @@ pub fn build_report_json(
         rules_not_run,
         dependency_snapshot,
         methodology,
+        coverage_gaps: coverage_gaps::coverage_gaps(report),
         disclaimer: AUDIT_REPORT_DISCLAIMER.to_string(),
     }
 }
@@ -5159,12 +5195,21 @@ async fn run_typst(data_json: &str, fonts: FontSources) -> anyhow::Result<(Vec<u
         .context("typst reported success but report.pdf was not found")
 }
 
+pub mod coverage_gaps;
+pub use coverage_gaps::{CoverageGapsJson, SkippedFileJson};
+
+#[cfg(test)]
+mod coverage_gaps_tests;
+
+#[cfg(test)]
+mod engine_identity_tests;
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::onboard::{AuditedRef, CoverageNote, LanguageVolume, ScanProvenance};
 
-    fn finding(rule_id: &str, path: &str, line: usize, severity: &str) -> Finding {
+    pub(super) fn finding(rule_id: &str, path: &str, line: usize, severity: &str) -> Finding {
         Finding {
             repo: "owner/repo".to_string(),
             path: path.to_string(),
@@ -5177,7 +5222,7 @@ mod tests {
         }
     }
 
-    fn report_with(findings: Vec<Finding>, audited_rule_ids: Vec<&str>) -> ScanReport {
+    pub(super) fn report_with(findings: Vec<Finding>, audited_rule_ids: Vec<&str>) -> ScanReport {
         ScanReport {
             repos: vec!["owner/repo".to_string()],
             stacks: Vec::new(),
@@ -5256,7 +5301,7 @@ mod tests {
         }
     }
 
-    fn empty_opts() -> ReportOptions {
+    pub(super) fn empty_opts() -> ReportOptions {
         ReportOptions::default()
     }
 
@@ -10873,6 +10918,7 @@ mod tests {
             repo: "acme/widgets".to_string(),
             pass: "rule-alternative recommendations".to_string(),
             reason: "Claude CLI timed out after 300s (no output).".to_string(),
+            files_not_reviewed: 0,
         }];
         let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
         assert_eq!(json.executive_summary.failed_passes.len(), 1);
@@ -11393,7 +11439,7 @@ mod tests {
     /// Best-effort `typst` presence check for the compile test's skip gate (mirrors the
     /// same PATH lookup `compile_pdf` itself relies on via `Command::new("typst")`, just
     /// synchronous and side-effect-free here).
-    fn which_typst() -> Option<()> {
+    pub(super) fn which_typst() -> Option<()> {
         camerata_test_env::typst_on_path().then_some(())
     }
 
@@ -12370,6 +12416,7 @@ mod tests {
             repo: "acme/widgets".to_string(),
             pass: "rule-alternative recommendations".to_string(),
             reason: "Claude CLI timed out after 300s (no output).".to_string(),
+            files_not_reviewed: 0,
         }];
         let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
 
@@ -12487,6 +12534,7 @@ mod tests {
             reason: "the calibration pass returned no usable remediation-effort estimate for \
                      any finding this run"
                 .to_string(),
+            files_not_reviewed: 0,
         }];
         let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
 

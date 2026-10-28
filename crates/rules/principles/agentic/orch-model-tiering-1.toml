@@ -1,6 +1,6 @@
 id = "ORCH-MODEL-TIERING-1"
-version = 2
-title = "Model tiering — cheap for bulk, top-tier for decisions"
+version = 3
+title = "Model tiering: cheap for bulk, top-tier for decisions"
 domain = "agentic"
 layer = "universal"
 enforcement = "prose"
@@ -11,7 +11,7 @@ verification = "grounded"
 
 [[sources]]
 url = "AGENTS.md"
-title = "AGENTS.md — ORCH-MODEL-TIERING-1 (model tiering)"
+title = "AGENTS.md: ORCH-MODEL-TIERING-1 (model tiering)"
 
 [[sources]]
 url = "docs/decisions/2026-06-20_deterministic_model_tiering.md"
@@ -19,7 +19,7 @@ title = "Decision: Deterministic model-tiering for the governed fleet (Capabilit
 
 [[sources]]
 url = "https://docs.anthropic.com/en/docs/about-claude/models/choosing-a-model"
-title = "Anthropic — Choosing the right model"
+title = "Anthropic: Choosing the right model"
 
 [decision]
 question = "How should models be tiered?"

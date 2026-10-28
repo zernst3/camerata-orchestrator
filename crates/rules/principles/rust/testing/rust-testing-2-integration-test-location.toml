@@ -1,5 +1,5 @@
 id = "RUST-TESTING-2"
-version = 2
+version = 3
 title = "Integration tests live in a top-level tests/ directory; each file is a separate crate"
 domain = "rust:testing"
 layer = "language"
@@ -11,11 +11,11 @@ verification = "grounded"
 
 [[sources]]
 url = "https://doc.rust-lang.org/book/ch11-03-test-organization.html"
-title = "The Rust Book — Ch 11.3: Test Organization (Integration Tests)"
+title = "The Rust Book: Ch 11.3: Test Organization (Integration Tests)"
 
 [[sources]]
 url = "https://doc.rust-lang.org/rust-by-example/testing/integration_testing.html"
-title = "Rust By Example — Integration Testing"
+title = "Rust By Example: Integration Testing"
 
 [decision]
 question = "Where do integration tests live in the project?"

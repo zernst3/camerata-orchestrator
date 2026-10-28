@@ -1,5 +1,5 @@
 id = "RUST-ENTITIES-4"
-version = 2
+version = 3
 title = "FK relations declared on BOTH sides"
 domain = "rust:seaorm"
 layer = "library"
@@ -46,8 +46,8 @@ why = "Leaves the FK graph perpetually incomplete: each new feature that wants a
 
 [[sources]]
 url = "https://www.sea-ql.org/SeaORM/docs/relation/one-to-many/"
-title = "SeaORM docs: One to Many — belongs_to on child, has_many on parent"
+title = "SeaORM docs: One to Many: belongs_to on child, has_many on parent"
 
 [[sources]]
 url = "https://www.sea-ql.org/SeaORM/docs/relation/one-to-one/"
-title = "SeaORM docs: One to One — always define belongs_to on the entity with the FK"
+title = "SeaORM docs: One to One: always define belongs_to on the entity with the FK"

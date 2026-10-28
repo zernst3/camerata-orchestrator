@@ -1,5 +1,5 @@
 id = "ARCH-CURRENCY-CONSISTENCY-1"
-version = 2
+version = 3
 title = "A payment amount's currency code and minor-unit denomination stay consistent from authorization through storage and comparison"
 domain = "api-layer"
 layer = "universal"
@@ -12,7 +12,7 @@ verification = "grounded"
 
 [[sources]]
 url = "https://docs.stripe.com/currencies#zero-decimal"
-title = "Stripe — Currencies: zero-decimal currencies (e.g. JPY, KRW) take the integer charge amount directly, with no x100 minor-unit multiplication — a documented, frequently-mishandled exception to the usual minor-unit convention"
+title = "Stripe: Currencies, zero-decimal currencies (e.g. JPY, KRW) take the integer charge amount directly, with no x100 minor-unit multiplication (a documented, frequently-mishandled exception to the usual minor-unit convention)"
 
 [[sources]]
 url = "https://cwe.mitre.org/data/definitions/704.html"
@@ -62,4 +62,4 @@ id = "assume-uniform-minor-unit-and-single-currency-throughout"
 violates = true
 label = "Apply the standard x100 minor-unit conversion uniformly and assume every amount is in the same currency, with no explicit tracking"
 directive = "amounts are converted to the payment provider's expected format using a single, uniform multiplication (e.g. always x100) regardless of the specific currency involved, and cross-currency comparisons or combinations are performed on raw numeric values with no currency tag or conversion step"
-why = "Rejected: a uniform x100 rule is wrong for every zero-decimal currency the project supports (silently 100x-ing the charge), and comparing or summing raw numbers across currencies with no conversion treats, say, 100 JPY and 100 USD as the same value — both failure modes are silent and only surface once an amount is visibly wrong to a customer or at reconciliation, by which point the charge or comparison has already completed."
+why = "Rejected: a uniform x100 rule is wrong for every zero-decimal currency the project supports (silently 100x-ing the charge), and comparing or summing raw numbers across currencies with no conversion treats, say, 100 JPY and 100 USD as the same value: both failure modes are silent and only surface once an amount is visibly wrong to a customer or at reconciliation, by which point the charge or comparison has already completed."

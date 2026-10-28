@@ -1,5 +1,5 @@
 id = "JAVASCRIPT-VUE-PROPS-DOWN-EVENTS-UP-1"
-version = 2
+version = 3
 title = "Props flow down; events flow up; avoid direct parent-to-child method calls and shared mutable state"
 domain = "javascript:vue"
 layer = "framework"
@@ -11,15 +11,15 @@ verification = "grounded"
 
 [[sources]]
 url = "https://vuejs.org/guide/components/props.html"
-title = "Vue.js — Components: Props (one-way data flow)"
+title = "Vue.js: Components: Props (one-way data flow)"
 
 [[sources]]
 url = "https://vuejs.org/guide/components/events.html"
-title = "Vue.js — Component Events (emitting events up)"
+title = "Vue.js: Component Events (emitting events up)"
 
 [[sources]]
 url = "https://eslint.vuejs.org/rules/no-mutating-props.html"
-title = "eslint-plugin-vue — vue/no-mutating-props"
+title = "eslint-plugin-vue: vue/no-mutating-props"
 linter = "eslint-plugin-vue: vue/no-mutating-props"
 
 [decision]

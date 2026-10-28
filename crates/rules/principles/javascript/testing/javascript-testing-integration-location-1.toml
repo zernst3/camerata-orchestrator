@@ -1,5 +1,5 @@
 id = "JAVASCRIPT-TESTING-INTEGRATION-LOCATION-1"
-version = 2
+version = 3
 title = "Integration tests live in a dedicated __tests__/integration/ or tests/integration/ directory, not co-located"
 domain = "javascript:testing"
 layer = "language"
@@ -12,15 +12,15 @@ verification = "grounded"
 
 [[sources]]
 url = "https://jestjs.io/docs/configuration#testpathignorepatterns-arraystring"
-title = "Jest configuration — testPathIgnorePatterns"
+title = "Jest configuration: testPathIgnorePatterns"
 
 [[sources]]
 url = "https://jestjs.io/docs/configuration#projects-arraystring--projectconfig"
-title = "Jest configuration — projects (split unit vs integration)"
+title = "Jest configuration: projects (split unit vs integration)"
 
 [[sources]]
 url = "https://vitest.dev/config/include"
-title = "Vitest configuration — include/exclude for project-level splits"
+title = "Vitest configuration: include/exclude for project-level splits"
 
 [decision]
 question = "Where do integration test files live relative to unit tests and source code?"
@@ -30,7 +30,7 @@ why = "An integration test exercises multiple modules working together (e.g. a s
 [[option]]
 id = "integration-tests-live-in-dedicated-integration-directory"
 label = "Integration tests live in a dedicated __tests__/integration/ or tests/integration/ directory"
-directive = "Integration tests — tests that span more than one real module and may require a database, HTTP server, or message queue — are placed in a dedicated tests/integration/ (or __tests__/integration/) directory at the project root or the package root. They are excluded from the default unit-test Jest/Vitest run via testPathIgnorePatterns or a separate project config entry. A separate CI step or npm script (test:integration) invokes them explicitly."
+directive = "Integration tests (tests that span more than one real module and may require a database, HTTP server, or message queue) are placed in a dedicated tests/integration/ (or __tests__/integration/) directory at the project root or the package root. They are excluded from the default unit-test Jest/Vitest run via testPathIgnorePatterns or a separate project config entry. A separate CI step or npm script (test:integration) invokes them explicitly."
 remediation = """
 Move the integration test (one that spans more than one real module or needs a database, HTTP server, or queue) into the dedicated tests/integration/ (or __tests__/integration/) directory, out of the unit-test tree. Verify by confirming the fast unit-test run excludes this file and a separate integration-test command picks it up.
 """

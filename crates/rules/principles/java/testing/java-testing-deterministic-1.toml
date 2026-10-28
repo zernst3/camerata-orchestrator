@@ -1,5 +1,5 @@
 id = "JAVA-TESTING-DETERMINISTIC-1"
-version = 1
+version = 2
 title = "Tests are deterministic: no Thread.sleep(), no wall-clock time (use injected Clock), no uncontrolled randomness, no ordering dependencies between test methods"
 domain = "java:testing"
 layer = "language"
@@ -17,16 +17,16 @@ why = "A test that passes on one run and fails on the next (a 'flaky test') dest
 
 [[sources]]
 url = "https://spotbugs.readthedocs.io/en/stable/bugDescriptions.html#iju-assert-method-invoked-from-run-method"
-title = "SpotBugs — IJU_ASSERT_METHOD_INVOKED_FROM_RUN_METHOD: JUnit assertion in run() will not be noticed by JUnit (threading anti-pattern)"
+title = "SpotBugs: IJU_ASSERT_METHOD_INVOKED_FROM_RUN_METHOD: JUnit assertion in run() will not be noticed by JUnit (threading anti-pattern)"
 linter = "SpotBugs: IJU_ASSERT_METHOD_INVOKED_FROM_RUN_METHOD"
 
 [[sources]]
 url = "https://docs.junit.org/5.14.1/writing-tests/annotations.html"
-title = "JUnit 5 User Guide — Annotations (@BeforeEach resets per-test state; @AfterEach cleans up)"
+title = "JUnit 5 User Guide: Annotations (@BeforeEach resets per-test state; @AfterEach cleans up)"
 
 [[sources]]
 url = "https://martinfowler.com/articles/nonDeterminism.html"
-title = "Martin Fowler — Eradicating Non-Determinism in Tests (time, ordering, and randomness as the classic sources of flakiness)"
+title = "Martin Fowler: Eradicating Non-Determinism in Tests (time, ordering, and randomness as the classic sources of flakiness)"
 
 [[option]]
 id = "no-sleep-no-clock-no-random"

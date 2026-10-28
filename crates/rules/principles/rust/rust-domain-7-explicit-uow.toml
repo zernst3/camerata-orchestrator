@@ -1,5 +1,5 @@
 id = "RUST-DOMAIN-7"
-version = 1
+version = 2
 title = "How transactional posture reaches the repository: explicit UnitOfWork param, generic Tx, ambient context, or concrete ORM type"
 domain = "rust"
 layer = "language"
@@ -18,7 +18,7 @@ verification = "grounded"
 
 [[sources]]
 url = "https://martinfowler.com/eaaCatalog/unitOfWork.html"
-title = "Martin Fowler — Patterns of Enterprise Application Architecture: Unit of Work (grounds the general pattern of tracking and coordinating a transaction's writes; the specific Option<&dyn UnitOfWork> + Any-downcast concretion is this project's own Rust encoding of it, not something PoEAA itself specifies)"
+title = "Martin Fowler: Patterns of Enterprise Application Architecture: Unit of Work (grounds the general pattern of tracking and coordinating a transaction's writes; the specific Option<&dyn UnitOfWork> + Any-downcast concretion is this project's own Rust encoding of it, not something PoEAA itself specifies)"
 
 [decision]
 question = "How does a repository method participate in a multi-write transaction: an explicit domain-defined UnitOfWork parameter, a generic Tx type parameter, an ambient closure-based context, or the concrete ORM transaction type in the signature?"

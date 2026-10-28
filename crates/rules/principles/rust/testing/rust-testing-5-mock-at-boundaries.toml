@@ -1,5 +1,5 @@
 id = "RUST-TESTING-5"
-version = 2
+version = 3
 title = "Mocking is done at trait boundaries; concrete dependencies are injected as trait objects or generics"
 domain = "rust:testing"
 layer = "language"
@@ -11,11 +11,11 @@ verification = "grounded"
 
 [[sources]]
 url = "https://doc.rust-lang.org/book/ch10-02-traits.html"
-title = "The Rust Book — Ch 10.2: Traits as Parameters (trait-based dependency injection)"
+title = "The Rust Book: Ch 10.2: Traits as Parameters (trait-based dependency injection)"
 
 [[sources]]
 url = "https://docs.rs/mockall/latest/mockall/"
-title = "mockall — Automock attribute for generating mock implementations of traits"
+title = "mockall: Automock attribute for generating mock implementations of traits"
 
 [decision]
 question = "How are external dependencies replaced with test doubles in tests?"

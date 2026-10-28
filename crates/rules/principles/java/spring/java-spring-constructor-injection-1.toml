@@ -1,5 +1,5 @@
 id = "JAVA-SPRING-CONSTRUCTOR-INJECTION-1"
-version = 1
+version = 2
 title = "Dependencies are injected via constructor parameters and stored in final fields; @Autowired field injection is forbidden"
 domain = "java:spring"
 layer = "framework"
@@ -24,7 +24,7 @@ why = "Constructor injection makes every dependency explicit in the class's publ
 
 [[sources]]
 url = "https://docs.spring.io/spring-framework/reference/core/beans/dependencies/factory-collaborators.html"
-title = "Spring Framework Reference — Constructor-based Dependency Injection (the Spring team's own recommended approach; Checkstyle's VisibilityModifier enforces private/final fields generally but does not detect @Autowired field injection specifically, so it is not cited as the enforcement mechanism here)"
+title = "Spring Framework Reference: Constructor-based Dependency Injection (the Spring team's own recommended approach; Checkstyle's VisibilityModifier enforces private/final fields generally but does not detect @Autowired field injection specifically, so it is not cited as the enforcement mechanism here)"
 
 [[option]]
 id = "constructor-injection-final-fields"

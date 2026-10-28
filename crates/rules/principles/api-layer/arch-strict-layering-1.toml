@@ -1,6 +1,6 @@
 id = "ARCH-STRICT-LAYERING-1"
-version = 2
-title = "Strict layering — services orchestrate, repositories own data access"
+version = 3
+title = "Strict layering: services orchestrate, repositories own data access"
 domain = "api-layer"
 layer = "universal"
 enforcement = "architectural"
@@ -16,15 +16,15 @@ verification = "grounded"
 
 [[sources]]
 url = "docs/decisions/2026-06-19_ast_architectural_rule_tier.md"
-title = "Decision: An AST-checkable architectural enforcement tier — ARCH-HANDLER-NO-DB-1 described as AST-checkable companion to ARCH-STRICT-LAYERING-1"
+title = "Decision: An AST-checkable architectural enforcement tier: ARCH-HANDLER-NO-DB-1 described as AST-checkable companion to ARCH-STRICT-LAYERING-1"
 
 [[sources]]
 url = "https://martinfowler.com/eaaCatalog/"
-title = "Martin Fowler — Patterns of Enterprise Application Architecture (Layering, ch. 1)"
+title = "Martin Fowler: Patterns of Enterprise Application Architecture (Layering, ch. 1)"
 
 [[sources]]
 url = "https://www.wiley.com/en-us/Pattern+Oriented+Software+Architecture,+Volume+1,+A+System+of+Patterns-p-9780471958697"
-title = "Buschmann et al. — Pattern-Oriented Software Architecture, Volume 1: A System of Patterns (the Layers pattern)"
+title = "Buschmann et al.: Pattern-Oriented Software Architecture, Volume 1: A System of Patterns (the Layers pattern)"
 
 [decision]
 question = "How is code organized into layers, and where does business logic live relative to data access?"
@@ -33,7 +33,7 @@ why = "Prevents business logic hiding inside the query layer; keeps each layer t
 
 [[option]]
 id = "strict-layering-services-orchestrate-repositories-own-data-access"
-label = "Strict layering — services orchestrate, repositories own data access"
+label = "Strict layering: services orchestrate, repositories own data access"
 directive = "Controllers handle HTTP only; services hold framework-agnostic business logic; repositories own all DB query calls. Enforce the boundary with lint (block direct DB access outside the data layer), with the AST checks in `arch-handler-no-db-1` and `arch-no-cross-boundary-imports-1` as the concrete enforcement mechanisms. Exception: transaction flow control belongs in services."
 remediation = """
 Move the database access found in the controller or service into a repository, keep business logic in the service layer, and keep the controller limited to HTTP handling. Add or confirm the lint/AST checks (arch-handler-no-db-1 and arch-no-cross-boundary-imports-1) run in CI to keep the boundary enforced going forward. Verify by confirming the controller and service in question contain no direct DB query calls and the lint check passes.
@@ -50,6 +50,6 @@ why = "Mixing layers leaks business logic into the query layer, where it becomes
 
 [[option]]
 id = "vertical-slice-architecture-organize-by-feature"
-label = "vertical-slice architecture — organize by feature/use-case, not by horizontal layer"
+label = "vertical-slice architecture: organize by feature/use-case, not by horizontal layer"
 directive = "Organize code by feature or use-case rather than by horizontal layer: each slice (e.g. 'create-order', 'invite-member') owns its own handler, logic, and data-access code end to end, instead of routing every feature through a project-wide controllers/services/repositories split. Cross-cutting infrastructure (DB client setup, auth middleware) may still be shared, but business logic and query calls for a given feature live together in that feature's slice."
 why = "Keeps everything needed to understand or change one feature in a small number of co-located files, so there is less cross-file navigation per change and a whole feature can be deleted cleanly by deleting its slice. The trade-off is real: infrastructure code (query builders, validation helpers, mapping logic) tends to be duplicated across slices instead of centralized in one repository layer, and the horizontal-layering benefit of swapping an entire layer's implementation in one place (e.g. replacing the persistence library for every aggregate at once) is lost because persistence logic is scattered across slices rather than concentrated in a repository tier."

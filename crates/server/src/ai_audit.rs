@@ -84,7 +84,40 @@ pub struct FailedPass {
     /// The error text, verbatim (e.g. the CLI timeout message), so the operator sees the
     /// real reason rather than a generic placeholder.
     pub reason: String,
+    /// How many files this pass was shown and therefore did NOT review, for a scan pass (a
+    /// file chunk x rule batch). Zero for a pass that is not over files (the recommendation,
+    /// estimate and fix passes). `serde(default)` so a report persisted before this existed
+    /// still loads. Rendered under Coverage by [`Self::coverage_line`].
+    #[serde(default)]
+    pub files_not_reviewed: usize,
 }
+
+impl FailedPass {
+    /// The Coverage line for this failed pass: `"<repo>, <pass>: pass failed, N files not
+    /// reviewed by the AI pass"`. A pass over no files states only that it failed. The full
+    /// reason stays in the methodology disclosure; this is the one-line coverage fact.
+    pub fn coverage_line(&self) -> String {
+        if self.files_not_reviewed == 0 {
+            return format!("{}, {}: pass failed", self.repo, self.pass);
+        }
+        let files = if self.files_not_reviewed == 1 {
+            "1 file".to_string()
+        } else {
+            format!("{} files", self.files_not_reviewed)
+        };
+        format!(
+            "{}, {}: pass failed, {files} not reviewed by the AI pass",
+            self.repo, self.pass
+        )
+    }
+}
+
+/// How many times a scan pass whose reply is MALFORMED (complete, not cut off, but holding no
+/// JSON object the parser can read) is sent again before the pass is declared failed. A
+/// malformed reply is never parsed as "no findings": it either recovers within this bound or
+/// becomes a [`FailedPass`] naming the files it did not review. Kept small because the same
+/// prompt tends to fail the same way and every retry is billed.
+pub(crate) const MALFORMED_REPLY_RETRIES: usize = 2;
 
 /// One scan pass (a file chunk x rule batch) that produced NO answer, and why. Collected by
 /// every pass runner ([`run_passes`], [`run_passes_batch`], [`run_routed_passes`],
@@ -97,6 +130,9 @@ struct PassFailure {
     pass: String,
     /// The error text (for a refusal, it says so).
     error: String,
+    /// How many files the failed pass was shown (its chunk), so the disclosure can say how
+    /// many went unreviewed. Zero when the pass is not over a file chunk.
+    files: usize,
 }
 
 impl PassFailure {
@@ -112,6 +148,7 @@ impl PassFailure {
         Self {
             pass: format!("{label} {}/{n_c} · rules {}/{n_b}", ci + 1, bi + 1),
             error: error.to_string(),
+            files: 0,
         }
     }
 
@@ -120,7 +157,14 @@ impl PassFailure {
         Self {
             pass,
             error: error.to_string(),
+            files: 0,
         }
+    }
+
+    /// The same failure, recording that the pass was shown `files` files.
+    fn with_files(mut self, files: usize) -> Self {
+        self.files = files;
+        self
     }
 }
 
@@ -150,6 +194,7 @@ fn failed_pass_rows(repo: &str, answered: usize, failures: &[PassFailure]) -> Ve
                  pass would have produced are missing)",
                 batch_mode::disclosable_error(&f.error)
             ),
+            files_not_reviewed: f.files,
         })
         .collect()
 }
@@ -378,6 +423,23 @@ impl UsageMeter {
         self.controls
             .max_cost_usd
             .is_some_and(|cap| self.spent_usd() >= cap)
+    }
+
+    /// True when one MORE call from a pass that already holds its permit would go past the
+    /// limit: the same test [`Self::admit`] applies to a new pass (spend so far plus one call's
+    /// reserve for every pass in flight, this one included, against the cap), without taking a
+    /// permit. A retry of a cut-off or malformed reply checks this before it is sent. Always
+    /// false with no cap; true once any call's cost was unknowable (the cap cannot be enforced).
+    pub fn retry_blocked(&self) -> bool {
+        let Some(cap) = self.controls.max_cost_usd else {
+            return false;
+        };
+        let budget = self.budget();
+        if budget.cost_unknown {
+            return true;
+        }
+        let reserve = self.max_call_micro_usd.load(Ordering::Relaxed) as f64 / 1_000_000.0;
+        self.spent_usd() + budget.in_flight.max(1) as f64 * reserve >= cap
     }
 
     fn budget(&self) -> std::sync::MutexGuard<'_, crate::cost_cap::BudgetState> {
@@ -2840,6 +2902,7 @@ pub async fn verify_findings(
             reason: "the calibration pass returned no usable remediation-effort estimate for \
                      any finding this run"
                 .to_string(),
+            files_not_reviewed: 0,
         });
     }
     // D5: the deterministic severity floor runs regardless of whether the LLM calibration
@@ -4462,6 +4525,7 @@ pub async fn generate_fix_specifics(
                  and {uncovered} had no authored remediation to fall back to either (routed \
                  to held for manual review rather than shipped with no fix at all)"
             ),
+            files_not_reviewed: 0,
         });
     }
 
@@ -4777,58 +4841,146 @@ async fn audit_pass(
     if let Some(m) = meter {
         m.record_stage(Stage::ScanPass, &resp);
     }
-    let resp = retry_truncated_scan_reply(llm, &req, resp, feedback, session, meter).await;
+    let ScanReply {
+        resp,
+        malformed_retries,
+        stopped_by_cap,
+    } = retry_unusable_scan_reply(
+        llm,
+        &req,
+        resp,
+        feedback,
+        session,
+        meter,
+        MALFORMED_REPLY_RETRIES,
+    )
+    .await;
+    // The spend limit stopped a retry the reply needed: the pass has no usable answer, and it
+    // says why rather than parsing a cut-off or malformed reply as "no findings".
+    if stopped_by_cap {
+        anyhow::bail!("{SPEND_LIMIT_BEFORE_RETRY}");
+    }
+    // A reply that is still not JSON is a FAILED pass, never "no findings": parsing it would
+    // return an empty list indistinguishable from a clean chunk. The caller records it as a
+    // failed pass naming the files it did not review.
+    if !resp.truncated && scan_output_is_malformed(&resp.text) {
+        anyhow::bail!("{}", malformed_reply_reason(1 + malformed_retries));
+    }
     let (f, p) = parse_ai_findings(repo, &resp.text, adopted);
     let needs = parse_needs_files(&resp.text);
     Ok((f, p, needs))
 }
 
-/// TRUNCATION-ONLY RETRY, the one function every scan pass uses: a real-time pass from
-/// [`audit_pass`] and a batch item from [`run_passes_batch`] alike. `resp` is the reply `req`
-/// got, already recorded on the meter.
+/// Why a pass failed when its spend limit stopped a retry the reply needed (the reply was cut
+/// off or malformed, and sending it again would have gone past the limit).
+pub(crate) const SPEND_LIMIT_BEFORE_RETRY: &str =
+    "spend limit reached before the reply could be retried";
+
+/// The failure reason for a scan reply that is still not JSON after `attempts` sends in all
+/// (the first plus any retries). States the attempt count so the operator sees how many calls
+/// were spent.
+pub(crate) fn malformed_reply_reason(attempts: usize) -> String {
+    format!(
+        "the model's reply was not valid JSON after {attempts} {}",
+        if attempts == 1 { "attempt" } else { "attempts" }
+    )
+}
+
+/// What [`retry_unusable_scan_reply`] hands back.
+struct ScanReply {
+    /// The reply the pass should use.
+    resp: crate::llm::LlmResponse,
+    /// How many malformed-reply retries were sent.
+    malformed_retries: usize,
+    /// True when the spend limit stopped a retry the reply needed (the reply is still cut off or
+    /// malformed). The caller decides what that means for its pass.
+    stopped_by_cap: bool,
+}
+
+/// THE RETRY STEP every scan pass uses: a real-time pass from [`audit_pass`] and a batch item
+/// from [`run_passes_batch`] alike. `resp` is the reply `req` got, already recorded on the meter.
 ///
-/// A reply cut off at `max_tokens` is the one failure a repeat can recover: the same request
-/// with a higher cap returns the whole answer, where the cut-off one parses to nothing and the
-/// chunk's findings are lost. Any OTHER unusable reply (a complete answer that is simply not
-/// JSON) is NOT retried: the same prompt at the same cap tends to return the same thing and the
-/// spend is paid again. At most one retry, sent in real time, and a retry that itself fails
-/// leaves the pass exactly as it was before this existed: the first response, parsed as it
-/// always was. Returns the reply the pass should use.
-async fn retry_truncated_scan_reply(
+/// 1. TRUNCATION RETRY. A reply cut off at `max_tokens` is recovered by the same request with a
+///    higher cap, which returns the whole answer where the cut-off one parses to nothing and the
+///    chunk's findings are lost. At most one retry, and a retry that itself fails leaves the
+///    first response in place.
+/// 2. MALFORMED-REPLY RETRY (H4). A complete reply (not cut off) that holds no JSON object the
+///    parser can read is sent again, at most `malformed_retries_allowed` times (a batch item
+///    passes zero: its reply is reported as a failed pass instead). A transport error on a retry
+///    ends the retries and leaves the malformed reply in place.
+///
+/// Every retry is one more billed call, so each checks the spend limit before sending: with the
+/// limit reached the retry is not sent and `stopped_by_cap` is set.
+async fn retry_unusable_scan_reply(
     llm: &dyn LlmPort,
     req: &LlmRequest,
     mut resp: crate::llm::LlmResponse,
     feedback: Option<(&crate::transcript::TranscriptStore, &str)>,
     session: &str,
     meter: Option<&UsageMeter>,
-) -> crate::llm::LlmResponse {
+    malformed_retries_allowed: usize,
+) -> ScanReply {
+    let cap_reached = || meter.is_some_and(UsageMeter::retry_blocked);
     let mut wasted_counted = false;
+    let mut stopped_by_cap = false;
     if resp.truncated && efficiency_of(meter).truncation_retry {
+        if cap_reached() {
+            stopped_by_cap = true;
+        } else {
+            if let Some(m) = meter {
+                m.record_wasted(Stage::ScanPass, &resp);
+            }
+            wasted_counted = true;
+            let retry_cap = req
+                .max_tokens
+                .saturating_mul(2)
+                .min(AGGREGATE_MAX_TOKENS_CEILING);
+            match send_audit_request(
+                llm,
+                req.clone().with_max_tokens(retry_cap),
+                feedback,
+                session,
+            )
+            .await
+            {
+                Ok(retry) => {
+                    if let Some(m) = meter {
+                        m.record_stage(Stage::ScanPass, &retry);
+                    }
+                    resp = retry;
+                    wasted_counted = false;
+                }
+                // The retry failed (possibly refused, and billed): the first reply stands.
+                Err(e) => meter_failed(meter, Stage::ScanPass, &e),
+            }
+        }
+    }
+    let mut malformed_retries = 0usize;
+    while !stopped_by_cap
+        && !resp.truncated
+        && scan_output_is_malformed(&resp.text)
+        && malformed_retries < malformed_retries_allowed
+    {
+        if cap_reached() {
+            stopped_by_cap = true;
+            break;
+        }
+        malformed_retries += 1;
         if let Some(m) = meter {
             m.record_wasted(Stage::ScanPass, &resp);
         }
-        wasted_counted = true;
-        let retry_cap = req
-            .max_tokens
-            .saturating_mul(2)
-            .min(AGGREGATE_MAX_TOKENS_CEILING);
-        match send_audit_request(
-            llm,
-            req.clone().with_max_tokens(retry_cap),
-            feedback,
-            session,
-        )
-        .await
-        {
+        match send_audit_request(llm, req.clone(), feedback, session).await {
             Ok(retry) => {
                 if let Some(m) = meter {
                     m.record_stage(Stage::ScanPass, &retry);
                 }
                 resp = retry;
-                wasted_counted = false;
             }
-            // The retry failed (possibly refused, and billed): the first reply stands.
-            Err(e) => meter_failed(meter, Stage::ScanPass, &e),
+            Err(e) => {
+                meter_failed(meter, Stage::ScanPass, &e);
+                wasted_counted = true;
+                break;
+            }
         }
     }
     // Whatever reply the pass ends up using: if it is still unusable (cut off again, or not JSON
@@ -4838,7 +4990,11 @@ async fn retry_truncated_scan_reply(
             m.record_wasted(Stage::ScanPass, &resp);
         }
     }
-    resp
+    ScanReply {
+        resp,
+        malformed_retries,
+        stopped_by_cap,
+    }
 }
 
 /// One scan-pass request: streamed into the transcript when feedback is present, else bounded
@@ -5227,7 +5383,8 @@ async fn run_passes(
                 requested.extend(needs);
                 ok += 1;
             }
-            Some(Err(e)) => failures.push(PassFailure::at(label, ci, n_c, bi, n_b, &e)),
+            Some(Err(e)) => failures
+                .push(PassFailure::at(label, ci, n_c, bi, n_b, &e).with_files(chunks[ci].len())),
             // Refused by the spend cap: already recorded as NOT RUN on the meter.
             None => {}
         }
@@ -5319,7 +5476,7 @@ where
 ///   failed poll or fetch AFTER a successful submit is retried a bounded number of times and,
 ///   if it still fails, disclosed as failed passes naming the batch id; the batch is never
 ///   resubmitted, because it may still be running and billed.
-/// * An item cut off at the output limit gets [`retry_truncated_scan_reply`], the real-time
+/// * An item cut off at the output limit gets [`retry_unusable_scan_reply`], the real-time
 ///   passes' own truncation retry (sent in real time, admitted under the spend limit).
 ///
 /// FALLBACK: without an API key this returns an error so the caller can say so.
@@ -5575,8 +5732,12 @@ async fn run_passes_batch(
                     }
                 };
                 let session = format!("audit-{repo}-batch-{}", w.custom_id);
+                // A batch item gets the truncation retry only: a reply that is complete but not
+                // JSON is reported by the reassembly as a failed pass naming its files.
                 let resp =
-                    retry_truncated_scan_reply(realtime, &w.req, resp, None, &session, meter).await;
+                    retry_unusable_scan_reply(realtime, &w.req, resp, None, &session, meter, 0)
+                        .await
+                        .resp;
                 (w, resp)
             })
             .collect();
@@ -5594,12 +5755,14 @@ async fn run_passes_batch(
     // The replies were metered as they arrived (`submit_round`, so the resubmission's spend gate
     // counted them), so the shared reassembly gets no meter: recording again would bill twice.
     let pairs: Vec<(usize, usize)> = work.iter().map(|w| (w.ci, w.bi)).collect();
+    let chunk_files: Vec<usize> = chunks.iter().map(|c| c.len()).collect();
     Ok(reassemble_batch_passes(
         repo,
         label,
         n_c,
         n_b,
         &pairs,
+        &chunk_files,
         &results,
         &round.refused,
         adopted,
@@ -5621,6 +5784,7 @@ fn reassemble_batch_passes(
     n_c: usize,
     n_b: usize,
     pairs: &[(usize, usize)],
+    chunk_files: &[usize],
     results: &crate::llm::BatchResults,
     refused_ids: &std::collections::HashSet<String>,
     adopted: &std::collections::HashSet<String>,
@@ -5643,6 +5807,28 @@ fn reassemble_batch_passes(
             continue;
         }
         match results.responses.get(&custom_id) {
+            // A malformed batch answer (complete, not JSON) cannot be retried inside a finished
+            // batch; it is a failed pass naming its files, never "no findings" (H4).
+            Some(resp) if !resp.truncated && scan_output_is_malformed(&resp.text) => {
+                if let Some(m) = meter {
+                    m.record_stage(Stage::ScanPass, resp);
+                    m.record_wasted(Stage::ScanPass, resp);
+                }
+                failures.push(
+                    PassFailure::at(
+                        label,
+                        ci,
+                        n_c,
+                        bi,
+                        n_b,
+                        &"the model's reply was not valid JSON (a batch item cannot be retried)",
+                    )
+                    .with_files(chunk_files.get(ci).copied().unwrap_or(0)),
+                );
+                if let Some((jstore, jid)) = job {
+                    jstore.inc_done(jid, 1);
+                }
+            }
             Some(resp) => {
                 if let Some(m) = meter {
                     m.record_stage(Stage::ScanPass, resp);
@@ -5675,7 +5861,10 @@ fn reassemble_batch_passes(
                     "[camerata-server] batch item {custom_id} (chunk {ci}, rule-batch {bi}) \
                      failed: {reason}"
                 );
-                failures.push(PassFailure::at(label, ci, n_c, bi, n_b, &reason));
+                failures.push(
+                    PassFailure::at(label, ci, n_c, bi, n_b, &reason)
+                        .with_files(chunk_files.get(ci).copied().unwrap_or(0)),
+                );
                 // Still count as done so the progress bar can reach 100%.
                 if let Some((jstore, jid)) = job {
                     jstore.inc_done(jid, 1);
@@ -8763,6 +8952,7 @@ pub async fn audit_repo(
                         repo: repo.to_string(),
                         pass: "rule-alternative recommendations".to_string(),
                         reason: e.to_string(),
+                        files_not_reviewed: 0,
                     });
                 }
             }
@@ -9916,6 +10106,15 @@ async fn run_security_passes(
                     if let Some(m) = meter {
                         m.record_stage(Stage::DeepTier, &resp);
                     }
+                    // A complete reply that holds no JSON is a FAILED pass, never "no findings":
+                    // parsing it would return an empty list indistinguishable from a clean
+                    // chunk. (No retry here: the deep tier is a single opt-in pass per chunk.)
+                    if !resp.truncated && scan_output_is_malformed(&resp.text) {
+                        if let Some(m) = meter {
+                            m.record_wasted(Stage::DeepTier, &resp);
+                        }
+                        anyhow::bail!("{}", malformed_reply_reason(1));
+                    }
                     let (f, p) = parse_ai_findings(repo, &resp.text, adopted);
                     let needs = parse_needs_files(&resp.text);
                     Ok((f, p, needs))
@@ -9944,10 +10143,10 @@ async fn run_security_passes(
                 requested.extend(needs);
                 ok += 1;
             }
-            Err(e) => failures.push(PassFailure::named(
-                format!("deep security {}/{n_c}", ci + 1),
-                &e,
-            )),
+            Err(e) => failures.push(
+                PassFailure::named(format!("deep security {}/{n_c}", ci + 1), &e)
+                    .with_files(chunks[ci].len()),
+            ),
         }
     }
     let _ = n_b; // single batch; kept for parity/readability with run_passes.
@@ -10087,6 +10286,9 @@ mod candidate_passes;
 
 #[cfg(test)]
 mod candidate_prefilter_tests;
+
+#[cfg(test)]
+mod malformed_reply_tests;
 
 #[cfg(test)]
 mod tests {
@@ -14911,6 +15113,7 @@ mod tests {
             1,
             3,
             &[(0, 0), (0, 1), (0, 2)],
+            &[1],
             &results,
             &std::collections::HashSet::new(),
             &std::collections::HashSet::new(),

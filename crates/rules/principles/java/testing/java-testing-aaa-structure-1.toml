@@ -1,5 +1,5 @@
 id = "JAVA-TESTING-AAA-STRUCTURE-1"
-version = 1
+version = 2
 title = "Every test method follows Arrange-Act-Assert: set up preconditions, invoke the single behavior under test, then assert the outcome; each test covers exactly one behavior"
 domain = "java:testing"
 layer = "language"
@@ -17,22 +17,22 @@ why = "Arrange-Act-Assert (AAA) is the canonical three-phase structure for unit 
 
 [[sources]]
 url = "https://pmd.github.io/pmd/pmd_rules_java_bestpractices.html#unittestshouldincludeassert"
-title = "PMD Best Practices — UnitTestShouldIncludeAssert: unit tests should include at least one assertion"
+title = "PMD Best Practices: UnitTestShouldIncludeAssert: unit tests should include at least one assertion"
 linter = "PMD: UnitTestShouldIncludeAssert"
 
 [[sources]]
 url = "https://pmd.github.io/pmd/pmd_rules_java_bestpractices.html#unittestcontainstoomanyasserts"
-title = "PMD Best Practices — UnitTestContainsTooManyAsserts: refactor tests with excessive assertions into multiple focused scenarios"
+title = "PMD Best Practices: UnitTestContainsTooManyAsserts: refactor tests with excessive assertions into multiple focused scenarios"
 linter = "PMD: UnitTestContainsTooManyAsserts"
 
 [[sources]]
 url = "https://docs.junit.org/5.14.1/writing-tests/annotations.html"
-title = "JUnit 5 User Guide — Annotations (@Test, @BeforeEach, @AfterEach lifecycle)"
+title = "JUnit 5 User Guide: Annotations (@Test, @BeforeEach, @AfterEach lifecycle)"
 
 [[option]]
 id = "arrange-act-assert"
 label = "three-phase Arrange / Act / Assert structure, one behavior per test"
-directive = "Structure every test method as three distinct phases separated by blank lines: (1) Arrange — create objects, configure mocks, set inputs; (2) Act — call exactly one method or trigger exactly one behavior; (3) Assert — assert the outcome with explicit assertions (never assume success from no-exception). Use @BeforeEach for setup shared across all tests in the class. Each @Test method covers exactly one behavior: if you need to verify two independent behaviors, write two test methods. Do not mix multiple Act invocations in one test body."
+directive = "Structure every test method as three distinct phases separated by blank lines: (1) Arrange: create objects, configure mocks, set inputs; (2) Act: call exactly one method or trigger exactly one behavior; (3) Assert: assert the outcome with explicit assertions (never assume success from no-exception). Use @BeforeEach for setup shared across all tests in the class. Each @Test method covers exactly one behavior: if you need to verify two independent behaviors, write two test methods. Do not mix multiple Act invocations in one test body."
 remediation = """
 Restructure the test method into three separated phases: Arrange (set up the system under test and its mocks), Act (exactly one call that invokes the behavior under test), and Assert (explicit assertions on the outcome). Split a test that currently exercises multiple behaviors in sequence into separate test methods, one per behavior. Verify by confirming each test method has exactly one Act step and fails for exactly one reason when it fails.
 """

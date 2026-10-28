@@ -1,5 +1,5 @@
 id = "TESTING-FAST-UNIT-TESTS-1"
-version = 1
+version = 2
 title = "Unit tests complete in milliseconds and require no external process or I/O"
 domain = "testing"
 layer = "universal"
@@ -11,15 +11,15 @@ verification = "grounded"
 
 [[sources]]
 url = "https://martinfowler.com/articles/practical-test-pyramid.html#WriteTests"
-title = "Ham Vocke / Martin Fowler — Practical Test Pyramid: unit tests must be fast and not use I/O"
+title = "Ham Vocke / Martin Fowler: Practical Test Pyramid: unit tests must be fast and not use I/O"
 
 [[sources]]
 url = "http://xunitpatterns.com/Slow%20Tests.html"
-title = "xUnit Test Patterns (Meszaros) — Slow Tests (causes and fixes)"
+title = "xUnit Test Patterns (Meszaros): Slow Tests (causes and fixes)"
 
 [[sources]]
 url = "https://testing.googleblog.com/2010/12/test-sizes.html"
-title = "Google Testing Blog — Test Sizes (Small / Medium / Large; Small = no I/O, single process)"
+title = "Google Testing Blog: Test Sizes (Small / Medium / Large; Small = no I/O, single process)"
 
 [decision]
 question = "What resource constraints apply to a unit test?"

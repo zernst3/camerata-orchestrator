@@ -1,5 +1,5 @@
 id = "SQL-MONEY-FLOAT-1"
-version = 2
+version = 3
 title = "Money and currency amounts are stored as numeric/decimal, never as a floating-point type"
 domain = "sql"
 layer = "universal"
@@ -20,7 +20,7 @@ qualifies = "Enforced by a scan over CREATE TABLE / ALTER TABLE ADD COLUMN (and 
 
 [[sources]]
 url = "https://www.postgresql.org/docs/current/datatype-numeric.html"
-title = "PostgreSQL — Numeric Types: 'If you require exact storage and calculations (such as for monetary amounts), use the numeric type instead' of real/double precision, which are inexact and can show discrepancies on storage, retrieval, and equality comparison"
+title = "PostgreSQL: Numeric Types: 'If you require exact storage and calculations (such as for monetary amounts), use the numeric type instead' of real/double precision, which are inexact and can show discrepancies on storage, retrieval, and equality comparison"
 
 [[sources]]
 url = "https://cwe.mitre.org/data/definitions/1339.html"
@@ -75,4 +75,4 @@ id = "use-floating-point-for-money-and-round-at-display-time"
 violates = true
 label = "Store money as real/double precision and round to two decimal places only when displaying it"
 directive = "Store monetary amounts in a floating-point column, applying rounding only in the presentation layer when the value is formatted for display, while keeping the underlying stored and computed values as floats."
-why = "Rejected: rounding at display time does nothing to fix accumulation error in STORED and COMPUTED values — a running balance updated by repeated float addition/subtraction drifts from the true value regardless of how it is later formatted, and an equality comparison against a float column can fail to match a value that is, to the cent, the same amount, purely because of binary floating-point representation. The bug lives in the arithmetic and the storage, not the display, so fixing only the display leaves the actual defect class (silently wrong totals, broken equality checks) fully intact."
+why = "Rejected: rounding at display time does nothing to fix accumulation error in STORED and COMPUTED values: a running balance updated by repeated float addition/subtraction drifts from the true value regardless of how it is later formatted, and an equality comparison against a float column can fail to match a value that is, to the cent, the same amount, purely because of binary floating-point representation. The bug lives in the arithmetic and the storage, not the display, so fixing only the display leaves the actual defect class (silently wrong totals, broken equality checks) fully intact."

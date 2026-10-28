@@ -386,6 +386,9 @@ pub fn check_pdf_data(stem: &str, data_json: &str) -> Result<(), GateFailure> {
 #[cfg(test)]
 mod tests;
 
+#[cfg(test)]
+mod triage_log_tests;
+
 // The enforcement of "the review timer and the per-row reviewed record are INTERNAL ONLY".
 #[cfg(test)]
 mod internal_only_tests;

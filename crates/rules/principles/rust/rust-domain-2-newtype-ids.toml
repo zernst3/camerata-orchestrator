@@ -1,5 +1,5 @@
 id = "RUST-DOMAIN-2"
-version = 1
+version = 2
 title = "How IDs are typed: per-type newtypes, bare Uuid, or a single phantom-parameterized generic"
 domain = "rust"
 layer = "language"
@@ -11,11 +11,11 @@ verification = "grounded"
 
 [[sources]]
 url = "https://rust-lang.github.io/api-guidelines/type-safety.html"
-title = "Rust API Guidelines — C-NEWTYPE: Newtypes provide static distinctions"
+title = "Rust API Guidelines: C-NEWTYPE: Newtypes provide static distinctions"
 
 [[sources]]
 url = "https://doc.rust-lang.org/rust-by-example/generics/new_types.html"
-title = "Rust By Example — New Type Idiom"
+title = "Rust By Example: New Type Idiom"
 
 [[emits]]
 target = "CONVENTIONS.md"

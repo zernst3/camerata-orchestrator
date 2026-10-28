@@ -1,5 +1,5 @@
 id = "RUST-TOKIO-NO-BLOCKING-IN-ASYNC-1"
-version = 2
+version = 3
 title = "Do not call blocking operations directly in async code; use tokio::task::spawn_blocking"
 domain = "rust:tokio"
 layer = "framework"
@@ -38,4 +38,4 @@ why = "Blocking the worker thread prevents all other tasks scheduled on that thr
 
 [[sources]]
 url = "https://docs.rs/tokio/latest/tokio/task/fn.spawn_blocking.html"
-title = "tokio::task::spawn_blocking — Blocking operations off the async runtime"
+title = "tokio::task::spawn_blocking: Blocking operations off the async runtime"

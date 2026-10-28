@@ -1,5 +1,5 @@
 id = "PROC-STORY-DOCS-1"
-version = 1
+version = 2
 title = "Per-story durable documentation keyed by story id"
 domain = "agentic"
 layer = "universal"
@@ -8,15 +8,16 @@ kind = "decision"
 inspectable = false
 default = true
 qualifies = "Enforcement reality (read this before assuming you must build a doc emitter): Camerata runs a post-story documentation hook (PostStoryHook) at sign-off — a Camerata-pipeline enforcement point. Coverage by chosen option is NOT uniform today. The 'per-story-docs' default is fully implemented: the hook emits docs/<story-id>/technical/ + docs/<story-id>/user/ for you, so you do NOT build that emitter. 'mechanical-minimum' is an intentional no-op (the commit/PR record is the durable artifact, so nothing is emitted by design). 'living-central-docs' and 'adr-per-change' are RECOGNIZED but NOT yet implemented by the hook: selecting either emits no files and instead records an honest sign-off history line noting the convention is unimplemented — so if you need one of those two enforced today, you must emit it yourself. Independent of option: the hook only covers stories completed THROUGH Camerata's pipeline. If you also want this documentation enforced at layer 4 (the repo's own origin CI, catching commits made outside Camerata), that part still requires a bespoke check wired into the repo's CI — Camerata's post-story hook does not reach origin."
-verification = "grounded"
+# `policy`, not `grounded`: the only outside source is rated low authority and supports splitting documentation by audience; per-story-id keying is this project's own policy.
+verification = "policy"
 
 [[sources]]
 url = "docs/decisions/2026-06-20_poststoryhook_doc_emission.md"
-title = "Decision: PostStoryHook — per-story documentation emission (PROC-STORY-DOCS-1)"
+title = "Decision: PostStoryHook: per-story documentation emission (PROC-STORY-DOCS-1)"
 
 [[sources]]
 url = "https://diataxis.fr/"
-title = "Diátaxis — a systematic framework for technical documentation"
+title = "Diátaxis: a systematic framework for technical documentation"
 relevance = "Authority note (author-facing): low — supports splitting documentation by audience/purpose, not the per-story-id keying"
 
 [decision]
@@ -35,18 +36,18 @@ why = "Keys off the story id the dev console and UoW already track; separates te
 
 [[option]]
 id = "living-central-docs"
-label = "Living central docs — update TECHNICAL.md + USER_GUIDE.md per change"
+label = "Living central docs: update TECHNICAL.md + USER_GUIDE.md per change"
 directive = "Maintain a single docs/TECHNICAL.md and a single docs/USER_GUIDE.md. Each completed story appends a dated section to both files. The agent performs a targeted append rather than creating new files."
 why = "A defensible alternative the project considered. Simpler directory structure; works well for small projects where per-story attribution is rarely needed. Becomes unwieldy as the story count grows and makes per-story audit difficult."
 
 [[option]]
 id = "adr-per-change"
-label = "ADR-per-change — docs/decisions/<date>_<slug>.md"
+label = "ADR-per-change: docs/decisions/<date>_<slug>.md"
 directive = "For every story, emit a single Architecture Decision Record at docs/decisions/<date>_<slug>.md following the existing ADR format. No separate user-facing file is produced; user impact is noted inside the ADR when relevant."
 why = "A defensible alternative the project considered. Precise and consistent with the existing docs/decisions/ directory; biased toward architecture rather than usage; produces no dedicated user-facing artifact and can conflate technical rationale with user guidance."
 
 [[option]]
 id = "mechanical-minimum"
-label = "Mechanical minimum — commit/PR record + generated CHANGELOG only"
+label = "Mechanical minimum: commit/PR record + generated CHANGELOG only"
 directive = "Do not create separate in-repo documentation files per story. Rely on the commit messages (gated by PROCESS-COMMIT-DOC-1 for substantive bodies with story-id references) and the PR description as the durable record. Optionally generate a CHANGELOG from the commit log at release time."
 why = "A defensible alternative the project considered. Lowest overhead; no file proliferation; commit and PR records are already durable artifacts. Loses searchable narrative, per-story technical rationale, and dedicated user-facing documentation for anything beyond what fits in a commit body."

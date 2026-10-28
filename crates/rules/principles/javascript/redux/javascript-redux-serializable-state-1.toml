@@ -1,5 +1,5 @@
 id = "JAVASCRIPT-REDUX-SERIALIZABLE-STATE-1"
-version = 2
+version = 3
 title = "Only plain serializable values live in the store and in actions"
 domain = "javascript:redux"
 layer = "library"
@@ -12,11 +12,11 @@ verification = "grounded"
 
 [[sources]]
 url = "https://redux.js.org/style-guide/#do-not-put-non-serializable-values-in-state-or-actions"
-title = "Redux Style Guide — Do Not Put Non-Serializable Values in State or Actions (Priority A: Essential)"
+title = "Redux Style Guide: Do Not Put Non-Serializable Values in State or Actions (Priority A: Essential)"
 
 [[sources]]
 url = "https://redux-toolkit.js.org/api/serializabilityMiddleware"
-title = "Redux Toolkit — Serializability Middleware"
+title = "Redux Toolkit: Serializability Middleware"
 
 [decision]
 question = "What kinds of values are held in the Redux store and carried in dispatched actions?"

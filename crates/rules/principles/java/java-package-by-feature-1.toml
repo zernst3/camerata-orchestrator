@@ -1,5 +1,5 @@
 id = "JAVA-PACKAGE-BY-FEATURE-1"
-version = 1
+version = 2
 title = "Java package organization: by feature (domain), by layer, or a flat namespace"
 domain = "java"
 layer = "architecture"
@@ -16,7 +16,7 @@ why = "The right package structure follows from the size of the codebase and how
 
 [[sources]]
 url = "https://pmd.github.io/pmd/pmd_rules_java_design.html#loosepackagecoupling"
-title = "PMD — LoosePackageCoupling: Enforce package-level architectural boundaries"
+title = "PMD: LoosePackageCoupling: Enforce package-level architectural boundaries"
 linter = "PMD: LoosePackageCoupling"
 
 [[option]]

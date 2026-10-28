@@ -1,5 +1,5 @@
 id = "JAVA-IMMUTABILITY-FINAL-1"
-version = 1
+version = 2
 title = "Classes and fields are marked final by default; mutability is explicit and intentional"
 domain = "java"
 layer = "language"
@@ -17,12 +17,12 @@ why = "Mutable shared state is a source of subtle bugs, race conditions, and mak
 
 [[sources]]
 url = "https://checkstyle.org/checks/design/finalclass.html"
-title = "Checkstyle — FinalClass: classes with only private constructors should be final"
+title = "Checkstyle: FinalClass: classes with only private constructors should be final"
 linter = "Checkstyle: FinalClass"
 
 [[sources]]
 url = "https://checkstyle.org/checks/design/visibilitymodifier.html"
-title = "Checkstyle — VisibilityModifier: enforces private/final field visibility"
+title = "Checkstyle: VisibilityModifier: enforces private/final field visibility"
 linter = "Checkstyle: VisibilityModifier"
 
 [[option]]

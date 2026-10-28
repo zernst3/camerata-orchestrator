@@ -1,5 +1,5 @@
 id = "GO-SMALL-INTERFACES-1"
-version = 1
+version = 2
 title = "Interfaces are small and cohesive; an interface has one responsibility, not a god-interface with every method a package might need"
 domain = "go"
 layer = "architecture"
@@ -13,11 +13,11 @@ qualifies = "Small, focused interfaces are easier to implement, mock, and reason
 
 [[sources]]
 url = "https://go.dev/doc/effective_go#interfaces_and_types"
-title = "Effective Go — Interfaces and other types"
+title = "Effective Go: Interfaces and other types"
 
 [[sources]]
 url = "https://go-proverbs.github.io/"
-title = "Go Proverbs — The bigger the interface, the weaker the abstraction"
+title = "Go Proverbs: The bigger the interface, the weaker the abstraction"
 
 [decision]
 question = "How large should interfaces be?"

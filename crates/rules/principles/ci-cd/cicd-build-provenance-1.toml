@@ -1,5 +1,5 @@
 id = "CICD-BUILD-PROVENANCE-1"
-version = 2
+version = 3
 title = "Published build artifacts (container images, packages, binaries) carry signed build provenance a consumer can verify back to the exact source commit and workflow run"
 domain = "ci-cd"
 layer = "universal"
@@ -13,11 +13,11 @@ qualifies = "Deterministically checkable (does the publish step generate and att
 
 [[sources]]
 url = "https://slsa.dev/spec/v1.0/provenance"
-title = "SLSA (Supply-chain Levels for Software Artifacts) v1.0 — Provenance: a verifiable statement about how an artifact was built, from what source, by what builder"
+title = "SLSA (Supply-chain Levels for Software Artifacts) v1.0: Provenance: a verifiable statement about how an artifact was built, from what source, by what builder"
 
 [[sources]]
 url = "https://docs.github.com/en/actions/security-guides/using-artifact-attestations-to-establish-provenance-for-builds"
-title = "GitHub docs — Using artifact attestations to establish provenance for builds: generating and verifying SLSA-conformant provenance for GitHub Actions builds"
+title = "GitHub docs: Using artifact attestations to establish provenance for builds: generating and verifying SLSA-conformant provenance for GitHub Actions builds"
 
 [[sources]]
 url = "https://cwe.mitre.org/data/definitions/345.html"

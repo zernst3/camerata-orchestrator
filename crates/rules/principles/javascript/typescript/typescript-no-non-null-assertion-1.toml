@@ -1,5 +1,5 @@
 id = "JAVASCRIPT-TYPESCRIPT-NO-NON-NULL-ASSERTION-1"
-version = 2
+version = 3
 title = "The non-null assertion operator (!) is forbidden; narrow instead"
 domain = "javascript:typescript"
 layer = "language"
@@ -12,7 +12,7 @@ verification = "grounded"
 
 [[sources]]
 url = "https://typescript-eslint.io/rules/no-non-null-assertion"
-title = "typescript-eslint — @typescript-eslint/no-non-null-assertion rule"
+title = "typescript-eslint: @typescript-eslint/no-non-null-assertion rule"
 linter = "@typescript-eslint: no-non-null-assertion"
 
 [decision]

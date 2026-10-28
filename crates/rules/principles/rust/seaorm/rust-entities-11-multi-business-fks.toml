@@ -1,5 +1,5 @@
 id = "RUST-ENTITIES-11"
-version = 2
+version = 3
 title = "Two or more business FKs to the same parent: both belongs_to + role-named reverse has_many; one impl Related on the primary direction"
 domain = "rust:seaorm"
 layer = "library"
@@ -43,8 +43,8 @@ why = "Compiles fine but reads worse: the principal semantic role makes the rela
 
 [[sources]]
 url = "https://www.sea-ql.org/SeaORM/docs/relation/complex-relations/"
-title = "SeaORM docs: Complex Relations — Diamond Relations (multiple FKs to same target entity, disambiguated via relation_enum/via_rel)"
+title = "SeaORM docs: Complex Relations: Diamond Relations (multiple FKs to same target entity, disambiguated via relation_enum/via_rel)"
 
 [[sources]]
 url = "https://www.sea-ql.org/SeaORM/docs/advanced-query/custom-joins/"
-title = "SeaORM docs: Custom Joins (Linked trait) — an alternative when Related cannot express multiple join paths between the same two entities"
+title = "SeaORM docs: Custom Joins (Linked trait): an alternative when Related cannot express multiple join paths between the same two entities"

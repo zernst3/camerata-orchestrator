@@ -1,5 +1,5 @@
 id = "RUST-ENTITIES-6"
-version = 2
+version = 3
 title = "Module-level doc comment citing the schema source"
 domain = "rust:seaorm"
 layer = "library"
@@ -7,7 +7,8 @@ enforcement = "structured"
 kind = "default_with_exceptions"
 inspectable = true
 default = true
-verification = "grounded"
+# `policy`, not `grounded`: the SeaORM docs describe the entity file shape; the convention that a module doc comment cites the schema source is this project's own policy.
+verification = "policy"
 
 [decision]
 question = "How do SeaORM entity files point readers to the schema that defines their columns?"

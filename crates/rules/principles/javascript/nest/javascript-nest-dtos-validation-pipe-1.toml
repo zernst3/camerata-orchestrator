@@ -1,5 +1,5 @@
 id = "JAVASCRIPT-NEST-DTOS-VALIDATION-PIPE-1"
-version = 2
+version = 3
 title = "Use DTOs with class-validator and ValidationPipe to validate incoming requests"
 domain = "javascript:nest"
 layer = "framework"
@@ -11,11 +11,11 @@ verification = "grounded"
 
 [[sources]]
 url = "https://docs.nestjs.com/pipes#class-validator"
-title = "NestJS Docs — Pipes: ValidationPipe with class-validator"
+title = "NestJS Docs: Pipes: ValidationPipe with class-validator"
 
 [[sources]]
 url = "https://docs.nestjs.com/techniques/validation"
-title = "NestJS Docs — Validation techniques: DTOs with class-validator"
+title = "NestJS Docs: Validation techniques: DTOs with class-validator"
 
 [decision]
 question = "How does the NestJS application validate incoming request payloads?"

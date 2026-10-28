@@ -1,6 +1,6 @@
 id = "ORCH-ENV-GATED-QUALITY-1"
-version = 2
-title = "Environment-gated quality — nothing ships unverified"
+version = 3
+title = "Environment-gated quality: nothing ships unverified"
 domain = "agentic"
 layer = "universal"
 enforcement = "structured"
@@ -12,19 +12,19 @@ verification = "grounded"
 
 [[sources]]
 url = "AGENTS.md"
-title = "AGENTS.md — ORCH-ENV-GATED-QUALITY-1 (environment-gated quality)"
+title = "AGENTS.md: ORCH-ENV-GATED-QUALITY-1 (environment-gated quality)"
 
 [[sources]]
 url = "docs/decisions/2026-06-16_enforcement_tiers_gate_vs_ci.md"
-title = "Decision: Enforcement tiers — write-time gate (security) vs CI checks (consistency)"
+title = "Decision: Enforcement tiers: write-time gate (security) vs CI checks (consistency)"
 
 [[sources]]
 url = "https://continuousdelivery.com/"
-title = "Humble & Farley — Continuous Delivery (automated promotion through pre-production environments)"
+title = "Humble & Farley: Continuous Delivery (automated promotion through pre-production environments)"
 
 [[sources]]
 url = "https://dora.dev/"
-title = "DORA — research on deployment pipelines and software delivery performance"
+title = "DORA: research on deployment pipelines and software delivery performance"
 
 [decision]
 question = "What path does an agent-authored change take before it reaches production?"

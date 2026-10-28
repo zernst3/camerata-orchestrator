@@ -1,5 +1,5 @@
 id = "JAVA-SQL-PARAMETERIZED-1"
-version = 1
+version = 2
 title = "SQL queries are parameterized with PreparedStatement or JPA parameters; strings are never built via concatenation"
 domain = "java"
 layer = "language"
@@ -23,7 +23,7 @@ why = "Concatenating or interpolating user input directly into a SQL string is t
 
 [[sources]]
 url = "https://find-sec-bugs.github.io/bugs.htm#SQL_INJECTION_JDBC"
-title = "Find Security Bugs — SQL_INJECTION_JDBC: Potential JDBC SQL injection via string concatenation"
+title = "Find Security Bugs: SQL_INJECTION_JDBC: Potential JDBC SQL injection via string concatenation"
 linter = "SpotBugs/FindSecBugs: SQL_INJECTION_JDBC"
 
 [[option]]

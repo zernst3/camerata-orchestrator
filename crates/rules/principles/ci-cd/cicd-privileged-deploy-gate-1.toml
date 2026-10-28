@@ -1,5 +1,5 @@
 id = "CICD-PRIVILEGED-DEPLOY-GATE-1"
-version = 2
+version = 3
 title = "A production-impacting job (deploy, prod database migration, infra apply) requires a protected environment with required reviewers, never an unconditional push-triggered run"
 domain = "ci-cd"
 layer = "universal"
@@ -12,7 +12,7 @@ qualifies = "Deterministically checkable in principle (does a job that deploys t
 
 [[sources]]
 url = "https://docs.github.com/en/actions/deployment/targeting-different-environments/using-environments-for-deployment"
-title = "GitHub docs — Using environments for deployment: required reviewers, wait timer, and deployment branch restrictions as environment protection rules"
+title = "GitHub docs: Using environments for deployment: required reviewers, wait timer, and deployment branch restrictions as environment protection rules"
 
 [[sources]]
 url = "https://cheatsheetseries.owasp.org/cheatsheets/CI_CD_Security_Cheat_Sheet.html"
@@ -50,7 +50,7 @@ directive = "Every job that deploys to production, runs a migration against a pr
 remediation = """
 Define (or confirm) a named environment in the CI platform for this privileged job's target (production, or a
 production database/infrastructure target), and configure a required-reviewers protection rule on that environment
-in the platform's own settings — not only in the workflow YAML, which can reference an environment with no
+in the platform's own settings, not only in the workflow YAML, which can reference an environment with no
 protection rules actually attached. Reference that environment from the privileged job so the platform itself
 blocks the run pending approval. Verify by triggering the job's normal path (e.g. pushing the tag that maps to
 prod) and confirming the run pauses awaiting a reviewer's approval before any production-impacting step executes,
@@ -64,4 +64,4 @@ id = "privileged-job-runs-unconditionally-on-its-trigger"
 violates = true
 label = "A production deploy/migration/infra-apply job runs unconditionally whenever its trigger ref is pushed, with no environment protection rule and no human approval gate"
 directive = "A job that deploys to production, migrates a production database, or applies production infrastructure changes runs to completion automatically whenever its configured trigger (a tag push, a release-branch push) fires, with no environment-level protection rule and no pause point for human approval."
-why = "Rejected: this collapses the gap between 'the triggering ref was pushed' and 'the privileged action actually ran' to zero, so any mistake upstream of that point — an accidentally pushed tag, a misconfigured environment variable discovered only at run time, a compromised credential with push access — runs straight through to production impact with no opportunity for a human to catch it first. Code review earlier in the process does not substitute for this, because code review approves the CHANGE, not the specific run's actual target and timing."
+why = "Rejected: this collapses the gap between 'the triggering ref was pushed' and 'the privileged action actually ran' to zero, so any mistake upstream of that point (an accidentally pushed tag, a misconfigured environment variable discovered only at run time, a compromised credential with push access) runs straight through to production impact with no opportunity for a human to catch it first. Code review earlier in the process does not substitute for this, because code review approves the CHANGE, not the specific run's actual target and timing."

@@ -1,5 +1,5 @@
 id = "JAVASCRIPT-TESTING-NAMING-1"
-version = 2
+version = 3
 title = "Test names describe observable behaviour in plain language; no duplicate titles within a suite"
 domain = "javascript:testing"
 layer = "language"
@@ -12,17 +12,17 @@ verification = "grounded"
 
 [[sources]]
 url = "https://github.com/jest-community/eslint-plugin-jest/blob/main/docs/rules/no-identical-title.md"
-title = "eslint-plugin-jest — no-identical-title rule (recommended)"
+title = "eslint-plugin-jest: no-identical-title rule (recommended)"
 linter = "jest: no-identical-title"
 
 [[sources]]
 url = "https://github.com/jest-community/eslint-plugin-jest/blob/main/README.md"
-title = "eslint-plugin-jest — valid-title rule (recommended)"
+title = "eslint-plugin-jest: valid-title rule (recommended)"
 linter = "jest: valid-title"
 
 [[sources]]
 url = "https://jestjs.io/docs/api#describename-fn"
-title = "Jest globals API — describe"
+title = "Jest globals API: describe"
 
 [decision]
 question = "How are tests and describe blocks named?"

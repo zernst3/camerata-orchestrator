@@ -1,5 +1,5 @@
 id = "SUPABASE-AUTH-EDGE-JWT-1"
-version = 1
+version = 2
 title = "An Edge Function with JWT verification disabled must have a compensating auth check in the function body"
 domain = "supabase:auth"
 layer = "platform"
@@ -18,11 +18,11 @@ qualifies = "Two-stage rule. Stage one (mechanical, always emitted): a regex sca
 
 [[sources]]
 url = "https://supabase.com/docs/guides/functions/auth"
-title = "Supabase docs — Edge Functions auth guide (verify_jwt default and disabling it for public/webhook functions)"
+title = "Supabase docs: Edge Functions auth guide (verify_jwt default and disabling it for public/webhook functions)"
 
 [[sources]]
 url = "https://supabase.com/docs/guides/cli/config"
-title = "Supabase docs — CLI config reference (functions.<name>.verify_jwt in supabase/config.toml)"
+title = "Supabase docs: CLI config reference (functions.<name>.verify_jwt in supabase/config.toml)"
 
 [[sources]]
 url = "https://cwe.mitre.org/data/definitions/306.html"
@@ -57,7 +57,7 @@ label = "Every Edge Function that disables JWT verification authenticates caller
 directive = """
 Edge Functions keep Supabase's `verify_jwt = true` default, which rejects any request without a
 valid JWT before the handler runs. Where a function genuinely needs to accept unauthenticated
-requests — a webhook receiver, a deliberately public endpoint — `verify_jwt = false` is set for
+requests (a webhook receiver, a deliberately public endpoint) `verify_jwt = false` is set for
 that one function in `supabase/config.toml`'s `[functions.<name>]` block (or `--no-verify-jwt` at
 deploy time) AND the handler performs its own check in place of the one it turned off: verifying
 the calling provider's webhook signature, checking a shared secret, or documenting that the
@@ -77,5 +77,5 @@ why = "Splitting mechanical evidence-gathering (the flag, which is deterministic
 id = "edge-function-disables-jwt-without-compensating-check"
 violates = true
 label = "An Edge Function disables JWT verification and its handler performs no compensating auth check"
-directive = "An Edge Function sets `verify_jwt = false` (or deploys with `--no-verify-jwt`) and its handler body performs no equivalent check of its own — no verified signature, no shared-secret check, no explicit authenticated-user gate — so it accepts requests from anyone on the internet."
-why = "Rejected: a function with JWT verification off and nothing in its place is unauthenticated by definition. The deliberately-public case — a webhook that validates the provider's own signature instead — carries that check inline; this is the case where nothing does."
+directive = "An Edge Function sets `verify_jwt = false` (or deploys with `--no-verify-jwt`) and its handler body performs no equivalent check of its own (no verified signature, no shared-secret check, no explicit authenticated-user gate) so it accepts requests from anyone on the internet."
+why = "Rejected: a function with JWT verification off and nothing in its place is unauthenticated by definition. The deliberately-public case (a webhook that validates the provider's own signature instead) carries that check inline; this is the case where nothing does."

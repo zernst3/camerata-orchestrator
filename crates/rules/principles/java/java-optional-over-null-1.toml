@@ -1,5 +1,5 @@
 id = "JAVA-OPTIONAL-OVER-NULL-1"
-version = 1
+version = 2
 title = "Methods return Optional<T> instead of null; null is used only for legacy compatibility or internal state"
 domain = "java"
 layer = "language"
@@ -17,7 +17,7 @@ why = "Returning null is a contract violation; callers must remember to check fo
 
 [[sources]]
 url = "https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/Optional.html"
-title = "java.util.Optional javadoc — API Note: Optional is intended primarily for use as a method return type where there is a clear need to represent \"no result\""
+title = "java.util.Optional javadoc: API Note: Optional is intended primarily for use as a method return type where there is a clear need to represent \"no result\""
 
 [[option]]
 id = "optional-return-types"

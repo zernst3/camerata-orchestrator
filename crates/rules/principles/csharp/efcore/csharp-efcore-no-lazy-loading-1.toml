@@ -1,5 +1,5 @@
 id = "CSHARP-EFCORE-NO-LAZY-LOADING-1"
-version = 2
+version = 3
 title = "Lazy loading is disabled; all navigation property access is intentional and explicit"
 domain = "csharp:efcore"
 layer = "library"
@@ -40,4 +40,4 @@ why = "Accessing a navigation property still issues a silent database round trip
 
 [[sources]]
 url = "https://learn.microsoft.com/en-us/ef/core/querying/related-data/lazy"
-title = "Lazy Loading of Related Data — EF Core | Microsoft Learn"
+title = "Lazy Loading of Related Data: EF Core | Microsoft Learn"

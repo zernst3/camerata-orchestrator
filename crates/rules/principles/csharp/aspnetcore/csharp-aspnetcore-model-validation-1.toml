@@ -1,5 +1,5 @@
 id = "CSHARP-ASPNETCORE-MODEL-VALIDATION-1"
-version = 1
+version = 2
 title = "[ApiController] automatic 400 responses are active; validation errors never reach business logic"
 domain = "csharp:aspnetcore"
 layer = "framework"
@@ -17,7 +17,7 @@ why = "ASP.NET Core's [ApiController] attribute connects the model-binding pipel
 [[option]]
 id = "apicontroller-auto-400"
 label = "[ApiController] on every controller; automatic 400 on invalid ModelState"
-directive = "Every controller class carries the [ApiController] attribute (or inherits from a base class that does). Request DTOs declare Data Annotation or FluentValidation constraints that express the valid input shape. Manual ModelState.IsValid guards inside action methods are forbidden — the attribute makes them redundant and their presence signals that [ApiController] is missing. Validation errors return a RFC 7807 problem-details 400 response automatically without controller code."
+directive = "Every controller class carries the [ApiController] attribute (or inherits from a base class that does). Request DTOs declare Data Annotation or FluentValidation constraints that express the valid input shape. Manual ModelState.IsValid guards inside action methods are forbidden: the attribute makes them redundant and their presence signals that [ApiController] is missing. Validation errors return a RFC 7807 problem-details 400 response automatically without controller code."
 remediation = """
 Add the [ApiController] attribute to the controller class (or its base class) and add Data Annotation or FluentValidation constraints to the request DTO describing valid input. Remove any manual ModelState.IsValid check from the action body, since the attribute now returns 400 automatically before the action runs. Verify by sending a request with an invalid field and confirming a 400 response is returned without the action method's code executing.
 """
@@ -40,4 +40,4 @@ why = "Pushes validation inward, away from the HTTP boundary. The API surface no
 
 [[sources]]
 url = "https://learn.microsoft.com/en-us/aspnet/core/web-api/?view=aspnetcore-10.0"
-title = "Create web APIs with ASP.NET Core — [ApiController] and automatic 400 responses | Microsoft Learn"
+title = "Create web APIs with ASP.NET Core: [ApiController] and automatic 400 responses | Microsoft Learn"

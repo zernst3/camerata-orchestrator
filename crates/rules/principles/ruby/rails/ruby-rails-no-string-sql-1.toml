@@ -1,5 +1,5 @@
 id = "RUBY-RAILS-NO-STRING-SQL-1"
-version = 1
+version = 2
 title = "ActiveRecord queries use placeholders or hash conditions; SQL is never built from interpolated strings"
 domain = "ruby:rails"
 layer = "framework"
@@ -47,9 +47,9 @@ why = "The canonical SQL injection antipattern; every such site is a latent vuln
 
 [[sources]]
 url = "https://brakemanscanner.org/docs/warning_types/sql_injection/"
-title = "Brakeman — SQL Injection warning type"
+title = "Brakeman: SQL Injection warning type"
 linter = "Brakeman: SQL Injection"
 
 [[sources]]
 url = "https://guides.rubyonrails.org/security.html#sql-injection"
-title = "Rails Guides — Securing Rails Applications: SQL Injection"
+title = "Rails Guides: Securing Rails Applications: SQL Injection"

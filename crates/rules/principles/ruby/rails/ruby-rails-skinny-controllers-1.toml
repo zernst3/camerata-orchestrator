@@ -1,5 +1,5 @@
 id = "RUBY-RAILS-SKINNY-CONTROLLERS-1"
-version = 1
+version = 2
 title = "Controllers are thin HTTP adapters; business logic lives in service objects or domain models"
 domain = "ruby:rails"
 layer = "framework"
@@ -50,4 +50,4 @@ why = "Works for single-resource operations but creates God-object models when c
 
 [[sources]]
 url = "https://guides.rubyonrails.org/action_controller_overview.html"
-title = "Rails Guides — Action Controller Overview (controllers as HTTP adapters)"
+title = "Rails Guides: Action Controller Overview (controllers as HTTP adapters)"

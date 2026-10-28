@@ -1,5 +1,5 @@
 id = "RUBY-RAILS-STRONG-PARAMS-1"
-version = 2
+version = 3
 title = "Controllers use strong parameters to guard mass assignment"
 domain = "ruby:rails"
 layer = "framework"
@@ -41,9 +41,9 @@ why = "Allows any attacker-controlled parameter to be written to the database; t
 
 [[sources]]
 url = "https://brakemanscanner.org/docs/warning_types/mass_assignment/"
-title = "Brakeman — Mass Assignment warning type"
+title = "Brakeman: Mass Assignment warning type"
 linter = "Brakeman: Mass Assignment"
 
 [[sources]]
 url = "https://guides.rubyonrails.org/action_controller_overview.html#strong-parameters"
-title = "Rails Guides — Action Controller Overview: Strong Parameters"
+title = "Rails Guides: Action Controller Overview: Strong Parameters"

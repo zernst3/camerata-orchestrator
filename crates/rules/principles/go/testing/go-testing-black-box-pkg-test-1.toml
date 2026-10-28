@@ -1,5 +1,5 @@
 id = "GO-TESTING-BLACK-BOX-PKG-TEST-1"
-version = 1
+version = 2
 title = "Black-box tests use package foo_test to verify exported API only; white-box tests stay in package foo"
 domain = "go:testing"
 layer = "testing"
@@ -13,18 +13,18 @@ qualifies = "Go allows two package declarations in _test.go files: package foo (
 
 [[sources]]
 url = "https://pkg.go.dev/testing"
-title = "pkg.go.dev/testing — Go testing package"
+title = "pkg.go.dev/testing: Go testing package"
 relevance = "The testing package documentation describes the two legal package declarations for _test.go files: the package under test (white-box) and the package under test with _test suffix (black-box), compiled as a separate package linked with the main test binary."
 
 [[sources]]
 url = "https://pkg.go.dev/cmd/go#hdr-Test_packages"
-title = "cmd/go — Test packages"
+title = "cmd/go: Test packages"
 linter = "golangci-lint: testpackage"
 relevance = "cmd/go documents: 'Files declaring package name_test are compiled as a separate package, then linked and run with the main test binary.' golangci-lint testpackage enforces the use of separate _test packages."
 
 [[sources]]
 url = "https://golangci-lint.run/docs/linters/"
-title = "golangci-lint linters — testpackage"
+title = "golangci-lint linters: testpackage"
 linter = "golangci-lint: testpackage"
 
 [decision]

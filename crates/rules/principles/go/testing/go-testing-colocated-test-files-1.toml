@@ -1,5 +1,5 @@
 id = "GO-TESTING-COLOCATED-TEST-FILES-1"
-version = 1
+version = 2
 title = "Unit test files are co-located with the source they test, named with the _test.go suffix"
 domain = "go:testing"
 layer = "testing"
@@ -13,16 +13,16 @@ qualifies = "Every Go source file foo.go has its unit tests in foo_test.go in th
 
 [[sources]]
 url = "https://pkg.go.dev/testing"
-title = "pkg.go.dev/testing — Go testing package"
+title = "pkg.go.dev/testing: Go testing package"
 
 [[sources]]
 url = "https://go.dev/doc/code#Testing"
-title = "How to Write Go Code — Testing section"
+title = "How to Write Go Code: Testing section"
 relevance = "The official Go tutorial shows test files co-located with source files in the same directory, using the _test.go suffix (e.g., morestrings/reverse_test.go alongside morestrings/reverse.go)."
 
 [[sources]]
 url = "https://pkg.go.dev/cmd/go#hdr-Test_packages"
-title = "cmd/go — Test packages"
+title = "cmd/go: Test packages"
 linter = "go build: _test.go exclusion"
 relevance = "go test documentation: 'Files whose names begin with _ or . (including _test.go) are ignored by the go tool.' Test files with the _test.go suffix are compiled and run only by go test."
 

@@ -1,5 +1,5 @@
 id = "JAVASCRIPT-REDUX-NO-EFFECTS-IN-REDUCERS-1"
-version = 2
+version = 3
 title = "Reducers are pure; side effects live in thunks or middleware"
 domain = "javascript:redux"
 layer = "library"
@@ -11,7 +11,7 @@ verification = "grounded"
 
 [[sources]]
 url = "https://redux.js.org/style-guide/#reducers-must-not-have-side-effects"
-title = "Redux Style Guide — Reducers Must Not Have Side Effects (Priority A: Essential)"
+title = "Redux Style Guide: Reducers Must Not Have Side Effects (Priority A: Essential)"
 
 [decision]
 question = "Where do side effects such as API calls and random value generation happen relative to Redux reducers?"

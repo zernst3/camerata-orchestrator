@@ -1,5 +1,5 @@
 id = "JAVASCRIPT-REDUX-TOOLKIT-DEFAULT-1"
-version = 2
+version = 3
 title = "State is built with Redux Toolkit, not hand-rolled action types and switch reducers"
 domain = "javascript:redux"
 layer = "library"
@@ -11,7 +11,7 @@ verification = "grounded"
 
 [[sources]]
 url = "https://redux.js.org/style-guide/#use-redux-toolkit-for-writing-redux-logic"
-title = "Redux Style Guide — Use Redux Toolkit for Writing Redux Logic (Priority B: Strongly Recommended)"
+title = "Redux Style Guide: Use Redux Toolkit for Writing Redux Logic (Priority B: Strongly Recommended)"
 
 [decision]
 question = "How is Redux logic authored, with Redux Toolkit or with hand-written action types and switch reducers?"

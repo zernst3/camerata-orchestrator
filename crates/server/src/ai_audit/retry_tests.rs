@@ -332,16 +332,18 @@ async fn a_pass_truncated_twice_is_retried_once_only() {
 }
 
 #[tokio::test]
-async fn a_malformed_but_complete_pass_is_not_blindly_retried() {
+async fn a_malformed_but_complete_pass_is_retried_a_bounded_number_of_times_then_fails() {
     let llm = ScriptedLlm::new(&[("I could not produce JSON for this chunk.", false)]);
     let meter = UsageMeter::default();
-    let (findings, _, _) = pass(&llm, &meter).await.expect("the pass completes");
-    assert_eq!(llm.calls(), 1, "no truncation, no retry");
-    assert!(findings.is_empty());
+    let err = pass(&llm, &meter)
+        .await
+        .expect_err("a reply that never becomes JSON is a failed pass, not zero findings");
+    assert!(err.to_string().contains("not valid JSON"), "{err}");
+    assert_eq!(llm.calls(), 1 + MALFORMED_REPLY_RETRIES, "bounded retries");
     // The spend bought nothing, and the table says so.
     let scan = meter.stage_telemetry(1_000).stages[0].usage.clone();
-    assert_eq!(scan.calls, 1);
-    assert_eq!(scan.wasted_calls, 1);
+    assert_eq!(scan.calls, 1 + MALFORMED_REPLY_RETRIES as u64);
+    assert_eq!(scan.wasted_calls, 1 + MALFORMED_REPLY_RETRIES as u64);
 }
 
 #[tokio::test]

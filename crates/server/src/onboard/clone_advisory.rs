@@ -348,6 +348,7 @@ async fn judge_rule(
             repo: req.repo.to_string(),
             pass: FAILED_PASS_NAME.to_string(),
             reason: format!("{}: {reason}", rule.id()),
+            files_not_reviewed: 0,
         });
     }
     judged

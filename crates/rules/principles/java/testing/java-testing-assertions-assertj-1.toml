@@ -1,5 +1,5 @@
 id = "JAVA-TESTING-ASSERTIONS-ASSERTJ-1"
-version = 1
+version = 2
 title = "Assertions use AssertJ's assertThat() fluent API; JUnit's assertEquals/assertTrue/assertNull are not used in new test code"
 domain = "java:testing"
 layer = "language"
@@ -17,11 +17,11 @@ why = "AssertJ's assertThat() fluent API produces failure messages that include 
 
 [[sources]]
 url = "https://assertj.github.io/doc/"
-title = "AssertJ — Fluent testing assertions for Java: 'provides a rich set of assertions and truly helpful error messages, improves test code readability'"
+title = "AssertJ: Fluent testing assertions for Java: 'provides a rich set of assertions and truly helpful error messages, improves test code readability'"
 
 [[sources]]
 url = "https://pmd.github.io/pmd/pmd_rules_java_bestpractices.html#unittestshouldincludeassert"
-title = "PMD Best Practices — UnitTestShouldIncludeAssert: unit tests should include at least one assertion (assertThat satisfies this)"
+title = "PMD Best Practices: UnitTestShouldIncludeAssert: unit tests should include at least one assertion (assertThat satisfies this)"
 linter = "PMD: UnitTestShouldIncludeAssert"
 
 [[option]]

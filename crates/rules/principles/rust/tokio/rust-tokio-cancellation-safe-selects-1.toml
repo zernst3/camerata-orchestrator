@@ -1,5 +1,5 @@
 id = "RUST-TOKIO-CANCELLATION-SAFE-SELECTS-1"
-version = 2
+version = 3
 title = "Use tokio::select! safely; ensure the selected branch leaves the system in a consistent state"
 domain = "rust:tokio"
 layer = "framework"
@@ -32,8 +32,8 @@ why = "If a cancelled branch was midway through a database transaction, a partia
 
 [[sources]]
 url = "https://docs.rs/tokio/latest/tokio/macro.select.html"
-title = "tokio::select! — Cancellation safety documentation"
+title = "tokio::select!: Cancellation safety documentation"
 
 [[sources]]
 url = "https://tokio.rs/tokio/tutorial/select"
-title = "Tokio tutorial: Select — branch cancellation and drop semantics"
+title = "Tokio tutorial: Select: branch cancellation and drop semantics"

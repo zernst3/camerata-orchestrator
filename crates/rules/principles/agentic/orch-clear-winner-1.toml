@@ -1,6 +1,6 @@
 id = "ORCH-CLEAR-WINNER-1"
-version = 3
-title = "The clear-winner test — decide vs. stop"
+version = 4
+title = "The clear-winner test: decide vs. stop"
 domain = "agentic"
 layer = "universal"
 enforcement = "prose"

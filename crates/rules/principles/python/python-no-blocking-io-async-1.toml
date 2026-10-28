@@ -1,5 +1,5 @@
 id = "PYTHON-NO-BLOCKING-IO-ASYNC-1"
-version = 1
+version = 2
 title = "Async handlers never call blocking I/O on the event loop"
 domain = "python"
 layer = "language"
@@ -32,19 +32,19 @@ why = "A blocking call inside an async function holds the event loop for its ful
 
 [[sources]]
 url = "https://docs.python.org/3/library/asyncio-eventloop.html#asyncio.loop.run_in_executor"
-title = "Python docs — asyncio loop.run_in_executor (offload blocking IO)"
+title = "Python docs: asyncio loop.run_in_executor (offload blocking IO)"
 
 [[sources]]
 url = "https://docs.astral.sh/ruff/rules/blocking-sleep-in-async-function/"
-title = "Ruff ASYNC251 — blocking-sleep-in-async-function"
+title = "Ruff ASYNC251: blocking-sleep-in-async-function"
 linter = "Ruff: ASYNC251"
 
 [[sources]]
 url = "https://docs.astral.sh/ruff/rules/blocking-open-call-in-async-function/"
-title = "Ruff ASYNC230 — blocking-open-call-in-async-function"
+title = "Ruff ASYNC230: blocking-open-call-in-async-function"
 linter = "Ruff: ASYNC230"
 
 [[sources]]
 url = "https://docs.astral.sh/ruff/rules/blocking-http-call-in-async-function/"
-title = "Ruff ASYNC210 — blocking-http-call-in-async-function"
+title = "Ruff ASYNC210: blocking-http-call-in-async-function"
 linter = "Ruff: ASYNC210"

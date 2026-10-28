@@ -1,5 +1,5 @@
 id = "PROCESS-BRANCH-NAMING-1"
-version = 1
+version = 2
 title = "Branch names start with an allowed prefix"
 domain = "process"
 layer = "universal"
@@ -23,7 +23,7 @@ title = "A successful Git branching model (branch-prefix conventions)"
 
 [[sources]]
 url = "https://docs.github.com/en/actions/learn-github-actions/contexts#github-context"
-title = "GitHub Actions — github.ref / branch context (CI-wirable branch-name check)"
+title = "GitHub Actions: github.ref / branch context (CI-wirable branch-name check)"
 
 [decision]
 question = "Does the project require new branch names to start with an allowed prefix, enforced over VCS metadata at the branch-creation gate and in CI?"

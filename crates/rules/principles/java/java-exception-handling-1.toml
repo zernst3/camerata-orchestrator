@@ -1,5 +1,5 @@
 id = "JAVA-EXCEPTION-HANDLING-1"
-version = 1
+version = 2
 title = "Exceptions are never silently swallowed; every catch block either re-throws, logs, or transforms the exception with context"
 domain = "java"
 layer = "language"
@@ -17,17 +17,17 @@ why = "Silently swallowing an exception hides failures, makes debugging impossib
 
 [[sources]]
 url = "https://spotbugs.readthedocs.io/en/stable/bugDescriptions.html#de-method-might-ignore-exception-de-might-ignore"
-title = "SpotBugs — DE_MIGHT_IGNORE: Method might ignore exception"
+title = "SpotBugs: DE_MIGHT_IGNORE: Method might ignore exception"
 linter = "SpotBugs: DE_MIGHT_IGNORE"
 
 [[sources]]
 url = "https://checkstyle.org/checks/blocks/emptycatchblock.html"
-title = "Checkstyle — EmptyCatchBlock: Checks for empty catch blocks"
+title = "Checkstyle: EmptyCatchBlock: Checks for empty catch blocks"
 linter = "Checkstyle: EmptyCatchBlock"
 
 [[sources]]
 url = "https://google.github.io/styleguide/javaguide.html#s6.2-caught-exceptions"
-title = "Google Java Style Guide — Section 6.2: Caught exceptions: not ignored"
+title = "Google Java Style Guide: Section 6.2 (Caught exceptions: not ignored)"
 
 [[option]]
 id = "log-or-rethrow-with-context"

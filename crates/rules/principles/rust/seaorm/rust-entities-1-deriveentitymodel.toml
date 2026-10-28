@@ -1,5 +1,5 @@
 id = "RUST-ENTITIES-1"
-version = 2
+version = 3
 title = "Use the DeriveEntityModel macro path"
 domain = "rust:seaorm"
 layer = "library"
@@ -45,8 +45,8 @@ why = "Works until an entity needs a hand-tuned variant; once that happens, the 
 
 [[sources]]
 url = "https://docs.rs/sea-orm/latest/sea_orm/derive.DeriveEntityModel.html"
-title = "sea_orm::DeriveEntityModel — the 'almighty' macro generating Entity, Column, PrimaryKey"
+title = "sea_orm::DeriveEntityModel: the 'almighty' macro generating Entity, Column, PrimaryKey"
 
 [[sources]]
 url = "https://www.sea-ql.org/SeaORM/docs/generate-entity/entity-format/"
-title = "SeaORM docs: Entity Format — DeriveEntityModel usage and column attributes"
+title = "SeaORM docs: Entity Format: DeriveEntityModel usage and column attributes"

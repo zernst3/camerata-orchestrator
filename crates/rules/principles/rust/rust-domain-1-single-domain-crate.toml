@@ -1,5 +1,5 @@
 id = "RUST-DOMAIN-1"
-version = 1
+version = 2
 title = "How the domain is crated: one crate with modules by context, a crate per context, or one flat crate"
 domain = "rust"
 layer = "language"
@@ -11,11 +11,11 @@ verification = "grounded"
 
 [[sources]]
 url = "https://doc.rust-lang.org/book/ch07-00-managing-growing-projects-with-packages-crates-and-modules.html"
-title = "The Rust Book — Ch 7: Managing Growing Projects with Packages, Crates, and Modules"
+title = "The Rust Book: Ch 7: Managing Growing Projects with Packages, Crates, and Modules"
 
 [[sources]]
 url = "https://doc.rust-lang.org/reference/items/modules.html"
-title = "The Rust Reference — Modules"
+title = "The Rust Reference: Modules"
 
 [decision]
 question = "How is the domain layer crated: one domain crate with bounded contexts as internal modules, a separate crate per bounded context, or a single domain crate with no module substructure?"

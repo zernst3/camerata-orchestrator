@@ -7,7 +7,7 @@
 # convention it never needed. Kept opt-in (never pre-checked/auto-recommended) until the option
 # set is redesigned to separate "how routes are organized" from "how auth is actually enforced".
 id = "JAVASCRIPT-NEXT-ROUTE-PLACEMENT-1"
-version = 2
+version = 3
 title = "App Router pages are organized into route groups by access tier, but auth is enforced in middleware/data layer, not by folder placement"
 domain = "javascript:next"
 layer = "framework"
@@ -20,11 +20,11 @@ verification = "grounded"
 
 [[sources]]
 url = "https://nextjs.org/docs/app/api-reference/file-conventions/route-groups"
-title = "Next.js — Route Groups: (folderName) convention for layout opt-in"
+title = "Next.js: Route Groups: (folderName) convention for layout opt-in"
 
 [[sources]]
 url = "https://nextjs.org/docs/app/getting-started/project-structure#route-groups"
-title = "Next.js — Project Structure: route groups for layout sharing"
+title = "Next.js: Project Structure: route groups for layout sharing"
 
 [decision]
 question = "How are App Router pages grouped by access tier, and where is authentication actually enforced?"

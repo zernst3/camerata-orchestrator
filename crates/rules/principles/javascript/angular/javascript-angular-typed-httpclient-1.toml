@@ -1,5 +1,5 @@
 id = "JAVASCRIPT-ANGULAR-TYPED-HTTPCLIENT-1"
-version = 2
+version = 3
 title = "HTTP requests are made through typed services, not directly from components"
 domain = "javascript:angular"
 layer = "framework"
@@ -24,7 +24,7 @@ verification = "grounded"
 
 [[sources]]
 url = "https://angular.dev/guide/http/making-requests"
-title = "Angular HttpClient — Making requests: use reusable injectable services"
+title = "Angular HttpClient: Making requests: use reusable injectable services"
 
 [decision]
 question = "Where in the Angular application are HTTP requests made?"

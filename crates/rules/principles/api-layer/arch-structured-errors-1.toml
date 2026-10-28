@@ -1,5 +1,5 @@
 id = "ARCH-STRUCTURED-ERRORS-1"
-version = 2
+version = 3
 title = "Error responses use a structured envelope with stable machine-readable codes"
 domain = "api-layer"
 layer = "universal"
@@ -16,7 +16,7 @@ verification = "grounded"
 
 [[sources]]
 url = "https://www.rfc-editor.org/rfc/rfc9457.html"
-title = "RFC 9457 — Problem Details for HTTP APIs"
+title = "RFC 9457: Problem Details for HTTP APIs"
 
 [decision]
 question = "What shape do API error responses take?"

@@ -1,5 +1,5 @@
 id = "RUBY-TESTING-DESCRIBE-NAMING-1"
-version = 1
+version = 2
 title = "describe uses the class constant; nested describe uses #method or .method; context starts with when/with/without"
 domain = "ruby:testing"
 layer = "language"
@@ -34,23 +34,23 @@ why = "Freeform describe strings produce failure output that names neither the m
 
 [[sources]]
 url = "https://www.betterspecs.org/"
-title = "Better Specs (community guideline, not an official RSpec/Rails standard) — Testing Guidelines (describe naming, context wording, it descriptions)"
+title = "Better Specs (community guideline, not an official RSpec/Rails standard): Testing Guidelines (describe naming, context wording, it descriptions)"
 
 [[sources]]
 url = "https://rspec.rubystyle.guide/"
-title = "RSpec Style Guide — Method naming with # and . prefixes"
+title = "RSpec Style Guide: Method naming with # and . prefixes"
 
 [[sources]]
 url = "https://www.rubydoc.info/gems/rubocop-rspec/RuboCop/Cop/RSpec/DescribeClass"
-title = "rubocop-rspec — RSpec/DescribeClass cop"
+title = "rubocop-rspec: RSpec/DescribeClass cop"
 linter = "rubocop-rspec: RSpec/DescribeClass"
 
 [[sources]]
 url = "https://www.rubydoc.info/gems/rubocop-rspec/RuboCop/Cop/RSpec/ContextWording"
-title = "rubocop-rspec — RSpec/ContextWording cop"
+title = "rubocop-rspec: RSpec/ContextWording cop"
 linter = "rubocop-rspec: RSpec/ContextWording"
 
 [[sources]]
 url = "https://docs.rubocop.org/rubocop-rspec/latest/cops_rspec.html"
-title = "RuboCop RSpec — full cop reference"
+title = "RuboCop RSpec: full cop reference"
 linter = "rubocop-rspec: RSpec/ExampleWording"

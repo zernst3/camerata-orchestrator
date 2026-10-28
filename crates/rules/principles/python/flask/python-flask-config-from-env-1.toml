@@ -1,5 +1,5 @@
 id = "PYTHON-FLASK-CONFIG-FROM-ENV-1"
-version = 1
+version = 2
 title = "Flask configuration is loaded from environment variables or config objects; no secrets appear in source files"
 domain = "python:flask"
 layer = "framework"
@@ -41,14 +41,14 @@ why = "Equivalent to committing credentials; the `.env` pattern is safe only whe
 
 [[sources]]
 url = "https://flask.palletsprojects.com/en/stable/config/"
-title = "Flask docs — Configuration Handling (SECRET_KEY, environment variables, config best practices)"
+title = "Flask docs: Configuration Handling (SECRET_KEY, environment variables, config best practices)"
 
 [[sources]]
 url = "https://bandit.readthedocs.io/en/latest/plugins/b105_hardcoded_password_string.html"
-title = "Bandit B105 — hardcoded_password_string"
+title = "Bandit B105: hardcoded_password_string"
 linter = "Bandit: B105"
 
 [[sources]]
 url = "https://docs.astral.sh/ruff/rules/hardcoded-password-string/"
-title = "Ruff S105 — hardcoded-password-string"
+title = "Ruff S105: hardcoded-password-string"
 linter = "Ruff: S105"

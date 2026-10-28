@@ -1,5 +1,5 @@
 id = "SQL-SOFT-DELETE-PARTIAL-INDEX-1"
-version = 1
+version = 2
 title = "A soft-deleted row's unique constraints are partial (excluding deleted rows), and ordinary reads filter it out by default"
 domain = "sql"
 layer = "universal"
@@ -15,7 +15,7 @@ qualifies = "Enforced by a scan over tables carrying a soft-delete column (delet
 
 [[sources]]
 url = "https://www.postgresql.org/docs/current/indexes-partial.html"
-title = "PostgreSQL — Partial Indexes: a unique partial index (`CREATE UNIQUE INDEX ... WHERE <condition>`) enforces uniqueness only among the rows matching the predicate, the documented mechanism for 'ensure there is only one successful entry... but there might be any number of unsuccessful ones'"
+title = "PostgreSQL: Partial Indexes: a unique partial index (`CREATE UNIQUE INDEX ... WHERE <condition>`) enforces uniqueness only among the rows matching the predicate, the documented mechanism for 'ensure there is only one successful entry... but there might be any number of unsuccessful ones'"
 
 [decision]
 question = "Is every unique constraint on a soft-deletable table scoped to exclude soft-deleted rows, and do ordinary reads filter soft-deleted rows out by default rather than requiring every caller to remember to?"
@@ -46,8 +46,8 @@ id = "partial-unique-constraints-and-default-filtered-reads"
 label = "Scope unique constraints to exclude soft-deleted rows; filter soft-deleted rows out by default rather than per-caller"
 directive = """
 On a table that uses a soft-delete column (deleted_at, is_deleted, archived_at, or a close variant), every unique
-constraint is partial — scoped with `WHERE deleted_at IS NULL` (or the equivalent) so uniqueness is enforced only
-among live rows and a value from a soft-deleted row can be reused — and ordinary reads exclude soft-deleted rows by
+constraint is partial, scoped with `WHERE deleted_at IS NULL` (or the equivalent) so uniqueness is enforced only
+among live rows and a value from a soft-deleted row can be reused, and ordinary reads exclude soft-deleted rows by
 default through a shared layer (an RLS policy predicate, a default ORM scope, or a view) rather than requiring every
 individual query, policy, or report to remember its own `WHERE deleted_at IS NULL` predicate. A soft-deleted row is
 therefore never surfaced as if it were live, and reuse of its previously-unique value is never blocked by a
@@ -56,7 +56,7 @@ constraint that cannot tell the conflicting row is gone.
 remediation = """
 Replace the plain unique constraint on `<table>.<column>` with a partial unique index scoped to live rows:
 `CREATE UNIQUE INDEX ... ON <table> (<column>) WHERE deleted_at IS NULL`. Scope the soft-delete filter once at a
-shared layer — an RLS policy predicate, a default ORM scope, or a view — rather than requiring every query site to
+shared layer (an RLS policy predicate, a default ORM scope, or a view) rather than requiring every query site to
 add `WHERE deleted_at IS NULL` by hand. Verify by soft-deleting a row and confirming a new row can reuse its
 previously-unique value, and that a default (unfiltered) read of the table no longer surfaces the soft-deleted row.
 """

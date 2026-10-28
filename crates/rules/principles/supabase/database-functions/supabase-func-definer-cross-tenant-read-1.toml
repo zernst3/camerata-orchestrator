@@ -1,5 +1,5 @@
 id = "SUPABASE-FUNC-DEFINER-CROSS-TENANT-READ-1"
-version = 4
+version = 5
 title = "A SECURITY DEFINER function that returns rows filtered only by its own caller-supplied parameter, and is granted EXECUTE to anon/public/authenticated, must check that id against the caller's identity"
 domain = "supabase:database-functions"
 # General Postgres/PostgREST, not just Supabase: a SECURITY DEFINER function that reads data
@@ -45,7 +45,7 @@ title = "CWE-863: Incorrect Authorization"
 
 [[sources]]
 url = "https://supabase.com/docs/guides/database/functions#security-definer-vs-invoker"
-title = "Supabase docs — Database Functions: SECURITY DEFINER runs with the privileges of the user that created it, bypassing the caller's own row-level security"
+title = "Supabase docs: Database Functions: SECURITY DEFINER runs with the privileges of the user that created it, bypassing the caller's own row-level security"
 
 [decision]
 question = "Must a SECURITY DEFINER function that returns rows filtered only by a caller-supplied parameter, and is granted EXECUTE to anon/public/authenticated, check that parameter against the caller's own identity before returning rows?"
@@ -85,7 +85,7 @@ directive = """
 A SECURITY DEFINER function runs with its creator's privileges, so the Row Level Security that would
 normally decide which rows a caller may see never runs. When such a function is granted EXECUTE to
 `anon`, `public` or `authenticated`, and selects rows by matching a column against one of its own
-parameters, the function body is the only place entitlement can be established — and it establishes
+parameters, the function body is the only place entitlement can be established, and it establishes
 it, before returning anything. A session or JWT identity read (`auth.uid()`, `auth.jwt()`,
 `current_user`, `session_user`, a `request.jwt` claims read) compared against the owner or tenant
 column, a call to a role/ownership-check function, or a caller-supplied shared secret compared
@@ -94,7 +94,7 @@ the caller provable. Where the function is only ever meant to return the caller'
 better shape is to derive the id from `auth.uid()` and not accept it as a parameter at all.
 
 Without that check, any caller matching the grant substitutes another tenant's id and reads their
-rows — IDOR, with the bypass happening inside the database rather than in a web handler. A UI that
+rows: IDOR, with the bypass happening inside the database rather than in a web handler. A UI that
 declines to render the button is not a substitute: the PostgREST RPC endpoint reaches the function
 directly regardless of what the interface shows.
 """
@@ -102,11 +102,11 @@ remediation = """
 For `<function-name>`, add a server-side identity check as the FIRST statement in the function
 body, before returning any rows: compare `auth.uid()` (or `current_user`/`session_user`, or a
 custom JWT claim read via `current_setting('request.jwt.claims', true)`) against the row's
-owner/tenant column for the id supplied, and `raise exception` on mismatch — or call a role-check
+owner/tenant column for the id supplied, and `raise exception` on mismatch, or call a role-check
 helper (e.g. `has_role(auth.uid(), 'admin')`) and `raise exception` when it returns false. If the
 function is only ever meant to return the CALLER's own data, consider deriving the id from
 `auth.uid()` directly instead of accepting it as a parameter, removing the substitution risk
-entirely. A UI-only disable/hide of the triggering control is never sufficient — the function is
+entirely. A UI-only disable/hide of the triggering control is never sufficient: the function is
 still reachable directly via the PostgREST RPC endpoint regardless of what the UI renders. Verify
 by confirming a direct RPC call supplying an id the caller does not own is rejected before any row
 is returned.

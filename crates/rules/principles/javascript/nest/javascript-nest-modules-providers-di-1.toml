@@ -1,5 +1,5 @@
 id = "JAVASCRIPT-NEST-MODULES-PROVIDERS-DI-1"
-version = 2
+version = 3
 title = "Use NestJS modules and dependency injection to organize and inject services"
 domain = "javascript:nest"
 layer = "framework"
@@ -18,11 +18,11 @@ verification = "grounded"
 
 [[sources]]
 url = "https://docs.nestjs.com/modules"
-title = "NestJS Docs — Modules: providers and dependency injection"
+title = "NestJS Docs: Modules: providers and dependency injection"
 
 [[sources]]
 url = "https://docs.nestjs.com/providers"
-title = "NestJS Docs — Providers: @Injectable and constructor injection"
+title = "NestJS Docs: Providers: @Injectable and constructor injection"
 
 [decision]
 question = "How are NestJS services and their dependencies wired together and constructed?"

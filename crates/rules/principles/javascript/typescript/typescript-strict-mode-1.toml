@@ -1,5 +1,5 @@
 id = "JAVASCRIPT-TYPESCRIPT-STRICT-MODE-1"
-version = 2
+version = 3
 title = "The compiler runs in strict mode"
 domain = "javascript:typescript"
 layer = "language"
@@ -12,7 +12,7 @@ verification = "grounded"
 
 [[sources]]
 url = "https://www.typescriptlang.org/tsconfig#strict"
-title = "TypeScript tsconfig reference — strict option"
+title = "TypeScript tsconfig reference: strict option"
 
 [decision]
 question = "How is the TypeScript compiler's strict mode configured across the tsconfig files?"

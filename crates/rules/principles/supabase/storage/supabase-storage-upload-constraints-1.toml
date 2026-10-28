@@ -1,5 +1,5 @@
 id = "SUPABASE-STORAGE-UPLOAD-CONSTRAINTS-1"
-version = 1
+version = 2
 title = "Every bucket that accepts user uploads declares a file-size limit and a content-type allowlist at the bucket level"
 domain = "supabase:storage"
 layer = "platform"
@@ -17,7 +17,7 @@ qualifies = "Enforced by a scan over bucket-creation statements — `createBucke
 
 [[sources]]
 url = "https://supabase.com/docs/reference/javascript/storage-createbucket"
-title = "Supabase JS client reference — storage.createBucket: fileSizeLimit and allowedMimeTypes bucket options"
+title = "Supabase JS client reference: storage.createBucket: fileSizeLimit and allowedMimeTypes bucket options"
 
 [[sources]]
 url = "https://cwe.mitre.org/data/definitions/434.html"
@@ -25,7 +25,7 @@ title = "CWE-434: Unrestricted Upload of File with Dangerous Type"
 
 [[sources]]
 url = "https://cheatsheetseries.owasp.org/cheatsheets/File_Upload_Cheat_Sheet.html"
-title = "OWASP File Upload Cheat Sheet — validate file size and content type server-side, not just in the client"
+title = "OWASP File Upload Cheat Sheet: validate file size and content type server-side, not just in the client"
 
 [decision]
 question = "Does every bucket that accepts user uploads declare a file-size limit and a content-type allowlist as bucket-level configuration, rather than relying on application-code validation alone?"
@@ -53,8 +53,8 @@ id = "declare-both-constraints-at-bucket-creation"
 label = "Every bucket that accepts uploads declares both a file-size limit and a content-type allowlist"
 directive = """
 Any bucket the application uploads user-supplied content into declares both `fileSizeLimit` and
-`allowedMimeTypes` at creation — or the `file_size_limit` / `allowed_mime_types` columns in a
-`storage.buckets` migration — scoped to what the feature actually needs, for example
+`allowedMimeTypes` at creation (or the `file_size_limit` / `allowed_mime_types` columns in a
+`storage.buckets` migration) scoped to what the feature actually needs, for example
 `{ fileSizeLimit: '10MB', allowedMimeTypes: ['image/png', 'image/jpeg'] }`. Both default to unset,
 meaning unlimited size and any MIME type, and declaring one without the other leaves the matching
 half of the problem open.
@@ -81,5 +81,5 @@ why = "Both constraints are declared once at the bucket level and then enforced 
 id = "validate-size-and-type-in-application-code-only"
 violates = true
 label = "File size and content type are checked only in application code, with the bucket's own limits left unset"
-directive = "A pre-upload check in the application's request handler — reading Content-Length and Content-Type, or inspecting the File object client-side — is the only thing rejecting oversized or disallowed uploads; the bucket's `fileSizeLimit` and `allowedMimeTypes` are unset."
-why = "Rejected: an application-layer check only runs for the specific call site that implements it. The Storage API itself still accepts anything once called directly — a different endpoint, an admin script, a bulk-import job, or simply a future developer who adds a new upload path without copying the same validation, bypasses the constraint entirely. A client-side-only check is also trivially bypassed by any direct API call that skips the browser altogether. The bucket-level fields exist precisely so the constraint is a property of the bucket, enforced once, rather than a duty every future call site has to remember to re-implement correctly."
+directive = "A pre-upload check in the application's request handler (reading Content-Length and Content-Type, or inspecting the File object client-side) is the only thing rejecting oversized or disallowed uploads; the bucket's `fileSizeLimit` and `allowedMimeTypes` are unset."
+why = "Rejected: an application-layer check only runs for the specific call site that implements it. The Storage API itself still accepts anything once called directly: a different endpoint, an admin script, a bulk-import job, or simply a future developer who adds a new upload path without copying the same validation, bypasses the constraint entirely. A client-side-only check is also trivially bypassed by any direct API call that skips the browser altogether. The bucket-level fields exist precisely so the constraint is a property of the bucket, enforced once, rather than a duty every future call site has to remember to re-implement correctly."

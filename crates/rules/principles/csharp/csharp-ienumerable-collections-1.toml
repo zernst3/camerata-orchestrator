@@ -1,5 +1,5 @@
 id = "CSHARP-IENUMERABLE-COLLECTIONS-1"
-version = 1
+version = 2
 title = "Methods return IEnumerable<T> or ICollection<T> instead of arrays or List<T>; callers should not couple to concrete collection types"
 domain = "csharp"
 layer = "language"
@@ -38,4 +38,4 @@ why = "Safe but inefficient; every call allocates a new collection. Acceptable f
 
 [[sources]]
 url = "https://learn.microsoft.com/en-us/dotnet/standard/design-guidelines/guidelines-for-collections"
-title = "Guidelines for Collections — Framework Design Guidelines | Microsoft Learn"
+title = "Guidelines for Collections: Framework Design Guidelines | Microsoft Learn"

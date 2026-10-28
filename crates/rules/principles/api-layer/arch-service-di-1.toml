@@ -1,5 +1,5 @@
 id = "ARCH-SERVICE-DI-1"
-version = 2
+version = 3
 title = "Services depend on repository abstractions injected at the composition root"
 domain = "api-layer"
 layer = "universal"
@@ -15,11 +15,11 @@ verification = "grounded"
 
 [[sources]]
 url = "https://martinfowler.com/articles/injection.html"
-title = "Martin Fowler — Inversion of Control Containers and the Dependency Injection pattern"
+title = "Martin Fowler: Inversion of Control Containers and the Dependency Injection pattern"
 
 [[sources]]
 url = "https://www.manning.com/books/dependency-injection-principles-practices-patterns"
-title = "Seemann & van Deursen — Dependency Injection Principles, Practices, and Patterns (Composition Root)"
+title = "Seemann & van Deursen: Dependency Injection Principles, Practices, and Patterns (Composition Root)"
 
 [decision]
 question = "How do services obtain the repositories they use?"

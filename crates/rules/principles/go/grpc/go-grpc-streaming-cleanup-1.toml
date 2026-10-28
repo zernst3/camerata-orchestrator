@@ -1,5 +1,5 @@
 id = "GO-GRPC-STREAMING-CLEANUP-1"
-version = 1
+version = 2
 title = "Streaming RPCs properly close send/receive loops and handle context cancellation; no resource leaks or dangling goroutines"
 domain = "go:grpc"
 layer = "framework"
@@ -11,11 +11,11 @@ verification = "grounded"
 
 [[sources]]
 url = "https://grpc.io/docs/languages/go/basics/"
-title = "gRPC — Basics tutorial (Go) — Bidirectional streaming"
+title = "gRPC: Basics tutorial (Go), Bidirectional streaming"
 
 [[sources]]
 url = "https://go.dev/wiki/CodeReviewComments#goroutine-lifetimes"
-title = "Go Code Review Comments — Goroutine Lifetimes"
+title = "Go Code Review Comments: Goroutine Lifetimes"
 
 [decision]
 question = "How should streaming RPC implementations handle loop cleanup and context cancellation?"

@@ -1,5 +1,5 @@
 id = "ARCH-REPO-PER-AGGREGATE-1"
-version = 2
+version = 3
 title = "One repository abstraction per aggregate, declared in the domain layer"
 domain = "api-layer"
 layer = "universal"
@@ -11,11 +11,11 @@ verification = "grounded"
 
 [[sources]]
 url = "https://www.amazon.com/Implementing-Domain-Driven-Design-Vaughn-Vernon/dp/0321834577"
-title = "Vaughn Vernon — Implementing Domain-Driven Design, Chapter 12: Repositories (per-aggregate collection-oriented repository)"
+title = "Vaughn Vernon: Implementing Domain-Driven Design, Chapter 12: Repositories (per-aggregate collection-oriented repository)"
 
 [[sources]]
 url = "https://martinfowler.com/eaaCatalog/repository.html"
-title = "Martin Fowler / Eric Evans — Repository (mediates between the domain and data mapping layers with a collection-like interface)"
+title = "Martin Fowler / Eric Evans: Repository (mediates between the domain and data mapping layers with a collection-like interface)"
 
 [decision]
 question = "How are data-access abstractions organized across the domain's aggregates?"
@@ -54,6 +54,6 @@ why = "No abstraction couples every service to the chosen persistence library; t
 
 [[option]]
 id = "cqrs-read-model-queries-bypass-the-aggregate-rep"
-label = "CQRS read/write split — read-model queries bypass the aggregate repository; writes still go through it"
+label = "CQRS read/write split: read-model queries bypass the aggregate repository; writes still go through it"
 directive = "Split reads from writes: write operations (commands) go through the per-aggregate repository as usual, but read operations that serve a specific view or report query a separate, often denormalized read model directly (a dedicated query/projection layer, a read replica, or hand-written SQL tailored to that view), bypassing the aggregate repository's finder methods entirely. Keep the aggregate repository as the sole write path so invariants are still enforced in one place."
 why = "Aggregate-shaped repository finders are a poor fit for multi-aggregate, denormalized, or list/report-style views — forcing every read through the aggregate repository either produces N+1 fetch-and-assemble code in services or pressures the repository into growing view-specific methods that don't belong to the aggregate. A read model built and queried for the view it serves avoids both. The trade-off is real: the read model can drift from the write model if projections aren't kept in sync, and the codebase now carries two data-access paths (command-side repository, query-side read model) instead of one, which is more machinery for a team that doesn't have read-shape problems severe enough to justify it. This is a complement to per-aggregate repositories, not a replacement — the write side still needs exactly the aggregate-repository discipline this rule describes."

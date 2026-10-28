@@ -1,5 +1,5 @@
 id = "RUBY-TESTING-UNIT-FILE-LOCATION-1"
-version = 1
+version = 2
 title = "Unit test files mirror the source tree under spec/ (RSpec) or test/ (Minitest) with matching names"
 domain = "ruby:testing"
 layer = "language"
@@ -33,13 +33,13 @@ why = "Eliminates nested directories but collapses the source-tree signal, makin
 
 [[sources]]
 url = "https://rspec.info/features/6-0/rspec-rails/directory-structure/"
-title = "RSpec Rails — Directory Structure"
+title = "RSpec Rails: Directory Structure"
 
 [[sources]]
 url = "https://www.rubydoc.info/gems/rubocop-rspec/RuboCop/Cop/RSpec/SpecFilePathFormat"
-title = "rubocop-rspec — RSpec/SpecFilePathFormat cop"
+title = "rubocop-rspec: RSpec/SpecFilePathFormat cop"
 linter = "rubocop-rspec: RSpec/SpecFilePathFormat"
 
 [[sources]]
 url = "https://guides.rubyonrails.org/testing.html"
-title = "Rails Guides — A Guide to Testing Rails Applications"
+title = "Rails Guides: A Guide to Testing Rails Applications"

@@ -1,5 +1,5 @@
 id = "GO-ERRORS-MUST-BE-CHECKED-1"
-version = 1
+version = 2
 title = "Errors are always checked; no naked return statements or silently ignored errors"
 domain = "go"
 layer = "language"
@@ -13,11 +13,11 @@ qualifies = "Enforced by a static-analysis gate (errcheck, golangci-lint errchec
 
 [[sources]]
 url = "https://go.dev/wiki/CodeReviewComments#handle-errors"
-title = "Go Code Review Comments — Handle Errors"
+title = "Go Code Review Comments: Handle Errors"
 
 [[sources]]
 url = "https://golangci-lint.run/docs/linters/"
-title = "golangci-lint linters — errcheck"
+title = "golangci-lint linters: errcheck"
 linter = "golangci-lint: errcheck"
 
 [decision]
