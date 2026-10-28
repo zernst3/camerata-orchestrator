@@ -446,6 +446,82 @@ pub struct ScanInputFacts {
     /// be neither confirmed nor refuted. A graded run must not repeat that.
     #[serde(default)]
     pub audit_model: Option<String>,
+    /// Auditable files the scan did NOT read, by path and reason (over the size cap, or past
+    /// the file cap). H4: listed under Coverage in the report and `findings.json` so a skipped
+    /// file is named, never silently absent. `serde(default)` so an older ledger still loads.
+    #[serde(default)]
+    pub skipped_files: Vec<SkippedFile>,
+    /// Skipped files NOT named in `skipped_files`, because the list holds at most
+    /// [`SKIPPED_FILES_LISTED_PER_REASON`] paths per reason. Every renderer states it as "and K
+    /// more", so a bounded list never reads as the whole list. `serde(default)` for older ledgers.
+    #[serde(default)]
+    pub skipped_beyond_cap_total: usize,
+}
+
+/// How many skipped paths are named per reason. A huge repository can have tens of thousands of
+/// files past the file cap; a report that listed them all would bury the rest of Coverage, so
+/// the first paths (in walk order) are named and the remainder is counted.
+pub const SKIPPED_FILES_LISTED_PER_REASON: usize = 1_000;
+
+/// Collects skipped files while honouring [`SKIPPED_FILES_LISTED_PER_REASON`]. Pure, so the
+/// bound is testable without a real tree.
+#[derive(Debug, Default)]
+pub struct SkippedFileList {
+    listed: Vec<SkippedFile>,
+    listed_per_reason: std::collections::HashMap<SkipReason, usize>,
+    beyond_cap_total: usize,
+}
+
+impl SkippedFileList {
+    /// Record one skipped file: named while its reason is under the bound, counted after.
+    pub fn push(&mut self, repo: &str, path: String, reason: SkipReason) {
+        let seen = self.listed_per_reason.entry(reason).or_insert(0);
+        if *seen < SKIPPED_FILES_LISTED_PER_REASON {
+            *seen += 1;
+            self.listed.push(SkippedFile {
+                repo: repo.to_string(),
+                path,
+                reason,
+            });
+        } else {
+            self.beyond_cap_total += 1;
+        }
+    }
+
+    /// The named files and the count of those not named.
+    pub fn finish(self) -> (Vec<SkippedFile>, usize) {
+        (self.listed, self.beyond_cap_total)
+    }
+}
+
+/// One auditable file the scan did not read. See [`ScanInputFacts::skipped_files`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SkippedFile {
+    /// The repo (`owner/repo`).
+    pub repo: String,
+    /// Repo-relative, forward-slashed path.
+    pub path: String,
+    pub reason: SkipReason,
+}
+
+/// Why a file was not read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SkipReason {
+    /// Larger than `onboard::files::MAX_FILE_BYTES` (400 KB).
+    Oversize,
+    /// Past `onboard::files::HARD_CAP_FILES` (20,000 files) in its repo.
+    BeyondFileCap,
+}
+
+impl SkipReason {
+    /// The client-facing reason, as the Coverage section states it.
+    pub fn label(self) -> &'static str {
+        match self {
+            SkipReason::Oversize => "over the 400 KB file size limit",
+            SkipReason::BeyondFileCap => "beyond the 20,000-file limit",
+        }
+    }
 }
 
 /// W21 — whether every row's `path` is actually a repository-relative FILE PATH.
@@ -1002,6 +1078,13 @@ impl ScanLedger {
         &self.stages
     }
 
+    /// Rows the scan dropped as repeats of another row at the same location, summed over every
+    /// stage that recorded a `deduped` count. These rows never reach review, so nothing
+    /// downstream (the triage log included) can count them.
+    pub fn deduped_total(&self) -> usize {
+        self.stages.iter().map(|s| s.deduped).sum()
+    }
+
     /// Rule ids that genuinely ran and emitted zero findings — the ONLY honest definition of
     /// "verified clean" / "What's healthy". Sorted for stable output.
     pub fn healthy_rule_ids(&self) -> Vec<String> {
@@ -1117,6 +1200,7 @@ pub fn stage_disclosure(
             stage.routed_informational,
             stage.deduped,
         ),
+        files_not_reviewed: 0,
     })
 }
 
@@ -1235,6 +1319,7 @@ pub fn rule_disclosure(
         repo: repo_label.to_string(),
         pass: "mechanical-enforcement coverage".to_string(),
         reason: format!("{} {}", rule.rule_id, reason),
+        files_not_reviewed: 0,
     })
 }
 

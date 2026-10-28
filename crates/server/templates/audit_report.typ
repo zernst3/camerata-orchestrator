@@ -780,6 +780,10 @@
 // `brand_title` above) and never a substitute for the agency's own resolved brand.
 Scanned with Camerata v#or_na(d.cover.camerata_version). Inspection model: #or_na(d.cover.audit_model). Calibration model: #or_na(d.cover.calibration_model).
 
+// H4: the exact engine build and rule library behind this report, the same values the README,
+// manifest.json and findings.json state. Each line renders only when the value was recorded.
+#if d.cover.engine_commit != none [Engine commit: #raw(d.cover.engine_commit). ]#if d.cover.corpus_version != none [Rule library lock hash: #raw(d.cover.corpus_version).]
+
 // P5: this reconciling line must never claim a human "reviewed"/"dispositioned" a finding
 // unless `d.review_state == "reviewed"` (at least one finding this session carries an explicit
 // auditor disposition — see `report_export::ReviewState`'s doc comment). The two branches also
@@ -807,6 +811,33 @@ Not performed in this engagement:
   Not computed this run (pass failed or timed out):
   #for note in d.methodology.failed_passes [
     - #note
+  ]
+]
+
+// H4: what this scan did not review, by pass and by path (`report_export::coverage_gaps`, the
+// same data the workbook's Coverage sheet and findings.json carry). A failed AI pass names how
+// many files it did not review; a skipped file is listed by path. The PDF lists the first 100
+// skipped files and points to the full list, which itself holds the first 1,000 per reason; the
+// rest are counted ("and K more").
+#let gaps = d.coverage_gaps
+#if gaps.failed_ai_passes.len() > 0 or gaps.skipped_files.len() > 0 or gaps.skipped_beyond_cap_total > 0 [
+  #v(0.2cm)
+  #card[
+    #subheading[Coverage, not reviewed this scan]
+    #v(0.1cm)
+    #for line in gaps.failed_ai_passes [
+      - #line
+    ]
+    #let shown = calc.min(gaps.skipped_files.len(), 100)
+    #for skipped in gaps.skipped_files.slice(0, shown) [
+      - #skipped.repo, #raw(skipped.path): #skipped.reason
+    ]
+    #if gaps.skipped_files.len() > shown [
+      - and #str(gaps.skipped_files.len() - shown) more skipped files, listed in full on the workbook's Coverage sheet and in findings.json
+    ]
+    #if "skipped_beyond_cap_note" in gaps [
+      - #gaps.skipped_beyond_cap_note
+    ]
   ]
 ]
 

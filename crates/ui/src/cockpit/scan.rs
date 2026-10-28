@@ -9571,9 +9571,7 @@ pub(super) fn DeepReportExportPanel(project_id: String, soc2_enabled: bool) -> E
 pub(super) async fn export_product_zip(
     project_id: &str,
     dispositions: &std::collections::HashMap<String, Disposition>,
-    project_title: &str,
-    prepared_by: &str,
-    executive_summary_override: Option<String>,
+    options: &camerata_ui_core::product_export::ProductExportOptions,
 ) -> Result<(Vec<u8>, String), String> {
     let url = format!(
         "{}/api/projects/{}/product-export",
@@ -9582,16 +9580,12 @@ pub(super) async fn export_product_zip(
     );
     let resp = reqwest::Client::new()
         .post(url)
-        .json(&serde_json::json!({
-            "dispositions": dispositions,
-            // The client name is not sent: the server reads it from the project's inspection
-            // setup (`Project::client_name`), so every export names the same client.
-            "options": {
-                "project_title": project_title,
-                "prepared_by": prepared_by,
-                "executive_summary_override": executive_summary_override,
-            },
-        }))
+        // The client name is not sent: the server reads it from the project's inspection setup
+        // (`Project::client_name`), so every export names the same client.
+        .json(&camerata_ui_core::product_export::request_body(
+            dispositions,
+            options,
+        ))
         .send()
         .await
         .map_err(|e| e.to_string())?;
@@ -9698,6 +9692,7 @@ pub(super) fn AuditReportExportPanel(
     let mut project_title = use_signal(String::new);
     let mut prepared_by = use_signal(String::new);
     let mut summary_override = use_signal(String::new);
+    let mut triage_log = use_signal(|| false);
 
     rsx! {
         div { class: "audit-export-panel",
@@ -9743,6 +9738,19 @@ pub(super) fn AuditReportExportPanel(
                     }
                 }
             }
+            div { class: "audit-model-row",
+                label { class: "audit-model-label", r#for: "export-triage-log", "Triage log" }
+                input {
+                    id: "export-triage-log",
+                    r#type: "checkbox",
+                    checked: triage_log(),
+                    onchange: move |e| triage_log.set(e.checked()),
+                }
+                span { class: "section-hint",
+                    "Also export, per rule, what the AI pass proposed, what review kept and threw \
+                     out, and why: a Triage Log sheet in the workbook and csv/triage-log.csv. Off by default."
+                }
+            }
             button {
                 class: "btn-run",
                 "data-tour": camerata_ui_core::walkthrough::target::EXPORT_PACKAGE,
@@ -9753,11 +9761,18 @@ pub(super) fn AuditReportExportPanel(
                     let pt = project_title();
                     let pb = prepared_by();
                     let so = summary_override();
+                    let log = triage_log();
                     loading.set(true);
                     spawn(async move {
                         let _guard = crate::loading::LoadingGuard::new();
                         let override_opt = if so.trim().is_empty() { None } else { Some(so) };
-                        match export_product_zip(&pid, &disp_snapshot, &pt, &pb, override_opt).await {
+                        let options = camerata_ui_core::product_export::ProductExportOptions {
+                            project_title: pt,
+                            prepared_by: pb,
+                            executive_summary_override: override_opt,
+                            triage_log: log,
+                        };
+                        match export_product_zip(&pid, &disp_snapshot, &options).await {
                             Ok((bytes, filename)) => {
                                 if save_bytes(&filename, bytes).await {
                                     crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, "Product export saved.");
@@ -9771,6 +9786,32 @@ pub(super) fn AuditReportExportPanel(
                 if loading() { "Exporting\u{2026}" } else { "Export product (ZIP: PDF + Excel + JSON)" }
             }
         }
+    }
+}
+
+/// The export dialog offers the triage log as an unticked box (off by default).
+#[cfg(test)]
+mod export_dialog_triage_log_box {
+    use super::AuditReportExportPanel;
+    use dioxus::prelude::*;
+
+    fn app() -> Element {
+        use_context_provider(|| Signal::new(Vec::<crate::toast::Toast>::new()));
+        let dispositions = use_signal(std::collections::HashMap::new);
+        rsx! {
+            AuditReportExportPanel { project_id: "p1".to_string(), dispositions }
+        }
+    }
+
+    #[test]
+    fn the_dialog_has_an_unticked_triage_log_checkbox() {
+        let mut vdom = VirtualDom::new(app);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        assert!(html.contains("export-triage-log"), "{html}");
+        assert!(html.contains(r#"type="checkbox""#), "{html}");
+        assert!(html.contains("Triage log"), "{html}");
+        assert!(!html.contains("checked=true"), "off by default: {html}");
     }
 }
 
@@ -17797,7 +17838,13 @@ mod order_preset_tests {
                 ..Disposition::default()
             },
         );
-        export_product_zip("p1", &dispositions, "Title", "Me", None)
+        let options = camerata_ui_core::product_export::ProductExportOptions {
+            project_title: "Title".to_string(),
+            prepared_by: "Me".to_string(),
+            triage_log: true,
+            ..Default::default()
+        };
+        export_product_zip("p1", &dispositions, &options)
             .await
             .expect("the export answers");
         let requests = server.received_requests().await.expect("recorded");
@@ -17810,6 +17857,11 @@ mod order_preset_tests {
             .collect();
         keys.sort_unstable();
         assert_eq!(keys, vec!["dispositions", "options"]);
+        assert_eq!(
+            body["options"]["triage_log"],
+            serde_json::json!(true),
+            "the ticked triage-log box reaches the request"
+        );
         assert!(
             body["options"].get("client_name").is_none(),
             "the client name comes from the project's inspection setup, never the request"

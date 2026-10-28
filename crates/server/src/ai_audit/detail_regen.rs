@@ -674,6 +674,7 @@ pub(crate) async fn regenerate_full_details(
                     )
                 })
                 .unwrap_or_default(),
+            files_not_reviewed: 0,
         });
     }
     (findings, failed_passes)
