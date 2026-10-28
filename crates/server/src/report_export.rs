@@ -64,7 +64,11 @@ pub struct DispositionWire {
 /// leaves it blank; every field degrades to an empty/omitted value in the template).
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct ReportOptions {
-    #[serde(default)]
+    /// Who the report is prepared FOR: the cover's "Prepared for" line and the confidentiality
+    /// marking on every page and sheet. Server-populated from the project's inspection setup
+    /// (`Project::client_name`), never client-supplied (`serde(skip)`), so every export of a
+    /// project names the same client. A blank name blocks the export ([`require_client_name`]).
+    #[serde(skip)]
     pub client_name: String,
     #[serde(default)]
     pub project_title: String,
@@ -1354,6 +1358,10 @@ pub struct AuditReportJson {
     /// agency's brand gets the text wordmark alone, so the template never puts one agency's
     /// logo on another's report.
     pub brand_mark: bool,
+    /// The confidentiality marking (2026-10-24 decision): the footer line on every PDF page and
+    /// the handling note on the first. The workbook prints the same `line` in every sheet's
+    /// footer ([`confidentiality_marking`] is the one producer).
+    pub confidentiality: ConfidentialityJson,
     pub executive_summary: ExecutiveSummaryJson,
     pub three_things: ThreeThingsJson,
     pub scorecard: ScorecardJson,
@@ -1396,6 +1404,114 @@ pub struct AuditReportJson {
     pub dependency_snapshot: DependencySnapshotJson,
     pub methodology: MethodologyJson,
     pub disclaimer: String,
+}
+
+/// The confidentiality marking a client deliverable carries (2026-10-24 decision, recorded in
+/// `docs/OVERNIGHT_DECISIONS.md`).
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ConfidentialityJson {
+    /// "Confidential, prepared for <client> on <date>": every PDF page footer and every
+    /// workbook sheet footer.
+    pub line: String,
+    /// The first page's short handling note: who the report is for, and not to forward it
+    /// outside that company without consent.
+    pub handling_note: String,
+}
+
+/// The longest client name the inspection setup accepts. The name is printed in every PDF
+/// footer and every workbook sheet footer, and a workbook footer holds at most 255 characters
+/// including its layout codes, so a bound here keeps the marking whole everywhere.
+pub const CLIENT_NAME_MAX_CHARS: usize = 100;
+
+/// Why an export refused to start: the inspection setup has no usable client name. Its
+/// `Display` is the plain message the operator sees (HTTP 422 body, CLI stderr).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClientNameRequired(pub String);
+
+impl std::fmt::Display for ClientNameRequired {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for ClientNameRequired {}
+
+/// Check a client name as the inspection setup saves it: trimmed, at most
+/// [`CLIENT_NAME_MAX_CHARS`] characters, no line breaks or other control characters (it is
+/// one line of a page footer). Blank is allowed here (the operator may clear the field);
+/// exporting with a blank name is refused by [`require_client_name`].
+pub fn validate_client_name(name: &str) -> Result<String, ClientNameRequired> {
+    let name = name.trim();
+    if name.chars().count() > CLIENT_NAME_MAX_CHARS {
+        return Err(ClientNameRequired(format!(
+            "The client name is longer than {CLIENT_NAME_MAX_CHARS} characters. Shorten it in \
+             the inspection setup; it is printed in the footer of every page."
+        )));
+    }
+    if name.chars().any(char::is_control) {
+        return Err(ClientNameRequired(
+            "The client name contains a line break or another control character. Enter it on \
+             one line in the inspection setup."
+                .to_string(),
+        ));
+    }
+    Ok(name.to_string())
+}
+
+/// The export-time check: a valid, NON-BLANK client name, or the message that blocks the
+/// export. Called by the one package assembly (`release_gate::build_product_package_with_stem`)
+/// and the PDF-only route, before anything is compiled, so no deliverable can say
+/// "prepared for ." (2026-10-24 decision).
+pub fn require_client_name(opts: &ReportOptions) -> Result<String, ClientNameRequired> {
+    let name = validate_client_name(&opts.client_name)?;
+    if name.is_empty() {
+        return Err(ClientNameRequired(
+            "Enter the client name in the inspection setup before exporting. It fills the \
+             confidentiality line on every page of the report and every sheet of the workbook."
+                .to_string(),
+        ));
+    }
+    Ok(name)
+}
+
+/// The scan date as the confidentiality line prints it: "21 October 2026". The SAME instant
+/// the cover's "Generated" line uses ([`scan_instant`], falling back to now only when the scan
+/// recorded no time), so the two can never name different days.
+fn marking_date(provenance: &crate::onboard::ScanProvenance) -> String {
+    scan_instant(provenance)
+        .unwrap_or_else(chrono::Utc::now)
+        .format("%-d %B %Y")
+        .to_string()
+}
+
+/// THE producer of the confidentiality marking, shared by the PDF data ([`build_report_json`])
+/// and the workbook (`xlsx_export::build_workbook`), so the PDF footer and the sheet footers
+/// print the same line. A blank client name (reachable only when a caller bypasses
+/// [`require_client_name`], as unit tests do) yields "Confidential, prepared on <date>" rather
+/// than "prepared for .". Consent is the brand's to give when there is one, else the preparer's.
+pub fn confidentiality_marking(
+    provenance: &crate::onboard::ScanProvenance,
+    opts: &ReportOptions,
+) -> ConfidentialityJson {
+    let client = strip_zero_width(opts.client_name.trim()).into_owned();
+    let date = marking_date(provenance);
+    let consent_from = resolve_brand(opts, None).unwrap_or_else(|| resolve_prepared_by(opts, None));
+    if client.is_empty() {
+        return ConfidentialityJson {
+            line: format!("Confidential, prepared on {date}"),
+            handling_note: format!(
+                "This report is confidential. Please do not forward it without the written \
+                 consent of {consent_from}."
+            ),
+        };
+    }
+    ConfidentialityJson {
+        line: format!("Confidential, prepared for {client} on {date}"),
+        handling_note: format!(
+            "This report is confidential and was prepared for {client} only. Please do not \
+             forward it outside {client} without the written consent of {consent_from}."
+        ),
+    }
 }
 
 /// General-audit variant of `ai_audit::DEEP_ADVISORY_DISCLAIMER` / the deep-report export's
@@ -4929,6 +5045,7 @@ pub fn build_report_json(
     AuditReportJson {
         review_state,
         brand_mark: brand_kit_matches(cover.brand.as_deref()),
+        confidentiality: confidentiality_marking(&report.provenance, opts),
         cover,
         executive_summary,
         three_things,
@@ -10558,6 +10675,74 @@ mod tests {
                 "the PDF does not embed {face}"
             );
         }
+    }
+
+    /// Confidentiality (2026-10-24 decision): the marking names the client and the SCAN date
+    /// (not the wall clock), consent belongs to the brand when there is one and else to the
+    /// preparer, and a blank client never prints "prepared for .".
+    #[test]
+    fn the_confidentiality_marking_names_the_client_the_scan_date_and_who_consents() {
+        let mut provenance = ScanProvenance {
+            finished_at: "2026-10-21T09:30:00Z".to_string(),
+            ..ScanProvenance::default()
+        };
+        let mut opts = empty_opts();
+        opts.client_name = "  Example Client Ltd ".to_string();
+        opts.brand = "Cantus Works".to_string();
+        let m = confidentiality_marking(&provenance, &opts);
+        assert_eq!(
+            m.line,
+            "Confidential, prepared for Example Client Ltd on 21 October 2026"
+        );
+        assert_eq!(
+            m.handling_note,
+            "This report is confidential and was prepared for Example Client Ltd only. Please \
+             do not forward it outside Example Client Ltd without the written consent of \
+             Cantus Works."
+        );
+
+        opts.brand = String::new();
+        opts.prepared_by = "A. Reviewer".to_string();
+        assert!(confidentiality_marking(&provenance, &opts)
+            .handling_note
+            .ends_with("written consent of A. Reviewer."));
+
+        opts.client_name = "   ".to_string();
+        provenance.finished_at = "2026-03-02T00:00:00Z".to_string();
+        let blank = confidentiality_marking(&provenance, &opts);
+        assert_eq!(blank.line, "Confidential, prepared on 2 March 2026");
+        assert!(!blank.line.contains("prepared for"));
+        for text in [&blank.line, &blank.handling_note, &m.line, &m.handling_note] {
+            assert!(
+                !text.contains('\u{2014}') && !text.contains('\u{2013}'),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_client_name_must_be_one_short_line_and_present_to_export() {
+        assert_eq!(
+            validate_client_name("  Example Client Ltd  ").as_deref(),
+            Ok("Example Client Ltd")
+        );
+        assert_eq!(validate_client_name("").as_deref(), Ok(""));
+        assert!(validate_client_name("Example\nClient").is_err());
+        assert!(validate_client_name(&"x".repeat(CLIENT_NAME_MAX_CHARS + 1)).is_err());
+        assert!(validate_client_name(&"x".repeat(CLIENT_NAME_MAX_CHARS)).is_ok());
+
+        let mut opts = empty_opts();
+        opts.client_name = " ".to_string();
+        let refused = require_client_name(&opts).expect_err("blank blocks the export");
+        assert!(
+            refused.to_string().contains("inspection setup"),
+            "{refused}"
+        );
+        opts.client_name = "Example Client Ltd".to_string();
+        assert_eq!(
+            require_client_name(&opts).as_deref(),
+            Ok("Example Client Ltd")
+        );
     }
 
     /// W27: the logo mark belongs to the bundled brand kit, so it renders for that brand only.

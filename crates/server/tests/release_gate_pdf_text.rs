@@ -103,6 +103,14 @@ fn report_with_one_finding_per_shape() -> SealedReport {
     .seal()
 }
 
+/// Report options naming the synthetic client every export needs.
+fn client_options() -> ReportOptions {
+    ReportOptions {
+        client_name: "Example Client Ltd".to_string(),
+        ..ReportOptions::default()
+    }
+}
+
 /// Whether any line of `value` is present in `text` (a PEM body leaks if any one line does).
 fn contains_value(text: &str, value: &str) -> bool {
     value.lines().any(|line| text.contains(line))
@@ -115,7 +123,7 @@ async fn pdf_text_contains_the_redacted_form_and_never_the_value() {
         return;
     }
     let sealed = report_with_one_finding_per_shape();
-    let package = build_product_package(&sealed, &HashMap::new(), None, &ReportOptions::default())
+    let package = build_product_package(&sealed, &HashMap::new(), None, &client_options())
         .await
         .expect("the package assembles");
     let pdf = package.pdf.clone();
@@ -226,7 +234,7 @@ async fn the_rendered_pdf_text_names_no_review_time_data() {
         return;
     }
     let sealed = report_with_one_finding_per_shape();
-    let package = build_product_package(&sealed, &HashMap::new(), None, &ReportOptions::default())
+    let package = build_product_package(&sealed, &HashMap::new(), None, &client_options())
         .await
         .expect("the package assembles");
     let text = pdf_extract::extract_text_from_mem(&package.pdf).expect("the PDF's text extracts");
@@ -261,5 +269,44 @@ async fn the_rendered_pdf_text_check_finds_a_name_that_is_there() {
     assert!(
         internal_terms_in(&text).contains(&"reviewed_by"),
         "a listed name rendered into the PDF must be found in its text"
+    );
+}
+
+/// Confidentiality (2026-10-24 decision): every rendered page carries "Confidential, prepared
+/// for <client> on <date>", and the first page carries the handling note. Read from the
+/// rendered text, page by page, so a footer that stops rendering on some pages is caught.
+#[tokio::test]
+async fn every_rendered_page_carries_the_confidentiality_line() {
+    if !typst_on_path() {
+        eprintln!("skipping every_rendered_page_carries_the_confidentiality_line: no typst");
+        return;
+    }
+    let sealed = report_with_one_finding_per_shape();
+    let package = build_product_package(&sealed, &HashMap::new(), None, &client_options())
+        .await
+        .expect("the package assembles");
+    let line = package.report_json.confidentiality.line.clone();
+    assert_eq!(
+        line,
+        "Confidential, prepared for Example Client Ltd on 21 October 2026"
+    );
+    let pages =
+        pdf_extract::extract_text_from_mem_by_pages(&package.pdf).expect("the PDF's text extracts");
+    assert!(pages.len() > 3, "anti-vacuity: a multi-page report");
+    // Extraction may break a long footer line or drop its spaces; compare without whitespace.
+    let squash = |s: &str| s.split_whitespace().collect::<String>();
+    for (i, page) in pages.iter().enumerate() {
+        assert!(
+            squash(page).contains(&squash(&line)),
+            "page {} lacks the confidentiality line: {page:?}",
+            i + 1
+        );
+    }
+    assert!(
+        squash(&pages[0]).contains(&squash(
+            "This report is confidential and was prepared for Example Client Ltd only."
+        )),
+        "the first page lacks the handling note: {:?}",
+        pages[0]
     );
 }

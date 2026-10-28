@@ -2761,6 +2761,17 @@ thing:
   kit's own (`BRAND_KIT_NAME`, `AuditReportJson::brand_mark`); another agency's brand
   gets the text wordmark alone. A test compiles with system fonts ignored to prove the
   bundle alone renders the report.
+- **Confidentiality marking** (2026-10-24 decision): `report_export::confidentiality_marking`
+  is the one producer of "Confidential, prepared for <client> on <date>" (the scan date) and
+  the first page's handling note; the PDF prints them from `AuditReportJson::confidentiality`
+  and `xlsx_export::build_workbook` puts the same line in every sheet's footer. The client name
+  is `Project::client_name` (inspection setup, `POST /api/projects/:id/client-name`, not
+  carried by project import); the export routes fill `ReportOptions::client_name` from it
+  (`serde(skip)`, never client-supplied), and `require_client_name` refuses a blank one in
+  `build_product_package_with_stem` and the PDF-only route (HTTP 422, `gate: "client_name"`).
+  `camerata inspect` takes `--client`. The release gate scans sheet headers and footers for
+  secrets, and its `confidentiality marking` check holds every sheet footer to a line naming the
+  client and equal to the PDF's.
 - **`findings.xlsx`** is the DETAIL surface, and a missing row there IS a fault.
 - **`findings.json`** is the machine-readable data structure. It carries the WHOLE
   non-false-positive row set, every kind included, with `provenance` and `summary`

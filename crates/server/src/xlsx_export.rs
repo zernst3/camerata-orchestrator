@@ -2323,8 +2323,25 @@ pub fn build_workbook(
     )
     .context("writing the Coverage sheet")?;
 
+    // Confidentiality (2026-10-24 decision): every sheet's footer prints the SAME line as
+    // every PDF page footer (one producer, `report_export::confidentiality_marking`), left,
+    // with the page number right. Applied after every sheet exists, so a sheet added later
+    // cannot be missed. The release gate reads the footers back and checks them.
+    let marking = crate::report_export::confidentiality_marking(&report.provenance, opts);
+    let footer = sheet_footer(&marking.line);
+    for ws in wb.worksheets_mut() {
+        ws.set_footer(&footer);
+    }
+
     wb.save_to_buffer()
         .context("serializing the xlsx workbook to bytes")
+}
+
+/// The sheet footer for a confidentiality line: the line on the left (`&L`), "Page N of M" on
+/// the right. `&` is Excel's footer control character, so a literal one in the line (a client
+/// called "Smith & Jones") is doubled.
+pub(crate) fn sheet_footer(line: &str) -> String {
+    format!("&L{}&RPage &P of &N", line.replace('&', "&&"))
 }
 
 // ── `findings.json` (product export, machine-readable sibling of the workbook) ────────

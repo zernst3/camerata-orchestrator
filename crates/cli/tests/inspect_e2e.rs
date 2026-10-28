@@ -107,6 +107,7 @@ async fn deterministic_only_inspect_runs_end_to_end_and_writes_a_valid_zip() {
         verbose: false,
         max_cost_usd: None,
         efficiency: Vec::new(),
+        client: "Example Client Ltd".to_string(),
     };
 
     let outcome = run_inspect_with_key_presence(args, false)
@@ -225,6 +226,7 @@ async fn headless_inspect_discloses_when_the_commodity_taint_pass_does_not_run()
         verbose: true,
         max_cost_usd: None,
         efficiency: Vec::new(),
+        client: "Example Client Ltd".to_string(),
     };
 
     let outcome = run_inspect_with_key_presence(args, false).await;

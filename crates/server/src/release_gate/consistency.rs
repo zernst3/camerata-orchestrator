@@ -319,6 +319,111 @@ pub fn row_parity(report: &AuditReportJson, findings: &FindingsExport) -> Vec<Pr
     problems
 }
 
+// ---- confidentiality marking (2026-10-24 decision) -------------------------------------------
+
+const MARKING: &str = "confidentiality marking";
+
+/// The prefix every confidentiality line starts with when it names a client (see
+/// `report_export::confidentiality_marking`).
+pub const MARKING_PREFIX: &str = "Confidential, prepared for ";
+
+/// The workbook's member name, and each sheet's name with its footer's left section (`None`
+/// when the sheet has no footer).
+type WorkbookFooters = (String, Vec<(String, Option<String>)>);
+
+/// The workbook's sheets and their decoded footers, or the problem that stops the check. `None`
+/// when there is no workbook to check (the dataset-set check reports that).
+fn workbook_footers(entries: &Entries) -> Option<Result<WorkbookFooters, Problem>> {
+    let stem = package_stem(entries)?;
+    let xlsx_name = format!("{stem}-findings.xlsx");
+    let xlsx = entries.get(&xlsx_name)?;
+    let (Ok(sheets), Ok(parts)) = (
+        super::archive::xlsx_sheet_names(xlsx),
+        super::archive::xlsx_header_footers(xlsx),
+    ) else {
+        return Some(Err(problem(
+            &xlsx_name,
+            MARKING,
+            "the workbook's sheet footers could not be read",
+        )));
+    };
+    let footers = sheets
+        .into_iter()
+        .map(|sheet| {
+            let left = parts
+                .iter()
+                .find(|p| p.part == "footer" && p.sheet == sheet)
+                .map(|p| p.left.clone());
+            (sheet, left)
+        })
+        .collect();
+    Some(Ok((xlsx_name, footers)))
+}
+
+/// Every worksheet of the package's workbook carries a footer whose left section is a
+/// confidentiality line naming the client, and every sheet prints the same line.
+pub fn marking_problems(entries: &Entries) -> Vec<Problem> {
+    let (xlsx_name, footers) = match workbook_footers(entries) {
+        None => return Vec::new(),
+        Some(Err(p)) => return vec![p],
+        Some(Ok(found)) => found,
+    };
+    let mut problems = Vec::new();
+    let mut seen: BTreeSet<&str> = BTreeSet::new();
+    for (sheet, left) in &footers {
+        let location = format!("sheet {sheet:?} footer");
+        match left {
+            None => problems.push(problem(
+                &xlsx_name,
+                &location,
+                "the sheet has no confidentiality footer",
+            )),
+            Some(line) if !line.starts_with(MARKING_PREFIX) => problems.push(problem(
+                &xlsx_name,
+                &location,
+                "the sheet footer is not a confidentiality line naming the client",
+            )),
+            Some(line) => {
+                seen.insert(line);
+            }
+        }
+    }
+    if seen.len() > 1 {
+        problems.push(problem(
+            &xlsx_name,
+            MARKING,
+            "the sheets print different confidentiality lines",
+        ));
+    }
+    problems
+}
+
+/// The PDF's confidentiality line (from its data) names the client, and is the line the
+/// workbook's sheets print. Run by the in-memory release, which holds the PDF's data; the
+/// sheets' own problems are [`marking_problems`]'s to report.
+pub fn pdf_marking_problems(entries: &Entries, pdf_line: &str) -> Vec<Problem> {
+    let mut problems = Vec::new();
+    if !pdf_line.starts_with(MARKING_PREFIX) {
+        problems.push(problem(
+            "PDF data",
+            "confidentiality.line",
+            "the PDF's confidentiality line does not name a client",
+        ));
+    }
+    if let Some(Ok((xlsx_name, footers))) = workbook_footers(entries) {
+        for (sheet, left) in &footers {
+            if left.as_deref().is_some_and(|line| line != pdf_line) {
+                problems.push(problem(
+                    &xlsx_name,
+                    &format!("sheet {sheet:?} footer"),
+                    "the sheet footer's confidentiality line differs from the PDF's",
+                ));
+            }
+        }
+    }
+    problems
+}
+
 // ---- manifest (gate 6) --------------------------------------------------------------------------
 
 fn sha256_hex(bytes: &[u8]) -> String {

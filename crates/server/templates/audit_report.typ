@@ -176,10 +176,16 @@
   // extraction read back "...page 1 · DRAFTDRAFT: not yet reviewed...". The header banner
   // above already marks EVERY page unambiguously; render the draft state once per page, not
   // twice.
+  //
+  // Confidentiality (2026-10-24 decision): every page carries "Confidential, prepared for
+  // <client> on <date>" (`d.confidentiality.line`, from `report_export::confidentiality_marking`,
+  // the same producer the workbook's sheet footers use), above the advisory line.
   footer: context [
     #set text(font: mono, size: 8pt, fill: ink_faint)
     #line(length: 100%, stroke: 0.5pt + line_c)
     #v(-2pt)
+    #align(center)[#d.confidentiality.line]
+    #v(-6pt)
     #align(center)[
       #if d.cover.brand != none [#d.cover.brand ]inspection report (advisory, not a certification), page #counter(page).display()
     ]
@@ -440,6 +446,15 @@
         ]#if r.dirty [ (working tree had uncommitted changes at scan time)]
     ]
   ]
+]
+
+// Confidentiality (2026-10-24 decision): the first page's handling note, who the report is
+// for and that it is not to be forwarded outside that company without consent.
+#v(0.6cm)
+#panel[
+  #text(size: 8.5pt, weight: 600, tracking: 0.09em, fill: accent)[CONFIDENTIAL]
+  #linebreak()
+  #text(size: 9pt)[#d.confidentiality.handling_note]
 ]
 
 #pagebreak()
