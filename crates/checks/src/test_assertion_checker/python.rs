@@ -281,7 +281,8 @@ struct Module<'t, 's> {
     asserting_fixtures: Option<&'s HashSet<String>>,
     /// Local name → module path (`.helpers`, `tests.utils`).
     imports: HashMap<String, String>,
-    functions: HashMap<&'s str, Node<'t>>,
+    /// Module-level functions by name (several when a name is defined more than once).
+    functions: HashMap<&'s str, Vec<Node<'t>>>,
 }
 
 impl<'t, 's> Module<'t, 's> {
@@ -315,12 +316,18 @@ impl<'t, 's> Module<'t, 's> {
                 _ => {}
             }
         }
-        let functions = named_children(root)
+        let mut functions: HashMap<&'s str, Vec<Node<'t>>> = HashMap::new();
+        for f in named_children(root)
             .into_iter()
             .map(|s| unwrap_decorated(s).0)
-            .filter(|f| f.kind() == "function_definition")
-            .filter_map(|f| Some((text(f.child_by_field_name("name")?, source), f)))
-            .collect();
+        {
+            if f.kind() != "function_definition" {
+                continue;
+            }
+            if let Some(name) = f.child_by_field_name("name") {
+                functions.entry(text(name, source)).or_default().push(f);
+            }
+        }
         Self {
             source,
             asserting_fixtures: None,
@@ -420,10 +427,12 @@ impl<'t, 's> Module<'t, 's> {
             return !framework && (module.starts_with('.') || is_support_module(module));
         }
         if callee.kind() == "identifier" && depth > 0 {
-            if let Some(helper) = self.functions.get(root) {
-                return helper
-                    .child_by_field_name("body")
-                    .is_some_and(|b| self.asserts(b, methods, depth - 1));
+            if let Some(helpers) = self.functions.get(root) {
+                return helpers.iter().any(|helper| {
+                    helper
+                        .child_by_field_name("body")
+                        .is_some_and(|b| self.asserts(b, methods, depth - 1))
+                });
             }
         }
         false

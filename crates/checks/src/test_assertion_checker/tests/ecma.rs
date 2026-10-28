@@ -203,3 +203,35 @@ fn a_helper_from_a_test_support_module_may_assert() {
 fn production_files_are_not_read() {
     assert!(reported("src/orders.ts", "it('a', () => { run(); });\n").is_empty());
 }
+
+#[test]
+fn end_to_end_driver_commands_fail_when_the_page_does_not_match() {
+    for body in [
+        "cy.visit('/'); cy.contains('Welcome');",
+        "await browser.url('/'); await $('#go').click();",
+        "await element(by.id('go')).tap();",
+    ] {
+        let src = format!("it('loads', async () => {{ {body} }});\n");
+        assert!(
+            reported("cypress/e2e/home.cy.js", &src).is_empty(),
+            "{body}"
+        );
+    }
+}
+
+#[test]
+fn a_helper_name_declared_twice_is_followed_into_every_declaration() {
+    let src = "\
+describe('a', () => {
+  const prepare = () => { expect(setup()).toBeTruthy(); };
+  it('a', () => { prepare(); });
+});
+describe('b', () => {
+  const prepare = () => setup();
+  it('b', () => { prepare(); });
+});
+";
+    // Which `prepare` each test calls is a scope question this check does not answer, so a
+    // name that might reach an assertion counts as one.
+    assert!(one(src).is_empty());
+}

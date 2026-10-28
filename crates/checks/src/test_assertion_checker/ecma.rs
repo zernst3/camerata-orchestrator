@@ -67,6 +67,10 @@ const SKIPPED_SUITES: &[&str] = &[
     "xcontext",
 ];
 
+/// End-to-end drivers whose commands wait for the page and fail when it does not match
+/// (Cypress's `cy`, WebdriverIO's `browser` and `$`, Detox's `element`, Selenium's `driver`).
+const E2E_DRIVERS: &[&str] = &["cy", "browser", "page", "$", "$$", "element", "driver"];
+
 /// Calls that check something without an assertion word in their name: Testing Library's
 /// `waitFor` (retries until its callback stops throwing), Jasmine and Jest's `fail`, Mocha's
 /// `done`.
@@ -104,8 +108,9 @@ struct File<'t, 's> {
     imports: HashMap<String, String>,
     /// Local name → the original exported name, for named imports.
     imported_as: HashMap<String, String>,
-    /// Function bodies by the name the file declares them under.
-    functions: HashMap<String, Node<'t>>,
+    /// Function bodies by the name the file declares them under (several when the name is
+    /// declared more than once, in different scopes).
+    functions: HashMap<String, Vec<Node<'t>>>,
     /// Every name the file declares (outside imports).
     declared: HashSet<String>,
 }
@@ -122,7 +127,7 @@ impl<'t, 's> File<'t, 's> {
             imports.insert(local, specifier);
         }
         let root = tree.root_node();
-        let mut functions = HashMap::new();
+        let mut functions: HashMap<String, Vec<Node<'t>>> = HashMap::new();
         let mut declared = HashSet::new();
         for node in descendants(root) {
             if node.kind() != "identifier" || !is_binding_position(node) {
@@ -144,7 +149,7 @@ impl<'t, 's> File<'t, 's> {
                 _ => None,
             };
             if let Some(body) = function.and_then(|f| f.child_by_field_name("body")) {
-                functions.insert(name.to_string(), body);
+                functions.entry(name.to_string()).or_default().push(body);
             }
         }
         Self {
@@ -206,8 +211,9 @@ impl<'t, 's> File<'t, 's> {
             return false;
         };
         let root_name = text(root, self.source);
-        // `assert.equal(...)`, `should.exist(...)` with a global or required assertion object.
-        if names_an_assertion(root_name) {
+        // `assert.equal(...)`, `should.exist(...)` with a global or required assertion object,
+        // and an end-to-end driver whose commands fail when the page does not match.
+        if names_an_assertion(root_name) || E2E_DRIVERS.contains(&root_name) {
             return true;
         }
         if let Some(specifier) = self.imports.get(root_name) {
@@ -217,8 +223,8 @@ impl<'t, 's> File<'t, 's> {
                 || (!is_package(specifier) && is_support_module(specifier));
         }
         if callee.kind() == "identifier" && depth > 0 {
-            if let Some(body) = self.functions.get(root_name) {
-                return self.asserts(*body, depth - 1);
+            if let Some(bodies) = self.functions.get(root_name) {
+                return bodies.iter().any(|body| self.asserts(*body, depth - 1));
             }
         }
         false
