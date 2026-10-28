@@ -306,6 +306,307 @@ pub struct UsageMeter {
     /// The same calls split by pipeline stage (operator telemetry; never exported — see
     /// [`crate::stage_telemetry`]). Always updated together with the aggregate above.
     stages: StageMeter,
+    /// The largest dollar cost any single call has had so far, in micro-dollars. The cap's
+    /// per-pass reserve (see [`crate::cost_cap`]).
+    max_call_micro_usd: AtomicU64,
+    /// How this run executes: efficiency switches and the spend cap. Set once, before the first
+    /// call, by [`Self::with_controls`]; the default is every measure on and no cap.
+    controls: crate::cost_cap::RunControls,
+    /// The cap's mutable record: passes in flight, and what the cap stopped.
+    budget: std::sync::Mutex<crate::cost_cap::BudgetState>,
+    /// Wakes passes waiting for the first reported cost (see [`Self::admit`]).
+    admission: tokio::sync::Notify,
+}
+
+/// Why a pass was not admitted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CapReached;
+
+/// Proof that a pass was admitted under the spend cap; releases its slot when dropped (after
+/// the pass, its truncation retry included, has finished).
+pub struct PassPermit<'a> {
+    meter: &'a UsageMeter,
+}
+
+impl Drop for PassPermit<'_> {
+    fn drop(&mut self) {
+        {
+            let mut budget = self.meter.budget();
+            budget.in_flight = budget.in_flight.saturating_sub(1);
+        }
+        self.meter.admission.notify_waiters();
+    }
+}
+
+/// The answer to one admission attempt.
+enum Admission<'a> {
+    Admitted(PassPermit<'a>),
+    /// The cap forbids another pass.
+    CapReached,
+    /// No call has reported a cost yet and a pass is already in flight, so there is nothing to
+    /// reserve against: wait for it.
+    Wait,
+}
+
+impl UsageMeter {
+    /// A meter for a run that executes under `controls`.
+    pub fn with_controls(controls: crate::cost_cap::RunControls) -> Self {
+        Self {
+            controls,
+            ..Self::default()
+        }
+    }
+
+    /// The efficiency switches this run executes under. A call site with no meter (a unit test
+    /// of one function) uses [`efficiency_of`].
+    pub fn efficiency(&self) -> crate::efficiency::EfficiencyConfig {
+        self.controls.efficiency
+    }
+
+    /// The run's controls, as built.
+    pub fn controls(&self) -> crate::cost_cap::RunControls {
+        self.controls
+    }
+
+    /// Actual spend so far, in dollars, as the telemetry and the printed total count it.
+    pub fn spent_usd(&self) -> f64 {
+        self.cost_micro_usd.load(Ordering::Relaxed) as f64 / 1_000_000.0
+    }
+
+    /// True once actual spend has reached the cap. Always false with no cap.
+    pub fn cap_reached(&self) -> bool {
+        self.controls
+            .max_cost_usd
+            .is_some_and(|cap| self.spent_usd() >= cap)
+    }
+
+    fn budget(&self) -> std::sync::MutexGuard<'_, crate::cost_cap::BudgetState> {
+        self.budget
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// One admission attempt. Admitted only while `spent + in_flight * reserve < cap` (see the
+    /// overshoot bound in [`crate::cost_cap`]); with no cap, always admitted. The check and the
+    /// in-flight count move together under one lock, so two passes cannot both claim the last
+    /// slot.
+    fn try_admit(&self) -> Admission<'_> {
+        let mut budget = self.budget();
+        if let Some(cap) = self.controls.max_cost_usd {
+            let reserve_micro = self.max_call_micro_usd.load(Ordering::Relaxed);
+            // Until one call has reported a cost there is nothing to reserve against, so only
+            // ONE pass may be in flight: a cap must never be a number that concurrent passes
+            // can all slip under at once (warm_schedule off, a free first call, ...).
+            if reserve_micro == 0 && budget.in_flight >= 1 {
+                return if self.spent_usd() >= cap {
+                    Admission::CapReached
+                } else {
+                    Admission::Wait
+                };
+            }
+            let reserve = reserve_micro as f64 / 1_000_000.0;
+            if self.spent_usd() + budget.in_flight as f64 * reserve >= cap {
+                return Admission::CapReached;
+            }
+        }
+        budget.in_flight += 1;
+        Admission::Admitted(PassPermit { meter: self })
+    }
+
+    /// Ask to start one scan pass. Waits (without spending anything) while the only thing
+    /// standing in the way is that no cost is known yet; refuses with [`CapReached`] when the
+    /// cap forbids the pass. An admitted pass holds its permit until it is dropped.
+    pub async fn admit(&self) -> Result<PassPermit<'_>, CapReached> {
+        loop {
+            // Register for wake-ups BEFORE checking, so a release between the check and the
+            // wait is not missed.
+            let woken = self.admission.notified();
+            tokio::pin!(woken);
+            woken.as_mut().enable();
+            match self.try_admit() {
+                Admission::Admitted(permit) => return Ok(permit),
+                Admission::CapReached => return Err(CapReached),
+                Admission::Wait => woken.await,
+            }
+        }
+    }
+
+    /// Record a scan pass the cap refused.
+    pub fn record_not_run(&self, pass: crate::cost_cap::NotRunPass) {
+        self.budget().not_run_passes.push(pass);
+    }
+
+    /// [`Self::admit`] for one call of a stage that is not a scan pass (a calibration batch, a
+    /// fix batch, a deep-tier call). A refusal records the stage as stopped PART WAY, because
+    /// the stage's earlier calls ran.
+    pub async fn admit_for_stage(
+        &self,
+        repo: &str,
+        stage: &str,
+    ) -> Result<PassPermit<'_>, CapReached> {
+        let permit = self.admit().await;
+        if permit.is_err() {
+            self.record_stage_not_run(repo, stage, true);
+        }
+        permit
+    }
+
+    fn record_stage_not_run(&self, repo: &str, stage: &str, partial: bool) {
+        let mut budget = self.budget();
+        if !budget
+            .not_run_stages
+            .iter()
+            .any(|s| s.repo == repo && s.stage == stage)
+        {
+            budget.not_run_stages.push(crate::cost_cap::NotRunStage {
+                repo: repo.to_string(),
+                stage: stage.to_string(),
+                partial,
+            });
+        }
+    }
+
+    /// Stage boundary check: true (and the stage is recorded as NOT RUN) when the stage must
+    /// not start, so the caller skips it. `stage` is the name the failed-pass list shows.
+    ///
+    /// A stage is blocked once spend has reached the cap, AND once the cap has already stopped
+    /// anything (a refused scan pass, or an earlier stage): after the cap has bitten, nothing
+    /// later may start, which is what keeps the overshoot bounded.
+    pub fn stage_blocked(&self, repo: &str, stage: &str) -> bool {
+        let Some(_) = self.controls.max_cost_usd else {
+            return false;
+        };
+        let already_stopped = {
+            let budget = self.budget();
+            !budget.not_run_passes.is_empty() || !budget.not_run_stages.is_empty()
+        };
+        if !self.cap_reached() && !already_stopped {
+            return false;
+        }
+        self.record_stage_not_run(repo, stage, false);
+        true
+    }
+
+    /// Batch gate: a submitted Message Batch cannot be cancelled cheaply, so the cap is checked
+    /// BEFORE submitting. Returns the operator-facing reason to refuse, or `None` to submit.
+    /// `projected_usd` is the caller's projection of what this submission commits (its exact
+    /// input tokens at the batch price); the pre-flight estimate of the whole run, when the
+    /// caller supplied one, can raise it. Pure: [`Self::record_note`] keeps the reason.
+    ///
+    /// `projected_usd` is `None` when the caller could not project the batch at all. With a cap
+    /// set and no projection from anywhere, the cap cannot be enforced, so the submission is
+    /// REFUSED and says so: a limit that silently does nothing is the worst outcome. The
+    /// pre-flight estimate covers the whole run, so only what remains of it (estimate minus
+    /// spend, floored at zero) is counted against each submission.
+    pub fn batch_refusal_reason(&self, projected_usd: Option<f64>) -> Option<String> {
+        let cap = self.controls.max_cost_usd?;
+        let spent = self.spent_usd();
+        let remaining_estimate = self
+            .controls
+            .estimate_hint_usd
+            .map(|hint| (hint - spent).max(0.0));
+        let projected = match (projected_usd, remaining_estimate) {
+            (None, None) => {
+                return Some(format!(
+                    "batch NOT submitted: the ${cap:.2} limit could not be enforced, because \
+                     neither the exact token count nor the estimate could project this batch's \
+                     cost, and a submitted batch cannot be cancelled cheaply"
+                ));
+            }
+            (a, b) => a.unwrap_or(0.0).max(b.unwrap_or(0.0)),
+        };
+        if spent + projected <= cap {
+            return None;
+        }
+        Some(format!(
+            "batch NOT submitted: spent ${spent:.2} plus a projected ${projected:.2} would pass \
+             the ${cap:.2} limit, and a submitted batch cannot be cancelled cheaply, so the \
+             limit is checked before submitting"
+        ))
+    }
+
+    /// Keep an operator-facing note on the cap's record (a refused batch submission).
+    pub fn record_note(&self, note: String) {
+        self.budget().notes.push(note);
+    }
+
+    /// What the cap did so far; `None` when no cap was set.
+    pub fn cost_cap_record(&self) -> Option<crate::cost_cap::CostCapRecord> {
+        let cap_usd = self.controls.max_cost_usd?;
+        let budget = self.budget();
+        Some(crate::cost_cap::CostCapRecord {
+            cap_usd,
+            spent_usd: self.spent_usd(),
+            not_run_passes: budget.not_run_passes.clone(),
+            not_run_stages: budget.not_run_stages.clone(),
+            notes: budget.notes.clone(),
+        })
+    }
+}
+
+/// [`UsageMeter::admit`] for a call site that may have no meter (no meter: always admitted, no
+/// permit).
+async fn admit_pass(meter: Option<&UsageMeter>) -> Result<Option<PassPermit<'_>>, CapReached> {
+    match meter {
+        Some(m) => m.admit().await.map(Some),
+        None => Ok(None),
+    }
+}
+
+/// [`UsageMeter::admit_for_stage`] for a call site that may have no meter.
+async fn admit_stage<'a>(
+    meter: Option<&'a UsageMeter>,
+    repo: &str,
+    stage: &str,
+) -> Result<Option<PassPermit<'a>>, CapReached> {
+    match meter {
+        Some(m) => m.admit_for_stage(repo, stage).await.map(Some),
+        None => Ok(None),
+    }
+}
+
+/// Stage names as the failed-pass list shows them (also the spend-cap record's keys).
+pub const STAGE_ALTERNATIVES: &str = "rule-alternative recommendations";
+pub const STAGE_CALIBRATION: &str = "calibration (verification and hour estimates)";
+pub const STAGE_FIX: &str = "fix-specific generation";
+pub const STAGE_CLONE_JUDGE: &str = "clone-advisory judge";
+pub const STAGE_DEEP: &str = "deep compliance tier";
+
+/// The shared estimator's whole-run dollars for a batch scan over `chunks` and `batches`, priced
+/// at `model` (scan and calibration alike). The fallback projection for the batch spend-cap gate
+/// when the exact token count is unavailable; `None` when the model has no list price.
+fn batch_estimate_usd(
+    model: &str,
+    chunks: &[&[(String, String)]],
+    batches: &[&[(String, String)]],
+) -> Option<f64> {
+    let price = crate::llm::models().into_iter().find(|m| m.id == model)?;
+    let code_chars: usize = chunks
+        .iter()
+        .flat_map(|c| c.iter())
+        .map(|(_, content)| content.len())
+        .sum();
+    let rules: usize = batches.iter().map(|b| b.len()).sum();
+    let (_tokens, dollars, _passes) = camerata_ui_core::scan::estimate_audit_cost(
+        code_chars,
+        rules,
+        "batch",
+        price.price_in,
+        price.price_out,
+        price.price_in,
+        price.price_out,
+        false,
+        false,
+        false,
+        crate::llm::ProjectBackend::Api,
+        0,
+    );
+    Some(dollars)
+}
+
+/// The efficiency switches in force for a call site that may have no meter (every measure on).
+pub fn efficiency_of(meter: Option<&UsageMeter>) -> crate::efficiency::EfficiencyConfig {
+    meter.map(UsageMeter::efficiency).unwrap_or_default()
 }
 
 impl UsageMeter {
@@ -331,7 +632,9 @@ impl UsageMeter {
 
     /// The per-stage telemetry so far, joined to the scan's counted-line total.
     pub fn stage_telemetry(&self, counted_lines: usize) -> StageTelemetry {
-        self.stages.snapshot(counted_lines)
+        let mut telemetry = self.stages.snapshot(counted_lines);
+        telemetry.efficiency = Some(self.controls.efficiency);
+        telemetry
     }
 
     /// Fold one completion's reported usage into the aggregate. Missing fields are simply not
@@ -344,8 +647,12 @@ impl UsageMeter {
             self.output_tokens.fetch_add(o, Ordering::Relaxed);
         }
         if let Some(c) = r.cost_usd {
-            self.cost_micro_usd
-                .fetch_add((c * 1_000_000.0) as u64, Ordering::Relaxed);
+            let micro = (c * 1_000_000.0) as u64;
+            self.cost_micro_usd.fetch_add(micro, Ordering::Relaxed);
+            let before = self.max_call_micro_usd.fetch_max(micro, Ordering::Relaxed);
+            if before == 0 && micro > 0 {
+                self.admission.notify_waiters();
+            }
             self.cost_calls.fetch_add(1, Ordering::Relaxed);
         }
         // Cache breakdowns are additive across calls (each call contributes its own share
@@ -2162,6 +2469,16 @@ pub async fn verify_findings(
     let mut calibrated: Vec<Finding> = Vec::with_capacity(findings.len());
 
     for (chunk_idx, chunk) in owned_chunks.into_iter().enumerate() {
+        // SPEND CAP, between batches: once the cap is reached the remaining batches do not run.
+        // Their findings pass through exactly as the scan produced them (none dropped) and the
+        // stage is recorded as stopped part way.
+        let _permit = match admit_stage(meter, repo, STAGE_CALIBRATION).await {
+            Err(CapReached) => {
+                calibrated.extend(chunk);
+                continue;
+            }
+            Ok(permit) => permit,
+        };
         let chunk_len = chunk.len();
         let mut prompt = format!("Repository: {repo}\n");
         // Proportionality signal (#51, Bug 4 §2b): ALWAYS given now (was thorough-only) — a
@@ -3432,6 +3749,16 @@ async fn run_fix_specifics_round(
     // chunk (the whole set) when `batch_size >= pending.len()`, so the request/self-check
     // shape below is unchanged from before this fix in that case.
     for batch in pending.chunks(batch_size.max(1)) {
+        // SPEND CAP, between batches: a batch the cap refuses is re-queued like a failed one
+        // (so its findings still reach the authored-remediation fallback) and the stage is
+        // recorded as stopped part way.
+        let _permit = match admit_stage(meter, repo, STAGE_FIX).await {
+            Err(CapReached) => {
+                still_pending.extend(batch.iter().copied());
+                continue;
+            }
+            Ok(permit) => permit,
+        };
         let prompt = {
             let refs: Vec<&Finding> = batch.iter().map(|&i| &findings[i]).collect();
             let local_feedback: std::collections::HashMap<usize, String> = batch
@@ -3644,8 +3971,11 @@ pub async fn generate_fix_specifics(
     // remediation, instantiated against the finding's captures, is where they were always going
     // to end up, so go there directly. Only when that fallback actually exists: skipping the model
     // for a rule with no authored remediation would leave the row with no fix at all.
-    let (indices, authored_directly) =
-        apply_authored_remediation_without_model(&mut findings, indices, files, corpus);
+    let (indices, authored_directly) = if efficiency_of(meter).fix_prefilter {
+        apply_authored_remediation_without_model(&mut findings, indices, files, corpus)
+    } else {
+        (indices, 0)
+    };
     if authored_directly > 0 {
         eprintln!(
             "[camerata-server] fix-specific generation: {authored_directly} finding(s) in {repo} \
@@ -3874,7 +4204,12 @@ fn cache_breakpoints_for_pass(
 /// request shares. Rules-first is therefore not built; see the telemetry before revisiting.
 ///
 /// Returns `(prompt, cache_breakpoints)`.
+///
+/// This is the prompt with the `label_after_prefix` efficiency measure ON (every test and the
+/// reference layout use it); [`build_pass_prompt_with`] is the one implementation and takes the
+/// switch.
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 fn build_pass_prompt(
     repo: &str,
     repo_map: &str,
@@ -3886,16 +4221,137 @@ fn build_pass_prompt(
     task_line: &str,
     rules_block: &str,
 ) -> (String, Vec<usize>) {
+    build_pass_prompt_with(
+        true,
+        repo,
+        repo_map,
+        label,
+        ci,
+        n_c,
+        digest,
+        n_b,
+        task_line,
+        rules_block,
+    )
+}
+
+/// [`build_pass_prompt`] with the `label_after_prefix` switch explicit. ON (the default): the
+/// label line leads the uncached suffix. OFF: the label line sits between the repo map and the
+/// digest, inside the cached digest segment, exactly as before rank 3 (so routing groups over
+/// the same files can no longer share a cached digest). Same bytes either way, rearranged.
+#[allow(clippy::too_many_arguments)]
+fn build_pass_prompt_with(
+    label_after_prefix: bool,
+    repo: &str,
+    repo_map: &str,
+    label: &str,
+    ci: usize,
+    n_c: usize,
+    digest: &str,
+    n_b: usize,
+    task_line: &str,
+    rules_block: &str,
+) -> (String, Vec<usize>) {
     let repo_map_prefix = format!("Repository: {repo}\n\n{repo_map}");
+    let label_line = format!("({label} {}/{n_c})\n\n", ci + 1);
+    if !label_after_prefix {
+        let digest_segment = format!("{label_line}{digest}\n\n");
+        let static_prefix = format!("{repo_map_prefix}{digest_segment}");
+        let cache_breakpoints =
+            cache_breakpoints_for_pass(repo_map_prefix.len(), static_prefix.len(), n_b);
+        return (
+            format!("{static_prefix}{task_line}\n\n{rules_block}"),
+            cache_breakpoints,
+        );
+    }
     let digest_segment = format!("{digest}\n\n");
     let static_prefix = format!("{repo_map_prefix}{digest_segment}");
     let cache_breakpoints =
         cache_breakpoints_for_pass(repo_map_prefix.len(), static_prefix.len(), n_b);
-    let prompt = format!(
-        "{static_prefix}({label} {}/{n_c})\n\n{task_line}\n\n{rules_block}",
-        ci + 1
-    );
+    let prompt = format!("{static_prefix}{label_line}{task_line}\n\n{rules_block}");
     (prompt, cache_breakpoints)
+}
+
+/// The prompt-cache TTL a batch item asks for under `eff`: 1 hour with `batch_long_cache` on
+/// (the default), else the 5-minute cache.
+fn batch_cache_ttl(eff: crate::efficiency::EfficiencyConfig) -> crate::llm::CacheTtl {
+    if eff.batch_long_cache {
+        crate::llm::BATCH_CACHE_TTL
+    } else {
+        crate::llm::CacheTtl::FiveMinutes
+    }
+}
+
+/// The instruction line that closes a scan pass's prompt. ONE definition for the real-time
+/// passes, the batch items and the pre-flight sample, so the three can never disagree about what
+/// a pass asks. `advisory` adds the "also flag other genuine issues" task (first rule-batch of a
+/// chunk only).
+fn pass_task_line(advisory: bool, bi: usize, n_b: usize) -> String {
+    if advisory {
+        format!("── Check the code above against the ADOPTED rules below (batch {}/{n_b}); ALSO flag any other genuine issues NOT covered by an adopted rule. Use the REPO MAP for cross-file context. ──", bi + 1)
+    } else {
+        format!("── Check the code above against ONLY the ADOPTED rules below (batch {}/{n_b}). Do NOT report issues outside these rules — a separate pass already covers novel findings. Use the REPO MAP for cross-file context. ──", bi + 1)
+    }
+}
+
+/// The request the exact-token sample counts for a pass whose prompt and cache layout are
+/// already built: the audit system prompt plus the prompt, split at the same breakpoints the
+/// real call uses. ONE builder for the batch path's sample and the pre-flight sample.
+fn sample_count_request(prompt: &str, cache_breakpoints: &[usize]) -> LlmRequest {
+    LlmRequest::new(prompt.to_string())
+        .with_system(audit_system_prompt())
+        .with_cache_breakpoints(cache_breakpoints.to_vec())
+}
+
+/// A representative scan pass for a repo: the first (chunk, rule-batch) pair, built exactly as
+/// the scan builds it (redacted files, repo map, digest, rules block, cache layout), so
+/// `count_tokens` on it is the real input size of one pass. Used by the pre-flight estimate in
+/// `camerata inspect`.
+pub struct ScanSample {
+    pub request: LlmRequest,
+    /// Chunks times rule-batches for the main scan (the real pass count, before routing).
+    pub passes: usize,
+}
+
+/// The [`ScanSample`] for `files` under `selected`; `None` when there are no files.
+pub fn representative_scan_sample(
+    repo: &str,
+    files: &[(String, String)],
+    selected: &[(String, String)],
+    mode: ScanMode,
+    efficiency: crate::efficiency::EfficiencyConfig,
+) -> Option<ScanSample> {
+    if files.is_empty() {
+        return None;
+    }
+    let model_files = crate::onboard::redact::files_for_model(files);
+    let repo_map = build_repo_map(&model_files);
+    let chunks = chunk_files(&model_files, CHUNK_DIGEST_CHARS);
+    let first_chunk = chunks.first()?;
+    let (_, batch_size) = mode.tuning();
+    let empty: &[(String, String)] = &[];
+    let batches: Vec<&[(String, String)]> = if selected.is_empty() {
+        vec![empty]
+    } else {
+        selected.chunks(batch_size.max(1)).collect()
+    };
+    let digest = build_digest(first_chunk);
+    let (prompt, bps) = build_pass_prompt_with(
+        efficiency.label_after_prefix,
+        repo,
+        &repo_map,
+        "pass",
+        0,
+        chunks.len(),
+        &digest,
+        batches.len(),
+        &pass_task_line(true, 0, batches.len()),
+        &build_rules_block(batches[0]),
+    );
+    Some(ScanSample {
+        request: sample_count_request(&prompt, &bps),
+        passes: chunks.len() * batches.len(),
+    })
 }
 
 /// One audit pass: build the request, run it (streaming into the transcript when feedback
@@ -3940,7 +4396,7 @@ async fn audit_pass(
     // that itself fails leaves the pass exactly as it was before this existed: the first
     // response, parsed as it always was.
     let mut wasted_counted = false;
-    if resp.truncated {
+    if resp.truncated && efficiency_of(meter).truncation_retry {
         if let Some(m) = meter {
             m.record_wasted(Stage::ScanPass, &resp);
         }
@@ -4194,89 +4650,134 @@ async fn run_passes(
             })
         })
         .collect();
+    // `None` = the spend cap refused the pass (it is recorded on the meter as NOT RUN).
     type PassOut = (
         usize,
         usize,
-        anyhow::Result<(Vec<Finding>, Vec<ProposedRule>, Vec<String>)>,
+        Option<anyhow::Result<(Vec<Finding>, Vec<ProposedRule>, Vec<String>)>>,
     );
-    let results: Vec<PassOut> =
-        crate::warm_schedule::run_warm_then_fan_out(jobs, concurrency, |(ci, bi)| {
-            let digest = &digests[ci];
-            let batch = batches[bi];
-            async move {
-                let rb = build_rules_block(batch);
-                // ADVISORY RUNS ONCE PER CHUNK, not once per rule-batch. The "flag novel
-                // issues beyond the adopted rules" task only depends on the code (the whole
-                // chunk is visible every pass), not on which rule-batch this is — so asking
-                // for it in all N batches just re-derives the SAME novel issue under N
-                // independently-invented names (one `.expect()` → AI-HANDLER-PANICS +
-                // AI-HANDLER-UNHANDLED-PANIC + AI-HANDLER-PANICS-ON-ERROR). Gate it to the
-                // first batch of each chunk; later batches check ONLY their adopted rules.
-                //
-                // ROUTING INTERACTION: when `advisory_disabled` is set (language-scoped groups),
-                // the advisory pass is suppressed in every batch, not just later ones. The
-                // cross-cutting All group keeps advisory enabled so novel issues are surfaced
-                // exactly once — against every file — with no per-language re-flagging.
-                let advisory = !advisory_disabled && bi == 0;
-                let task_line = if advisory {
-                    format!("── Check the code above against the ADOPTED rules below (batch {}/{n_b}); ALSO flag any other genuine issues NOT covered by an adopted rule. Use the REPO MAP for cross-file context. ──", bi + 1)
-                } else {
-                    format!("── Check the code above against ONLY the ADOPTED rules below (batch {}/{n_b}). Do NOT report issues outside these rules — a separate pass already covers novel findings. Use the REPO MAP for cross-file context. ──", bi + 1)
-                };
-                // PROMPT ORDER IS CACHE-AWARE, with the SHARED content leading, then the
-                // PER-CHUNK content, then the PER-BATCH (varying) content trailing — built by
-                // `build_pass_prompt` (shared verbatim with `run_passes_batch` so the two
-                // scan modes can't drift):
-                //
-                //   Repository: {repo}\n\n{repo_map}   <- IDENTICAL across every chunk in scan
-                //   ({label} n/n_c)\n\n{digest}\n\n     <- stable across this chunk's rule-batches
-                //   {task_line}\n\n{rb}                 <- varies every rule-batch, never cached
-                //
-                // The repo-map segment is deliberately free of the chunk index/label — that's
-                // what the OLD ordering got wrong (the label sat in front of the repo map, so
-                // the "static" prefix actually differed at ~byte 30 on every chunk and could
-                // never cache-hit across chunks). Leading with the byte-identical repo map
-                // instead means chunk 2, 3, ... of the SAME scan can cache-HIT it instead of
-                // re-billing the repo map on every chunk. Bonus: rules landing last = most
-                // recent context = strongest rule-following (unchanged).
-                //
-                // CACHING: `cache_breakpoints_for_pass` marks a breakpoint after the repo-map
-                // segment (re-reads across chunks) and, when there's more than one rule-batch,
-                // a second one after the chunk (label+digest) segment (re-reads across this
-                // chunk's rule-batches — the existing parallel-mode win). The CLI backend
-                // ignores these breakpoints entirely.
-                let (prompt, cache_bps) =
-                    build_pass_prompt(repo, repo_map, label, ci, n_c, digest, n_b, &task_line, &rb);
-                let session = format!("{session_prefix}-c{ci}-b{bi}");
-                if let Some((store, key)) = feedback {
-                    store.register(
-                        key,
-                        crate::transcript::AgentTranscript {
-                            session_id: session.clone(),
-                            role: format!("{label} {}/{n_c} · rules {}/{n_b} — {repo}", ci + 1, bi + 1),
-                            prompt: prompt.clone(),
-                            output: String::new(),
-                            status: "running".to_string(),
-                        },
-                    );
-                }
-                let r = audit_pass(llm, audit_model, prompt, cache_bps, repo, adopted, feedback, &session, meter).await;
-                if let Some((store, key)) = feedback {
-                    store.set_status(key, &session, if r.is_ok() { "done" } else { "blocked" });
-                }
-                // Stream this pass's findings + progress into the job (live preview) as it
-                // completes — so a Mode-3 poller sees findings appear incrementally. A failed
-                // pass still counts toward `done` so the progress bar can reach 100%.
-                if let Some((jstore, jid)) = job {
-                    if let Ok((f, _, _)) = &r {
-                        jstore.add_findings(jid, f.clone());
+    let eff = efficiency_of(meter);
+    let run_one = |(ci, bi): (usize, usize)| {
+        let digest = &digests[ci];
+        let batch = batches[bi];
+        async move {
+            // SPEND CAP: asked before anything is built or sent, and held until the pass
+            // (its truncation retry included) has finished, so a pass is never cut off
+            // mid-response. A refused pass is recorded as NOT RUN, never skipped silently.
+            let _permit = match admit_pass(meter).await {
+                Err(CapReached) => {
+                    if let Some(m) = meter {
+                        m.record_not_run(crate::cost_cap::NotRunPass {
+                            repo: repo.to_string(),
+                            group: label.to_string(),
+                            chunk: ci + 1,
+                            n_chunks: n_c,
+                            rule_batch: bi + 1,
+                            n_rule_batches: n_b,
+                            rule_ids: batch.iter().map(|(id, _)| id.clone()).collect(),
+                        });
                     }
-                    jstore.inc_done(jid, 1);
+                    if let Some((jstore, jid)) = job {
+                        jstore.inc_not_run(jid, 1);
+                    }
+                    return (ci, bi, None);
                 }
-                (ci, bi, r)
+                Ok(permit) => permit,
+            };
+            let rb = build_rules_block(batch);
+            // ADVISORY RUNS ONCE PER CHUNK, not once per rule-batch. The "flag novel
+            // issues beyond the adopted rules" task only depends on the code (the whole
+            // chunk is visible every pass), not on which rule-batch this is — so asking
+            // for it in all N batches just re-derives the SAME novel issue under N
+            // independently-invented names (one `.expect()` → AI-HANDLER-PANICS +
+            // AI-HANDLER-UNHANDLED-PANIC + AI-HANDLER-PANICS-ON-ERROR). Gate it to the
+            // first batch of each chunk; later batches check ONLY their adopted rules.
+            //
+            // ROUTING INTERACTION: when `advisory_disabled` is set (language-scoped groups),
+            // the advisory pass is suppressed in every batch, not just later ones. The
+            // cross-cutting All group keeps advisory enabled so novel issues are surfaced
+            // exactly once — against every file — with no per-language re-flagging.
+            let advisory = !advisory_disabled && bi == 0;
+            let task_line = pass_task_line(advisory, bi, n_b);
+            // PROMPT ORDER IS CACHE-AWARE, with the SHARED content leading, then the
+            // PER-CHUNK content, then the PER-BATCH (varying) content trailing — built by
+            // `build_pass_prompt` (shared verbatim with `run_passes_batch` so the two
+            // scan modes can't drift):
+            //
+            //   Repository: {repo}\n\n{repo_map}   <- IDENTICAL across every chunk in scan
+            //   ({label} n/n_c)\n\n{digest}\n\n     <- stable across this chunk's rule-batches
+            //   {task_line}\n\n{rb}                 <- varies every rule-batch, never cached
+            //
+            // The repo-map segment is deliberately free of the chunk index/label — that's
+            // what the OLD ordering got wrong (the label sat in front of the repo map, so
+            // the "static" prefix actually differed at ~byte 30 on every chunk and could
+            // never cache-hit across chunks). Leading with the byte-identical repo map
+            // instead means chunk 2, 3, ... of the SAME scan can cache-HIT it instead of
+            // re-billing the repo map on every chunk. Bonus: rules landing last = most
+            // recent context = strongest rule-following (unchanged).
+            //
+            // CACHING: `cache_breakpoints_for_pass` marks a breakpoint after the repo-map
+            // segment (re-reads across chunks) and, when there's more than one rule-batch,
+            // a second one after the chunk (label+digest) segment (re-reads across this
+            // chunk's rule-batches — the existing parallel-mode win). The CLI backend
+            // ignores these breakpoints entirely.
+            let (prompt, cache_bps) = build_pass_prompt_with(
+                eff.label_after_prefix,
+                repo,
+                repo_map,
+                label,
+                ci,
+                n_c,
+                digest,
+                n_b,
+                &task_line,
+                &rb,
+            );
+            let session = format!("{session_prefix}-c{ci}-b{bi}");
+            if let Some((store, key)) = feedback {
+                store.register(
+                    key,
+                    crate::transcript::AgentTranscript {
+                        session_id: session.clone(),
+                        role: format!("{label} {}/{n_c} · rules {}/{n_b} — {repo}", ci + 1, bi + 1),
+                        prompt: prompt.clone(),
+                        output: String::new(),
+                        status: "running".to_string(),
+                    },
+                );
             }
-        })
-        .await;
+            let r = audit_pass(
+                llm,
+                audit_model,
+                prompt,
+                cache_bps,
+                repo,
+                adopted,
+                feedback,
+                &session,
+                meter,
+            )
+            .await;
+            if let Some((store, key)) = feedback {
+                store.set_status(key, &session, if r.is_ok() { "done" } else { "blocked" });
+            }
+            // Stream this pass's findings + progress into the job (live preview) as it
+            // completes — so a Mode-3 poller sees findings appear incrementally. A failed
+            // pass still counts toward `done` so the progress bar can reach 100%.
+            if let Some((jstore, jid)) = job {
+                if let Ok((f, _, _)) = &r {
+                    jstore.add_findings(jid, f.clone());
+                }
+                jstore.inc_done(jid, 1);
+            }
+            (ci, bi, Some(r))
+        }
+    };
+    let results: Vec<PassOut> = if eff.warm_schedule {
+        crate::warm_schedule::run_warm_then_fan_out(jobs, concurrency, &run_one).await
+    } else {
+        crate::warm_schedule::run_unscheduled(jobs, concurrency, &run_one).await
+    };
 
     let mut findings = Vec::new();
     let mut proposed = Vec::new();
@@ -4285,13 +4786,15 @@ async fn run_passes(
     let mut failures: Vec<PassFailure> = Vec::new();
     for (ci, bi, r) in results {
         match r {
-            Ok((f, p, needs)) => {
+            Some(Ok((f, p, needs))) => {
                 findings.extend(f);
                 proposed.extend(p);
                 requested.extend(needs);
                 ok += 1;
             }
-            Err(e) => failures.push(PassFailure::at(label, ci, n_c, bi, n_b, &e)),
+            Some(Err(e)) => failures.push(PassFailure::at(label, ci, n_c, bi, n_b, &e)),
+            // Refused by the spend cap: already recorded as NOT RUN on the meter.
+            None => {}
         }
     }
     (findings, proposed, requested, ok, failures)
@@ -4396,6 +4899,11 @@ async fn run_passes_batch(
 ) -> anyhow::Result<PassesOut> {
     use crate::llm::{build_batch_item, reassemble_batch_results, LlmRequest};
 
+    // Rank 3 `batch_long_cache`: ON asks for the 1-hour cache (items outlive the 5-minute one).
+    // The same TTL prices the results.
+    let eff = efficiency_of(meter);
+    let batch_ttl = batch_cache_ttl(eff);
+
     if llm.api_key().is_none() {
         anyhow::bail!(
             "batch mode requires the Api backend with an Anthropic API key; \
@@ -4424,11 +4932,7 @@ async fn run_passes_batch(
             // duplicate novel findings for each language group (the problem advisory_disabled
             // was introduced to prevent in the parallel path).
             let advisory = !advisory_disabled && bi == 0;
-            let task_line = if advisory {
-                format!("── Check the code above against the ADOPTED rules below (batch {}/{n_b}); ALSO flag any other genuine issues NOT covered by an adopted rule. Use the REPO MAP for cross-file context. ──", bi + 1)
-            } else {
-                format!("── Check the code above against ONLY the ADOPTED rules below (batch {}/{n_b}). Do NOT report issues outside these rules — a separate pass already covers novel findings. Use the REPO MAP for cross-file context. ──", bi + 1)
-            };
+            let task_line = pass_task_line(advisory, bi, n_b);
             // Same `build_pass_prompt` builder as `run_passes` — see the extensive comment
             // there and on `cache_breakpoints_for_pass`. In BATCH mode this matters even
             // more: the default `BATCH_RULE_BATCH_SIZE = usize::MAX` puts every rule in ONE
@@ -4437,8 +4941,18 @@ async fn run_passes_batch(
             // re-read, paying a pure ~1.25x write premium for zero benefit) and keeps only
             // the repo-map breakpoint, which DOES re-read across this batch submission's
             // other chunks.
-            let (prompt, cache_bps) =
-                build_pass_prompt(repo, repo_map, label, ci, n_c, digest, n_b, &task_line, &rb);
+            let (prompt, cache_bps) = build_pass_prompt_with(
+                eff.label_after_prefix,
+                repo,
+                repo_map,
+                label,
+                ci,
+                n_c,
+                digest,
+                n_b,
+                &task_line,
+                &rb,
+            );
 
             let custom_id = format!("c{ci}-b{bi}");
             let req = {
@@ -4451,7 +4965,7 @@ async fn run_passes_batch(
                 let _ = &mut r; // avoid unused_mut lint
                 r
             };
-            items.push(build_batch_item(&custom_id, &req, &model));
+            items.push(build_batch_item(&custom_id, &req, &model, batch_ttl));
             work_meta.push((ci, bi, prompt, cache_bps));
         }
     }
@@ -4464,18 +4978,41 @@ async fn run_passes_batch(
     // number) — gracefully skipped on ANY failure (no key, network error, non-2xx) via
     // `exact_input_token_count`'s `Option` return, since a precise quote is a nice-to-have,
     // never a reason to fail or stall the audit itself.
-    if let Some((ci0, bi0, prompt0, cache_bps0)) = work_meta.first() {
-        let sample_req = LlmRequest::new(prompt0.clone())
-            .with_system(audit_system_prompt())
-            .with_cache_breakpoints(cache_bps0.clone());
-        if let Some(exact) = crate::llm::exact_input_token_count(llm, &sample_req, &model).await {
-            eprintln!(
-                "[camerata-server] batch mode: exact input-token count for chunk {ci0} rule-batch \
-                 {bi0} = {exact} tokens (via count_tokens; {} total (chunk,batch) pairs this run)",
-                work_meta.len()
-            );
+    //
+    // SPEND CAP (batch): a submitted batch cannot be cancelled cheaply, so the cap is checked
+    // BEFORE every submission. The sample is only counted when the spend so far plus the
+    // caller's pre-flight estimate (no network needed) has not already refused the run.
+    let hint_refuses = meter.is_some_and(|m| m.batch_refusal_reason(Some(0.0)).is_some());
+    let mut per_item_usd: Option<f64> = None;
+    if !hint_refuses {
+        if let Some((ci0, bi0, prompt0, cache_bps0)) = work_meta.first() {
+            let sample_req = sample_count_request(prompt0, cache_bps0);
+            if let Some(exact) = crate::llm::exact_input_token_count(llm, &sample_req, &model).await
+            {
+                eprintln!(
+                    "[camerata-server] batch mode: exact input-token count for chunk {ci0} rule-batch \
+                     {bi0} = {exact} tokens (via count_tokens; {} total (chunk,batch) pairs this run)",
+                    work_meta.len()
+                );
+                // One item's input side at the batch price, sized like the sample and with no
+                // cache credit: a projection of what a submission commits, not a quote (output
+                // is not projected).
+                per_item_usd = crate::llm::input_cost_usd(
+                    &model,
+                    exact,
+                    crate::llm::PriceBasis::batch(batch_ttl),
+                );
+            }
+        }
+        // No exact projection (the count failed, or the model is unpriced): fall back to the
+        // shared estimator, spread over the items. Still `None` when it cannot price either,
+        // and the gate then refuses rather than guessing.
+        if per_item_usd.is_none() && !work_meta.is_empty() {
+            per_item_usd = batch_estimate_usd(&model, chunks, batches)
+                .map(|total| total / work_meta.len() as f64);
         }
     }
+    let mut refused_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     // Tell the job the total pass count so the progress bar can be pre-seeded.
     let total = items.len();
@@ -4503,6 +5040,29 @@ async fn run_passes_batch(
     let mut all_errors: std::collections::HashMap<String, String> =
         std::collections::HashMap::new();
     for (sub_idx, sub_items) in sub_batches.iter().enumerate() {
+        // Checked again for every sub-batch: the spend of the ones before it is known by now.
+        if let Some(m) = meter {
+            if let Some(why) =
+                m.batch_refusal_reason(per_item_usd.map(|p| p * sub_items.len() as f64))
+            {
+                eprintln!("[camerata-server] {why}");
+                m.record_note(why);
+                let first = sub_idx * BATCH_CAP;
+                for (ci, bi, _prompt, _bps) in &work_meta[first..first + sub_items.len()] {
+                    refused_ids.insert(format!("c{ci}-b{bi}"));
+                    m.record_not_run(crate::cost_cap::NotRunPass {
+                        repo: repo.to_string(),
+                        group: label.to_string(),
+                        chunk: ci + 1,
+                        n_chunks: n_c,
+                        rule_batch: bi + 1,
+                        n_rule_batches: n_b,
+                        rule_ids: batches[*bi].iter().map(|(id, _)| id.clone()).collect(),
+                    });
+                }
+                continue;
+            }
+        }
         let submit_result = llm.submit_batch(sub_items.to_vec()).await?;
         let batch_id = submit_result.batch_id;
         eprintln!(
@@ -4540,7 +5100,7 @@ async fn run_passes_batch(
         .await?;
 
         // Fetch + parse results.
-        let rows = llm.fetch_batch_results(&batch_id).await?;
+        let rows = llm.fetch_batch_results(&batch_id, batch_ttl).await?;
         let sub = reassemble_batch_results(rows);
         all_responses.extend(sub.responses);
         all_errors.extend(sub.errors);
@@ -4556,6 +5116,7 @@ async fn run_passes_batch(
         &pairs,
         &all_responses,
         &all_errors,
+        &refused_ids,
         adopted,
         meter,
         job,
@@ -4576,6 +5137,7 @@ fn reassemble_batch_passes(
     pairs: &[(usize, usize)],
     responses: &std::collections::HashMap<String, crate::llm::LlmResponse>,
     errors: &std::collections::HashMap<String, String>,
+    refused_ids: &std::collections::HashSet<String>,
     adopted: &std::collections::HashSet<String>,
     meter: Option<&UsageMeter>,
     job: Option<(&crate::jobs::JobStore, &str)>,
@@ -4588,6 +5150,13 @@ fn reassemble_batch_passes(
 
     for &(ci, bi) in pairs {
         let custom_id = format!("c{ci}-b{bi}");
+        if refused_ids.contains(&custom_id) {
+            // Refused by the spend cap before submission: recorded as NOT RUN on the meter.
+            if let Some((jstore, jid)) = job {
+                jstore.inc_not_run(jid, 1);
+            }
+            continue;
+        }
         match responses.get(&custom_id) {
             Some(resp) => {
                 if let Some(m) = meter {
@@ -7360,7 +7929,11 @@ pub async fn audit_repo(
         // rule left. Fail-soft — a failed recommendation pass leaves those rules at their
         // pre-existing (project-selected/default) directive, exactly today's behavior, rather
         // than aborting the whole audit.
-        if !ask_alts.is_empty() {
+        // SPEND CAP: a stage that would start after the cap was reached is skipped and recorded
+        // as NOT RUN; its rules keep their pre-existing directive, as when the pass fails.
+        let alternatives_blocked = !ask_alts.is_empty()
+            && meter.is_some_and(|m| m.stage_blocked(repo, STAGE_ALTERNATIVES));
+        if !ask_alts.is_empty() && !alternatives_blocked {
             match recommend_alternatives(
                 llm,
                 repo,
@@ -7673,7 +8246,11 @@ pub async fn audit_repo(
     // content instead of a mystery hang or an empty placeholder. (Dedup/merge also
     // shrinks N, so this round is now faster too.)
     let pre_calibration_len = all_findings.len();
-    let verified = if all_findings.is_empty() {
+    let verified = if all_findings.is_empty()
+        || meter.is_some_and(|m| m.stage_blocked(repo, STAGE_CALIBRATION))
+    {
+        // Nothing to calibrate, or the spend cap was reached (recorded as NOT RUN): the
+        // findings go on exactly as the scan produced them, none dropped.
         all_findings
     } else {
         // Repo-shape line for the proportionality signal (Bug 4 §2b): detected stack + code-file
@@ -8259,6 +8836,17 @@ async fn run_prose_lens(
         "Repository: {repo}\n\n{repo_map}{digest}\n\n── {} for the code above. Return the JSON described in the system prompt. ──",
         lens.title()
     );
+    // SPEND CAP: a lens is one call, admitted like a scan pass; refused, it is reported on the
+    // lens result and recorded as the deep tier stopped part way.
+    let _permit = match admit_stage(meter, repo, STAGE_DEEP).await {
+        Err(CapReached) => {
+            let mut result = DeepLensResult::empty(lens);
+            result.error =
+                Some("not run: the spend limit set for this run was reached".to_string());
+            return result;
+        }
+        Ok(permit) => permit,
+    };
     let session = format!("deep-{}-{repo}", lens.id());
     if let Some((store, key)) = feedback {
         store.register(
@@ -8422,6 +9010,18 @@ async fn run_security_passes(
         .map(|ci| {
             let digest = &digests[ci];
             async move {
+                // SPEND CAP: each deep-security pass is admitted like a scan pass.
+                let _permit = match admit_stage(meter, repo, STAGE_DEEP).await {
+                    Err(CapReached) => {
+                        return (
+                            ci,
+                            Err(anyhow::anyhow!(
+                                "not run: the spend limit set for this run was reached"
+                            )),
+                        );
+                    }
+                    Ok(permit) => permit,
+                };
                 let prompt = format!(
                     "Repository: {repo} (security pass {}/{n_c})\n\n{repo_map}{digest}\n\n── Perform a DEEP SECURITY AUDIT of the code above. Use the REPO MAP for cross-file context. Return the JSON described in the system prompt. ──",
                     ci + 1,
@@ -8603,6 +9203,9 @@ mod cache_schedule_tests;
 
 #[cfg(test)]
 mod retry_tests;
+
+#[cfg(test)]
+mod efficiency_cap_tests;
 
 #[cfg(test)]
 mod tests {
@@ -13434,6 +14037,7 @@ mod tests {
             &[(0, 0), (0, 1), (0, 2)],
             &responses,
             &errors,
+            &std::collections::HashSet::new(),
             &std::collections::HashSet::new(),
             None,
             None,

@@ -486,6 +486,14 @@ Slotted RIGHT AFTER the delete/re-fetch blocker, blocking items first, all befor
   `_workspace/brownfield-audits/CORPUS_FRESHNESS_WORK_ORDER.md` (monthly source check command;
   quarterly review). `camerata corpus check` and the due-soon warning exist; build what the work
   order still needs (the source-check command / sweep). Slotted with the item-21 engine follow-ups.
+  **Part A built (2026-10-27):** `camerata corpus check-sources` (crate `camerata-source-check`),
+  sidecar `crates/rules/CORPUS_SOURCE_HASHES.json`, text + JSON report. Part B is a runbook in
+  `docs/USER_GUIDE.md` §9. NOT yet wired into exports: the export builder calls
+  `camerata_source_check::source_confidence(rule, &sidecar, today, DEFAULT_CHANGED_WINDOW_DAYS)`
+  per rule (lowered confidence on `lowered`, "Source re-checked <date>" from `.line()`). A changed
+  section is never silently re-baselined: it stays "changed, not yet reviewed" on every run until
+  `--accept <url#anchor>` / `--accept-all` (who and when recorded in the sidecar); an unaccepted
+  change lowers confidence with no time limit, and the 100-day window runs from the accept date.
 - **22g (handoff item 16, protected: corpus, Zach already asked): clean three showcase rule files**
   of internal notes for the website overlay: SEC-NO-HARDCODED-SECRETS-1 (drop the internal
   docs/ENFORCEMENT.md source or relabel it), ARCH-IDEMPOTENCY-KEYS-1 (replace the boilerplate
@@ -563,6 +571,15 @@ V2, the V2 items (keyed fixture, Dart grammar, Flutter rules) move to the front.
   build, Fable review. **Acceptance:** a small open-source Firebase app scans end to end with no
   false critical on the apiKey. Keyed calibration fixture: V2.
 - **Slot:** with W29 Wave D and 22e (the corpus/detector block), after token efficiency.
+
+### 2f. Item 25: inspection walkthrough (added 2026-10-27, Zach, V1)
+
+A guided mode that points at each real control in the Inspection flow with a short explanation,
+from an empty app to an exported package. Turned on by a "Guided inspection" switch, offered once
+on first launch, restartable from Help and the command palette. Design:
+`docs/design/2026-10-27_inspection-walkthrough.md` (12 steps, one step table, `data-tour` ids
+enforced by a test so a renamed button breaks the build). V1 is Inspection only; other tours V2.
+**Slot:** after viewer 7d merges (same UI files); can run in parallel with the efficiency ranks.
 
 ## 3. Explicitly NOT doing
 

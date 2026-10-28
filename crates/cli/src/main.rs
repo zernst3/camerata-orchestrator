@@ -162,6 +162,21 @@ enum Command {
         /// summary.
         #[arg(long)]
         verbose: bool,
+        /// Stop the run, between passes, once actual spend reaches this many US dollars. A run
+        /// that stops early lists every pass and stage it did not run, marks its export incomplete
+        /// and exits non-zero (4). The limit is checked before each scan pass, calibration or
+        /// fix batch and deep-tier call starts; one that has started always finishes, and once
+        /// the limit has stopped anything no later stage starts. So a run can end about one pass
+        /// over the limit (a pass can include one retry). In batch mode the limit is checked
+        /// before the batch is submitted.
+        #[arg(long = "max-cost-usd", value_name = "USD")]
+        max_cost_usd: Option<f64>,
+        /// Switch a token-efficiency measure `on` or `off` for this run, e.g.
+        /// `--efficiency warm_schedule=off`. Repeatable; wins over `CAMERATA_EFFICIENCY`. Every
+        /// measure is on by default; the run states which were on. Measures: warm_schedule,
+        /// label_after_prefix, batch_long_cache, result_cache, truncation_retry, fix_prefilter.
+        #[arg(long = "efficiency", value_name = "NAME=on|off")]
+        efficiency: Vec<String>,
     },
 
     /// W6 / I2: the PRE-FLIGHT INTEGRITY GATE. Evaluate a scan ledger written by
@@ -243,6 +258,40 @@ enum CorpusAction {
     /// REFUSES, writing nothing, when a rule changed without a `version` bump. Edit the rule,
     /// bump its `version`, run this, commit both.
     Lock,
+    /// Check every rule's cited sources (Part A of the corpus freshness routine): fetch each
+    /// `[[sources]]` URL, record ok / redirected / dead (or unreachable), and compare each cited
+    /// section's text hash with the last run. Prints a date-stamped report; changes no rule.
+    /// Writes only the sidecar crates/rules/CORPUS_SOURCE_HASHES.json (commit it afterward).
+    CheckSources {
+        /// Print the report as JSON instead of text.
+        #[arg(long)]
+        json: bool,
+        /// Write the report to this file instead of stdout.
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// The sidecar to read and update (default: crates/rules/CORPUS_SOURCE_HASHES.json).
+        #[arg(long)]
+        sidecar: Option<PathBuf>,
+        /// Do not write the sidecar back (dry run: nothing is recorded).
+        #[arg(long)]
+        no_save: bool,
+        /// Pause between two requests to the same host, in milliseconds.
+        #[arg(long, default_value_t = 1500)]
+        delay_ms: u64,
+        /// Accept a reviewed section change: `url#anchor=sha256:<hash>` with the hash the report
+        /// printed (refused if the page changed again since), or the bare `url#anchor`
+        /// (accepts whatever is pending now, with a warning). Repeatable. A changed section
+        /// stays listed on every run until accepted. Makes no requests; it only updates the
+        /// sidecar, recording who accepted and when.
+        #[arg(long, value_name = "URL", conflicts_with_all = ["accept_all", "no_save", "json", "out"])]
+        accept: Vec<String>,
+        /// Accept every unreviewed section change (use after reading the whole report).
+        #[arg(long, conflicts_with_all = ["no_save", "json", "out"])]
+        accept_all: bool,
+        /// Who is accepting, recorded in the sidecar (default: $USER).
+        #[arg(long, value_name = "NAME")]
+        by: Option<String>,
+    },
 }
 
 /// `--backend`'s `value_parser`: `ProjectBackend` lives in `camerata-api-types`, a foreign
@@ -336,6 +385,8 @@ async fn main() -> anyhow::Result<()> {
             calibration_model,
             full,
             verbose,
+            max_cost_usd,
+            efficiency,
         } => {
             run_inspect_cmd(InspectArgs {
                 repo,
@@ -346,6 +397,8 @@ async fn main() -> anyhow::Result<()> {
                 calibration_model,
                 full,
                 verbose,
+                max_cost_usd,
+                efficiency,
             })
             .await
         }
@@ -375,6 +428,30 @@ async fn main() -> anyhow::Result<()> {
                 camerata::corpus_cmd::run_corpus_confirm(domain, date).await
             }
             CorpusAction::Lock => camerata::corpus_cmd::run_corpus_lock().await,
+            CorpusAction::CheckSources {
+                json,
+                out,
+                sidecar,
+                no_save,
+                delay_ms,
+                accept,
+                accept_all,
+                by,
+            } => {
+                camerata::corpus_sources_cmd::run_corpus_check_sources(
+                    camerata::corpus_sources_cmd::CheckSourcesArgs {
+                        json,
+                        out,
+                        sidecar,
+                        no_save,
+                        delay_ms,
+                        accept,
+                        accept_all,
+                        by,
+                    },
+                )
+                .await
+            }
         },
     }
 }
@@ -435,6 +512,15 @@ async fn run_inspect_cmd(args: InspectArgs) -> anyhow::Result<()> {
     match inspect_cmd::run_inspect(args).await {
         Ok(outcome) => {
             println!("{}", inspect_cmd::format_outcome_report(&outcome));
+            // A run the spend limit cut short wrote an export (marked incomplete) but is not a
+            // success: a script must not read it as one.
+            if outcome.cost_capped() {
+                eprintln!(
+                    "camerata inspect: STOPPED BY THE SPEND LIMIT; the export is INCOMPLETE (see \
+                     the passes listed as NOT RUN above)."
+                );
+                std::process::exit(inspect_cmd::EXIT_COST_CAPPED);
+            }
             Ok(())
         }
         Err(e) => {
@@ -782,6 +868,8 @@ mod cli_parse_tests {
                 calibration_model,
                 full,
                 verbose,
+                max_cost_usd,
+                efficiency,
             } => {
                 assert_eq!(repo, PathBuf::from("/tmp/r"));
                 assert_eq!(export, PathBuf::from("/tmp/o.zip"));
@@ -791,6 +879,38 @@ mod cli_parse_tests {
                 assert!(calibration_model.is_none());
                 assert!(!full);
                 assert!(!verbose);
+                assert!(max_cost_usd.is_none(), "no cap unless asked for");
+                assert!(efficiency.is_empty());
+            }
+            other => panic!("expected Command::Inspect, got a different variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn inspect_parses_the_spend_limit_and_repeatable_efficiency_switches() {
+        let cli = Cli::try_parse_from([
+            "camerata",
+            "inspect",
+            "--repo",
+            "/tmp/r",
+            "--export",
+            "/tmp/o.zip",
+            "--max-cost-usd",
+            "12.50",
+            "--efficiency",
+            "warm_schedule=off",
+            "--efficiency",
+            "result_cache=off",
+        ])
+        .expect("must parse");
+        match cli.command {
+            Command::Inspect {
+                max_cost_usd,
+                efficiency,
+                ..
+            } => {
+                assert_eq!(max_cost_usd, Some(12.5));
+                assert_eq!(efficiency, vec!["warm_schedule=off", "result_cache=off"]);
             }
             other => panic!("expected Command::Inspect, got a different variant: {other:?}"),
         }

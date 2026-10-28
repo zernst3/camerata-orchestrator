@@ -988,7 +988,17 @@ async fn export_product_success_names_the_release_checks_in_a_header() {
         request(),
     )
     .await;
-    assert_eq!(resp.status(), axum::http::StatusCode::OK);
+    if resp.status() != axum::http::StatusCode::OK {
+        // This test failed intermittently in full parallel runs with a bare "500 != 200";
+        // say WHY, so the next occurrence names its cause.
+        use http_body_util::BodyExt;
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.expect("body").to_bytes();
+        panic!(
+            "export_product returned {status}: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+    }
     assert_eq!(
         resp.headers()
             .get("x-camerata-release-checks")

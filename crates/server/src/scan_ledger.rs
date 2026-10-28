@@ -168,6 +168,14 @@ pub struct RuleLedgerEntry {
     /// genuinely looked, found nothing" case).
     #[serde(default)]
     pub not_applicable: bool,
+    /// Set when the rule ran on SOME of the code and the scan was stopped before it ran on the
+    /// rest (today: the spend limit). The rule did run (`ran` is true, its findings are real),
+    /// but it was NOT checked everywhere, so it is never [`Self::verified_clean`], the
+    /// integrity gate fails on it as incomplete coverage, and the export lists it with this
+    /// reason. Distinct from `ran == false`, which means it did not run at all. Set via
+    /// [`ScanLedger::note_partial_rule`].
+    #[serde(default)]
+    pub partial_reason: Option<String>,
 }
 
 impl RuleLedgerEntry {
@@ -181,7 +189,10 @@ impl RuleLedgerEntry {
     /// whole W2 pass exists to close (a `not_applicable` determination must never be
     /// indistinguishable from a rule that genuinely ran and found nothing to report).
     pub fn verified_clean(&self) -> bool {
-        self.ran && self.findings_emitted == 0 && !self.not_applicable
+        self.ran
+            && self.findings_emitted == 0
+            && !self.not_applicable
+            && self.partial_reason.is_none()
     }
 }
 
@@ -369,6 +380,16 @@ pub struct ScanLedger {
     /// then re-scans in full. Operator-only, like [`Self::stage_telemetry`].
     #[serde(default)]
     ai_key: Option<crate::scan_cache::AiScanKey>,
+    /// Which token-efficiency measures were on for this scan ([`crate::efficiency`]), so a cost
+    /// or behavior change between two runs can be traced to a switch. Operator-only. `None`
+    /// for a ledger written before the switches existed.
+    #[serde(default)]
+    efficiency: Option<crate::efficiency::EfficiencyConfig>,
+    /// What the `--max-cost-usd` spend cap did, when one was set: actual spend and everything
+    /// it stopped. Operator-only (it carries dollar figures); the export gets only a
+    /// "capped" fact. See [`crate::cost_cap`].
+    #[serde(default)]
+    cost_cap: Option<crate::cost_cap::CostCapRecord>,
 }
 
 /// The facts about a scan's INPUT, recorded so the integrity gate can judge them.
@@ -575,6 +596,33 @@ impl ScanLedger {
         self.ai_key = Some(key);
     }
 
+    /// Record which efficiency measures were on. Overwrites: one scan, one record.
+    pub fn record_efficiency(&mut self, efficiency: crate::efficiency::EfficiencyConfig) {
+        self.efficiency = Some(efficiency);
+    }
+
+    /// The efficiency measures that were on, when the scan recorded them.
+    pub fn efficiency(&self) -> Option<&crate::efficiency::EfficiencyConfig> {
+        self.efficiency.as_ref()
+    }
+
+    /// Record what the spend cap did. Overwrites: one scan, one record.
+    pub fn record_cost_cap(&mut self, record: crate::cost_cap::CostCapRecord) {
+        self.cost_cap = Some(record);
+    }
+
+    /// What the spend cap did, when one was set.
+    pub fn cost_cap(&self) -> Option<&crate::cost_cap::CostCapRecord> {
+        self.cost_cap.as_ref()
+    }
+
+    /// True when the spend cap stopped part of this scan, so the inspection is incomplete.
+    pub fn is_cost_capped(&self) -> bool {
+        self.cost_cap
+            .as_ref()
+            .is_some_and(crate::cost_cap::CostCapRecord::stopped_the_run)
+    }
+
     /// The question this scan's AI findings answered, when it recorded one.
     pub fn ai_key(&self) -> Option<&crate::scan_cache::AiScanKey> {
         self.ai_key.as_ref()
@@ -716,8 +764,18 @@ impl ScanLedger {
                 findings_emitted,
                 coverage_note,
                 not_applicable,
+                partial_reason: None,
             });
         self.rules.get(&rule_id).expect("just inserted")
+    }
+
+    /// Mark a rule that [`Self::record_rule`] already recorded as having run on only PART of the
+    /// code (see [`RuleLedgerEntry::partial_reason`]). The first reason is kept. A rule the
+    /// ledger has no entry for is ignored: there is nothing to qualify.
+    pub fn note_partial_rule(&mut self, rule_id: &str, reason: impl Into<String>) {
+        if let Some(entry) = self.rules.get_mut(rule_id) {
+            entry.partial_reason.get_or_insert_with(|| reason.into());
+        }
     }
 
     /// W13 — record a rule whose CORPUS FILE could not be parsed, so the rule never entered
@@ -803,6 +861,7 @@ impl ScanLedger {
                         findings_emitted: 0,
                         coverage_note: Some(CORPUS_LOAD_FAILED_NOTE.to_string()),
                         not_applicable: false,
+                        partial_reason: None,
                     },
                 );
             }
@@ -929,6 +988,7 @@ impl ScanLedger {
                 findings_emitted,
                 coverage_note,
                 not_applicable,
+                partial_reason: None,
             },
         );
         self.rules.get(&rule_id).expect("just inserted")
@@ -970,17 +1030,21 @@ impl ScanLedger {
         ids
     }
 
-    /// Rule ids that did NOT run this scan, each with its reason — the "excluded from this
-    /// audit" section. Sorted by rule id for stable output.
+    /// Rule ids that did NOT run this scan, or ran on only part of the code, each with its
+    /// reason — the "excluded from this audit" section. Sorted by rule id for stable output.
     pub fn excluded_rules(&self) -> Vec<(&str, &str)> {
         let mut out: Vec<(&str, &str)> = self
             .rules
             .values()
-            .filter(|r| !r.ran)
+            .filter(|r| !r.ran || r.partial_reason.is_some())
             .map(|r| {
                 (
                     r.rule_id.as_str(),
-                    r.skip_reason.as_deref().unwrap_or("did not run this scan"),
+                    // A rule that ran on part of the code is listed with WHY it is incomplete.
+                    r.partial_reason
+                        .as_deref()
+                        .or(r.skip_reason.as_deref())
+                        .unwrap_or("did not run this scan"),
                 )
             })
             .collect();

@@ -1,18 +1,16 @@
 id = "ARCH-OBSERVABILITY-LOG-CONSISTENCY-1"
-version = 1
+version = 2
 title = "Once a repo has adopted a structured logger, every log call site goes through it; bare print/console-style calls do not sit alongside it"
 domain = "universal"
 layer = "universal"
 enforcement = "architectural"
 kind = "defect"
 inspectable = true
-# Severity ceiling, transcribed from this rule's own prose: "the pipeline's observability cap plus
-# `report_export::is_informational`'s structural bypass force this rule's findings to severity Low
-# and out of every action bucket regardless of the model's proposed severity."
+# Severity ceiling: findings from this rule are capped at Low, whatever severity the model proposes.
 max_severity = "low"
 default = true
 verification = "grounded"
-qualifies = "This is an INCONSISTENCY check, not a 'you must adopt structured logging' stance — it only fires once a repo has ALREADY adopted a structured logger (slog/zap/winston/pino/slf4j/serilog/tracing, or an equivalent project-specific wrapper) and some OTHER call site in the same repo still uses a bare print/console-style call alongside it. For Go and Java specifically, the 'always use structured logging' stance itself is already covered by GO-LOGGING-STRUCTURED-1 and JAVA-LOGGING-STRUCTURED-1 (both full-severity, per-language prose rules) — this rule does not re-litigate that stance for those two languages; it exists for (a) every OTHER stack (Python, JS/TS, Rust, C#, Ruby) where no per-language stance rule already covers the question, and (b) the cross-stack/multi-language case where the inconsistency is between files or layers rather than within a single language's own convention. Camerata ships no detector for this; it reaches the codebase only through the semantic/AI audit pass, and `ai_audit`'s D8 observability cap plus `report_export::is_informational`'s structural bypass force this rule's findings to severity Low and out of every action bucket regardless of the model's proposed severity. A bare print/console-style call that is the CLI tool's actual stdout product, or that appears in a test or script file where print output IS the point, is out of scope and not flagged."
+qualifies = "This is an INCONSISTENCY check, not a 'you must adopt structured logging' stance — it only fires once a repo has ALREADY adopted a structured logger (slog/zap/winston/pino/slf4j/serilog/tracing, or an equivalent project-specific wrapper) and some OTHER call site in the same repo still uses a bare print/console-style call alongside it. For Go and Java specifically, the 'always use structured logging' stance itself is already covered by GO-LOGGING-STRUCTURED-1 and JAVA-LOGGING-STRUCTURED-1 (both full-severity, per-language prose rules) — this rule does not re-litigate that stance for those two languages; it exists for (a) every OTHER stack (Python, JS/TS, Rust, C#, Ruby) where no per-language stance rule already covers the question, and (b) the cross-stack/multi-language case where the inconsistency is between files or layers rather than within a single language's own convention. Camerata has no deterministic check for this rule; the model-assisted review finds it, and its findings are capped at severity Low. A bare print/console-style call that is the CLI tool's actual stdout product, or that appears in a test or script file where print output IS the point, is out of scope and not flagged."
 
 [[sources]]
 url = "https://cheatsheetseries.owasp.org/cheatsheets/Logging_Cheat_Sheet.html"

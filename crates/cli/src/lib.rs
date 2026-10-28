@@ -7,6 +7,7 @@
 pub mod acceptance;
 pub mod build_demo;
 pub mod corpus_cmd;
+pub mod corpus_sources_cmd;
 /// `camerata cost-regression`: compare two inspections' cost per 1K counted lines (no model).
 pub mod cost_regression_cmd;
 /// `camerata count <repo>`: the inspection's own file filter as a size count (no model).

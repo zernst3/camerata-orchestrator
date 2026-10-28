@@ -65,7 +65,9 @@ pub mod jobs;
 // `camerata_app_core::lifecycle` (RUST-HEADLESS-CORE-1); re-exported so `crate::lifecycle::*` call
 // sites (uow, lib) are unchanged.
 pub use camerata_app_core::lifecycle;
+pub mod cost_cap;
 pub mod dev_implement_run;
+pub mod efficiency;
 pub mod live_fleet;
 pub mod llm;
 pub mod notify;
@@ -76,6 +78,7 @@ pub mod orchestrator_message;
 pub mod ownership;
 pub mod pr;
 pub mod pr_resolve_run;
+pub mod preflight;
 pub mod project;
 pub mod provider;
 pub mod reconcile;
@@ -5477,6 +5480,11 @@ struct AuditRuleReq {
 
 #[derive(serde::Deserialize)]
 struct AuditReq {
+    /// The scan settings' spend limit in US dollars (`camerata inspect --max-cost-usd`'s twin).
+    /// `None` = no limit. The run stops between passes once actual spend reaches it and says
+    /// what it did not run; see [`crate::cost_cap`].
+    #[serde(default)]
+    max_cost_usd: Option<f64>,
     #[serde(default)]
     repos: Vec<String>,
     #[serde(default)]
@@ -5860,6 +5868,7 @@ async fn onboard_audit(
     State(state): State<AppState>,
     Json(req): Json<AuditReq>,
 ) -> Json<crate::onboard::ScanReport> {
+    let run_controls = req.run_controls();
     let repos: Vec<String> = req
         .repos
         .into_iter()
@@ -5947,7 +5956,7 @@ async fn onboard_audit(
     // no stale/partially-mutated state a caller could see.
     use futures::FutureExt;
     let outcome = std::panic::AssertUnwindSafe(async move {
-        let (mut report, manifest) = crate::onboard::audit_repos(
+        let (mut report, manifest) = crate::onboard::audit_repos_controlled(
             state.credential_store.as_ref(),
             &sources,
             &selected,
@@ -5970,6 +5979,7 @@ async fn onboard_audit(
                 .as_ref()
                 .map(project_chosen_options)
                 .unwrap_or_default(),
+            run_controls,
         )
         .await;
         // Persist the fresh manifest (even after a forced full scan) so the NEXT scan can be
@@ -6925,6 +6935,21 @@ async fn onboard_audit_start(
     Json(serde_json::json!({ "job_id": job_id }))
 }
 
+impl AuditReq {
+    /// How this scan executes: the environment's efficiency switches and the request's spend
+    /// limit. A limit that is not a positive number cannot be honored as written, so it becomes
+    /// the smallest possible limit (one pass runs, the rest are reported as not run), never
+    /// "no limit": a typo must not remove the guard.
+    fn run_controls(&self) -> crate::cost_cap::RunControls {
+        crate::cost_cap::RunControls {
+            max_cost_usd: self.max_cost_usd.map(|cap| {
+                crate::cost_cap::RunControls::validate_cap(cap).unwrap_or(f64::MIN_POSITIVE)
+            }),
+            ..crate::cost_cap::RunControls::from_env()
+        }
+    }
+}
+
 /// How a started audit job differs from the plain "scan" the UI's scan button starts. Every
 /// field defaults to the plain scan, so [`onboard_audit_start`] passes `default()`.
 #[derive(Default)]
@@ -6959,6 +6984,7 @@ pub(crate) async fn start_audit_job(
     options: AuditJobOptions,
 ) -> String {
     let state = state.clone();
+    let run_controls = req.run_controls();
     let repos: Vec<String> = req
         .repos
         .into_iter()
@@ -7126,7 +7152,7 @@ pub(crate) async fn start_audit_job(
                 body_jobs.declare_tools(&body_jid, &id_refs);
             }
 
-            let (mut report, manifest) = crate::onboard::audit_repos(
+            let (mut report, manifest) = crate::onboard::audit_repos_controlled(
                 state.credential_store.as_ref(),
                 &sources,
                 &selected,
@@ -7146,6 +7172,7 @@ pub(crate) async fn start_audit_job(
                 backend_resolution,
                 corpus.as_ref(),
                 &chosen_options,
+                run_controls,
             )
             .await;
             // Persist the fresh manifest so the next scan can be incremental.
@@ -17240,6 +17267,10 @@ pub struct ManifestProvenance {
     /// The model backend and provider that ran the inspection. `None` when the caller did not
     /// record one (an honest absence: `null` in the manifest, no README line).
     pub model: Option<ModelRecord>,
+    /// True when the operator's spend limit stopped part of this inspection, so it is
+    /// INCOMPLETE. States only that fact: no dollar figure is exported (cost numbers are
+    /// operator-only). What was not run is listed in the report's failed-pass section.
+    pub cost_cap_reached: bool,
 }
 
 impl ManifestProvenance {
@@ -17300,6 +17331,7 @@ impl ManifestProvenance {
             "rules_last_reviewed": self.rules_last_reviewed,
             "model_backend": self.model.as_ref().map(|m| &m.backend),
             "model_provider": self.model.as_ref().map(|m| &m.provider),
+            "cost_cap_reached": self.cost_cap_reached,
             "release_checks": Self::release_checks(),
         })
     }
@@ -17347,6 +17379,9 @@ impl ManifestProvenance {
             out.push_str(&format!("Model backend: {}\n", model.backend));
             out.push_str(&format!("Model provider: {}\n", model.provider));
         }
+        if self.cost_cap_reached {
+            out.push_str(&format!("{COST_CAP_README_LINE}\n"));
+        }
         out.push_str(&format!(
             "Release checks: {} (all passed)\n",
             Self::release_checks().join(", ")
@@ -17354,6 +17389,11 @@ impl ManifestProvenance {
         out
     }
 }
+
+/// The README line that states the inspection was stopped by the operator's spend limit. Printed
+/// only when [`ManifestProvenance::cost_cap_reached`] is true; the release gate parses it back.
+pub const COST_CAP_README_LINE: &str = "Spend limit: reached. This inspection is INCOMPLETE; the \
+     report lists the passes that were not run.";
 
 /// The one-sentence purpose + per-contract `schema_version` for a file in the product ZIP, keyed
 /// by its archive path. `None` schema for formats with no data contract (PDF, xlsx, README).
@@ -26945,6 +26985,40 @@ mod tests {
     /// manifest lists every ZIP member except itself, and each listed sha256 equals the actual
     /// hash of that member. The corruption clause (that a flipped byte is caught) lives in
     /// `tests/product_export_manifest_gates.rs`.
+    /// The scan settings' spend limit reaches the run as a cap. A limit the server cannot read
+    /// as a positive number must not become "no limit" (a typo would remove the guard).
+    #[test]
+    fn an_audit_request_carries_its_spend_limit_into_the_run_controls() {
+        let req = |body: serde_json::Value| -> AuditReq { serde_json::from_value(body).unwrap() };
+        assert_eq!(
+            req(serde_json::json!({})).run_controls().max_cost_usd,
+            None,
+            "no field, no cap"
+        );
+        assert_eq!(
+            req(serde_json::json!({ "max_cost_usd": null }))
+                .run_controls()
+                .max_cost_usd,
+            None
+        );
+        assert_eq!(
+            req(serde_json::json!({ "max_cost_usd": 25.0 }))
+                .run_controls()
+                .max_cost_usd,
+            Some(25.0)
+        );
+        for bad in [0.0, -4.0] {
+            let cap = req(serde_json::json!({ "max_cost_usd": bad }))
+                .run_controls()
+                .max_cost_usd;
+            assert_eq!(
+                cap,
+                Some(f64::MIN_POSITIVE),
+                "{bad} is the tightest cap, not none"
+            );
+        }
+    }
+
     #[test]
     fn manifest_lists_and_hashes_every_file_except_itself() {
         use sha2::{Digest, Sha256};

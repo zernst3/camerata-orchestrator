@@ -259,14 +259,16 @@ pub fn rates_for(model_id: &str, prompt_tokens: u64) -> Option<ModelRates> {
         Some(t) if prompt_tokens > t.above_prompt_tokens => (t.price_in, t.price_out),
         _ => (e.price_in, e.price_out),
     };
-    let cache_read = e.cache_read_price.unwrap_or(price_in * 0.1);
+    let cache_read = e
+        .cache_read_price
+        .unwrap_or(price_in * crate::llm::CACHE_READ_MULT);
     let per_token = |per_million: f64| per_million / 1_000_000.0;
     Some(ModelRates {
         input: per_token(price_in),
         output: per_token(price_out),
         cache_read: per_token(cache_read),
-        cache_write_5m: per_token(price_in * 1.25),
-        cache_write_1h: per_token(price_in * 2.0),
+        cache_write_5m: per_token(price_in * crate::llm::CACHE_WRITE_5M_MULT),
+        cache_write_1h: per_token(price_in * crate::llm::CACHE_WRITE_1H_MULT),
     })
 }
 

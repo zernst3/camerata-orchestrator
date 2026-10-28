@@ -182,6 +182,56 @@ Repository Workspace · Settings · Docs**.
 
 ---
 
+## 2a. Guided inspection (the walkthrough)
+
+A short guided mode for the Inspection, from an empty app to an exported package. A small popup
+points at the real control on screen (with an arrow, and the control lightly highlighted), says in a
+sentence or two what it does, and shows "Step N of 12" with **Back**, **Next** and **Exit**. It
+never clicks, types or decides anything for you.
+
+**Turning it on**
+- The **Guided inspection** switch on the **Onboard repos** screen, where an inspection starts. On
+  means the walkthrough runs alongside the real flow; off hides it. The switch is remembered for
+  you on this computer (it is an app setting, not part of any project, so a project export never
+  carries it).
+- On a first launch with no projects, the Projects home offers it once: "Want a guided first
+  inspection?" **No thanks** is remembered and the offer is not made again; the switch stays
+  available.
+- **Start walkthrough** in the **Help** menu, or the same line in the command palette (Ctrl+K or
+  Cmd+K), starts it again from step 1 at any time.
+
+**How it behaves**
+- Most steps move on by themselves when you do the thing (open a project, press the audit button).
+  If you start it with the thing already done (from inside an open project, step 1 is already
+  satisfied), it skips that step. **Next** skips ahead, and is how the steps that only explain are
+  passed. **Back** goes back.
+- If the control is not on screen (you are on another page, or the inspection has not run yet), the
+  popup says how to get there instead of pointing at nothing.
+- **Esc** exits, as does **Exit** (and **Done** on the last step); exiting also turns the switch off.
+  Esc is left alone while a reason prompt, the code viewer, the stacked view, the palette or a dialog
+  is open, or while you are typing in a field.
+- It gets out of the way: while a reason prompt, the code viewer, the stacked view, the command
+  palette or any dialog is open, the popup is hidden, and it comes back when they close. Starting
+  the walkthrough is refused (with a note saying why) while any of those is open. Only the
+  palette's own **Start walkthrough** line can start it with the palette open (it closes the
+  palette itself); the Help menu cannot.
+- Keyboard and screen readers: starting it moves the keyboard into the popup, each step is
+  announced, and closing it puts the keyboard back on the control it was pointing at (on a bar or
+  a block, the block itself, never on a button inside it, so a stray Enter cannot decide a
+  finding). For the run and export steps it leaves the keyboard on the area around the button, not
+  the button, so a stray Enter cannot start a paid run or an export. The popup only listens for clicks and Esc while it is running, so a key pressed
+  between walkthroughs does nothing to the next one.
+
+**What it covers (twelve steps).** Create or open a project; add the client repository; the client
+name; the model backend and where the key is saved; the stack rules; the line count and cost
+estimate; running the inspection; failed or skipped passes; the review queue and its four decisions;
+the speed tools (stacked review, the code viewer, the palette); review time; exporting the package.
+This first version covers the Inspection only. Where a step's own control does not exist yet (the
+client name field in the inspection setup, the spending cap), it points at the nearest control that
+does.
+
+---
+
 ## 3. Onboarding a repo (the main flow)
 
 Open **Onboard repos**. The flow: **detect stack → pick rules → scan the repo for violations (audit)
@@ -616,6 +666,36 @@ fresh scan starts a new session; a crash mid-scan just re-runs the scan).
    the app saved a view setting this version does not know (an order, or which table was open), it
    falls back to the default; your decisions are never lost to it.
 
+   **Command palette.** Press **Ctrl+K** (**Cmd+K** on a Mac) anywhere on the results screen
+   (you do not have to click into the Queue first), or click **Commands** at the end of the
+   toolbar, to open one list of the review actions. Type to filter
+   it as you go: every word you type must appear in a line, in any order and either case, and the
+   keys shown at the right (`C`, `Down`) are matched too. **Up** and **Down** move the highlight,
+   **Enter** runs the highlighted line (clicking a line runs it too), and **Esc** closes the
+   palette and puts the keyboard back where it was (on the detail pane if it was nowhere useful,
+   including when you opened it with the Commands button), so the decision keys work again without
+   a click. Pressing **Ctrl+K** again closes it the same way. **Tab** and **Shift+Tab** stay in the
+   palette. A letter typed in the palette's field is text; it is never read as `C` / `I` / `T` /
+   `F`.
+
+   The palette adds no action of its own. Each line runs exactly what its button or key runs:
+   deciding the focused finding (Confirm, Ignore, Tech debt, False positive), the next and
+   previous finding, **Open in the code viewer** (`O`), **Review this group stacked** (`B`, offered
+   only on a deviation or defect row), the pane's **Full detail** and Rule Hub buttons, **Undo**
+   (offered only while the five-second undo is live), the four **Order** cuts (the cut you are in
+   is not listed), the strip's **Pause** / **Resume** button and its **Review time** button, and
+   **Start walkthrough** (the Help menu's item; see §2a). A
+   decision line has the same rules as its key: Confirm and Tech debt apply at once with the
+   five-second undo, while Ignore and False positive open the reason prompt and write nothing
+   until you commit a reason. A line whose control is not on screen is not listed, and a line is checked again at the
+   moment you run it: if what it named is gone (the focused finding was decided, the undo window
+   closed) or it now says something else (the timer paused itself, so "Pause" is now "Resume"), it
+   says what changed and runs nothing. The palette does not open while a reason prompt is open (the
+   pane's or the toolbar's), nor over the code viewer, the stacked view or any dialog (full detail,
+   the Rule Hub, the review-time view); it says so instead. If a reason prompt opens while the
+   palette is up, running a line is refused and the keyboard goes to that prompt. Keys and clicks inside the palette count as
+   review activity for the internal review timer.
+
    **Scan-time deterministic preview.** For each **mechanical** rule you selected that maps to a tool
    Camerata can drive (clippy, ruff, eslint, semgrep), the deterministic scan **runs that tool itself**
    with a Camerata-supplied config and folds the results into triage as **preview findings** — even if
@@ -757,7 +837,7 @@ Two tables:
 - **Project rules** — the rules the project has selected, in one table, **filterable by repo** (a repo
   single-select), with project-level rules shown too. Click a rule to switch its chosen option; remove
   a rule from a repo. Edits persist to the project's ruleset.
-- **All rules** - the full corpus (**417 rules across many language and framework stacks** as of 2026-10-11: Rust,
+- **All rules** - the full corpus (**437 rules across 22 domains** as of 2026-10-27: Rust,
   Python, Go, JS/TS and its frameworks, Java/Spring, C#/ASP.NET, Ruby/Rails, SQL, fullstack, plus the
   always-on security floor and the agentic governance rules), viewable even when unassigned. Each row
   shows **which repos it's applied to**, with **"Add to repo"** (add a rule to any repo it's not yet
@@ -790,7 +870,7 @@ meant a client report could open its healthy list with a rule about how *Camerat
 agents, presented as a verified property of *their* codebase.
 
 Those rules now carry a flag (`inspectable = false`) that separates the two roles. **26 of the
-417 corpus rules are emit-only.** For you, that means:
+437 corpus rules are emit-only.** For you, that means:
 
 - They are still proposed, still selectable, and still written verbatim into the repo's
   `AGENTS.md` / `CONVENTIONS.md`. As governance directives they are unchanged.
@@ -1482,6 +1562,109 @@ reviewed PR), not from inside the app.
 > "update to current version" diff so you decide whether to take it. It is informational and never
 > auto-updates an applied rule. Tracked in [#66](https://github.com/zernst3/camerata-orchestrator/issues/66).
 
+### Keeping the corpus's sources current (maintainer runbook)
+
+This is a maintainer routine, not something a client sees. It has two halves: a mechanical monthly
+check that costs nothing, and a judgment pass once a quarter. Neither one edits a rule; every change
+to the corpus is a human decision.
+
+**Part A, monthly: check the sources.** Run:
+
+```
+camerata corpus check-sources                       # text report on stdout
+camerata corpus check-sources --json --out report.json
+camerata corpus check-sources --no-save             # dry run: records nothing
+```
+
+For every `[[sources]]` URL in every rule it records one of five outcomes:
+
+- **ok**: the page answered.
+- **redirected**: it answered after a redirect; the report shows where it lives now, so the rule's
+  source can be updated.
+- **dead**: the server says the page is gone (404 or 410).
+- **unreachable**: no usable answer this run (timeout, refused connection, a 5xx, a 401/403/429, a bot
+  wall, or a redirect chain that never ends, which is what login and consent pages do). This is never a
+  verdict on the page; run again before acting on it.
+- **refused**: the tool's network policy would not contact it, and nothing was requested. Only public
+  http(s) addresses are allowed: no loopback, private, link-local or unique-local addresses, no
+  `.localhost` / `.local` / single-label names, no other schemes. This is checked on the URL, after
+  DNS resolution, and on every redirect hop, so a public page cannot bounce the check onto the
+  operator's own network.
+
+When a rule cites an anchor (`...#section`), the section's text is normalised, hashed, and compared with
+the last ACCEPTED text. A changed section is shown as removed and added sentences. A cited anchor the
+page no longer contains is listed separately, and the sidecar records since when, so an export treats it
+like a dead link (some pages build their content with JavaScript, so check before assuming the section
+was removed). A page larger than 5 MiB is cut at that size; its sections are listed as not checked and
+nothing is hashed from a partial page. Sources that are repo documents rather than web URLs are counted
+but not fetched. The report ends with the rules that have no source at all. The section counts at the
+top add up: unchanged, changed, unreviewed from earlier runs and not re-read, new baseline, anchor not
+found, and not verified together equal the cited sections.
+
+Known limit: a "soft 404" (a page that answers 200 with a "not found" body, or redirects every missing
+page to a home page) looks like a healthy page here. A moved or emptied section still shows up as a
+missing anchor or a changed section, but a vanished page behind a soft 404 does not show up as dead.
+Part B is where that gets caught.
+
+The hashes live in the sidecar `crates/rules/CORPUS_SOURCE_HASHES.json`, never in a rule file. The first
+run only records baselines; changes show from the second run on. Commit the sidecar after a run so the
+next one has something to compare against. Requests are polite: one at a time per host, a pause between
+them (`--delay-ms`, default 1500), a timeout, and a user agent that names the tool.
+
+Safety rails on the sidecar: it is written atomically (a temp file in the same folder, fsynced, then
+renamed), so a crash leaves the old file or the new one. A run or an accept that will write takes a lock
+file `CORPUS_SOURCE_HASHES.json.lock` beside it; a second one fails with a message instead of overwriting
+the first. If a run crashed and left the lock behind, delete that file. If any rule file fails to load,
+the run still prints its report but refuses to save the sidecar (and exits with an error), because the
+missing rules' URLs would otherwise look "no longer cited" and lose their baselines and unreviewed changes.
+
+**A change does not clear itself.** The first run that sees a section differ records the new text as
+pending and keeps the old baseline, so the section is listed as "changed, not yet reviewed" on every
+later run, even if nobody read the first report (and even on a run where the page did not answer). It
+clears only when you accept it after reading the diff:
+
+```
+camerata corpus check-sources --accept "https://example.com/guide#section=sha256:<hash>"  # repeatable
+camerata corpus check-sources --accept "https://example.com/guide#section"                # unpinned, warns
+camerata corpus check-sources --accept-all                    # after reviewing the whole report
+camerata corpus check-sources --accept-all --by "Zach"        # name recorded (default: $USER)
+```
+
+The report prints the pending hash for each change and a ready-to-paste `--accept "<url>=<hash>"` line.
+Use the pinned form: it is refused if the page changed again after you read the report, so you can only
+accept the text you reviewed. The bare form accepts whatever is pending at that moment and warns about
+it. `--accept-all` prints every hash it accepted. An accept is all or nothing.
+
+Accepting makes no requests. The pending text becomes the new baseline, and the sidecar records who
+accepted and on what date. Commit the sidecar afterward. If the page goes back to the accepted text on
+its own, the flag clears without any action. A client export that reads this data treats an unaccepted
+change as lowered confidence with no time limit; the 100-day window starts at the accept date.
+
+**Part B, quarterly: the judgment pass.** A model session with web access, run by hand, with Part A's
+latest report as its input. Steps:
+
+1. Run Part A (or take the most recent report) and keep the JSON.
+2. Start a session with web access and give it the report plus the list of pattern-level rules
+   (architecture, UI and framework conventions) in the domains due for review (see `camerata corpus check`
+   for which are due). Use a rotating quarter of the pattern rules each time, so the whole set is
+   covered in a year.
+3. For each rule the report flags (dead, redirected, changed section, no source) and each rule in that
+   quarter's slice, ask: is this still the vendor's or ecosystem's current guidance? If it was
+   superseded, since when and by what? Require links.
+4. The session's output is a proposed-edits file, one entry per rule: a new source, `superseded_since`
+   with `current_recommendation`, or a revised directive. It is a diff file only. Nothing is applied.
+5. Review it rule by rule and give the go for each. Apply approved edits as normal rule changes (bump
+   the rule's `version`, run `camerata corpus lock`, commit). For each section change you have now
+   reviewed (whether or not it led to an edit), run `camerata corpus check-sources --accept <url#anchor>`
+   so it stops being listed.
+6. When a domain is reviewed and you are confident it is current, run
+   `camerata corpus confirm <domain> <date>` and commit `CORPUS_FRESHNESS.toml`. Running the check never
+   advances that watermark; only your confirmation does.
+
+Why only the first half is monthly: most rules do not change in a quarter, so a monthly model pass over
+the whole corpus would spend tokens to confirm nothing moved. The mechanical check catches the common
+case (a vendor page moved or changed) for free.
+
 ---
 
 ## 10. Single-rule editing (project and repo scope)
@@ -1571,8 +1754,49 @@ anywhere the run fails and tells you to add one, it never falls back to the Clau
 internal benchmark runs, and the export's `manifest.json` and `README.txt` record the backend and provider,
 for example `api` / `anthropic`), `--batch` (the Anthropic Message Batches path, roughly half the token cost, results
 arrive asynchronously, needs `--backend api`), `--model` / `--calibration-model`, `--full` to ignore
-the incremental-scan cache and rescan every file, and `--verbose` to print the per-rule coverage
-ledger rather than the concise summary.
+the incremental-scan cache and rescan every file, `--verbose` to print the per-rule coverage
+ledger rather than the concise summary, `--max-cost-usd` to cap the spend, and `--efficiency` to
+switch a saving off (both below).
+
+#### What a scan will cost, and how to cap it
+
+Before the first model call, `camerata inspect` prints a pre-flight ESTIMATE: about how many dollars,
+over how many model calls, and the basis it is built on (characters of code, number of rules, the
+models, the mode and backend). It is an estimate, not a quote. On the API backend it also prints the
+exact input size of one scan pass, counted by the API for free. A repeat run on an unchanged tree
+reuses the previous findings and costs less than the estimate.
+
+To put a ceiling on a run, add `--max-cost-usd 25`. The run stops BETWEEN passes once its actual
+spend reaches the limit; it never cuts a pass off halfway. The limit is checked before each scan pass,
+each calibration or fix batch and each deep-tier call starts, and once the limit has stopped anything no
+later stage starts. Calls already started finish, so a run can end about one pass over the limit (a pass
+can include one retry of a reply that was cut off). When the limit stops a run:
+
+- the final report says so, and lists the passes that were NOT RUN (also shown under FAILED PASSES);
+- the export is still written but is marked incomplete: its report lists the passes that did not run,
+  `manifest.json` says `"cost_cap_reached": true` and `README.txt` says so in one line. No dollar
+  figure is put in the export;
+- the command exits with status 4, so a script cannot mistake it for a complete inspection.
+
+A limit needs every model the run uses to have a known price. If the scan, calibration, fix, deep-tier
+or clone-judge model has none (a model outside the built-in price list), the run refuses to start,
+before any model call, and names the model, because the cost of its calls could not be counted against
+the limit. Without a limit such a model runs as before.
+
+With `--batch` the limit is checked BEFORE the batch is submitted (a submitted batch cannot be
+cancelled cheaply); if the estimate would pass the limit, nothing is submitted and every pass is
+reported as not run. The desktop app has the same control as "Spend limit (USD)" in the scan settings.
+When any pass or stage did not run, for any reason (the limit, or a failure), the app's results screen
+shows an "Incomplete" banner listing them, a short reminder beside the export button, and the progress
+line counts them as NOT RUN rather than done. A rule that was checked on only part of the code is
+listed as such and never counted as clean.
+
+Every saving the product applies is on by default and can be switched off for one run, to find out
+whether it caused a cost or behavior change: `--efficiency warm_schedule=off` (repeatable), or
+`CAMERATA_EFFICIENCY=warm_schedule=off,result_cache=off`. The measures are `warm_schedule`,
+`label_after_prefix`, `batch_long_cache`, `result_cache`, `truncation_retry` and `fix_prefilter`
+(what each does is in TECHNICAL.md). A misspelled name is an error. Every run prints which measures
+were on.
 
 To size a repo before quoting it, run `cargo run -p camerata -- count <PATH>` (add `--json` for
 machine-readable output). It uses no model and no network, reads the repo through the inspection's

@@ -877,7 +877,12 @@ pub use camerata_api_types::llm::LlmResponse;
 ///
 /// `text` concatenates the content's text blocks; cost is computed from usage times the model's
 /// list price (the API reports no dollar figure); `truncated` is `stop_reason == "max_tokens"`.
-fn messages_response(msg: &serde_json::Value, model: &str, backend: &str) -> LlmResponse {
+fn messages_response(
+    msg: &serde_json::Value,
+    model: &str,
+    backend: &str,
+    basis: PriceBasis,
+) -> LlmResponse {
     let text = msg["content"]
         .as_array()
         .map(|blocks| {
@@ -889,12 +894,16 @@ fn messages_response(msg: &serde_json::Value, model: &str, backend: &str) -> Llm
         })
         .unwrap_or_default();
     let (input_tokens, output_tokens, cache_read, cache_creation) = usage_tokens(&msg["usage"]);
-    let cost_usd = compute_cost_usd(
+    let cost_usd = usage_cost_usd(
         model,
-        input_tokens,
-        output_tokens,
-        cache_read,
-        cache_creation,
+        &CallUsage {
+            input: input_tokens,
+            output: output_tokens,
+            cache_read,
+            cache_creation,
+            cache_creation_1h: msg["usage"]["cache_creation"]["ephemeral_1h_input_tokens"].as_u64(),
+        },
+        basis,
     );
     LlmResponse {
         text,
@@ -975,17 +984,124 @@ fn cli_result_text(v: &serde_json::Value) -> anyhow::Result<&str> {
     })
 }
 
-/// List price ($/Mtok input, $/Mtok output) for a model id, from
-/// [`crate::model_registry::CLAUDE_REGISTRY_MODELS`] (the live registry — see [`models`]'s
-/// doc comment for why this must not be a second, independently-maintained price list).
-fn price_for(model_id: &str) -> Option<(f64, f64)> {
-    crate::model_registry::registry_entry_for(model_id).map(|m| (m.price_in, m.price_out))
+/// Whether `model_id` has a list price in the model registry (the exact id, a dated snapshot of
+/// it, or the undated alias of a dated entry, the one resolution [`rates_for`] uses). The
+/// spend-cap refusal for an unpriced model asks this, so a model the cost arithmetic CAN price
+/// is never refused as unpriced.
+pub fn is_priced(model_id: &str) -> bool {
+    crate::model_registry::registry_entry_for(model_id).is_some()
 }
 
-/// Compute the dollar cost from token usage and list price. `input` folds in cache-read and
-/// cache-creation tokens, which are NOT billed at the full input rate: cache reads are ~0.1×
-/// and cache writes ~1.25×. Price the three input components separately so cached reads are
-/// not over-billed ~10×. Returns `None` unless the model is priced and both token counts are
+/// How a call was billed, which decides the multipliers [`compute_cost_usd`] applies on top of
+/// the list price. Both facts are properties of the REQUEST, known when it is built, so the
+/// caller states them rather than the arithmetic guessing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PriceBasis {
+    /// The call was an item of a Message Batch: every token (input, output, cache write and
+    /// cache read) is billed at [`BATCH_MULT`] of the real-time price.
+    pub batch: bool,
+    /// The prompt-cache TTL the request asked for; it sets the cache-WRITE multiplier.
+    pub cache_ttl: CacheTtl,
+}
+
+impl PriceBasis {
+    /// A real-time `/v1/messages` call with the TTL the transport will request
+    /// ([`CacheTtl::from_env`]).
+    pub fn realtime() -> Self {
+        Self {
+            batch: false,
+            cache_ttl: CacheTtl::from_env(),
+        }
+    }
+
+    /// A Message Batch item with the TTL its request carried.
+    pub fn batch(cache_ttl: CacheTtl) -> Self {
+        Self {
+            batch: true,
+            cache_ttl,
+        }
+    }
+}
+
+/// Anthropic's published price ratios, applied on top of the list input price. ONE definition:
+/// every dollar figure in the product (the printed cost, the telemetry, the `--max-cost-usd`
+/// cap) comes from [`compute_cost_usd`], so they cannot disagree with each other.
+/// A 5-minute cache write is 1.25x input.
+pub const CACHE_WRITE_5M_MULT: f64 = 1.25;
+/// A 1-hour cache write is 2x input.
+pub const CACHE_WRITE_1H_MULT: f64 = 2.0;
+/// A cache read is 0.1x input.
+pub const CACHE_READ_MULT: f64 = 0.1;
+/// A Message Batch item is billed at half the real-time price, on input and output alike.
+pub const BATCH_MULT: f64 = 0.5;
+
+/// Dollars for `input_tokens` of plain (uncached) input on `model_id` under `basis`, or `None`
+/// for an unpriced model. For projections (the batch spend-cap gate); the actual cost of a call
+/// always comes from [`compute_cost_usd`] with its real usage.
+pub fn input_cost_usd(model_id: &str, input_tokens: u64, basis: PriceBasis) -> Option<f64> {
+    compute_cost_usd(model_id, Some(input_tokens), Some(0), 0, 0, basis)
+}
+
+impl CacheTtl {
+    /// The cache-write multiplier this TTL is billed at.
+    pub fn write_multiplier(self) -> f64 {
+        match self {
+            CacheTtl::FiveMinutes => CACHE_WRITE_5M_MULT,
+            CacheTtl::OneHour => CACHE_WRITE_1H_MULT,
+        }
+    }
+}
+
+/// The usage one call reported, as the cost arithmetic needs it. `input` folds in the cache
+/// read and cache write tokens (so it is also the prompt size that picks a long-prompt price
+/// tier); `cache_creation_1h` is how many of the cache-WRITE tokens were 1-hour writes when the
+/// API said (`usage.cache_creation.ephemeral_1h_input_tokens`), else `None`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CallUsage {
+    pub input: Option<u64>,
+    pub output: Option<u64>,
+    pub cache_read: u64,
+    pub cache_creation: u64,
+    pub cache_creation_1h: Option<u64>,
+}
+
+/// THE dollar cost of one call: the single function the real-time/batch response parser
+/// ([`compute_cost_usd`]) and the usage ledger's fallback both price through, so the printed
+/// cost, the telemetry, the spend cap and the cumulative meter cannot disagree.
+///
+/// Rates come from [`crate::model_registry::rates_for`] for the prompt size (the model's own
+/// cache-read price, and its long-prompt tier above the threshold). The fresh input (`input`
+/// minus the cache read and cache creation tokens) is billed at the input rate; cache reads at the cache-read rate; cache
+/// writes at the 1-hour rate for the `cache_creation_1h` tokens and the 5-minute rate for the
+/// rest (when the API did not split them, every write takes `basis.cache_ttl`'s rate); output
+/// at the output rate. A Message Batch item ([`PriceBasis::batch`]) is billed at
+/// [`BATCH_MULT`] of the whole figure. `None` unless the model is priced and both the input and
+/// output token counts are present.
+pub fn usage_cost_usd(model_id: &str, usage: &CallUsage, basis: PriceBasis) -> Option<f64> {
+    let (i, o) = (usage.input?, usage.output?);
+    let r = crate::model_registry::rates_for(model_id, i)?;
+    let fresh = i
+        .saturating_sub(usage.cache_read)
+        .saturating_sub(usage.cache_creation);
+    let writes_1h = usage
+        .cache_creation_1h
+        .unwrap_or(if basis.cache_ttl == CacheTtl::OneHour {
+            usage.cache_creation
+        } else {
+            0
+        })
+        .min(usage.cache_creation);
+    let writes_5m = usage.cache_creation - writes_1h;
+    let list = fresh as f64 * r.input
+        + usage.cache_read as f64 * r.cache_read
+        + writes_5m as f64 * r.cache_write_5m
+        + writes_1h as f64 * r.cache_write_1h
+        + o as f64 * r.output;
+    Some(if basis.batch { list * BATCH_MULT } else { list })
+}
+
+/// [`usage_cost_usd`] for a call whose cache writes are not split by TTL (every write is priced
+/// at `basis.cache_ttl`). Returns `None` unless the model is priced and both token counts are
 /// present.
 fn compute_cost_usd(
     model_id: &str,
@@ -993,17 +1109,19 @@ fn compute_cost_usd(
     output: Option<u64>,
     cache_read: u64,
     cache_creation: u64,
+    basis: PriceBasis,
 ) -> Option<f64> {
-    price_for(model_id).and_then(|(pin, pout)| match (input, output) {
-        (Some(i), Some(o)) => {
-            let fresh_input = i.saturating_sub(cache_read).saturating_sub(cache_creation);
-            let input_cost = fresh_input as f64 * pin
-                + cache_read as f64 * pin * 0.1
-                + cache_creation as f64 * pin * 1.25;
-            Some((input_cost + o as f64 * pout) / 1_000_000.0)
-        }
-        _ => None,
-    })
+    usage_cost_usd(
+        model_id,
+        &CallUsage {
+            input,
+            output,
+            cache_read,
+            cache_creation,
+            cache_creation_1h: None,
+        },
+        basis,
+    )
 }
 
 /// The shared `reqwest::Client` for every Anthropic API call (`complete_api` + the
@@ -1045,7 +1163,7 @@ pub(crate) fn shared_http_client() -> &'static reqwest::Client {
 /// minutes apart (large sequential scans, slow batch-mode turnaround) — the default stays
 /// at 5m so a typical fast-parallel scan isn't paying the 2x write premium for no benefit.
 /// Message Batches are the exception: their items run minutes to hours apart, so
-/// [`build_batch_item`] always requests 1h.
+/// [`build_batch_item`] is given [`BATCH_CACHE_TTL`] (1h).
 ///
 /// NEEDS LIVE-KEY VERIFICATION: confirm against the current Anthropic API docs that a bare
 /// `"ttl": "1h"` field (no beta header) is accepted now that extended cache TTL has GA'd —
@@ -1055,6 +1173,9 @@ pub enum CacheTtl {
     FiveMinutes,
     OneHour,
 }
+
+/// The TTL every Message Batch item asks for (see [`build_batch_item`]).
+pub const BATCH_CACHE_TTL: CacheTtl = CacheTtl::OneHour;
 
 impl CacheTtl {
     /// Resolve from `CAMERATA_ANTHROPIC_CACHE_TTL_1H` (truthy -> 1h; anything else,
@@ -1536,7 +1657,8 @@ impl Llm {
             )
         })?;
 
-        let body = messages_request_body(req, model);
+        let basis = PriceBasis::realtime();
+        let body = messages_request_body(req, model, basis.cache_ttl);
 
         // NOTE: no `anthropic-beta` header — `prompt-caching-2024-07-31` is GA now (the
         // feature activates whenever a `cache_control` block is present, beta or not).
@@ -1554,7 +1676,7 @@ impl Llm {
         }
         let v: serde_json::Value =
             serde_json::from_str(&text).map_err(|e| anyhow::anyhow!("parse API JSON: {e}"))?;
-        self.api_response_or_refusal(&v, model)
+        self.api_response_or_refusal(&v, model, basis)
     }
 
     /// Turn a parsed Messages response into the call's result. A refusal is an `Err`, but a
@@ -1564,8 +1686,9 @@ impl Llm {
         &self,
         v: &serde_json::Value,
         model: &str,
+        basis: PriceBasis,
     ) -> anyhow::Result<LlmResponse> {
-        let resp = messages_response(v, model, "api");
+        let resp = messages_response(v, model, "api", basis);
         if let Some(refusal) = refusal_error(v) {
             self.ledger_record(&resp);
             return Err(refusal);
@@ -1644,13 +1767,8 @@ pub struct BatchMessage {
 /// [`crate::model_registry::conform_messages_body`], the one place a body is made valid for
 /// its model (effort default, fields the model rejects). Kept separate from the HTTP call so
 /// the exact request shape is unit-testable without a network.
-fn messages_request_body(req: &LlmRequest, model: &str) -> serde_json::Value {
-    let user_content = cached_user_content(
-        &req.prompt,
-        &req.cache_breakpoints,
-        true,
-        CacheTtl::from_env(),
-    );
+fn messages_request_body(req: &LlmRequest, model: &str, cache_ttl: CacheTtl) -> serde_json::Value {
+    let user_content = cached_user_content(&req.prompt, &req.cache_breakpoints, true, cache_ttl);
     let mut body = serde_json::json!({
         "model": model,
         "max_tokens": req.max_tokens,
@@ -1719,12 +1837,19 @@ pub async fn exact_input_token_count(llm: &Llm, req: &LlmRequest, model: &str) -
 /// is forwarded verbatim (the batch API accepts the same `system` field as the messages
 /// API).
 ///
-/// Batch items always use the 1-hour cache TTL ([`CacheTtl::OneHour`]): Anthropic processes a
-/// batch over minutes to hours, so the 5-minute default would have expired before most items
-/// ran and every item would re-write the prefix it was meant to read. Real-time requests keep
-/// the 5-minute default (see [`CacheTtl::from_env`]).
-pub fn build_batch_item(custom_id: impl Into<String>, req: &LlmRequest, model: &str) -> BatchItem {
-    let content = cached_user_content(&req.prompt, &req.cache_breakpoints, true, CacheTtl::OneHour);
+/// `cache_ttl` is the TTL the cached blocks ask for. The product passes
+/// [`BATCH_CACHE_TTL`] (1 hour): Anthropic processes a batch over minutes to hours, so the
+/// 5-minute default would have expired before most items ran and every item would re-write the
+/// prefix it was meant to read. Real-time requests keep the 5-minute default (see
+/// [`CacheTtl::from_env`]). The same TTL must be given to [`parse_batch_results_jsonl`] so the
+/// cost is priced at the matching write multiplier.
+pub fn build_batch_item(
+    custom_id: impl Into<String>,
+    req: &LlmRequest,
+    model: &str,
+    cache_ttl: CacheTtl,
+) -> BatchItem {
+    let content = cached_user_content(&req.prompt, &req.cache_breakpoints, true, cache_ttl);
     // Run the SAME conformer `complete_api` uses on the equivalent body, then lift what it
     // added (`output_config`) onto the typed params. The typed struct has no field for any
     // rejected parameter, so there is nothing to strip.
@@ -1892,7 +2017,11 @@ impl Llm {
     /// RETRY: same policy as [`Self::complete_api`] — losing the results fetch after a
     /// batch has already run to completion (tokens spent) would be a pure waste, so this
     /// retries transient failures rather than surfacing immediately.
-    pub async fn fetch_batch_results(&self, batch_id: &str) -> anyhow::Result<Vec<BatchResultRow>> {
+    pub async fn fetch_batch_results(
+        &self,
+        batch_id: &str,
+        cache_ttl: CacheTtl,
+    ) -> anyhow::Result<Vec<BatchResultRow>> {
         let key = self.api_key.as_ref().ok_or_else(|| {
             anyhow::anyhow!(
                 "batch result fetch requires an Anthropic API key; {}",
@@ -1911,7 +2040,7 @@ impl Llm {
         if !status.is_success() {
             anyhow::bail!("batch results HTTP {status}: {text}");
         }
-        parse_batch_results_jsonl(&text)
+        parse_batch_results_jsonl(&text, cache_ttl)
     }
 
     /// Convenience accessor for the API key (needed by the batch polling loop to confirm
@@ -1971,8 +2100,12 @@ fn parse_request_counts(v: &serde_json::Value) -> BatchRequestCounts {
 /// Parse the JSONL results body (one JSON object per line) into a vec of `BatchResultRow`.
 /// Robust: malformed lines are skipped (logged at debug), so one bad item never aborts
 /// the whole result set. The caller converts this vec into a `custom_id -> response` map
-/// via [`reassemble_batch_results`].
-pub fn parse_batch_results_jsonl(jsonl: &str) -> anyhow::Result<Vec<BatchResultRow>> {
+/// via [`reassemble_batch_results`]. `cache_ttl` is the TTL the batch was SUBMITTED with (see
+/// [`build_batch_item`]); it prices the cache writes in each row.
+pub fn parse_batch_results_jsonl(
+    jsonl: &str,
+    cache_ttl: CacheTtl,
+) -> anyhow::Result<Vec<BatchResultRow>> {
     let mut rows = Vec::new();
     for line in jsonl.lines() {
         let line = line.trim();
@@ -2011,7 +2144,12 @@ pub fn parse_batch_results_jsonl(jsonl: &str) -> anyhow::Result<Vec<BatchResultR
             let model_id = msg["model"].as_str().unwrap_or("");
             rows.push(BatchResultRow {
                 custom_id,
-                response: Some(messages_response(msg, model_id, "api/batch")),
+                response: Some(messages_response(
+                    msg,
+                    model_id,
+                    "api/batch",
+                    PriceBasis::batch(cache_ttl),
+                )),
                 error: None,
             });
         } else {
@@ -2827,8 +2965,8 @@ mod tests {
         // opus: price_in 5, price_out 25 ($/Mtok) — the registry's live Anthropic list price
         // (see crate::model_registry::CLAUDE_REGISTRY_MODELS). input folds cache fields
         // (base 100, read 200, creation 30 -> 330); fresh input is 100.
-        let cost =
-            compute_cost_usd("claude-opus-5", Some(330), Some(50), 200, 30).expect("priced model");
+        let cost = compute_cost_usd("claude-opus-5", Some(330), Some(50), 200, 30, five_min())
+            .expect("priced model");
         // 100*5 (fresh) + 200*5*0.1 (read) + 30*5*1.25 (creation) + 50*25 (out) = 1837.5
         let expected =
             (100.0 * 5.0 + 200.0 * 5.0 * 0.1 + 30.0 * 5.0 * 1.25 + 50.0 * 25.0) / 1_000_000.0;
@@ -2844,44 +2982,310 @@ mod tests {
         );
 
         // No cache tokens -> matches the plain input*price formula.
-        let plain = compute_cost_usd("claude-opus-5", Some(100), Some(50), 0, 0).unwrap();
+        let plain =
+            compute_cost_usd("claude-opus-5", Some(100), Some(50), 0, 0, five_min()).unwrap();
         assert!((plain - (100.0 * 5.0 + 50.0 * 25.0) / 1_000_000.0).abs() < 1e-12);
 
         // Unknown model or missing counts -> None.
-        assert!(compute_cost_usd("nope", Some(1), Some(1), 0, 0).is_none());
-        assert!(compute_cost_usd("claude-opus-5", None, Some(1), 0, 0).is_none());
+        assert!(compute_cost_usd("nope", Some(1), Some(1), 0, 0, five_min()).is_none());
+        assert!(compute_cost_usd("claude-opus-5", None, Some(1), 0, 0, five_min()).is_none());
     }
 
-    // Regression for the stale-pricing bug: `price_for` (and everything built on it —
-    // `compute_cost_usd`, the usage ledger's cost fallback, and the legacy `/api/models`
-    // list) must agree EXACTLY with the live registry, never a second hand-maintained
-    // number. Locks Opus's price at the registry's $5/$25 rather than the old $15/$75.
+    fn five_min() -> PriceBasis {
+        PriceBasis {
+            batch: false,
+            cache_ttl: CacheTtl::FiveMinutes,
+        }
+    }
+
+    /// The published ratios, each pinned on its own so a wrong constant cannot hide behind a
+    /// sum: opus is $5 in / $25 out per Mtok. One million of each token kind makes the
+    /// expected dollars read straight off the price.
     #[test]
-    fn price_for_matches_the_live_model_registry_exactly() {
+    fn compute_cost_applies_the_published_price_ratios() {
+        const M: u64 = 1_000_000;
+        let cost = |input: u64, output: u64, read: u64, write: u64, basis: PriceBasis| {
+            compute_cost_usd(
+                "claude-opus-5",
+                Some(input + read + write),
+                Some(output),
+                read,
+                write,
+                basis,
+            )
+            .expect("priced model")
+        };
+        let close = |a: f64, b: f64| assert!((a - b).abs() < 1e-9, "{a} != {b}");
+        let hour = PriceBasis {
+            batch: false,
+            cache_ttl: CacheTtl::OneHour,
+        };
+
+        // 5-minute cache write: 1.25x input.
+        close(cost(0, 0, 0, M, five_min()), 5.0 * 1.25);
+        // 1-hour cache write: 2x input.
+        close(cost(0, 0, 0, M, hour), 5.0 * 2.0);
+        // Cache read: 0.1x input, at either TTL.
+        close(cost(0, 0, M, 0, five_min()), 5.0 * 0.1);
+        close(cost(0, 0, M, 0, hour), 5.0 * 0.1);
+        // Plain input and output are at list price; the TTL does not touch them.
+        close(cost(M, 0, 0, 0, hour), 5.0);
+        close(cost(0, M, 0, 0, hour), 25.0);
+
+        // A batch item is half price on EVERYTHING: input, output, cache write, cache read.
+        let batch_5m = PriceBasis::batch(CacheTtl::FiveMinutes);
+        let batch_1h = PriceBasis::batch(CacheTtl::OneHour);
+        close(cost(M, 0, 0, 0, batch_5m), 5.0 * 0.5);
+        close(cost(0, M, 0, 0, batch_5m), 25.0 * 0.5);
+        close(cost(0, 0, 0, M, batch_5m), 5.0 * 1.25 * 0.5);
+        close(cost(0, 0, 0, M, batch_1h), 5.0 * 2.0 * 0.5);
+        close(cost(0, 0, M, 0, batch_1h), 5.0 * 0.1 * 0.5);
+
+        // The same usage, every basis: batch is exactly half of real-time at the same TTL.
+        let real = cost(3 * M, 2 * M, 4 * M, M, hour);
+        let batch = cost(3 * M, 2 * M, 4 * M, M, batch_1h);
+        close(batch, real * 0.5);
+    }
+
+    /// A batch row is priced as a batch row, at the TTL the batch was submitted with: the
+    /// number the product prints must be what the API bills.
+    #[test]
+    fn a_batch_result_row_is_priced_at_the_batch_discount_and_its_submitted_ttl() {
+        let line = serde_json::json!({
+            "custom_id": "c0-b0",
+            "result": {"type": "succeeded", "message": {
+                "model": "claude-opus-5",
+                "content": [{"type": "text", "text": "{}"}],
+                "stop_reason": "end_turn",
+                "usage": {
+                    "input_tokens": 1_000_000u64,
+                    "output_tokens": 1_000_000u64,
+                    "cache_creation_input_tokens": 1_000_000u64,
+                    "cache_read_input_tokens": 0u64,
+                },
+            }},
+        })
+        .to_string();
+        // fresh 1M + write 1M at the TTL + output 1M, then halved.
+        let price = |ttl| {
+            parse_batch_results_jsonl(&line, ttl).unwrap()[0]
+                .response
+                .as_ref()
+                .unwrap()
+                .cost_usd
+                .unwrap()
+        };
+        assert!((price(CacheTtl::OneHour) - (5.0 + 5.0 * 2.0 + 25.0) * 0.5).abs() < 1e-9);
+        assert!((price(CacheTtl::FiveMinutes) - (5.0 + 5.0 * 1.25 + 25.0) * 0.5).abs() < 1e-9);
+    }
+
+    // Regression for the stale-pricing bug: the rates the billing path uses (and everything
+    // built on them, `compute_cost_usd`, the usage ledger's cost fallback, and the legacy
+    // `/api/models` list) must agree EXACTLY with the live registry, never a second
+    // hand-maintained number. Locks Opus's price at the registry's $5/$25 rather than the old
+    // $15/$75.
+    #[test]
+    fn billing_rates_match_the_live_model_registry_exactly() {
         for reg in crate::model_registry::CLAUDE_REGISTRY_MODELS {
-            let (pin, pout) = price_for(reg.id).unwrap_or_else(|| {
+            let r = crate::model_registry::rates_for(reg.id, 0).unwrap_or_else(|| {
                 panic!(
-                    "price_for must resolve every registry model id, missing {}",
+                    "rates_for must resolve every registry model id, missing {}",
                     reg.id
                 )
             });
-            assert_eq!(
-                pin, reg.price_in,
-                "{} price_in must match the registry",
+            assert!(
+                (r.input * 1e6 - reg.price_in).abs() < 1e-9,
+                "{} input rate must match the registry",
                 reg.id
             );
-            assert_eq!(
-                pout, reg.price_out,
-                "{} price_out must match the registry",
+            assert!(
+                (r.output * 1e6 - reg.price_out).abs() < 1e-9,
+                "{} output rate must match the registry",
                 reg.id
             );
         }
-        let (opus_in, opus_out) = price_for("claude-opus-5").unwrap();
-        assert_eq!(
-            (opus_in, opus_out),
-            (5.0, 25.0),
+        let r = crate::model_registry::rates_for("claude-opus-5", 0).unwrap();
+        assert!(
+            (r.input * 1e6 - 5.0).abs() < 1e-9 && (r.output * 1e6 - 25.0).abs() < 1e-9,
             "Opus must price at the current $5/$25, not the stale $15/$75"
         );
+    }
+
+    // ---- the billing path prices through the registry's per-model rates ------------------------
+
+    fn usd(model: &str, usage: CallUsage, basis: PriceBasis) -> f64 {
+        usage_cost_usd(model, &usage, basis).expect("priced model")
+    }
+
+    fn rt() -> PriceBasis {
+        PriceBasis {
+            batch: false,
+            cache_ttl: CacheTtl::FiveMinutes,
+        }
+    }
+
+    /// Fable 5.1 reads cache at $0.25/M (0.025x), not the usual 0.1x ($1.00/M).
+    #[test]
+    fn fable_5_1_cache_reads_bill_at_its_own_rate() {
+        // 1M prompt tokens, all of them cache reads, 0 output: $0.25.
+        let c = usd(
+            "claude-fable-5-1",
+            CallUsage {
+                input: Some(1_000_000),
+                output: Some(0),
+                cache_read: 1_000_000,
+                ..Default::default()
+            },
+            rt(),
+        );
+        assert!((c - 0.25).abs() < 1e-9, "got {c}");
+        // The same usage on Fable 5 (no override) is the 0.1x default.
+        let legacy = usd(
+            "claude-fable-5",
+            CallUsage {
+                input: Some(1_000_000),
+                output: Some(0),
+                cache_read: 1_000_000,
+                ..Default::default()
+            },
+            rt(),
+        );
+        assert!((legacy - 1.0).abs() < 1e-9, "got {legacy}");
+    }
+
+    /// Haiku 5.5: a prompt above 100K tokens moves the WHOLE request to the higher tier.
+    #[test]
+    fn haiku_5_5_bills_the_long_prompt_tier_above_100k() {
+        let at = |input: u64| {
+            usd(
+                "claude-haiku-5-5",
+                CallUsage {
+                    input: Some(input),
+                    output: Some(1_000_000),
+                    ..Default::default()
+                },
+                rt(),
+            )
+        };
+        // 100K prompt: 0.1M * $0.10 + 1M * $0.50.
+        assert!(
+            (at(100_000) - (0.01 + 0.50)).abs() < 1e-9,
+            "{}",
+            at(100_000)
+        );
+        // 100,001 prompt tokens: every token at $0.50 / $2.50.
+        let long = at(100_001);
+        assert!(
+            (long - (100_001.0 * 0.50 / 1e6 + 2.50)).abs() < 1e-9,
+            "{long}"
+        );
+    }
+
+    /// Cache writes split by TTL when the API says how many were 1-hour writes; otherwise the
+    /// request's TTL decides.
+    #[test]
+    fn cache_writes_split_by_the_apis_one_hour_count() {
+        let usage = |one_hour: Option<u64>| CallUsage {
+            input: Some(1_000_000),
+            output: Some(0),
+            cache_creation: 1_000_000,
+            cache_creation_1h: one_hour,
+            ..Default::default()
+        };
+        // Opus 5.5 is $4/M: 5m write 1.25x = $5, 1h write 2x = $8.
+        let all_5m = usd("claude-opus-5-5", usage(None), rt());
+        assert!((all_5m - 5.0).abs() < 1e-9, "{all_5m}");
+        let half = usd("claude-opus-5-5", usage(Some(500_000)), rt());
+        assert!((half - (2.5 + 4.0)).abs() < 1e-9, "{half}");
+        let all_1h = usd(
+            "claude-opus-5-5",
+            usage(None),
+            PriceBasis {
+                batch: false,
+                cache_ttl: CacheTtl::OneHour,
+            },
+        );
+        assert!((all_1h - 8.0).abs() < 1e-9, "{all_1h}");
+    }
+
+    /// Through the real response parser: the API's `cache_creation.ephemeral_1h_input_tokens`
+    /// reaches the cost, and a batch row is halved.
+    #[test]
+    fn the_response_parser_prices_the_one_hour_split_and_the_batch_discount() {
+        let msg = serde_json::json!({
+            "model": "claude-opus-5-5", "content": [], "stop_reason": "end_turn",
+            "usage": {
+                "input_tokens": 0,
+                "cache_creation_input_tokens": 1_000_000,
+                "cache_creation": {
+                    "ephemeral_5m_input_tokens": 500_000,
+                    "ephemeral_1h_input_tokens": 500_000
+                },
+                "output_tokens": 1_000_000
+            }
+        });
+        let real = messages_response(&msg, "claude-opus-5-5", "api", rt());
+        // 0.5M * $5 + 0.5M * $8 + 1M * $20 = 2.5 + 4 + 20.
+        assert!(
+            (real.cost_usd.unwrap() - 26.5).abs() < 1e-9,
+            "{:?}",
+            real.cost_usd
+        );
+        let batch = messages_response(
+            &msg,
+            "claude-opus-5-5",
+            "api/batch",
+            PriceBasis::batch(CacheTtl::OneHour),
+        );
+        assert!(
+            (batch.cost_usd.unwrap() - 13.25).abs() < 1e-9,
+            "a batch row is half price: {:?}",
+            batch.cost_usd
+        );
+    }
+
+    /// A batch RESULT row (the JSONL the batch path really parses) for Fable 5.1 with cache
+    /// reads: per-model cache-read rate, then the 0.5x batch discount.
+    #[test]
+    fn a_fable_5_1_batch_row_prices_cache_reads_then_halves() {
+        let row = r#"{"custom_id":"c0-b0","result":{"type":"succeeded","message":{"model":"claude-fable-5-1","content":[{"type":"text","text":"{}"}],"stop_reason":"end_turn","usage":{"input_tokens":0,"cache_read_input_tokens":1000000,"output_tokens":0}}}}"#;
+        let rows = parse_batch_results_jsonl(row, BATCH_CACHE_TTL).unwrap();
+        let cost = rows[0].response.as_ref().unwrap().cost_usd.unwrap();
+        assert!((cost - 0.125).abs() < 1e-9, "$0.25 x 0.5, got {cost}");
+    }
+
+    /// The usage ledger's fallback prices a response with no reported cost through the SAME
+    /// function (here: Haiku 5.5, 100,001 prompt tokens -> the long-prompt tier).
+    #[test]
+    fn the_ledger_fallback_prices_through_the_same_function() {
+        let ledger = crate::usage_ledger::UsageLedger::new();
+        let resp = LlmResponse {
+            text: String::new(),
+            model: "claude-haiku-5-5".to_string(),
+            backend: "api".to_string(),
+            cost_usd: None,
+            input_tokens: Some(100_001),
+            output_tokens: Some(0),
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+            or_cache_discount: None,
+            truncated: false,
+        };
+        ledger.record("claude-haiku-5-5", &resp);
+        let expected = usd(
+            "claude-haiku-5-5",
+            CallUsage {
+                input: Some(100_001),
+                output: Some(0),
+                ..Default::default()
+            },
+            PriceBasis::realtime(),
+        );
+        assert!((ledger.snapshot().total_cost_usd - expected).abs() < 2e-6);
+        // An undated alias of a dated entry is priced too, and is "priced" for the spend cap.
+        assert!(is_priced("claude-haiku-4-5"));
+        assert!(is_priced("claude-opus-5-5-20261001"));
+        assert!(!is_priced("some-unlisted-model"));
     }
 
     #[test]
@@ -2945,7 +3349,7 @@ mod tests {
         let req = LlmRequest::new("audit this code")
             .with_model("claude-sonnet-5")
             .with_max_tokens(2048);
-        let item = build_batch_item("c0-b1", &req, "claude-sonnet-5");
+        let item = build_batch_item("c0-b1", &req, "claude-sonnet-5", BATCH_CACHE_TTL);
         assert_eq!(item.custom_id, "c0-b1");
         assert_eq!(item.params.model, "claude-sonnet-5");
         assert_eq!(item.params.max_tokens, 2048);
@@ -2964,7 +3368,7 @@ mod tests {
         let req = LlmRequest::new(prompt)
             .with_cache_prefix_len(split)
             .with_model("claude-sonnet-5");
-        let item = build_batch_item("c2-b0", &req, "claude-sonnet-5");
+        let item = build_batch_item("c2-b0", &req, "claude-sonnet-5", BATCH_CACHE_TTL);
         let content = serde_json::to_value(&item.params.messages[0].content).unwrap();
         let arr = content.as_array().expect("cached content is an array");
         assert_eq!(arr.len(), 2);
@@ -2995,7 +3399,7 @@ mod tests {
         let req = LlmRequest::new(&prompt)
             .with_cache_breakpoints(vec![bp1, bp2])
             .with_model("claude-sonnet-5");
-        let item = build_batch_item("c0-b0", &req, "claude-sonnet-5");
+        let item = build_batch_item("c0-b0", &req, "claude-sonnet-5", BATCH_CACHE_TTL);
         let content = serde_json::to_value(&item.params.messages[0].content).unwrap();
         let arr = content.as_array().expect("cached content is an array");
         assert_eq!(arr.len(), 3, "two breakpoints -> three blocks");
@@ -3033,6 +3437,7 @@ mod tests {
             &message_with_stop(Some("max_tokens")),
             "claude-sonnet-5",
             "api",
+            PriceBasis::realtime(),
         );
         assert!(r.truncated);
         assert_eq!(r.output_tokens, Some(8192));
@@ -3047,7 +3452,12 @@ mod tests {
             Some("tool_use"),
             None,
         ] {
-            let r = messages_response(&message_with_stop(stop), "claude-sonnet-5", "api");
+            let r = messages_response(
+                &message_with_stop(stop),
+                "claude-sonnet-5",
+                "api",
+                PriceBasis::realtime(),
+            );
             assert!(!r.truncated, "{stop:?}");
         }
     }
@@ -3059,9 +3469,9 @@ mod tests {
                 r#"{{"custom_id":"c0-b0","result":{{"type":"succeeded","message":{{"model":"claude-sonnet-5","content":[{{"type":"text","text":"x"}}],"stop_reason":"{stop}","usage":{{"input_tokens":1,"output_tokens":2}}}}}}}}"#
             )
         };
-        let truncated = parse_batch_results_jsonl(&line("max_tokens")).unwrap();
+        let truncated = parse_batch_results_jsonl(&line("max_tokens"), BATCH_CACHE_TTL).unwrap();
         assert!(truncated[0].response.as_ref().unwrap().truncated);
-        let complete = parse_batch_results_jsonl(&line("end_turn")).unwrap();
+        let complete = parse_batch_results_jsonl(&line("end_turn"), BATCH_CACHE_TTL).unwrap();
         assert!(!complete[0].response.as_ref().unwrap().truncated);
         assert_eq!(complete[0].response.as_ref().unwrap().backend, "api/batch");
     }
@@ -3076,7 +3486,7 @@ mod tests {
         let req = LlmRequest::new("static prefix\ndynamic suffix")
             .with_cache_breakpoints(vec!["static prefix\n".len()])
             .with_model("claude-sonnet-5");
-        let item = build_batch_item("c0-b0", &req, "claude-sonnet-5");
+        let item = build_batch_item("c0-b0", &req, "claude-sonnet-5", BATCH_CACHE_TTL);
         let content = serde_json::to_value(&item.params.messages[0].content).unwrap();
         let arr = content.as_array().expect("cached content is an array");
         assert_eq!(arr[0]["cache_control"]["type"], "ephemeral");
@@ -3117,7 +3527,7 @@ mod tests {
         let req = LlmRequest::new("check this")
             .with_system("you are an auditor")
             .with_model("claude-haiku-4-5-20251001");
-        let item = build_batch_item("c0-b0", &req, "claude-haiku-4-5-20251001");
+        let item = build_batch_item("c0-b0", &req, "claude-haiku-4-5-20251001", BATCH_CACHE_TTL);
         assert_eq!(item.params.system.as_deref(), Some("you are an auditor"));
         // Ensure it serialises correctly (no missing field).
         let v = serde_json::to_value(&item.params).unwrap();
@@ -3133,7 +3543,8 @@ mod tests {
 {"custom_id":"c0-b1","result":{"type":"succeeded","message":{"model":"claude-sonnet-5","content":[{"type":"text","text":"finding B"}],"usage":{"input_tokens":80,"output_tokens":40}}}}
 malformed line, not json
 "#;
-        let rows = parse_batch_results_jsonl(jsonl).expect("parse should not fail");
+        let rows =
+            parse_batch_results_jsonl(jsonl, BATCH_CACHE_TTL).expect("parse should not fail");
         // 2 succeeded + 1 errored; the malformed line is skipped.
         assert_eq!(
             rows.len(),
@@ -3225,7 +3636,8 @@ malformed line, not json
     /// never an error). Empty bodies arise when a batch has 0 items that completed.
     #[test]
     fn parse_batch_results_empty_body_is_ok() {
-        let rows = parse_batch_results_jsonl("").expect("empty body should not error");
+        let rows =
+            parse_batch_results_jsonl("", BATCH_CACHE_TTL).expect("empty body should not error");
         assert!(rows.is_empty());
     }
 
@@ -3235,7 +3647,7 @@ malformed line, not json
         let req = LlmRequest::new("hello")
             .with_model("claude-sonnet-5")
             .with_max_tokens(512);
-        let item = build_batch_item("c0-b0", &req, "claude-sonnet-5");
+        let item = build_batch_item("c0-b0", &req, "claude-sonnet-5", BATCH_CACHE_TTL);
         let v = serde_json::to_value(&item).unwrap();
         assert_eq!(v["custom_id"], "c0-b0");
         assert!(v["params"]["model"].is_string());
@@ -3936,7 +4348,7 @@ exit 1
             "usage": {"input_tokens": 1000, "output_tokens": 7}
         });
         let err = llm
-            .api_response_or_refusal(&refused, "claude-opus-5-5")
+            .api_response_or_refusal(&refused, "claude-opus-5-5", rt())
             .expect_err("a refusal is an error");
         assert!(is_refusal(&err));
         let snap = ledger.snapshot();
@@ -3949,7 +4361,7 @@ exit 1
             "stop_reason": "end_turn", "usage": {"input_tokens": 1, "output_tokens": 1}
         });
         assert_eq!(
-            llm.api_response_or_refusal(&fine, "claude-opus-5-5")
+            llm.api_response_or_refusal(&fine, "claude-opus-5-5", rt())
                 .unwrap()
                 .text,
             "x"
@@ -4477,7 +4889,7 @@ printf '%s\n' '{"type":"result","is_error":false,"result":"LIVE-DONE","total_cos
     #[test]
     fn complete_request_for_every_new_model_has_no_rejected_fields() {
         for model in STRICT_MODELS {
-            let body = messages_request_body(&shape_request(), model);
+            let body = messages_request_body(&shape_request(), model, CacheTtl::FiveMinutes);
             assert_no_rejected_fields(&body, &format!("complete/{model}"));
             assert_eq!(body["model"], model);
             assert_eq!(body["max_tokens"], 8192);
@@ -4487,7 +4899,7 @@ printf '%s\n' '{"type":"result","is_error":false,"result":"LIVE-DONE","total_cos
     #[test]
     fn batch_item_for_every_new_model_has_no_rejected_fields() {
         for model in STRICT_MODELS {
-            let item = build_batch_item("c0-b0", &shape_request(), model);
+            let item = build_batch_item("c0-b0", &shape_request(), model, BATCH_CACHE_TTL);
             let v = serde_json::to_value(&item).unwrap();
             assert_no_rejected_fields(&v["params"], &format!("batch/{model}"));
         }
@@ -4508,9 +4920,14 @@ printf '%s\n' '{"type":"result","is_error":false,"result":"LIVE-DONE","total_cos
     fn effort_is_set_high_only_where_the_model_defaults_lower() {
         for model in STRICT_MODELS {
             let wants_high = matches!(model, "claude-opus-5-5" | "claude-haiku-5-5");
-            let complete = messages_request_body(&shape_request(), model);
-            let batch =
-                serde_json::to_value(build_batch_item("c0-b0", &shape_request(), model)).unwrap();
+            let complete = messages_request_body(&shape_request(), model, CacheTtl::FiveMinutes);
+            let batch = serde_json::to_value(build_batch_item(
+                "c0-b0",
+                &shape_request(),
+                model,
+                BATCH_CACHE_TTL,
+            ))
+            .unwrap();
             if wants_high {
                 assert_eq!(complete["output_config"]["effort"], "high", "{model}");
                 assert_eq!(
@@ -4531,7 +4948,7 @@ printf '%s\n' '{"type":"result","is_error":false,"result":"LIVE-DONE","total_cos
             "claude-sonnet-5",
             "claude-haiku-4-5-20251001",
         ] {
-            let body = messages_request_body(&shape_request(), model);
+            let body = messages_request_body(&shape_request(), model, CacheTtl::FiveMinutes);
             assert!(body.get("output_config").is_none(), "{model}");
         }
     }
@@ -4559,7 +4976,8 @@ printf '%s\n' '{"type":"result","is_error":false,"result":"LIVE-DONE","total_cos
     fn a_refused_batch_item_is_an_error_row_and_is_absent_from_the_results_map() {
         let refused = r#"{"custom_id":"c0-b0","result":{"type":"succeeded","message":{"model":"claude-opus-5-5","content":[],"stop_reason":"refusal","usage":{"input_tokens":1,"output_tokens":0}}}}"#;
         let fine = r#"{"custom_id":"c0-b1","result":{"type":"succeeded","message":{"model":"claude-opus-5-5","content":[{"type":"text","text":"{}"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":2}}}}"#;
-        let rows = parse_batch_results_jsonl(&format!("{refused}\n{fine}\n")).unwrap();
+        let rows =
+            parse_batch_results_jsonl(&format!("{refused}\n{fine}\n"), BATCH_CACHE_TTL).unwrap();
         assert_eq!(rows.len(), 2);
         let r0 = rows.iter().find(|r| r.custom_id == "c0-b0").unwrap();
         assert!(r0.response.is_none(), "a refusal carries no response");

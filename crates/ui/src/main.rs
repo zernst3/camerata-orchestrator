@@ -30,6 +30,7 @@ mod style;
 mod terminal;
 mod toast;
 mod vcs_settings;
+mod walkthrough;
 mod workspace;
 
 use dioxus::prelude::*;

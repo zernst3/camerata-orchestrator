@@ -1701,9 +1701,16 @@ enum HomeView {
 pub fn CockpitShell() -> Element {
     let screen = use_signal(|| CockpitScreen::Projects);
     use_context_provider(|| screen);
-    match screen() {
-        CockpitScreen::Projects => rsx! { ProjectGate {} },
-        CockpitScreen::InProject => rsx! { CockpitApp {} },
+    // The inspection walkthrough's state (shared by the switch, the offer, the Help menu and the
+    // palette), and its popup host. The host draws nothing while the walkthrough is off.
+    crate::walkthrough::provide_tour();
+    rsx! {
+        match screen() {
+            CockpitScreen::Projects => rsx! { ProjectGate {} },
+            CockpitScreen::InProject => rsx! { CockpitApp {} },
+        }
+        crate::walkthrough::HelpMenuListener {}
+        crate::walkthrough::WalkthroughHost {}
     }
 }
 
@@ -1909,6 +1916,8 @@ fn HomeNav(home_view: Signal<HomeView>) -> Element {
                 onclick: move |_| hv.set(HomeView::Docs),
                 "Docs"
             }
+            // No `data-tour` here: the walkthrough's backend step is about the Settings tab INSIDE
+            // a project, and a click on this one (before any project is open) must not advance it.
             button {
                 class: cls(HomeView::Settings),
                 onclick: move |_| hv.set(HomeView::Settings),
@@ -2051,6 +2060,10 @@ fn ProjectsHome() -> Element {
                 p { class: "eyebrow", "Camerata" }
                 h1 { class: "h1", "Your projects" }
                 p { class: "lede", "A project is the container for everything — its repos, ruleset, baseline, and workspace. Open one to begin, or create a new one." }
+                // The one-time first-launch offer of the guided inspection (no projects yet).
+                crate::walkthrough::WalkthroughOffer {
+                    projects: if loading { None } else { Some(list.len()) },
+                }
 
                 if loading {
                     p { class: "pg-empty", "Loading projects\u{2026}" }
@@ -2179,7 +2192,10 @@ fn ProjectsHome() -> Element {
                     }
                 }
 
-                div { class: "pg-create",
+                div {
+                    class: "pg-create",
+                    // The walkthrough's first step points here.
+                    "data-tour": camerata_ui_core::walkthrough::target::PROJECT_NEW,
                     p { class: "section-label", "Create a project" }
                     p { class: "section-hint", "A project starts empty — just a name. You add repos, rules, and everything else from inside it (the way an Azure resource group works)." }
                     div { class: "pg-create-row",
@@ -2259,6 +2275,7 @@ fn CockpitNav(view: Signal<CockpitView>) -> Element {
             }
             button {
                 class: cls(CockpitView::Onboard),
+                "data-tour": camerata_ui_core::walkthrough::target::NAV_ONBOARD,
                 onclick: move |_| view.set(CockpitView::Onboard),
                 "Onboard repos"
             }
@@ -2294,6 +2311,7 @@ fn CockpitNav(view: Signal<CockpitView>) -> Element {
             }
             button {
                 class: cls(CockpitView::Credentials),
+                "data-tour": camerata_ui_core::walkthrough::target::SETTINGS,
                 onclick: move |_| view.set(CockpitView::Credentials),
                 "Settings"
             }
@@ -3324,12 +3342,15 @@ fn DocsView() -> Element {
 
 mod freshness;
 pub mod live_run;
+mod palette;
 mod pane_context;
 mod review;
 pub mod rules;
 pub mod scan;
 mod stack;
 pub mod table;
+#[cfg(test)]
+mod tour_targets;
 pub mod uow;
 pub mod viewer;
 
