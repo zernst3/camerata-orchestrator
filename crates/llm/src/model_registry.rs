@@ -86,12 +86,12 @@ pub const CLAUDE_REGISTRY_MODELS: &[RegistryEntryStatic] = &[
         price_out: 50.0,
         cache_read_price: None,
         long_prompt: None,
-        // Rejects budget thinking, sampling params, prefill and `thinking: disabled`. Forced
-        // tool_choice is not documented as accepted, so only `auto` is sent.
+        // Rejects budget thinking, sampling params, prefill and `thinking: disabled`. Accepts
+        // forced tool_choice (the 400 on it is new in Fable 5.1).
         shape: RequestShapeSpec {
             strict_params: true,
             disabled_thinking: DisabledThinking::Rejected,
-            no_forced_tool_choice: true,
+            no_forced_tool_choice: false,
             effort: EffortPolicy::Omit,
         },
     },
@@ -2727,7 +2727,7 @@ mod tests {
     }
 
     /// Fable 5: rejects budget thinking, sampling params, prefill AND `thinking: disabled`
-    /// (omit instead); only `auto` tool_choice is sent.
+    /// (omit instead); ACCEPTS forced tool_choice (only Fable 5.1 rejects it).
     #[test]
     fn fable_5_strips_exactly_what_it_rejects() {
         let mut b = hostile_body();
@@ -2736,7 +2736,10 @@ mod tests {
             assert!(b.get(k).is_none(), "{k}");
         }
         assert_eq!(b["messages"].as_array().unwrap().len(), 1);
-        assert_eq!(b["tool_choice"], serde_json::json!({"type": "auto"}));
+        assert_eq!(
+            b["tool_choice"]["type"], "tool",
+            "forced tool_choice is accepted"
+        );
         let mut d = with_thinking(disabled(), None);
         conform_messages_body("claude-fable-5", &mut d);
         assert!(d.get("thinking").is_none(), "disabled is omitted, not sent");

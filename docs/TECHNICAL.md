@@ -887,7 +887,7 @@ Key design points:
   | Fable 5.1, Sonnet 5.5 | rejected (omit it) | rejected | high |
   | Haiku 5.5 | only at effort high or below | accepted | medium (set to `high`) |
   | Opus 5.5 | rejected (omit it) | rejected | medium (set to `high`) |
-  | Fable 5 | rejected (omit it) | not documented, so `auto` only | high |
+  | Fable 5 | rejected (omit it) | accepted | high |
   | Opus 5 | only at effort high or below | accepted | high |
   | Sonnet 5 | accepted | accepted | high |
   | Haiku 4.5 and older | accepted | accepted | n/a (nothing is stripped) |
