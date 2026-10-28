@@ -46,6 +46,10 @@ I. Repo hardening work order (`_workspace/brownfield-audits/WORK_ORDER_REPO_HARD
    prompt-injection defense (after rank 4 merges), H5 citations + repeatability, H4 no silent loss
    + engine version + triage log (after the PDF rebuild merges), H6 README/PLATFORM split (after
    Wave D). Briefs: scratchpad `hardening_tasks.md` + `hardening_local_preamble.md`. Waiting on
+   Zach may start H1 to H5 in the cloud from his phone (briefs on branch `briefs/hardening`,
+   file CLOUD_BRIEFS.md): before starting any H section locally, check `git ls-remote origin
+   'cloud/*'` for cloud/hygiene, cloud/client-lock, cloud/injection, cloud/coverage,
+   cloud/citations and skip any that exists (it is running in the cloud). Waiting on
    Zach: D1 (where working notes go; blocks Phase 1 item 5), D3 branch protection (his GitHub
    step), the `.claude/settings.json` deny-list move (needs his user settings; the permission
    classifier blocks the agent from editing them), the release tag (with the morning PR).
