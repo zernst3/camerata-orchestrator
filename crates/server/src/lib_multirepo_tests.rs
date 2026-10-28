@@ -177,3 +177,84 @@ fn a_repo_left_out_of_a_partial_run_is_recorded_as_not_inspected() {
     );
     assert_eq!(report.repos_not_inspected.len(), 1);
 }
+
+// ── a refusal renders as a refusal ──────────────────────────────────────────────────────
+
+mod refusal_routes {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::Request;
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+
+    async fn post(uri: &str, body: &str) -> serde_json::Value {
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    /// The desktop shows `blocked` as a refusal banner. A report with only a message on it, and
+    /// no `blocked`, shows as a scan that ran and found nothing.
+    fn assert_is_a_refusal(json: &serde_json::Value) {
+        assert_eq!(json["blocked"], true, "{json:?}");
+        assert_eq!(json["gated"], false, "{json:?}");
+        let reason = json["ai_blocked_reason"].as_str().expect("a reason");
+        assert!(reason.contains("1 of 1 repositories"), "{reason}");
+        assert!(reason.contains("me/api"), "{reason}");
+        assert_eq!(json["message"].as_str(), Some(reason), "{json:?}");
+        assert_eq!(json["findings"].as_array().map(Vec::len), Some(0));
+    }
+
+    #[tokio::test]
+    async fn a_scan_of_a_repo_with_no_local_folder_is_a_refusal() {
+        let json = post("/api/onboard/scan", r#"{"repos":["me/api"]}"#).await;
+        assert_is_a_refusal(&json);
+    }
+
+    #[tokio::test]
+    async fn an_audit_of_a_repo_with_no_local_folder_is_a_refusal() {
+        let json = post("/api/onboard/audit", r#"{"repos":["me/api"]}"#).await;
+        assert_is_a_refusal(&json);
+    }
+}
+
+// ── the manifest is corrected for a repo that was never read ────────────────────────────
+
+#[test]
+fn a_manifest_stamped_complete_is_corrected_when_a_repo_was_never_read() {
+    let mut report = crate::onboard::ScanReport::gated(&["acme/one".to_string()]);
+    report.gated = false;
+    let mut manifest = crate::scan_cache::ManifestBuilder::new()
+        .with_ai_covered(true)
+        .finish();
+    assert!(manifest.ai_covered && report.ai_review_complete());
+
+    // Nothing unresolved: the stamp is left alone.
+    record_unresolved_repos_before_storing(&mut report, &mut manifest, &[], &[], None);
+    assert!(manifest.ai_covered);
+
+    record_unresolved_repos_before_storing(
+        &mut report,
+        &mut manifest,
+        &[("acme/two".to_string(), "no local folder is set".to_string())],
+        &[],
+        None,
+    );
+    assert!(!report.ai_review_complete());
+    assert!(
+        !manifest.ai_covered,
+        "a baseline from a run that never read a repo is not a complete one"
+    );
+}

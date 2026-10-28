@@ -224,6 +224,13 @@ fn report_with_text(p: &Planted) -> ScanReport {
         }],
         ..crate::ai_audit::RuleRecommendation::default()
     };
+    // The per-repo list holds the same text, one entry per (rule, repo).
+    report
+        .recommendations_by_repo
+        .push(crate::ai_audit::RuleRecommendation {
+            repo: "acme/app".to_string(),
+            ..rec.clone()
+        });
     report.recommendations.insert("ARCH-X-1".to_string(), rec);
     report.coverage_notes.push(crate::onboard::CoverageNote {
         repo: None,

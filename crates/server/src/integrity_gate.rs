@@ -131,6 +131,15 @@ impl SkipClass {
         if reason.is_empty() {
             return SkipClass::Unrecognised;
         }
+        // A reason a failure site wrote starts with that site's marker, and the error text after
+        // it can say anything, "not applicable" included. The marker decides, before any phrase
+        // is searched for.
+        if reason.starts_with(crate::scan_ledger::AI_AUDIT_FAILED_MARKER) {
+            return SkipClass::ToolFailed;
+        }
+        if reason.starts_with(crate::scan_ledger::REPO_UNREADABLE_MARKER) {
+            return SkipClass::Unrecognised;
+        }
         let lower = reason.to_ascii_lowercase();
 
         // ── Defect phrases first. See property 2 above. ──────────────────────────────────
@@ -534,7 +543,15 @@ pub fn evaluate(ledger: &ScanLedger, opts: &IntegrityGateOptions) -> IntegrityVe
                     .rules()
                     .filter(|r| r.tier == tier && r.repo == *repo)
                     .collect();
-                if !in_tier.is_empty() && in_tier.iter().all(|r| !r.ran) {
+                // A rule skipped because the repo holds nothing it covers says nothing about
+                // whether the tier ran there; only the rules that should have run are judged.
+                let judged: Vec<_> = in_tier
+                    .iter()
+                    .filter(|r| {
+                        r.ran || !crate::scan_ledger::is_out_of_scope_skip(r.skip_reason.as_deref())
+                    })
+                    .collect();
+                if !judged.is_empty() && judged.iter().all(|r| !r.ran) {
                     failures.push(IntegrityFailure {
                         code: "dark_tier".to_string(),
                         detail: format!(
@@ -1946,5 +1963,56 @@ mod tests {
         );
         let verdict = evaluate(&l, &IntegrityGateOptions::smoke());
         assert!(verdict.passed(), "{:#?}", verdict.failures);
+    }
+
+    #[test]
+    fn a_tier_whose_rules_were_all_skipped_out_of_scope_on_a_repo_is_not_dark_there() {
+        let mut l = two_repo_ledger();
+        l.record_rule("acme/one", "RUST-1", RuleTier::Semantic, true, None, 10, 0);
+        // A repo whose only semantic rule was scoped out entirely: nothing in the tier was
+        // meant to run there.
+        l.record_rule(
+            "acme/web",
+            "SEC-FLOOR-1",
+            RuleTier::Deterministic,
+            true,
+            None,
+            10,
+            0,
+        );
+        l.record_rule(
+            "acme/web",
+            "TAINT-1",
+            RuleTier::ExternalTool,
+            true,
+            None,
+            10,
+            0,
+        );
+        l.record_rule(
+            "acme/web",
+            "RUST-1",
+            RuleTier::Semantic,
+            false,
+            Some("no rust files matched this scan's file set".into()),
+            0,
+            0,
+        );
+        let verdict = evaluate(&l, &IntegrityGateOptions::default());
+        assert!(
+            !verdict.failures.iter().any(|f| f.code == "dark_tier"),
+            "{:#?}",
+            verdict.failures
+        );
+    }
+
+    #[test]
+    fn error_text_saying_not_applicable_is_still_a_failed_tool() {
+        let reason = format!(
+            "{}: the reply said the rule was not applicable",
+            crate::scan_ledger::AI_AUDIT_FAILED_MARKER
+        );
+        assert_eq!(SkipClass::classify(Some(&reason)), SkipClass::ToolFailed);
+        assert!(!SkipClass::classify(Some(&reason)).is_justified());
     }
 }

@@ -808,7 +808,7 @@ fn record_repo_not_inspected(
     // Every rule that would have run on this repo is on record as not run, so none of them can
     // read as "checked, found nothing" for it, and the rules that did run on other repos are
     // listed as incomplete with this repo named.
-    let skip = format!("repository could not be read: {reason}");
+    let skip = format!("{}: {reason}", crate::scan_ledger::REPO_UNREADABLE_MARKER);
     for rid in AUDIT_RULES {
         ledger.record_rule(
             spec,
@@ -2931,7 +2931,8 @@ pub async fn audit_repos_with_llm_controlled(
                                         crate::scan_ledger::RuleTier::Semantic,
                                         false,
                                         Some(format!(
-                                            "AI/semantic audit pass failed for this repo: {e}"
+                                            "{}: {e}",
+                                            crate::scan_ledger::AI_AUDIT_FAILED_MARKER
                                         )),
                                         0,
                                         0,

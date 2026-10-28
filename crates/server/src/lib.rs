@@ -5696,7 +5696,7 @@ struct ScanReq {
 /// `<workspace_root>/<owner>/<repo>`. Repos with no local git clone are returned as NOTES
 /// (not sources) so the caller can surface "browse to the repo's folder" — onboarding reads
 /// code from disk, never from GitHub.
-fn resolve_local_sources(state: &AppState, repos: &[String]) -> LocalSources {
+pub(crate) fn resolve_local_sources(state: &AppState, repos: &[String]) -> LocalSources {
     let workspace_root = state.settings.workspace_root();
     let mut resolved = LocalSources::default();
     for spec in repos {
@@ -5734,14 +5734,14 @@ fn resolve_local_sources(state: &AppState, repos: &[String]) -> LocalSources {
 
 /// What [`resolve_local_sources`] found: the repos with a local clone, and the ones without.
 #[derive(Default)]
-struct LocalSources {
+pub(crate) struct LocalSources {
     /// `(spec, folder)` for every repo that has a local git clone.
-    sources: Vec<(String, std::path::PathBuf)>,
+    pub sources: Vec<(String, std::path::PathBuf)>,
     /// One note per repo that has none, in the words the scan message uses.
-    notes: Vec<String>,
+    pub notes: Vec<String>,
     /// `(spec, reason)` for every repo that has none. A run that goes ahead without them must
     /// say so in its report; one that cannot is refused ([`partial_run_refusal`]).
-    unresolved: Vec<(String, String)>,
+    pub unresolved: Vec<(String, String)>,
 }
 
 /// The refusal for a run that would inspect fewer repos than it was asked to, or `None` when
@@ -5784,6 +5784,23 @@ fn record_unresolved_repos(
     }
 }
 
+/// [`record_unresolved_repos`] for a run that has just built its incremental manifest. The
+/// manifest was stamped complete or not before these repos were known, so it is corrected here,
+/// before it is stored: a manifest that says the AI review covered everything, from a run that
+/// never read a repo, would be reused as a complete baseline by the next scan.
+fn record_unresolved_repos_before_storing(
+    report: &mut crate::onboard::ScanReport,
+    manifest: &mut crate::scan_cache::ScanManifest,
+    unresolved: &[(String, String)],
+    selected: &[crate::onboard::SelectedRule],
+    corpus: Option<&camerata_rules::RuleSet>,
+) {
+    record_unresolved_repos(report, unresolved, selected, corpus);
+    if !report.ai_review_complete() {
+        manifest.ai_covered = false;
+    }
+}
+
 async fn onboard_scan(
     State(state): State<AppState>,
     Json(req): Json<ScanReq>,
@@ -5812,10 +5829,10 @@ async fn onboard_scan(
         unresolved,
     } = resolve_local_sources(&state, &repos);
     if let Some(why) = partial_run_refusal(&unresolved, repos.len(), req.allow_partial) {
-        let mut r = crate::onboard::ScanReport::gated(&repos);
-        r.gated = false;
-        r.message = Some(why);
-        return Json(r);
+        // The same shape a client-engagement refusal has (`blocked`, with the reason), which the
+        // desktop already renders as a refusal banner. A bare message on an otherwise empty
+        // report would show as a successful scan that found nothing.
+        return Json(client_lock_blocked_report(&repos, why));
     }
     let mut report = crate::onboard::scan_repos(&sources, notes).await;
     for (spec, why) in &unresolved {
@@ -6292,10 +6309,10 @@ async fn onboard_audit(
         unresolved,
     } = resolve_local_sources(&state, &repos);
     if let Some(why) = partial_run_refusal(&unresolved, repos.len(), req.allow_partial) {
-        let mut r = crate::onboard::ScanReport::gated(&repos);
-        r.gated = false;
-        r.message = Some(why);
-        return Json(r);
+        // The same shape a client-engagement refusal has (`blocked`, with the reason), which the
+        // desktop already renders as a refusal banner. A bare message on an otherwise empty
+        // report would show as a successful scan that found nothing.
+        return Json(client_lock_blocked_report(&repos, why));
     }
     let selected: Vec<crate::onboard::SelectedRule> = req
         .rules
@@ -6380,7 +6397,7 @@ async fn onboard_audit(
     // no stale/partially-mutated state a caller could see.
     use futures::FutureExt;
     let outcome = std::panic::AssertUnwindSafe(async move {
-        let (mut report, manifest) = crate::onboard::audit_repos_controlled(
+        let (mut report, mut manifest) = crate::onboard::audit_repos_controlled(
             state.credential_store.as_ref(),
             &sources,
             &selected,
@@ -6406,6 +6423,15 @@ async fn onboard_audit(
             run_controls,
         )
         .await;
+        // A repo that could not be read is on the report as not inspected, never just absent,
+        // and the manifest is corrected for it before it is stored.
+        record_unresolved_repos_before_storing(
+            &mut report,
+            &mut manifest,
+            &unresolved,
+            &selected,
+            corpus.as_ref(),
+        );
         // Persist the fresh manifest (even after a forced full scan) so the NEXT scan can be
         // incremental. Only when there's an active project to key it to.
         if let Some(id) = &project_id {
@@ -6417,8 +6443,6 @@ async fn onboard_audit(
         // client line and the operator log. Before this, those errors were discarded at the
         // load site and a rule with a typo'd enum value vanished from the scan silently.
         record_corpus_load_failures(&mut report, &corpus_load_failures);
-        // A repo that could not be read is on the report as not inspected, never just absent.
-        record_unresolved_repos(&mut report, &unresolved, &selected, corpus.as_ref());
         // The engagement this scan ran under, with the models that actually ran.
         report
             .ledger
@@ -7787,7 +7811,7 @@ pub(crate) async fn start_audit_job(
                 }
             }
 
-            let (mut report, manifest) = crate::onboard::audit_repos_controlled(
+            let (mut report, mut manifest) = crate::onboard::audit_repos_controlled(
                 state.credential_store.as_ref(),
                 &sources,
                 &selected,
@@ -7810,6 +7834,15 @@ pub(crate) async fn start_audit_job(
                 run_controls,
             )
             .await;
+            // A repo that could not be read is on the report as not inspected, never just
+            // absent, and the manifest is corrected for it before it is stored.
+            record_unresolved_repos_before_storing(
+                &mut report,
+                &mut manifest,
+                &unresolved,
+                &selected,
+                corpus.as_ref(),
+            );
             // Persist the fresh manifest so the next scan can be incremental.
             if let Some(id) = &project_id {
                 scan_cache.put(id, manifest);
@@ -7819,8 +7852,6 @@ pub(crate) async fn start_audit_job(
             // corpus file that would not parse into the ledger, the integrity gate, one
             // concise client line and the operator log.
             record_corpus_load_failures(&mut report, &corpus_load_failures);
-            // A repo that could not be read is on the report as not inspected, never just absent.
-            record_unresolved_repos(&mut report, &unresolved, &selected, corpus.as_ref());
             report.ledger.record_engagement(engagement_record_for_scan(
                 engagement_project.as_ref(),
                 &report,

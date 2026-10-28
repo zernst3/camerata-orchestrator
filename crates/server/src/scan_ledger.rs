@@ -221,7 +221,62 @@ pub struct ScopeCoverage {
     pub changed_files_only: bool,
 }
 
+/// What one (rule, repo) cell says. The one definition every reader of the ledger shares: the
+/// merge below, the integrity gate and the patterns-across-services matrix.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CellState {
+    /// The rule ran on the repo and found something. `sites` is the number of findings emitted.
+    Violated { sites: usize },
+    /// The rule ran on the repo, found nothing and was checked everywhere on it. It does NOT
+    /// require files evaluated: a repo whose result was carried from an earlier inspection
+    /// (nothing changed, nothing re-read) ran the rule on zero fresh files and is still clean.
+    Clean,
+    /// The rule has nothing to check on the repo: its concern was judged absent there, or the
+    /// repo holds nothing in the rule's scope (no file in its language, not armed for it), or
+    /// the rule is not selected for the repo at all.
+    NotApplicable { reason: String },
+    /// The rule should have been checked on the repo and was not, or not everywhere: it did not
+    /// run, the spend limit stopped it, the review failed, the repo could not be read, or it
+    /// ran on part of the code only. Never to be read as clean.
+    NotReviewed { reason: String },
+}
+
 impl RuleLedgerEntry {
+    /// This entry's [`CellState`], decided in this order: findings first (a rule that found
+    /// something is violated whatever else is true of it), then a judged-not-applicable rule,
+    /// then a skip because the repo holds nothing the rule covers ([`is_out_of_scope_skip`]),
+    /// then every other way of not being checked (did not run, partial coverage), and clean
+    /// only after all of those are ruled out.
+    pub fn cell_state(&self) -> CellState {
+        if self.ran && self.findings_emitted > 0 {
+            return CellState::Violated {
+                sites: self.findings_emitted,
+            };
+        }
+        if self.not_applicable {
+            return CellState::NotApplicable {
+                reason: "judged not applicable: no evidence the concern exists here".to_string(),
+            };
+        }
+        if !self.ran {
+            let reason = self
+                .skip_reason
+                .clone()
+                .unwrap_or_else(|| "did not run this scan".to_string());
+            return if is_out_of_scope_skip(self.skip_reason.as_deref()) {
+                CellState::NotApplicable { reason }
+            } else {
+                CellState::NotReviewed { reason }
+            };
+        }
+        if let Some(why) = &self.partial_reason {
+            return CellState::NotReviewed {
+                reason: why.clone(),
+            };
+        }
+        CellState::Clean
+    }
+
     /// The one predicate every "what's healthy" / scorecard "Clean" derivation must use
     /// instead of inferring cleanliness from mere selection.
     ///
@@ -1366,6 +1421,23 @@ impl ScanLedger {
         self.merged_rules().get(rule_id)
     }
 
+    /// The state of the (rule, repo) cell. A repo with no entry for the rule is
+    /// [`CellState::NotApplicable`] only when the rule does not apply to it
+    /// (`rule_applies_to_repo` is false: it is bound to other repos), and
+    /// [`CellState::NotReviewed`] when it does apply and nothing was recorded, since a missing
+    /// record never counts as clean. See [`RuleLedgerEntry::cell_state`].
+    pub fn cell_state(&self, rule_id: &str, repo: &str, rule_applies_to_repo: bool) -> CellState {
+        match self.rule_for_repo(rule_id, repo) {
+            Some(entry) => entry.cell_state(),
+            None if rule_applies_to_repo => CellState::NotReviewed {
+                reason: "nothing was recorded for this repo".to_string(),
+            },
+            None => CellState::NotApplicable {
+                reason: "the rule does not apply to this repo".to_string(),
+            },
+        }
+    }
+
     /// The rule's entry for one repo. Use `""` for an entry that names no repo.
     pub fn rule_for_repo(&self, rule_id: &str, repo: &str) -> Option<&RuleLedgerEntry> {
         self.rules.get(&(rule_id.to_string(), repo.to_string()))
@@ -1694,16 +1766,34 @@ mod rules_serde {
 /// A repo skipped for this reason does not count against a rule the other repos ran: there was
 /// nothing there to check. Anything not recognised counts as a gap, so a reason this function
 /// does not know can only make a rule look less covered, never more.
-fn is_out_of_scope_skip(reason: Option<&str>) -> bool {
+pub(crate) fn is_out_of_scope_skip(reason: Option<&str>) -> bool {
     let Some(reason) = reason else {
         return false;
     };
+    // A failure carries the text of the error that caused it, and that text can say anything,
+    // "not applicable" included. The marker the failure site wrote decides first.
+    if is_failure_reason(reason) {
+        return false;
+    }
     let lower = reason.to_ascii_lowercase();
     // The router's own notes for a language or declared scope that matched no file.
     lower.contains("files matched this scan's file set")
         || lower.contains("no file in this scan's file set")
         || crate::integrity_gate::SkipClass::classify(Some(reason))
             == crate::integrity_gate::SkipClass::NotApplicableToStack
+}
+
+/// The start of the skip reason written when a repo's whole AI review failed. The error text
+/// follows it, and is never read for meaning.
+pub const AI_AUDIT_FAILED_MARKER: &str = "AI/semantic audit pass failed for this repo";
+
+/// The start of the skip reason written for a repo that could not be read at all.
+pub const REPO_UNREADABLE_MARKER: &str = "repository could not be read";
+
+/// Whether a skip reason was written by a failure site, found by the marker it starts with.
+pub(crate) fn is_failure_reason(reason: &str) -> bool {
+    let reason = reason.trim_start();
+    reason.starts_with(AI_AUDIT_FAILED_MARKER) || reason.starts_with(REPO_UNREADABLE_MARKER)
 }
 
 /// The repo as a reader of a sentence would name it.
@@ -1743,7 +1833,7 @@ fn merge_rule_entries(entries: &[&RuleLedgerEntry]) -> RuleLedgerEntry {
     let gaps: Vec<&&RuleLedgerEntry> = if any_ran {
         entries
             .iter()
-            .filter(|e| !e.ran && !is_out_of_scope_skip(e.skip_reason.as_deref()))
+            .filter(|e| !e.ran && matches!(e.cell_state(), CellState::NotReviewed { .. }))
             .collect()
     } else {
         Vec::new()
@@ -1753,7 +1843,7 @@ fn merge_rule_entries(entries: &[&RuleLedgerEntry]) -> RuleLedgerEntry {
     } else {
         entries
             .iter()
-            .find(|e| e.skip_reason.is_some() && !is_out_of_scope_skip(e.skip_reason.as_deref()))
+            .find(|e| matches!(e.cell_state(), CellState::NotReviewed { .. }) && !e.ran)
             .or_else(|| entries.iter().find(|e| e.skip_reason.is_some()))
             .and_then(|e| e.skip_reason.clone())
     };
@@ -1819,7 +1909,16 @@ fn merge_rule_entries(entries: &[&RuleLedgerEntry]) -> RuleLedgerEntry {
         files_evaluated: entries.iter().map(|e| e.files_evaluated).sum(),
         findings_emitted: entries.iter().map(|e| e.findings_emitted).sum(),
         coverage_note: entries.iter().find_map(|e| e.coverage_note.clone()),
-        not_applicable: entries.iter().any(|e| e.not_applicable),
+        not_applicable: {
+            // Judged not applicable only when every repo the rule applies to said so. A repo
+            // with nothing in the rule's scope does not count either way; one repo's judgment
+            // never speaks for another (each repo's own value stays on its entry).
+            let applying: Vec<&&RuleLedgerEntry> = entries
+                .iter()
+                .filter(|e| e.ran || !is_out_of_scope_skip(e.skip_reason.as_deref()))
+                .collect();
+            !applying.is_empty() && applying.iter().all(|e| e.not_applicable)
+        },
         partial_reason: (!parts.is_empty()).then(|| parts.join("; ")),
         repos_not_run: gaps
             .iter()
@@ -1943,7 +2042,7 @@ mod tests {
     }
 
     #[test]
-    fn a_not_applicable_finding_on_one_repo_keeps_the_rule_out_of_the_healthy_list() {
+    fn a_rule_judged_not_applicable_on_one_repo_only_keeps_each_repos_own_value() {
         let mut ledger = ScanLedger::new();
         ledger.note_not_applicable_rule("acme/one", RULE);
         ran(&mut ledger, "acme/one", 0);
@@ -1960,8 +2059,120 @@ mod tests {
                 .unwrap()
                 .not_applicable
         );
-        assert!(ledger.healthy_rule_ids().is_empty());
+        // One repo's judgment does not speak for the other: the merged entry is not "not
+        // applicable", and the rule stands as checked and clean where it applies.
+        assert!(!ledger.rule(RULE).unwrap().not_applicable);
+        assert!(ledger.not_applicable_rule_ids().is_empty());
+        assert_eq!(ledger.healthy_rule_ids(), vec![RULE.to_string()]);
+    }
+
+    #[test]
+    fn a_rule_judged_not_applicable_on_every_repo_it_applies_to_is_not_applicable() {
+        let mut ledger = ScanLedger::new();
+        ledger.note_not_applicable_rule("acme/one", RULE);
+        ledger.note_not_applicable_rule("acme/two", RULE);
+        ran(&mut ledger, "acme/one", 0);
+        ran(&mut ledger, "acme/two", 0);
+        not_run(
+            &mut ledger,
+            "acme/web",
+            "no rust files matched this scan's file set",
+        );
+        assert!(ledger.rule(RULE).unwrap().not_applicable);
         assert_eq!(ledger.not_applicable_rule_ids(), vec![RULE.to_string()]);
+        assert!(ledger.healthy_rule_ids().is_empty());
+    }
+
+    // ── the cell state every reader shares ────────────────────────────────────────────────
+
+    #[test]
+    fn a_cell_is_violated_clean_not_applicable_or_not_reviewed() {
+        let mut ledger = ScanLedger::new();
+        ran(&mut ledger, "acme/violated", 4);
+        ran(&mut ledger, "acme/clean", 0);
+        ledger.note_not_applicable_rule("acme/judged", RULE);
+        ran(&mut ledger, "acme/judged", 0);
+        not_run(
+            &mut ledger,
+            "acme/web",
+            "no rust files matched this scan's file set",
+        );
+        not_run(
+            &mut ledger,
+            "acme/failed",
+            "AI/semantic audit pass failed for this repo: x",
+        );
+        ran(&mut ledger, "acme/partial", 0);
+        ledger.note_partial_rule(RULE, "acme/partial", "checked on part of the code only");
+        let state = |repo: &str| ledger.cell_state(RULE, repo, true);
+        assert_eq!(state("acme/violated"), CellState::Violated { sites: 4 });
+        assert_eq!(state("acme/clean"), CellState::Clean);
+        assert!(matches!(
+            state("acme/judged"),
+            CellState::NotApplicable { .. }
+        ));
+        assert!(matches!(state("acme/web"), CellState::NotApplicable { .. }));
+        assert!(matches!(
+            state("acme/failed"),
+            CellState::NotReviewed { .. }
+        ));
+        assert!(matches!(
+            state("acme/partial"),
+            CellState::NotReviewed { .. }
+        ));
+    }
+
+    #[test]
+    fn a_fully_cached_repo_with_no_files_evaluated_is_still_clean() {
+        let mut ledger = ScanLedger::new();
+        ledger.record_rule("acme/one", RULE, RuleTier::Semantic, true, None, 0, 0);
+        assert_eq!(ledger.cell_state(RULE, "acme/one", true), CellState::Clean);
+    }
+
+    #[test]
+    fn a_repo_with_no_entry_is_not_applicable_only_when_the_rule_does_not_apply_to_it() {
+        let mut ledger = ScanLedger::new();
+        ran(&mut ledger, "acme/one", 0);
+        assert!(matches!(
+            ledger.cell_state(RULE, "acme/two", false),
+            CellState::NotApplicable { .. }
+        ));
+        assert!(matches!(
+            ledger.cell_state(RULE, "acme/two", true),
+            CellState::NotReviewed { .. }
+        ));
+    }
+
+    #[test]
+    fn findings_make_a_cell_violated_even_when_the_rule_was_partial() {
+        let mut ledger = ScanLedger::new();
+        ran(&mut ledger, "acme/one", 2);
+        ledger.note_partial_rule(RULE, "acme/one", "checked on part of the code only");
+        assert_eq!(
+            ledger.cell_state(RULE, "acme/one", true),
+            CellState::Violated { sites: 2 }
+        );
+    }
+
+    #[test]
+    fn error_text_that_says_not_applicable_does_not_turn_a_failure_into_a_scope_skip() {
+        let failure = format!(
+            "{AI_AUDIT_FAILED_MARKER}: the model replied that this rule is not applicable \
+             and no matching files were found"
+        );
+        assert!(!is_out_of_scope_skip(Some(&failure)));
+        let mut ledger = ScanLedger::new();
+        ran(&mut ledger, "acme/one", 0);
+        not_run(&mut ledger, "acme/two", &failure);
+        assert!(matches!(
+            ledger.cell_state(RULE, "acme/two", true),
+            CellState::NotReviewed { .. }
+        ));
+        let merged = ledger.rule(RULE).unwrap();
+        assert_eq!(merged.repos_not_run, vec!["acme/two".to_string()]);
+        assert!(ledger.healthy_rule_ids().is_empty());
+        let unreadable = format!("{REPO_UNREADABLE_MARKER}: no matching files");
+        assert!(!is_out_of_scope_skip(Some(&unreadable)));
     }
 
     #[test]
