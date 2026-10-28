@@ -2775,6 +2775,8 @@ html, body {
   padding: 1px 6px; border-radius: 999px; background: var(--accent-wash); color: var(--ink);
 }
 .triage-tab.active .triage-tab-count { background: rgba(255,255,255,.25); color: #fff; }
+.triage-repo-counts { display: flex; gap: 6px 14px; margin: -4px 0 12px; flex-wrap: wrap; font-size: 12px; color: var(--ink-soft); }
+.triage-repo-count { font-variant-numeric: tabular-nums; }
 .triage-process {
   display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
   margin: 12px 0; padding: 11px 13px;

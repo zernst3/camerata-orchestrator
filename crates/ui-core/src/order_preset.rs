@@ -164,8 +164,10 @@ pub fn compare(preset: OrderPreset, a: &FindingView, b: &FindingView) -> Orderin
     let own = match preset {
         // The curated key is severity-led, so the flat cut is the same key ungrouped.
         OrderPreset::Curated | OrderPreset::CriticalFirst => Ordering::Equal,
-        OrderPreset::ByFile => (enforced(a), &a.path, &a.rule_id, a.line).cmp(&(
+        // The repo is part of a file's identity: `src/index.ts` in two repos is two files.
+        OrderPreset::ByFile => (enforced(a), &a.repo, &a.path, &a.rule_id, a.line).cmp(&(
             enforced(b),
+            &b.repo,
             &b.path,
             &b.rule_id,
             b.line,
@@ -174,6 +176,7 @@ pub fn compare(preset: OrderPreset, a: &FindingView, b: &FindingView) -> Orderin
             enforced(a),
             &a.rule_id,
             severity_rank(&a.severity),
+            &a.repo,
             &a.path,
             a.line,
         )
@@ -181,6 +184,7 @@ pub fn compare(preset: OrderPreset, a: &FindingView, b: &FindingView) -> Orderin
                 enforced(b),
                 &b.rule_id,
                 severity_rank(&b.severity),
+                &b.repo,
                 &b.path,
                 b.line,
             )),
@@ -286,6 +290,33 @@ mod tests {
             .collect();
         assert_eq!(rules_in_a, [("R-A", 1), ("R-A", 9), ("R-B", 2)]);
         assert_eq!(OrderPreset::ByFile.grouping(), Grouping::FileThenRule);
+    }
+
+    fn in_repo(repo: &str, rule: &str, line: usize) -> FindingView {
+        let mut f = finding(rule, "high", "src/index.ts", line, "active");
+        f.repo = repo.into();
+        f
+    }
+
+    /// M10: two repos each have `src/index.ts`. Every preset keeps a repo's rows together, so the
+    /// grouped views never merge the two files into one group.
+    #[test]
+    fn the_same_path_in_two_repos_is_never_interleaved() {
+        let rows = vec![
+            in_repo("acme/b", "R-A", 1),
+            in_repo("acme/a", "R-A", 2),
+            in_repo("acme/b", "R-A", 3),
+            in_repo("acme/a", "R-A", 4),
+        ];
+        for preset in [OrderPreset::ByFile, OrderPreset::ByRule, OrderPreset::Curated] {
+            let got = order_findings(preset, &rows);
+            let repos: Vec<&str> = got.iter().map(|f| f.repo.as_str()).collect();
+            assert_eq!(
+                repos,
+                ["acme/a", "acme/a", "acme/b", "acme/b"],
+                "{preset:?} interleaved two repos' src/index.ts"
+            );
+        }
     }
 
     #[test]
