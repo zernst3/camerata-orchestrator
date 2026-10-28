@@ -211,6 +211,65 @@ pub struct ChatTurn {
     pub text: String,
 }
 
+/// Check `name` against git's ref-format rules for a branch name (`git check-ref-format
+/// --branch`), plus the rule that matters most for Camerata: a branch name becomes a
+/// directory name under the worktrees root, so `.`, `..` and any `..` segment must never get
+/// through (they would point the worktree at the root itself or at its parent).
+///
+/// The ONE validator for every place a branch name enters: the unit's recorded branch, the
+/// Intake repo scope, the run target and the worktree itself. Rejects: empty names, a leading
+/// `-` (read as an option), a leading or trailing `/`, `//`, a trailing `.`, `..` anywhere,
+/// `@{`, a bare `@`, any segment that starts with `.` or ends in `.lock`, whitespace and
+/// control characters, and `~ ^ : ? * [ \`.
+///
+/// # Errors
+///
+/// A one-line reason naming what is wrong with the name.
+pub fn validate_branch_name(name: &str) -> Result<(), String> {
+    let bad = |why: &str| {
+        Err(format!(
+            "`{}` is not a valid branch name: {why}.",
+            name.escape_debug()
+        ))
+    };
+    if name.is_empty() {
+        return bad("it is empty");
+    }
+    if name.len() > 255 {
+        return bad("it is longer than 255 bytes");
+    }
+    if name.starts_with('-') {
+        return bad("it starts with `-`");
+    }
+    if name.starts_with('/') || name.ends_with('/') || name.contains("//") {
+        return bad("it has an empty path segment");
+    }
+    if name.ends_with('.') {
+        return bad("it ends with `.`");
+    }
+    if name.contains("..") {
+        return bad("it contains `..`");
+    }
+    if name.contains("@{") || name == "@" {
+        return bad("it contains `@{` or is a bare `@`");
+    }
+    if let Some(c) = name
+        .chars()
+        .find(|c| c.is_control() || c.is_whitespace() || "~^:?*[\\".contains(*c))
+    {
+        return bad(&format!("it contains the character `{}`", c.escape_debug()));
+    }
+    for segment in name.split('/') {
+        if segment.starts_with('.') {
+            return bad("a path segment starts with `.`");
+        }
+        if segment.ends_with(".lock") {
+            return bad("a path segment ends with `.lock`");
+        }
+    }
+    Ok(())
+}
+
 /// The branch mode for one in-scope repo (R6): either work off an EXISTING branch in
 /// that repo, or create a NEW UoW-specific branch from a chosen base. Both are
 /// first-class options (3-phase doc §3, fleet doc R6).
@@ -244,16 +303,26 @@ impl Default for BranchMode {
 }
 
 impl BranchMode {
+    /// The branch name the architect typed for this repo, trimmed, or `None` when it is blank
+    /// (the branch is then derived from the story id).
+    pub fn explicit_name(&self) -> Option<&str> {
+        let name = match self {
+            Self::Existing { branch_name } => branch_name,
+            Self::NewFromBase { new_name, .. } => new_name,
+        };
+        Some(name.trim()).filter(|n| !n.is_empty())
+    }
+
     /// The branch the unit of work `story_id` works on in this repo: the named existing
     /// branch, the requested new branch name, or `camerata/<story_id>` when neither is
-    /// given. The ONE derivation shared by the server's multi-repo worktree setup and the
-    /// console's run start (which records it as the unit's branch), so the two can never
-    /// pick different branches for the same repo.
+    /// given. The ONE derivation shared by the server's run target, multi-repo worktree
+    /// setup and Ship, and the console's run start, so they can never pick different
+    /// branches for the same repo. The result is not validated: pass it through
+    /// [`validate_branch_name`] before it names a directory.
     pub fn branch_for_story(&self, story_id: &str) -> String {
-        match self {
-            Self::Existing { branch_name } if !branch_name.trim().is_empty() => branch_name.clone(),
-            Self::NewFromBase { new_name, .. } if !new_name.trim().is_empty() => new_name.clone(),
-            _ => format!("camerata/{story_id}"),
+        match self.explicit_name() {
+            Some(name) => name.to_string(),
+            None => format!("camerata/{story_id}"),
         }
     }
 }
@@ -441,6 +510,68 @@ mod tests {
         assert_eq!(new["mode"], "new_from_base");
         assert_eq!(new["base"], "main");
         assert_eq!(new["new_name"], "n");
+    }
+
+    #[test]
+    fn branch_names_that_escape_a_directory_or_break_git_ref_rules_are_rejected() {
+        for bad in [
+            "",
+            " ",
+            ".",
+            "..",
+            "a/../b",
+            "../x",
+            "x/..",
+            "a/./b",
+            "-x",
+            "-",
+            "/x",
+            "x/",
+            "a//b",
+            "a b",
+            "a\tb",
+            "a\u{7f}b",
+            "a\nb",
+            "x.lock",
+            "a/x.lock/b",
+            "a.",
+            ".hidden",
+            "a/.hidden",
+            "a~1",
+            "a^",
+            "a:b",
+            "a?",
+            "a*",
+            "a[b",
+            "a\\b",
+            "a@{b",
+            "@",
+            "a..b",
+        ] {
+            assert!(
+                validate_branch_name(bad).is_err(),
+                "{bad:?} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn ordinary_and_camerata_default_branch_names_are_accepted() {
+        for good in [
+            "main",
+            "feature/x",
+            "camerata/fix-7",
+            "camerata/acme/api#7",
+            "camerata/orchestrator/1761600000000",
+            "release-1.2.3",
+            "a_b/c-d",
+            "caf\u{e9}",
+        ] {
+            assert!(
+                validate_branch_name(good).is_ok(),
+                "{good:?} must be accepted"
+            );
+        }
     }
 
     #[test]

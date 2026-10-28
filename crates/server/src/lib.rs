@@ -14056,14 +14056,30 @@ struct UowBranchReq {
     branch: Option<String>,
 }
 
-/// Set (or clear) the branch for a story's UoW.
+/// A 400 for a branch name that fails [`camerata_api_types::uow::validate_branch_name`].
+fn invalid_branch_response(reason: String) -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(serde_json::json!({ "error": "invalid branch name", "reason": reason })),
+    )
+        .into_response()
+}
+
+/// Set (or clear) the branch for a story's UoW. A name is validated with the ref-format
+/// rules first (it becomes a directory under the worktrees root), so `.`, `..` and the like
+/// are refused with a 400 and nothing is recorded.
 async fn uow_set_branch(
     State(state): State<AppState>,
     Path(story_id): Path<String>,
     Json(req): Json<UowBranchReq>,
-) -> Json<crate::uow::UnitOfWork> {
+) -> Response {
+    if let Some(branch) = req.branch.as_deref() {
+        if let Err(reason) = camerata_api_types::uow::validate_branch_name(branch) {
+            return invalid_branch_response(reason);
+        }
+    }
     state.uow.set_branch(&story_id, req.branch);
-    Json(state.uow.get_or_create(&story_id))
+    Json(state.uow.get_or_create(&story_id)).into_response()
 }
 
 #[derive(serde::Deserialize)]
@@ -14131,8 +14147,18 @@ async fn uow_set_intake_repos(
     State(state): State<AppState>,
     Path(story_id): Path<String>,
     Json(req): Json<UowIntakeReposReq>,
-) -> Json<crate::uow::UnitOfWork> {
-    Json(state.uow.set_intake_repos(&story_id, req.repos))
+) -> Response {
+    // A branch name typed into the scope becomes a worktree directory name: validate every
+    // explicit name before anything is recorded. (A blank name derives `camerata/<story>`,
+    // which the run target validates when it is used.)
+    for scope in &req.repos {
+        if let Some(name) = scope.branch.explicit_name() {
+            if let Err(reason) = camerata_api_types::uow::validate_branch_name(name) {
+                return invalid_branch_response(format!("Repo `{}`: {reason}", scope.repo));
+            }
+        }
+    }
+    Json(state.uow.set_intake_repos(&story_id, req.repos)).into_response()
 }
 
 /// Per-repo Ship result for one in-scope repo. Part of the [`UowIntakeShipResponse`].

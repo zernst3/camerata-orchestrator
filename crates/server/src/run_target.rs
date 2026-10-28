@@ -76,6 +76,18 @@ pub(crate) fn plan_run_target(
         };
     };
 
+    // The branch becomes a directory under the worktrees root, so it must be a real branch
+    // name: a recorded `.` or `..` (from any writer, including data saved before validation
+    // existed) is refused here, before any worktree code runs.
+    if let Err(why) = camerata_api_types::uow::validate_branch_name(branch) {
+        return RunTarget::Refused {
+            reason: format!(
+                "The branch recorded for this unit of work is unusable. {why} Fix the branch \
+                 under Intake, Repos in scope, then start development again. (Unit `{story_id}`.)"
+            ),
+        };
+    }
+
     // Today a run's repository is the one named in the unit's id (`OWNER/REPO#N`).
     let Some((repo, _)) = story_id.rsplit_once('#') else {
         return RunTarget::Refused {
@@ -297,6 +309,25 @@ mod tests {
     }
 
     #[test]
+    fn a_recorded_branch_that_escapes_the_worktree_root_is_refused() {
+        let clone = git_clone_dir();
+        let path = clone.path().display().to_string();
+        for bad in [".", "..", "a/../b", "-rf", "x\u{7}y"] {
+            let target = plan_run_target(
+                "acme/api#7",
+                &uow(Some(bad), &["acme/api"]),
+                Some(&repos(&["acme/api"])),
+                |_| Some(path.clone()),
+                None,
+            );
+            let RunTarget::Refused { reason } = target else {
+                panic!("branch {bad:?} must be refused, got {target:?}");
+            };
+            assert!(reason.contains("not a valid branch name"), "{reason}");
+        }
+    }
+
+    #[test]
     fn a_unit_not_linked_to_an_issue_is_refused() {
         let target = plan_run_target(
             "draft-1",
@@ -497,5 +528,107 @@ mod http_tests {
             .history
             .iter()
             .any(|h| h.text.starts_with("Development run refused: ")));
+    }
+
+    #[tokio::test]
+    async fn the_branch_endpoint_refuses_names_that_escape_the_worktree_root() {
+        let state = state_with_project();
+        for bad in [".", "..", "a/../b", "-rf"] {
+            let resp = post(
+                &state,
+                &format!("/api/uow/{STORY_SEG}/branch"),
+                serde_json::json!({ "branch": bad }),
+            )
+            .await;
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{bad:?}");
+            assert_eq!(
+                state.uow.get_or_create(STORY).branch,
+                None,
+                "{bad:?} must not be recorded"
+            );
+        }
+        let ok = post(
+            &state,
+            &format!("/api/uow/{STORY_SEG}/branch"),
+            serde_json::json!({ "branch": "camerata/fix-7" }),
+        )
+        .await;
+        assert_eq!(ok.status(), StatusCode::OK);
+        let cleared = post(
+            &state,
+            &format!("/api/uow/{STORY_SEG}/branch"),
+            serde_json::json!({ "branch": null }),
+        )
+        .await;
+        assert_eq!(cleared.status(), StatusCode::OK);
+        assert_eq!(state.uow.get_or_create(STORY).branch, None);
+    }
+
+    #[tokio::test]
+    async fn the_intake_scope_refuses_branch_names_that_escape_the_worktree_root() {
+        let state = state_with_project();
+        for (mode, field) in [("existing", "branch_name"), ("new_from_base", "new_name")] {
+            for bad in [".", "..", "a/../b"] {
+                let resp = post(
+                    &state,
+                    &format!("/api/uow/{STORY_SEG}/intake/repos"),
+                    serde_json::json!({ "repos": [
+                        { "repo": "acme/api", "branch": { "mode": mode, field: bad } }
+                    ]}),
+                )
+                .await;
+                assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{mode} {bad:?}");
+                assert!(
+                    state.uow.get_or_create(STORY).intake.repos.is_empty(),
+                    "{mode} {bad:?} must not be recorded"
+                );
+            }
+        }
+        // A blank name (derived later) and an ordinary name are fine.
+        let resp = post(
+            &state,
+            &format!("/api/uow/{STORY_SEG}/intake/repos"),
+            serde_json::json!({ "repos": [
+                { "repo": "acme/api", "branch": { "mode": "existing", "branch_name": "feature/x" } }
+            ]}),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    /// A branch recorded before validation existed (or by any other writer) must still never
+    /// reach the worktree code: the run is refused and the shared clone and the worktrees
+    /// root are untouched.
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn a_recorded_escaping_branch_is_refused_and_destroys_nothing() {
+        let _live = camerata_test_env::EnvGuard::set("CAMERATA_LIVE_BUILD", "1");
+        let _token = camerata_test_env::EnvGuard::remove("CAMERATA_GITHUB_TOKEN");
+        let clone = tempfile::tempdir().unwrap();
+        crate::test_git::init_repo(clone.path(), &[("README.md", "fixture\n")]);
+        let other_unit = clone
+            .path()
+            .join(".camerata-worktrees")
+            .join("camerata__other");
+        std::fs::create_dir_all(&other_unit).unwrap();
+        std::fs::write(other_unit.join("work.txt"), "uncommitted").unwrap();
+        let state = state_with_project();
+        state
+            .settings
+            .set_repo_path("acme/api", Some(clone.path().display().to_string()));
+
+        for bad in [".", ".."] {
+            state.uow.set_branch(STORY, Some(bad.to_string()));
+            let resp = post(
+                &state,
+                &format!("/api/stories/{STORY_SEG}/run"),
+                serde_json::json!({}),
+            )
+            .await;
+            assert_eq!(resp.status(), StatusCode::CONFLICT, "{bad:?}");
+            assert!(other_unit.join("work.txt").exists(), "{bad:?} wiped work");
+            assert!(clone.path().join("README.md").exists());
+            assert!(state.runs.active_run_for_story(STORY).is_none());
+        }
     }
 }
