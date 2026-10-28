@@ -53,7 +53,17 @@ impl LlmPort for StubModel {
             if self.regeneration_down.load(Ordering::SeqCst) {
                 anyhow::bail!("transport down");
             }
-            format!(r#"{{"details":[{{"index":0,"detail":"{FULL}"}}]}}"#)
+            // Address the reply the way the prompt asks: the finding's id, path and line.
+            let header = req
+                .prompt
+                .lines()
+                .find(|l| l.starts_with('[') && l.contains("] rule "))
+                .expect("the regeneration prompt addresses the finding by an id");
+            let id = &header[1..header.find(']').expect("a closing bracket")];
+            let line = header.rsplit(':').next().expect("a line").trim();
+            format!(
+                r#"{{"details":[{{"id":"{id}","path":"{HANDLER_PATH}","line":{line},"detail":"{FULL}"}}]}}"#
+            )
         } else if system.starts_with("You are a senior software architect") {
             scan_response()
         } else {

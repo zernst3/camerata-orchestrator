@@ -618,6 +618,24 @@ fn batch_estimate_usd(
     Some(dollars)
 }
 
+/// Whether the `terse_output` measure applies to a call site that may have no meter.
+///
+/// Unlike the other measures this one is OFF without a meter. It asks the model for less and
+/// then spends a second stage to get the rest back; that stage must be metered (the spend limit,
+/// the telemetry row and the operator's opt-out all live on the meter), so a path with no meter
+/// runs the scan exactly as it ran before rank 4. [`warn_terse_needs_meter`] says so once.
+pub fn terse_output_of(meter: Option<&UsageMeter>) -> bool {
+    meter.is_some_and(|m| m.efficiency().terse_output)
+}
+
+/// The note for a path that has no meter: `terse_output` would have applied, and did not.
+fn warn_terse_needs_meter(repo: &str) {
+    eprintln!(
+        "[camerata-server] {repo}: terse_output needs a run meter (spend limit, telemetry, \
+         opt-out), and this path has none; scanning with the full detail instead"
+    );
+}
+
 /// The efficiency switches in force for a call site that may have no meter (every measure on).
 pub fn efficiency_of(meter: Option<&UsageMeter>) -> crate::efficiency::EfficiencyConfig {
     meter.map(UsageMeter::efficiency).unwrap_or_default()
@@ -1200,7 +1218,13 @@ pub fn parse_ai_findings(
                 "low" => "low",
                 _ => "medium",
             };
-            let title = f["title"].as_str().unwrap_or("").trim().to_string();
+            // The title is the headline of `Finding::detail`, split off again by the detail
+            // regeneration at the FIRST `HEADLINE_SEP`, so the title itself must never hold one.
+            let title = f["title"]
+                .as_str()
+                .unwrap_or("")
+                .trim()
+                .replace(HEADLINE_SEP, " - ");
             let code = f["code"].as_str().unwrap_or("").trim().to_string();
             let detail = f["detail"].as_str().unwrap_or("").trim().to_string();
             if title.is_empty() && detail.is_empty() && code.is_empty() {
@@ -3630,6 +3654,29 @@ fn fix_evidence_blob(f: &Finding, files: &[(String, String)]) -> String {
     )
 }
 
+/// The first line of a finding's block in an aggregate-stage prompt (fix generation, detail
+/// regeneration): the label the reply addresses it by, then its rule, severity and location.
+fn finding_block_header(label: &str, f: &Finding) -> String {
+    format!(
+        "[{label}] rule {} — severity {} — {}:{}\n",
+        f.rule_id, f.severity, f.path, f.line
+    )
+}
+
+/// The "Captured objects" line of a finding's block, or nothing when it captured none.
+fn captured_objects_line(f: &Finding) -> String {
+    if f.captures.is_empty() {
+        return String::new();
+    }
+    let caps = f
+        .captures
+        .iter()
+        .map(|(k, v)| format!("{k}={v}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("Captured objects: {caps}\n")
+}
+
 /// Build the per-finding prompt body for a fix-generation round. `findings` are the
 /// findings THIS round is asking about (batch-local order); `feedback`, when present for a
 /// batch-local position, is a one-line note on why that finding's PRIOR attempt was
@@ -3642,10 +3689,7 @@ fn build_fix_specific_block(
 ) -> String {
     let mut out = String::new();
     for (i, f) in findings.iter().enumerate() {
-        out.push_str(&format!(
-            "[{i}] rule {} — severity {} — {}:{}\n",
-            f.rule_id, f.severity, f.path, f.line
-        ));
+        out.push_str(&finding_block_header(&i.to_string(), f));
         if !f.snippet.is_empty() {
             out.push_str(&format!(
                 "Snippet: {}\n",
@@ -3656,15 +3700,7 @@ fn build_fix_specific_block(
             "Detail: {}\n",
             camerata_secrets::redact_str(&f.detail)
         ));
-        if !f.captures.is_empty() {
-            let caps = f
-                .captures
-                .iter()
-                .map(|(k, v)| format!("{k}={v}"))
-                .collect::<Vec<_>>()
-                .join(", ");
-            out.push_str(&format!("Captured objects: {caps}\n"));
-        }
+        out.push_str(&captured_objects_line(f));
         let context = fix_context_window(files, &f.path, f.line, 8);
         if !context.is_empty() {
             out.push_str(&format!("Surrounding code:\n{context}"));
@@ -4543,7 +4579,7 @@ async fn audit_pass(
     meter: Option<&UsageMeter>,
 ) -> anyhow::Result<(Vec<Finding>, Vec<ProposedRule>, Vec<String>)> {
     let mut req = LlmRequest::new(prompt)
-        .with_system(audit_system_prompt_with(efficiency_of(meter).terse_output))
+        .with_system(audit_system_prompt_with(terse_output_of(meter)))
         .with_max_tokens(8192);
     if let Some(m) = audit_model {
         req = req.with_model(m.to_string());
@@ -4690,15 +4726,22 @@ fn build_repo_map(files: &[(String, String)]) -> String {
          directories are repositories vs services vs controllers, where a named type lives):\n",
     );
     for (path, content) in files {
-        let syms = extract_public_symbols(content);
-        if syms.is_empty() {
-            out.push_str(&format!("  {path}\n"));
-        } else {
-            out.push_str(&format!("  {path}  [{}]\n", syms.join(", ")));
-        }
+        out.push_str(&repo_map_line(path, content));
     }
     out.push('\n');
     out
+}
+
+/// One file's line of the repo map: its path and the public symbols it defines. ONE definition
+/// for the map every scan pass reads and for the detail regeneration's view of a file the
+/// finding names.
+fn repo_map_line(path: &str, content: &str) -> String {
+    let syms = extract_public_symbols(content);
+    if syms.is_empty() {
+        format!("  {path}\n")
+    } else {
+        format!("  {path}  [{}]\n", syms.join(", "))
+    }
 }
 
 /// Max concurrent LLM calls + rules-per-batch for the parallel mode. Tunable.
@@ -4873,7 +4916,7 @@ async fn run_passes(
             // cross-cutting All group keeps advisory enabled so novel issues are surfaced
             // exactly once — against every file — with no per-language re-flagging.
             let advisory = !advisory_disabled && bi == 0;
-            let task_line = pass_task_line(advisory, bi, n_b, eff.terse_output);
+            let task_line = pass_task_line(advisory, bi, n_b, terse_output_of(meter));
             // PROMPT ORDER IS CACHE-AWARE, with the SHARED content leading, then the
             // PER-CHUNK content, then the PER-BATCH (varying) content trailing — built by
             // `build_pass_prompt` (shared verbatim with `run_passes_batch` so the two
@@ -5107,7 +5150,7 @@ async fn run_passes_batch(
             // duplicate novel findings for each language group (the problem advisory_disabled
             // was introduced to prevent in the parallel path).
             let advisory = !advisory_disabled && bi == 0;
-            let task_line = pass_task_line(advisory, bi, n_b, eff.terse_output);
+            let task_line = pass_task_line(advisory, bi, n_b, terse_output_of(meter));
             // Same `build_pass_prompt` builder as `run_passes` — see the extensive comment
             // there and on `cache_breakpoints_for_pass`. In BATCH mode this matters even
             // more: the default `BATCH_RULE_BATCH_SIZE = usize::MAX` puts every rule in ONE
@@ -5132,7 +5175,7 @@ async fn run_passes_batch(
             let custom_id = format!("c{ci}-b{bi}");
             let req = {
                 let mut r = LlmRequest::new(prompt.clone())
-                    .with_system(audit_system_prompt_with(eff.terse_output))
+                    .with_system(audit_system_prompt_with(terse_output_of(meter)))
                     .with_max_tokens(8192)
                     .with_model(model.clone())
                     .with_cache_breakpoints(cache_bps.clone());
@@ -5161,7 +5204,7 @@ async fn run_passes_batch(
     let mut per_item_usd: Option<f64> = None;
     if !hint_refuses {
         if let Some((ci0, bi0, prompt0, cache_bps0)) = work_meta.first() {
-            let sample_req = sample_count_request(prompt0, cache_bps0, eff.terse_output);
+            let sample_req = sample_count_request(prompt0, cache_bps0, terse_output_of(meter));
             if let Some(exact) = crate::llm::exact_input_token_count(llm, &sample_req, &model).await
             {
                 eprintln!(
@@ -8414,12 +8457,17 @@ pub async fn audit_repo(
     // `merge_by_location` above reads no `detail`, so it ran on the short one. A finding whose
     // detail could not be written stays, marked, and is reported as a failed pass. See
     // `detail_regen`'s module comment for the per-consumer table.
-    if efficiency_of(meter).terse_output {
+    if meter.is_none() {
+        warn_terse_needs_meter(repo);
+    }
+    if terse_output_of(meter) {
+        // The whole redacted file set, not just the files this run scanned: on an incremental
+        // run `files` is only the changed ones, and a statement can name any file of the repo.
         let (regenerated, regen_failed) = regenerate_full_details(
             llm,
             repo,
             std::mem::take(&mut all_findings),
-            files,
+            map_files.unwrap_or(files),
             &effective_selected,
             audit_model.as_deref(),
             meter,
@@ -9190,18 +9238,11 @@ async fn run_security_lens(
     // survivors. A lens finding that could not get one keeps the short detail plus the
     // incomplete marker, and the lens reports it in its `error` note (the deep tier's own
     // failed-pass path), so it is never dropped and never silently short.
-    let findings = if efficiency_of(meter).terse_output {
+    let mut lens_notes: Vec<String> = Vec::new();
+    let findings = if terse_output_of(meter) {
         let (findings, failed) =
             regenerate_full_details(llm, repo, findings, files, &[], audit_model, meter).await;
-        if !failed.is_empty() {
-            result.error = Some(
-                failed
-                    .iter()
-                    .map(|f| format!("{}: {}", f.pass, f.reason))
-                    .collect::<Vec<_>>()
-                    .join("; "),
-            );
-        }
+        lens_notes.extend(failed.iter().map(|f| format!("{}: {}", f.pass, f.reason)));
         findings
     } else {
         findings
@@ -9210,7 +9251,7 @@ async fn run_security_lens(
     // A failed (or refused) security pass must not read as "no security findings": say so on
     // the lens result, the same field the other lenses use when they fail.
     if !sec_failures.is_empty() {
-        result.error = Some(format!(
+        lens_notes.push(format!(
             "{} of {} security pass(es) failed, so findings from them are missing: {}",
             sec_failures.len(),
             sec_ok + sec_failures.len(),
@@ -9220,6 +9261,9 @@ async fn run_security_lens(
                 .collect::<Vec<_>>()
                 .join("; ")
         ));
+    }
+    if !lens_notes.is_empty() {
+        result.error = Some(lens_notes.join("; "));
     }
     result
 }
@@ -9286,9 +9330,7 @@ async fn run_security_passes(
                 // The security lens swaps in its own system prompt; everything else mirrors
                 // `audit_pass` (streaming + meter + robust parse).
                 let mut req = LlmRequest::new(prompt)
-                    .with_system(deep_security_system_prompt_with(
-                        efficiency_of(meter).terse_output,
-                    ))
+                    .with_system(deep_security_system_prompt_with(terse_output_of(meter)))
                     .with_max_tokens(8192);
                 if let Some(m) = audit_model {
                     req = req.with_model(m.to_string());
@@ -9446,7 +9488,7 @@ pub async fn run_deep_tier(
     }
 }
 
-mod detail_regen;
+pub(crate) mod detail_regen;
 use detail_regen::regenerate_full_details;
 
 #[cfg(test)]

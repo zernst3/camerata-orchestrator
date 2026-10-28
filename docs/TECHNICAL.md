@@ -2835,11 +2835,44 @@ against a runaway bill, not a saving, so it fails loudly:
    `merge_by_location` and before calibration, `audit_repo` calls
    `detail_regen::regenerate_full_details`, which writes the full `detail` of the
    findings that survived, in batches of 25 (one call per batch, `Stage::DetailRegeneration`,
-   shown as "detail" in the telemetry table, `STAGE_DETAIL` for the spend limit). The
-   headline (the scan's `title`, before `HEADLINE_SEP`) is kept and only the explanation
-   after it is replaced. The call sees the rule's directive, the short statement, the
-   snippet, the captures and six lines of code either side of the finding, on the scan
-   model. Nothing in `onboard.rs` changed for this except one line in the cache key.
+   shown as "detail" in the telemetry table, `STAGE_DETAIL` for the spend limit and for the
+   failed-pass name). The headline (the scan's `title`, before the first `HEADLINE_SEP`; the
+   parser keeps the title free of one) is kept and only the explanation after it is replaced.
+   The call sees the rule's directive, the short statement, the snippet, the captures, six
+   lines of code either side of the finding and, for every file or symbol the headline or
+   statement names, a bounded excerpt (the first match per token, three lines either side, at
+   most 20 lines per finding) with that file's repo-map line, resolved in the WHOLE redacted
+   file set of the repo (`map_files.unwrap_or(files)`), so on an incremental run a file that
+   was not rescanned is still shown. It runs on the scan model. Nothing in `onboard.rs`
+   changed for this except one line in the cache key.
+   **Without a meter the measure is off.** `terse_output_of(meter)` is false for a path that
+   passes no `UsageMeter` (the spend limit, the telemetry row and the operator's opt-out all
+   live on the meter), so such a path scans exactly as before rank 4 and says so on stderr.
+   The rescan-alternatives endpoint builds a meter from the environment
+   (`RunControls::from_env`) so `CAMERATA_EFFICIENCY=terse_output=off` reaches it.
+
+**The reply is not trusted.** The regenerated text feeds severity decisions, so each entry is
+accepted on its own and only when all of these hold (`detail_regen::accept_entry`, tests in
+`detail_regen_tests.rs`):
+
+- It is addressed by an opaque id (six hex digits of a hash of the finding's place in the run,
+  not its position) and echoes the finding's path and line. A reply numbered from 1, a reply
+  in another order, an id the batch does not have, an id used twice, a wrong echo: none of
+  these can land a text on a neighbour; the entry is simply not written.
+- Every path or identifier the short statement names (a token with `/`, `::`, `_`, a file
+  extension or CamelCase) appears in the text, spelled as given.
+- It makes no exploit precondition (`mentions_exploit_precondition`, the phrase list
+  calibration's raise-block and the D5 cap already use; one list) that neither the short
+  statement nor the code shown makes. An invented "requires a valid session" would stop
+  calibration raising a critical on a claim nobody made. The check can reject a harmless
+  "depends on", which costs a marker and not a wrong severity; the sweep reports the rate.
+- A statement that begins "Borderline:" keeps it: the text gets "Borderline: " put back at the
+  front when it lost it.
+
+An entry that fails is treated exactly like one the model left out: it stays pending, the
+repeat round runs it again in a batch of half the size (13), and what is still unwritten
+then gets the marker. A reply cut off at the output limit is discarded whole, counted as
+waste in the telemetry, and repeated the same way.
 
 **Who reads `detail`, and on which text.** `detail` is evidence text for several
 consumers. Each one's choice, and the test that pins it (all in
@@ -2863,7 +2896,8 @@ same-location duplicates), but it is not measured; the sweep's `cross-family-mer
 counts show it.
 
 **Never short, never dropped.** A finding whose regeneration did not happen (the call
-failed twice, the model left it out twice, or the spend limit stopped the step) keeps the
+failed twice, the model left it out or failed a check twice, or the spend limit stopped the
+step) keeps the
 scan's one-sentence detail, gets the visible marker `[detail incomplete]` appended, and
 the run records a `FailedPass` named "detail regeneration" with the count. That is the
 existing failed-pass path, so the export's methodology and summary disclose it (the
@@ -2896,6 +2930,11 @@ comes from). Dropping `proposed_rules` from non-advisory passes is a saving rega
 Whether the scan's output is dominated by `detail` at all is unmeasured; the per-stage
 telemetry (scan "out" tokens against the new "detail" row) is how the API sweep decides.
 
+**Prompt pins.** The terse scan prompt, the deep security lens's terse prompt and the
+regeneration prompt are hashed next to `AUDIT_PROMPT_SCHEMA_VERSION` in
+`scan_cache::ai_key_tests::the_terse_prompts_are_pinned_to_the_prompt_schema_version`, so
+editing one fails until the version is bumped and the pin updated.
+
 **Cache key.** `AiScanKey` gained `terse_output` (absent in a key stored before it, read
 as false): findings written under the other setting answered a different question, so a
 baseline from one setting is not reused under the other. This is what lets the sweep flip
@@ -2908,7 +2947,8 @@ suppressed would show as lost recall); the duplicate-merge counts at `ai-locatio
 and `cross-family-merge` (rows in, rows out, `also_matches` sizes), since the cross-family
 merge decides on the regenerated text; the calibration verdict distribution (severity
 moves, `needs-review` share, floor and ceiling rationales fired); the share of findings
-carrying `[detail incomplete]` (it should be zero); and the cost split, scan output tokens
+carrying `[detail incomplete]` (it should be zero; a high rate means the grounding or
+precondition checks are rejecting good text); and the cost split, scan output tokens
 and the "detail" stage against the previous run's scan output.
 
 The ZIP holds four entries, and they are deliberately not three views of the same

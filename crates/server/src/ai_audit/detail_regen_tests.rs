@@ -13,7 +13,8 @@
 use std::sync::Mutex;
 
 use super::detail_regen::{
-    mark_detail_incomplete, regenerate_full_details, DETAIL_FAILED_PASS, DETAIL_INCOMPLETE_MARKER,
+    accept_entry, mark_detail_incomplete, named_tokens, regenerate_full_details, Entry, Reject,
+    DETAIL_INCOMPLETE_MARKER,
 };
 use super::*;
 use crate::cost_cap::RunControls;
@@ -51,6 +52,21 @@ fn role_of(system: &str) -> Role {
     }
 }
 
+fn stub_response(text: String) -> LlmResponse {
+    LlmResponse {
+        text,
+        model: "stub".to_string(),
+        backend: "api".to_string(),
+        cost_usd: Some(0.01),
+        input_tokens: Some(1_000),
+        output_tokens: Some(100),
+        cache_read_input_tokens: 0,
+        cache_creation_input_tokens: 0,
+        or_cache_discount: None,
+        truncated: false,
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Regen {
     /// Writes [`FULL`] for every finding it is asked about.
@@ -61,11 +77,44 @@ enum Regen {
     Down,
     /// Writes [`FULL`] for the first finding of each batch only.
     FirstOnly,
+    /// Numbers its entries from 1 instead of echoing the ids it was given.
+    OneIndexed,
+    /// Answers in reverse order, ids and echoes correct.
+    Reversed,
+    /// Leaves the last finding of each batch out.
+    DropsLast,
+    /// Echoes the wrong line.
+    WrongLine,
+    /// Adds an exploit precondition the statement never made.
+    InventsPrecondition,
+    /// The first call is cut off at the output limit; later calls write normally.
+    TruncatedOnce,
+}
+
+/// The findings a regeneration prompt asks about: `(id, path, line)` from each block header.
+fn asked(prompt: &str) -> Vec<(String, String, u64)> {
+    prompt
+        .lines()
+        .filter(|l| l.starts_with('[') && l.contains("] rule "))
+        .filter_map(|l| {
+            let id = l[1..l.find(']')?].to_string();
+            let place = l.rsplit(" \u{2014} ").next()?;
+            let (path, line) = place.rsplit_once(':')?;
+            Some((id, path.to_string(), line.parse().ok()?))
+        })
+        .collect()
+}
+
+/// The text a well-behaved model writes for the finding at `line`: [`FULL`] plus its own line,
+/// so a detail that lands on the wrong finding is visible.
+fn full_for(line: u64) -> String {
+    format!("{FULL} (finding at line {line})")
 }
 
 struct RoleLlm {
     scan: String,
     regen: Regen,
+    regen_calls: std::sync::atomic::AtomicUsize,
     log: Mutex<Vec<(Role, LlmRequest)>>,
 }
 
@@ -74,6 +123,7 @@ impl RoleLlm {
         Self {
             scan: scan.to_string(),
             regen,
+            regen_calls: std::sync::atomic::AtomicUsize::new(0),
             log: Mutex::new(Vec::new()),
         }
     }
@@ -110,35 +160,52 @@ impl LlmPort for RoleLlm {
             Role::Regen => match self.regen {
                 Regen::Down => anyhow::bail!("transport down"),
                 Regen::Garbage => "not json".to_string(),
-                Regen::Writes | Regen::FirstOnly => {
-                    let asked = (0..64)
-                        .take_while(|i| req.prompt.contains(&format!("[{i}] rule ")))
-                        .count();
-                    let n = if self.regen == Regen::FirstOnly {
-                        asked.min(1)
-                    } else {
-                        asked
-                    };
-                    let entries: Vec<String> = (0..n)
-                        .map(|i| format!(r#"{{"index":{i},"detail":"{FULL}"}}"#))
+                _ => {
+                    let call = self
+                        .regen_calls
+                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let mut rows = asked(&req.prompt);
+                    match self.regen {
+                        Regen::FirstOnly => rows.truncate(1),
+                        Regen::DropsLast => {
+                            rows.pop();
+                        }
+                        Regen::Reversed => rows.reverse(),
+                        _ => {}
+                    }
+                    let entries: Vec<String> = rows
+                        .iter()
+                        .enumerate()
+                        .map(|(n, (id, path, line))| {
+                            let (id, line_echo, text) = match self.regen {
+                                Regen::OneIndexed => ((n + 1).to_string(), *line, full_for(*line)),
+                                Regen::WrongLine => (id.clone(), line + 1, full_for(*line)),
+                                Regen::InventsPrecondition => (
+                                    id.clone(),
+                                    *line,
+                                    format!("{} It requires a valid session first.", full_for(*line)),
+                                ),
+                                _ => (id.clone(), *line, full_for(*line)),
+                            };
+                            format!(
+                                r#"{{"id":"{id}","path":"{path}","line":{line_echo},"detail":"{text}"}}"#
+                            )
+                        })
                         .collect();
-                    format!(r#"{{"details":[{}]}}"#, entries.join(","))
+                    let body = format!(r#"{{"details":[{}]}}"#, entries.join(","));
+                    if self.regen == Regen::TruncatedOnce && call == 0 {
+                        return Ok(LlmResponse {
+                            text: body,
+                            truncated: true,
+                            ..stub_response(String::new())
+                        });
+                    }
+                    body
                 }
             },
             Role::Calibrate | Role::Other => "{}".to_string(),
         };
-        Ok(LlmResponse {
-            text,
-            model: "stub".to_string(),
-            backend: "api".to_string(),
-            cost_usd: Some(0.01),
-            input_tokens: Some(1_000),
-            output_tokens: Some(100),
-            cache_read_input_tokens: 0,
-            cache_creation_input_tokens: 0,
-            or_cache_discount: None,
-            truncated: false,
-        })
+        Ok(stub_response(text))
     }
     async fn complete_streaming(
         &self,
@@ -296,10 +363,7 @@ async fn switch_off_sends_the_old_system_prompt_and_makes_no_regeneration_call()
     }
     assert_eq!(findings.len(), 1);
     assert!(findings[0].detail.contains(FULL));
-    assert!(
-        failed.iter().all(|f| f.pass != DETAIL_FAILED_PASS),
-        "{failed:?}"
-    );
+    assert!(failed.iter().all(|f| f.pass != STAGE_DETAIL), "{failed:?}");
     assert!(meter
         .stage_telemetry(0)
         .stages
@@ -367,7 +431,7 @@ async fn every_pass_of_a_terse_scan_shares_one_system_prompt() {
         false,
     )
     .await;
-    assert!(err.is_none(), "{err:?}");
+    assert!(err.is_empty(), "{err:?}");
     assert_eq!(ok, 3);
     let systems = llm.systems(Role::Scan);
     assert_eq!(systems.len(), 3);
@@ -537,10 +601,7 @@ async fn audit_repo_hands_calibration_and_everything_after_it_the_full_detail() 
     );
     assert!(!findings[0].detail.contains(SHORT));
     assert!(!findings[0].detail.contains(DETAIL_INCOMPLETE_MARKER));
-    assert!(
-        failed.iter().all(|f| f.pass != DETAIL_FAILED_PASS),
-        "{failed:?}"
-    );
+    assert!(failed.iter().all(|f| f.pass != STAGE_DETAIL), "{failed:?}");
     // The regeneration is its own line in the per-stage telemetry.
     let telemetry = meter.stage_telemetry(0);
     let detail = telemetry
@@ -568,7 +629,7 @@ async fn only_the_findings_that_survive_the_merge_are_regenerated() {
     assert_eq!(findings.len(), 2);
     let regen = llm.prompts(Role::Regen);
     assert_eq!(regen.len(), 1, "one batched call, not one per finding");
-    assert!(regen[0].contains("[1] rule ") && !regen[0].contains("[2] rule "));
+    assert_eq!(asked(&regen[0]).len(), 2, "two survivors asked about");
 }
 
 // ── failure: marked, reported, never dropped ────────────────────────────────────────────────
@@ -595,7 +656,7 @@ async fn a_failed_regeneration_keeps_the_finding_marked_and_reports_a_failed_pas
         }
         let pass = failed
             .iter()
-            .find(|f| f.pass == DETAIL_FAILED_PASS)
+            .find(|f| f.pass == STAGE_DETAIL)
             .unwrap_or_else(|| panic!("a failed pass is reported: {failed:?}"));
         assert!(pass.reason.contains("2 of 2"), "{}", pass.reason);
         assert!(pass.reason.contains(DETAIL_INCOMPLETE_MARKER));
@@ -620,7 +681,7 @@ async fn a_partial_regeneration_repeats_for_what_was_left_out() {
     assert!(findings
         .iter()
         .all(|f| !f.detail.contains(DETAIL_INCOMPLETE_MARKER)));
-    assert!(failed.iter().all(|f| f.pass != DETAIL_FAILED_PASS));
+    assert!(failed.iter().all(|f| f.pass != STAGE_DETAIL));
     assert_eq!(llm.prompts(Role::Regen).len(), 2);
 }
 
@@ -636,10 +697,7 @@ async fn the_spend_limit_stopping_the_step_leaves_every_finding_marked() {
     let (findings, failed) = audit(&llm, &meter).await;
     assert_eq!(findings.len(), 1);
     assert!(findings[0].detail.contains(DETAIL_INCOMPLETE_MARKER));
-    assert!(
-        failed.iter().any(|f| f.pass == DETAIL_FAILED_PASS),
-        "{failed:?}"
-    );
+    assert!(failed.iter().any(|f| f.pass == STAGE_DETAIL), "{failed:?}");
     assert!(
         llm.prompts(Role::Regen).is_empty(),
         "no call after the limit bit"
@@ -665,12 +723,15 @@ async fn regeneration_alone_keeps_the_headline_and_replaces_only_the_explanation
     let (out, failed) =
         regenerate_full_details(&llm, REPO, input, &files(), &selected(), None, None).await;
     assert!(failed.is_empty());
-    assert_eq!(out[0].detail, format!("{TITLE}{HEADLINE_SEP}{FULL}"));
+    assert_eq!(
+        out[0].detail,
+        format!("{TITLE}{HEADLINE_SEP}{}", full_for(9))
+    );
     assert_eq!(
         out[1].detail,
-        format!("only a title, no explanation{HEADLINE_SEP}{FULL}")
+        format!("only a title, no explanation{HEADLINE_SEP}{}", full_for(9))
     );
-    assert_eq!(out[2].detail, FULL);
+    assert_eq!(out[2].detail, full_for(9));
     // The rule's directive and the surrounding code reached the prompt.
     let prompt = llm.prompts(Role::Regen).join("\n");
     assert!(prompt.contains("Rule: Verify the webhook signature."));
@@ -773,7 +834,7 @@ async fn a_deep_security_regeneration_failure_marks_the_finding_and_reports_on_t
     assert!(result
         .error
         .as_deref()
-        .is_some_and(|e| e.contains(DETAIL_FAILED_PASS)));
+        .is_some_and(|e| e.contains(STAGE_DETAIL)));
 }
 
 #[tokio::test]
@@ -796,4 +857,361 @@ async fn the_deep_security_lens_with_the_switch_off_is_unchanged() {
     assert_eq!(llm.systems(Role::Scan), vec![deep_security_system_prompt()]);
     assert!(llm.prompts(Role::Regen).is_empty());
     assert!(result.security_findings[0].detail.contains(SHORT));
+}
+
+// ── the reply is not trusted ────────────────────────────────────────────────────────────────
+
+/// The distinct text each of two findings (lines 9 and 49) must end up with.
+fn own_text_landed(findings: &[Finding]) -> bool {
+    findings.iter().all(|f| {
+        let own = format!("(finding at line {})", f.line);
+        let other = if f.line == 9 { "line 49" } else { "line 9)" };
+        f.detail.contains(&own) && !f.detail.contains(other)
+    })
+}
+
+#[tokio::test]
+async fn a_reply_numbered_from_one_is_not_written_onto_its_neighbours() {
+    let llm = RoleLlm::new(&terse_scan(2), Regen::OneIndexed);
+    let meter = meter_with(EfficiencyConfig::default());
+    let (findings, failed) = audit(&llm, &meter).await;
+    assert_eq!(findings.len(), 2);
+    for f in &findings {
+        assert!(f.detail.contains(DETAIL_INCOMPLETE_MARKER), "{}", f.detail);
+        assert!(!f.detail.contains("(finding at line"), "{}", f.detail);
+    }
+    assert!(failed
+        .iter()
+        .any(|f| f.pass == STAGE_DETAIL && f.reason.contains("2 of 2")));
+}
+
+#[tokio::test]
+async fn a_reordered_reply_lands_each_text_on_its_own_finding() {
+    let llm = RoleLlm::new(&terse_scan(2), Regen::Reversed);
+    let meter = meter_with(EfficiencyConfig::default());
+    let (findings, failed) = audit(&llm, &meter).await;
+    assert_eq!(findings.len(), 2);
+    assert!(own_text_landed(&findings), "{findings:?}");
+    assert!(failed.iter().all(|f| f.pass != STAGE_DETAIL));
+    assert_eq!(
+        llm.prompts(Role::Regen).len(),
+        1,
+        "nothing needed repeating"
+    );
+}
+
+#[tokio::test]
+async fn a_dropped_id_leaves_only_that_finding_unwritten() {
+    let llm = RoleLlm::new(&terse_scan(2), Regen::DropsLast);
+    let meter = meter_with(EfficiencyConfig::default());
+    let (mut findings, failed) = audit(&llm, &meter).await;
+    findings.sort_by_key(|f| f.line);
+    assert!(findings[0].detail.contains("(finding at line 9)"));
+    assert!(!findings[0].detail.contains(DETAIL_INCOMPLETE_MARKER));
+    assert!(findings[1].detail.contains(DETAIL_INCOMPLETE_MARKER));
+    assert!(findings[1].detail.contains(SHORT));
+    assert!(failed
+        .iter()
+        .any(|f| f.pass == STAGE_DETAIL && f.reason.contains("1 of 2")));
+}
+
+#[tokio::test]
+async fn an_entry_that_echoes_the_wrong_line_is_not_written() {
+    let llm = RoleLlm::new(&terse_scan(1), Regen::WrongLine);
+    let meter = meter_with(EfficiencyConfig::default());
+    let (findings, failed) = audit(&llm, &meter).await;
+    assert!(findings[0].detail.contains(DETAIL_INCOMPLETE_MARKER));
+    assert!(!findings[0].detail.contains("(finding at line"));
+    assert!(failed.iter().any(|f| f.pass == STAGE_DETAIL));
+}
+
+#[tokio::test]
+async fn an_invented_exploit_precondition_keeps_the_short_statement() {
+    // "It requires a valid session first" would stop calibration raising this to critical, on a
+    // claim neither the statement nor the code makes.
+    let llm = RoleLlm::new(&terse_scan(1), Regen::InventsPrecondition);
+    let meter = meter_with(EfficiencyConfig::default());
+    let (findings, failed) = audit(&llm, &meter).await;
+    assert!(findings[0].detail.contains(SHORT));
+    assert!(findings[0].detail.contains(DETAIL_INCOMPLETE_MARKER));
+    assert!(!findings[0].detail.contains("requires a valid session"));
+    assert!(failed.iter().any(|f| f.pass == STAGE_DETAIL));
+    // And what calibration saw was never the invented text.
+    assert!(!llm
+        .prompts(Role::Calibrate)
+        .join("\n")
+        .contains("requires a valid session"));
+}
+
+fn entry(f: &Finding, detail: &str) -> Entry {
+    Entry {
+        id: "x".to_string(),
+        path: Some(f.path.clone()),
+        line: Some(f.line as u64),
+        detail: detail.to_string(),
+    }
+}
+
+fn statement(short: &str) -> Finding {
+    finding(&format!("{TITLE}{HEADLINE_SEP}{short}"))
+}
+
+#[test]
+fn accept_entry_requires_the_echo_the_named_tokens_and_no_new_precondition() {
+    let f = statement(SHORT);
+    // The echo.
+    let mut wrong_path = entry(&f, FULL);
+    wrong_path.path = Some("other.rs".to_string());
+    assert_eq!(accept_entry(&f, &wrong_path, ""), Err(Reject::Mismatch));
+    let mut no_line = entry(&f, FULL);
+    no_line.line = None;
+    assert_eq!(accept_entry(&f, &no_line, ""), Err(Reject::Mismatch));
+    // Every path or identifier the statement names must survive.
+    assert_eq!(
+        accept_entry(
+            &f,
+            &entry(&f, "The handler trusts a flag from src/config.rs."),
+            ""
+        ),
+        Err(Reject::DropsNamedToken(
+            "REQUIRE_WEBHOOK_SIGNATURE".to_string()
+        ))
+    );
+    assert_eq!(
+        accept_entry(
+            &f,
+            &entry(&f, "REQUIRE_WEBHOOK_SIGNATURE is trusted by the handler."),
+            ""
+        ),
+        Err(Reject::DropsNamedToken("src/config.rs".to_string()))
+    );
+    assert!(accept_entry(&f, &entry(&f, FULL), "").is_ok());
+    // A new precondition is refused, unless the statement or the code shown already makes it.
+    let invented = format!("{FULL} Exploiting it only if the caller holds a session.");
+    assert_eq!(
+        accept_entry(&f, &entry(&f, &invented), "let x = 1;"),
+        Err(Reject::InventedPrecondition)
+    );
+    assert!(accept_entry(&f, &entry(&f, &invented), "// only if the caller is local").is_ok());
+    let conditional = statement(&format!("{SHORT} Only if the flag is false."));
+    assert!(accept_entry(&conditional, &entry(&conditional, &invented), "").is_ok());
+    // "requires no ..." negates, and is not a precondition.
+    let negated = format!("{FULL} The endpoint requires no authentication.");
+    assert!(accept_entry(&f, &entry(&f, &negated), "").is_ok());
+}
+
+#[test]
+fn a_borderline_statement_stays_borderline() {
+    let f = statement(&format!("Borderline: {SHORT}"));
+    let kept = accept_entry(&f, &entry(&f, FULL), "").unwrap();
+    assert_eq!(kept, format!("Borderline: {FULL}"));
+    // Already there, in any case: not doubled.
+    let said = format!("borderline: {FULL}");
+    assert_eq!(accept_entry(&f, &entry(&f, &said), "").unwrap(), said);
+    // A confident statement is not made borderline.
+    let confident = statement(SHORT);
+    assert_eq!(
+        accept_entry(&confident, &entry(&confident, FULL), "").unwrap(),
+        FULL
+    );
+}
+
+#[test]
+fn named_tokens_are_paths_and_identifiers_not_words() {
+    let tokens: Vec<String> = named_tokens(
+        "Trusts `REQUIRE_WEBHOOK_SIGNATURE` from src/config.rs, e.g. the WebhookPayload, via std::fs and webhook.rs.",
+    )
+    .into_iter()
+    .map(|t| t.text)
+    .collect();
+    assert_eq!(
+        tokens,
+        vec![
+            "REQUIRE_WEBHOOK_SIGNATURE",
+            "src/config.rs",
+            "WebhookPayload",
+            "std::fs",
+            "webhook.rs"
+        ]
+    );
+    let paths: Vec<bool> = named_tokens("src/config.rs and CamelCaseName")
+        .into_iter()
+        .map(|t| t.is_path)
+        .collect();
+    assert_eq!(paths, vec![true, false]);
+}
+
+#[test]
+fn a_title_with_the_separator_in_it_cannot_move_the_headline_boundary() {
+    let raw = r#"{"findings":[{"path":"a.rs","line":3,"severity":"low","rule":"x","title":"Flag set here \u2014 trusted there","code":"c();","detail":"short"}]}"#;
+    let (findings, _) = parse_ai_findings(REPO, raw, &Default::default());
+    assert_eq!(
+        findings[0].detail,
+        format!("Flag set here - trusted there{HEADLINE_SEP}short")
+    );
+}
+
+// ── what the regeneration is shown ──────────────────────────────────────────────────────────
+
+#[test]
+fn a_finding_that_names_another_file_gets_that_files_excerpt_and_repo_map_line() {
+    let files = files();
+    let f = statement(SHORT);
+    let prompt = build_block_for_test(&f, &files);
+    assert!(prompt.contains("Files the statement names"), "{prompt}");
+    assert!(
+        prompt.contains("  src/config.rs"),
+        "the repo-map line of the named file: {prompt}"
+    );
+    assert!(
+        prompt.contains("src/config.rs:\n1: pub const REQUIRE_WEBHOOK_SIGNATURE: bool = false;"),
+        "an excerpt of the named file around the symbol: {prompt}"
+    );
+    // Bounded.
+    let excerpt_lines = prompt
+        .split("Files the statement names")
+        .nth(1)
+        .unwrap()
+        .lines()
+        .filter(|l| l.chars().next().is_some_and(|c| c.is_ascii_digit()))
+        .count();
+    assert!(excerpt_lines <= 20, "{excerpt_lines}");
+}
+
+fn build_block_for_test(f: &Finding, files: &[(String, String)]) -> String {
+    // The block the regeneration builds, read back from the prompt of a real call.
+    let llm = RoleLlm::new("{}", Regen::Garbage);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let _ = regenerate_full_details(&llm, REPO, vec![f.clone()], files, &[], None, None).await;
+    });
+    llm.prompts(Role::Regen).remove(0)
+}
+
+#[test]
+fn a_statement_naming_nothing_adds_no_excerpt_section() {
+    let files = files();
+    let f = statement("The handler skips the check.");
+    assert!(!build_block_for_test(&f, &files).contains("Files the statement names"));
+}
+
+#[tokio::test]
+async fn on_an_incremental_run_the_named_file_comes_from_the_whole_repo_not_the_scanned_files() {
+    // Only the handler changed since the last scan; config.rs is in the repo map set.
+    let all = files();
+    let changed: Vec<(String, String)> = vec![all[1].clone()];
+    let llm = RoleLlm::new(&terse_scan(1), Regen::Writes);
+    let meter = meter_with(EfficiencyConfig::default());
+    let (findings, _p, _r, failed, _s) = audit_repo(
+        &llm,
+        REPO,
+        &changed,
+        &selected(),
+        &[],
+        &std::collections::HashMap::new(),
+        None,
+        None,
+        ScanMode::Sequential,
+        false,
+        None,
+        None,
+        Some(&meter),
+        Some(&all),
+    )
+    .await
+    .unwrap();
+    let regen = llm.prompts(Role::Regen).join("\n");
+    assert!(
+        regen.contains("pub const REQUIRE_WEBHOOK_SIGNATURE"),
+        "the file the statement names must be shown even though it was not rescanned: {regen}"
+    );
+    assert!(findings[0].detail.contains(FULL), "{}", findings[0].detail);
+    assert!(failed.iter().all(|f| f.pass != STAGE_DETAIL));
+}
+
+// ── the repeat round, and running without a meter ───────────────────────────────────────────
+
+#[tokio::test]
+async fn the_repeat_round_uses_half_the_batch_size() {
+    // 30 findings in batches of 25 and 5; none written; the repeat runs 13, 13 and 4.
+    let findings: Vec<Finding> = (0..30)
+        .map(|i| {
+            let mut f = statement(SHORT);
+            f.line = i + 1;
+            f
+        })
+        .collect();
+    let llm = RoleLlm::new("{}", Regen::Garbage);
+    let (out, failed) =
+        regenerate_full_details(&llm, REPO, findings, &files(), &[], None, None).await;
+    let sizes: Vec<usize> = llm
+        .prompts(Role::Regen)
+        .iter()
+        .map(|p| asked(p).len())
+        .collect();
+    assert_eq!(sizes, vec![25, 5, 13, 13, 4]);
+    assert_eq!(out.len(), 30, "none dropped");
+    assert!(out
+        .iter()
+        .all(|f| f.detail.contains(DETAIL_INCOMPLETE_MARKER)));
+    assert!(failed[0].reason.contains("30 of 30"));
+}
+
+#[tokio::test]
+async fn a_cut_off_reply_is_discarded_counted_as_waste_and_repeated() {
+    let llm = RoleLlm::new(&terse_scan(2), Regen::TruncatedOnce);
+    let meter = meter_with(EfficiencyConfig::default());
+    let (findings, failed) = audit(&llm, &meter).await;
+    assert!(own_text_landed(&findings), "{findings:?}");
+    assert!(failed.iter().all(|f| f.pass != STAGE_DETAIL));
+    assert_eq!(llm.prompts(Role::Regen).len(), 2);
+    let telemetry = meter.stage_telemetry(0);
+    let usage = &telemetry
+        .stages
+        .iter()
+        .find(|s| s.stage == Stage::DetailRegeneration)
+        .unwrap()
+        .usage;
+    assert_eq!(usage.calls, 2);
+    assert_eq!(usage.wasted_calls, 1);
+}
+
+#[tokio::test]
+async fn without_a_meter_the_scan_runs_exactly_as_before_rank_4() {
+    assert!(!terse_output_of(None));
+    assert!(terse_output_of(Some(&meter_with(
+        EfficiencyConfig::default()
+    ))));
+    let llm = RoleLlm::new(
+        &format!(
+            r#"{{"findings":[{{"path":"{HANDLER}","line":9,"severity":"high","rule":"ARCH-X-1","title":"{TITLE}","code":"{SNIPPET}","detail":"{FULL}"}}],"proposed_rules":[],"needs_files":[]}}"#
+        ),
+        Regen::Writes,
+    );
+    let files = files();
+    let (findings, _p, _r, failed, _s) = audit_repo(
+        &llm,
+        REPO,
+        &files,
+        &selected(),
+        &[],
+        &std::collections::HashMap::new(),
+        None,
+        None,
+        ScanMode::Sequential,
+        false,
+        None,
+        None,
+        None,
+        Some(&files),
+    )
+    .await
+    .unwrap();
+    assert_eq!(llm.roles(), vec![Role::Scan, Role::Calibrate]);
+    assert_eq!(llm.systems(Role::Scan), vec![audit_system_prompt()]);
+    assert!(!llm.prompts(Role::Scan)[0].contains("In THIS pass only"));
+    assert!(findings[0].detail.contains(FULL));
+    assert!(failed.iter().all(|f| f.pass != STAGE_DETAIL));
 }

@@ -16,12 +16,24 @@
 //!
 //! The reasons and the tests that pin each row are in `docs/TECHNICAL.md`, "Terse scan output".
 //!
+//! # The reply is not trusted
+//!
+//! The regenerated text feeds severity decisions, so a reply is accepted per finding, and only
+//! when it passes four checks (see [`accept_entry`]). It is addressed by an opaque id and echoes
+//! the finding's path and line (a reply numbered from 1, or reordered, cannot land on a
+//! neighbour); it must keep every path or identifier the short statement named; it must not add
+//! an exploit precondition that neither the statement nor the code shown makes (the same phrase
+//! list calibration's raise-block uses, [`mentions_exploit_precondition`]); and a borderline
+//! statement stays borderline. An entry that fails is simply not written, exactly like one the
+//! model left out.
+//!
 //! # Never short, never dropped
 //!
 //! A finding the regeneration could not rewrite (the call failed, the spend limit stopped the
-//! stage, the model left it out twice) stays in the result with its short detail and a visible
-//! [`DETAIL_INCOMPLETE_MARKER`], and the run reports a `FailedPass`, the same path every other
-//! degraded stage uses. So the export can hold a short detail only with the marker beside it.
+//! stage, the model left it out or failed a check twice) stays in the result with its short
+//! detail and a visible [`DETAIL_INCOMPLETE_MARKER`], and the run reports a `FailedPass`, the same
+//! path every other degraded stage uses. So the export can hold a short detail only with the
+//! marker beside it.
 
 use super::*;
 
@@ -30,9 +42,6 @@ use super::*;
 /// findings would raise their prose overlap and could fuse them.
 pub(crate) const DETAIL_INCOMPLETE_MARKER: &str = "[detail incomplete]";
 
-/// The `FailedPass::pass` name the export's disclosure shows.
-pub(crate) const DETAIL_FAILED_PASS: &str = "detail regeneration";
-
 /// How many findings one regeneration call covers. Batched, not one call per finding: see
 /// "Cost arithmetic" in `docs/TECHNICAL.md` and `batching_beats_one_call_per_finding`.
 const DETAIL_BATCH_SIZE: usize = 25;
@@ -40,44 +49,62 @@ const DETAIL_BATCH_SIZE: usize = 25;
 /// Output budget per finding: 2 to 4 sentences is about 100 tokens, with headroom.
 const DETAIL_TOKENS_PER_FINDING: u32 = 160;
 
-/// Lines of code either side of the finding the regeneration shows (the scan saw the whole
-/// digest; this call sees only this window, so cross-file facts must already be in the short
-/// detail the scan wrote). Smaller than the fix prompt's 8: this call is paid for on every
-/// survivor, and the window is its main input.
+/// Lines of code either side of the finding the regeneration shows. Smaller than the fix prompt's
+/// 8: this call is paid for on every survivor, and the window is its main input.
 const DETAIL_CONTEXT_RADIUS: usize = 6;
 
-/// Attempts per finding: the first, and one repeat for what the first left out or failed on.
+/// Lines either side of the first occurrence of a token the statement names in ANOTHER place
+/// (a flag defined in a different file, a helper whose body decides the case).
+const EXCERPT_RADIUS: usize = 3;
+
+/// The most excerpt lines one finding gets from the files its statement names.
+const EXCERPT_LINE_BUDGET: usize = 20;
+
+/// The most tokens of one statement that are looked up in the file set.
+const MAX_LOOKUP_TOKENS: usize = 6;
+
+/// Attempts per finding: the first, and one repeat for what the first left out, failed a check
+/// on, or lost to a cut-off reply. The repeat uses half the batch size.
 const DETAIL_ROUNDS: usize = 2;
 
 /// The system prompt of the regeneration call.
-pub(super) fn detail_regen_system_prompt() -> String {
+pub(crate) fn detail_regen_system_prompt() -> String {
     r#"You write the full explanation for audit findings that were reported in one short sentence. A human architect reads it to decide what to do, so it must be specific to the code shown.
 
-For each finding below write `detail`: two to four sentences saying why THIS code is a problem and what the fix direction is.
+Each finding below starts with an opaque id in square brackets, then its location. For each finding write `detail`: two to four sentences saying why THIS code is a problem and what the fix direction is.
 
 Rules, every finding:
-- Keep every fact the short statement already makes: each file name, symbol, flag and other file it depends on stays in your explanation. Never contradict it.
-- Ground the rest in the evidence given for that finding (its rule, snippet and the surrounding code). NEVER state a fact about code you were not shown: you see only a few lines around the finding, not the files it mentions.
+- Keep every fact the short statement already makes: each file name, symbol, flag and other file it names stays in your explanation, spelled exactly as given. Never contradict it.
+- Ground the rest in the evidence given for that finding (its rule, snippet, the surrounding code and the excerpts from the files it names). NEVER state a fact about code you were not shown.
+- Do not add conditions the statement does not make. Do not write that exploiting it requires, depends on, is contingent on, assumes, or needs an attacker to do something unless the statement or the code shown says so.
 - If the statement says the case is borderline, keep saying so and say what would settle it.
 - Do not repeat the statement word for word and do not restate the rule's text.
 - Say WHAT is wrong and the DIRECTION of the fix. Do not mention Camerata, a scanner, the audit or any detection mechanism.
 - NEVER repeat a credential value, not even partly. Name the variable and the line instead.
 
 Return ONLY JSON, no prose:
-{"details":[{"index":0,"detail":"..."}]}
-One entry per finding, addressed by its [index]."#
+{"details":[{"id":"<the finding's id, copied exactly>","path":"<its path, copied exactly>","line":<its line number>,"detail":"..."}]}
+One entry per finding. An entry whose id, path or line does not match its finding is discarded."#
         .to_string()
         + crate::onboard::redact::MODEL_REDACTION_NOTICE
 }
 
 /// The one-line statement at the front of `Finding::detail`: the part [`parse_ai_findings`]
-/// wrote from the model's `title`, before [`HEADLINE_SEP`]. A text with no separator is a title
-/// on its own (or, rarely, a detail with no title); either way the whole text is kept as the
-/// headline so nothing the scan said is lost.
+/// wrote from the model's `title`, before the first [`HEADLINE_SEP`] (the parser keeps the title
+/// free of one, so the first is the boundary). A text with no separator is a title on its own
+/// (or, rarely, a detail with no title); either way the whole text is kept as the headline so
+/// nothing the scan said is lost.
 fn headline_of(detail: &str) -> &str {
     detail
         .split_once(HEADLINE_SEP)
         .map_or(detail, |(headline, _)| headline)
+}
+
+/// The scan's own explanation: everything after the headline (the whole text when there is none).
+fn short_statement_of(detail: &str) -> &str {
+    detail
+        .split_once(HEADLINE_SEP)
+        .map_or(detail, |(_, short)| short)
 }
 
 /// The detail a regenerated explanation produces: the finding's headline, then the explanation.
@@ -102,81 +129,368 @@ pub(crate) fn mark_detail_incomplete(f: &mut Finding) {
     }
 }
 
-/// The per-finding evidence the regeneration prompt shows, in batch order. Everything is
-/// redacted: the snippet, the statement and (via the caller's model-facing file set) the code.
-fn build_detail_regen_block(
-    findings: &[&Finding],
-    files: &[(String, String)],
-    directives: &std::collections::HashMap<String, String>,
-) -> String {
-    let mut out = String::new();
-    for (i, f) in findings.iter().enumerate() {
-        out.push_str(&format!(
-            "[{i}] rule {} — severity {} — {}:{}\n",
-            f.rule_id, f.severity, f.path, f.line
-        ));
-        if let Some(directive) = directives.get(&f.rule_id.to_ascii_uppercase()) {
-            out.push_str(&format!(
-                "Rule: {}\n",
-                camerata_secrets::redact_str(directive)
-            ));
+// ── tokens a statement names ────────────────────────────────────────────────────────────────
+
+/// The kinds of token a statement can name that the regenerated text must keep.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct NamedToken {
+    pub text: String,
+    /// A file path or file name (`src/config.rs`, `webhook.rs`), as opposed to a symbol.
+    pub is_path: bool,
+}
+
+/// Strip the punctuation a token picks up from the sentence around it.
+fn trim_token(raw: &str) -> &str {
+    raw.trim_matches(|c: char| {
+        matches!(
+            c,
+            '`' | '"'
+                | '\''
+                | '('
+                | ')'
+                | '['
+                | ']'
+                | '{'
+                | '}'
+                | ','
+                | ';'
+                | ':'
+                | '.'
+                | '!'
+                | '?'
+        )
+    })
+}
+
+/// `name.ext` with a plausible extension: a stem of two or more characters, an extension of one
+/// to five alphanumerics starting with a letter (`config.rs`, `app.tsx`; not `e.g`, not `3.5`).
+fn looks_like_file_name(token: &str) -> bool {
+    let Some((stem, ext)) = token.rsplit_once('.') else {
+        return false;
+    };
+    stem.chars().count() >= 2
+        && (1..=5).contains(&ext.len())
+        && ext.chars().all(|c| c.is_ascii_alphanumeric())
+        && ext.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
+        && stem
+            .chars()
+            .all(|c| c.is_alphanumeric() || matches!(c, '_' | '-' | '/' | '.'))
+}
+
+/// `WebhookPayload`, `parseURL`: a lowercase letter followed later by an uppercase one, in a
+/// token long enough to be an identifier rather than a word.
+fn looks_like_camel_case(token: &str) -> bool {
+    token.chars().count() >= 4
+        && token.chars().all(|c| c.is_alphanumeric())
+        && token
+            .chars()
+            .zip(token.chars().skip(1))
+            .any(|(a, b)| a.is_lowercase() && b.is_uppercase())
+}
+
+/// Every path-like or identifier-like token of `text`, in order of appearance, without repeats:
+/// a token containing `/`, `::`, `_`, a file extension, or CamelCase.
+pub(super) fn named_tokens(text: &str) -> Vec<NamedToken> {
+    let mut out: Vec<NamedToken> = Vec::new();
+    for raw in text.split_whitespace() {
+        let token = trim_token(raw);
+        if token.is_empty() {
+            continue;
         }
-        out.push_str(&format!(
-            "Short statement: {}\n",
-            camerata_secrets::redact_str(&f.detail)
-        ));
-        if !f.snippet.is_empty() {
-            out.push_str(&format!(
-                "Code: {}\n",
-                camerata_secrets::redact_str(&f.snippet)
-            ));
+        let is_file = looks_like_file_name(token);
+        let is_path = is_file || token.contains('/');
+        let is_symbol = token.contains("::") || token.contains('_') || looks_like_camel_case(token);
+        if !(is_path || is_symbol) {
+            continue;
         }
-        if !f.captures.is_empty() {
-            let caps = f
-                .captures
-                .iter()
-                .map(|(k, v)| format!("{k}={v}"))
-                .collect::<Vec<_>>()
-                .join(", ");
-            out.push_str(&format!("Captured objects: {caps}\n"));
+        if out.iter().any(|t| t.text == token) {
+            continue;
         }
-        let context = fix_context_window(files, &f.path, f.line, DETAIL_CONTEXT_RADIUS);
-        if !context.is_empty() {
-            out.push_str(&format!("Surrounding code:\n{context}"));
-        }
-        out.push('\n');
+        out.push(NamedToken {
+            text: token.to_string(),
+            is_path,
+        });
     }
     out
 }
 
-/// Parse `{"details":[{"index":N,"detail":"..."}]}` into batch-local index -> text. Malformed
-/// output, a missing array or a blank entry leaves that index absent: the caller treats an
-/// absent index as "not written", never as an empty explanation.
-fn parse_detail_regen(raw: &str) -> std::collections::HashMap<usize, String> {
-    let mut out = std::collections::HashMap::new();
-    let Some(json) = extract_json_object(raw) else {
-        return out;
-    };
-    let Ok(v) = serde_json::from_str::<serde_json::Value>(json) else {
-        return out;
-    };
-    let Some(arr) = v["details"].as_array() else {
-        return out;
-    };
-    for entry in arr {
-        let (Some(idx), Some(text)) = (entry["index"].as_u64(), entry["detail"].as_str()) else {
+// ── the evidence a finding is regenerated from ──────────────────────────────────────────────
+
+/// The file whose path is `token` (exact, or `token` is a trailing path of it, or it is a
+/// trailing path of `token`).
+fn file_named<'a>(files: &'a [(String, String)], token: &str) -> Option<&'a (String, String)> {
+    let token = token.trim_start_matches("./");
+    files.iter().find(|(p, _)| p == token).or_else(|| {
+        files
+            .iter()
+            .find(|(p, _)| p.ends_with(&format!("/{token}")) || token.ends_with(&format!("/{p}")))
+    })
+}
+
+/// The 1-based line of the first occurrence of `symbol` in `content`.
+fn first_line_with(content: &str, symbol: &str) -> Option<usize> {
+    content
+        .lines()
+        .position(|l| l.contains(symbol))
+        .map(|i| i + 1)
+}
+
+/// `radius` lines either side of `line` (1-based) of `content`, numbered, as
+/// `(first_line, last_line, text)`.
+fn numbered_excerpt(content: &str, line: usize, radius: usize) -> (usize, usize, String) {
+    let lines: Vec<&str> = content.lines().collect();
+    let idx = line.saturating_sub(1).min(lines.len().saturating_sub(1));
+    let start = idx.saturating_sub(radius);
+    let end = (idx + radius + 1).min(lines.len());
+    let text: String = lines[start..end]
+        .iter()
+        .enumerate()
+        .map(|(i, l)| format!("{}: {l}\n", start + i + 1))
+        .collect();
+    (start + 1, end, text)
+}
+
+/// Add a file's repo-map line to `lines` once.
+fn push_map_line(lines: &mut Vec<String>, path: &str, content: &str) {
+    let line = repo_map_line(path, content);
+    if !lines.contains(&line) {
+        lines.push(line);
+    }
+}
+
+/// Excerpts from the OTHER files a finding's headline and statement name: for each path token the
+/// file's repo-map line, and for each symbol token the first place it occurs (the files the
+/// statement names first, then the rest) with a few lines around it. At most
+/// [`EXCERPT_LINE_BUDGET`] lines, and never a place the finding's own window already shows.
+/// Empty when the statement names nothing that resolves. This is what keeps a cross-file
+/// finding (a flag set in one file, trusted in another) explainable on an incremental run,
+/// where the file it names is not among the files scanned.
+fn named_file_excerpts(f: &Finding, files: &[(String, String)]) -> String {
+    let tokens = named_tokens(&f.detail);
+    let named_files: Vec<&(String, String)> = tokens
+        .iter()
+        .filter(|t| t.is_path)
+        .filter_map(|t| file_named(files, &t.text))
+        .collect();
+    let mut shown: Vec<(String, usize, usize)> = Vec::new();
+    let mut body = String::new();
+    let mut map_lines: Vec<String> = Vec::new();
+    let mut budget = EXCERPT_LINE_BUDGET;
+    for (path, content) in &named_files {
+        push_map_line(&mut map_lines, path, content);
+    }
+    for token in tokens.iter().filter(|t| !t.is_path).take(MAX_LOOKUP_TOKENS) {
+        if budget == 0 {
+            break;
+        }
+        let hit = named_files
+            .iter()
+            .copied()
+            .chain(files.iter())
+            .find_map(|(p, c)| first_line_with(c, &token.text).map(|l| (p, c, l)));
+        let Some((path, content, line)) = hit else {
             continue;
         };
-        let text = text.trim();
-        if !text.is_empty() {
-            out.insert(idx as usize, text.to_string());
+        // The finding's own window already shows this place.
+        if *path == f.path && line.abs_diff(f.line) <= DETAIL_CONTEXT_RADIUS {
+            continue;
         }
+        let (first, last, text) = numbered_excerpt(content, line, EXCERPT_RADIUS);
+        if shown
+            .iter()
+            .any(|(p, a, b)| p == path && first <= *b && last >= *a)
+        {
+            continue;
+        }
+        let n = last + 1 - first;
+        if n > budget {
+            break;
+        }
+        budget -= n;
+        push_map_line(&mut map_lines, path, content);
+        shown.push((path.clone(), first, last));
+        body.push_str(&format!("{path}:\n{text}"));
     }
-    out
+    // A named file with no symbol excerpt still shows its first lines, within the budget.
+    for (path, content) in &named_files {
+        if budget < 4 || shown.iter().any(|(p, _, _)| p == path) {
+            continue;
+        }
+        let (first, last, text) = numbered_excerpt(content, 1, EXCERPT_RADIUS);
+        let n = last + 1 - first;
+        if n > budget {
+            continue;
+        }
+        budget -= n;
+        shown.push((path.clone(), first, last));
+        body.push_str(&format!("{path}:\n{text}"));
+    }
+    if body.is_empty() && map_lines.is_empty() {
+        return String::new();
+    }
+    format!(
+        "Files the statement names (repo map, then excerpts):\n{}{body}",
+        map_lines.concat()
+    )
 }
 
-/// One round: the `pending` findings in bounded batches. Writes the regenerated detail into
-/// `findings` and returns the indices still without one.
+/// One finding's prompt block, and the text of the code it shows (the evidence an exploit
+/// precondition must be found in to be allowed).
+struct Block {
+    prompt: String,
+    code_shown: String,
+}
+
+fn build_block(
+    id: &str,
+    f: &Finding,
+    files: &[(String, String)],
+    directives: &std::collections::HashMap<String, String>,
+) -> Block {
+    let mut prompt = finding_block_header(id, f);
+    if let Some(directive) = directives.get(&f.rule_id.to_ascii_uppercase()) {
+        prompt.push_str(&format!(
+            "Rule: {}\n",
+            camerata_secrets::redact_str(directive)
+        ));
+    }
+    prompt.push_str(&format!(
+        "Short statement: {}\n",
+        camerata_secrets::redact_str(&f.detail)
+    ));
+    if !f.snippet.is_empty() {
+        prompt.push_str(&format!(
+            "Code: {}\n",
+            camerata_secrets::redact_str(&f.snippet)
+        ));
+    }
+    prompt.push_str(&captured_objects_line(f));
+    let mut code_shown = f.snippet.clone();
+    let window = fix_context_window(files, &f.path, f.line, DETAIL_CONTEXT_RADIUS);
+    if !window.is_empty() {
+        prompt.push_str(&format!("Surrounding code:\n{window}"));
+        code_shown.push('\n');
+        code_shown.push_str(&window);
+    }
+    let excerpts = named_file_excerpts(f, files);
+    if !excerpts.is_empty() {
+        prompt.push_str(&excerpts);
+        code_shown.push('\n');
+        code_shown.push_str(&excerpts);
+    }
+    prompt.push('\n');
+    Block { prompt, code_shown }
+}
+
+// ── the reply ───────────────────────────────────────────────────────────────────────────────
+
+/// One entry of the reply, before any check.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct Entry {
+    pub id: String,
+    pub path: Option<String>,
+    pub line: Option<u64>,
+    pub detail: String,
+}
+
+/// Parse `{"details":[{"id","path","line","detail"}]}`. Malformed output, a missing array or an
+/// entry without an id or text yields nothing for it; the caller treats a missing entry as "not
+/// written", never as an empty explanation.
+pub(super) fn parse_detail_regen(raw: &str) -> Vec<Entry> {
+    let Some(json) = extract_json_object(raw) else {
+        return Vec::new();
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(json) else {
+        return Vec::new();
+    };
+    let Some(arr) = v["details"].as_array() else {
+        return Vec::new();
+    };
+    arr.iter()
+        .filter_map(|entry| {
+            let id = entry["id"].as_str()?.trim().to_string();
+            let detail = entry["detail"].as_str()?.trim().to_string();
+            if id.is_empty() || detail.is_empty() {
+                return None;
+            }
+            Some(Entry {
+                id,
+                path: entry["path"].as_str().map(|p| p.trim().to_string()),
+                line: entry["line"].as_u64(),
+                detail,
+            })
+        })
+        .collect()
+}
+
+/// Why a reply entry was not written.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum Reject {
+    /// The echoed path or line is not the finding's.
+    Mismatch,
+    /// A path or identifier the statement named is missing from the text.
+    DropsNamedToken(String),
+    /// The text makes an exploit precondition that neither the statement nor the code shown makes.
+    InventedPrecondition,
+}
+
+/// The checks one entry must pass to be written (the id match is done by the caller, which
+/// knows the batch). Returns the text to write: the model's, with `Borderline: ` put back at the
+/// front when the statement was borderline and the text lost it.
+pub(super) fn accept_entry(f: &Finding, entry: &Entry, code_shown: &str) -> Result<String, Reject> {
+    if entry.path.as_deref() != Some(f.path.as_str()) || entry.line != Some(f.line as u64) {
+        return Err(Reject::Mismatch);
+    }
+    let text = camerata_secrets::redact_str(&entry.detail).into_owned();
+    let short = short_statement_of(&f.detail);
+    // Every path or identifier the statement named stays. Compared on the redacted text, which
+    // is what would be written.
+    for token in named_tokens(short) {
+        if !text.contains(&token.text) {
+            return Err(Reject::DropsNamedToken(token.text));
+        }
+    }
+    // No new exploit precondition. The same phrase list as calibration's raise-block and the D5
+    // cap (`mentions_exploit_precondition`): a regenerated "requires a valid session" would
+    // silently stop calibration raising a critical, on a claim nobody made.
+    if mentions_exploit_precondition(&text)
+        && !mentions_exploit_precondition(short)
+        && !mentions_exploit_precondition(code_shown)
+    {
+        return Err(Reject::InventedPrecondition);
+    }
+    // A borderline statement stays borderline, deterministically.
+    let borderline = |s: &str| {
+        s.trim_start()
+            .to_ascii_lowercase()
+            .starts_with("borderline:")
+    };
+    if borderline(short) && !borderline(&text) {
+        return Ok(format!("Borderline: {text}"));
+    }
+    Ok(text)
+}
+
+/// An opaque per-finding id for one batch: not its position, so a reply numbered from 1 or
+/// reordered cannot land on a neighbour. Six hex digits of a hash of the finding's place in the
+/// run, re-hashed on the rare collision within the batch.
+fn opaque_id(repo: &str, idx: usize, f: &Finding, taken: &[String]) -> String {
+    let mut salt = 0u32;
+    loop {
+        let h = crate::suppression::fnv1a(&format!(
+            "{repo}\u{1f}{idx}\u{1f}{}\u{1f}{}\u{1f}{salt}",
+            f.path, f.line
+        ));
+        let id = format!("{:06x}", h & 0xff_ffff);
+        if !taken.contains(&id) {
+            return id;
+        }
+        salt += 1;
+    }
+}
+
+/// One round: the `pending` findings in batches of `batch_size`. Writes the regenerated detail
+/// into `findings` and returns the indices still without one.
 #[allow(clippy::too_many_arguments)]
 async fn run_detail_round(
     llm: &dyn LlmPort,
@@ -188,9 +502,10 @@ async fn run_detail_round(
     directives: &std::collections::HashMap<String, String>,
     findings: &mut [Finding],
     pending: &[usize],
+    batch_size: usize,
 ) -> Vec<usize> {
     let mut still_pending = Vec::new();
-    for batch in pending.chunks(DETAIL_BATCH_SIZE) {
+    for batch in pending.chunks(batch_size.max(1)) {
         // SPEND CAP, between batches: a refused batch stays pending (it ends up marked
         // incomplete, never dropped) and the stage is recorded as stopped part way.
         let _permit = match admit_stage(meter, repo, STAGE_DETAIL).await {
@@ -200,13 +515,17 @@ async fn run_detail_round(
             }
             Ok(permit) => permit,
         };
-        let prompt = {
-            let refs: Vec<&Finding> = batch.iter().map(|&i| &findings[i]).collect();
-            format!(
-                "Repository: {repo}\n\nWrite the full detail for each finding below:\n\n{}",
-                build_detail_regen_block(&refs, files, directives)
-            )
-        };
+        let mut ids: Vec<String> = Vec::with_capacity(batch.len());
+        let mut blocks: Vec<Block> = Vec::with_capacity(batch.len());
+        for &idx in batch {
+            let id = opaque_id(repo, idx, &findings[idx], &ids);
+            blocks.push(build_block(&id, &findings[idx], files, directives));
+            ids.push(id);
+        }
+        let prompt = format!(
+            "Repository: {repo}\n\nWrite the full detail for each finding below:\n\n{}",
+            blocks.iter().map(|b| b.prompt.as_str()).collect::<String>()
+        );
         let mut req = LlmRequest::new(prompt)
             .with_system(system.to_string())
             .with_max_tokens(scaled_max_tokens(batch.len(), DETAIL_TOKENS_PER_FINDING));
@@ -226,23 +545,50 @@ async fn run_detail_round(
         if let Some(m) = meter {
             m.record_stage(Stage::DetailRegeneration, &resp);
         }
-        let parsed = parse_detail_regen(&resp.text);
-        for (pos, &idx) in batch.iter().enumerate() {
-            let Some(text) = parsed.get(&pos) else {
-                still_pending.push(idx);
+        // A reply cut off at the output limit is not trusted even where it parses: the repeat
+        // round runs it again in a smaller batch.
+        if resp.truncated {
+            if let Some(m) = meter {
+                m.record_wasted(Stage::DetailRegeneration, &resp);
+            }
+            still_pending.extend(batch.iter().copied());
+            continue;
+        }
+        let entries = parse_detail_regen(&resp.text);
+        // An id the reply uses twice is ambiguous: neither entry is written.
+        let used_twice: Vec<&str> = entries
+            .iter()
+            .map(|e| e.id.as_str())
+            .filter(|id| entries.iter().filter(|e| e.id == *id).count() > 1)
+            .collect();
+        let mut written = vec![false; batch.len()];
+        for entry in &entries {
+            if used_twice.contains(&entry.id.as_str()) {
+                continue;
+            }
+            // An id that is not this batch's is ignored, never matched by position.
+            let Some(pos) = ids.iter().position(|id| *id == entry.id) else {
                 continue;
             };
-            // The text is client-visible and may repeat the offending value: redact it.
-            let full = camerata_secrets::redact_str(text).into_owned();
-            findings[idx].detail = compose_detail(&findings[idx].detail, &full);
+            let idx = batch[pos];
+            if let Ok(text) = accept_entry(&findings[idx], entry, &blocks[pos].code_shown) {
+                findings[idx].detail = compose_detail(&findings[idx].detail, &text);
+                written[pos] = true;
+            }
+        }
+        for (pos, &idx) in batch.iter().enumerate() {
+            if !written[pos] {
+                still_pending.push(idx);
+            }
         }
     }
     still_pending
 }
 
 /// Write the full `detail` of every finding in `findings`, which the scan wrote as one short
-/// sentence. `files` is the model-facing (redacted) file set; `directives` maps an uppercase
-/// rule id to the directive the scan checked it against.
+/// sentence. `files` is the WHOLE model-facing (redacted) file set of the repo, not only the
+/// files this run scanned, so a file the statement names is found even on an incremental run;
+/// `directives` maps an uppercase rule id to the directive the scan checked it against.
 ///
 /// Never drops a finding. Returns the findings, each with its regenerated detail or, when that
 /// failed, its short detail plus [`DETAIL_INCOMPLETE_MARKER`], and one `FailedPass` naming how
@@ -270,6 +616,7 @@ pub(crate) async fn regenerate_full_details(
     // its short detail, marked.
     let blocked = meter.is_some_and(|m| m.stage_blocked(repo, STAGE_DETAIL));
     if !blocked {
+        let mut batch_size = DETAIL_BATCH_SIZE;
         for _ in 0..DETAIL_ROUNDS {
             if pending.is_empty() {
                 break;
@@ -284,8 +631,12 @@ pub(crate) async fn regenerate_full_details(
                 &directives,
                 &mut findings,
                 &pending,
+                batch_size,
             )
             .await;
+            // The repeat is smaller: a cut-off or a muddled long reply is the usual reason a
+            // batch fails, and a smaller one is both shorter and easier to keep straight.
+            batch_size = batch_size.div_ceil(2);
         }
     }
     let mut failed_passes = Vec::new();
@@ -295,7 +646,7 @@ pub(crate) async fn regenerate_full_details(
         }
         failed_passes.push(FailedPass {
             repo: repo.to_string(),
-            pass: DETAIL_FAILED_PASS.to_string(),
+            pass: STAGE_DETAIL.to_string(),
             reason: format!(
                 "the full explanation could not be written for {} of {total} finding(s) this \
                  run{}; they are in the report with the one-sentence detail the scan wrote and \

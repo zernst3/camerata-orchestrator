@@ -76,8 +76,23 @@ fn answer(req: &LlmRequest, canned: String) -> String {
         return canned;
     }
     let scan: serde_json::Value = serde_json::from_str(&canned).expect("the canned scan response");
-    let detail = scan["findings"][0]["detail"].as_str().unwrap_or_default();
-    serde_json::json!({"details": [{"index": 0, "detail": detail}]}).to_string()
+    let finding = &scan["findings"][0];
+    // The block header the prompt addresses the finding by: `[<id>] rule ... - <path>:<line>`.
+    let header = req
+        .prompt
+        .lines()
+        .find(|l| l.starts_with('[') && l.contains("] rule "))
+        .expect("the regeneration prompt addresses the finding by an id");
+    let id = &header[1..header.find(']').expect("a closing bracket")];
+    let place = header.rsplit(" \u{2014} ").next().expect("a location");
+    let (path, line) = place.rsplit_once(':').expect("path:line");
+    serde_json::json!({"details": [{
+        "id": id,
+        "path": path,
+        "line": line.parse::<u64>().expect("a line number"),
+        "detail": finding["detail"],
+    }]})
+    .to_string()
 }
 
 #[async_trait]
@@ -195,7 +210,9 @@ async fn mechanical_rule_with_no_detector_is_evaluated_and_fires_via_the_semanti
         false, // thorough
         None,  // feedback
         None,  // job
-        None,  // meter
+        // A meter, so the default `terse_output` path (a short scan detail, the full one
+        // regenerated afterwards) is what this test drives; the stub answers both calls.
+        Some(&ai_audit::UsageMeter::default()),
         Some(&files),
     )
     .await

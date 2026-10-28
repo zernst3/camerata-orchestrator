@@ -168,3 +168,28 @@ fn the_terse_output_setting_is_part_of_the_question() {
     .unwrap();
     assert!(!legacy.terse_output);
 }
+
+/// The terse-output prompts are the other half of the question a `terse_output` finding
+/// answered: the terse scan system prompt, the deep security lens's, and the prompt that writes
+/// the full detail afterwards. Editing any of them without bumping
+/// [`crate::ai_audit::AUDIT_PROMPT_SCHEMA_VERSION`] would reuse answers to the old prompt, so
+/// they are pinned the same way: change one, bump the version, update the numbers here.
+#[test]
+fn the_terse_prompts_are_pinned_to_the_prompt_schema_version() {
+    let hash = |text: String| format!("{:016x}", crate::suppression::fnv1a(&text));
+    assert_eq!(
+        (
+            crate::ai_audit::AUDIT_PROMPT_SCHEMA_VERSION,
+            hash(crate::ai_audit::audit_system_prompt_with(true)).as_str(),
+            hash(crate::ai_audit::deep_security_system_prompt_with(true)).as_str(),
+            hash(crate::ai_audit::detail_regen::detail_regen_system_prompt()).as_str(),
+        ),
+        (
+            1,
+            "5bc27c39facb8c9d",
+            "fb0d0667d9ea0281",
+            "019f11a358b9dc0f"
+        ),
+        "a terse-output prompt changed: bump AUDIT_PROMPT_SCHEMA_VERSION and update this pin"
+    );
+}
