@@ -186,6 +186,17 @@ fn an_empty_triage_log_still_has_its_header() {
     assert!(String::from_utf8_lossy(bytes).starts_with("Rule ID,"));
 }
 
+/// The key the export dialog sends (`triage_log`) is the one `ReportOptions` reads.
+#[test]
+fn the_export_dialogs_options_key_turns_the_triage_log_on() {
+    let on: ReportOptions = serde_json::from_str(r#"{"triage_log": true}"#).unwrap();
+    assert!(on.triage_log);
+    let off: ReportOptions = serde_json::from_str(r#"{"triage_log": false}"#).unwrap();
+    assert!(!off.triage_log);
+    let absent: ReportOptions = serde_json::from_str("{}").unwrap();
+    assert!(!absent.triage_log);
+}
+
 #[test]
 fn the_env_switch_turns_the_triage_log_on_only_for_one_or_true() {
     use crate::report_export::triage_log_env_on;

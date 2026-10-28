@@ -19,6 +19,7 @@ pub mod order_preset;
 pub mod palette;
 pub mod pane_context;
 pub mod progress;
+pub mod product_export;
 pub mod provider_safety;
 pub mod readiness;
 pub mod review_stats;
