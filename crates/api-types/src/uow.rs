@@ -695,8 +695,7 @@ mod tests {
         let back: UowSource = serde_json::from_value(json).expect("round trip");
         assert_eq!(back, src);
         assert_eq!(src.kind_str(), "findings");
-        let r: RetestEvidence =
-            serde_json::from_str(r#"{"inspection_id":"d1"}"#).expect("partial");
+        let r: RetestEvidence = serde_json::from_str(r#"{"inspection_id":"d1"}"#).expect("partial");
         assert_eq!(r.inspection_id, "d1");
         assert!(r.resolved.is_empty() && !r.rules_changed);
     }
