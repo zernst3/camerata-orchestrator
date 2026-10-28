@@ -876,7 +876,20 @@ Key design points:
   Cache writes are 1.25x input (5 minute) or 2x input (1 hour); the Batch API is
   0.5x input and output. A per-model cache-read price (`cache_read_price`) and the
   Haiku tier (`long_prompt`) are data on the entry; `rates_for(model, prompt_tokens)`
-  returns the per-token rates for a request.
+  returns the per-token rates for a request. ASSUMPTION (not confirmed against a bill):
+  the prompt size that picks Haiku 5.5's tier is the folded total (input plus cache
+  reads plus cache writes), and the higher tier's input rate also drives the cache
+  read (0.1x) and cache write (1.25x / 2x) rates. The reference lists the tier on
+  input and output only.
+
+  **Cost accounting.** One function, `usage_cost_usd`, prices every call (the response
+  parser, the usage ledger's fallback, the spend cap's meter). A refused call is billed:
+  the refusal error carries the usage (`ModelRefusal.billed`), a refused batch row keeps
+  it (`BatchResults.billed`), and the spend-cap meter counts both. With a cap set, a call
+  that reports no dollar figure is priced from its tokens; if that is impossible the cap
+  is unenforceable, a note says so, and nothing further is admitted. Dollars feeding a cap
+  are converted to micro-dollars rounding up. `is_priced` (the spend-cap gate for an
+  unpriced model) needs non-zero input and output prices.
 
   **Request shape.** All of the 5.x models answer HTTP 400 to `thinking` with
   `budget_tokens`, non-default `temperature` / `top_p` / `top_k`, and assistant

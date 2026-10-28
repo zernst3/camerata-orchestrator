@@ -157,11 +157,7 @@ impl UsageLedger {
         // the long-prompt tier, the batch discount), so the ledger never disagrees with a
         // call's own reported cost. Missing token fields count as zero; a model the registry
         // cannot price counts as $0.
-        let basis = if r.backend == "api/batch" {
-            crate::llm::PriceBasis::batch(crate::llm::BATCH_CACHE_TTL)
-        } else {
-            crate::llm::PriceBasis::realtime()
-        };
+        let basis = crate::llm::PriceBasis::for_response(r);
         crate::llm::usage_cost_usd(
             model_id,
             &crate::llm::CallUsage {
@@ -192,7 +188,7 @@ impl UsageLedger {
         self.cache_creation
             .fetch_add(r.cache_creation_input_tokens, Ordering::Relaxed);
         self.cost_micro_usd
-            .fetch_add((cost * 1_000_000.0) as u64, Ordering::Relaxed);
+            .fetch_add(crate::llm::usd_to_micro_ceil(cost), Ordering::Relaxed);
         self.calls.fetch_add(1, Ordering::Relaxed);
         // A successful call means we're being served again -> clear the rate-limit flag.
         self.rate_limited.store(false, Ordering::Relaxed);

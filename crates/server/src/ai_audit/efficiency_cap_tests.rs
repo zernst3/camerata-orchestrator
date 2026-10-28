@@ -671,3 +671,235 @@ async fn the_overshoot_bound_holds_with_warm_schedule_off_too() {
         assert!(ok >= 1);
     }
 }
+
+// ── a refused call is billed, so the cap must count it ──────────────────────────────────────
+
+/// A model refusal as the transport raises it: an error carrying what the call was BILLED.
+/// On Opus 5.5 ($4 in / $20 out per million) 100K input + 10K output is exactly $0.60.
+fn billed_refusal() -> anyhow::Error {
+    crate::llm::refusal_error_billed(
+        &serde_json::json!({
+            "model": "claude-opus-5-5",
+            "content": [],
+            "stop_reason": "refusal",
+            "usage": { "input_tokens": 100_000, "output_tokens": 10_000 }
+        }),
+        "claude-opus-5-5",
+        "api",
+        crate::llm::PriceBasis {
+            batch: false,
+            cache_ttl: crate::llm::CacheTtl::FiveMinutes,
+        },
+    )
+    .expect("a refusal stop_reason is an error")
+}
+
+#[test]
+fn a_realtime_refusal_counts_toward_the_cap_and_sets_the_reserve() {
+    let m = meter(EfficiencyConfig::default(), Some(1.0));
+    m.record_failed(Stage::ScanPass, &billed_refusal());
+    assert!((m.spent_usd() - 0.60).abs() < 1e-9, "{}", m.spent_usd());
+    assert!(!m.cap_reached());
+    m.record_failed(Stage::ScanPass, &billed_refusal());
+    assert!(m.cap_reached(), "two refusals at $0.60 pass a $1.00 cap");
+    // A failure that carries no usage (a transport error) changes nothing.
+    let before = m.spent_usd();
+    m.record_failed(Stage::ScanPass, &anyhow::anyhow!("connection reset"));
+    assert_eq!(m.spent_usd(), before);
+}
+
+#[test]
+fn a_billed_batch_refusal_counts_toward_the_cap() {
+    let refused = r#"{"custom_id":"c0-b0","result":{"type":"succeeded","message":{"model":"claude-opus-5-5","content":[],"stop_reason":"refusal","usage":{"input_tokens":100000,"output_tokens":10000}}}}"#;
+    let rows = crate::llm::parse_batch_results_jsonl(refused, crate::llm::BATCH_CACHE_TTL).unwrap();
+    let results = crate::llm::reassemble_batch_results(rows);
+    assert!(results.responses.is_empty());
+    let m = meter(EfficiencyConfig::default(), Some(5.0));
+    let (_f, _p, _r, ok, failures) = reassemble_batch_passes(
+        REPO,
+        "pass",
+        1,
+        1,
+        &[(0, 0)],
+        &results,
+        &std::collections::HashSet::new(),
+        &std::collections::HashSet::new(),
+        Some(&m),
+        None,
+    );
+    assert_eq!(ok, 0);
+    assert!(failures[0].error.contains("refus"));
+    // $0.60 real-time, halved for a batch row.
+    assert!((m.spent_usd() - 0.30).abs() < 1e-9, "{}", m.spent_usd());
+}
+
+/// Every call refuses. The first refusal teaches the cap what a call costs, and the run still
+/// stops at the cap instead of running every pass at an apparent $0.
+struct AlwaysRefuses {
+    calls: AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl LlmPort for AlwaysRefuses {
+    async fn complete(&self, _req: LlmRequest) -> anyhow::Result<LlmResponse> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Err(billed_refusal())
+    }
+    async fn complete_streaming(
+        &self,
+        req: LlmRequest,
+        _on_delta: &mut (dyn for<'a> FnMut(&'a str) + Send),
+    ) -> anyhow::Result<LlmResponse> {
+        self.complete(req).await
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+#[tokio::test]
+async fn a_run_whose_first_calls_all_refuse_still_stops_at_the_cap() {
+    const TOTAL: usize = 10;
+    let llm = AlwaysRefuses {
+        calls: AtomicUsize::new(0),
+    };
+    let m = meter(EfficiencyConfig::default(), Some(1.0));
+    let files = vec![("a.rs".to_string(), "fn a() {}".to_string())];
+    let chunks: Vec<&[(String, String)]> = vec![files.as_slice()];
+    let rule_batches: Vec<Vec<(String, String)>> = (0..TOTAL)
+        .map(|n| vec![(format!("RULE-{n}"), format!("rule {n}"))])
+        .collect();
+    let batches: Vec<&[(String, String)]> = rule_batches.iter().map(Vec::as_slice).collect();
+    let (_f, _p, _r, ok, failures) = run_passes(
+        &llm,
+        REPO,
+        REPO_MAP,
+        &std::collections::HashSet::new(),
+        None,
+        None,
+        None,
+        &chunks,
+        &batches,
+        6,
+        "pass[all]",
+        "refuse",
+        Some(&m),
+        false,
+    )
+    .await;
+    let record = m.cost_cap_record().unwrap();
+    let calls = llm.calls.load(Ordering::SeqCst);
+    assert_eq!(ok, 0);
+    assert!(
+        calls < TOTAL,
+        "the cap stopped the run: {calls} of {TOTAL} calls ran"
+    );
+    assert_eq!(
+        calls,
+        failures.len(),
+        "every call that ran is a named failed pass"
+    );
+    assert_eq!(
+        calls + record.not_run_passes.len(),
+        TOTAL,
+        "every other pass is recorded NOT RUN"
+    );
+    assert!(
+        m.spent_usd() >= 1.0,
+        "refusals were counted: {}",
+        m.spent_usd()
+    );
+}
+
+// ── the cap needs every call's cost ─────────────────────────────────────────────────────────
+
+fn response(
+    model: &str,
+    cost: Option<f64>,
+    input: Option<u64>,
+    output: Option<u64>,
+) -> LlmResponse {
+    LlmResponse {
+        text: String::new(),
+        model: model.to_string(),
+        backend: "api".to_string(),
+        cost_usd: cost,
+        input_tokens: input,
+        output_tokens: output,
+        cache_read_input_tokens: 0,
+        cache_creation_input_tokens: 0,
+        or_cache_discount: None,
+        truncated: false,
+    }
+}
+
+#[tokio::test]
+async fn a_call_with_tokens_but_no_cost_is_priced_from_its_tokens_under_a_cap() {
+    let m = meter(EfficiencyConfig::default(), Some(10.0));
+    // Opus 5.5: 100K in at $4/M + 10K out at $20/M = $0.60.
+    m.record_stage(
+        Stage::ScanPass,
+        &response("claude-opus-5-5", None, Some(100_000), Some(10_000)),
+    );
+    assert!((m.spent_usd() - 0.60).abs() < 1e-9, "{}", m.spent_usd());
+    assert!(
+        m.admit().await.is_ok(),
+        "an enforceable cap keeps admitting"
+    );
+}
+
+#[tokio::test]
+async fn a_call_whose_cost_cannot_be_known_makes_the_cap_unenforceable_and_stops_admission() {
+    let m = meter(EfficiencyConfig::default(), Some(10.0));
+    // No dollar figure, and a model the registry cannot price.
+    m.record_stage(
+        Stage::ScanPass,
+        &response("mystery-model", None, Some(1_000), Some(100)),
+    );
+    assert!(m.admit().await.is_err(), "no further pass is admitted");
+    let record = m.cost_cap_record().unwrap();
+    assert!(
+        record
+            .notes
+            .iter()
+            .any(|n| n.contains("could not be enforced") && n.contains("mystery-model")),
+        "{:?}",
+        record.notes
+    );
+    assert!(
+        m.stage_blocked(REPO, STAGE_CALIBRATION),
+        "later stages are blocked too"
+    );
+    // Missing token counts are unpriceable too.
+    let m2 = meter(EfficiencyConfig::default(), Some(10.0));
+    m2.record_stage(
+        Stage::ScanPass,
+        &response("claude-opus-5-5", None, None, None),
+    );
+    assert!(m2.admit().await.is_err());
+}
+
+#[tokio::test]
+async fn without_a_cap_a_call_with_no_cost_changes_nothing() {
+    let m = meter(EfficiencyConfig::default(), None);
+    m.record_stage(
+        Stage::ScanPass,
+        &response("mystery-model", None, Some(1), Some(1)),
+    );
+    assert!(m.admit().await.is_ok());
+    assert!(m.cost_cap_record().is_none());
+}
+
+#[test]
+fn a_fraction_of_a_micro_dollar_is_rounded_up_into_the_cap() {
+    let m = meter(EfficiencyConfig::default(), Some(1.0));
+    m.record_stage(
+        Stage::ScanPass,
+        &response("m", Some(0.0000001), Some(1), Some(1)),
+    );
+    assert!(
+        (m.spent_usd() - 0.000001).abs() < 1e-12,
+        "{}",
+        m.spent_usd()
+    );
+}

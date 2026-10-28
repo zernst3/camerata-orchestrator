@@ -923,16 +923,38 @@ fn messages_response(
 /// can decline a request with HTTP 200 and no usable content; read as a normal response that
 /// is an empty answer, which a scan would take for "no findings" and report a clean pass.
 /// Returning an error instead makes the pass a FAILED PASS (disclosed, export incomplete).
-/// `None` for any other stop reason.
+/// `None` for any other stop reason. This form carries no usage; use
+/// [`refusal_error_billed`] where the response's usage is known.
 pub fn refusal_error(msg: &serde_json::Value) -> Option<anyhow::Error> {
-    (msg["stop_reason"].as_str() == Some("refusal")).then(|| anyhow::Error::new(ModelRefusal))
+    (msg["stop_reason"].as_str() == Some("refusal"))
+        .then(|| anyhow::Error::new(ModelRefusal { billed: None }))
+}
+
+/// [`refusal_error`] for a response whose usage is known: the error carries the call's
+/// [`LlmResponse`] (empty text, the tokens and the dollars the call was BILLED), so a caller
+/// that meters spend (the cumulative ledger, the run's spend cap) can count it before
+/// propagating the failure. A refused call costs what any other call costs.
+pub fn refusal_error_billed(
+    msg: &serde_json::Value,
+    model: &str,
+    backend: &str,
+    basis: PriceBasis,
+) -> Option<anyhow::Error> {
+    (msg["stop_reason"].as_str() == Some("refusal")).then(|| {
+        anyhow::Error::new(ModelRefusal {
+            billed: Some(Box::new(messages_response(msg, model, backend, basis))),
+        })
+    })
 }
 
 /// The typed error behind a refusal, so a caller that must react differently to "the model
 /// declined" than to "the call broke" (the agentic loop keeps its partial work on the first)
 /// can tell them apart with [`is_refusal`] instead of matching message text.
 #[derive(Debug)]
-pub struct ModelRefusal;
+pub struct ModelRefusal {
+    /// What the refused call was billed, when the transport knew it.
+    pub billed: Option<Box<LlmResponse>>,
+}
 
 impl std::fmt::Display for ModelRefusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -947,6 +969,13 @@ impl std::error::Error for ModelRefusal {}
 /// Whether `e` (or anything it wraps) is a [`ModelRefusal`].
 pub fn is_refusal(e: &anyhow::Error) -> bool {
     e.chain().any(|c| c.is::<ModelRefusal>())
+}
+
+/// The usage a refused call was billed, when `e` is a refusal that carries it.
+pub fn refusal_billed(e: &anyhow::Error) -> Option<&LlmResponse> {
+    e.chain()
+        .find_map(|c| c.downcast_ref::<ModelRefusal>())
+        .and_then(|r| r.billed.as_deref())
 }
 
 fn usage_tokens(usage: &serde_json::Value) -> (Option<u64>, Option<u64>, u64, u64) {
@@ -967,7 +996,7 @@ fn cli_result_text(v: &serde_json::Value) -> anyhow::Result<&str> {
     // can arrive with `is_error:false` and prose in `result`, which would parse as a clean
     // "no findings" pass; the explicit stop reason is the signal (no text heuristic).
     if v["stop_reason"].as_str() == Some("refusal") {
-        return Err(anyhow::Error::new(ModelRefusal));
+        return Err(anyhow::Error::new(ModelRefusal { billed: None }));
     }
     if v["is_error"].as_bool() == Some(true) {
         anyhow::bail!(
@@ -989,7 +1018,17 @@ fn cli_result_text(v: &serde_json::Value) -> anyhow::Result<&str> {
 /// spend-cap refusal for an unpriced model asks this, so a model the cost arithmetic CAN price
 /// is never refused as unpriced.
 pub fn is_priced(model_id: &str) -> bool {
-    crate::model_registry::registry_entry_for(model_id).is_some()
+    crate::model_registry::registry_entry_for(model_id)
+        .is_some_and(|e| e.price_in > 0.0 && e.price_out > 0.0)
+}
+
+/// Dollars to whole micro-dollars, ROUNDED UP, for anything that feeds a spend cap: flooring
+/// would let a run that is a fraction of a micro-dollar over the limit read as under it. The
+/// product is first rounded to the nearest nano-dollar so float noise (`0.25 * 1e6` landing a
+/// hair above `250000`) cannot add a phantom micro-dollar.
+pub fn usd_to_micro_ceil(usd: f64) -> u64 {
+    let micro = usd * 1_000_000.0;
+    ((micro * 1_000.0).round() / 1_000.0).ceil().max(0.0) as u64
 }
 
 /// How a call was billed, which decides the multipliers [`compute_cost_usd`] applies on top of
@@ -1011,6 +1050,17 @@ impl PriceBasis {
         Self {
             batch: false,
             cache_ttl: CacheTtl::from_env(),
+        }
+    }
+
+    /// The basis a finished response was billed on, read from the backend that produced it
+    /// (`api/batch` is a Message Batch item at [`BATCH_CACHE_TTL`]). For pricing a response that
+    /// reports tokens but no dollar figure.
+    pub fn for_response(r: &LlmResponse) -> Self {
+        if r.backend == "api/batch" {
+            Self::batch(BATCH_CACHE_TTL)
+        } else {
+            Self::realtime()
         }
     }
 
@@ -1688,12 +1738,15 @@ impl Llm {
         model: &str,
         basis: PriceBasis,
     ) -> anyhow::Result<LlmResponse> {
-        let resp = messages_response(v, model, "api", basis);
-        if let Some(refusal) = refusal_error(v) {
-            self.ledger_record(&resp);
+        if let Some(refusal) = refusal_error_billed(v, model, "api", basis) {
+            // A refused call is billed: the ledger counts it now, and the error carries the
+            // same usage so a run's spend cap can count it too.
+            if let Some(billed) = refusal_billed(&refusal) {
+                self.ledger_record(billed);
+            }
             return Err(refusal);
         }
-        Ok(resp)
+        Ok(messages_response(v, model, "api", basis))
     }
 }
 
@@ -1908,6 +1961,10 @@ pub struct BatchResultRow {
     pub response: Option<LlmResponse>,
     /// The error message when `result_type != "succeeded"`.
     pub error: Option<String>,
+    /// What the item was BILLED when it failed after running (a model refusal): empty text, the
+    /// tokens and dollars of the call. `None` for an item that never ran or whose usage the API
+    /// did not report.
+    pub billed: Option<LlmResponse>,
 }
 
 impl Llm {
@@ -2131,13 +2188,20 @@ pub fn parse_batch_results_jsonl(
         if result_type == "succeeded" {
             // The response mirrors the /v1/messages response shape.
             let msg = &v["result"]["message"];
-            if let Some(refusal) = refusal_error(msg) {
+            if let Some(refusal) = refusal_error_billed(
+                msg,
+                msg["model"].as_str().unwrap_or(""),
+                "api/batch",
+                PriceBasis::batch(cache_ttl),
+            ) {
                 // A refusal is a failed item, never an empty answer: no response, so the
-                // reassembler reports it missing and the pass is disclosed as failed.
+                // reassembler reports it missing and the pass is disclosed as failed. Its
+                // usage is kept: the item was billed.
                 rows.push(BatchResultRow {
                     custom_id,
                     response: None,
                     error: Some(refusal.to_string()),
+                    billed: refusal_billed(&refusal).cloned(),
                 });
                 continue;
             }
@@ -2151,6 +2215,7 @@ pub fn parse_batch_results_jsonl(
                     PriceBasis::batch(cache_ttl),
                 )),
                 error: None,
+                billed: None,
             });
         } else {
             let error_msg = v["result"]["error"]["message"]
@@ -2161,6 +2226,7 @@ pub fn parse_batch_results_jsonl(
                 custom_id,
                 response: None,
                 error: Some(error_msg),
+                billed: None,
             });
         }
     }
@@ -2176,6 +2242,18 @@ pub struct BatchResults {
     /// neither map reports it as missing from the results; one that finds it here reports the
     /// real reason (a refusal reads as a refusal).
     pub errors: std::collections::HashMap<String, String>,
+    /// `custom_id -> usage` for failed items that were nevertheless BILLED (a refusal). A caller
+    /// that meters spend counts these before reporting the failure.
+    pub billed: std::collections::HashMap<String, LlmResponse>,
+}
+
+impl BatchResults {
+    /// Fold another sub-batch's results into this one.
+    pub fn extend(&mut self, other: BatchResults) {
+        self.responses.extend(other.responses);
+        self.errors.extend(other.errors);
+        self.billed.extend(other.billed);
+    }
 }
 
 /// Build the `custom_id -> LlmResponse` map (and the `custom_id -> reason` map for failed
@@ -2193,6 +2271,9 @@ pub fn reassemble_batch_results(rows: Vec<BatchResultRow>) -> BatchResults {
                 out.responses.insert(r.custom_id, resp);
             }
             (None, Some(err)) => {
+                if let Some(billed) = r.billed {
+                    out.billed.insert(r.custom_id.clone(), billed);
+                }
                 out.errors.insert(r.custom_id, err);
             }
             (None, None) => {}
@@ -3593,11 +3674,13 @@ malformed line, not json
                     truncated: false,
                 }),
                 error: None,
+                billed: None,
             },
             BatchResultRow {
                 custom_id: "c1-b0".to_string(),
                 response: None,
                 error: Some("limit exceeded".to_string()),
+                billed: None,
             },
             BatchResultRow {
                 custom_id: "c0-b1".to_string(),
@@ -3614,6 +3697,7 @@ malformed line, not json
                     truncated: false,
                 }),
                 error: None,
+                billed: None,
             },
         ];
         let results = reassemble_batch_results(rows);
@@ -4367,6 +4451,66 @@ exit 1
             "x"
         );
         assert_eq!(ledger.snapshot().calls, 1);
+    }
+
+    /// A refusal error carries what the call was billed, for any caller that meters spend.
+    #[test]
+    fn a_refusal_error_carries_the_billed_usage() {
+        let msg = serde_json::json!({
+            "model": "claude-fable-5-1", "content": [], "stop_reason": "refusal",
+            "usage": { "input_tokens": 1_000_000, "output_tokens": 0 }
+        });
+        let e = refusal_error_billed(&msg, "claude-fable-5-1", "api", rt()).unwrap();
+        assert!(is_refusal(&e));
+        let billed = refusal_billed(&e).expect("the error carries the usage");
+        assert!((billed.cost_usd.unwrap() - 10.0).abs() < 1e-9);
+        assert_eq!(billed.input_tokens, Some(1_000_000));
+        // The plain form carries none, and a non-refusal is not an error at all.
+        assert!(refusal_billed(&refusal_error(&msg).unwrap()).is_none());
+        assert!(refusal_error_billed(
+            &serde_json::json!({"stop_reason": "end_turn"}),
+            "m",
+            "api",
+            rt()
+        )
+        .is_none());
+        // Still found through added context.
+        let wrapped = e.context("provider call failed");
+        assert!(refusal_billed(&wrapped).is_some());
+    }
+
+    #[test]
+    fn a_refused_batch_row_keeps_its_billed_usage() {
+        let row = r#"{"custom_id":"c0-b0","result":{"type":"succeeded","message":{"model":"claude-opus-5-5","content":[],"stop_reason":"refusal","usage":{"input_tokens":1000000,"output_tokens":0}}}}"#;
+        let rows = parse_batch_results_jsonl(row, BATCH_CACHE_TTL).unwrap();
+        let results = reassemble_batch_results(rows);
+        let billed = &results.billed["c0-b0"];
+        // $4/M input, halved for a batch item.
+        assert!((billed.cost_usd.unwrap() - 2.0).abs() < 1e-9);
+        assert!(results.errors["c0-b0"].contains("refus"));
+    }
+
+    #[test]
+    fn micro_dollars_round_up_but_float_noise_does_not_add_one() {
+        assert_eq!(usd_to_micro_ceil(0.0), 0);
+        assert_eq!(usd_to_micro_ceil(0.0000001), 1);
+        assert_eq!(usd_to_micro_ceil(0.25), 250_000);
+        assert_eq!(usd_to_micro_ceil(0.60), 600_000);
+        assert_eq!(usd_to_micro_ceil(1.0000004), 1_000_001);
+        assert_eq!(usd_to_micro_ceil(-1.0), 0);
+    }
+
+    #[test]
+    fn a_model_is_priced_only_with_non_zero_input_and_output_prices() {
+        assert!(is_priced("claude-opus-5"));
+        assert!(is_priced("claude-haiku-5-5"));
+        assert!(!is_priced(""));
+        assert!(!is_priced("some-free-model:free"));
+        // Every catalog entry that counts as priced really has both prices.
+        for e in crate::model_registry::CLAUDE_REGISTRY_MODELS {
+            assert!(e.price_in > 0.0 && e.price_out > 0.0, "{}", e.id);
+            assert!(is_priced(e.id), "{}", e.id);
+        }
     }
 
     /// `count_tokens` goes through the same conformer as every other body, minus the

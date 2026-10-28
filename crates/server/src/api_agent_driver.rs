@@ -430,6 +430,10 @@ async fn run_loop(
             // (and paid for) real work. End the run with an explicit refused outcome that
             // keeps the cost and the assistant output so far, instead of discarding it all.
             Err(e) if crate::llm::is_refusal(&e) => {
+                // The refused call was billed too: its cost belongs in the run's total.
+                if let Some(c) = crate::llm::refusal_billed(&e).and_then(|b| b.cost_usd) {
+                    total_cost_usd += c;
+                }
                 final_result = refused_result(iteration, &messages);
                 break;
             }

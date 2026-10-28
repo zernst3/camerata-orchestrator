@@ -393,6 +393,10 @@ impl UsageMeter {
     fn try_admit(&self) -> Admission<'_> {
         let mut budget = self.budget();
         if let Some(cap) = self.controls.max_cost_usd {
+            // A call's cost was unknowable, so the cap cannot be enforced: admit nothing more.
+            if budget.cost_unknown {
+                return Admission::CapReached;
+            }
             let reserve_micro = self.max_call_micro_usd.load(Ordering::Relaxed);
             // Until one call has reported a cost there is nothing to reserve against, so only
             // ONE pass may be in flight: a cap must never be a number that concurrent passes
@@ -478,7 +482,9 @@ impl UsageMeter {
         };
         let already_stopped = {
             let budget = self.budget();
-            !budget.not_run_passes.is_empty() || !budget.not_run_stages.is_empty()
+            !budget.not_run_passes.is_empty()
+                || !budget.not_run_stages.is_empty()
+                || budget.cost_unknown
         };
         if !self.cap_reached() && !already_stopped {
             return false;
@@ -541,6 +547,13 @@ impl UsageMeter {
             not_run_stages: budget.not_run_stages.clone(),
             notes: budget.notes.clone(),
         })
+    }
+}
+
+/// [`UsageMeter::record_failed`] for a call site that may have no meter.
+fn meter_failed(meter: Option<&UsageMeter>, stage: Stage, error: &anyhow::Error) {
+    if let Some(m) = meter {
+        m.record_failed(stage, error);
     }
 }
 
@@ -646,8 +659,34 @@ impl UsageMeter {
         if let Some(o) = r.output_tokens {
             self.output_tokens.fetch_add(o, Ordering::Relaxed);
         }
-        if let Some(c) = r.cost_usd {
-            let micro = (c * 1_000_000.0) as u64;
+        // With a cap set a call's cost MUST be known. A reported figure is used as is; a call that
+        // reported tokens but no dollars is priced from them (the same function every other cost
+        // path uses); a call that cannot be priced either way makes the cap unenforceable.
+        let cost = match r.cost_usd {
+            Some(c) => Some(c),
+            None if self.controls.max_cost_usd.is_some() => {
+                let derived = crate::llm::usage_cost_usd(
+                    &r.model,
+                    &crate::llm::CallUsage {
+                        input: r.input_tokens,
+                        output: r.output_tokens,
+                        cache_read: r.cache_read_input_tokens,
+                        cache_creation: r.cache_creation_input_tokens,
+                        cache_creation_1h: None,
+                    },
+                    crate::llm::PriceBasis::for_response(r),
+                );
+                if derived.is_none() {
+                    self.mark_cost_unknown(&r.model);
+                }
+                derived
+            }
+            None => None,
+        };
+        if let Some(c) = cost {
+            // Rounded UP: this feeds the cap, and flooring could read a run that is over the
+            // limit by a fraction of a micro-dollar as under it.
+            let micro = crate::llm::usd_to_micro_ceil(c);
             self.cost_micro_usd.fetch_add(micro, Ordering::Relaxed);
             let before = self.max_call_micro_usd.fetch_max(micro, Ordering::Relaxed);
             if before == 0 && micro > 0 {
@@ -662,6 +701,34 @@ impl UsageMeter {
         self.cache_creation_input_tokens
             .fetch_add(r.cache_creation_input_tokens, Ordering::Relaxed);
         self.calls.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A call's cost could not be determined while a cap is set: remember that the cap is no
+    /// longer enforceable (nothing further is admitted) and say so once, in the cap's record.
+    fn mark_cost_unknown(&self, model: &str) {
+        {
+            let mut budget = self.budget();
+            if budget.cost_unknown {
+                return;
+            }
+            budget.cost_unknown = true;
+            budget.notes.push(format!(
+                "The spend limit could not be enforced past this point: a call to `{model}` \
+                 reported no cost and its tokens could not be priced, so what it cost is unknown. \
+                 No further passes were started (NOT RUN)."
+            ));
+        }
+        self.admission.notify_waiters();
+    }
+
+    /// Count a call that FAILED but was still billed: a model refusal carries the usage it was
+    /// charged (see [`crate::llm::ModelRefusal`]). A refused call costs what any other call
+    /// costs, so the cap must see it; without this a run of refusals reads as $0 spent and never
+    /// stops. A failure that carries no usage (a transport error) changes nothing.
+    pub fn record_failed(&self, stage: Stage, error: &anyhow::Error) {
+        if let Some(billed) = crate::llm::refusal_billed(error) {
+            self.record_stage(stage, billed);
+        }
     }
 
     pub fn snapshot(&self) -> ActualUsage {
@@ -2559,7 +2626,11 @@ pub async fn verify_findings(
             // is still recorded post-hoc below, unchanged, so `feedback = Some` behavior is
             // byte-for-byte identical to before this change.
             let mut on_delta = |_: &str| {};
-            if let Ok(resp) = llm.complete_streaming(build_req(), &mut on_delta).await {
+            let calibration = llm.complete_streaming(build_req(), &mut on_delta).await;
+            if let Err(e) = &calibration {
+                meter_failed(meter, Stage::Calibration, e);
+            }
+            if let Ok(resp) = calibration {
                 if let Some(m) = meter {
                     m.record_stage(Stage::Calibration, &resp);
                 }
@@ -3360,7 +3431,13 @@ async fn recommend_alternatives(
                 },
             );
         }
-        let resp = resp_result?;
+        let resp = match resp_result {
+            Ok(r) => r,
+            Err(e) => {
+                meter_failed(meter, Stage::Alternatives, &e);
+                return Err(e);
+            }
+        };
         if let Some(m) = meter {
             m.record_stage(Stage::Alternatives, &resp);
         }
@@ -3788,7 +3865,8 @@ async fn run_fix_specifics_round(
             // Re-queue exactly this chunk's findings so the next round retries them (or,
             // on the last round, the instantiated-fallback below picks them up) — a
             // failure never re-queues findings OUTSIDE this chunk.
-            Err(_) => {
+            Err(e) => {
+                meter_failed(meter, Stage::FixGeneration, &e);
                 still_pending.extend(batch.iter().copied());
                 continue;
             }
@@ -4384,7 +4462,13 @@ async fn audit_pass(
     if !cache_breakpoints.is_empty() {
         req = req.with_cache_breakpoints(cache_breakpoints);
     }
-    let mut resp = send_audit_request(llm, req.clone(), feedback, session).await?;
+    let mut resp = match send_audit_request(llm, req.clone(), feedback, session).await {
+        Ok(r) => r,
+        Err(e) => {
+            meter_failed(meter, Stage::ScanPass, &e);
+            return Err(e);
+        }
+    };
     if let Some(m) = meter {
         m.record_stage(Stage::ScanPass, &resp);
     }
@@ -4405,14 +4489,16 @@ async fn audit_pass(
             .max_tokens
             .saturating_mul(2)
             .min(AGGREGATE_MAX_TOKENS_CEILING);
-        if let Ok(retry) =
-            send_audit_request(llm, req.with_max_tokens(retry_cap), feedback, session).await
-        {
-            if let Some(m) = meter {
-                m.record_stage(Stage::ScanPass, &retry);
+        match send_audit_request(llm, req.with_max_tokens(retry_cap), feedback, session).await {
+            Ok(retry) => {
+                if let Some(m) = meter {
+                    m.record_stage(Stage::ScanPass, &retry);
+                }
+                resp = retry;
+                wasted_counted = false;
             }
-            resp = retry;
-            wasted_counted = false;
+            // The retry failed (possibly refused, and billed): the first reply stands.
+            Err(e) => meter_failed(meter, Stage::ScanPass, &e),
         }
     }
     // Whatever reply the pass ends up using: if it is still unusable (cut off again, or not JSON
@@ -5033,12 +5119,10 @@ async fn run_passes_batch(
 
     // Submit all sub-batches (sequentially — the API is async so there's no rate-limit
     // pressure; we just need the batch_id from each one).
-    let mut all_responses: std::collections::HashMap<String, crate::llm::LlmResponse> =
-        std::collections::HashMap::new();
-    // Per-item reasons for items that came back without an answer (errored, expired, or a
-    // model refusal), so the failure names the real cause instead of "missing".
-    let mut all_errors: std::collections::HashMap<String, String> =
-        std::collections::HashMap::new();
+    // Every sub-batch's outcomes: the answers, the per-item reasons for items that came back
+    // without one (errored, expired, or a model refusal, so a failure names the real cause
+    // instead of "missing"), and the usage of failed items that were nevertheless billed.
+    let mut all_results = crate::llm::BatchResults::default();
     for (sub_idx, sub_items) in sub_batches.iter().enumerate() {
         // Checked again for every sub-batch: the spend of the ones before it is known by now.
         if let Some(m) = meter {
@@ -5101,9 +5185,7 @@ async fn run_passes_batch(
 
         // Fetch + parse results.
         let rows = llm.fetch_batch_results(&batch_id, batch_ttl).await?;
-        let sub = reassemble_batch_results(rows);
-        all_responses.extend(sub.responses);
-        all_errors.extend(sub.errors);
+        all_results.extend(reassemble_batch_results(rows));
     }
 
     // Reassemble: look up each (ci, bi) pair's response by its deterministic custom_id.
@@ -5114,8 +5196,7 @@ async fn run_passes_batch(
         n_c,
         n_b,
         &pairs,
-        &all_responses,
-        &all_errors,
+        &all_results,
         &refused_ids,
         adopted,
         meter,
@@ -5135,8 +5216,7 @@ fn reassemble_batch_passes(
     n_c: usize,
     n_b: usize,
     pairs: &[(usize, usize)],
-    responses: &std::collections::HashMap<String, crate::llm::LlmResponse>,
-    errors: &std::collections::HashMap<String, String>,
+    results: &crate::llm::BatchResults,
     refused_ids: &std::collections::HashSet<String>,
     adopted: &std::collections::HashSet<String>,
     meter: Option<&UsageMeter>,
@@ -5157,7 +5237,7 @@ fn reassemble_batch_passes(
             }
             continue;
         }
-        match responses.get(&custom_id) {
+        match results.responses.get(&custom_id) {
             Some(resp) => {
                 if let Some(m) = meter {
                     m.record_stage(Stage::ScanPass, resp);
@@ -5177,7 +5257,12 @@ fn reassemble_batch_passes(
             None => {
                 // The item failed or was not in the result set. Prefer the per-item reason
                 // the API gave (a refusal reads as a refusal) over a generic "missing".
-                let reason = errors
+                // A failed item that was still billed (a refusal) counts toward the spend cap.
+                if let (Some(m), Some(billed)) = (meter, results.billed.get(&custom_id)) {
+                    m.record_stage(Stage::ScanPass, billed);
+                }
+                let reason = results
+                    .errors
                     .get(&custom_id)
                     .cloned()
                     .unwrap_or_else(|| format!("batch item {custom_id} missing from results"));
@@ -8905,6 +8990,7 @@ async fn run_prose_lens(
             }
         }
         Err(e) => {
+            meter_failed(meter, Stage::DeepTier, &e);
             result.error = Some(format!("{e}"));
             if let Some((store, key)) = feedback {
                 store.set_status(key, &session, "blocked");
@@ -9048,14 +9134,22 @@ async fn run_security_passes(
                     req = req.with_model(m.to_string());
                 }
                 let r: anyhow::Result<(Vec<Finding>, Vec<ProposedRule>, Vec<String>)> = async {
-                    let resp = if let Some((store, key)) = feedback {
+                    let call = if let Some((store, key)) = feedback {
                         let mut on_delta = |t: &str| store.append_output_raw(key, &session, t);
-                        llm.complete_streaming(req, &mut on_delta).await?
+                        llm.complete_streaming(req, &mut on_delta).await
                     } else {
                         let cap = total_backstop();
                         tokio::time::timeout(cap, llm.complete(req))
                             .await
-                            .map_err(|_| anyhow::anyhow!("security pass exceeded the {}s backstop", cap.as_secs()))??
+                            .map_err(|_| anyhow::anyhow!("security pass exceeded the {}s backstop", cap.as_secs()))
+                            .and_then(|r| r)
+                    };
+                    let resp = match call {
+                        Ok(r) => r,
+                        Err(e) => {
+                            meter_failed(meter, Stage::DeepTier, &e);
+                            return Err(e);
+                        }
                     };
                     if let Some(m) = meter {
                         m.record_stage(Stage::DeepTier, &resp);
@@ -14005,8 +14099,8 @@ mod tests {
     /// refusal, not "missing from results".
     #[test]
     fn a_refused_batch_item_is_reported_as_a_refusal_not_as_missing() {
-        let mut responses = std::collections::HashMap::new();
-        responses.insert(
+        let mut results = crate::llm::BatchResults::default();
+        results.responses.insert(
             "c0-b0".to_string(),
             LlmResponse {
                 text: r#"{"findings":[]}"#.to_string(),
@@ -14021,8 +14115,7 @@ mod tests {
                 truncated: false,
             },
         );
-        let mut errors = std::collections::HashMap::new();
-        errors.insert(
+        results.errors.insert(
             "c0-b1".to_string(),
             crate::llm::refusal_error(&serde_json::json!({"stop_reason": "refusal"}))
                 .unwrap()
@@ -14035,8 +14128,7 @@ mod tests {
             1,
             3,
             &[(0, 0), (0, 1), (0, 2)],
-            &responses,
-            &errors,
+            &results,
             &std::collections::HashSet::new(),
             &std::collections::HashSet::new(),
             None,
