@@ -396,7 +396,10 @@ fn partition_rows(
             .map(|s| s.url.clone())
             .collect::<Vec<_>>()
             .join("\n");
-        let fix = resolve_fix(&f.rule_id, corpus, f, chosen_option_for_rule);
+        // Plain-text artifacts (workbook cells, findings.json, CSV): hard wraps joined and the
+        // markdown backticks dropped. The PDF keeps the backticks and sets them as mono.
+        let fix = resolve_fix(&f.rule_id, corpus, f, chosen_option_for_rule)
+            .map(|s| crate::report_export::fix_text::plain(&s));
         // C4-P3: calibration's effort, else the rule's authored band (see
         // `report_export::resolve_effort`'s doc comment) — never `f.effort` alone, so a
         // deterministic/RLS-replay floor finding with an authored band doesn't render "not
@@ -468,7 +471,11 @@ fn partition_rows(
             status: f.status.clone(),
             snippet: cap_snippet_for_workbook(&f.snippet),
             detail,
-            fix_specific: f.fix_specific.clone(),
+            fix_specific: f
+                .fix_specific
+                .as_deref()
+                .map(crate::report_export::fix_text::plain)
+                .filter(|s| !s.is_empty()),
             fix,
             is_fp,
             fp_reason,
@@ -3570,7 +3577,7 @@ mod tests {
         let (rows, _) = partition_rows(&report, &HashMap::new(), None, &HashMap::new());
         assert_eq!(
             rows[0].fix_specific.as_deref(),
-            Some("Use `safeInternalPath` from lib/redirect.ts, as app/auth/signin/route.ts does.")
+            Some("Use safeInternalPath from lib/redirect.ts, as app/auth/signin/route.ts does.")
         );
     }
 
@@ -3600,14 +3607,76 @@ mod tests {
         f.fix_specific = Some("Enable RLS directly on `profiles`.".to_string());
         let report = report_with(vec![f], vec![]);
         let (rows, _) = partition_rows(&report, &HashMap::new(), Some(&corpus), &HashMap::new());
+        // Plain-text artifacts carry the fix without the markdown backticks.
         assert_eq!(
             rows[0].fix_specific.as_deref(),
-            Some("Enable RLS directly on `profiles`.")
+            Some("Enable RLS directly on profiles.")
         );
         assert!(rows[0]
             .fix
             .as_deref()
             .is_some_and(|s| s.contains("profiles")));
+    }
+
+    /// Fix text reaches the plain-text artifacts (workbook cells, `findings.json`, CSV) as ONE
+    /// paragraph per authored paragraph and without markdown backticks: the rule TOML's hard
+    /// line wraps are joined and `code` spans lose their backticks.
+    #[tokio::test]
+    async fn fix_text_is_joined_and_backtick_free_in_workbook_json_and_csv() {
+        let (corpus, errors) =
+            camerata_rules::load_corpus_lenient(&camerata_rules::corpus_path()).await;
+        assert!(errors.is_empty(), "corpus must load cleanly: {errors:?}");
+        let mut f = finding(
+            "SUPABASE-KEY-SERVICE-ROLE-CLIENT-1",
+            "apps/web/.env.production",
+            3,
+            "critical",
+        );
+        f.fix_specific = Some(
+            "Move the key out of `apps/web/.env.production`\nand rename `VITE_KEY`,\nthen rotate it.\n\nRedeploy."
+                .to_string(),
+        );
+        let report = report_with(vec![f], vec![]);
+        let sealed = report.clone().seal();
+        let (rows, _) = partition_rows(&report, &HashMap::new(), Some(&corpus), &HashMap::new());
+        let generic = rows[0].fix.as_deref().expect("authored remediation");
+        let specific = rows[0].fix_specific.as_deref().expect("specific fix");
+        assert_eq!(
+            specific,
+            "Move the key out of apps/web/.env.production and rename VITE_KEY, then rotate it.\n\nRedeploy."
+        );
+        assert!(
+            !generic.contains('`') && !generic.contains('\n'),
+            "{generic:?}"
+        );
+        assert!(generic.contains("NEXT_PUBLIC_"), "{generic:?}");
+
+        // The workbook cells (V = fix_specific, W = Recommended Fix on the All Findings sheet).
+        let xlsx = build_workbook(&sealed, &HashMap::new(), Some(&corpus), &empty_opts()).unwrap();
+        for cell in ["V2", "W2"] {
+            let text = cell_text(&xlsx, "xl/worksheets/sheet2.xml", cell);
+            assert!(!text.contains('`'), "{cell}: {text:?}");
+        }
+        assert_eq!(
+            cell_text(&xlsx, "xl/worksheets/sheet2.xml", "W2"),
+            generic.to_string()
+        );
+
+        // The CSV (derived from the same rows).
+        let exports =
+            build_csv_exports(&sealed, &HashMap::new(), Some(&corpus), &empty_opts()).unwrap();
+        let all = &exports
+            .iter()
+            .find(|(n, _)| n == "csv/all-findings.csv")
+            .unwrap()
+            .1;
+        let mut rdr = csv::Reader::from_reader(all.as_slice());
+        let headers = rdr.headers().unwrap().clone();
+        let rec = rdr.records().next().expect("one data row").unwrap();
+        for col in ["fix", "fix_specific"] {
+            let i = headers.iter().position(|h| h == col).expect(col);
+            assert!(!rec[i].contains('`'), "{col}: {:?}", &rec[i]);
+        }
     }
 
     // ── `findings.json` (product export, machine-readable sibling of the workbook) ─────
@@ -3976,7 +4045,11 @@ mod tests {
             expected.is_some(),
             "fixture rule must have authored remediation"
         );
-        assert_eq!(findings_export.findings[0].fix, expected);
+        // Same authored text, in the plain-text form (no markdown backticks) the workbook uses.
+        assert_eq!(
+            findings_export.findings[0].fix,
+            expected.map(|s| crate::report_export::fix_text::plain(&s))
+        );
     }
 
     #[test]
@@ -4035,7 +4108,7 @@ mod tests {
         );
         assert_eq!(
             findings_export.findings[0].fix_specific.as_deref(),
-            Some("Use `safeInternalPath` from lib/redirect.ts.")
+            Some("Use safeInternalPath from lib/redirect.ts.")
         );
         let serialized = serde_json::to_string(&findings_export.findings[0]).unwrap();
         let fix_specific_idx = serialized

@@ -91,6 +91,7 @@ pub mod repeatability;
 /// PDF audit-report export (brownfield audit hardening Pass B): `AuditReportJson` +
 /// `build_report_json` (pure serializer) + `compile_pdf` (Typst compile). See the
 /// module doc comment and `docs/design/2026-07-23_brownfield-audit-report.md`.
+pub mod remediation_plan;
 pub mod report_export;
 pub mod review_agent;
 pub mod routine;
