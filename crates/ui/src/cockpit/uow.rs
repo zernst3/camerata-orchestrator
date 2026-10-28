@@ -1008,6 +1008,16 @@ pub(super) struct UowView {
     /// blocks sign-off until it is fixed or accepted with a reason.
     #[serde(default)]
     pub review_findings: Vec<super::review_findings::RecordedReviewFindingView>,
+    /// Where the unit came from: the inspection findings it closes (roadmap 2c). `None` for every
+    /// other unit.
+    #[serde(default)]
+    pub source: Option<super::remediation::UowSourceView>,
+    /// What each delta retest said about those findings, oldest first.
+    #[serde(default)]
+    pub retests: Vec<super::remediation::RetestEvidenceView>,
+    /// The project the unit belongs to (a rescan runs against it).
+    #[serde(default)]
+    pub project_id: Option<String>,
     /// The persisted Intake state (#105): free-text context + repo/branch scope (R6).
     #[serde(default)]
     pub intake: IntakeStateView,
@@ -1606,6 +1616,9 @@ pub(super) struct UowListEntry {
     /// `true` when this is a blank/authoring DRAFT UoW (render the authoring panel).
     #[serde(default)]
     pub authoring: bool,
+    /// `"findings"` for a unit made from an inspection's findings (a small badge in the list).
+    #[serde(default)]
+    pub source_kind: Option<String>,
 }
 
 /// The `GET /api/uows` envelope.
@@ -2511,6 +2524,9 @@ pub(super) fn GovernedDevPage() -> Element {
                                             }
                                             span { class: "govdev-uow-assignee", "{assignees}" }
                                             span { class: "govdev-uow-stage", "{stage}" }
+                                            if u.source_kind.as_deref() == Some("findings") {
+                                                span { class: "govdev-uow-source", "from inspection" }
+                                            }
                                         }
                                     }
                                     if confirming {
@@ -5376,6 +5392,25 @@ pub(super) fn DevelopmentPhaseView(
         .map(|u| u.review_findings)
         .unwrap_or_default();
 
+    // The inspection findings this unit closes, with what each delta retest said (gap 6).
+    let (findings_source, findings_retests, findings_repo, findings_project): (
+        Option<super::remediation::FindingsSourceView>,
+        Vec<super::remediation::RetestEvidenceView>,
+        String,
+        Option<String>,
+    ) = uow_for_stage
+        .read()
+        .clone()
+        .flatten()
+        .map(|u| {
+            let repo = u.repo.clone().unwrap_or_default();
+            let source = u
+                .source
+                .map(|super::remediation::UowSourceView::Findings(f)| f);
+            (source, u.retests, repo, u.project_id)
+        })
+        .unwrap_or_default();
+
     // ── Layer-2 results (displayed after a dev run completes — no button) ─────────
     // TODO(#105): fetch real Layer-2 bounce results from the run's provenance endpoint
     let layer2_results: Option<String> = uow_for_stage
@@ -5838,6 +5873,11 @@ pub(super) fn DevelopmentPhaseView(
 
             // ── Layer-3 reviewer findings (gap 4): rendered only when the unit has some ───
             super::review_findings::ReviewFindingsSection { story_id: story_id.clone(), findings: review_findings, uow_refresh }
+
+            // ── Inspection findings this unit closes (gap 6): rendered only for such a unit ───
+            if let Some(source) = findings_source {
+                super::remediation::FindingsSourceSection { source, retests: findings_retests, repo: findings_repo, story_id: story_id.clone(), project_id: findings_project, uow_refresh }
+            }
 
             // ── §8: Ship panel (§5.7) — per in-scope repo ───────────────────────
             // One Ship row per in-scope repo. The fan-out guarantees each repo's branch
@@ -9664,6 +9704,7 @@ mod render_tests {
                         work_item: None,
                         stage: UowStage::default(),
                         authoring: false,
+                        source_kind: None,
                     }),
                     uows_refresh,
                     sel,

@@ -3437,6 +3437,7 @@ mod freshness;
 pub mod live_run;
 mod palette;
 mod pane_context;
+mod remediation;
 mod review;
 mod review_findings;
 pub mod rules;
@@ -4101,12 +4102,14 @@ mod tests {
                 work_item: Some(wi("github:acme/web#10")),
                 stage: UowStage::Development,
                 authoring: false,
+                source_kind: None,
             },
             UowListEntry {
                 id: "uow-2".to_string(),
                 work_item: Some(wi("github:acme/web#11")),
                 stage: UowStage::Intake,
                 authoring: false,
+                source_kind: None,
             },
         ];
         // A match returns the right UoW (drives "Open Unit of Work").
