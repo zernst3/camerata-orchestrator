@@ -31,8 +31,9 @@ pub struct SqlStatement {
     pub end_line: usize,
 }
 
-/// A construct [`split_statements_strict`] found still open at end of file: the file does not
-/// parse as SQL, so its statement boundaries past `line` are guesses.
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// A construct [`split_statements_strict`] found still open at end of file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Unterminated {
     /// What was left open.
@@ -51,26 +52,83 @@ impl std::fmt::Display for Unterminated {
     }
 }
 
+/// Why [`split_statements_strict`] cannot vouch for a split: the file does not parse as SQL, or
+/// parses only by guessing, so its statement boundaries past the reported line are guesses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SplitError {
+    /// A string, quoted identifier, dollar-quoted body or block comment is open at end of file.
+    Unterminated(Unterminated),
+    /// A backslash directly before a quote outside an escape string (`E'...'`). Whether the
+    /// backslash escapes the quote depends on `standard_conforming_strings` and on the kind of
+    /// string, so the splitter will not guess which statements follow.
+    AmbiguousBackslash {
+        /// The 1-based line of the quote.
+        line: usize,
+    },
+    /// The caller's cancel flag was raised: the split was abandoned, not finished.
+    Cancelled,
+}
+
+impl std::fmt::Display for SplitError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unterminated(u) => u.fmt(f),
+            Self::AmbiguousBackslash { line } => write!(
+                f,
+                "ambiguous backslash before a quote on line {line} (outside an E'' string)"
+            ),
+            Self::Cancelled => write!(f, "cancelled before the file was fully read"),
+        }
+    }
+}
+
 /// Split `sql` into top-level statements. See the module doc for the hardening contract:
 /// this function never panics, regardless of input.
 pub fn split_statements(sql: &str) -> Vec<SqlStatement> {
-    split_inner(sql).0
+    split_inner(sql, None).0
 }
 
 /// [`split_statements`] for a caller that must know the split is TRUSTWORTHY: `Err` when a
 /// string literal, quoted identifier, dollar-quoted body or block comment is still open at end
-/// of file. The lenient split runs such a construct to EOF and carries on; a caller that narrows
-/// what a reader sees by statement (the candidate-site locators) must instead treat the file as
-/// unparseable, because every boundary after the open construct is a guess. Never panics.
-pub fn split_statements_strict(sql: &str) -> Result<Vec<SqlStatement>, Unterminated> {
-    match split_inner(sql) {
+/// of file, or when a backslash sits directly before a quote outside an `E'...'` string (see
+/// [`SplitError::AmbiguousBackslash`]). The lenient split runs such a construct to EOF and
+/// carries on; a caller that narrows what a reader sees by statement (the candidate-site
+/// locators) must instead treat the file as unparseable, because every boundary after the
+/// problem is a guess. Never panics.
+pub fn split_statements_strict(sql: &str) -> Result<Vec<SqlStatement>, SplitError> {
+    split_statements_strict_until(sql, &AtomicBool::new(false))
+}
+
+/// [`split_statements_strict`] that gives up with [`SplitError::Cancelled`] soon after `cancel`
+/// is raised (polled every few thousand characters), so a caller that stopped waiting can stop
+/// the work too.
+pub fn split_statements_strict_until(
+    sql: &str,
+    cancel: &AtomicBool,
+) -> Result<Vec<SqlStatement>, SplitError> {
+    match split_inner(sql, Some(cancel)) {
         (statements, None) => Ok(statements),
-        (_, Some(open)) => Err(open),
+        (_, Some(problem)) => Err(problem),
     }
 }
 
-/// The one splitter: the statements, plus the first construct left open at EOF (if any).
-fn split_inner(sql: &str) -> (Vec<SqlStatement>, Option<Unterminated>) {
+/// Record the FIRST problem a split meets; later ones add nothing.
+fn note(slot: &mut Option<SplitError>, problem: SplitError) {
+    if slot.is_none() {
+        *slot = Some(problem);
+    }
+}
+
+/// Is the quote at `chars[i]` the opening quote of an escape string (`E'...'` / `e'...'`)? The
+/// `E` must not be the tail of a longer word (`type'` does not open one).
+fn opens_escape_string(chars: &[char], i: usize) -> bool {
+    i > 0
+        && matches!(chars[i - 1], 'E' | 'e')
+        && (i == 1 || !(chars[i - 2].is_alphanumeric() || matches!(chars[i - 2], '_' | '$')))
+}
+
+/// The one splitter: the statements, plus the first problem found (if any).
+fn split_inner(sql: &str, cancel: Option<&AtomicBool>) -> (Vec<SqlStatement>, Option<SplitError>) {
     // Normalize CRLF to LF up front so line counting and comment/string scanning never has
     // to special-case '\r' — a stray '\r' left in `cur` would otherwise leak into the
     // whitespace-normalized statement text.
@@ -82,11 +140,17 @@ fn split_inner(sql: &str) -> (Vec<SqlStatement>, Option<Unterminated>) {
     let mut out = Vec::new();
     let mut cur = String::new();
     let mut cur_start_line: Option<usize> = None;
-    let mut unterminated: Option<Unterminated> = None;
-    let mut open = |construct: &'static str, line: usize| {
-        if unterminated.is_none() {
-            unterminated = Some(Unterminated { construct, line });
-        }
+    let mut problem: Option<SplitError> = None;
+    let mut ticks: u32 = 0;
+    // True once the caller raised the cancel flag; polled every 4096 steps of any loop.
+    macro_rules! cancelled {
+        () => {{
+            ticks = ticks.wrapping_add(1);
+            ticks & 0xfff == 0 && cancel.is_some_and(|c| c.load(Ordering::Relaxed))
+        }};
+    }
+    let unterminated = |construct: &'static str, line: usize| {
+        SplitError::Unterminated(Unterminated { construct, line })
     };
 
     // Push a single normalizing space into `cur`, but only once a statement has actually
@@ -100,6 +164,9 @@ fn split_inner(sql: &str) -> (Vec<SqlStatement>, Option<Unterminated>) {
     };
 
     while i < n {
+        if cancelled!() {
+            return (out, Some(SplitError::Cancelled));
+        }
         let c = chars[i];
 
         // ── line comment ────────────────────────────────────────────────────────────
@@ -117,6 +184,9 @@ fn split_inner(sql: &str) -> (Vec<SqlStatement>, Option<Unterminated>) {
             let comment_line = line;
             i += 2;
             while i < n && !(i + 1 < n && chars[i] == '*' && chars[i + 1] == '/') {
+                if cancelled!() {
+                    return (out, Some(SplitError::Cancelled));
+                }
                 if chars[i] == '\n' {
                     line += 1;
                 }
@@ -127,7 +197,7 @@ fn split_inner(sql: &str) -> (Vec<SqlStatement>, Option<Unterminated>) {
             if i + 1 < n {
                 i += 2;
             } else {
-                open("block comment", comment_line);
+                note(&mut problem, unterminated("block comment", comment_line));
                 i = n;
             }
             push_sep(&mut cur, cur_start_line.is_some());
@@ -140,13 +210,22 @@ fn split_inner(sql: &str) -> (Vec<SqlStatement>, Option<Unterminated>) {
                 cur_start_line = Some(line);
             }
             let open_line = line;
+            // `E'...'`: a backslash escapes the next character, `\'` included. In any other
+            // string a backslash before a quote is ambiguous (see `SplitError`).
+            let escape_string = opens_escape_string(&chars, i);
+            if !escape_string && i > 0 && chars[i - 1] == '\\' {
+                note(&mut problem, SplitError::AmbiguousBackslash { line });
+            }
             cur.push(c);
             i += 1;
             loop {
                 if i >= n {
                     // unterminated string: best-effort, run to EOF, never panic
-                    open("string literal", open_line);
+                    note(&mut problem, unterminated("string literal", open_line));
                     break;
+                }
+                if cancelled!() {
+                    return (out, Some(SplitError::Cancelled));
                 }
                 let ch = chars[i];
                 if ch == '\n' {
@@ -154,7 +233,22 @@ fn split_inner(sql: &str) -> (Vec<SqlStatement>, Option<Unterminated>) {
                 }
                 cur.push(ch);
                 i += 1;
+                if escape_string && ch == '\\' {
+                    // The escaped character is data, whatever it is (a quote, another
+                    // backslash, a newline).
+                    if i < n {
+                        if chars[i] == '\n' {
+                            line += 1;
+                        }
+                        cur.push(chars[i]);
+                        i += 1;
+                    }
+                    continue;
+                }
                 if ch == '\'' {
+                    if !escape_string && i >= 2 && chars[i - 2] == '\\' {
+                        note(&mut problem, SplitError::AmbiguousBackslash { line });
+                    }
                     if i < n && chars[i] == '\'' {
                         // doubled quote inside the literal: escaped, keep scanning
                         cur.push(chars[i]);
@@ -173,13 +267,19 @@ fn split_inner(sql: &str) -> (Vec<SqlStatement>, Option<Unterminated>) {
                 cur_start_line = Some(line);
             }
             let open_line = line;
+            if i > 0 && chars[i - 1] == '\\' {
+                note(&mut problem, SplitError::AmbiguousBackslash { line });
+            }
             cur.push(c);
             i += 1;
             loop {
                 if i >= n {
                     // unterminated identifier: best-effort, never panic
-                    open("quoted identifier", open_line);
+                    note(&mut problem, unterminated("quoted identifier", open_line));
                     break;
+                }
+                if cancelled!() {
+                    return (out, Some(SplitError::Cancelled));
                 }
                 let ch = chars[i];
                 if ch == '\n' {
@@ -188,6 +288,9 @@ fn split_inner(sql: &str) -> (Vec<SqlStatement>, Option<Unterminated>) {
                 cur.push(ch);
                 i += 1;
                 if ch == '"' {
+                    if i >= 2 && chars[i - 2] == '\\' {
+                        note(&mut problem, SplitError::AmbiguousBackslash { line });
+                    }
                     if i < n && chars[i] == '"' {
                         cur.push(chars[i]);
                         i += 1;
@@ -213,8 +316,11 @@ fn split_inner(sql: &str) -> (Vec<SqlStatement>, Option<Unterminated>) {
                 loop {
                     if i >= n {
                         // unterminated dollar-quote: best-effort, run to EOF, never panic
-                        open("dollar-quoted body", open_line);
+                        note(&mut problem, unterminated("dollar-quoted body", open_line));
                         break;
+                    }
+                    if cancelled!() {
+                        return (out, Some(SplitError::Cancelled));
                     }
                     if chars[i] == '\n' {
                         line += 1;
@@ -292,7 +398,7 @@ fn split_inner(sql: &str) -> (Vec<SqlStatement>, Option<Unterminated>) {
         }
     }
 
-    (out, unterminated)
+    (out, problem)
 }
 
 /// If `chars[i]` begins a valid dollar-quote tag (`$$` or `$tag$`, where `tag` is
@@ -358,10 +464,85 @@ mod tests {
         ] {
             assert_eq!(
                 split_statements_strict(sql),
-                Err(Unterminated { construct, line }),
+                Err(SplitError::Unterminated(Unterminated { construct, line })),
                 "{sql}"
             );
         }
+    }
+
+    #[test]
+    fn an_escape_string_honours_a_backslash_escaped_quote() {
+        // `\'` inside E'' is data, so the `;` after it is still inside the string.
+        let sql = "insert into t values (E'it\\'s; still inside');\ncreate table after_it (id int);";
+        let stmts = split_statements(sql);
+        assert_eq!(stmts.len(), 2, "{stmts:#?}");
+        assert!(stmts[0].text.contains("it\\'s; still inside"));
+        assert_eq!(stmts[1].line, 2);
+        assert_eq!(split_statements_strict(sql), Ok(stmts));
+        // A doubled backslash does not escape the quote that follows it; lowercase `e` works too.
+        let sql = "select e'ends with a backslash\\\\'; create table b (id int);";
+        let stmts = split_statements(sql);
+        assert_eq!(stmts.len(), 2, "{stmts:#?}");
+        assert!(split_statements_strict(sql).is_ok());
+        // An escaped newline keeps the line count honest.
+        let sql = "select E'a\\\nb'; create table c (id int);";
+        let stmts = split_statements(sql);
+        assert_eq!(stmts.len(), 2);
+        assert_eq!(stmts[0].end_line, 2);
+    }
+
+    #[test]
+    fn an_e_that_ends_a_longer_word_does_not_open_an_escape_string() {
+        // `type'x\'` : the `e` is the tail of `type`, so this is a standard string and the
+        // backslash before its closing quote is ambiguous.
+        assert_eq!(
+            split_statements_strict("select type'x\\';"),
+            Err(SplitError::AmbiguousBackslash { line: 1 })
+        );
+    }
+
+    #[test]
+    fn a_backslash_before_a_quote_outside_an_escape_string_is_a_strict_error() {
+        for sql in [
+            // standard string ending in a backslash (or an escape under old settings)
+            "insert into t values ('C:\\');\ncreate table a (id int);",
+            "insert into t values ('it\\'s');",
+            // a backslash right before an opening quote at top level
+            "select \\'x';",
+            // a quoted identifier closed right after a backslash
+            "create table \"a\\\" (id int);",
+        ] {
+            assert!(
+                matches!(
+                    split_statements_strict(sql),
+                    Err(SplitError::AmbiguousBackslash { .. })
+                ),
+                "{sql}"
+            );
+            // the lenient split still answers (best effort) and never panics
+            let _ = split_statements(sql);
+        }
+        assert_eq!(
+            split_statements_strict("insert into t values ('a\\b');"),
+            Ok(split_statements("insert into t values ('a\\b');")),
+            "a backslash that is not before a quote is plain data"
+        );
+    }
+
+    #[test]
+    fn a_raised_cancel_flag_stops_the_split() {
+        let big = "insert into t values ('x');\n".repeat(50_000);
+        let cancel = AtomicBool::new(true);
+        assert_eq!(
+            split_statements_strict_until(&big, &cancel),
+            Err(SplitError::Cancelled)
+        );
+        let mid_string = format!("select '{}';", "y".repeat(100_000));
+        assert_eq!(
+            split_statements_strict_until(&mid_string, &cancel),
+            Err(SplitError::Cancelled)
+        );
+        assert!(split_statements_strict_until(&big, &AtomicBool::new(false)).is_ok());
     }
 
     #[test]
