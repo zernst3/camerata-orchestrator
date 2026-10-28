@@ -446,6 +446,41 @@ pub struct ScanInputFacts {
     /// be neither confirmed nor refuted. A graded run must not repeat that.
     #[serde(default)]
     pub audit_model: Option<String>,
+    /// Auditable files the scan did NOT read, by path and reason (over the size cap, or past
+    /// the file cap). H4: listed under Coverage in the report and `findings.json` so a skipped
+    /// file is named, never silently absent. `serde(default)` so an older ledger still loads.
+    #[serde(default)]
+    pub skipped_files: Vec<SkippedFile>,
+}
+
+/// One auditable file the scan did not read. See [`ScanInputFacts::skipped_files`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SkippedFile {
+    /// The repo (`owner/repo`).
+    pub repo: String,
+    /// Repo-relative, forward-slashed path.
+    pub path: String,
+    pub reason: SkipReason,
+}
+
+/// Why a file was not read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SkipReason {
+    /// Larger than `onboard::files::MAX_FILE_BYTES` (400 KB).
+    Oversize,
+    /// Past `onboard::files::HARD_CAP_FILES` (20,000 files) in its repo.
+    BeyondFileCap,
+}
+
+impl SkipReason {
+    /// The client-facing reason, as the Coverage section states it.
+    pub fn label(self) -> &'static str {
+        match self {
+            SkipReason::Oversize => "over the 400 KB file size limit",
+            SkipReason::BeyondFileCap => "beyond the 20,000-file limit",
+        }
+    }
 }
 
 /// W21 — whether every row's `path` is actually a repository-relative FILE PATH.

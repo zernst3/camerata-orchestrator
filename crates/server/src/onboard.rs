@@ -1619,6 +1619,9 @@ pub async fn audit_repos_with_llm_controlled(
     // correctly; this mirrors that logic over the SAME `files` this loop already reads.
     let mut files_excluded_total = 0usize;
     let mut engine_artifacts_total = 0usize;
+    // H4: every auditable file the walk did not read (over the size cap or past the file cap),
+    // by path, for the Coverage section.
+    let mut skipped_files_total: Vec<crate::scan_ledger::SkippedFile> = Vec::new();
     let mut code_chars_total = 0usize;
     let mut code_lines_total = 0usize;
     let mut lang_lines_total: std::collections::BTreeMap<String, usize> =
@@ -1757,11 +1760,28 @@ pub async fn audit_repos_with_llm_controlled(
                 reference_files,
                 truncated,
                 reference_truncated,
+                skipped_oversize,
+                skipped_beyond_cap,
                 excluded_noise,
                 excluded_noise_paths: _,
             }) => {
                 files_total += files.len();
                 files_excluded_total += excluded_noise;
+                for (paths, reason) in [
+                    (skipped_oversize, crate::scan_ledger::SkipReason::Oversize),
+                    (
+                        skipped_beyond_cap,
+                        crate::scan_ledger::SkipReason::BeyondFileCap,
+                    ),
+                ] {
+                    skipped_files_total.extend(paths.into_iter().map(|path| {
+                        crate::scan_ledger::SkippedFile {
+                            repo: spec.to_string(),
+                            path,
+                            reason,
+                        }
+                    }));
+                }
                 // W19: must stay zero. Non-zero means Camerata admitted its own artifacts as
                 // source — the 2026-10-16 defect. Fed to the integrity gate below.
                 engine_artifacts_total += files
@@ -2635,6 +2655,7 @@ pub async fn audit_repos_with_llm_controlled(
             // `None` ambiguous between "no model ran" and "nobody wrote it down", and left the
             // 2026-10-16 before/after comparison unfalsifiable. See `resolve_audit_model`.
             audit_model: ai_ran_for_ledger.then(|| crate::ai_audit::resolve_audit_model(model)),
+            skipped_files: skipped_files_total,
         });
     // W19: record the model that ACTUALLY ran, resolved, not the caller's raw pick — but
     // only when the AI tier ran at all. A floor-only or compliance-blocked run made zero

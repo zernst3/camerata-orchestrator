@@ -1379,6 +1379,9 @@ pub struct AuditReportJson {
     pub rules_not_run: Vec<ExcludedRuleJson>,
     pub dependency_snapshot: DependencySnapshotJson,
     pub methodology: MethodologyJson,
+    /// H4: what this scan did not cover, by pass and by path (see [`coverage_gaps`]). Rendered
+    /// in the PDF's Coverage block, the workbook's Coverage sheet and `findings.json`.
+    pub coverage_gaps: CoverageGapsJson,
     pub disclaimer: String,
 }
 
@@ -4930,6 +4933,7 @@ pub fn build_report_json(
         rules_not_run,
         dependency_snapshot,
         methodology,
+        coverage_gaps: coverage_gaps::coverage_gaps(report),
         disclaimer: AUDIT_REPORT_DISCLAIMER.to_string(),
     }
 }
@@ -5063,12 +5067,18 @@ pub async fn compile_pdf_from_data(data_json: &str) -> anyhow::Result<Vec<u8>> {
         .context("typst reported success but report.pdf was not found")
 }
 
+pub mod coverage_gaps;
+pub use coverage_gaps::{CoverageGapsJson, SkippedFileJson};
+
+#[cfg(test)]
+mod coverage_gaps_tests;
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::onboard::{AuditedRef, CoverageNote, LanguageVolume, ScanProvenance};
 
-    fn finding(rule_id: &str, path: &str, line: usize, severity: &str) -> Finding {
+    pub(super) fn finding(rule_id: &str, path: &str, line: usize, severity: &str) -> Finding {
         Finding {
             repo: "owner/repo".to_string(),
             path: path.to_string(),
@@ -5081,7 +5091,7 @@ mod tests {
         }
     }
 
-    fn report_with(findings: Vec<Finding>, audited_rule_ids: Vec<&str>) -> ScanReport {
+    pub(super) fn report_with(findings: Vec<Finding>, audited_rule_ids: Vec<&str>) -> ScanReport {
         ScanReport {
             repos: vec!["owner/repo".to_string()],
             stacks: Vec::new(),
@@ -5158,7 +5168,7 @@ mod tests {
         }
     }
 
-    fn empty_opts() -> ReportOptions {
+    pub(super) fn empty_opts() -> ReportOptions {
         ReportOptions::default()
     }
 
@@ -11089,7 +11099,7 @@ mod tests {
     /// Best-effort `typst` presence check for the compile test's skip gate (mirrors the
     /// same PATH lookup `compile_pdf` itself relies on via `Command::new("typst")`, just
     /// synchronous and side-effect-free here).
-    fn which_typst() -> Option<()> {
+    pub(super) fn which_typst() -> Option<()> {
         std::process::Command::new("typst")
             .arg("--version")
             .output()

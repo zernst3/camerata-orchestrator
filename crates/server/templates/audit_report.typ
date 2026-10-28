@@ -677,6 +677,26 @@ Not performed in this engagement:
   ]
 ]
 
+// H4: what this scan did not review, by pass and by path (`report_export::coverage_gaps`, the
+// same data the workbook's Coverage sheet and findings.json carry). A failed AI pass names how
+// many files it did not review; a skipped file is listed by path. The PDF lists the first 100
+// skipped files and points to the full list.
+#let gaps = d.coverage_gaps
+#if gaps.failed_ai_passes.len() > 0 or gaps.skipped_files.len() > 0 [
+  #v(0.2cm)
+  Coverage, not reviewed this scan:
+  #for line in gaps.failed_ai_passes [
+    - #line
+  ]
+  #let shown = calc.min(gaps.skipped_files.len(), 100)
+  #for skipped in gaps.skipped_files.slice(0, shown) [
+    - #skipped.repo, #raw(skipped.path): #skipped.reason
+  ]
+  #if gaps.skipped_files.len() > shown [
+    - #str(gaps.skipped_files.len() - shown) more skipped files, listed in full on the workbook's Coverage sheet and in findings.json
+  ]
+]
+
 = Disclaimer
 
 #block(stroke: 0.5pt + rgb("#cccccc"), inset: 10pt, radius: 2pt)[

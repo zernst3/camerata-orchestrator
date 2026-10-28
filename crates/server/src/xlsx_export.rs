@@ -1555,6 +1555,7 @@ fn write_coverage_sheet(
     tool_coverage_notes: &[String],
     rules_not_run: &[(String, String)],
     not_assessed: &[NotAssessedRow],
+    gaps: &crate::report_export::CoverageGapsJson,
     fmts: &Formats,
 ) -> Result<(), XlsxError> {
     let ws = wb.add_worksheet();
@@ -1751,6 +1752,46 @@ fn write_coverage_sheet(
             ws.write_string_with_format(next_r, 0, rid, &fmts.cell(None, false, false))?;
             ws.write_string_with_format(next_r, 1, reason, &fmts.cell(None, true, false))?;
             next_r += 1;
+        }
+        next_r += 1;
+    }
+
+    // H4: what the scan did not review, by pass and by path — the same
+    // `report_export::coverage_gaps` the PDF and findings.json carry. Every skipped file is
+    // listed here in full (the PDF shows the first ones and points here).
+    if !gaps.is_empty() {
+        ws.write_string_with_format(next_r, 0, "Not reviewed this scan", &fmts.section_title)?;
+        next_r += 1;
+        for line in &gaps.failed_ai_passes {
+            ws.write_string_with_format(next_r, 0, line, &fmts.cell(None, true, false))?;
+            next_r += 1;
+        }
+        if !gaps.skipped_files.is_empty() {
+            for (c, h) in ["Repo", "File", "Why it was not read"].iter().enumerate() {
+                ws.write_string_with_format(next_r, c as u16, *h, &fmts.header)?;
+            }
+            next_r += 1;
+            for skipped in &gaps.skipped_files {
+                ws.write_string_with_format(
+                    next_r,
+                    0,
+                    &skipped.repo,
+                    &fmts.cell(None, false, false),
+                )?;
+                ws.write_string_with_format(
+                    next_r,
+                    1,
+                    &skipped.path,
+                    &fmts.cell(None, true, false),
+                )?;
+                ws.write_string_with_format(
+                    next_r,
+                    2,
+                    &skipped.reason,
+                    &fmts.cell(None, false, false),
+                )?;
+                next_r += 1;
+            }
         }
     }
 
@@ -2319,6 +2360,7 @@ pub fn build_workbook(
         &tool_coverage_notes,
         &rules_not_run,
         &not_assessed_rows,
+        &crate::report_export::coverage_gaps::coverage_gaps(report),
         &fmts,
     )
     .context("writing the Coverage sheet")?;
@@ -2357,6 +2399,9 @@ pub struct FindingsExport {
     pub provenance: crate::report_export::CoverJson,
     pub summary: crate::report_export::ExecutiveSummaryJson,
     pub findings: Vec<FindingRow>,
+    /// H4: what the scan did not review (failed AI passes, files skipped for size or past the
+    /// file cap), by path. Reused verbatim from `report_json.coverage_gaps`, like `provenance`.
+    pub coverage: crate::report_export::CoverageGapsJson,
 }
 
 /// Build the `findings.json` payload — the JSON sibling of [`build_workbook`]. Takes the
@@ -2379,6 +2424,7 @@ pub fn build_findings_export(
         provenance: report_json.cover.clone(),
         summary: report_json.executive_summary.clone(),
         findings,
+        coverage: report_json.coverage_gaps.clone(),
     }
 }
 

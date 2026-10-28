@@ -462,6 +462,13 @@ pub struct ExtractedRepo {
     pub truncated: bool,
     /// The reference list hit [`HARD_CAP_REFERENCE_FILES`]: some reference text is missing.
     pub reference_truncated: bool,
+    /// Admissible files NOT read because they exceed [`MAX_FILE_BYTES`], by path. Listed under
+    /// Coverage in the report and `findings.json`, so a skipped file is named, never silent.
+    pub skipped_oversize: Vec<String>,
+    /// Admissible files NOT read because the walk had already admitted [`HARD_CAP_FILES`], by
+    /// path. Non-empty exactly when `truncated` is true. Listed under Coverage like
+    /// `skipped_oversize`.
+    pub skipped_beyond_cap: Vec<String>,
     pub excluded_noise: usize,
     /// The paths behind `excluded_noise` (always the same length), so `camerata count` can size
     /// what the filter dropped without a second walk.
@@ -512,23 +519,71 @@ impl ExtractedRepo {
 pub fn read_local_repo_files(root: &std::path::Path) -> anyhow::Result<ExtractedRepo> {
     let extra_dirs = extra_exclude_dirs();
     if root.join(".git").exists() {
-        read_local_repo_files_gitignore(root, &extra_dirs)
+        read_local_repo_files_gitignore(root, &extra_dirs, HARD_CAP_FILES)
     } else {
-        read_local_repo_files_noise_denylist(root, &extra_dirs)
+        read_local_repo_files_noise_denylist(root, &extra_dirs, HARD_CAP_FILES)
+    }
+}
+
+/// Where the walk puts each admissible (non-noise, auditable) file: read into `files`, or
+/// named in `oversize` / `beyond_cap` when it is not read. Every admissible file lands in
+/// exactly one of the three, so nothing the scan would have audited is dropped silently (H4).
+struct AdmittedSink {
+    cap: usize,
+    files: Vec<(String, String)>,
+    oversize: Vec<String>,
+    beyond_cap: Vec<String>,
+}
+
+impl AdmittedSink {
+    fn new(cap: usize) -> Self {
+        Self {
+            cap,
+            files: Vec::new(),
+            oversize: Vec::new(),
+            beyond_cap: Vec::new(),
+        }
+    }
+
+    /// Admit `rel` (at `full`, `len` bytes on disk; `None` when the size could not be read,
+    /// which skips it as before: an unreadable entry is not a file the walk can name honestly).
+    /// Returns whether it was read into `files`.
+    fn admit(&mut self, rel: String, full: &std::path::Path, len: Option<u64>) -> bool {
+        let Some(len) = len else {
+            return false;
+        };
+        if len as usize > MAX_FILE_BYTES {
+            self.oversize.push(rel);
+            return false;
+        }
+        if self.files.len() >= self.cap {
+            self.beyond_cap.push(rel);
+            return false;
+        }
+        let Ok(content) = std::fs::read_to_string(full) else {
+            return false; // skip non-UTF-8 / unreadable
+        };
+        self.files.push((rel, content));
+        true
+    }
+
+    fn truncated(&self) -> bool {
+        !self.beyond_cap.is_empty()
     }
 }
 
 /// Gitignore-aware walk (used when `.git` exists). Delegates to the `ignore` crate so
 /// `.gitignore`, `.git/info/exclude`, and the user's global gitignore are all respected.
-/// The noise denylist is applied afterward as a belt-and-suspenders guard.
+/// The noise denylist is applied afterward as a belt-and-suspenders guard. `cap` is
+/// [`HARD_CAP_FILES`] in production; tests pass a small one.
 fn read_local_repo_files_gitignore(
     root: &std::path::Path,
     extra_dirs: &[String],
+    cap: usize,
 ) -> anyhow::Result<ExtractedRepo> {
-    let mut files = Vec::new();
+    let mut admitted = AdmittedSink::new(cap);
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut excluded_noise_paths: Vec<String> = Vec::new();
-    let mut truncated = false;
     let mut reference = ReferenceSink::new(HARD_CAP_REFERENCE_FILES);
 
     // hidden(false): we want to scan dotfiles like .env and .camerata/ — the `ignore`
@@ -541,7 +596,7 @@ fn read_local_repo_files_gitignore(
         .hidden(false)
         .build();
 
-    'walk: for result in walker {
+    for result in walker {
         let entry = match result {
             Ok(e) => e,
             Err(_) => continue,
@@ -581,22 +636,10 @@ fn read_local_repo_files_gitignore(
         if noise || !admissible {
             continue;
         }
-        if entry
-            .metadata()
-            .map(|m| m.len() as usize)
-            .unwrap_or(usize::MAX)
-            > MAX_FILE_BYTES
-        {
-            continue;
-        }
-        let Ok(content) = std::fs::read_to_string(p) else {
-            continue; // skip non-UTF-8 / unreadable
-        };
-        files.push((rel, content));
-        if files.len() >= HARD_CAP_FILES {
-            truncated = true;
-            break 'walk;
-        }
+        // Past the cap the walk continues, naming each further admissible file instead of
+        // reading it, so the report can list what the cap left out.
+        let len = entry.metadata().ok().map(|m| m.len());
+        admitted.admit(rel, p, len);
     }
 
     // Union in git-TRACKED files the ignore-aware walk above skipped because they match a
@@ -606,7 +649,8 @@ fn read_local_repo_files_gitignore(
     // for this scan to catch, not a gap to leave open. `git_tracked_files` returns `None` on
     // any failure (no `git` on PATH, etc.); the primary walk above already succeeded
     // regardless, so this is purely additive and never turns a working scan into an error.
-    if !truncated {
+    // It runs past the cap too, so a tracked file beyond the cap is named like any other.
+    {
         if let Some(tracked) = git_tracked_files(root) {
             for rel in tracked {
                 if seen.contains(&rel) {
@@ -629,27 +673,23 @@ fn read_local_repo_files_gitignore(
                 let Ok(meta) = std::fs::metadata(&full) else {
                     continue; // tracked in the index but not present on disk (rare edge case)
                 };
-                if !meta.is_file() || meta.len() as usize > MAX_FILE_BYTES {
+                if !meta.is_file() {
                     continue;
                 }
-                let Ok(content) = std::fs::read_to_string(&full) else {
-                    continue; // skip non-UTF-8 / unreadable
-                };
                 seen.insert(rel.clone());
-                files.push((rel, content));
-                if files.len() >= HARD_CAP_FILES {
-                    truncated = true;
-                    break;
-                }
+                admitted.admit(rel, &full, Some(meta.len()));
             }
         }
     }
 
+    let truncated = admitted.truncated();
     Ok(ExtractedRepo {
-        files,
+        files: admitted.files,
         reference_files: reference.files,
         truncated,
         reference_truncated: reference.truncated,
+        skipped_oversize: admitted.oversize,
+        skipped_beyond_cap: admitted.beyond_cap,
         excluded_noise: excluded_noise_paths.len(),
         excluded_noise_paths,
     })
@@ -684,10 +724,10 @@ fn git_tracked_files(root: &std::path::Path) -> Option<Vec<String>> {
 fn read_local_repo_files_noise_denylist(
     root: &std::path::Path,
     extra_dirs: &[String],
+    cap: usize,
 ) -> anyhow::Result<ExtractedRepo> {
-    let mut files = Vec::new();
+    let mut admitted = AdmittedSink::new(cap);
     let mut excluded_noise_paths: Vec<String> = Vec::new();
-    let mut truncated = false;
     let mut reference = ReferenceSink::new(HARD_CAP_REFERENCE_FILES);
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
@@ -730,32 +770,18 @@ fn read_local_repo_files_noise_denylist(
             if noise || !admissible {
                 continue;
             }
-            if entry
-                .metadata()
-                .map(|m| m.len() as usize)
-                .unwrap_or(usize::MAX)
-                > MAX_FILE_BYTES
-            {
-                continue;
-            }
-            let Ok(content) = std::fs::read_to_string(&p) else {
-                continue; // skip non-UTF-8 / unreadable
-            };
-            files.push((rel, content));
-            if files.len() >= HARD_CAP_FILES {
-                truncated = true;
-                break;
-            }
-        }
-        if truncated {
-            break;
+            let len = entry.metadata().ok().map(|m| m.len());
+            admitted.admit(rel, &p, len);
         }
     }
+    let truncated = admitted.truncated();
     Ok(ExtractedRepo {
-        files,
+        files: admitted.files,
         reference_files: reference.files,
         truncated,
         reference_truncated: reference.truncated,
+        skipped_oversize: admitted.oversize,
+        skipped_beyond_cap: admitted.beyond_cap,
         excluded_noise: excluded_noise_paths.len(),
         excluded_noise_paths,
     })
@@ -1424,5 +1450,128 @@ mod tests {
                 .any(|f| f.path == "lib/config.dart" && f.rule_id == "SEC-NO-VENDOR-TOKEN-1"),
             "the floor must read lib/config.dart: {findings:#?}"
         );
+    }
+
+    // ── H4: no silent loss — skipped files are named, by path ──────────────────
+
+    fn sorted(mut v: Vec<String>) -> Vec<String> {
+        v.sort();
+        v
+    }
+
+    fn oversize_fixture(root: &std::path::Path) {
+        write(root, "src/a.rs", "fn a() {}\n");
+        write(root, "src/huge.rs", &"x".repeat(MAX_FILE_BYTES + 1));
+        // Not admissible at all (no code extension), so not "skipped for size" either.
+        write(root, "assets/huge.bin", &"x".repeat(MAX_FILE_BYTES + 1));
+    }
+
+    #[test]
+    fn a_file_over_the_size_cap_is_listed_by_path_in_a_non_git_tree() {
+        let dir = tempfile::tempdir().unwrap();
+        oversize_fixture(dir.path());
+        let extracted = scan(dir.path());
+        assert_eq!(paths(&extracted), ["src/a.rs"]);
+        assert_eq!(extracted.skipped_oversize, ["src/huge.rs"]);
+        assert!(extracted.skipped_beyond_cap.is_empty());
+    }
+
+    #[test]
+    fn a_file_over_the_size_cap_is_listed_by_path_in_a_git_tree() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join(".git")).unwrap();
+        oversize_fixture(dir.path());
+        let extracted = scan(dir.path());
+        assert_eq!(paths(&extracted), ["src/a.rs"]);
+        assert_eq!(extracted.skipped_oversize, ["src/huge.rs"]);
+    }
+
+    #[test]
+    fn a_tracked_but_gitignored_oversize_file_is_listed_by_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let git = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .args(args)
+                .current_dir(root)
+                .status();
+            matches!(status, Ok(s) if s.success())
+        };
+        if !git(&["init", "-q"]) {
+            return; // no git on PATH: the union path is not exercisable here
+        }
+        write(root, "src/a.rs", "fn a() {}\n");
+        write(root, "gen/big.rs", &"x".repeat(MAX_FILE_BYTES + 1));
+        assert!(git(&["add", "-f", "src/a.rs", "gen/big.rs"]));
+        write(root, ".gitignore", "gen/\n");
+        let extracted = scan(root);
+        assert_eq!(extracted.skipped_oversize, ["gen/big.rs"]);
+    }
+
+    fn cap_fixture(root: &std::path::Path) {
+        for i in 0..5 {
+            write(root, &format!("src/f{i}.rs"), "fn f() {}\n");
+        }
+        write(
+            root,
+            "README.md",
+            "not admissible, never counted against the cap\n",
+        );
+    }
+
+    #[test]
+    fn files_beyond_the_file_cap_are_listed_by_path_in_a_non_git_tree() {
+        let dir = tempfile::tempdir().unwrap();
+        cap_fixture(dir.path());
+        let extracted =
+            read_local_repo_files_noise_denylist(dir.path(), &[], 3).expect("walk succeeds");
+        assert!(extracted.truncated);
+        assert_eq!(extracted.files.len(), 3);
+        assert_eq!(extracted.skipped_beyond_cap.len(), 2);
+        let mut all: Vec<String> = extracted.files.iter().map(|(p, _)| p.clone()).collect();
+        all.extend(extracted.skipped_beyond_cap.clone());
+        assert_eq!(
+            sorted(all),
+            [
+                "src/f0.rs",
+                "src/f1.rs",
+                "src/f2.rs",
+                "src/f3.rs",
+                "src/f4.rs"
+            ],
+            "every admissible file is either read or named as beyond the cap"
+        );
+    }
+
+    #[test]
+    fn files_beyond_the_file_cap_are_listed_by_path_in_a_git_tree() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join(".git")).unwrap();
+        cap_fixture(dir.path());
+        let extracted = read_local_repo_files_gitignore(dir.path(), &[], 3).expect("walk succeeds");
+        assert!(extracted.truncated);
+        assert_eq!(extracted.files.len(), 3);
+        let mut all: Vec<String> = extracted.files.iter().map(|(p, _)| p.clone()).collect();
+        all.extend(extracted.skipped_beyond_cap.clone());
+        assert_eq!(
+            sorted(all),
+            [
+                "src/f0.rs",
+                "src/f1.rs",
+                "src/f2.rs",
+                "src/f3.rs",
+                "src/f4.rs"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_tree_under_the_cap_lists_nothing_as_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        cap_fixture(dir.path());
+        let extracted = scan(dir.path());
+        assert!(!extracted.truncated);
+        assert!(extracted.skipped_beyond_cap.is_empty());
+        assert!(extracted.skipped_oversize.is_empty());
     }
 }
