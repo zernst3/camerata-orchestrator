@@ -8,14 +8,14 @@ use super::*;
 use crate::onboard::MergedLocation;
 
 fn site_at(path: &str, line: usize, rule_id: &str, consequence: bool) -> MergedLocation {
-    MergedLocation {
-        repo: "owner/repo".to_string(),
-        path: path.to_string(),
+    MergedLocation::site(
+        "owner/repo".to_string(),
+        path.to_string(),
         line,
-        rule_id: rule_id.to_string(),
-        snippet: "x".to_string(),
+        rule_id.to_string(),
+        "x".to_string(),
         consequence,
-    }
+    )
 }
 
 fn report_with_absorbed_sites(n: usize) -> crate::onboard::ScanReport {

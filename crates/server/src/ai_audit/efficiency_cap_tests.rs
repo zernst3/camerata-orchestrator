@@ -743,6 +743,7 @@ fn a_billed_batch_refusal_counts_toward_the_cap() {
         &std::collections::HashSet::new(),
         &std::collections::HashSet::new(),
         Some(&m),
+        false,
         None,
     );
     assert_eq!(ok, 0);

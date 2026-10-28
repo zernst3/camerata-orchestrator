@@ -102,22 +102,22 @@ fn fixture() -> (SealedReport, HashMap<String, DispositionWire>) {
     sql.fix_specific = Some("Bind the id as a parameter,\nnever format it in.".to_string());
     sql.also_matches = vec!["ARCH-STRICT-LAYERING-1".to_string()];
     sql.also_locations = vec![
-        MergedLocation {
-            repo: "acme/portal".to_string(),
-            path: "src/refunds.rs".to_string(),
-            line: 22,
-            rule_id: "SEC-NO-RAW-SQL-CONCAT-1".to_string(),
-            snippet: "format!(...)".to_string(),
-            consequence: false,
-        },
-        MergedLocation {
-            repo: "acme/portal".to_string(),
-            path: "src/report.rs".to_string(),
-            line: 3,
-            rule_id: "SEC-NO-RAW-SQL-CONCAT-1".to_string(),
-            snippet: "impact".to_string(),
-            consequence: true,
-        },
+        MergedLocation::site(
+            "acme/portal".to_string(),
+            "src/refunds.rs".to_string(),
+            22,
+            "SEC-NO-RAW-SQL-CONCAT-1".to_string(),
+            "format!(...)".to_string(),
+            false,
+        ),
+        MergedLocation::site(
+            "acme/portal".to_string(),
+            "src/report.rs".to_string(),
+            3,
+            "SEC-NO-RAW-SQL-CONCAT-1".to_string(),
+            "impact".to_string(),
+            true,
+        ),
     ];
 
     let mut in_test = kinded(
