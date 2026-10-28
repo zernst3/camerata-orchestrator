@@ -297,6 +297,7 @@ impl CostCapRecord {
                      code. This inspection is incomplete.",
                     first.n_rule_batches
                 ),
+                files_not_reviewed: 0,
             });
             i = j;
         }
@@ -313,6 +314,7 @@ impl CostCapRecord {
                      stage started. This inspection is incomplete."
                 }
                 .to_string(),
+                files_not_reviewed: 0,
             });
         }
         out

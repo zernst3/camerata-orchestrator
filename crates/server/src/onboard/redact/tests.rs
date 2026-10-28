@@ -232,6 +232,7 @@ fn report_with_text(p: &Planted) -> ScanReport {
         repo: "acme/app".to_string(),
         pass: "alternatives".to_string(),
         reason: format!("error: {}", p.text),
+        files_not_reviewed: 0,
     });
     report.ai_error = Some(format!("auth failed {}", p.text));
     report.ai_blocked_reason = Some(p.text.clone());

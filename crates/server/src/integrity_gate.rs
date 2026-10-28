@@ -787,6 +787,7 @@ mod tests {
             code_chars: 98_522,
             engine_artifacts_admitted: 0,
             audit_model: Some("claude-sonnet-5".to_string()),
+            skipped_files: Vec::new(),
         }
     }
 

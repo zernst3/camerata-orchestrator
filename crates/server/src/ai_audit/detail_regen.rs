@@ -658,6 +658,7 @@ pub(crate) async fn regenerate_full_details(
                     ""
                 },
             ),
+            files_not_reviewed: 0,
         });
     }
     (findings, failed_passes)
