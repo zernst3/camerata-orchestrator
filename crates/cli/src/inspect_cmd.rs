@@ -965,6 +965,10 @@ pub async fn run_inspect_pipeline_with(
     // Pass-1 W1 seal fix: one ledger stage entry for this loop's net additions — mirrors
     // `onboard_audit`'s synchronous path in `camerata_server::lib` exactly (see
     // `camerata_server::scan_ledger::record_addition_stage`'s doc comment).
+    // Runtime and framework end of life and known runtime vulnerabilities, before the dependency
+    // pass so that the KEV / EPSS enrichment below covers these rows too.
+    let runtime_rows_in = report.findings.len();
+    camerata_server::runtime_audit::run_runtime_audit(&mut report, &sources).await;
     let dep_audit_rows_in = report.findings.len();
     let mut osv_runs: Vec<camerata_server::vuln_intel::OsvRun> = Vec::new();
     for (spec, dir) in &sources {
@@ -985,7 +989,7 @@ pub async fn run_inspect_pipeline_with(
     // ORDER: before `apply_scan_severity_bounds` below, never after (see `vuln_intel::apply`).
     camerata_server::vuln_intel::enrich_dependency_findings(
         &mut report,
-        dep_audit_rows_in,
+        runtime_rows_in,
         &osv_runs,
     )
     .await;

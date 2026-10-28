@@ -153,8 +153,13 @@ done)"
 free="$(free_gib)"
 if [ -n "$free" ] && [ "$free" -lt "$TIER1_GIB" ]; then
     log "tier 1 (free ${free} GiB < ${TIER1_GIB}): cargo-sweep --time 1"
+    # Idle targets only: a sweep over a target a build is writing removed object files the
+    # linker was about to read and failed the build (2026-10-28, twice).
     if [ "$DRY_RUN" = 0 ] && command -v cargo-sweep >/dev/null; then
-        cargo-sweep sweep --recursive --time 1 "$REPOS_ROOT" >/dev/null 2>&1
+        echo "$IDLE_TARGETS" | while read -r t; do
+            [ -n "$t" ] || continue
+            cargo-sweep sweep --time 1 "$(dirname "$t")" >/dev/null 2>&1
+        done
     fi
 fi
 
