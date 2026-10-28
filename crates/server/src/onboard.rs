@@ -2466,7 +2466,7 @@ pub async fn audit_repos_with_llm_controlled(
                     let rules_match = prior.is_current() && prior.matches_rules(&rules_fp);
                     let question_changed = rules_match && prior.ai_covered;
                     notes.push(if !controls.efficiency.result_cache {
-                        format!("{spec}: result cache switched off — full re-scan")
+                        format!("{spec}: result cache switched off (full re-scan)")
                     } else if run_ai_review && rules_match && !prior.ai_covered {
                         // H3: the earlier scan left files unreviewed (a failed pass, a spend
                         // stop, an AI error or no AI at all). Its fingerprints are not evidence
@@ -2479,14 +2479,14 @@ pub async fn audit_repos_with_llm_controlled(
                         // earlier scan has no complete AI review to reuse, and that is all this
                         // run can say about it.
                         format!(
-                            "{spec}: prior scan had no complete AI review, so nothing is reused — full re-scan"
+                            "{spec}: prior scan had no complete AI review, so nothing is reused (full re-scan)"
                         )
                     } else if question_changed {
                         format!(
-                            "{spec}: model, prompt or rule wording changed since last scan — full re-scan"
+                            "{spec}: model, prompt or rule wording changed since last scan (full re-scan)"
                         )
                     } else {
-                        format!("{spec}: rule selection changed since last scan — full re-scan")
+                        format!("{spec}: rule selection changed since last scan (full re-scan)")
                     });
                 }
                 if effective_prior.is_some() && part.unchanged_count > 0 {
