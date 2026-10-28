@@ -12724,9 +12724,9 @@ async fn uow_publish(
 // Attachments are stored inline in the UoW JSON, travel with the project export,
 // and are embedded in the published GitHub issue body as collapsed `<details>` blocks.
 //
-// Decided (2026-07-01): publish-embed uses inline `<details>` in the issue body.
-// The gist/CDN and repo-commit paths are deferred for Zach to confirm (see
-// .overnight-decisions_needed.md entry #1).
+// Decided (2026-07-01): publish-embed uses inline `<details>` in the issue body: the
+// content stays searchable and needs no extra GitHub scope. The gist/CDN and
+// repo-commit paths were deferred.
 
 /// `GET /api/uow/:story_id/attachments` -- list all attachments on a UoW
 /// (name + mime; content is omitted from the list for bandwidth). Returns
