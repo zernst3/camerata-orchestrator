@@ -74,6 +74,10 @@ H. By 08:30: morning summary at the top of `docs/OVERNIGHT_DECISIONS.md`; the PR
 
 ## Status log (newest first)
 
+- 00:20: README split (cloud) reviewed: counts and links verified; 2 HIGH (README claims every
+  finding is reviewed before a deliverable, but `camerata inspect` exports untriaged; linked docs
+  still say 417 and the count test skips them), 5 MEDIUM. Brief queued
+  (scratchpad/readme_merge_brief.md), runs after the integration merge lands (count 440).
 - 00:15: rank 10 + CI branch gated green (8,896 passed, 0 failed) and pushed; GitHub CI is
   running on the working branch with the new workflow (run 40629518781). Issue triage (cloud)
   verified: 11 closed, none wrongly; reopened #110 because its author's keep-open condition (a
