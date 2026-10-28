@@ -30,6 +30,12 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
+      # Gate 0: this repository is public, so no tracked file may name a personal home
+      # directory or the private fixture folder. Seconds long and needs no toolchain, so
+      # it runs before anything is installed.
+      - name: Personal path gate
+        run: ./scripts/ci-gate.sh "Personal path gate" ./scripts/check-personal-paths.sh
+
       - name: Free disk space
         run: ./scripts/ci-free-disk.sh
 
