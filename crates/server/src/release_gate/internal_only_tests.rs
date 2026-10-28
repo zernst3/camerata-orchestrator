@@ -97,13 +97,7 @@ async fn an_export_of_a_project_whose_draft_carries_the_log_names_none_of_it() {
     use camerata_api_types::review_timing::REVIEW_LOG_KEY;
     use http_body_util::BodyExt;
 
-    if std::process::Command::new("typst")
-        .arg("--version")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .is_none()
-    {
+    if !camerata_test_env::typst_on_path() {
         eprintln!("skipping: typst is not on PATH");
         return;
     }

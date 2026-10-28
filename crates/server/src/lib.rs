@@ -26544,12 +26544,7 @@ mod tests {
     /// gate) — the PDF-compile stage of the happy-path product-export test skips
     /// gracefully rather than hard-failing CI environments without Typst installed.
     fn typst_on_path() -> bool {
-        std::process::Command::new("typst")
-            .arg("--version")
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .is_some()
+        camerata_test_env::typst_on_path()
     }
 
     #[tokio::test]

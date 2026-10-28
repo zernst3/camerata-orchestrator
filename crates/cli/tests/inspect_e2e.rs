@@ -70,12 +70,7 @@ fn copy_dir_recursive(src: &Path, dest: &Path) {
 /// `e2e_report_pipeline.rs`'s): the PDF-compile stage of `inspect` skips gracefully rather
 /// than hard-failing CI environments without `typst` on PATH.
 fn typst_on_path() -> bool {
-    std::process::Command::new("typst")
-        .arg("--version")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .is_some()
+    camerata_test_env::typst_on_path()
 }
 
 // Serial with the env-mutating test below: the scan pipeline this drives READS

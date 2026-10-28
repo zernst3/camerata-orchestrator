@@ -22,12 +22,7 @@ use camerata_server::report_export::{
 use serde_json::Value;
 
 fn typst_on_path() -> bool {
-    std::process::Command::new("typst")
-        .arg("--version")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .is_some()
+    camerata_test_env::typst_on_path()
 }
 
 /// One high-severity finding per fixture shape, each carrying its secret in the snippet, the

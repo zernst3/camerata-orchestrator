@@ -4536,11 +4536,7 @@ mod tests {
     /// cross-artifact test below can exercise a REAL PDF compile where possible without
     /// failing in an environment that never installed the binary.
     fn typst_available() -> bool {
-        std::process::Command::new("typst")
-            .arg("--version")
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false)
+        camerata_test_env::typst_on_path()
     }
 
     /// C4-P2: an AI-tier finding with no corpus entry of its own, classified via the P3

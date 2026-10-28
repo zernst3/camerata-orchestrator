@@ -617,14 +617,9 @@ fn unzip(bytes: &[u8]) -> std::collections::BTreeMap<String, Vec<u8>> {
 /// with a message naming it, instead of returning silently; the assertions that need no PDF live
 /// in tests of their own that always run.
 fn typst_missing(test: &str) -> bool {
-    let missing = std::process::Command::new("typst")
-        .arg("--version")
-        .output()
-        .is_err();
-    if missing {
-        eprintln!("SKIPPED {test}: typst is not on PATH, so no PDF can be compiled");
-    }
-    missing
+    // Under CI (the `CI` variable) a missing typst FAILS the test; elsewhere it skips with a
+    // banner naming the test.
+    !camerata_test_env::typst_on_path_for(test)
 }
 
 /// Delete `REPO` over HTTP exactly as the modal does; returns the record's `completed_at`.

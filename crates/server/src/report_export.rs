@@ -11419,12 +11419,7 @@ mod tests {
     /// same PATH lookup `compile_pdf` itself relies on via `Command::new("typst")`, just
     /// synchronous and side-effect-free here).
     fn which_typst() -> Option<()> {
-        std::process::Command::new("typst")
-            .arg("--version")
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .map(|_| ())
+        camerata_test_env::typst_on_path().then_some(())
     }
 
     // ── Regression guard: the backtick-hash interpolation bug class ───────────

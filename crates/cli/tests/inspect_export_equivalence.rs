@@ -62,12 +62,7 @@ use camerata_server::report_export::{self, ReportOptions};
 const CLIENT: &str = "Example Client Ltd";
 
 fn typst_on_path() -> bool {
-    std::process::Command::new("typst")
-        .arg("--version")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .is_some()
+    camerata_test_env::typst_on_path()
 }
 
 /// A `Finding` built from only its non-defaulted required fields (`repo`/`path`/`line`/

@@ -58,33 +58,12 @@ impl LlmPort for Scripted {
     }
 }
 
-fn typst_on_path() -> bool {
-    std::process::Command::new("typst")
-        .arg("--version")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .is_some()
-}
-
 /// Whether the export can be built here. These tests are the only end-to-end proof that a capped
 /// run's export says it is incomplete, so a missing `typst` must never read as a pass: under CI
 /// (the `CI` environment variable is set) it FAILS the test; locally it prints a loud banner on
 /// stderr and skips.
 fn typst_available(test: &str) -> bool {
-    if typst_on_path() {
-        return true;
-    }
-    assert!(
-        std::env::var_os("CI").is_none(),
-        "{test}: `typst` is not on PATH, and this test cannot run without it. Install typst in \
-         the CI image; a silent skip would hide a broken capped-run export."
-    );
-    eprintln!(
-        "\n*** SKIPPED {test}: `typst` is not on PATH, so the capped-run export was NOT \
-         exercised. Install typst (brew install typst) to run it. ***\n"
-    );
-    false
+    camerata_test_env::typst_on_path_for(test)
 }
 
 fn stage_fixture(dest: &Path) {
