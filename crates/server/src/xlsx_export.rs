@@ -1807,7 +1807,6 @@ fn write_coverage_sheet(
             // The list is bounded per reason; the files past the bound are counted, not named.
             if let Some(note) = &gaps.skipped_beyond_cap_note {
                 ws.write_string_with_format(next_r, 1, note, &fmts.cell(None, true, false))?;
-                next_r += 1;
             }
         }
     }

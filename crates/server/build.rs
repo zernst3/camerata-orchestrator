@@ -40,11 +40,12 @@ fn git(args: &[&str]) -> Option<String> {
     Some(text.trim().to_string())
 }
 
-/// Rebuild when HEAD moves: on a branch switch (HEAD itself), on a new commit to a branch (a
-/// file under `refs/heads`, watched as a directory so a ref that is created by the commit is
-/// seen too), and when refs are packed. Worktrees keep HEAD in their own git dir and refs in the
-/// common dir, so both are asked for. Only existing paths are watched: cargo treats a missing
-/// one as changed on every build.
+/// Rebuild when the commit this build names can have changed, and not otherwise. Watches HEAD
+/// itself (a branch switch, or a detached checkout moving) and the ONE ref file HEAD points at
+/// (a new commit on the current branch), never the whole `refs/heads` tree, so a commit on an
+/// unrelated branch does not rebuild this crate. Linked checkouts keep HEAD in their own git dir
+/// and branch refs in the common dir, so both are asked for. Only existing paths are watched:
+/// cargo treats a missing one as changed on every build.
 fn watch_head() {
     let (Some(git_dir), Some(common_dir)) = (
         git(&["rev-parse", "--absolute-git-dir"]).map(PathBuf::from),
@@ -57,17 +58,41 @@ fn watch_head() {
     } else {
         std::env::current_dir().map_or(common_dir.clone(), |cwd| cwd.join(common_dir))
     };
-    for path in [
-        git_dir.join("HEAD"),
-        common_dir.join("packed-refs"),
-        common_dir.join("refs").join("heads"),
-    ] {
-        rerun_if_changed(&path);
+    let head = std::fs::read_to_string(git_dir.join("HEAD")).unwrap_or_default();
+    for path in watched_paths(&git_dir, &common_dir, &head, &|p: &Path| p.exists()) {
+        println!("cargo:rerun-if-changed={}", path.display());
     }
 }
 
-fn rerun_if_changed(path: &Path) {
-    if path.exists() {
-        println!("cargo:rerun-if-changed={}", path.display());
+/// The paths whose change can move the commit `HEAD` names. `head` is the text of
+/// `<git_dir>/HEAD`; `exists` says whether a path is on disk (injected so the choice is testable
+/// without a repository).
+///
+/// - `HEAD` always.
+/// - A symbolic `HEAD` (`ref: refs/heads/main`) adds the one ref file it names, from the common
+///   dir. When that ref exists only in `packed-refs` (no loose file yet), `packed-refs` is
+///   watched instead, plus the ref's own directory so the loose file a new commit creates is
+///   seen.
+/// - A detached `HEAD` holds the SHA itself, so `HEAD` alone is enough.
+///
+/// Only paths that exist are returned.
+pub fn watched_paths(
+    git_dir: &Path,
+    common_dir: &Path,
+    head: &str,
+    exists: &dyn Fn(&Path) -> bool,
+) -> Vec<PathBuf> {
+    let mut candidates = vec![git_dir.join("HEAD")];
+    if let Some(reference) = head.trim().strip_prefix("ref:").map(str::trim) {
+        let loose = common_dir.join(reference);
+        if exists(&loose) {
+            candidates.push(loose);
+        } else {
+            candidates.push(common_dir.join("packed-refs"));
+            if let Some(dir) = loose.parent() {
+                candidates.push(dir.to_path_buf());
+            }
+        }
     }
+    candidates.into_iter().filter(|p| exists(p)).collect()
 }
