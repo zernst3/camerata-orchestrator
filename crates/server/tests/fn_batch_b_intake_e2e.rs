@@ -441,6 +441,56 @@ async fn a_finding_carried_twice_keeps_the_commit_it_was_last_found_at() {
     );
 }
 
+#[tokio::test]
+async fn findings_carried_from_the_same_commit_stay_separate_rows() {
+    // The carried-from mark and the producer stamp are bookkeeping. A merge stage that read
+    // them as "the same captured object" would fuse unrelated findings from different files.
+    let dir = tempfile::tempdir().unwrap();
+    stage_repo(
+        dir.path(),
+        &[
+            ("src/a.ts", "export const a = 1;\n"),
+            ("src/b.ts", "export const b = 2;\n"),
+            ("src/c.ts", "export const c = 3;\n"),
+        ],
+    );
+    let finding = |path: &str, code: &str, title: &str| {
+        serde_json::json!({
+            "path": path, "line": 1, "severity": "high", "rule": AI_RULE,
+            "title": title, "code": code, "detail": format!("{title} in {path}"),
+        })
+    };
+    let reply = serde_json::json!({
+        "findings": [
+            finding("src/a.ts", "export const a = 1;", "first problem"),
+            finding("src/b.ts", "export const b = 2;", "second problem"),
+        ],
+        "proposed_rules": [], "needs_files": [], "verdicts": [], "fixes": [],
+    })
+    .to_string();
+    let (first, manifest) = scan_one(&Script::replying(reply), dir.path(), None).await;
+    let fresh_rows = first
+        .findings
+        .iter()
+        .filter(|f| f.rule_id == AI_RULE)
+        .count();
+    assert_eq!(fresh_rows, 2, "{:?}", first.findings);
+
+    std::fs::write(dir.path().join("src/c.ts"), "export const c = 4;\n").unwrap();
+    commit_all(dir.path());
+    let (report, _m) = scan_one(&Script::ok(), dir.path(), Some(&manifest)).await;
+    let carried: Vec<_> = report
+        .findings
+        .iter()
+        .filter(|f| f.rule_id == AI_RULE)
+        .collect();
+    assert_eq!(carried.len(), 2, "{carried:?}");
+    assert!(carried
+        .iter()
+        .all(|f| camerata_server::report_export::carried_from(f).is_some()));
+    assert!(carried.iter().all(|f| f.also_locations.is_empty()));
+}
+
 // ── H12 ───────────────────────────────────────────────────────────────────────────────────
 
 #[tokio::test]

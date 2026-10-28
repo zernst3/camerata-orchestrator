@@ -97,6 +97,68 @@ pub const AUDIT_RULES: &[&str] = &[
 /// before this existed, which the rescan then classifies by its rule's ledger tier as before.
 pub const PRODUCED_TIER_CAPTURE: &str = "produced_tier";
 
+/// The `captures` keys that are bookkeeping about a finding, not names of objects it is about:
+/// the producer ([`PRODUCED_TIER_CAPTURE`]) and the commit a carried finding came from
+/// (`report_export::CARRIED_FROM_CAPTURE`).
+///
+/// Captured VALUES are an identity signal: the merge stages treat two findings that share a
+/// captured value of three or more characters as the same root cause, even across files. A value
+/// like `semantic`, or the commit every carried finding names, would fuse unrelated findings into
+/// one row. So these keys are held aside across the merge stages ([`BookkeepingCaptures`]) and put
+/// back on the surviving rows.
+const BOOKKEEPING_CAPTURE_KEYS: &[&str] = &[
+    PRODUCED_TIER_CAPTURE,
+    crate::report_export::CARRIED_FROM_CAPTURE,
+];
+
+/// Bookkeeping captures taken off findings before the merge stages and restored after them, keyed
+/// by what identifies a row there (repo, path, rule and snippet; not the line, which a merge may
+/// move).
+#[derive(Debug, Default)]
+struct BookkeepingCaptures {
+    held: std::collections::HashMap<(String, String, String, String), Vec<(String, String)>>,
+}
+
+impl BookkeepingCaptures {
+    fn key(f: &Finding) -> (String, String, String, String) {
+        (
+            f.repo.clone(),
+            f.path.clone(),
+            f.rule_id.clone(),
+            f.snippet.clone(),
+        )
+    }
+
+    /// Remove the bookkeeping keys from `findings`, remembering them.
+    fn take(&mut self, findings: &mut [Finding]) {
+        for f in findings {
+            let mut taken = Vec::new();
+            for key in BOOKKEEPING_CAPTURE_KEYS {
+                if let Some(value) = f.captures.remove(*key) {
+                    taken.push(((*key).to_string(), value));
+                }
+            }
+            if !taken.is_empty() {
+                self.held.entry(Self::key(f)).or_default().extend(taken);
+            }
+        }
+    }
+
+    /// Put the remembered keys back on the rows that survived. A key a row already carries is
+    /// left alone.
+    fn restore(&self, findings: &mut [Finding]) {
+        for f in findings {
+            if let Some(held) = self.held.get(&Self::key(f)) {
+                for (key, value) in held {
+                    f.captures
+                        .entry(key.clone())
+                        .or_insert_with(|| value.clone());
+                }
+            }
+        }
+    }
+}
+
 /// One violation already present in the repo.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Finding {
@@ -1732,6 +1794,9 @@ pub async fn audit_repos_with_llm_controlled(
     // H11: what the incremental run re-audited and carried forward, summed over every repo, for
     // the one `IncrementalCarry` record the exporters read.
     let mut incremental_carry = crate::scan_cache::CarryTally::default();
+    // Producer and carried-from marks held aside while the merge stages run (see
+    // [`BookkeepingCaptures`]), restored once the whole scan's rows are final.
+    let mut bookkeeping = BookkeepingCaptures::default();
     // Aggregates REAL usage across every repo's audit (passes + calibration) for the
     // actual-vs-estimated readout.
     // The model the fix stage calls (rank 10): resolved once, from the same controls the
@@ -2653,6 +2718,7 @@ pub async fn audit_repos_with_llm_controlled(
                 // undercounts, or entirely drops, an absorption whose rule id collides with the
                 // primary's or with another absorbed member's — the exact shape of the
                 // 45-rows-in/32-out/8-merged/5-unaccounted defect this fixes).
+                bookkeeping.take(&mut repo_findings);
                 let pre_merge_findings = repo_findings.clone();
                 let rows_in = repo_findings.len();
                 let mut repo_findings =
@@ -2755,7 +2821,8 @@ pub async fn audit_repos_with_llm_controlled(
     // `cross-family-merge`, via `account_location_merge` over `also_locations`.
     let pre_structural_group = all_findings.clone();
     let rows_in = all_findings.len();
-    let all_findings = crate::ai_audit::group_structural_needs_review(all_findings);
+    let mut all_findings = crate::ai_audit::group_structural_needs_review(all_findings);
+    bookkeeping.restore(&mut all_findings);
     let rows_out = all_findings.len();
     if rows_in != rows_out {
         let acc = account_location_merge(&pre_structural_group, &all_findings);
