@@ -28,7 +28,12 @@ pub fn repos_without_ai_review(report: &crate::onboard::ScanReport) -> Vec<Strin
             out.push(repo.to_string());
         }
     };
-    if report.ai_blocked_reason.is_some() || report.ai_error.is_some() {
+    // `provenance.audit_model` is stamped only when a model call was made, so `None` means no
+    // model reviewed anything in this run (a deterministic-only scan, or every call blocked).
+    if report.ai_blocked_reason.is_some()
+        || report.ai_error.is_some()
+        || report.provenance.audit_model.is_none()
+    {
         for repo in &report.repos {
             add(repo);
         }
@@ -139,18 +144,31 @@ pub fn coverage_gaps(report: &crate::onboard::ScanReport) -> CoverageGapsJson {
 /// clean check (see [`crate::dep_audit::note_proves_clean`]), as a sentence with its first
 /// letter capitalised. A repo with no lockfiles at all is a completed check, not a gap.
 pub fn dependency_gaps(report: &crate::onboard::ScanReport) -> Vec<String> {
-    report
-        .coverage_notes
-        .iter()
-        .filter(|n| n.tool == "osv-scanner")
-        .filter(|n| !crate::dep_audit::note_proves_clean(n))
-        .map(|n| {
-            let message = n.message.trim();
-            let mut chars = message.chars();
-            match chars.next() {
-                Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
-                None => String::new(),
-            }
-        })
-        .collect()
+    let mut gaps: Vec<String> = Vec::new();
+    // `provenance.osv_scanner_version` is stamped only when the deterministic tier (and with it
+    // the dependency audit) ran. `None` is an AI-only scan: nothing was checked, and no note
+    // says so, because the audit never started.
+    if report.provenance.osv_scanner_version.is_none() {
+        gaps.push(
+            "Dependency audit (osv-scanner) did not run in this scan, so known vulnerable \
+             dependencies were not checked."
+                .to_string(),
+        );
+    }
+    gaps.extend(
+        report
+            .coverage_notes
+            .iter()
+            .filter(|n| n.tool == "osv-scanner")
+            .filter(|n| !crate::dep_audit::note_proves_clean(n))
+            .map(|n| {
+                let message = n.message.trim();
+                let mut chars = message.chars();
+                match chars.next() {
+                    Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                    None => String::new(),
+                }
+            }),
+    );
+    gaps
 }

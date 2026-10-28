@@ -162,6 +162,23 @@ fn declares_dependencies(path: &Path, file_name: &str) -> bool {
         "Cargo.toml" => ["[dependencies", "[dev-dependencies", "[build-dependencies"]
             .iter()
             .any(|h| text.contains(h)),
+        // A .NET project with no PackageReference has no NuGet packages to check.
+        n if n.ends_with(".csproj") || n.ends_with(".fsproj") || n.ends_with(".vbproj") => {
+            text.to_ascii_lowercase().contains("<packagereference")
+        }
+        "Gemfile" => text
+            .lines()
+            .any(|l| l.trim_start().starts_with("gem ") || l.trim_start().starts_with("gem(")),
+        "pubspec.yaml" => {
+            let lines: Vec<&str> = text.lines().collect();
+            lines.iter().enumerate().any(|(i, l)| {
+                matches!(l.trim_end(), "dependencies:" | "dev_dependencies:")
+                    && lines[i + 1..]
+                        .iter()
+                        .find(|n| !n.trim().is_empty() && !n.trim_start().starts_with('#'))
+                        .is_some_and(|n| n.starts_with(' ') || n.starts_with('\t'))
+            })
+        }
         _ => true,
     }
 }
@@ -253,22 +270,91 @@ pub fn manifests_sentence(manifests: &[String]) -> Option<String> {
     ))
 }
 
-/// The lines of osv-scanner's stderr that report a problem reading a file, with the local clone
+/// The prefixes osv-scanner puts on a stderr line that reports a problem reading a file. A line
+/// is quoted only when it STARTS with one of these, so a progress line that merely contains the
+/// word "error" (a path such as `error-handling/package-lock.json`) is not mistaken for one.
+const ERROR_PREFIXES: &[&str] = &[
+    "Error during extraction",
+    "Error:",
+    "Error ",
+    "error:",
+    "ERROR",
+    "Failed to ",
+    "failed to ",
+];
+
+/// Remove every local filesystem path from `text`. The clone directory (as given and as
+/// canonicalised, since `/tmp` may resolve to `/private/tmp`) becomes `.`, so a path inside it
+/// reads as a repository-relative one; any other absolute path (the tooling directory, a home
+/// directory, a Windows drive path) is cut down to its file name. URLs and relative paths are
+/// left alone.
+pub fn scrub_local_paths(text: &str, repo_dir: &Path) -> String {
+    let mut roots: Vec<String> = vec![repo_dir.to_string_lossy().into_owned()];
+    if let Ok(canonical) = std::fs::canonicalize(repo_dir) {
+        roots.push(canonical.to_string_lossy().into_owned());
+    }
+    roots.retain(|r| r.len() > 1);
+    roots.sort_by_key(|r| std::cmp::Reverse(r.len()));
+    roots.dedup();
+    let mut out = text.to_string();
+    for root in &roots {
+        out = out
+            .replace(&format!("{root}/"), "./")
+            .replace(root.as_str(), ".");
+    }
+    out.split_inclusive(char::is_whitespace)
+        .map(scrub_token)
+        .collect()
+}
+
+/// Cut the absolute path inside one whitespace-delimited token down to its file name.
+fn scrub_token(token: &str) -> String {
+    const OPENERS: &str = "(\"'=[<";
+    const CLOSERS: &str = ")]\"',;:.>";
+    let trailing_ws = token.len() - token.trim_end().len();
+    let (body, ws) = token.split_at(token.len() - trailing_ws);
+    let bytes: Vec<char> = body.chars().collect();
+    let mut start = None;
+    for (i, c) in bytes.iter().enumerate() {
+        let after_opener = i == 0 || OPENERS.contains(bytes[i - 1]);
+        if !after_opener {
+            continue;
+        }
+        let unix = *c == '/' && bytes.get(i + 1) != Some(&'/');
+        let windows = c.is_ascii_alphabetic()
+            && bytes.get(i + 1) == Some(&':')
+            && matches!(bytes.get(i + 2), Some('\\') | Some('/'));
+        if unix || windows {
+            start = Some(i);
+            break;
+        }
+    }
+    let Some(start) = start else {
+        return token.to_string();
+    };
+    let rest: String = bytes[start..].iter().collect();
+    let trimmed = rest.trim_end_matches(|c| CLOSERS.contains(c));
+    let tail = &rest[trimmed.len()..];
+    let name = trimmed
+        .rsplit(['/', '\\'])
+        .find(|p| !p.is_empty())
+        .unwrap_or("path");
+    let head: String = bytes[..start].iter().collect();
+    format!("{head}{name}{tail}{ws}")
+}
+
+/// The lines of osv-scanner's stderr that report a problem reading a file, with every local
 /// path removed, as the sentence for [`crate::dep_audit::UNREAD_FILES`]; `None` when stderr
 /// holds no such line. A lockfile osv-scanner failed to parse was not audited, and a clean exit
 /// code does not say so.
 pub fn unread_files_sentence(stderr: &str, repo_dir: &Path) -> Option<String> {
-    let root = repo_dir.to_string_lossy();
     let lines: Vec<String> = stderr
         .lines()
         .map(str::trim)
-        .filter(|l| {
-            let lower = l.to_ascii_lowercase();
-            lower.contains("error") || lower.contains("failed to")
-        })
+        .filter(|l| ERROR_PREFIXES.iter().any(|p| l.starts_with(p)))
         .take(STDERR_LINES)
         .map(|l| {
-            let scrubbed = l.replace(&*root, ".");
+            let scrubbed = scrub_local_paths(l, repo_dir);
             scrubbed.chars().take(200).collect::<String>()
         })
         .collect();
@@ -350,7 +436,11 @@ mod tests {
     #[test]
     fn a_dotnet_project_needs_its_own_lock_file() {
         let dir = tempfile::tempdir().unwrap();
-        write(dir.path(), "src/App/App.csproj", "<Project/>");
+        write(
+            dir.path(),
+            "src/App/App.csproj",
+            "<Project><ItemGroup><PackageReference Include=\"X\"/></ItemGroup></Project>",
+        );
         write(dir.path(), "packages.lock.json", "{}");
         assert_eq!(unaudited_manifests(dir.path()), ["src/App/App.csproj"]);
         write(dir.path(), "src/App/packages.lock.json", "{}");
@@ -377,6 +467,35 @@ mod tests {
         assert!(!s.contains("/tmp/clone"), "{s}");
         assert!(!s.contains("found 3 packages"), "{s}");
         assert!(unread_files_sentence("Scanned a file\n", Path::new("/x")).is_none());
+    }
+
+    #[test]
+    fn a_project_that_declares_nothing_is_not_called_unchecked() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "a/A.csproj",
+            "<Project Sdk=\"x\"><PropertyGroup/></Project>",
+        );
+        write(dir.path(), "b/Gemfile", "source 'https://rubygems.org'\n");
+        write(dir.path(), "c/pubspec.yaml", "name: c\nversion: 1.0.0\n");
+        assert!(unaudited_manifests(dir.path()).is_empty());
+
+        write(
+            dir.path(),
+            "a/A.csproj",
+            "<Project><ItemGroup><PackageReference Include=\"X\" Version=\"1\"/></ItemGroup></Project>",
+        );
+        write(dir.path(), "b/Gemfile", "source 'x'\ngem 'rails'\n");
+        write(
+            dir.path(),
+            "c/pubspec.yaml",
+            "name: c\ndependencies:\n  http: ^1.0.0\n",
+        );
+        assert_eq!(
+            unaudited_manifests(dir.path()),
+            ["a/A.csproj", "b/Gemfile", "c/pubspec.yaml"]
+        );
     }
 
     #[test]

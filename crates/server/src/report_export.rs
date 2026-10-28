@@ -3660,7 +3660,7 @@ fn ai_tier_note_for(review_state: ReviewState, repos_not_run: usize, total_repos
         // The tier ran nowhere: say so, and make no claim about a review that did not happen.
         return format!(
             "The advisory language-model tier did not run for {}; see Coverage. Every finding \
-             in this export comes from the deterministic tier.",
+             produced in this run came from the deterministic tier.",
             repos(repos_not_run)
         );
     }
@@ -4853,7 +4853,10 @@ pub fn build_report_json(
     // network, a timeout, an unreadable result) or that left manifests unaudited used to leave
     // the rows empty and so read as clean. Only a run that proves it checked everything may say
     // so.
+    // An AI-only scan never started osv-scanner (`osv_scanner_version` is `None`): it checked
+    // nothing, so it cannot say nothing was found.
     let dependency_clean = dep_rows.is_empty()
+        && report.provenance.osv_scanner_version.is_some()
         && report
             .coverage_notes
             .iter()
@@ -5437,6 +5440,9 @@ mod fn_batch_c_adjust_tests;
 
 #[cfg(test)]
 mod fn_batch_c_dep_tests;
+
+#[cfg(test)]
+mod fn_batch_c_followup_tests;
 
 #[cfg(test)]
 mod fn_batch_c_incremental_tests;
