@@ -847,8 +847,7 @@ pub(crate) fn retest_verdict(
             .get(&(sf.repo.to_ascii_lowercase(), sf.path.as_str()))
             .is_some_and(|rows| {
                 rows.iter().any(|f| {
-                    let same_rule =
-                        f.rule_id == sf.rule_id || f.also_matches.iter().any(|m| *m == sf.rule_id);
+                    let same_rule = f.rule_id == sf.rule_id || f.also_matches.contains(&sf.rule_id);
                     same_rule && fingerprint(&sf.rule_id, &f.snippet) == sf.fingerprint
                 })
             });
