@@ -2364,6 +2364,13 @@ pub fn build_workbook(
         &fmts,
     )
     .context("writing the Coverage sheet")?;
+    // H4: the optional triage log, last so every existing sheet keeps its position. Off by
+    // default; see `triage_log`.
+    if triage_log::wanted(opts) {
+        let log = triage_log::build_triage_log(report, dispositions, corpus, &opts.chosen_options);
+        triage_log::write_triage_log_sheet(&mut wb, &log, &fmts)
+            .context("writing the Triage Log sheet")?;
+    }
 
     wb.save_to_buffer()
         .context("serializing the xlsx workbook to bytes")
@@ -2574,7 +2581,8 @@ pub fn build_csv_exports(
     opts: &ReportOptions,
 ) -> anyhow::Result<Vec<(String, Vec<u8>)>> {
     let json = build_json_exports(report, dispositions, corpus, opts)?;
-    json.into_iter()
+    let mut csv: Vec<(String, Vec<u8>)> = json
+        .into_iter()
         .map(|(path, bytes)| {
             // json/foo.json -> csv/foo.csv
             let name = path
@@ -2584,8 +2592,23 @@ pub fn build_csv_exports(
             let value: serde_json::Value = serde_json::from_slice(&bytes)?;
             Ok((format!("csv/{name}.csv"), json_array_to_csv(&value)?))
         })
-        .collect()
+        .collect::<anyhow::Result<_>>()?;
+    // H4: the optional triage log's CSV, only when asked for (it has no `json/` sibling and is
+    // not one of the eight `DATASETS`; the release gate admits it as an optional member).
+    if triage_log::wanted(opts) {
+        let log = triage_log::build_triage_log(report, dispositions, corpus, &opts.chosen_options);
+        csv.push((
+            triage_log::TRIAGE_LOG_CSV.to_string(),
+            triage_log::triage_log_csv(&log)?,
+        ));
+    }
+    Ok(csv)
 }
+
+pub mod triage_log;
+
+#[cfg(test)]
+mod triage_log_tests;
 
 #[cfg(test)]
 mod tests {
@@ -2606,7 +2629,7 @@ mod tests {
         }
     }
 
-    fn report_with(findings: Vec<Finding>, audited_rule_ids: Vec<&str>) -> ScanReport {
+    pub(super) fn report_with(findings: Vec<Finding>, audited_rule_ids: Vec<&str>) -> ScanReport {
         ScanReport {
             repos: vec!["owner/repo".to_string()],
             stacks: Vec::new(),

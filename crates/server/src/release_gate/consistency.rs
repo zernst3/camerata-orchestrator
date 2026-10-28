@@ -60,13 +60,18 @@ pub fn dataset_set_problems(entries: &Entries) -> Vec<Problem> {
         expected.insert(format!("csv/{dataset}.csv"));
         expected.insert(format!("json/{dataset}.json"));
     }
+    // H4: the optional triage log is admitted when present (it is off by default, so a package
+    // without it is complete). Its content is still scanned by the secrets check like every
+    // other member.
+    let mut allowed = expected.clone();
+    allowed.insert(crate::xlsx_export::triage_log::TRIAGE_LOG_CSV.to_string());
     for name in &expected {
         if !entries.contains_key(name) {
             problems.push(problem(name, DATASET_SET, "a promised file is missing"));
         }
     }
     for name in entries.keys() {
-        if !expected.contains(name) {
+        if !allowed.contains(name) {
             problems.push(problem(
                 name,
                 DATASET_SET,
