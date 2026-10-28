@@ -4518,14 +4518,31 @@ pub fn step_model_or(
     }
 }
 
+/// The active project's explicit fix-stage model, or `None` when it has none (or there is no
+/// active project). Unlike the other steps, the fix step is UNSET by default: an unset fix model
+/// lets the `fix_on_haiku` efficiency measure decide (see
+/// [`crate::ai_audit::resolve_fix_model`]), which a seeded default would silently override.
+pub fn fix_step_model(state: &AppState) -> Option<String> {
+    state
+        .projects
+        .active()
+        .map(|p| {
+            p.model_for_step(crate::project::StepKind::Fix)
+                .trim()
+                .to_string()
+        })
+        .filter(|m| !m.is_empty())
+}
+
 /// Body for `POST /api/projects/:id/step-models`: which NON-FLEET AI step and the model id
 /// to bind to it. Patch semantics — one step per call, the others left untouched.
 #[derive(serde::Deserialize)]
 struct SetStepModelReq {
-    /// The step key: `audit` | `calibration` | `research_chat` | `story_authoring` |
+    /// The step key: `audit` | `calibration` | `fix` | `research_chat` | `story_authoring` |
     /// `decomposition` | `escalation` | `clarification`.
     step: String,
-    /// The model id to bind (e.g. `claude-opus-5`).
+    /// The model id to bind (e.g. `claude-opus-5`). Blank is accepted for `fix` only, where it
+    /// clears the setting back to the default (see [`fix_step_model`]).
     model: String,
 }
 
@@ -4541,6 +4558,7 @@ fn parse_step_kind(s: &str) -> Option<crate::project::StepKind> {
     {
         "audit" => Some(StepKind::Audit),
         "calibration" => Some(StepKind::Calibration),
+        "fix" => Some(StepKind::Fix),
         "research_chat" => Some(StepKind::ResearchChat),
         "story_authoring" => Some(StepKind::StoryAuthoring),
         "decomposition" => Some(StepKind::Decomposition),
@@ -4552,8 +4570,8 @@ fn parse_step_kind(s: &str) -> Option<crate::project::StepKind> {
 
 /// `POST /api/projects/:id/step-models` — set the model for ONE non-fleet AI step on this
 /// project. Patch semantics (one step per call); mirrors the tier-map write path —
-/// mutates only the named project and persists. A blank `model` or unknown `step` is a
-/// no-op error response (never silently mutates).
+/// mutates only the named project and persists. A blank `model` (except for `fix`, where it
+/// clears the setting) or unknown `step` is a no-op error response (never silently mutates).
 async fn set_step_model(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -4563,7 +4581,7 @@ async fn set_step_model(
         return Json(serde_json::json!({ "ok": false, "message": "unknown step" }));
     };
     let model = req.model.trim().to_string();
-    if model.is_empty() {
+    if model.is_empty() && step != crate::project::StepKind::Fix {
         return Json(serde_json::json!({ "ok": false, "message": "model must not be empty" }));
     }
     match state.projects.set_step_model(&id, step, model) {
@@ -5869,7 +5887,7 @@ async fn onboard_audit(
     State(state): State<AppState>,
     Json(req): Json<AuditReq>,
 ) -> Json<crate::onboard::ScanReport> {
-    let run_controls = req.run_controls();
+    let run_controls = req.run_controls_for(&state);
     let repos: Vec<String> = req
         .repos
         .into_iter()
@@ -6953,17 +6971,26 @@ async fn onboard_audit_start(
 }
 
 impl AuditReq {
-    /// How this scan executes: the environment's efficiency switches and the request's spend
-    /// limit. A limit that is not a positive number cannot be honored as written, so it becomes
-    /// the smallest possible limit (one pass runs, the rest are reported as not run), never
-    /// "no limit": a typo must not remove the guard.
-    fn run_controls(&self) -> crate::cost_cap::RunControls {
+    /// How this scan executes: the environment's efficiency switches, the request's spend
+    /// limit and the project's fix model (`fix_model`, from [`fix_step_model`]). A limit that is
+    /// not a positive number cannot be honored as written, so it becomes the smallest possible
+    /// limit (one pass runs, the rest are reported as not run), never "no limit": a typo must
+    /// not remove the guard.
+    fn run_controls(&self, fix_model: Option<String>) -> crate::cost_cap::RunControls {
         crate::cost_cap::RunControls {
             max_cost_usd: self.max_cost_usd.map(|cap| {
                 crate::cost_cap::RunControls::validate_cap(cap).unwrap_or(f64::MIN_POSITIVE)
             }),
+            fix_model,
             ..crate::cost_cap::RunControls::from_env()
         }
+    }
+
+    /// [`Self::run_controls`] for the app's active project: its fix step model (unset unless the
+    /// operator picked one) is what the run's fix stage is told. The one place the project's
+    /// fix setting becomes run controls; both audit entry points come through it.
+    fn run_controls_for(&self, state: &AppState) -> crate::cost_cap::RunControls {
+        self.run_controls(fix_step_model(state))
     }
 }
 
@@ -7001,7 +7028,7 @@ pub(crate) async fn start_audit_job(
     options: AuditJobOptions,
 ) -> String {
     let state = state.clone();
-    let run_controls = req.run_controls();
+    let run_controls = req.run_controls_for(&state);
     let repos: Vec<String> = req
         .repos
         .into_iter()
@@ -27036,25 +27063,25 @@ mod tests {
     fn an_audit_request_carries_its_spend_limit_into_the_run_controls() {
         let req = |body: serde_json::Value| -> AuditReq { serde_json::from_value(body).unwrap() };
         assert_eq!(
-            req(serde_json::json!({})).run_controls().max_cost_usd,
+            req(serde_json::json!({})).run_controls(None).max_cost_usd,
             None,
             "no field, no cap"
         );
         assert_eq!(
             req(serde_json::json!({ "max_cost_usd": null }))
-                .run_controls()
+                .run_controls(None)
                 .max_cost_usd,
             None
         );
         assert_eq!(
             req(serde_json::json!({ "max_cost_usd": 25.0 }))
-                .run_controls()
+                .run_controls(None)
                 .max_cost_usd,
             Some(25.0)
         );
         for bad in [0.0, -4.0] {
             let cap = req(serde_json::json!({ "max_cost_usd": bad }))
-                .run_controls()
+                .run_controls(None)
                 .max_cost_usd;
             assert_eq!(
                 cap,
@@ -27062,6 +27089,86 @@ mod tests {
                 "{bad} is the tightest cap, not none"
             );
         }
+        // The project's fix model rides along; none set leaves the fix stage to the switch.
+        let empty = req(serde_json::json!({}));
+        assert_eq!(empty.run_controls(None).fix_model, None);
+        assert_eq!(
+            empty
+                .run_controls(Some("claude-opus-5".to_string()))
+                .fix_model
+                .as_deref(),
+            Some("claude-opus-5")
+        );
+    }
+
+    /// Rank 10, the wiring the desktop audit takes: the active project's fix step model becomes
+    /// the run's fix model through the same function both audit entry points call
+    /// (`AuditReq::run_controls_for`), and from there the model the fix stage resolves. Not a
+    /// hand-built `RunControls`: the project is set through its store, as the settings screen's
+    /// `POST /step-models` does.
+    #[test]
+    fn the_projects_fix_model_reaches_the_audit_runs_controls() {
+        let state = AppState::seeded();
+        let project = state
+            .projects()
+            .create("Fix wiring", vec!["me/repo".to_string()])
+            .expect("create active project");
+        let req: AuditReq = serde_json::from_value(serde_json::json!({})).unwrap();
+        let resolved = |state: &AppState| {
+            let controls = req.run_controls_for(state);
+            let fix_model = controls
+                .fix_model_for(Some("scan-model"), Some("calibration-model"))
+                .map(str::to_string);
+            (controls.fix_model.clone(), fix_model)
+        };
+
+        // New project: no fix model, so the switch decides (Haiku by default).
+        assert_eq!(
+            resolved(&state),
+            (
+                None,
+                Some(crate::ai_audit::FIX_STAGE_HAIKU_MODEL.to_string())
+            )
+        );
+
+        // The operator picks a model for the fix step: it is the run's fix model.
+        state
+            .projects()
+            .set_step_model(
+                &project.id,
+                crate::project::StepKind::Fix,
+                "claude-opus-5".to_string(),
+            )
+            .unwrap();
+        assert_eq!(
+            resolved(&state),
+            (
+                Some("claude-opus-5".to_string()),
+                Some("claude-opus-5".to_string())
+            )
+        );
+
+        // Cleared back to Default (a blank id): unset again.
+        state
+            .projects()
+            .set_step_model(&project.id, crate::project::StepKind::Fix, String::new())
+            .unwrap();
+        assert_eq!(
+            resolved(&state),
+            (
+                None,
+                Some(crate::ai_audit::FIX_STAGE_HAIKU_MODEL.to_string())
+            )
+        );
+
+        // No active project at all: nothing set.
+        assert_eq!(
+            resolved(&AppState::seeded()),
+            (
+                None,
+                Some(crate::ai_audit::FIX_STAGE_HAIKU_MODEL.to_string())
+            )
+        );
     }
 
     #[test]

@@ -96,6 +96,10 @@ efficiency_measures! {
     /// Rank 6: a finding with no surrounding code goes straight to the rule's authored
     /// remediation with no model call. Off: it is sent to the fix model like any other.
     fix_prefilter => "findings with no code context skip the fix model when the rule has an authored fix",
+    /// Rank 10: with no fix model set, the fix stage runs on
+    /// [`crate::ai_audit::FIX_STAGE_HAIKU_MODEL`] at effort [`crate::ai_audit::FIX_STAGE_EFFORT`].
+    /// Off: it runs on the calibration model, else the scan model (the pre-rank-10 choice).
+    fix_on_haiku => "the fix stage runs on Haiku unless a fix model is set",
 }
 
 impl EfficiencyConfig {

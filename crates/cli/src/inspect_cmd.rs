@@ -81,6 +81,9 @@ pub struct InspectArgs {
     pub model: Option<String>,
     /// Explicit model override for the calibration pass. Same fallback as `model`.
     pub calibration_model: Option<String>,
+    /// `--fix-model`: the fix stage's explicit model. `None`/blank = not set, and the fix stage
+    /// follows the `fix_on_haiku` measure (see `camerata_server::ai_audit::resolve_fix_model`).
+    pub fix_model: Option<String>,
     /// Ignore the on-disk incremental-scan cache (see [`manifest_cache_path`]) and force a
     /// full re-scan of every file.
     pub full: bool,
@@ -116,6 +119,7 @@ impl InspectArgs {
             efficiency,
             max_cost_usd,
             estimate_hint_usd: None,
+            fix_model: self.fix_model.clone(),
         })
     }
 }
@@ -648,6 +652,7 @@ pub async fn run_inspect_pipeline_with(
             calibration_model,
             false,
             &ids,
+            &controls,
         );
         if let Some(why) = controls.refuse_if_cap_unenforceable(&models) {
             return Err(InspectError::Failed(why));
@@ -724,7 +729,7 @@ pub async fn run_inspect_pipeline_with(
                 backend_resolution,
                 corpus.as_ref(),
                 &HashMap::new(),
-                controls,
+                controls.clone(),
             )
             .await
         }
@@ -749,7 +754,7 @@ pub async fn run_inspect_pipeline_with(
                 backend_resolution,
                 corpus.as_ref(),
                 &HashMap::new(),
-                controls,
+                controls.clone(),
             )
             .await
         }
@@ -1179,6 +1184,7 @@ mod tests {
             batch: false,
             model: None,
             calibration_model: None,
+            fix_model: None,
             full: false,
             verbose: false,
             max_cost_usd: None,
@@ -1222,6 +1228,21 @@ mod tests {
         args.max_cost_usd = Some(12.5);
         validate_args(&args, false).unwrap();
         assert_eq!(args.run_controls().unwrap().max_cost_usd, Some(12.5));
+    }
+
+    #[test]
+    fn the_fix_model_flag_reaches_the_run_controls() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut args = base_args(dir.path().to_path_buf(), dir.path().join("o.zip"));
+        assert_eq!(args.run_controls().unwrap().fix_model, None);
+        args.fix_model = Some("claude-opus-5".to_string());
+        let controls = args.run_controls().unwrap();
+        assert_eq!(controls.fix_model.as_deref(), Some("claude-opus-5"));
+        assert_eq!(
+            controls.fix_model_for(Some("claude-sonnet-5"), None),
+            Some("claude-opus-5"),
+            "an explicit fix model wins over the switch"
+        );
     }
 
     #[test]

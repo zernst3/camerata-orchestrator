@@ -154,6 +154,8 @@ enum Command {
         /// Model override for the calibration pass. Defaults to the project-less model floor.
         #[arg(long = "calibration-model")]
         calibration_model: Option<String>,
+        #[arg(long = "fix-model", help = fix_model_help())]
+        fix_model: Option<String>,
         /// Ignore the on-disk incremental-scan cache and force a full re-scan of every file.
         #[arg(long)]
         full: bool,
@@ -308,6 +310,17 @@ fn parse_backend(s: &str) -> Result<ProjectBackend, String> {
     }
 }
 
+/// `--fix-model` help text. The default model's name comes from the same constant the server
+/// resolves it from, so the help cannot drift from what the fix stage actually runs.
+fn fix_model_help() -> String {
+    format!(
+        "Model for the fix stage (one concrete fix per finding). Unset: {} while the \
+         `fix_on_haiku` efficiency measure is on (the default), else the calibration model, else \
+         the audit model",
+        camerata_api_types::project::fix_stage_haiku_display_name()
+    )
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // Record the operator's redaction switch BEFORE the .env loader runs: the .env is resolved
@@ -383,6 +396,7 @@ async fn main() -> anyhow::Result<()> {
             batch,
             model,
             calibration_model,
+            fix_model,
             full,
             verbose,
             max_cost_usd,
@@ -395,6 +409,7 @@ async fn main() -> anyhow::Result<()> {
                 batch,
                 model,
                 calibration_model,
+                fix_model,
                 full,
                 verbose,
                 max_cost_usd,
@@ -665,6 +680,23 @@ async fn run_gate_probe_cmd() -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod cli_parse_tests {
+    /// The `--fix-model` help names the fix stage's default model from the shared constant.
+    #[test]
+    fn the_fix_model_help_names_the_default_model_from_the_shared_constant() {
+        use clap::CommandFactory;
+        let cmd = Cli::command();
+        let inspect = cmd.find_subcommand("inspect").expect("inspect subcommand");
+        let arg = inspect
+            .get_arguments()
+            .find(|a| a.get_id() == "fix_model")
+            .expect("--fix-model");
+        let help = arg.get_help().expect("help text").to_string();
+        assert!(
+            help.contains(&camerata_api_types::project::fix_stage_haiku_display_name()),
+            "{help}"
+        );
+    }
+
     use super::*;
 
     /// Every preserved demo/eval subcommand must still parse with no extra args
@@ -866,6 +898,7 @@ mod cli_parse_tests {
                 batch,
                 model,
                 calibration_model,
+                fix_model,
                 full,
                 verbose,
                 max_cost_usd,
@@ -877,6 +910,7 @@ mod cli_parse_tests {
                 assert!(!batch);
                 assert!(model.is_none());
                 assert!(calibration_model.is_none());
+                assert!(fix_model.is_none(), "no fix model unless asked for");
                 assert!(!full);
                 assert!(!verbose);
                 assert!(max_cost_usd.is_none(), "no cap unless asked for");
@@ -932,6 +966,8 @@ mod cli_parse_tests {
             "claude-sonnet-5",
             "--calibration-model",
             "claude-opus-5",
+            "--fix-model",
+            "claude-sonnet-5",
             "--full",
             "--verbose",
         ])
@@ -942,6 +978,7 @@ mod cli_parse_tests {
                 batch,
                 model,
                 calibration_model,
+                fix_model,
                 full,
                 verbose,
                 ..
@@ -950,6 +987,7 @@ mod cli_parse_tests {
                 assert!(batch);
                 assert_eq!(model.as_deref(), Some("claude-sonnet-5"));
                 assert_eq!(calibration_model.as_deref(), Some("claude-opus-5"));
+                assert_eq!(fix_model.as_deref(), Some("claude-sonnet-5"));
                 assert!(full);
                 assert!(verbose);
             }

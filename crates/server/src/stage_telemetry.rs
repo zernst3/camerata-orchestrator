@@ -94,6 +94,24 @@ pub struct StageUsage {
     pub wasted_output_tokens: u64,
     #[serde(default)]
     pub wasted_cost_usd: f64,
+    /// Calls per model id, so a stage that runs on a different model than the scan (the fix
+    /// stage on Haiku, rank 10) states what it ran on. The API backend reports the model that
+    /// served the call; the CLI backend does not, so its calls are keyed by the REQUESTED model
+    /// with a ` (requested)` suffix (see [`model_key`]). Sums to `calls`. Empty for a record
+    /// written before this existed.
+    #[serde(default)]
+    pub models: BTreeMap<String, u64>,
+}
+
+/// The key a call is counted under in [`StageUsage::models`]: the served model id when the
+/// backend reports it (the API does), else the requested id marked `(requested)` (the CLI
+/// backend echoes the id it was asked for and never says what served the call).
+fn model_key(r: &LlmResponse) -> String {
+    if r.backend == "cli" {
+        format!("{} (requested)", r.model)
+    } else {
+        r.model.clone()
+    }
 }
 
 impl StageUsage {
@@ -113,6 +131,7 @@ impl StageUsage {
             self.cost_usd += c;
             self.cost_reported_calls += 1;
         }
+        *self.models.entry(model_key(r)).or_default() += 1;
     }
 
     fn fold_wasted(&mut self, r: &LlmResponse, share: f64) {
@@ -136,6 +155,64 @@ impl StageUsage {
         self.wasted_input_tokens += other.wasted_input_tokens;
         self.wasted_output_tokens += other.wasted_output_tokens;
         self.wasted_cost_usd += other.wasted_cost_usd;
+        for (model, calls) in &other.models {
+            *self.models.entry(model.clone()).or_default() += calls;
+        }
+    }
+
+    /// `model xN, other xM`, in model-id order. Empty when no call recorded a model.
+    pub fn render_models(&self) -> String {
+        self.models
+            .iter()
+            .map(|(model, calls)| format!("{model} x{calls}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+}
+
+/// How the fix stage ended for the findings it was given, summed over every repo in the run. The
+/// give-up rate is the quality signal a cheaper fix model is judged on: a finding the model
+/// answered whose fix never passed the self-check falls back to the rule's authored remediation
+/// instead of a codebase-specific fix. A finding the model was never heard from on (the spend
+/// limit stopped it, or every call failed in transport) says nothing about the model's quality
+/// and is reported separately, never as a give-up.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FixOutcome {
+    /// Findings a fix call was actually made for (after carried fixes and the no-code
+    /// pre-filter). A finding the spend limit refused every batch for is not in this figure.
+    pub sent_to_model: u64,
+    /// Of those, findings that received at least one parsed response. The give-up rate's
+    /// denominator.
+    #[serde(default)]
+    pub answered: u64,
+    /// Of the answered findings, those with no fix that passed the self-check after every retry.
+    pub gave_up: u64,
+    /// Findings left without a fix because the spend limit stopped the stage before any call
+    /// for them was answered. Not a give-up.
+    #[serde(default)]
+    pub cap_stopped: u64,
+    /// Findings left without a fix because every call for them failed in transport (timeout,
+    /// HTTP error). Not a give-up.
+    #[serde(default)]
+    pub transport_failed: u64,
+    /// Findings the no-code pre-filter gave the authored remediation with no model call. Not in
+    /// any figure above.
+    pub authored_without_model: u64,
+}
+
+impl FixOutcome {
+    /// `gave_up / answered`; `None` when the model answered nothing.
+    pub fn give_up_rate(&self) -> Option<f64> {
+        (self.answered > 0).then(|| self.gave_up as f64 / self.answered as f64)
+    }
+
+    fn add(&mut self, other: FixOutcome) {
+        self.sent_to_model += other.sent_to_model;
+        self.answered += other.answered;
+        self.gave_up += other.gave_up;
+        self.cap_stopped += other.cap_stopped;
+        self.transport_failed += other.transport_failed;
+        self.authored_without_model += other.authored_without_model;
     }
 }
 
@@ -143,6 +220,8 @@ impl StageUsage {
 #[derive(Default)]
 pub struct StageMeter {
     stages: Mutex<BTreeMap<Stage, StageUsage>>,
+    /// `None` until a fix-generation pass reports; stays `None` on a run with no fix stage.
+    fix_outcome: Mutex<Option<FixOutcome>>,
 }
 
 impl StageMeter {
@@ -165,12 +244,26 @@ impl StageMeter {
         self.with_stage(stage, |u| u.fold_wasted(r, share));
     }
 
+    /// Add to the run's fix give-up tally.
+    pub fn record_fix_outcome(&self, outcome: FixOutcome) {
+        self.fix_outcome
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get_or_insert_with(FixOutcome::default)
+            .add(outcome);
+    }
+
     /// Snapshot, joined to the scan's counted-line total.
     pub fn snapshot(&self, counted_lines: usize) -> StageTelemetry {
+        let fix_outcome = *self
+            .fix_outcome
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let stages = self.lock();
         StageTelemetry {
             counted_lines,
             efficiency: None,
+            fix_outcome,
             stages: Stage::ALL
                 .iter()
                 .filter_map(|stage| {
@@ -218,6 +311,10 @@ pub struct StageTelemetry {
     /// switches existed.
     #[serde(default)]
     pub efficiency: Option<crate::efficiency::EfficiencyConfig>,
+    /// The fix stage's give-up tally for the run. `None` when the fix stage never ran (or for a
+    /// record written before this existed).
+    #[serde(default)]
+    pub fix_outcome: Option<FixOutcome>,
 }
 
 impl StageTelemetry {
@@ -289,6 +386,30 @@ impl StageTelemetry {
             row(&mut out, s.stage.label(), &s.usage, self.counted_lines);
         }
         row(&mut out, "total", &self.total(), self.counted_lines);
+        for s in &self.stages {
+            let models = s.usage.render_models();
+            if !models.is_empty() {
+                writeln!(out, "  {} model: {models}", s.stage.label()).ok();
+            }
+        }
+        if let Some(fix) = &self.fix_outcome {
+            let rate = fix
+                .give_up_rate()
+                .map_or_else(|| "n/a".to_string(), |r| format!("{:.1}%", r * 100.0));
+            writeln!(
+                out,
+                "  fix give-up rate: {rate} ({} of {} answered by the fix model; {} not answered: {} \
+                 stopped by the spend limit, {} failed in transport; {} used the authored \
+                 remediation with no model call)",
+                fix.gave_up,
+                fix.answered,
+                fix.cap_stopped + fix.transport_failed,
+                fix.cap_stopped,
+                fix.transport_failed,
+                fix.authored_without_model
+            )
+            .ok();
+        }
         writeln!(out, "  counted lines: {}", self.counted_lines).ok();
         out
     }

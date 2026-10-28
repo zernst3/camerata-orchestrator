@@ -1568,7 +1568,13 @@ pub async fn audit_repos_with_llm_controlled(
     // before any file is read or any model is called.
     if run_ai_review {
         let ids: Vec<&str> = selected.iter().map(|r| r.id.as_str()).collect();
-        let models = crate::cost_cap::models_the_run_will_use(model, calibration_model, deep, &ids);
+        let models = crate::cost_cap::models_the_run_will_use(
+            model,
+            calibration_model,
+            deep,
+            &ids,
+            &controls,
+        );
         if let Some(why) = controls.refuse_if_cap_unenforceable(&models) {
             let repos: Vec<String> = sources.iter().map(|(spec, _)| spec.clone()).collect();
             let mut report = ScanReport::gated(&repos);
@@ -1665,7 +1671,12 @@ pub async fn audit_repos_with_llm_controlled(
     let mut first_ai_error: Option<String> = None;
     // Aggregates REAL usage across every repo's audit (passes + calibration) for the
     // actual-vs-estimated readout.
-    let meter = crate::ai_audit::UsageMeter::with_controls(controls);
+    // The model the fix stage calls (rank 10): resolved once, from the same controls the
+    // spend-limit check above listed it from.
+    let fix_model: Option<String> = controls
+        .fix_model_for(model, calibration_model)
+        .map(str::to_string);
+    let meter = crate::ai_audit::UsageMeter::with_controls(controls.clone());
     // Wave C: the clone-candidate judge's verdict cache. Seeded from the prior manifest even when
     // that manifest is not usable as an AI baseline (verdicts are keyed by the content of the
     // question, so a changed rule set or an AI-off prior scan does not invalidate them); a
@@ -2453,7 +2464,7 @@ pub async fn audit_repos_with_llm_controlled(
                             spec,
                             repo_findings,
                             &files,
-                            calibration_model.or(model),
+                            fix_model.as_deref(),
                             Some(&meter),
                             corpus,
                         )

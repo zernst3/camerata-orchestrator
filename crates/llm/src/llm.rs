@@ -747,6 +747,10 @@ pub struct LlmRequest {
     /// the primary. READ-ONLY and non-agentic — same posture as `repo_read_dir`. Empty by
     /// default; ignored on the API backend.
     pub repo_read_extra_dirs: Vec<std::path::PathBuf>,
+    /// The Messages API `output_config.effort` (`low` | `medium` | `high` | ...). `None` = the
+    /// field is not sent and the model uses its own default. Sent on the real-time API path
+    /// only; the CLI backend and non-Anthropic vendors ignore it.
+    pub effort: Option<String>,
 }
 
 impl LlmRequest {
@@ -760,7 +764,14 @@ impl LlmRequest {
             cache_breakpoints: Vec::new(),
             repo_read_dir: None,
             repo_read_extra_dirs: Vec::new(),
+            effort: None,
         }
+    }
+
+    /// Ask for `output_config.effort = effort` (API path only; see [`LlmRequest::effort`]).
+    pub fn with_effort(mut self, effort: impl Into<String>) -> Self {
+        self.effort = Some(effort.into());
+        self
     }
 
     /// Grant the CLI-backend model ON-DEMAND READ access to a local repo clone: it runs with
@@ -1802,8 +1813,10 @@ pub struct BatchItemParams {
     pub max_tokens: u32,
     pub system: Option<String>,
     pub messages: Vec<BatchMessage>,
-    /// `output_config` (effort) for models whose default effort is not the one the audit was
-    /// tuned for; absent otherwise. Filled by [`build_batch_item`] from the model registry.
+    /// `output_config` (effort): the request's own effort when it set one, else the model
+    /// registry's default for models whose default is not the one the audit was tuned for;
+    /// absent otherwise. Filled by [`build_batch_item`] through the same path as the real-time
+    /// body.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output_config: Option<serde_json::Value>,
 }
@@ -1815,11 +1828,28 @@ pub struct BatchMessage {
     pub content: serde_json::Value,
 }
 
+/// Write the request's own `effort` (when it asks for one) into `body.output_config.effort`.
+/// Must run BEFORE [`crate::model_registry::conform_messages_body`]: the conformer only fills
+/// the model's effort default when none is present, so a caller-chosen effort wins. A blank
+/// effort is treated as none. The one place a request's effort reaches a wire body (real-time
+/// and batch alike).
+fn apply_request_effort(req: &LlmRequest, body: &mut serde_json::Value) {
+    if let Some(effort) = req
+        .effort
+        .as_deref()
+        .map(str::trim)
+        .filter(|e| !e.is_empty())
+    {
+        body["output_config"] = serde_json::json!({ "effort": effort });
+    }
+}
+
 /// Pure request-body builder for [`Llm::complete_api`]: the user message (split into cached
-/// blocks per `req.cache_breakpoints`), the optional system prompt, and then
-/// [`crate::model_registry::conform_messages_body`], the one place a body is made valid for
-/// its model (effort default, fields the model rejects). Kept separate from the HTTP call so
-/// the exact request shape is unit-testable without a network.
+/// blocks per `req.cache_breakpoints`), the optional system prompt, the request's own effort
+/// ([`apply_request_effort`]), and then [`crate::model_registry::conform_messages_body`], the
+/// one place a body is made valid for its model (effort default, fields the model rejects).
+/// Kept separate from the HTTP call so the exact request shape is unit-testable without a
+/// network.
 fn messages_request_body(req: &LlmRequest, model: &str, cache_ttl: CacheTtl) -> serde_json::Value {
     let user_content = cached_user_content(&req.prompt, &req.cache_breakpoints, true, cache_ttl);
     let mut body = serde_json::json!({
@@ -1830,6 +1860,7 @@ fn messages_request_body(req: &LlmRequest, model: &str, cache_ttl: CacheTtl) -> 
     if let Some(system) = &req.system {
         body["system"] = serde_json::json!(system);
     }
+    apply_request_effort(req, &mut body);
     crate::model_registry::conform_messages_body(model, &mut body);
     body
 }
@@ -1907,6 +1938,7 @@ pub fn build_batch_item(
     // added (`output_config`) onto the typed params. The typed struct has no field for any
     // rejected parameter, so there is nothing to strip.
     let mut shape = serde_json::json!({ "messages": [{ "role": "user", "content": "" }] });
+    apply_request_effort(req, &mut shape);
     crate::model_registry::conform_messages_body(model, &mut shape);
     BatchItem {
         custom_id: custom_id.into(),
@@ -3613,6 +3645,54 @@ mod tests {
         // Ensure it serialises correctly (no missing field).
         let v = serde_json::to_value(&item.params).unwrap();
         assert_eq!(v["system"], "you are an auditor");
+    }
+
+    /// Rank 10: an effort on the request is sent as `output_config.effort` on the wire body and
+    /// survives the model conformer; a request without one (or a blank one) gets the model
+    /// registry's default (`high` on Haiku 5.5, nothing on Sonnet 5).
+    #[test]
+    fn request_effort_reaches_the_wire_body_and_survives_conforming() {
+        let plain = LlmRequest::new("fix this").with_system("s");
+        let body = messages_request_body(&plain, "claude-sonnet-5", CacheTtl::FiveMinutes);
+        assert!(body.get("output_config").is_none(), "{body}");
+        assert_eq!(body["model"], "claude-sonnet-5");
+        assert_eq!(body["system"], "s");
+
+        // The fix call on Haiku 5.5: the caller's `low` beats the registry's `high`.
+        let low = LlmRequest::new("fix this").with_effort("low");
+        let body = messages_request_body(&low, "claude-haiku-5-5", CacheTtl::FiveMinutes);
+        assert_eq!(body["output_config"]["effort"], "low", "{body}");
+        assert_eq!(body["model"], "claude-haiku-5-5");
+
+        // No effort, or a blank one: the registry fills its default.
+        for req in [
+            LlmRequest::new("fix this"),
+            LlmRequest::new("fix this").with_effort("  "),
+        ] {
+            let body = messages_request_body(&req, "claude-haiku-5-5", CacheTtl::FiveMinutes);
+            assert_eq!(body["output_config"]["effort"], "high", "{body}");
+        }
+    }
+
+    /// The batch path takes the request's effort through the same helper, so a future batched
+    /// fix stage keeps `low` on Haiku 5.5 and agrees with the real-time body.
+    #[test]
+    fn batch_item_keeps_the_request_effort() {
+        let low = LlmRequest::new("fix this").with_effort("low");
+        let item = build_batch_item("c0-b0", &low, "claude-haiku-5-5", BATCH_CACHE_TTL);
+        let v = serde_json::to_value(&item).unwrap();
+        assert_eq!(v["params"]["output_config"]["effort"], "low", "{v}");
+        let realtime = messages_request_body(&low, "claude-haiku-5-5", CacheTtl::FiveMinutes);
+        assert_eq!(v["params"]["output_config"], realtime["output_config"]);
+
+        let none = build_batch_item(
+            "c0-b0",
+            &LlmRequest::new("fix this"),
+            "claude-haiku-5-5",
+            BATCH_CACHE_TTL,
+        );
+        let v = serde_json::to_value(&none).unwrap();
+        assert_eq!(v["params"]["output_config"]["effort"], "high", "{v}");
     }
 
     /// `parse_batch_results_jsonl` extracts succeeded rows, maps error rows, and skips
