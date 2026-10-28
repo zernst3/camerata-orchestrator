@@ -51,6 +51,10 @@ H. By 08:30: morning summary at the top of `docs/OVERNIGHT_DECISIONS.md`; the PR
 
 ## Status log (newest first)
 
+- 23:05: Wave D (cloud) reviewed: 2 HIGH false-positive shapes (Rust method-call helpers incl.
+  trybuild; React setters escaping via object shorthand), 3 MEDIUM, 4 LOW. Decision: render-only
+  and compile-only tests are smoke tests, not flagged. Merge+fix brief ready
+  (scratchpad/w29_merge_brief.md); starts when a local builder slot frees (5 busy).
 - 22:50: GitHub CI green for the first time on `fix/github-ci` (run 40621036960, all four
   gates, about 17 min); in Fable review before merge. Queued follow-ups it found:
   `derive_shared_target_dir` returns `/.camerata-shared-target` instead of None
