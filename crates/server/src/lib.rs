@@ -71,6 +71,7 @@ pub mod dev_implement_run;
 pub mod efficiency;
 pub mod live_fleet;
 pub mod llm;
+mod native_units;
 pub mod notify;
 pub mod onboard;
 /// `POST /api/orchestrator/message` — the architect-orchestrator's first
@@ -1522,6 +1523,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/uow/from-workitem", post(uow_from_workitem))
         // ── AI story authoring from a blank UoW (2026-06-22) ──────────────────
         .route("/api/uow/blank", post(uow_blank))
+        .route("/api/uow/native", post(native_units::uow_native_create))
         .route("/api/uow/:story_id/author", post(uow_author))
         // ── UoW file attachments (2026-07-01) ─────────────────────────────────
         .route(
@@ -1883,7 +1885,7 @@ pub async fn serve(addr: &str) -> anyhow::Result<()> {
                 let Some(branch) = uow.branch.as_deref().filter(|b| !b.trim().is_empty()) else {
                     continue;
                 };
-                let Some(repo) = repo_from_story_id(&uow.story_id) else {
+                let Some(repo) = uow.repo().map(str::to_string) else {
                     continue;
                 };
                 let override_path = settings.repo_path(&repo);
@@ -3696,7 +3698,7 @@ async fn sign_off_run(
     let run_after_signoff = state.runs.get(&run.id).unwrap_or_else(|| run.clone());
     if run_after_signoff.done {
         if let Some(branch) = uow.branch.as_deref().filter(|b| !b.trim().is_empty()) {
-            if let Some(repo) = repo_from_story_id(&run.story_id) {
+            if let Some(repo) = uow.repo().map(str::to_string) {
                 let override_path = state.settings.repo_path(&repo);
                 let workspace_root = state.settings.workspace_root();
                 if let Some(clone) = crate::workspace::resolve_repo_dir(
@@ -3748,7 +3750,9 @@ async fn list_open_clarifications(State(state): State<AppState>) -> Json<Vec<Cla
     let Some(p) = state.projects.active() else {
         return Json(vec![]);
     };
-    let clars = state.clarifications.all_open_for_project(&p.repos);
+    let clars = state
+        .clarifications
+        .all_open_for_project(&p.repos, |id| state.uow.repo_for(id));
     Json(with_resume_run_ids(&state.clarify_resume, clars))
 }
 
@@ -12387,40 +12391,29 @@ async fn workitems_set_parent(
     }
 }
 
-/// Parse a GitHub work-item id (`github:OWNER/REPO#NUMBER`) into `(repo, number)`.
-/// Errors when the provider is not `github` or the shape is malformed.
+/// Parse a GitHub work-item id (`github:OWNER/REPO#NUMBER`) into `(repo, number)` through
+/// the GitHub adapter ([`crate::workitems::parse_github_work_item_id`]). A 400 when the
+/// provider is not `github` or the shape is malformed.
 fn parse_github_work_item_id(work_item_id: &str) -> Result<(String, u64), AppError> {
-    let rest = work_item_id.strip_prefix("github:").ok_or_else(|| {
-        AppError::bad_request(anyhow::anyhow!(
-            "work_item_id must be `github:OWNER/REPO#NUMBER`, got `{work_item_id}`"
-        ))
-    })?;
-    let (repo, num) = rest.rsplit_once('#').ok_or_else(|| {
-        AppError::bad_request(anyhow::anyhow!(
-            "work_item_id missing `#NUMBER`: `{work_item_id}`"
-        ))
-    })?;
-    if camerata_worktracker::RepoCoord::parse(repo).is_none() {
-        return Err(AppError::bad_request(anyhow::anyhow!(
-            "work_item_id repo is not `owner/repo`: `{repo}`"
-        )));
-    }
-    let number: u64 = num.parse().map_err(|_| {
-        AppError::bad_request(anyhow::anyhow!("work_item_id number is not a u64: `{num}`"))
-    })?;
-    Ok((repo.to_string(), number))
+    crate::workitems::parse_github_work_item_id(work_item_id)
+        .map_err(|reason| AppError::bad_request(anyhow::anyhow!(reason)))
 }
 
 /// A UoW with the WorkItem it references and its lifecycle stage, for `GET /api/uows`.
 #[derive(serde::Serialize)]
 struct UowView {
-    /// The UoW id (its story id, e.g. `OWNER/REPO#123`, or `draft-<token>` for an
-    /// AI-authoring draft).
+    /// The UoW id: an opaque key (`uow-<token>` for a native unit, `OWNER/REPO#123` for a
+    /// unit created from a GitHub issue, `draft-<token>` for an AI-authoring draft).
     id: String,
-    /// The work item this UoW references, when it maps to one (a GitHub-sourced
-    /// spine story). `None` for native/legacy stories with no external ref AND for a
-    /// blank/authoring DRAFT UoW that has not been published to the board yet.
+    /// The work item this UoW references, when it maps to one: a GitHub-sourced spine
+    /// story, or a native unit's own spine story (provider `native`). `None` for legacy
+    /// stories with no tracker and no native number AND for a blank/authoring DRAFT UoW
+    /// that has not been published to the board yet.
     work_item: Option<crate::workitems::WorkItem>,
+    /// Where the unit is tracked: `native` (Camerata itself, no board) or the tracker.
+    provider: camerata_worktracker::Provider,
+    /// The repository the unit works in ([`crate::uow::UnitOfWork::repo`]), if any.
+    repo: Option<String>,
     /// The lifecycle stage as a snake_case wire string (`intake`, `development`, …).
     stage: String,
     /// `true` when this is a blank/authoring DRAFT UoW (it has an authoring state and no
@@ -12444,13 +12437,19 @@ async fn uows_list(State(state): State<AppState>) -> Result<Json<serde_json::Val
             // normal UoW's key IS the work-item story id. Resolve against the spine by
             // whichever applies.
             let lookup_id = u.work_item.clone().unwrap_or_else(|| u.story_id.clone());
-            let work_item = stories
-                .iter()
-                .find(|s| s.id == lookup_id)
-                .and_then(crate::workitems::WorkItem::from_canonical_story);
+            let work_item = stories.iter().find(|s| s.id == lookup_id).and_then(|s| {
+                match (u.provider(), u.native_number) {
+                    (camerata_worktracker::Provider::Native, Some(n)) => Some(
+                        crate::workitems::WorkItem::from_native_story(s, u.repo(), n),
+                    ),
+                    _ => crate::workitems::WorkItem::from_canonical_story(s),
+                }
+            });
             // A draft is one with an authoring state and no published work item yet.
             let authoring = u.authoring.is_some() && work_item.is_none();
             UowView {
+                provider: u.provider(),
+                repo: u.repo().map(str::to_string),
                 id: u.story_id,
                 work_item,
                 stage: u.stage.wire_str().to_string(),
@@ -14397,7 +14396,7 @@ async fn uow_intake_ship(
     // GAP-2: Camerata authors these Ship PRs, so make their title/body COMPLIANT with the
     // project's active process rules and HARD-BLOCK gate them at each PR-open site.
     let vcs_config = process_rule_config_for(&state, &active_project_id(&state));
-    let numeric_id = crate::vcs_choke::numeric_story_id(&story_id);
+    let numeric_id = uow.commit_reference();
 
     // ── Multi-repo path: intake.repos has explicit selections ─────────────────
     if !uow.intake.repos.is_empty() {
@@ -14533,10 +14532,8 @@ async fn uow_intake_ship(
                 .to_string(),
         );
     };
-    let Some(repo) = repo_from_story_id(&story_id) else {
-        return bad(format!(
-            "could not derive owner/repo from story id `{story_id}`"
-        ));
+    let Some(repo) = uow.repo().map(str::to_string) else {
+        return bad(NO_UNIT_REPO.to_string());
     };
     let override_path = state.settings.repo_path(&repo);
     let Some(dir) = crate::workspace::resolve_uow_worktree(
@@ -15634,19 +15631,6 @@ async fn uow_rerun_investigation(
     Json(serde_json::json!({ "run_id": run_id, "story_id": story_id })).into_response()
 }
 
-/// Derive `owner/repo` from a UoW story id (`owner/repo#num`). The UoW story id is the
-/// GitHub-sourced id WITHOUT the `github:` prefix (see [`UowView`]); the repo is the part
-/// before the last `#`. Returns `None` when the id has no `#` or the repo part is not a
-/// valid `owner/repo`.
-pub(crate) fn repo_from_story_id(story_id: &str) -> Option<String> {
-    let (repo, _num) = story_id.rsplit_once('#')?;
-    if camerata_worktracker::RepoCoord::parse(repo).is_some() {
-        Some(repo.to_string())
-    } else {
-        None
-    }
-}
-
 /// Derive the story branch for one in-scope repo given its [`BranchMode`] and the
 /// current story id. Used during per-repo worktree setup (R6 multi-repo path).
 ///
@@ -15759,18 +15743,22 @@ pub(crate) fn derive_scope_branch(mode: &crate::uow::BranchMode, story_id: &str)
     mode.branch_for_story(story_id)
 }
 
+/// The 4xx reason when a repository action is asked of a unit that names no repository.
+const NO_UNIT_REPO: &str = "this unit of work names no repository: set it under Intake, Repos \
+     in scope (a unit created from a GitHub issue works in the issue's repository)";
+
 /// `POST /api/uow/:story_id/branches` → `{ "local": [...], "origin": [...] }`.
 ///
 /// Lists the branches this UoW can merge FROM, populating the "Update branch" picker.
-/// Resolves the repo (from the story id) and its local clone dir; `local` are the
-/// working copy's branches, `origin` are the `origin/*` remote-tracking branches (prefix
-/// stripped). Token-less / no-clone / unresolvable repo → empty lists (graceful, never an
+/// Resolves the unit's repository ([`crate::uow::UnitOfWork::repo`]) and its local clone
+/// dir; `local` are the working copy's branches, `origin` are the `origin/*`
+/// remote-tracking branches (prefix stripped). Token-less / no-clone / unresolvable repo → empty lists (graceful, never an
 /// error) so the UI renders an empty picker rather than breaking.
 async fn uow_list_branches(
     State(state): State<AppState>,
     Path(story_id): Path<String>,
 ) -> Json<crate::workspace::MergeSourceBranches> {
-    let Some(repo) = repo_from_story_id(&story_id) else {
+    let Some(repo) = state.uow.repo_for(&story_id) else {
         return Json(crate::workspace::MergeSourceBranches::default());
     };
     let override_path = state.settings.repo_path(&repo);
@@ -15834,17 +15822,15 @@ async fn uow_update_branch(
 
     // The UoW must have a working branch to update.
     let uow = state.uow.get_or_create(&story_id);
-    let Some(target_branch) = uow.branch.filter(|b| !b.trim().is_empty()) else {
+    let Some(target_branch) = uow.branch.clone().filter(|b| !b.trim().is_empty()) else {
         return bad(
             "this UoW has no branch yet — start development first so there is a branch to update"
                 .to_string(),
         );
     };
 
-    let Some(repo) = repo_from_story_id(&story_id) else {
-        return bad(format!(
-            "could not derive owner/repo from story id `{story_id}`"
-        ));
+    let Some(repo) = uow.repo().map(str::to_string) else {
+        return bad(NO_UNIT_REPO.to_string());
     };
     let override_path = state.settings.repo_path(&repo);
     let workspace_root = state.settings.workspace_root();
@@ -15972,10 +15958,8 @@ async fn uow_pr_open(
                 .to_string(),
         );
     };
-    let Some(repo) = repo_from_story_id(&story_id) else {
-        return bad(format!(
-            "could not derive owner/repo from story id `{story_id}`"
-        ));
+    let Some(repo) = uow.repo().map(str::to_string) else {
+        return bad(NO_UNIT_REPO.to_string());
     };
     let override_path = state.settings.repo_path(&repo);
     let workspace_root = state.settings.workspace_root();
@@ -16005,7 +15989,7 @@ async fn uow_pr_open(
     // with the project's active process rules and HARD-BLOCK gates them. A non-compliant
     // machine PR surfaces as an error here rather than opening an ungated PR.
     let vcs_config = process_rule_config_for(&state, &active_project_id(&state));
-    let numeric_id = crate::vcs_choke::numeric_story_id(&story_id);
+    let numeric_id = uow.commit_reference();
     let summary = uow
         .work_item
         .as_deref()
@@ -16062,12 +16046,12 @@ async fn uow_pr_get(
             "Connect GitHub (set CAMERATA_GITHUB_TOKEN) to pull PR info.",
         ));
     };
-    let Some(repo) = repo_from_story_id(&story_id) else {
-        return Json(empty("Could not derive owner/repo from the story id."));
-    };
     // ROUTES-8: READ — must not create. An unknown id resolves to a default UoW (no PR ref),
     // so the "No PR" path fires without persisting a junk UoW.
     let uow = state.uow.get_or_default(&story_id);
+    let Some(repo) = uow.repo().map(str::to_string) else {
+        return Json(empty(NO_UNIT_REPO));
+    };
     let Some(info) =
         crate::pr::resolve_pr_for_uow(&state.uow, &story_id, &uow, &repo, &token).await
     else {
@@ -16114,12 +16098,10 @@ async fn uow_pr_comment(
     if req.body.trim().is_empty() {
         return bad("comment body must not be empty".to_string());
     }
-    let Some(repo) = repo_from_story_id(&story_id) else {
-        return bad(format!(
-            "could not derive owner/repo from story id `{story_id}`"
-        ));
-    };
     let uow = state.uow.get_or_create(&story_id);
+    let Some(repo) = uow.repo().map(str::to_string) else {
+        return bad(NO_UNIT_REPO.to_string());
+    };
     let Some(info) =
         crate::pr::resolve_pr_for_uow(&state.uow, &story_id, &uow, &repo, &token).await
     else {
@@ -16166,10 +16148,8 @@ async fn uow_pr_resolve(
     let Some(target_branch) = uow.branch.clone().filter(|b| !b.trim().is_empty()) else {
         return bad("this UoW has no branch yet — nothing to resolve".to_string());
     };
-    let Some(repo) = repo_from_story_id(&story_id) else {
-        return bad(format!(
-            "could not derive owner/repo from story id `{story_id}`"
-        ));
+    let Some(repo) = uow.repo().map(str::to_string) else {
+        return bad(NO_UNIT_REPO.to_string());
     };
     // Resolve the PR (stored → else head-search + store) so we have the feedback to feed.
     let Some(info) =
@@ -28245,24 +28225,6 @@ mod tests {
             derive_scope_branch(&mode, "acme/api#7"),
             "camerata/acme/api#7",
         );
-    }
-
-    // ── repo_from_story_id (also verifies the helper is stable) ─────────────────
-
-    /// `repo_from_story_id` extracts `owner/repo` from a `owner/repo#num` story id.
-    #[test]
-    fn repo_from_story_id_parses_owner_repo() {
-        assert_eq!(
-            repo_from_story_id("acme/api#42"),
-            Some("acme/api".to_string())
-        );
-    }
-
-    /// `repo_from_story_id` returns None for a malformed story id.
-    #[test]
-    fn repo_from_story_id_returns_none_for_invalid_id() {
-        // No '#' → None.
-        assert_eq!(repo_from_story_id("not-a-story-id"), None);
     }
 
     // ── uow_intake_ship single-repo fallback (no-token 4xx) ─────────────────────

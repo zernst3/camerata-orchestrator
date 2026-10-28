@@ -119,8 +119,8 @@ pub fn gated_branch(config: &ProcessRuleConfig, name: &str) -> Result<(), ChokeE
 /// - **PROCESS-ADO-LINK-1** — when enabled, the configured `<prefix>#<digits>` ticket reference is
 ///   appended to the subject.
 ///
-/// `numeric_id` is the story's numeric identifier (the tail of a canonical `owner/repo#<num>`
-/// story id). If it is empty, no compliant story-id reference can be produced; the returned
+/// `numeric_id` is the unit's numeric reference ([`crate::uow::UnitOfWork::commit_reference`]:
+/// its native number or its tracker item's number). If it is empty, no compliant story-id reference can be produced; the returned
 /// message will omit it and [`gated_commit`] will HARD-BLOCK, which is the intended signal that
 /// the run lacks a usable story id.
 pub fn compliant_machine_commit_message(
@@ -229,33 +229,6 @@ pub fn compliant_machine_pr(
     }
 
     (title, body)
-}
-
-/// Extract the numeric story identifier from a Camerata story id.
-///
-/// Canonical story ids are `owner/repo#<num>`; the numeric id is the tail after the last `#`.
-/// When there is no `#`, we fall back to the trailing run of ASCII digits (covers ids like
-/// `story-42`). Returns an empty string when no digits are present, which signals the caller
-/// that a compliant story-id reference cannot be formed.
-pub fn numeric_story_id(story_id: &str) -> String {
-    let tail = story_id
-        .rsplit_once('#')
-        .map(|(_, n)| n)
-        .unwrap_or(story_id);
-    // Take a leading run of digits from the tail (handles `#42` and `#42-suffix`).
-    let leading: String = tail.chars().take_while(|c| c.is_ascii_digit()).collect();
-    if !leading.is_empty() {
-        return leading;
-    }
-    // Fall back to a trailing run of digits anywhere (handles `story-42`).
-    story_id
-        .chars()
-        .rev()
-        .take_while(|c| c.is_ascii_digit())
-        .collect::<String>()
-        .chars()
-        .rev()
-        .collect()
 }
 
 /// Gate a COMMIT, allowing an auditable bypass for orchestration-internal commits that
@@ -447,19 +420,6 @@ mod tests {
     }
 
     // ── Compliant machine-message generation (Refinement #1) ─────────────────────
-
-    #[test]
-    fn numeric_story_id_extracts_tail_after_hash() {
-        assert_eq!(numeric_story_id("acme/widgets#42"), "42");
-        assert_eq!(numeric_story_id("story-1"), "1");
-        assert_eq!(numeric_story_id("#7"), "7");
-    }
-
-    #[test]
-    fn numeric_story_id_empty_when_no_digits() {
-        assert_eq!(numeric_story_id("acme/widgets#"), "");
-        assert_eq!(numeric_story_id("no-number-here"), "");
-    }
 
     #[test]
     fn machine_commit_passes_default_ruleset() {

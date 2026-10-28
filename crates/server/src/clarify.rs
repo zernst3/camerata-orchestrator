@@ -261,21 +261,22 @@ impl ClarificationStore {
         v
     }
 
-    /// Open clarifications whose `story_id` resolves to a repo in `repos` (the active
-    /// project's repos). ISOLATION (A9): the global [`Self::all_open`] leaks every
-    /// project's NEEDS-YOU queue. Clarifications whose story_id has no resolvable repo
-    /// (drafts) are EXCLUDED.
-    pub fn all_open_for_project(&self, repos: &[String]) -> Vec<Clarification> {
+    /// Open clarifications whose story's repository (`repo_of(story_id)`, the unit's own
+    /// repository) is in `repos` (the active project's repos). ISOLATION (A9): the global
+    /// [`Self::all_open`] leaks every project's NEEDS-YOU queue. Clarifications whose story
+    /// names no repository (drafts) are EXCLUDED.
+    pub fn all_open_for_project(
+        &self,
+        repos: &[String],
+        repo_of: impl Fn(&str) -> Option<String>,
+    ) -> Vec<Clarification> {
         let mut v: Vec<Clarification> = self
             .items
             .lock()
             .map(|g| {
                 g.values()
                     .filter(|c| c.is_open())
-                    .filter(|c| {
-                        crate::repo_from_story_id(&c.story_id)
-                            .is_some_and(|r| repos.iter().any(|p| p == &r))
-                    })
+                    .filter(|c| repo_of(&c.story_id).is_some_and(|r| repos.iter().any(|p| p == &r)))
                     .cloned()
                     .collect()
             })
