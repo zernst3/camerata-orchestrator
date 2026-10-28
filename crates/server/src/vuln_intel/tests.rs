@@ -661,6 +661,13 @@ fn sample_stamp() -> VulnDataStamp {
             as_of: "2026-10-28".to_string(),
             note: None,
         },
+        endoflife: FeedStamp::Checked {
+            as_of: "2026-10-28".to_string(),
+            note: None,
+        },
+        nvd: FeedStamp::NotChecked {
+            reason: "the feed could not be fetched".to_string(),
+        },
     }
 }
 
@@ -688,6 +695,10 @@ fn the_stamp_appears_in_the_readme_and_the_manifest() {
     assert!(readme
         .contains("Vulnerability data (FIRST EPSS) not checked (the feed could not be fetched)\n"));
     assert!(readme.contains("Vulnerability data (OSV) as of 2026-10-28\n"));
+    assert!(readme.contains("Vulnerability data (End-of-life, endoflife.date) as of 2026-10-28\n"));
+    assert!(readme.contains(
+        "Vulnerability data (NVD, runtimes) not checked (the feed could not be fetched)\n"
+    ));
 
     let inspection = provenance.inspection_json();
     let data = &inspection["vulnerability_data"];

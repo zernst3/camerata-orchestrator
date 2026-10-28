@@ -519,7 +519,7 @@ fn cvss_roundup(x: f64) -> f64 {
 /// The base score of a CVSS v3.0 or v3.1 vector (`CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H`),
 /// computed from the metrics. `None` for anything else (a v4 vector, a vector missing a base
 /// metric, or an unknown metric value), so the caller never guesses.
-fn cvss_v3_base_score(vector: &str) -> Option<f64> {
+pub(crate) fn cvss_v3_base_score(vector: &str) -> Option<f64> {
     let mut parts = vector.trim().split('/');
     match parts.next()? {
         "CVSS:3.0" | "CVSS:3.1" => {}
@@ -600,7 +600,7 @@ fn cvss_v3_base_score(vector: &str) -> Option<f64> {
 
 /// The base score of a CVSS v2 vector (`AV:N/AC:L/Au:N/C:P/I:P/A:P`). `None` when a base metric is
 /// missing or unrecognised.
-fn cvss_v2_base_score(vector: &str) -> Option<f64> {
+pub(crate) fn cvss_v2_base_score(vector: &str) -> Option<f64> {
     let (mut av, mut ac, mut au, mut c, mut i, mut a) = (None, None, None, None, None, None);
     for part in vector.trim().split('/') {
         let (key, value) = part.split_once(':')?;
@@ -649,7 +649,7 @@ fn cvss_v2_base_score(vector: &str) -> Option<f64> {
 }
 
 /// Map a CVSS base score (0.0-10.0) to Camerata's four-level severity vocabulary.
-fn cvss_score_to_severity(score: f64) -> &'static str {
+pub(crate) fn cvss_score_to_severity(score: f64) -> &'static str {
     if score <= 0.0 {
         // CVSS rates "no impact" 0.0; that is none, not low.
         "info"
