@@ -1,5 +1,5 @@
 id = "ARCH-UTC-TIMESTAMPS-1"
-version = 2
+version = 3
 title = "Domain timestamps are anchored to UTC; mappers normalize at the persistence boundary"
 domain = "api-layer"
 layer = "universal"
@@ -11,11 +11,11 @@ verification = "grounded"
 
 [[sources]]
 url = "https://www.rfc-editor.org/rfc/rfc3339.html"
-title = "RFC 3339 — Date and Time on the Internet: Timestamps"
+title = "RFC 3339: Date and Time on the Internet: Timestamps"
 
 [[sources]]
 url = "https://www.postgresql.org/docs/current/datatype-datetime.html"
-title = "PostgreSQL — 8.5. Date/Time Types (timestamptz stores UTC; the wire offset is session-determined, medium authority for the 'normalize at the persistence boundary' half specifically)"
+title = "PostgreSQL: 8.5. Date/Time Types (timestamptz stores UTC; the wire offset is session-determined, medium authority for the 'normalize at the persistence boundary' half specifically)"
 
 [decision]
 question = "How are timestamps represented in the domain layer, and where are they normalized?"

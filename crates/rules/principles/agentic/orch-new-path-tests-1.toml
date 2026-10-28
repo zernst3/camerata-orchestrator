@@ -1,5 +1,5 @@
 id = "ORCH-NEW-PATH-TESTS-1"
-version = 2
+version = 3
 title = "AI-authored code paths carry tests, not just a passing existing suite"
 domain = "agentic"
 layer = "universal"
@@ -12,15 +12,15 @@ verification = "grounded"
 
 [[sources]]
 url = "AGENTS.md"
-title = "AGENTS.md — ORCH-NEW-PATH-TESTS-1 (AI-authored code paths carry tests)"
+title = "AGENTS.md: ORCH-NEW-PATH-TESTS-1 (AI-authored code paths carry tests)"
 
 [[sources]]
 url = "docs/decisions/2026-06-20_uow_governed_dev_loop.md"
-title = "Decision: Wire the governed development loop over the Unit of Work — cites ORCH-NEW-PATH-TESTS-1"
+title = "Decision: Wire the governed development loop over the Unit of Work: cites ORCH-NEW-PATH-TESTS-1"
 
 [[sources]]
 url = "https://testing.googleblog.com/2020/08/code-coverage-best-practices.html"
-title = "Google Testing Blog — Code Coverage Best Practices (2020)"
+title = "Google Testing Blog: Code Coverage Best Practices (2020)"
 
 [decision]
 question = "How does the team confirm that code paths added by an agent are actually tested?"

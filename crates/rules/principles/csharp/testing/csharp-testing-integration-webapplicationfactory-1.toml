@@ -1,5 +1,5 @@
 id = "CSHARP-TESTING-INTEGRATION-WEBAPPLICATIONFACTORY-1"
-version = 1
+version = 2
 title = "ASP.NET Core integration tests use WebApplicationFactory<TProgram> to host the real application in-process; infrastructure is replaced via ConfigureWebHost"
 domain = "csharp:testing"
 layer = "language"
@@ -36,9 +36,9 @@ id = "no-integration-tests"
 violates = true
 label = "rely solely on unit tests; skip integration tests"
 directive = "Only unit tests are written; the HTTP pipeline and DI registrations are never integration-tested."
-why = "Skips an entire class of bugs — middleware ordering, routing, DI wiring — that only manifest in the real pipeline. Microsoft's documentation explicitly states that integration tests should complement unit tests, not be skipped."
+why = "Skips an entire class of bugs (middleware ordering, routing, DI wiring), that only manifest in the real pipeline. Microsoft's documentation explicitly states that integration tests should complement unit tests, not be skipped."
 
 
 [[sources]]
 url = "https://learn.microsoft.com/en-us/aspnet/core/test/integration-tests"
-title = "Integration tests in ASP.NET Core — WebApplicationFactory, project structure, IClassFixture pattern"
+title = "Integration tests in ASP.NET Core: WebApplicationFactory, project structure, IClassFixture pattern"

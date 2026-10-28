@@ -1,5 +1,5 @@
 id = "CSHARP-TESTING-MOCK-AT-BOUNDARY-1"
-version = 1
+version = 2
 title = "Mocks and stubs target only infrastructure boundaries (I/O, external services, time); production class internals are never mocked"
 domain = "csharp:testing"
 layer = "language"
@@ -39,8 +39,8 @@ why = "These are integration tests, not unit tests; they are slower, order-depen
 
 [[sources]]
 url = "https://learn.microsoft.com/en-us/dotnet/core/testing/unit-testing-best-practices"
-title = "Best practices for writing unit tests — Handle stub static references with seams; Avoid infrastructure dependencies"
+title = "Best practices for writing unit tests: Handle stub static references with seams; Avoid infrastructure dependencies"
 
 [[sources]]
 url = "https://github.com/devlooped/moq"
-title = "Moq — The most popular and friendly mocking library for .NET"
+title = "Moq: The most popular and friendly mocking library for .NET"

@@ -1,5 +1,5 @@
 id = "SQL-FK-CASCADE-FINANCIAL-1"
-version = 1
+version = 2
 title = "A foreign key from a mutable user table into a financial, audit, or historical record never cascades deletes onto that record"
 domain = "sql"
 layer = "universal"
@@ -17,7 +17,7 @@ qualifies = "Enforced by a scan over FOREIGN KEY declarations (REFERENCES clause
 
 [[sources]]
 url = "https://www.postgresql.org/docs/current/ddl-constraints.html"
-title = "PostgreSQL — Foreign Keys: ON DELETE CASCADE deletes the referencing row(s) automatically when the referenced row is deleted"
+title = "PostgreSQL: Foreign Keys: ON DELETE CASCADE deletes the referencing row(s) automatically when the referenced row is deleted"
 
 [[sources]]
 url = "https://cheatsheetseries.owasp.org/cheatsheets/Logging_Cheat_Sheet.html"
@@ -57,7 +57,7 @@ A foreign key from a routine, user-mutable table (a session, cart, profile edit,
 ordinary course of the product) into a financial, audit, or historical record (an invoice, payment, transaction,
 order, ledger entry, audit log, charge, receipt, or statement) never uses `ON DELETE CASCADE`; it uses `ON DELETE
 RESTRICT`/`NO ACTION`, or a nullable FK with `ON DELETE SET NULL`. Deleting the routine-course row therefore can
-never silently and irreversibly destroy the financial or audit record that exists to document what happened — the
+never silently and irreversibly destroy the financial or audit record that exists to document what happened: the
 delete is either blocked until the reference is handled explicitly, or the reference is nulled, rather than
 cascading the record away.
 """

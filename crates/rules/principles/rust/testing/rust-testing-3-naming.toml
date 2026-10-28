@@ -1,5 +1,5 @@
 id = "RUST-TESTING-3"
-version = 2
+version = 3
 title = "Test functions use snake_case names that read as sentences describing the scenario"
 domain = "rust:testing"
 layer = "language"
@@ -12,17 +12,17 @@ qualifies = "Mechanical via the non_snake_case lint (deny-by-default for all Rus
 
 [[sources]]
 url = "https://doc.rust-lang.org/book/ch11-01-writing-tests.html"
-title = "The Rust Book — Ch 11.1: Writing Tests (test function naming examples)"
+title = "The Rust Book: Ch 11.1: Writing Tests (test function naming examples)"
 linter = "rustc: non_snake_case (deny by default)"
 
 [[sources]]
 url = "https://rust-lang.github.io/api-guidelines/naming.html"
-title = "Rust API Guidelines — C-CASE: Casing conforms to RFC 430 (snake_case for functions)"
+title = "Rust API Guidelines: C-CASE: Casing conforms to RFC 430 (snake_case for functions)"
 linter = "rustc: non_snake_case"
 
 [[sources]]
 url = "https://rust-lang.github.io/rust-clippy/master/index.html#tests_outside_test_module"
-title = "Clippy Lints — clippy::tests_outside_test_module (restriction)"
+title = "Clippy Lints: clippy::tests_outside_test_module (restriction)"
 linter = "clippy: tests_outside_test_module"
 
 [decision]

@@ -1,5 +1,5 @@
 id = "JAVA-TESTING-INTEGRATION-TEST-LOCATION-1"
-version = 1
+version = 2
 title = "Integration tests are named *IT.java (or *ITCase.java) and tagged @Tag(\"integration\") so they can be separated from unit tests in CI"
 domain = "java:testing"
 layer = "language"
@@ -17,12 +17,12 @@ why = "Maven Failsafe Plugin runs integration tests (verify phase) using the def
 
 [[sources]]
 url = "https://maven.apache.org/surefire/maven-failsafe-plugin/examples/inclusion-exclusion.html"
-title = "Maven Failsafe Plugin — Inclusions and Exclusions (default IT*.java / *IT.java / *ITCase.java patterns)"
+title = "Maven Failsafe Plugin: Inclusions and Exclusions (default IT*.java / *IT.java / *ITCase.java patterns)"
 linter = "Maven Failsafe: default *IT.java inclusion pattern"
 
 [[sources]]
 url = "https://docs.junit.org/5.14.1/writing-tests/annotations.html"
-title = "JUnit 5 User Guide — Annotations (@Tag: Used to declare tags for filtering tests)"
+title = "JUnit 5 User Guide: Annotations (@Tag: Used to declare tags for filtering tests)"
 linter = "JUnit 5: @Tag"
 
 [[option]]

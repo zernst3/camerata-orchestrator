@@ -1,5 +1,5 @@
 id = "RUBY-TESTING-DETERMINISTIC-NO-FLAKY-1"
-version = 1
+version = 2
 title = "Tests run in random order with --order random and pass on any seed; no time, sequence, or state leakage"
 domain = "ruby:testing"
 layer = "language"
@@ -32,13 +32,13 @@ why = "Running examples in a fixed order lets one example quietly depend on stat
 
 [[sources]]
 url = "https://www.fastruby.io/blog/rspec/debug/how-to-debug-non-deterministic-specs.html"
-title = "FastRuby.io — How to Debug Non-Deterministic Test Failures With RSpec"
+title = "FastRuby.io: How to Debug Non-Deterministic Test Failures With RSpec"
 
 [[sources]]
 url = "https://evilmartians.com/chronicles/flaky-tests-be-gone-long-lasting-relief-chronic-ci-retry-irritation"
-title = "Evil Martians — Flaky tests, be gone"
+title = "Evil Martians: Flaky tests, be gone"
 
 [[sources]]
 url = "https://docs.rubocop.org/rubocop-rspec/latest/cops_rspec.html"
-title = "RuboCop RSpec — RSpec/BeforeAfterAll cop (warns on before(:all) state leakage)"
+title = "RuboCop RSpec: RSpec/BeforeAfterAll cop (warns on before(:all) state leakage)"
 linter = "rubocop-rspec: RSpec/BeforeAfterAll"

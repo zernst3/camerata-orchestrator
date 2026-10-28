@@ -1,5 +1,5 @@
 id = "ARCH-WEBHOOK-EVENT-DEDUP-1"
-version = 2
+version = 3
 title = "Payment-provider webhook handlers deduplicate by the provider's event id so redelivery never re-applies a side effect"
 domain = "api-layer"
 layer = "universal"
@@ -12,11 +12,11 @@ qualifies = "Enforced by a scan over payment-provider webhook handlers for a sid
 
 [[sources]]
 url = "https://docs.stripe.com/webhooks#handle-duplicate-events"
-title = "Stripe docs — Webhooks: 'Webhook endpoints might occasionally receive the same event more than once... We recommend... guarding against duplicated events by making your event processing idempotent'"
+title = "Stripe docs: Webhooks: 'Webhook endpoints might occasionally receive the same event more than once... We recommend... guarding against duplicated events by making your event processing idempotent'"
 
 [[sources]]
 url = "https://developer.paypal.com/api/rest/webhooks/rest/"
-title = "PayPal Developer docs — Webhooks REST API: webhook notifications are delivered at-least-once and a given event may be received more than once"
+title = "PayPal Developer docs: Webhooks REST API: webhook notifications are delivered at-least-once and a given event may be received more than once"
 
 [decision]
 question = "Does a payment-provider webhook handler deduplicate by the provider's own event id before applying its side effect, given that providers document at-least-once (possibly duplicate) delivery, or does it apply the effect unconditionally on every delivery it receives?"
@@ -47,7 +47,7 @@ directive = "The webhook handler, after verifying the provider's signature, atte
 remediation = """
 Add a processed-events table (or equivalent) keyed by the payment provider's own event id with a unique constraint,
 and change the webhook handler to attempt an atomic insert of the incoming event's id before applying its side
-effect — treating a unique-constraint violation as an already-processed duplicate that still returns a 2xx response
+effect: treating a unique-constraint violation as an already-processed duplicate that still returns a 2xx response
 with no further action. Verify by replaying the same provider event payload (same event id, valid signature) twice
 and confirming the side effect (wallet credit, subscription extension, usage increment) occurs exactly once across
 both deliveries.
@@ -60,11 +60,11 @@ id = "apply-the-effect-unconditionally-on-every-delivery"
 violates = true
 label = "Apply the webhook's side effect unconditionally every time the handler receives a signed event"
 directive = "The webhook handler verifies the provider's signature and then applies the event's side effect (crediting a wallet, extending a subscription, incrementing a counter) directly, with no check for whether this specific event id has already been processed."
-why = "Rejected: every major payment provider documents at-least-once delivery as expected, normal behavior, not an edge case — a handler with no dedup step is guaranteed to eventually double-apply an effect on a redelivered event, through no fault of the client and with no attacker involved at all. This is a correctness defect that WILL manifest in production operation, not merely a theoretical risk."
+why = "Rejected: every major payment provider documents at-least-once delivery as expected, normal behavior, not an edge case: a handler with no dedup step is guaranteed to eventually double-apply an effect on a redelivered event, through no fault of the client and with no attacker involved at all. This is a correctness defect that WILL manifest in production operation, not merely a theoretical risk."
 
 [[option]]
 id = "non-atomic-check-then-insert-dedup"
 violates = true
 label = "Deduplicate by checking whether the event id has been seen, then inserting it as a separate step"
 directive = "The handler performs a SELECT to check whether the incoming event id already exists in a processed-events table, and if not, proceeds to apply the side effect and then INSERT the event id as a separate subsequent write."
-why = "Rejected: the read and the write are not atomic, so two redeliveries of the same event arriving close together can both pass the SELECT before either has completed its INSERT, both proceeding to apply the side effect — the exact race this rule exists to close. The insert attempt itself must be the uniqueness check (via its own constraint violation), not a value a prior read already decided."
+why = "Rejected: the read and the write are not atomic, so two redeliveries of the same event arriving close together can both pass the SELECT before either has completed its INSERT, both proceeding to apply the side effect: the exact race this rule exists to close. The insert attempt itself must be the uniqueness check (via its own constraint violation), not a value a prior read already decided."

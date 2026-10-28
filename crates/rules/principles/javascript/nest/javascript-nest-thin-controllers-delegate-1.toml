@@ -1,5 +1,5 @@
 id = "JAVASCRIPT-NEST-THIN-CONTROLLERS-DELEGATE-1"
-version = 2
+version = 3
 title = "Controllers stay thin; business logic and data access live in services"
 domain = "javascript:nest"
 layer = "framework"
@@ -17,11 +17,11 @@ verification = "grounded"
 
 [[sources]]
 url = "https://docs.nestjs.com/controllers"
-title = "NestJS Docs — Controllers: delegate business logic to providers"
+title = "NestJS Docs: Controllers: delegate business logic to providers"
 
 [[sources]]
 url = "https://docs.nestjs.com/providers"
-title = "NestJS Docs — Providers: services encapsulate business logic"
+title = "NestJS Docs: Providers: services encapsulate business logic"
 
 [decision]
 question = "Where do business logic and data access live relative to NestJS controllers?"

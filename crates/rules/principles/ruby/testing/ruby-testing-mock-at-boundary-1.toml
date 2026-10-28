@@ -1,5 +1,5 @@
 id = "RUBY-TESTING-MOCK-AT-BOUNDARY-1"
-version = 1
+version = 2
 title = "Mock only at architectural boundaries (external services, I/O); use instance_double/class_double to keep doubles verified"
 domain = "ruby:testing"
 layer = "language"
@@ -33,17 +33,17 @@ why = "Plain doubles do not verify that the methods they stub exist on the real 
 
 [[sources]]
 url = "https://rspec.info/features/3-12/rspec-mocks/verifying-doubles/"
-title = "RSpec — Verifying Doubles documentation"
+title = "RSpec: Verifying Doubles documentation"
 
 [[sources]]
 url = "https://www.rubydoc.info/gems/rubocop-rspec/RuboCop/Cop/RSpec/VerifiedDoubles"
-title = "rubocop-rspec — RSpec/VerifiedDoubles cop"
+title = "rubocop-rspec: RSpec/VerifiedDoubles cop"
 linter = "rubocop-rspec: RSpec/VerifiedDoubles"
 
 [[sources]]
 url = "https://www.betterspecs.org/"
-title = "Better Specs (community guideline, not an official RSpec/Rails standard) — mock judiciously; test real behavior when possible"
+title = "Better Specs (community guideline, not an official RSpec/Rails standard): mock judiciously; test real behavior when possible"
 
 [[sources]]
 url = "https://github.com/rspec/rspec-mocks"
-title = "rspec-mocks — instance_double, allow/expect usage"
+title = "rspec-mocks: instance_double, allow/expect usage"

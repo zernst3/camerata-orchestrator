@@ -1,5 +1,5 @@
 id = "UI-AUTH-TOKEN-STORAGE-1"
-version = 2
+version = 3
 title = "Session and auth tokens never live in JS-accessible storage (localStorage, sessionStorage, IndexedDB, a non-HttpOnly cookie); they live in an HttpOnly, Secure, SameSite cookie"
 domain = "ui"
 layer = "universal"
@@ -16,11 +16,11 @@ title = "CWE-522: Insufficiently Protected Credentials"
 
 [[sources]]
 url = "https://cheatsheetseries.owasp.org/cheatsheets/Session_Management_Cheat_Sheet.html"
-title = "OWASP Session Management Cheat Sheet — cookie attributes: HttpOnly (not accessible via JavaScript), Secure (HTTPS only), SameSite (CSRF mitigation)"
+title = "OWASP Session Management Cheat Sheet: cookie attributes: HttpOnly (not accessible via JavaScript), Secure (HTTPS only), SameSite (CSRF mitigation)"
 
 [[sources]]
 url = "https://cheatsheetseries.owasp.org/cheatsheets/HTML5_Security_Cheat_Sheet.html#local-storage"
-title = "OWASP HTML5 Security Cheat Sheet — Local Storage: 'do not store... sensitive data in local storage due to the lack of security'"
+title = "OWASP HTML5 Security Cheat Sheet: Local Storage: 'do not store... sensitive data in local storage due to the lack of security'"
 
 [decision]
 question = "Does every session/auth/refresh token live only in an HttpOnly, Secure, SameSite cookie set by the server, or does any such credential ever live in JS-accessible storage (localStorage, sessionStorage, IndexedDB, or a cookie set without HttpOnly)?"
@@ -74,4 +74,4 @@ id = "cookie-set-via-client-side-javascript-no-httponly"
 violates = true
 label = "Set the session cookie via client-side JavaScript (document.cookie) rather than a server Set-Cookie header"
 directive = "After receiving a token from the login response body, client-side JavaScript sets it as a cookie via document.cookie, rather than the server setting it directly via a Set-Cookie response header."
-why = "Rejected: a cookie set via document.cookie can never carry the HttpOnly attribute — only a server's Set-Cookie response header can set it — so this pattern produces a cookie that LOOKS like the safer storage mechanism while remaining exactly as JS-readable (and therefore XSS-exfiltrable) as localStorage. The token must be set directly by the server's response header to actually gain HttpOnly's protection."
+why = "Rejected: a cookie set via document.cookie can never carry the HttpOnly attribute (only a server's Set-Cookie response header can set it), so this pattern produces a cookie that LOOKS like the safer storage mechanism while remaining exactly as JS-readable (and therefore XSS-exfiltrable) as localStorage. The token must be set directly by the server's response header to actually gain HttpOnly's protection."

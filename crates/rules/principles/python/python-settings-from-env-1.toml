@@ -1,5 +1,5 @@
 id = "PYTHON-SETTINGS-FROM-ENV-1"
-version = 1
+version = 2
 title = "Configuration and secrets come from the environment, never hardcoded"
 domain = "python"
 layer = "language"
@@ -38,10 +38,10 @@ why = "Both a security leak (secrets in VCS history) and operationally rigid (ro
 
 [[sources]]
 url = "https://bandit.readthedocs.io/en/latest/plugins/b105_hardcoded_password_string.html"
-title = "Bandit B105 — hardcoded_password_string (CWE-259)"
+title = "Bandit B105: hardcoded_password_string (CWE-259)"
 linter = "Bandit: B105"
 
 [[sources]]
 url = "https://docs.astral.sh/ruff/rules/hardcoded-password-default/"
-title = "Ruff S107 — hardcoded-password-default"
+title = "Ruff S107: hardcoded-password-default"
 linter = "Ruff: S107"

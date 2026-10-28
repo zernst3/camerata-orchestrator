@@ -1,5 +1,5 @@
 id = "ORCH-CONFORMANCE-1"
-version = 2
+version = 3
 title = "Codified architectural commitments are enforced gates, not advisory documents"
 domain = "agentic"
 layer = "universal"
@@ -12,15 +12,15 @@ verification = "grounded"
 
 [[sources]]
 url = "AGENTS.md"
-title = "AGENTS.md — ORCH-CONFORMANCE-1 (codified architectural commitments are enforced gates)"
+title = "AGENTS.md: ORCH-CONFORMANCE-1 (codified architectural commitments are enforced gates)"
 
 [[sources]]
 url = "docs/RATIONALE.md"
-title = "docs/RATIONALE.md — §2 The approach: two deterministic layers (the enforcement thesis)"
+title = "docs/RATIONALE.md: §2 The approach: two deterministic layers (the enforcement thesis)"
 
 [[sources]]
 url = "https://www.oreilly.com/library/view/building-evolutionary-architectures/9781491986356/"
-title = "Ford, Parsons, Kua — Building Evolutionary Architectures (fitness functions as enforced, executable governance)"
+title = "Ford, Parsons, Kua: Building Evolutionary Architectures (fitness functions as enforced, executable governance)"
 
 [decision]
 question = "How are the project's codified architectural commitments checked against agent-authored changes?"

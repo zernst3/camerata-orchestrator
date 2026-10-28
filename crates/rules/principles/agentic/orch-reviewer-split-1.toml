@@ -1,5 +1,5 @@
 id = "ORCH-REVIEWER-SPLIT-1"
-version = 2
+version = 3
 title = "The reviewer agent for any change is distinct from the author agent"
 domain = "agentic"
 layer = "universal"
@@ -11,15 +11,15 @@ verification = "grounded"
 
 [[sources]]
 url = "AGENTS.md"
-title = "AGENTS.md — ORCH-REVIEWER-SPLIT-1 (reviewer agent distinct from author agent)"
+title = "AGENTS.md: ORCH-REVIEWER-SPLIT-1 (reviewer agent distinct from author agent)"
 
 [[sources]]
 url = "docs/decisions/2026-06-15_cross_agent_integration_gate.md"
-title = "Decision: Cross-agent rules — the integration gate (reviewer-author separation principle)"
+title = "Decision: Cross-agent rules: the integration gate (reviewer-author separation principle)"
 
 [[sources]]
 url = "https://arxiv.org/abs/2404.13076"
-title = "Panickssery, Bowman, Feng — LLM Evaluators Recognize and Favor Their Own Generations (arXiv:2404.13076)"
+title = "Panickssery, Bowman, Feng: LLM Evaluators Recognize and Favor Their Own Generations (arXiv:2404.13076)"
 
 [decision]
 question = "Who reviews a change that an agent authored?"

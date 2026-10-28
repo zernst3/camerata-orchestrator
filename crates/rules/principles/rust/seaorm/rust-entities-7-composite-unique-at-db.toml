@@ -1,5 +1,5 @@
 id = "RUST-ENTITIES-7"
-version = 2
+version = 3
 title = "Unique constraints the macro cannot express live at the DB level and are noted in the module doc"
 domain = "rust:seaorm"
 layer = "library"
@@ -46,4 +46,4 @@ why = "A clear regression: the database loses the ability to reject duplicates a
 
 [[sources]]
 url = "https://www.sea-ql.org/SeaORM/docs/generate-entity/entity-format/"
-title = "SeaORM docs: Entity Format — #[sea_orm(unique)] single-column constraint only"
+title = "SeaORM docs: Entity Format: #[sea_orm(unique)] single-column constraint only"

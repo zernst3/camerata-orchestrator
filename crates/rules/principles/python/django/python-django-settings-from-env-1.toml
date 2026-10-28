@@ -1,5 +1,5 @@
 id = "PYTHON-DJANGO-SETTINGS-FROM-ENV-1"
-version = 1
+version = 2
 title = "Django settings read credentials from environment variables; no secrets in settings.py"
 domain = "python:django"
 layer = "framework"
@@ -41,14 +41,14 @@ why = "Production credentials are still committed to the repository, so anyone w
 
 [[sources]]
 url = "https://docs.djangoproject.com/en/6.0/ref/settings/#secret-key"
-title = "Django docs — SECRET_KEY setting (keep this value secret)"
+title = "Django docs: SECRET_KEY setting (keep this value secret)"
 
 [[sources]]
 url = "https://bandit.readthedocs.io/en/latest/plugins/b105_hardcoded_password_string.html"
-title = "Bandit B105 — hardcoded_password_string"
+title = "Bandit B105: hardcoded_password_string"
 linter = "Bandit: B105"
 
 [[sources]]
 url = "https://docs.astral.sh/ruff/rules/hardcoded-password-string/"
-title = "Ruff S105 — hardcoded-password-string"
+title = "Ruff S105: hardcoded-password-string"
 linter = "Ruff: S105"

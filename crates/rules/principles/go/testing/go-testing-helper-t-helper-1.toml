@@ -1,5 +1,5 @@
 id = "GO-TESTING-HELPER-T-HELPER-1"
-version = 1
+version = 2
 title = "Test helper functions call t.Helper() as their first statement so failures are attributed to the caller"
 domain = "go:testing"
 layer = "testing"
@@ -13,17 +13,17 @@ qualifies = "A test helper is any function that takes *testing.T and may call t.
 
 [[sources]]
 url = "https://pkg.go.dev/testing#T.Helper"
-title = "pkg.go.dev/testing — T.Helper"
+title = "pkg.go.dev/testing: T.Helper"
 relevance = "Official testing package: 'Helper marks the calling function as a test helper function. When printing file and line information, that function will be skipped. Helper may be called simultaneously from multiple goroutines.'"
 
 [[sources]]
 url = "https://go.dev/wiki/TestComments"
-title = "Go Wiki — Test Comments (testing conventions)"
+title = "Go Wiki: Test Comments (testing conventions)"
 relevance = "Go test comments wiki: 'Call t.Helper() to attribute failures to the call site, not the helper function.' Shows readFile example with t.Helper() as first statement."
 
 [[sources]]
 url = "https://golangci-lint.run/docs/linters/"
-title = "golangci-lint linters — thelper"
+title = "golangci-lint linters: thelper"
 linter = "golangci-lint: thelper"
 relevance = "golangci-lint thelper: 'Detects tests helpers which do not start with the t.Helper() method.' Mechanically enforces the t.Helper() convention on functions that take *testing.T."
 

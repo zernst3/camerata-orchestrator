@@ -1,5 +1,5 @@
 id = "RUST-NO-UNWRAP-1"
-version = 2
+version = 3
 title = "unwrap() is forbidden in non-test code; propagate the error instead"
 domain = "rust"
 layer = "language"
@@ -12,16 +12,16 @@ verification = "grounded"
 
 [[sources]]
 url = "https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used"
-title = "Clippy Lints — clippy::unwrap_used (restriction)"
+title = "Clippy Lints: clippy::unwrap_used (restriction)"
 linter = "clippy: unwrap_used"
 
 [[sources]]
 url = "https://doc.rust-lang.org/clippy/lint_configuration.html"
-title = "Clippy Configuration — allow-unwrap-in-tests"
+title = "Clippy Configuration: allow-unwrap-in-tests"
 
 [[sources]]
 url = "https://doc.rust-lang.org/book/ch09-03-to-panic-or-not-to-panic.html"
-title = "The Rust Book — Ch 9.3: To panic! or Not to panic!"
+title = "The Rust Book: Ch 9.3: To panic! or Not to panic!"
 
 [decision]
 question = "How is unwrap() kept out of non-test Rust code?"

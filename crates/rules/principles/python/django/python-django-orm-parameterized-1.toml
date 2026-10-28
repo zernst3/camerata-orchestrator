@@ -1,5 +1,5 @@
 id = "PYTHON-DJANGO-ORM-PARAMETERIZED-1"
-version = 1
+version = 2
 title = "Django ORM queries use parameters; raw SQL with f-strings or .extra() is forbidden"
 domain = "python:django"
 layer = "framework"
@@ -41,14 +41,14 @@ why = "Discouraged in Django's own documentation in favor of other QuerySet meth
 
 [[sources]]
 url = "https://docs.djangoproject.com/en/6.0/topics/db/sql/"
-title = "Django docs — Performing raw SQL queries (params argument, cursor.execute parameterization)"
+title = "Django docs: Performing raw SQL queries (params argument, cursor.execute parameterization)"
 
 [[sources]]
 url = "https://docs.astral.sh/ruff/rules/hardcoded-sql-expression/"
-title = "Ruff S608 — hardcoded-sql-expression"
+title = "Ruff S608: hardcoded-sql-expression"
 linter = "Ruff: S608"
 
 [[sources]]
 url = "https://bandit.readthedocs.io/en/latest/plugins/b608_hardcoded_sql_expressions.html"
-title = "Bandit B608 — hardcoded_sql_expressions"
+title = "Bandit B608: hardcoded_sql_expressions"
 linter = "Bandit: B608"

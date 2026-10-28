@@ -1,5 +1,5 @@
 id = "RUST-DIOXUS-7"
-version = 2
+version = 3
 title = "Event handlers are move closures in templates; callback props use the framework EventHandler type"
 domain = "rust:dioxus"
 layer = "framework"
@@ -43,4 +43,4 @@ why = "Works only for stateless callbacks and does not compose with closures tha
 
 [[sources]]
 url = "https://dioxuslabs.com/learn/0.6/reference/event_handlers"
-title = "Dioxus reference: Event Handlers — EventHandler type for component callback props"
+title = "Dioxus reference: Event Handlers: EventHandler type for component callback props"

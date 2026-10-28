@@ -1,5 +1,5 @@
 id = "JAVASCRIPT-TESTING-NO-DISABLED-TESTS-1"
-version = 2
+version = 3
 title = "Disabled tests (xtest, xit, .skip, pending) are forbidden in committed code"
 domain = "javascript:testing"
 layer = "language"
@@ -12,12 +12,12 @@ verification = "grounded"
 
 [[sources]]
 url = "https://github.com/jest-community/eslint-plugin-jest/blob/main/docs/rules/no-disabled-tests.md"
-title = "eslint-plugin-jest — no-disabled-tests rule (recommended)"
+title = "eslint-plugin-jest: no-disabled-tests rule (recommended)"
 linter = "jest: no-disabled-tests"
 
 [[sources]]
 url = "https://github.com/jest-community/eslint-plugin-jest/blob/main/README.md"
-title = "eslint-plugin-jest — no-focused-tests rule (recommended)"
+title = "eslint-plugin-jest: no-focused-tests rule (recommended)"
 linter = "jest: no-focused-tests"
 
 [decision]

@@ -1,5 +1,5 @@
 id = "SUPABASE-AUTH-EMAIL-CONFIRMATION-1"
-version = 1
+version = 2
 title = "A production-linked config disables email confirmation only deliberately, never by carrying the local-dev default forward unreviewed"
 domain = "supabase:auth"
 layer = "platform"
@@ -17,11 +17,11 @@ qualifies = "Enforced by a scan over supabase/config.toml's `[auth.email] enable
 
 [[sources]]
 url = "https://supabase.com/docs/guides/local-development/cli/config"
-title = "Supabase CLI config reference — auth.email.enable_confirmations (local-dev scaffold default: false)"
+title = "Supabase CLI config reference: auth.email.enable_confirmations (local-dev scaffold default: false)"
 
 [[sources]]
 url = "https://cwe.mitre.org/data/definitions/287.html"
-title = "CWE-287: Improper Authentication — a signup succeeds and grants full access without the claimed email ever being verified"
+title = "CWE-287: Improper Authentication: a signup succeeds and grants full access without the claimed email ever being verified"
 
 [decision]
 question = "Does the project's remote/production auth configuration require email confirmation before an unverified signup can authenticate, rather than silently inheriting the local-dev scaffold default?"
@@ -55,8 +55,8 @@ The configuration that is actually pushed to a remote project sets `enable_confi
 Supabase CLI scaffolds `false` there deliberately, to spare local development a working mail server,
 and a config.toml that never leaves a developer's machine may keep that value; the line to hold is
 that the value reaching a real, internet-facing project is one somebody chose rather than one nobody
-revisited. With confirmations off, anyone can sign up with an address they do not own — including
-pre-registering someone else's real address — and use the app under that identity immediately.
+revisited. With confirmations off, anyone can sign up with an address they do not own (including
+pre-registering someone else's real address), and use the app under that identity immediately.
 """
 remediation = """
 Set `enable_confirmations = true` under `[auth.email]` in the configuration that is actually applied to your
@@ -73,4 +73,4 @@ id = "leave-confirmations-off-matching-local-dev-default"
 violates = true
 label = "The production-linked configuration still carries the local-dev scaffold's enable_confirmations = false"
 directive = "The configuration pushed to the remote project keeps `enable_confirmations = false` exactly as the CLI scaffolded it, so a signup authenticates immediately without the claimed email address ever being confirmed."
-why = "Rejected: this is precisely the gap the rule targets. The default exists for local-development convenience, not because unconfirmed production signups are an acceptable security posture — carrying it forward unreviewed means anyone, including someone impersonating a real user's email address, can authenticate under an identity nobody ever confirmed they own."
+why = "Rejected: this is precisely the gap the rule targets. The default exists for local-development convenience, not because unconfirmed production signups are an acceptable security posture: carrying it forward unreviewed means anyone, including someone impersonating a real user's email address, can authenticate under an identity nobody ever confirmed they own."

@@ -1,5 +1,5 @@
 id = "JAVASCRIPT-TESTING-DETERMINISTIC-1"
-version = 2
+version = 3
 title = "Tests are deterministic: clocks, timers, and random values are controlled; no real I/O or network calls in unit tests"
 domain = "javascript:testing"
 layer = "language"
@@ -12,22 +12,22 @@ verification = "grounded"
 
 [[sources]]
 url = "https://jestjs.io/docs/timer-mocks"
-title = "Jest — Timer Mocks documentation"
+title = "Jest: Timer Mocks documentation"
 linter = "jest: jest.useFakeTimers() API"
 
 [[sources]]
 url = "https://github.com/jest-community/eslint-plugin-jest/blob/main/docs/rules/no-conditional-expect.md"
-title = "eslint-plugin-jest — no-conditional-expect (recommended)"
+title = "eslint-plugin-jest: no-conditional-expect (recommended)"
 linter = "jest: no-conditional-expect"
 
 [[sources]]
 url = "https://github.com/jest-community/eslint-plugin-jest/blob/main/README.md"
-title = "eslint-plugin-jest — expect-expect rule (recommended)"
+title = "eslint-plugin-jest: expect-expect rule (recommended)"
 linter = "jest: expect-expect"
 
 [[sources]]
 url = "https://github.com/jest-community/eslint-plugin-jest/blob/main/README.md"
-title = "eslint-plugin-jest — no-done-callback rule (recommended)"
+title = "eslint-plugin-jest: no-done-callback rule (recommended)"
 linter = "jest: no-done-callback"
 
 [decision]

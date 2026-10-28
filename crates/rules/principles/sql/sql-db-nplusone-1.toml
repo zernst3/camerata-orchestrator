@@ -1,5 +1,5 @@
 id = "SQL-DB-NPLUSONE-1"
-version = 1
+version = 2
 title = "No N+1 query patterns"
 domain = "sql"
 layer = "universal"
@@ -12,11 +12,11 @@ verification = "grounded"
 
 [[sources]]
 url = "https://guides.rubyonrails.org/active_record_querying.html#eager-loading-associations"
-title = "Rails Guides — Active Record Querying: N+1 Queries Problem and eager-loading solutions (includes, preload, eager_load)"
+title = "Rails Guides: Active Record Querying: N+1 Queries Problem and eager-loading solutions (includes, preload, eager_load)"
 
 [[sources]]
 url = "https://docs.djangoproject.com/en/5.2/topics/db/optimization/"
-title = "Django — Database Access Optimization: 'a query executed in a loop … could end up doing many database queries, when only one was needed'"
+title = "Django: Database Access Optimization: 'a query executed in a loop … could end up doing many database queries, when only one was needed'"
 
 [decision]
 question = "What position does the project take on: No N+1 query patterns?"

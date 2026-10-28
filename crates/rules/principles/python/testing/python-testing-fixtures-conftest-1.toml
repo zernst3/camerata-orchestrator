@@ -1,5 +1,5 @@
 id = "PYTHON-TESTING-FIXTURES-CONFTEST-1"
-version = 1
+version = 2
 title = "Shared test setup lives in conftest.py fixtures, not in setUp helpers or module-level globals"
 domain = "python:testing"
 layer = "language"
@@ -40,8 +40,8 @@ why = "Teardown is manual and fragile; state leaks between tests when a test fai
 
 [[sources]]
 url = "https://docs.pytest.org/en/stable/how-to/fixtures.html"
-title = "pytest — How to use fixtures (conftest.py, scope, yield teardown)"
+title = "pytest: How to use fixtures (conftest.py, scope, yield teardown)"
 
 [[sources]]
 url = "https://docs.pytest.org/en/stable/explanation/fixtures.html"
-title = "pytest — About fixtures (explicitness, modularity, composability)"
+title = "pytest: About fixtures (explicitness, modularity, composability)"

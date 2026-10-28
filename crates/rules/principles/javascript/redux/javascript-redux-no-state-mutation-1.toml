@@ -1,5 +1,5 @@
 id = "JAVASCRIPT-REDUX-NO-STATE-MUTATION-1"
-version = 2
+version = 3
 title = "Reducers never mutate existing state; they produce a new state value"
 domain = "javascript:redux"
 layer = "library"
@@ -11,7 +11,7 @@ verification = "grounded"
 
 [[sources]]
 url = "https://redux.js.org/style-guide/#do-not-mutate-state"
-title = "Redux Style Guide — Do Not Mutate State (Priority A: Essential)"
+title = "Redux Style Guide: Do Not Mutate State (Priority A: Essential)"
 
 [decision]
 question = "How do Redux reducers produce the next state from the current state?"

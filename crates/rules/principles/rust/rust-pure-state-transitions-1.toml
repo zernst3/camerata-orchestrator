@@ -1,5 +1,5 @@
 id = "RUST-PURE-STATE-TRANSITIONS-1"
-version = 1
+version = 2
 title = "Core state changes are pure functions from old state to new state, with side effects pushed to the edges"
 domain = "rust"
 layer = "library"
@@ -11,11 +11,11 @@ verification = "grounded"
 
 [[sources]]
 url = "https://guide.elm-lang.org/architecture/"
-title = "The Elm Architecture — model/update/view: update is a pure function from (msg, model) to a new model"
+title = "The Elm Architecture: model/update/view: update is a pure function from (msg, model) to a new model"
 
 [[sources]]
 url = "https://redux.js.org/understanding/thinking-in-redux/three-principles"
-title = "Redux — Three Principles (state changes are described by pure reducer functions)"
+title = "Redux: Three Principles (state changes are described by pure reducer functions)"
 
 [decision]
 question = "How does the core of a library compute a state change in response to an event?"

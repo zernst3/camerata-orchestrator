@@ -1,5 +1,5 @@
 id = "ARCH-RESPONSE-FIELD-PROJECTION-1"
-version = 2
+version = 3
 title = "REST and GraphQL responses expose an explicit, allowlisted set of fields the consumer needs, not a serialize-the-whole-model default"
 domain = "api-layer"
 layer = "universal"
@@ -12,7 +12,7 @@ qualifies = "Deterministically checkable, but no off-the-shelf linter enforces i
 
 [[sources]]
 url = "https://owasp.org/www-project-api-security/"
-title = "OWASP API Security Top 10 (2023) — API3: Broken Object Property Level Authorization (formerly API3:2019 Excessive Data Exposure): 'Looking forward to shiny new gadgets... developers tend to expose all object properties without considering their individual sensitivity, relying on clients to filter the data'"
+title = "OWASP API Security Top 10 (2023): API3: Broken Object Property Level Authorization (formerly API3:2019 Excessive Data Exposure): 'Looking forward to shiny new gadgets... developers tend to expose all object properties without considering their individual sensitivity, relying on clients to filter the data'"
 
 [[sources]]
 url = "https://cwe.mitre.org/data/definitions/213.html"

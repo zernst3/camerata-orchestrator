@@ -1,5 +1,5 @@
 id = "JAVA-SPRING-DTO-BOUNDARY-1"
-version = 2
+version = 3
 title = "DTOs cross the HTTP boundary; JPA entities are never exposed directly in request or response bodies"
 domain = "java:spring"
 layer = "framework"
@@ -16,7 +16,7 @@ why = "JPA entities are persistence-layer objects: they carry annotations (@Enti
 
 [[sources]]
 url = "https://docs.spring.io/spring-framework/reference/web/webmvc/mvc-controller/ann-validation.html"
-title = "Spring MVC Reference — Validation (@Valid on @RequestBody; DTO binding)"
+title = "Spring MVC Reference: Validation (@Valid on @RequestBody; DTO binding)"
 
 [[option]]
 id = "dtos-at-http-boundary"

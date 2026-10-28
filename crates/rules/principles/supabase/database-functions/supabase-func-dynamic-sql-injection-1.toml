@@ -1,5 +1,5 @@
 id = "SUPABASE-FUNC-DYNAMIC-SQL-INJECTION-1"
-version = 3
+version = 4
 title = "A database function must not EXECUTE a dynamically-assembled query string built via non-quoting interpolation (|| concatenation or format()'s %s)"
 domain = "supabase:database-functions"
 # General Postgres, not just Supabase: a plpgsql function that EXECUTEs a dynamically-built query
@@ -39,11 +39,11 @@ title = "CWE-89: Improper Neutralization of Special Elements used in an SQL Comm
 
 [[sources]]
 url = "https://www.postgresql.org/docs/current/plpgsql-statements.html#PLPGSQL-STATEMENTS-EXECUTING-DYN"
-title = "PostgreSQL docs — PL/pgSQL: Executing Dynamic Commands (EXECUTE, and the warning against building query strings by direct concatenation of untrusted data)"
+title = "PostgreSQL docs: PL/pgSQL: Executing Dynamic Commands (EXECUTE, and the warning against building query strings by direct concatenation of untrusted data)"
 
 [[sources]]
 url = "https://www.postgresql.org/docs/current/functions-string.html#FUNCTIONS-STRING-FORMAT"
-title = "PostgreSQL docs — format(): %L quotes a literal, %I quotes an identifier, %s inserts a string value AS-IS with no escaping"
+title = "PostgreSQL docs: format(): %L quotes a literal, %I quotes an identifier, %s inserts a string value AS-IS with no escaping"
 
 [decision]
 question = "Must a database function's dynamically-assembled EXECUTE'd query string always use an escaping/bound channel (format()'s %L/%I, or EXECUTE ... USING) rather than || concatenation or format()'s %s placeholder?"

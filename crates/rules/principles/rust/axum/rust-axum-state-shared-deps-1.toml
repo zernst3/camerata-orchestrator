@@ -1,5 +1,5 @@
 id = "RUST-AXUM-STATE-SHARED-DEPS-1"
-version = 2
+version = 3
 title = "Share application dependencies via Axum State, not global static variables"
 domain = "rust:axum"
 layer = "framework"
@@ -45,8 +45,8 @@ why = "Extension is Axum's older, more loosely-typed mechanism: it stores values
 
 [[sources]]
 url = "https://docs.rs/axum/latest/axum/extract/struct.State.html"
-title = "axum::extract::State — Shared application state extractor"
+title = "axum::extract::State: Shared application state extractor"
 
 [[sources]]
 url = "https://docs.rs/axum/latest/axum/struct.Router.html"
-title = "axum::Router — with_state method and global state"
+title = "axum::Router: with_state method and global state"

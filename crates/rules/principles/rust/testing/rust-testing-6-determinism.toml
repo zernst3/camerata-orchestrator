@@ -1,5 +1,5 @@
 id = "RUST-TESTING-6"
-version = 2
+version = 3
 title = "Tests are deterministic: no global mutable state, no wall-clock time, no random without a fixed seed"
 domain = "rust:testing"
 layer = "language"
@@ -11,15 +11,15 @@ verification = "grounded"
 
 [[sources]]
 url = "https://doc.rust-lang.org/book/ch11-02-running-tests.html"
-title = "The Rust Book — Ch 11.2: Controlling How Tests Are Run (parallel execution requires independent tests, --test-threads for shared-state cases)"
+title = "The Rust Book: Ch 11.2: Controlling How Tests Are Run (parallel execution requires independent tests, --test-threads for shared-state cases)"
 
 [[sources]]
 url = "https://nexte.st/book/how-it-works.html"
-title = "cargo-nextest — How It Works (process-per-test isolation eliminates cross-test state corruption)"
+title = "cargo-nextest: How It Works (process-per-test isolation eliminates cross-test state corruption)"
 
 [[sources]]
 url = "https://nexte.st/book/retries.html"
-title = "cargo-nextest — Retries and Flaky Tests (a retried success is marked flaky)"
+title = "cargo-nextest: Retries and Flaky Tests (a retried success is marked flaky)"
 
 [decision]
 question = "How do tests avoid depending on global state, wall-clock time, and unseeded randomness?"

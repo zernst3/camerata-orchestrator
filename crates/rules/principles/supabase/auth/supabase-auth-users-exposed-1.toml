@@ -1,5 +1,5 @@
 id = "SUPABASE-AUTH-USERS-EXPOSED-1"
-version = 3
+version = 4
 title = "auth.users must never be exposed to anon/authenticated via a view, materialized view, or grant in an exposed schema"
 domain = "supabase:auth"
 layer = "platform"
@@ -22,7 +22,7 @@ qualifies = "Enforced by a statement-granular scan for SQL referencing auth.user
 
 [[sources]]
 url = "https://supabase.com/docs/guides/database/database-advisors?lint=0002_auth_users_exposed"
-title = "Supabase Database Linter — 0002_auth_users_exposed (\"User data exposed through a view\")"
+title = "Supabase Database Linter: 0002_auth_users_exposed (\"User data exposed through a view\")"
 linter = "splinter: auth_users_exposed"
 
 [decision]
@@ -51,7 +51,7 @@ id = "flag-any-exposed-auth-users-reference"
 label = "No API-exposed view, materialized view, or grant reads from auth.users"
 directive = """
 Nothing in an API-exposed schema selects from `auth.users` or grants access to it. That table is
-Supabase's internal identity store — every account's email, phone number and `raw_user_meta_data` —
+Supabase's internal identity store (every account's email, phone number and `raw_user_meta_data`),
 and any exposed object reading it makes the whole user directory readable through PostgREST, which
 is a full account-list leak rather than a partial one. Where the application needs user information
 of its own, it keeps an application-owned table (a `public.profiles` or similar) populated by a
@@ -72,4 +72,4 @@ id = "allow-column-restricted-views-over-auth-users"
 violates = true
 label = "An API-exposed view reads from auth.users but limits its column list to non-identifying fields such as id"
 directive = "An exposed-schema view selects from `auth.users` with its column list restricted to non-identifying fields such as `id`, on the basis that no email, phone or metadata column is included."
-why = "Rejected: even an id-only view over auth.users still confirms which UUIDs exist as real accounts (an enumeration primitive) and, more importantly, is a fragile pattern that silently widens the moment someone adds `select *` or another column to the same view later — a change a reviewer is unlikely to recognize as security-relevant since the view already existed. The application-owned profiles-table pattern achieves the same legitimate need (referencing a user by id) without ever exposing the auth schema itself."
+why = "Rejected: even an id-only view over auth.users still confirms which UUIDs exist as real accounts (an enumeration primitive) and, more importantly, is a fragile pattern that silently widens the moment someone adds `select *` or another column to the same view later: a change a reviewer is unlikely to recognize as security-relevant since the view already existed. The application-owned profiles-table pattern achieves the same legitimate need (referencing a user by id) without ever exposing the auth schema itself."

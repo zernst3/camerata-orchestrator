@@ -1,5 +1,5 @@
 id = "ORCH-PREREVIEW-1"
-version = 1
+version = 2
 title = "Every change carries an AI reviewer's verdict into the human review queue"
 domain = "agentic"
 layer = "universal"
@@ -12,15 +12,15 @@ verification = "grounded"
 
 [[sources]]
 url = "AGENTS.md"
-title = "AGENTS.md — ORCH-PREREVIEW-1 (every change carries an AI reviewer's verdict)"
+title = "AGENTS.md: ORCH-PREREVIEW-1 (every change carries an AI reviewer's verdict)"
 
 [[sources]]
 url = "docs/decisions/2026-06-15_cross_agent_integration_gate.md"
-title = "Decision: Cross-agent rules — the integration gate (pipeline: execute → integrate → cross-agent gate → push/PR → human QA)"
+title = "Decision: Cross-agent rules: the integration gate (pipeline: execute → integrate → cross-agent gate → push/PR → human QA)"
 
 [[sources]]
 url = "https://research.google/pubs/modern-code-review-a-case-study-at-google/"
-title = "Sadowski et al. — Modern Code Review: A Case Study at Google"
+title = "Sadowski et al.: Modern Code Review: A Case Study at Google"
 relevance = "Authority note (author-facing): low — supports pre-merge review generally, not an AI-reviewer-specific mandate"
 
 [decision]

@@ -1,5 +1,5 @@
 id = "PROC-HIDE-DEAD-END-1"
-version = 2
+version = 3
 title = "Hide dead-end affordances"
 domain = "permissions"
 layer = "universal"
@@ -11,11 +11,11 @@ verification = "grounded"
 
 [[sources]]
 url = "CONVENTIONS.md"
-title = "CONVENTIONS.md — §PROC-HIDE-DEAD-END-1 (hide dead-end affordances)"
+title = "CONVENTIONS.md: §PROC-HIDE-DEAD-END-1 (hide dead-end affordances)"
 
 [[sources]]
 url = "https://www.smashingmagazine.com/2024/05/hidden-vs-disabled-ux/"
-title = "Smashing Magazine — Hidden vs. Disabled In UX (2024)"
+title = "Smashing Magazine: Hidden vs. Disabled In UX (2024)"
 
 [decision]
 question = "What does the UI do with an action the current user lacks permission to perform?"

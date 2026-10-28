@@ -1,5 +1,5 @@
 id = "SUPABASE-RLS-PERMISSIVE-TRUE-1"
-version = 3
+version = 4
 title = "A policy with USING (true) / WITH CHECK (true) targeting anon or public is a hole shaped like a policy"
 domain = "supabase:rls"
 layer = "platform"
@@ -29,11 +29,11 @@ qualifies = "Enforced by a statement-granular scan of CREATE POLICY statements (
 
 [[sources]]
 url = "https://supabase.com/docs/guides/database/postgres/row-level-security"
-title = "Supabase docs — Row Level Security guide (CREATE POLICY syntax: USING, WITH CHECK, TO roles)"
+title = "Supabase docs: Row Level Security guide (CREATE POLICY syntax: USING, WITH CHECK, TO roles)"
 
 [[sources]]
 url = "https://owasp.org/Top10/2021/A01_2021-Broken_Access_Control/index.html"
-title = "OWASP Top 10:2021 — A01 Broken Access Control"
+title = "OWASP Top 10:2021: A01 Broken Access Control"
 
 [decision]
 question = "Does any policy targeting anon or public carry an unconditional USING (true) / WITH CHECK (true) predicate?"
@@ -65,7 +65,7 @@ do once it authenticates, which is exactly what RLS policies define.
 id = "flag-true-predicate-severity-split"
 label = "No policy reachable by anon or public grants access through an unconditional true predicate"
 directive = """
-A policy is not a comment describing intended access — it is the access control itself, and
+A policy is not a comment describing intended access: it is the access control itself, and
 `USING (true)` / `WITH CHECK (true)` means the predicate always passes. Combined with a `TO anon`
 or `TO public` clause, or no `TO` clause at all (Postgres defaults an absent one to `public`), that
 grants every anonymous request whatever the policy covers.
@@ -74,14 +74,14 @@ Write access is never granted this way. A true predicate on an INSERT, UPDATE or
 any `WITH CHECK (true)`, means anyone can write, and there is no version of that which is the right
 design. Predicates scope to the actual owner or role instead: `using (auth.uid() = user_id)`.
 
-Read access under a true predicate is a real choice rather than an automatic fault — a public
+Read access under a true predicate is a real choice rather than an automatic fault: a public
 product catalog, published posts, a reference or lookup table are all legitimately world-readable.
 Where it appears, it is because someone decided this table's rows are public, not because the
 predicate was left wide while the policy was being written.
 """
 remediation = """
 Rewrite the policy's `USING`/`WITH CHECK` clause on `<table>` to scope it to the actual owner or
-role, for example `using (auth.uid() = user_id)` instead of `using (true)` — or, if every row on
+role, for example `using (auth.uid() = user_id)` instead of `using (true)`, or, if every row on
 `<table>` is genuinely meant to be public (a catalog, published content), keep `true` for SELECT
 only and make sure no INSERT/UPDATE/DELETE policy also carries an unconditional `true`. Verify by
 confirming an authenticated request for another user's row is rejected, and that only the

@@ -1,5 +1,5 @@
 id = "ARCH-REPO-RETURNS-DOMAIN-1"
-version = 2
+version = 3
 title = "Repositories return domain types, never persistence representations"
 domain = "api-layer"
 layer = "universal"
@@ -15,7 +15,7 @@ verification = "grounded"
 
 [[sources]]
 url = "https://martinfowler.com/eaaCatalog/repository.html"
-title = "Martin Fowler — Patterns of Enterprise Application Architecture: Repository"
+title = "Martin Fowler: Patterns of Enterprise Application Architecture: Repository"
 
 [decision]
 question = "What types do repositories return to their callers?"

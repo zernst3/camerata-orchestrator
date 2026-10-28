@@ -1,5 +1,5 @@
 id = "PROC-FEATURE-FLAGS-1"
-version = 2
+version = 3
 title = "Feature flags via env var or runtime config; no long-lived feature branches"
 domain = "ci-cd"
 layer = "universal"
@@ -11,11 +11,11 @@ verification = "grounded"
 
 [[sources]]
 url = "https://martinfowler.com/articles/feature-toggles.html"
-title = "Pete Hodgson (martinfowler.com) — Feature Toggles (aka Feature Flags)"
+title = "Pete Hodgson (martinfowler.com): Feature Toggles (aka Feature Flags)"
 
 [[sources]]
 url = "https://trunkbaseddevelopment.com/feature-flags/"
-title = "Trunk Based Development — Feature Flags"
+title = "Trunk Based Development: Feature Flags"
 
 [decision]
 question = "How does unfinished work reach the main branch without being exposed to users?"

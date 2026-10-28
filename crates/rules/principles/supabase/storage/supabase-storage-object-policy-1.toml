@@ -1,5 +1,5 @@
 id = "SUPABASE-STORAGE-OBJECT-POLICY-1"
-version = 3
+version = 4
 title = "storage.objects policies must not grant unconditional or unscoped anon write/delete access"
 domain = "supabase:storage"
 layer = "platform"
@@ -27,11 +27,11 @@ qualifies = "Enforced by the same policy-predicate scan machinery as SUPABASE-RL
 
 [[sources]]
 url = "https://supabase.com/docs/guides/storage/security/access-control"
-title = "Supabase docs — Storage access control: storage authorization IS Row Level Security on storage.objects"
+title = "Supabase docs: Storage access control: storage authorization IS Row Level Security on storage.objects"
 
 [[sources]]
 url = "https://owasp.org/Top10/2021/A01_2021-Broken_Access_Control/index.html"
-title = "OWASP Top 10:2021 — A01 Broken Access Control"
+title = "OWASP Top 10:2021: A01 Broken Access Control"
 
 [decision]
 question = "Do any storage.objects policies grant unconditional or unscoped anon write/delete access to a bucket?"
@@ -59,8 +59,8 @@ already covers generically.
 id = "flag-unscoped-object-policies-by-bucket"
 label = "storage.objects policies scope writes and deletes to the object's owner, per bucket"
 directive = """
-Storage authorization is Row Level Security on the `storage.objects` table — Supabase allows no
-uploads to a bucket until a policy on that table permits them — so every concern that applies to a
+Storage authorization is Row Level Security on the `storage.objects` table (Supabase allows no
+uploads to a bucket until a policy on that table permits them), so every concern that applies to a
 table policy applies here unchanged.
 
 Policies on `storage.objects` that cover INSERT, UPDATE or DELETE scope the operation to the

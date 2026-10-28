@@ -1,5 +1,5 @@
 id = "ARCH-NO-STORE-SENSITIVE-RESPONSES-1"
-version = 2
+version = 3
 title = "API responses carrying auth tokens or PII set Cache-Control: no-store, so browser disk cache and shared/intermediate caches never retain them"
 domain = "api-layer"
 layer = "universal"
@@ -16,11 +16,11 @@ title = "CWE-525: Use of Web Browser Cache Containing Sensitive Information"
 
 [[sources]]
 url = "https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Cache-Control#no-store"
-title = "MDN — Cache-Control: no-store: 'The no-store response directive indicates that any caches of any kind (private or shared) should not store this response'"
+title = "MDN: Cache-Control: no-store: 'The no-store response directive indicates that any caches of any kind (private or shared) should not store this response'"
 
 [[sources]]
 url = "https://cheatsheetseries.owasp.org/cheatsheets/Session_Management_Cheat_Sheet.html"
-title = "OWASP Session Management Cheat Sheet — applications should send Cache-Control: no-store on pages/responses containing sensitive content"
+title = "OWASP Session Management Cheat Sheet: applications should send Cache-Control: no-store on pages/responses containing sensitive content"
 
 [decision]
 question = "Does every API response carrying an auth/session token or PII explicitly set Cache-Control: no-store (or equivalently strict directives), or is the response left with no explicit caching policy (inheriting whatever default a browser, CDN, or intermediate proxy applies)?"
@@ -62,4 +62,4 @@ id = "no-explicit-caching-header-rely-on-framework-default"
 violates = true
 label = "Leave Cache-Control unset on token/PII responses, relying on the framework's or CDN's default caching behavior to not retain them"
 directive = "Responses carrying auth tokens or PII are returned with no explicit Cache-Control header, on the assumption that the framework, browser, or CDN in front of the application defaults to not caching dynamic or authenticated responses."
-why = "Rejected: default caching behavior varies by browser, by whether an intermediate proxy or CDN sits in front of the application, and by configuration changes made by people who never see this specific endpoint's sensitivity — a safe default today is not a guarantee against a CDN configuration change, a new reverse proxy added later, or a browser quirk, and the application has no way to verify the assumption holds everywhere the response is ever served from. An explicit no-store removes the dependency on an assumption entirely."
+why = "Rejected: default caching behavior varies by browser, by whether an intermediate proxy or CDN sits in front of the application, and by configuration changes made by people who never see this specific endpoint's sensitivity: a safe default today is not a guarantee against a CDN configuration change, a new reverse proxy added later, or a browser quirk, and the application has no way to verify the assumption holds everywhere the response is ever served from. An explicit no-store removes the dependency on an assumption entirely."

@@ -1,5 +1,5 @@
 id = "SUPABASE-EXPOSURE-SCHEMAS-1"
-version = 3
+version = 4
 title = "Extra PostgREST-exposed schemas widen the API surface to tables that may never have been RLS-reviewed"
 domain = "supabase:exposure"
 layer = "platform"
@@ -20,11 +20,11 @@ qualifies = "Enforced by a config scan: the `[api] schemas = [...]` list in supa
 
 [[sources]]
 url = "https://supabase.com/docs/guides/api/using-custom-schemas"
-title = "Supabase docs — Using custom schemas: exposing an additional schema via the API settings 'Exposed schemas' list"
+title = "Supabase docs: Using custom schemas: exposing an additional schema via the API settings 'Exposed schemas' list"
 
 [[sources]]
 url = "https://supabase.com/docs/guides/cli/config"
-title = "Supabase docs — CLI config reference: [api] schemas in supabase/config.toml"
+title = "Supabase docs: CLI config reference: [api] schemas in supabase/config.toml"
 
 [decision]
 question = "Has every schema listed in [api] schemas beyond the default set been reviewed for RLS coverage on its tables?"
@@ -54,7 +54,7 @@ label = "Every schema exposed through the API beyond the default set has been re
 directive = """
 `[api] schemas` in `supabase/config.toml` lists the schemas PostgREST serves, defaulting to
 `["public", "storage", "graphql_public"]`. Every schema added beyond that default gets an API
-endpoint for every table, view and function inside it — the same reachability `public` has. So
+endpoint for every table, view and function inside it: the same reachability `public` has. So
 adding one is paired with the review that goes with it: each table in the new schema has Row Level
 Security enabled and policies held to the same standard as the `public` tables, rather than
 inheriting an assumption, made when `public` was the only exposed schema, that nothing in here is

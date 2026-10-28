@@ -1,5 +1,5 @@
 id = "RUST-ENTITIES-13"
-version = 1
+version = 2
 title = "Where persistence entities live: their own crate, the infrastructure crate, or the mapper crate"
 domain = "rust:seaorm"
 layer = "library"
@@ -42,4 +42,4 @@ why = "Keeps data access and the translation it depends on in a single crate, wh
 
 [[sources]]
 url = "https://docs.rs/sea-orm/latest/sea_orm/derive.DeriveEntityModel.html"
-title = "sea_orm::DeriveEntityModel — generates Entity, Column, and PrimaryKey from a Model (the entities-own-crate placement is a project convention this macro does not itself mandate)"
+title = "sea_orm::DeriveEntityModel: generates Entity, Column, and PrimaryKey from a Model (the entities-own-crate placement is a project convention this macro does not itself mandate)"

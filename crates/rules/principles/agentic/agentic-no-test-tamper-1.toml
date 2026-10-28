@@ -1,5 +1,5 @@
 id = "AGENTIC-NO-TEST-TAMPER-1"
-version = 2
+version = 3
 title = "Do not modify existing tests without human review"
 domain = "agentic"
 layer = "universal"
@@ -12,11 +12,11 @@ verification = "grounded"
 
 [[sources]]
 url = "AGENTS.md"
-title = "AGENTS.md — AGENTIC-NO-TEST-TAMPER-1 (do not modify existing tests without human review)"
+title = "AGENTS.md: AGENTIC-NO-TEST-TAMPER-1 (do not modify existing tests without human review)"
 
 [[sources]]
 url = "https://deepmind.google/discover/blog/specification-gaming-the-flip-side-of-ai-ingenuity/"
-title = "DeepMind — Specification gaming: the flip side of AI ingenuity"
+title = "DeepMind: Specification gaming: the flip side of AI ingenuity"
 
 [decision]
 question = "When an agent's change would modify or delete an existing test, what happens?"

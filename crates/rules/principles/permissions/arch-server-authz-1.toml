@@ -1,5 +1,5 @@
 id = "ARCH-SERVER-AUTHZ-1"
-version = 2
+version = 3
 title = "Authorization on the server; UI renders permission hints"
 domain = "permissions"
 layer = "universal"
@@ -12,11 +12,11 @@ verification = "grounded"
 
 [[sources]]
 url = "CONVENTIONS.md"
-title = "CONVENTIONS.md — §ARCH-SERVER-AUTHZ-1 (authorization on the server; UI renders permission hints)"
+title = "CONVENTIONS.md: §ARCH-SERVER-AUTHZ-1 (authorization on the server; UI renders permission hints)"
 
 [[sources]]
 url = "https://owasp.org/www-project-application-security-verification-standard/"
-title = "OWASP Application Security Verification Standard (ASVS) — V4 Access Control"
+title = "OWASP Application Security Verification Standard (ASVS): V4 Access Control"
 
 [decision]
 question = "Where are authorization decisions made, and how does the UI learn what the user may do?"

@@ -1,5 +1,5 @@
 id = "CSHARP-EFCORE-MIGRATIONS-CHECKED-IN-1"
-version = 2
+version = 3
 title = "EF Core migrations are checked into source control and applied as part of the deployment process"
 domain = "csharp:efcore"
 layer = "library"
@@ -39,4 +39,4 @@ why = "Creates the database schema from the model snapshot without any migration
 
 [[sources]]
 url = "https://learn.microsoft.com/en-us/ef/core/managing-schemas/migrations/applying"
-title = "Applying Migrations — EF Core | Microsoft Learn"
+title = "Applying Migrations: EF Core | Microsoft Learn"

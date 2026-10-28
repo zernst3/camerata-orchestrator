@@ -1,5 +1,5 @@
 id = "RUST-SEAORM-RAW-SQL-ESCAPE-1"
-version = 1
+version = 2
 title = "Raw-SQL queries are wrapped in a typed domain projection at the repository boundary"
 domain = "rust:seaorm"
 layer = "library"
@@ -57,4 +57,4 @@ why = "Trades single-query performance for keeping the entire repository surface
 
 [[sources]]
 url = "https://docs.rs/sea-orm/latest/sea_orm/"
-title = "sea-orm — Raw SQL query support and typed result mapping"
+title = "sea-orm: Raw SQL query support and typed result mapping"

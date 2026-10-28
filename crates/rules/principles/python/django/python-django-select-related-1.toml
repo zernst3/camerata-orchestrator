@@ -1,5 +1,5 @@
 id = "PYTHON-DJANGO-SELECT-RELATED-1"
-version = 1
+version = 2
 title = "select_related and prefetch_related are used to avoid N+1 queries on related objects"
 domain = "python:django"
 layer = "framework"
@@ -38,4 +38,4 @@ why = "Eliminates N+1 for read-only flat projections but cannot return model ins
 
 [[sources]]
 url = "https://docs.djangoproject.com/en/6.0/topics/db/optimization/"
-title = "Django docs — Database access optimization (select_related, prefetch_related, N+1)"
+title = "Django docs: Database access optimization (select_related, prefetch_related, N+1)"

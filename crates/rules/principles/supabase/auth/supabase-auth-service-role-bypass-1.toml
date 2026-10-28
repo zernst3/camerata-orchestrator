@@ -1,5 +1,5 @@
 id = "SUPABASE-AUTH-SERVICE-ROLE-BYPASS-1"
-version = 1
+version = 2
 title = "A service_role-backed client used in a user-reachable request handler must re-implement authorization explicitly"
 domain = "supabase:auth"
 layer = "platform"
@@ -16,7 +16,7 @@ qualifies = "Whether a user-reachable handler that constructs a service_role cli
 
 [[sources]]
 url = "https://supabase.com/docs/guides/api/api-keys"
-title = "Supabase docs — API keys: the service_role (secret) key bypasses Row Level Security and must never be exposed to end users"
+title = "Supabase docs: API keys: the service_role (secret) key bypasses Row Level Security and must never be exposed to end users"
 
 [[sources]]
 url = "https://cwe.mitre.org/data/definitions/862.html"
@@ -50,18 +50,18 @@ severity) or a description of the check that exists.
 id = "require-explicit-authz-on-service-role-paths"
 label = "Every user-reachable handler that uses a service_role client performs its own authorization check"
 directive = """
-Any handler a regular end user can reach — an API route, a server action, an Edge Function — that
+Any handler a regular end user can reach (an API route, a server action, an Edge Function), that
 constructs or receives a service_role-backed Supabase client validates the caller's entitlement to
 the specific action and row before performing it. service_role carries BYPASSRLS: the moment that
 client is used, every Row Level Security policy that would have constrained the request stops
 applying, and the handler's own logic becomes the only access control on that path. So the check
-the policies would have made is made explicitly here instead — confirm the session identifies a
+the policies would have made is made explicitly here instead: confirm the session identifies a
 specific user, then confirm that user is entitled to the exact row or action requested. "It runs on
 the server" is not that check; it answers only whether the key itself is reachable from the browser.
 """
 remediation = """
 In `<file>`, add an explicit authorization check before the service_role client performs its
-privileged operation — confirm the caller's session identifies a specific user, then verify that
+privileged operation: confirm the caller's session identifies a specific user, then verify that
 user is entitled to the exact row/action being requested (RLS will not do this for you on a
 service_role connection). Verify by confirming a request from a legitimate but unentitled user
 (e.g. one user trying to act on another user's data) is now rejected.

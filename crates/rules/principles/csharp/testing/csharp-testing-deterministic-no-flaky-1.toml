@@ -1,5 +1,5 @@
 id = "CSHARP-TESTING-DETERMINISTIC-NO-FLAKY-1"
-version = 1
+version = 2
 title = "Tests are deterministic and environment-independent; no sleeps, random values, real clocks, or shared mutable state across tests"
 domain = "csharp:testing"
 layer = "language"
@@ -41,8 +41,8 @@ why = "Shared mutable static state allows one test to corrupt the state seen by 
 
 [[sources]]
 url = "https://learn.microsoft.com/en-us/dotnet/core/testing/unit-testing-best-practices"
-title = "Best practices for writing unit tests — Characteristics of good unit tests (Repeatable); Handle stub static references with seams"
+title = "Best practices for writing unit tests: Characteristics of good unit tests (Repeatable); Handle stub static references with seams"
 
 [[sources]]
 url = "https://xunit.net/docs/shared-context"
-title = "xUnit.net — Sharing Context between Tests (constructor/Dispose, IClassFixture, ICollectionFixture)"
+title = "xUnit.net: Sharing Context between Tests (constructor/Dispose, IClassFixture, ICollectionFixture)"

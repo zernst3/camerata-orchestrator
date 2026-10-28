@@ -1,5 +1,5 @@
 id = "RUST-ENTITIES-5"
-version = 2
+version = 3
 title = "Empty ActiveModelBehavior unless a hook is genuinely needed"
 domain = "rust:seaorm"
 layer = "library"
@@ -37,4 +37,4 @@ why = "Contradicts SeaORM's official entity-format guidance, which explicitly di
 
 [[sources]]
 url = "https://www.sea-ql.org/SeaORM/docs/generate-entity/entity-format/"
-title = "SeaORM docs: Entity Format — ActiveModelBehavior hooks; do not delete empty impl"
+title = "SeaORM docs: Entity Format: ActiveModelBehavior hooks; do not delete empty impl"

@@ -1,5 +1,5 @@
 id = "SPIRIT-DOC-DECISIONS-1"
-version = 2
+version = 3
 title = "Document decisions immediately"
 domain = "universal"
 layer = "universal"
@@ -11,11 +11,11 @@ verification = "grounded"
 
 [[sources]]
 url = "CONVENTIONS.md"
-title = "CONVENTIONS.md — §SPIRIT-DOC-DECISIONS-1 (document decisions immediately)"
+title = "CONVENTIONS.md: §SPIRIT-DOC-DECISIONS-1 (document decisions immediately)"
 
 [[sources]]
 url = "https://www.cognitect.com/blog/2011/11/15/documenting-architecture-decisions"
-title = "Michael Nygard — Documenting Architecture Decisions (the source of the ADR pattern; the 'immediately' strengthening beyond ADR-on-drift is project-specific)"
+title = "Michael Nygard: Documenting Architecture Decisions (the source of the ADR pattern; the 'immediately' strengthening beyond ADR-on-drift is project-specific)"
 
 [decision]
 question = "When are decisions written down in a durable artifact?"

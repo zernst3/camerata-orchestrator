@@ -1,5 +1,5 @@
 id = "GO-SQL-PARAMETERIZED-1"
-version = 1
+version = 2
 title = "SQL is parameterized via prepared statements or ORM query builders; query strings are never built from interpolated values"
 domain = "go"
 layer = "language"
@@ -19,7 +19,7 @@ qualifies = "Enforced by a static-analysis gate (Bandit-equivalent or sqlc-integ
 
 [[sources]]
 url = "https://securego.io/docs/rules/g201-g202.html"
-title = "gosec — G201/G202: SQL query construction using format string/string concatenation"
+title = "gosec: G201/G202: SQL query construction using format string/string concatenation"
 linter = "golangci-lint: gosec (G201, G202)"
 
 [decision]

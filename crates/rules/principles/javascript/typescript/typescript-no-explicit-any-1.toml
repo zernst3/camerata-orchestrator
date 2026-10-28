@@ -1,5 +1,5 @@
 id = "JAVASCRIPT-TYPESCRIPT-NO-EXPLICIT-ANY-1"
-version = 2
+version = 3
 title = "any is forbidden; unknown is the typed escape hatch at boundaries"
 domain = "javascript:typescript"
 layer = "language"
@@ -12,7 +12,7 @@ verification = "grounded"
 
 [[sources]]
 url = "https://typescript-eslint.io/rules/no-explicit-any"
-title = "typescript-eslint — @typescript-eslint/no-explicit-any rule"
+title = "typescript-eslint: @typescript-eslint/no-explicit-any rule"
 linter = "@typescript-eslint: no-explicit-any"
 
 [decision]

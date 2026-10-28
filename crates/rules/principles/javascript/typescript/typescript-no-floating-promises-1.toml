@@ -1,5 +1,5 @@
 id = "JAVASCRIPT-TYPESCRIPT-NO-FLOATING-PROMISES-1"
-version = 2
+version = 3
 title = "Every Promise is awaited, returned, or explicitly handled"
 domain = "javascript:typescript"
 layer = "language"
@@ -12,7 +12,7 @@ verification = "grounded"
 
 [[sources]]
 url = "https://typescript-eslint.io/rules/no-floating-promises"
-title = "typescript-eslint — @typescript-eslint/no-floating-promises rule"
+title = "typescript-eslint: @typescript-eslint/no-floating-promises rule"
 linter = "@typescript-eslint: no-floating-promises"
 
 [decision]

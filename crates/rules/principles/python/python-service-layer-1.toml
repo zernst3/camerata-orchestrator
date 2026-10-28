@@ -1,5 +1,5 @@
 id = "PYTHON-SERVICE-LAYER-1"
-version = 1
+version = 2
 title = "Business logic lives in a service layer, not in views or route handlers"
 domain = "python"
 layer = "language"
@@ -24,7 +24,7 @@ verification = "grounded"
 
 [[sources]]
 url = "https://www.cosmicpython.com/book/chapter_04_service_layer.html"
-title = "Cosmic Python (Percival & Gregory) — Chapter 4: Our First Use Case: Flask API and Service Layer"
+title = "Cosmic Python (Percival & Gregory): Chapter 4: Our First Use Case: Flask API and Service Layer"
 
 [decision]
 question = "Where does business logic live relative to web views and route handlers?"
@@ -49,4 +49,4 @@ why = "Ties the logic to the request cycle: it cannot be reused outside HTTP or 
 
 [[sources]]
 url = "https://docs.djangoproject.com/en/6.0/misc/design-philosophies/"
-title = "Django Design Philosophies — Simplicity; models contain domain logic"
+title = "Django Design Philosophies: Simplicity; models contain domain logic"

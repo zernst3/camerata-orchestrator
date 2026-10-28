@@ -1,5 +1,5 @@
 id = "RUST-AXUM-HANDLERS-THIN-DELEGATE-1"
-version = 2
+version = 3
 title = "Handlers stay thin; business logic and data access live in services or repositories"
 domain = "rust:axum"
 layer = "framework"
@@ -37,4 +37,4 @@ why = "Logic embedded in a handler is reachable only through an HTTP request, so
 
 [[sources]]
 url = "https://docs.rs/axum/latest/axum/"
-title = "axum — Overview: handlers, extractors, and routing architecture"
+title = "axum: Overview: handlers, extractors, and routing architecture"

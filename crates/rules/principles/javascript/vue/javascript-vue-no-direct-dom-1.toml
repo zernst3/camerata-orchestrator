@@ -1,5 +1,5 @@
 id = "JAVASCRIPT-VUE-NO-DIRECT-DOM-1"
-version = 2
+version = 3
 title = "Do not manipulate the DOM directly; declare the desired state and let Vue render it"
 domain = "javascript:vue"
 layer = "framework"
@@ -11,11 +11,11 @@ verification = "grounded"
 
 [[sources]]
 url = "https://vuejs.org/guide/essentials/reactivity-fundamentals.html"
-title = "Vue.js — Reactivity Fundamentals: declare state, let Vue render"
+title = "Vue.js: Reactivity Fundamentals: declare state, let Vue render"
 
 [[sources]]
 url = "https://vuejs.org/guide/extras/ways-of-using-vue.html"
-title = "Vue.js — Progressive Enhancement: declarative rendering model"
+title = "Vue.js: Progressive Enhancement: declarative rendering model"
 
 [decision]
 question = "How do Vue components change what is shown on the page, and does any code touch the DOM directly?"

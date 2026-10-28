@@ -1,5 +1,5 @@
 id = "PROC-REGRESSION-TEST-1"
-version = 2
+version = 3
 title = "Every bug fix ships with a regression test that fails before the fix and passes after"
 domain = "universal"
 layer = "universal"
@@ -11,11 +11,11 @@ verification = "grounded"
 
 [[sources]]
 url = "CONVENTIONS.md"
-title = "CONVENTIONS.md — §PROC-REGRESSION-TEST-1 (every bug fix ships with a regression test)"
+title = "CONVENTIONS.md: §PROC-REGRESSION-TEST-1 (every bug fix ships with a regression test)"
 
 [[sources]]
 url = "https://llvm.org/docs/DeveloperPolicy.html"
-title = "LLVM Developer Policy — Test Cases (every bug fix/feature ships with a regression test)"
+title = "LLVM Developer Policy: Test Cases (every bug fix/feature ships with a regression test)"
 
 [decision]
 question = "When a bug is fixed, what test accompanies the fix?"

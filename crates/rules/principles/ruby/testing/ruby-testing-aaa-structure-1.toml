@@ -1,5 +1,5 @@
 id = "RUBY-TESTING-AAA-STRUCTURE-1"
-version = 1
+version = 2
 title = "Each example follows Arrange-Act-Assert: let/subject for setup, a single action, then expect(); hooks appear before examples"
 domain = "ruby:testing"
 layer = "language"
@@ -31,17 +31,17 @@ why = "Explicit and self-contained per example, but creates significant duplicat
 
 [[sources]]
 url = "https://www.fastruby.io/blog/testing/the-aaa-pattern-writing-robust-tests-for-any-project-with-confidence.html"
-title = "FastRuby.io — The AAA Pattern: Writing Robust Tests"
+title = "FastRuby.io: The AAA Pattern: Writing Robust Tests"
 
 [[sources]]
 url = "https://www.betterspecs.org/"
-title = "Better Specs (community guideline, not an official RSpec/Rails standard) — let, before, subject structure"
+title = "Better Specs (community guideline, not an official RSpec/Rails standard): let, before, subject structure"
 
 [[sources]]
 url = "https://rspec.rubystyle.guide/"
-title = "RSpec Style Guide — Sequence: subject → let → before"
+title = "RSpec Style Guide: Sequence: subject → let → before"
 
 [[sources]]
 url = "https://docs.rubocop.org/rubocop-rspec/latest/cops_rspec.html"
-title = "RuboCop RSpec — RSpec/LetBeforeExamples, RSpec/HooksBeforeExamples, RSpec/LeadingSubject cops"
+title = "RuboCop RSpec: RSpec/LetBeforeExamples, RSpec/HooksBeforeExamples, RSpec/LeadingSubject cops"
 linter = "rubocop-rspec: RSpec/LetBeforeExamples"
