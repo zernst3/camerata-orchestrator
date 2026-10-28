@@ -342,6 +342,7 @@ fn the_dependencies_sheet_lists_worst_first_then_its_coverage_notes_one_per_row(
     let deps = vec![
         dep("left-pad", "low", Some("1.2.0"), ""),
         dep("zlib", "high", None, "Monitor upstream."),
+        dep("minimist", "medium", Some("1.2.6"), ""),
     ];
     let notes = vec![
         "osv-scanner timed out on repo b".to_string(),
@@ -355,14 +356,16 @@ fn the_dependencies_sheet_lists_worst_first_then_its_coverage_notes_one_per_row(
         (col(1, 0), col(1, 2), col(1, 4), col(1, 5)),
         ("zlib", "High", "(no patch yet)", "Monitor upstream.")
     );
+    assert_eq!(col(2, 0), "minimist");
     assert_eq!(
-        (col(2, 0), col(2, 2), col(2, 4), col(2, 5)),
+        (col(3, 0), col(3, 2), col(3, 4), col(3, 5)),
         ("left-pad", "Low", "1.2.0", "Upgrade to >= 1.2.0.")
     );
-    assert_eq!(col(3, 0), "", "one blank row after the table");
-    assert_eq!(col(4, 0), "Dependency-audit coverage notes");
-    assert_eq!(col(5, 0), "osv-scanner timed out on repo b");
-    assert_eq!(col(6, 0), "no lockfile in repo c");
+    // Three rows, so "two rows after the last" (5) differs from "twice the last" (6).
+    assert_eq!(col(4, 0), "", "one blank row after the table");
+    assert_eq!(col(5, 0), "Dependency-audit coverage notes");
+    assert_eq!(col(6, 0), "osv-scanner timed out on repo b");
+    assert_eq!(col(7, 0), "no lockfile in repo c");
 }
 
 // ---- the Coverage sheet layout ----------------------------------------------------------------
