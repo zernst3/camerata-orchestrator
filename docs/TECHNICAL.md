@@ -1892,25 +1892,73 @@ so the model can cite accurate line numbers.
 This gives every chunk architectural context (which dirs are repositories vs.
 services) without needing every file body.
 
-**Scan modes.** The audit picker offers THREE choices, but they are two orthogonal
-dimensions — the `ScanMode` enum has only two variants (the batching algorithm), and
-"Background job" is a separate EXECUTION dimension (foreground vs detached), not a third
-`ScanMode`. This is the common point of confusion.
+**Scan modes.** Two orthogonal dimensions: the `ScanMode` enum (how the LLM calls are made)
+and, in the app, "Background job" (foreground vs detached execution, not a `ScanMode`).
 
-`ScanMode` (`ai_audit.rs`) — how the LLM calls are batched; `tuning()` returns
+`ScanMode` (`ai_audit.rs`); `tuning(efficiency)` returns
 `(max_concurrent_calls, rules_per_batch)`:
-- `Sequential` — `(1, usize::MAX)`: one call per file-chunk with ALL rules at once,
-  chunks one after another. Simplest, gentlest on rate limits — the debug/fallback floor.
-- `Parallel` (default) — `(PARALLEL_CONCURRENCY=6, RULE_BATCH_SIZE=15)`: rule-batches ×
+- `Sequential`: `(1, usize::MAX)`, one call per file-chunk with ALL rules at once,
+  chunks one after another. Simplest, gentlest on rate limits; the debug/fallback floor.
+- `Parallel`: `(PARALLEL_CONCURRENCY=6, RULE_BATCH_SIZE=15)`, rule-batches x
   file-chunks run concurrently (capped). Wall-clock is the slowest batch, not the sum.
+- `Batch`: every (chunk, rule-batch) pair is an item of an Anthropic Message Batch, half
+  price on every token, results when the batch ends. 15 rules per item
+  (`BATCH_RULE_BATCH_SIZE`, the graded parallel shape); `CAMERATA_BATCH_RULE_BATCH_SIZE`
+  overrides it. With `batch_default` off, all rules go in one item per chunk (the pre-rank-2
+  shape).
 
-The picker's third option, **"Background job"**, runs the audit (Parallel batching)
-SERVER-SIDE as a detached `JobStore` job instead of inline in the request: the UI gets a
-job id and polls `JobState` (status / done / total / live `findings` preview / final
-`report`), so the architect can leave and watch findings stream in. Best for huge /
-multi-repo scans where a foreground request would be long-lived. Foreground Parallel and
-Sequential block until the audit returns. `from_wire("sequential") -> Sequential`, else
-`Parallel`; the "job" choice selects detached execution and still uses Parallel batching.
+**Which mode a run uses** (`resolve_scan_mode`, rank 2). A mode forced by the caller always
+wins: `camerata inspect --batch` or `--realtime`, or the app's picker set to Parallel,
+Sequential or Batch. Otherwise (neither flag, or the picker's "Default", which sends
+`auto`): on the API backend the scan is a `Batch`; on the CLI backend (a `claude`
+subprocess, no batches endpoint) it is `Parallel` and the run says so once (the CLI prints
+`CLI_BACKEND_REALTIME_NOTICE` before the scan, the app adds it to the scan notes); with
+`batch_default` off it is `Parallel` (batch is opt-in, as before rank 2). `ScanMode::parse`
+accepts `auto`, `parallel`, `sequential` and `batch` (blank or absent means `auto`); any
+other value is an error naming the choices, never a silent fallback (the app returns it as
+the scan's error, the background job fails with it). The SYNCHRONOUS desktop endpoint
+(`onboard_audit`, no job) never runs a batch, whatever the mode resolved to: it runs in real
+time and adds `SYNCHRONOUS_SCAN_REALTIME_NOTICE` to the scan notes once, because a batch can
+run for hours and that request has no job to record the batch id on; batch runs on the job
+path, where `JobStore::set_batch_id` records it. "Background job" sends `auto` and runs
+detached: the UI gets a job id and polls `JobState` (status / done / total / live `findings`
+preview / final `report`). The cockpit's estimate prices `auto` and `job` as batch on the
+API backend and parallel on the CLI backend (`camerata_ui_core::scan::estimate_mode`).
+
+**Batch mode, made safe to be the default** (`run_passes_batch` and
+`ai_audit/batch_mode.rs`; all of it behind `batch_default`):
+- **Resubmission rule.** Every item that errored, expired or is missing from the results the
+  API returned is resubmitted ONCE, all such items together in ONE follow-up batch (never real
+  time: the follow-up keeps the discount and passes the same spend check as the first
+  submission). Only a failed SUBMIT (nothing was accepted) fails just that sub-batch's items and
+  lets them be resubmitted. A poll or fetch that fails AFTER a successful submit is retried a
+  bounded number of times (`POST_SUBMIT_ATTEMPTS`); if it still fails, the batch is never
+  submitted again (it may still be running and billed, and a second copy would be outside the
+  cap's sight and orphan the id): its items are failed passes whose reason names the batch id,
+  and a meter note says the batch was not resubmitted. An item that fails again is a failed
+  scan pass. A follow-up the spend limit refuses is NOT RUN on the meter, and a note records
+  that the item had already failed once.
+- **Failed scan passes** (real-time and batch alike, one shape: `PassFailure`, turned into
+  `FailedPass` rows by `failed_pass_rows`). A real-time pass whose call errored, or a batch item
+  that failed twice, is returned by the pass runner and becomes a `FailedPass` ("audit {group}
+  c/n · rules b/m", with how many passes in the round answered), which reaches the export's
+  failed-pass disclosure (executive summary and methodology) and the `camerata inspect` FAILED
+  PASSES block. The reason carries only the provider error's TYPE and MESSAGE
+  (`batch_mode::disclosable_error`), never a response body. When every pass failed the repo is
+  reported as "AI audit skipped" instead (unchanged).
+- **Truncation retry.** A batch item that stopped on `max_tokens` goes through
+  `retry_truncated_scan_reply`, the same function a real-time pass uses (one retry at twice
+  the output cap, sent in real time, admitted under the spend limit; `truncation_retry=off`
+  still turns it off).
+- **Cache TTL rule** (`batch_mode::batch_cache_ttl`, per submission): 1 hour from two items
+  up, 5 minutes for a single item. That is what the price comparison reduces to, per token of
+  the cached prefix every item of a submission shares (the repo map), at the multipliers
+  `PriceBasis` bills at: 5 minutes costs `n x 1.25` on the assumption (a worst case, not a
+  measurement) that the entry expired before each next item; 1 hour costs one write and
+  `n - 1` reads, `2 + 0.1 (n - 1)`; the second is cheaper exactly when `n >= 2`. A test
+  recomputes the comparison from the live multipliers so a price change that moves the
+  threshold fails there. `batch_long_cache=off` forces 5 minutes; `batch_default=off` keeps the 1-hour
+  batch TTL of rank 3. Each row is priced at the TTL its submission asked for.
 
 **Resolution round:** passes may defer a judgment by returning `needs_files`. A
 single bounded resolution round re-runs those requested files together. The
@@ -2678,9 +2726,11 @@ cargo run -p camerata -- inspect --repo <PATH> --export <OUT.zip>
 ```
 
 Flags: `--backend cli|api` (the same compliance-safety setting a project's
-`backend` field carries; `cli` is the default), `--batch` (the Anthropic Message
-Batches path, roughly 50% cheaper, latency not returned until the whole batch
-completes, requires `--backend api`), `--model` and `--calibration-model`
+`backend` field carries; `api` is the default), `--batch` (force the Anthropic
+Message Batches path, roughly 50% cheaper, latency not returned until the whole
+batch completes, requires `--backend api`; on the API backend this is already the
+default unless `batch_default` is off), `--realtime` (force real-time parallel calls;
+exclusive with `--batch`), `--model` and `--calibration-model`
 overrides, `--full` to ignore the on-disk incremental-scan cache, `--verbose`
 to print the ledger's per-rule detail alongside the default concise summary,
 `--max-cost-usd <USD>` (the spend limit) and `--efficiency <name>=on|off`
@@ -2709,6 +2759,7 @@ one line to the `efficiency_measures!` list and reads
 | `fix_prefilter` | rank 6: findings with no code context skip the fix model when the rule has an authored fix | they go to the fix model |
 | `fix_on_haiku` | rank 10: with no fix model set, the fix stage runs on `claude-haiku-5-5` at effort `low` | the fix stage runs on the calibration model, else the scan model, with no effort sent (the pre-rank-10 request) |
 | `terse_output` | rank 4: scan passes write a one-sentence `detail` and no `proposed_rules` (the advisory pass keeps them); the full `detail` is regenerated for the findings that survive the first merge | the scan prompts and the pipeline are exactly what they were before rank 4 |
+| `batch_default` | rank 2: on the API backend a scan with no forced mode runs as a Message Batch; failed items are resubmitted once; a cut-off item gets the truncation retry; 15 rules per item; the batch cache TTL by the price arithmetic (see "Scan modes") | batch is opt-in and runs exactly as before rank 2: one submission, all rules per item, the rank-3 TTL, no resubmission and no truncation retry (a failed batch item is still disclosed as a failed pass) |
 
 Set with `CAMERATA_EFFICIENCY=name=off,other=off` or `camerata inspect --efficiency
 name=off` (repeatable; the flag wins). An unknown name or a malformed entry is an
@@ -2790,8 +2841,9 @@ caller states how the call was billed (`PriceBasis { batch, cache_ttl }`) and th
 function applies the published ratios: cache read 0.1x input, cache write 1.25x
 (5-minute TTL) or 2x (1-hour TTL), and a Message Batch item 0.5x on everything.
 Real-time calls use `CacheTtl::from_env()`, the TTL the request carried; batch rows
-are priced at the TTL the batch was submitted with (`BATCH_CACHE_TTL` unless
-`batch_long_cache` is off). Per-model cache-read prices are a later change to the
+are priced at the TTL their submission asked for (rank 2's TTL rule under "Scan
+modes"; `BATCH_CACHE_TTL` with `batch_default` off, 5 minutes with `batch_long_cache`
+off). Per-model cache-read prices are a later change to the
 model registry; the 0.1x here is the default.
 
 **Pre-flight estimate** (`camerata inspect`, before the first model call). The
@@ -2849,7 +2901,10 @@ against a runaway bill, not a saving, so it fails loudly:
   NO projection can be made at all, the submission is refused with a note saying
   the limit could not be enforced (a limit that silently does nothing is worse than
   a refused run). A submitted batch is not cancelled, so the check cannot be later.
-  A refused batch records every pair as not run.
+  A refused batch records every pair as not run. The resubmission batch of failed
+  items (rank 2) is a submission like any other and is checked the same way, after the
+  first round's spend has been counted; the real-time truncation retry of a batch item
+  is admitted like a real-time pass.
 - **Reporting.** The ledger carries a `CostCapRecord` (limit, spend, the not-run
   pairs and stages, notes). `CostCapRecord::failed_passes` turns it into the
   existing failed-pass list, one entry per (repo, group, chunk) naming its

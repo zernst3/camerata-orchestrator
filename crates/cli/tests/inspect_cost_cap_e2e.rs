@@ -124,6 +124,8 @@ fn args(repo: &Path, export: &Path, cap: Option<f64>) -> InspectArgs {
         export: export.to_path_buf(),
         backend: ProjectBackend::Api,
         batch: false,
+        // The cap on the real-time path: a scripted model has no batches endpoint.
+        realtime: true,
         model: None,
         calibration_model: None,
         // No fix model: a capped run takes the fix stage's default (Haiku 5.5), which the model

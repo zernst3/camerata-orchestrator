@@ -396,6 +396,19 @@ fresh scan starts a new session; a crash mid-scan just re-runs the scan).
      (seconds to minutes, up to 24h on very large scans). Best when latency is acceptable in
      exchange for cost.
 
+   **Release note: Batch is now the default on the API backend.** When you do not pick a mode, a scan
+   on the API backend runs as a Message Batch (half price); on the CLI (subscription) backend it still
+   runs in real time and says so once. Choose Parallel or Sequential, or pass `--realtime`, to force
+   real time. A scan started as a plain foreground request (no background job) always runs in real
+   time and says so in its notes, because a batch can run for hours and a foreground request has
+   nowhere to record the batch id; start it as a background job to use batches. If the results of an
+   accepted batch cannot be retrieved, the affected passes are reported as failed with the batch id,
+   and the batch is never submitted a second time. The `batch_default=off` efficiency switch restores
+   the previous behavior (real time unless Batch is chosen). **A scan mode Camerata does not
+   recognize is now an error** (naming the valid choices) instead of silently running the default
+   mode; check any script or saved setting that passes a mode other than `parallel`, `sequential`,
+   `batch` or `auto`.
+
    **What the five finding kinds mean.** Every row carries a `kind`, and it tells you what sort of
    statement the row is making. This replaced a binary model in which a row was a violation or it was
    not, and the change matters because three of the five kinds say nothing is wrong:
@@ -2120,6 +2133,33 @@ authoritative source, only the derived output.
 After editing `.camerata/checks.toml`, regenerate the CI workflow by clicking the **Regenerate CI
 workflow** button in the Rules view (or calling `POST /api/projects/active/generate-ci-workflow`).
 The workflow is derived entirely from the manifest, so regenerating it is always safe to repeat.
+
+### `camerata-check` severities and which findings fail the build
+
+`camerata-check` reports each finding at the same severity your Camerata report shows. It runs
+the checker's severity through the rule corpus's severity bounds (a rule's minimum severity, its
+maximum severity, the deviation ceiling, and the rule that a finding with no location is
+informational), using the same implementation the inspection and its exports use. For example,
+ARCH-DEAD-CODE-1 is capped at `low` by the corpus, so the CI gate reports it at `low`.
+
+Which deterministic findings fail the build:
+
+| Severity after the bounds | Default run | `--strict` |
+|---|---|---|
+| `critical`, `high`, `medium` | fails the build (exit 1) | fails the build |
+| `low`, `info` | advisory: reported, exit 0 | fails the build |
+
+The bar is one constant (`FAIL_AT_SEVERITY = "medium"` in `crates/camerata-check/src/lib.rs`).
+The reasoning: a low-severity consistency finding is worth seeing on every pull request, but it
+should not block a merge. Needs-review findings never fail a default run, whatever their
+severity. The human output tags an advisory finding `deterministic, advisory`; the JSON output
+carries `blocking_count`, the number of findings that failed the build.
+
+The corpus is read from the bundled rules, or from the directory in `CAMERATA_CORPUS_PATH`. If
+it cannot be loaded, the gate still runs and still applies the bounds that need no rule, but a
+finding keeps the checker's own severity, the JSON says `"corpus_bounds_applied": false`, and the
+human output says so. When you vendor a built binary into a CI image, also copy the corpus
+(`crates/rules/principles`) and set `CAMERATA_CORPUS_PATH`.
 
 ### `camerata-check --strict` and Firebase rules kept in the console
 

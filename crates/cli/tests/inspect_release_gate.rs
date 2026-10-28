@@ -78,6 +78,7 @@ async fn cli_inspect_export_exits_3_and_writes_nothing_when_blocked() {
         export: export_path.clone(),
         backend: ProjectBackend::Api,
         batch: false,
+        realtime: false,
         model: None,
         calibration_model: None,
         fix_model: None,

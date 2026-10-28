@@ -51,6 +51,21 @@ pub fn parse_spend_limit(text: &str) -> Result<Option<f64>, String> {
     }
 }
 
+/// The mode string [`estimate_audit_cost`] should price for the picker's `mode`. `auto` (the
+/// default) and `job` (a background job, which sends `auto`) leave the choice to the server,
+/// which runs a Message Batch on the API backend and real time on the CLI backend (rank 2,
+/// `camerata_server::ai_audit::resolve_scan_mode`), so they are priced as that. The server can
+/// have the `batch_default` switch off, which this side cannot see; then the estimate is the
+/// batch price for a real-time run, an approximation like the rest of the estimate. A named
+/// mode is priced as itself.
+pub fn estimate_mode(mode: &str, backend: ProjectBackend) -> &str {
+    match (mode, backend) {
+        ("auto" | "job", ProjectBackend::Api) => "batch",
+        ("auto" | "job", ProjectBackend::Cli) => "parallel",
+        (other, _) => other,
+    }
+}
+
 /// Estimate the token + dollar cost of a governed audit run over `code_chars` of code with
 /// `selected` rules, returning `(total_tokens, dollars, passes)`. PURE so the readout is
 /// unit-testable without rendering. Pricing is per-million-token model rates; the mode string
@@ -260,6 +275,19 @@ pub fn estimate_audit_cost(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_default_mode_is_priced_as_batch_on_the_api_backend_only() {
+        assert_eq!(estimate_mode("auto", ProjectBackend::Api), "batch");
+        assert_eq!(estimate_mode("job", ProjectBackend::Api), "batch");
+        assert_eq!(estimate_mode("auto", ProjectBackend::Cli), "parallel");
+        assert_eq!(estimate_mode("parallel", ProjectBackend::Api), "parallel");
+        assert_eq!(
+            estimate_mode("sequential", ProjectBackend::Api),
+            "sequential"
+        );
+        assert_eq!(estimate_mode("batch", ProjectBackend::Cli), "batch");
+    }
 
     #[test]
     fn human_tokens_formats_by_magnitude() {

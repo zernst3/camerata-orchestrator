@@ -105,6 +105,13 @@ efficiency_measures! {
     /// before calibration, for the findings that survived. Off: the scan prompts and the
     /// pipeline are exactly what they were before rank 4.
     terse_output => "scan passes write a short detail; the full detail is regenerated for the findings that survive the merge",
+    /// Rank 2: on the API backend a scan runs as a Message Batch unless real time is forced,
+    /// errored or expired batch items are resubmitted once in a follow-up batch, a batch item
+    /// cut off at the output limit gets the real-time truncation retry, batch rule-batches hold
+    /// 15 rules, and the batch cache TTL is the cheaper one by the price arithmetic. Off: batch
+    /// is opt-in again and runs exactly as before rank 2 (one submission, all rules per item,
+    /// the `batch_long_cache` TTL).
+    batch_default => "on the API backend scans run as a Message Batch, with failed items resubmitted once",
 }
 
 impl EfficiencyConfig {
