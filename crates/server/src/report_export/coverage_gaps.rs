@@ -93,8 +93,11 @@ pub struct ScopeLimitedRuleJson {
     pub rule_id: String,
     /// Files the rule was checked against.
     pub files_checked: usize,
-    /// Files the repositories handed the audit.
+    /// Files the audit was handed: every file of the repositories, or on an incremental run
+    /// only the files changed since the earlier inspection ([`Self::changed_files_only`]).
     pub files_total: usize,
+    /// True when the counts are over the changed files of an incremental run, not all files.
+    pub changed_files_only: bool,
     /// `language` or `declared`.
     pub scope: String,
 }
@@ -105,13 +108,17 @@ fn scope_limited_sentence(rules: &[ScopeLimitedRuleJson]) -> Option<String> {
     let count = rules.len();
     Some(format!(
         "{count} {} checked only against the files in {} scope, not every file in the \
-         repositories (for example {}: {} of {} files). The files each was checked against are \
-         listed on the workbook's Coverage sheet and in findings.json.",
+         repositories (for example {}: {} of {}). The counts per rule are on the workbook's \
+         Coverage sheet and in findings.json.",
         if count == 1 { "rule was" } else { "rules were" },
         if count == 1 { "its" } else { "their" },
         first.rule_id,
         first.files_checked,
-        first.files_total,
+        if first.changed_files_only {
+            format!("the {} changed files", first.files_total)
+        } else {
+            format!("{} files", first.files_total)
+        },
     ))
 }
 
@@ -188,6 +195,7 @@ pub fn coverage_gaps(report: &crate::onboard::ScanReport) -> CoverageGapsJson {
             rule_id: rule_id.to_string(),
             files_checked: scope.checked,
             files_total: scope.of,
+            changed_files_only: scope.changed_files_only,
             scope: scope.kind.clone(),
         })
         .collect();

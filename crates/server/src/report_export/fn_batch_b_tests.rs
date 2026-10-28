@@ -82,10 +82,10 @@ fn scoped_scan() -> crate::onboard::ScanReport {
         .record_rule("RUST-A-1", RuleTier::Semantic, true, None, 50, 0);
     report
         .ledger
-        .note_scope_subset("RUST-A-1", 10, 10, "language");
+        .note_scope_subset("RUST-A-1", 10, 10, "language", false);
     report
         .ledger
-        .note_scope_subset("RUST-A-1", 6, 40, "language");
+        .note_scope_subset("RUST-A-1", 6, 40, "language", false);
     // RUST-B-1 carries another coverage note already; the scope fact must not be dropped.
     report.ledger.note_config_gated_rule("RUST-B-1");
     report
@@ -93,14 +93,14 @@ fn scoped_scan() -> crate::onboard::ScanReport {
         .record_rule("RUST-B-1", RuleTier::Semantic, true, None, 50, 0);
     report
         .ledger
-        .note_scope_subset("RUST-B-1", 6, 40, "declared");
+        .note_scope_subset("RUST-B-1", 6, 40, "declared", false);
     // ARCH-C-1 looked at every file of both repos: nothing to say.
     report
         .ledger
         .record_rule("ARCH-C-1", RuleTier::Semantic, true, None, 50, 0);
     report
         .ledger
-        .note_scope_subset("ARCH-C-1", 40, 40, "declared");
+        .note_scope_subset("ARCH-C-1", 40, 40, "declared", false);
     report
 }
 
@@ -136,6 +136,72 @@ fn the_coverage_gaps_aggregate_a_rules_scope_across_repos() {
 }
 
 #[test]
+fn the_scope_sentence_promises_counts_not_file_lists() {
+    let gaps = coverage_gaps(&scoped_scan());
+    let note = gaps.scope_limited_note.as_deref().unwrap();
+    assert!(
+        note.contains(
+            "The counts per rule are on the workbook's Coverage sheet and in findings.json."
+        ),
+        "{note}"
+    );
+    assert!(!note.contains("files each was checked against"), "{note}");
+    assert!(note.contains("16 of 50 files"), "{note}");
+}
+
+#[test]
+fn an_incremental_runs_scope_counts_say_they_are_over_the_changed_files() {
+    let mut report = two_repo_scan();
+    report
+        .ledger
+        .record_rule("RUST-A-1", RuleTier::Semantic, true, None, 3, 0);
+    report
+        .ledger
+        .note_scope_subset("RUST-A-1", 2, 5, "language", true);
+    let gaps = coverage_gaps(&report);
+    assert!(gaps.scope_limited_rules[0].changed_files_only);
+    let note = gaps.scope_limited_note.as_deref().unwrap();
+    assert!(note.contains("2 of the 5 changed files"), "{note}");
+
+    let bytes =
+        crate::xlsx_export::build_workbook(&report.seal(), &HashMap::new(), None, &empty_opts())
+            .unwrap();
+    let all = crate::release_gate::xlsx_strings(&bytes)
+        .expect("a workbook")
+        .join("\n");
+    assert!(
+        all.contains("files changed since the earlier inspection"),
+        "{all}"
+    );
+}
+
+#[test]
+fn failure_text_loses_machine_paths_when_the_report_is_sealed() {
+    let mut report = two_repo_scan();
+    report.ai_error = Some(
+        "owner/two: AI audit skipped (could not read /Users/auditor/clones/two/src/a.rs)"
+            .to_string(),
+    );
+    report.ai_blocked_reason = Some("blocked: /home/ci/work/key.json is missing".to_string());
+    report.failed_passes.push(crate::ai_audit::FailedPass {
+        repo: "owner/two".to_string(),
+        pass: AI_REVIEW_ALL_PASSES.to_string(),
+        reason: "cannot open C:\\Users\\auditor\\two\\src\\a.rs".to_string(),
+        files_not_reviewed: 4,
+    });
+    let sealed = report.seal();
+    let sealed: &crate::onboard::ScanReport = &sealed;
+    let all = format!(
+        "{:?} {:?} {}",
+        sealed.ai_error, sealed.ai_blocked_reason, sealed.failed_passes[0].reason
+    );
+    for local in ["/Users/auditor", "/home/ci", "C:\\Users", "clones/two"] {
+        assert!(!all.contains(local), "{local} in {all}");
+    }
+    assert!(all.contains("a.rs") && all.contains("key.json"), "{all}");
+}
+
+#[test]
 fn a_scan_whose_rules_all_saw_every_file_has_no_scope_line() {
     let mut report = two_repo_scan();
     report
@@ -143,7 +209,7 @@ fn a_scan_whose_rules_all_saw_every_file_has_no_scope_line() {
         .record_rule("ARCH-C-1", RuleTier::Semantic, true, None, 50, 0);
     report
         .ledger
-        .note_scope_subset("ARCH-C-1", 40, 40, "declared");
+        .note_scope_subset("ARCH-C-1", 40, 40, "declared", false);
     let gaps = coverage_gaps(&report);
     assert!(gaps.scope_limited_rules.is_empty());
     assert!(gaps.scope_limited_note.is_none());

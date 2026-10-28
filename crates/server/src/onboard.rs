@@ -2375,6 +2375,13 @@ pub async fn audit_repos_with_llm_controlled(
                         format!(
                             "{spec}: prior scan incomplete, full AI review re-run (full re-scan)"
                         )
+                    } else if rules_match && !prior.ai_covered {
+                        // The AI review is off in this run, so nothing is re-run in full: the
+                        // earlier scan has no complete AI review to reuse, and that is all this
+                        // run can say about it.
+                        format!(
+                            "{spec}: prior scan had no complete AI review, so nothing is reused — full re-scan"
+                        )
                     } else if question_changed {
                         format!(
                             "{spec}: model, prompt or rule wording changed since last scan — full re-scan"
@@ -2608,12 +2615,17 @@ pub async fn audit_repos_with_llm_controlled(
                                     if evaluated == 0 {
                                         continue;
                                     }
+                                    // On an incremental run the audit is handed only the changed
+                                    // files, so the count is over those, and the ledger says so.
+                                    let changed_files_only =
+                                        effective_prior.is_some() && part.unchanged_count > 0;
                                     for rule in &group.rules {
                                         pipeline_ledger.note_scope_subset(
                                             &rule.id,
                                             evaluated,
                                             part.changed.len(),
                                             kind,
+                                            changed_files_only,
                                         );
                                     }
                                 }
@@ -5955,6 +5967,16 @@ mod tests {
             msg.contains("full re-scan"),
             "a matching-rules but ai_covered=false prior must be treated as no usable cache \
              (the SAME 'no effective prior' path a rules mismatch takes), not silently reused: {msg}"
+        );
+        // The earlier scan was incomplete and this run has the AI review off: the note says that,
+        // not that the rule selection changed.
+        assert!(
+            msg.contains("prior scan had no complete AI review"),
+            "an incomplete prior with the AI off gets its own true note: {msg}"
+        );
+        assert!(
+            !msg.contains("rule selection changed"),
+            "the rules did not change: {msg}"
         );
         // This run has the AI review off, so it re-runs nothing: the note must not claim it did.
         assert!(

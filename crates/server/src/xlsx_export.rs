@@ -1826,7 +1826,8 @@ fn write_coverage_sheet(
             for (c, h) in [
                 "Rule ID",
                 "Files checked",
-                "Files in the repositories",
+                "Files handed to the audit",
+                "Counted over",
                 "Scope",
             ]
             .iter()
@@ -1847,6 +1848,16 @@ fn write_coverage_sheet(
                 ws.write_string_with_format(
                     next_r,
                     3,
+                    if rule.changed_files_only {
+                        "files changed since the earlier inspection"
+                    } else {
+                        "all files"
+                    },
+                    &fmts.cell(None, false, false),
+                )?;
+                ws.write_string_with_format(
+                    next_r,
+                    4,
                     &rule.scope,
                     &fmts.cell(None, false, false),
                 )?;

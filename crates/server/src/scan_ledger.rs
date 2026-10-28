@@ -206,6 +206,10 @@ pub struct ScopeCoverage {
     pub of: usize,
     /// `language` (the rule id names a language) or `declared` (the rule declares `applies_to`).
     pub kind: String,
+    /// True when some repo's count is over the files changed since an earlier inspection (an
+    /// incremental run hands the audit only those), so `of` is not the repo's file count.
+    #[serde(default)]
+    pub changed_files_only: bool,
 }
 
 impl RuleLedgerEntry {
@@ -959,7 +963,14 @@ impl ScanLedger {
     /// not fail it (that is what [`RuleLedgerEntry::partial_reason`] is for). Kept apart from
     /// [`RuleLedgerEntry::coverage_note`], which another stage may already have set. The first
     /// `kind` is kept.
-    pub fn note_scope_subset(&mut self, rule_id: &str, checked: usize, of: usize, kind: &str) {
+    pub fn note_scope_subset(
+        &mut self,
+        rule_id: &str,
+        checked: usize,
+        of: usize,
+        kind: &str,
+        changed_files_only: bool,
+    ) {
         let Some(entry) = self.rules.get_mut(rule_id) else {
             return;
         };
@@ -967,9 +978,11 @@ impl ScanLedger {
             checked: 0,
             of: 0,
             kind: kind.to_string(),
+            changed_files_only: false,
         });
         scope.checked += checked;
         scope.of += of;
+        scope.changed_files_only |= changed_files_only;
     }
 
     /// The rules whose scope held files back, as `(rule id, coverage)`, sorted by rule id: the
@@ -1014,10 +1027,14 @@ impl ScanLedger {
             .clone();
         let ours = format!("not run for {}: {why}", entry.repos_not_run.join(", "));
         let existing = entry.partial_reason.take().unwrap_or_default();
-        let foreign = match previous {
+        let mut foreign = match previous {
             Some(prev) => existing.replacen(&prev, "", 1),
             None => existing,
         };
+        // Taking our text out of the middle leaves its two separators side by side.
+        while foreign.contains("; ; ") {
+            foreign = foreign.replace("; ; ", "; ");
+        }
         let foreign = foreign.trim_matches(|c| c == ';' || c == ' ');
         entry.partial_reason = Some(if foreign.is_empty() {
             ours
@@ -1608,6 +1625,28 @@ mod tests {
         assert!(why.contains("acme/one, acme/two, acme/three"), "{why}");
         assert_eq!(why.matches("not run for").count(), 1, "{why}");
         assert_eq!(why.matches("a later stage").count(), 1, "{why}");
+    }
+
+    #[test]
+    fn a_partial_reason_with_our_text_mid_string_keeps_clean_separators() {
+        let mut ledger = ScanLedger::new();
+        ledger.record_rule("ARCH-X-1", RuleTier::Semantic, true, None, 1, 0);
+        ledger.note_partial_rule("ARCH-X-1", "first stage");
+        ledger.note_rule_not_run_for_repo("ARCH-X-1", "acme/one", "the AI review failed (one)");
+        ledger.note_partial_rule("ARCH-X-1", "last stage");
+        // Our text is now between the other two; adding a repo takes it out and puts it back.
+        ledger.note_rule_not_run_for_repo("ARCH-X-1", "acme/two", "the AI review failed (two)");
+        let why = ledger
+            .rule("ARCH-X-1")
+            .unwrap()
+            .partial_reason
+            .clone()
+            .unwrap();
+        assert!(!why.contains("; ;"), "{why}");
+        assert!(!why.starts_with(';') && !why.ends_with(';'), "{why}");
+        for part in ["first stage", "last stage", "acme/one, acme/two"] {
+            assert_eq!(why.matches(part).count(), 1, "{part} in {why}");
+        }
     }
 
     // ── req_a3: a tier family label names an ENGINE, never a rule family ─────────────────
