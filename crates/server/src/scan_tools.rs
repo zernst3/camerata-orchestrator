@@ -2268,7 +2268,9 @@ mod tests {
         std::fs::write(
             dir.join("build.rs"),
             format!(
-                "fn main() {{ std::fs::write({:?}, \"built\").unwrap(); }}\n",
+                // No `unwrap`: this build script is linted too, and under `RUSTFLAGS=-D warnings`
+                // an `unwrap_used` warning would stop it compiling and so stop it running.
+                "fn main() {{ let _ = std::fs::write({:?}, \"built\"); }}\n",
                 marker.display().to_string()
             ),
         )

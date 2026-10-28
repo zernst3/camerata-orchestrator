@@ -975,6 +975,8 @@ mod cli_parse_tests {
             "/tmp/r",
             "--export",
             "/tmp/o.zip",
+            "--client",
+            "Example Client Ltd",
             "--internal",
             "--run-client-tooling",
         ])
