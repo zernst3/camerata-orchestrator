@@ -1890,7 +1890,18 @@ in `<<<UNTRUSTED <token> "<path>">>>` and `<<<END UNTRUSTED <token>>>` lines
 random source, drawn once per run and named in that run's system prompt, so a file
 cannot print a line that passes for the end of its own frame or the start of another
 file. The repo map and the quoted evidence sent to calibration and fix generation are
-framed the same way.
+framed the same way. The detail-regeneration pass, the candidate-site digests of the
+candidate prefilter and the clone-advisory judge frame their client excerpts under the run's
+token and carry the same clause. A token is drawn through `FrameNonce::generate_avoiding`, which
+draws again (at most 8 times) if the token happens to occur in any text it will frame.
+
+**Cost of the per-run token.** The system prompt leads every cached prefix, and it now names a
+token that is new each run. Within one run every pass shares one prefix as before, so the
+warm-then-fan-out cache schedule is unchanged. Across runs the prefix never matches, so a run no
+longer reads cache entries written by an earlier one. The prompt change also bumped
+`AUDIT_PROMPT_SCHEMA_VERSION`, which is part of the incremental cache key: the first scan of each
+repository after the upgrade re-runs the AI pass for files whose findings were carried, once.
+After that the carried findings are reused as before.
 
 **Repo map:** every chunk also receives the whole-repo symbol map from
 `build_repo_map` (every file path + its public symbols, from a cheap line scan).
