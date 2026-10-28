@@ -777,8 +777,13 @@ pub async fn run_inspect_pipeline_with(
     // `onboard_audit`'s synchronous path in `camerata_server::lib` exactly (see
     // `camerata_server::scan_ledger::record_addition_stage`'s doc comment).
     let dep_audit_rows_in = report.findings.len();
+    let mut osv_runs: Vec<camerata_server::vuln_intel::OsvRun> = Vec::new();
     for (spec, dir) in &sources {
         let (dep_findings, dep_note) = camerata_server::dep_audit::run_dep_audit(spec, dir).await;
+        osv_runs.push(camerata_server::vuln_intel::OsvRun::from_note(
+            spec,
+            dep_note.as_ref(),
+        ));
         if !dep_findings.is_empty() {
             report.findings.extend(dep_findings);
         }
@@ -786,6 +791,14 @@ pub async fn run_inspect_pipeline_with(
             report.coverage_notes.push(note);
         }
     }
+    // KEV / EPSS enrichment and the "vulnerability data as of" stamp: the SAME single
+    // implementation `onboard_audit` calls, once per run over the rows the loop above added.
+    camerata_server::vuln_intel::enrich_dependency_findings(
+        &mut report,
+        dep_audit_rows_in,
+        &osv_runs,
+    )
+    .await;
     camerata_server::scan_ledger::record_addition_stage(
         &mut report.ledger,
         "dependency-audit-merge",

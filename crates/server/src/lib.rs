@@ -143,6 +143,7 @@ pub mod usage_ledger;
 /// funnels through `vcs_choke` so a project's configured process rules are actually enforced
 /// (HARD-BLOCK on violation), not merely configurable via the bypass endpoint.
 pub mod vcs_choke;
+pub mod vuln_intel;
 pub mod warm_schedule;
 pub mod workflow_gen;
 pub mod workitems;
@@ -6012,6 +6013,7 @@ async fn onboard_audit(
             // stage entry (a no-op when every repo's dep-audit found nothing new) — see
             // `crate::scan_ledger::record_addition_stage`'s doc comment.
             let dep_audit_rows_in = report.findings.len();
+            let mut osv_runs: Vec<crate::vuln_intel::OsvRun> = Vec::new();
             for (spec, dir) in &sources {
                 let spec = spec.as_str();
                 let run = crate::dep_audit::run_dep_audit(spec, dir);
@@ -6027,6 +6029,10 @@ async fn onboard_audit(
                         }),
                     ),
                 };
+                osv_runs.push(crate::vuln_intel::OsvRun::from_note(
+                    spec,
+                    dep_note.as_ref(),
+                ));
                 if !dep_findings.is_empty() {
                     report.findings.extend(dep_findings);
                 }
@@ -6034,6 +6040,14 @@ async fn onboard_audit(
                     report.coverage_notes.push(note);
                 }
             }
+            // KEV / EPSS enrichment and the "vulnerability data as of" stamp, once per run over
+            // the rows this loop added (the one implementation, shared with the CLI).
+            crate::vuln_intel::enrich_dependency_findings(
+                &mut report,
+                dep_audit_rows_in,
+                &osv_runs,
+            )
+            .await;
             crate::scan_ledger::record_addition_stage(
                 &mut report.ledger,
                 "dependency-audit-merge",
@@ -7213,6 +7227,7 @@ pub(crate) async fn start_audit_job(
                 // Pass-1 W1 seal fix: see the identical comment in `onboard_audit`'s synchronous
                 // path — one ledger stage entry for the whole loop's net additions.
                 let dep_audit_rows_in = report.findings.len();
+                let mut osv_runs: Vec<crate::vuln_intel::OsvRun> = Vec::new();
                 for (spec, dir) in &sources {
                     let spec = spec.as_str();
                     let run = crate::dep_audit::run_dep_audit(spec, dir);
@@ -7231,13 +7246,29 @@ pub(crate) async fn start_audit_job(
                     let dep_count = dep_findings.len();
                     body_jobs.det_tool_running(&body_jid, "dep-audit");
                     body_jobs.det_tool_done(&body_jid, "dep-audit", dep_count);
+                    osv_runs.push(crate::vuln_intel::OsvRun::from_note(
+                        spec,
+                        dep_note.as_ref(),
+                    ));
                     if !dep_findings.is_empty() {
-                        body_jobs.add_findings(&body_jid, dep_findings.clone());
                         report.findings.extend(dep_findings);
                     }
                     if let Some(note) = dep_note {
                         report.coverage_notes.push(note);
                     }
+                }
+                // KEV / EPSS enrichment and the "vulnerability data as of" stamp, once per run
+                // (see the identical call in `onboard_audit`). The job receives the dependency
+                // rows only after enrichment, so the live view never shows an unlabelled row.
+                crate::vuln_intel::enrich_dependency_findings(
+                    &mut report,
+                    dep_audit_rows_in,
+                    &osv_runs,
+                )
+                .await;
+                if report.findings.len() > dep_audit_rows_in {
+                    body_jobs
+                        .add_findings(&body_jid, report.findings[dep_audit_rows_in..].to_vec());
                 }
                 crate::scan_ledger::record_addition_stage(
                     &mut report.ledger,
@@ -17271,6 +17302,11 @@ pub struct ManifestProvenance {
     /// INCOMPLETE. States only that fact: no dollar figure is exported (cost numbers are
     /// operator-only). What was not run is listed in the report's failed-pass section.
     pub cost_cap_reached: bool,
+    /// "Vulnerability data as of": per feed (CISA KEV, FIRST EPSS, OSV), the date the data
+    /// behind the dependency findings was current as of, or plainly that the feed was not
+    /// checked. `None` renders as every feed not checked (never an omitted line). Filled from
+    /// `ScanProvenance::vulnerability_data`; rendered by [`crate::vuln_intel`].
+    pub vulnerability_data: Option<crate::vuln_intel::VulnDataStamp>,
 }
 
 impl ManifestProvenance {
@@ -17332,6 +17368,7 @@ impl ManifestProvenance {
             "model_backend": self.model.as_ref().map(|m| &m.backend),
             "model_provider": self.model.as_ref().map(|m| &m.provider),
             "cost_cap_reached": self.cost_cap_reached,
+            "vulnerability_data": crate::vuln_intel::manifest_json(self.vulnerability_data.as_ref()),
             "release_checks": Self::release_checks(),
         })
     }
@@ -17382,6 +17419,9 @@ impl ManifestProvenance {
         if self.cost_cap_reached {
             out.push_str(&format!("{COST_CAP_README_LINE}\n"));
         }
+        out.push_str(&crate::vuln_intel::readme_lines(
+            self.vulnerability_data.as_ref(),
+        ));
         out.push_str(&format!(
             "Release checks: {} (all passed)\n",
             Self::release_checks().join(", ")

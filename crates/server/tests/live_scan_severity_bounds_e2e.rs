@@ -129,6 +129,7 @@ fn report_with(findings: Vec<Finding>) -> ScanReport {
             audited_rule_ids,
             camerata_version: "0.0.0-test".to_string(),
             osv_scanner_version: Some("1.9.0".to_string()),
+            vulnerability_data: None,
             started_at: "2026-10-10T00:00:00Z".to_string(),
             finished_at: "2026-10-10T00:05:00Z".to_string(),
             model_sessions: Vec::new(),
