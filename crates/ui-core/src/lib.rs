@@ -18,6 +18,7 @@ pub mod models;
 pub mod order_preset;
 pub mod palette;
 pub mod pane_context;
+pub mod patterns;
 pub mod product_export;
 pub mod progress;
 pub mod provider_safety;
