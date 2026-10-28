@@ -720,6 +720,7 @@ pub async fn run_inspect_pipeline_with(
             incremental: incremental_prior.is_some(),
             cap_usd: controls.max_cost_usd,
             exact,
+            terse_output: controls.efficiency.terse_output,
         });
         (seams.preflight_sink)(&pf.text);
         controls.estimate_hint_usd = pf.estimate_usd;

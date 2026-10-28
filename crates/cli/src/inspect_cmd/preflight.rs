@@ -23,6 +23,9 @@ pub struct PreflightInputs<'a> {
     pub cap_usd: Option<f64>,
     /// The exact size of one scan pass, when the API backend could count it.
     pub exact: Option<ExactSample>,
+    /// The `terse_output` measure is on: the full detail of each surviving finding is written by
+    /// a separate step after the scan, which the estimate then includes.
+    pub terse_output: bool,
 }
 
 /// The wording, and the number the batch spend-cap gate is given.
@@ -80,6 +83,7 @@ pub fn build(inputs: &PreflightInputs<'_>) -> Preflight {
                 false,
                 inputs.backend,
                 repo.multi_option_rules,
+                inputs.terse_output,
             );
             tokens += t;
             dollars += d;
@@ -120,6 +124,13 @@ pub fn build(inputs: &PreflightInputs<'_>) -> Preflight {
         inputs.model, inputs.calibration_model
     )
     .ok();
+    if inputs.terse_output {
+        writeln!(
+            out,
+            "  includes the detail regeneration step (an upper bound); rule routing by declared scope is not modeled, so a scan that skips rules costs less"
+        )
+        .ok();
+    }
     match (&inputs.exact, inputs.backend) {
         (Some(exact), _) => {
             writeln!(
@@ -216,6 +227,7 @@ mod tests {
             incremental: false,
             cap_usd: cap,
             exact: None,
+            terse_output: false,
         }
     }
 
@@ -278,6 +290,25 @@ mod tests {
         let p = build(&unpriced);
         assert!(p.estimate_usd.is_none());
         assert!(p.text.contains("unavailable (no list price"), "{}", p.text);
+    }
+
+    /// Rank 4: with `terse_output` on the estimate (and so the hint the batch spend-limit gate
+    /// is given) includes the detail-regeneration step; with it off it does not.
+    #[test]
+    fn the_estimate_includes_detail_regeneration_only_with_terse_output_on() {
+        let repos = [repo(400_000, 30)];
+        let off = build(&inputs(&repos, None));
+        let mut on_inputs = inputs(&repos, None);
+        on_inputs.terse_output = true;
+        let on = build(&on_inputs);
+        let (off_usd, on_usd) = (off.estimate_usd.unwrap(), on.estimate_usd.unwrap());
+        assert!(on_usd > off_usd, "on {on_usd} must exceed off {off_usd}");
+        assert!(on.text.contains("detail regeneration"), "{}", on.text);
+        assert!(!off.text.contains("detail regeneration"), "{}", off.text);
+        assert!(
+            !on.text.contains('\u{2014}'),
+            "no em-dashes in user-facing text"
+        );
     }
 
     #[test]

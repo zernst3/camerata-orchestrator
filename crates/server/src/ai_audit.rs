@@ -593,6 +593,7 @@ fn batch_estimate_usd(
     model: &str,
     chunks: &[&[(String, String)]],
     batches: &[&[(String, String)]],
+    terse_output: bool,
 ) -> Option<f64> {
     let price = crate::llm::models().into_iter().find(|m| m.id == model)?;
     let code_chars: usize = chunks
@@ -614,6 +615,7 @@ fn batch_estimate_usd(
         false,
         crate::llm::ProjectBackend::Api,
         0,
+        terse_output,
     );
     Some(dollars)
 }
@@ -5394,8 +5396,8 @@ async fn run_passes_batch(
         // shared estimator, spread over the items. Still `None` when it cannot price either,
         // and the gate then refuses rather than guessing.
         if per_item_usd.is_none() && !work.is_empty() {
-            per_item_usd =
-                batch_estimate_usd(&model, chunks, batches).map(|total| total / work.len() as f64);
+            per_item_usd = batch_estimate_usd(&model, chunks, batches, terse_output_of(meter))
+                .map(|total| total / work.len() as f64);
         }
     }
 
