@@ -30,7 +30,15 @@ use camerata_rules::{load_corpus, DEFAULT_CORPUS_PATH};
 
 /// Docs a reader lands on. Each is checked for stale counts; the README must also carry the
 /// canonical "N rules across M domains" sentence.
-const CHECKED_DOCS: &[&str] = &["README.md", "docs/OVERVIEW.md"];
+const CHECKED_DOCS: &[&str] = &[
+    "README.md",
+    "docs/OVERVIEW.md",
+    "docs/RULES_REFERENCE.md",
+    "docs/RULE_AUTHORING.md",
+    "docs/ARCHITECTURE.md",
+    "docs/TECHNICAL.md",
+    "docs/ENFORCEMENT.md",
+];
 
 /// Docs held to the exact sentence shapes only (see the module doc).
 const SENTENCE_CHECKED_DOCS: &[&str] = &["docs/USER_GUIDE.md"];
@@ -39,16 +47,46 @@ fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
+/// Marks a sentence, clause or list-item boundary in the token stream. It is never a word and
+/// never a number, so a count claim cannot reach across it.
+const BOUNDARY: &str = "|";
+
+/// An ISO date such as `2026-10-27` (digits only, 4-2-2). It is one token, never three numbers.
+fn is_iso_date(word: &str) -> bool {
+    let parts: Vec<&str> = word.split('-').collect();
+    matches!(parts.as_slice(), [y, m, d]
+        if y.len() == 4 && m.len() == 2 && d.len() == 2
+            && [y, m, d].iter().all(|p| p.chars().all(|c| c.is_ascii_digit())))
+}
+
 /// Split into lowercase word tokens: whitespace, hyphens and slashes separate words, and
 /// surrounding markdown/punctuation is trimmed so `**417` and `rules,` read as `417` / `rules`.
+///
+/// Two things are kept out of the number stream so they cannot pose as a count: an ISO date
+/// becomes the single word `date`, and a word that ends in sentence punctuation (`3.`, `27,`,
+/// `4:`) is followed by a [`BOUNDARY`] token, so a numbered-list marker ("3. Rules ...") or a
+/// date closing a clause ("as of 2026-10-27, rules ...") never sits next to the noun it precedes.
 fn words(text: &str) -> Vec<String> {
-    text.split(|c: char| c.is_whitespace() || c == '-' || c == '/' || c == '\u{2013}')
-        .map(|w| {
-            w.trim_matches(|c: char| !c.is_alphanumeric() && c != '~' && c != '+')
-                .to_lowercase()
-        })
-        .filter(|w| !w.is_empty())
-        .collect()
+    let mut out = Vec::new();
+    for raw in text.split_whitespace() {
+        let core = raw.trim_matches(|c: char| !c.is_alphanumeric() && c != '~' && c != '+');
+        if is_iso_date(core) {
+            out.push("date".to_string());
+        } else {
+            for piece in core.split(|c: char| c == '-' || c == '/' || c == '\u{2013}') {
+                let w = piece
+                    .trim_matches(|c: char| !c.is_alphanumeric() && c != '~' && c != '+')
+                    .to_lowercase();
+                if !w.is_empty() {
+                    out.push(w);
+                }
+            }
+        }
+        if raw.ends_with(['.', ',', ':', ';', '!', '?', ')']) && !out.is_empty() {
+            out.push(BOUNDARY.to_string());
+        }
+    }
+    out
 }
 
 /// `437`, `~423`, `1,200`, `350+` parse to a number; anything else is `None`.
@@ -72,7 +110,7 @@ fn count_claims(text: &str, nouns: &[&str]) -> Vec<(u64, String)> {
             continue;
         }
         for back in 1..=3 {
-            if i < back {
+            if i < back || toks[i - back] == BOUNDARY {
                 break;
             }
             if let Some(n) = as_count(&toks[i - back]) {
@@ -85,7 +123,9 @@ fn count_claims(text: &str, nouns: &[&str]) -> Vec<(u64, String)> {
     out
 }
 
-/// Every "N rules across M domains" claim, as (rules, domains, the matched words).
+/// Every "N rules across M domains" claim, as (rules, domains, the matched words). A
+/// descriptive "TOML" between the number and "rules" ("417 TOML rules across 22 domains") is
+/// still the headline claim.
 fn headline_claims(text: &str) -> Vec<(u64, u64, String)> {
     let toks = words(text);
     let mut out = Vec::new();
@@ -96,8 +136,13 @@ fn headline_claims(text: &str) -> Vec<(u64, u64, String)> {
         if toks.get(i + 3).map(String::as_str) != Some("domains") {
             continue;
         }
-        if let (Some(n), Some(m)) = (as_count(&toks[i - 1]), as_count(&toks[i + 2])) {
-            out.push((n, m, toks[i - 1..=i + 3].join(" ")));
+        let start = if toks[i - 1] == "toml" && i >= 2 {
+            i - 2
+        } else {
+            i - 1
+        };
+        if let (Some(n), Some(m)) = (as_count(&toks[start]), as_count(&toks[i + 2])) {
+            out.push((n, m, toks[start..=i + 3].join(" ")));
         }
     }
     out
@@ -126,9 +171,12 @@ fn sentence_claims(text: &str) -> Vec<(u64, Option<u64>, String)> {
     out
 }
 
-/// Directories the repo-wide walk never enters: build output, VCS internals, vendored
-/// packages and the private grading material that must never be read.
-const SKIPPED_DIRS: &[&str] = &["target", ".git", "node_modules", "_keys"];
+/// Whether the repo-wide walk skips a directory: build output, vendored packages and every
+/// hidden directory (VCS internals, tool state, nested worktrees), except `.github`, whose
+/// templates a reader does see.
+fn is_skipped_dir(name: &str) -> bool {
+    matches!(name, "target" | "node_modules") || (name.starts_with('.') && name != ".github")
+}
 
 /// Every markdown file under the repo root, as a repo-relative path with `/` separators,
 /// sorted so a failure lists them in a stable order.
@@ -147,13 +195,10 @@ fn markdown_docs() -> Vec<String> {
                 .file_type()
                 .unwrap_or_else(|e| panic!("cannot stat {}: {e}", path.display()));
             if file_type.is_dir() {
-                if !SKIPPED_DIRS.contains(&name.as_str()) {
+                if !is_skipped_dir(&name) {
                     stack.push(path);
                 }
-            } else if file_type.is_file()
-                && name.ends_with(".md")
-                && !name.ends_with("-ANSWER-KEY.md")
-            {
+            } else if file_type.is_file() && name.ends_with(".md") {
                 let rel = path
                     .strip_prefix(&root)
                     .expect("walked paths sit under the repo root")
@@ -292,6 +337,7 @@ fn req_headline_scanner_sees_only_the_exact_shape() {
             20,
         ),
         ("(for example \"1,200 rules across 30 domains\")", 1200, 30),
+        ("a corpus of 417 TOML rules across 22 domains", 417, 22),
     ];
     for (text, want_rules, want_domains) in seen {
         let got = headline_claims(text);
@@ -303,7 +349,6 @@ fn req_headline_scanner_sees_only_the_exact_shape() {
     }
     let ignored = [
         "all 417 rules were classified",
-        "417 TOML rules across 22 domains",
         "13 rules across `RULE_REGISTRY`",
         "enforces rules across four check layers",
         "437 rules across many stacks",
@@ -363,4 +408,46 @@ fn req_sentence_scanner_reads_the_exact_shapes_only() {
         sentence_claims("1. Pick rules\n2. Add 3 rules to the repo\n4. Review rules").is_empty()
     );
     assert!(sentence_claims("26 of the rules across 3 repos").is_empty());
+}
+
+/// A date or a numbered-list marker next to the word "rules" is not a count. "as of
+/// 2026-10-27, rules ..." and "3. Rules ..." must stay silent, while a real count right next
+/// to them is still seen.
+#[test]
+fn req_count_scanner_ignores_dates_and_numbered_list_items() {
+    let silent = [
+        "As of 2026-10-27, rules are loaded from the bundled folder.",
+        "As of 2026-10-27 rules are loaded from the bundled folder.",
+        "1. Rules come first\n2. Domains follow\n3. Rules again",
+        "Step 3. Rules are validated.",
+        "See section 4: rules for each domain.",
+    ];
+    for text in silent {
+        assert!(
+            count_claims(text, &["rule", "rules"]).is_empty(),
+            "count scanner read a date or list marker as a rule count in {text:?}"
+        );
+        assert!(
+            count_claims(text, &["domain", "domains"]).is_empty(),
+            "count scanner read a date or list marker as a domain count in {text:?}"
+        );
+    }
+    let got = count_claims("As of 2026-10-27, the library holds 440 rules.", &["rule", "rules"]);
+    assert_eq!(got.first().map(|(n, _)| *n), Some(440), "{got:?}");
+    let got = count_claims("3. The library holds 440 rules across 22 domains", &["domains"]);
+    assert_eq!(got.first().map(|(n, _)| *n), Some(22), "{got:?}");
+    // The headline scanner must keep reading the shape through a trailing date.
+    let got = headline_claims("(**417 rules across 20 domains** as of 2026-10-11)");
+    assert_eq!(got.first().map(|(n, m, _)| (*n, *m)), Some((417, 20)));
+}
+
+/// The walk must skip build output and hidden tool state, and still read `.github`.
+#[test]
+fn req_markdown_walk_skips_build_output_and_hidden_dirs_only() {
+    for skipped in ["target", "node_modules", ".git", ".claude", ".cache"] {
+        assert!(is_skipped_dir(skipped), "{skipped} must be skipped");
+    }
+    for walked in [".github", "docs", "crates", "tools"] {
+        assert!(!is_skipped_dir(walked), "{walked} must be walked");
+    }
 }
