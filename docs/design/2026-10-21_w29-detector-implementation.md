@@ -2988,6 +2988,193 @@ anywhere silences the whole); a manifest whose lint setup lives in a parent dire
 scanned root is invisible; a repository linting only through Biome or oxlint is silent, not
 checked for their equivalent rules.
 
+## Wave D and 22e: the specs (written before the build, 2026-10-28)
+
+Built on `cloud/w29-wave-d` from `feat/audit-report-export`. Same shape as Waves A and B: one
+`ArchChecker` per rule in `crates/checks/src`, registered in `all_checkers`, positive and
+safe-twin tests beside it, a corpus TOML with a ceiling and an external citation, a proposed-rules
+test in `onboard/propose.rs`. Every rule lives in an already-mapped domain (`ui`, `javascript`,
+`testing`), so no `domains_for_stack` or `domain_to_glob` edit is expected; the proposed-rules
+test proves it. The standing law holds for all three: a detector that is unsure stays silent.
+
+Shared file guard for the two production-code rules: the clone detector's `classify_path`
+(not a test, fixture or story file; not generated, declaration, vendored, minified, migration,
+translation or committed tsc output). Reused, not copied: it becomes `pub(crate)`.
+
+### UI-STATE-SHAPE-1 (domain `ui`): one status, one variable
+
+**What it flags.** Two deterministic shapes inside one React function component or custom hook
+(`.js`, `.jsx`, `.ts`, `.tsx`), where `useState`/`useEffect` are imported from `react` (or
+called as `React.useState`), or from `preact/hooks` or `preact/compat`:
+
+1. *Exclusive flags.* Two boolean state variables, each declared `const [a, setA] =
+   useState(false | true)` (a `<boolean>` type argument allowed), such that every call of either
+   setter passes a single `true` or `false` literal, every call that sets one to `true` sits in a
+   statement list (a block, or an arrow's expression body) that also sets the other to `false`,
+   both directions occur (somewhere `a` is turned on and `b` off, somewhere the reverse), and the
+   two do not both start `true`. That is a verifiable fact: every place that turns one on turns
+   the other off, so the pair is one status with three values stored in two variables. Three or
+   more flags that are pairwise exclusive are one finding (greedy maximal group, declaration order).
+2. *Derived state copied by an effect.* `useEffect(() => { setX(expr) }, [deps])` (or the
+   expression-body arrow) where the body is that one call and nothing else, `setX` is a `useState`
+   setter of the same component called nowhere else, `expr` is not a function (the updater form
+   accumulates), contains no call except a pure array or string method from a short allowlist
+   (`filter`, `map`, `slice`, `join`, `trim`, `toLowerCase`, ...; their callbacks obey the same
+   limits), no `new`, `await`, assignment, update, `this` or `.current`, every free identifier of
+   `expr` is a dependency (or the root of a listed member dependency), and the dependency array
+   is non-empty and holds only names and member paths. React's own guidance is that such a value
+   is computed during render; the effect adds an extra render with a stale value in between.
+
+**Never flags (traps, each with a safe-twin test):**
+- independent booleans reset together (`setOpen(false); setDirty(false)`): nothing turns one on
+  while turning the other off;
+- a toggle or computed value (`setOpen(!open)`, `setOpen(o => !o)`, `setBusy(isBusy)`);
+- a flag turned on alone anywhere (`onClick={() => setOpen(true)}`): both could be true;
+- both set `true` together anywhere;
+- the pair split across branches (`if (x) setA(true); setB(false)`): the `true` call is unpaired;
+- a setter passed or aliased (`<Modal onClose={setOpen} />`, `const f = setOpen`): call sites unknown;
+- a name re-declared inside the component (shadowing);
+- non-boolean state (`useState(0)`, `useState(null)`, `useState('')`);
+- `useState` from a local module or a non-React library;
+- the derived-state setter also called elsewhere (an editable copy that resets when a prop changes);
+- the updater form (`setCount(c => c + 1)`), a cleanup, a condition or a second statement in the
+  effect, a timer or a promise (`setTimeout(...)`, `fetch(...).then(setData)`);
+- an impure or external read (`Date.now()`, `localStorage.getItem(k)`, `window.innerWidth`,
+  `ref.current`) or an identifier missing from the dependency array;
+- an empty dependency array (a one-time copy of an initial prop);
+- `useLayoutEffect` (measurement), `useReducer`, class components;
+- test, story, fixture and generated files.
+
+**Safe twins (named):** independent booleans; a flag toggled; an editable copy synced from a prop.
+
+**Severity.** Emitted `medium` (a checker never emits `low`); corpus `max_severity = "low"`: a
+duplicated status is a maintenance hazard, not a fault in today's behavior. Grade `Defect`.
+`advisory_coexisting = true` (the rule's judgment half, "is this one fact stored twice" for any
+shape the detector does not prove, stays in the semantic pass) with `defects_need_review = false`
+(the two proven shapes are facts CI may fail on), the Firebase rules checker's pattern.
+
+### STYLE-NEEDLESS-COMPLEXITY-1 (domain `javascript`): no negated ternaries, no needless optional props
+
+**What it flags.**
+
+1. *Negated ternary.* `!x ? a : b` in production ECMAScript source, where the operand of `!` is a
+   name, a member access, a subscript or a call (not another `!`, not a parenthesised expression),
+   neither branch is itself a conditional, the expression is not a branch of another conditional,
+   it fits on one line, and its branches are not both boolean literals (that is a different
+   smell: the whole ternary is `!x` or `x`). The fix is `x ? b : a`.
+2. *Needless optional prop.* In a `.tsx` component (a function or arrow whose name starts with
+   a capital, that renders JSX, with a first parameter typed by an inline object type or by a
+   non-exported `interface` / object `type` in the same file that nothing else in the file uses),
+   an optional member `p?: T` (not `children`, no default in the parameter's destructuring) that
+   every call site passes with a value that cannot be `undefined`: an attribute with no value, a
+   string, number, boolean, template, `null`, object, array, function or JSX value, or a name the
+   file declares once as a function or as a `const` holding one of those. Call sites are found
+   through the import graph of ARCH-ONE-IMPORT-PATH-1 (its re-export canonicalisation, reused):
+   every JSX element of the component, in its own file and in every importer, at least two in all.
+
+**Never flags (traps, each with a safe-twin test):**
+- `a !== b ? x : y` and `a != b ? ...` (presence checks read better as written);
+- `!!x ? a : b` (a coercion, not a negation of the branch order);
+- a chain (`!a ? b : c ? d : e`) or a negated ternary inside a chain (the else-if shape);
+- a multi-line ternary (the guard-first JSX shape, `!data ? <Spinner /> : (<Table ... />)`, which
+  is the "genuinely clearer" twin);
+- TypeScript's non-null assertion `x! ? a : b`, conditional types `T extends U ? X : Y`;
+- `!x ? true : false`;
+- `if (!x) ... else ...` statements (out of scope; only the ternary form is named by the rule);
+- a component in a library package (its `package.json` declares `main`, `module`, `exports`,
+  `types`, `typings`, `browser` or `bin`), or with no `package.json` above it: callers outside
+  the repository are invisible;
+- a call site with a spread (`<Button {...rest} />`) or a value that may be `undefined` (a name
+  of unknown origin, a member, a call, a ternary, an optional chain, `undefined` itself);
+- the component used as a value anywhere (`memo(Button)`, `forwardRef`, `lazy`, `{ component:
+  Button }`, `typeof Button`, `createElement(Button)`), a namespace import of its module used as
+  `UI.Button`, a dynamic `import()` of its module, or any `.mdx`, `.vue`, `.svelte` or `.astro`
+  file naming it;
+- a file that names the component without an import the resolver can follow to it (an alias it
+  cannot resolve, a global), which could be a call site that omits the prop;
+- a props type that is exported, used twice, generic, a union or an intersection;
+- a prop with a default in the destructuring (`size = 'md'`): the default is a documented choice;
+- fewer than two call sites, or any call site (a test or a story included) that omits the prop.
+
+**Safe twins (named):** a multi-line guard-first ternary; an optional prop one caller omits.
+
+**Severity.** Emitted `medium`; corpus `max_severity = "low"`: readability, not behavior. Grade
+`Defect`. Fully deterministic (`advisory_coexisting = false`): the corpus rule names exactly these
+two shapes, so the id leaves the semantic prompt.
+
+### TESTING-MEANINGFUL-ASSERTION-1 (domain `testing`, 22e): a test asserts something
+
+**What it flags (deterministic half).** A test whose body holds no assertion at all, in the
+three test ecosystems the extractor layer parses:
+
+- *JavaScript and TypeScript* (Jest, Vitest, Mocha, Jasmine, `node:test`, Bun): in a test file
+  (`is_test_path`), a call `it(...)`, `test(...)` or `specify(...)` (also `.only` and
+  `.concurrent`) whose first argument is a string or template and whose last argument is a
+  function with no parameters. When `it`/`test` is imported, it must come from `vitest`,
+  `@jest/globals`, `node:test`, `bun:test`, `mocha` or `@playwright/test`; a locally declared or
+  otherwise imported `test` is skipped.
+- *Python* (pytest, unittest): in a test module (`test_*.py`, `*_test.py`, `tests.py`, or under a
+  test folder), a module-level `def test*` or a `test*` method of a class named `Test*` or deriving
+  from a `*TestCase` class.
+- *Rust*: a function carrying `#[test]` or a `#[<runtime>::test]` attribute, anywhere.
+
+**What counts as an assertion** (any one, anywhere in the body, nested closures included):
+- JS: a call or member chain rooted at `expect`, `assert`, `expectTypeOf`, `assertType` or
+  `should`, any `.should` member, any name bound by an import from an assertion module (`assert`,
+  `node:assert`, `chai`, `expect`, `should`, `power-assert`, `uvu/assert`), a `throw`, a Testing
+  Library query that throws when nothing matches (`getBy*`, `getAllBy*`, `findBy*`,
+  `findAllBy*`), `waitFor`, `fail`, `done`;
+- Python: an `assert` statement, a `raise`, a `with pytest.raises(...)`/`pytest.warns(...)`;
+- Rust: an `assert*!`/`debug_assert*!`/`panic!`/`unreachable!`/`todo!`/`unimplemented!` macro,
+  `.unwrap()`, `.expect(..)`, `.unwrap_err()`, `.expect_err(..)`, or the `?` operator (a test
+  returning `Result` fails on `Err`). These panicking calls are assertions by the task's ruling;
+- every language: a call whose name contains `assert`, `expect`, `verify`, `check`, `should`,
+  `ensure`, `validate`, `match`, `snapshot`, `fail` or `raise` (case-insensitive), and any macro
+  outside a short list of known non-asserting ones (`println!`, `format!`, `vec!`, `dbg!`, ...);
+- a helper: a call to a function defined in the same file whose body (followed to depth three)
+  holds an assertion, or ANY call to a name that could be a test helper the detector cannot see:
+  imported from a relative or absolute module whose path names a test-support place (`test`,
+  `spec`, `helper`, `support`, `fixture`, `util`, `common`, `harness`, `mock`, `setup`,
+  `conftest`), a `self.`/`this.` method not defined in the same class, a Rust path through such a
+  module, or a name brought in by a glob import.
+
+**Never flags (traps, each with a safe-twin test):**
+- an assertion through an alias (`import { expect as e } from 'chai'`, `import ok from 'node:assert'`);
+- assertions in a shared hook (`afterEach(() => expect(console.error).not.toHaveBeenCalled())`):
+  any `beforeEach`/`afterEach`/`beforeAll`/`afterAll` holding an assertion skips the whole file;
+- a JS test whose callback takes a parameter (AVA/tap `t`, Mocha `done`, Playwright fixtures):
+  the parameter may assert or carry auto-checking fixtures;
+- skipped and placeholder forms (`it.skip`, `xit`, `it.todo`, `describe.skip`, `xdescribe`,
+  `@pytest.mark.skip`, `@unittest.skip`, `#[ignore]`) and `#[should_panic]`;
+- table forms (`it.each(...)(...)`), a custom `test` from a fixtures module;
+- a Python test with any decorator outside a known non-asserting list (`pytest.mark.*` other than
+  skip/skipif/xfail, `patch`, `given`, `settings`, `freeze_time`, `override_settings`, ...);
+- a Python test file, or a `conftest.py` above it, that defines an `autouse` fixture (it may
+  assert on teardown); a fixture parameter whose name says it checks (`snapshot`, `*assert*`);
+- a test that calls a same-file helper which asserts, or a helper from a test-support module;
+- `/re/.test(x)` and other member calls named `test` (not a test declaration);
+- Testing Library queries that throw (`screen.getByText('Title')`);
+- Rust `?`, `.unwrap()`, `.expect(..)` (panicking calls), `insta::assert_snapshot!`, an unknown macro.
+
+**Positive cases (named):** an empty test in each language; a "renders without crashing" test
+(`render(<App />)` only); a Python test that only calls the code under test; a Rust `#[test]` that
+only builds a value.
+
+**The judgment half: "asserts only a stub".** A test that asserts, but only on a value its own
+mock or stub produced, needs a reader. It is routed to the existing AI-judged path exactly the way
+the Firebase checkers route their judgment halves: `advisory_coexisting = true` keeps the rule id
+in the semantic prompt, so the model reads it against the rule's text, and `defects_need_review =
+false` keeps the deterministic "no assertion at all" rows facts CI fails on. No new seam.
+
+**Not covered deterministically:** Go, Java, C#, Ruby and the other corpus languages have no
+parser in the extractor layer; their tests are read only by the semantic pass. Stated in
+`qualifies`.
+
+**Severity.** Emitted `medium`; corpus `max_severity = "medium"`: a test that checks nothing reports
+green whatever the code does and inflates coverage, a real gap in the safety net but not a fault in
+running behavior. Grade `Defect`. Runs at write time (an agent writing a test with no assertion is
+exactly what the gate should bounce, and the fix is local).
+
 ## Scope note
 Dead-code, one-import-path, shared-constant, state-shape, needless-complexity are **deterministic**
 (no model, no token cost). Single-source/naming/shared-primitive add ONE shared clone pass and an
