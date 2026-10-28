@@ -1319,10 +1319,17 @@ pub async fn execute_dev_implement_run(
     // every enforced gate rule; a project with no selection falls back to the built-in
     // corpus subset. The source is recorded in the run's events.
     let project = project_id.as_deref().and_then(|id| projects.get(id));
+    // A unit created from inspection findings adds the rules its findings violate (empty for every
+    // other unit).
+    let focus_rules = uow
+        .get(&story_id)
+        .map(|u| u.source_rule_ids())
+        .unwrap_or_default();
     let role = match crate::governed_rules::project_governed_role(
         "BrownfieldImplementer",
         project.as_ref(),
         Some(repo.as_str()),
+        &focus_rules,
     )
     .await
     {
