@@ -177,6 +177,12 @@ pub struct ScanManifest {
     /// evidence, so a missing cache only costs one scan's judge calls).
     #[serde(default)]
     pub clone_verdicts: crate::onboard::clone_advisory::VerdictCache,
+    /// H11: `repo` -> the commit that scan audited (`HEAD` of the repo), for a repo with a
+    /// source identity. An incremental run reads it to say which inspection its carried findings
+    /// came from. `serde(default)` and additive, like `clone_verdicts`: a manifest written before
+    /// this existed carries no commits, and the carried rows then say "an earlier inspection".
+    #[serde(default)]
+    pub commits: BTreeMap<String, String>,
 }
 
 /// Fingerprint the selected rule set (ids + their repo bindings) so a change to the selection
@@ -311,6 +317,74 @@ pub fn partition(
     }
 }
 
+/// What a carried finding says when its source commit is unknown (a manifest saved before commits
+/// were recorded, or a repo with no source identity).
+pub const CARRIED_FROM_UNKNOWN: &str = "an earlier inspection";
+
+/// H11: mark each of `carried` with the commit it was last found at (`captures["carried_from"]`,
+/// read by `report_export::carried_from`). A finding that already carries the mark was carried on
+/// from an earlier incremental run and keeps its commit: the commit where its file was last
+/// actually audited, not the commit of the run that merely passed it along.
+pub fn mark_carried(carried: &mut [Finding], prior_commit: Option<&str>) {
+    let source = prior_commit
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(CARRIED_FROM_UNKNOWN);
+    for f in carried {
+        f.captures
+            .entry(crate::report_export::CARRIED_FROM_CAPTURE.to_string())
+            .or_insert_with(|| source.to_string());
+    }
+}
+
+/// H11: sums what an incremental scan re-audited and carried forward across its repos, then
+/// yields the one [`crate::scan_ledger::IncrementalCarry`] the ledger records.
+#[derive(Debug, Default)]
+pub struct CarryTally {
+    changed: usize,
+    carried_files: usize,
+    carried_findings: usize,
+    commits: Vec<String>,
+}
+
+impl CarryTally {
+    /// Add one repo's partition. A repo that carried no file adds nothing: it was a full scan.
+    pub fn add_repo(
+        &mut self,
+        changed: usize,
+        carried_files: usize,
+        carried_findings: usize,
+        prior_commit: Option<String>,
+    ) {
+        if carried_files == 0 {
+            return;
+        }
+        self.changed += changed;
+        self.carried_files += carried_files;
+        self.carried_findings += carried_findings;
+        if let Some(sha) = prior_commit {
+            if !self.commits.contains(&sha) {
+                self.commits.push(sha);
+            }
+        }
+    }
+
+    /// `None` when no repo carried a file (a full scan). The source commit is named only when
+    /// every carrying repo came from the same one; with several, the cover says "an earlier
+    /// inspection" rather than naming one commit for rows that came from different repos.
+    pub fn finish(self) -> Option<crate::scan_ledger::IncrementalCarry> {
+        (self.carried_files > 0).then(|| crate::scan_ledger::IncrementalCarry {
+            changed: self.changed,
+            carried_files: self.carried_files,
+            carried_findings: self.carried_findings,
+            prior_sha: match self.commits.as_slice() {
+                [only] => Some(only.clone()),
+                _ => None,
+            },
+        })
+    }
+}
+
 /// Accumulates a fresh manifest across a multi-repo scan, then finalizes it for persistence.
 ///
 /// For each repo the caller records (a) the current fingerprints of EVERY file that was in the
@@ -325,6 +399,7 @@ pub struct ManifestBuilder {
     ai_covered: bool,
     ai_key: AiScanKey,
     clone_verdicts: crate::onboard::clone_advisory::VerdictCache,
+    commits: BTreeMap<String, String>,
 }
 
 impl ManifestBuilder {
@@ -382,6 +457,15 @@ impl ManifestBuilder {
         );
     }
 
+    /// Record the commit `repo` was audited at (see [`ScanManifest::commits`]). Skipped for a
+    /// blank sha, so a repo without a source identity simply has none.
+    pub fn record_commit(&mut self, repo: &str, sha: &str) {
+        let sha = sha.trim();
+        if !sha.is_empty() {
+            self.commits.insert(repo.to_string(), sha.to_string());
+        }
+    }
+
     /// Finalize into a persistable manifest stamped with the current schema version.
     pub fn finish(self) -> ScanManifest {
         ScanManifest {
@@ -392,6 +476,7 @@ impl ManifestBuilder {
             ai_covered: self.ai_covered,
             ai_key: self.ai_key,
             clone_verdicts: self.clone_verdicts,
+            commits: self.commits,
         }
     }
 }
@@ -527,6 +612,9 @@ impl ScanCacheStore {
         };
         let removed = repo_slice_stats(manifest, repo);
         manifest.files.retain(|k, _| !k.eq_ignore_ascii_case(repo));
+        manifest
+            .commits
+            .retain(|k, _| !k.eq_ignore_ascii_case(repo));
         manifest
             .findings
             .retain(|f| !f.repo.eq_ignore_ascii_case(repo));
@@ -1144,6 +1232,7 @@ mod tests {
             ai_covered: true,
             ai_key: AiScanKey::default(),
             clone_verdicts: Default::default(),
+            commits: Default::default(),
         };
 
         let p = partition(Some(&stale), "me/api", &files);
@@ -1246,5 +1335,56 @@ mod tests {
             got.findings[0].rule_id, "R2",
             "re-put must store the new manifest, not the cleared one"
         );
+    }
+
+    // ── H11: carried findings and the incremental record ─────────────────────────────────
+
+    #[test]
+    fn mark_carried_names_the_commit_and_keeps_an_earlier_mark() {
+        let mut fresh = Finding::default();
+        let mut older = Finding::default();
+        older
+            .captures
+            .insert("carried_from".to_string(), "aaa1111".to_string());
+        let mut both = vec![fresh.clone(), older];
+        mark_carried(&mut both, Some("bbb2222"));
+        assert_eq!(both[0].captures["carried_from"], "bbb2222");
+        assert_eq!(both[1].captures["carried_from"], "aaa1111");
+        let mut unknown = vec![std::mem::take(&mut fresh)];
+        mark_carried(&mut unknown, None);
+        assert_eq!(unknown[0].captures["carried_from"], CARRIED_FROM_UNKNOWN);
+    }
+
+    #[test]
+    fn the_carry_tally_sums_repos_and_names_one_commit_only_when_it_is_one() {
+        let mut one = CarryTally::default();
+        one.add_repo(2, 8, 3, Some("abc".to_string()));
+        one.add_repo(5, 0, 0, Some("zzz".to_string())); // a full scan: adds nothing
+        let carry = one.finish().expect("a repo carried files");
+        assert_eq!(
+            (carry.changed, carry.carried_files, carry.carried_findings),
+            (2, 8, 3)
+        );
+        assert_eq!(carry.prior_sha.as_deref(), Some("abc"));
+
+        let mut two = CarryTally::default();
+        two.add_repo(1, 4, 1, Some("abc".to_string()));
+        two.add_repo(1, 4, 1, Some("def".to_string()));
+        assert_eq!(two.finish().unwrap().prior_sha, None);
+
+        assert!(CarryTally::default().finish().is_none(), "a full scan");
+    }
+
+    #[test]
+    fn a_manifest_records_commits_and_a_repo_removal_drops_its_commit() {
+        let mut b = ManifestBuilder::new();
+        b.record_commit("me/api", " abc123 ");
+        b.record_commit("me/web", "   ");
+        let m = b.finish();
+        assert_eq!(m.commits.get("me/api").map(String::as_str), Some("abc123"));
+        assert!(!m.commits.contains_key("me/web"));
+        // A manifest saved before commits existed still loads.
+        let old: ScanManifest = serde_json::from_str(r#"{"version":3}"#).unwrap();
+        assert!(old.commits.is_empty());
     }
 }

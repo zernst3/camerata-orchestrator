@@ -157,6 +157,15 @@ pub fn lang_for_extension(ext: &str) -> Option<&'static str> {
     camerata_rules::applies_to::lang_for_extension(ext)
 }
 
+/// The scope key for rules that apply to every JVM language (Java and Kotlin).
+const JVM_SCOPE: &str = "jvm";
+
+/// Whether a scope's language key covers a file whose own language is `file_lang`: the same
+/// language, or the JVM scope over a Java or Kotlin file.
+fn language_covers(scope_lang: &str, file_lang: &str) -> bool {
+    scope_lang == file_lang || (scope_lang == JVM_SCOPE && matches!(file_lang, "java" | "kotlin"))
+}
+
 /// The canonical language a file belongs to, from its path's extension.
 fn file_language(path: &str) -> Option<&'static str> {
     let ext = path.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase())?;
@@ -191,7 +200,10 @@ const LANGUAGE_PREFIXES: &[(&str, &str)] = &[
     ("GO", "go"),
     ("GOLANG", "go"),
     ("JAVA", "java"),
-    ("SPRING", "java"),
+    // Spring runs on both JVM languages: a Spring Boot service in Kotlin is as common as one in
+    // Java, and a Spring rule routed to `java` alone never saw it. `jvm` is a scope key, not an
+    // `applies_to` language: it covers Java and Kotlin files (see [`language_covers`]).
+    ("SPRING", JVM_SCOPE),
     ("KOTLIN", "kotlin"),
     ("RUBY", "ruby"),
     ("RAILS", "ruby"),
@@ -277,21 +289,69 @@ fn declared_scope_matches(path: &str, content: &str, applies: &AppliesTo) -> boo
 pub fn file_in_scope(path: &str, content: &str, scope: &Scope) -> bool {
     match scope {
         Scope::All => true,
-        Scope::Language(lang) => file_language(path) == Some(lang),
+        Scope::Language(lang) => file_language(path).is_some_and(|f| language_covers(lang, f)),
         Scope::Declared { language, applies } => {
-            language.is_none_or(|l| file_language(path) == Some(l))
+            language.is_none_or(|l| file_language(path).is_some_and(|f| language_covers(l, f)))
                 && declared_scope_matches(path, content, applies)
         }
     }
 }
 
+/// Build and configuration files a language-scoped rule needs to see beside its language's
+/// source: the dependency manifest names the framework and versions (`Cargo.toml`,
+/// `package.json`) and the application config holds the settings Spring and Django rules judge
+/// (`application.yml`). They have no routed language, so an id-prefix language scope used to skip
+/// them. Matched on the file name, at any depth.
+const MANIFEST_BASENAMES: &[&str] = &[
+    "Cargo.toml",
+    "package.json",
+    "pyproject.toml",
+    "requirements.txt",
+    "go.mod",
+    "pom.xml",
+    "build.gradle",
+    "build.gradle.kts",
+    "settings.gradle",
+    "settings.gradle.kts",
+    "composer.json",
+    "Gemfile",
+    "Package.swift",
+    "application.yml",
+    "application.yaml",
+    "application.properties",
+    "settings.py",
+];
+
+fn is_manifest_file(path: &str) -> bool {
+    let basename = path.rsplit('/').next().unwrap_or(path);
+    MANIFEST_BASENAMES.contains(&basename)
+        || (basename.starts_with("application-")
+            && [".yml", ".yaml", ".properties"]
+                .iter()
+                .any(|ext| basename.ends_with(ext)))
+        || basename.ends_with(".csproj")
+}
+
 /// The files of `files` a scope covers, owned (what a group's passes are chunked from).
+///
+/// H10: a language scope that matched at least one source file also receives the repo's manifest
+/// and application config files ([`MANIFEST_BASENAMES`]). With no source file of its language the
+/// group stays empty, so it is still reported as not assessed rather than "ran, found nothing" on
+/// a lone `package.json`.
 pub fn files_in_scope(files: &[(String, String)], scope: &Scope) -> Vec<(String, String)> {
-    files
+    let covered: Vec<(String, String)> = files
         .iter()
         .filter(|(p, c)| file_in_scope(p, c, scope))
         .cloned()
-        .collect()
+        .collect();
+    if matches!(scope, Scope::Language(_)) && !covered.is_empty() {
+        return files
+            .iter()
+            .filter(|(p, c)| file_in_scope(p, c, scope) || is_manifest_file(p))
+            .cloned()
+            .collect();
+    }
+    covered
 }
 
 /// The files a single rule should be audited against (a view into `files`).
@@ -301,9 +361,11 @@ pub fn files_for_rule<'a>(
     files: &'a [(String, String)],
 ) -> Vec<&'a (String, String)> {
     let scope = scope_of(rule, applies_to_routing);
+    let language_hit = files.iter().any(|(p, c)| file_in_scope(p, c, &scope));
+    let with_manifests = matches!(scope, Scope::Language(_)) && language_hit;
     files
         .iter()
-        .filter(|(p, c)| file_in_scope(p, c, &scope))
+        .filter(|(p, c)| file_in_scope(p, c, &scope) || (with_manifests && is_manifest_file(p)))
         .collect()
 }
 
@@ -382,9 +444,8 @@ pub fn plan_routes(
     let routed_chars = by_scope
         .values()
         .map(|g| {
-            let group_chars: u64 = files
+            let group_chars: u64 = files_in_scope(files, &g.scope)
                 .iter()
-                .filter(|(p, c)| file_in_scope(p, c, &g.scope))
                 .map(|(_, c)| c.len() as u64)
                 .sum();
             group_chars.saturating_mul(g.rules.len() as u64)
@@ -638,7 +699,7 @@ mod tests {
         assert_eq!(rule_scope("FASTAPI-ROUTE-1"), Scope::Language("python"));
         assert_eq!(rule_scope("NEXTJS-LAYOUT-1"), Scope::Language("web"));
         assert_eq!(rule_scope("ANGULAR-COMPONENT-1"), Scope::Language("web"));
-        assert_eq!(rule_scope("SPRING-BOOT-1"), Scope::Language("java"));
+        assert_eq!(rule_scope("SPRING-BOOT-1"), Scope::Language("jvm"));
         assert_eq!(rule_scope("DOTNET-ASYNC-1"), Scope::Language("csharp"));
     }
 
@@ -855,5 +916,85 @@ mod tests {
             "",
             &scope_of(&cs, true)
         ));
+    }
+
+    // ── H10: language scopes that dropped files a rule needs ─────────────────────────────
+
+    #[test]
+    fn a_spring_rule_is_routed_to_java_and_kotlin_alike() {
+        let spring = r("SPRING-NO-FIELD-INJECTION-1");
+        let scope = scope_of(&spring, true);
+        assert!(file_in_scope("src/A.java", "", &scope));
+        assert!(file_in_scope("src/B.kt", "", &scope));
+        assert!(file_in_scope(
+            "build.gradle.kts",
+            "",
+            &scope_of(&r("KOTLIN-1"), true)
+        ));
+        assert!(!file_in_scope("src/c.py", "", &scope));
+        // A plain Java rule stays Java-only.
+        assert!(!file_in_scope(
+            "src/B.kt",
+            "",
+            &scope_of(&r("JAVA-1"), true)
+        ));
+    }
+
+    #[test]
+    fn a_language_group_also_receives_the_manifests_and_application_config() {
+        let files = vec![
+            f("src/main.rs", 10),
+            f("Cargo.toml", 10),
+            f("web/package.json", 10),
+            f("src/main/resources/application.yml", 10),
+            f("README.md", 10),
+        ];
+        let rust = r("RUST-1");
+        let picked: Vec<&str> = files_for_rule(&rust, true, &files)
+            .into_iter()
+            .map(|(p, _)| p.as_str())
+            .collect();
+        assert_eq!(
+            picked,
+            [
+                "src/main.rs",
+                "Cargo.toml",
+                "web/package.json",
+                "src/main/resources/application.yml"
+            ]
+        );
+        let scope = scope_of(&rust, true);
+        let group: Vec<String> = files_in_scope(&files, &scope)
+            .into_iter()
+            .map(|(p, _)| p)
+            .collect();
+        assert_eq!(group.len(), 4, "{group:?}");
+        let plan = plan_routes(&[rust], &files, true);
+        assert_eq!(plan.routed_chars, 40);
+    }
+
+    #[test]
+    fn a_language_group_with_no_source_file_stays_empty_even_with_a_manifest() {
+        // A Rust rule in a TypeScript repo must still be "not assessed", not "ran, found nothing"
+        // on a lone package.json.
+        let files = vec![f("src/app.ts", 10), f("package.json", 10)];
+        let scope = scope_of(&r("RUST-1"), true);
+        assert!(files_in_scope(&files, &scope).is_empty());
+        assert!(files_for_rule(&r("RUST-1"), true, &files).is_empty());
+    }
+
+    #[test]
+    fn single_file_components_and_more_c_family_extensions_have_a_language() {
+        for (ext, lang) in [
+            ("vue", "web"),
+            ("svelte", "web"),
+            ("astro", "web"),
+            ("kts", "kotlin"),
+            ("cc", "cpp"),
+            ("hpp", "cpp"),
+            ("cxx", "cpp"),
+        ] {
+            assert_eq!(lang_for_extension(ext), Some(lang), "{ext}");
+        }
     }
 }

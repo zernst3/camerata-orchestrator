@@ -30,6 +30,14 @@ const CODE_EXTS: &[&str] = &[
     // Firebase rules file by its `service` header, never by its name. Admitted by extension, not
     // by the two default basenames, because `firebase.json` may point at any file.
     "rules",
+    // H8: build and script source the walk used to drop unseen. Gradle build scripts (Groovy and
+    // Kotlin) hold signing passwords and repository tokens; Scala, C++ headers and PowerShell and
+    // batch scripts are hand-written source and a common home of inline credentials.
+    "gradle", "kts", "scala", "cc", "hpp", "ps1", "bat",
+    // H8: single-file components. Their `<script>` is source code the model never saw while they
+    // were only reference text for the dead-code rule (which still reads them: the architectural
+    // tier is handed the audited files and the reference list together).
+    "vue", "svelte", "astro",
 ];
 
 /// Extensionless basenames that still carry stack/CI signal and must be extracted so
@@ -61,7 +69,30 @@ const CONFIG_TEXT_EXTS: &[&str] = &[
     // Apple property lists: `GoogleService-Info.plist` carries the iOS Firebase `API_KEY`, and
     // real committed credentials land in plists.
     "plist",
+    // H8: secret-bearing files the walk used to drop unseen. A `.key` is a private key by
+    // convention (the secret-file rule names the extension); `.tfvars` and `.tfstate` hold
+    // Terraform variables and state, which carry credentials in clear; `.p8` is an Apple signing
+    // key; `.xml` and `.config` hold connection strings and API keys (`web.config`, Maven
+    // `settings.xml`, Android resources); a notebook's outputs keep whatever was printed.
+    "key",
+    "tfvars",
+    "tfstate",
+    "p8",
+    "xml",
+    "config",
+    "ipynb",
 ];
+
+/// Extensionless file names that hold credentials, admitted by name because they have no
+/// extension to match (H8): the AWS shared credentials file, a kubeconfig, and the default SSH
+/// private key names with any suffix (`id_rsa_deploy`). A public key (`id_rsa.pub`) has an
+/// extension and is not one of these.
+fn is_credential_basename(basename: &str) -> bool {
+    const PRIVATE_KEY_PREFIXES: &[&str] = &["id_rsa", "id_dsa", "id_ecdsa", "id_ed25519"];
+    basename == "credentials"
+        || basename == "kubeconfig"
+        || PRIVATE_KEY_PREFIXES.iter().any(|p| basename.starts_with(p))
+}
 
 /// Directory names that are build output, dependency trees, caches, or tool state — pure
 /// noise for an architecture audit, and the bulk of a repo's bytes/tokens. A real consumer
@@ -246,24 +277,26 @@ pub(crate) fn is_admissible_text(path: &str) -> bool {
     if basename.starts_with('.') && basename.len() > 1 {
         return true;
     }
-    match path.rsplit_once('.') {
+    // The extension of the file NAME, not of the whole path: `home/.aws/credentials` has a dot in
+    // a directory, and splitting the path on its last dot read `aws/credentials` as an extension.
+    match basename.rsplit_once('.') {
         Some((_, ext)) => CONFIG_TEXT_EXTS.contains(&ext.to_ascii_lowercase().as_str()),
-        // Extensionless, non-dotfile basename (e.g. a bare `credentials`). Deliberately NOT
-        // broadened here — `CODE_BASENAMES` (checked above via `has_code_ext`) remains the
-        // explicit opt-in list for that narrower case; a blanket "any extensionless file"
-        // admission would sweep up compiled binaries and other noise with no extension at all.
-        None => false,
+        // Extensionless, non-dotfile basename. Deliberately NOT broadened to "any extensionless
+        // file" (that would sweep up compiled binaries and other noise): `CODE_BASENAMES`
+        // (checked above via `has_code_ext`) and `is_credential_basename` are the explicit
+        // opt-in lists for this narrower case.
+        None => is_credential_basename(basename),
     }
 }
 
 /// Extensions of REFERENCE TEXT: files that are not audited as code and carry no committed-secret
 /// signal of their own, but whose text can REFER to a source file by name (a `<script src>` in
-/// HTML, an import inside a Vue or Svelte component, a run instruction in a README, a stylesheet
-/// `@import`). The dead-code rule needs them to see that a file is still used; nothing else
+/// HTML, a run instruction in a README, a stylesheet `@import`; Vue, Svelte and Astro components
+/// are audited source now (H8) and reach the dead-code rule with the audited files). The dead-code rule needs them to see that a file is still used; nothing else
 /// reads them. See [`ExtractedRepo::reference_files`].
 const REFERENCE_TEXT_EXTS: &[&str] = &[
-    "html", "htm", "vue", "svelte", "astro", "md", "mdx", "css", "scss", "less", "ejs", "erb",
-    "hbs", "pug", "njk", "j2", "jinja", "jinja2",
+    "html", "htm", "md", "mdx", "css", "scss", "less", "ejs", "erb", "hbs", "pug", "njk", "j2",
+    "jinja", "jinja2",
 ];
 
 /// Extensionless build-runner files that name the scripts and sources they run.
@@ -469,6 +502,11 @@ pub struct ExtractedRepo {
     /// path. Non-empty exactly when `truncated` is true. Listed under Coverage like
     /// `skipped_oversize`.
     pub skipped_beyond_cap: Vec<String>,
+    /// H9: admissible files NOT read because their bytes are not text this scan can decode
+    /// (binary key stores, files in a legacy code page), by path. Named under Coverage, and the
+    /// path-only floor rules still run over each, so a `.p12` is flagged by its name though it
+    /// could not be read.
+    pub skipped_unreadable: Vec<String>,
     pub excluded_noise: usize,
     /// The paths behind `excluded_noise` (always the same length), so `camerata count` can size
     /// what the filter dropped without a second walk.
@@ -545,6 +583,7 @@ struct AdmittedSink {
     files: Vec<(String, String)>,
     oversize: Vec<String>,
     beyond_cap: Vec<String>,
+    unreadable: Vec<String>,
 }
 
 impl AdmittedSink {
@@ -554,6 +593,7 @@ impl AdmittedSink {
             files: Vec::new(),
             oversize: Vec::new(),
             beyond_cap: Vec::new(),
+            unreadable: Vec::new(),
         }
     }
 
@@ -572,8 +612,12 @@ impl AdmittedSink {
             self.beyond_cap.push(rel);
             return false;
         }
-        let Ok(content) = std::fs::read_to_string(full) else {
-            return false; // skip non-UTF-8 / unreadable
+        // H9: a file that is not valid UTF-8 is decoded when it is UTF-16 with a byte order mark
+        // (what Windows tools and SQL Server write), and otherwise named as unreadable. It is
+        // never dropped without a trace.
+        let Some(content) = std::fs::read(full).ok().and_then(|b| decode_text(&b)) else {
+            self.unreadable.push(rel);
+            return false;
         };
         self.files.push((rel, content));
         true
@@ -582,6 +626,32 @@ impl AdmittedSink {
     fn truncated(&self) -> bool {
         !self.beyond_cap.is_empty()
     }
+}
+
+/// The text in `bytes`: UTF-8, or UTF-16 announced by a byte order mark. `None` for anything else
+/// (binary, or a legacy code page), which the caller names as unreadable rather than guessing.
+fn decode_text(bytes: &[u8]) -> Option<String> {
+    if let Ok(text) = std::str::from_utf8(bytes) {
+        return Some(text.to_string());
+    }
+    let (body, little_endian) = match bytes {
+        [0xFF, 0xFE, rest @ ..] => (rest, true),
+        [0xFE, 0xFF, rest @ ..] => (rest, false),
+        _ => return None,
+    };
+    if body.len() % 2 != 0 {
+        return None;
+    }
+    let units = body.chunks_exact(2).map(|pair| {
+        if little_endian {
+            u16::from_le_bytes([pair[0], pair[1]])
+        } else {
+            u16::from_be_bytes([pair[0], pair[1]])
+        }
+    });
+    char::decode_utf16(units)
+        .collect::<Result<String, _>>()
+        .ok()
 }
 
 /// Gitignore-aware walk (used when `.git` exists). Delegates to the `ignore` crate so
@@ -704,6 +774,7 @@ fn read_local_repo_files_gitignore(
         reference_truncated: reference.truncated,
         skipped_oversize: admitted.oversize,
         skipped_beyond_cap: admitted.beyond_cap,
+        skipped_unreadable: admitted.unreadable,
         excluded_noise: excluded_noise_paths.len(),
         excluded_noise_paths,
     }
@@ -801,6 +872,7 @@ fn read_local_repo_files_noise_denylist(
         reference_truncated: reference.truncated,
         skipped_oversize: admitted.oversize,
         skipped_beyond_cap: admitted.beyond_cap,
+        skipped_unreadable: admitted.unreadable,
         excluded_noise: excluded_noise_paths.len(),
         excluded_noise_paths,
     }
@@ -972,9 +1044,6 @@ mod tests {
         for yes in [
             "index.html",
             "pages/x.htm",
-            "src/App.vue",
-            "src/Page.svelte",
-            "src/pages/index.astro",
             "README.md",
             "docs/guide.mdx",
             "styles/a.css",
@@ -997,6 +1066,10 @@ mod tests {
             assert!(is_reference_text(yes), "{yes}");
         }
         for no in [
+            // Single-file components are audited source now (H8), not reference text.
+            "src/App.vue",
+            "src/Page.svelte",
+            "src/pages/index.astro",
             "src/a.ts",
             "src/a.rs",
             "Makefile.bak",
@@ -1012,13 +1085,7 @@ mod tests {
 
     #[test]
     fn reference_text_is_not_audit_input() {
-        for path in [
-            "index.html",
-            "src/App.vue",
-            "README.md",
-            "a.css",
-            "Makefile",
-        ] {
+        for path in ["index.html", "README.md", "a.css", "Makefile"] {
             assert!(
                 !is_admissible_text(path),
                 "{path} must stay out of the audited file list"
@@ -1029,7 +1096,11 @@ mod tests {
     fn reference_fixture(root: &std::path::Path) {
         write(root, "src/a.ts", "export const a = 1;\n");
         write(root, "index.html", "<script src=\"/src/a.ts\"></script>\n");
-        write(root, "src/App.vue", "<script setup>import './a'</script>\n");
+        write(
+            root,
+            "views/page.ejs",
+            "<script src=\"/src/a.ts\"></script>\n",
+        );
         // A secret-shaped literal in prose: reference text is not read by the secrets floor.
         let readme = concat!("Run it.\nAPI_KEY=\"Zq9Xk3Pm7Rt2", "Vw5Yb8Nc4Jd6Hf1Ga0\"\n");
         write(root, "README.md", readme);
@@ -1061,8 +1132,8 @@ mod tests {
                 "Makefile",
                 "README.md",
                 "index.html",
-                "src/App.vue",
-                "styles/a.css"
+                "styles/a.css",
+                "views/page.ejs"
             ],
             "noise dirs, engine artifacts and oversized files are excluded from the tier too"
         );
@@ -1642,5 +1713,120 @@ mod tests {
         assert!(!extracted.truncated);
         assert!(extracted.skipped_beyond_cap.is_empty());
         assert!(extracted.skipped_oversize.is_empty());
+    }
+
+    // ── H8 / H9: secret-bearing and source files the walk used to drop unseen ───────────────
+
+    #[test]
+    fn h8_files_that_carry_secrets_or_source_are_admitted() {
+        for yes in [
+            "deploy/server.key",
+            "infra/prod.tfvars",
+            "infra/terraform.tfstate",
+            "keys/AuthKey_ABC123.p8",
+            "android/app/build.gradle",
+            "android/app/build.gradle.kts",
+            "settings.kts",
+            "config/web.config",
+            "pom.xml",
+            "src/Main.scala",
+            "src/util.cc",
+            "include/util.hpp",
+            "scripts/deploy.ps1",
+            "scripts/deploy.bat",
+            "notebooks/analysis.ipynb",
+            "src/App.vue",
+            "src/Page.svelte",
+            "src/pages/index.astro",
+            "home/.aws/credentials",
+            "credentials",
+            "kubeconfig",
+            "ops/kubeconfig",
+            "keys/id_rsa",
+            "keys/id_ed25519",
+            "keys/id_rsa_deploy",
+        ] {
+            assert!(is_admissible_text(yes), "{yes} must be audited");
+        }
+        for no in ["README", "notes", "keys/id_rsa.pub", "logo.png", "Makefile"] {
+            assert!(!is_admissible_text(no), "{no} must stay out");
+        }
+    }
+
+    #[test]
+    fn h9_a_pem_private_key_file_is_read_and_reaches_the_floor() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "deploy/server.key",
+            "-----BEGIN RSA PRIVATE KEY-----\nMIIBOgIBAAJBAKj34GkxFhD90vcNLYLInFEX6Ppy1tPf9Cnzj4p4WGeKLs1Pt8Qu\n-----END RSA PRIVATE KEY-----\n",
+        );
+        let extracted = scan(dir.path());
+        assert_eq!(paths(&extracted), ["deploy/server.key"]);
+        let findings = crate::onboard::audit::audit_files("o/r", &extracted.files);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.path == "deploy/server.key" && f.rule_id == "SEC-NO-SECRET-FILE-1"),
+            "{findings:#?}"
+        );
+    }
+
+    #[test]
+    fn h9_a_utf16_file_with_a_byte_order_mark_is_decoded_and_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let text = "CREATE TABLE users (id int);\r\n";
+        let mut bytes: Vec<u8> = vec![0xFF, 0xFE];
+        for unit in text.encode_utf16() {
+            bytes.extend_from_slice(&unit.to_le_bytes());
+        }
+        let full = dir.path().join("db/schema.sql");
+        fs::create_dir_all(full.parent().unwrap()).unwrap();
+        fs::write(&full, &bytes).unwrap();
+        let big_endian: Vec<u8> = [0xFE, 0xFF]
+            .into_iter()
+            .chain(text.encode_utf16().flat_map(u16::to_be_bytes))
+            .collect();
+        fs::write(dir.path().join("db/other.sql"), &big_endian).unwrap();
+        let extracted = scan(dir.path());
+        assert_eq!(paths(&extracted), ["db/other.sql", "db/schema.sql"]);
+        assert!(extracted
+            .files
+            .iter()
+            .all(|(_, content)| content.contains("CREATE TABLE users")));
+        assert!(extracted.skipped_unreadable.is_empty());
+    }
+
+    #[test]
+    fn h9_a_file_that_is_not_text_is_named_as_skipped_not_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("deploy")).unwrap();
+        fs::write(
+            dir.path().join("deploy/store.p12"),
+            [0x30, 0x82, 0x00, 0xFF, 0xFE],
+        )
+        .unwrap();
+        write(dir.path(), "src/main.rs", "fn main() {}\n");
+        let extracted = scan(dir.path());
+        assert_eq!(paths(&extracted), ["src/main.rs"]);
+        assert_eq!(extracted.skipped_unreadable, ["deploy/store.p12"]);
+    }
+
+    #[test]
+    fn h9_the_path_rule_runs_over_a_file_the_walk_could_not_read() {
+        let findings = crate::onboard::audit::audit_unread_paths(
+            "o/r",
+            &[
+                "deploy/store.p12".to_string(),
+                "src/huge.rs".to_string(),
+                "keys/big.pem".to_string(),
+            ],
+            &[],
+        );
+        let hits: Vec<&str> = findings.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(hits, ["deploy/store.p12", "keys/big.pem"], "{findings:#?}");
+        assert!(findings
+            .iter()
+            .all(|f| f.rule_id == "SEC-NO-SECRET-FILE-1" && f.line == 0));
     }
 }

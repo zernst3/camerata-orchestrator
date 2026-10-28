@@ -107,11 +107,21 @@ fn ai_covered(report: &ScanReport) -> bool {
 
 /// Whether `finding` came from the AI (semantic) review, which the delta carries forward for
 /// unchanged files. The deterministic floor and the preview linters are recomputed over the
-/// whole tree every run and must NOT be carried (they would duplicate); the ledger records the
-/// tier each rule ran under, and an ad hoc `AI-` rule the model invented is semantic by nature.
+/// whole tree every run and must NOT be carried (they would duplicate).
+///
+/// H12: the finding's own producer decides, when it recorded one
+/// ([`crate::onboard::PRODUCED_TIER_CAPTURE`]). The model can report under a floor rule id, such as
+/// a hardcoded secret the floor's patterns missed; the ledger holds that id as a deterministic rule
+/// (the tier is whichever ran first), so judging by the ledger dropped the model's finding from the
+/// delta and the file's problem vanished from the next report. A finding saved before the producer
+/// was recorded falls back to the tier its rule ran under, and an ad hoc `AI-` rule the model
+/// invented is semantic by nature.
 fn is_ai_advisory(finding: &Finding, report: &ScanReport) -> bool {
     if finding.preview {
         return false;
+    }
+    if let Some(producer) = finding.captures.get(crate::onboard::PRODUCED_TIER_CAPTURE) {
+        return producer == "semantic";
     }
     match report.ledger.rule(&finding.rule_id) {
         Some(entry) => entry.tier == RuleTier::Semantic,
@@ -290,6 +300,12 @@ pub async fn rescan_changes(
         changed_files += delta.changed;
         prior.files.insert(name.clone(), delta.unchanged);
         prior.findings.extend(delta.carried);
+        // H11: the carried findings come from this inspection, so the incremental run can say
+        // which commit they were last found at. Not when the inspection ran on a dirty tree:
+        // the commit would then name a state that was not what the findings describe.
+        if !covered.dirty {
+            prior.commits.insert(name.clone(), inspected.to_string());
+        }
         if covered.dirty {
             notes.push(format!(
                 "{name}: the inspection ran on a tree with uncommitted changes; the delta is \

@@ -176,6 +176,13 @@ pub struct RuleLedgerEntry {
     /// [`ScanLedger::note_partial_rule`].
     #[serde(default)]
     pub partial_reason: Option<String>,
+    /// The repos of a multi-repo scan this rule was NOT run for, though it ran for others (a
+    /// repo whose whole AI review failed). `record_rule` ORs `ran` across repos, so without
+    /// this a rule that ran on one repo and failed on another read as "ran, found nothing".
+    /// Set via [`ScanLedger::note_rule_not_run_for_repo`], which also sets
+    /// [`Self::partial_reason`] so every existing reader treats the rule as incomplete.
+    #[serde(default)]
+    pub repos_not_run: Vec<String>,
 }
 
 impl RuleLedgerEntry {
@@ -541,6 +548,9 @@ pub enum SkipReason {
     Oversize,
     /// Past `onboard::files::HARD_CAP_FILES` (20,000 files) in its repo.
     BeyondFileCap,
+    /// Not text this scan can decode: a binary key store, or a file in a legacy code page (H9).
+    /// UTF-16 with a byte order mark is decoded and read, so it is not in this class.
+    NotText,
 }
 
 impl SkipReason {
@@ -549,6 +559,7 @@ impl SkipReason {
         match self {
             SkipReason::Oversize => "over the 400 KB file size limit",
             SkipReason::BeyondFileCap => "beyond the 20,000-file limit",
+            SkipReason::NotText => "not UTF-8 text",
         }
     }
 }
@@ -890,6 +901,7 @@ impl ScanLedger {
                 coverage_note,
                 not_applicable,
                 partial_reason: None,
+                repos_not_run: Vec::new(),
             });
         self.rules.get(&rule_id).expect("just inserted")
     }
@@ -900,6 +912,45 @@ impl ScanLedger {
     pub fn note_partial_rule(&mut self, rule_id: &str, reason: impl Into<String>) {
         if let Some(entry) = self.rules.get_mut(rule_id) {
             entry.partial_reason.get_or_insert_with(|| reason.into());
+        }
+    }
+
+    /// H10: record that `rule_id` ran over only part of the files its repo handed the audit,
+    /// because its scope (the language its id names, or the `applies_to` it declares) excludes the
+    /// rest. This is a disclosure, not a gap: a Rust rule has no business in a `.ts` file, so the
+    /// rule is still complete for what it covers and the integrity gate does not fail it (that is
+    /// what [`RuleLedgerEntry::partial_reason`] is for). It lands in
+    /// [`RuleLedgerEntry::coverage_note`] so a reader of the ledger sees the rule did not look at
+    /// every file. The first note is kept.
+    pub fn note_scope_subset(&mut self, rule_id: &str, evaluated: usize, of: usize, kind: &str) {
+        if let Some(entry) = self.rules.get_mut(rule_id) {
+            if entry.coverage_note.is_none() {
+                entry.coverage_note =
+                    Some(format!("ran over {evaluated} of {of} files ({kind} scope)"));
+            }
+        }
+    }
+
+    /// H4: record that `rule_id` was not run for `repo`, in a scan where it may have run for
+    /// other repos. Call it after the [`Self::record_rule`] call that recorded the rule as not
+    /// run for this repo. It names the repo on the entry and sets [`RuleLedgerEntry::partial_reason`]
+    /// to list every such repo with `reason` (the first reason is kept), so a rule that ran on one
+    /// repo and failed on another is incomplete coverage, never verified clean. A rule that
+    /// ran nowhere stays "not run" (its skip reason says why); this only adds the repo list.
+    pub fn note_rule_not_run_for_repo(&mut self, rule_id: &str, repo: &str, reason: &str) {
+        if let Some(entry) = self.rules.get_mut(rule_id) {
+            if !entry.repos_not_run.iter().any(|r| r == repo) {
+                entry.repos_not_run.push(repo.to_string());
+            }
+            let first_reason = entry
+                .partial_reason
+                .as_deref()
+                .and_then(|p| p.split_once(": ").map(|(_, why)| why.to_string()))
+                .unwrap_or_else(|| reason.to_string());
+            entry.partial_reason = Some(format!(
+                "not run for {}: {first_reason}",
+                entry.repos_not_run.join(", ")
+            ));
         }
     }
 
@@ -987,6 +1038,7 @@ impl ScanLedger {
                         coverage_note: Some(CORPUS_LOAD_FAILED_NOTE.to_string()),
                         not_applicable: false,
                         partial_reason: None,
+                        repos_not_run: Vec::new(),
                     },
                 );
             }
@@ -1114,6 +1166,7 @@ impl ScanLedger {
                 coverage_note,
                 not_applicable,
                 partial_reason: None,
+                repos_not_run: Vec::new(),
             },
         );
         self.rules.get(&rule_id).expect("just inserted")
