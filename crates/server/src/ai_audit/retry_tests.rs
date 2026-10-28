@@ -91,6 +91,7 @@ async fn pass(
         None,
         "s",
         Some(meter),
+        1,
     )
     .await
 }

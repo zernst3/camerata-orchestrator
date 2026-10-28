@@ -138,6 +138,7 @@ async fn a_scan_pass_is_recorded_under_the_scan_stage() {
         None,
         "s",
         Some(&meter),
+        1,
     )
     .await
     .expect("the stub answers");

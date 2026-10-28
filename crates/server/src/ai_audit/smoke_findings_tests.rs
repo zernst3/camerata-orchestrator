@@ -313,3 +313,78 @@ async fn audit_repo_records_a_pass_for_rules_the_alternatives_reply_never_reache
     );
     assert_eq!(rows[0].repo, REPO);
 }
+
+// ── 2. The scan's output cap scales with the rules in the batch ─────────────────────────────
+
+/// The `max_tokens` of every scan request a run of one chunk and one batch of `n_rules` rules sent.
+async fn scan_caps(n_rules: usize) -> Vec<u32> {
+    let llm = StageLlm::new(&[]);
+    let files: Vec<(String, String)> = vec![("a.rs".to_string(), "fn a() {}".to_string())];
+    let chunks: Vec<&[(String, String)]> = vec![files.as_slice()];
+    let rules: Vec<(String, String)> = (0..n_rules)
+        .map(|i| (format!("RULE-{i}"), format!("rule {i}")))
+        .collect();
+    let batches: Vec<&[(String, String)]> = vec![rules.as_slice()];
+    let adopted: std::collections::HashSet<String> =
+        rules.iter().map(|(id, _)| id.clone()).collect();
+    run_passes(
+        &llm,
+        REPO,
+        "REPO MAP:\na.rs: fn a()\n",
+        &crate::prompt_frame::FrameNonce::generate(),
+        &adopted,
+        None,
+        None,
+        None,
+        &chunks,
+        None,
+        &batches,
+        1,
+        "pass",
+        "smoke",
+        None,
+        false,
+    )
+    .await;
+    let caps: Vec<u32> = llm
+        .seen
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|r| r.max_tokens)
+        .collect();
+    caps
+}
+
+#[test]
+fn the_scan_cap_is_the_per_rule_budget_with_the_old_flat_cap_as_its_floor() {
+    use camerata_ui_core::scan::{SCAN_MAX_TOKENS_FLOOR, SCAN_OUTPUT_TOKENS_PER_RULE};
+    assert_eq!(scan_max_tokens(1), 8_192, "a small batch keeps today's cap");
+    assert_eq!(scan_max_tokens(12), SCAN_MAX_TOKENS_FLOOR);
+    assert_eq!(
+        scan_max_tokens(15),
+        15 * SCAN_OUTPUT_TOKENS_PER_RULE,
+        "a full 15-rule batch gets its measured budget"
+    );
+    assert!(
+        scan_max_tokens(15) >= 9_516,
+        "the measured useful output of a full batch fits"
+    );
+    assert_eq!(
+        scan_max_tokens(usize::MAX),
+        AGGREGATE_MAX_TOKENS_CEILING,
+        "an every-rule-in-one-prompt batch is bounded by the shared ceiling"
+    );
+    let mut last = 0;
+    for n in 0..200 {
+        let cap = scan_max_tokens(n);
+        assert!(cap >= last, "never smaller for more rules");
+        last = cap;
+    }
+}
+
+#[tokio::test]
+async fn a_full_rule_batch_is_sent_with_its_scaled_cap_and_a_small_one_with_the_floor() {
+    assert_eq!(scan_caps(15).await, vec![scan_max_tokens(15)]);
+    assert_eq!(scan_caps(2).await, vec![8_192]);
+}

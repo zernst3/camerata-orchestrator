@@ -2891,6 +2891,16 @@ pub(crate) fn scaled_max_tokens(n_items: usize, per_item_tokens: u32) -> u32 {
         .clamp(AGGREGATE_MAX_TOKENS_FLOOR, AGGREGATE_MAX_TOKENS_CEILING)
 }
 
+/// `max_tokens` for one scan request holding `n_rules` rules: the measured per-rule output budget
+/// ([`camerata_ui_core::scan::SCAN_OUTPUT_TOKENS_PER_RULE`], the figure the pre-flight estimate
+/// prices the scan's output from) through [`scaled_max_tokens`], never below the flat cap the scan
+/// used before it scaled ([`camerata_ui_core::scan::SCAN_MAX_TOKENS_FLOOR`]) and never above the
+/// shared ceiling. A smoke run showed 8 replies of a 15-rule batch cut off at the flat 8192.
+pub(crate) fn scan_max_tokens(n_rules: usize) -> u32 {
+    scaled_max_tokens(n_rules, camerata_ui_core::scan::SCAN_OUTPUT_TOKENS_PER_RULE)
+        .max(camerata_ui_core::scan::SCAN_MAX_TOKENS_FLOOR)
+}
+
 /// Per-finding token estimate for the CALIBRATION pass's response — each verdict is a
 /// compact JSON object (`{"index","severity","confidence","reason"}`) with a one-sentence
 /// `reason`, so a modest per-item budget covers it comfortably.
@@ -5441,13 +5451,15 @@ async fn audit_pass(
     feedback: Option<(&crate::transcript::TranscriptStore, &str)>,
     session: &str,
     meter: Option<&UsageMeter>,
+    // How many rules the prompt holds; the reply's output cap scales with it ([`scan_max_tokens`]).
+    n_rules: usize,
 ) -> anyhow::Result<(Vec<Finding>, Vec<ProposedRule>, Vec<String>)> {
     let mut req = LlmRequest::new(prompt)
         .with_system(crate::prompt_frame::with_untrusted_clause(
             audit_system_prompt_with(terse_output_of(meter)),
             nonce,
         ))
-        .with_max_tokens(8192)
+        .with_max_tokens(scan_max_tokens(n_rules))
         .with_temperature(AUDIT_TEMPERATURE);
     if let Some(m) = audit_model {
         req = req.with_model(m.to_string());
@@ -6153,6 +6165,7 @@ async fn run_passes(
                 feedback,
                 &session,
                 meter,
+                batch.len(),
             )
             .await;
             if let Some((store, key)) = feedback {
@@ -6373,7 +6386,7 @@ async fn run_passes_batch(
                     audit_system_prompt_with(terse_output_of(meter)),
                     nonce,
                 ))
-                .with_max_tokens(8192)
+                .with_max_tokens(scan_max_tokens(batch.len()))
                 .with_model(model.clone())
                 .with_cache_breakpoints(cache_bps)
                 .with_temperature(AUDIT_TEMPERATURE);

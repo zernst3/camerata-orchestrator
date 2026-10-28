@@ -91,6 +91,19 @@ const REGEN_SYSTEM_PROMPT_TOKENS: f64 = 450.0;
 /// are assumed, so the term errs high.
 pub const REGEN_SCAN_TOKENS_PER_FINDING: f64 = 300.0;
 
+/// The output budget of the scan stage per rule in a rule batch, in tokens. MEASURED, not
+/// guessed: a smoke run of the 152-rule library over a 36-file repository (every efficiency
+/// switch on, terse output) spent 190323 scan output tokens over 20 answered rule batches of at
+/// most 15 rules, which is 9516 per batch or 634 per rule (rounded up to 640), and 8 replies hit
+/// the flat 8192 cap. The server sizes each scan request's `max_tokens` from this
+/// (`camerata_server::ai_audit::scan_max_tokens`) and the estimator prices the scan's output from
+/// it, so the cap, the estimate and the measurement cannot drift apart.
+pub const SCAN_OUTPUT_TOKENS_PER_RULE: u32 = 640;
+
+/// The least a scan request is ever allowed to produce: the flat cap the scan used before it
+/// scaled with the rules in the batch. A batch of a few rules keeps exactly this.
+pub const SCAN_MAX_TOKENS_FLOOR: u32 = 8_192;
+
 /// The detail-regeneration stage's share of a pre-flight estimate (rank 4, `terse_output`).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RegenerationEstimate {
@@ -274,16 +287,25 @@ pub fn estimate_audit_cost(
     let scan_in_digest = cacheable_pass_tokens(chars_per_chunk, batches) * chunks as f64;
     let overhead_cost = OVERHEAD_CHARS_PER_PASS as f64 / CHARS_PER_TOKEN * passes as f64;
     let scan_in = scan_in_digest + overhead_cost;
-    let scan_out =
+    // The findings the scan reports: a baseline per pass plus a term that scales with the code.
+    // Calibration and the detail regeneration are sized from this volume.
+    let findings_out =
         OUT_TOKENS_PER_PASS * passes as f64 + OUTPUT_PER_CODE_TOKEN * code_tokens * batches as f64;
+    // What the scan stage itself writes: the measured per-rule budget, plus the code-density term
+    // (which carries the repository's size, so the rule term is NOT also multiplied by the chunk
+    // count: a rule reports what the code holds once, not once per chunk, and the measurement was
+    // taken on a one-chunk repository). This is what the server's `max_tokens` scales with, so a
+    // scan the estimate passes is a scan whose replies fit their cap.
+    let scan_out = f64::from(SCAN_OUTPUT_TOKENS_PER_RULE) * selected as f64
+        + OUTPUT_PER_CODE_TOKEN * code_tokens * batches as f64;
 
     // ── Calibration: ONE pass over all findings, priced at the CALIBRATION model. It
     // re-reads roughly the scan's output (the findings) and RE-EMITS each finding with a
     // corrected/verified body. So its output rides with the full findings volume, ~1× the
-    // scan's output. Thorough mode (#51) runs ~3× for multi-vote consensus.
+    // findings volume. Thorough mode (#51) runs ~3× for multi-vote consensus.
     let cal_passes = if thorough { 3.0 } else { 1.0 };
-    let cal_in = scan_out * cal_passes;
-    let cal_out = scan_out * cal_passes;
+    let cal_in = findings_out * cal_passes;
+    let cal_out = findings_out * cal_passes;
 
     // ── Deep tier: three EXTRA whole-repo prose passes at the AUDIT model. Each reads the
     // full code (no per-rule batching, no caching discount — distinct prompts per lens) and
@@ -316,7 +338,7 @@ pub fn estimate_audit_cost(
     // ── Detail regeneration (rank 4, `terse_output`): real time at the audit model, no batch
     // discount, sized from the scan's output (the findings it implies). Zero with the switch off.
     let regen = if terse_output {
-        regeneration_estimate(scan_out)
+        regeneration_estimate(findings_out)
     } else {
         RegenerationEstimate {
             findings: 0.0,
@@ -1967,5 +1989,47 @@ mod tests {
             regeneration_estimate(50_000.0).output_tokens
                 >= regeneration_estimate(2_600.0).output_tokens
         );
+    }
+
+    /// The scan stage's output budget per rule is measured, not guessed, and the estimator prices
+    /// the scan's output from it: each further rule in the same batch adds exactly that many
+    /// output tokens (only the audit model's output is priced here, per million tokens, so the
+    /// dollar figure is the token figure).
+    #[test]
+    fn the_scan_output_estimate_follows_the_per_rule_budget() {
+        let output_tokens = |rules: usize| {
+            let (_, dollars, _) = estimate_audit_cost(
+                0,
+                rules,
+                "parallel",
+                0.0,
+                1.0,
+                0.0,
+                0.0,
+                false,
+                false,
+                false,
+                ProjectBackend::Api,
+                0,
+                false,
+            );
+            dollars * 1_000_000.0
+        };
+        // Five and ten rules are both one rule batch, so the resolution term is the same.
+        let extra = output_tokens(10) - output_tokens(5);
+        assert!(
+            (extra - 5.0 * f64::from(SCAN_OUTPUT_TOKENS_PER_RULE)).abs() < 1e-6,
+            "five more rules priced at {extra} output tokens"
+        );
+    }
+
+    /// The budget covers what the smoke run measured: 190323 scan output tokens over 20 answered
+    /// rule batches of at most 15 rules is 9516 per batch, 634 per rule. A full batch must not be
+    /// capped below that, and the cap must never be lower than the flat 8192 it replaces.
+    #[test]
+    fn the_per_rule_scan_budget_covers_the_measured_batch() {
+        assert!(SCAN_OUTPUT_TOKENS_PER_RULE >= 634);
+        assert!(SCAN_OUTPUT_TOKENS_PER_RULE * 15 >= 9_516);
+        assert_eq!(SCAN_MAX_TOKENS_FLOOR, 8_192);
     }
 }

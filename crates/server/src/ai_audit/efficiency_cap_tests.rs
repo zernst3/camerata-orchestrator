@@ -232,6 +232,7 @@ async fn truncated_pass_calls(efficiency: EfficiencyConfig) -> usize {
         None,
         "s",
         Some(&meter),
+        1,
     )
     .await;
     llm.calls()
