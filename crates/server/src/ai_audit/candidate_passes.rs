@@ -178,6 +178,7 @@ pub(super) async fn plan_pass_sets(
     repo: &str,
     prefilter: bool,
     env: CandidateEnv,
+    nonce: &crate::prompt_frame::FrameNonce,
     meter: Option<&UsageMeter>,
 ) -> Vec<Vec<PassSet>> {
     let locators: HashMap<&str, CandidateLocator> = if prefilter {
@@ -199,7 +200,7 @@ pub(super) async fn plan_pass_sets(
             out.push(vec![whole_unit_set(unit, repo, chunk_count)]);
             continue;
         }
-        out.push(plan_unit(unit, &locators, repo, env, meter).await);
+        out.push(plan_unit(unit, &locators, repo, env, nonce, meter).await);
     }
     out
 }
@@ -210,6 +211,7 @@ async fn plan_unit(
     locators: &HashMap<&str, CandidateLocator>,
     repo: &str,
     env: CandidateEnv,
+    nonce: &crate::prompt_frame::FrameNonce,
     meter: Option<&UsageMeter>,
 ) -> Vec<PassSet> {
     let chunks = chunk_files(&unit.files, super::CHUNK_DIGEST_CHARS);
@@ -221,15 +223,16 @@ async fn plan_unit(
     // Each chunk's whole-file digest, built ONCE: its length is the baseline the saving is
     // measured against, and the whole-file sets reuse the text instead of building it again in
     // `run_passes`.
-    let whole_digests: Vec<String> = chunks.iter().map(|c| build_digest(c)).collect();
+    let whole_digests: Vec<String> = chunks.iter().map(|c| build_digest(c, nonce)).collect();
     let whole_bytes: Vec<usize> = whole_digests.iter().map(String::len).collect();
 
     // Every (chunk, locator) evaluation runs at once, each on a blocking thread under the time
     // limit.
     let jobs = chunks.iter().enumerate().flat_map(|(ci, chunk)| {
         let whole = whole_bytes[ci];
-        used.iter()
-            .map(move |&l| async move { ((ci, l), evaluate(l, chunk, whole, env).await) })
+        used.iter().map(move |&l| async move {
+            ((ci, l), evaluate(l, chunk, whole, env, nonce).await)
+        })
     });
     let verdicts: BTreeMap<(usize, CandidateLocator), ChunkVerdict> =
         futures::future::join_all(jobs).await.into_iter().collect();
@@ -366,6 +369,7 @@ async fn evaluate(
     chunk: &[(String, String)],
     whole_bytes: usize,
     env: CandidateEnv,
+    nonce: &crate::prompt_frame::FrameNonce,
 ) -> ChunkVerdict {
     let input_bytes: usize = chunk.iter().map(|(_, content)| content.len()).sum();
     if input_bytes > env.max_input_bytes {
@@ -378,6 +382,7 @@ async fn evaluate(
     let locate = env.locate;
     let cancel = Arc::new(AtomicBool::new(false));
     let worker_cancel = Arc::clone(&cancel);
+    let nonce = nonce.clone();
     let task = tokio::task::spawn_blocking(move || {
         let mut found = Vec::with_capacity(owned.len());
         for (path, content) in &owned {
@@ -386,7 +391,7 @@ async fn evaluate(
             }
             found.push(locate(locator, path, content, &worker_cancel)?);
         }
-        Ok(decide(locator, &owned, &found, whole_bytes))
+        Ok(decide(locator, &owned, &found, whole_bytes, &nonce))
     });
     match tokio::time::timeout(env.timeout, task).await {
         Ok(Ok(Ok(verdict))) => verdict,
@@ -408,6 +413,7 @@ fn decide(
     files: &[(String, String)],
     found: &[FileCandidates],
     whole_bytes: usize,
+    nonce: &crate::prompt_frame::FrameNonce,
 ) -> ChunkVerdict {
     let any_content = found.iter().any(|f| match f {
         FileCandidates::Sites(s) => !s.is_empty(),
@@ -416,7 +422,7 @@ fn decide(
     if !any_content {
         return ChunkVerdict::NoSites;
     }
-    let digest = candidate_digest(locator, files, found);
+    let digest = candidate_digest(locator, files, found, nonce);
     let (num, den) = MAX_CANDIDATE_SHARE;
     if digest.len() * den > whole_bytes * num {
         return ChunkVerdict::NotNarrowed;
@@ -426,11 +432,13 @@ fn decide(
 
 /// The per-rule candidate section that replaces a chunk's digest: every site with
 /// [`CANDIDATE_CONTEXT_LINES`] lines of context, numbered with the file's real line numbers, and
-/// every file the locator does not read in full. Files with no site are omitted.
+/// every file the locator does not read in full. Files with no site are omitted. Each file's
+/// text sits in its own frame under the run's `nonce`, like a whole-file digest.
 pub(super) fn candidate_digest(
     locator: CandidateLocator,
     files: &[(String, String)],
     found: &[FileCandidates],
+    nonce: &crate::prompt_frame::FrameNonce,
 ) -> String {
     let mut out = format!(
         "// ===== CANDIDATE SITES (locator: {}) =====\n\
@@ -438,20 +446,22 @@ pub(super) fn candidate_digest(
          deterministic locator selected every statement in these files that can be the rules' \
          subject; each is shown with up to {CANDIDATE_CONTEXT_LINES} lines of context and the \
          file's real line numbers. Lines not shown hold no candidate site, and a file not listed \
-         holds none. A file marked (whole) is one the locator does not read, so it is shown in \
-         full.\n\n",
+         holds none. A file the locator does not read is shown in full.\n\n",
         locator.name()
     );
     for ((path, content), found) in files.iter().zip(found) {
         match found {
             FileCandidates::NotRead => {
-                out.push_str(&format!("// ===== FILE: {path} (whole) =====\n"));
-                out.push_str(&number_lines_from(content.lines(), 1));
+                out.push_str(&crate::prompt_frame::frame_untrusted(
+                    nonce,
+                    path,
+                    &number_lines_from(content.lines(), 1),
+                ));
                 out.push('\n');
             }
             FileCandidates::Sites(sites) if !sites.is_empty() => {
                 let lines: Vec<&str> = content.lines().collect();
-                out.push_str(&format!("// ===== FILE: {path} (excerpts) =====\n"));
+                let mut body = String::new();
                 let ranges = merged_ranges(
                     sites.iter().map(|s| (s.start_line, s.end_line)),
                     lines.len(),
@@ -459,25 +469,26 @@ pub(super) fn candidate_digest(
                 let mut shown_to = 0usize;
                 for (start, end) in ranges {
                     if start > shown_to + 1 {
-                        out.push_str(&format!(
+                        body.push_str(&format!(
                             "     ... (lines {}-{} not shown)\n",
                             shown_to + 1,
                             start - 1
                         ));
                     }
-                    out.push_str(&number_lines_from(
+                    body.push_str(&number_lines_from(
                         lines[start - 1..end].iter().copied(),
                         start,
                     ));
                     shown_to = end;
                 }
                 if shown_to < lines.len() {
-                    out.push_str(&format!(
+                    body.push_str(&format!(
                         "     ... (lines {}-{} not shown)\n",
                         shown_to + 1,
                         lines.len()
                     ));
                 }
+                out.push_str(&crate::prompt_frame::frame_untrusted(nonce, path, &body));
                 out.push('\n');
             }
             FileCandidates::Sites(_) => {}
@@ -555,15 +566,24 @@ mod unit_tests {
             FileCandidates::Sites(Vec::new()),
             FileCandidates::NotRead,
         ];
-        let d = candidate_digest(CandidateLocator::SqlRoutines, &files, &found);
+        let nonce = crate::prompt_frame::FrameNonce::fixed("tok");
+        let d = candidate_digest(CandidateLocator::SqlRoutines, &files, &found, &nonce);
         assert!(d.starts_with("// ===== CANDIDATE SITES (locator: sql_routines) ====="));
-        assert!(d.contains("// ===== FILE: m.sql (excerpts) =====\n     ... (lines 1-11 not shown)\n  12| line 12\n"));
-        assert!(d.contains("  29| line 29\n     ... (lines 30-40 not shown)\n"));
+        assert!(d.contains(
+            "<<<UNTRUSTED tok \"m.sql\">>>\n     ... (lines 1-11 not shown)\n  12| line 12\n"
+        ));
+        assert!(d.contains(
+            "  29| line 29\n     ... (lines 30-40 not shown)\n<<<END UNTRUSTED tok>>>\n"
+        ));
         assert!(!d.contains("line 11\n") && !d.contains("line 30\n"));
         assert!(!d.contains("none.sql"), "a file with no site is not listed");
         assert!(d.contains(
-            "// ===== FILE: supabase/config.toml (whole) =====\n   1| [api]\n   2| schemas"
+            "<<<UNTRUSTED tok \"supabase/config.toml\">>>\n   1| [api]\n   2| schemas"
         ));
+        assert!(
+            !d.contains("// ===== FILE:"),
+            "no forgeable file header is left"
+        );
         assert!(!d.contains('\u{2014}'), "no em-dashes in prompt text");
     }
 }

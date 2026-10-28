@@ -1070,11 +1070,15 @@ mod tests {
         assert!(!extracted.truncated);
 
         // The digest input is byte-for-byte the digest of the audited files alone.
-        let expected = crate::ai_audit::build_digest(&[(
-            "src/a.ts".to_string(),
-            "export const a = 1;\n".to_string(),
-        )]);
-        assert_eq!(crate::ai_audit::build_digest(&extracted.files), expected);
+        let nonce = crate::prompt_frame::FrameNonce::generate();
+        let expected = crate::ai_audit::build_digest(
+            &[("src/a.ts".to_string(), "export const a = 1;\n".to_string())],
+            &nonce,
+        );
+        assert_eq!(
+            crate::ai_audit::build_digest(&extracted.files, &nonce),
+            expected
+        );
 
         // The secrets floor reads only the audited files, so the literal in the README is not a
         // finding, and nothing about the floor's input changed.
@@ -1235,17 +1239,24 @@ mod tests {
             ["src/__generated__/ops.ts", "src/routeTree.gen.ts"],
             "generated code is kept as reference; vendored, built and minified code is not"
         );
-        let expected = crate::ai_audit::build_digest(&[
-            (
-                "src/main.tsx".to_string(),
-                "import { routeTree } from './routeTree.gen';\n".to_string(),
-            ),
-            (
-                "src/routes/about.tsx".to_string(),
-                "export const Route = 1;\n".to_string(),
-            ),
-        ]);
-        assert_eq!(crate::ai_audit::build_digest(&extracted.files), expected);
+        let nonce = crate::prompt_frame::FrameNonce::generate();
+        let expected = crate::ai_audit::build_digest(
+            &[
+                (
+                    "src/main.tsx".to_string(),
+                    "import { routeTree } from './routeTree.gen';\n".to_string(),
+                ),
+                (
+                    "src/routes/about.tsx".to_string(),
+                    "export const Route = 1;\n".to_string(),
+                ),
+            ],
+            &nonce,
+        );
+        assert_eq!(
+            crate::ai_audit::build_digest(&extracted.files, &nonce),
+            expected
+        );
     }
 
     /// A tree with enough files and directories, created in reverse order, that a scanner

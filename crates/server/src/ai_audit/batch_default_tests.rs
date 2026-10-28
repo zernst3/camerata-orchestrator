@@ -278,6 +278,7 @@ async fn run(api: &FakeBatch, meter: &UsageMeter) -> (Vec<Finding>, usize, Vec<P
         api,
         REPO,
         REPO_MAP,
+        &crate::prompt_frame::FrameNonce::fixed("0123456789abcdef0123456789abcdef"),
         &adopted,
         None,
         None,
@@ -651,6 +652,7 @@ async fn a_failed_real_time_pass_is_disclosed_too() {
         &llm,
         REPO,
         REPO_MAP,
+        &crate::prompt_frame::FrameNonce::fixed("0123456789abcdef0123456789abcdef"),
         &HashSet::new(),
         None,
         None,
@@ -761,6 +763,7 @@ async fn a_failed_submit_is_the_only_failure_that_may_be_resubmitted() {
         &api,
         REPO,
         REPO_MAP,
+        &crate::prompt_frame::FrameNonce::fixed("0123456789abcdef0123456789abcdef"),
         &HashSet::new(),
         None,
         None,
@@ -834,7 +837,10 @@ async fn batch_items_carry_the_terse_system_prompt_and_the_token_count_uses_the_
         let m = meter(config, None);
         let (_findings, ok, failures) = run(&api, &m).await;
         assert_eq!(ok, 4, "{failures:?}");
-        let expected = Some(audit_system_prompt_with(terse));
+        let expected = Some(crate::prompt_frame::with_untrusted_clause(
+            audit_system_prompt_with(terse),
+            &crate::prompt_frame::FrameNonce::fixed("0123456789abcdef0123456789abcdef"),
+        ));
         let (items, counted) = systems_sent(&api);
         assert_eq!(items.len(), 4, "all four items were submitted");
         assert!(

@@ -75,6 +75,27 @@ fn rules() -> Vec<AuditRule> {
     ]
 }
 
+/// Does the request's system prompt start with `base`? Every pass appends the untrusted-content
+/// clause (which names the run's random delimiter token) after its own prompt.
+fn is_system(r: &LlmRequest, base: &str) -> bool {
+    r.system.as_deref().is_some_and(|s| s.starts_with(base))
+}
+
+/// The request's prompt with the run's delimiter token replaced by a constant, so two runs that
+/// drew different tokens can be compared byte for byte.
+fn without_token(r: &LlmRequest) -> String {
+    let system = r.system.clone().unwrap_or_default();
+    let token: String = system
+        .split_once("delimiter token is ")
+        .map(|(_, rest)| rest.chars().take_while(char::is_ascii_hexdigit).collect())
+        .unwrap_or_default();
+    if token.is_empty() {
+        r.prompt.clone()
+    } else {
+        r.prompt.replace(&token, "TOKEN")
+    }
+}
+
 async fn audit(files: &[(String, String)], rules: &[AuditRule]) -> Vec<LlmRequest> {
     let llm = Recorder::default();
     audit_repo(
@@ -103,11 +124,11 @@ async fn the_scan_and_calibration_passes_ask_for_temperature_zero() {
     let seen = audit(&files(), &rules()).await;
     let scan: Vec<&LlmRequest> = seen
         .iter()
-        .filter(|r| r.system.as_deref() == Some(audit_system_prompt().as_str()))
+        .filter(|r| is_system(r, &audit_system_prompt()))
         .collect();
     let calibration: Vec<&LlmRequest> = seen
         .iter()
-        .filter(|r| r.system.as_deref() == Some(verify_system_prompt().as_str()))
+        .filter(|r| is_system(r, &verify_system_prompt()))
         .collect();
     assert!(
         !scan.is_empty() && !calibration.is_empty(),
@@ -129,8 +150,8 @@ async fn the_same_files_and_rules_in_another_order_produce_the_same_prompts() {
     let prompts = |seen: Vec<LlmRequest>| {
         let mut p: Vec<String> = seen
             .into_iter()
-            .filter(|r| r.system.as_deref() == Some(audit_system_prompt().as_str()))
-            .map(|r| r.prompt)
+            .filter(|r| is_system(r, &audit_system_prompt()))
+            .map(|r| without_token(&r))
             .collect();
         // Parallel passes may finish in any order; what is sent must not depend on input order.
         p.sort();

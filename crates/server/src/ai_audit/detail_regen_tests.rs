@@ -91,18 +91,23 @@ enum Regen {
     TruncatedOnce,
 }
 
-/// The findings a regeneration prompt asks about: `(id, path, line)` from each block header.
+/// The findings a regeneration prompt asks about: `(id, path, line)` from each block header and
+/// the `Location:` line that opens the block's frame.
 fn asked(prompt: &str) -> Vec<(String, String, u64)> {
-    prompt
-        .lines()
-        .filter(|l| l.starts_with('[') && l.contains("] rule "))
-        .filter_map(|l| {
-            let id = l[1..l.find(']')?].to_string();
-            let place = l.rsplit(" \u{2014} ").next()?;
-            let (path, line) = place.rsplit_once(':')?;
-            Some((id, path.to_string(), line.parse().ok()?))
-        })
-        .collect()
+    let mut out = Vec::new();
+    let mut id: Option<String> = None;
+    for l in prompt.lines() {
+        if l.starts_with('[') && l.contains("] rule ") {
+            id = l.find(']').map(|end| l[1..end].to_string());
+        } else if let Some(place) = l.strip_prefix("Location: ") {
+            if let (Some(found), Some((path, line))) = (id.take(), place.rsplit_once(':')) {
+                if let Ok(line) = line.parse() {
+                    out.push((found, path.to_string(), line));
+                }
+            }
+        }
+    }
+    out
 }
 
 /// The text a well-behaved model writes for the finding at `line`: [`FULL`] plus its own line,
@@ -237,6 +242,20 @@ fn terse_scan(n_findings: usize) -> String {
     )
 }
 
+/// The delimiter token of the runs these tests drive directly.
+fn nonce() -> crate::prompt_frame::FrameNonce {
+    crate::prompt_frame::FrameNonce::fixed("0123456789abcdef0123456789abcdef")
+}
+
+/// A system prompt as the stage built it, without the untrusted-content clause `audit_repo`
+/// appends (its token is drawn inside the run, so a test cannot name it).
+fn without_clause(system: &str) -> &str {
+    system
+        .split("\n\nUNTRUSTED CONTENT.")
+        .next()
+        .expect("split yields at least one part")
+}
+
 fn files() -> Vec<(String, String)> {
     let mut handler = String::new();
     // Enough lines apart that distinct findings never share a code location.
@@ -358,7 +377,8 @@ async fn switch_off_sends_the_old_system_prompt_and_makes_no_regeneration_call()
         "no regeneration step"
     );
     for system in llm.systems(Role::Scan) {
-        assert_eq!(system, audit_system_prompt());
+        assert_eq!(without_clause(&system), audit_system_prompt());
+        assert!(system.contains("UNTRUSTED CONTENT."));
     }
     for prompt in llm.prompts(Role::Scan) {
         assert!(!prompt.contains("In THIS pass only"), "{prompt}");
@@ -420,6 +440,7 @@ async fn every_pass_of_a_terse_scan_shares_one_system_prompt() {
         &llm,
         REPO,
         "REPO MAP",
+        &crate::prompt_frame::FrameNonce::generate(),
         &std::collections::HashSet::new(),
         None,
         None,
@@ -438,7 +459,13 @@ async fn every_pass_of_a_terse_scan_shares_one_system_prompt() {
     assert_eq!(ok, 3);
     let systems = llm.systems(Role::Scan);
     assert_eq!(systems.len(), 3);
-    assert!(systems.iter().all(|s| *s == audit_system_prompt_with(true)));
+    assert!(systems
+        .iter()
+        .all(|s| without_clause(s) == audit_system_prompt_with(true)));
+    assert!(
+        systems.iter().all(|s| *s == systems[0]),
+        "one system prompt, clause and token included, for every pass"
+    );
     let with_rules_instruction = llm
         .prompts(Role::Scan)
         .iter()
@@ -774,6 +801,7 @@ async fn a_billed_refusal_in_regeneration_counts_toward_the_cap_and_is_named_in_
         vec![finding(&format!("{TITLE}{HEADLINE_SEP}{SHORT}"))],
         &files(),
         &selected(),
+        &crate::prompt_frame::FrameNonce::generate(),
         None,
         Some(&meter),
     )
@@ -810,7 +838,8 @@ async fn regeneration_alone_keeps_the_headline_and_replaces_only_the_explanation
         finding(""),
     ];
     let (out, failed) =
-        regenerate_full_details(&llm, REPO, input, &files(), &selected(), None, None).await;
+        regenerate_full_details(&llm, REPO, input, &files(), &selected(), &nonce(), None, None)
+            .await;
     assert!(failed.is_empty());
     assert_eq!(
         out[0].detail,
@@ -881,6 +910,7 @@ async fn the_deep_security_lens_asks_for_a_short_detail_and_regenerates_its_surv
         REPO,
         &files,
         "REPO MAP",
+        &nonce(),
         None,
         ScanMode::Sequential,
         None,
@@ -890,7 +920,10 @@ async fn the_deep_security_lens_asks_for_a_short_detail_and_regenerates_its_surv
 
     assert_eq!(
         llm.systems(Role::Scan),
-        vec![deep_security_system_prompt_with(true)]
+        vec![crate::prompt_frame::with_untrusted_clause(
+            deep_security_system_prompt_with(true),
+            &nonce()
+        )]
     );
     assert_eq!(llm.prompts(Role::Regen).len(), 1);
     assert_eq!(result.security_findings.len(), 1);
@@ -909,6 +942,7 @@ async fn a_deep_security_regeneration_failure_marks_the_finding_and_reports_on_t
         REPO,
         &files,
         "REPO MAP",
+        &nonce(),
         None,
         ScanMode::Sequential,
         None,
@@ -936,6 +970,7 @@ async fn the_deep_security_lens_with_the_switch_off_is_unchanged() {
         REPO,
         &files,
         "REPO MAP",
+        &nonce(),
         None,
         ScanMode::Sequential,
         None,
@@ -943,7 +978,13 @@ async fn the_deep_security_lens_with_the_switch_off_is_unchanged() {
     )
     .await;
 
-    assert_eq!(llm.systems(Role::Scan), vec![deep_security_system_prompt()]);
+    assert_eq!(
+        llm.systems(Role::Scan),
+        vec![crate::prompt_frame::with_untrusted_clause(
+            deep_security_system_prompt(),
+            &nonce()
+        )]
+    );
     assert!(llm.prompts(Role::Regen).is_empty());
     assert!(result.security_findings[0].detail.contains(SHORT));
 }
@@ -1174,7 +1215,8 @@ fn build_block_for_test(f: &Finding, files: &[(String, String)]) -> String {
         .build()
         .unwrap();
     runtime.block_on(async {
-        let _ = regenerate_full_details(&llm, REPO, vec![f.clone()], files, &[], None, None).await;
+        let _ = regenerate_full_details(&llm, REPO, vec![f.clone()], files, &[], &nonce(), None, None)
+                .await;
     });
     llm.prompts(Role::Regen).remove(0)
 }
@@ -1234,7 +1276,7 @@ async fn the_repeat_round_uses_half_the_batch_size() {
         .collect();
     let llm = RoleLlm::new("{}", Regen::Garbage);
     let (out, failed) =
-        regenerate_full_details(&llm, REPO, findings, &files(), &[], None, None).await;
+        regenerate_full_details(&llm, REPO, findings, &files(), &[], &nonce(), None, None).await;
     let sizes: Vec<usize> = llm
         .prompts(Role::Regen)
         .iter()
@@ -1299,7 +1341,13 @@ async fn without_a_meter_the_scan_runs_exactly_as_before_rank_4() {
     .await
     .unwrap();
     assert_eq!(llm.roles(), vec![Role::Scan, Role::Calibrate]);
-    assert_eq!(llm.systems(Role::Scan), vec![audit_system_prompt()]);
+    assert_eq!(
+        llm.systems(Role::Scan)
+            .iter()
+            .map(|s| without_clause(s).to_string())
+            .collect::<Vec<_>>(),
+        vec![audit_system_prompt()]
+    );
     assert!(!llm.prompts(Role::Scan)[0].contains("In THIS pass only"));
     assert!(findings[0].detail.contains(FULL));
     assert!(failed.iter().all(|f| f.pass != STAGE_DETAIL));

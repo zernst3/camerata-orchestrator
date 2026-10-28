@@ -1883,9 +1883,14 @@ god objects, etc.
 call so the whole repo is covered regardless of size. A file larger than the
 budget becomes its own chunk.
 
-**Digest format:** each chunk is rendered via `build_digest`, which emits
-`// ===== FILE: <path> =====` headers with every line numbered as `NNNN| line`
-so the model can cite accurate line numbers.
+**Digest format:** each chunk is rendered via `build_digest`, which numbers every
+line as `NNNN| line` so the model can cite accurate line numbers and wraps each file
+in `<<<UNTRUSTED <token> "<path>">>>` and `<<<END UNTRUSTED <token>>>` lines
+(`prompt_frame::frame_untrusted`). The token is 128 bits from the operating system's
+random source, drawn once per run and named in that run's system prompt, so a file
+cannot print a line that passes for the end of its own frame or the start of another
+file. The repo map and the quoted evidence sent to calibration and fix generation are
+framed the same way.
 
 **Repo map:** every chunk also receives the whole-repo symbol map from
 `build_repo_map` (every file path + its public symbols, from a cheap line scan).

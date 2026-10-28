@@ -19,6 +19,16 @@ const REPO: &str = "acme/notes";
 const MIGRATION: &str = "supabase/migrations/20240101_init.sql";
 const CONFIG: &str = "supabase/config.toml";
 
+/// The delimiter token of the one run every test here drives.
+fn run_nonce() -> crate::prompt_frame::FrameNonce {
+    crate::prompt_frame::FrameNonce::fixed("0123456789abcdef0123456789abcdef")
+}
+
+/// The opening line of `path`'s frame in a prompt built under [`run_nonce`].
+fn opening(path: &str) -> String {
+    format!("<<<UNTRUSTED {} \"{path}\">>>\n", run_nonce())
+}
+
 /// A migration of 120 tables with ONE security-definer function in the middle (lines 241-244),
 /// so a candidate digest is a small share of the whole one.
 fn migration(with_function: bool) -> String {
@@ -88,7 +98,7 @@ async fn run_with(
         consensus: false,
     });
     let plan = plan_routes(rules, files, true);
-    let repo_map = build_repo_map(files);
+    let repo_map = build_repo_map(files, &run_nonce());
     let adopted = rules.iter().map(|r| r.id.to_ascii_uppercase()).collect();
     let mut skipped = Vec::new();
     let (_f, _p, _r, _ok, err) = run_routed_passes(
@@ -98,6 +108,7 @@ async fn run_with(
         rules,
         &plan,
         &repo_map,
+        &run_nonce(),
         &adopted,
         None,
         None,
@@ -169,7 +180,7 @@ async fn a_candidate_prompt_carries_only_the_sites_with_context_and_the_unread_f
     assert_eq!(fn_prompts.len(), 1, "one chunk, one candidate pass");
     let p = fn_prompts[0];
     assert!(p.contains("// ===== CANDIDATE SITES (locator: sql_routines) ====="));
-    assert!(p.contains(&format!("// ===== FILE: {MIGRATION} (excerpts) =====")));
+    assert!(p.contains(&opening(MIGRATION)));
     // The function (lines 241-244) with 8 lines of context on each side, real line numbers.
     assert!(p.contains(" 243| security definer\n"), "{p}");
     assert!(p.contains(" 233| ") && p.contains(" 252| "));
@@ -180,11 +191,9 @@ async fn a_candidate_prompt_carries_only_the_sites_with_context_and_the_unread_f
         "unrelated statements are not sent"
     );
     // The config file is not SQL: the locator does not read it, so it is shown whole.
-    assert!(p.contains(&format!(
-        "// ===== FILE: {CONFIG} (whole) =====\n   1| [api]\n"
-    )));
+    assert!(p.contains(&format!("{}   1| [api]\n", opening(CONFIG))));
     // The repo map still leads the prompt.
-    assert!(p.contains(&build_repo_map(&supabase_files(true))));
+    assert!(p.contains(&build_repo_map(&supabase_files(true), &run_nonce())));
     // No advisory on excerpts, and no other rule rides along.
     assert!(p.contains("against ONLY the ADOPTED rules"), "{p}");
     assert!(!p.contains("- [ARCH-1] "));
@@ -192,7 +201,7 @@ async fn a_candidate_prompt_carries_only_the_sites_with_context_and_the_unread_f
     // The whole-file prompt (ARCH-1, with the advisory pass) no longer carries the rule.
     let arch = carrying(&prompts, "ARCH-1");
     assert_eq!(arch.len(), 1);
-    assert!(arch[0].contains(&format!("// ===== FILE: {MIGRATION} =====")));
+    assert!(arch[0].contains(&opening(MIGRATION)));
     assert!(arch[0].contains("ALSO flag any other genuine issues"));
 
     let t = m.stage_telemetry(0).candidates.expect("recorded");
@@ -224,7 +233,7 @@ async fn a_failing_locator_falls_back_to_the_whole_file_prompt_and_is_recorded()
     );
     assert!(failed.iter().all(|p| !p.contains("CANDIDATE SITES")));
     assert!(
-        carrying(&failed, "SUPA-FN-1")[0].contains(&format!("// ===== FILE: {MIGRATION} ====="))
+        carrying(&failed, "SUPA-FN-1")[0].contains(&opening(MIGRATION))
     );
 
     let t = m.stage_telemetry(0).candidates.expect("recorded");
@@ -280,7 +289,7 @@ async fn an_unparseable_sql_file_falls_back_to_the_whole_file_prompt_never_zero_
         1,
         "the rule is still sent, with whole files"
     );
-    assert!(fn_prompts[0].contains("// ===== FILE: supabase/migrations/20240102_fn.sql ====="));
+    assert!(fn_prompts[0].contains(&opening("supabase/migrations/20240102_fn.sql")));
 
     let t = m.stage_telemetry(0).candidates.expect("recorded");
     assert_eq!(t.rules["SUPA-FN-1"].chunks_without_sites, 0);
@@ -331,8 +340,8 @@ async fn a_chunk_the_locator_read_with_no_site_sends_the_rule_nothing() {
     let (prompts, _) = run(&rules, &supabase_files(false), true).await;
     let fn_prompts = carrying(&prompts, "SUPA-FN-1");
     assert_eq!(fn_prompts.len(), 1);
-    assert!(fn_prompts[0].contains(&format!("// ===== FILE: {CONFIG} (whole) =====")));
-    assert!(!fn_prompts[0].contains("(excerpts)"));
+    assert!(fn_prompts[0].contains(&opening(CONFIG)));
+    assert!(fn_prompts[0].contains("CANDIDATE SITES"));
 }
 
 #[tokio::test]
@@ -346,7 +355,7 @@ async fn the_advisory_pass_keeps_whole_files_when_every_rule_of_a_chunk_is_narro
         .filter(|p| p.contains("ALSO flag any other genuine issues"))
         .collect();
     assert_eq!(advisory.len(), 1);
-    assert!(advisory[0].contains(&format!("// ===== FILE: {MIGRATION} =====")));
+    assert!(advisory[0].contains(&opening(MIGRATION)));
     assert!(!advisory[0].contains("- [SUPA-FN-1] "));
     assert!(!advisory[0].contains("CANDIDATE SITES"));
     assert_eq!(carrying(&prompts, "SUPA-FN-1").len(), 1);
@@ -490,7 +499,7 @@ async fn a_fallback_still_sends_whole_files_when_no_meter_is_attached() {
     let files = supabase_files(true);
     let rec = Recorder::default();
     let plan = plan_routes(&rules, &files, true);
-    let repo_map = build_repo_map(&files);
+    let repo_map = build_repo_map(&files, &run_nonce());
     let adopted = rules.iter().map(|r| r.id.to_ascii_uppercase()).collect();
     let mut skipped = Vec::new();
     let (_f, _p, _r, ok, failures) = run_routed_passes(
@@ -500,6 +509,7 @@ async fn a_fallback_still_sends_whole_files_when_no_meter_is_attached() {
         &rules,
         &plan,
         &repo_map,
+        &run_nonce(),
         &adopted,
         None,
         None,
@@ -553,7 +563,7 @@ async fn a_rule_narrowed_in_one_chunk_and_kept_whole_in_another_sees_each_chunk_
     let (prompts, m) = run(&rules, &files, true).await;
     let (off, _) = run(&rules, &files, false).await;
 
-    let header = |path: &str| format!("// ===== FILE: {path} =====");
+    let header = |path: &str| opening(path);
     let fn_prompts = carrying(&prompts, "SUPA-FN-1");
     assert_eq!(
         fn_prompts.len(),
@@ -571,11 +581,11 @@ async fn a_rule_narrowed_in_one_chunk_and_kept_whole_in_another_sees_each_chunk_
     assert_eq!((candidate.len(), whole.len()), (1, 1), "{fn_prompts:#?}");
 
     // Chunk 1: excerpts of the tables file only.
-    assert!(candidate[0].contains(&format!("// ===== FILE: {CHUNK_A} (excerpts) =====")));
-    assert!(!candidate[0].contains(&format!("// ===== FILE: {CHUNK_B}")));
+    assert!(candidate[0].contains(&opening(CHUNK_A)));
+    assert!(!candidate[0].contains(&opening(CHUNK_B)));
     // Chunk 2: the functions file whole, exactly the prompt the switch-off scan sends for it.
     assert!(whole[0].contains(&header(CHUNK_B)));
-    assert!(!whole[0].contains(&format!("// ===== FILE: {CHUNK_A}")));
+    assert!(!whole[0].contains(&opening(CHUNK_A)));
     // It is the switch-off prompt for that chunk, down to the byte, except for the pass label's
     // position counter (this pass covers one chunk, the switch-off scan's covers chunk 2 of 2).
     assert!(
@@ -693,7 +703,7 @@ async fn run_batch(
         consensus: false,
     });
     let plan = plan_routes(rules, files, true);
-    let repo_map = build_repo_map(files);
+    let repo_map = build_repo_map(files, &run_nonce());
     let adopted = rules.iter().map(|r| r.id.to_ascii_uppercase()).collect();
     let mut skipped = Vec::new();
     let (_f, _p, _r, _ok, failures) = run_routed_passes_batch(
@@ -703,6 +713,7 @@ async fn run_batch(
         rules,
         &plan,
         &repo_map,
+        &run_nonce(),
         &adopted,
         None,
         None,
