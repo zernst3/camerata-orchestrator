@@ -89,6 +89,10 @@ H. By 08:30: morning summary at the top of `docs/OVERNIGHT_DECISIONS.md`; the PR
 
 ## Status log (newest first)
 
+- 00:35: console gaps merged in its worktree with all 5 review fixes (4,980 tests); one shared
+  branch validator, containment check before any worktree delete, project-membership refusal.
+  Sent back for two leftovers (membership on Intake/multi-repo setup; show rejected branch errors
+  in the UI). Decision: Ship pushes the recorded branch (the one holding the commits).
 - 00:25 (04:23 UTC): GitHub CI GREEN on the working branch for the first time (run 40629518781,
   "Camerata governs its own code" success). Disk 49 GB: all four active builders (W27, console,
   integration, hygiene) hold 60 to 75 GB build folders each; no idle folder left to clear;
