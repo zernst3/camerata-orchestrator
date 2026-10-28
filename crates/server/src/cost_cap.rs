@@ -56,7 +56,7 @@ use crate::efficiency::EfficiencyConfig;
 /// on and how much it may spend. Built once per run, carried on the run's
 /// [`crate::ai_audit::UsageMeter`] (which every model-calling stage already receives), so no
 /// stage signature grows.
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct RunControls {
     pub efficiency: EfficiencyConfig,
     /// `--max-cost-usd`. `None` = no cap.
@@ -65,6 +65,10 @@ pub struct RunControls {
     /// decide whether a non-cancellable batch may be submitted (a real-time run is capped on
     /// actual spend alone).
     pub estimate_hint_usd: Option<f64>,
+    /// The fix stage's explicit model (the project's fix step model, or
+    /// `camerata inspect --fix-model`). `None` or blank = not set: the fix stage then follows the
+    /// `fix_on_haiku` measure. See [`crate::ai_audit::resolve_fix_model`].
+    pub fix_model: Option<String>,
 }
 
 impl RunControls {
@@ -88,6 +92,22 @@ impl RunControls {
             ))
         }
     }
+
+    /// The model this run's fix stage calls, given the run's scan and calibration picks:
+    /// [`crate::ai_audit::resolve_fix_model`] over this run's explicit fix model and its
+    /// `fix_on_haiku` switch.
+    pub fn fix_model_for<'a>(
+        &'a self,
+        model: Option<&'a str>,
+        calibration_model: Option<&'a str>,
+    ) -> Option<&'a str> {
+        crate::ai_audit::resolve_fix_model(
+            self.fix_model.as_deref(),
+            self.efficiency.fix_on_haiku,
+            model,
+            calibration_model,
+        )
+    }
 }
 
 /// Every model a run will call, with the role it plays, resolved exactly as the stages resolve
@@ -99,6 +119,7 @@ pub fn models_the_run_will_use(
     calibration_model: Option<&str>,
     deep: bool,
     selected_rule_ids: &[&str],
+    controls: &RunControls,
 ) -> Vec<(String, String)> {
     let scan = crate::ai_audit::resolve_audit_model(model);
     let calibration = calibration_model
@@ -110,7 +131,8 @@ pub fn models_the_run_will_use(
                 .filter(|s| !s.trim().is_empty())
         })
         .unwrap_or_else(|| scan.clone());
-    let fix = crate::ai_audit::resolve_audit_model(calibration_model.or(model));
+    let fix =
+        crate::ai_audit::resolve_audit_model(controls.fix_model_for(model, calibration_model));
     let mut roles: Vec<(&str, String)> = vec![
         ("the scan", scan.clone()),
         ("calibration", calibration),
@@ -393,11 +415,20 @@ mod tests {
             .is_none());
     }
 
+    /// The pre-rank-10 controls: the fix stage follows the calibration model, else the scan model.
+    fn fix_follows_calibration() -> RunControls {
+        let mut controls = RunControls::default();
+        controls.efficiency.fix_on_haiku = false;
+        controls
+    }
+
     #[test]
     fn the_models_a_run_uses_are_listed_by_role_and_deduplicated() {
-        let all = models_the_run_will_use(Some("claude-sonnet-5"), None, false, &["ARCH-1"]);
+        let off = fix_follows_calibration();
+        let all = models_the_run_will_use(Some("claude-sonnet-5"), None, false, &["ARCH-1"], &off);
         assert_eq!(all.len(), 1, "one model fills every role: {all:?}");
         assert!(all[0].0.contains("the scan") && all[0].0.contains("calibration"));
+        assert!(all[0].0.contains("fix generation"));
         assert!(!all[0].0.contains("clone judge") && !all[0].0.contains("deep"));
 
         let split = models_the_run_will_use(
@@ -405,6 +436,7 @@ mod tests {
             Some("claude-opus-5"),
             true,
             &[camerata_checks::clone_rules::RULE_SINGLE_SOURCE],
+            &off,
         );
         let ids: Vec<&str> = split.iter().map(|(_, m)| m.as_str()).collect();
         assert!(
@@ -416,6 +448,51 @@ mod tests {
             text.contains("the deep tier") && text.contains("the clone judge"),
             "{text}"
         );
+    }
+
+    /// Rank 10: the spend-limit check lists the model the fix stage will actually call, in the
+    /// same precedence as the call itself: an explicit fix model, else Haiku with the switch on.
+    #[test]
+    fn the_fix_role_is_listed_on_the_model_the_fix_stage_will_call() {
+        let fix_model_of = |controls: &RunControls| {
+            models_the_run_will_use(Some("claude-sonnet-5"), None, false, &[], controls)
+                .into_iter()
+                .find(|(roles, _)| roles.contains("fix generation"))
+                .map(|(_, model)| model)
+                .unwrap()
+        };
+        assert_eq!(
+            fix_model_of(&RunControls::default()),
+            crate::ai_audit::FIX_STAGE_HAIKU_MODEL
+        );
+        let explicit = RunControls {
+            fix_model: Some("claude-opus-5".to_string()),
+            ..RunControls::default()
+        };
+        assert_eq!(fix_model_of(&explicit), "claude-opus-5");
+        assert_eq!(fix_model_of(&fix_follows_calibration()), "claude-sonnet-5");
+
+        // With a spend limit, the default run is refused exactly when Haiku has no list price
+        // (until the model registry carries it), and the refusal names the fix role.
+        let capped = controls_with_cap(Some(5.0));
+        let models = models_the_run_will_use(Some("claude-sonnet-5"), None, false, &[], &capped);
+        let haiku_priced = crate::llm::models()
+            .iter()
+            .any(|m| m.id == crate::ai_audit::FIX_STAGE_HAIKU_MODEL);
+        match capped.refuse_if_cap_unenforceable(&models) {
+            Some(why) => {
+                assert!(!haiku_priced, "a priced model must not refuse: {why}");
+                assert!(
+                    why.contains(crate::ai_audit::FIX_STAGE_HAIKU_MODEL)
+                        && why.contains("fix generation"),
+                    "{why}"
+                );
+            }
+            None => assert!(
+                haiku_priced,
+                "an unpriced fix model must refuse a capped run"
+            ),
+        }
     }
 
     #[test]

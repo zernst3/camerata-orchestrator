@@ -128,12 +128,20 @@ impl Default for StallThresholds {
 /// mirrors `TierMap` exactly: `serde(default)` on every field (legacy-JSON back-compat),
 /// a [`Default`] impl seeding every slot with [`DEFAULT_MODEL`], and per-project storage
 /// on `Project` mutated only through `ProjectStore::set_step_model`.
+///
+/// One exception to "every slot is seeded": [`StepModels::fix`] is EMPTY by default, meaning
+/// "not set". The fix stage's default depends on a run-time efficiency switch (Haiku when on,
+/// the calibration model when off), and a seeded model id would read as an explicit choice
+/// that silently overrides that switch.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StepModels {
     #[serde(default = "default_model")]
     pub audit: String,
     #[serde(default = "default_model")]
     pub calibration: String,
+    /// The fix stage's model. Empty = not set (the default; see the type's doc).
+    #[serde(default)]
+    pub fix: String,
     #[serde(default = "default_model")]
     pub research_chat: String,
     #[serde(default = "default_model")]
@@ -151,6 +159,7 @@ impl Default for StepModels {
         Self {
             audit: DEFAULT_MODEL.to_string(),
             calibration: DEFAULT_MODEL.to_string(),
+            fix: String::new(),
             research_chat: DEFAULT_MODEL.to_string(),
             story_authoring: DEFAULT_MODEL.to_string(),
             decomposition: DEFAULT_MODEL.to_string(),

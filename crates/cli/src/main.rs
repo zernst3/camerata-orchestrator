@@ -154,6 +154,11 @@ enum Command {
         /// Model override for the calibration pass. Defaults to the project-less model floor.
         #[arg(long = "calibration-model")]
         calibration_model: Option<String>,
+        /// Model for the fix stage (one concrete fix per finding). Unset: Claude Haiku 5.5 while
+        /// the `fix_on_haiku` efficiency measure is on (the default), else the calibration model,
+        /// else the audit model.
+        #[arg(long = "fix-model")]
+        fix_model: Option<String>,
         /// Ignore the on-disk incremental-scan cache and force a full re-scan of every file.
         #[arg(long)]
         full: bool,
@@ -383,6 +388,7 @@ async fn main() -> anyhow::Result<()> {
             batch,
             model,
             calibration_model,
+            fix_model,
             full,
             verbose,
             max_cost_usd,
@@ -395,6 +401,7 @@ async fn main() -> anyhow::Result<()> {
                 batch,
                 model,
                 calibration_model,
+                fix_model,
                 full,
                 verbose,
                 max_cost_usd,
@@ -866,6 +873,7 @@ mod cli_parse_tests {
                 batch,
                 model,
                 calibration_model,
+                fix_model,
                 full,
                 verbose,
                 max_cost_usd,
@@ -877,6 +885,7 @@ mod cli_parse_tests {
                 assert!(!batch);
                 assert!(model.is_none());
                 assert!(calibration_model.is_none());
+                assert!(fix_model.is_none(), "no fix model unless asked for");
                 assert!(!full);
                 assert!(!verbose);
                 assert!(max_cost_usd.is_none(), "no cap unless asked for");
@@ -932,6 +941,8 @@ mod cli_parse_tests {
             "claude-sonnet-5",
             "--calibration-model",
             "claude-opus-5",
+            "--fix-model",
+            "claude-sonnet-5",
             "--full",
             "--verbose",
         ])
@@ -942,6 +953,7 @@ mod cli_parse_tests {
                 batch,
                 model,
                 calibration_model,
+                fix_model,
                 full,
                 verbose,
                 ..
@@ -950,6 +962,7 @@ mod cli_parse_tests {
                 assert!(batch);
                 assert_eq!(model.as_deref(), Some("claude-sonnet-5"));
                 assert_eq!(calibration_model.as_deref(), Some("claude-opus-5"));
+                assert_eq!(fix_model.as_deref(), Some("claude-sonnet-5"));
                 assert!(full);
                 assert!(verbose);
             }

@@ -135,6 +135,10 @@ fn controls(cap: Option<f64>, efficiency: EfficiencyConfig) -> RunControls {
         efficiency,
         max_cost_usd: cap,
         estimate_hint_usd: None,
+        // A spend limit needs every model priced, and the fix stage's default (Haiku 5.5) has no
+        // list price until the model registry carries it: a capped run here names a priced fix
+        // model so it is not refused before it starts.
+        fix_model: cap.map(|_| camerata_server::llm::DEFAULT_MODEL.to_string()),
     }
 }
 

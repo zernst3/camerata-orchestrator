@@ -296,8 +296,8 @@ impl UsageMeter {
     }
 
     /// The run's controls, as built.
-    pub fn controls(&self) -> crate::cost_cap::RunControls {
-        self.controls
+    pub fn controls(&self) -> &crate::cost_cap::RunControls {
+        &self.controls
     }
 
     /// Actual spend so far, in dollars, as the telemetry and the printed total count it.
@@ -560,6 +560,12 @@ impl UsageMeter {
     /// [`StageMeter::record_wasted_share`].
     pub fn record_wasted_share(&self, stage: Stage, r: &crate::llm::LlmResponse, share: f64) {
         self.stages.record_wasted_share(stage, r, share);
+    }
+
+    /// Add one fix-generation pass's counts to the run's fix give-up tally (see
+    /// [`crate::stage_telemetry::FixOutcome`]).
+    pub fn record_fix_outcome(&self, outcome: crate::stage_telemetry::FixOutcome) {
+        self.stages.record_fix_outcome(outcome);
     }
 
     /// The per-stage telemetry so far, joined to the scan's counted-line total.
@@ -3323,6 +3329,57 @@ async fn recommend_alternatives(
 /// guessing again blind.
 const MAX_FIX_REGENERATIONS: usize = 2;
 
+/// Rank 10: the model the fix stage runs on when no fix model is set and the `fix_on_haiku`
+/// efficiency measure is on (the default). The fix call is short, narrow, evidence-bound prose
+/// and every answer is checked by the self-check below, so it is the stage where a cheaper model
+/// costs the least quality. Named once; nothing else spells this id.
+pub const FIX_STAGE_HAIKU_MODEL: &str = "claude-haiku-5-5";
+
+/// Rank 10: the `output_config.effort` the fix call sends when it runs on
+/// [`FIX_STAGE_HAIKU_MODEL`]. That model thinks adaptively at `medium` unless told otherwise;
+/// the fix task is bounded by its evidence and re-checked, so `low` is the starting point (see
+/// `docs/TECHNICAL.md`, "Fix stage model and effort"). Raise it only when the give-up rate or a
+/// fix-quality sample says the fixes need more.
+pub const FIX_STAGE_EFFORT: &str = "low";
+
+/// The model the fix stage runs on, in precedence order:
+///
+/// 1. `explicit`: the fix model the operator set (the project's fix step model, or
+///    `camerata inspect --fix-model`). Blank counts as unset.
+/// 2. With `fix_on_haiku` on: [`FIX_STAGE_HAIKU_MODEL`].
+/// 3. With it off: `calibration_model.or(model)`, exactly the pre-rank-10 choice (`None` lets
+///    the transport pick its default, as it always has).
+///
+/// The ONE place this is decided: the fix call and the spend-limit preflight
+/// ([`crate::cost_cap::models_the_run_will_use`]) both come through here, so the model that is
+/// checked for a price is the model that is called.
+pub fn resolve_fix_model<'a>(
+    explicit: Option<&'a str>,
+    fix_on_haiku: bool,
+    model: Option<&'a str>,
+    calibration_model: Option<&'a str>,
+) -> Option<&'a str> {
+    if let Some(explicit) = explicit.map(str::trim).filter(|m| !m.is_empty()) {
+        return Some(explicit);
+    }
+    if fix_on_haiku {
+        return Some(FIX_STAGE_HAIKU_MODEL);
+    }
+    calibration_model.or(model)
+}
+
+/// The effort the fix call asks for: [`FIX_STAGE_EFFORT`] when the call runs on
+/// [`FIX_STAGE_HAIKU_MODEL`] with `fix_on_haiku` on, otherwise none (the request is what it was
+/// before rank 10). Gated on the model, not on the switch alone, because not every model accepts
+/// an effort setting and an explicit fix model may be one that rejects it.
+pub fn fix_effort(
+    fix_model: Option<&str>,
+    efficiency: crate::efficiency::EfficiencyConfig,
+) -> Option<&'static str> {
+    (efficiency.fix_on_haiku && fix_model == Some(FIX_STAGE_HAIKU_MODEL))
+        .then_some(FIX_STAGE_EFFORT)
+}
+
 /// SYSTEM PROMPT for the fix-specific generation pass. Deliberately narrow: this pass does
 /// NOT re-judge severity/confidence/effort (calibration already did that) and does NOT
 /// explain the violation (the finding's own `detail` already does) — its ONLY job is a
@@ -3709,6 +3766,9 @@ async fn run_fix_specifics_round(
         if let Some(m) = fix_model {
             req = req.with_model(m.to_string());
         }
+        if let Some(effort) = fix_effort(fix_model, efficiency_of(meter)) {
+            req = req.with_effort(effort);
+        }
         // Routed through the STREAMING transport (not the flat `complete`) so a large
         // batch gets the CLI heartbeat + partial-output salvage instead of a flat,
         // non-reset 300s deadline. `on_delta` is a no-op: this pass has no live
@@ -3915,6 +3975,15 @@ pub async fn generate_fix_specifics(
              remediation with no model call."
         );
     }
+    // Telemetry: the denominator of the fix give-up rate is what is sent to the fix model here;
+    // the give-ups are added after the last round below.
+    if let Some(m) = meter {
+        m.record_fix_outcome(crate::stage_telemetry::FixOutcome {
+            sent_to_model: indices.len() as u64,
+            gave_up: 0,
+            authored_without_model: authored_directly as u64,
+        });
+    }
     if indices.is_empty() {
         return (findings, Vec::new());
     }
@@ -3974,6 +4043,12 @@ pub async fn generate_fix_specifics(
     // one. A finding whose rule carries no authored remediation at all keeps `fix_specific`
     // as `None`; `report_export::is_action_row_missing_a_fix` is what re-routes THAT case to
     // `"held"` rather than shipping an action-bucket row with no fix text anywhere.
+    if let Some(m) = meter {
+        m.record_fix_outcome(crate::stage_telemetry::FixOutcome {
+            gave_up: pending.len() as u64,
+            ..Default::default()
+        });
+    }
     let mut failed_passes = Vec::new();
     if !pending.is_empty() {
         let gave_up = pending.len();
@@ -9086,6 +9161,9 @@ mod retry_tests;
 
 #[cfg(test)]
 mod efficiency_cap_tests;
+
+#[cfg(test)]
+mod fix_model_tests;
 
 #[cfg(test)]
 mod tests {

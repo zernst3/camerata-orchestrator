@@ -236,3 +236,63 @@ fn telemetry_round_trips_through_json_so_a_ledger_can_carry_it() {
     let back: StageTelemetry = serde_json::from_str(&json).unwrap();
     assert_eq!(t, back);
 }
+
+/// Rank 10: each call is counted against the model that served it, per stage and in the total,
+/// and the fix give-up tally sums across repos.
+#[test]
+fn calls_are_counted_per_model_and_the_fix_tally_sums() {
+    let meter = StageMeter::default();
+    let on = |model: &str| LlmResponse {
+        model: model.to_string(),
+        ..resp(10, 1, 0, 0, Some(0.01))
+    };
+    meter.record(Stage::ScanPass, &on("claude-sonnet-5"));
+    meter.record(Stage::FixGeneration, &on("claude-haiku-5-5"));
+    meter.record(Stage::FixGeneration, &on("claude-haiku-5-5"));
+    meter.record(Stage::FixGeneration, &on("claude-sonnet-5"));
+    for (sent, gave_up, authored) in [(4, 1, 2), (6, 2, 0)] {
+        meter.record_fix_outcome(FixOutcome {
+            sent_to_model: sent,
+            gave_up,
+            authored_without_model: authored,
+        });
+    }
+
+    let t = meter.snapshot(0);
+    let fix = &t
+        .stages
+        .iter()
+        .find(|s| s.stage == Stage::FixGeneration)
+        .unwrap()
+        .usage;
+    assert_eq!(
+        fix.render_models(),
+        "claude-haiku-5-5 x2, claude-sonnet-5 x1"
+    );
+    assert_eq!(t.total().models.get("claude-sonnet-5"), Some(&2));
+    let outcome = t.fix_outcome.unwrap();
+    assert_eq!(
+        (
+            outcome.sent_to_model,
+            outcome.gave_up,
+            outcome.authored_without_model
+        ),
+        (10, 3, 2)
+    );
+    assert_eq!(outcome.give_up_rate(), Some(0.3));
+    let table = t.render_table();
+    assert!(
+        table.contains("fix model: claude-haiku-5-5 x2, claude-sonnet-5 x1"),
+        "{table}"
+    );
+    assert!(
+        table.contains("fix give-up rate: 30.0% (3 of 10 sent to the fix model; 2 used"),
+        "{table}"
+    );
+
+    assert_eq!(
+        StageMeter::default().snapshot(0).fix_outcome,
+        None,
+        "no fix stage, no tally"
+    );
+}

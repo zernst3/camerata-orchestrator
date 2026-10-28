@@ -747,6 +747,10 @@ pub struct LlmRequest {
     /// the primary. READ-ONLY and non-agentic — same posture as `repo_read_dir`. Empty by
     /// default; ignored on the API backend.
     pub repo_read_extra_dirs: Vec<std::path::PathBuf>,
+    /// The Messages API `output_config.effort` (`low` | `medium` | `high` | ...). `None` = the
+    /// field is not sent and the model uses its own default. Sent on the real-time API path
+    /// only; the CLI backend and non-Anthropic vendors ignore it.
+    pub effort: Option<String>,
 }
 
 impl LlmRequest {
@@ -760,7 +764,14 @@ impl LlmRequest {
             cache_breakpoints: Vec::new(),
             repo_read_dir: None,
             repo_read_extra_dirs: Vec::new(),
+            effort: None,
         }
+    }
+
+    /// Ask for `output_config.effort = effort` (API path only; see [`LlmRequest::effort`]).
+    pub fn with_effort(mut self, effort: impl Into<String>) -> Self {
+        self.effort = Some(effort.into());
+        self
     }
 
     /// Grant the CLI-backend model ON-DEMAND READ access to a local repo clone: it runs with
@@ -1576,17 +1587,7 @@ impl Llm {
         })?;
 
         let basis = PriceBasis::realtime();
-        let user_content =
-            cached_user_content(&req.prompt, &req.cache_breakpoints, true, basis.cache_ttl);
-
-        let mut body = serde_json::json!({
-            "model": model,
-            "max_tokens": req.max_tokens,
-            "messages": [{ "role": "user", "content": user_content }],
-        });
-        if let Some(system) = &req.system {
-            body["system"] = serde_json::json!(system);
-        }
+        let body = api_message_body(req, model, basis.cache_ttl);
 
         // NOTE: no `anthropic-beta` header — `prompt-caching-2024-07-31` is GA now (the
         // feature activates whenever a `cache_control` block is present, beta or not).
@@ -1606,6 +1607,24 @@ impl Llm {
             serde_json::from_str(&text).map_err(|e| anyhow::anyhow!("parse API JSON: {e}"))?;
         Ok(messages_response(&v, model, "api", basis))
     }
+}
+
+/// The real-time Messages API request body for `req` on `model`: the (cache-split) user message,
+/// the system prompt when set, and `output_config.effort` when the request asks for one.
+fn api_message_body(req: &LlmRequest, model: &str, cache_ttl: CacheTtl) -> serde_json::Value {
+    let user_content = cached_user_content(&req.prompt, &req.cache_breakpoints, true, cache_ttl);
+    let mut body = serde_json::json!({
+        "model": model,
+        "max_tokens": req.max_tokens,
+        "messages": [{ "role": "user", "content": user_content }],
+    });
+    if let Some(system) = &req.system {
+        body["system"] = serde_json::json!(system);
+    }
+    if let Some(effort) = req.effort.as_deref().filter(|e| !e.trim().is_empty()) {
+        body["output_config"] = serde_json::json!({ "effort": effort });
+    }
+    body
 }
 
 // ════════════════════════════════════════════════════════════════════════════════════
@@ -3202,6 +3221,29 @@ mod tests {
         // Ensure it serialises correctly (no missing field).
         let v = serde_json::to_value(&item.params).unwrap();
         assert_eq!(v["system"], "you are an auditor");
+    }
+
+    /// Rank 10: an effort on the request is sent as `output_config.effort` on the real-time API
+    /// body, and a request without one sends no `output_config` at all (the model's default).
+    #[test]
+    fn api_message_body_sends_effort_only_when_asked() {
+        let plain = LlmRequest::new("fix this").with_system("s");
+        let body = api_message_body(&plain, "claude-sonnet-5", CacheTtl::FiveMinutes);
+        assert!(body.get("output_config").is_none(), "{body}");
+        assert_eq!(body["model"], "claude-sonnet-5");
+        assert_eq!(body["system"], "s");
+
+        let low = LlmRequest::new("fix this").with_effort("low");
+        let body = api_message_body(&low, "claude-haiku-5-5", CacheTtl::FiveMinutes);
+        assert_eq!(body["output_config"]["effort"], "low", "{body}");
+        assert_eq!(body["model"], "claude-haiku-5-5");
+
+        let blank = LlmRequest::new("fix this").with_effort("  ");
+        let body = api_message_body(&blank, "claude-haiku-5-5", CacheTtl::FiveMinutes);
+        assert!(
+            body.get("output_config").is_none(),
+            "a blank effort is not sent: {body}"
+        );
     }
 
     /// `parse_batch_results_jsonl` extracts succeeded rows, maps error rows, and skips

@@ -126,6 +126,9 @@ fn args(repo: &Path, export: &Path, cap: Option<f64>) -> InspectArgs {
         batch: false,
         model: None,
         calibration_model: None,
+        // A spend limit needs every model priced, and the fix stage's default (Haiku 5.5) has no
+        // list price until the model registry carries it: a capped run names a priced fix model.
+        fix_model: cap.map(|_| camerata_server::llm::DEFAULT_MODEL.to_string()),
         full: true,
         verbose: false,
         max_cost_usd: cap,

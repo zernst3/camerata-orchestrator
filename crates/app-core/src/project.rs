@@ -49,6 +49,9 @@ pub enum StepKind {
     /// The calibration pass (severity recalibration + confidence tagging) that runs after
     /// the audit. UI-picked: an explicit request model overrides.
     Calibration,
+    /// The fix stage (one codebase-specific fix per finding, after calibration). UNSET by
+    /// default (an empty model id): unset, the `fix_on_haiku` efficiency measure picks the model.
+    Fix,
     /// The research / side-by-side chat completion. UI-picked: an explicit request model
     /// overrides.
     ResearchChat,
@@ -711,6 +714,7 @@ impl Project {
         match step {
             StepKind::Audit => &self.step_models.audit,
             StepKind::Calibration => &self.step_models.calibration,
+            StepKind::Fix => &self.step_models.fix,
             StepKind::ResearchChat => &self.step_models.research_chat,
             StepKind::StoryAuthoring => &self.step_models.story_authoring,
             StepKind::Decomposition => &self.step_models.decomposition,
@@ -727,6 +731,7 @@ impl Project {
         match step {
             StepKind::Audit => self.step_models.audit = model,
             StepKind::Calibration => self.step_models.calibration = model,
+            StepKind::Fix => self.step_models.fix = model,
             StepKind::ResearchChat => self.step_models.research_chat = model,
             StepKind::StoryAuthoring => self.step_models.story_authoring = model,
             StepKind::Decomposition => self.step_models.decomposition = model,
