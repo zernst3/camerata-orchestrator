@@ -1684,7 +1684,12 @@ mod tests {
 
     /// One project has ONE cache and ONE ledger, whatever order the repos were named in, and
     /// they are not the files of either repo alone.
+    ///
+    /// Each path read resolves the state dir from process environment, which other tests in
+    /// this binary mutate, so it takes the `process_env` key like
+    /// `bookkeeping_is_never_written_into_the_scanned_repo` (it flaked once in a full run).
     #[test]
+    #[serial_test::serial(process_env)]
     fn several_repos_share_one_cache_and_one_ledger() {
         let (root, a, b) = two_repos();
         let ab = multi(
