@@ -493,6 +493,64 @@ pub struct SignOff {
     pub note: Option<String>,
 }
 
+// ── Layer-3 reviewer findings recorded on the unit ─────────────────────────────
+
+/// What became of one recorded reviewer finding.
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq, Default)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum ReviewFindingStatus {
+    /// Reported and not yet resolved. An open HIGH or MEDIUM blocks sign-off.
+    #[default]
+    Open,
+    /// A later review re-checked it against the diff and confirmed it gone (a `[FIXED]` line).
+    /// Merely not being reported again is NOT enough. `run_id` and `iteration` name the review
+    /// that confirmed it ("Fixed in run R, pass P").
+    Fixed {
+        #[serde(default)]
+        run_id: String,
+        iteration: usize,
+    },
+    /// The architect accepted it as is, with a reason (also written as a decision).
+    Accepted {
+        by: String,
+        reason: String,
+        /// RFC 3339 timestamp of the acceptance.
+        at: String,
+    },
+}
+
+/// One Layer-3 reviewer finding recorded on a unit of work, so nothing the reviewer found is
+/// dropped silently: each is fixed, accepted with a reason, or still open at sign-off.
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
+pub struct RecordedReviewFinding {
+    /// The run whose review reported it.
+    pub run_id: String,
+    /// The pass (iteration) in which it was reported.
+    pub iteration: usize,
+    /// `"high"`, `"medium"` or `"low"`.
+    pub severity: String,
+    pub title: String,
+    /// The concrete way it fails.
+    #[serde(default)]
+    pub scenario: String,
+    /// The rule id or acceptance criterion the reviewer quoted.
+    #[serde(default)]
+    pub rule: Option<String>,
+    /// The file or `file:line` in the diff.
+    #[serde(default)]
+    pub location: Option<String>,
+    #[serde(default)]
+    pub status: ReviewFindingStatus,
+}
+
+impl RecordedReviewFinding {
+    /// True for a finding that stops sign-off: still open and ranked high or medium.
+    pub fn blocks_sign_off(&self) -> bool {
+        matches!(self.status, ReviewFindingStatus::Open)
+            && matches!(self.severity.as_str(), "high" | "medium")
+    }
+}
+
 // ── `GET /api/uows` list view (Phase D: `camerata-client`) ─────────────────────
 
 /// One row of `GET /api/uows`'s response (mirrors the server's private `UowView` in
@@ -764,5 +822,60 @@ mod tests {
             Some(PhaseTab::Development)
         );
         assert_eq!(PhaseTab::from_wire("bogus"), None);
+    }
+
+    #[test]
+    fn a_recorded_review_finding_loads_with_defaults_and_open_status() {
+        let f: RecordedReviewFinding =
+            serde_json::from_str(r#"{"run_id":"r1","iteration":0,"severity":"high","title":"t"}"#)
+                .unwrap();
+        assert_eq!(f.status, ReviewFindingStatus::Open);
+        assert!(f.scenario.is_empty() && f.rule.is_none() && f.location.is_none());
+        assert!(f.blocks_sign_off());
+    }
+
+    #[test]
+    fn only_an_open_high_or_medium_finding_blocks_sign_off() {
+        let mut f: RecordedReviewFinding =
+            serde_json::from_str(r#"{"run_id":"r","iteration":0,"severity":"low","title":"t"}"#)
+                .unwrap();
+        assert!(!f.blocks_sign_off(), "LOW never blocks");
+        f.severity = "medium".into();
+        assert!(f.blocks_sign_off());
+        f.status = ReviewFindingStatus::Fixed {
+            run_id: "r".into(),
+            iteration: 1,
+        };
+        assert!(!f.blocks_sign_off());
+        f.status = ReviewFindingStatus::Accepted {
+            by: "architect".into(),
+            reason: "ok".into(),
+            at: "t".into(),
+        };
+        assert!(!f.blocks_sign_off());
+    }
+
+    #[test]
+    fn review_finding_status_uses_a_state_tag() {
+        let json = serde_json::to_string(&ReviewFindingStatus::Fixed {
+            run_id: "run-3".into(),
+            iteration: 2,
+        })
+        .unwrap();
+        assert_eq!(json, r#"{"state":"fixed","run_id":"run-3","iteration":2}"#);
+        // A record written before the run id was kept still loads.
+        let old: ReviewFindingStatus =
+            serde_json::from_str(r#"{"state":"fixed","iteration":1}"#).unwrap();
+        assert_eq!(
+            old,
+            ReviewFindingStatus::Fixed {
+                run_id: String::new(),
+                iteration: 1
+            }
+        );
+        assert_eq!(
+            serde_json::to_string(&ReviewFindingStatus::Open).unwrap(),
+            r#"{"state":"open"}"#
+        );
     }
 }

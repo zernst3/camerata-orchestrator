@@ -24,7 +24,8 @@ pub use camerata_app_core::project::{
     default_routine_secs, default_watched_secs, export_ruleset, parse_ruleset, CustomRule,
     HierarchySchema, ImportOutcome, L3ReviewConfig, MemoryEntry, MemoryKind, MemoryStatus,
     ModelProfile, OperatingPrinciple, Project, ProjectBackend, ProjectImport, ProjectRuleset,
-    RuleSelection, StallThresholds, StepKind, StepModels, TypeRelation, WorkType, DEFAULT_MODEL,
+    ReviewOnError, ReviewTier, RuleSelection, StallThresholds, StepKind, StepModels, TypeRelation,
+    WorkType, DEFAULT_MODEL,
 };
 
 use crate::model_tier::TierMap;

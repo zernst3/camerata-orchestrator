@@ -1397,10 +1397,34 @@ After the dev agent finishes each iteration and Layer-2 checks run, the L3 revie
 
 1. Runs `git diff HEAD` in the agent's worktree.
 2. Sends the **story + selected rules + diff** to the configured model.
-3. Returns a PASS or BOUNCE verdict.
+3. Returns a ranked list of findings and a PASS or BOUNCE verdict.
 
-A BOUNCE feeds the bounce reasons back to the dev agent on the next iteration — same
+The reviewer is adversarial: it looks for the way the change fails. Every finding is ranked HIGH,
+MEDIUM or LOW and carries a concrete failure scenario, the rule or acceptance criterion it breaks
+and the place in the diff. A HIGH or MEDIUM finding is a BOUNCE. A reply the reviewer did not write
+in the agreed format is never read as a PASS: it bounces with one MEDIUM finding.
+
+A BOUNCE feeds the findings back to the dev agent on the next iteration, with the same
 bounce-and-revise mechanism as Layer-2. A PASS is recorded as a `layer-3` gate event in the run log.
+
+Every finding is recorded on the unit of work, so none is dropped silently. A finding a later pass no
+longer reports is marked fixed. The rest stay open and are listed under **Reviewer findings** in the
+Development panel. An open HIGH or MEDIUM finding blocks sign-off until you fix it or choose
+**Accept with reason** and say why it is acceptable as is. The acceptance is also written as a
+decision on the unit. LOW findings never block sign-off.
+
+### Reviewer settings
+
+Three more controls sit under the enable toggle. Each defaults to the earlier behaviour:
+
+- **On reviewer error**: advisory (the run continues when the reviewer cannot run) or fail closed (the
+  run stops, so no run passes without a review).
+- **Fix rounds after a bounce**: 0 (the default), 1 or 2 extra implementer passes beyond the
+  project's iteration limit. With the default single pass, a bounce ends the run.
+- **Reviewer model tier**: balanced (the default) or strongest, used when no model is pinned above.
+
+Each review is one model call with the whole diff as input, once per pass. Fix rounds add implementer
+passes. Strongest costs more per call than balanced.
 
 If the diff is empty (nothing changed), the L3 review is skipped (logged: "Layer-3 skipped: no diff
 to review").

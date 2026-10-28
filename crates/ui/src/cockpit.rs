@@ -335,6 +335,7 @@ use camerata_api_types::project::L3ReviewConfig as L3ReviewView;
 use camerata_api_types::project::ProjectBackend;
 use camerata_api_types::project::StallThresholds as StallThresholdsView;
 use camerata_api_types::project::StepModels as StepModelsView;
+use camerata_api_types::project::{ReviewOnError, ReviewTier, MAX_L3_FIX_ROUNDS};
 use camerata_ui_core::backend::ProjectBackendExt;
 
 /// UI mirror of `camerata_fleet::tier::TierMap`. Three model-id slots, one per
@@ -1285,15 +1286,16 @@ fn MemoryEditor(project: ProjectView, refresh: Signal<u32>) -> Element {
 }
 
 /// Set the L3 agentic code-review gate configuration for a project.
-/// Uses the `POST /api/projects/:id/l3-review` endpoint (R7).
-async fn set_project_l3_review(id: &str, enabled: bool, model: &str) -> bool {
+/// Uses the `POST /api/projects/:id/l3-review` endpoint (R7). Posts the whole config:
+/// `enabled`, `model` and the reviewer policy (`on_error`, `fix_rounds`, `tier`).
+async fn set_project_l3_review(id: &str, config: &L3ReviewView) -> bool {
     reqwest::Client::new()
         .post(format!(
             "{}/api/projects/{}/l3-review",
             crate::bff_base(),
             id
         ))
-        .json(&serde_json::json!({ "enabled": enabled, "model": model }))
+        .json(config)
         .send()
         .await
         .map(|r| r.status().is_success())
@@ -3381,6 +3383,7 @@ pub mod live_run;
 mod palette;
 mod pane_context;
 mod review;
+mod review_findings;
 pub mod rules;
 pub mod scan;
 mod stack;
@@ -5064,26 +5067,38 @@ mod tests {
         assert!(ok);
     }
 
-    /// `set_project_l3_review` POSTs {enabled, model}.
+    /// `set_project_l3_review` POSTs the whole config: enabled, model and the reviewer policy.
     #[tokio::test]
     #[serial_test::serial(process_env)]
-    async fn set_project_l3_review_posts_enabled_and_model() {
+    async fn set_project_l3_review_posts_enabled_model_and_reviewer_policy() {
+        use camerata_api_types::project::{ReviewOnError, ReviewTier};
         use wiremock::matchers::{body_json, method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/api/projects/p-1/l3-review"))
-            .and(body_json(
-                serde_json::json!({ "enabled": true, "model": "claude-opus-5" }),
-            ))
+            .and(body_json(serde_json::json!({
+                "enabled": true,
+                "model": "claude-opus-5",
+                "on_error": "fail_closed",
+                "fix_rounds": 1,
+                "tier": "strongest"
+            })))
             .respond_with(ResponseTemplate::new(200))
             .expect(1)
             .mount(&server)
             .await;
 
         let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
-        let ok = super::set_project_l3_review("p-1", true, "claude-opus-5").await;
+        let config = super::L3ReviewView {
+            enabled: true,
+            model: "claude-opus-5".to_string(),
+            on_error: ReviewOnError::FailClosed,
+            fix_rounds: 1,
+            tier: ReviewTier::Strongest,
+        };
+        let ok = super::set_project_l3_review("p-1", &config).await;
 
         assert!(ok);
     }

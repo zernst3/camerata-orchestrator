@@ -223,7 +223,7 @@ pub(super) async fn save_intake_context(story_id: &str, context: &str) -> bool {
 /// The message a server refusal carries: its `reason` (else its `error`), or `fallback` plus the
 /// HTTP status when the body has neither. What the console shows when a save is refused (400
 /// invalid branch name, 409 repository outside the active project) instead of failing silently.
-async fn rejection_message(resp: reqwest::Response, fallback: &str) -> String {
+pub(super) async fn rejection_message(resp: reqwest::Response, fallback: &str) -> String {
     let status = resp.status();
     let body = resp.json::<serde_json::Value>().await.ok();
     body.as_ref()
@@ -1004,6 +1004,10 @@ pub(super) struct UowView {
     pub gate_provenance: Option<GateProvenanceView>,
     #[serde(default)]
     pub sign_off: Option<SignOffView>,
+    /// The Layer-3 reviewer findings recorded for this unit (gap 4). An open HIGH or MEDIUM one
+    /// blocks sign-off until it is fixed or accepted with a reason.
+    #[serde(default)]
+    pub review_findings: Vec<super::review_findings::RecordedReviewFindingView>,
     /// The persisted Intake state (#105): free-text context + repo/branch scope (R6).
     #[serde(default)]
     pub intake: IntakeStateView,
@@ -5360,6 +5364,14 @@ pub(super) fn DevelopmentPhaseView(
     let mut bug_report = use_signal(String::new);
     let mut bug_fix_running = use_signal(|| false);
 
+    // The Layer-3 reviewer findings recorded on the unit (empty until a review has run).
+    let review_findings: Vec<super::review_findings::RecordedReviewFindingView> = uow_for_stage
+        .read()
+        .clone()
+        .flatten()
+        .map(|u| u.review_findings)
+        .unwrap_or_default();
+
     // ── Layer-2 results (displayed after a dev run completes — no button) ─────────
     // TODO(#105): fetch real Layer-2 bounce results from the run's provenance endpoint
     let layer2_results: Option<String> = uow_for_stage
@@ -5819,6 +5831,9 @@ pub(super) fn DevelopmentPhaseView(
                 // TODO(#105): integrate live Layer-2 bounce stream and Layer-3 opt-in agentic
                 // code reviewer (R7); both run with / parallel to Layer-2.
             }
+
+            // ── Layer-3 reviewer findings (gap 4): rendered only when the unit has some ───
+            super::review_findings::ReviewFindingsSection { story_id: story_id.clone(), findings: review_findings, uow_refresh }
 
             // ── §8: Ship panel (§5.7) — per in-scope repo ───────────────────────
             // One Ship row per in-scope repo. The fan-out guarantees each repo's branch
