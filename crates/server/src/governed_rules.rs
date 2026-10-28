@@ -23,20 +23,35 @@ use camerata_core::{Role, RuleId};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum RuleSubsetSource {
     /// The project's selected rules (`selected` of them), plus the enforced gate rules.
-    ProjectSelection { selected: usize },
+    /// `inert` names the selected rules that have NO gateway arm: they are carried in the
+    /// subset (and so in the agent's grounding) but deny nothing at write time.
+    ProjectSelection { selected: usize, inert: Vec<String> },
     /// No project selection: the bundled corpus's Rust/agentic slice, plus the enforced gate
     /// rules.
     CorpusFallback,
 }
 
 impl RuleSubsetSource {
-    /// One line for the run's events, so the architect can see which rules gated the writes.
+    /// One line for the run's events, so the architect can see which rules gated the writes and
+    /// which selected rules only ride along.
     pub(crate) fn describe(&self, subset_len: usize) -> String {
         match self {
-            Self::ProjectSelection { selected } => format!(
-                "Layer-1 rule subset: the project's {selected} selected rule(s) plus the \
-                 enforced gate rules ({subset_len} in total)."
-            ),
+            Self::ProjectSelection { selected, inert } => {
+                let enforced = selected.saturating_sub(inert.len());
+                let mut line = format!(
+                    "Layer-1 rule subset: the project's {selected} selected rule(s) plus the \
+                     enforced gate rules ({subset_len} in total). Enforced at write time: \
+                     {enforced} of {selected} selected rule(s) have a gateway arm."
+                );
+                if !inert.is_empty() {
+                    line.push_str(&format!(
+                        " Carried but NOT enforced at Layer 1 (no gateway arm, so they deny \
+                         nothing at write time): {}.",
+                        inert.join(", ")
+                    ));
+                }
+                line
+            }
             Self::CorpusFallback => format!(
                 "Layer-1 rule subset: this project has no rule selection, so the built-in \
                  Rust/agentic corpus subset applies, plus the enforced gate rules \
@@ -53,7 +68,7 @@ pub(crate) async fn project_governed_role(
     role_name: &str,
     project: Option<&crate::project::Project>,
 ) -> anyhow::Result<(Role, RuleSubsetSource)> {
-    let selected: Vec<RuleId> = match project {
+    let mut selected: Vec<RuleId> = match project {
         Some(p) => crate::resolve_project_selection_rules(p)
             .await
             .into_iter()
@@ -61,15 +76,27 @@ pub(crate) async fn project_governed_role(
             .collect(),
         None => Vec::new(),
     };
+    // One rule selected for several placements counts once.
+    let mut seen = HashSet::new();
+    selected.retain(|id| seen.insert(id.0.clone()));
     if selected.is_empty() {
         log_fallback_once(project.map(|p| p.id.as_str()));
         let role = camerata_fleet::governed_role(role_name).await?;
         return Ok((role, RuleSubsetSource::CorpusFallback));
     }
     let count = selected.len();
+    // A selected rule with no gateway arm is carried but denies nothing at write time: name it.
+    let inert: Vec<String> = selected
+        .iter()
+        .filter(|id| camerata_gateway::lookup_arm(&id.0).is_none())
+        .map(|id| id.0.clone())
+        .collect();
     Ok((
         camerata_fleet::governed_role_from_rules(role_name, selected),
-        RuleSubsetSource::ProjectSelection { selected: count },
+        RuleSubsetSource::ProjectSelection {
+            selected: count,
+            inert,
+        },
     ))
 }
 
@@ -128,19 +155,37 @@ mod tests {
         "SUPABASE-RLS-ENABLED-1",
     ];
 
+    /// What the selection does and does not buy at Layer 1. The selected ids are CARRIED in the
+    /// subset (and become the run's grounding), but only a rule with a gateway arm denies a
+    /// write; the run event must say which of the selected rules are which.
     #[tokio::test]
-    async fn a_project_with_sql_and_supabase_rules_selected_gates_writes_by_them() {
-        let project = project_selecting(SQL_SUPABASE);
+    async fn a_project_with_sql_and_supabase_rules_carries_them_but_enforces_only_those_with_an_arm(
+    ) {
+        // Guard the premise: if an arm is added for either inert rule, this test must be
+        // revisited rather than silently keep asserting the old split.
+        assert!(camerata_gateway::lookup_arm("SEC-NO-RAW-SQL-CONCAT-1").is_some());
+        assert!(camerata_gateway::lookup_arm("SQL-PRIVILEGED-WRITE-AUDIT-1").is_none());
+        assert!(camerata_gateway::lookup_arm("SUPABASE-RLS-ENABLED-1").is_none());
 
+        let project = project_selecting(SQL_SUPABASE);
         let (role, source) = project_governed_role("BrownfieldImplementer", Some(&project))
             .await
             .unwrap();
 
-        assert_eq!(source, RuleSubsetSource::ProjectSelection { selected: 3 });
+        assert_eq!(
+            source,
+            RuleSubsetSource::ProjectSelection {
+                selected: 3,
+                inert: vec![
+                    "SQL-PRIVILEGED-WRITE-AUDIT-1".to_string(),
+                    "SUPABASE-RLS-ENABLED-1".to_string(),
+                ],
+            }
+        );
         for id in SQL_SUPABASE {
             assert!(
                 role.rule_subset.contains(&RuleId(id.to_string())),
-                "{id} must be in the Layer-1 subset: {:?}",
+                "{id} must be carried in the Layer-1 subset: {:?}",
                 role.rule_subset
             );
         }
@@ -149,7 +194,31 @@ mod tests {
         assert!(!role
             .rule_subset
             .contains(&RuleId("RUST-DOMAIN-2".to_string())));
-        // And the selected SQL rule is ENFORCED at write time by the gate.
+
+        // The event line states the split and names the inert rules.
+        let line = source.describe(role.rule_subset.len());
+        assert!(line.contains("1 of 3"), "{line}");
+        assert!(line.contains("SUPABASE-RLS-ENABLED-1"), "{line}");
+        assert!(line.contains("SQL-PRIVILEGED-WRITE-AUDIT-1"), "{line}");
+        assert!(!line.contains("SEC-NO-RAW-SQL-CONCAT-1 "), "{line}");
+
+        // The inert rule enforces nothing: a table created without row level security is
+        // allowed at write time even though SUPABASE-RLS-ENABLED-1 is selected.
+        let decision = evaluate_call(
+            &role.rule_subset,
+            &write("db/schema.sql", "create table accounts (id int);"),
+        );
+        assert!(matches!(decision, Decision::Allow), "{decision:?}");
+    }
+
+    /// The SQL concatenation denial is NOT sourced from the selection: the gate rule is always
+    /// on, so a project that selected only an unrelated rule is denied the same write.
+    #[tokio::test]
+    async fn the_sql_concat_denial_does_not_depend_on_the_selection() {
+        let project = project_selecting(&["SUPABASE-RLS-ENABLED-1"]);
+        let (role, _) = project_governed_role("BrownfieldImplementer", Some(&project))
+            .await
+            .unwrap();
         let decision = evaluate_call(
             &role.rule_subset,
             &write(
@@ -161,6 +230,24 @@ mod tests {
             Decision::Deny { rule, .. } => assert_eq!(rule.0, "SEC-NO-RAW-SQL-CONCAT-1"),
             Decision::Allow => panic!("an SQL string concatenation must be denied at write time"),
         }
+    }
+
+    #[tokio::test]
+    async fn a_selection_of_only_enforced_rules_reports_no_inert_rules() {
+        let project = project_selecting(&["SEC-NO-RAW-SQL-CONCAT-1"]);
+        let (role, source) = project_governed_role("BrownfieldImplementer", Some(&project))
+            .await
+            .unwrap();
+        assert_eq!(
+            source,
+            RuleSubsetSource::ProjectSelection {
+                selected: 1,
+                inert: Vec::new(),
+            }
+        );
+        let line = source.describe(role.rule_subset.len());
+        assert!(line.contains("1 of 1"), "{line}");
+        assert!(!line.contains("NOT enforced"), "{line}");
     }
 
     #[tokio::test]
@@ -211,7 +298,10 @@ mod tests {
     #[test]
     fn the_source_lines_carry_no_em_dash() {
         for s in [
-            RuleSubsetSource::ProjectSelection { selected: 2 },
+            RuleSubsetSource::ProjectSelection {
+                selected: 2,
+                inert: vec!["SUPABASE-RLS-ENABLED-1".to_string()],
+            },
             RuleSubsetSource::CorpusFallback,
         ] {
             assert!(!s.describe(9).contains('\u{2014}'));
