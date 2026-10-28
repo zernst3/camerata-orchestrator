@@ -268,8 +268,9 @@ pub struct FindingView {
 
 impl FindingView {
     /// True when this finding is about a leaked credential: the server classed it
-    /// `secret-exposure`, or its rule id names a secret (a deterministic finding carries no
-    /// category). The snippet of such a finding is redacted to a placeholder, so two of them in
+    /// `secret-exposure` (it stamps that on the deterministic floor rows too), or, as a
+    /// fallback for a row without a category, its rule id names a secret, a token, a private key
+    /// or the Supabase service-role key. The snippet of such a finding is redacted to a placeholder, so two of them in
     /// different repos look identical while describing different credentials. Decision memory
     /// uses this to keep them apart.
     pub fn is_secret_exposure(&self) -> bool {
@@ -284,7 +285,13 @@ impl FindingView {
             || word_starts("CREDENTIAL")
             || word_starts("APIKEY")
             || word_starts("PASSWORD")
-            || words.windows(2).any(|w| w == ["API", "KEY"])
+            || word_starts("TOKEN")
+            || ["API-KEY", "PRIVATE-KEY", "VENDOR-TOKEN", "SUPABASE-KEY"]
+                .iter()
+                .any(|run| {
+                    let run: Vec<&str> = run.split('-').collect();
+                    words.windows(run.len()).any(|w| w == run.as_slice())
+                })
     }
 }
 

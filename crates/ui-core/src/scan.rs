@@ -460,6 +460,14 @@ pub fn repo_estimate_line(
     )
 }
 
+/// The line for a repo whose rule choice is not known yet. It is left out of the estimate rather
+/// than priced on a guessed number of rules.
+pub fn unknown_rules_repo_line(repo: &str) -> String {
+    format!(
+        "{repo}: rules chosen: unknown. Open this repo's rule list to include it in the estimate."
+    )
+}
+
 /// The line for a repo that could not be read. It is left out of the estimate, and the line says
 /// so: a repo missing from the figure must not read as a cheap one.
 pub fn unreadable_repo_line(repo: &str, why: &str) -> String {
@@ -487,6 +495,9 @@ mod tests {
             ..row
         };
         assert!(repo_estimate_line("acme/api", 1, 10, &cheap).contains("<$0.01"));
+        let unknown = unknown_rules_repo_line("acme/jobs");
+        assert!(unknown.starts_with("acme/jobs: ") && unknown.contains("unknown"));
+        assert!(!unknown.contains('\u{2014}'));
         let gone = unreadable_repo_line("acme/web", "no local folder set");
         assert!(gone.contains("not in this estimate") && gone.starts_with("acme/web: "));
         assert!(!gone.contains('\u{2014}'));

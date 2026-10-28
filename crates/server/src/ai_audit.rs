@@ -7171,6 +7171,11 @@ pub(crate) fn categorize_rule_id(rule_id: &str) -> Option<String> {
         || has("API-KEY")
         || has("APIKEY")
         || has("PASSWORD")
+        // The floor's other credential rules and the Supabase service-role key: their rows carry
+        // no calibration verdict, so this is the only source of their category.
+        || has("PRIVATE-KEY")
+        || has("VENDOR-TOKEN")
+        || has("SUPABASE-KEY")
     {
         "secret-exposure"
     } else if has("RAW-SQL")
@@ -19759,6 +19764,31 @@ mod tests {
                 "{rule_id} must classify as Hygiene"
             );
         }
+    }
+
+    /// The deterministic floor's credential rules (private key, vendor token) and the Supabase
+    /// service-role rule are secret exposure. Their rows carry no calibration verdict, so this
+    /// is the only place their `category` can come from; the cockpit keeps repos apart for
+    /// decision memory on exactly this value.
+    #[test]
+    fn floor_credential_rules_are_categorized_secret_exposure() {
+        for id in [
+            "SEC-NO-HARDCODED-SECRETS-1",
+            "SEC-NO-PRIVATE-KEY-1",
+            "SEC-NO-VENDOR-TOKEN-1",
+            "SUPABASE-KEY-SERVICE-ROLE-CLIENT-1",
+        ] {
+            assert_eq!(
+                categorize_rule_id(id).as_deref(),
+                Some("secret-exposure"),
+                "{id}"
+            );
+        }
+        // Not credentials.
+        assert_ne!(
+            categorize_rule_id("SEC-NO-RAW-SQL-CONCAT-1").as_deref(),
+            Some("secret-exposure")
+        );
     }
 
     // ── D5 pt.2: categorize_rule_id word-boundary matching ────────────────────────────────

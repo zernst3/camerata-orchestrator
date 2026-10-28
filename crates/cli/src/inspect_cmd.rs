@@ -749,6 +749,19 @@ pub async fn run_inspect_pipeline_with(
     // one report, one cache and one ledger.
     let sources = args.resolve_sources()?;
     let (manifest_path, ledger_file) = args.state_paths();
+    // A multi-repo run's one cache and one ledger cover several folders; record which, so that
+    // deleting any one of them can find and remove the files (see `project_files_covering`).
+    // Written before anything is spent: a cache that deletion could not find must not exist.
+    if args.repo_dirs().len() > 1 {
+        camerata_server::scan_cache::state_dir::write_project_repos(&args.repo_dirs()).map_err(
+            |e| {
+                InspectError::Failed(format!(
+                    "could not record which folders this run covers in {}: {e}",
+                    camerata_state_dir().display()
+                ))
+            },
+        )?;
+    }
 
     // ── Phase 1: stack detection + rule proposal ────────────────────────────────────────
     let scan = camerata_server::onboard::scan_repos(&sources, Vec::new()).await;

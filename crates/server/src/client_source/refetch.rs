@@ -89,6 +89,13 @@ pub struct RemoteInfo {
     pub head_date: Option<String>,
 }
 
+/// A repo outside GitHub (a `non_github/...` name) has no GitHub remote to probe or clone from.
+/// Refused before any URL is built, so nothing is aimed at a name that is not a real coordinate.
+pub(crate) fn require_github_for_network(repo: &str) -> Result<(), Refusal> {
+    workspace::require_github_repo(repo)
+        .map_err(|e| Refusal::conflict("not_on_github", e.to_string()))
+}
+
 /// Ask the remote for its default branch and head (`git ls-remote --symref`, no API call).
 pub async fn probe_remote(
     state: &AppState,
@@ -97,6 +104,7 @@ pub async fn probe_remote(
 ) -> Result<RemoteInfo, Refusal> {
     let (_, repo) = project_and_repo(state, project_id, repo_param)?;
     let token = state.github_token().ok_or_else(no_token)?;
+    require_github_for_network(&repo)?;
     let url = state.git_remotes.fetch_url(&repo, &token);
     let head = probe_remote_from(&url, &repo, &token)
         .await
@@ -213,6 +221,7 @@ pub async fn refetch_source_with_headroom(
     }
 
     // 4. Clone, full history.
+    require_github_for_network(&repo)?;
     let url = state.git_remotes.fetch_url(&repo, &token);
     clone_full_from(&url, &repo, &dest, &token)
         .await

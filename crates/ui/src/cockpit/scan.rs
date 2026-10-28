@@ -5662,7 +5662,7 @@ pub(super) fn OnboardView(connection: Option<ProviderView>) -> Element {
                                     RepoDetect::Cancelled => {}
                                     // #50: block re-onboarding a repo that's already onboarded.
                                     RepoDetect::Found { repo: found, onboarded_in: Some(project), .. } => {
-                                        crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, format!("{found} is already onboarded (project \u{201c}{project}\u{201d}). Onboarding is one-time — add it to your workspace to work on it, instead of re-onboarding."));
+                                        crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, format!("{found} is already onboarded (project \u{201c}{project}\u{201d}). Onboarding is one-time, so add it to your workspace to work on it, instead of re-onboarding."));
                                     }
                                     RepoDetect::Found { repo: found, path: folder, note, .. } => {
                                         let saved = set_repo_path(&found, &folder).await;
@@ -8896,20 +8896,19 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                         let (toks, dollars, passes) = match sizes {
                             Some(sizes) => {
                                 let selection = repo_selection.read().clone();
-                                let readable: Vec<&RepoSizeView> = sizes.iter().filter(|z| z.error.is_none()).collect();
-                                let fallback = sel.div_ceil(readable.len().max(1));
-                                let inputs: Vec<camerata_ui_core::scan::RepoEstimateInput> = readable
+                                // A repo is priced only when its rule choice is known: a guessed
+                                // rule count would put a made-up figure in front of a spend decision.
+                                let inputs: Vec<camerata_ui_core::scan::RepoEstimateInput> = sizes
                                     .iter()
-                                    .map(|z| {
-                                        let ids = selection.get(&z.repo);
-                                        camerata_ui_core::scan::RepoEstimateInput {
+                                    .filter(|z| z.error.is_none())
+                                    .filter_map(|z| {
+                                        let ids = selection.get(&z.repo)?;
+                                        Some(camerata_ui_core::scan::RepoEstimateInput {
                                             repo: z.repo.clone(),
                                             code_chars: z.code_chars,
-                                            selected: ids.map(|v| v.len()).unwrap_or(fallback),
-                                            multi_option_selected: ids
-                                                .map(|v| report.proposed_rules.iter().filter(|r| r.options.len() >= 2 && v.contains(&r.id)).count())
-                                                .unwrap_or(multi_option_selected),
-                                        }
+                                            selected: ids.len(),
+                                            multi_option_selected: report.proposed_rules.iter().filter(|r| r.options.len() >= 2 && ids.contains(&r.id)).count(),
+                                        })
                                     })
                                     .collect();
                                 let est = camerata_ui_core::scan::estimate_audit_cost_by_repo(&inputs, &est_mode, a_in, a_out, c_in, c_out, audit_thorough(), incremental, deep, backend, true);
@@ -8917,7 +8916,7 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                                     match (&z.error, est.rows.iter().find(|r| r.repo == z.repo)) {
                                         (Some(why), _) => repo_lines.push(camerata_ui_core::scan::unreadable_repo_line(&z.repo, why)),
                                         (None, Some(row)) => repo_lines.push(camerata_ui_core::scan::repo_estimate_line(&z.repo, z.files, z.code_chars, row)),
-                                        (None, None) => {}
+                                        (None, None) => repo_lines.push(camerata_ui_core::scan::unknown_rules_repo_line(&z.repo)),
                                     }
                                 }
                                 (est.tokens, est.dollars, est.passes)

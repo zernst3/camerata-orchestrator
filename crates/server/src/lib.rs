@@ -1406,7 +1406,10 @@ pub fn router(state: AppState) -> Router {
             "/api/onboard/audit/start",
             post(onboard_audit_start).layer(source_gate.clone()),
         )
-        .route("/api/onboard/preflight", post(preflight::onboard_preflight))
+        .route(
+            "/api/onboard/preflight",
+            post(preflight::onboard_preflight).layer(source_gate.clone()),
+        )
         .route("/api/onboard/audit/job/:id", get(onboard_audit_job))
         .route("/api/onboard/audit/job/:id/cancel", post(cancel_audit_job))
         .route("/api/onboard/finding-context", get(onboard_finding_context))

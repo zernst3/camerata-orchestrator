@@ -212,7 +212,8 @@ impl DecisionIndex {
     /// Index `rows` against `dispositions`. A row counts when it has a decision other than
     /// Unresolved and a snippet (a blank snippet is every blank-snippet finding of the rule, not a
     /// shape); a finding listed twice counts once; a disposition for a finding not in `rows` is not
-    /// evidence about this scan. The repo is not part of the shape (see the module comment).
+    /// evidence about this scan. The repo is part of the shape for a secret-exposure finding only
+    /// ([`shape_of`]; see the module comment).
     pub fn build(rows: &[FindingView], dispositions: &HashMap<String, Disposition>) -> Self {
         let mut seen = HashSet::new();
         let mut by_shape: HashMap<Shape, Vec<Decided>> = HashMap::new();
@@ -725,6 +726,41 @@ mod tests {
         let d = decided(&[&a1], TriageState::FalsePositive, "fixture key");
         let p = prior_decisions(&rows, &d, &a2).expect("same repo remembers");
         assert_eq!(p.reason, "fixture key");
+    }
+
+    /// M9 follow-up: every credential rule keeps repos apart, not only the hardcoded-secret
+    /// one. A false-positive mark on a vendor token or a PEM header in repo A must never
+    /// pre-fill repo B's, with or without the server's category on the row.
+    #[test]
+    fn every_credential_rule_is_repo_scoped_with_or_without_a_category() {
+        let cases = [
+            ("SEC-NO-PRIVATE-KEY-1", "-----BEGIN PRIVATE KEY-----"),
+            ("SEC-NO-VENDOR-TOKEN-1", "ghp_FAKEFAKEFAKEFAKE"),
+            (
+                "SUPABASE-KEY-SERVICE-ROLE-CLIENT-1",
+                "serviceRoleKey = [REDACTED]",
+            ),
+            ("SEC-NO-HARDCODED-SECRETS-1", "key = [REDACTED]"),
+        ];
+        for (rule, snippet) in cases {
+            for category in [None, Some("secret-exposure".to_string())] {
+                let mut a = in_repo("acme/a", rule, 3, snippet);
+                let mut b = in_repo("acme/b", rule, 3, snippet);
+                a.category = category.clone();
+                b.category = category.clone();
+                let rows = vec![a.clone(), b.clone()];
+                let d = decided(&[&a], TriageState::FalsePositive, "fixture key");
+                assert!(
+                    prior_decisions(&rows, &d, &b).is_none(),
+                    "{rule} ({category:?}): repo A's decision reached repo B"
+                );
+                // The same repo still remembers.
+                let mut a2 = in_repo("acme/a", rule, 9, snippet);
+                a2.category = category.clone();
+                let rows = vec![a.clone(), a2.clone()];
+                assert!(prior_decisions(&rows, &d, &a2).is_some(), "{rule}");
+            }
+        }
     }
 
     /// M9: a non-secret rule keeps the cross-repo memory even with the same path in both repos.

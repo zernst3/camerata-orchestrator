@@ -176,6 +176,30 @@ async fn two_repos_with_the_same_path_are_one_project_one_report_one_cache() {
         .unwrap()
         .to_string_lossy()
         .starts_with("project-2-"));
+    // And a list of the folders it covers, beside it, so deleting either repo's source can find
+    // and remove the project's files.
+    let lists: Vec<_> = std::fs::read_dir(state.path().join("camerata"))
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.to_string_lossy().ends_with(".repos.json"))
+        .collect();
+    assert_eq!(lists.len(), 1, "{lists:?}");
+    let listed: Vec<String> =
+        serde_json::from_str(&std::fs::read_to_string(&lists[0]).unwrap()).unwrap();
+    let canon = |p: &Path| p.canonicalize().unwrap().to_string_lossy().into_owned();
+    assert_eq!(listed.len(), 2);
+    assert!(
+        listed.contains(&canon(&a)) && listed.contains(&canon(&b)),
+        "{listed:?}"
+    );
+    assert_eq!(
+        camerata_server::scan_cache::state_dir::project_files_covering(
+            &state.path().join("camerata"),
+            &a
+        )
+        .len(),
+        3
+    );
     let manifest: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&caches[0]).unwrap()).unwrap();
     let files = manifest["files"].as_object().unwrap();

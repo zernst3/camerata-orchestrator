@@ -11,6 +11,7 @@
 //! | the checkout | the resolved folder, canonicalised | `remove_dir_all`, then an emptied `<owner>` parent under the workspace root |
 //! | server incremental-scan cache | `ScanCacheStore` | `remove_repo` (this repo's slice only) |
 //! | CLI scan cache and ledger | `repo_state_key(checkout)` in the CLI state dir | `remove_file` |
+//! | CLI cache, ledger and folder list of a multi-repo run | every `project-*.repos.json` that lists the checkout | `remove_file` |
 //! | Claude Code session files | the ids recorded on the project's inspection entries | `remove_file` / `remove_dir_all` on `<claude dir>/*/<id>.jsonl` and `<id>/` |
 //! | in-memory copies | scan transcripts, finished jobs of the project | cleared |
 //!
@@ -22,7 +23,7 @@ use std::path::{Path, PathBuf};
 use super::guard::GuardedTarget;
 use super::records::{PurgeOutcome, PurgedItem, PurgedKind};
 use super::storage::ensure_not_real_location_in_test;
-use crate::scan_cache::state_dir::repo_state_files_in;
+use crate::scan_cache::state_dir::{project_files_covering, repo_state_files_in};
 use crate::workspace;
 use crate::AppState;
 
@@ -213,6 +214,31 @@ pub async fn plan(state: &AppState, target: &GuardedTarget) -> PurgePlan {
                 item: PurgedItem {
                     kind,
                     path: path.to_string_lossy().into_owned(),
+                    files: totals.0,
+                    bytes: totals.1,
+                    outcome: PurgeOutcome::Planned,
+                },
+                action: Action::File(path),
+            });
+        }
+    }
+
+    // A `camerata inspect` run over several repos keeps one cache and one ledger for the whole
+    // set (`project-<n>-<hash>`), with a `.repos.json` listing the folders it covers. Any such
+    // set that includes this checkout holds this repo's findings, so it goes too.
+    if let Some(cli_dir) = &state.storage_roots.cli_state_dir {
+        for path in project_files_covering(cli_dir, &checkout) {
+            let name = path.to_string_lossy().into_owned();
+            let kind = if name.ends_with(".cache.json") {
+                PurgedKind::CliScanCache
+            } else {
+                PurgedKind::CliLedger
+            };
+            let totals = walk_totals(&path, &[]);
+            steps.push(PurgeStep {
+                item: PurgedItem {
+                    kind,
+                    path: name,
                     files: totals.0,
                     bytes: totals.1,
                     outcome: PurgeOutcome::Planned,
