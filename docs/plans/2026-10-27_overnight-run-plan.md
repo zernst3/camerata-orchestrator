@@ -89,6 +89,11 @@ H. By 08:30: morning summary at the top of `docs/OVERNIGHT_DECISIONS.md`; the PR
 
 ## Status log (newest first)
 
+- 00:25: boards optional (cloud) reviewed: 2 HIGH (native refs render as `#n` and GitHub
+  autolinks them to real issues; merge conflict with console gaps), 3 MEDIUM (repo not
+  validated before paths and push URLs; phantom units; numbers reused after delete). Brief
+  queued (scratchpad/boards_merge_brief.md), runs after console gaps merge. Hygiene merge+fix
+  builder running; settings.json move, MPL-2.0 and fixture-name privacy added to Needs Zach.
 - 00:10 (Oct 28 local 00:10 = 04:10 UTC): false-negative hunt (cloud) delivered: 12 HIGH, 26
   MEDIUM, 22 LOW on base 7bc10573 (before tonight's merges; some are already fixed by rank 2's
   batch truncation retry and H4's malformed-JSON retry). Report saved to
