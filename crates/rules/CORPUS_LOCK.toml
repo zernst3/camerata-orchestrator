@@ -25,7 +25,7 @@
 "ARCH-HANDLER-NO-DB-1" = { version = 1, hash = "sha256:b78467484ed2242d91c58d5ba6e38c10e67ddb07a5f630d189c9c2a1ab3ffdf0" }
 "ARCH-HOT-READ-CACHE-1" = { version = 1, hash = "sha256:29c9208d9a4ef4c68393fae8a65104cc87b61c70468e6406a381fb5b33ab7c02" }
 "ARCH-IAC-1" = { version = 1, hash = "sha256:8df04b36432b34a569101a0ccc19d4ecd995cb82ba047f453b329e081fb38642" }
-"ARCH-IDEMPOTENCY-KEYS-1" = { version = 1, hash = "sha256:bccde395230f6e470af422bcf3dbef7eb503f2e0064efbf2b05c12f5dab8f312" }
+"ARCH-IDEMPOTENCY-KEYS-1" = { version = 2, hash = "sha256:ea56889bde0083dffb97aaf82b3886e39af4e77f3062d4009ef73134a5b5824c" }
 "ARCH-MIDDLEWARE-FIRST-1" = { version = 1, hash = "sha256:534121d7f0a55a47a6f6010cb9e09afc7a49035253878fa3d29656992e1978d4" }
 "ARCH-MONOLITH-FIRST-1" = { version = 1, hash = "sha256:49174c7269263c9437fcfc426319bbdd3fccfe67854bc4ed4dd587a6abe87c8d" }
 "ARCH-NAMING-ONE-CONCEPT-1" = { version = 2, hash = "sha256:d174503a2cde7a1f6dd91c56f491d73c1e435edb4846785f9bb09336ef8aff79" }
@@ -372,7 +372,7 @@
 "RUST-TOKIO-STRUCTURED-CONCURRENCY-JOINSET-1" = { version = 1, hash = "sha256:a4cbabebe24c3a9cbc23becff3e50e7ae577277325abed70d3c94732cb26ae8f" }
 "SEC-NO-COMMAND-INJECTION-1" = { version = 1, hash = "sha256:a5a53d4ec6dc30cedc31b77d2b519c90489dd16405d0785f74d42e2c45c204b4" }
 "SEC-NO-DISABLED-TLS-1" = { version = 1, hash = "sha256:1d3213809dff44f25de48e08111ee261072ad42f15c15171b72b9a0edfabee6e" }
-"SEC-NO-HARDCODED-SECRETS-1" = { version = 1, hash = "sha256:77325f784f3f188432463da57b1a68105b127c09939ef07c74ca7fd62a091d6f" }
+"SEC-NO-HARDCODED-SECRETS-1" = { version = 2, hash = "sha256:bdd1ee4790883524a3dc6ef6a20dce02bd193a232ea587f2c97374f41b083445" }
 "SEC-NO-OPEN-REDIRECT-1" = { version = 1, hash = "sha256:faa891dde32f679fbd3d8a5f91eee0d6ce299b372f3450130d14b8f7877de567" }
 "SEC-NO-PERMISSIVE-CORS-CREDENTIALS-1" = { version = 1, hash = "sha256:c2d47ccab40839a77acdb0ab33bb70766a00e5eb715667dc27626ebb5a5ac156" }
 "SEC-NO-PRIVATE-KEY-1" = { version = 1, hash = "sha256:1861212b6794547a986746874d8ca5040920c1041b97712f22d3ab8a41ffe7fa" }
