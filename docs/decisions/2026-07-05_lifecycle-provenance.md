@@ -5,7 +5,7 @@
 
 ## Context
 
-The Fable 5 audit (`docs/ARCH_AUDIT_2026-07-04_fable5-complete.md`) found four run-engine lifecycle
+The Fable 5 audit (private working notes) found four run-engine lifecycle
 defects. The pure `UowStage` transition table (`app-core/src/lifecycle.rs`) is clean; every bug is in
 the CALLERS bypassing it.
 

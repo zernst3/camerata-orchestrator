@@ -608,7 +608,7 @@ pub(super) use camerata_ui_core::triage::{
     finding_key, Disposition, FindingView, TechDebtBucket, TriageCounts, TriageModel, TriageState,
 };
 
-// Pass 2 step 1 (docs/plans/2026-10-11_pass2-curator-ui-design.md): the five-kind taxonomy's
+// Pass 2 step 1 (the pass-2 curator UI design notes): the five-kind taxonomy's
 // surface routing, the Kind badge's wire tag, and the one-rule-one-surface invariant. All pure,
 // all in core; this layer only renders them.
 pub(super) use camerata_ui_core::triage::{
@@ -1006,7 +1006,7 @@ pub(super) struct RuleRecommendationView {
     #[serde(default)]
     pub operator_chosen: bool,
     /// The `file:line` (or `file:line — short note`) citation in the repo the model grounded its
-    /// pick in (P7, docs/plans/2026-09-29_codebase-inspection-hardening.md). `None` when the
+    /// pick in (P7, the codebase-inspection hardening notes). `None` when the
     /// model gave no evidence for this rule (or, for an operator-forced pick, no evidence is
     /// expected). Mirrors `camerata_server::ai_audit::RuleRecommendation::evidence`.
     /// `#[serde(default)]` so a report from before this field existed still deserializes as
@@ -1648,7 +1648,7 @@ impl AuditModelsResp {
     /// Return only vision-capable models, grouped by provider.
     // dead_code: the Designer (vision) band selector now lists ALL models (06003633), so the
     // vision-only grouping is unwired; kept (with its tests) because
-    // docs/plans/2026-07-01_ui-core-extraction.md lists it among the pure logic to extract.
+    // The UI-core extraction notes list it among the pure logic to extract.
     #[allow(dead_code)]
     pub fn vision_grouped(&self) -> Vec<(&'static str, Vec<&AuditModelOption>)> {
         let claude: Vec<&AuditModelOption> = self
@@ -12633,7 +12633,7 @@ mod render_tests {
         }
     }
 
-    /// P7 (docs/plans/2026-09-29_codebase-inspection-hardening.md): each rule's card must show
+    /// P7 (the codebase-inspection hardening notes): each rule's card must show
     /// the evidence `file:line` the pick was grounded in, and an applicability marker when the
     /// model judged the rule not applicable to this repo — "a wrong pick costs a glance, not a
     /// false finding".
@@ -12878,7 +12878,7 @@ mod render_tests {
     }
 
     // ── Pass 2 step 1: the Kind column + the three informational panels ──────
-    // docs/plans/2026-10-11_pass2-curator-ui-design.md §11 step 1.
+    // the pass-2 curator UI design notes §11 step 1.
 
     fn kinded_finding(rule_id: &str, severity: &str, kind: serde_json::Value) -> FindingView {
         let mut row = serde_json::json!({
@@ -13294,7 +13294,7 @@ mod render_tests {
     }
 
     // ── Pass 2 step 2: MANUAL column sorting over the curated default ────────
-    // docs/plans/2026-10-11_pass2-curator-ui-design.md §5: "the default sort is a curated
+    // the pass-2 curator UI design notes §5: "the default sort is a curated
     // order ... the column headers still allow any manual re-sort chorale supports — the
     // default is opinionated, the table is not locked."
     //
@@ -13965,7 +13965,7 @@ mod render_tests {
     }
 
     // ── Pass 2 step 2: the deviation group header ────────────────────────────
-    // docs/plans/2026-10-11_pass2-curator-ui-design.md §2/§4/§11-step-2: "Group headers carry
+    // the pass-2 curator UI design notes §2/§4/§11-step-2: "Group headers carry
     // the Deviation sentence ... rendered from data: 'N of M sites deviate from
     // <convention_label>'. No prose parsing" and "Group headers carry rule-level bulk
     // actions for deviations ... because the natural unit of a deviation decision is the

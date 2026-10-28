@@ -1,5 +1,5 @@
 //! `POST /api/orchestrator/message` — the first functional increment of the
-//! architect-orchestrator LOOP (`docs/plans/2026-07-09_product-owner-head-vibe-mode.md`,
+//! architect-orchestrator LOOP (the product-owner vibe-mode design notes,
 //! "Architect-orchestrator design (decided 2026-07-10)").
 //!
 //! Scope: handle a CHANGE REQUEST against an EXISTING scaffolded project, end to

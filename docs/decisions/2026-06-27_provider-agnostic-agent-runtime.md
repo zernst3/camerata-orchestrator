@@ -75,5 +75,5 @@ HTML/Tailwind **IR** that a logic tier translates into Dioxus `rsx!` — the vis
 Rust. Build the **routing seams** (per-band/per-domain model selection + the IR handoff), never
 hard-code model→domain assignments (models churn; the routing architecture is durable). The
 registry flags vision-capable models via OpenRouter `architecture.input_modalities`. Full design:
-`docs/plans/2026-06-27_model-efficiency-and-provider-agnostic-plan.md` §10. Orchestrator tiering is
+the model-efficiency and provider-agnostic plan §10 (private working notes). Orchestrator tiering is
 unchanged (escalation already routes to `Strongest`).

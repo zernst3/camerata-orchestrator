@@ -469,7 +469,7 @@ pub(crate) fn classify(finding: &Finding, wire: Option<&DispositionWire>) -> Dis
 /// - The PDF's per-page "DRAFT: not yet reviewed" banner (`Raw` only) — see the Typst
 ///   template's `d.review_state` read.
 ///
-/// See `docs/plans/2026-09-29_codebase-inspection-hardening.md`'s P5 section: the bug this
+/// See the codebase-inspection hardening notes' P5 section: the bug this
 /// fixes is a raw (nobody-reviewed) export whose narrative said "N were reviewed... 0 were
 /// dispositioned as false positives by the auditor" — a flat fabrication, since reviewing
 /// something is precisely what had not happened.
@@ -1404,7 +1404,7 @@ pub struct AuditReportJson {
 }
 
 /// The confidentiality marking a client deliverable carries (2026-10-24 decision, recorded in
-/// `docs/OVERNIGHT_DECISIONS.md`).
+/// the private decision log).
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct ConfidentialityJson {
     /// "Confidential, prepared for <client> on <date>": every PDF page footer and every
@@ -3154,7 +3154,7 @@ pub(crate) fn provenance_tier_rank(citation_kind: &str) -> u8 {
     }
 }
 
-// C3-1b (`docs/plans/2026-09-30_cycle2-queue-hardening.md`): there used to be a
+// C3-1b (the cycle-2 queue-hardening notes): there used to be a
 // `fix_generation_failed` gate here that read a `"[needs review: fix not generated]"` tag
 // off `detail` and demoted a would-be `do_now` finding to `do_next` — conflating a PIPELINE
 // failure (the fix-specific generation pass gave up) with a CONFIDENCE judgement about the
@@ -6263,7 +6263,7 @@ mod tests {
         );
     }
 
-    // ── E2 (`docs/plans/2026-10-09_audit-findings-tracker.md`): a rule's `max_severity`
+    // ── E2 (the audit findings tracker): a rule's `max_severity`
     // ceiling, applied LAST — never exceeded by any report, never raising a lower severity ──
 
     /// Every site severity a report actually exported, scanning BOTH top-level row sections.
@@ -7438,7 +7438,7 @@ mod tests {
     }
 
     // ── P1: deduplication + cross-tier merge, end-to-end through build_report_json ──────────
-    // docs/plans/2026-09-29_codebase-inspection-hardening.md, P1. Runs the SAME two merge
+    // the codebase-inspection hardening notes, P1. Runs the SAME two merge
     // passes the real audit pipeline runs (`ai_audit::merge_by_location` then
     // `ai_audit::merge_semantic_groups`) over a faktura-SHAPED synthetic fixture — never the
     // real fixture, never a fixture-specific rule/file/table name — then builds the report and
@@ -9752,7 +9752,7 @@ mod tests {
     }
 
     // ── P3 (2026-09-29): the citation gate ──────────────────────────────────────────────
-    // docs/plans/2026-09-29_codebase-inspection-hardening.md, P3.
+    // the codebase-inspection hardening notes, P3.
 
     /// An AI-tier finding (`AI-`-prefixed rule id) whose defect does not classify into any
     /// of the P3 closed taxonomy classes must be held OUT of `curated_findings` entirely —
@@ -15840,7 +15840,7 @@ mod export_invariants_gate {
         );
     }
 
-    // ── Pass-1 W1: the seal (docs/plans/2026-10-09_audit-findings-tracker.md) ─────────────
+    // ── Pass-1 W1: the seal (the audit findings tracker) ─────────────
     //
     // C1 — every row the engine produces reaches the reader; nothing may be added after the
     //      row set is final.

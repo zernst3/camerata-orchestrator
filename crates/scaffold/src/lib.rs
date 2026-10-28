@@ -1,5 +1,5 @@
 //! `camerata-scaffold` — Part 1 of the Rust-fullstack PWA scaffolder
-//! (`docs/plans/2026-07-09_product-owner-head-vibe-mode.md`, section 4 "Rust-fullstack
+//! (the product-owner vibe-mode design notes, section 4 "Rust-fullstack
 //! scaffolder" + the "Feedback loop" section).
 //!
 //! This crate materializes a vetted, working Dioxus-fullstack (web) PWA app skeleton

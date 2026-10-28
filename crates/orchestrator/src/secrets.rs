@@ -1,5 +1,5 @@
 //! Secret detector + scrubber (FOLD E — the chat secret-interceptor,
-//! `docs/plans/2026-07-09_product-owner-head-vibe-mode.md`'s usability backlog:
+//! the product-owner vibe-mode design notes' usability backlog:
 //! "chat secret-interceptor (scrub pasted keys from transcript/memory/audit)").
 //!
 //! A secret pasted into a chat (or captured in a deployed app's own logs) must

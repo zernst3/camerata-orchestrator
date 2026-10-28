@@ -8,7 +8,7 @@ into a real, unit-tested adapter.
 
 **Local-first, no cloud.** This crate only ever spawns `dx serve` on the same machine and
 serves on `127.0.0.1`. Sharing a preview URL off-box (a cloud tunnel) is a later phase per the
-design doc (`docs/plans/2026-07-09_product-owner-head-vibe-mode.md`) and is out of scope here.
+design doc (the product-owner vibe-mode design notes) and is out of scope here.
 
 ## Layers
 

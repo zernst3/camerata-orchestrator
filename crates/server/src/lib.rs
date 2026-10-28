@@ -138,7 +138,7 @@ pub mod release_gate;
 /// W1: the pipeline-integrity ledger — per-rule "did it actually run" tracking and
 /// per-stage row-accounting, so a rule that never ran can never be reported as
 /// "verified clean" and a row that vanishes between pipeline stages can never go
-/// unnoticed. See the module doc comment and `docs/plans/` for the defects this closes.
+/// unnoticed. See the module doc comment and the hardening-cycle notes for the defects this closes.
 pub mod scan_ledger;
 pub mod settings;
 pub mod story_docs_gate;
@@ -291,7 +291,7 @@ pub struct AppState {
     /// The confidence engine's decision + outcome + calibration store (SQLite). Backs
     /// the Architect orchestrator's `orchestrator_decision` recording (the "measured
     /// override rate at max dial" moat metric — see
-    /// `docs/plans/2026-07-09_product-owner-head-vibe-mode.md`,
+    /// the product-owner vibe-mode design notes,
     /// "Architect-orchestrator design"). Opened best-effort in [`AppState::from_env`],
     /// same fail-soft pattern as `governance_log`/`feedback_store`: `None` in tests and
     /// on open failure. NOT YET instrumented at any lifecycle site as of this phase —
@@ -3444,7 +3444,7 @@ fn compute_feedback_fingerprint(report: &camerata_api_types::feedback::DefectRep
 /// same `{ ok: false, message }` shape.
 ///
 /// Fingerprint + dedupe fold (the "cheapest-now / most-expensive-later" fold — see
-/// `docs/plans/2026-07-09_product-owner-head-vibe-mode.md`'s usability backlog): when
+/// the product-owner vibe-mode design notes' usability backlog): when
 /// the client did not already send a `fingerprint`, one is computed here
 /// ([`compute_feedback_fingerprint`]). If a recent OPEN report with the SAME
 /// fingerprint already exists for this project, this occurrence is folded into that

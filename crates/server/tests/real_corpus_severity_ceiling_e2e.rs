@@ -2,7 +2,7 @@
 //!
 //! > **E2 AGREED** — rules may declare a maximum severity; no report may exceed it.
 //! >
-//! > — `docs/plans/2026-10-09_audit-findings-tracker.md`
+//! > — the audit findings tracker
 //!
 //! # Why this file exists separately from `report_export.rs`'s own `req_e2_*` tests
 //!

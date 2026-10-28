@@ -4,7 +4,7 @@
 //! any rendering framework (RUST-HEADLESS-CORE-1). The Dioxus adapter crate (`camerata-ui`) depends on
 //! it and renders its state; everything here is unit-testable with no VirtualDom.
 //!
-//! Extraction from `camerata-ui` is incremental (see `docs/plans/2026-07-01_ui-core-extraction.md`);
+//! Extraction from `camerata-ui` is incremental (see the UI-core extraction notes);
 //! modules are added here as each surface's logic moves over.
 
 pub mod adopt;
