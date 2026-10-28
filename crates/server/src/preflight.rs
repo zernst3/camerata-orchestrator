@@ -125,13 +125,14 @@ pub(crate) struct PreflightReq {
 }
 
 /// One [`RepoSizeWire`] per requested repo, in request order. A requested repo that did not
-/// resolve to a local clone (`unresolved`, the notes from `resolve_local_sources`) or could not
+/// resolve to a local clone (`unresolved`, `LocalSources::unresolved` from `resolve_local_sources`,
+/// the one place that decides a repo has no usable folder) or could not
 /// be read is a row with an `error`, never absent: an estimate that silently drops a repo prices
 /// a smaller job than the scan will run.
 pub fn repo_sizes(
     requested: &[String],
     facts: &[RepoScanFacts],
-    unresolved: &[String],
+    unresolved: &[(String, String)],
 ) -> Vec<RepoSizeWire> {
     requested
         .iter()
@@ -151,7 +152,8 @@ pub fn repo_sizes(
                 error: Some(
                     unresolved
                         .iter()
-                        .find_map(|n| n.strip_prefix(&format!("{spec}: ")))
+                        .find(|(name, _)| name == spec)
+                        .map(|(_, why)| why.as_str())
                         .unwrap_or("no local folder is set for this repo")
                         .to_string(),
                 ),
@@ -167,9 +169,9 @@ pub(crate) async fn onboard_preflight(
     axum::extract::State(state): axum::extract::State<crate::AppState>,
     axum::Json(req): axum::Json<PreflightReq>,
 ) -> axum::Json<Vec<RepoSizeWire>> {
-    let (sources, unresolved) = crate::resolve_local_sources(&state, &req.repos);
-    let facts = gather_scan_facts(&sources, &[], None).await;
-    axum::Json(repo_sizes(&req.repos, &facts, &unresolved))
+    let local = crate::resolve_local_sources(&state, &req.repos);
+    let facts = gather_scan_facts(&local.sources, &[], None).await;
+    axum::Json(repo_sizes(&req.repos, &facts, &local.unresolved))
 }
 
 /// The exact input size of one representative scan pass, from `count_tokens` (free, API backend
@@ -262,7 +264,10 @@ mod tests {
         let sizes = repo_sizes(
             &["acme/a".into(), " ".into(), "acme/gone".into()],
             &[],
-            &["acme/gone: no local folder set, browse to the repo's folder".to_string()],
+            &[(
+                "acme/gone".to_string(),
+                "no local folder is set".to_string(),
+            )],
         );
         let names: Vec<&str> = sizes.iter().map(|s| s.repo.as_str()).collect();
         assert_eq!(
@@ -272,7 +277,8 @@ mod tests {
         );
         assert_eq!(
             sizes[1].error.as_deref(),
-            Some("no local folder set, browse to the repo's folder")
+            Some("no local folder is set"),
+            "the reason is the resolver's own, with no prefix to strip"
         );
         assert!(
             sizes[0].error.is_some(),
