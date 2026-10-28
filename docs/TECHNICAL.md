@@ -2751,7 +2751,16 @@ thing:
   a PDF fault. `report_export::build_report_json` produces `AuditReportJson`;
   `compile_pdf` shells `typst compile` over
   `crates/server/templates/audit_report.typ`. No model call is made in the export
-  path, so it is deterministic and reproducible.
+  path, so it is deterministic and reproducible. Styling follows the W27 brand guide
+  (`docs/design/2026-10-27_pdf-brand-guide.md`): the colour, type and size tokens sit
+  at the top of the template. The fonts (Inter for text, JetBrains Mono for code, SIL
+  OFL, licence files beside them in `templates/fonts/`) and the two logo marks
+  (`docs/design/brand/`) are compiled into the binary (`TEMPLATE_ASSETS`), written next
+  to the template on every compile, and passed with `--font-path`, which Typst searches
+  before system fonts. The logo mark renders only when the resolved brand is the brand
+  kit's own (`BRAND_KIT_NAME`, `AuditReportJson::brand_mark`); another agency's brand
+  gets the text wordmark alone. A test compiles with system fonts ignored to prove the
+  bundle alone renders the report.
 - **`findings.xlsx`** is the DETAIL surface, and a missing row there IS a fault.
 - **`findings.json`** is the machine-readable data structure. It carries the WHOLE
   non-false-positive row set, every kind included, with `provenance` and `summary`

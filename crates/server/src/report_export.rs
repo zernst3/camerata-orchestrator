@@ -123,6 +123,17 @@ pub const NEUTRAL_COVER_TITLE: &str = "Codebase Inspection Report";
 /// env var still wins over this (see [`resolve_prepared_by`]'s precedence).
 pub const DEFAULT_PREPARED_BY: &str = "Zachary Ernst, Cantus Works";
 
+/// The brand the bundled logo files (`docs/design/brand/`) belong to. The mark renders on a
+/// report only when its resolved brand is this one ([`brand_kit_matches`]); the colours and
+/// type of the W27 template apply to every report, the logo does not.
+pub const BRAND_KIT_NAME: &str = "Cantus Works";
+
+/// Whether `brand` (the resolved [`ReportOptions::brand`], `None` for no brand) is the bundled
+/// brand kit's, ignoring case and surrounding whitespace.
+pub(crate) fn brand_kit_matches(brand: Option<&str>) -> bool {
+    brand.is_some_and(|b| b.trim().eq_ignore_ascii_case(BRAND_KIT_NAME))
+}
+
 /// Precedence resolver: the per-report field wins when non-blank, else the env value when
 /// non-blank, else `None`/empty. Pure — takes the env value as an explicit `Option<&str>`
 /// rather than calling `std::env::var` itself, so it stays unit-testable without mutating real
@@ -1338,6 +1349,11 @@ pub struct AuditReportJson {
     /// review-claim wording — see [`ReviewState`]'s doc comment.
     pub review_state: ReviewState,
     pub cover: CoverJson,
+    /// W27: whether the bundled brand kit's logo mark renders (cover and running header).
+    /// True only when the resolved brand IS the kit's brand ([`brand_kit_matches`]); any other
+    /// agency's brand gets the text wordmark alone, so the template never puts one agency's
+    /// logo on another's report.
+    pub brand_mark: bool,
     pub executive_summary: ExecutiveSummaryJson,
     pub three_things: ThreeThingsJson,
     pub scorecard: ScorecardJson,
@@ -4912,6 +4928,7 @@ pub fn build_report_json(
 
     AuditReportJson {
         review_state,
+        brand_mark: brand_kit_matches(cover.brand.as_deref()),
         cover,
         executive_summary,
         three_things,
@@ -4966,6 +4983,55 @@ pub async fn compile_pdf(json: &AuditReportJson) -> anyhow::Result<Vec<u8>> {
     compile_pdf_from_data(&render_data_json(json)?).await
 }
 
+/// The files the template reads besides `data.json`, written next to it for every compile: the
+/// embedded fonts (W27: Inter for text, JetBrains Mono for code, both SIL OFL, licence files
+/// beside them in `templates/fonts/`) and the brand kit's two logo marks. Embedded in the
+/// binary like the template itself, so nothing has to ship alongside the server and the PDF
+/// never depends on what fonts the exporting machine happens to have installed.
+const TEMPLATE_ASSETS: [(&str, &[u8]); 7] = [
+    (
+        "fonts/Inter-Regular.ttf",
+        include_bytes!("../templates/fonts/Inter-Regular.ttf"),
+    ),
+    (
+        "fonts/Inter-Italic.ttf",
+        include_bytes!("../templates/fonts/Inter-Italic.ttf"),
+    ),
+    (
+        "fonts/Inter-SemiBold.ttf",
+        include_bytes!("../templates/fonts/Inter-SemiBold.ttf"),
+    ),
+    (
+        "fonts/Inter-SemiBoldItalic.ttf",
+        include_bytes!("../templates/fonts/Inter-SemiBoldItalic.ttf"),
+    ),
+    (
+        "fonts/JetBrainsMono-Regular.ttf",
+        include_bytes!("../templates/fonts/JetBrainsMono-Regular.ttf"),
+    ),
+    (
+        "brand-mark.svg",
+        include_bytes!("../../../docs/design/brand/cantus-logo-mark.svg"),
+    ),
+    (
+        "brand-mark-small.svg",
+        include_bytes!("../../../docs/design/brand/cantus-logo-mark-small.svg"),
+    ),
+];
+
+/// Which fonts Typst may draw from. Production uses [`FontSources::BundledFirst`]; the
+/// embedding test uses [`FontSources::BundledOnly`] to prove the bundle alone renders the
+/// report on a machine with no Inter or JetBrains Mono installed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FontSources {
+    /// `--font-path fonts`: Typst searches the bundled files BEFORE system fonts, so Inter
+    /// and JetBrains Mono always come from the bundle, and a glyph neither has (a CJK path, an
+    /// emoji) still falls back to a system font instead of rendering as a missing box.
+    BundledFirst,
+    /// `--font-path fonts --ignore-system-fonts`.
+    BundledOnly,
+}
+
 /// Compile `data_json` (from [`render_data_json`]) into a PDF via a bundled Typst template.
 /// Self-contained: the template
 /// text is embedded in the binary (`include_str!`), so no external file needs to ship
@@ -4977,6 +5043,15 @@ pub async fn compile_pdf(json: &AuditReportJson) -> anyhow::Result<Vec<u8>> {
 /// generation time (see [`creation_epoch`]). The template reads `data.json` via Typst's own
 /// `json()` builtin — no `--input` plumbing needed.
 pub async fn compile_pdf_from_data(data_json: &str) -> anyhow::Result<Vec<u8>> {
+    let (pdf, warnings) = run_typst(data_json, FontSources::BundledFirst).await?;
+    if !warnings.trim().is_empty() {
+        tracing::warn!(%warnings, "typst reported warnings while compiling the report");
+    }
+    Ok(pdf)
+}
+
+/// The compile itself: the PDF bytes and Typst's stderr (its warnings, on success).
+async fn run_typst(data_json: &str, fonts: FontSources) -> anyhow::Result<(Vec<u8>, String)> {
     let tmp = tempfile::tempdir().context("could not create a temp dir for the PDF export")?;
     let data_path = tmp.path().join("data.json");
     let template_path = tmp.path().join("report.typ");
@@ -4991,6 +5066,14 @@ pub async fn compile_pdf_from_data(data_json: &str) -> anyhow::Result<Vec<u8>> {
     )
     .await
     .context("could not write report.typ")?;
+    tokio::fs::create_dir_all(tmp.path().join("fonts"))
+        .await
+        .context("could not create the fonts dir for the PDF export")?;
+    for (name, bytes) in TEMPLATE_ASSETS {
+        tokio::fs::write(tmp.path().join(name), bytes)
+            .await
+            .with_context(|| format!("could not write {name}"))?;
+    }
 
     let mut cmd = tokio::process::Command::new("typst");
     cmd.current_dir(tmp.path())
@@ -4999,7 +5082,12 @@ pub async fn compile_pdf_from_data(data_json: &str) -> anyhow::Result<Vec<u8>> {
         .arg("report.pdf")
         .arg("--root")
         .arg(tmp.path())
+        .arg("--font-path")
+        .arg(tmp.path().join("fonts"))
         .kill_on_drop(true);
+    if fonts == FontSources::BundledOnly {
+        cmd.arg("--ignore-system-fonts");
+    }
     // Reproducibility: pin the PDF's creation timestamp instead of letting Typst read the wall
     // clock. Typst stamps that clock into FIVE places — the Info dict's `/CreationDate` and
     // `/ModDate`, the XMP packet's `xmp:CreateDate`, `xmp:ModifyDate`, `xmpMM:InstanceID` and
@@ -5034,13 +5122,14 @@ pub async fn compile_pdf_from_data(data_json: &str) -> anyhow::Result<Vec<u8>> {
         Err(_elapsed) => anyhow::bail!("typst compile timed out after 30s"),
     };
 
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
         anyhow::bail!("typst compile failed: {stderr}");
     }
 
     tokio::fs::read(&pdf_path)
         .await
+        .map(|pdf| (pdf, stderr))
         .context("typst reported success but report.pdf was not found")
 }
 
@@ -10425,6 +10514,60 @@ mod tests {
             pdf.starts_with(b"%PDF"),
             "output must start with the PDF magic bytes"
         );
+    }
+
+    /// W27: the bundled fonts alone render the report. Compiled with system fonts IGNORED, so a
+    /// machine that happens to have Inter or JetBrains Mono installed cannot mask a missing or
+    /// misnamed bundle file: Typst warns "unknown font family" for a family it cannot find, and
+    /// the PDF's font dictionaries name every embedded face.
+    #[tokio::test]
+    async fn the_bundled_fonts_alone_render_the_report_in_inter_and_jetbrains_mono() {
+        if which_typst().is_none() {
+            eprintln!("skipping the_bundled_fonts_alone_render_the_report: typst not on PATH");
+            return;
+        }
+        let report = report_with(
+            vec![finding(
+                "SEC-NO-HARDCODED-SECRETS-1",
+                "src/a.rs",
+                10,
+                "critical",
+            )],
+            vec!["SEC-NO-HARDCODED-SECRETS-1"],
+        );
+        let mut opts = empty_opts();
+        opts.client_name = "Acme Corp".to_string();
+        opts.brand = BRAND_KIT_NAME.to_string();
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &opts);
+        assert!(json.brand_mark, "the kit's own brand renders the mark");
+
+        let (pdf, warnings) = run_typst(
+            &render_data_json(&json).expect("serialize"),
+            FontSources::BundledOnly,
+        )
+        .await
+        .expect("the report compiles from the bundled fonts alone");
+        assert!(
+            !warnings.contains("unknown font family"),
+            "a bundled family is missing: {warnings}"
+        );
+        let text = String::from_utf8_lossy(&pdf);
+        for face in ["Inter-Regular", "Inter-SemiBold", "JetBrainsMono-Regular"] {
+            assert!(
+                text.contains(&format!("+{face}")),
+                "the PDF does not embed {face}"
+            );
+        }
+    }
+
+    /// W27: the logo mark belongs to the bundled brand kit, so it renders for that brand only.
+    /// Another agency's brand, or no brand, never gets it.
+    #[test]
+    fn the_brand_mark_renders_only_for_the_brand_kit_brand() {
+        assert!(brand_kit_matches(Some("Cantus Works")));
+        assert!(brand_kit_matches(Some("  cantus works ")));
+        assert!(!brand_kit_matches(Some("Another Agency")));
+        assert!(!brand_kit_matches(None));
     }
 
     // ── req_det: two exports of ONE report are byte-identical ─────────────────
