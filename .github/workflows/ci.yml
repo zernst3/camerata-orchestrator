@@ -75,16 +75,6 @@ jobs:
         if: ${{ !cancelled() }}
         run: ./scripts/ci-gate.sh "Self-measurement gate" ./scripts/self-measurement.sh
 
-      # TEMPORARY DIAGNOSTIC (remove before merge): reproduce the fixture crate that
-      # crates/core/tests/fleet_real_check.rs builds, with the CI environment.
-      - name: Probe fixture crate
-        if: ${{ !cancelled() }}
-        run: >
-          ./scripts/ci-gate.sh "Probe" bash -c
-          'd=$(mktemp -d) && mkdir "$d/src" && printf "[package]\nname = \"fleet-probe\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\n[dependencies]\n" > "$d/Cargo.toml"
-          && printf "fn main() {\n    let x = 1;\n    println!(\"{}\", x);\n}\n" > "$d/src/main.rs"
-          && cd "$d" && env | grep -i "cargo\|rust" | sort && cargo clippy -- -D warnings'
-
       # Gate 4: the test suite must pass.
       - name: Test gate
         if: ${{ !cancelled() }}

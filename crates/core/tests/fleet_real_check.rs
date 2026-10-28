@@ -39,22 +39,30 @@ use camerata_core::{AgentDriver, AgentOutcome, FleetCoordinator, FleetStage, Rol
 // ─── self-cleaning temp worktree (no new crate dependency) ───────────────────
 
 struct TempWorktree {
+    /// The throwaway clone root. The worktree lives under it in the canonical
+    /// `<clone>/.camerata-worktrees/<name>` layout, so the shared cargo target dir the
+    /// checks derive (`<clone>/.camerata-shared-target`) also lands inside it. A
+    /// worktree placed directly in the OS temp dir derives `<tmp>/../.camerata-shared-target`,
+    /// which is a writable directory on macOS (`/var/folders/..`) but `/` on Linux, where
+    /// the real clippy and test checks then cannot create their target dir.
+    root: PathBuf,
     path: PathBuf,
 }
 
 impl TempWorktree {
     fn new(tag: &str) -> std::io::Result<Self> {
-        let mut path = std::env::temp_dir();
+        let mut root = std::env::temp_dir();
         let stamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos())
             .unwrap_or(0);
-        path.push(format!(
+        root.push(format!(
             "camerata-fleet-{tag}-{}-{stamp}",
             std::process::id()
         ));
+        let path = root.join(".camerata-worktrees").join("fleet-probe");
         fs::create_dir_all(&path)?;
-        Ok(Self { path })
+        Ok(Self { root, path })
     }
 
     fn path(&self) -> &Path {
@@ -64,7 +72,7 @@ impl TempWorktree {
 
 impl Drop for TempWorktree {
     fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.path);
+        let _ = fs::remove_dir_all(&self.root);
     }
 }
 
