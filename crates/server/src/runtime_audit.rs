@@ -147,6 +147,8 @@ fn describe(d: &Declaration) -> String {
 
 fn note(tool: &str, message: String) -> CoverageNote {
     CoverageNote {
+        // The feeds are checked once for the whole scan, so the note names no single repo.
+        repo: None,
         tool: tool.to_string(),
         message,
     }
