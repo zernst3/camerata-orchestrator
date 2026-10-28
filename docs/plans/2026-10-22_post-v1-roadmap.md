@@ -54,6 +54,78 @@ contracts will usually NOT include access to the client's board, so it must be b
   way, following the same strict guardrails the inspection looks for, down to the details. Most of
   this exists (Layer 1 MCP deny-before-write gate, Layer 2 post-task checks, Layer 4 CI).
 
+### 2a. HIGH PRIORITY: the orchestration process inside the console (Zach, 2026-10-27)
+
+Zach's directive: the way Camerata itself is being built (one orchestrator directing tiered
+models, adversarial review before every merge) becomes the console's development process, so client
+remediation and development work run inside Camerata, under its rules and its write-time gate.
+The console was built and has per-step model selection, but it has not been run live end to end
+and its original requirements are not written down.
+
+- **Step 1, measure before building.** Write down what the console does today (Fable-led gap
+  analysis against this section), run it live on a fixture repo, and list what is missing. Only
+  then refine.
+- **The roles, as practised in this repo:**
+  - Orchestrator (top tier, today Opus): plans, writes briefs, decides, merges, never edits code
+    directly except small fixes.
+  - Builder (mid tier, today Sonnet): implements one brief in its own isolated worktree, runs the
+    gate, commits, never pushes.
+  - Mechanical (cheapest tier, today Haiku): searches, status tables, rote edits.
+  - Reviewer (strongest judgment tier, today Fable): adversarial, read-only review of every change
+    before merge; findings ranked HIGH / MEDIUM / LOW with a concrete failure scenario; every
+    finding fixed or explicitly decided, never silently dropped.
+  - Each role's model is a project setting (it already is per step); the defaults follow the tiers.
+- **The loop:** brief (with time-box, files owned, files off limits) -> build in a worktree ->
+  gate -> adversarial review -> fix round -> merge -> full gate -> push -> remove the worktree.
+  Independent units run in parallel up to a machine-aware limit; units that touch the same files
+  are sequenced, not parallelised.
+- **The decision log:** every decision the orchestrator makes on the client's behalf is written to
+  a project decisions log with its reason (as `docs/OVERNIGHT_DECISIONS.md` does here), and only
+  irreversible or destructive steps stop for the human.
+- **What Camerata adds that this repo does by hand:** the corpus rules and the Layer 1 MCP gate
+  block a violating write before it reaches disk; the reviewer is given the rules the change must
+  satisfy; the same release checks run before anything leaves.
+- **Resource guards:** the lessons from running this at speed: cap parallel local builders, seed
+  build folders from a shared clone, clear idle worktrees' build output, keep disk headroom so a
+  cleanup job never deletes artifacts a running gate needs, and fail loudly on a flaky test
+  rather than retrying it.
+
+### 2b. Units of work without a board (Zach, 2026-10-27)
+
+- Board access (GitHub Issues today) becomes optional. Units of work are created and tracked inside
+  Camerata; a board is an optional two-way sync adapter.
+- A unit of work carries: its source (inspection finding set, free text, plan), the rules it must
+  satisfy, acceptance checks, branch, PR, status.
+
+### 2c. Inspection report -> development console handoff (Zach, 2026-10-27)
+
+- One action turns a delivered inspection (its confirmed findings, after review) into a
+  remediation plan of units of work in the console, keeping every link back to the finding, rule,
+  file and line, and to the inspection's commit.
+- A finding marked false positive or ignored in review never becomes work. Tech debt becomes
+  work only when chosen.
+- After a fix merges, a delta re-inspection (item 1) confirms the finding is gone, and the unit
+  records that evidence.
+
+### 2d. Branch and pull-request strategy for remediation
+
+Zach's inclination: one branch and one PR per violated rule, containing every violation of that
+rule, instead of one per finding (findings can number in the hundreds). Opus's view: per rule is
+the right default, with four refinements, to be settled when this is built:
+
+1. **Split a rule that is too big for one review.** When one rule has more violations than a
+   reviewer can check in one sitting (a threshold, e.g. about 20 files or 400 changed lines),
+   split that rule's PR by area (package, service or directory), one PR per area, still one rule
+   each.
+2. **Group findings that share one fix.** When one change resolves findings under several rules
+   (e.g. a missing auth middleware behind three rules), make that one unit with all the rules
+   named, so two PRs do not edit the same lines.
+3. **Order by severity and dependency.** Critical and high rules first; a rule whose fix changes
+   code another rule's fix touches goes first, and the second rebases on it.
+4. **Traceability.** Each PR description lists the rule, its standard, and every finding it
+   closes (file, line, inspection id), so the client's reviewer can check the PR against the
+   report line by line.
+
 ## 3. Dev-time enforcement parity with the inspection (Layer 1 / Layer 2)
 
 The inspection's deterministic coverage has outgrown Layer 1. The gate has 11 regex/path arms
