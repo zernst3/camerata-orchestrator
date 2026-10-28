@@ -12,16 +12,23 @@ on:
     branches: [main, "feat/**", "fix/**"]
   pull_request:
 
+# Least privilege: nothing here writes to the repository, issues or packages.
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: "-D warnings"
+
+# Third-party actions are pinned to full commit SHAs (a tag can be moved, a SHA cannot);
+# the version each SHA corresponds to is the trailing comment.
 
 jobs:
   govern:
     name: Camerata governs its own code
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Free disk space
         run: ./scripts/ci-free-disk.sh
@@ -32,15 +39,22 @@ jobs:
       - name: Install typst (pinned)
         run: ./scripts/ci-install-typst.sh
 
-      # Pinned, not floating: the gate must mean the same thing on every run. On `stable`
-      # (1.99) clippy reports `double_must_use` on every `#[async_trait]` trait and rustc
-      # reports a redundant glob import as unused, neither of which 1.95 does. Bump this
-      # deliberately, together with whatever the new toolchain flags.
-      - uses: dtolnay/rust-toolchain@1.95.0
+      # Pinned, not floating: the gate must mean the same thing on every run. The version is
+      # read from rust-toolchain.toml, the same file rustup uses locally, so CI and a
+      # developer's machine cannot drift. On `stable` (1.99) clippy reports
+      # `double_must_use` on every `#[async_trait]` trait and rustc reports a redundant glob
+      # import as unused, neither of which 1.95 does. Bump the toml deliberately, together
+      # with whatever the new toolchain flags.
+      - name: Read the pinned toolchain
+        id: toolchain
+        run: echo "channel=$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
+
+      - uses: dtolnay/rust-toolchain@035fceb3c12fb0c6a9461b52775e16473133e591 # 1.95.0 branch
         with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
           components: rustfmt, clippy
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
       # Every gate below runs through scripts/ci-gate.sh, which runs the command
       # unchanged and, on failure, re-emits the tail of its output as annotations
@@ -88,16 +102,21 @@ jobs:
     name: Strict frontier (informational, non-blocking)
     runs-on: ubuntu-latest
     continue-on-error: true
+    env:
+      # This job deliberately tracks the NEWEST stable as an early warning, so it overrides
+      # the rust-toolchain.toml pin that the blocking job and local builds use.
+      RUSTUP_TOOLCHAIN: stable
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Free disk space
         run: ./scripts/ci-free-disk.sh
       - name: Install system packages
         run: ./scripts/ci-apt-deps.sh
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@035fceb3c12fb0c6a9461b52775e16473133e591 # branch-per-version action, toolchain set below
         with:
+          toolchain: stable
           components: clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Clippy (pedantic + restriction, report only)
         run: >
           ./scripts/ci-gate.sh "Strict frontier"
