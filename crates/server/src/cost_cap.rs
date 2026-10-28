@@ -326,6 +326,10 @@ pub(crate) struct BudgetState {
     pub not_run_passes: Vec<NotRunPass>,
     pub not_run_stages: Vec<NotRunStage>,
     pub notes: Vec<String>,
+    /// A call's cost could not be determined (no reported dollar figure and no way to price its
+    /// tokens) while a cap was set. The cap can no longer be enforced, so nothing further is
+    /// admitted: refusing a pass that might have fit beats running past the limit unseen.
+    pub cost_unknown: bool,
 }
 
 #[cfg(test)]
