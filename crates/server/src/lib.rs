@@ -6042,6 +6042,9 @@ async fn onboard_audit(
             }
             // KEV / EPSS enrichment and the "vulnerability data as of" stamp, once per run over
             // the rows this loop added (the one implementation, shared with the CLI).
+            // ORDER: this MUST stay before `apply_scan_severity_bounds` below. The KEV floor to
+            // critical is written first and the corpus bounds get the last word; see
+            // `vuln_intel::apply` and `tests/vuln_intel_call_order.rs`.
             crate::vuln_intel::enrich_dependency_findings(
                 &mut report,
                 dep_audit_rows_in,
@@ -7259,7 +7262,9 @@ pub(crate) async fn start_audit_job(
                 }
                 // KEV / EPSS enrichment and the "vulnerability data as of" stamp, once per run
                 // (see the identical call in `onboard_audit`). The job receives the dependency
-                // rows only after enrichment, so the live view never shows an unlabelled row.
+                // rows only after enrichment, so the live view never shows an unlabelled row. The
+                // wait is bounded: both feeds share `vuln_intel::ENRICHMENT_BUDGET` (45 s), after
+                // which a feed counts as failed (cache, or not checked) and the rows are released.
                 crate::vuln_intel::enrich_dependency_findings(
                     &mut report,
                     dep_audit_rows_in,

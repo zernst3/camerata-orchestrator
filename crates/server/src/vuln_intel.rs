@@ -23,6 +23,18 @@
 //! [`MAX_CACHE_AGE_DAYS`] is used and the stamp says it is a cached copy; otherwise no finding is
 //! labelled from that feed and the stamp says the feed was not checked. A stale feed is never
 //! presented as current, and a missing one is never silently omitted.
+//!
+//! A body that downloads but does not parse into a believable feed (a KEV catalog with fewer than
+//! [`feeds::KEV_MIN_ENTRIES`] usable rows, an EPSS page whose rows all fail to parse) counts as a
+//! failed fetch, never as an empty feed that was "checked".
+//!
+//! The two fetches run concurrently under one time budget, [`ENRICHMENT_BUDGET`]. A feed that has
+//! not answered by then is a failed fetch, so a scan (and the live view of a background audit job,
+//! which receives the dependency rows only after enrichment) is never held longer than that.
+//!
+//! The EPSS cache accumulates per CVE across runs (see [`feeds::EpssCache`]), so a run for
+//! another project can use scores an earlier run already fetched. Every date the cache puts in a
+//! stamp is a UTC date, and the stamp text says so.
 
 mod feeds;
 #[cfg(test)]
@@ -38,10 +50,16 @@ use serde::{Deserialize, Serialize};
 use crate::dep_audit::DEP_AUDIT_RULE_ID;
 use crate::onboard::{CoverageNote, Finding, ScanReport};
 
-pub use feeds::{EpssBatch, EpssScore, FeedState, KevFeed};
+pub use feeds::{EpssBatch, EpssScore, FeedState, KevFeed, KEV_MIN_ENTRIES};
 
 /// A cached feed older than this many days counts as not checked. The one staleness constant.
 pub const MAX_CACHE_AGE_DAYS: i64 = 7;
+
+/// The one time budget for the whole enrichment's network phase: both feeds, fetched
+/// concurrently, must answer within this long or be treated as failed fetches (cache, or not
+/// checked). It is longer than one request's own 30 s timeout so a slow-but-working feed is not
+/// cut short, and short enough that a scan is never held up for a minute.
+pub const ENRICHMENT_BUDGET: Duration = Duration::from_secs(45);
 
 /// The CISA Known Exploited Vulnerabilities catalog (JSON).
 pub const KEV_URL: &str =
@@ -298,13 +316,70 @@ async fn fetch_epss(
     Ok(batch)
 }
 
+/// The stamp note for a cached copy. The date is the UTC date the copy was fetched.
 fn cached_note(cached_on: &Option<String>) -> Option<String> {
     cached_on
         .as_ref()
-        .map(|d| format!("cached copy fetched {d}; the live feed could not be fetched"))
+        .map(|d| format!("cached copy fetched {d} UTC; the live feed could not be fetched"))
+}
+
+/// The stamp note when FIRST was asked and returned no score at all. It says what happened
+/// (nothing was published as of the request date) rather than dating data that never came back.
+const NOTE_NO_SCORES: &str = "no scores were published for these CVEs as of the request date (UTC)";
+
+/// The stamp note when FIRST returned scores but none of them carried a score date.
+const NOTE_NO_SCORE_DATE: &str =
+    "FIRST gave no score date; the date shown is the request date (UTC)";
+
+/// The EPSS line of the stamp. `as_of` is FIRST's own score date whenever it gave one; when it
+/// gave none (no rows, or rows without a date) it is the request date, and a note says so.
+fn epss_stamp(data: &EpssBatch, cached_on: &Option<String>, now: DateTime<Utc>) -> FeedStamp {
+    let request_date = cached_on
+        .clone()
+        .unwrap_or_else(|| now.format("%Y-%m-%d").to_string());
+    let mut notes: Vec<String> = cached_note(cached_on).into_iter().collect();
+    let as_of = match &data.date {
+        Some(date) => date.clone(),
+        None => {
+            notes.push(
+                if data.scores.is_empty() {
+                    NOTE_NO_SCORES
+                } else {
+                    NOTE_NO_SCORE_DATE
+                }
+                .to_string(),
+            );
+            request_date
+        }
+    };
+    FeedStamp::Checked {
+        as_of,
+        note: (!notes.is_empty()).then(|| notes.join("; ")),
+    }
+}
+
+/// Run `fetch` under `budget`; running out of time is an ordinary failed fetch.
+async fn within_budget<T>(
+    budget: Duration,
+    fetch: impl std::future::Future<Output = anyhow::Result<T>>,
+) -> anyhow::Result<T> {
+    match tokio::time::timeout(budget, fetch).await {
+        Ok(result) => result,
+        Err(_elapsed) => anyhow::bail!("no answer within {} s", budget.as_secs_f64()),
+    }
 }
 
 /// Apply checked feeds to the dependency findings: label and floor KEV hits, attach EPSS.
+///
+/// ORDER: this runs BEFORE `severity_bounds::apply_scan_severity_bounds` at every call site, and
+/// the bounds have the last word on severity (a `max_severity` ceiling lowers whatever it is
+/// given). The "Severity raised from X to critical" sentence below is only true because no rule
+/// that governs `DEP-AUDIT-1` findings declares a ceiling. If one ever does, the sentence would
+/// contradict the severity the report shows. The tests
+/// `no_shipped_ceiling_governs_dependency_findings` and
+/// `a_dependency_ceiling_would_overrule_the_raise_so_the_text_depends_on_there_being_none` (and
+/// `tests/vuln_intel_call_order.rs` for the order itself) pin that, so the change has to
+/// reconcile the text instead of silently shipping a false claim.
 fn apply(findings: &mut [Finding], kev: &FeedState<KevFeed>, epss: &FeedState<EpssBatch>) {
     for f in findings.iter_mut().filter(|f| is_dependency_finding(f)) {
         let cves = finding_cves(f);
@@ -378,13 +453,34 @@ fn unavailable_note(label: &str, state_reason: Option<&str>, effect: &str) -> Op
 
 /// The testable core of [`enrich_dependency_findings`]: enrich `findings` from the feeds behind
 /// `fetcher` (cached under `cache_dir`, when one resolves) and return the stamp plus a coverage
-/// note per feed that could not be consulted.
+/// note per feed that could not be consulted. Both feeds run under [`ENRICHMENT_BUDGET`].
 pub async fn enrich_with(
     findings: &mut [Finding],
     osv_runs: &[OsvRun],
     fetcher: &dyn FeedFetcher,
     cache_dir: Option<&Path>,
     now: DateTime<Utc>,
+) -> (VulnDataStamp, Vec<CoverageNote>) {
+    enrich_with_budget(
+        findings,
+        osv_runs,
+        fetcher,
+        cache_dir,
+        now,
+        ENRICHMENT_BUDGET,
+    )
+    .await
+}
+
+/// [`enrich_with`] with the time budget as a parameter, so a test can exercise the timeout path
+/// without waiting 45 s.
+async fn enrich_with_budget(
+    findings: &mut [Finding],
+    osv_runs: &[OsvRun],
+    fetcher: &dyn FeedFetcher,
+    cache_dir: Option<&Path>,
+    now: DateTime<Utc>,
+    budget: Duration,
 ) -> (VulnDataStamp, Vec<CoverageNote>) {
     let osv = osv_stamp(osv_runs, now);
     if matches!(osv, FeedStamp::NotChecked { .. }) {
@@ -401,24 +497,31 @@ pub async fn enrich_with(
         .flat_map(finding_cves)
         .collect();
 
+    // The two feeds do not depend on each other, so they are fetched at the same time, each under
+    // the same budget (both start together, so it is one shared deadline).
+    let (kev_fetched, epss_fetched) =
+        tokio::join!(within_budget(budget, fetch_kev(fetcher)), async {
+            if cves.is_empty() {
+                None
+            } else {
+                Some(within_budget(budget, fetch_epss(fetcher, &cves)).await)
+            }
+        });
+
     let kev_cache = cache_dir.map(|d| d.join("kev.json"));
-    let kev = feeds::resolve(fetch_kev(fetcher).await, kev_cache.as_deref(), now, |_| {
-        true
+    let kev = feeds::resolve(kev_fetched, kev_cache.as_deref(), now, |k: &KevFeed| {
+        k.entries.len() >= KEV_MIN_ENTRIES
     });
 
-    let epss = if cves.is_empty() {
-        FeedState::NotChecked {
+    let epss = match epss_fetched {
+        None => FeedState::NotChecked {
             reason: REASON_NO_CVES.to_string(),
+        },
+        Some(fetched) => {
+            let epss_cache = cache_dir.map(|d| d.join("epss.json"));
+            // A cached answer is usable only when it covers every CVE this run needs.
+            feeds::resolve_epss(fetched, epss_cache.as_deref(), now, &cves)
         }
-    } else {
-        let epss_cache = cache_dir.map(|d| d.join("epss.json"));
-        // A cached batch is usable only when it covers every CVE this run needs.
-        feeds::resolve(
-            fetch_epss(fetcher, &cves).await,
-            epss_cache.as_deref(),
-            now,
-            |cached: &EpssBatch| cves.is_subset(&cached.queried),
-        )
     };
 
     apply(findings, &kev, &epss);
@@ -431,20 +534,7 @@ pub async fn enrich_with(
         FeedState::NotChecked { reason } => FeedStamp::not_checked(reason),
     };
     let first_epss = match &epss {
-        FeedState::Checked { data, cached_on } => {
-            let note = match (&data.date, cached_note(cached_on)) {
-                (_, Some(cached)) => Some(cached),
-                (None, None) => Some("no published scores for these CVEs".to_string()),
-                (Some(_), None) => None,
-            };
-            FeedStamp::Checked {
-                as_of: data
-                    .date
-                    .clone()
-                    .unwrap_or_else(|| now.format("%Y-%m-%d").to_string()),
-                note,
-            }
-        }
+        FeedState::Checked { data, cached_on } => epss_stamp(data, cached_on, now),
         FeedState::NotChecked { reason } => FeedStamp::not_checked(reason),
     };
 

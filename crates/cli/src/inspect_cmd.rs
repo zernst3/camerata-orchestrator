@@ -793,6 +793,7 @@ pub async fn run_inspect_pipeline_with(
     }
     // KEV / EPSS enrichment and the "vulnerability data as of" stamp: the SAME single
     // implementation `onboard_audit` calls, once per run over the rows the loop above added.
+    // ORDER: before `apply_scan_severity_bounds` below, never after (see `vuln_intel::apply`).
     camerata_server::vuln_intel::enrich_dependency_findings(
         &mut report,
         dep_audit_rows_in,
