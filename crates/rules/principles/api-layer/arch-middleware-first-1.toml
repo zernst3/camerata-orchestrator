@@ -7,7 +7,8 @@ enforcement = "structured"
 kind = "default_with_exceptions"
 inspectable = true
 default = true
-verification = "grounded"
+# `policy`, not `grounded`: both outside sources are rated low authority; they document the middleware mechanism, not the mandate to extract every cross-cutting concern, which is this project's own policy.
+verification = "policy"
 
 [[sources]]
 url = "https://learn.microsoft.com/en-us/aspnet/core/fundamentals/middleware/"

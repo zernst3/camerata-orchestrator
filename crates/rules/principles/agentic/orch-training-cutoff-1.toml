@@ -7,7 +7,8 @@ enforcement = "prose"
 kind = "decision"
 inspectable = false
 default = true
-verification = "grounded"
+# `policy`, not `grounded`: the only outside source is rated low authority and supports the general training-data limitation risk; routing by category is this project's own policy.
+verification = "policy"
 
 [[sources]]
 url = "AGENTS.md"

@@ -1,5 +1,5 @@
 id = "ARCH-TRUNK-SYNC-1"
-version = 2
+version = 3
 title = "Single-source trunk sync"
 domain = "ci-cd"
 layer = "universal"
@@ -7,7 +7,8 @@ enforcement = "prose"
 kind = "decision"
 inspectable = true
 default = true
-verification = "grounded"
+# `policy`, not `grounded`: the git documentation only sets the direction of flow (fix on the oldest branch that needs it, then merge upwards); the once-after-ship merge cadence is this project's own policy.
+verification = "policy"
 
 [[sources]]
 url = "https://git-scm.com/docs/gitworkflows"

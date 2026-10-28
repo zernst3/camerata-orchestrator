@@ -7,7 +7,8 @@ enforcement = "structured"
 kind = "defect"
 inspectable = false
 default = true
-verification = "grounded"
+# `policy`, not `grounded`: the ADR pattern is cited, but strengthening it to 'immediately' is this project's own stance.
+verification = "policy"
 
 [[sources]]
 url = "CONVENTIONS.md"
