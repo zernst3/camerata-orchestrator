@@ -281,6 +281,7 @@ fn fixture() -> (SealedReport, HashMap<String, DispositionWire>) {
         files_scanned: 10,
         test_file_count: 1,
         files_excluded: 0,
+        excluded_noise_lines: None,
         code_chars: 5000,
         code_lines: 400,
         code_lines_by_language: vec![LanguageVolume {

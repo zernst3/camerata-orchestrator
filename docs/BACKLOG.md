@@ -52,6 +52,16 @@ fail a build on a finding the corpus caps at `low` (ARCH-DEAD-CODE-1 stays at th
 `max_severity`, `deviation_ceiling`) at build time. Not built now: a build script that generates a
 table from the corpus is a new build-time pattern and needs an owner's call. Documented for users in
 `USER_GUIDE.md` section 14 and `crates/camerata-check/README.md`.
+## `camerata count` after an inspection differs from the manifest (2026-10-28)
+
+The manifest's counted lines and excluded-noise figures are read at scan time. Running
+`camerata count` on the same client repo afterwards can give different numbers, because the
+inspection itself leaves build output in the client repo (for example a `target/` folder from the
+clippy tier), and that output is then counted or filtered. Not a wrong
+number in the report: the report states what the scan saw. The gap matters when a client or a
+reviewer re-checks the figures by hand. Options: run the inspection against a clean throwaway clone
+so nothing is left in the client's checkout, or have `camerata count` exclude the known tool output
+folders. Related to the client-code isolation item in the repo hardening order (Phase 2, item 8).
 
 ## Live model-list fetch from Anthropic /v1/models (hybrid) (2026-06-22)
 

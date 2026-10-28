@@ -697,6 +697,13 @@ pub struct ScanReport {
     /// scan. Surfaced so the filter's effect is visible ("N scanned, M excluded as noise").
     #[serde(default)]
     pub files_excluded: usize,
+    /// Non-blank lines in the files counted in `files_excluded`, read at scan time through
+    /// `count::excluded_noise_lines`, the function `camerata count` uses, so the export can state
+    /// the full quote basis (counted lines plus what was excluded as noise) without the source
+    /// on disk. `None` for a report from before this was recorded, or from a path that read no
+    /// local files: an honest absence in the manifest, never a fabricated zero.
+    #[serde(default)]
+    pub excluded_noise_lines: Option<usize>,
     /// Total characters of scannable code across all repos (after noise pruning). Drives the
     /// pre-audit cost estimate: the digest the model sees is built from this, so it's the
     /// honest token base before chunk/batch multipliers.
@@ -846,6 +853,7 @@ impl ScanReport {
             files_scanned: 0,
             test_file_count: 0,
             files_excluded: 0,
+            excluded_noise_lines: None,
             excluded_mechanical_rules: Vec::new(),
             code_chars: 0,
             code_lines: 0,
@@ -883,6 +891,7 @@ impl ScanReport {
             files_scanned: 0,
             test_file_count: 0,
             files_excluded: 0,
+            excluded_noise_lines: None,
             excluded_mechanical_rules: Vec::new(),
             code_chars: 0,
             code_lines: 0,
@@ -1666,6 +1675,9 @@ pub async fn audit_repos_with_llm_controlled(
     // how large the repo was. `scan_repos` (the lighter phase-1 preview) already did this
     // correctly; this mirrors that logic over the SAME `files` this loop already reads.
     let mut files_excluded_total = 0usize;
+    // 22c: the non-blank lines in those excluded files, for the manifest's quote basis.
+    let mut excluded_noise_lines_total = 0usize;
+    let mut any_repo_read = false;
     let mut engine_artifacts_total = 0usize;
     let mut code_chars_total = 0usize;
     let mut code_lines_total = 0usize;
@@ -1801,20 +1813,33 @@ pub async fn audit_repos_with_llm_controlled(
         // Clone `dir` for spawn_blocking (which moves it); the outer `dir` ref
         // comes from the loop binding and is the PathBuf we're iterating.
         let dir = dir.clone();
-        match tokio::task::spawn_blocking(move || read_local_repo_files(&dir))
-            .await
-            .unwrap_or_else(|e| Err(anyhow::anyhow!("scan task failed: {e}")))
+        // The excluded-noise line count (22c) is read in the same blocking task, through the
+        // function `camerata count` uses (`count::excluded_noise_lines`).
+        match tokio::task::spawn_blocking(move || {
+            read_local_repo_files(&dir).map(|extracted| {
+                let noise_lines =
+                    count::excluded_noise_lines(&dir, &extracted.excluded_noise_paths);
+                (extracted, noise_lines)
+            })
+        })
+        .await
+        .unwrap_or_else(|e| Err(anyhow::anyhow!("scan task failed: {e}")))
         {
-            Ok(ExtractedRepo {
-                files,
-                reference_files,
-                truncated,
-                reference_truncated,
-                excluded_noise,
-                excluded_noise_paths: _,
-            }) => {
+            Ok((
+                ExtractedRepo {
+                    files,
+                    reference_files,
+                    truncated,
+                    reference_truncated,
+                    excluded_noise,
+                    excluded_noise_paths: _,
+                },
+                noise_lines,
+            )) => {
                 files_total += files.len();
                 files_excluded_total += excluded_noise;
+                excluded_noise_lines_total += noise_lines;
+                any_repo_read = true;
                 // W19: must stay zero. Non-zero means Camerata admitted its own artifacts as
                 // source — the 2026-10-16 defect. Fed to the integrity gate below.
                 engine_artifacts_total += files
@@ -2600,6 +2625,9 @@ pub async fn audit_repos_with_llm_controlled(
     }
     report.test_file_count = test_files_total;
     report.files_excluded = files_excluded_total;
+    // Recorded only when at least one repo was actually read, so a run that read nothing
+    // states no figure rather than a zero.
+    report.excluded_noise_lines = any_repo_read.then_some(excluded_noise_lines_total);
     report.code_chars = code_chars_total;
     report.code_lines = code_lines_total;
     report.code_lines_by_language = finalize_language_breakdown(lang_lines_total);

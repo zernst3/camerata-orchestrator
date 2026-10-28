@@ -909,6 +909,68 @@ pub fn sanitize_branch_segment(branch: &str) -> String {
     out
 }
 
+/// The directory where `branch`'s worktree lives: `<clone>/.camerata-worktrees/<segment>`.
+///
+/// Fails closed. The branch must pass [`camerata_api_types::uow::validate_branch_name`], and
+/// its directory segment must be exactly one plain path component, so a name such as `.` or
+/// `..` can never resolve to the worktrees root or to a parent of it.
+fn worktree_dir_for_branch(clone: &Path, branch: &str) -> anyhow::Result<PathBuf> {
+    camerata_api_types::uow::validate_branch_name(branch).map_err(|e| anyhow::anyhow!(e))?;
+    let segment = sanitize_branch_segment(branch);
+    let mut parts = Path::new(&segment).components();
+    let one_plain_component = matches!(
+        (parts.next(), parts.next()),
+        (Some(std::path::Component::Normal(_)), None)
+    );
+    if !one_plain_component {
+        anyhow::bail!("branch `{branch}` does not map to a single worktree directory");
+    }
+    Ok(worktrees_root(clone).join(segment))
+}
+
+/// Prove `dir` is a directory that lives strictly inside `clone`'s worktrees root, so it is
+/// safe to remove or hand out as a worktree. Canonicalizes everything it compares, so `.`,
+/// `..` and symlinks cannot get around it. Refuses when `dir` is the root itself, is a
+/// symlink, resolves outside the root, or when the root itself resolves outside the clone.
+/// Anything that cannot be resolved is refused too (fail closed).
+///
+/// Call this before ANY `remove_dir_all` of a worktree directory, and before reusing an
+/// existing directory as a worktree.
+fn ensure_inside_worktrees_root(clone: &Path, dir: &Path) -> anyhow::Result<()> {
+    let resolve = |p: &Path, what: &str| {
+        std::fs::canonicalize(p).map_err(|e| {
+            anyhow::anyhow!(
+                "cannot resolve the {what} `{}` ({e}); refusing",
+                p.display()
+            )
+        })
+    };
+    let clone_real = resolve(clone, "clone")?;
+    let root_real = resolve(&worktrees_root(clone), "worktrees root")?;
+    if root_real == clone_real || !root_real.starts_with(&clone_real) {
+        anyhow::bail!(
+            "the worktrees root `{}` resolves outside the clone `{}`; refusing",
+            root_real.display(),
+            clone_real.display()
+        );
+    }
+    let is_symlink = std::fs::symlink_metadata(dir)
+        .map(|m| m.file_type().is_symlink())
+        .unwrap_or(false);
+    if is_symlink {
+        anyhow::bail!("`{}` is a symbolic link; refusing", dir.display());
+    }
+    let dir_real = resolve(dir, "worktree directory")?;
+    if dir_real == root_real || !dir_real.starts_with(&root_real) {
+        anyhow::bail!(
+            "`{}` is not inside the worktrees root `{}`; refusing",
+            dir_real.display(),
+            root_real.display()
+        );
+    }
+    Ok(())
+}
+
 /// Find the worktree path that currently has `branch` checked out, if any, by scanning
 /// `git worktree list --porcelain`. Returns the absolute worktree path. This is how we
 /// honor "a branch is already checked out elsewhere" gracefully: rather than letting
@@ -961,6 +1023,11 @@ pub async fn ensure_uow_worktree(clone: &Path, branch: &str) -> anyhow::Result<P
         );
     }
 
+    // SECURITY: the branch becomes a directory name. Refuse anything that is not a real branch
+    // name (`.`, `..`, `a/../b`, ...) before ANY git or filesystem call, and compute the
+    // target directory through the one checked helper.
+    let dir = worktree_dir_for_branch(clone, branch)?;
+
     // 0. Disk-headroom preflight guard (dogfood disk-safety, 2026-06-22): refuse to create
     //    another worktree when the disk is running low. Each worktree + shared target can consume
     //    significant space; this guard is the backstop that prevents filling the disk.
@@ -972,16 +1039,25 @@ pub async fn ensure_uow_worktree(clone: &Path, branch: &str) -> anyhow::Result<P
         return Ok(canonical_or_self(existing));
     }
 
-    let dir = worktrees_root(clone).join(sanitize_branch_segment(branch));
+    // Anything already at the target path (a worktree, a stale leftover, or a symlink) must
+    // be proven to live strictly inside the worktrees root BEFORE it is reused or deleted;
+    // otherwise fail closed. (A path that does not exist yet has nothing to reuse or delete.)
+    let occupied = dir.exists() || std::fs::symlink_metadata(&dir).is_ok();
+    if occupied {
+        ensure_inside_worktrees_root(clone, &dir)?;
+    }
 
     // 2. If the target dir is itself an already-registered worktree (its branch may differ),
     //    just return it. (Branch match was handled above; this guards the path being live.)
     if is_git_repo(&dir) {
         return Ok(canonical_or_self(dir));
     }
-    // A stale, non-worktree dir at the target path would make `git worktree add` fail; clear it.
-    if dir.exists() {
-        let _ = tokio::fs::remove_dir_all(&dir).await;
+    // A stale, non-worktree dir at the target path would make `git worktree add` fail; clear it
+    // (containment was asserted above, so this can only remove a directory inside the root).
+    if occupied {
+        tokio::fs::remove_dir_all(&dir)
+            .await
+            .map_err(|e| anyhow::anyhow!("clear stale worktree dir {}: {e}", dir.display()))?;
     }
     if let Some(parent) = dir.parent() {
         tokio::fs::create_dir_all(parent)
@@ -1039,7 +1115,13 @@ pub async fn resolve_uow_worktree(
     workspace_root: Option<&str>,
     repo: &str,
     branch: &str,
+    project_repos: Option<&[String]>,
 ) -> Option<PathBuf> {
+    // A repository outside the active project gets no worktree, whichever path asked for it
+    // (run, multi-repo setup, Ship, PR flows): the same check as the run and the branch record.
+    if !crate::run_target::repo_in_project(repo, project_repos) {
+        return None;
+    }
     let clone = resolve_repo_dir(override_path, workspace_root, repo)?;
     if !is_git_repo(&clone) {
         return None;
@@ -1057,14 +1139,21 @@ pub async fn remove_uow_worktree(clone: &Path, branch: &str) {
     }
     // Prefer removing by the registered path (handles a branch checked out under a path that
     // doesn't match the sanitized name, e.g. a worktree created out-of-band).
-    let path = worktree_for_branch(clone, branch)
-        .await
-        .unwrap_or_else(|| worktrees_root(clone).join(sanitize_branch_segment(branch)));
+    let path = match worktree_for_branch(clone, branch).await {
+        Some(registered) => registered,
+        // Not registered: the fallback path comes from the branch name, so it must be a real
+        // branch name. Anything else has no worktree to tear down (fail closed, delete nothing).
+        None => match worktree_dir_for_branch(clone, branch) {
+            Ok(dir) => dir,
+            Err(_) => return,
+        },
+    };
     let path_str = path.to_string_lossy().into_owned();
     let _ = git(Some(clone), &["worktree", "remove", "--force", &path_str]).await;
     // Belt-and-suspenders: if the dir lingers (e.g. it was never a registered worktree),
-    // drop it from disk, then prune the admin records.
-    if path.exists() {
+    // drop it from disk, then prune the admin records. Only a directory proven to be inside
+    // the worktrees root is ever deleted this way.
+    if path.exists() && ensure_inside_worktrees_root(clone, &path).is_ok() {
         let _ = tokio::fs::remove_dir_all(&path).await;
     }
     prune_worktrees(clone).await;
@@ -2634,6 +2723,120 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
+    /// A clone whose worktrees root holds another unit's uncommitted work (a sentinel file),
+    /// plus a directory OUTSIDE the clone with its own sentinel.
+    #[cfg(test)]
+    fn clone_with_sentinels(tag: &str) -> (PathBuf, PathBuf, PathBuf, PathBuf) {
+        let base = std::env::temp_dir().join(format!("cam-wt-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let clone = base.join("clone");
+        init_repo_with_commit(&clone);
+        let other_unit = worktrees_root(&clone).join("camerata__other");
+        std::fs::create_dir_all(&other_unit).unwrap();
+        let other_work = other_unit.join("uncommitted.txt");
+        std::fs::write(&other_work, "another unit's uncommitted work").unwrap();
+        let outside = base.join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        let outside_file = outside.join("precious.txt");
+        std::fs::write(&outside_file, "outside the worktrees root").unwrap();
+        (base, clone, other_work, outside_file)
+    }
+
+    /// SECURITY: a branch named `.` or `..` (or with a `..` segment) must be refused outright:
+    /// it used to map to the worktrees root or its parent, so a stale-dir cleanup wiped every
+    /// other unit's uncommitted work, or the agent worked in the shared clone itself.
+    #[tokio::test]
+    async fn escaping_branch_names_are_refused_and_nothing_is_deleted() {
+        let (base, clone, other_work, outside_file) = clone_with_sentinels("escape");
+        for branch in [".", "..", "a/../b", "../x", "x/..", "-rf", ""] {
+            let res = ensure_uow_worktree(&clone, branch).await;
+            assert!(res.is_err(), "branch {branch:?} must be refused");
+            assert!(
+                other_work.exists(),
+                "branch {branch:?} must not delete other units' work"
+            );
+            assert!(outside_file.exists());
+            assert!(clone.join(".git").exists());
+            // Teardown with the same names is a no-op too.
+            remove_uow_worktree(&clone, branch).await;
+            assert!(other_work.exists(), "teardown of {branch:?} deleted work");
+            assert!(clone.join("README.md").exists() || clone.join(".git").exists());
+        }
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The containment assertion holds on its own, whatever the validator accepts: `.`, `..`,
+    /// the root itself and a path outside it are all refused; a real subdirectory passes.
+    #[test]
+    fn containment_check_refuses_dot_dotdot_root_and_outside_paths() {
+        let (base, clone, _other, _outside_file) = clone_with_sentinels("contain");
+        let root = worktrees_root(&clone);
+        assert!(ensure_inside_worktrees_root(&clone, &root.join("camerata__other")).is_ok());
+        for bad in [
+            root.join("."),
+            root.join(".."),
+            root.clone(),
+            clone.clone(),
+            base.join("outside"),
+            root.join("does-not-exist"),
+        ] {
+            assert!(
+                ensure_inside_worktrees_root(&clone, &bad).is_err(),
+                "{} must be refused",
+                bad.display()
+            );
+        }
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// SECURITY: a worktree directory that is a symlink out of the root is never deleted
+    /// through, and is never handed out as the unit's worktree.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_symlinked_worktree_directory_cannot_escape_the_root() {
+        let (base, clone, other_work, outside_file) = clone_with_sentinels("symlink");
+        let link = worktrees_root(&clone).join("camerata__escape");
+        std::os::unix::fs::symlink(base.join("outside"), &link).unwrap();
+
+        let res = ensure_uow_worktree(&clone, "camerata/escape").await;
+        assert!(res.is_err(), "a symlinked target must be refused: {res:?}");
+        assert!(outside_file.exists(), "the symlink target must survive");
+        assert!(other_work.exists());
+
+        // Even when the symlink points at a real git checkout, it is not handed out.
+        std::fs::remove_file(&link).unwrap();
+        let other_clone = base.join("other-clone");
+        init_repo_with_commit(&other_clone);
+        std::os::unix::fs::symlink(&other_clone, &link).unwrap();
+        let res = ensure_uow_worktree(&clone, "camerata/escape").await;
+        assert!(res.is_err(), "must not return an outside checkout: {res:?}");
+
+        remove_uow_worktree(&clone, "camerata/escape").await;
+        assert!(other_clone.join(".git").exists());
+        assert!(outside_file.exists());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A worktrees root that is itself a symlink out of the clone (a client repo can commit
+    /// one) is refused rather than trusted.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_worktrees_root_that_resolves_outside_the_clone_is_refused() {
+        let base = std::env::temp_dir().join(format!("cam-wt-rootlink-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let clone = base.join("clone");
+        init_repo_with_commit(&clone);
+        let outside = base.join("elsewhere");
+        std::fs::create_dir_all(outside.join("camerata__stale")).unwrap();
+        std::fs::write(outside.join("camerata__stale").join("f.txt"), "x").unwrap();
+        std::os::unix::fs::symlink(&outside, worktrees_root(&clone)).unwrap();
+
+        let res = ensure_uow_worktree(&clone, "camerata/stale").await;
+        assert!(res.is_err(), "{res:?}");
+        assert!(outside.join("camerata__stale").join("f.txt").exists());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     /// remove + prune behave: removing a UoW worktree deregisters it and drops its dir;
     /// prune afterward leaves the clone consistent (no error, branch survives for the PR).
     #[tokio::test]
@@ -2763,6 +2966,7 @@ mod tests {
             None,
             "acme/api",
             "camerata/story-1",
+            None,
         )
         .await
         .expect("resolves a worktree from the override clone");
@@ -2773,9 +2977,57 @@ mod tests {
         assert_eq!(branch_of(&resolved).await, "camerata/story-1");
 
         // An unresolved repo (no override, no workspace root) yields None.
-        let none = resolve_uow_worktree(None, None, "acme/api", "b").await;
+        let none = resolve_uow_worktree(None, None, "acme/api", "b", None).await;
         assert!(none.is_none());
 
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// `resolve_uow_worktree` refuses a repository outside the active project's list and makes
+    /// no worktree for it; a listed repository (any letter case) and a project with no list
+    /// resolve as before.
+    #[tokio::test]
+    async fn resolve_uow_worktree_refuses_a_repo_outside_the_active_project() {
+        let base = std::env::temp_dir().join(format!("cam-wt-member-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let clone = base.join("my-checkout");
+        init_repo_with_commit(&clone);
+        let override_path = clone.to_string_lossy().into_owned();
+        let project = vec!["other/web".to_string(), "other/db".to_string()];
+
+        let refused = resolve_uow_worktree(
+            Some(&override_path),
+            None,
+            "acme/api",
+            "camerata/story-1",
+            Some(&project),
+        )
+        .await;
+        assert!(refused.is_none(), "{refused:?}");
+        assert!(
+            !worktrees_root(&clone).exists(),
+            "a refused repo gets no worktree directory"
+        );
+
+        let own = vec!["Acme/API".to_string()];
+        assert!(resolve_uow_worktree(
+            Some(&override_path),
+            None,
+            "acme/api",
+            "camerata/story-1",
+            Some(&own),
+        )
+        .await
+        .is_some());
+        assert!(resolve_uow_worktree(
+            Some(&override_path),
+            None,
+            "acme/api",
+            "camerata/story-2",
+            Some(&[]),
+        )
+        .await
+        .is_some());
         let _ = std::fs::remove_dir_all(&base);
     }
 

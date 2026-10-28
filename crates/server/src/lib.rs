@@ -57,6 +57,7 @@ pub mod evidence;
 pub mod feature_flags;
 pub mod fix;
 pub mod github_issues;
+mod governed_rules;
 pub mod grounding;
 pub mod inspections;
 pub mod investigation_run;
@@ -89,6 +90,7 @@ pub mod report_export;
 pub mod review_agent;
 pub mod routine;
 pub mod run;
+mod run_target;
 pub mod scan_cache;
 pub mod scan_routing;
 pub mod scan_tools;
@@ -1272,6 +1274,7 @@ pub fn router(state: AppState) -> Router {
         // Designer (vision) band toggle: enable/disable the vision band for this project.
         .route("/api/projects/:id/vision-enabled", post(set_vision_enabled))
         .route("/api/projects/:id/product-brief", post(set_product_brief))
+        .route("/api/projects/:id/client-name", post(set_client_name))
         .route(
             "/api/projects/:id/operating-principles",
             post(set_operating_principles),
@@ -2114,6 +2117,24 @@ async fn start_run(
         return (StatusCode::CONFLICT, body).into_response();
     }
 
+    // Repository pre-flight (live runs only; the scripted run writes no code): a unit that
+    // should work in a repository but cannot (no branch selected, no local clone, ...) is
+    // refused here with the reason, never silently handed to the greenfield scaffolder.
+    // Checked BEFORE the development gate so a refusal leaves the lifecycle stage untouched.
+    if live_mode_enabled() {
+        let uow = state.uow.get_or_create(&story_id);
+        if let crate::run_target::RunTarget::Refused { reason } =
+            crate::run_target::plan_run_target_for_state(&state, &story_id, &uow)
+        {
+            let body = Json(serde_json::json!({
+                "error": "no repository for this run",
+                "reason": reason,
+                "story_id": story_id,
+            }));
+            return (StatusCode::CONFLICT, body).into_response();
+        }
+    }
+
     // The no-code-first gate (Pillar 2): a governed run cannot start until every
     // DecisionRecord on this story's UoW is approved (decisions_approved_for_development).
     // We block + surface exactly why, rather than silently starting a run that the
@@ -2489,13 +2510,16 @@ async fn spawn_brownfield_dev_run(
             let workspace_root = state.settings.workspace_root();
             let mut worktrees = Vec::new();
             for scope in &intake_repos {
-                let scope_branch = derive_scope_branch(&scope.branch, &story_id);
+                let scope_branch =
+                    crate::run_target::unit_branch_for_repo(&uow_data, &story_id, &scope.repo)
+                        .unwrap_or_else(|| derive_scope_branch(&scope.branch, &story_id));
                 let override_path = state.settings.repo_path(&scope.repo);
                 if let Some(wt_dir) = crate::workspace::resolve_uow_worktree(
                     override_path.as_deref(),
                     workspace_root.as_deref(),
                     &scope.repo,
                     &scope_branch,
+                    active_project_repos(state).as_deref(),
                 )
                 .await
                 {
@@ -2674,16 +2698,20 @@ async fn start_governed_run(
 
         // ── Brownfield vs. greenfield dispatch ────────────────────────────────
         //
-        // When the UoW's repo worktree is RESOLVABLE (a local clone exists on disk),
-        // use the brownfield in-place implement path: the agent edits the EXISTING
-        // codebase on the UoW's branch, and the server commits. The spec comes from
-        // the UoW's APPROVED decisions (the no-code-first gate already verified them).
+        // `run_target::plan_run_target` decides where the run writes:
+        //   - Repository: the unit's branch is set and its repo has a local clone. Use the
+        //     brownfield in-place implement path: the agent edits the EXISTING codebase on the
+        //     UoW's branch, and the server commits. The spec comes from the UoW's APPROVED
+        //     decisions (the no-code-first gate already verified them).
+        //   - Greenfield: the project has no repositories and the unit names none. Scaffold a
+        //     new app from a plan in a throwaway temp dir (execute_live_run / _tiered), and
+        //     say so in the run's events.
+        //   - Refused: the unit should work in a repository but cannot (no branch selected, no
+        //     local clone, ...). The run fails with the reason; it is NEVER silently handed to
+        //     the greenfield scaffolder. `start_run` refuses the same cases up front with a 409;
+        //     this arm covers the other callers (e.g. the orchestrator chat).
         //
-        // When the worktree is NOT resolvable (no local clone, no workspace root), fall
-        // back to the greenfield scaffolder (execute_live_run / _tiered) which builds a
-        // new app from a plan in a throwaway temp dir.
-        //
-        // GATE UNCHANGED in both paths: `ensure_development_gate` (the no-code-first
+        // GATE UNCHANGED in every path: `ensure_development_gate` (the no-code-first
         // check) runs above, and every agent spawned here uses `governed_role` +
         // `gated_write`-only tools regardless of which branch is taken.
         //
@@ -2691,138 +2719,147 @@ async fn start_governed_run(
         // early so the tokio::spawn closure can capture it as `'static`.
         let story_id_owned = story_id.to_string();
         let uow_data = state.uow.get_or_create(story_id);
-        let uow_branch = uow_data
-            .branch
-            .as_deref()
-            .filter(|b| !b.trim().is_empty())
-            .map(|b| b.to_string());
-
-        // Try to resolve the UoW's worktree from the active project's settings.
-        // We require an active project to have a resolvable workspace root / repo override.
-        let worktree =
-            if let (Some(branch), Some(_proj)) = (uow_branch.as_deref(), state.projects.active()) {
-                // Derive repo from story_id (owner/repo#num → owner/repo).
-                let repo_from_story = story_id
-                    .rsplit_once('#')
-                    .map(|(r, _)| r)
-                    .unwrap_or(story_id);
-                let override_path = state.settings.repo_path(repo_from_story);
-                let workspace_root = state.settings.workspace_root();
-                crate::workspace::resolve_uow_worktree(
-                    override_path.as_deref(),
-                    workspace_root.as_deref(),
-                    repo_from_story,
-                    branch,
-                )
-                .await
-            } else {
-                None
-            };
-
-        if crate::dev_implement_run::is_brownfield(worktree.as_deref()) {
-            // Brownfield: implement in-place in the UoW's worktree.
-            let dir = worktree.expect("is_brownfield guarantees Some");
-            let repo = story_id
-                .rsplit_once('#')
-                .map(|(r, _)| r.to_string())
-                .unwrap_or_else(|| story_id.to_string());
-            let branch = uow_branch.unwrap_or_else(|| format!("camerata/{story_id}"));
-            // For the tiered path we pick the strongest model for the implementer; for
-            // the single-model path we use the caller's model (or the default).
-            let impl_model = match &tier_map {
-                Some(map) => map.strongest.clone(),
-                None => model
-                    .clone()
-                    .unwrap_or_else(crate::model_tier::default_strongest_model),
-            };
-            // Derive the project inputs + spawn the implement run. SHARED with the resume path
-            // (`spawn_brownfield_dev_run`), so a fresh run and a resumed run never drift.
-            spawn_brownfield_dev_run(
-                state,
-                rid,
-                story_id_owned,
-                title,
-                desc,
+        let target = match crate::run_target::plan_run_target_for_state(state, story_id, &uow_data)
+        {
+            crate::run_target::RunTarget::Repository {
                 repo,
-                dir,
                 branch,
-                impl_model,
-                max_iterations,
-                tier_map,
-                skip_layer2,
-                None,
-            )
-            .await;
-        } else {
-            // Greenfield fallback: scaffold a new app from the plan in a throwaway dir.
-            match tier_map {
-                // TIERED path (ORCH-MODEL-TIERING-1): each task on its band's model, the
-                // strongest tier leading. The single `model` is ignored when a map is given.
-                Some(map) => {
-                    // Provider-dispatch context for the LEAD/orchestrator driver factory
-                    // (the lead runs on the strongest model's OWN provider).
-                    let live_registry = state.model_registry.clone();
-                    let live_policy = state.settings.provider_policy();
-                    let live_creds = state.credential_store.clone();
-                    let live_limiter = state.rate_limiter.clone();
-                    // The compliance-safety gate: the active project's backend setting,
-                    // threaded into the lead/child driver factory. No active project floors
-                    // to `ProjectBackend::Cli` (the same zero-setup default a fresh project gets).
-                    let live_backend = state
-                        .projects
-                        .active()
-                        .map(|p| p.backend)
-                        .unwrap_or_default();
-                    // LIFECYCLE-1: register the abort handle so a Stop reaps the greenfield
-                    // fleet's live agent subprocesses (kill_on_drop). Cleared on finish.
-                    let runs_for_clear = state.runs.clone();
-                    let rid_for_clear = rid.clone();
-                    let rid_register = rid.clone();
-                    let handle = tokio::spawn(async move {
-                        live_fleet::execute_live_run_tiered(
-                            store,
-                            rid,
-                            title,
-                            desc,
-                            map,
-                            max_iterations,
-                            skip_layer2,
-                            vision_enabled,
-                            live_registry,
-                            live_policy,
-                            live_creds,
-                            live_limiter,
-                            live_backend,
-                        )
-                        .await;
-                        runs_for_clear.clear_abort(&rid_for_clear);
-                    });
-                    state
-                        .runs
-                        .register_abort(&rid_register, handle.abort_handle());
+                clone,
+            } => {
+                // One source of truth for the branch: the plan derived it from the Intake
+                // scope, so record it (the history says so when it changed) BEFORE the
+                // worktree and the implement run, which read the unit's recorded branch.
+                crate::run_target::record_run_branch(&state.uow, story_id, &branch);
+                match crate::run_target::ensure_target_worktree(&clone, &branch).await {
+                    Ok(dir) => Ok(Some((repo, branch, dir))),
+                    Err(reason) => Err(reason),
                 }
-                // Single-model path (back-compat): one operator-wide model for every agent.
-                None => {
-                    // LIFECYCLE-1: register the abort handle (see tiered arm above).
-                    let runs_for_clear = state.runs.clone();
-                    let rid_for_clear = rid.clone();
-                    let rid_register = rid.clone();
-                    let handle = tokio::spawn(async move {
-                        live_fleet::execute_live_run(
-                            store,
-                            rid,
-                            title,
-                            desc,
-                            model,
-                            max_iterations,
-                            skip_layer2,
-                        )
-                        .await;
-                        runs_for_clear.clear_abort(&rid_for_clear);
-                    });
-                    state
-                        .runs
-                        .register_abort(&rid_register, handle.abort_handle());
+            }
+            crate::run_target::RunTarget::Greenfield => Ok(None),
+            crate::run_target::RunTarget::Refused { reason } => Err(reason),
+        };
+
+        match target {
+            Err(reason) => {
+                state.runs.fail_with_reason(&rid, reason.clone());
+                state.uow.append_history(
+                    story_id,
+                    "dev_implement",
+                    &format!("Development run refused: {reason}"),
+                );
+            }
+            Ok(Some((repo, branch, dir))) => {
+                // Brownfield: implement in-place in the UoW's worktree.
+                // For the tiered path we pick the strongest model for the implementer; for
+                // the single-model path we use the caller's model (or the default).
+                let impl_model = match &tier_map {
+                    Some(map) => map.strongest.clone(),
+                    None => model
+                        .clone()
+                        .unwrap_or_else(crate::model_tier::default_strongest_model),
+                };
+                // Derive the project inputs + spawn the implement run. SHARED with the resume path
+                // (`spawn_brownfield_dev_run`), so a fresh run and a resumed run never drift.
+                spawn_brownfield_dev_run(
+                    state,
+                    rid,
+                    story_id_owned,
+                    title,
+                    desc,
+                    repo,
+                    dir,
+                    branch,
+                    impl_model,
+                    max_iterations,
+                    tier_map,
+                    skip_layer2,
+                    None,
+                )
+                .await;
+            }
+            Ok(None) => {
+                // Greenfield: scaffold a new app from the plan in a throwaway dir, announced in the
+                // run's events so it is never mistaken for work on a real repository.
+                state.runs.push_event(
+                    &rid,
+                    crate::run::GateEvent {
+                        seq: 0,
+                        layer: "run".to_string(),
+                        verdict: "info".to_string(),
+                        rule: None,
+                        detail: crate::run_target::GREENFIELD_NOTICE.to_string(),
+                        content_hash: None,
+                    },
+                );
+                match tier_map {
+                    // TIERED path (ORCH-MODEL-TIERING-1): each task on its band's model, the
+                    // strongest tier leading. The single `model` is ignored when a map is given.
+                    Some(map) => {
+                        // Provider-dispatch context for the LEAD/orchestrator driver factory
+                        // (the lead runs on the strongest model's OWN provider).
+                        let live_registry = state.model_registry.clone();
+                        let live_policy = state.settings.provider_policy();
+                        let live_creds = state.credential_store.clone();
+                        let live_limiter = state.rate_limiter.clone();
+                        // The compliance-safety gate: the active project's backend setting,
+                        // threaded into the lead/child driver factory. No active project floors
+                        // to `ProjectBackend::Cli` (the same zero-setup default a fresh project gets).
+                        let live_backend = state
+                            .projects
+                            .active()
+                            .map(|p| p.backend)
+                            .unwrap_or_default();
+                        // LIFECYCLE-1: register the abort handle so a Stop reaps the greenfield
+                        // fleet's live agent subprocesses (kill_on_drop). Cleared on finish.
+                        let runs_for_clear = state.runs.clone();
+                        let rid_for_clear = rid.clone();
+                        let rid_register = rid.clone();
+                        let handle = tokio::spawn(async move {
+                            live_fleet::execute_live_run_tiered(
+                                store,
+                                rid,
+                                title,
+                                desc,
+                                map,
+                                max_iterations,
+                                skip_layer2,
+                                vision_enabled,
+                                live_registry,
+                                live_policy,
+                                live_creds,
+                                live_limiter,
+                                live_backend,
+                            )
+                            .await;
+                            runs_for_clear.clear_abort(&rid_for_clear);
+                        });
+                        state
+                            .runs
+                            .register_abort(&rid_register, handle.abort_handle());
+                    }
+                    // Single-model path (back-compat): one operator-wide model for every agent.
+                    None => {
+                        // LIFECYCLE-1: register the abort handle (see tiered arm above).
+                        let runs_for_clear = state.runs.clone();
+                        let rid_for_clear = rid.clone();
+                        let rid_register = rid.clone();
+                        let handle = tokio::spawn(async move {
+                            live_fleet::execute_live_run(
+                                store,
+                                rid,
+                                title,
+                                desc,
+                                model,
+                                max_iterations,
+                                skip_layer2,
+                            )
+                            .await;
+                            runs_for_clear.clear_abort(&rid_for_clear);
+                        });
+                        state
+                            .runs
+                            .register_abort(&rid_register, handle.abort_handle());
+                    }
                 }
             }
         }
@@ -3930,6 +3967,11 @@ async fn export_project(
         .get(&id)
         .ok_or_else(|| AppError::not_found(anyhow::anyhow!("project not found: {id}")))?;
     let routines = state.routines.list_for_project(&id);
+    // A project export is a backup file that moves between machines, not a client deliverable,
+    // and a client's name should not travel in a file by default: it is left blank here (the
+    // stored project keeps it) and the operator sets it again for the engagement on import.
+    let mut project = project;
+    project.client_name.clear();
     Ok(Json(ProjectExportDoc { project, routines }))
 }
 
@@ -4373,6 +4415,34 @@ async fn set_product_brief(
 ) -> Json<serde_json::Value> {
     match state.projects.update(&id, |p| {
         p.product_brief = req.product_brief.trim().to_string();
+    }) {
+        Some(p) => Json(serde_json::json!({ "ok": true, "project": p })),
+        None => Json(serde_json::json!({ "ok": false, "message": "no such project" })),
+    }
+}
+
+/// Body for `POST /api/projects/:id/client-name`.
+#[derive(serde::Deserialize)]
+struct SetClientNameReq {
+    client_name: String,
+}
+
+/// `POST /api/projects/:id/client-name` — set who the inspection is for, part of the inspection
+/// setup saved with the project. Every export fills the confidentiality line from it
+/// (`Project::client_name`). Blank clears it (an export then refuses until it is set); a name
+/// that is too long or spans lines is refused with the reason
+/// (`report_export::validate_client_name`).
+async fn set_client_name(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<SetClientNameReq>,
+) -> Json<serde_json::Value> {
+    let name = match crate::report_export::validate_client_name(&req.client_name) {
+        Ok(name) => name,
+        Err(e) => return Json(serde_json::json!({ "ok": false, "message": e.to_string() })),
+    };
+    match state.projects.update(&id, |p| {
+        p.client_name = name;
     }) {
         Some(p) => Json(serde_json::json!({ "ok": true, "project": p })),
         None => Json(serde_json::json!({ "ok": false, "message": "no such project" })),
@@ -14108,14 +14178,47 @@ struct UowBranchReq {
     branch: Option<String>,
 }
 
-/// Set (or clear) the branch for a story's UoW.
+/// A 400 for a branch name that fails [`camerata_api_types::uow::validate_branch_name`].
+fn invalid_branch_response(reason: String) -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(serde_json::json!({ "error": "invalid branch name", "reason": reason })),
+    )
+        .into_response()
+}
+
+/// Set (or clear) the branch for a story's UoW. A name is validated with the ref-format
+/// rules first (it becomes a directory under the worktrees root), so `.`, `..` and the like
+/// are refused with a 400 and nothing is recorded.
 async fn uow_set_branch(
     State(state): State<AppState>,
     Path(story_id): Path<String>,
     Json(req): Json<UowBranchReq>,
-) -> Json<crate::uow::UnitOfWork> {
+) -> Response {
+    if let Some(branch) = req.branch.as_deref() {
+        if let Err(reason) = camerata_api_types::uow::validate_branch_name(branch) {
+            return invalid_branch_response(reason);
+        }
+    }
+    // The unit must belong to the active project: a story id from another project is refused
+    // rather than given a branch in this project's repositories.
+    let project = state.projects.active();
+    if let Some(reason) = crate::run_target::project_membership_refusal(
+        &story_id,
+        project.as_ref().map(|p| p.repos.as_slice()),
+    ) {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": "unit not in the active project",
+                "reason": reason,
+                "story_id": story_id,
+            })),
+        )
+            .into_response();
+    }
     state.uow.set_branch(&story_id, req.branch);
-    Json(state.uow.get_or_create(&story_id))
+    Json(state.uow.get_or_create(&story_id)).into_response()
 }
 
 #[derive(serde::Deserialize)]
@@ -14170,6 +14273,12 @@ async fn uow_set_intake_context(
     Json(state.uow.set_intake_context(&story_id, &req.context))
 }
 
+/// The active project's repositories (`None` with no active project), for the membership
+/// check every worktree resolution goes through.
+pub(crate) fn active_project_repos(state: &AppState) -> Option<Vec<String>> {
+    state.projects.active().map(|p| p.repos)
+}
+
 #[derive(serde::Deserialize)]
 struct UowIntakeReposReq {
     /// The full in-scope repo/branch set (replaces the prior scope). Out-of-scope repos
@@ -14183,8 +14292,38 @@ async fn uow_set_intake_repos(
     State(state): State<AppState>,
     Path(story_id): Path<String>,
     Json(req): Json<UowIntakeReposReq>,
-) -> Json<crate::uow::UnitOfWork> {
-    Json(state.uow.set_intake_repos(&story_id, req.repos))
+) -> Response {
+    // A branch name typed into the scope becomes a worktree directory name: validate every
+    // explicit name before anything is recorded. (A blank name derives `camerata/<story>`,
+    // which the run target validates when it is used.)
+    for scope in &req.repos {
+        if let Some(name) = scope.branch.explicit_name() {
+            if let Err(reason) = camerata_api_types::uow::validate_branch_name(name) {
+                return invalid_branch_response(format!("Repo `{}`: {reason}", scope.repo));
+            }
+        }
+    }
+    // Every in-scope repository must belong to the active project (the same check as the run
+    // and the branch record), so a scope cannot pull another project's clones into this unit.
+    let project_repos = active_project_repos(&state);
+    for scope in &req.repos {
+        if let Some(reason) = crate::run_target::scope_membership_refusal(
+            &story_id,
+            &scope.repo,
+            project_repos.as_deref(),
+        ) {
+            return (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({
+                    "error": "repository not in the active project",
+                    "reason": reason,
+                    "story_id": story_id,
+                })),
+            )
+                .into_response();
+        }
+    }
+    Json(state.uow.set_intake_repos(&story_id, req.repos)).into_response()
 }
 
 /// Per-repo Ship result for one in-scope repo. Part of the [`UowIntakeShipResponse`].
@@ -14265,7 +14404,11 @@ async fn uow_intake_ship(
         let mut results: Vec<RepoShipResult> = Vec::new();
 
         for scope in &uow.intake.repos {
-            let scope_branch = derive_scope_branch(&scope.branch, &story_id);
+            // The same branch the run works on (the unit's recorded branch for its own
+            // repository; the scope's branch for the others).
+            let scope_branch =
+                crate::run_target::unit_branch_for_repo(&uow, &story_id, &scope.repo)
+                    .unwrap_or_else(|| derive_scope_branch(&scope.branch, &story_id));
             let override_path = state.settings.repo_path(&scope.repo);
 
             // Resolve the worktree for this repo + branch.
@@ -14274,6 +14417,7 @@ async fn uow_intake_ship(
                 workspace_root.as_deref(),
                 &scope.repo,
                 &scope_branch,
+                active_project_repos(&state).as_deref(),
             )
             .await
             {
@@ -14400,6 +14544,7 @@ async fn uow_intake_ship(
         workspace_root.as_deref(),
         &repo,
         &branch,
+        active_project_repos(&state).as_deref(),
     )
     .await
     else {
@@ -15608,16 +15753,10 @@ fn walk_source_files(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
     out
 }
 
+/// The branch an in-scope repo works on for `story_id`; delegates to the shared
+/// [`crate::uow::BranchMode::branch_for_story`] so the console's run start agrees.
 pub(crate) fn derive_scope_branch(mode: &crate::uow::BranchMode, story_id: &str) -> String {
-    match mode {
-        crate::uow::BranchMode::Existing { branch_name } if !branch_name.trim().is_empty() => {
-            branch_name.clone()
-        }
-        crate::uow::BranchMode::NewFromBase { new_name, .. } if !new_name.trim().is_empty() => {
-            new_name.clone()
-        }
-        _ => format!("camerata/{story_id}"),
-    }
+    mode.branch_for_story(story_id)
 }
 
 /// `POST /api/uow/:story_id/branches` → `{ "local": [...], "origin": [...] }`.
@@ -15719,6 +15858,7 @@ async fn uow_update_branch(
         workspace_root.as_deref(),
         &repo,
         &target_branch,
+        active_project_repos(&state).as_deref(),
     )
     .await
     else {
@@ -15844,6 +15984,7 @@ async fn uow_pr_open(
         workspace_root.as_deref(),
         &repo,
         &branch,
+        active_project_repos(&state).as_deref(),
     )
     .await
     else {
@@ -16056,6 +16197,7 @@ async fn uow_pr_resolve(
         workspace_root.as_deref(),
         &repo,
         &target_branch,
+        active_project_repos(&state).as_deref(),
     )
     .await
     else {
@@ -17031,6 +17173,12 @@ async fn export_audit_report(
     // `resolve_fix`'s chosen-option fallback (audit-integrated alternatives) — server-
     // populated, never client-supplied (see `ReportOptions::chosen_options`'s doc comment).
     req.options.chosen_options = project_chosen_options(&project);
+    // Confidentiality: the client name comes from the project's inspection setup, and a blank
+    // one blocks the export before anything is built.
+    req.options.client_name = project.client_name.clone();
+    if let Err(e) = crate::report_export::require_client_name(&req.options) {
+        return client_name_required_response(&e);
+    }
 
     let json = crate::report_export::build_report_json(
         &report,
@@ -17169,6 +17317,9 @@ async fn export_product(
     // The backend the project's scans ran on, recorded in the manifest and README. Server-
     // populated, never client-supplied.
     req.options.model = Some(ModelRecord::anthropic(project.backend));
+    // Confidentiality: the client name comes from the project's inspection setup. The package
+    // assembly refuses a blank one (mapped to a 422 below).
+    req.options.client_name = project.client_name.clone();
 
     // ONE assembly (`release_gate::build_product_package`) and ONE path to zip bytes
     // (`release_gate::release`), shared by this handler, `camerata inspect --export` and the
@@ -17187,6 +17338,9 @@ async fn export_product(
             // same blocked response as one from `release`.
             if let Some(failure) = crate::release_gate::gate_failure_of(&e) {
                 return release_blocked_response(failure);
+            }
+            if let Some(missing) = e.downcast_ref::<crate::report_export::ClientNameRequired>() {
+                return client_name_required_response(missing);
             }
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -17237,6 +17391,22 @@ async fn export_product(
             ),
         ],
         zip_bytes,
+    )
+        .into_response()
+}
+
+/// The 422 the export routes return when the inspection setup has no client name:
+/// `{ ok: false, gate: "client_name", message }`, the message saying where to enter it.
+fn client_name_required_response(missing: &crate::report_export::ClientNameRequired) -> Response {
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+    (
+        StatusCode::UNPROCESSABLE_ENTITY,
+        Json(serde_json::json!({
+            "ok": false,
+            "gate": "client_name",
+            "message": missing.to_string(),
+        })),
     )
         .into_response()
 }
@@ -17418,6 +17588,22 @@ pub struct ManifestProvenance {
     /// checked. `None` renders as every feed not checked (never an omitted line). Filled from
     /// `ScanProvenance::vulnerability_data`; rendered by [`crate::vuln_intel`].
     pub vulnerability_data: Option<crate::vuln_intel::VulnDataStamp>,
+    /// 22c: who the inspection was prepared for (the inspection setup's client name, the same
+    /// name the confidentiality marking prints). `None` only for a caller that set none.
+    pub client_name: Option<String>,
+    /// 22c: how many corpus rules the inspection applied (the distinct audited rule ids found
+    /// in the loaded corpus). `None` when no corpus was loaded.
+    pub corpus_rules_applied: Option<usize>,
+    /// 22c: the non-blank lines the inspection read, the figure `camerata count` reports and a
+    /// quote is priced on (same file filter, same line definition). `None` when the run read
+    /// no local files.
+    pub counted_lines: Option<usize>,
+    /// 22c: the files the noise filter excluded (build output, lockfiles, vendored and
+    /// generated code). `None` when the run read no local files.
+    pub excluded_noise_files: Option<usize>,
+    /// 22c: the non-blank lines in those excluded files. `None` for a run that did not record
+    /// it (a report from before 22c).
+    pub excluded_noise_lines: Option<usize>,
 }
 
 impl ManifestProvenance {
@@ -17480,6 +17666,11 @@ impl ManifestProvenance {
             "model_provider": self.model.as_ref().map(|m| &m.provider),
             "cost_cap_reached": self.cost_cap_reached,
             "vulnerability_data": crate::vuln_intel::manifest_json(self.vulnerability_data.as_ref()),
+            "client_name": self.client_name,
+            "corpus_rules_applied": self.corpus_rules_applied,
+            "counted_lines": self.counted_lines,
+            "excluded_noise_files": self.excluded_noise_files,
+            "excluded_noise_lines": self.excluded_noise_lines,
             "release_checks": Self::release_checks(),
         })
     }
@@ -17501,11 +17692,15 @@ impl ManifestProvenance {
     /// manifest.
     pub fn readme_lines(&self) -> String {
         let names: Vec<&str> = self.repos.iter().map(|r| r.name.as_str()).collect();
-        let mut out = format!(
+        let mut out = String::new();
+        if let Some(client) = &self.client_name {
+            out.push_str(&format!("Prepared for: {client}\n"));
+        }
+        out.push_str(&format!(
             "Repos inspected: {}\nGenerated: {}\n",
             names.join(", "),
             self.generated_at
-        );
+        ));
         for repo in &self.repos {
             if let Some(commit) = &repo.commit {
                 let note = if repo.dirty {
@@ -17522,6 +17717,20 @@ impl ManifestProvenance {
         }
         if let Some(reviewed) = &self.rules_last_reviewed {
             out.push_str(&format!("Rules last reviewed on {reviewed}\n"));
+        }
+        if let Some(applied) = self.corpus_rules_applied {
+            out.push_str(&format!("Corpus rules applied: {applied}\n"));
+        }
+        if let Some(lines) = self.counted_lines {
+            out.push_str(&format!("Counted lines: {lines}\n"));
+        }
+        if let Some(files) = self.excluded_noise_files {
+            match self.excluded_noise_lines {
+                Some(lines) => out.push_str(&format!(
+                    "Excluded as noise: {files} files, {lines} lines\n"
+                )),
+                None => out.push_str(&format!("Excluded as noise: {files} files\n")),
+            }
         }
         if let Some(model) = &self.model {
             out.push_str(&format!("Model backend: {}\n", model.backend));
@@ -19414,6 +19623,49 @@ mod tests {
         assert!(
             item.get("has_gate_provenance").is_none(),
             "stale boolean `has_gate_provenance` must be replaced by `gate_provenance`"
+        );
+    }
+
+    /// A project export is a backup file Zach moves between machines, not a client deliverable,
+    /// and a client's name should not travel in a file by default: the export carries every
+    /// project setting except the client name, which is left blank (and so is blank again on
+    /// import, where the operator sets it for that engagement).
+    #[tokio::test]
+    async fn a_project_export_file_does_not_carry_the_client_name() {
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        let p = state
+            .projects
+            .create("Acme", vec!["acme/portal".to_string()])
+            .expect("project created");
+        state
+            .projects
+            .update(&p.id, |p| p.client_name = "Example Client Ltd".to_string())
+            .expect("project updated");
+        let app = router(state.clone());
+
+        let exp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/projects/{}/export", p.id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(exp.status(), StatusCode::OK);
+        let doc = body_json(exp).await;
+        assert_eq!(doc["client_name"], "", "{doc}");
+        assert!(
+            !doc.to_string().contains("Example Client Ltd"),
+            "the client name must not appear anywhere in the export: {doc}"
+        );
+        // The rest of the project still travels.
+        assert_eq!(doc["name"], "Acme");
+        assert_eq!(doc["repos"][0], "acme/portal");
+        // The stored project is untouched: only the file is redacted.
+        assert_eq!(
+            state.projects.get(&p.id).expect("project").client_name,
+            "Example Client Ltd"
         );
     }
 
@@ -26476,6 +26728,7 @@ mod tests {
             files_scanned: 1,
             test_file_count: 0,
             files_excluded: 0,
+            excluded_noise_lines: None,
             code_chars: 100,
             code_lines: 10,
             code_lines_by_language: Vec::new(),
@@ -26566,12 +26819,7 @@ mod tests {
     /// gate) — the PDF-compile stage of the happy-path product-export test skips
     /// gracefully rather than hard-failing CI environments without Typst installed.
     fn typst_on_path() -> bool {
-        std::process::Command::new("typst")
-            .arg("--version")
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .is_some()
+        camerata_test_env::typst_on_path()
     }
 
     #[tokio::test]
@@ -26631,6 +26879,12 @@ mod tests {
             .projects
             .create("Acme", vec!["owner/repo".to_string()])
             .expect("project created");
+        let project = state
+            .projects
+            .update(&project.id, |p| {
+                p.client_name = "Example Client Ltd".to_string()
+            })
+            .expect("project exists");
         state.set_last_scan(
             project.id.clone(),
             make_scan_report("SEC-NO-HARDCODED-SECRETS-1"),
@@ -27022,6 +27276,12 @@ mod tests {
                 .projects
                 .create("Acme", vec!["owner/repo".to_string()])
                 .expect("project created");
+            let project = state
+                .projects
+                .update(&project.id, |p| {
+                    p.client_name = "Example Client Ltd".to_string()
+                })
+                .expect("project exists");
             state.set_last_scan(
                 project.id.clone(),
                 make_scan_report("SEC-NO-HARDCODED-SECRETS-1"),

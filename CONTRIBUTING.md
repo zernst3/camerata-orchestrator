@@ -51,6 +51,9 @@ cargo test -p camerata-server --test benchmark_supabase_fixture
   a bump. Commit `crates/rules/CORPUS_LOCK.toml` together with the rule change.
 - The README and `docs/OVERVIEW.md` state the rule and domain counts. A test in
   `crates/rules/tests/readme_rule_count.rs` fails when either doc disagrees with the corpus, and
-  its message says which number to change. Write the count as plain digits (for example
-  "437 rules across 22 domains").
+  its message says which number to change. The same test reads every other markdown file in the
+  repository for the headline shape "N rules across M domains", so any doc that quotes the
+  headline must quote the real one. The long technical docs the README links are held to the
+  same number wherever they state a whole-corpus count of 100 or more; say "every rule" where a
+  figure adds nothing. Write the count as plain digits in the shape "N rules across M domains".
 - The authoring workflow is in [`docs/RULE_AUTHORING.md`](docs/RULE_AUTHORING.md).

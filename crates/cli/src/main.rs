@@ -186,6 +186,11 @@ enum Command {
         /// fix_on_haiku, terse_output, batch_default, applies_to_routing, candidates_prefilter.
         #[arg(long = "efficiency", value_name = "NAME=on|off")]
         efficiency: Vec<String>,
+        /// Who the inspection is for. Printed in the export's confidentiality line ("Confidential,
+        /// prepared for <client> on <date>") on every PDF page and workbook sheet. Required: it
+        /// is checked before anything is read or spent.
+        #[arg(long, value_name = "NAME")]
+        client: String,
     },
 
     /// W6 / I2: the PRE-FLIGHT INTEGRITY GATE. Evaluate a scan ledger written by
@@ -409,6 +414,7 @@ async fn main() -> anyhow::Result<()> {
             verbose,
             max_cost_usd,
             efficiency,
+            client,
         } => {
             run_inspect_cmd(InspectArgs {
                 repo,
@@ -423,6 +429,7 @@ async fn main() -> anyhow::Result<()> {
                 verbose,
                 max_cost_usd,
                 efficiency,
+                client,
             })
             .await
         }
@@ -883,7 +890,9 @@ mod cli_parse_tests {
             "--repo",
             "/tmp/r",
             "--export",
-            "/tmp/o.zip"
+            "/tmp/o.zip",
+            "--client",
+            "Example Client Ltd"
         ])
         .is_ok());
     }
@@ -897,6 +906,8 @@ mod cli_parse_tests {
             "/tmp/r",
             "--export",
             "/tmp/o.zip",
+            "--client",
+            "Example Client Ltd",
         ])
         .expect("must parse");
         match cli.command {
@@ -913,7 +924,9 @@ mod cli_parse_tests {
                 verbose,
                 max_cost_usd,
                 efficiency,
+                client,
             } => {
+                assert_eq!(client, "Example Client Ltd");
                 assert_eq!(repo, PathBuf::from("/tmp/r"));
                 assert_eq!(export, PathBuf::from("/tmp/o.zip"));
                 assert_eq!(backend, ProjectBackend::Api);
@@ -940,6 +953,8 @@ mod cli_parse_tests {
             "/tmp/r",
             "--export",
             "/tmp/o.zip",
+            "--client",
+            "Example Client Ltd",
             "--max-cost-usd",
             "12.50",
             "--efficiency",
@@ -970,6 +985,8 @@ mod cli_parse_tests {
             "/tmp/r",
             "--export",
             "/tmp/o.zip",
+            "--client",
+            "Example Client Ltd",
             "--backend",
             "api",
             "--batch",
@@ -1042,6 +1059,8 @@ mod cli_parse_tests {
             "/tmp/r",
             "--export",
             "/tmp/o.zip",
+            "--client",
+            "Example Client Ltd",
             "--backend",
             "API",
         ])
@@ -1058,11 +1077,31 @@ mod cli_parse_tests {
             "/tmp/r",
             "--export",
             "/tmp/o.zip",
+            "--client",
+            "Example Client Ltd",
             "--backend",
             "azure",
         ]) {
             Ok(_) => panic!("an unknown --backend value must fail to parse"),
             Err(err) => assert!(err.to_string().contains("azure"), "{err}"),
+        }
+    }
+
+    /// Confidentiality: `--client` is required, so a headless run cannot reach its export
+    /// without a client to mark it for.
+    #[test]
+    fn inspect_requires_the_client_name() {
+        let parsed = Cli::try_parse_from([
+            "camerata",
+            "inspect",
+            "--repo",
+            "/tmp/r",
+            "--export",
+            "/tmp/o.zip",
+        ]);
+        match parsed {
+            Ok(_) => panic!("inspect without --client must fail to parse"),
+            Err(err) => assert!(err.to_string().contains("--client"), "{err}"),
         }
     }
 }

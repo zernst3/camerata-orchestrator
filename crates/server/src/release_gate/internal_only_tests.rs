@@ -97,13 +97,7 @@ async fn an_export_of_a_project_whose_draft_carries_the_log_names_none_of_it() {
     use camerata_api_types::review_timing::REVIEW_LOG_KEY;
     use http_body_util::BodyExt;
 
-    if std::process::Command::new("typst")
-        .arg("--version")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .is_none()
-    {
+    if !camerata_test_env::typst_on_path() {
         eprintln!("skipping: typst is not on PATH");
         return;
     }
@@ -114,6 +108,12 @@ async fn an_export_of_a_project_whose_draft_carries_the_log_names_none_of_it() {
         .projects
         .create("Acme", vec!["acme/portal".to_string()])
         .expect("project created");
+    let project = state
+        .projects
+        .update(&project.id, |p| {
+            p.client_name = "Example Client Ltd".to_string()
+        })
+        .expect("project exists");
     state.set_last_scan(project.id.clone(), super::tests::scan_report());
     let log = serde_json::json!({
         "review_groups": { "g": { "opened_at_ms": 1, "active_ms": 72_000_000, "group_reviewed": true } },

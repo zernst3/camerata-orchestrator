@@ -85,8 +85,8 @@ current_recommendation = "…"   # W32, optional, REQUIRED WITH superseded_since
   claims a verified-clean result on a codebase it cannot be checked against. Like `kind`, there is
   deliberately no default: `rules_missing_inspectable` in `crates/rules/src/lib.rs` fails the build
   on an absent value, because guessing `true` would ship an unassessable rule as "verified clean"
-  in a paid deliverable and guessing `false` would silently stop a real check from running. 26 of
-  417 rules are currently `false`. If you are unsure, `true` is the reversible choice. Semantics
+  in a paid deliverable and guessing `false` would silently stop a real check from running. 26 rules
+  are currently `false`. If you are unsure, `true` is the reversible choice. Semantics
   and the full consumer list: `docs/RULES_REFERENCE.md` section 3.6a.
 - **`version` is mandatory, and you bump it whenever anything about the rule changes.** A new
   rule starts at `1`. Any edit to the rule (a directive, an option, a source, a flag, the title,
@@ -111,7 +111,7 @@ current_recommendation = "…"   # W32, optional, REQUIRED WITH superseded_since
 - **`superseded_since` and `current_recommendation` travel together.** Set both or neither
   (`rules_with_unpaired_supersession`). They are populated only by a CONFIRMED sweep finding,
   never speculatively.
-- **Do not add a `tag` field.** It was deleted from all 417 rules and from the schema on
+- **Do not add a `tag` field.** It was deleted from every rule and from the schema on
   2026-10-12, and the unknown-field gate now fails the build if it reappears. `layer` is still
   authored on every rule and is still read by nothing; keep it accurate for human readers and do
   not expect it to do anything.

@@ -78,12 +78,7 @@ fn plain_postgres_files() -> Vec<(&'static str, &'static str)> {
 }
 
 fn typst_on_path() -> bool {
-    std::process::Command::new("typst")
-        .arg("--version")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .is_some()
+    camerata_test_env::typst_on_path()
 }
 
 /// STEP 1 — arming, at the real selection seam: `scan_repos` (stack detection +
@@ -156,6 +151,7 @@ async fn plain_postgres_repo_fires_both_rules_through_camerata_inspect_end_to_en
         verbose: false,
         max_cost_usd: None,
         efficiency: Vec::new(),
+        client: "Example Client Ltd".to_string(),
     };
 
     let outcome = run_inspect_with_key_presence(args, false)
