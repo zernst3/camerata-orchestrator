@@ -527,6 +527,7 @@ pub struct UowListResponse {
 /// aggregate gaining its `source` field, because the remediation planner's traceable PR body
 /// (`camerata_server::remediation_plan::pr_body`) renders it.
 #[derive(Clone, Default, Serialize, Deserialize, Debug, PartialEq, Eq)]
+#[serde(default)]
 pub struct FindingsSource {
     /// The inspection the findings were taken from (`InspectionEntry::id`).
     pub inspection_id: String,
@@ -551,6 +552,7 @@ pub struct FindingsSource {
 
 /// The commit an inspection read in one repository.
 #[derive(Clone, Default, Serialize, Deserialize, Debug, PartialEq, Eq)]
+#[serde(default)]
 pub struct AuditedCommit {
     pub repo: String,
     #[serde(default)]
@@ -559,6 +561,7 @@ pub struct AuditedCommit {
 
 /// One finding a unit is expected to close, with both identities.
 #[derive(Clone, Default, Serialize, Deserialize, Debug, PartialEq, Eq)]
+#[serde(default)]
 pub struct SourceFinding {
     /// `report_export::finding_key` of the finding at plan time (exact identity).
     pub key: String,
@@ -577,6 +580,19 @@ pub struct SourceFinding {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn findings_source_shapes_load_from_partial_json() {
+        let s: FindingsSource = serde_json::from_str("{}").expect("empty source");
+        assert_eq!(s, FindingsSource::default());
+        let a: AuditedCommit = serde_json::from_str(r#"{"sha":"abc"}"#).expect("no repo");
+        assert_eq!(a.sha.as_deref(), Some("abc"));
+        let f: SourceFinding = serde_json::from_str(r#"{"path":"src/a.rs"}"#).expect("path only");
+        assert_eq!(
+            (f.path.as_str(), f.line, f.key.as_str()),
+            ("src/a.rs", 0, "")
+        );
+    }
 
     #[test]
     fn bug10_gate_provenance_new_enforces_invariant() {

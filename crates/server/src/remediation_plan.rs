@@ -122,6 +122,7 @@ pub fn plan(
     options: &PlanOptions,
 ) -> RemediationPlan {
     let mut notes = Vec::new();
+    let findings = dedupe(findings, &mut notes);
     let mut units = Vec::new();
     for (repo, repo_findings) in partition_by_repo(findings) {
         let (repo_findings, mut absorbed) = if options.group_shared_fix {
@@ -135,6 +136,9 @@ pub fn plan(
                 units.push(unit);
             }
         }
+        // Every absorbed finding sits at a location a kept finding also sits at, and that
+        // finding is in exactly one unit, so nothing is left over.
+        debug_assert!(absorbed.is_empty(), "absorbed findings left without a unit");
     }
     order_units(&mut units);
     link_dependencies(&mut units, &mut notes);
@@ -143,9 +147,48 @@ pub fn plan(
 }
 
 /// Rank of a severity, lower is worse. The one ranking (`camerata_rules::severity_bounds`),
-/// applied to the lowercased text so `High` and `high` agree.
+/// applied to the trimmed, lowercased text so `High`, ` high ` and `high` agree.
 fn rank(severity: &str) -> u8 {
-    camerata_rules::severity_bounds::severity_rank(&severity.to_ascii_lowercase())
+    camerata_rules::severity_bounds::severity_rank(&severity.trim().to_ascii_lowercase())
+}
+
+/// The same finding listed twice (same key, repository, path, line and rule) is planned once,
+/// so it can never be counted, listed or closed twice. The kept copy has the worst severity and
+/// the union of the `also_matches`, which makes the result independent of input order.
+fn dedupe(findings: Vec<PlanFinding>, notes: &mut Vec<String>) -> Vec<PlanFinding> {
+    let total = findings.len();
+    let mut kept: BTreeMap<(String, String, String, usize, String), PlanFinding> = BTreeMap::new();
+    for f in findings {
+        let id = (
+            f.key.clone(),
+            f.repo.clone(),
+            f.path.clone(),
+            f.line,
+            f.rule_id.clone(),
+        );
+        match kept.get_mut(&id) {
+            None => {
+                kept.insert(id, f);
+            }
+            Some(have) => {
+                if rank(&f.severity) < rank(&have.severity) {
+                    have.severity = f.severity;
+                }
+                have.also_matches.extend(f.also_matches);
+                have.also_matches.sort();
+                have.also_matches.dedup();
+            }
+        }
+    }
+    let dropped = total - kept.len();
+    if dropped > 0 {
+        notes.push(if dropped == 1 {
+            "1 duplicate finding was planned once.".to_string()
+        } else {
+            format!("{dropped} duplicate findings were planned once.")
+        });
+    }
+    kept.into_values().collect()
 }
 
 /// Step 1. A unit never spans repositories (a PR is per repository). Sorted by repo name so the
@@ -343,6 +386,16 @@ fn split_group(
         "{rule} has {total} findings in {files} files; split into {} units by directory.",
         parts.len()
     ));
+    for (label, part) in &parts {
+        if too_big(part, options) {
+            let n = part.len();
+            let f = distinct_paths(part);
+            let noun = if f == 1 { "file" } else { "files" };
+            notes.push(format!(
+                "{rule} in {label} still has {n} findings in {f} {noun} after the split; it stays one unit."
+            ));
+        }
+    }
     parts
         .into_iter()
         .map(|(label, part)| build_unit(repo, rule, Some(label), part, options.group_shared_fix))
@@ -556,13 +609,13 @@ pub fn pr_body_with(
         } else {
             standards
                 .iter()
-                .map(|(t, u)| format!("{t} ({u})"))
+                .map(|(t, u)| format!("{} ({})", table_cell(t), table_cell(u)))
                 .collect::<Vec<_>>()
                 .join("; ")
         };
         out.push_str(&format!(
             "Rule {id}: {}. Standard: {standard}.\n",
-            title.trim_end_matches('.')
+            table_cell(title).trim_end_matches('.')
         ));
     }
 
@@ -599,6 +652,8 @@ pub fn pr_body_with(
                 source.inspection_id
             )),
         }
+        // Markdown only starts a table after a blank line.
+        out.push('\n');
         out.push_str("| # | File | Line | Rule | Severity | Finding |\n");
         out.push_str("| --- | --- | --- | --- | --- | --- |\n");
         // A merged finding is listed straight after the first finding at its location.
@@ -636,14 +691,18 @@ pub fn pr_body_with(
         let named: Vec<String> = context
             .depends_on
             .iter()
-            .map(|(label, title)| format!("{label} ({title})"))
+            .map(|(label, title)| format!("{} ({})", table_cell(label), table_cell(title)))
             .collect();
-        out.push_str(&format!("Depends on: {}\n", named.join(", ")));
+        out.push_str(&format!("\nDepends on: {}\n", named.join(", ")));
     } else if !source.depends_on.is_empty() {
-        out.push_str(&format!("Depends on: {}\n", source.depends_on.join(", ")));
+        let ids: Vec<String> = source.depends_on.iter().map(|d| table_cell(d)).collect();
+        out.push_str(&format!("\nDepends on: {}\n", ids.join(", ")));
     }
     if let Some(story) = context.story_id.as_deref() {
-        out.push_str(&format!("Opened by Camerata for unit {story}.\n"));
+        out.push_str(&format!(
+            "\nOpened by Camerata for unit {}.\n",
+            table_cell(story)
+        ));
     }
     out.truncate(out.trim_end().len());
     out
@@ -1069,6 +1128,7 @@ Rule SEC-2: Parameterise queries. Standard: no outside source listed.\n\
 \n\
 ## Findings closed\n\
 Inspection insp-proj-1700000000-ab12cd; o/a at 0123abcd.\n\
+\n\
 | # | File | Line | Rule | Severity | Finding |\n\
 | --- | --- | --- | --- | --- | --- |\n";
         assert!(body.starts_with(expected_head), "{body}");
@@ -1403,5 +1463,212 @@ Inspection insp-proj-1700000000-ab12cd; o/a at 0123abcd.\n\
         );
         assert!(!body.contains(&m1.snippet), "still no snippets");
         assert!(!body.contains('\u{2014}'));
+    }
+
+    #[test]
+    fn a_merged_finding_with_no_row_to_sit_under_still_gets_a_row_and_is_counted() {
+        let src = FindingsSource {
+            inspection_id: "insp-x".to_string(),
+            audited: vec![AuditedCommit {
+                repo: "o/a".to_string(),
+                sha: Some("abc".to_string()),
+            }],
+            findings: vec![sf("src/a.rs", 1, "A-RULE", "high")],
+            ..Default::default()
+        };
+        let stray = sf("src/elsewhere.rs", 9, "B-RULE", "low");
+        let ctx = PrContext {
+            merged: vec![stray.clone()],
+            ..PrContext::default()
+        };
+        let body = pr_body_with(&src, &HashMap::new(), &ctx);
+        let row = body
+            .lines()
+            .find(|l| l.contains(&stray.fingerprint))
+            .unwrap_or_else(|| panic!("the stray merged finding has no row:\n{body}"));
+        assert!(
+            row.contains("merged into another finding of this PR"),
+            "{row}"
+        );
+        assert!(
+            row.starts_with("| 2 |"),
+            "numbered after the main rows: {row}"
+        );
+        assert!(body.contains("\n2 findings."), "{body}");
+    }
+
+    #[test]
+    fn a_blank_line_precedes_each_table_and_the_depends_on_and_opened_by_lines() {
+        let mut src = source();
+        src.audited.push(AuditedCommit {
+            repo: "o/b".to_string(),
+            sha: None,
+        });
+        src.findings.push({
+            let mut f = sf("lib/x.rs", 2, "SEC-2", "high");
+            f.repo = "o/b".to_string();
+            f
+        });
+        let ctx = PrContext {
+            story_id: Some("story-77".to_string()),
+            depends_on: vec![("uow-12".to_string(), "Fix SEC-9".to_string())],
+            merged: Vec::new(),
+        };
+        let body = pr_body_with(&src, &body_rules(), &ctx);
+        let lines: Vec<&str> = body.lines().collect();
+        let headers: Vec<usize> = lines
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| l.starts_with("| # |"))
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(headers.len(), 2, "one table per repository:\n{body}");
+        for i in headers {
+            assert_eq!(
+                lines[i - 1],
+                "",
+                "header row must follow an empty line:\n{body}"
+            );
+        }
+        for starts in ["Depends on: ", "Opened by Camerata"] {
+            let i = lines
+                .iter()
+                .position(|l| l.starts_with(starts))
+                .expect(starts);
+            assert_eq!(
+                lines[i - 1],
+                "",
+                "`{starts}` must follow an empty line:\n{body}"
+            );
+        }
+    }
+
+    #[test]
+    fn titles_and_dependency_names_cannot_break_the_body_layout() {
+        let rs = rules(vec![info(
+            "SEC-1",
+            "Bad|title\nsecond line",
+            &[("Std|1\n2", "http://x/a|b")],
+        )]);
+        let ctx = PrContext {
+            story_id: None,
+            depends_on: vec![("uow-3".to_string(), "Fix|it\nnow".to_string())],
+            merged: Vec::new(),
+        };
+        let mut src = source();
+        src.rule_ids = vec!["SEC-1".to_string()];
+        let body = pr_body_with(&src, &rs, &ctx);
+        assert!(
+            body.contains(
+                "Rule SEC-1: Bad\\|title second line. Standard: Std\\|1 2 (http://x/a\\|b)."
+            ),
+            "{body}"
+        );
+        assert!(body.contains("Depends on: uow-3 (Fix\\|it now)"), "{body}");
+    }
+
+    #[test]
+    fn a_unit_sharing_files_with_two_earlier_units_depends_on_both() {
+        let findings = vec![
+            pf("o/a", "src/one.rs", 1, "FIRST", "critical"),
+            pf("o/a", "src/two.rs", 1, "SECOND", "high"),
+            pf("o/a", "src/one.rs", 5, "THIRD", "medium"),
+            pf("o/a", "src/two.rs", 5, "THIRD", "medium"),
+        ];
+        let p = plan(findings, &HashMap::new(), &PlanOptions::default());
+        let idx = |r: &str| p.units.iter().position(|u| primary(u) == r).expect("unit");
+        assert_eq!(
+            p.units[idx("THIRD")].depends_on,
+            vec![idx("FIRST"), idx("SECOND")]
+        );
+        assert!(
+            p.units[idx("SECOND")].depends_on.is_empty(),
+            "FIRST and SECOND share nothing"
+        );
+        let edges = p
+            .notes
+            .iter()
+            .filter(|n| n.starts_with("uow for THIRD edits files"))
+            .count();
+        assert_eq!(edges, 2);
+    }
+
+    #[test]
+    fn severity_ranks_ignore_case_and_surrounding_spaces() {
+        let mut findings = vec![pf("o/a", "t.rs", 1, "TOP", " High ")];
+        findings.push(pf("o/a", "t2.rs", 1, "TOP", " High "));
+        for i in 0..5 {
+            findings.push(pf("o/a", &format!("m{i}.rs"), 1, "MID", "medium"));
+        }
+        findings.push(pf("o/a", "c.rs", 1, "CRIT", "CRITICAL"));
+        let p = plan(findings, &HashMap::new(), &PlanOptions::default());
+        let order: Vec<&str> = p.units.iter().map(primary).collect();
+        assert_eq!(
+            order,
+            vec!["CRIT", "TOP", "MID"],
+            "High beats medium however it is written"
+        );
+    }
+
+    #[test]
+    fn a_duplicate_finding_is_planned_once_and_the_plan_says_so() {
+        let one = pf("o/a", "src/a.rs", 3, "R1", "high");
+        let mut again = one.clone();
+        again.also_matches = vec!["R2".to_string()];
+        let other = pf("o/a", "src/b.rs", 4, "R1", "high");
+        let p = plan(
+            vec![one.clone(), other, again, one.clone()],
+            &HashMap::new(),
+            &PlanOptions::default(),
+        );
+        assert_eq!(p.units.len(), 1);
+        assert_eq!(p.units[0].findings.len(), 2, "src/a.rs:3 is listed once");
+        assert!(
+            p.notes
+                .iter()
+                .any(|n| n == "2 duplicate findings were planned once."),
+            "{:?}",
+            p.notes
+        );
+        // The same input in another order plans the same way.
+        let reordered = plan(
+            vec![
+                one.clone(),
+                one.clone(),
+                pf("o/a", "src/b.rs", 4, "R1", "high"),
+                {
+                    let mut a = one;
+                    a.also_matches = vec!["R2".to_string()];
+                    a
+                },
+            ],
+            &HashMap::new(),
+            &PlanOptions::default(),
+        );
+        assert_eq!(reordered.units, p.units);
+    }
+
+    #[test]
+    fn a_part_still_over_the_limit_after_the_split_is_named_in_a_note() {
+        let mut findings = Vec::new();
+        for i in 0..70 {
+            findings.push(pf("o/a", "src/huge.rs", i + 1, "BIG", "high"));
+        }
+        findings.push(pf("o/a", "tests/t.rs", 1, "BIG", "high"));
+        let p = plan(findings, &HashMap::new(), &PlanOptions::default());
+        assert_eq!(p.units.len(), 2);
+        assert!(
+            p.notes.iter().any(|n| {
+                n
+                == "BIG in src still has 70 findings in 1 file after the split; it stays one unit."
+            }),
+            "{:?}",
+            p.notes
+        );
+        assert!(
+            !p.notes.iter().any(|n| n.contains("in tests still")),
+            "{:?}",
+            p.notes
+        );
     }
 }
