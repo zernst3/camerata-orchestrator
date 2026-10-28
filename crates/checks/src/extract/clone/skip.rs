@@ -91,6 +91,15 @@ impl LangFamily {
     }
 }
 
+/// Whether a path lies in a folder of code someone else wrote or a build produced (`vendor`,
+/// `node_modules`, `dist`, `site-packages`, ...).
+pub(crate) fn is_vendored_path(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    let mut segments: Vec<&str> = lower.split('/').collect();
+    segments.pop();
+    segments.iter().any(|s| VENDORED_SEGMENTS.contains(s))
+}
+
 /// The language of a file that passes every path guard, or why it does not.
 pub(crate) fn classify_path(
     path: &str,
@@ -112,7 +121,7 @@ pub(crate) fn classify_path(
     {
         return Err(SkipReason::Generated);
     }
-    if segments.iter().any(|s| VENDORED_SEGMENTS.contains(s)) {
+    if is_vendored_path(path) {
         return Err(SkipReason::Vendored);
     }
     if file.contains(".min.") || file.contains(".bundle.") {

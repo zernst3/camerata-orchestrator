@@ -2020,6 +2020,39 @@ mod tests {
         );
     }
 
+    /// `TESTING-MEANINGFUL-ASSERTION-1` (22e) lives in the `testing` domain, which is always on
+    /// (`ALWAYS_ON_DOMAINS`), so no stack wiring is needed; this proves it for the three
+    /// ecosystems the checker reads rather than assuming it.
+    #[tokio::test]
+    async fn testing_meaningful_assertion_is_proposed_for_js_python_and_rust_stacks() {
+        const ID: &str = "TESTING-MEANINGFUL-ASSERTION-1";
+        for (repo, path) in [
+            ("acme/ts-app", "src/app.test.ts"),
+            ("acme/py-app", "tests/test_app.py"),
+            ("acme/rs-app", "src/lib.rs"),
+        ] {
+            let repo_files = files(&[(path, "x")]);
+            let stack = detect_stack(repo, &repo_files);
+            let domains = domains_for_stack(&stack);
+            assert!(
+                domains.contains(&"testing".to_string()),
+                "{repo}: {domains:?}"
+            );
+            let proposed = propose_corpus_rules(&[(repo.to_string(), domains)]).await;
+            let rule = proposed
+                .iter()
+                .find(|r| r.id == ID)
+                .unwrap_or_else(|| panic!("{ID} must be proposed for {repo}"));
+            assert_eq!(rule.domain, "testing");
+            assert!(rule.recommended, "{repo}: suggested, not merely available");
+            assert!(
+                rule.is_auto_recommended,
+                "{repo}: a grounded rule is auto-recommended (pre-checked)"
+            );
+            assert_eq!(rule.repos, vec![repo.to_string()]);
+        }
+    }
+
     /// req_a6: a plain Rust + Axum + Tokio + sqlx service must arm `rust:axum`, `rust:tokio`
     /// and `rust:sqlx` — the three Rust families the audit named, 15 rules between them.
     #[test]

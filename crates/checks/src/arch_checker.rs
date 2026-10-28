@@ -317,6 +317,7 @@ pub fn all_checkers() -> Vec<Box<dyn ArchChecker>> {
         Box::new(crate::react_hooks_lint_checker::ReactHooksLintChecker),
         Box::new(crate::state_shape_checker::StateShapeChecker),
         Box::new(crate::needless_complexity_checker::NeedlessComplexityChecker),
+        Box::new(crate::test_assertion_checker::TestAssertionChecker),
         Box::new(crate::firebase::FirebaseRulesChecker::default()),
         Box::new(crate::firebase::FirebaseFunctionsChecker),
         Box::new(crate::firebase::FirebaseAdminSdkClientChecker),
@@ -648,6 +649,14 @@ mod tests {
             "UI-STATE-SHAPE-1 must stay LLM-advisory-eligible: {ids:?}"
         );
         assert!(any_registered_checker_answers("UI-STATE-SHAPE-1"));
+        // 22e: "asserts only a stub" is the judgment half the semantic pass keeps.
+        assert!(
+            !ids.contains("TESTING-MEANINGFUL-ASSERTION-1"),
+            "TESTING-MEANINGFUL-ASSERTION-1 must stay LLM-advisory-eligible: {ids:?}"
+        );
+        assert!(any_registered_checker_answers(
+            "TESTING-MEANINGFUL-ASSERTION-1"
+        ));
         // But the checker IS registered and DOES answer the rule id (just excluded from
         // this particular subtraction set).
         let all_ids: std::collections::HashSet<&str> = all_checkers()

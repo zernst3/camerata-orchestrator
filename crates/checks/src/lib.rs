@@ -190,6 +190,13 @@ pub mod state_shape_checker;
 /// `crates/rules/principles/javascript/style-needless-complexity-1.toml`.
 pub mod needless_complexity_checker;
 
+/// `TESTING-MEANINGFUL-ASSERTION-1` (master sequence 22e, with W29 Wave D,
+/// `docs/design/2026-10-21_w29-detector-implementation.md`): a test whose body holds no
+/// assertion at all, in JavaScript and TypeScript, Python and Rust test code. "Asserts only a
+/// stub" is a judgment left to the semantic pass. See
+/// `crates/rules/principles/testing/testing-meaningful-assertion-1.toml`.
+pub mod test_assertion_checker;
+
 /// The Layer-2 (Governed Development write-time gate) executor for [`arch_checker`]'s
 /// checker registry — "Plug point B" in
 /// `docs/design/2026-07-26_architectural-executor-feasibility.md` §2.3. Composed into
