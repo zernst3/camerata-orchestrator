@@ -70,6 +70,7 @@ pub mod dev_implement_run;
 pub mod efficiency;
 pub mod live_fleet;
 pub mod llm;
+mod native_units;
 pub mod notify;
 pub mod onboard;
 /// `POST /api/orchestrator/message` — the architect-orchestrator's first
@@ -1518,6 +1519,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/uow/from-workitem", post(uow_from_workitem))
         // ── AI story authoring from a blank UoW (2026-06-22) ──────────────────
         .route("/api/uow/blank", post(uow_blank))
+        .route("/api/uow/native", post(native_units::uow_native_create))
         .route("/api/uow/:story_id/author", post(uow_author))
         // ── UoW file attachments (2026-07-01) ─────────────────────────────────
         .route(
@@ -12186,13 +12188,18 @@ fn parse_github_work_item_id(work_item_id: &str) -> Result<(String, u64), AppErr
 /// A UoW with the WorkItem it references and its lifecycle stage, for `GET /api/uows`.
 #[derive(serde::Serialize)]
 struct UowView {
-    /// The UoW id (its story id, e.g. `OWNER/REPO#123`, or `draft-<token>` for an
-    /// AI-authoring draft).
+    /// The UoW id: an opaque key (`uow-<token>` for a native unit, `OWNER/REPO#123` for a
+    /// unit created from a GitHub issue, `draft-<token>` for an AI-authoring draft).
     id: String,
-    /// The work item this UoW references, when it maps to one (a GitHub-sourced
-    /// spine story). `None` for native/legacy stories with no external ref AND for a
-    /// blank/authoring DRAFT UoW that has not been published to the board yet.
+    /// The work item this UoW references, when it maps to one: a GitHub-sourced spine
+    /// story, or a native unit's own spine story (provider `native`). `None` for legacy
+    /// stories with no tracker and no native number AND for a blank/authoring DRAFT UoW
+    /// that has not been published to the board yet.
     work_item: Option<crate::workitems::WorkItem>,
+    /// Where the unit is tracked: `native` (Camerata itself, no board) or the tracker.
+    provider: camerata_worktracker::Provider,
+    /// The repository the unit works in ([`crate::uow::UnitOfWork::repo`]), if any.
+    repo: Option<String>,
     /// The lifecycle stage as a snake_case wire string (`intake`, `development`, …).
     stage: String,
     /// `true` when this is a blank/authoring DRAFT UoW (it has an authoring state and no
@@ -12216,13 +12223,19 @@ async fn uows_list(State(state): State<AppState>) -> Result<Json<serde_json::Val
             // normal UoW's key IS the work-item story id. Resolve against the spine by
             // whichever applies.
             let lookup_id = u.work_item.clone().unwrap_or_else(|| u.story_id.clone());
-            let work_item = stories
-                .iter()
-                .find(|s| s.id == lookup_id)
-                .and_then(crate::workitems::WorkItem::from_canonical_story);
+            let work_item = stories.iter().find(|s| s.id == lookup_id).and_then(|s| {
+                match (u.provider(), u.native_number) {
+                    (camerata_worktracker::Provider::Native, Some(n)) => Some(
+                        crate::workitems::WorkItem::from_native_story(s, u.repo(), n),
+                    ),
+                    _ => crate::workitems::WorkItem::from_canonical_story(s),
+                }
+            });
             // A draft is one with an authoring state and no published work item yet.
             let authoring = u.authoring.is_some() && work_item.is_none();
             UowView {
+                provider: u.provider(),
+                repo: u.repo().map(str::to_string),
                 id: u.story_id,
                 work_item,
                 stage: u.stage.wire_str().to_string(),
