@@ -649,7 +649,12 @@ enum KindSheet {
 /// The ONE kind→sheet decision, so no sheet writer re-derives it and two of them can never
 /// disagree (which would either duplicate a row or lose it entirely).
 fn kind_sheet(row: &FindingRow) -> KindSheet {
-    match &row.kind.0 {
+    kind_sheet_for(row.kind.0.as_ref())
+}
+
+/// [`kind_sheet`] over the kind alone.
+fn kind_sheet_for(kind: Option<&FindingKind>) -> KindSheet {
+    match kind {
         // An absent kind is NOT a synonym for `Defect` on the wire (A5.6), but for ROUTING it
         // must land with the accusing rows: the honest failure mode for an unmapped emission
         // path is "visible in the wrong tab", never "quietly filed as an observation".
@@ -786,6 +791,18 @@ fn build_deviation_groups(
     out
 }
 
+/// The Conventions sheet's Status cell for a convention the codebase follows, and for a rule
+/// with no convention adopted. The sheet prints no kind tag (`convention_observed` is our
+/// taxonomy, not the client's vocabulary), so these two plain-language cells are the only kind
+/// marker on its rows. The writer and the release gate's count reconciliation both read them
+/// from here, so the gate counts exactly the cells written.
+pub(crate) const CONVENTION_STATUS_FOLLOWED: &str = "Followed consistently — no exceptions found";
+pub(crate) const CONVENTION_STATUS_NONE_ADOPTED: &str = "No single convention adopted";
+
+/// The Coverage sheet's section title above its "could not complete" rows (one per
+/// `not_assessed` finding). Shared with the release gate for the same reason as the statuses.
+pub(crate) const NOT_ASSESSED_SECTION_TITLE: &str = "Checks we could not complete this scan";
+
 /// One row of the `Conventions` sheet — the derived decision set (A5.5). A shipped
 /// deliverable: the audit derives the client's conventions and this is the sheet those
 /// conventions are read off, so it answers "what does our codebase already do well and
@@ -827,13 +844,13 @@ fn build_convention_rows(
             let (rank, status, convention_label, patterns_in_use) = match &row.kind.0 {
                 Some(FindingKind::ConventionObserved(c)) => (
                     0u8,
-                    "Followed consistently — no exceptions found".to_string(),
+                    CONVENTION_STATUS_FOLLOWED.to_string(),
                     c.convention_label.clone(),
                     String::new(),
                 ),
                 Some(FindingKind::NoConvention(n)) => (
                     1u8,
-                    "No single convention adopted".to_string(),
+                    CONVENTION_STATUS_NONE_ADOPTED.to_string(),
                     String::new(),
                     n.observed_options
                         .iter()
@@ -1705,12 +1722,7 @@ fn write_coverage_sheet(
     // EXPORTED ROW (it reaches findings.json), so this section renders each row's own
     // headline verbatim — that is what keeps artifact parity true after the kind partition.
     if !not_assessed.is_empty() {
-        ws.write_string_with_format(
-            next_r,
-            0,
-            "Checks we could not complete this scan",
-            &fmts.section_title,
-        )?;
+        ws.write_string_with_format(next_r, 0, NOT_ASSESSED_SECTION_TITLE, &fmts.section_title)?;
         next_r += 1;
         for (c, h) in [
             "What was checked",
@@ -1795,8 +1807,9 @@ fn write_index_sheet(
         ws.write_string(r, 0, &opts.project_title)?;
         r += 1;
     }
-    if !opts.client_name.is_empty() {
-        ws.write_string(r, 0, format!("Prepared for {}", opts.client_name))?;
+    let client = crate::report_export::clean_client_name(&opts.client_name);
+    if !client.is_empty() {
+        ws.write_string(r, 0, format!("Prepared for {client}"))?;
         r += 1;
     }
     if !opts.prepared_by.is_empty() {
@@ -1935,22 +1948,18 @@ fn write_index_sheet(
             None => unclassified += 1,
         }
     }
-    for (label, count, where_to_look) in [
-        ("Defects", defects, "All Findings"),
+    for (tag, count, where_to_look) in [
+        ("defect", defects, "All Findings"),
         (
-            "Deviations from your own conventions",
+            "deviation",
             deviations,
             "Deviations (one row per convention), All Findings (one row per site)",
         ),
-        (
-            "Conventions followed consistently",
-            conventions_followed,
-            "Conventions",
-        ),
-        ("No convention adopted", no_convention, "Conventions"),
-        ("Not assessed this scan", not_assessed, "Coverage"),
+        ("convention_observed", conventions_followed, "Conventions"),
+        ("no_convention", no_convention, "Conventions"),
+        ("not_assessed", not_assessed, "Coverage"),
     ] {
-        ws.write_string(r, 0, label)?;
+        ws.write_string(r, 0, statement_type_label(tag))?;
         ws.write_number(r, 1, count as f64)?;
         ws.write_string(r, 2, where_to_look)?;
         r += 1;
@@ -1959,7 +1968,12 @@ fn write_index_sheet(
     // producer assigned no kind is an unmapped emission path, and A5.6's backfill rule is
     // that such a row is surfaced as a gap rather than silently counted as a defect.
     if unclassified > 0 {
-        ws.write_string_with_format(r, 0, "Unclassified", &fmts.bold)?;
+        ws.write_string_with_format(
+            r,
+            0,
+            statement_type_label(camerata_api_types::audit::UNSPECIFIED_KIND_TAG),
+            &fmts.bold,
+        )?;
         ws.write_number_with_format(r, 1, unclassified as f64, &fmts.bold)?;
         ws.write_string(r, 2, "All Findings")?;
         r += 1;
@@ -2094,6 +2108,38 @@ fn write_index_sheet(
 
     Ok(())
 }
+
+/// The Index sheet's "Statement types" label for each kind's wire tag (`FindingKind::tag`, or
+/// `UNSPECIFIED_KIND_TAG` for a row with no kind). The one table the Index writer and the
+/// release gate's count reconciliation both read, so the gate finds exactly the line written.
+pub(crate) const STATEMENT_TYPES: [(&str, &str); 6] = [
+    ("defect", "Defects"),
+    ("deviation", "Deviations from your own conventions"),
+    ("convention_observed", "Conventions followed consistently"),
+    ("no_convention", "No convention adopted"),
+    ("not_assessed", "Not assessed this scan"),
+    (
+        camerata_api_types::audit::UNSPECIFIED_KIND_TAG,
+        "Unclassified",
+    ),
+];
+
+/// [`STATEMENT_TYPES`]' label for `tag`; the tag itself for one not in the table.
+pub(crate) fn statement_type_label(tag: &str) -> &str {
+    STATEMENT_TYPES
+        .iter()
+        .find(|(t, _)| *t == tag)
+        .map_or(tag, |(_, label)| label)
+}
+
+/// The kinds the "All Findings" sheet lists one row per site (`kind_sheet` routes the rest to
+/// the Conventions and Coverage sheets, grouped), so the gate compares that sheet with the JSON
+/// rows of these kinds only.
+pub(crate) const ALL_FINDINGS_SHEET_KINDS: [&str; 3] = [
+    "defect",
+    "deviation",
+    camerata_api_types::audit::UNSPECIFIED_KIND_TAG,
+];
 
 // ── Public entry point ──────────────────────────────────────────────────────────────
 
@@ -2323,8 +2369,25 @@ pub fn build_workbook(
     )
     .context("writing the Coverage sheet")?;
 
+    // Confidentiality (2026-10-24 decision): every sheet's footer prints the SAME line as
+    // every PDF page footer (one producer, `report_export::confidentiality_marking`), left,
+    // with the page number right. Applied after every sheet exists, so a sheet added later
+    // cannot be missed. The release gate reads the footers back and checks them.
+    let marking = crate::report_export::confidentiality_marking(&report.provenance, opts);
+    let footer = sheet_footer(&marking.line);
+    for ws in wb.worksheets_mut() {
+        ws.set_footer(&footer);
+    }
+
     wb.save_to_buffer()
         .context("serializing the xlsx workbook to bytes")
+}
+
+/// The sheet footer for a confidentiality line: the line on the left (`&L`), "Page N of M" on
+/// the right. `&` is Excel's footer control character, so a literal one in the line (a client
+/// called "Smith & Jones") is doubled.
+pub(crate) fn sheet_footer(line: &str) -> String {
+    format!("&L{}&RPage &P of &N", line.replace('&', "&&"))
 }
 
 // ── `findings.json` (product export, machine-readable sibling of the workbook) ────────
@@ -2567,6 +2630,7 @@ mod tests {
             files_scanned: 10,
             test_file_count: 0,
             files_excluded: 2,
+            excluded_noise_lines: None,
             code_chars: 5000,
             code_lines: 400,
             code_lines_by_language: Vec::new(),
@@ -3472,6 +3536,47 @@ mod tests {
     // ── `findings.json` (product export, machine-readable sibling of the workbook) ─────
 
     // ── Pass-1 W3 (A5.6/A5.2): the kind must survive to findings.json, losslessly ────────
+
+    /// 22d: the release gate compares the All Findings sheet with the JSON rows of
+    /// `ALL_FINDINGS_SHEET_KINDS` only, so that list must be exactly the kinds `kind_sheet`
+    /// routes to the sheet; and every kind has a Statement types label.
+    #[test]
+    fn the_gates_sheet_kind_list_matches_the_sheet_routing_and_every_kind_has_a_label() {
+        use camerata_api_types::audit::{
+            ConventionObservedKind, DeviationKind, FindingKind, NoConventionKind, NotAssessedKind,
+            NotAssessedReason,
+        };
+        let kinds: Vec<Option<FindingKind>> = vec![
+            None,
+            Some(FindingKind::Defect),
+            Some(FindingKind::Deviation(DeviationKind {
+                deviating_sites: 1,
+                assessed_sites: None,
+                convention_option_id: None,
+                convention_label: String::new(),
+            })),
+            Some(FindingKind::ConventionObserved(ConventionObservedKind {
+                convention_option_id: String::new(),
+                convention_label: String::new(),
+            })),
+            Some(FindingKind::NoConvention(NoConventionKind {
+                observed_options: Vec::new(),
+            })),
+            Some(FindingKind::NotAssessed(NotAssessedKind {
+                reason: NotAssessedReason::PassFailed,
+                reason_detail: String::new(),
+            })),
+        ];
+        for kind in &kinds {
+            let tag = FindingKind::tag_or_unspecified(kind.as_ref());
+            assert_eq!(
+                ALL_FINDINGS_SHEET_KINDS.contains(&tag),
+                kind_sheet_for(kind.as_ref()) == KindSheet::Findings,
+                "{tag}"
+            );
+            assert_ne!(statement_type_label(tag), tag, "{tag} has no Index label");
+        }
+    }
 
     fn kinded(mut f: Finding, kind: camerata_api_types::audit::FindingKind) -> Finding {
         f.kind = Some(kind);
@@ -4439,11 +4544,7 @@ mod tests {
     /// cross-artifact test below can exercise a REAL PDF compile where possible without
     /// failing in an environment that never installed the binary.
     fn typst_available() -> bool {
-        std::process::Command::new("typst")
-            .arg("--version")
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false)
+        camerata_test_env::typst_on_path()
     }
 
     /// C4-P2: an AI-tier finding with no corpus entry of its own, classified via the P3

@@ -117,6 +117,15 @@ async fn scan_html() -> String {
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true})))
         .mount(&server)
         .await;
+    // A real Scan screen always belongs to an open project; the inspection setup's client-name
+    // field renders only then.
+    Mock::given(method("GET"))
+        .and(path("/api/projects/active"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "id": "p1", "name": "Acme", "client_name": ""
+        })))
+        .mount(&server)
+        .await;
     let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
 
     let mut vdom = VirtualDom::new(scan_results_screen);

@@ -304,6 +304,7 @@ async fn regenerate_sample_report() {
         files_scanned: 214,
         test_file_count: 0,
         files_excluded: 1188,
+        excluded_noise_lines: Some(96_400),
         code_chars: 486_203,
         code_lines: 18_700,
         code_lines_by_language: vec![
@@ -566,10 +567,5 @@ fn fn_by_rule(findings: &[Finding], rule_id: &str) -> Finding {
 }
 
 fn typst_on_path() -> bool {
-    std::process::Command::new("typst")
-        .arg("--version")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .is_some()
+    camerata_test_env::typst_on_path()
 }

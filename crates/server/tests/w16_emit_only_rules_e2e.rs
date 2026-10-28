@@ -103,6 +103,7 @@ fn minimal_report(ledger: ScanLedger, audited_rule_ids: Vec<String>) -> ScanRepo
         files_scanned: 1,
         test_file_count: 0,
         files_excluded: 0,
+        excluded_noise_lines: None,
         code_chars: 48,
         code_lines: 3,
         code_lines_by_language: Vec::new(),

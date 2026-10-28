@@ -64,7 +64,11 @@ pub struct DispositionWire {
 /// leaves it blank; every field degrades to an empty/omitted value in the template).
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct ReportOptions {
-    #[serde(default)]
+    /// Who the report is prepared FOR: the cover's "Prepared for" line and the confidentiality
+    /// marking on every page and sheet. Server-populated from the project's inspection setup
+    /// (`Project::client_name`), never client-supplied (`serde(skip)`), so every export of a
+    /// project names the same client. A blank name blocks the export ([`require_client_name`]).
+    #[serde(skip)]
     pub client_name: String,
     #[serde(default)]
     pub project_title: String,
@@ -122,6 +126,17 @@ pub const NEUTRAL_COVER_TITLE: &str = "Codebase Inspection Report";
 /// the ultimate fallback is a real name, not an empty string. A per-report `prepared_by` or the
 /// env var still wins over this (see [`resolve_prepared_by`]'s precedence).
 pub const DEFAULT_PREPARED_BY: &str = "Zachary Ernst, Cantus Works";
+
+/// The brand the bundled logo files (`docs/design/brand/`) belong to. The mark renders on a
+/// report only when its resolved brand is this one ([`brand_kit_matches`]); the colours and
+/// type of the W27 template apply to every report, the logo does not.
+pub const BRAND_KIT_NAME: &str = "Cantus Works";
+
+/// Whether `brand` (the resolved [`ReportOptions::brand`], `None` for no brand) is the bundled
+/// brand kit's, ignoring case and surrounding whitespace.
+pub(crate) fn brand_kit_matches(brand: Option<&str>) -> bool {
+    brand.is_some_and(|b| b.trim().eq_ignore_ascii_case(BRAND_KIT_NAME))
+}
 
 /// Precedence resolver: the per-report field wins when non-blank, else the env value when
 /// non-blank, else `None`/empty. Pure — takes the env value as an explicit `Option<&str>`
@@ -1193,6 +1208,15 @@ pub struct AuditReportJson {
     /// review-claim wording — see [`ReviewState`]'s doc comment.
     pub review_state: ReviewState,
     pub cover: CoverJson,
+    /// W27: whether the bundled brand kit's logo mark renders (cover and running header).
+    /// True only when the resolved brand IS the kit's brand ([`brand_kit_matches`]); any other
+    /// agency's brand gets the text wordmark alone, so the template never puts one agency's
+    /// logo on another's report.
+    pub brand_mark: bool,
+    /// The confidentiality marking (2026-10-24 decision): the footer line on every PDF page and
+    /// the handling note on the first. The workbook prints the same `line` in every sheet's
+    /// footer ([`confidentiality_marking`] is the one producer).
+    pub confidentiality: ConfidentialityJson,
     pub executive_summary: ExecutiveSummaryJson,
     pub three_things: ThreeThingsJson,
     pub scorecard: ScorecardJson,
@@ -1235,6 +1259,149 @@ pub struct AuditReportJson {
     pub dependency_snapshot: DependencySnapshotJson,
     pub methodology: MethodologyJson,
     pub disclaimer: String,
+}
+
+/// The confidentiality marking a client deliverable carries (2026-10-24 decision, recorded in
+/// `docs/OVERNIGHT_DECISIONS.md`).
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ConfidentialityJson {
+    /// "Confidential, prepared for <client> on <date>": every PDF page footer and every
+    /// workbook sheet footer.
+    pub line: String,
+    /// The first page's short handling note: who the report is for, and not to forward it
+    /// outside that company without consent.
+    pub handling_note: String,
+}
+
+/// The longest client name the inspection setup accepts. The name is printed in every PDF
+/// footer and every workbook sheet footer, so this is the plain length cap; the workbook
+/// footer's own limit (which counts each `&` twice) is checked on top of it, see
+/// [`validate_client_name`].
+pub const CLIENT_NAME_MAX_CHARS: usize = 100;
+
+/// The most characters Excel keeps in one header or footer string, layout codes included.
+pub(crate) const EXCEL_FOOTER_MAX_CHARS: usize = 255;
+
+/// The widest date the marking line can carry ("%-d %B %Y": two digits, the longest month
+/// name, four digits). The footer bound is measured with it, so a name accepted today still
+/// fits whatever day the inspection is dated.
+pub(crate) const WORST_MARKING_DATE: &str = "30 September 2026";
+
+/// The confidentiality line for `client` (already cleaned) and `date`: the one place its
+/// wording lives, shared by the marking and the footer-length bound.
+fn marking_line(client: &str, date: &str) -> String {
+    format!("Confidential, prepared for {client} on {date}")
+}
+
+/// A client name as every artifact prints it: invisible zero-width characters removed, then
+/// trimmed. The one cleaning step, so the PDF, the workbook and the manifest can never print
+/// different strings for the same name.
+pub(crate) fn clean_client_name(raw: &str) -> String {
+    strip_zero_width(raw).trim().to_string()
+}
+
+/// Why an export refused to start: the inspection setup has no usable client name. Its
+/// `Display` is the plain message the operator sees (HTTP 422 body, CLI stderr).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClientNameRequired(pub String);
+
+impl std::fmt::Display for ClientNameRequired {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for ClientNameRequired {}
+
+/// Check a client name as the inspection setup saves it: zero-width characters removed and
+/// trimmed ([`clean_client_name`]), at most [`CLIENT_NAME_MAX_CHARS`] characters, no line breaks
+/// or other control characters (it is one line of a page footer), and short enough that the
+/// workbook footer holds the whole confidentiality line (Excel keeps 255 characters, and a
+/// literal `&` is written twice). Blank is allowed here (the operator may clear the field);
+/// exporting with a blank name is refused by [`require_client_name`].
+pub fn validate_client_name(name: &str) -> Result<String, ClientNameRequired> {
+    let name = clean_client_name(name);
+    if name.chars().count() > CLIENT_NAME_MAX_CHARS {
+        return Err(ClientNameRequired(format!(
+            "The client name is longer than {CLIENT_NAME_MAX_CHARS} characters. Shorten it in \
+             the inspection setup; it is printed in the footer of every page."
+        )));
+    }
+    if name.chars().any(char::is_control) {
+        return Err(ClientNameRequired(
+            "The client name contains a line break or another control character. Enter it on \
+             one line in the inspection setup."
+                .to_string(),
+        ));
+    }
+    if !name.is_empty() {
+        let footer = crate::xlsx_export::sheet_footer(&marking_line(&name, WORST_MARKING_DATE));
+        let used = footer.encode_utf16().count();
+        if used > EXCEL_FOOTER_MAX_CHARS {
+            return Err(ClientNameRequired(format!(
+                "The client name is too long for the workbook footer: Excel keeps \
+                 {EXCEL_FOOTER_MAX_CHARS} characters there and this name needs {used} (each \
+                 & counts twice). Shorten it in the inspection setup."
+            )));
+        }
+    }
+    Ok(name)
+}
+
+/// The export-time check: a valid, NON-BLANK client name, or the message that blocks the
+/// export. Called by the one package assembly (`release_gate::build_product_package_with_stem`)
+/// and the PDF-only route, before anything is compiled, so no deliverable can say
+/// "prepared for ." (2026-10-24 decision).
+pub fn require_client_name(opts: &ReportOptions) -> Result<String, ClientNameRequired> {
+    let name = validate_client_name(&opts.client_name)?;
+    if name.is_empty() {
+        return Err(ClientNameRequired(
+            "Enter the client name in the inspection setup before exporting. It fills the \
+             confidentiality line on every page of the report and every sheet of the workbook."
+                .to_string(),
+        ));
+    }
+    Ok(name)
+}
+
+/// The scan date as the confidentiality line prints it: "21 October 2026". The SAME instant
+/// the cover's "Generated" line uses ([`scan_instant`], falling back to now only when the scan
+/// recorded no time), so the two can never name different days.
+fn marking_date(provenance: &crate::onboard::ScanProvenance) -> String {
+    scan_instant(provenance)
+        .unwrap_or_else(chrono::Utc::now)
+        .format("%-d %B %Y")
+        .to_string()
+}
+
+/// THE producer of the confidentiality marking, shared by the PDF data ([`build_report_json`])
+/// and the workbook (`xlsx_export::build_workbook`), so the PDF footer and the sheet footers
+/// print the same line. A blank client name (reachable only when a caller bypasses
+/// [`require_client_name`], as unit tests do) yields "Confidential, prepared on <date>" rather
+/// than "prepared for .". Consent is the brand's to give when there is one, else the preparer's.
+pub fn confidentiality_marking(
+    provenance: &crate::onboard::ScanProvenance,
+    opts: &ReportOptions,
+) -> ConfidentialityJson {
+    let client = clean_client_name(&opts.client_name);
+    let date = marking_date(provenance);
+    let consent_from = resolve_brand(opts, None).unwrap_or_else(|| resolve_prepared_by(opts, None));
+    if client.is_empty() {
+        return ConfidentialityJson {
+            line: format!("Confidential, prepared on {date}"),
+            handling_note: format!(
+                "This report is confidential. Please do not forward it without the written \
+                 consent of {consent_from}."
+            ),
+        };
+    }
+    ConfidentialityJson {
+        line: marking_line(&client, &date),
+        handling_note: format!(
+            "This report is confidential and was prepared for {client} only. Please do not \
+             forward it outside {client} without the written consent of {consent_from}."
+        ),
+    }
 }
 
 /// General-audit variant of `ai_audit::DEEP_ADVISORY_DISCLAIMER` / the deep-report export's
@@ -4701,7 +4868,7 @@ pub fn build_report_json(
         camerata_version: report.provenance.camerata_version.clone(),
         // The SCAN time, not the wall clock at serialization — see `generated_at_label`.
         generated_at: generated_at_label(&report.provenance),
-        client_name: opts.client_name.clone(),
+        client_name: clean_client_name(&opts.client_name),
         project_title: opts.project_title.clone(),
         // `build_report_json` stays pure/no-I/O (per its own doc comment): it does NOT read
         // `CAMERATA_REPORT_BRAND`/`CAMERATA_REPORT_PREPARED_BY` itself. By the time `opts`
@@ -4762,6 +4929,8 @@ pub fn build_report_json(
 
     AuditReportJson {
         review_state,
+        brand_mark: brand_kit_matches(cover.brand.as_deref()),
+        confidentiality: confidentiality_marking(&report.provenance, opts),
         cover,
         executive_summary,
         three_things,
@@ -4835,6 +5004,60 @@ fn typst_program() -> std::ffi::OsString {
     "typst".into()
 }
 
+/// The files the template reads besides `data.json`, written next to it for every compile: the
+/// embedded fonts (W27: Inter for text, JetBrains Mono for code, both SIL OFL, licence files
+/// beside them in `templates/fonts/`) and the brand kit's two logo marks. Embedded in the
+/// binary like the template itself, so nothing has to ship alongside the server and the PDF
+/// never depends on what fonts the exporting machine happens to have installed.
+const TEMPLATE_ASSETS: [(&str, &[u8]); 7] = [
+    (
+        "fonts/Inter-Regular.ttf",
+        include_bytes!("../templates/fonts/Inter-Regular.ttf"),
+    ),
+    (
+        "fonts/Inter-Italic.ttf",
+        include_bytes!("../templates/fonts/Inter-Italic.ttf"),
+    ),
+    (
+        "fonts/Inter-SemiBold.ttf",
+        include_bytes!("../templates/fonts/Inter-SemiBold.ttf"),
+    ),
+    (
+        "fonts/Inter-SemiBoldItalic.ttf",
+        include_bytes!("../templates/fonts/Inter-SemiBoldItalic.ttf"),
+    ),
+    (
+        "fonts/JetBrainsMono-Regular.ttf",
+        include_bytes!("../templates/fonts/JetBrainsMono-Regular.ttf"),
+    ),
+    (
+        "brand-mark.svg",
+        include_bytes!("../../../docs/design/brand/cantus-logo-mark.svg"),
+    ),
+    (
+        "brand-mark-small.svg",
+        include_bytes!("../../../docs/design/brand/cantus-logo-mark-small.svg"),
+    ),
+];
+
+/// Which fonts Typst may draw from. Production uses [`FontSources::BundledFirst`]; the
+/// embedding test uses [`FontSources::BundledOnly`] to prove the bundle alone renders the
+/// report on a machine with no Inter or JetBrains Mono installed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FontSources {
+    /// `--font-path fonts`: Typst searches the bundled files BEFORE system fonts, so Inter
+    /// and JetBrains Mono always come from the bundle, and a glyph neither has (a CJK path, an
+    /// emoji) still falls back to a system font instead of rendering as a missing box.
+    ///
+    /// Production stays on this, deliberately: every character the bundled fonts cover is drawn
+    /// from them on any machine, and forcing [`FontSources::BundledOnly`] would silently drop
+    /// the characters they lack (the multi-byte path test pins that a report keeps an accented,
+    /// CJK or emoji path and snippet). Installed fonts reach the output only for such a glyph.
+    BundledFirst,
+    /// `--font-path fonts --ignore-system-fonts`.
+    BundledOnly,
+}
+
 /// Compile `data_json` (from [`render_data_json`]) into a PDF via a bundled Typst template.
 /// Self-contained: the template
 /// text is embedded in the binary (`include_str!`), so no external file needs to ship
@@ -4846,6 +5069,15 @@ fn typst_program() -> std::ffi::OsString {
 /// generation time (see [`creation_epoch`]). The template reads `data.json` via Typst's own
 /// `json()` builtin — no `--input` plumbing needed.
 pub async fn compile_pdf_from_data(data_json: &str) -> anyhow::Result<Vec<u8>> {
+    let (pdf, warnings) = run_typst(data_json, FontSources::BundledFirst).await?;
+    if !warnings.trim().is_empty() {
+        tracing::warn!(%warnings, "typst reported warnings while compiling the report");
+    }
+    Ok(pdf)
+}
+
+/// The compile itself: the PDF bytes and Typst's stderr (its warnings, on success).
+async fn run_typst(data_json: &str, fonts: FontSources) -> anyhow::Result<(Vec<u8>, String)> {
     let tmp = tempfile::tempdir().context("could not create a temp dir for the PDF export")?;
     let data_path = tmp.path().join("data.json");
     let template_path = tmp.path().join("report.typ");
@@ -4860,6 +5092,14 @@ pub async fn compile_pdf_from_data(data_json: &str) -> anyhow::Result<Vec<u8>> {
     )
     .await
     .context("could not write report.typ")?;
+    tokio::fs::create_dir_all(tmp.path().join("fonts"))
+        .await
+        .context("could not create the fonts dir for the PDF export")?;
+    for (name, bytes) in TEMPLATE_ASSETS {
+        tokio::fs::write(tmp.path().join(name), bytes)
+            .await
+            .with_context(|| format!("could not write {name}"))?;
+    }
 
     let mut cmd = tokio::process::Command::new(typst_program());
     cmd.current_dir(tmp.path())
@@ -4868,7 +5108,12 @@ pub async fn compile_pdf_from_data(data_json: &str) -> anyhow::Result<Vec<u8>> {
         .arg("report.pdf")
         .arg("--root")
         .arg(tmp.path())
+        .arg("--font-path")
+        .arg(tmp.path().join("fonts"))
         .kill_on_drop(true);
+    if fonts == FontSources::BundledOnly {
+        cmd.arg("--ignore-system-fonts");
+    }
     // Reproducibility: pin the PDF's creation timestamp instead of letting Typst read the wall
     // clock. Typst stamps that clock into FIVE places — the Info dict's `/CreationDate` and
     // `/ModDate`, the XMP packet's `xmp:CreateDate`, `xmp:ModifyDate`, `xmpMM:InstanceID` and
@@ -4903,13 +5148,14 @@ pub async fn compile_pdf_from_data(data_json: &str) -> anyhow::Result<Vec<u8>> {
         Err(_elapsed) => anyhow::bail!("typst compile timed out after 30s"),
     };
 
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
         anyhow::bail!("typst compile failed: {stderr}");
     }
 
     tokio::fs::read(&pdf_path)
         .await
+        .map(|pdf| (pdf, stderr))
         .context("typst reported success but report.pdf was not found")
 }
 
@@ -4938,6 +5184,7 @@ mod tests {
             files_scanned: 10,
             test_file_count: 0,
             files_excluded: 2,
+            excluded_noise_lines: None,
             code_chars: 5000,
             code_lines: 400,
             code_lines_by_language: vec![
@@ -10297,6 +10544,213 @@ mod tests {
         );
     }
 
+    /// W27: the bundled fonts alone render the report. Compiled with system fonts IGNORED, so a
+    /// machine that happens to have Inter or JetBrains Mono installed cannot mask a missing or
+    /// misnamed bundle file: Typst warns "unknown font family" for a family it cannot find, and
+    /// the PDF's font dictionaries name every embedded face.
+    #[tokio::test]
+    async fn the_bundled_fonts_alone_render_the_report_in_inter_and_jetbrains_mono() {
+        if which_typst().is_none() {
+            eprintln!("skipping the_bundled_fonts_alone_render_the_report: typst not on PATH");
+            return;
+        }
+        let report = report_with(
+            vec![finding(
+                "SEC-NO-HARDCODED-SECRETS-1",
+                "src/a.rs",
+                10,
+                "critical",
+            )],
+            vec!["SEC-NO-HARDCODED-SECRETS-1"],
+        );
+        let mut opts = empty_opts();
+        opts.client_name = "Acme Corp".to_string();
+        opts.brand = BRAND_KIT_NAME.to_string();
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &opts);
+        assert!(json.brand_mark, "the kit's own brand renders the mark");
+
+        let (pdf, warnings) = run_typst(
+            &render_data_json(&json).expect("serialize"),
+            FontSources::BundledOnly,
+        )
+        .await
+        .expect("the report compiles from the bundled fonts alone");
+        assert!(
+            !warnings.contains("unknown font family"),
+            "a bundled family is missing: {warnings}"
+        );
+        let text = String::from_utf8_lossy(&pdf);
+        for face in ["Inter-Regular", "Inter-SemiBold", "JetBrainsMono-Regular"] {
+            assert!(
+                text.contains(&format!("+{face}")),
+                "the PDF does not embed {face}"
+            );
+        }
+    }
+
+    /// Confidentiality (2026-10-24 decision): the marking names the client and the SCAN date
+    /// (not the wall clock), consent belongs to the brand when there is one and else to the
+    /// preparer, and a blank client never prints "prepared for .".
+    #[test]
+    fn the_confidentiality_marking_names_the_client_the_scan_date_and_who_consents() {
+        let mut provenance = ScanProvenance {
+            finished_at: "2026-10-21T09:30:00Z".to_string(),
+            ..ScanProvenance::default()
+        };
+        let mut opts = empty_opts();
+        opts.client_name = "  Example Client Ltd ".to_string();
+        opts.brand = "Cantus Works".to_string();
+        let m = confidentiality_marking(&provenance, &opts);
+        assert_eq!(
+            m.line,
+            "Confidential, prepared for Example Client Ltd on 21 October 2026"
+        );
+        assert_eq!(
+            m.handling_note,
+            "This report is confidential and was prepared for Example Client Ltd only. Please \
+             do not forward it outside Example Client Ltd without the written consent of \
+             Cantus Works."
+        );
+
+        opts.brand = String::new();
+        opts.prepared_by = "A. Reviewer".to_string();
+        assert!(confidentiality_marking(&provenance, &opts)
+            .handling_note
+            .ends_with("written consent of A. Reviewer."));
+
+        opts.client_name = "   ".to_string();
+        provenance.finished_at = "2026-03-02T00:00:00Z".to_string();
+        let blank = confidentiality_marking(&provenance, &opts);
+        assert_eq!(blank.line, "Confidential, prepared on 2 March 2026");
+        assert!(!blank.line.contains("prepared for"));
+        for text in [&blank.line, &blank.handling_note, &m.line, &m.handling_note] {
+            assert!(
+                !text.contains('\u{2014}') && !text.contains('\u{2013}'),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_client_name_must_be_one_short_line_and_present_to_export() {
+        assert_eq!(
+            validate_client_name("  Example Client Ltd  ").as_deref(),
+            Ok("Example Client Ltd")
+        );
+        assert_eq!(validate_client_name("").as_deref(), Ok(""));
+        assert!(validate_client_name("Example\nClient").is_err());
+        assert!(validate_client_name(&"x".repeat(CLIENT_NAME_MAX_CHARS + 1)).is_err());
+        assert!(validate_client_name(&"x".repeat(CLIENT_NAME_MAX_CHARS)).is_ok());
+
+        let mut opts = empty_opts();
+        opts.client_name = " ".to_string();
+        let refused = require_client_name(&opts).expect_err("blank blocks the export");
+        assert!(
+            refused.to_string().contains("inspection setup"),
+            "{refused}"
+        );
+        opts.client_name = "Example Client Ltd".to_string();
+        assert_eq!(
+            require_client_name(&opts).as_deref(),
+            Ok("Example Client Ltd")
+        );
+    }
+
+    /// Invisible characters are not part of a client's name: they are stripped where the name is
+    /// saved, so the manifest, the workbook and the PDF can never print different strings, and a
+    /// name made only of them is blank (and refused with the message that says so).
+    #[test]
+    fn zero_width_characters_are_stripped_from_the_client_name() {
+        assert_eq!(
+            validate_client_name("Ex\u{200B}ample\u{FEFF} Client\u{2060} Ltd\u{200D}").as_deref(),
+            Ok("Example Client Ltd")
+        );
+        assert_eq!(
+            validate_client_name("\u{200B}  \u{200C}\u{2060}").as_deref(),
+            Ok("")
+        );
+        let mut opts = empty_opts();
+        opts.client_name = "\u{200B}\u{200D}".to_string();
+        let refused = require_client_name(&opts).expect_err("an invisible name is a blank name");
+        assert!(
+            refused.to_string().contains("Enter the client name"),
+            "the refusal says the name is missing: {refused}"
+        );
+        // The marking prints the same string the setup saved.
+        opts.client_name = "Acme\u{200B} Ltd".to_string();
+        assert_eq!(
+            confidentiality_marking(&ScanProvenance::default(), &opts)
+                .line
+                .split(" on ")
+                .next(),
+            Some("Confidential, prepared for Acme Ltd")
+        );
+    }
+
+    /// The workbook footer holds 255 characters, with each `&` written twice, so a name made of
+    /// ampersands has the least room. The bound is measured on the real footer, with the longest
+    /// date the marking can print, and refused with a message that says what to shorten.
+    #[test]
+    fn a_client_name_that_would_overflow_the_workbook_footer_is_refused() {
+        assert!(validate_client_name(&"x".repeat(CLIENT_NAME_MAX_CHARS)).is_ok());
+        // 80 characters with several ampersands is a realistic long name.
+        let long = format!("{} & Sons & Daughters & Partners", "A".repeat(49));
+        assert!(long.chars().count() <= 80);
+        assert!(validate_client_name(&long).is_ok());
+
+        let footer_len = |name: &str| {
+            let line = marking_line(name, WORST_MARKING_DATE);
+            crate::xlsx_export::sheet_footer(&line)
+                .encode_utf16()
+                .count()
+        };
+        let widest_accepted = (1..=CLIENT_NAME_MAX_CHARS)
+            .take_while(|n| validate_client_name(&"&".repeat(*n)).is_ok())
+            .last()
+            .expect("a short name of ampersands is accepted");
+        assert!(widest_accepted < CLIENT_NAME_MAX_CHARS, "the bound bites");
+        assert!(footer_len(&"&".repeat(widest_accepted)) <= EXCEL_FOOTER_MAX_CHARS);
+        assert!(
+            footer_len(&"&".repeat(widest_accepted + 1)) > EXCEL_FOOTER_MAX_CHARS,
+            "the bound is exact, not merely safe"
+        );
+        let refused = validate_client_name(&"&".repeat(CLIENT_NAME_MAX_CHARS))
+            .expect_err("a hundred ampersands cannot fit a footer");
+        assert!(refused.to_string().contains("footer"), "{refused}");
+        assert!(refused.to_string().contains("Shorten"), "{refused}");
+    }
+
+    /// The longest date the marking can print is the one the bound is measured with.
+    #[test]
+    fn the_worst_marking_date_is_the_longest_the_marking_can_print() {
+        use chrono::TimeZone;
+        let longest = (1..=12u32)
+            .flat_map(|month| {
+                (1..=28u32).map(move |day| {
+                    chrono::Utc
+                        .with_ymd_and_hms(2026, month, day, 0, 0, 0)
+                        .unwrap()
+                        .format("%-d %B %Y")
+                        .to_string()
+                })
+            })
+            .map(|date| date.chars().count())
+            .max()
+            .unwrap();
+        // Days 29 to 31 add no width over 28 (both are two digits).
+        assert_eq!(WORST_MARKING_DATE.chars().count(), longest);
+    }
+
+    /// W27: the logo mark belongs to the bundled brand kit, so it renders for that brand only.
+    /// Another agency's brand, or no brand, never gets it.
+    #[test]
+    fn the_brand_mark_renders_only_for_the_brand_kit_brand() {
+        assert!(brand_kit_matches(Some("Cantus Works")));
+        assert!(brand_kit_matches(Some("  cantus works ")));
+        assert!(!brand_kit_matches(Some("Another Agency")));
+        assert!(!brand_kit_matches(None));
+    }
+
     // ── req_det: two exports of ONE report are byte-identical ─────────────────
 
     /// req_det: compiling the SAME report twice, across a second boundary, must produce
@@ -10940,12 +11394,7 @@ mod tests {
     /// same PATH lookup `compile_pdf` itself relies on via `Command::new("typst")`, just
     /// synchronous and side-effect-free here).
     fn which_typst() -> Option<()> {
-        std::process::Command::new("typst")
-            .arg("--version")
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .map(|_| ())
+        camerata_test_env::typst_on_path().then_some(())
     }
 
     // ── Regression guard: the backtick-hash interpolation bug class ───────────
@@ -13168,6 +13617,7 @@ mod export_invariants_gate {
             files_scanned: 40,
             test_file_count: 5,
             files_excluded: 3,
+            excluded_noise_lines: None,
             code_chars: 20_000,
             code_lines: 1_200,
             code_lines_by_language: vec![LanguageVolume {

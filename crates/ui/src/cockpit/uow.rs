@@ -220,12 +220,30 @@ pub(super) async fn save_intake_context(story_id: &str, context: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// The message a server refusal carries: its `reason` (else its `error`), or `fallback` plus the
+/// HTTP status when the body has neither. What the console shows when a save is refused (400
+/// invalid branch name, 409 repository outside the active project) instead of failing silently.
+async fn rejection_message(resp: reqwest::Response, fallback: &str) -> String {
+    let status = resp.status();
+    let body = resp.json::<serde_json::Value>().await.ok();
+    body.as_ref()
+        .and_then(|v| v.get("reason").or_else(|| v.get("error")))
+        .and_then(|m| m.as_str())
+        .filter(|m| !m.trim().is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("{fallback} (HTTP {status})."))
+}
+
 /// Persist the per-story repo/branch scope (R6). `repos` is the full in-scope set; each
 /// entry is `{ repo, branch }` where `branch` is the tagged `BranchMode` JSON
 /// (`{"mode":"existing","branch_name":…}` or `{"mode":"new_from_base","base":…,"new_name":…}`).
-/// Fire-and-forget: returns `true` on a 2xx.
-pub(super) async fn save_intake_repos(story_id: &str, repos: serde_json::Value) -> bool {
-    reqwest::Client::new()
+/// `Err(message)` when the server refuses (the message is the server's reason, for a toast) or
+/// cannot be reached.
+pub(super) async fn save_intake_repos(
+    story_id: &str,
+    repos: serde_json::Value,
+) -> Result<(), String> {
+    let resp = reqwest::Client::new()
         .post(format!(
             "{}/api/uow/{}/intake/repos",
             crate::bff_base(),
@@ -234,8 +252,12 @@ pub(super) async fn save_intake_repos(story_id: &str, repos: serde_json::Value) 
         .json(&serde_json::json!({ "repos": repos }))
         .send()
         .await
-        .map(|r| r.status().is_success())
-        .unwrap_or(false)
+        .map_err(|_| "Could not reach the server to save the repo scope.".to_string())?;
+    if resp.status().is_success() {
+        Ok(())
+    } else {
+        Err(rejection_message(resp, "The repo scope was not saved").await)
+    }
 }
 
 /// Append one turn (`role` = `"user"` | `"agent"`) to the investigation/refinement agent
@@ -1006,6 +1028,138 @@ pub(super) async fn fetch_uow(story_id: &str) -> Option<UowView> {
     .json::<UowView>()
     .await
     .ok()
+}
+
+/// The branch a development run works on for this unit, derived from its Intake Repos in
+/// scope: the branch mode of the single in-scope repo or, with several, of the repo named in
+/// the unit's id (`OWNER/REPO#N`, the repo a run works in). `None` when no such repo is in
+/// scope. Uses the shared [`camerata_api_types::uow::BranchMode::branch_for_story`], so the
+/// branch matches the one the server derives for that repo's worktree.
+pub(super) fn run_branch_from_scope(story_id: &str, repos: &[RepoScopeView]) -> Option<String> {
+    let entry = match repos {
+        [only] => only,
+        many => {
+            let (repo, _) = story_id.rsplit_once('#')?;
+            many.iter().find(|r| r.repo == repo)?
+        }
+    };
+    // A malformed mode reads as the default (new branch from base), exactly as the server's
+    // `#[serde(default)]` does.
+    let mode: camerata_api_types::uow::BranchMode =
+        serde_json::from_value(entry.branch.clone()).unwrap_or_default();
+    Some(mode.branch_for_story(story_id))
+}
+
+/// `POST /api/uow/:story_id/branch` body `{ branch }`: record the unit's branch. `Err(message)`
+/// when the server refuses (400 invalid branch name, 409 unit outside the active project: the
+/// message is the server's reason) or cannot be reached.
+pub(super) async fn set_uow_branch(story_id: &str, branch: &str) -> Result<(), String> {
+    let resp = reqwest::Client::new()
+        .post(format!(
+            "{}/api/uow/{}/branch",
+            crate::bff_base(),
+            enc_seg(story_id)
+        ))
+        .json(&serde_json::json!({ "branch": branch }))
+        .send()
+        .await
+        .map_err(|_| "Could not reach the server to record the branch.".to_string())?;
+    if resp.status().is_success() {
+        Ok(())
+    } else {
+        Err(rejection_message(resp, "The branch was not recorded").await)
+    }
+}
+
+/// Before a development run starts: record the unit's branch from its Intake Repos in scope
+/// when none is set yet, so the run works in the unit's real repository. Without a branch the
+/// server has no repository to work in. An already-set branch is left alone here: the server
+/// is the single owner of the branch, and a run re-derives it from the Intake scope and records
+/// any change in the unit's history. When no repo is in scope nothing is recorded and the run
+/// start goes ahead (the server refuses it with the reason). When the server REFUSES the
+/// branch, `Err(message)` carries its reason so the console shows it instead of starting a run
+/// that cannot work.
+pub(super) async fn ensure_run_branch(story_id: &str) -> Result<(), String> {
+    let Some(uow) = fetch_uow(story_id).await else {
+        return Ok(());
+    };
+    if uow.branch.as_deref().is_some_and(|b| !b.trim().is_empty()) {
+        return Ok(());
+    }
+    match run_branch_from_scope(story_id, &uow.intake.repos) {
+        Some(branch) => set_uow_branch(story_id, &branch).await,
+        None => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod run_branch_tests {
+    use super::{run_branch_from_scope, RepoScopeView};
+
+    fn scope(repo: &str, branch: serde_json::Value) -> RepoScopeView {
+        RepoScopeView {
+            repo: repo.to_string(),
+            branch,
+        }
+    }
+
+    #[test]
+    fn a_single_new_from_base_repo_works_on_the_story_branch() {
+        let repos = [scope(
+            "acme/api",
+            serde_json::json!({ "mode": "new_from_base", "base": "main", "new_name": "" }),
+        )];
+        assert_eq!(
+            run_branch_from_scope("acme/api#7", &repos).as_deref(),
+            Some("camerata/acme/api#7")
+        );
+    }
+
+    #[test]
+    fn a_single_existing_branch_repo_works_on_that_branch() {
+        let repos = [scope(
+            "acme/api",
+            serde_json::json!({ "mode": "existing", "branch_name": "feature/x" }),
+        )];
+        assert_eq!(
+            run_branch_from_scope("acme/api#7", &repos).as_deref(),
+            Some("feature/x")
+        );
+    }
+
+    #[test]
+    fn with_several_repos_the_issue_repo_decides_and_a_missing_one_gives_none() {
+        let repos = [
+            scope(
+                "acme/web",
+                serde_json::json!({ "mode": "existing", "branch_name": "web-branch" }),
+            ),
+            scope(
+                "acme/api",
+                serde_json::json!({ "mode": "existing", "branch_name": "api-branch" }),
+            ),
+        ];
+        assert_eq!(
+            run_branch_from_scope("acme/api#7", &repos).as_deref(),
+            Some("api-branch")
+        );
+        assert_eq!(run_branch_from_scope("acme/other#7", &repos), None);
+        assert_eq!(run_branch_from_scope("draft-1", &repos), None);
+    }
+
+    #[test]
+    fn no_repo_in_scope_gives_none() {
+        assert_eq!(run_branch_from_scope("acme/api#7", &[]), None);
+    }
+
+    #[test]
+    fn a_malformed_mode_reads_as_the_default_new_branch() {
+        let repos = [scope("acme/api", serde_json::json!("bogus"))];
+        assert_eq!(
+            run_branch_from_scope("acme/api#7", &repos).as_deref(),
+            Some("camerata/acme/api#7")
+        );
+    }
 }
 
 /// POST a new dev-status for a story's UoW. Returns `Some(())` on a 2xx. The server
@@ -4087,7 +4241,11 @@ pub(super) fn IntakePhaseView(
             let sid = sid.clone();
             let payload = repo_scope_payload(&selected_repos(), &repo_branch_modes());
             spawn(async move {
-                let _ = save_intake_repos(&sid, payload).await;
+                // A refused scope (invalid branch name, repository outside the project) is
+                // shown to the user, never dropped silently.
+                if let Err(message) = save_intake_repos(&sid, payload).await {
+                    crate::toast::push_toast(toasts, crate::toast::ToastKind::Warning, message);
+                }
             });
         }
     };
@@ -7784,9 +7942,84 @@ mod bff_tests {
             .await;
 
         let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
-        let ok = super::save_intake_repos("CAM-1", repos).await;
+        let saved = super::save_intake_repos("CAM-1", repos).await;
 
-        assert!(ok);
+        assert_eq!(saved, Ok(()));
+    }
+
+    /// A refused scope save returns the server's own reason (what the console toasts), for the
+    /// 400 invalid-branch and 409 outside-the-project refusals, and a status fallback when the
+    /// body carries no message.
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn save_intake_repos_returns_the_servers_refusal_message() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/uow/BAD-1/intake/repos"))
+            .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({
+                "error": "invalid branch name",
+                "reason": "Repo `o/r`: `..` is not a valid branch name: it contains `..`."
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/uow/OUT-1/intake/repos"))
+            .respond_with(ResponseTemplate::new(409).set_body_json(serde_json::json!({
+                "error": "repository not in the active project",
+                "reason": "This unit's Repos in scope include `other/web`, which is not one of the active project's repositories."
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/uow/EMPTY-1/intake/repos"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
+        let repos = serde_json::json!([]);
+
+        let err = super::save_intake_repos("BAD-1", repos.clone())
+            .await
+            .unwrap_err();
+        assert!(err.contains("not a valid branch name"), "{err}");
+        let err = super::save_intake_repos("OUT-1", repos.clone())
+            .await
+            .unwrap_err();
+        assert!(
+            err.contains("other/web") && err.contains("active project"),
+            "{err}"
+        );
+        let err = super::save_intake_repos("EMPTY-1", repos)
+            .await
+            .unwrap_err();
+        assert!(err.contains("not saved") && err.contains("500"), "{err}");
+    }
+
+    /// The branch record returns the server's message on a 400/409 too.
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn set_uow_branch_returns_the_servers_refusal_message() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/uow/CAM-9/branch"))
+            .respond_with(ResponseTemplate::new(409).set_body_json(serde_json::json!({
+                "reason": "This unit of work belongs to `other/web`, which is not one of the active project's repositories."
+            })))
+            .mount(&server)
+            .await;
+
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
+        let err = super::set_uow_branch("CAM-9", "camerata/x")
+            .await
+            .unwrap_err();
+        assert!(err.contains("other/web"), "{err}");
     }
 
     #[tokio::test]

@@ -32,6 +32,7 @@ fn report_with_refs(refs: Vec<AuditedRef>, audited: &[&str]) -> ScanReport {
         files_scanned: 10,
         test_file_count: 0,
         files_excluded: 0,
+        excluded_noise_lines: None,
         code_chars: 5000,
         code_lines: 400,
         code_lines_by_language: vec![LanguageVolume {
@@ -477,4 +478,121 @@ fn the_gate_catches_a_readme_that_hides_or_invents_the_spend_limit() {
             .any(|p| format!("{p:?}").contains("Spend limit")),
         "{problems:?}"
     );
+}
+
+// ---- 22c: client name, corpus rules applied, counted lines, excluded noise ---------------------
+
+/// The scan's recorded quote basis and the corpus rule count reach the manifest and the README,
+/// and the two agree; the client name rides in when the export sets it.
+#[test]
+fn the_manifest_and_readme_carry_the_client_rule_count_and_quote_basis() {
+    let mut report = default_report();
+    report.files_excluded = 7;
+    report.excluded_noise_lines = Some(1234);
+    // One audited id the corpus does not hold: it is not a corpus rule, so it is not counted.
+    report
+        .provenance
+        .audited_rule_ids
+        .push("AI-INVENTED-1".to_string());
+    report.provenance.audited_rule_ids.push(RULE_A.to_string());
+    let json = cover_of(&report);
+    let mut provenance = export_provenance_with(&report, &json.cover, Some(&corpus()), None);
+    provenance.client_name = Some("Example Client Ltd".to_string());
+    let (manifest, readme) = manifest_and_readme(&provenance);
+
+    let inspection = &manifest["inspection"];
+    assert_eq!(inspection["client_name"], "Example Client Ltd");
+    assert_eq!(inspection["corpus_rules_applied"], 2);
+    assert_eq!(inspection["counted_lines"], 400);
+    assert_eq!(inspection["excluded_noise_files"], 7);
+    assert_eq!(inspection["excluded_noise_lines"], 1234);
+    for line in [
+        "Prepared for: Example Client Ltd\n",
+        "Corpus rules applied: 2\n",
+        "Counted lines: 400\n",
+        "Excluded as noise: 7 files, 1234 lines\n",
+    ] {
+        assert!(readme.contains(line), "{line:?} missing from {readme}");
+    }
+    assert!(camerata_server::release_gate::verify_readme_provenance(&readme, &manifest).is_empty());
+
+    // 22c also asks that these are populated: the corpus version, the inspected commit and
+    // the engine version.
+    assert!(inspection["corpus_version"]
+        .as_str()
+        .is_some_and(|v| v.starts_with("sha256:")));
+    assert_eq!(inspection["repos"][0]["commit"], "abcdef1234567890");
+    assert!(inspection["engine_version"]
+        .as_str()
+        .is_some_and(|v| v.starts_with("camerata ")));
+}
+
+/// A value the scan did not record is null in the manifest and absent from the README, never a
+/// fabricated zero: no corpus, no recorded noise lines, a run that read no files.
+#[test]
+fn unrecorded_22c_values_are_null_and_absent() {
+    let mut report = default_report();
+    report.code_lines = 0;
+    report.code_lines_by_language.clear();
+    report.excluded_noise_lines = Some(9);
+    let json = cover_of(&report);
+    let provenance = export_provenance_with(&report, &json.cover, None, None);
+    let (manifest, readme) = manifest_and_readme(&provenance);
+    for key in [
+        "client_name",
+        "corpus_rules_applied",
+        "counted_lines",
+        "excluded_noise_files",
+        "excluded_noise_lines",
+    ] {
+        assert!(manifest["inspection"][key].is_null(), "{key}: {manifest}");
+    }
+    for label in [
+        "Prepared for",
+        "Corpus rules applied",
+        "Counted lines",
+        "Excluded as noise",
+    ] {
+        assert!(!readme.contains(label), "{label} in {readme}");
+    }
+    assert!(camerata_server::release_gate::verify_readme_provenance(&readme, &manifest).is_empty());
+}
+
+/// The gate holds each new README line to the manifest.
+#[test]
+fn the_gate_catches_a_readme_that_disagrees_on_a_22c_value() {
+    let mut report = default_report();
+    report.files_excluded = 7;
+    report.excluded_noise_lines = Some(1234);
+    let json = cover_of(&report);
+    let mut provenance = export_provenance_with(&report, &json.cover, Some(&corpus()), None);
+    provenance.client_name = Some("Example Client Ltd".to_string());
+    let (manifest, readme) = manifest_and_readme(&provenance);
+    for (from, to, label) in [
+        (
+            "Prepared for: Example Client Ltd",
+            "Prepared for: Other Ltd",
+            "Prepared for",
+        ),
+        (
+            "Corpus rules applied: 2",
+            "Corpus rules applied: 3",
+            "Corpus rules applied",
+        ),
+        ("Counted lines: 400", "Counted lines: 401", "Counted lines"),
+        (
+            "7 files, 1234 lines",
+            "7 files, 1 lines",
+            "Excluded as noise",
+        ),
+    ] {
+        let tampered = readme.replace(from, to);
+        assert_ne!(tampered, readme, "anti-vacuity: {from}");
+        let problems =
+            camerata_server::release_gate::verify_readme_provenance(&tampered, &manifest);
+        assert!(
+            problems.iter().any(|p| format!("{p:?}").contains(label)),
+            "{label}: {problems:?}"
+        );
+    }
 }

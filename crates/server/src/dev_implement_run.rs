@@ -11,8 +11,9 @@
 //! # The gate is universal + unchanged
 //!
 //! Implementing brownfield code is still CODE-WRITING. The agent is built from the SAME
-//! [`camerata_fleet::governed_role`] + [`camerata_agent::prepare_session`] machinery as
-//! pr_resolve_run and update_branch_run:
+//! `camerata_fleet` governed-role + [`camerata_agent::prepare_session`] machinery as
+//! pr_resolve_run and update_branch_run, with one difference: its Layer-1 rule subset is the
+//! project's selected rules plus every enforced gate rule (see [`crate::governed_rules`]):
 //!
 //! - `--allowedTools` = the read-only built-ins (Read/Grep/Glob/LS) PLUS `gated_write`
 //!   (`gated_write` is the only WRITE path).
@@ -56,7 +57,7 @@ use std::sync::Arc;
 use camerata_agent::{prepare_session, HeartbeatFn};
 use camerata_checks::runner_for_worktree;
 use camerata_core::{AgentDriver, RuleId};
-use camerata_fleet::{governed_role, locate_gateway_bin};
+use camerata_fleet::locate_gateway_bin;
 use camerata_worktracker::investigation::DecisionRecord;
 
 use crate::api_agent_driver::build_agent_driver;
@@ -1164,10 +1165,23 @@ pub async fn execute_dev_implement_run(
             return;
         }
     };
-    // THE SAME governed role the fleet uses: allowedTools = gated tools only,
-    // Task / Write / Bash / Edit / MultiEdit / NotebookEdit disallowed.
-    let role = match governed_role("BrownfieldImplementer").await {
-        Ok(r) => r,
+    // THE SAME governed role machinery the fleet uses: allowedTools = gated tools only,
+    // Task / Write / Bash / Edit / MultiEdit / NotebookEdit disallowed. Its Layer-1 rule
+    // subset is THIS project's selected rules (the selection the inspection resolves) plus
+    // every enforced gate rule; a project with no selection falls back to the built-in
+    // corpus subset. The source is recorded in the run's events.
+    let project = project_id.as_deref().and_then(|id| projects.get(id));
+    let role = match crate::governed_rules::project_governed_role(
+        "BrownfieldImplementer",
+        project.as_ref(),
+        Some(repo.as_str()),
+    )
+    .await
+    {
+        Ok((r, source)) => {
+            event(&runs, "info", source.describe(r.rule_subset.len()));
+            r
+        }
         Err(e) => {
             fail(
                 &runs,
@@ -2739,7 +2753,8 @@ mod tests {
 
     // ── 3. GATE UNCHANGED assertion ────────────────────────────────────────────
 
-    /// The brownfield implement run uses `governed_role` + `prepare_session(..., Some(worktree))`
+    /// The brownfield implement run uses a governed role (`governed_rules::project_governed_role`,
+    /// built on `camerata_fleet`) + `prepare_session(..., Some(worktree))`
     /// — the IDENTICAL gate machinery as pr_resolve_run and update_branch_run. This test
     /// asserts the compile-time guarantee: we call `governed_role` and `prepare_session`
     /// from the same crates (`camerata_fleet` / `camerata_agent`) with the same
