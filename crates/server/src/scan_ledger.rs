@@ -1563,7 +1563,7 @@ mod tests {
         ledger.note_rule_not_run_for_repo(
             "ARCH-X-1",
             "acme/web",
-            "the AI review failed (could not open /Users/someone/clones/web/.env: token=SECRETVALUE)",
+            "the AI review failed (could not open /Users/auditor/clones/web/.env: token=SECRETVALUE)",
         );
         let mut redact = |text: &mut String| {
             if text.contains("SECRETVALUE") {
@@ -1582,7 +1582,7 @@ mod tests {
             .clone()
             .unwrap();
         assert!(!why.contains("SECRETVALUE"), "{why}");
-        assert!(!why.contains("/Users/someone"), "{why}");
+        assert!(!why.contains("/Users/auditor"), "{why}");
         assert!(why.contains(".env"), "the file name is kept: {why}");
         assert!(why.contains("acme/web"), "{why}");
     }
