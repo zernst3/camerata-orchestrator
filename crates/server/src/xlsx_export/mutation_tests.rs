@@ -477,7 +477,10 @@ fn index_fixture() -> (
     camerata_rules::RuleSet,
     ReportOptions,
 ) {
-    use camerata_api_types::audit::{DeviationKind, FindingKind};
+    use camerata_api_types::audit::{
+        ConventionObservedKind, DeviationKind, FindingKind, NoConventionKind, NotAssessedKind,
+        NotAssessedReason,
+    };
     let finding = |rule_id: &str, line: usize, severity: &str, kind: Option<FindingKind>| Finding {
         repo: "owner/repo".to_string(),
         path: "src/a.rs".to_string(),
@@ -507,6 +510,32 @@ fn index_fixture() -> (
         finding(DEP_AUDIT_RULE_ID, 7, "high", None),
         held,
         finding("IDX-INFO-1", 9, "info", Some(FindingKind::Defect)),
+        finding(
+            "IDX-CONV-1",
+            10,
+            "info",
+            Some(FindingKind::ConventionObserved(ConventionObservedKind {
+                convention_option_id: "opt-a".to_string(),
+                convention_label: "Option A".to_string(),
+            })),
+        ),
+        finding(
+            "IDX-NOCONV-1",
+            11,
+            "info",
+            Some(FindingKind::NoConvention(NoConventionKind {
+                observed_options: Vec::new(),
+            })),
+        ),
+        finding(
+            "IDX-NA-1",
+            12,
+            "info",
+            Some(FindingKind::NotAssessed(NotAssessedKind {
+                reason: NotAssessedReason::NoFilesMatched,
+                reason_detail: "no matching files".to_string(),
+            })),
+        ),
     ]);
     report.provenance.audited_rule_ids = vec!["IDX-CLEAN-1".to_string()];
     let wire = |state: &str| DispositionWire {
@@ -582,19 +611,19 @@ fn the_index_sheet_reads_exactly_this() {
             "",
             "Findings by category",
             "Category | Critical | High | Medium | Low | Total",
-            "Other | 0 | 1 | 3 | 2 | 6",
+            "Other | 0 | 1 | 3 | 5 | 9",
             "Security | 1 | 0 | 0 | 0 | 1",
-            "Total | 1 | 1 | 3 | 2 | 7",
+            "Total | 1 | 1 | 3 | 5 | 10",
             "",
             "Statement types",
             "Defects | 5 | All Findings",
             "Deviations from your own conventions | 1 | Deviations (one row per convention), All Findings (one row per site)",
-            "Conventions followed consistently | 0 | Conventions",
-            "No convention adopted | 0 | Conventions",
-            "Not assessed this scan | 0 | Coverage",
+            "Conventions followed consistently | 1 | Conventions",
+            "No convention adopted | 1 | Conventions",
+            "Not assessed this scan | 1 | Coverage",
             "Unclassified | 1 | All Findings",
             "",
-            "Disposition summary: 4 open, 1 do now, 1 do next, 2 planned, 1 accepted, 2 held for review, 1 excluded as false positives, 1 dependency advisory.",
+            "Disposition summary: 4 open, 1 do now, 1 do next, 2 planned, 1 accepted, 5 held for review, 1 excluded as false positives, 1 dependency advisory.",
             "",
             "Legend",
             "Severity",
@@ -625,7 +654,7 @@ fn the_index_sheet_reads_exactly_this() {
             "Sheet | Findings | Worst severity",
             "All Findings | 7 | Critical",
             "Deviations | 1 | Low",
-            "Conventions | 0",
+            "Conventions | 2",
             "Security | 1 | Critical",
             "Other | 6 | High",
             "Dependencies | 1 | High",
