@@ -1,5 +1,5 @@
 id = "RUST-TOKIO-NO-STD-MUTEX-ACROSS-AWAIT-1"
-version = 1
+version = 2
 title = "Do not hold a std::sync::Mutex lock across await points; use tokio::sync::Mutex"
 domain = "rust:tokio"
 layer = "framework"
@@ -10,7 +10,7 @@ default = true
 verification = "grounded"
 
 [decision]
-question = "What position does the project take on: Holding locks across await points?"
+question = "Which mutex type guards shared state that is held across await points?"
 default = "use-tokio-mutex-for-async-code"
 why = "std::sync::Mutex is designed for synchronous code. Its lock() call is a blocking OS-level primitive: if the lock is contended, the calling thread blocks until it is free. On a Tokio worker thread, that block stalls the entire thread, which means every other task multiplexed onto that thread stops making progress too, not just the caller. Holding a std::sync::Mutex guard across an await point compounds this: the guard is not released by the await (a std guard is a plain RAII value with no awareness of async at all), so if the awaited operation takes a long time, or if the task that would release the lock never gets scheduled because the thread is blocked, the result is starvation or deadlock. tokio::sync::Mutex does not change this fundamental fact about holding guards: once `lock().await` returns a guard, that guard is held across any subsequent await points in its scope exactly like a std guard would be, until it is dropped. What tokio::sync::Mutex changes is the *acquisition*: `lock().await` integrates with the async scheduler, so a task waiting to acquire a contended tokio Mutex yields the thread to other tasks instead of blocking it outright, and is woken up when the lock becomes available. If std::sync::Mutex is necessary (e.g., for a short, synchronous critical section that must not yield), the lock should be released before any await point. The rule is: if a lock must be held across an await, use tokio::sync::Mutex so that waiting to *acquire* it does not block the executor thread; the guard itself, from either mutex type, is still held for as long as it is in scope."
 

@@ -1,5 +1,5 @@
 id = "ARCH-IDEMPOTENCY-KEYS-1"
-version = 1
+version = 2
 title = "Non-GET writes that trigger external side effects require an idempotency key"
 domain = "api-layer"
 layer = "universal"
@@ -18,7 +18,7 @@ url = "https://docs.stripe.com/api/idempotent_requests"
 title = "Stripe — Idempotent Requests"
 
 [decision]
-question = "What position does the project take on: Non-GET writes that trigger external side effects require an idempotency key?"
+question = "When a client retries a write that charges a card, sends an email, or enqueues a job, how does the API keep the side effect from happening twice?"
 default = "non-get-writes-that-trigger-external-side-effects-require-an-idempotency-key"
 why = "Network retries are inevitable. Without idempotency keys, a client cannot safely retry after a timeout because the original may have succeeded silently. With keys, the client retries freely until it gets a definitive response, and the server never double-executes. Allowing retries without keys means the client risks double-charging or sending duplicates on every timeout, because the network cannot tell the client whether the original request reached the server. Deduplicating via natural keys works only when natural keys exist, are stable, and uniquely identify the intended effect, and many real operations have no such key (a payment intent, an outbound email, an external job enqueue). Making the client responsible for not retrying pushes correctness onto every consumer; one careless caller produces duplicates and the server has no way to defend against it."
 

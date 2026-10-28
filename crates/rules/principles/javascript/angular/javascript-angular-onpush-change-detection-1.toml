@@ -1,5 +1,5 @@
 id = "JAVASCRIPT-ANGULAR-ONPUSH-CHANGE-DETECTION-1"
-version = 1
+version = 2
 title = "Components use OnPush change detection by default for performance"
 domain = "javascript:angular"
 layer = "framework"
@@ -19,7 +19,7 @@ title = "angular-eslint — prefer-on-push-component-change-detection"
 linter = "@angular-eslint/prefer-on-push-component-change-detection"
 
 [decision]
-question = "What position does the project take on: Components use OnPush change detection by default for performance?"
+question = "Which change detection strategy do Angular components use by default?"
 default = "components-use-onpush-change-detection-by-default"
 why = "Angular's default change detection runs a check on every component in the tree whenever any asynchronous event fires (timers, network requests, user input). With OnPush, a component's view only re-renders if its input @Input() properties change by reference or if change detection is explicitly triggered. This dramatically reduces the number of checks Angular must perform in complex trees and makes performance predictable and scalable. When a component receives its data through @Input() properties (as in a presentational or 'dumb' component pattern), OnPush ensures the view is consistent with the inputs without requiring Angular to diff the entire component tree. The tradeoff—that the component must be disciplined about immutability and async data handling—is a discipline worth enforcing, because it catches the mutation bugs that make change detection unreliable at scale. The decision is: all new components default to changeDetection: ChangeDetectionStrategy.OnPush, and only explicitly switch to Default when the component structure genuinely cannot use OnPush (a rare case)."
 

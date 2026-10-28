@@ -140,7 +140,7 @@ opt_in_only = true             # never auto-recommended / pre-checked at onboard
 layer3_only = true             # CI-tier only; never run at layer-2 or scan time
 
 [decision]
-question = "What position does the project take on …?"
+question = "How does the API deduplicate retried mutations?"   # asked OF the client's code; options answer it
 default  = "the-default-option-id"
 why      = "rationale for the adopted default"
 
@@ -593,8 +593,9 @@ Stated here as authoring rules; mechanics and citations in the reference.
 1. **`kind` x `violates`.** No `violates = true` option on a `decision`-kind rule (build
    gate). A `why` opening `Rejected:` requires `violates = true` on any kind that permits
    the flag (build gate); on a `decision`-kind rule the same prose is an advisory signal
-   that the KIND is wrong, pinned to a roster. Converse convention: every `violates` option's
-   `why` opens with `Rejected:`.
+   that the KIND is wrong, pinned to a roster. There is no converse: a `violates` option's
+   `why` need not open with `Rejected:` (the token is optional, see the `why` standard above),
+   but it must open fault-first.
 2. **Severity bounds order.** `min_severity <= max_severity` and
    `deviation_ceiling <= max_severity`, both build-gated; exact vocabulary
    `critical|high|medium|low|info` (a typo is NOT a no-op - gotcha 1 - the gates catch it).
@@ -624,6 +625,41 @@ Stated here as authoring rules; mechanics and citations in the reference.
    `qualifies` inside `[[sources]]` fails the build.
 8. **New folder/stack = wiring, not just TOML:** stack detection, `domains_for_stack`, and
    `domain_to_glob`, plus a proposed-rules test - or every rule in the pack is orphaned.
+9. **`enforcement` x multi-option: a CI-tier rule has no decision apparatus.** A rule whose
+   `enforcement` is `mechanical` or `architectural` is CI-tier, and `is_semantic_multi_option_rule`
+   (`onboard/audit.rs`) excludes CI-tier rules from the alternatives pass outright. The model is
+   never asked which option the repository follows, so for such a rule NOTHING downstream of
+   that pass exists: no `violates` flag ever fires, no ConventionObserved row, no Deviation row,
+   no NoConvention row. The rule is checked against its resolved option's directive and nothing
+   else. The same exclusion applies to `kind = "defect"` rules, to gate-armed rules, and to the
+   `ORCH-`/`SPIRIT-`/`PROC-` families. This is the most consequential interaction in the schema
+   because nothing fails when you get it wrong: as of 2026-10-28, 44 non-defect CI-tier rules
+   carry two or more options and 19 of them carry `violates` flags that can never fire. So,
+   before authoring alternatives or a `violates` flag, check the tier. If the alternatives must
+   be decided per repository, the rule is `prose` or `structured`; if the rule really is CI-tier,
+   its options are architect choices made at onboarding, and a fault you need reported must be
+   expressed in the default option's directive (which the scan does check), not in a flag.
+10. **`remediation` x `violates`: the flag alone decides what the Fix line means.** On a
+    non-`violates` option, a remediation that tells the client how to REACH that option's state
+    is correct (`UI-QUERY-LIBRARY-1` and `ARCH-MONOLITH-FIRST-1` both do it properly). On a
+    `violates` option the identical syntax ships a Fix line telling the client to implement the
+    fault (the `ARCH-HOT-READ-CACHE-1` instance, fixed in `d0ea2ea`). Nothing else in the TOML
+    distinguishes the two. So a remediation on a `violates` option must move the code OUT of the
+    flagged state. Leaving it unauthored is not a safe fallback: `resolve_fix` resolves the option
+    the finding was judged under and does NOT fall back to the default option's remediation when
+    that option has none, so the row ships with no authored Fix line. Re-read every remediation
+    against its option's flag before committing.
+11. **`inspectable` scope: the test is the working tree, not the clone.** `inspectable` asks
+    whether the files as they sit on disk can confirm or refute the rule. Commit subjects, commit
+    bodies, branch names, PR titles and PR descriptions are VCS metadata: they are readable from a
+    clone, but the scan never reads them, so a rule whose subject is VCS metadata is `inspectable
+    = false` (the `process/*` and `PROC-CITE-CONVENTION-ID-1` rules). A rule whose subject is a
+    FILE committed to the repository is `inspectable = true` even when the file only governs
+    process, as with `PROC-PR-CONCURRENCY-1`, whose subject is the PR template file. Decide by
+    where the evidence lives, not by whether the rule is about code or about process: a process
+    rule with a file artifact is inspectable, and a code-adjacent rule whose only evidence is in
+    commit history is not. Each `false` is pinned with its reason in
+    `crates/rules/tests/w16_inspectable_gate.rs`.
 
 ---
 

@@ -1,5 +1,5 @@
 id = "JAVASCRIPT-ANGULAR-TYPED-HTTPCLIENT-1"
-version = 1
+version = 2
 title = "HTTP requests are made through typed services, not directly from components"
 domain = "javascript:angular"
 layer = "framework"
@@ -27,7 +27,7 @@ url = "https://angular.dev/guide/http/making-requests"
 title = "Angular HttpClient — Making requests: use reusable injectable services"
 
 [decision]
-question = "What position does the project take on: HTTP requests are made through typed services, not directly from components?"
+question = "Where in the Angular application are HTTP requests made?"
 default = "http-requests-are-made-through-typed-services"
 why = "HTTP requests are a data-access concern; making them directly from a component mixes transport concerns into the presentation layer. When a component calls HttpClient.get() or HttpClient.post() directly, the HTTP logic is embedded in the component, unreachable by other routes or services that might need the same data, and difficult to test without mocking HttpClient. A service (often called a 'data service' or 'API service') wraps the HTTP calls, maps the response to domain types, and exposes Observable methods that components can call. Services handle the HTTP layer; components inject the service and call its methods. The pattern parallels the Express backend rule: route handlers delegate to a service layer; Angular components delegate to a service layer. The service is testable, reusable across the app, and the component focuses on presentation and coordination. The rule is: HttpClient is injected only into services, never into components. A component that needs data calls a service method that returns an Observable; the service handles the HTTP request, response parsing, and error translation."
 

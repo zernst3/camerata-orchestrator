@@ -1,5 +1,5 @@
 id = "JAVASCRIPT-ANGULAR-NO-DIRECT-DOM-MANIPULATION-1"
-version = 1
+version = 2
 title = "DOM is not manipulated directly; Renderer2 and property bindings are used instead"
 domain = "javascript:angular"
 layer = "framework"
@@ -18,7 +18,7 @@ url = "https://angular.dev/guide/ssr#why-use-server-side-rendering"
 title = "Angular SSR — server-safe DOM abstraction rationale"
 
 [decision]
-question = "What position does the project take on: DOM is not manipulated directly; Renderer2 and property bindings are used instead?"
+question = "How do Angular components read or change DOM elements?"
 default = "dom-is-not-manipulated-directly-renderer2-and-bin"
 why = "Direct DOM manipulation using document.querySelector(), .innerHTML, .className, or .style bypasses Angular's rendering system and creates a mismatch between the Angular model and the actual DOM. When the component re-renders or change detection runs, Angular's view may be out of sync with the directly-modified DOM, leading to bugs where the component state and the rendered view diverge. Direct manipulation also makes server-side rendering (SSR) impossible; it is not safe for web workers or other non-browser environments. Angular provides safe patterns that integrate with its rendering system: property bindings in the template ([property]='value', [style.color]='value', [class.active]='value'), the Renderer2 service (for imperative DOM changes that cannot be expressed in a template), and — since Angular 16+ — the afterRender and afterNextRender lifecycle hooks, which are now the more idiomatic place to run imperative DOM-touching code safely, because they guarantee the callback runs after Angular has finished rendering (and, unlike a raw constructor/ngOnInit body, are SSR-safe by construction: framework-provided phases like read/write let code that must inspect layout or touch the DOM opt out of running during server-side rendering rather than requiring the author to guard it manually). Renderer2 remains valid, especially for imperative element mutation itself (setStyle, addClass, setProperty) and non-browser rendering targets; afterRender/afterNextRender solve a different but related problem — safely timing when DOM-touching code (including Renderer2 calls) runs relative to a render, particularly in standalone components. The rule is: do not use document.querySelector(), .innerHTML, .style, or .className directly; use template bindings, Renderer2, and — for render-timed imperative work — afterRender/afterNextRender instead. Accessing the DOM via ViewChild and manipulating it must use Renderer2, not direct properties."
 

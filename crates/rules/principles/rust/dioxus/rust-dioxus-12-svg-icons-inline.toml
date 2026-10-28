@@ -1,5 +1,5 @@
 id = "RUST-DIOXUS-12"
-version = 1
+version = 2
 title = "Icons render as inline SVG from static string constants; no runtime icon-library fetches"
 domain = "rust:dioxus"
 layer = "framework"
@@ -15,7 +15,7 @@ title = "GitHub Engineering — Delivering Octicons with SVG"
 relevance = "Authority note (author-facing): medium authority — a real, widely-cited case study for inline SVG icons over icon fonts/runtime fetches, not a formal standard"
 
 [decision]
-question = "What position does the project take on: Icons render as inline SVG from static string constants; no runtime icon-library fetches?"
+question = "How are icons delivered and rendered in the Dioxus UI?"
 default = "icons-render-as-inline-svg-from-static-string-constants"
 why = "Inline SVG is the smallest-bundle, fastest-first-paint approach. It has no runtime dependency, no network round-trip, no flash of invisible text, and renders correctly in the server-rendered initial paint. Extracting from an existing icon set once into static strings preserves visual identity across a port without taking on a runtime dependency on the source library. An icon-library crate that bundles every icon from a popular set grows the binary by the size of the full set, most of which the application never uses, with no easy path to tree-shake the unused icons out. A web font containing the icon glyphs adds a runtime font fetch, produces a flash of invisible text on slow networks, and breaks the server-rendered first paint. An external SVG sprite sheet loaded over HTTP adds a separate HTTP request and a cache-invalidation surface; it is rarely worth it for the small number of icons most applications actually use."
 

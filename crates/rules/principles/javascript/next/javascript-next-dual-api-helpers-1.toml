@@ -1,5 +1,5 @@
 id = "JAVASCRIPT-NEXT-DUAL-API-1"
-version = 1
+version = 2
 title = "Client-side code goes through sanctioned API helpers; Server Components may fetch directly"
 domain = "javascript:next"
 layer = "framework"
@@ -20,7 +20,7 @@ title = "ESLint — no-restricted-imports (enforces import restrictions)"
 linter = "eslint: no-restricted-imports"
 
 [decision]
-question = "What position does the project take on: Client-side code goes through sanctioned API helpers; Server Components may fetch directly?"
+question = "How does client-side code call the backend API, and how do Server Components fetch their data?"
 default = "two-sanctioned-api-helpers-client-vs-server-only"
 why = "Browser fetches and server-side fetches (RSC, metadata, route handlers) have different requirements: cookies, hostnames, auth flow, secret access. On the client, there is no framework-level fetch deduplication or caching, so a raw fetch call re-derives credentials, base URLs, and error handling at every call site; centralizing those concerns in a shared client helper is what avoids the drift and the leaked-secret/broken-auth failure modes. On the server, this tradeoff does not hold: Next.js extends fetch itself with automatic request memoization and caching for Server Components, route handlers, and other server-side rendering paths, so direct fetch() there is the documented, idiomatic default rather than an anti-pattern. Forcing every server-side fetch through a shared helper fights the framework's built-in deduplication for no corresponding benefit. A 'server-only' marker on the server helper (used when a server-side call needs private-network access or centralized secret handling) enforces that split at compile time. Mixing browser and server fetch concerns in one isomorphic helper has to compromise on cookies, hostname resolution, and secret handling because no single shape satisfies both contexts at once; any compromise the helper makes leaks a failure mode into one side or the other."
 

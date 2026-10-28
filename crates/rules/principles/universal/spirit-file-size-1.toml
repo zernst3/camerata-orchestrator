@@ -1,5 +1,5 @@
 id = "SPIRIT-FILE-SIZE-1"
-version = 1
+version = 2
 title = "Files are sized for human reading, not for AI write-cost"
 domain = "universal"
 layer = "universal"
@@ -14,7 +14,7 @@ url = "AGENTS.md"
 title = "AGENTS.md — SPIRIT-FILE-SIZE-1 (files sized for human reading)"
 
 [decision]
-question = "What position does the project take on: Files are sized for human reading, not for AI write-cost?"
+question = "How are hand-maintained files sized and split so a human can navigate them?"
 default = "files-are-sized-for-human-reading-not-for-ai-write-cost"
 why = "Pre-AI, splitting had a real writing cost (boilerplate, imports, naming) that made monolithic files a defensible tradeoff. AI removed that cost. The only remaining force keeping hand-written files small is human comprehension, so let it be the deciding axis. Generated artifacts are read tools-first, so the rule doesn't bind them. Letting hand-maintained files grow without a human-reading size guideline fails the human-comprehension axis the rule exists to protect: AI happily extends files, but humans reviewing or debugging those files bog down and lose orientation as the files grow. Applying the same size guideline to auto-generated files fails in the opposite direction, because it forces useless splits in files no person hand-edits and that tooling rewrites wholesale anyway."
 

@@ -1,5 +1,5 @@
 id = "ORCH-CONTEXT-OVERRIDE-1"
-version = 1
+version = 2
 title = "Rule overrides driven by project context require explicit human sign-off"
 domain = "agentic"
 layer = "universal"
@@ -18,7 +18,7 @@ url = "https://www.cognitect.com/blog/2011/11/15/documenting-architecture-decisi
 title = "Michael Nygard — Documenting Architecture Decisions (an override is itself a decision that needs a durable, attributed record)"
 
 [decision]
-question = "What position does the project take on: Rule overrides driven by project context require explicit human sign-off?"
+question = "When an agent finds that a documented rule would produce the wrong result for this project, what happens?"
 default = "rule-overrides-driven-by-project-context-require"
 why = "Documented rules exist because an architect made an explicit commit; overriding one without review treats the original commit as casual. The override may still be right (projects evolve, ecosystems shift, downstream constraints can defeat a rule's original rationale), but the rule revision plus the deviating artifact together represent a non-trivial architectural shift that warrants the same review the original commit received. Pausing is the price of preserving rule authority while still allowing rules to evolve. The autonomous-override-then-review-later alternative trades pause cost for review-cadence cost and can be defensible when the project's review process is slower than the agent's iteration cadence, but it lets architectural shifts ship before the architect sees them and accepts that subsequent work may build on a divergence that the eventual review would have caught. The absolute-rules alternative trades agent autonomy for rule stability and can be defensible in regulated or safety-critical contexts where the cost of unreviewed deviation exceeds the cost of slower iteration, but it strands the agent on any rule whose context has genuinely shifted, since there is no path from 'this rule no longer fits' to a deviating artifact at all."
 
@@ -42,4 +42,4 @@ id = "documented-rules-are-absolute-the-agent-never-ov"
 violates = true
 label = "Absolute rules, no overrides"
 directive = "Documented rules are absolute; the agent never overrides them based on local context, and a poor-fit rule is filed to the decisions log for human revision without the agent producing any artifact in the meantime."
-why = "Absolute rules buy stability and can be right in regulated or safety-critical contexts, but they strand the agent on any rule whose context has genuinely shifted, since there is no path from 'this rule no longer fits' to a deviating artifact at all."
+why = "The agent is stranded on any rule whose context has genuinely shifted, because there is no path from 'this rule no longer fits' to a deviating artifact at all. Absolute rules buy stability, which can be the right trade only in regulated or safety-critical contexts."

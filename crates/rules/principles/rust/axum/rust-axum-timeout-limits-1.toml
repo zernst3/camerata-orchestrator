@@ -1,5 +1,5 @@
 id = "RUST-AXUM-TIMEOUT-LIMITS-1"
-version = 1
+version = 2
 title = "Set request timeouts and body size limits to prevent resource exhaustion"
 domain = "rust:axum"
 layer = "framework"
@@ -10,7 +10,7 @@ default = true
 verification = "grounded"
 
 [decision]
-question = "What position does the project take on: Request timeouts and body size limits?"
+question = "What request timeouts and body size limits does the Axum server enforce?"
 default = "configure-timeouts-and-body-limits"
 why = "Axum allows configuration of request timeouts (how long a handler can run) and body size limits (the maximum size of an incoming request body). Without these limits, a single slow or malicious client can hold connections open indefinitely or send a gigabyte-sized request, exhausting server resources and denying service to other clients. When timeouts and limits are not configured, the application does not degrade gracefully under load; it is vulnerable to resource exhaustion, since nothing at the framework boundary rejects a slow client or an oversized body before it consumes memory, connections, or handler time. When they are configured, known bad states are rejected at the framework boundary. Note that axum has shipped a default body-size limit since 0.6: the Router's json/bytes/string extractors are wrapped with tower_http's/axum's DefaultBodyLimit layer, which rejects bodies over 2 MB unless explicitly overridden with DefaultBodyLimit::max(n) or disabled with DefaultBodyLimit::disable(). Timeouts are especially important for async handlers that may wait on external services; a handler waiting for an API response should not wait forever if the remote service becomes unresponsive."
 

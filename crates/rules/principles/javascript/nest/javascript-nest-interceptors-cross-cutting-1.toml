@@ -1,5 +1,5 @@
 id = "JAVASCRIPT-NEST-INTERCEPTORS-CROSS-CUTTING-1"
-version = 1
+version = 2
 title = "Use interceptors for cross-cutting concerns like logging, tracing, and response transformation"
 domain = "javascript:nest"
 layer = "framework"
@@ -14,7 +14,7 @@ url = "https://docs.nestjs.com/interceptors"
 title = "NestJS Docs — Interceptors: cross-cutting concerns"
 
 [decision]
-question = "What position does the project take on: Interceptors for cross-cutting concerns?"
+question = "Where does cross-cutting logic such as logging, tracing, and response transformation live in the NestJS application?"
 default = "interceptors-for-cross-cutting"
 why = "NestJS interceptors are functions that run before and after a controller method, implemented via the RxJS-based NestInterceptor interface. They can log requests and responses, add tracing headers, measure execution time, transform the response shape, implement caching, and more. When these cross-cutting concerns (logging, tracing, response shaping) live inside controllers or services, they are duplicated and inconsistent. Interceptors centralize these concerns and apply them consistently across all routes. An interceptor can measure how long a request takes and log it; this is not specific to any business logic and applies globally. If logging lives in each controller, a developer might forget to add it to a new endpoint or log the wrong format. Interceptors are not Nest's mechanism for exception handling: mapping a thrown exception (or an HttpException subtype) to an HTTP status and response body is the job of Exception Filters (@Catch(), implementing ExceptionFilter, applied via @UseFilters() or the global APP_FILTER provider). An interceptor's handle() method can observe a stream and use RxJS's catchError to react to an error passing through it, but centralized exception-to-response mapping across the app belongs to a filter, not an interceptor — the two are separate, complementary NestJS concepts (interceptor = wrap around a call for cross-cutting behavior; filter = catch a thrown exception and shape the error response) that are sometimes confused because both can technically observe an error."
 

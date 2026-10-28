@@ -1,5 +1,5 @@
 id = "JAVASCRIPT-TESTING-NO-DISABLED-TESTS-1"
-version = 1
+version = 2
 title = "Disabled tests (xtest, xit, .skip, pending) are forbidden in committed code"
 domain = "javascript:testing"
 layer = "language"
@@ -21,7 +21,7 @@ title = "eslint-plugin-jest — no-focused-tests rule (recommended)"
 linter = "jest: no-focused-tests"
 
 [decision]
-question = "What position does the project take on: may disabled tests (xtest, test.skip, pending, etc.) be committed to the main branch?"
+question = "What happens when a disabled test such as xtest, test.skip, or pending is about to be committed to the main branch?"
 default = "disabled-tests-are-forbidden-in-committed-code"
 why = "A disabled test is a bug that has been hidden rather than fixed. When a developer commits xtest() or test.skip(), they have removed a safety net without removing the problem the test was written to catch. The longer a disabled test sits in the codebase, the more likely the tested behaviour has changed in the interim, and the test no longer reflects reality even if re-enabled. The jest/no-disabled-tests rule (recommended config) makes disabled tests a lint error, so the author must either fix the test before committing or delete it with a tracked issue instead of silently burying it. The jest/no-focused-tests rule is the symmetric gate: a committed test.only() or fit() silently skips the rest of the suite, meaning CI can be green with 90% of tests not running — an extremely dangerous false positive."
 

@@ -1,5 +1,5 @@
 id = "PROC-PR-CONCURRENCY-1"
-version = 1
+version = 2
 title = "PR template forces a concurrency story"
 domain = "concurrency"
 layer = "universal"
@@ -7,14 +7,20 @@ enforcement = "structured"
 kind = "defect"
 inspectable = true
 default = true
-verification = "grounded"
+verification = "policy"
 
 [[sources]]
-url = "CONVENTIONS.md"
-title = "CONVENTIONS.md — §PROC-PR-CONCURRENCY-1 (PR template forces a concurrency story)"
+url = "https://docs.github.com/en/communities/using-templates-to-encourage-useful-issues-and-pull-requests/creating-a-pull-request-template-for-your-repository"
+title = "GitHub Docs: Creating a pull request template for your repository"
+relevance = "Documents the mechanism the default option relies on (a repository-level PR template that pre-fills every PR description). It does not itself prescribe a concurrency section; that requirement is this project's own policy, which is why the rule is labelled policy rather than grounded."
+
+[[sources]]
+url = "https://go.dev/doc/articles/race_detector"
+title = "Go: Data Race Detector"
+relevance = "Supports the automated-race-detection-in-ci option: documents go test -race and its main limit, that it only reports races on code paths the tests actually execute."
 
 [decision]
-question = "What position does the project take on: PR template forces a concurrency story?"
+question = "How does a pull request that touches shared mutable state show its locking strategy and concurrency testing?"
 default = "pr-template-forces-a-concurrency-story"
 why = "Forcing authors to make the concurrency analysis visible and required catches races that review otherwise misses. Without a required template section, the concurrency story depends on whatever discipline the author and reviewer happen to bring to the diff that day, and races slip through review by default precisely because nothing on the PR surface forces the analysis to be written down."
 

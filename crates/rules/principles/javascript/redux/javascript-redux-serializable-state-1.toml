@@ -1,5 +1,5 @@
 id = "JAVASCRIPT-REDUX-SERIALIZABLE-STATE-1"
-version = 1
+version = 2
 title = "Only plain serializable values live in the store and in actions"
 domain = "javascript:redux"
 layer = "library"
@@ -19,7 +19,7 @@ url = "https://redux-toolkit.js.org/api/serializabilityMiddleware"
 title = "Redux Toolkit — Serializability Middleware"
 
 [decision]
-question = "What position does the project take on: Only plain serializable values live in the store and in actions?"
+question = "What kinds of values are held in the Redux store and carried in dispatched actions?"
 default = "only-plain-serializable-values-live-in-the-store"
 why = "Several core Redux capabilities depend on state and actions being plain serializable data: persisting and rehydrating the store, replaying actions, time-travel debugging, and the devtools' ability to show and diff state all serialize the values and assume they survive a round trip. Putting a non-serializable value into the store (a Promise, a function, a class instance, a Date, a Map or Set, DOM nodes) breaks those features quietly: persistence drops or corrupts the value, devtools cannot render it, and replay produces a different state than the original run. The same applies to action payloads, which flow through the same machinery. Storing a Date or a class instance because it is convenient at the call site trades these whole-store capabilities for local convenience; the fix is to keep the serializable projection in the store (an ISO string, a plain object, an id) and reconstruct the rich value at the edge where it is used. Genuinely non-serializable concerns (a Promise mid-flight, an AbortController) belong in middleware or component state, not the store."
 

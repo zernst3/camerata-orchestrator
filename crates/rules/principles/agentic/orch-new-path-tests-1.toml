@@ -1,5 +1,5 @@
 id = "ORCH-NEW-PATH-TESTS-1"
-version = 1
+version = 2
 title = "AI-authored code paths carry tests, not just a passing existing suite"
 domain = "agentic"
 layer = "universal"
@@ -23,7 +23,7 @@ url = "https://testing.googleblog.com/2020/08/code-coverage-best-practices.html"
 title = "Google Testing Blog — Code Coverage Best Practices (2020)"
 
 [decision]
-question = "What position does the project take on: AI-authored code paths carry tests, not just a passing existing suite?"
+question = "How does the team confirm that code paths added by an agent are actually tested?"
 default = "ai-authored-code-paths-carry-tests-not-just-a-passing-existing-suite"
 why = "Green existing tests prove the new code did not break old paths; they do not prove the new path works. The unstated assumption that 'tests pass' implies 'tests cover' breaks down on every diff that adds code outside the existing test surface. For human-authored changes the failure mode is a slow drift; for AI-authored changes it is an immediate, every-diff failure mode because the agent has no instinct to test what it just wrote unless the pipeline forces the test to exist and to actually exercise the new path. Requiring only that the existing suite passes is the common industry default and misses every new branch the existing suite cannot reach, which on an AI-authored diff can be most of the new code. Requiring a coverage percentage on the full project offers statistical comfort but masks targeted gaps in specific new paths, because a single uncovered new branch barely moves the project-wide percentage. Relying on post-merge canary or staging environments to catch coverage gaps does produce real catches, but they arrive late and are expensive to act on once human reviewer attention has moved on to the next change."
 
@@ -41,18 +41,18 @@ id = "the-change-pipeline-requires-only-that-the-exist"
 violates = true
 label = "Existing suite passes only"
 directive = "the change pipeline requires only that the existing test suite passes on a diff; no check verifies that the new code path introduced by the diff is actually exercised by any test"
-why = "Requiring only that the existing suite passes is the common industry default and misses every new branch the existing suite cannot reach, which on an AI-authored diff can be most of the new code."
+why = "Every new branch the existing suite cannot reach ships untested, and on an AI-authored diff that can be most of the new code. Requiring only a passing existing suite is a common default, which is why the gap is easy to miss."
 
 [[option]]
 id = "the-change-pipeline-requires-the-project-to-stay"
 violates = true
 label = "Project-wide coverage percentage"
 directive = "the change pipeline requires the project to stay above a fixed coverage percentage on the full project, with no per-diff check that the introduced lines specifically are covered"
-why = "A project-wide percentage offers statistical comfort but masks targeted gaps in specific new paths: a single uncovered new branch barely moves the project-wide number."
+why = "A project-wide percentage masks targeted gaps in specific new paths: a single uncovered new branch barely moves the project-wide number."
 
 [[option]]
 id = "the-change-pipeline-ships-ai-authored-changes-on"
 violates = true
 label = "Post-merge environment feedback"
 directive = "the change pipeline ships AI-authored changes on the strength of a passing existing suite, and post-merge canary or staging environments are relied on to surface coverage gaps after the fact"
-why = "Post-merge environments do catch some gaps, but they arrive late and are expensive to act on once human reviewer attention has moved on to the next change."
+why = "Gaps surface late, after merge, when they are expensive to act on and reviewer attention has moved on to the next change. Post-merge environments catch only some of them."

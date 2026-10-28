@@ -1,5 +1,5 @@
 id = "JAVASCRIPT-TYPESCRIPT-NO-NON-NULL-ASSERTION-1"
-version = 1
+version = 2
 title = "The non-null assertion operator (!) is forbidden; narrow instead"
 domain = "javascript:typescript"
 layer = "language"
@@ -16,7 +16,7 @@ title = "typescript-eslint — @typescript-eslint/no-non-null-assertion rule"
 linter = "@typescript-eslint: no-non-null-assertion"
 
 [decision]
-question = "What position does the project take on: The non-null assertion operator (!) is forbidden; narrow instead?"
+question = "How does code handle values typed as possibly null or undefined?"
 default = "the-non-null-assertion-operator-is-forbidden-narrow-instead"
 why = "The non-null assertion ! tells the compiler 'trust me, this is not null here' and erases the very check strictNullChecks exists to enforce. It is a runtime no-op: if the author is wrong and the value is null, nothing happens at the assertion site and the program continues until the value is dereferenced, where it throws a TypeError detached from the bad assumption. This is the same hazard as Rust's unwrap, and the same discipline applies: prove the non-null-ness with a control-flow narrowing (an if guard, optional chaining with a fallback, an early return) so the compiler verifies the claim, rather than asserting it and asking to be trusted. Sprinkling ! to silence 'possibly undefined' errors works until the one input that actually is null arrives, at which point the assertion that suppressed the warning is exactly what lets the null through to the crash."
 

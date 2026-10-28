@@ -1,5 +1,5 @@
 id = "JAVASCRIPT-ANGULAR-DI-CONSTRUCTOR-OR-INJECT-1"
-version = 1
+version = 2
 title = "Services are injected via inject() (preferred) or constructor parameters, never manually instantiated"
 domain = "javascript:angular"
 layer = "framework"
@@ -36,7 +36,7 @@ title = "angular-eslint — prefer-inject"
 linter = "@angular-eslint/prefer-inject"
 
 [decision]
-question = "What position does the project take on: Services are injected via inject() or constructor parameters, never manually instantiated?"
+question = "How do Angular classes obtain the services they depend on?"
 default = "inject-function-as-default"
 why = "Angular's dependency injection (DI) container is the authoritative source for service instances. When a component or service requests a dependency via constructor injection or the inject() function, Angular's DI system provides the right instance (singleton, scoped, or factory-created as configured). Manually instantiating a service (new MyService()) bypasses DI entirely: the constructor call runs outside the container, any setup or initialization hooks are skipped, the service is not a singleton (a new instance is created every time), and mocking or swapping the implementation for testing is impossible without changing the source code. Both this rule's own cited sources — the Angular DI guide and the Angular Style Guide's 'Prefer the inject function over constructor parameter injection' section — explicitly recommend inject() as the primary mechanism, not merely a co-equal alternative to constructor injection, and angular-eslint ships a dedicated prefer-inject lint rule enforcing exactly that preference. inject() is also often the only option available at all: functional guards, interceptors, and resolvers are plain functions, not classes, so they have no constructor to inject into, and inject() is the only way to reach the DI container from inside them. Constructor injection remains valid for standard component/service classes and for codebases on Angular versions before inject() existed (pre-14), but it is not the rule's default recommendation for new code. The rule's forbidden pattern, regardless of which injection style is used, is manual instantiation: if a service is not available in the DI container, add it to the providers array or the providedIn configuration; do not create a new instance by hand."
 
