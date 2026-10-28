@@ -126,10 +126,7 @@ fn finding(rule: &str, sev: &str, detail: &str) -> Finding {
 }
 
 fn adjustments(f: &Finding) -> Vec<String> {
-    f.captures
-        .get(SEVERITY_ADJUSTMENTS_KEY)
-        .map(|v| v.lines().map(str::to_string).collect())
-        .unwrap_or_default()
+    crate::severity_bounds::recorded_adjustments(f)
 }
 
 // ── H1: a reply still cut off after the retry ───────────────────────────────────────────────
@@ -273,6 +270,7 @@ fn a_batch_item_still_cut_off_is_a_failed_pass_with_its_complete_findings_kept()
         &std::collections::HashSet::new(),
         &adopted(),
         None,
+        false,
         None,
     );
     assert_eq!(ok, 1, "only the complete item answered");
@@ -307,6 +305,7 @@ fn a_batch_item_cut_off_with_nothing_complete_is_never_zero_findings() {
         &std::collections::HashSet::new(),
         &adopted(),
         None,
+        false,
         None,
     );
     assert_eq!((ok, findings.len(), failures.len()), (0, 0, 1));
@@ -831,5 +830,230 @@ async fn a_cut_off_deep_security_chunk_keeps_its_complete_findings_and_is_report
         failures[0].error.contains("cut off at the output limit"),
         "{}",
         failures[0].error
+    );
+}
+
+// ── follow-up: review fixes ─────────────────────────────────────────────────────────────────
+
+#[test]
+fn ai_adjustments_go_through_the_shared_writer_and_share_its_cap() {
+    let mut f = finding("AI-X-1", "high", "d");
+    // A sentence the corpus bounds wrote, then ours: one list, read by the one reader.
+    crate::severity_bounds::record_adjustment(
+        &mut f,
+        "severity lowered from high to info: bound".into(),
+    );
+    record_severity_adjustment(&mut f, "high", "low", "ceiling");
+    assert_eq!(adjustments(&f).len(), 2, "{:?}", adjustments(&f));
+    for i in 0..20 {
+        record_severity_adjustment(&mut f, "high", "low", &format!("reason {i}"));
+    }
+    assert_eq!(adjustments(&f).len(), 8, "the shared writer caps the list");
+}
+
+#[test]
+fn a_snippet_inside_another_snippet_is_the_same_finding() {
+    let mut a = finding("AI-X-1", "low", "first");
+    a.line = 0;
+    a.snippet = "let q = format!(\"SELECT * FROM t WHERE id = {}\", id);".to_string();
+    let mut b = finding("AI-X-1", "high", "second");
+    b.line = 0;
+    b.snippet = "format!(\"select * from t where id = {}\", id)".to_string();
+    let mut c = finding("AI-X-1", "medium", "third");
+    c.line = 0;
+    c.snippet = "something else entirely".to_string();
+    let mut all = vec![a, b, c];
+    dedup_findings_keep_max_severity(&mut all);
+    assert_eq!(all.len(), 2, "{all:?}");
+    assert_eq!(all[0].severity, "high");
+}
+
+#[test]
+fn salvage_skips_one_bad_object_and_keeps_the_others() {
+    let text = r#"{"findings":[
+      {"path":"a.rs","line":1,"severity":"low","rule":"RULE-0","title":"One","code":"x = 1","detail":"ok"},
+      {"path":"a.rs","line":2,"severity":,"rule":"RULE-0"},
+      {"path":"a.rs","line":3,"severity":"high","rule":"RULE-0","title":"Three","code":"z = 3","detail":"ok"},
+      {"path":"a.rs","li"#;
+    let (f, _) = salvage_complete_findings(REPO, text, &adopted());
+    assert_eq!(f.len(), 2, "{f:?}");
+}
+
+#[test]
+fn salvage_ignores_the_word_findings_in_prose_before_the_object() {
+    let text = r#"My "findings" are below: {"findings":[{"path":"a.rs","line":1,"severity":"low","rule":"RULE-0","title":"One","code":"x = 1","detail":"ok"},{"path":"b"#;
+    let (f, _) = salvage_complete_findings(REPO, text, &adopted());
+    assert_eq!(f.len(), 1);
+    // A "findings" that is not a key of the object (no brace or comma before it) is not used.
+    assert!(
+        salvage_complete_findings(REPO, r#"see {"x": "findings" [{"a":1}"#, &adopted())
+            .0
+            .is_empty()
+    );
+}
+
+#[test]
+fn a_label_naming_two_adopted_rules_is_not_guessed_to_be_the_first() {
+    let adopted = ["SEC-NO-A-1", "SEC-NO-B-1"];
+    assert_eq!(
+        rule_of(r#""rule":"SEC-NO-A-1-SEC-NO-B-1""#, &adopted),
+        "AI-SEC-NO-A-1-SEC-NO-B-1"
+    );
+    // A plain extension still maps.
+    assert_eq!(
+        rule_of(r#""rule":"SEC-NO-A-1-IN-REPORTS""#, &adopted),
+        "SEC-NO-A-1"
+    );
+}
+
+#[test]
+fn a_line_written_as_line_42_is_read() {
+    assert_eq!(line_of(r#""line 42""#), 42);
+    assert_eq!(line_of(r#""Line: 42""#), 42);
+    assert_eq!(line_of(r#""lines 42-47""#), 42);
+    assert_eq!(line_of(r##""#42""##), 42);
+}
+
+#[test]
+fn already_nested_sites_are_deduplicated_when_a_location_group_merges() {
+    let files = vec![(
+        "src/h.rs".to_string(),
+        "fn a() {}\nfn b() {}\ndb.get(invoice_id)\n".to_string(),
+    )];
+    let nested =
+        crate::onboard::MergedLocation::site(REPO, "src/other.rs", 9, "AI-NESTED", "x", false);
+    let mut a = finding("AI-IDOR-INVOICES", "high", "One");
+    a.also_locations = vec![nested.clone()];
+    let mut b = finding("AI-OTHER-NAME", "high", "Two");
+    b.also_locations = vec![nested];
+    let merged = merge_by_location(vec![a, b], &files);
+    assert_eq!(merged.len(), 1);
+    assert_eq!(
+        merged[0].also_locations.len(),
+        2,
+        "the shared nested site once, plus the absorbed member's own: {:?}",
+        merged[0].also_locations
+    );
+}
+
+#[test]
+fn a_legacy_batch_reply_that_bought_nothing_is_counted_wasted_without_being_staged_twice() {
+    let mut results = crate::llm::BatchResults::default();
+    results
+        .responses
+        .insert("c0-b0".to_string(), response(CUT_OFF, true));
+    results.responses.insert(
+        "c1-b0".to_string(),
+        response("not json at all, just prose", false),
+    );
+    let m = UsageMeter::default();
+    // As in production: the replies were staged when they arrived.
+    for resp in results.responses.values() {
+        m.record_stage(Stage::ScanPass, resp);
+    }
+    let _ = reassemble_batch_passes(
+        REPO,
+        "batch",
+        2,
+        1,
+        &[(0, 0), (1, 0)],
+        &[1, 1],
+        &results,
+        &std::collections::HashSet::new(),
+        &adopted(),
+        Some(&m),
+        true,
+        None,
+    );
+    let usage = m.stage_telemetry(1_000).stages[0].usage.clone();
+    assert_eq!(
+        usage.wasted_calls, 2,
+        "both unusable replies are counted wasted"
+    );
+    assert_eq!(
+        usage.calls, 2,
+        "the replies were staged on arrival and not a second time here"
+    );
+}
+
+#[tokio::test]
+async fn a_rule_judged_not_applicable_is_asked_on_at_most_four_chunks_and_says_so() {
+    let big = |name: &str| {
+        (
+            name.to_string(),
+            format!("// {name}\n{}\n", "x".repeat(250_000)),
+        )
+    };
+    let files: Vec<(String, String)> = (0..6).map(|i| big(&format!("src/f{i}.rs"))).collect();
+    let llm = ScriptedLlm::new(&[(NOT_APPLICABLE, false)]);
+    let recs = recommend_alternatives(
+        &llm,
+        REPO,
+        &files,
+        &files,
+        &crate::prompt_frame::FrameNonce::generate(),
+        &[two_option_alt("MULTI-RULE-1")],
+        None,
+        None,
+        None,
+    )
+    .await
+    .expect("the pass runs");
+    assert_eq!(llm.calls(), 4, "never more than four chunks");
+    assert!(!recs[0].applicable);
+    assert!(
+        recs[0]
+            .recommendation_reasoning
+            .contains("Judged over 4 of 6 file chunks."),
+        "{}",
+        recs[0].recommendation_reasoning
+    );
+}
+
+// ── bookkeeping captures are not identity ───────────────────────────────────────────────────
+
+const SENTENCE: &str = "severity lowered from critical to medium: a ceiling applied";
+
+fn with_bookkeeping(rule: &str, path: &str, line: usize) -> Finding {
+    let mut f = finding(rule, "high", "Different defect entirely");
+    f.path = path.to_string();
+    f.line = line;
+    f.snippet = format!("code at {path}");
+    crate::severity_bounds::record_adjustment(&mut f, SENTENCE.to_string());
+    f.captures
+        .insert("carried_from".to_string(), "abc1234".to_string());
+    f
+}
+
+#[test]
+fn the_same_adjustment_sentence_is_not_a_shared_object() {
+    let a = with_bookkeeping("CONFIG-FLAG-DEBUG-MODE", "config.rs", 5);
+    let b = with_bookkeeping("AI-HANDLER-TRUSTS-FLAG", "handler.rs", 80);
+    assert!(!shared_captured_object(&a, &b));
+    assert!(normalized_capture_values(&a).is_empty());
+    let out = merge_semantic_groups(vec![a, b], &[]);
+    assert_eq!(out.len(), 2, "unrelated findings must not fuse: {out:?}");
+}
+
+#[test]
+fn a_real_shared_object_still_matches_beside_the_bookkeeping() {
+    let mut a = with_bookkeeping("CONFIG-FLAG-DEBUG-MODE", "config.rs", 5);
+    let mut b = with_bookkeeping("AI-HANDLER-TRUSTS-FLAG", "handler.rs", 80);
+    a.captures
+        .insert("flag".to_string(), "debug_mode".to_string());
+    b.captures
+        .insert("flag".to_string(), "debug_mode".to_string());
+    assert!(shared_captured_object(&a, &b));
+}
+
+#[test]
+fn bookkeeping_does_not_stop_the_object_backfill() {
+    let mut f = with_bookkeeping("AI-X-1", "a.rs", 1);
+    f.snippet = "reads public.orders".to_string();
+    backfill_captured_object(&mut f);
+    assert!(
+        f.captures.contains_key("object"),
+        "a finding with only bookkeeping captures still gets its object: {:?}",
+        f.captures
     );
 }

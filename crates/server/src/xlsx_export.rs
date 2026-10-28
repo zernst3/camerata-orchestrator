@@ -488,7 +488,7 @@ fn partition_rows(
             is_fp,
             fp_reason,
             also_locations: f.also_locations.clone(),
-            site_count: 1 + f.also_locations.len(),
+            site_count: f.distinct_site_count(),
             kind: camerata_api_types::audit::KindOnWire(f.kind.clone()),
             severity_adjustments: crate::severity_bounds::severity_adjustment_lines(f, corpus)
                 .join(" "),
@@ -703,7 +703,9 @@ fn site_locations(row: &FindingRow) -> Vec<String> {
     if !row.path.is_empty() {
         out.push(format!("{}:{}", row.path, row.line));
     }
-    for l in &row.also_locations {
+    // Only members at a DIFFERENT place are sites; the rest are "also flagged" notes.
+    let own = crate::onboard::site_place(&row.repo, &row.path, row.line, &row.snippet);
+    for l in crate::report_export::split_absorbed(own, &row.also_locations).other_sites {
         if l.consequence {
             out.push(format!("{}:{} (also affected)", l.path, l.line));
         } else {
@@ -711,6 +713,17 @@ fn site_locations(row: &FindingRow) -> Vec<String> {
         }
     }
     out
+}
+
+/// The "Also flagged here as <headline> (<severity>)" notes of a row: members absorbed at a
+/// place already named, which are not other sites.
+fn flagged_here_notes(row: &FindingRow) -> Vec<String> {
+    let own = crate::onboard::site_place(&row.repo, &row.path, row.line, &row.snippet);
+    crate::report_export::split_absorbed(own.clone(), &row.also_locations)
+        .same_place
+        .into_iter()
+        .map(|(l, at_own)| crate::report_export::flagged_sentence(l, at_own, None))
+        .collect()
 }
 
 /// One row of the `Deviations` sheet — ONE row per RULE, not per site.
@@ -896,6 +909,7 @@ fn build_convention_rows(
                 also_found_at: site_locations(row)
                     .into_iter()
                     .skip(1)
+                    .chain(flagged_here_notes(row))
                     .collect::<Vec<_>>()
                     .join("\n"),
             })
@@ -1228,16 +1242,12 @@ fn write_finding_row(
     // raw rule ids here: this cell is client-facing, and each absorbed site's own rule
     // identity already travels in findings.json's `also_locations` entries.
     ws.write_number_with_format(r, 24, row.site_count as f64, &fmts.cell(bg, false, false))?;
-    let also_found_at = row
-        .also_locations
-        .iter()
-        .map(|l| {
-            if l.consequence {
-                format!("{}:{} (also affected)", l.path, l.line)
-            } else {
-                format!("{}:{}", l.path, l.line)
-            }
-        })
+    // Only members at a different place are listed as sites; those at a place already named
+    // read "Also flagged here as <headline> (<severity>)".
+    let also_found_at = site_locations(row)
+        .into_iter()
+        .skip(usize::from(!row.path.is_empty()))
+        .chain(flagged_here_notes(row))
         .collect::<Vec<_>>()
         .join("\n");
     ws.write_string_with_format(r, 25, &also_found_at, &fmts.cell(bg, true, false))?;
@@ -5277,26 +5287,22 @@ mod tests {
     fn req_c5_absorbed_sites_are_observable_in_findings_json() {
         let mut f = finding("SEC-NO-RAW-SQL-CONCAT-1", "src/orders.rs", 10, "high");
         f.also_locations = vec![
-            crate::onboard::MergedLocation {
-                severity: String::new(),
-                headline: String::new(),
-                repo: "owner/repo".to_string(),
-                path: "src/orders.rs".to_string(),
-                line: 24,
-                rule_id: "SEC-NO-RAW-SQL-CONCAT-1".to_string(),
-                snippet: "let q = format!(\"SELECT ... {}\", id);".to_string(),
-                consequence: false,
-            },
-            crate::onboard::MergedLocation {
-                severity: String::new(),
-                headline: String::new(),
-                repo: "owner/repo".to_string(),
-                path: "src/orders.rs".to_string(),
-                line: 41,
-                rule_id: "SEC-NO-RAW-SQL-CONCAT-1".to_string(),
-                snippet: "let q = \"DELETE ...\".to_string() + &id;".to_string(),
-                consequence: true,
-            },
+            crate::onboard::MergedLocation::site(
+                "owner/repo".to_string(),
+                "src/orders.rs".to_string(),
+                24,
+                "SEC-NO-RAW-SQL-CONCAT-1".to_string(),
+                "let q = format!(\"SELECT ... {}\", id);".to_string(),
+                false,
+            ),
+            crate::onboard::MergedLocation::site(
+                "owner/repo".to_string(),
+                "src/orders.rs".to_string(),
+                41,
+                "SEC-NO-RAW-SQL-CONCAT-1".to_string(),
+                "let q = \"DELETE ...\".to_string() + &id;".to_string(),
+                true,
+            ),
         ];
         let report = report_with(vec![f], vec!["SEC-NO-RAW-SQL-CONCAT-1"]);
         let json = crate::report_export::build_report_json(
@@ -5357,16 +5363,14 @@ mod tests {
     fn req_c6_a_rule_merged_away_as_a_member_never_renders_clean_on_the_coverage_sheet() {
         let mut primary = finding("SEC-NO-RAW-SQL-CONCAT-1", "src/orders.rs", 10, "high");
         primary.also_matches = vec!["SEC-NO-HARDCODED-SECRETS-1".to_string()];
-        primary.also_locations = vec![crate::onboard::MergedLocation {
-            severity: String::new(),
-            headline: String::new(),
-            repo: "owner/repo".to_string(),
-            path: "src/orders.rs".to_string(),
-            line: 12,
-            rule_id: "SEC-NO-HARDCODED-SECRETS-1".to_string(),
-            snippet: "let key = \"sk_live_...\";".to_string(),
-            consequence: false,
-        }];
+        primary.also_locations = vec![crate::onboard::MergedLocation::site(
+            "owner/repo".to_string(),
+            "src/orders.rs".to_string(),
+            12,
+            "SEC-NO-HARDCODED-SECRETS-1".to_string(),
+            "let key = \"sk_live_...\";".to_string(),
+            false,
+        )];
         let report = report_with(
             vec![primary],
             vec!["SEC-NO-RAW-SQL-CONCAT-1", "SEC-NO-HARDCODED-SECRETS-1"],
@@ -5455,6 +5459,35 @@ mod tests {
             shared.contains("Rules not run this scan")
                 && shared.contains("JS-SOME-NEVER-RUN-RULE-1"),
             "a ledger-excluded rule must be named on the Coverage sheet"
+        );
+    }
+
+    /// A member absorbed at the row's own line is the same place: the workbook counts one site
+    /// and prints the "Also flagged here" note (with the member's headline and severity).
+    #[test]
+    fn a_same_line_member_is_a_note_not_another_site_in_the_workbook() {
+        let mut f = finding("SEC-NO-RAW-SQL-CONCAT-1", "src/orders.rs", 10, "medium");
+        f.also_locations = vec![crate::onboard::MergedLocation::site(
+            "owner/repo",
+            "src/orders.rs",
+            10,
+            "AI-INVENTED-1",
+            "x",
+            false,
+        )
+        .with_rating("critical", "Any user can read any invoice")];
+        let report = report_with(vec![f], vec!["SEC-NO-RAW-SQL-CONCAT-1"]);
+        let sealed = report.seal();
+        let json =
+            crate::report_export::build_report_json(&sealed, &HashMap::new(), None, &empty_opts());
+        let export = build_findings_export(&sealed, &HashMap::new(), None, &json, &HashMap::new());
+        let row = serde_json::to_value(&export.findings[0]).unwrap();
+        assert_eq!(row["site_count"], 1, "{row}");
+        let xlsx = build_workbook(&sealed, &HashMap::new(), None, &empty_opts()).unwrap();
+        let shared = read_zip_entry(&xlsx, "xl/sharedStrings.xml");
+        assert!(
+            shared.contains("Also flagged here as Any user can read any invoice (critical)"),
+            "the note is in the workbook"
         );
     }
 
@@ -6090,15 +6123,15 @@ mod tests {
     #[test]
     fn req_pass3_absorbed_merge_sites_stay_visible_on_the_new_sheets() {
         use camerata_api_types::audit::{ConventionObservedKind, DeviationKind, FindingKind};
-        let loc = |line: usize, consequence: bool| crate::onboard::MergedLocation {
-            severity: String::new(),
-            headline: String::new(),
-            repo: "owner/repo".to_string(),
-            path: "src/api/users.rs".to_string(),
-            line,
-            rule_id: "ARCH-API-VERSIONING-1".to_string(),
-            snippet: "router.get(\"/users\", …)".to_string(),
-            consequence,
+        let loc = |line: usize, consequence: bool| {
+            crate::onboard::MergedLocation::site(
+                "owner/repo".to_string(),
+                "src/api/users.rs".to_string(),
+                line,
+                "ARCH-API-VERSIONING-1".to_string(),
+                "router.get(\"/users\", …)".to_string(),
+                consequence,
+            )
         };
         let mut dev = kinded(
             finding("ARCH-API-VERSIONING-1", "src/api/users.rs", 4, "medium"),
@@ -6118,16 +6151,14 @@ mod tests {
                 convention_label: "Cursor pagination".to_string(),
             }),
         );
-        conv.also_locations = vec![crate::onboard::MergedLocation {
-            severity: String::new(),
-            headline: String::new(),
-            repo: "owner/repo".to_string(),
-            path: "src/api/search.rs".to_string(),
-            line: 22,
-            rule_id: "ARCH-PAGINATION-1".to_string(),
-            snippet: "cursor".to_string(),
-            consequence: false,
-        }];
+        conv.also_locations = vec![crate::onboard::MergedLocation::site(
+            "owner/repo".to_string(),
+            "src/api/search.rs".to_string(),
+            22,
+            "ARCH-PAGINATION-1".to_string(),
+            "cursor".to_string(),
+            false,
+        )];
 
         let report = report_with(vec![dev, conv], vec![]);
         let bytes =

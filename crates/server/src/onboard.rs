@@ -325,6 +325,79 @@ pub struct MergedLocation {
     pub headline: String,
 }
 
+impl MergedLocation {
+    /// An absorbed site with no rating or headline recorded. Every construction goes through
+    /// this (and [`Self::with_rating`]) so a new field never breaks a caller.
+    pub fn site(
+        repo: impl Into<String>,
+        path: impl Into<String>,
+        line: usize,
+        rule_id: impl Into<String>,
+        snippet: impl Into<String>,
+        consequence: bool,
+    ) -> Self {
+        Self {
+            repo: repo.into(),
+            path: path.into(),
+            line,
+            rule_id: rule_id.into(),
+            snippet: snippet.into(),
+            consequence,
+            severity: String::new(),
+            headline: String::new(),
+        }
+    }
+
+    /// The same site, recording the severity and headline the absorbed finding carried.
+    pub fn with_rating(mut self, severity: impl Into<String>, headline: impl Into<String>) -> Self {
+        self.severity = severity.into();
+        self.headline = headline.into();
+        self
+    }
+
+    /// Where this site is, for counting distinct places.
+    pub fn place(&self) -> SitePlace {
+        site_place(&self.repo, &self.path, self.line, &self.snippet)
+    }
+}
+
+/// The identity of a place in the code: repo, path and line. A finding with no line (0) has no
+/// place of its own beyond the file, so its snippet tells two apart.
+pub type SitePlace = (String, String, usize, String);
+
+/// See [`SitePlace`].
+pub fn site_place(repo: &str, path: &str, line: usize, snippet: &str) -> SitePlace {
+    (
+        repo.to_string(),
+        path.to_string(),
+        line,
+        if line == 0 {
+            snippet.trim().to_string()
+        } else {
+            String::new()
+        },
+    )
+}
+
+impl Finding {
+    /// This finding's own place in the code.
+    pub fn place(&self) -> SitePlace {
+        site_place(&self.repo, &self.path, self.line, &self.snippet)
+    }
+
+    /// How many DISTINCT places this row stands for: its own plus every absorbed site at a
+    /// different place. A member absorbed at the row's own line is the same place, not another
+    /// site, and reads as "also flagged here".
+    pub fn distinct_site_count(&self) -> usize {
+        let mut seen: std::collections::HashSet<SitePlace> = std::collections::HashSet::new();
+        seen.insert(self.place());
+        for l in &self.also_locations {
+            seen.insert(l.place());
+        }
+        seen.len()
+    }
+}
+
 /// A finding is presumed presence-type (`located = true`) unless the AI merge pass proves its
 /// snippet is a description rather than code present in the file.
 fn default_located() -> bool {
@@ -3509,16 +3582,14 @@ mod tests {
     fn cross_family_merge_ledger_reconciles_when_a_fresh_absorption_collides_with_an_already_absorbed_site(
     ) {
         let mut pre_primary = structural_site("acme/api", "handler.rs", 50, "RULE-1");
-        pre_primary.also_locations = vec![MergedLocation {
-            severity: String::new(),
-            headline: String::new(),
-            repo: "acme/api".to_string(),
-            path: "handler.rs".to_string(),
-            line: 52,
-            rule_id: "RULE-1".to_string(),
-            snippet: "already-absorbed-earlier".to_string(),
-            consequence: false,
-        }];
+        pre_primary.also_locations = vec![MergedLocation::site(
+            "acme/api".to_string(),
+            "handler.rs".to_string(),
+            52,
+            "RULE-1".to_string(),
+            "already-absorbed-earlier".to_string(),
+            false,
+        )];
         let y = structural_site("acme/api", "handler.rs", 52, "RULE-1");
 
         let findings = vec![pre_primary, y];

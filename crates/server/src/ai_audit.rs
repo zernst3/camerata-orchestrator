@@ -1380,17 +1380,26 @@ fn adopted_near_match(norm: &str, adopted: &std::collections::HashSet<String>) -
     if let [only] = versioned.as_slice() {
         return Some((*only).clone());
     }
+    // The label extends an adopted id. Not when what it adds is itself a run of another adopted
+    // id's words ("SEC-NO-A-1-SEC-NO-B-1": two rules named at once): that is not one rule.
+    let words_of = |id: &str| format!("-{id}-");
     adopted
         .iter()
         .filter(|a| {
             norm.strip_prefix(a.as_str())
-                .is_some_and(|rest| rest.starts_with('-'))
+                .and_then(|rest| rest.strip_prefix('-'))
+                .is_some_and(|rest| {
+                    !rest.is_empty()
+                        && !adopted
+                            .iter()
+                            .any(|b| words_of(b).contains(&words_of(rest)))
+                })
         })
         .max_by_key(|a| a.len())
         .cloned()
 }
 
-/// A model-written line number (M5): a number, a numeric string, `L42`, or a range such as
+/// A model-written line number (M5): a number, a numeric string, `L42`, `line 42`, or a range such as
 /// `42-47` (its first line). Anything else is 0, "no line".
 fn parse_model_line(v: &serde_json::Value) -> usize {
     if let Some(n) = v.as_u64() {
@@ -1402,8 +1411,13 @@ fn parse_model_line(v: &serde_json::Value) -> usize {
     let Some(t) = v.as_str() else {
         return 0;
     };
-    let t = t.trim().trim_start_matches(['L', 'l']).trim_start();
-    let digits: String = t.chars().take_while(char::is_ascii_digit).collect();
+    let lower = t.trim().to_ascii_lowercase();
+    let rest = ["lines", "line", "ln", "l"]
+        .iter()
+        .find_map(|p| lower.strip_prefix(p))
+        .unwrap_or(&lower);
+    let rest = rest.trim_start_matches(|c: char| c.is_whitespace() || matches!(c, ':' | '#' | '.'));
+    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
     digits.parse().unwrap_or(0)
 }
 
@@ -3746,6 +3760,10 @@ pub fn parse_alternative_recommendations(
     out
 }
 
+/// Most file chunks a rule judged "not applicable" is asked about again (M7). Beyond this the
+/// judgment stands and says how many chunks it covers.
+const ALTERNATIVES_MAX_FILE_CHUNKS: usize = 4;
+
 /// A path a model named in `needs_files` or a scan reply, in the form the scan lists files: no
 /// leading `./` or `/`, forward slashes, trimmed of quotes and backticks (M6).
 pub(crate) fn normalize_requested_path(raw: &str) -> String {
@@ -3803,11 +3821,17 @@ async fn recommend_alternatives(
     // further chunk, because the code that makes it applicable may sit in any of them. Rules
     // already judged applicable (or with no convention) are not asked again, so the common case
     // is still ONE call per rule batch. A rule is "not applicable" only when EVERY chunk says so.
+    let total_chunks = file_chunks.len().max(1);
     let digests: Vec<String> = if file_chunks.is_empty() {
         vec![String::new()]
     } else {
-        file_chunks.iter().map(|c| build_digest(c, nonce)).collect()
+        file_chunks
+            .iter()
+            .take(ALTERNATIVES_MAX_FILE_CHUNKS)
+            .map(|c| build_digest(c, nonce))
+            .collect()
     };
+    let chunks_read = digests.len();
 
     // Bounded chunks (see `ALTERNATIVES_BATCH_SIZE`'s doc comment) - each rule-batch is an
     // independent streamed call, so no single completion is asked to decide every
@@ -3928,6 +3952,15 @@ async fn recommend_alternatives(
                         best[at] = Some(rec);
                     }
                 }
+            }
+        }
+        // A rule still judged not applicable after reading fewer chunks than the repo has says
+        // so: the judgment covers part of the code only.
+        for rec in best.iter_mut().flatten() {
+            if !rec.applicable && chunks_read < total_chunks {
+                rec.recommendation_reasoning.push_str(&format!(
+                    " Judged over {chunks_read} of {total_chunks} file chunks."
+                ));
             }
         }
         recommendations.extend(best.into_iter().flatten());
@@ -4079,7 +4112,10 @@ fn fix_context_window(
 /// [`find_ungrounded_identifier`] (validation) so the two can never silently drift apart.
 fn fix_evidence_blob(f: &Finding, files: &[(String, String)]) -> String {
     let context = fix_context_window(files, &f.path, f.line, 8);
-    let captures = f.captures.values().cloned().collect::<Vec<_>>().join(" ");
+    let captures = object_captures(f)
+        .map(|(_, v)| v.clone())
+        .collect::<Vec<_>>()
+        .join(" ");
     format!(
         "{} {} {} {} {}",
         f.path, f.snippet, f.detail, captures, context
@@ -4088,12 +4124,10 @@ fn fix_evidence_blob(f: &Finding, files: &[(String, String)]) -> String {
 
 /// The "Captured objects" line of a finding's block, or nothing when it captured none.
 fn captured_objects_line(f: &Finding) -> String {
-    if f.captures.is_empty() {
+    if object_captures(f).next().is_none() {
         return String::new();
     }
-    let caps = f
-        .captures
-        .iter()
+    let caps = object_captures(f)
         .map(|(k, v)| format!("{k}={v}"))
         .collect::<Vec<_>>()
         .join(", ");
@@ -5241,10 +5275,26 @@ fn salvage_complete_findings(
     adopted: &std::collections::HashSet<String>,
 ) -> (Vec<Finding>, Vec<ProposedRule>) {
     let none = || (Vec::new(), Vec::new());
-    let Some(key) = text.find("\"findings\"") else {
+    // Anchored at the JSON object: prose before the first `{` that happens to say "findings" is
+    // not the key, and the key must open the object or follow a comma.
+    let Some(obj_start) = text.find('{') else {
         return none();
     };
-    let after = &text[key + "\"findings\"".len()..];
+    let json = &text[obj_start..];
+    let Some(key) = json
+        .match_indices("\"findings\"")
+        .map(|(i, _)| i)
+        .find(|&i| {
+            json[..i]
+                .trim_end()
+                .chars()
+                .last()
+                .is_some_and(|c| c == '{' || c == ',')
+        })
+    else {
+        return none();
+    };
+    let after = &json[key + "\"findings\"".len()..];
     let Some(open) = after.find('[') else {
         return none();
     };
@@ -5298,10 +5348,16 @@ fn salvage_complete_findings(
             _ => i += 1,
         }
     }
-    if objects.is_empty() {
+    // One object at a time: a complete-looking object that is not valid JSON is skipped on its
+    // own and does not cost the others.
+    let valid: Vec<&str> = objects
+        .into_iter()
+        .filter(|o| serde_json::from_str::<serde_json::Value>(o).is_ok())
+        .collect();
+    if valid.is_empty() {
         return none();
     }
-    let synthetic = format!("{{\"findings\":[{}]}}", objects.join(","));
+    let synthetic = format!("{{\"findings\":[{}]}}", valid.join(","));
     parse_ai_findings(repo, &synthetic, adopted)
 }
 
@@ -6225,6 +6281,10 @@ async fn run_passes_batch(
     // counted them), so the shared reassembly gets no meter: recording again would bill twice.
     let pairs: Vec<(usize, usize)> = work.iter().map(|w| (w.ci, w.bi)).collect();
     let chunk_files: Vec<usize> = chunks.iter().map(|c| c.len()).collect();
+    // Every reply was staged as it arrived, so the reassembly stages nothing. A reply that came
+    // back unusable is counted wasted here unless the batch_default retry step already did (it
+    // counts the reply it ends with); only the legacy path, which has no retry, needs it.
+    let wasted_meter = if eff.batch_default { None } else { meter };
     Ok(reassemble_batch_passes(
         repo,
         label,
@@ -6235,7 +6295,8 @@ async fn run_passes_batch(
         &results,
         &round.refused,
         adopted,
-        None,
+        wasted_meter,
+        true,
         job,
     ))
 }
@@ -6258,6 +6319,7 @@ fn reassemble_batch_passes(
     refused_ids: &std::collections::HashSet<String>,
     adopted: &std::collections::HashSet<String>,
     meter: Option<&UsageMeter>,
+    replies_already_metered: bool,
     job: Option<(&crate::jobs::JobStore, &str)>,
 ) -> PassesOut {
     let mut findings = Vec::new();
@@ -6265,6 +6327,13 @@ fn reassemble_batch_passes(
     let mut requested = std::collections::HashSet::new();
     let mut ok = 0usize;
     let mut failures: Vec<PassFailure> = Vec::new();
+    // A caller that metered each reply as it arrived still needs the replies that bought nothing
+    // counted as wasted; it must not stage them a second time.
+    let stage = |m: &UsageMeter, resp: &crate::llm::LlmResponse| {
+        if !replies_already_metered {
+            m.record_stage(Stage::ScanPass, resp);
+        }
+    };
 
     for &(ci, bi) in pairs {
         let custom_id = format!("c{ci}-b{bi}");
@@ -6280,7 +6349,7 @@ fn reassemble_batch_passes(
             // batch; it is a failed pass naming its files, never "no findings" (H4).
             Some(resp) if !resp.truncated && scan_output_is_malformed(&resp.text) => {
                 if let Some(m) = meter {
-                    m.record_stage(Stage::ScanPass, resp);
+                    stage(m, resp);
                     m.record_wasted(Stage::ScanPass, resp);
                 }
                 failures.push(
@@ -6303,7 +6372,7 @@ fn reassemble_batch_passes(
             // the complete findings that arrived are kept (H2). It never reads as "no findings".
             Some(resp) if resp.truncated => {
                 if let Some(m) = meter {
-                    m.record_stage(Stage::ScanPass, resp);
+                    stage(m, resp);
                     m.record_wasted(Stage::ScanPass, resp);
                 }
                 let (f, p) = salvage_complete_findings(repo, &resp.text, adopted);
@@ -6322,7 +6391,7 @@ fn reassemble_batch_passes(
             }
             Some(resp) => {
                 if let Some(m) = meter {
-                    m.record_stage(Stage::ScanPass, resp);
+                    stage(m, resp);
                 }
                 let (f, p) = parse_ai_findings(repo, &resp.text, adopted);
                 let needs = parse_needs_files(&resp.text);
@@ -6341,7 +6410,7 @@ fn reassemble_batch_passes(
                 // the API gave (a refusal reads as a refusal) over a generic "missing".
                 // A failed item that was still billed (a refusal) counts toward the spend cap.
                 if let (Some(m), Some(billed)) = (meter, results.billed.get(&custom_id)) {
-                    m.record_stage(Stage::ScanPass, billed);
+                    stage(m, billed);
                 }
                 let reason = results
                     .errors
@@ -6678,18 +6747,10 @@ fn primary_rank(f: &Finding, group_len: usize, index: usize) -> (u8, u8, u8, u8,
     )
 }
 
-/// The `Finding::captures` key under which every producer that MOVES a severity records one
-/// sentence saying so (one sentence per line). Read by
-/// `camerata_rules::severity_bounds::recorded_adjustments`; the exporters show it as "Severity
-/// adjusted from X: reason" so a lowered rating is never silent.
-pub(crate) const SEVERITY_ADJUSTMENTS_KEY: &str = "severity_adjustments";
-
-/// Most adjustment sentences one finding keeps (a row passes through a handful of producers).
-const MAX_SEVERITY_ADJUSTMENTS: usize = 8;
-
-/// Record that `from` became `to` on `f`, and why, as one sentence under
-/// [`SEVERITY_ADJUSTMENTS_KEY`]. A no-op when the two are the same. The reason is flattened to
-/// one line and capped so the entry stays one sentence.
+/// Record that `from` became `to` on `f`, and why, as one sentence through the ONE shared
+/// writer ([`crate::severity_bounds::record_adjustment`], which de-duplicates and caps); the
+/// exporters read it back with `recorded_adjustments`. A no-op when the two are the same. The
+/// reason is flattened to one line and capped so the entry stays one sentence.
 pub(crate) fn record_severity_adjustment(f: &mut Finding, from: &str, to: &str, reason: &str) {
     if from == to {
         return;
@@ -6708,17 +6769,7 @@ pub(crate) fn record_severity_adjustment(f: &mut Finding, from: &str, to: &str, 
     } else {
         format!("severity {verb} from {from} to {to}: {why}")
     };
-    let entry = f
-        .captures
-        .entry(SEVERITY_ADJUSTMENTS_KEY.to_string())
-        .or_default();
-    if entry.lines().any(|l| l == sentence) || entry.lines().count() >= MAX_SEVERITY_ADJUSTMENTS {
-        return;
-    }
-    if !entry.is_empty() {
-        entry.push('\n');
-    }
-    entry.push_str(&sentence);
+    crate::severity_bounds::record_adjustment(f, sentence);
 }
 
 /// The one-line headline of a finding: its title (the text before the first `HEADLINE_SEP` in
@@ -6739,16 +6790,15 @@ fn finding_headline(f: &Finding) -> String {
 /// `f`'s own evidence site as an absorbed [`MergedLocation`], keeping its OWN severity and
 /// headline so the merge never hides a higher rating or the defect it named (H5).
 fn absorbed_site(f: &Finding) -> MergedLocation {
-    MergedLocation {
-        repo: f.repo.clone(),
-        path: f.path.clone(),
-        line: f.line,
-        rule_id: f.rule_id.clone(),
-        snippet: f.snippet.clone(),
-        consequence: !f.located,
-        severity: f.severity.clone(),
-        headline: finding_headline(f),
-    }
+    MergedLocation::site(
+        f.repo.clone(),
+        f.path.clone(),
+        f.line,
+        f.rule_id.clone(),
+        f.snippet.clone(),
+        !f.located,
+    )
+    .with_rating(f.severity.clone(), finding_headline(f))
 }
 
 /// C5-1: the merged row's severity. The default — and the ONLY behavior when every member of
@@ -6816,11 +6866,22 @@ fn merge_location_group(group: Vec<Finding>) -> Finding {
     // H5: every absorbed member leaves its own rule id, severity and headline behind, so a
     // critical AI finding folded into a medium deterministic row stays visible with the rating
     // and the title it carried. The members' own already-nested sites are carried too.
+    //
+    // The sites ALREADY nested (the primary's own, and each member's) are de-duplicated by
+    // (repo, path, line, rule) as `merge_semantic_group` does; each member's FRESH own-site
+    // entry is always kept, so every absorbed member leaves one.
+    let mut nested = std::mem::take(&mut primary.also_locations);
+    for f in &group {
+        nested.extend(f.also_locations.iter().cloned());
+    }
+    let mut nested_seen: std::collections::HashSet<(String, String, usize, String)> =
+        std::collections::HashSet::new();
+    nested.retain(|l| {
+        nested_seen.insert((l.repo.clone(), l.path.clone(), l.line, l.rule_id.clone()))
+    });
+    primary.also_locations = nested;
     for f in &group {
         primary.also_locations.push(absorbed_site(f));
-        primary
-            .also_locations
-            .extend(f.also_locations.iter().cloned());
     }
     let max_sev_seen = max_sev.clone();
     primary.severity = merged_severity(&primary, max_sev, all_same_tier);
@@ -6867,30 +6928,38 @@ fn dedup_snippet_key(snippet: &str) -> String {
         .to_ascii_lowercase()
 }
 
+/// Whether two normalized snippets name the same code: equal, or one is inside the other (a
+/// chunk quoting the whole statement and another only the call in it). An empty snippet matches
+/// only another empty one.
+fn same_snippet(a: &str, b: &str) -> bool {
+    if a.is_empty() || b.is_empty() {
+        return a == b;
+    }
+    a == b || a.contains(b) || b.contains(a)
+}
+
 /// Drop the repeats of one finding reported by several passes, keyed on
-/// `(path, line, rule id, snippet)` (M5). The snippet is part of the key so two different
-/// problems that one rule found at line 0 of a file, or that share an unresolved line estimate,
-/// are not collapsed into the first. Of a group of repeats the first is kept, at the HIGHEST
-/// severity any repeat carried. Order is preserved.
+/// `(path, line, rule id)` plus the snippet (M5): two findings are repeats when their
+/// normalized snippets are equal or one contains the other. A different snippet is a different
+/// problem (two things one rule found at line 0 of a file, or at one unresolved line
+/// estimate), so it is kept. Of a group of repeats the first is kept, at the HIGHEST severity
+/// any repeat carried. Order is preserved.
 fn dedup_findings_keep_max_severity(findings: &mut Vec<Finding>) {
-    let mut index: std::collections::HashMap<(String, usize, String, String), usize> =
+    let mut by_key: std::collections::HashMap<(String, usize, String), Vec<(String, usize)>> =
         std::collections::HashMap::new();
     let mut kept: Vec<Finding> = Vec::with_capacity(findings.len());
     for f in std::mem::take(findings) {
-        let key = (
-            f.path.clone(),
-            f.line,
-            f.rule_id.clone(),
-            dedup_snippet_key(&f.snippet),
-        );
-        match index.get(&key) {
-            Some(&at) => {
+        let key = (f.path.clone(), f.line, f.rule_id.clone());
+        let snip = dedup_snippet_key(&f.snippet);
+        let entry = by_key.entry(key).or_default();
+        match entry.iter().find(|(s, _)| same_snippet(s, &snip)) {
+            Some(&(_, at)) => {
                 if severity_rank(&f.severity) > severity_rank(&kept[at].severity) {
                     kept[at].severity = f.severity;
                 }
             }
             None => {
-                index.insert(key, kept.len());
+                entry.push((snip, kept.len()));
                 kept.push(f);
             }
         }
@@ -7279,15 +7348,30 @@ fn structural_objects(f: &Finding) -> std::collections::HashSet<String> {
     out
 }
 
+/// `Finding::captures` keys that are BOOKKEEPING about the row, not objects the finding is
+/// about: the severity-adjustment sentences and the carried-from commit. Two unrelated findings
+/// can carry the same such value (the same ceiling sentence, the same commit), so they are never
+/// identity evidence for a merge, a veto, a backfill or a credential-identity match.
+const BOOKKEEPING_CAPTURE_KEYS: &[&str] = &[
+    crate::severity_bounds::SEVERITY_ADJUSTMENTS_CAPTURE,
+    crate::report_export::CARRIED_FROM_CAPTURE,
+];
+
+/// The captures that name an object: every capture except the bookkeeping keys.
+fn object_captures(f: &Finding) -> impl Iterator<Item = (&String, &String)> {
+    f.captures
+        .iter()
+        .filter(|(k, _)| !BOOKKEEPING_CAPTURE_KEYS.contains(&k.as_str()))
+}
+
 /// W7 (C4): a finding's normalized detector-capture VALUES — the same normalization
 /// [`shared_captured_object`] applies (trimmed, lowercased, length-floored at
 /// [`MIN_SHARED_CAPTURE_LEN`] so a bare `id`/`ok` value proves nothing). The STRUCTURED
 /// identity a detector emitted when it matched, as opposed to whatever the prose happens to
 /// mention.
 fn normalized_capture_values(f: &Finding) -> std::collections::HashSet<String> {
-    f.captures
-        .values()
-        .map(|v| v.trim().to_ascii_lowercase())
+    object_captures(f)
+        .map(|(_, v)| v.trim().to_ascii_lowercase())
         .filter(|v| v.len() >= MIN_SHARED_CAPTURE_LEN)
         .collect()
 }
@@ -7366,19 +7450,13 @@ const MIN_SHARED_CAPTURE_LEN: usize = 3;
 /// the object they each independently identified (one might key it `table`, the other
 /// `object-name`); the object identity is what matters, not the label.
 fn shared_captured_object(a: &Finding, b: &Finding) -> bool {
-    if a.captures.is_empty() || b.captures.is_empty() {
+    if object_captures(a).next().is_none() || object_captures(b).next().is_none() {
         return false;
     }
-    let a_values: std::collections::HashSet<String> = a
-        .captures
-        .values()
-        .map(|v| v.trim().to_ascii_lowercase())
-        .filter(|v| v.len() >= MIN_SHARED_CAPTURE_LEN)
-        .collect();
-    b.captures.values().any(|v| {
-        let v = v.trim().to_ascii_lowercase();
-        v.len() >= MIN_SHARED_CAPTURE_LEN && a_values.contains(&v)
-    })
+    let a_values = normalized_capture_values(a);
+    normalized_capture_values(b)
+        .iter()
+        .any(|v| a_values.contains(v))
 }
 
 /// C4-P1 design point 2: backfill a `captures` entry from the finding's own structural-object
@@ -7397,7 +7475,7 @@ fn shared_captured_object(a: &Finding, b: &Finding) -> bool {
 /// opportunity for a finding that previously had none, never silently pick the wrong object out
 /// of several. Never overwrites a `captures` entry a detector already set.
 fn backfill_captured_object(f: &mut Finding) {
-    if !f.captures.is_empty() {
+    if object_captures(f).next().is_some() {
         return;
     }
     let mut objs = structural_objects(f).into_iter();
@@ -7501,7 +7579,7 @@ fn credential_identifier_tokens(text: &str) -> std::collections::BTreeSet<String
 /// conservatively left two same-root-cause rows distinct.
 pub(crate) fn root_cause_credential_identities(f: &Finding) -> std::collections::BTreeSet<String> {
     let mut out = credential_identifier_tokens(&format!("{} {}", f.snippet, f.detail));
-    for v in f.captures.values() {
+    for (_, v) in object_captures(f) {
         out.extend(credential_identifier_tokens(v));
     }
     out
@@ -8110,16 +8188,14 @@ fn build_structural_group_finding(rule_id: String, occurrences: Vec<Finding>) ->
     let mut also_locations: Vec<MergedLocation> = Vec::new();
     for (i, f) in occurrences.iter().enumerate() {
         if i > 0 {
-            also_locations.push(MergedLocation {
-                severity: String::new(),
-                headline: String::new(),
-                repo: f.repo.clone(),
-                path: f.path.clone(),
-                line: f.line,
-                rule_id: f.rule_id.clone(),
-                snippet: f.snippet.clone(),
-                consequence: false,
-            });
+            also_locations.push(MergedLocation::site(
+                f.repo.clone(),
+                f.path.clone(),
+                f.line,
+                f.rule_id.clone(),
+                f.snippet.clone(),
+                false,
+            ));
         }
         also_locations.extend(f.also_locations.iter().cloned());
     }
@@ -11535,16 +11611,14 @@ mod tests {
         // id's own site in `also_locations`.
         let mut a = structural_needs_review("a.rs", 10);
         a.also_matches = vec!["AI-ALREADY-MERGED-1".to_string()];
-        a.also_locations = vec![MergedLocation {
-            severity: String::new(),
-            headline: String::new(),
-            repo: a.repo.clone(),
-            path: "already-merged-site.rs".to_string(),
-            line: 99,
-            rule_id: "AI-ALREADY-MERGED-1".to_string(),
-            snippet: "prior evidence".to_string(),
-            consequence: false,
-        }];
+        a.also_locations = vec![MergedLocation::site(
+            a.repo.clone(),
+            "already-merged-site.rs".to_string(),
+            99,
+            "AI-ALREADY-MERGED-1".to_string(),
+            "prior evidence".to_string(),
+            false,
+        )];
         let b = structural_needs_review("b.rs", 20);
 
         let out = group_structural_needs_review(vec![a, b]);
@@ -15897,6 +15971,7 @@ mod tests {
             &std::collections::HashSet::new(),
             &std::collections::HashSet::new(),
             None,
+            false,
             None,
         );
         assert_eq!(ok, 1);
@@ -17240,16 +17315,14 @@ mod tests {
                 // A merged row that ABSORBED one more site under the same rule — the
                 // numerator must count it (2 rows + 1 absorbed = 3 deviating sites).
                 let mut f = deviation_fixture("MULTI-RULE-1", "src/b.rs", 20);
-                f.also_locations.push(MergedLocation {
-                    severity: String::new(),
-                    headline: String::new(),
-                    repo: "me/api".to_string(),
-                    path: "src/c.rs".to_string(),
-                    line: 30,
-                    rule_id: "MULTI-RULE-1".to_string(),
-                    snippet: "third site".to_string(),
-                    consequence: false,
-                });
+                f.also_locations.push(MergedLocation::site(
+                    "me/api".to_string(),
+                    "src/c.rs".to_string(),
+                    30,
+                    "MULTI-RULE-1".to_string(),
+                    "third site".to_string(),
+                    false,
+                ));
                 f
             },
             // An unrelated rule's row must be untouched.
