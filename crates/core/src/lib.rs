@@ -47,9 +47,21 @@ pub enum Decision {
 /// allow/deny BEFORE the call executes. The MCP-gateway binding
 /// (`camerata-gateway`) is one implementation; gate logic MUST NOT assume
 /// Claude `PreToolUse` hooks. Proven in Rust (RUST_CORE_VERIFICATION.md).
-#[async_trait::async_trait]
+// Written in the form `#[async_trait]` expands to, so implementations keep using the
+// macro unchanged. Declaring it with the macro adds a bare `#[must_use]` to each method,
+// which clippy (Rust 1.99+) reports as `double_must_use`: the boxed future is already
+// `#[must_use]`.
 pub trait GovernanceGateway: Send + Sync {
-    async fn evaluate(&self, session: &SessionId, call: &ToolCall) -> Decision;
+    fn evaluate<'life0, 'life1, 'life2, 'async_trait>(
+        &'life0 self,
+        session: &'life1 SessionId,
+        call: &'life2 ToolCall,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Decision> + Send + 'async_trait>>
+    where
+        'life0: 'async_trait,
+        'life1: 'async_trait,
+        'life2: 'async_trait,
+        Self: 'async_trait;
 }
 
 /// Result of one agent run.
@@ -65,9 +77,23 @@ pub struct AgentOutcome {
 ///
 /// The `claude -p` CLI driver (`camerata-agent`) is the first implementation;
 /// provider / tier / model live behind this seam.
-#[async_trait::async_trait]
+// Written in the form `#[async_trait]` expands to, so implementations keep using the
+// macro unchanged. Declaring it with the macro adds a bare `#[must_use]` to each method,
+// which clippy (Rust 1.99+) reports as `double_must_use`: the boxed future is already
+// `#[must_use]`.
 pub trait AgentDriver: Send + Sync {
-    async fn run(&self, role: &Role, task: &str) -> anyhow::Result<AgentOutcome>;
+    fn run<'life0, 'life1, 'life2, 'async_trait>(
+        &'life0 self,
+        role: &'life1 Role,
+        task: &'life2 str,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = anyhow::Result<AgentOutcome>> + Send + 'async_trait>,
+    >
+    where
+        'life0: 'async_trait,
+        'life1: 'async_trait,
+        'life2: 'async_trait,
+        Self: 'async_trait;
 }
 
 /// Upper bound on the `diagnostics` text a [`CheckOutcome`] carries, in bytes.
@@ -149,9 +175,23 @@ impl CheckOutcome {
 /// [`CheckOutcome`]). The coordinator bounces each violated rule back to the
 /// agent for revision, and forwards the diagnostics so the agent sees the actual
 /// error text, not just the rule id.
-#[async_trait::async_trait]
+// Written in the form `#[async_trait]` expands to, so implementations keep using the
+// macro unchanged. Declaring it with the macro adds a bare `#[must_use]` to each method,
+// which clippy (Rust 1.99+) reports as `double_must_use`: the boxed future is already
+// `#[must_use]`.
 pub trait CheckRunner: Send + Sync {
-    async fn check(&self, role: &Role, worktree: &std::path::Path) -> anyhow::Result<CheckOutcome>;
+    fn check<'life0, 'life1, 'life2, 'async_trait>(
+        &'life0 self,
+        role: &'life1 Role,
+        worktree: &'life2 std::path::Path,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = anyhow::Result<CheckOutcome>> + Send + 'async_trait>,
+    >
+    where
+        'life0: 'async_trait,
+        'life1: 'async_trait,
+        'life2: 'async_trait,
+        Self: 'async_trait;
 }
 
 pub mod coordinator;

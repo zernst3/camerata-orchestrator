@@ -1,7 +1,8 @@
 # The one place the Rust toolchain is pinned. rustup reads it for local builds, and the CI
 # workflow reads the same `channel` line (see .github/workflows/ci.yml), so the two cannot
-# drift. Bump it deliberately, together with whatever the new toolchain's rustc and clippy
-# flag (1.99's clippy, for one, reports `double_must_use` on every `#[async_trait]` trait).
+# drift. The 1.99 findings were fixed ahead of the bump (expanded `#[async_trait]`
+# declarations and four lint fixes). Bump it deliberately, together with whatever the next
+# toolchain's rustc and clippy flag.
 [toolchain]
 channel = "1.95.0"
 components = ["rustfmt", "clippy"]

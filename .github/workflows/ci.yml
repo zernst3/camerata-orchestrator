@@ -47,10 +47,8 @@ jobs:
 
       # Pinned, not floating: the gate must mean the same thing on every run. The version is
       # read from rust-toolchain.toml, the same file rustup uses locally, so CI and a
-      # developer's machine cannot drift. On `stable` (1.99) clippy reports
-      # `double_must_use` on every `#[async_trait]` trait and rustc reports a redundant glob
-      # import as unused, neither of which 1.95 does. Bump the toml deliberately, together
-      # with whatever the new toolchain flags.
+      # developer's machine cannot drift. The 1.99 findings were fixed ahead of the bump;
+      # bump the toml deliberately, together with whatever the next toolchain flags.
       - name: Read the pinned toolchain
         id: toolchain
         run: echo "channel=$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)" >> "$GITHUB_OUTPUT"

@@ -7017,7 +7017,7 @@ fn merge_semantic_group(group: Vec<Finding>) -> Finding {
     // `also_locations`. Deliberately kept separate from each member's FRESH own-site entry
     // below: this list alone is what the "same already-absorbed record reachable via two
     // paths" dedup further down is allowed to collapse.
-    let mut nested_locations: Vec<MergedLocation> = primary.also_locations.drain(..).collect();
+    let mut nested_locations: Vec<MergedLocation> = std::mem::take(&mut primary.also_locations);
     // FRESH sites only — THIS stage's own absorption of each group member. See the dedup
     // comment below for why these must never be deduplicated away.
     let mut fresh_locations: Vec<MergedLocation> = Vec::new();

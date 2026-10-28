@@ -180,11 +180,27 @@ impl ResumePayload {
 /// A driver that turns the translation prompt into a model completion. Abstracted so the
 /// AI-translation step can be unit-tested with a FAKE/echo driver (no live model call),
 /// while production uses the real `LlmTranslator` in `camerata-server`.
-#[async_trait::async_trait]
+// Written in the form `#[async_trait]` expands to, so implementations keep using the
+// macro unchanged. Declaring it with the macro adds a bare `#[must_use]` to each method,
+// which clippy (Rust 1.99+) reports as `double_must_use`: the boxed future is already
+// `#[must_use]`.
 pub trait TranslationDriver: Send + Sync {
     /// Complete `prompt` (with `system` grounding) on `model`. Returns the raw model text
     /// (expected to be the JSON of a [`ResumePayload`], but the parser is lenient).
-    async fn complete(&self, system: &str, prompt: &str, model: &str) -> anyhow::Result<String>;
+    fn complete<'life0, 'life1, 'life2, 'life3, 'async_trait>(
+        &'life0 self,
+        system: &'life1 str,
+        prompt: &'life2 str,
+        model: &'life3 str,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = anyhow::Result<String>> + Send + 'async_trait>,
+    >
+    where
+        'life0: 'async_trait,
+        'life1: 'async_trait,
+        'life2: 'async_trait,
+        'life3: 'async_trait,
+        Self: 'async_trait;
 }
 
 /// System grounding for the translator agent: it restates a human decision as a precise,
