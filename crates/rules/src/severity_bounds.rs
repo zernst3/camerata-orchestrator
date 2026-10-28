@@ -150,12 +150,18 @@ pub fn clamp_to_max_severity(severity: String, rule: Option<&Rule>) -> String {
 ///    [`downgrade_unlocated`] (C4-R1) exists to force exactly that shape to `info`. Declining
 ///    here, rather than relying on running before C4-R1, makes the floor order-independent with
 ///    respect to that safety net.
+/// 3. **Not a producer-emitted `info`.** A producer that emits `info` is making an
+///    OBSERVATION ("confirm in the dashboard"), not claiming a live defect, and a floor exists
+///    to stop an under-rated DEFECT. Raising an observation to the rule's floor turned
+///    SUPABASE-RLS-POLICY-DISABLED-1's platform-owned row (`info`, "confirm in the dashboard")
+///    into a `critical` in both the scan and `camerata-check`. The decision (logged 2026-10-28)
+///    is that `info` is exempt, whatever the kind and whoever the producer.
 pub fn raise_to_min_severity<F: BoundedFinding + ?Sized>(
     severity: String,
     f: &F,
     rule: Option<&Rule>,
 ) -> String {
-    if !f.bound_kind().is_accusing() || f.is_unlocated() {
+    if !f.bound_kind().is_accusing() || f.is_unlocated() || severity == "info" {
         return severity;
     }
     let Some(raw_floor) = rule.and_then(|r| r.min_severity.as_deref()) else {
@@ -315,6 +321,17 @@ mod tests {
         assert_eq!(bounded("low", BoundKind::Informational, &set), "low");
         assert_eq!(bounded("low", BoundKind::Unspecified, &set), "low");
         assert_eq!(bounded("critical", BoundKind::Defect, &set), "critical");
+    }
+
+    #[test]
+    fn a_floor_never_raises_a_producer_emitted_info_observation() {
+        let set = rule_set(|r| r.min_severity = Some("critical".to_string()));
+        for kind in [BoundKind::Defect, BoundKind::Deviation] {
+            assert_eq!(bounded("info", kind, &set), "info", "{kind:?}");
+            assert_eq!(bounded("INFO", kind, &set), "INFO", "{kind:?}");
+        }
+        // The exemption is only for `info`: the next tier up is still floored.
+        assert_eq!(bounded("low", BoundKind::Defect, &set), "critical");
     }
 
     #[test]

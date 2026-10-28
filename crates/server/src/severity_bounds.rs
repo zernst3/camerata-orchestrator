@@ -172,6 +172,16 @@ mod tests {
         );
     }
 
+    /// The live scan applies the same exemption the shared chain defines: a producer-emitted
+    /// `info` is an observation, not a defect, and the floor never raises it.
+    #[test]
+    fn the_live_scan_floor_never_raises_a_producer_emitted_info() {
+        let set = rule_set(|r| r.min_severity = Some("critical".to_string()));
+        assert_eq!(bounded("info", Some(FindingKind::Defect), &set), "info");
+        assert_eq!(bounded("Info", Some(deviation()), &set), "Info");
+        assert_eq!(bounded("low", Some(FindingKind::Defect), &set), "critical");
+    }
+
     #[test]
     fn a_floor_declines_a_kindless_or_unlocated_finding() {
         let set = rule_set(|r| r.min_severity = Some("high".to_string()));

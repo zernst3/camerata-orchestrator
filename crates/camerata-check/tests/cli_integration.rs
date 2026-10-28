@@ -570,3 +570,56 @@ fn an_unreadable_rules_file_is_listed_as_not_assessed_and_is_never_clean() {
         .stdout(predicate::str::contains("Not assessed"))
         .stdout(predicate::str::contains("NOT CLEAN"));
 }
+
+/// One malformed rule file must not disable every bound: the gate loads the corpus leniently,
+/// names the skipped file on stderr, still applies the bounds of the rules that did load (the
+/// dead-code ceiling), and does NOT claim the corpus was fully applied.
+#[test]
+fn ci_gate_with_one_malformed_corpus_file_still_bounds_but_reports_a_partial_corpus() {
+    let corpus = tempfile::tempdir().expect("tempdir");
+    std::fs::copy(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../rules/principles/universal/arch-dead-code-1.toml"),
+        corpus.path().join("arch-dead-code-1.toml"),
+    )
+    .unwrap();
+    std::fs::write(corpus.path().join("broken.toml"), "this is = not [a rule").unwrap();
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir_all(tmp.path().join("src")).unwrap();
+    std::fs::write(
+        tmp.path().join("package.json"),
+        r#"{"private":true,"main":"src/app.ts"}"#,
+    )
+    .unwrap();
+    std::fs::write(tmp.path().join("src/app.ts"), "export const app = 1;\n").unwrap();
+    std::fs::write(
+        tmp.path().join("src/orphan.ts"),
+        "export const orphan = 1;\n",
+    )
+    .unwrap();
+
+    let output = bin()
+        .env("CAMERATA_CORPUS_PATH", corpus.path())
+        .arg(tmp.path())
+        .arg("--format")
+        .arg("json")
+        .output()
+        .expect("must run");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let value: serde_json::Value =
+        serde_json::from_str(&stdout).expect("stdout must be valid JSON");
+    assert_eq!(value["corpus_bounds_applied"], false, "{stdout}");
+    assert!(stderr.contains("broken.toml"), "{stderr}");
+    let dead = value["violations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v["rule_id"] == "ARCH-DEAD-CODE-1")
+        .unwrap_or_else(|| panic!("dead code must be reported: {stdout}"));
+    assert_eq!(
+        dead["severity"], "low",
+        "the loaded rule's cap still applies"
+    );
+}

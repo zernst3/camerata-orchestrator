@@ -68,8 +68,11 @@
 //! the corpus caps it at `low`.
 //!
 //! The corpus is read from [`camerata_rules::corpus_path`] (the bundled rules, or
-//! `CAMERATA_CORPUS_PATH`). When it cannot be loaded the bounds that need no authored rule still
-//! apply, and [`RunReport::corpus_bounds_applied`] is `false` so the output says so.
+//! `CAMERATA_CORPUS_PATH`) leniently: one malformed rule file is skipped and named on stderr
+//! rather than disabling every bound. The bounds of the files that did load still apply, but
+//! [`RunReport::corpus_bounds_applied`] is `true` only when the load had ZERO errors, so a
+//! partial corpus is never reported as the complete one. When the corpus cannot be loaded at all
+//! the bounds that need no authored rule still apply, and the flag is `false`.
 //!
 //! A deterministic violation BELOW [`FAIL_AT_SEVERITY`] (a `low` or `info` finding, such as a
 //! consistency rule the corpus caps at `low`) is ADVISORY: reported, counted, and exit code 0.
@@ -98,14 +101,17 @@ pub const NEEDS_REVIEW_MARKER: &str = "[needs review";
 pub const EXIT_CODE_RUN_ERROR: i32 = 2;
 
 /// The lowest (bounded) severity at which a deterministic violation fails the default gate.
-/// Anything ranking below it (`low`, `info`, or an unrecognized severity, which normalizes to
-/// `low`) is advisory: reported, never a failure without `--strict`. See the module doc.
+/// Only `low` and `info` rank below it and are advisory: reported, never a failure without
+/// `--strict`. An UNRECOGNIZED severity string is NOT advisory: a gate that cannot read a
+/// severity fails closed (see [`severity_fails_gate`]). See the module doc.
 pub const FAIL_AT_SEVERITY: &str = "medium";
 
-/// Whether a violation at `severity` (any casing) ranks at or above [`FAIL_AT_SEVERITY`].
+/// Whether a violation at `severity` (any casing) fails the default gate: it ranks at or above
+/// [`FAIL_AT_SEVERITY`], OR it is not a recognized severity at all. Fail closed: a checker or
+/// corpus typo (`"hgih"`) must not turn a blocking finding into a silent pass, which is what
+/// treating the unknown as `low` did.
 pub fn severity_fails_gate(severity: &str) -> bool {
-    use camerata_rules::severity_bounds::{normalize_severity, severity_rank};
-    severity_rank(&normalize_severity(severity)) <= severity_rank(FAIL_AT_SEVERITY)
+    !matches!(severity.to_ascii_lowercase().as_str(), "low" | "info")
 }
 
 /// What to check and how — the fully-resolved input to [`run`]. Built by `main.rs` from CLI
@@ -127,6 +133,10 @@ pub struct Options {
     /// The rule corpus whose severity bounds apply to every violation. `None` (not loadable)
     /// still applies the bounds that need no authored rule; see the module doc.
     pub corpus: Option<camerata_rules::RuleSet>,
+    /// How many corpus files failed to load (a lenient load skips them). The bounds of the files
+    /// that loaded still apply, but a non-zero count means the corpus is PARTIAL, so
+    /// [`RunReport::corpus_bounds_applied`] is `false`. `0` for a complete load.
+    pub corpus_load_errors: usize,
 }
 
 /// One violation, in the shape this crate's CLI renders (human and JSON alike). A direct,
@@ -192,8 +202,8 @@ pub struct RunReport {
     /// `true` iff `violations` is empty. Convenience mirror of `violations.is_empty()` so a
     /// JSON consumer doesn't have to check array length for the common case.
     pub clean: bool,
-    /// `true` when the rule corpus loaded and its authored severity bounds were applied.
-    /// `false` means only the bounds that need no authored rule were applied, so a severity may
+    /// `true` when the rule corpus loaded COMPLETELY (no skipped file) and its authored severity
+    /// bounds were applied. `false` means the corpus was missing or partial, so a severity may
     /// read higher than the client's report shows it. Absent in older output (`serde(default)`).
     #[serde(default)]
     pub corpus_bounds_applied: bool,
@@ -318,7 +328,7 @@ pub fn run(opts: &Options) -> anyhow::Result<RunReport> {
         unsupported_rule_ids,
         projected,
     );
-    report.corpus_bounds_applied = opts.corpus.is_some();
+    report.corpus_bounds_applied = opts.corpus.is_some() && opts.corpus_load_errors == 0;
     Ok(report)
 }
 
@@ -473,8 +483,15 @@ fn apply_config_override(
     Ok(())
 }
 
-/// Render a [`RunReport`] as the human-readable CLI output.
+/// Render a [`RunReport`] as the human-readable CLI output of a default (non-`--strict`) run.
 pub fn render_human(report: &RunReport) -> String {
+    render_human_for(report, false)
+}
+
+/// Render a [`RunReport`] as the human-readable CLI output for a run with the given `strict`
+/// mode. Under `--strict` every violation fails the build, so none is labelled "advisory": a
+/// below-the-bar deterministic row reads "below medium" instead, and the header says it fails.
+pub fn render_human_for(report: &RunReport, strict: bool) -> String {
     let mut out = String::new();
     if report.clean {
         out.push_str(&format!(
@@ -493,12 +510,17 @@ pub fn render_human(report: &RunReport) -> String {
         ));
     } else {
         out.push_str(&format!(
-            "camerata-check: {} violation(s) in {} ({} deterministic, of which {} advisory below \
-             {FAIL_AT_SEVERITY}; {} needs-review)\n\n",
+            "camerata-check: {} violation(s) in {} ({} deterministic, of which {} {}; {} \
+             needs-review)\n\n",
             report.violations.len(),
             report.repo,
             report.deterministic_count,
             report.deterministic_count - report.blocking_count,
+            if strict {
+                format!("below {FAIL_AT_SEVERITY}, failing under --strict")
+            } else {
+                format!("advisory below {FAIL_AT_SEVERITY}")
+            },
             report.needs_review_count
         ));
         for v in &report.violations {
@@ -506,6 +528,8 @@ pub fn render_human(report: &RunReport) -> String {
                 "needs-review"
             } else if severity_fails_gate(&v.severity) {
                 "deterministic"
+            } else if strict {
+                "deterministic, below medium"
             } else {
                 "deterministic, advisory"
             };
@@ -546,9 +570,10 @@ pub fn render_human(report: &RunReport) -> String {
         && !(report.violations.is_empty() && report.not_assessed.is_empty())
     {
         out.push_str(
-            "\nNote: the rule corpus could not be loaded (set CAMERATA_CORPUS_PATH to the corpus \
-             directory), so the corpus's severity bounds were not applied; a severity may read \
-             higher than the Camerata report shows it.\n",
+            "\nNote: the rule corpus could not be loaded completely (set CAMERATA_CORPUS_PATH to \
+             the corpus directory; skipped files are named on stderr), so the corpus's severity \
+             bounds were not all applied; a severity may read higher than the Camerata report \
+             shows it.\n",
         );
     }
     if !report.unmatched_rule_ids.is_empty() {
@@ -602,6 +627,7 @@ mod tests {
             config_override: None,
             rule_ids: Vec::new(),
             corpus: None,
+            corpus_load_errors: 0,
         }
     }
 
@@ -1071,14 +1097,74 @@ mod tests {
     }
 
     #[test]
-    fn the_fail_bar_is_medium_and_an_unknown_severity_is_below_it() {
+    fn the_fail_bar_is_medium_and_an_unknown_severity_fails_closed() {
         assert_eq!(FAIL_AT_SEVERITY, "medium");
-        for sev in ["critical", "high", "medium", "Medium"] {
+        for sev in [
+            "critical", "high", "medium", "Medium", "unknown", "hgih", "",
+        ] {
             assert!(severity_fails_gate(sev), "{sev}");
         }
-        for sev in ["low", "info", "unknown"] {
+        for sev in ["low", "info", "Low", "INFO"] {
             assert!(!severity_fails_gate(sev), "{sev}");
         }
+    }
+
+    #[test]
+    fn an_unrecognized_severity_blocks_the_default_gate() {
+        let mut v = graded_violation(ViolationGrade::Defect, "TYPO-1");
+        v.severity = "hgih";
+        let report = bounded_report_of(vec![v], None);
+        assert_eq!(report.blocking_count, 1, "{report:?}");
+        assert_eq!(report.exit_code(false), 1);
+        assert!(!render_human(&report).contains("deterministic, advisory"));
+    }
+
+    /// A producer-emitted `info` observation (SUPABASE-RLS-POLICY-DISABLED-1's platform-owned
+    /// row: "confirm in the dashboard") is never raised by the rule's floor, so it stays advisory
+    /// in the gate exactly as it does in the scan.
+    #[test]
+    fn a_corpus_floor_never_raises_an_info_observation_in_the_gate() {
+        let corpus = corpus_with("OBS-1", |r| r.min_severity = Some("critical".to_string()));
+        let mut v = graded_violation(ViolationGrade::Defect, "OBS-1");
+        v.severity = "info";
+        let report = bounded_report_of(vec![v], Some(&corpus));
+        assert_eq!(report.violations[0].severity, "info");
+        assert_eq!(report.blocking_count, 0);
+        assert_eq!(report.exit_code(false), 0);
+    }
+
+    #[test]
+    fn a_partial_corpus_load_does_not_claim_the_bounds_were_applied() {
+        let dir = tmpdir();
+        write_migration(
+            dir.path(),
+            "20240101000000_init.sql",
+            "create table public.profiles (id uuid primary key);\n",
+        );
+        let corpus = corpus_with("ANY-1", |r| r.max_severity = Some("low".to_string()));
+        let mut o = opts(dir.path());
+        o.corpus = Some(corpus);
+        assert!(run(&o).unwrap().corpus_bounds_applied, "complete load");
+        o.corpus_load_errors = 1;
+        let report = run(&o).unwrap();
+        assert!(!report.corpus_bounds_applied, "one skipped file = partial");
+        assert!(render_human(&report).contains("CAMERATA_CORPUS_PATH"));
+    }
+
+    /// Under `--strict` a below-the-bar deterministic row fails the build, so it is not called
+    /// advisory; the default render still does.
+    #[test]
+    fn strict_does_not_label_a_failing_row_advisory() {
+        let corpus = corpus_with("CAP-1", |r| r.max_severity = Some("low".to_string()));
+        let report = bounded_report_of(
+            vec![graded_violation(ViolationGrade::Defect, "CAP-1")],
+            Some(&corpus),
+        );
+        let strict = render_human_for(&report, true);
+        assert!(!strict.contains("advisory"), "{strict}");
+        assert!(strict.contains("failing under --strict"), "{strict}");
+        assert!(strict.contains("deterministic, below medium"), "{strict}");
+        assert!(render_human_for(&report, false).contains("deterministic, advisory"));
     }
 
     #[test]

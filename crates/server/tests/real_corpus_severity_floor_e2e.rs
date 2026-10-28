@@ -217,6 +217,38 @@ async fn req_w8_an_authored_floor_raises_a_real_rule() {
     );
 }
 
+/// A checker-emitted `info` is an OBSERVATION ("confirm in the dashboard"), not a live defect, so
+/// the corpus floor never raises it (decision logged 2026-10-28). The real case is
+/// `SUPABASE-RLS-POLICY-DISABLED-1`'s platform-owned row: severity `info`, rule floor `critical`.
+/// Before the exemption the export (and `camerata-check`) read it as `critical`. The `low` control
+/// proves the rule's floor still raises a real, lower-rated defect.
+#[tokio::test]
+async fn an_info_observation_is_never_raised_by_the_floor_but_a_low_defect_still_is() {
+    let Some(corpus) = real_corpus().await else {
+        return;
+    };
+    const RULE: &str = "SUPABASE-RLS-POLICY-DISABLED-1";
+    assert_eq!(
+        corpus
+            .iter()
+            .find(|r| r.id.0 == RULE)
+            .and_then(|r| r.min_severity.clone())
+            .as_deref(),
+        Some("critical"),
+        "{RULE} must declare its critical floor, or this test is vacuous"
+    );
+    assert_eq!(
+        exported_severity(RULE, "info", Some(&corpus)),
+        "info",
+        "an info observation must not be floored to critical"
+    );
+    assert_eq!(
+        exported_severity(RULE, "low", Some(&corpus)),
+        "critical",
+        "the floor still raises a below-floor defect"
+    );
+}
+
 /// req_w8 (attribution control): the SAME `low` finding under a real corpus rule that authors
 /// NO floor still exports `low`. Without this, the test above would also pass if some
 /// unrelated part of the export pipeline happened to raise everything — it proves the raise is

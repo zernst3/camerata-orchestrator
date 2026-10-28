@@ -52,9 +52,10 @@ async fn main() -> ExitCode {
     let cli = Cli::parse();
 
     let corpus_dir = camerata_rules::corpus_path();
-    // Best-effort: an unreachable corpus is never fatal. The run still applies the bounds that
-    // need no authored rule, and the report says the corpus bounds were not applied.
-    let corpus = camerata_rules::load_corpus(&corpus_dir).await.ok();
+    // Best-effort and lenient: an unreachable corpus is never fatal, and one malformed rule file
+    // must not disable every bound. A skipped file is named on stderr, the loaded rules' bounds
+    // still apply, and the report says the corpus was not fully applied (corpus_load_errors).
+    let (corpus, corpus_load_errors) = load_corpus_for_gate(&corpus_dir).await;
     warn_on_unknown_corpus_rule_ids(&cli.rule_id, corpus.as_ref(), &corpus_dir);
 
     let opts = camerata_check::Options {
@@ -62,6 +63,7 @@ async fn main() -> ExitCode {
         config_override: cli.config.clone(),
         rule_ids: cli.rule_id.clone(),
         corpus,
+        corpus_load_errors,
     };
 
     let report = match camerata_check::run(&opts) {
@@ -73,7 +75,7 @@ async fn main() -> ExitCode {
     };
 
     match cli.format {
-        Format::Human => print!("{}", camerata_check::render_human(&report)),
+        Format::Human => print!("{}", camerata_check::render_human_for(&report, cli.strict)),
         Format::Json => match camerata_check::render_json(&report) {
             Ok(json) => println!("{json}"),
             Err(e) => {
@@ -87,6 +89,25 @@ async fn main() -> ExitCode {
         0 => ExitCode::SUCCESS,
         _ => ExitCode::FAILURE,
     }
+}
+
+/// Load the corpus leniently. `None` when nothing loaded at all (no corpus directory, or every
+/// file malformed); otherwise the rules that did load plus the number of files that were
+/// skipped, each reported on stderr with its path and error.
+async fn load_corpus_for_gate(
+    corpus_dir: &std::path::Path,
+) -> (Option<camerata_rules::RuleSet>, usize) {
+    let (set, errors) = camerata_rules::load_corpus_lenient(corpus_dir).await;
+    for (path, err) in &errors {
+        eprintln!(
+            "camerata-check: warning: skipped corpus file {}: {err}",
+            path.display()
+        );
+    }
+    if set.is_empty() && !errors.is_empty() {
+        return (None, errors.len());
+    }
+    (Some(set), errors.len())
 }
 
 /// Best-effort, non-fatal: if the rule corpus loaded (it does on any machine that has this repo

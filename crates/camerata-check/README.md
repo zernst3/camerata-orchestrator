@@ -69,12 +69,17 @@ Each violation's severity is the checker's own run through the corpus severity b
 use), so the gate reports a finding at the severity the client's report shows (ARCH-DEAD-CODE-1
 at `low`, its corpus ceiling). A deterministic violation below `FAIL_AT_SEVERITY` (`medium`) is
 advisory: reported, counted in `deterministic_count`, but not in `blocking_count`, and exit
-code 0 without `--strict`.
+code 0 without `--strict`. Only `low` and `info` are below the bar: a severity string the gate
+does not recognize is treated as blocking (fail closed), never as advisory. A finding a checker
+emits at `info` is an observation, not a live defect, and a rule's `min_severity` floor never
+raises it. Under `--strict` no row is labelled "advisory", since every row fails the build.
 
-The corpus is read from `camerata_rules::corpus_path()`: the bundled `crates/rules/principles`
-of the checkout the binary was built from, or `CAMERATA_CORPUS_PATH`. If it cannot be loaded,
-the bounds that need no rule (an unlocated finding is `info`) still apply,
-`corpus_bounds_applied` is `false`, and the human output says so. A vendored binary therefore
+The corpus is read leniently from `camerata_rules::corpus_path()`: the bundled
+`crates/rules/principles` of the checkout the binary was built from, or `CAMERATA_CORPUS_PATH`.
+A malformed rule file is skipped and named on stderr; the rules that did load still bound their
+findings, but `corpus_bounds_applied` is `true` only when no file was skipped. If the corpus
+cannot be loaded at all, the bounds that need no rule (an unlocated finding is `info`) still
+apply, `corpus_bounds_applied` is `false`, and the human output says so. A vendored binary therefore
 needs the corpus copied alongside it and `CAMERATA_CORPUS_PATH` set.
 | `2` | The run itself failed — e.g. an explicit `--config` path that doesn't exist. |
 
