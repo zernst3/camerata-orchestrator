@@ -69,13 +69,16 @@ pub fn estimate_mode(mode: &str, backend: ProjectBackend) -> &str {
 /// How many findings one detail-regeneration call covers (rank 4, `terse_output`). The server's
 /// regeneration stage (`camerata_server::ai_audit::detail_regen`) takes its batch size from here,
 /// so the estimate and the stage cannot drift apart.
-pub const REGEN_BATCH_SIZE: usize = 25;
+pub const REGEN_BATCH_SIZE: usize = 10;
 
 /// The output budget per finding of a regeneration call (the stage's `max_tokens` per finding).
-pub const REGEN_TOKENS_PER_FINDING: u32 = 160;
+/// Measured: a full detail with its JSON wrapping is about 280 output tokens, so a batch of
+/// [`REGEN_BATCH_SIZE`] asks for about 4,500.
+pub const REGEN_TOKENS_PER_FINDING: u32 = 450;
 
-/// Attempts per finding: the first, and one repeat for what the first left out or failed.
-pub const REGEN_ROUNDS: usize = 2;
+/// Attempts per finding: the first, a repeat in half-size batches for what the first left out or
+/// failed, and a last round of one finding to a call for any straggler.
+pub const REGEN_ROUNDS: usize = 3;
 
 /// Estimator assumption: input tokens per finding of a regeneration call (the finding's rule
 /// directive, short statement, snippet, six lines of code either side and at most 20 excerpt
@@ -1957,6 +1960,12 @@ mod tests {
                 (r.findings as usize).div_ceil(REGEN_BATCH_SIZE) * REGEN_ROUNDS
             );
         }
+        // The numbers follow the constants: 86 findings (the size of a real run) are 9 calls of
+        // up to 10 a round, and every finding is priced at 450 output tokens a round.
+        let r = regeneration_estimate(86.0 * REGEN_SCAN_TOKENS_PER_FINDING);
+        assert_eq!(r.findings, 86.0);
+        assert_eq!(r.calls, 9 * 3);
+        assert_eq!(r.output_tokens, 86.0 * 450.0 * 3.0);
         let none = regeneration_estimate(0.0);
         assert_eq!(
             (none.calls, none.input_tokens, none.output_tokens),

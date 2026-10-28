@@ -36,6 +36,7 @@
 //! marker beside it.
 
 use super::*;
+use crate::stage_telemetry::DetailRejections;
 
 /// The marker appended to a finding whose full detail could not be written. Two words on
 /// purpose: it reaches `description_overlap_score`, and a longer marker shared by two failed
@@ -46,7 +47,8 @@ pub(crate) const DETAIL_INCOMPLETE_MARKER: &str = "[detail incomplete]";
 /// "Cost arithmetic" in `docs/TECHNICAL.md` and `batching_beats_one_call_per_finding`.
 const DETAIL_BATCH_SIZE: usize = camerata_ui_core::scan::REGEN_BATCH_SIZE;
 
-/// Output budget per finding: 2 to 4 sentences is about 100 tokens, with headroom.
+/// Output budget per finding. Measured on a real run: a full detail with its JSON wrapping is
+/// about 280 output tokens, so 160 cut off 4 of 10 calls. 450 leaves headroom for a long one.
 const DETAIL_TOKENS_PER_FINDING: u32 = camerata_ui_core::scan::REGEN_TOKENS_PER_FINDING;
 
 /// Lines of code either side of the finding the regeneration shows. Smaller than the fix prompt's
@@ -63,9 +65,19 @@ const EXCERPT_LINE_BUDGET: usize = 20;
 /// The most tokens of one statement that are looked up in the file set.
 const MAX_LOOKUP_TOKENS: usize = 6;
 
-/// Attempts per finding: the first, and one repeat for what the first left out, failed a check
-/// on, or lost to a cut-off reply. The repeat uses half the batch size.
+/// Attempts per finding: the first, a repeat in half-size batches for what the first left out,
+/// failed a check on, or lost to a cut-off reply, and a last round of one finding to a call for
+/// any straggler. Each call still passes the spend-limit check.
 const DETAIL_ROUNDS: usize = camerata_ui_core::scan::REGEN_ROUNDS;
+
+/// The batch size of round `round` (0-based): the full batch, half of it, then one at a time.
+fn round_batch_size(round: usize) -> usize {
+    match round {
+        0 => DETAIL_BATCH_SIZE,
+        1 => DETAIL_BATCH_SIZE.div_ceil(2),
+        _ => 1,
+    }
+}
 
 /// The system prompt of the regeneration call.
 pub(crate) fn detail_regen_system_prompt() -> String {
@@ -402,34 +414,61 @@ pub(super) struct Entry {
     pub detail: String,
 }
 
+/// A reply read entry by entry: the usable entries, and how many array members were not one
+/// (no id, or no text).
+#[derive(Debug, Default)]
+pub(super) struct ParsedReply {
+    pub entries: Vec<Entry>,
+    pub unusable: usize,
+}
+
+fn entry_of(value: &serde_json::Value) -> Option<Entry> {
+    let id = value["id"].as_str()?.trim().to_string();
+    let detail = value["detail"].as_str()?.trim().to_string();
+    if id.is_empty() || detail.is_empty() {
+        return None;
+    }
+    Some(Entry {
+        id,
+        path: value["path"].as_str().map(|p| p.trim().to_string()),
+        line: value["line"].as_u64(),
+        detail,
+    })
+}
+
 /// Parse `{"details":[{"id","path","line","detail"}]}`. Malformed output, a missing array or an
 /// entry without an id or text yields nothing for it; the caller treats a missing entry as "not
 /// written", never as an empty explanation.
-pub(super) fn parse_detail_regen(raw: &str) -> Vec<Entry> {
-    let Some(json) = extract_json_object(raw) else {
-        return Vec::new();
+///
+/// A reply `cut_off` at the output limit is read one entry at a time with the scan's salvage
+/// walker ([`complete_array_objects`]): every complete, well-formed entry is kept, the unfinished
+/// last one and anything after it are not guessed at.
+pub(super) fn parse_detail_reply(raw: &str, cut_off: bool) -> ParsedReply {
+    let values: Vec<serde_json::Value> = if cut_off {
+        complete_array_objects(raw, "details")
+            .into_iter()
+            .filter_map(|o| serde_json::from_str(o).ok())
+            .collect()
+    } else {
+        let Some(json) = extract_json_object(raw) else {
+            return ParsedReply::default();
+        };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(json) else {
+            return ParsedReply::default();
+        };
+        let Some(arr) = v["details"].as_array() else {
+            return ParsedReply::default();
+        };
+        arr.clone()
     };
-    let Ok(v) = serde_json::from_str::<serde_json::Value>(json) else {
-        return Vec::new();
-    };
-    let Some(arr) = v["details"].as_array() else {
-        return Vec::new();
-    };
-    arr.iter()
-        .filter_map(|entry| {
-            let id = entry["id"].as_str()?.trim().to_string();
-            let detail = entry["detail"].as_str()?.trim().to_string();
-            if id.is_empty() || detail.is_empty() {
-                return None;
-            }
-            Some(Entry {
-                id,
-                path: entry["path"].as_str().map(|p| p.trim().to_string()),
-                line: entry["line"].as_u64(),
-                detail,
-            })
-        })
-        .collect()
+    let mut out = ParsedReply::default();
+    for value in &values {
+        match entry_of(value) {
+            Some(e) => out.entries.push(e),
+            None => out.unusable += 1,
+        }
+    }
+    out
 }
 
 /// Why a reply entry was not written.
@@ -443,18 +482,35 @@ pub(super) enum Reject {
     InventedPrecondition,
 }
 
+/// `path` without a leading `./` or `/` (repeated), so `./src/a.rs` and `/src/a.rs` read as
+/// `src/a.rs`.
+fn normalized_path(path: &str) -> &str {
+    let mut p = path.trim();
+    while let Some(rest) = p.strip_prefix("./").or_else(|| p.strip_prefix('/')) {
+        p = rest;
+    }
+    p
+}
+
 /// The checks one entry must pass to be written (the id match is done by the caller, which
 /// knows the batch). Returns the text to write: the model's, with `Borderline: ` put back at the
 /// front when the statement was borderline and the text lost it.
 pub(super) fn accept_entry(f: &Finding, entry: &Entry, code_shown: &str) -> Result<String, Reject> {
-    if entry.path.as_deref() != Some(f.path.as_str()) || entry.line != Some(f.line as u64) {
+    // The path is read forgivingly (a leading "./" or "/" is not a different file); the line is
+    // not: any other line is another place.
+    if entry.path.as_deref().map(normalized_path) != Some(normalized_path(&f.path))
+        || entry.line != Some(f.line as u64)
+    {
         return Err(Reject::Mismatch);
     }
     let text = camerata_secrets::redact_str(&entry.detail).into_owned();
     let short = short_statement_of(&f.detail);
-    // Every path or identifier the statement named stays. Compared on the redacted text, which
-    // is what would be written.
-    for token in named_tokens(short) {
+    // Every path or identifier the statement named stays. Both sides go through the same secret
+    // redaction: the text is what would be written, and a name the redactor rewrites in the
+    // statement is rewritten the same way in the text, so a kept secret-shaped name is not
+    // mistaken for a dropped one.
+    let redacted_short = camerata_secrets::redact_str(short);
+    for token in named_tokens(&redacted_short) {
         if !text.contains(&token.text) {
             return Err(Reject::DropsNamedToken(token.text));
         }
@@ -500,7 +556,8 @@ fn opaque_id(repo: &str, idx: usize, f: &Finding, taken: &[String]) -> String {
 
 /// One round: the `pending` findings in batches of `batch_size`. Writes the regenerated detail
 /// into `findings` and returns the indices still without one. `last_error` keeps the text of the
-/// most recent failed call, for the failed pass's reason.
+/// most recent failed call, for the failed pass's reason; `rejections` counts why entries were
+/// turned down.
 #[allow(clippy::too_many_arguments)]
 async fn run_detail_round(
     llm: &dyn LlmPort,
@@ -515,6 +572,7 @@ async fn run_detail_round(
     pending: &[usize],
     batch_size: usize,
     last_error: &mut Option<String>,
+    rejections: &mut DetailRejections,
 ) -> Vec<usize> {
     let mut still_pending = Vec::new();
     for batch in pending.chunks(batch_size.max(1)) {
@@ -561,16 +619,20 @@ async fn run_detail_round(
         if let Some(m) = meter {
             m.record_stage(Stage::DetailRegeneration, &resp);
         }
-        // A reply cut off at the output limit is not trusted even where it parses: the repeat
-        // round runs it again in a smaller batch.
+        // A reply cut off at the output limit is still a billed, partly wasted call, counted as
+        // waste as before; but every complete entry in it is kept (read one by one), and only
+        // the findings it lost go to the next round.
         if resp.truncated {
             if let Some(m) = meter {
                 m.record_wasted(Stage::DetailRegeneration, &resp);
             }
-            still_pending.extend(batch.iter().copied());
-            continue;
         }
-        let entries = parse_detail_regen(&resp.text);
+        let parsed = parse_detail_reply(&resp.text, resp.truncated);
+        // Entries that name no finding of the batch (no usable id or text, or an id that is not
+        // the batch's). Each is charged below to one finding the reply did not answer, so a
+        // finding's attempt is counted once, under one reason.
+        let mut stray = parsed.unusable;
+        let entries = parsed.entries;
         // An id the reply uses twice is ambiguous: neither entry is written.
         let used_twice: Vec<&str> = entries
             .iter()
@@ -578,22 +640,48 @@ async fn run_detail_round(
             .filter(|id| entries.iter().filter(|e| e.id == *id).count() > 1)
             .collect();
         let mut written = vec![false; batch.len()];
+        // A finding some entry of the reply was addressed to (whatever became of it).
+        let mut answered = vec![false; batch.len()];
+        // A finding whose id the reply used twice.
+        let mut ambiguous = vec![false; batch.len()];
         for entry in &entries {
-            if used_twice.contains(&entry.id.as_str()) {
-                continue;
-            }
             // An id that is not this batch's is ignored, never matched by position.
             let Some(pos) = ids.iter().position(|id| *id == entry.id) else {
+                stray += 1;
                 continue;
             };
+            answered[pos] = true;
+            if used_twice.contains(&entry.id.as_str()) {
+                ambiguous[pos] = true;
+                continue;
+            }
             let idx = batch[pos];
-            if let Ok(text) = accept_entry(&findings[idx], entry, &blocks[pos].code_shown) {
-                findings[idx].detail = compose_detail(&findings[idx].detail, &text);
-                written[pos] = true;
+            match accept_entry(&findings[idx], entry, &blocks[pos].code_shown) {
+                Ok(text) => {
+                    findings[idx].detail = compose_detail(&findings[idx].detail, &text);
+                    written[pos] = true;
+                }
+                Err(Reject::Mismatch) => rejections.mismatch += 1,
+                Err(Reject::DropsNamedToken(_)) => rejections.drops_named_token += 1,
+                Err(Reject::InventedPrecondition) => rejections.invented_precondition += 1,
             }
         }
         for (pos, &idx) in batch.iter().enumerate() {
             if !written[pos] {
+                // One count per finding per attempt. An entry that failed a check was counted
+                // above under its reason; the rest are counted here.
+                if ambiguous[pos] {
+                    rejections.missing_id += 1;
+                } else if !answered[pos] {
+                    if stray > 0 {
+                        stray -= 1;
+                        rejections.missing_id += 1;
+                    } else if resp.truncated {
+                        rejections.truncated += 1;
+                    } else {
+                        rejections.left_out += 1;
+                    }
+                }
                 still_pending.push(idx);
             }
         }
@@ -631,12 +719,12 @@ pub(crate) async fn regenerate_full_details(
     let total = findings.len();
     let mut pending: Vec<usize> = (0..total).collect();
     let mut last_error: Option<String> = None;
+    let mut rejections = DetailRejections::default();
     // The stage boundary check: stopped by the spend limit before it began, every finding keeps
     // its short detail, marked.
     let blocked = meter.is_some_and(|m| m.stage_blocked(repo, STAGE_DETAIL));
     if !blocked {
-        let mut batch_size = DETAIL_BATCH_SIZE;
-        for _ in 0..DETAIL_ROUNDS {
+        for round in 0..DETAIL_ROUNDS {
             if pending.is_empty() {
                 break;
             }
@@ -651,13 +739,18 @@ pub(crate) async fn regenerate_full_details(
                 &directives,
                 &mut findings,
                 &pending,
-                batch_size,
+                // Each round is smaller: a cut-off or a muddled long reply is the usual reason a
+                // batch fails, and a smaller one is both shorter and easier to keep straight.
+                round_batch_size(round),
                 &mut last_error,
+                &mut rejections,
             )
             .await;
-            // The repeat is smaller: a cut-off or a muddled long reply is the usual reason a
-            // batch fails, and a smaller one is both shorter and easier to keep straight.
-            batch_size = batch_size.div_ceil(2);
+        }
+    }
+    if rejections.total() > 0 {
+        if let Some(m) = meter {
+            m.record_detail_rejections(rejections);
         }
     }
     let mut failed_passes = Vec::new();
@@ -678,7 +771,17 @@ pub(crate) async fn regenerate_full_details(
                 } else {
                     ""
                 },
-            ) + &last_error
+            ) + &(if rejections.total() > 0 {
+                // The total only, in plain words: the breakdown by reason is operator telemetry.
+                let n = rejections.total();
+                format!(
+                    "; the model's replies fell short {n} {} across the attempts (an entry failed \
+                     a check, was left out or was cut off)",
+                    if n == 1 { "time" } else { "times" }
+                )
+            } else {
+                String::new()
+            }) + &last_error
                 .as_deref()
                 .map(|e| {
                     format!(
