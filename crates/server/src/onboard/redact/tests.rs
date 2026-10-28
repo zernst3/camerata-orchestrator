@@ -74,6 +74,8 @@ fn finding_carrying(p: &Planted, kind: FindingKind) -> Finding {
         calibration_rationale: Some(format!("Floored: {}", p.text)),
         captures,
         also_locations: vec![MergedLocation {
+            severity: String::new(),
+            headline: String::new(),
             repo: "acme/app".to_string(),
             path: ".env.local".to_string(),
             line: 5,

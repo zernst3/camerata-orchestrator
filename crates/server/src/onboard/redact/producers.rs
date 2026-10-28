@@ -101,6 +101,8 @@ fn sanitize_finding_text_covers_fix_specific_also_locations_and_rationale() {
             fix_specific: Some(format!("Replace {} now.", p.text)),
             calibration_rationale: Some(format!("because {}", p.text)),
             also_locations: vec![MergedLocation {
+                severity: String::new(),
+                headline: String::new(),
                 repo: "acme/app".to_string(),
                 path: ".env".to_string(),
                 line: 1,

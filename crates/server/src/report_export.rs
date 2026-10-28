@@ -7182,6 +7182,8 @@ mod tests {
     fn req_w23_a_rule_absorbed_into_another_rows_locations_is_never_verified_clean() {
         let mut carrier = finding("SEC-NO-VENDOR-TOKEN-1", ".env.production", 4, "critical");
         carrier.also_locations = vec![crate::onboard::MergedLocation {
+            severity: String::new(),
+            headline: String::new(),
             repo: "owner/repo".to_string(),
             path: ".env.production".to_string(),
             line: 1,
@@ -15100,6 +15102,8 @@ mod export_invariants_gate {
         let mut collision_primary = finding("SEC-COLLISION-DEMO-1", "handler.rs", 50, "medium");
         collision_primary.repo = "acme/widgets".to_string();
         collision_primary.also_locations = vec![crate::onboard::MergedLocation {
+            severity: String::new(),
+            headline: String::new(),
             repo: "acme/widgets".to_string(),
             path: "handler.rs".to_string(),
             line: 52,
@@ -15160,6 +15164,8 @@ mod export_invariants_gate {
         a.confidence = Some("needs-review".to_string());
         a.also_matches = vec!["AI-ALREADY-MERGED-A-1".to_string()];
         a.also_locations = vec![MergedLocation {
+            severity: String::new(),
+            headline: String::new(),
             repo: a.repo.clone(),
             path: "already-merged-a.rs".to_string(),
             line: 99,
@@ -15172,6 +15178,8 @@ mod export_invariants_gate {
         b.confidence = Some("needs-review".to_string());
         b.also_matches = vec!["AI-ALREADY-MERGED-B-1".to_string()];
         b.also_locations = vec![MergedLocation {
+            severity: String::new(),
+            headline: String::new(),
             repo: b.repo.clone(),
             path: "already-merged-b.rs".to_string(),
             line: 199,
@@ -15626,6 +15634,8 @@ mod export_invariants_gate {
         );
         fully_represented.kind = deviation_kind.clone();
         fully_represented.also_locations = vec![crate::onboard::MergedLocation {
+            severity: String::new(),
+            headline: String::new(),
             repo: "demo/portal".to_string(),
             path: "src/api/users.rs".to_string(),
             line: 7,

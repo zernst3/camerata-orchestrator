@@ -103,6 +103,8 @@ fn fixture() -> (SealedReport, HashMap<String, DispositionWire>) {
     sql.also_matches = vec!["ARCH-STRICT-LAYERING-1".to_string()];
     sql.also_locations = vec![
         MergedLocation {
+            severity: String::new(),
+            headline: String::new(),
             repo: "acme/portal".to_string(),
             path: "src/refunds.rs".to_string(),
             line: 22,
@@ -111,6 +113,8 @@ fn fixture() -> (SealedReport, HashMap<String, DispositionWire>) {
             consequence: false,
         },
         MergedLocation {
+            severity: String::new(),
+            headline: String::new(),
             repo: "acme/portal".to_string(),
             path: "src/report.rs".to_string(),
             line: 3,

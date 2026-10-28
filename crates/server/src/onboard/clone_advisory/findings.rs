@@ -333,6 +333,8 @@ pub fn confirmed_finding(
     };
     let also_locations: Vec<MergedLocation> = sites
         .map(|site| MergedLocation {
+            severity: String::new(),
+            headline: String::new(),
             repo: repo.to_string(),
             path: site.path.clone(),
             line: site.start_line as usize,

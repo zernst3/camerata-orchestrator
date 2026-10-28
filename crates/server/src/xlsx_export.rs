@@ -5239,6 +5239,8 @@ mod tests {
         let mut f = finding("SEC-NO-RAW-SQL-CONCAT-1", "src/orders.rs", 10, "high");
         f.also_locations = vec![
             crate::onboard::MergedLocation {
+                severity: String::new(),
+                headline: String::new(),
                 repo: "owner/repo".to_string(),
                 path: "src/orders.rs".to_string(),
                 line: 24,
@@ -5247,6 +5249,8 @@ mod tests {
                 consequence: false,
             },
             crate::onboard::MergedLocation {
+                severity: String::new(),
+                headline: String::new(),
                 repo: "owner/repo".to_string(),
                 path: "src/orders.rs".to_string(),
                 line: 41,
@@ -5315,6 +5319,8 @@ mod tests {
         let mut primary = finding("SEC-NO-RAW-SQL-CONCAT-1", "src/orders.rs", 10, "high");
         primary.also_matches = vec!["SEC-NO-HARDCODED-SECRETS-1".to_string()];
         primary.also_locations = vec![crate::onboard::MergedLocation {
+            severity: String::new(),
+            headline: String::new(),
             repo: "owner/repo".to_string(),
             path: "src/orders.rs".to_string(),
             line: 12,
@@ -6046,6 +6052,8 @@ mod tests {
     fn req_pass3_absorbed_merge_sites_stay_visible_on_the_new_sheets() {
         use camerata_api_types::audit::{ConventionObservedKind, DeviationKind, FindingKind};
         let loc = |line: usize, consequence: bool| crate::onboard::MergedLocation {
+            severity: String::new(),
+            headline: String::new(),
             repo: "owner/repo".to_string(),
             path: "src/api/users.rs".to_string(),
             line,
@@ -6072,6 +6080,8 @@ mod tests {
             }),
         );
         conv.also_locations = vec![crate::onboard::MergedLocation {
+            severity: String::new(),
+            headline: String::new(),
             repo: "owner/repo".to_string(),
             path: "src/api/search.rs".to_string(),
             line: 22,

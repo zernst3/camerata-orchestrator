@@ -313,6 +313,16 @@ pub struct MergedLocation {
     /// that shares the SAME fix as the primary. A report renders a consequence site under
     /// "also affects" instead of listing it as a peer evidence location.
     pub consequence: bool,
+    /// The severity this site carried before it was absorbed. A merged row keeps ONE severity
+    /// (see `ai_audit::merged_severity`); an absorbed member's own severity is kept here so a
+    /// higher rating is never hidden by the merge. Empty for a record that predates the field
+    /// (back-compatible serde default); renderers show it only when present.
+    #[serde(default)]
+    pub severity: String,
+    /// The absorbed member's own one-line headline (its title), kept for the same reason as
+    /// `severity`. Empty when the member had none or the record predates the field.
+    #[serde(default)]
+    pub headline: String,
 }
 
 /// A finding is presumed presence-type (`located = true`) unless the AI merge pass proves its
@@ -3500,6 +3510,8 @@ mod tests {
     ) {
         let mut pre_primary = structural_site("acme/api", "handler.rs", 50, "RULE-1");
         pre_primary.also_locations = vec![MergedLocation {
+            severity: String::new(),
+            headline: String::new(),
             repo: "acme/api".to_string(),
             path: "handler.rs".to_string(),
             line: 52,
