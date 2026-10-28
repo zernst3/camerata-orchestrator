@@ -1199,7 +1199,12 @@ mod tests {
                 "export const Route = 1;\n".to_string(),
             ),
         ]);
-        assert_eq!(crate::ai_audit::build_digest(&extracted.files), expected);
+        // The scanners return files in directory-walk order, which is filesystem-defined
+        // (sorted on APFS, hash order on ext4). Sort before digesting so this compares
+        // CONTENT, not the order the OS happened to list the fixture in.
+        let mut files = extracted.files.clone();
+        files.sort();
+        assert_eq!(crate::ai_audit::build_digest(&files), expected);
     }
 
     #[test]

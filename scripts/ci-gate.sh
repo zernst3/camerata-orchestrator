@@ -40,7 +40,7 @@ if [ "$status" -ne 0 ]; then
 
   # GitHub caps error annotations per step, so emit one multi-line annotation per view
   # rather than one per line.
-  grep -E '^(error|warning)(\[|:)|FAILED|panicked at|^failures:|test result: FAILED|could not compile|^ +--> ' "$clean" | head -n 40 > "${clean}.hits" || true
+  grep -E -A 6 '^(error|warning)(\[|:)|FAILED|panicked at|^failures:|test result: FAILED|could not compile|^ +--> ' "$clean" | head -n 80 > "${clean}.hits" || true
   if [ -s "${clean}.hits" ]; then
     emit "${title} failure lines" "${clean}.hits"
   fi
