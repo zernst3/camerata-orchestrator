@@ -2897,6 +2897,27 @@ pub(crate) fn scaled_max_tokens(n_items: usize, per_item_tokens: u32) -> u32 {
         .clamp(AGGREGATE_MAX_TOKENS_FLOOR, AGGREGATE_MAX_TOKENS_CEILING)
 }
 
+/// `max_tokens` for one scan request holding `n_rules` rules: the measured per-rule output budget
+/// ([`camerata_ui_core::scan::SCAN_OUTPUT_TOKENS_PER_RULE`], the figure the pre-flight estimate
+/// prices the scan's output from) through [`scaled_max_tokens`], never below the flat cap the scan
+/// used before it scaled ([`camerata_ui_core::scan::SCAN_MAX_TOKENS_FLOOR`]) and never above the
+/// shared ceiling. A smoke run showed 8 replies of a 15-rule batch cut off at the flat 8192.
+pub(crate) fn scan_max_tokens(n_rules: usize) -> u32 {
+    scaled_max_tokens(n_rules, camerata_ui_core::scan::SCAN_OUTPUT_TOKENS_PER_RULE)
+        .max(camerata_ui_core::scan::SCAN_MAX_TOKENS_FLOOR)
+}
+
+/// `max_tokens` for one alternatives request asking about `n_rules` rules: the measured per-rule
+/// budget ([`camerata_ui_core::scan::ALTERNATIVES_OUTPUT_TOKENS_PER_RULE`], the figure the
+/// pre-flight estimate prices the stage from) through [`scaled_max_tokens`], so never below the
+/// flat 4096 the stage used before it scaled and never above the shared ceiling.
+pub(crate) fn alternatives_max_tokens(n_rules: usize) -> u32 {
+    scaled_max_tokens(
+        n_rules,
+        camerata_ui_core::scan::ALTERNATIVES_OUTPUT_TOKENS_PER_RULE,
+    )
+}
+
 /// Per-finding token estimate for the CALIBRATION pass's response — each verdict is a
 /// compact JSON object (`{"index","severity","confidence","reason"}`) with a one-sentence
 /// `reason`, so a modest per-item budget covers it comfortably.
@@ -3845,7 +3866,13 @@ pub(crate) fn normalize_requested_path(raw: &str) -> String {
 /// whose defining pattern lives entirely in a later chunk may get a less-informed pick; this
 /// is a disclosed limitation, not a silent one.
 ///
-/// Returns `Ok(vec![])` when `alternatives` is empty (nothing to decide — no call made).
+/// Returns `Ok((vec![], None))` when `alternatives` is empty (nothing to decide — no call made).
+///
+/// A reply cut off at the output limit is not read as "no answer". The entries that closed before
+/// the cut are kept ([`salvage_alternative_answers`]); the rules it never reached are asked again
+/// ONCE as a smaller batch; a rule still unanswered then gets no entry (it keeps its default
+/// directive) and the second value of the result is the plain-words reason the caller records
+/// as a pass, naming those rules. `None` when every rule was decided.
 #[allow(clippy::too_many_arguments)]
 async fn recommend_alternatives(
     llm: &dyn LlmPort,
@@ -3857,9 +3884,9 @@ async fn recommend_alternatives(
     audit_model: Option<&str>,
     feedback: Option<(&crate::transcript::TranscriptStore, &str)>,
     meter: Option<&UsageMeter>,
-) -> anyhow::Result<Vec<RuleRecommendation>> {
+) -> anyhow::Result<(Vec<RuleRecommendation>, Option<String>)> {
     if alternatives.is_empty() {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), None));
     }
     let repo_map = build_repo_map(map_files, nonce);
     let file_chunks = chunk_files(files, CHUNK_DIGEST_CHARS);
@@ -3888,10 +3915,15 @@ async fn recommend_alternatives(
         alternatives.chunks(ALTERNATIVES_BATCH_SIZE).collect();
     let n_chunks = rule_chunks.len();
     let mut recommendations = Vec::with_capacity(alternatives.len());
+    let mut gaps = AlternativesGaps::default();
 
     for (chunk_idx, alt_chunk) in rule_chunks.into_iter().enumerate() {
         // The best answer so far for each rule of this batch, in the batch's order.
         let mut best: Vec<Option<RuleRecommendation>> = vec![None; alt_chunk.len()];
+        // Rules whose MOST RECENT ask (a first send and its smaller retry included) got no
+        // answer because the reply was cut off at the output limit.
+        let mut unanswered_ids: std::collections::BTreeSet<String> =
+            std::collections::BTreeSet::new();
         for (digest_idx, digest) in digests.iter().enumerate() {
             let pending: Vec<RuleAlternatives> = alt_chunk
                 .iter()
@@ -3906,10 +3938,6 @@ async fn recommend_alternatives(
             if digest_idx > 0 && meter.is_some_and(UsageMeter::retry_blocked) {
                 break;
             }
-            let prompt = format!(
-                "Repository: {repo}\n\n{repo_map}{digest}\n\n{}",
-                build_alternatives_block(&pending)
-            );
             // Single-call runs keep the EXACT session id + role this function always used
             // (`audit-{repo}-alternatives`); the `-bN` suffix + batch label only appears once
             // there's more than one chunk, and `-dN` once a rule is asked on a further digest.
@@ -3921,74 +3949,111 @@ async fn recommend_alternatives(
             if digest_idx > 0 {
                 session.push_str(&format!("-d{digest_idx}"));
             }
-            if let Some((store, key)) = feedback {
-                store.register(
-                    key,
-                    crate::transcript::AgentTranscript {
-                        session_id: session.clone(),
-                        role: format!(
-                            "recommending {} alternative(s) — {repo}{}{}",
-                            pending.len(),
-                            if n_chunks > 1 {
-                                format!(" (batch {}/{n_chunks})", chunk_idx + 1)
-                            } else {
-                                String::new()
-                            },
-                            if digest_idx > 0 {
-                                format!(" (file chunk {}/{})", digest_idx + 1, digests.len())
-                            } else {
-                                String::new()
-                            }
-                        ),
-                        prompt: prompt.clone(),
-                        output: String::new(),
-                        status: "running".to_string(),
-                    },
-                );
-            }
-            let mut req = LlmRequest::new(prompt)
-                .with_system(crate::prompt_frame::with_untrusted_clause(
-                    alternatives_system_prompt(),
-                    nonce,
-                ))
-                .with_max_tokens(4096)
-                .with_temperature(AUDIT_TEMPERATURE);
-            if let Some(m) = audit_model {
-                req = req.with_model(m.to_string());
-            }
-            // Routed through the STREAMING transport EVEN WHEN there is no live transcript to
-            // feed (`feedback = None`) - the CLI leg's heartbeat resets on any progress and
-            // SALVAGES partial output on a late kill, instead of the flat non-streaming path's
-            // fixed 300s deadline with no partial credit for a near-complete run.
-            let resp_result = if let Some((store, key)) = feedback {
-                let mut on_delta = |t: &str| store.append_output_raw(key, &session, t);
-                llm.complete_streaming(req, &mut on_delta).await
-            } else {
-                let mut on_delta = |_: &str| {};
-                llm.complete_streaming(req, &mut on_delta).await
-            };
-            if let Some((store, key)) = feedback {
-                store.set_status(
-                    key,
-                    &session,
-                    if resp_result.is_ok() {
-                        "done"
-                    } else {
-                        "blocked"
-                    },
-                );
-            }
-            let resp = match resp_result {
-                Ok(r) => r,
-                Err(e) => {
-                    meter_failed(meter, Stage::Alternatives, &e);
-                    return Err(e);
+            let role = format!(
+                "recommending {} alternative(s), {repo}{}{}",
+                pending.len(),
+                if n_chunks > 1 {
+                    format!(" (batch {}/{n_chunks})", chunk_idx + 1)
+                } else {
+                    String::new()
+                },
+                if digest_idx > 0 {
+                    format!(" (file chunk {}/{})", digest_idx + 1, digests.len())
+                } else {
+                    String::new()
                 }
+            );
+            let ask = AlternativesAsk {
+                llm,
+                repo,
+                repo_map: &repo_map,
+                digest,
+                nonce,
+                audit_model,
+                feedback,
+                meter,
             };
-            if let Some(m) = meter {
-                m.record_stage(Stage::Alternatives, &resp);
+            let resp = ask.send(&pending, &session, &role).await?;
+            let (mut answered, unanswered) = if resp.truncated {
+                // A reply cut off at the output limit: the entries that closed before the cut
+                // are answers; the rest were never reached.
+                gaps.attempts = gaps.attempts.max(1);
+                let (recs, rest) = salvage_alternative_answers(&resp.text, &pending);
+                if recs.is_empty() {
+                    if let Some(m) = meter {
+                        m.record_wasted(Stage::Alternatives, &resp);
+                    }
+                }
+                (recs, rest)
+            } else {
+                (
+                    parse_alternative_recommendations(&resp.text, &pending),
+                    Vec::new(),
+                )
+            };
+            let mut still_unanswered: Vec<RuleAlternatives> = Vec::new();
+            if !unanswered.is_empty() {
+                // ONE retry of what the cut-off reply left out, as a smaller batch: the rules not
+                // yet answered, and when the first reply answered none of them, half of the
+                // batch at a time, so the retry is never the same size as the send that failed.
+                let why_not = if !efficiency_of(meter).truncation_retry {
+                    Some("the retry of a cut-off reply is switched off".to_string())
+                } else {
+                    None
+                };
+                let sizes = if unanswered.len() == pending.len() && unanswered.len() > 1 {
+                    unanswered.len().div_ceil(2)
+                } else {
+                    unanswered.len()
+                };
+                for (n, group) in unanswered.chunks(sizes).enumerate() {
+                    if let Some(why) = &why_not {
+                        gaps.retry_note.get_or_insert_with(|| why.clone());
+                        still_unanswered.extend_from_slice(group);
+                        continue;
+                    }
+                    if meter.is_some_and(UsageMeter::retry_blocked) {
+                        gaps.retry_note
+                            .get_or_insert_with(|| SPEND_LIMIT_BEFORE_RETRY.to_string());
+                        still_unanswered.extend_from_slice(group);
+                        continue;
+                    }
+                    gaps.attempts = gaps.attempts.max(2);
+                    let retry_session = format!("{session}-r{n}");
+                    let retry_role = format!(
+                        "recommending {} alternative(s), {repo} (retry of a cut-off reply)",
+                        group.len()
+                    );
+                    match ask.send(group, &retry_session, &retry_role).await {
+                        Ok(retry) if retry.truncated => {
+                            let (recs, rest) = salvage_alternative_answers(&retry.text, group);
+                            if recs.is_empty() {
+                                if let Some(m) = meter {
+                                    m.record_wasted(Stage::Alternatives, &retry);
+                                }
+                            }
+                            answered.extend(recs);
+                            still_unanswered.extend(rest);
+                        }
+                        Ok(retry) => {
+                            answered.extend(parse_alternative_recommendations(&retry.text, group));
+                        }
+                        // The failed call is already on the meter; the answers so far stand.
+                        Err(e) => {
+                            gaps.retry_note
+                                .get_or_insert_with(|| format!("the retry did not complete: {e}"));
+                            still_unanswered.extend_from_slice(group);
+                        }
+                    }
+                }
             }
-            for rec in parse_alternative_recommendations(&resp.text, &pending) {
+            for a in &pending {
+                unanswered_ids.remove(&a.rule_id);
+            }
+            for a in &still_unanswered {
+                unanswered_ids.insert(a.rule_id.clone());
+            }
+            for rec in answered {
                 if let Some(at) = alt_chunk.iter().position(|a| a.rule_id == rec.rule_id) {
                     // The first answer is kept unless a later digest finds the rule applicable.
                     if best[at]
@@ -3997,6 +4062,24 @@ async fn recommend_alternatives(
                     {
                         best[at] = Some(rec);
                     }
+                }
+            }
+        }
+        // A rule whose last ask was cut off and never answered keeps its default directive (it has
+        // no entry here); one that an earlier file chunk did answer keeps that answer, and says it
+        // was judged on fewer chunks.
+        for (a, b) in alt_chunk.iter().zip(best.iter_mut()) {
+            if !unanswered_ids.contains(&a.rule_id) {
+                continue;
+            }
+            match b {
+                None => gaps.undecided.push(a.rule_id.clone()),
+                Some(rec) => {
+                    rec.recommendation_reasoning.push_str(
+                        " A reply for a later file chunk was cut off, so this was judged on fewer \
+                         file chunks.",
+                    );
+                    gaps.partial.push(a.rule_id.clone());
                 }
             }
         }
@@ -4011,7 +4094,199 @@ async fn recommend_alternatives(
         }
         recommendations.extend(best.into_iter().flatten());
     }
-    Ok(recommendations)
+    Ok((recommendations, gaps.reason()))
+}
+
+/// What the recommendation pass could not settle because a reply was cut off at the output limit
+/// and the one smaller retry did not finish the job. Plain data; [`Self::reason`] words it.
+#[derive(Default)]
+struct AlternativesGaps {
+    /// Rules no reply answered. They keep their default directive.
+    undecided: Vec<String>,
+    /// Rules an earlier file chunk answered whose later-chunk reply was cut off.
+    partial: Vec<String>,
+    /// The most sends one rule batch needed (the first, then the retry).
+    attempts: usize,
+    /// Why the retry was not sent or did not complete, when that is the case.
+    retry_note: Option<String>,
+}
+
+impl AlternativesGaps {
+    /// The sentence the run records for what was left undecided, or `None` when nothing was. No
+    /// failure wording: the rules named keep their default directive and the sentence says so.
+    fn reason(&self) -> Option<String> {
+        if self.undecided.is_empty() && self.partial.is_empty() {
+            return None;
+        }
+        let list = |ids: &[String]| {
+            const SHOWN: usize = 8;
+            let mut out = ids
+                .iter()
+                .take(SHOWN)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ");
+            if ids.len() > SHOWN {
+                out.push_str(&format!(" and {} more", ids.len() - SHOWN));
+            }
+            out
+        };
+        let plural = |n: usize| if n == 1 { "rule" } else { "rules" };
+        let mut text = format!(
+            "the model's reply deciding which option each rule follows was cut off at the output \
+             limit after {} attempt{}",
+            self.attempts.max(1),
+            if self.attempts <= 1 { "" } else { "s" }
+        );
+        if let Some(note) = &self.retry_note {
+            text.push_str(&format!(" ({note})"));
+        }
+        if !self.undecided.is_empty() {
+            text.push_str(&format!(
+                "; {} {} ({}) keep their default directive",
+                self.undecided.len(),
+                plural(self.undecided.len()),
+                list(&self.undecided)
+            ));
+        }
+        if !self.partial.is_empty() {
+            text.push_str(&format!(
+                "; {} {} ({}) judged on fewer file chunks than the repo has",
+                self.partial.len(),
+                plural(self.partial.len()),
+                list(&self.partial)
+            ));
+        }
+        Some(text)
+    }
+}
+
+/// The inputs every call of the recommendation pass shares, so the first send and a retry build
+/// the same request.
+struct AlternativesAsk<'a> {
+    llm: &'a dyn LlmPort,
+    repo: &'a str,
+    repo_map: &'a str,
+    digest: &'a str,
+    nonce: &'a crate::prompt_frame::FrameNonce,
+    audit_model: Option<&'a str>,
+    feedback: Option<(&'a crate::transcript::TranscriptStore, &'a str)>,
+    meter: Option<&'a UsageMeter>,
+}
+
+impl AlternativesAsk<'_> {
+    /// One call asking for `rules`. A transport error is recorded on the meter and returned; a
+    /// reply (cut off or not) is recorded as the alternatives stage's and returned for the caller
+    /// to read.
+    async fn send(
+        &self,
+        rules: &[RuleAlternatives],
+        session: &str,
+        role: &str,
+    ) -> anyhow::Result<crate::llm::LlmResponse> {
+        let Self {
+            llm,
+            repo,
+            repo_map,
+            digest,
+            nonce,
+            audit_model,
+            feedback,
+            meter,
+        } = *self;
+        let prompt = format!(
+            "Repository: {repo}\n\n{repo_map}{digest}\n\n{}",
+            build_alternatives_block(rules)
+        );
+        if let Some((store, key)) = feedback {
+            store.register(
+                key,
+                crate::transcript::AgentTranscript {
+                    session_id: session.to_string(),
+                    role: role.to_string(),
+                    prompt: prompt.clone(),
+                    output: String::new(),
+                    status: "running".to_string(),
+                },
+            );
+        }
+        let mut req = LlmRequest::new(prompt)
+            .with_system(crate::prompt_frame::with_untrusted_clause(
+                alternatives_system_prompt(),
+                nonce,
+            ))
+            .with_max_tokens(alternatives_max_tokens(rules.len()))
+            .with_temperature(AUDIT_TEMPERATURE);
+        if let Some(m) = audit_model {
+            req = req.with_model(m.to_string());
+        }
+        // Routed through the STREAMING transport EVEN WHEN there is no live transcript to
+        // feed (`feedback = None`) - the CLI leg's heartbeat resets on any progress and
+        // SALVAGES partial output on a late kill, instead of the flat non-streaming path's
+        // fixed 300s deadline with no partial credit for a near-complete run.
+        let resp_result = if let Some((store, key)) = feedback {
+            let mut on_delta = |t: &str| store.append_output_raw(key, session, t);
+            llm.complete_streaming(req, &mut on_delta).await
+        } else {
+            let mut on_delta = |_: &str| {};
+            llm.complete_streaming(req, &mut on_delta).await
+        };
+        if let Some((store, key)) = feedback {
+            store.set_status(
+                key,
+                session,
+                if resp_result.is_ok() {
+                    "done"
+                } else {
+                    "blocked"
+                },
+            );
+        }
+        let resp = match resp_result {
+            Ok(r) => r,
+            Err(e) => {
+                meter_failed(meter, Stage::Alternatives, &e);
+                return Err(e);
+            }
+        };
+        if let Some(m) = meter {
+            m.record_stage(Stage::Alternatives, &resp);
+        }
+        Ok(resp)
+    }
+}
+
+/// What a cut-off recommendation reply still answers: the recommendations for the rules in
+/// `pending` whose entry closed before the cut (read by the same brace-balanced walker the scan
+/// uses, [`complete_array_objects`]), and the rules it never reached. A rule the reply did not
+/// reach gets NO entry here (not the fallback answer a whole reply's omission gets): the caller
+/// asks again or leaves the rule at its default directive and says so.
+fn salvage_alternative_answers(
+    text: &str,
+    pending: &[RuleAlternatives],
+) -> (Vec<RuleRecommendation>, Vec<RuleAlternatives>) {
+    let mut kept: Vec<&str> = Vec::new();
+    let mut answered: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for object in complete_array_objects(text, "recommendations") {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(object) else {
+            continue;
+        };
+        let Some(id) = v["rule_id"].as_str().map(str::trim) else {
+            continue;
+        };
+        if pending.iter().any(|a| a.rule_id == id) && answered.insert(id.to_string()) {
+            kept.push(object);
+        }
+    }
+    let (done, rest): (Vec<RuleAlternatives>, Vec<RuleAlternatives>) = pending
+        .iter()
+        .cloned()
+        .partition(|a| answered.contains(&a.rule_id));
+    if kept.is_empty() {
+        return (Vec::new(), rest);
+    }
+    let synthetic = format!("{{\"recommendations\":[{}]}}", kept.join(","));
+    (parse_alternative_recommendations(&synthetic, &done), rest)
 }
 
 // ════════════════════════════════════════════════════════════════════════════════════
@@ -5193,13 +5468,15 @@ async fn audit_pass(
     feedback: Option<(&crate::transcript::TranscriptStore, &str)>,
     session: &str,
     meter: Option<&UsageMeter>,
+    // How many rules the prompt holds; the reply's output cap scales with it ([`scan_max_tokens`]).
+    n_rules: usize,
 ) -> anyhow::Result<(Vec<Finding>, Vec<ProposedRule>, Vec<String>)> {
     let mut req = LlmRequest::new(prompt)
         .with_system(crate::prompt_frame::with_untrusted_clause(
             audit_system_prompt_with(terse_output_of(meter)),
             nonce,
         ))
-        .with_max_tokens(8192)
+        .with_max_tokens(scan_max_tokens(n_rules))
         .with_temperature(AUDIT_TEMPERATURE);
     if let Some(m) = audit_model {
         req = req.with_model(m.to_string());
@@ -5904,6 +6181,7 @@ async fn run_passes(
                 feedback,
                 &session,
                 meter,
+                batch.len(),
             )
             .await;
             if let Some((store, key)) = feedback {
@@ -6124,7 +6402,7 @@ async fn run_passes_batch(
                     audit_system_prompt_with(terse_output_of(meter)),
                     nonce,
                 ))
-                .with_max_tokens(8192)
+                .with_max_tokens(scan_max_tokens(batch.len()))
                 .with_model(model.clone())
                 .with_cache_breakpoints(cache_bps)
                 .with_temperature(AUDIT_TEMPERATURE);
@@ -6794,12 +7072,20 @@ fn kinds_merge_compatible(a: &Finding, b: &Finding) -> bool {
 /// (now only a tiebreak within one class+origin tier — e.g. two deterministic members, or two AI
 /// members); (4) confidence (a "needs-review" flag ranks last); (5) earliest appearance, the
 /// final deterministic tiebreak so output never depends on hash/iteration order.
-fn primary_rank(f: &Finding, group_len: usize, index: usize) -> (u8, u8, u8, u8, u8, u8, usize) {
+fn primary_rank(
+    f: &Finding,
+    group_len: usize,
+    index: usize,
+) -> (u8, u8, u8, u8, u8, u8, u8, usize) {
     (
         kind_actionability_rank(f),
         // Firebase review: an asserted row is never ranked beneath a held one, whatever the
         // class — see `kinds_merge_compatible`, which keeps such a group from forming at all.
         asserted_rank(f),
+        // A row about a real secret leads a row about a placeholder (smoke run: an
+        // `.env.example` placeholder took the headline and absorbed the real `.env.production`
+        // key). Ahead of class and origin, which two secret rows share anyway.
+        u8::from(!is_placeholder_secret_row(f)),
         class_rank(finding_class(f)),
         origin_rank(finding_origin(f)),
         severity_rank(&f.severity),
@@ -6808,6 +7094,142 @@ fn primary_rank(f: &Finding, group_len: usize, index: usize) -> (u8, u8, u8, u8,
         // EARLIEST appearance — see BUG-7's original comment on this idiom.
         group_len - index,
     )
+}
+
+/// The severity a row about a placeholder is held at: a committed example value is worth a row
+/// but is not a live credential.
+const PLACEHOLDER_SEVERITY_CEILING: &str = "low";
+
+/// The floor rule about committed secret-bearing files (`.env.production`, key files): a secret
+/// rule with no value shape of its own.
+const SECRET_FILE_RULE: &str = "SEC-NO-SECRET-FILE-1";
+
+/// Whether `rule_id` is one of the secret rules: a rule the secrets crate detects values for, or
+/// the secret-file rule. NOT every `SEC-` rule: the prefix also covers injection, transport and
+/// sink rules, which an example file name or a template token says nothing about.
+fn is_secret_rule(rule_id: &str) -> bool {
+    rule_id == SECRET_FILE_RULE || !camerata_secrets::shapes_for_rule(rule_id).is_empty()
+}
+
+/// Whether `path` names an example or sample file: `.env.example`, `.env.sample` or anything
+/// ending `.example`. Deliberately narrow: a `templates/prod.env` or `config.template.ts` may be
+/// the file a deployment actually loads, so a name alone does not make it an example.
+fn is_example_file_path(path: &str) -> bool {
+    let name = path
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(path)
+        .to_ascii_lowercase();
+    name == ".env.example" || name == ".env.sample" || name.ends_with(".example")
+}
+
+/// Whether `value` (quotes and whitespace trimmed) is one of the literal weak words a default
+/// configuration ships with (`password`, `changeme`, `secret`, `token`). These are real default
+/// credentials an attacker tries first, not unfilled templates: they are placeholders only inside
+/// an example file, which [`is_example_file_path`] already covers.
+fn is_weak_default_word(value: &str) -> bool {
+    let value = value
+        .trim()
+        .trim_matches(|c: char| matches!(c, '"' | '\'' | '`'));
+    [
+        "password",
+        "secret",
+        "token",
+        "changeme",
+        "change_me",
+        "change-me",
+    ]
+    .iter()
+    .any(|word| value.eq_ignore_ascii_case(word))
+}
+
+/// Whether one assigned value (the text after `=` or `:` on a line) is wholly an unfilled template
+/// token and so leaks no credential: empty, a closed template (`${VAR}`, `{{ var }}`,
+/// `<your-key>`, `[KEY]`) or a run of filler (`xxxx`, `****`). A bracketed value with a quote or a
+/// comma inside it is a list of values (`["s3cr3t"]`), not a template. A literal weak word
+/// (`changeme`) is NOT a template: see [`is_weak_default_word`].
+fn assigned_value_is_template(raw: &str) -> bool {
+    let value = raw
+        .trim()
+        .trim_matches(|c: char| matches!(c, '"' | '\'' | '`' | ';' | ',') || c.is_whitespace());
+    let closed = |open: &str, close: char| {
+        value.len() > open.len() && value.starts_with(open) && value.ends_with(close)
+    };
+    let single_token = || !value.contains(['"', '\'', '`', ',']);
+    value.is_empty()
+        || closed("${", '}')
+        || closed("{{", '}')
+        || (closed("<", '>') && single_token())
+        || (closed("[", ']') && single_token())
+        || (value.chars().count() >= 3 && value.chars().all(|c| matches!(c, 'x' | 'X' | '*')))
+}
+
+/// Whether the value `snippet` cites is wholly an unfilled template token, in any file: either
+/// every secret-shaped match the secrets crate finds is a template token (and none is a literal
+/// weak word, which the crate also files under that twin), or (when it finds none) every line
+/// assigns a template, an empty string or filler. A placeholder WORD inside a value that is
+/// otherwise secret-shaped (`sb_secret_FAKE_...`) is not this: it proves nothing outside an
+/// example file. A snippet with no assignment at all is not a template.
+fn snippet_value_is_template(snippet: &str) -> bool {
+    use camerata_secrets::Twin;
+    let found = camerata_secrets::detect_all(snippet);
+    if !found.is_empty() {
+        return found.iter().all(|m| match m.twin {
+            Some(Twin::TemplateToken) => !is_weak_default_word(&snippet[m.value.clone()]),
+            // A placeholder word makes the value a template only when the value is nothing but
+            // filler (`xxxxxxxx`); a word inside a longer secret-shaped value is not.
+            Some(Twin::PlaceholderWord(_)) => assigned_value_is_template(&snippet[m.value.clone()]),
+            _ => false,
+        });
+    }
+    let lines: Vec<&str> = snippet
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+    !lines.is_empty()
+        && lines.iter().all(|line| {
+            line.find(['=', ':'])
+                .is_some_and(|at| assigned_value_is_template(&line[at + 1..]))
+        })
+}
+
+/// Whether `snippet` cites a real credential value: one the secrets crate classes as a secret (a
+/// raw value, as the floor sees the line before redaction) or one already redacted (the redaction
+/// ellipsis is left only where a real value was). A real key pasted into `.env.example` is a
+/// leak, whatever the file is called.
+fn snippet_holds_real_secret(snippet: &str) -> bool {
+    snippet.contains('\u{2026}')
+        || camerata_secrets::detect_all(snippet)
+            .iter()
+            .any(camerata_secrets::SecretMatch::is_secret)
+}
+
+/// Whether `f` is a secret row about a placeholder: a secret rule whose row cites no real value
+/// and either (a) sits in an example or sample file, or (b) whose value is wholly an unfilled
+/// template token wherever it sits. A placeholder word inside an otherwise secret-shaped value
+/// outside an example file keeps its rating: the word is not proof the value is fake.
+fn is_placeholder_secret_row(f: &Finding) -> bool {
+    is_secret_rule(&f.rule_id)
+        && !snippet_holds_real_secret(&f.snippet)
+        && (is_example_file_path(&f.path) || snippet_value_is_template(&f.snippet))
+}
+
+/// A placeholder row is never above [`PLACEHOLDER_SEVERITY_CEILING`], whether it stands alone,
+/// leads a merged row or is absorbed into one; the lowering is recorded in words.
+fn cap_placeholder_severity(f: &mut Finding) {
+    if severity_rank(&f.severity) <= severity_rank(PLACEHOLDER_SEVERITY_CEILING)
+        || !is_placeholder_secret_row(f)
+    {
+        return;
+    }
+    let from = f.severity.clone();
+    record_severity_adjustment(
+        f,
+        &from,
+        PLACEHOLDER_SEVERITY_CEILING,
+        "the value is a placeholder or sits in an example file, not a live secret",
+    );
+    f.severity = PLACEHOLDER_SEVERITY_CEILING.to_string();
 }
 
 /// Record that `from` became `to` on `f`, and why, as one sentence through the ONE shared
@@ -6900,7 +7322,8 @@ fn merged_severity(primary: &Finding, max_sev: String, all_same_tier: bool) -> S
 /// primacy regardless of severity, hiding the security defect. `primary_rank`'s class-first
 /// ordering fixes that while leaving same-class ties resolved exactly as before (now
 /// origin-before-severity within a class — C5-1).
-fn merge_location_group(group: Vec<Finding>) -> Finding {
+fn merge_location_group(mut group: Vec<Finding>) -> Finding {
+    group.iter_mut().for_each(cap_placeholder_severity);
     let primary_idx = group
         .iter()
         .enumerate()
@@ -6918,7 +7341,6 @@ fn merge_location_group(group: Vec<Finding>) -> Finding {
         .iter()
         .all(|f| finding_origin(f) == finding_origin(&group[0]));
 
-    let mut group = group;
     let mut primary = group.remove(primary_idx);
     // Every OTHER distinct rule id, in first-seen order, minus the primary's own.
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -7836,6 +8258,72 @@ fn description_overlap_score(a: &Finding, b: &Finding) -> f64 {
 /// policies) are still kept apart.
 const DESCRIPTION_OVERLAP_THRESHOLD: f64 = 0.5;
 
+/// Whether a row is about an exposed secret (the `secret-exposure` category the merge pass
+/// backfills from the rule id, or the model or calibration set).
+fn is_secret_exposure(f: &Finding) -> bool {
+    f.category.as_deref() == Some("secret-exposure")
+}
+
+/// The redacted fingerprints of the credential values a row's snippet holds: the prefix and last
+/// four characters [`camerata_secrets::redact_str`] leaves (`sk_live_…ab12`), and for a value too
+/// short to show a tail the prefix and the length (`…|12`). A raw value is redacted first, so a
+/// floor row that kept the raw line and an AI row that quoted the redacted line give the same
+/// fingerprint. Empty when the snippet holds no credential value.
+fn credential_fingerprints(f: &Finding) -> std::collections::BTreeSet<String> {
+    const ELLIPSIS: char = '\u{2026}';
+    let redacted = camerata_secrets::redact_str(&f.snippet);
+    let chars: Vec<char> = redacted.chars().collect();
+    let is_body = |c: char| c.is_ascii_alphanumeric() || c == '_' || c == '-';
+    let mut out = std::collections::BTreeSet::new();
+    for (i, &c) in chars.iter().enumerate() {
+        if c != ELLIPSIS {
+            continue;
+        }
+        let mut start = i;
+        while start > 0 && is_body(chars[start - 1]) {
+            start -= 1;
+        }
+        let mut end = i + 1;
+        while end < chars.len() && is_body(chars[end]) {
+            end += 1;
+        }
+        let prefix: String = chars[start..i].iter().collect();
+        let tail: String = chars[i + 1..end].iter().collect();
+        // A value that shows no prefix and no tail (a password) leaves only its length, which
+        // every 12-character password shares: it proves nothing, so it makes no fingerprint.
+        if prefix.is_empty() && tail.is_empty() {
+            continue;
+        }
+        let mut print = format!("{prefix}{ELLIPSIS}{tail}");
+        if tail.is_empty() {
+            let rest: String = chars[end..].iter().collect();
+            if let Some(count) = rest.strip_prefix(" (") {
+                let digits: String = count.chars().take_while(char::is_ascii_digit).collect();
+                print.push_str(&format!("|{digits}"));
+            }
+        }
+        out.insert(print);
+    }
+    out
+}
+
+/// Whether two secret rows are the same credential: the same exact location in one repository,
+/// or a shared redacted fingerprint ([`credential_fingerprints`]). A row that cites no credential
+/// value, at a different place, is not proven to be the same credential.
+fn same_credential(a: &Finding, b: &Finding) -> bool {
+    if a.repo != b.repo {
+        return false;
+    }
+    if a.path == b.path && a.line != 0 && a.line == b.line {
+        return true;
+    }
+    let a_prints = credential_fingerprints(a);
+    !a_prints.is_empty()
+        && credential_fingerprints(b)
+            .iter()
+            .any(|print| a_prints.contains(print))
+}
+
 /// The pairwise semantic-merge predicate (design §1b, extended by P1 design point 2, the MERGE
 /// cycle-2/cycle-3 hardening passes, and C4-P1's defect-shaped merge redesign). `a` and `b`
 /// cluster as the same defect when ANY of SIX GENERAL signals fires (never a seventh,
@@ -7958,6 +8446,19 @@ fn semantic_pair_merges(a: &Finding, b: &Finding, content: Option<&str>) -> bool
     // Signal (b): a shared captured object, general and cross-file (design point 2b).
     let shared_object = shared_captured_object(a, b);
 
+    // Credential-identity guard: two secret rows are one finding only when they are the same
+    // credential. "Both are a leaked secret" and "a few lines apart in one file" prove nothing,
+    // and fusing two credentials lets one reviewer decision dispose of both. A shared named
+    // credential (signal (b)) still links two rows; a row never links across repositories.
+    if is_secret_exposure(a) && is_secret_exposure(b) {
+        if a.repo != b.repo {
+            return false;
+        }
+        if !shared_object && !same_credential(a, b) {
+            return false;
+        }
+    }
+
     // Signal (c): near-identical description prose, general and same-file-only (design MERGE
     // gap (i)).
     let description_overlap =
@@ -8031,7 +8532,8 @@ fn semantic_pair_merges(a: &Finding, b: &Finding, content: Option<&str>) -> bool
 /// marked `consequence: true` there, so it folds in as an "also affects" location rather than
 /// reading as a peer, independently-actionable site. C5-1: a primary with no `fix_specific` of
 /// its own inherits the first member's (see `merge_location_group`'s matching comment).
-fn merge_semantic_group(group: Vec<Finding>) -> Finding {
+fn merge_semantic_group(mut group: Vec<Finding>) -> Finding {
+    group.iter_mut().for_each(cap_placeholder_severity);
     let primary_idx = group
         .iter()
         .enumerate()
@@ -8048,7 +8550,6 @@ fn merge_semantic_group(group: Vec<Finding>) -> Finding {
     let all_same_tier = group
         .iter()
         .all(|f| finding_origin(f) == finding_origin(&group[0]));
-    let mut group = group;
     let mut primary = group.remove(primary_idx);
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     seen.insert(primary.rule_id.clone());
@@ -9745,7 +10246,17 @@ pub async fn audit_repo(
             )
             .await
             {
-                Ok(recs) => {
+                Ok((recs, unfinished)) => {
+                    // Rules a cut-off reply never reached keep their default directive (they
+                    // have no entry in `recs`); the run says so rather than saying nothing.
+                    if let Some(reason) = unfinished {
+                        failed_passes.push(FailedPass {
+                            repo: repo.to_string(),
+                            pass: "rule-alternative recommendations".to_string(),
+                            reason,
+                            files_not_reviewed: 0,
+                        });
+                    }
                     for rec in &recs {
                         let Some(a) = ask_alts.iter().find(|a| a.rule_id == rec.rule_id) else {
                             continue;
@@ -11232,6 +11743,9 @@ mod malformed_reply_tests;
 
 #[cfg(test)]
 mod fn_batch_a_tests;
+
+#[cfg(test)]
+mod smoke_findings_tests;
 
 #[cfg(test)]
 mod drift_tests;

@@ -4039,6 +4039,9 @@ mod tests {
         let mut det = structural_site("acme/api", "handler.rs", 50, "SEC-NO-HARDCODED-SECRETS-1");
         det.severity = "medium".to_string();
         det.detail = "deterministic-detected-secret".to_string();
+        // Two secret rows merge only when they are the same credential (the same redacted
+        // fingerprint here), so both rows cite the same redacted value.
+        det.snippet = "token = \"sk_live_\u{2026}ab12 (32 chars)\"".to_string();
         // `confidence: None` (the `structural_site` default) + a non-`AI-` rule id ->
         // `Origin::Deterministic`.
 
@@ -4050,6 +4053,7 @@ mod tests {
         );
         model.severity = "critical".to_string(); // uncalibrated AI severity, routinely inflated
         model.detail = "ai-detected-secret".to_string();
+        model.snippet = "token = \"sk_live_\u{2026}ab12 (32 chars)\"".to_string();
         model.confidence = Some("high".to_string()); // calibration touched it -> Origin::AdoptedAi
 
         let findings = vec![det, model];

@@ -771,6 +771,7 @@ async fn recommend(llm: &ScriptedLlm) -> Vec<RuleRecommendation> {
     )
     .await
     .expect("the recommendation pass runs")
+    .0
 }
 
 #[tokio::test]
@@ -998,7 +999,8 @@ async fn a_rule_judged_not_applicable_is_asked_on_at_most_four_chunks_and_says_s
         None,
     )
     .await
-    .expect("the pass runs");
+    .expect("the pass runs")
+    .0;
     assert_eq!(llm.calls(), 4, "never more than four chunks");
     assert!(!recs[0].applicable);
     assert!(
