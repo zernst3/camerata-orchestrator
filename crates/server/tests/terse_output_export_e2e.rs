@@ -60,7 +60,13 @@ impl LlmPort for StubModel {
                 .find(|l| l.starts_with('[') && l.contains("] rule "))
                 .expect("the regeneration prompt addresses the finding by an id");
             let id = &header[1..header.find(']').expect("a closing bracket")];
-            let line = header.rsplit(':').next().expect("a line").trim();
+            let line = req
+                .prompt
+                .lines()
+                .find_map(|l| l.strip_prefix("Location: "))
+                .and_then(|place| place.rsplit(':').next())
+                .expect("a location line")
+                .trim();
             format!(
                 r#"{{"details":[{{"id":"{id}","path":"{HANDLER_PATH}","line":{line},"detail":"{FULL}"}}]}}"#
             )

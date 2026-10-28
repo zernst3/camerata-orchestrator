@@ -71,7 +71,7 @@ const DETAIL_ROUNDS: usize = camerata_ui_core::scan::REGEN_ROUNDS;
 pub(crate) fn detail_regen_system_prompt() -> String {
     r#"You write the full explanation for audit findings that were reported in one short sentence. A human architect reads it to decide what to do, so it must be specific to the code shown.
 
-Each finding below starts with an opaque id in square brackets, then its location. For each finding write `detail`: two to four sentences saying why THIS code is a problem and what the fix direction is.
+Each finding below starts with an opaque id in square brackets, then its rule and severity; its location and evidence follow inside its delimited block, starting with the line `Location: path:line`. For each finding write `detail`: two to four sentences saying why THIS code is a problem and what the fix direction is.
 
 Rules, every finding:
 - Keep every fact the short statement already makes: each file name, symbol, flag and other file it names stays in your explanation, spelled exactly as given. Never contradict it.
@@ -346,38 +346,47 @@ fn build_block(
     f: &Finding,
     files: &[(String, String)],
     directives: &std::collections::HashMap<String, String>,
+    nonce: &crate::prompt_frame::FrameNonce,
 ) -> Block {
-    let mut prompt = finding_block_header(id, f);
+    let mut prompt = format!("[{id}] rule {} — severity {}\n", f.rule_id, f.severity);
     if let Some(directive) = directives.get(&f.rule_id.to_ascii_uppercase()) {
         prompt.push_str(&format!(
             "Rule: {}\n",
             camerata_secrets::redact_str(directive)
         ));
     }
-    prompt.push_str(&format!(
+    // Everything that derives from the client's files (location, the short statement the scan
+    // wrote from them, quoted code, captured names, the windows and excerpts) sits in one frame.
+    let mut evidence = format!("Location: {}:{}\n", f.path, f.line);
+    evidence.push_str(&format!(
         "Short statement: {}\n",
         camerata_secrets::redact_str(&f.detail)
     ));
     if !f.snippet.is_empty() {
-        prompt.push_str(&format!(
+        evidence.push_str(&format!(
             "Code: {}\n",
             camerata_secrets::redact_str(&f.snippet)
         ));
     }
-    prompt.push_str(&captured_objects_line(f));
+    evidence.push_str(&captured_objects_line(f));
     let mut code_shown = f.snippet.clone();
     let window = fix_context_window(files, &f.path, f.line, DETAIL_CONTEXT_RADIUS);
     if !window.is_empty() {
-        prompt.push_str(&format!("Surrounding code:\n{window}"));
+        evidence.push_str(&format!("Surrounding code:\n{window}"));
         code_shown.push('\n');
         code_shown.push_str(&window);
     }
     let excerpts = named_file_excerpts(f, files);
     if !excerpts.is_empty() {
-        prompt.push_str(&excerpts);
+        evidence.push_str(&excerpts);
         code_shown.push('\n');
         code_shown.push_str(&excerpts);
     }
+    prompt.push_str(&crate::prompt_frame::frame_untrusted(
+        nonce,
+        &format!("finding {id}"),
+        &evidence,
+    ));
     prompt.push('\n');
     Block { prompt, code_shown }
 }
@@ -497,6 +506,7 @@ async fn run_detail_round(
     llm: &dyn LlmPort,
     repo: &str,
     system: &str,
+    nonce: &crate::prompt_frame::FrameNonce,
     model: Option<&str>,
     meter: Option<&UsageMeter>,
     files: &[(String, String)],
@@ -521,7 +531,7 @@ async fn run_detail_round(
         let mut blocks: Vec<Block> = Vec::with_capacity(batch.len());
         for &idx in batch {
             let id = opaque_id(repo, idx, &findings[idx], &ids);
-            blocks.push(build_block(&id, &findings[idx], files, directives));
+            blocks.push(build_block(&id, &findings[idx], files, directives, nonce));
             ids.push(id);
         }
         let prompt = format!(
@@ -599,12 +609,14 @@ async fn run_detail_round(
 /// Never drops a finding. Returns the findings, each with its regenerated detail or, when that
 /// failed, its short detail plus [`DETAIL_INCOMPLETE_MARKER`], and one `FailedPass` naming how
 /// many.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn regenerate_full_details(
     llm: &dyn LlmPort,
     repo: &str,
     mut findings: Vec<Finding>,
     files: &[(String, String)],
     directives: &[(String, String)],
+    nonce: &crate::prompt_frame::FrameNonce,
     model: Option<&str>,
     meter: Option<&UsageMeter>,
 ) -> (Vec<Finding>, Vec<FailedPass>) {
@@ -615,7 +627,7 @@ pub(crate) async fn regenerate_full_details(
         .iter()
         .map(|(id, directive)| (id.to_ascii_uppercase(), directive.clone()))
         .collect();
-    let system = detail_regen_system_prompt();
+    let system = crate::prompt_frame::with_untrusted_clause(detail_regen_system_prompt(), nonce);
     let total = findings.len();
     let mut pending: Vec<usize> = (0..total).collect();
     let mut last_error: Option<String> = None;
@@ -632,6 +644,7 @@ pub(crate) async fn regenerate_full_details(
                 llm,
                 repo,
                 &system,
+                nonce,
                 model,
                 meter,
                 files,

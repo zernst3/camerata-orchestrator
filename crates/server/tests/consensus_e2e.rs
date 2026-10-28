@@ -32,7 +32,12 @@ fn finding(file: &str, code: &str) -> String {
 #[async_trait]
 impl LlmPort for Varying {
     async fn complete(&self, req: LlmRequest) -> anyhow::Result<LlmResponse> {
-        let text = if req.system.as_deref() == Some(audit_system_prompt().as_str()) {
+        // Every pass appends the untrusted-content clause after its own system prompt.
+        let text = if req
+            .system
+            .as_deref()
+            .is_some_and(|s| s.starts_with(audit_system_prompt().as_str()))
+        {
             let n = self.scan_calls.fetch_add(1, Ordering::SeqCst) + 1;
             let mut found = vec![finding("a.ts", "export const a = 1;")];
             match n {

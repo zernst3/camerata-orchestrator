@@ -61,14 +61,16 @@ impl Scripted {
 }
 
 fn asked_ids(req: &LlmRequest) -> Vec<String> {
-    let json = req
+    // Each candidate is one JSON object on its own line, inside its own delimited block.
+    let blocks = req
         .prompt
-        .split_once("Candidates (JSON):\n")
+        .split_once("Candidates (one JSON object per delimited block):\n")
         .map(|(_, rest)| rest)
         .unwrap_or_default();
-    let items: Vec<serde_json::Value> = serde_json::from_str(json).unwrap_or_default();
-    items
-        .iter()
+    blocks
+        .lines()
+        .filter(|l| l.starts_with('{'))
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
         .filter_map(|i| i["id"].as_str().map(str::to_string))
         .collect()
 }
