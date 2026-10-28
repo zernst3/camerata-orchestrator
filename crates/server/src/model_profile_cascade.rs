@@ -72,6 +72,7 @@ fn balanced_assignments() -> ProfileAssignments {
         l3_review: L3ReviewConfig {
             enabled: false,
             model: String::new(),
+            ..Default::default()
         },
     }
 }
@@ -100,6 +101,7 @@ fn max_quality_assignments() -> ProfileAssignments {
         l3_review: L3ReviewConfig {
             enabled: true,
             model: SONNET.to_string(),
+            ..Default::default()
         },
     }
 }
@@ -187,6 +189,7 @@ fn max_efficiency_assignments(registry: &ModelRegistry) -> ProfileAssignments {
         l3_review: L3ReviewConfig {
             enabled: l3_enabled,
             model: l3_model,
+            ..Default::default()
         },
     }
 }

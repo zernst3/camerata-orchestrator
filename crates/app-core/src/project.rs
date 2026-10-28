@@ -30,7 +30,8 @@ use camerata_fleet::tier::TierMap;
 /// resolving unchanged.
 pub use camerata_api_types::project::{
     default_model, default_routine_secs, default_watched_secs, L3ReviewConfig, ProjectBackend,
-    StallThresholds, StepModels, DEFAULT_MODEL, DEFAULT_ROUTINE_STALL_SECS,
+    ReviewOnError, ReviewTier, StallThresholds, StepModels, DEFAULT_MODEL,
+    DEFAULT_ROUTINE_STALL_SECS,
 };
 
 /// The NON-FLEET AI steps whose model is configured per-project on [`StepModels`].
@@ -788,14 +789,17 @@ impl Project {
 
     /// The effective model id for the L3 reviewer on this project.
     ///
-    /// Returns `self.l3_review.model` when it is non-empty; falls back to
-    /// `self.tier_map.balanced` so a project that opts in but doesn't pin a specific
-    /// model uses its configured balanced tier.
+    /// Returns `self.l3_review.model` when it is non-empty (an explicit pin always wins);
+    /// otherwise the tier the project chose for the reviewer: `Strongest` gives the
+    /// strongest tier model, `Balanced` (the default) gives `self.tier_map.balanced`.
     pub fn l3_model(&self) -> &str {
         if !self.l3_review.model.trim().is_empty() {
             &self.l3_review.model
         } else {
-            self.tier_map.balanced_primary()
+            match self.l3_review.tier {
+                ReviewTier::Strongest => &self.tier_map.strongest,
+                ReviewTier::Balanced => self.tier_map.balanced_primary(),
+            }
         }
     }
 
@@ -1164,6 +1168,7 @@ mod tests {
         p.set_l3_review(L3ReviewConfig {
             enabled: true,
             model: "pinned-l3".into(),
+            ..Default::default()
         });
         assert_eq!(p.model_profile, ModelProfile::Custom);
     }

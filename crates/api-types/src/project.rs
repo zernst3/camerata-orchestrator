@@ -140,6 +140,42 @@ pub struct L3ReviewConfig {
     /// The model id that runs the L3 reviewer. Empty = use the project's `balanced` tier model.
     #[serde(default)]
     pub model: String,
+    /// What a run does when the reviewer itself cannot run (an outage, a refused call).
+    /// `Advisory` (default, today's behaviour) logs it and lets the run continue;
+    /// `FailClosed` stops the run, so no run passes without a review.
+    #[serde(default)]
+    pub on_error: ReviewOnError,
+    /// Extra implementer passes allowed after a reviewer bounce, beyond the project's
+    /// `max_iterations`. `0` (default) keeps today's behaviour: with the default single pass
+    /// a bounce ends the run. Each round costs a whole implementer session plus one review.
+    #[serde(default)]
+    pub fix_rounds: u8,
+    /// Which model tier runs the review when no model is pinned in `model`. `Balanced`
+    /// (default) is today's behaviour; `Strongest` costs more per call.
+    #[serde(default)]
+    pub tier: ReviewTier,
+}
+
+/// What a run does when the Layer-3 reviewer cannot run.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewOnError {
+    /// Log the error and let the run continue (today's behaviour).
+    #[default]
+    Advisory,
+    /// Stop the run: a review is required before a run passes.
+    FailClosed,
+}
+
+/// Which model tier runs the Layer-3 review when no model is pinned.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewTier {
+    /// The project's balanced tier model (today's behaviour).
+    #[default]
+    Balanced,
+    /// The project's strongest tier model.
+    Strongest,
 }
 
 /// Per-project stall detection thresholds, split by context (watched = interactive,
@@ -218,5 +254,38 @@ mod fix_stage_model_name_tests {
         assert_eq!(model_display_name("claude-sonnet-5"), "Claude Sonnet 5");
         assert_eq!(model_display_name("claude-fable-5-1"), "Claude Fable 5.1");
         assert_eq!(fix_stage_haiku_display_name(), "Claude Haiku 5.5");
+    }
+}
+
+#[cfg(test)]
+mod l3_review_config_tests {
+    use super::*;
+
+    /// A project file written before the reviewer settings existed must read as today's
+    /// behaviour: balanced tier, advisory on error, no fix round.
+    #[test]
+    fn l3_review_config_defaults_match_todays_behaviour_from_an_old_project_json() {
+        let cfg: L3ReviewConfig = serde_json::from_str(r#"{"enabled":true,"model":""}"#).unwrap();
+        assert!(cfg.enabled);
+        assert_eq!(cfg.on_error, ReviewOnError::Advisory);
+        assert_eq!(cfg.fix_rounds, 0);
+        assert_eq!(cfg.tier, ReviewTier::Balanced);
+        assert_eq!(L3ReviewConfig::default().on_error, ReviewOnError::Advisory);
+    }
+
+    #[test]
+    fn the_new_settings_round_trip_as_snake_case() {
+        let cfg = L3ReviewConfig {
+            enabled: true,
+            model: String::new(),
+            on_error: ReviewOnError::FailClosed,
+            fix_rounds: 2,
+            tier: ReviewTier::Strongest,
+        };
+        let json = serde_json::to_string(&cfg).unwrap();
+        assert!(json.contains(r#""on_error":"fail_closed""#));
+        assert!(json.contains(r#""tier":"strongest""#));
+        let back: L3ReviewConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, cfg);
     }
 }

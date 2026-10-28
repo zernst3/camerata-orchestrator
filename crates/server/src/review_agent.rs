@@ -27,6 +27,7 @@
 //! maps it where needed.
 
 use crate::llm::{LlmPort, LlmRequest};
+use serde::{Deserialize, Serialize};
 
 // ── Shared verdict type ────────────────────────────────────────────────────────
 
@@ -73,32 +74,137 @@ You are an expert code reviewer performing a Layer-3 agentic review. Your job is
 
 You see ONLY: the story, the rules, and the diff. You do NOT have access to any other agent's reasoning, implementation notes, or context (this isolation is intentional). You also cannot see the rest of the codebase, so judge completeness by whether the diff's breadth plausibly matches the story's implied scope; when a cross-cutting story is addressed by a narrow diff, bounce and ask to confirm the sweep covered every instance.
 
-PROCEDURE (in order, before you decide): (1) check the diff rule-by-rule against the SSOT; (2) check it criterion-by-criterion against the story's requirements and acceptance criteria; only then form the verdict. For each BOUNCE reason, quote the violated rule id or the specific criterion it fails. If you cannot verify a rule or criterion from the diff alone, that is a BOUNCE reason (\"cannot verify <what>\"), never a silent PASS.
+YOU ARE ADVERSARIAL. Assume the change is wrong until the diff shows otherwise. Look for the way it FAILS: the input it mishandles, the case it forgets, the rule it breaks, the acceptance criterion it skips. Do not praise the change and do not look for reasons to approve it.
 
-Return your verdict in this exact format:
-PASS
-(if the code satisfies both the rules and the story intent)
+PROCEDURE (in order, before you decide): (1) check the diff rule-by-rule against the SSOT; (2) check it criterion-by-criterion against the story's requirements and acceptance criteria; only then form the verdict. If you cannot verify a rule or criterion from the diff alone, that is a MEDIUM finding (\"cannot verify <what>\"), never a silent PASS.
 
-or:
+List EVERY finding, ranked HIGH, MEDIUM or LOW. HIGH: the change is wrong, unsafe or breaks a rule or acceptance criterion. MEDIUM: a likely defect, an unverifiable point or an incomplete sweep. LOW: a minor issue that does not block the change. Each finding MUST carry a concrete failure scenario (the input or situation, and what goes wrong), the rule id or the specific criterion it fails, and the location in the diff. Write PASS only when there is no HIGH and no MEDIUM finding.
 
-BOUNCE
-- <reason 1>
-- <reason 2>
-...
-(if there are violations)
+Return your verdict in this exact format, one finding per line:
+FINDINGS
+- [HIGH] <title> | scenario: <one sentence> | rule: <id or criterion or none> | where: <file:line or none>
+- [LOW] <title> | scenario: <one sentence> | rule: <id or criterion or none> | where: <file:line or none>
+VERDICT: PASS
+(or VERDICT: BOUNCE when any finding is HIGH or MEDIUM)
 
-Be specific and terse. Do not include explanation outside the verdict format.";
+If there are no findings, write FINDINGS, then \"- none\", then the VERDICT line.
+
+Be specific and terse. Do not include explanation outside this format.";
+
+/// How serious a reviewer finding is. Declaration order is the ranking: `High` sorts first.
+/// `High` and `Medium` block a pass; `Low` is recorded and left for the architect at sign-off.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ReviewSeverity {
+    High,
+    Medium,
+    Low,
+}
+
+impl ReviewSeverity {
+    /// The upper-case tag used in the reviewer's output and in event text.
+    pub fn tag(self) -> &'static str {
+        match self {
+            ReviewSeverity::High => "HIGH",
+            ReviewSeverity::Medium => "MEDIUM",
+            ReviewSeverity::Low => "LOW",
+        }
+    }
+
+    /// True for the severities that stop a pass (`High`, `Medium`).
+    pub fn blocks(self) -> bool {
+        !matches!(self, ReviewSeverity::Low)
+    }
+
+    fn from_tag(tag: &str) -> Option<Self> {
+        match tag.trim().to_ascii_uppercase().as_str() {
+            "HIGH" => Some(ReviewSeverity::High),
+            "MEDIUM" => Some(ReviewSeverity::Medium),
+            "LOW" => Some(ReviewSeverity::Low),
+            _ => None,
+        }
+    }
+}
+
+/// One ranked finding from the L3 reviewer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewFinding {
+    pub severity: ReviewSeverity,
+    pub title: String,
+    /// The concrete way this fails (what input, what happens). Required by the prompt.
+    #[serde(default)]
+    pub scenario: String,
+    /// The rule id or acceptance criterion the reviewer quoted.
+    #[serde(default)]
+    pub rule: Option<String>,
+    /// The file or `file:line` from the diff.
+    #[serde(default)]
+    pub location: Option<String>,
+}
+
+impl ReviewFinding {
+    /// One line for the implementer's revise prompt and the run events:
+    /// `[HIGH] title: scenario` (just `[HIGH] title` when there is no scenario).
+    pub fn reason_line(&self) -> String {
+        if self.scenario.trim().is_empty() {
+            format!("[{}] {}", self.severity.tag(), self.title)
+        } else {
+            format!(
+                "[{}] {}: {}",
+                self.severity.tag(),
+                self.title,
+                self.scenario
+            )
+        }
+    }
+}
+
+/// The L3 reviewer's verdict. Unlike the integration gate's [`ReviewVerdict`] it carries ranked
+/// findings. A reply that cannot be read is never a pass (see [`parse_l3_verdict`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum L3Verdict {
+    /// No HIGH or MEDIUM finding. Any LOW findings are carried so they can be recorded.
+    Pass { low: Vec<ReviewFinding> },
+    /// At least one HIGH or MEDIUM finding. Every finding is listed, LOW ones included.
+    Bounce { findings: Vec<ReviewFinding> },
+}
+
+impl L3Verdict {
+    /// True when the verdict is `Pass`.
+    pub fn is_pass(&self) -> bool {
+        matches!(self, L3Verdict::Pass { .. })
+    }
+
+    /// Every finding in the verdict (the LOW ones of a pass, all of a bounce's).
+    pub fn findings(&self) -> &[ReviewFinding] {
+        match self {
+            L3Verdict::Pass { low } => low,
+            L3Verdict::Bounce { findings } => findings,
+        }
+    }
+
+    /// The bounce reasons as `[HIGH] title: scenario` lines; empty for a pass. This keeps the
+    /// pre-contract call sites (a list of reason strings, empty meaning pass) working.
+    pub fn reasons(&self) -> Vec<String> {
+        match self {
+            L3Verdict::Pass { .. } => Vec::new(),
+            L3Verdict::Bounce { findings } => {
+                findings.iter().map(ReviewFinding::reason_line).collect()
+            }
+        }
+    }
+}
 
 /// Run the L3 agentic code reviewer.
 ///
 /// Calls the LLM with a structured prompt that contains the story + rules + diff.
 /// The reviewer is BLIND to implementation notes and other-agent transcripts — only the
-/// three inputs above are forwarded. Returns `ReviewVerdict::Pass` or a list of reasons
-/// to bounce back to the developer.
+/// three inputs above are forwarded. Returns an [`L3Verdict`]: a pass (carrying any LOW
+/// findings) or a bounce with every ranked finding for the developer.
 pub async fn run_l3_review(
     llm: &dyn LlmPort,
     input: &L3ReviewInput<'_>,
-) -> anyhow::Result<ReviewVerdict> {
+) -> anyhow::Result<L3Verdict> {
     let user_prompt = build_l3_prompt(input);
     let req = LlmRequest::new(user_prompt)
         .with_system(l3_system_prompt())
@@ -120,21 +226,162 @@ pub fn build_l3_prompt(input: &L3ReviewInput<'_>) -> String {
     )
 }
 
-/// Parse the L3 reviewer's text response into a typed `ReviewVerdict`.
-/// Pure + testable (no I/O).
-pub fn parse_l3_verdict(text: &str) -> ReviewVerdict {
-    let trimmed = text.trim();
-    if trimmed.to_ascii_uppercase().starts_with("PASS") {
-        return ReviewVerdict::Pass;
+/// What the reviewer said its verdict was, before the findings are weighed.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StatedVerdict {
+    Pass,
+    Bounce,
+}
+
+/// The first alphabetic word of a line, upper-cased (`"PASS - fine"` gives `PASS`).
+fn leading_word(text: &str) -> String {
+    text.trim_start_matches(|c: char| !c.is_ascii_alphabetic())
+        .chars()
+        .take_while(char::is_ascii_alphabetic)
+        .collect::<String>()
+        .to_ascii_uppercase()
+}
+
+fn stated_verdict_word(word: &str) -> Option<StatedVerdict> {
+    match word {
+        "PASS" => Some(StatedVerdict::Pass),
+        "BOUNCE" => Some(StatedVerdict::Bounce),
+        _ => None,
     }
-    // Extract BOUNCE reasons: lines starting with "-".
-    let reasons: Vec<String> = trimmed
-        .lines()
-        .filter(|l| l.trim_start().starts_with('-'))
-        .map(|l| l.trim_start_matches('-').trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect();
-    ReviewVerdict::Bounce { reasons }
+}
+
+/// The last `VERDICT: PASS|BOUNCE` line, tolerating markdown emphasis around it.
+fn verdict_line(text: &str) -> Option<StatedVerdict> {
+    text.lines().rev().find_map(|line| {
+        let plain = line
+            .trim()
+            .trim_matches(|c: char| c == '*' || c == '`' || c == '#')
+            .trim();
+        let head = plain.get(..8)?;
+        if !head.eq_ignore_ascii_case("VERDICT:") {
+            return None;
+        }
+        stated_verdict_word(&leading_word(&plain[8..]))
+    })
+}
+
+/// Strip a leading bullet marker (`-`, `*`, `1.`) from a line.
+fn strip_bullet(line: &str) -> &str {
+    let t = line.trim_start();
+    t.strip_prefix('-')
+        .or_else(|| t.strip_prefix('*'))
+        .map(str::trim_start)
+        .unwrap_or(t)
+}
+
+/// Parse one tagged finding line, `[HIGH] title | scenario: .. | rule: .. | where: ..`.
+/// `None` when the line carries no `[HIGH|MEDIUM|LOW]` tag.
+fn parse_tagged_finding(line: &str) -> Option<ReviewFinding> {
+    let t = strip_bullet(line);
+    let rest = t.strip_prefix('[')?;
+    let (tag, after) = rest.split_once(']')?;
+    let severity = ReviewSeverity::from_tag(tag)?;
+    let mut parts = after.split('|');
+    let title = parts.next().unwrap_or("").trim().to_string();
+    let mut finding = ReviewFinding {
+        severity,
+        title,
+        scenario: String::new(),
+        rule: None,
+        location: None,
+    };
+    for part in parts {
+        let Some((key, value)) = part.split_once(':') else {
+            continue;
+        };
+        let value = value.trim();
+        let none = value.is_empty() || value.eq_ignore_ascii_case("none");
+        match key.trim().to_ascii_lowercase().as_str() {
+            "scenario" => finding.scenario = value.to_string(),
+            "rule" if !none => finding.rule = Some(value.to_string()),
+            "where" | "location" if !none => finding.location = Some(value.to_string()),
+            _ => {}
+        }
+    }
+    if finding.title.is_empty() {
+        finding.title = "(untitled finding)".to_string();
+    }
+    Some(finding)
+}
+
+fn medium(title: &str, scenario: String) -> ReviewFinding {
+    ReviewFinding {
+        severity: ReviewSeverity::Medium,
+        title: title.to_string(),
+        scenario,
+        rule: None,
+        location: None,
+    }
+}
+
+/// Parse the L3 reviewer's text response into a typed [`L3Verdict`]. Pure + testable.
+///
+/// The contract is `FINDINGS` (one `- [HIGH|MEDIUM|LOW] title | scenario: .. | rule: .. |
+/// where: ..` line each) then `VERDICT: PASS|BOUNCE`. The parser fails safe:
+/// - the findings win over the verdict line: any HIGH or MEDIUM finding is a bounce even when
+///   the reply says PASS;
+/// - the old shape still reads (`PASS`, or `BOUNCE` with `- reason` lines, each reason a MEDIUM
+///   finding);
+/// - a reply with no `VERDICT:` line and no leading `PASS` is NEVER a pass: it bounces with
+///   one MEDIUM finding carrying the raw text (so a truncated reply cannot hide a finding).
+pub fn parse_l3_verdict(text: &str) -> L3Verdict {
+    let trimmed = text.trim();
+    let tagged: Vec<ReviewFinding> = trimmed.lines().filter_map(parse_tagged_finding).collect();
+
+    // The findings win: a HIGH or MEDIUM finding is a bounce whatever the verdict line says.
+    if tagged.iter().any(|f| f.severity.blocks()) {
+        return L3Verdict::Bounce { findings: tagged };
+    }
+
+    let stated = verdict_line(trimmed).or_else(|| stated_verdict_word(&leading_word(trimmed)));
+    match stated {
+        Some(StatedVerdict::Pass) => L3Verdict::Pass { low: tagged },
+        Some(StatedVerdict::Bounce) => {
+            let mut findings = tagged;
+            findings.extend(untagged_reasons(trimmed));
+            if !findings.iter().any(|f| f.severity.blocks()) {
+                findings.push(medium(
+                    "reviewer bounced without a ranked finding",
+                    "The reviewer's verdict was BOUNCE but it listed no HIGH or MEDIUM finding."
+                        .to_string(),
+                ));
+            }
+            L3Verdict::Bounce { findings }
+        }
+        None => {
+            let mut findings = tagged;
+            findings.extend(untagged_reasons(trimmed));
+            findings.push(medium(
+                "reviewer reply was not in the agreed format",
+                truncate_chars(trimmed, 500),
+            ));
+            L3Verdict::Bounce { findings }
+        }
+    }
+}
+
+/// Bullet lines without a severity tag (the old `BOUNCE\n- reason` shape), each read as a
+/// MEDIUM finding titled with the reason. A bare `- none` is not a reason.
+fn untagged_reasons(text: &str) -> Vec<ReviewFinding> {
+    text.lines()
+        .filter(|l| {
+            let t = l.trim_start();
+            t.starts_with('-') || t.starts_with('*')
+        })
+        .filter(|l| parse_tagged_finding(l).is_none())
+        .map(|l| strip_bullet(l).trim().to_string())
+        .filter(|s| !s.is_empty() && !s.trim_end_matches('.').eq_ignore_ascii_case("none"))
+        .map(|reason| medium(&reason, String::new()))
+        .collect()
+}
+
+fn truncate_chars(text: &str, max: usize) -> String {
+    text.chars().take(max).collect()
 }
 
 // ── Integration-gate reviewer (R3.e) ─────────────────────────────────────────
@@ -327,6 +574,7 @@ mod tests {
         let config = L3ReviewConfig {
             enabled: true,
             model: "claude-opus-5".to_string(),
+            ..Default::default()
         };
         assert!(config.enabled);
     }
@@ -441,32 +689,150 @@ mod tests {
 
     #[test]
     fn parse_l3_verdict_pass() {
-        assert_eq!(parse_l3_verdict("PASS"), ReviewVerdict::Pass);
-        assert_eq!(parse_l3_verdict("pass"), ReviewVerdict::Pass);
-        assert_eq!(parse_l3_verdict("PASS\n"), ReviewVerdict::Pass);
+        let pass = L3Verdict::Pass { low: vec![] };
+        assert_eq!(parse_l3_verdict("PASS"), pass);
+        assert_eq!(parse_l3_verdict("pass"), pass);
+        assert_eq!(parse_l3_verdict("PASS\n"), pass);
         assert_eq!(
             parse_l3_verdict("PASS\n(the code satisfies both rules and story intent)"),
-            ReviewVerdict::Pass
+            pass
+        );
+        // The new shape with no findings.
+        assert_eq!(parse_l3_verdict("FINDINGS\n- none\nVERDICT: PASS"), pass);
+    }
+
+    #[test]
+    fn parse_ranked_findings_reads_severity_title_scenario_rule_and_location() {
+        let text = "FINDINGS\n\
+            - [HIGH] Token never expires | scenario: a stolen token works forever | rule: SEC-AUTH-1 | where: src/auth.rs:42\n\
+            - [MEDIUM] No error path | scenario: a malformed header panics | rule: none | where: src/auth.rs:60\n\
+            VERDICT: BOUNCE";
+        let L3Verdict::Bounce { findings } = parse_l3_verdict(text) else {
+            panic!("a HIGH finding must bounce");
+        };
+        assert_eq!(findings.len(), 2);
+        assert_eq!(findings[0].severity, ReviewSeverity::High);
+        assert_eq!(findings[0].title, "Token never expires");
+        assert_eq!(findings[0].scenario, "a stolen token works forever");
+        assert_eq!(findings[0].rule.as_deref(), Some("SEC-AUTH-1"));
+        assert_eq!(findings[0].location.as_deref(), Some("src/auth.rs:42"));
+        assert_eq!(findings[1].severity, ReviewSeverity::Medium);
+        assert_eq!(findings[1].rule, None, "`none` reads as no rule");
+        assert_eq!(findings[1].location.as_deref(), Some("src/auth.rs:60"));
+        assert_eq!(
+            findings[0].reason_line(),
+            "[HIGH] Token never expires: a stolen token works forever"
         );
     }
 
     #[test]
-    fn parse_l3_verdict_bounce() {
-        let text = "BOUNCE\n- Missing error handling in authenticate()\n- JWT secret is hard-coded";
+    fn a_reply_with_only_low_findings_is_a_pass_that_carries_them() {
+        let text = "FINDINGS\n- [LOW] Name could be clearer | scenario: a reader may misread it | rule: none | where: a.rs:1\nVERDICT: PASS";
         let verdict = parse_l3_verdict(text);
-        assert!(matches!(verdict, ReviewVerdict::Bounce { .. }));
-        if let ReviewVerdict::Bounce { reasons } = verdict {
-            assert_eq!(reasons.len(), 2);
-            assert!(reasons[0].contains("Missing error handling"));
-            assert!(reasons[1].contains("JWT secret is hard-coded"));
+        assert!(verdict.is_pass());
+        let L3Verdict::Pass { low } = verdict else {
+            panic!("expected a pass");
+        };
+        assert_eq!(low.len(), 1);
+        assert_eq!(low[0].severity, ReviewSeverity::Low);
+        assert_eq!(low[0].title, "Name could be clearer");
+    }
+
+    #[test]
+    fn a_reply_with_a_medium_finding_is_a_bounce_even_if_it_says_pass() {
+        // The VERDICT line disagrees with the findings: the findings win.
+        let text = "FINDINGS\n- [MEDIUM] Cannot verify the retry cap | scenario: unbounded retries | rule: none | where: none\n- [LOW] nit | scenario: x | rule: none | where: none\nVERDICT: PASS";
+        let L3Verdict::Bounce { findings } = parse_l3_verdict(text) else {
+            panic!("a MEDIUM finding must bounce whatever the verdict line says");
+        };
+        assert_eq!(findings.len(), 2, "every finding is listed, LOW included");
+        // And the same when the reply simply opens with PASS.
+        let text = "PASS\n- [HIGH] Hard-coded secret | scenario: leaks in logs | rule: SEC-1 | where: x.rs:3";
+        assert!(!parse_l3_verdict(text).is_pass());
+    }
+
+    #[test]
+    fn the_old_bounce_shape_still_parses_as_medium_findings() {
+        let text = "BOUNCE\n- Missing error handling in authenticate()\n- JWT secret is hard-coded";
+        let L3Verdict::Bounce { findings } = parse_l3_verdict(text) else {
+            panic!("the old BOUNCE shape must bounce");
+        };
+        assert_eq!(findings.len(), 2);
+        assert!(findings
+            .iter()
+            .all(|f| f.severity == ReviewSeverity::Medium));
+        assert_eq!(
+            findings[0].title,
+            "Missing error handling in authenticate()"
+        );
+        assert_eq!(findings[1].title, "JWT secret is hard-coded");
+        assert_eq!(parse_l3_verdict(text).reasons().len(), 2);
+    }
+
+    #[test]
+    fn an_unformatted_reply_is_never_a_pass() {
+        for reply in [
+            "something unexpected",
+            "Looks good to me.",
+            "",
+            "FINDINGS\n- [LOW] nit | scenario: s | rule: none | where: none",
+            "PASSING grade overall",
+            "The change is fine. VERDICT is pending.",
+        ] {
+            let verdict = parse_l3_verdict(reply);
+            assert!(!verdict.is_pass(), "reply {reply:?} must not read as PASS");
+            let L3Verdict::Bounce { findings } = verdict else {
+                unreachable!()
+            };
+            assert!(
+                findings.iter().any(|f| f.severity == ReviewSeverity::Medium
+                    && f.title == "reviewer reply was not in the agreed format"),
+                "reply {reply:?} carries the format finding"
+            );
         }
     }
 
     #[test]
-    fn parse_l3_verdict_empty_bounce_has_no_reasons() {
-        // An empty or malformed bounce response is still a Bounce (safe default).
-        let verdict = parse_l3_verdict("something unexpected");
-        assert!(matches!(verdict, ReviewVerdict::Bounce { reasons } if reasons.is_empty()));
+    fn an_unformatted_reply_carries_its_raw_text_truncated_to_500_chars() {
+        let raw = "x".repeat(900);
+        let L3Verdict::Bounce { findings } = parse_l3_verdict(&raw) else {
+            panic!("unformatted must bounce");
+        };
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].scenario.chars().count(), 500);
+    }
+
+    #[test]
+    fn a_bounce_verdict_with_only_low_findings_still_bounces() {
+        let text =
+            "FINDINGS\n- [LOW] nit | scenario: s | rule: none | where: none\nVERDICT: BOUNCE";
+        let L3Verdict::Bounce { findings } = parse_l3_verdict(text) else {
+            panic!("an explicit BOUNCE is never read as a pass");
+        };
+        assert!(findings.iter().any(|f| f.severity.blocks()));
+    }
+
+    #[test]
+    fn reasons_lists_bounce_findings_and_is_empty_for_a_pass() {
+        assert!(parse_l3_verdict("PASS").reasons().is_empty());
+        let reasons = parse_l3_verdict("BOUNCE\n- bad thing").reasons();
+        assert_eq!(reasons, vec!["[MEDIUM] bad thing".to_string()]);
+    }
+
+    /// The prompt demands a ranked, adversarial review with a failure scenario per finding.
+    #[test]
+    fn l3_system_prompt_demands_ranked_findings_with_a_failure_scenario() {
+        let p = L3_SYSTEM_PROMPT;
+        for word in [
+            "HIGH",
+            "MEDIUM",
+            "LOW",
+            "scenario",
+            "ADVERSARIAL",
+            "VERDICT:",
+        ] {
+            assert!(p.contains(word), "L3 prompt must contain {word:?}");
+        }
     }
 
     // ── 4. Integration gate verdict mapping ───────────────────────────────────
@@ -537,10 +903,43 @@ mod tests {
                 L3ReviewConfig {
                     enabled: true,
                     model: "claude-opus-5".to_string(),
+                    ..Default::default()
                 },
             )
             .unwrap();
         assert_eq!(updated.l3_model(), "claude-opus-5");
+    }
+
+    /// `tier = Strongest` picks the strongest tier model when no model is pinned; a pinned
+    /// model still wins; `Balanced` (the default) is unchanged.
+    #[test]
+    fn l3_model_uses_the_strongest_tier_when_configured_and_no_model_is_pinned() {
+        let store = crate::project::ProjectStore::new();
+        let p = store.create("T3", vec![]).unwrap();
+        let strongest = store
+            .set_l3_review(
+                &p.id,
+                L3ReviewConfig {
+                    enabled: true,
+                    tier: crate::project::ReviewTier::Strongest,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(strongest.l3_model(), strongest.tier_map.strongest);
+        assert_ne!(strongest.l3_model(), strongest.tier_map.balanced_primary());
+        let pinned = store
+            .set_l3_review(
+                &p.id,
+                L3ReviewConfig {
+                    enabled: true,
+                    model: "claude-opus-5".to_string(),
+                    tier: crate::project::ReviewTier::Strongest,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(pinned.l3_model(), "claude-opus-5", "a pinned model wins");
     }
 
     // ── 7. check_integration_gate_live short-circuits ─────────────────────────

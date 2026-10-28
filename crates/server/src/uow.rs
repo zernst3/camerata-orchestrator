@@ -66,6 +66,17 @@ fn investigation_artifact_id(story_id: &str) -> String {
     format!("{story_id}/investigation")
 }
 
+pub use camerata_api_types::uow::{RecordedReviewFinding, ReviewFindingStatus};
+
+/// Why [`UowStore::accept_review_finding`] refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AcceptReviewFindingError {
+    /// No such unit, or the index is out of range.
+    NotFound,
+    /// The finding was already fixed or accepted.
+    NotOpen,
+}
+
 /// The Unit of Work for one story. Keyed by `story_id`.
 #[derive(Clone, Default, Serialize, Deserialize, Debug)]
 pub struct UnitOfWork {
@@ -163,6 +174,11 @@ pub struct UnitOfWork {
     /// sign-off survives sessions and is visible alongside the dev status.
     #[serde(default)]
     pub sign_off: Option<SignOff>,
+    /// Every Layer-3 reviewer finding recorded for this unit's runs, so none is dropped
+    /// silently: fixed by a later pass, accepted by the architect with a reason, or still open
+    /// at sign-off (an open HIGH or MEDIUM blocks it). Empty until a review has run.
+    #[serde(default)]
+    pub review_findings: Vec<RecordedReviewFinding>,
     /// The SOC-2 evidence record for the most recent completed governed run (issue #53).
     ///
     /// Assembled and attached by [`UowStore::attach_evidence`] when a run finishes.
@@ -400,6 +416,15 @@ impl UnitOfWork {
         self.evidence
             .as_ref()
             .is_some_and(|e| e.is_sign_off_blocked())
+    }
+
+    /// How many recorded reviewer findings still block sign-off: open and ranked HIGH or
+    /// MEDIUM. LOW findings, fixed ones and accepted ones never block.
+    pub fn open_blocking_review_findings(&self) -> usize {
+        self.review_findings
+            .iter()
+            .filter(|f| f.blocks_sign_off())
+            .count()
     }
 }
 
@@ -1196,6 +1221,101 @@ impl UowStore {
         uow.updated = Self::now_rfc3339();
         drop(map);
         self.flush();
+    }
+
+    /// Record the findings one Layer-3 review reported on a story's unit (creating it if
+    /// needed). A finding with the same `(severity, title)` as one still `Open` is the same
+    /// finding and stays `Open` (not added twice); an `Open` finding the review did NOT
+    /// report becomes `Fixed { iteration }`; every other finding is added `Open`. LOW
+    /// findings of a passing review are recorded too: the architect decides them at sign-off.
+    /// Returns how many earlier findings this review marked fixed.
+    pub fn record_review_findings(
+        &self,
+        story_id: &str,
+        run_id: &str,
+        iteration: usize,
+        findings: &[crate::review_agent::ReviewFinding],
+    ) -> usize {
+        let severity_wire = |f: &crate::review_agent::ReviewFinding| match f.severity {
+            crate::review_agent::ReviewSeverity::High => "high",
+            crate::review_agent::ReviewSeverity::Medium => "medium",
+            crate::review_agent::ReviewSeverity::Low => "low",
+        };
+        let mut fixed = 0usize;
+        {
+            let mut map = self.mem.lock().expect("uow mutex poisoned");
+            let uow = map
+                .entry(story_id.to_string())
+                .or_insert_with(|| UnitOfWork::keyed(story_id));
+            for rec in uow.review_findings.iter_mut() {
+                if matches!(rec.status, ReviewFindingStatus::Open)
+                    && !findings
+                        .iter()
+                        .any(|f| severity_wire(f) == rec.severity && f.title == rec.title)
+                {
+                    rec.status = ReviewFindingStatus::Fixed { iteration };
+                    fixed += 1;
+                }
+            }
+            for f in findings {
+                let sev = severity_wire(f);
+                let already_open = uow.review_findings.iter().any(|rec| {
+                    matches!(rec.status, ReviewFindingStatus::Open)
+                        && rec.severity == sev
+                        && rec.title == f.title
+                });
+                if !already_open {
+                    uow.review_findings.push(RecordedReviewFinding {
+                        run_id: run_id.to_string(),
+                        iteration,
+                        severity: sev.to_string(),
+                        title: f.title.clone(),
+                        scenario: f.scenario.clone(),
+                        rule: f.rule.clone(),
+                        location: f.location.clone(),
+                        status: ReviewFindingStatus::Open,
+                    });
+                }
+            }
+            uow.updated = Self::now_rfc3339();
+        }
+        self.flush();
+        fixed
+    }
+
+    /// Accept one recorded reviewer finding as is, with the architect's reason. Only an
+    /// `Open` finding can be accepted. Does NOT write the decision record or history line:
+    /// the HTTP handler does, so it can report a failure of either.
+    pub fn accept_review_finding(
+        &self,
+        story_id: &str,
+        index: usize,
+        by: &str,
+        reason: &str,
+    ) -> Result<RecordedReviewFinding, AcceptReviewFindingError> {
+        let accepted = {
+            let mut map = self.mem.lock().expect("uow mutex poisoned");
+            let uow = map
+                .get_mut(story_id)
+                .ok_or(AcceptReviewFindingError::NotFound)?;
+            let rec = uow
+                .review_findings
+                .get_mut(index)
+                .ok_or(AcceptReviewFindingError::NotFound)?;
+            if !matches!(rec.status, ReviewFindingStatus::Open) {
+                return Err(AcceptReviewFindingError::NotOpen);
+            }
+            rec.status = ReviewFindingStatus::Accepted {
+                by: by.to_string(),
+                reason: reason.to_string(),
+                at: Self::now_rfc3339(),
+            };
+            let accepted = rec.clone();
+            uow.updated = Self::now_rfc3339();
+            accepted
+        };
+        self.flush();
+        Ok(accepted)
     }
 
     /// Set (or clear) the branch for a story's UoW.
@@ -4632,5 +4752,118 @@ mod concurrency_regression_tests {
         // The root no longer lists and is no longer resolvable as a design root.
         assert!(store.list_design_roots_for_project("p").is_empty());
         assert!(store.get_design_root(&root.story_id).is_none());
+    }
+}
+
+// The HTTP side of the reviewer findings (sign-off block, accept route). Registered here, not in
+// `lib.rs`, because the source-scanning tests cut `lib.rs` at its first `#[cfg(test)]`.
+#[cfg(test)]
+#[path = "review_findings_http_tests.rs"]
+mod review_findings_http_tests;
+
+#[cfg(test)]
+mod review_finding_tests {
+    use super::*;
+    use crate::review_agent::{ReviewFinding, ReviewSeverity};
+
+    fn finding(sev: ReviewSeverity, title: &str) -> ReviewFinding {
+        ReviewFinding {
+            severity: sev,
+            title: title.to_string(),
+            scenario: format!("{title} fails"),
+            rule: Some("RULE-1".to_string()),
+            location: Some("a.rs:1".to_string()),
+        }
+    }
+
+    #[test]
+    fn review_findings_are_recorded_open_and_fixed_ones_are_marked_when_absent_next_iteration() {
+        let store = UowStore::new();
+        let high = finding(ReviewSeverity::High, "Token never expires");
+        let low = finding(ReviewSeverity::Low, "nit");
+        // Pass 0 reports a HIGH and a LOW.
+        store.record_review_findings("S-1", "run-1", 0, &[high.clone(), low.clone()]);
+        let u = store.get_or_create("S-1");
+        assert_eq!(u.review_findings.len(), 2);
+        assert!(u
+            .review_findings
+            .iter()
+            .all(|f| f.status == ReviewFindingStatus::Open && f.run_id == "run-1"));
+        assert_eq!(u.open_blocking_review_findings(), 1, "only the HIGH blocks");
+
+        // Pass 1 reports only the LOW again plus a new MEDIUM: the HIGH is fixed, the LOW is the
+        // same finding (not added twice), the MEDIUM is new.
+        let medium = finding(ReviewSeverity::Medium, "No error path");
+        let fixed = store.record_review_findings("S-1", "run-1", 1, &[low, medium]);
+        assert_eq!(fixed, 1);
+        let u = store.get_or_create("S-1");
+        assert_eq!(u.review_findings.len(), 3);
+        assert_eq!(
+            u.review_findings[0].status,
+            ReviewFindingStatus::Fixed { iteration: 1 }
+        );
+        assert_eq!(u.review_findings[1].status, ReviewFindingStatus::Open);
+        assert_eq!(u.review_findings[2].title, "No error path");
+        assert_eq!(u.review_findings[2].iteration, 1);
+        assert_eq!(
+            u.open_blocking_review_findings(),
+            1,
+            "only the MEDIUM blocks"
+        );
+
+        // Pass 2 reports nothing: everything still open is fixed.
+        store.record_review_findings("S-1", "run-1", 2, &[]);
+        assert_eq!(
+            store.get_or_create("S-1").open_blocking_review_findings(),
+            0
+        );
+    }
+
+    #[test]
+    fn a_later_run_that_no_longer_reports_a_finding_marks_the_earlier_runs_one_fixed() {
+        let store = UowStore::new();
+        store.record_review_findings(
+            "S-2",
+            "run-1",
+            0,
+            &[finding(ReviewSeverity::High, "old bug")],
+        );
+        store.record_review_findings("S-2", "run-2", 0, &[]);
+        assert_eq!(
+            store.get_or_create("S-2").open_blocking_review_findings(),
+            0
+        );
+    }
+
+    #[test]
+    fn accept_sets_accepted_once_and_refuses_a_second_time_or_a_bad_index() {
+        let store = UowStore::new();
+        store.record_review_findings("S-3", "run-1", 0, &[finding(ReviewSeverity::High, "h")]);
+        let rec = store
+            .accept_review_finding("S-3", 0, "architect", "tracked elsewhere")
+            .unwrap();
+        assert!(matches!(rec.status, ReviewFindingStatus::Accepted { .. }));
+        assert_eq!(
+            store.get_or_create("S-3").open_blocking_review_findings(),
+            0
+        );
+        assert_eq!(
+            store.accept_review_finding("S-3", 0, "architect", "again"),
+            Err(AcceptReviewFindingError::NotOpen)
+        );
+        assert_eq!(
+            store.accept_review_finding("S-3", 9, "architect", "x"),
+            Err(AcceptReviewFindingError::NotFound)
+        );
+        assert_eq!(
+            store.accept_review_finding("no-such", 0, "architect", "x"),
+            Err(AcceptReviewFindingError::NotFound)
+        );
+    }
+
+    #[test]
+    fn an_old_uow_json_without_review_findings_loads_empty() {
+        let u: UnitOfWork = serde_json::from_str(r#"{"story_id":"S-4"}"#).unwrap();
+        assert!(u.review_findings.is_empty());
     }
 }
