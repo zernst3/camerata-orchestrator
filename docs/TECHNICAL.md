@@ -2543,7 +2543,7 @@ PR (catching non-Camerata changes too). See
 > separately names shapes that are faults under all of them. It permits `violates`
 > flags and is denied the no-convention escape. `RUST-DOMAIN-6` is its sole member,
 > asserted as an equality. Second, **not every selected rule is scanned any more.**
-> `Rule::inspectable` (W16) is required on all 417 corpus rules, and the 26 that
+> `Rule::inspectable` (W16) is required on every corpus rule, and the 26 that
 > declare `false` are removed from the selected set BEFORE arming, by
 > `inspectable_rules_for_scan` plus a `selected` shadow in `audit_repos`
 > (`crates/server/src/onboard.rs:944-961, 1254-1255`). Those rules are still emitted
@@ -2666,7 +2666,7 @@ Two things about this are worth internalising because both have already bitten:
 
 - **A mechanism with no data is inert, and a green test suite will not tell you.**
   `max_severity`, its clamp, and all four `req_e2_*` unit tests shipped against a
-  corpus in which ZERO of 417 rules declared a ceiling. Every test passed and the
+  corpus in which ZERO rules declared a ceiling. Every test passed and the
   feature did nothing. The fix is the anti-inertness gate:
   `rules_declaring_max_severity` / `rules_declaring_min_severity` /
   `rules_declaring_deviation_ceiling` must be NON-empty for the real corpus, so a

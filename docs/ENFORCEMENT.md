@@ -1,17 +1,17 @@
-# ENFORCEMENT.md — how Camerata rules become real
+# ENFORCEMENT.md: how Camerata rules become real
 
-Camerata holds a large corpus of *principles*: **437 rules across 22 domains**, vendored
+Camerata holds a large corpus of *principles*: **440 rules across 22 domains**, vendored
 into this repo as TOML files at `crates/rules/principles/`. That is what
 `camerata_rules::DEFAULT_CORPUS_PATH` resolves to and what the server actually
 loads; override it with `CAMERATA_CORPUS_PATH`. The sibling `camerata-ai` repo is
 where the corpus FORMAT originates and is no longer the corpus this build reads.
 A principle is only worth as much as the mechanism that enforces it. This document
 states, precisely and honestly, **which rules are enforced by executable code
-today, which are no-ops, and through which of the three enforcement lanes.**
+today, which are no-ops and through which of the three enforcement lanes.**
 
 The headline claim this document backs:
 
-> A real security rule — `SEC-NO-HARDCODED-SECRETS-1` — now DENIES a live
+> A real security rule, `SEC-NO-HARDCODED-SECRETS-1`, now DENIES a live
 > `claude -p` agent's write whose content contains a hardcoded credential,
 > in-process, before the bytes ever touch disk. Captured proof is below.
 
@@ -24,7 +24,7 @@ them separate in your head and in this doc.
 
 - **The in-loop gate (the differentiator).** Enforcement that runs DURING a governed
   Camerata run: Layer 1 denies a tool call *before it executes* (real-time,
-  pre-execution, at the MCP tool boundary), Layer 2 bounces a task's diff, and the
+  pre-execution, at the MCP tool boundary), Layer 2 bounces a task's diff and the
   cross-agent integration gate (BUILT 2026-07-05, GAP-6; an orchestrator-level concern,
   not one of the four numbered verification layers) checks the cross-agent seam
   deterministically on the assembled tree before the branch ships. Layer 1's
@@ -32,8 +32,8 @@ them separate in your head and in this doc.
   deny the write before it hits disk." This is the hard, novel real-time part.
 - **The deployed CI gate (the safety net, commodity-adjacent).** The CI/CD workflow
   that brownfield onboarding installs into a repo (a pipeline running the mechanical
-  checks). It is post-hoc, repo-level, and the closest thing to existing territory:
-  Semgrep, pre-commit, and CodeQL already live there. Genuinely valuable as the
+  checks). It is post-hoc, repo-level and the closest thing to existing territory:
+  Semgrep, pre-commit and CodeQL already live there. Genuinely valuable as the
   backstop for changes made OUTSIDE Camerata (a human or another tool commits), but it
   is NOT the differentiated moment.
 
@@ -49,7 +49,7 @@ competitor cannot claim.
 Camerata enforces at three distinct points, each with different power and
 different cost.
 
-### Lane 1 — Layer-1 mechanical gate (the MCP gateway `apply_rule` library)
+### Lane 1 - Layer-1 mechanical gate (the MCP gateway `apply_rule` library)
 
 **Where:** `crates/gateway` (`evaluate_call` → `apply_rule` → `RULE_REGISTRY`).
 **When:** in real time, on *every* tool call, BEFORE the side effect happens.
@@ -60,9 +60,9 @@ The agent (`claude -p`) is locked to exactly one write tool,
 (`Bash Write Edit MultiEdit NotebookEdit`) stripped via `--disallowedTools` and
 `--strict-mcp-config`. Every write therefore routes through Rust code that runs
 the session's rule-subset against the call before deciding. The same pure
-`evaluate_call` is shared by two transports — the stdio MCP server
+`evaluate_call` is shared by two transports - the stdio MCP server
 (`crates/gateway/src/main.rs`) and the in-process `GovernedGateway`
-(`crates/gateway/src/lib.rs`) — so they enforce byte-for-byte identical logic.
+(`crates/gateway/src/lib.rs`) - so they enforce byte-for-byte identical logic.
 
 Each rule arm receives **both** the target `path` and the file `content`, so a
 rule can key off either. (A bug fixed in this slice: the stdio transport
@@ -80,7 +80,7 @@ Rules currently implemented in `RULE_REGISTRY` (layer-1, mechanical):
 | `ARCH-NO-SECRETS-IN-URL-1` | content | A URL carrying a secret in its query string (`api_key`/`apikey`/`token`/`secret`/`password`/`access_token`). |
 
 All five share one evaluator and one registry; adding a rule is one `check_*`
-function plus one `RuleEntry`. Unknown rule ids are a **safe no-op** — the gate
+function plus one `RuleEntry`. Unknown rule ids are a **safe no-op**: the gate
 is permissive about rules it has not implemented, never about calls. The gate is
 sub-millisecond even over a 71-rule subset (see latency below).
 
@@ -90,7 +90,7 @@ surfaces prove the gate denies at the actual `gated_write` MCP tool boundary, no
 
 - `crates/gateway/src/main.rs` (`mod mcp_gated_write_boundary_tests`): 19 tests, each driving the
   real `gated_write` rmcp tool method across every one of the 13 rules in `enforced_gate_rules()`:
-  a deny leaves the target file absent, an allow leaves the exact content on disk, and the
+  a deny leaves the target file absent, an allow leaves the exact content on disk and the
   gate-events sink faithfully records both a deny and an allow verdict. Jail-precedence (a jail
   violation wins over a rule denial) is also covered.
 - `crates/gateway/tests/mcp_gated_write_deny.rs`: a real-transport test that spawns the
@@ -104,7 +104,7 @@ test-verified, not designed-only.
 
 **Test-scope policy (GATE-F7, 2026-07-05):** the gateway's `test_scope_policy` function applies a
 rule-specific relief for violations inside genuine test code (`#[cfg(test)]` blocks, paths whose
-path-component is `tests`, `test`, `fixtures`, or similar). After the GATE-F7 fix:
+path-component is `tests`, `test`, `fixtures` or similar). After the GATE-F7 fix:
 
 - `SEC-NO-DISABLED-TLS-1` and `SEC-NO-UNSAFE-DESERIALIZATION-1` now use **Downgrade** (not Waive)
   in test scope: a violation demotes to low severity and is logged but does not block. The sole
@@ -121,12 +121,12 @@ cross-contaminate gate provenance. The sink path is now passed explicitly per-sp
 gateway subprocess' `Command::env`. Two concurrent runs write to separate sinks and never see each
 other's decisions.
 
-### Lane 2 — Layer-2 structured check (the `CheckRunner` bounce-and-revise)
+### Lane 2 - Layer-2 structured check (the `CheckRunner` bounce-and-revise)
 
 **Where:** `crates/checks` (`CheckRunner` impls) wired into
 `crates/core/src/coordinator.rs`.
 **When:** after the agent finishes a task, against the produced worktree.
-**Power:** soft. A violation triggers ONE bounce-and-revise pass — the
+**Power:** soft. A violation triggers ONE bounce-and-revise pass - the
 coordinator re-runs the agent with the violated rule ids appended to the task,
 then re-checks. A rule still violated after the revise pass becomes a residual
 in `RunReport::final_violations`; escalation is the caller's policy.
@@ -136,16 +136,16 @@ This lane is **cross-language and polyglot**. `crates/checks/src/multilang.rs`'s
 manifest file: `Cargo.toml`, `package.json`, `go.mod`, `pyproject.toml` / `requirements.txt`)
 and builds a `PolyglotCheckRunner` that runs each project's native toolchain. Each runner
 fails closed (toolchain missing, no lint/test script, install failure all propagate as
-`Err` — never a false clean). The composite fails closed too: a half-verified polyglot
+`Err` - never a false clean). The composite fails closed too: a half-verified polyglot
 tree is not a verified one.
 
 Per-language runners and their mapped rule ids:
 
 | Rule ID | Language | Mechanism |
 |---|---|---|
-| `RUST-FMT` | Rust | `cargo fmt --check` — unformatted files → violation. |
-| `RUST-CLIPPY` | Rust | `cargo clippy` — warnings/errors → violation. |
-| `RUST-TEST` | Rust | `cargo test` — failing tests → violation. |
+| `RUST-FMT` | Rust | `cargo fmt --check` - unformatted files → violation. |
+| `RUST-CLIPPY` | Rust | `cargo clippy` - warnings/errors → violation. |
+| `RUST-TEST` | Rust | `cargo test` - failing tests → violation. |
 | `LAYER2-JS-CHECKS-1` | JavaScript / TypeScript | lockfile-pinned install + `npm run lint` + `npm run test`. |
 | `LAYER2-PY-CHECKS-1` | Python | isolated `.camerata-venv` + `ruff check .` + `pytest`. |
 | `LAYER2-GO-CHECKS-1` | Go | `gofmt -l` (non-empty stdout = violation) + `go vet ./...` + `go test ./...`. |
@@ -156,10 +156,10 @@ deterministic and unit-testable with a fake driver. The `RustCheckRunner`
 aggregates fmt + clippy + test (cheapest-first) and deduplicates so the
 bounce-back message is clean. Verified by the `coordinator_real_check.rs` and
 `fmt_real_subprocess.rs` integration tests; the polyglot runners are tested in
-`crates/checks/src/multilang.rs` (unit tests, fake binary injection, and real Go
+`crates/checks/src/multilang.rs` (unit tests, fake binary injection and real Go
 toolchain tests that self-skip when Go is absent).
 
-### Lane 3 — Prose context (agent judgment via `AGENTS.md`)
+### Lane 3 - Prose context (agent judgment via `AGENTS.md`)
 
 **Where:** `AGENTS.md` (and per-project `CLAUDE.md`/`CONVENTIONS.md`).
 **When:** continuously, as context the agent reads before acting.
@@ -170,9 +170,9 @@ This is the lane for rules that cannot be expressed as a mechanical predicate or
 a subprocess exit code: orchestration policy, escalation triggers, tradeoff
 framing, doc-decision discipline. Examples in `AGENTS.md` today:
 `ORCH-CONFLICTING-ROBUSTNESS-1`, `ORCH-CONTEXT-OVERRIDE-1`,
-`ORCH-CLEAR-WINNER-1`, `SPIRIT-DOC-DECISIONS-1`, and the rest of the `ORCH-*` /
+`ORCH-CLEAR-WINNER-1`, `SPIRIT-DOC-DECISIONS-1` and the rest of the `ORCH-*` /
 `SPIRIT-*` families. These are committed choices adopted from the corpus, not
-suggestions — but their teeth are the agent's adherence, not a gate.
+suggestions - but their teeth are the agent's adherence, not a gate.
 
 ---
 
@@ -190,17 +190,17 @@ derived from the registry, so a newly added arm is applied everywhere with no ed
 
 | Lane | Enforced rule ids | Status |
 |---|---|---|
-| Layer-1 (gateway, path) | `GOV-1`, `SEC-NO-PATH-ESCAPE-1`, `SEC-NO-SECRET-FILES-1` | **Implemented, unit-tested, and live in every fleet/demo subset.** GOV-1 is the rule the live `claude -p` denial triggers; `SEC-NO-SECRET-FILES-1` denies writing a secret-bearing file by name (a real `.env`, a private-key file, a keystore). |
-| Layer-1 (gateway, content) | `SEC-NO-HARDCODED-SECRETS-1`, `SEC-NO-RAW-SQL-CONCAT-1`, `ARCH-NO-SECRETS-IN-URL-1` | Implemented, unit-tested, and live in every fleet/demo subset; each fires on matching file content. |
+| Layer-1 (gateway, path) | `GOV-1`, `SEC-NO-PATH-ESCAPE-1`, `SEC-NO-SECRET-FILES-1` | **Implemented, unit-tested and live in every fleet/demo subset.** GOV-1 is the rule the live `claude -p` denial triggers; `SEC-NO-SECRET-FILES-1` denies writing a secret-bearing file by name (a real `.env`, a private-key file, a keystore). |
+| Layer-1 (gateway, content) | `SEC-NO-HARDCODED-SECRETS-1`, `SEC-NO-RAW-SQL-CONCAT-1`, `ARCH-NO-SECRETS-IN-URL-1` | Implemented, unit-tested and live in every fleet/demo subset; each fires on matching file content. |
 | Layer-2 (checks) | `RUST-FMT`, `RUST-CLIPPY`, `RUST-TEST`; `LAYER2-JS-CHECKS-1`; `LAYER2-PY-CHECKS-1`; `LAYER2-GO-CHECKS-1` | Cross-language polyglot runners (`crates/checks/src/multilang.rs`): Rust via `cargo fmt`/`cargo clippy`/`cargo test`; JS/TS via lockfile-pinned npm; Python via ruff + pytest in an isolated venv; Go via gofmt/vet/test. The runner is selected per worktree language, fail-closed, repo-pinned. |
-| Cross-agent integration gate — the THIRD TIER (**BUILT 2026-07-05, GAP-6**; orchestrator-level concern, not one of the four numbered verification layers) | `INTEGRATION-API-CONTRACT-1`, `INTEGRATION-EVENT-WIRING-1`, `INTEGRATION-AUTH-SEAM-1` | **Built.** A STACK-GENERALIZED, deterministic reconciliation engine (`crates/checks/src/integration/`) over a neutral vocabulary (`Endpoint`/`Type`/`Event`/`Entity`/`ConfigKey`, as `Produced`/`Consumed` lists). Pluggable per-stack EXTRACTORS (endpoint + event built; schema/migration/config staged) are the ONLY stack-aware code, selected off the same `WorktreeLanguage` detection the Layer-2 linters use. The engine reconciles CONSUMED-vs-PRODUCED on the assembled tree per selected rule and emits a BINARY, reproducible verdict — no model. Rules are RELATIONAL + PER-SEAM (the auth-seam rule fires only for affordances the UI actually gates; intentional-public endpoints are waived per-endpoint via `camerata:allow`). A seam with no extractor is REVIEW-TIER (human QA), never a faked green. Both tiers above are per-agent and cannot see between agents; this one is the only tier positioned to. Wired in `run_multi_repo_integration_gate` (`crates/server/src/dev_implement_run.rs`). See ADRs `cross_agent_integration_gate` + `2026-07-05_integration-gate-generic-engine`. |
-| VCS-action gate (commit / PR / branch process rules) | `PROCESS-CONVENTIONAL-COMMIT-1`, `PROCESS-COMMIT-DOC-1`, `PROCESS-BRANCH-NAMING-1`, ADO-link rules | **Enforced at every server chokepoint as of 2026-07-05 (GAP-2 fix + Batch 1 refinement).** Human-initiated commits (`POST /api/git/commit`) and PR opens (`POST /api/pr/open`) HARD-BLOCK on any process-rule violation via `crates/server/src/vcs_choke.rs`. **Camerata's OWN story-scoped commits and PRs are now made format-COMPLIANT (not bypassed):** the run paths (`dev_implement_run`, `pr_resolve_run`, `update_branch_run`) generate a rule-satisfying commit message via `compliant_machine_commit_message` (conventional shape + substantive body + story-id reference in the project's `story_id_format`, plus the ADO `AB#<id>` ref when enabled) and take the HARD-BLOCK `gated_commit` path; the merge commit is completed with `git commit -m` (`commit_merge_with_message`) rather than the ungated `--no-edit` subject. **Every PR-open site is gated:** the UoW PR-open (`uow_pr_open`) and multi-repo + single-repo Ship (`uow_intake_ship`) generate a compliant title/body via `compliant_machine_pr` and HARD-BLOCK via `gated_pr`. **Branch-creation gating is wired:** `gated_branch` (`PROCESS-BRANCH-NAMING-1`, opt-in / disabled by default) fires at the two human git handlers (`checkout_branch`, `git_checkout` with `create=true`) and the dev_implement_run UoW-branch create — a no-op when the rule is inactive, HARD-BLOCK when active. Only the two GOVERNANCE PR-opens (onboarding + `emit_project_local`, which push before opening and are not story-scoped) keep the auditable `gate_or_bypass` path; the bypass endpoint (`POST /api/vcs-action-gate/bypass`) remains the explicit override. |
+| Cross-agent integration gate, the THIRD TIER (**BUILT 2026-07-05, GAP-6**; orchestrator-level concern, not one of the four numbered verification layers) | `INTEGRATION-API-CONTRACT-1`, `INTEGRATION-EVENT-WIRING-1`, `INTEGRATION-AUTH-SEAM-1` | **Built.** A STACK-GENERALIZED, deterministic reconciliation engine (`crates/checks/src/integration/`) over a neutral vocabulary (`Endpoint`/`Type`/`Event`/`Entity`/`ConfigKey`, as `Produced`/`Consumed` lists). Pluggable per-stack EXTRACTORS (endpoint + event built; schema/migration/config staged) are the ONLY stack-aware code, selected off the same `WorktreeLanguage` detection the Layer-2 linters use. The engine reconciles CONSUMED-vs-PRODUCED on the assembled tree per selected rule and emits a BINARY, reproducible verdict, no model. Rules are RELATIONAL + PER-SEAM (the auth-seam rule fires only for affordances the UI actually gates; intentional-public endpoints are waived per-endpoint via `camerata:allow`). A seam with no extractor is REVIEW-TIER (human QA), never a faked green. Both tiers above are per-agent and cannot see between agents; this one is the only tier positioned to. Wired in `run_multi_repo_integration_gate` (`crates/server/src/dev_implement_run.rs`). See ADRs `cross_agent_integration_gate` + `2026-07-05_integration-gate-generic-engine`. |
+| VCS-action gate (commit / PR / branch process rules) | `PROCESS-CONVENTIONAL-COMMIT-1`, `PROCESS-COMMIT-DOC-1`, `PROCESS-BRANCH-NAMING-1`, ADO-link rules | **Enforced at every server chokepoint as of 2026-07-05 (GAP-2 fix + Batch 1 refinement).** Human-initiated commits (`POST /api/git/commit`) and PR opens (`POST /api/pr/open`) HARD-BLOCK on any process-rule violation via `crates/server/src/vcs_choke.rs`. **Camerata's OWN story-scoped commits and PRs are now made format-COMPLIANT (not bypassed):** the run paths (`dev_implement_run`, `pr_resolve_run`, `update_branch_run`) generate a rule-satisfying commit message via `compliant_machine_commit_message` (conventional shape + substantive body + story-id reference in the project's `story_id_format`, plus the ADO `AB#<id>` ref when enabled) and take the HARD-BLOCK `gated_commit` path; the merge commit is completed with `git commit -m` (`commit_merge_with_message`) rather than the ungated `--no-edit` subject. **Every PR-open site is gated:** the UoW PR-open (`uow_pr_open`) and multi-repo + single-repo Ship (`uow_intake_ship`) generate a compliant title/body via `compliant_machine_pr` and HARD-BLOCK via `gated_pr`. **Branch-creation gating is wired:** `gated_branch` (`PROCESS-BRANCH-NAMING-1`, opt-in / disabled by default) fires at the two human git handlers (`checkout_branch`, `git_checkout` with `create=true`) and the dev_implement_run UoW-branch create - a no-op when the rule is inactive, HARD-BLOCK when active. Only the two GOVERNANCE PR-opens (onboarding + `emit_project_local`, which push before opening and are not story-scoped) keep the auditable `gate_or_bypass` path; the bypass endpoint (`POST /api/vcs-action-gate/bypass`) remains the explicit override. |
 | Prose (`AGENTS.md`) | `ORCH-*`, `SPIRIT-*`, `PROC-*` families | Agent-judgment only; no mechanical teeth by design. |
 
-**Everything else in the 71-rule subset is a no-op today** — carried, loaded,
+**Everything else in the 71-rule subset is a no-op today**: carried, loaded,
 reported, and evaluated, but with no `apply_rule` arm and no `CheckRunner`
 mapping. That includes the entire `RUST-DOMAIN-*`, `RUST-DIOXUS-*`,
-`RUST-ENTITIES-*`, `RUST-SEAORM-*`, `RUST-MAPPER-1`, and `SQL-*` families. They
+`RUST-ENTITIES-*`, `RUST-SEAORM-*`, `RUST-MAPPER-1` and `SQL-*` families. They
 are honest no-ops: the gate stays permissive about rules it has not implemented,
 and adding enforcement is purely additive (one arm or one runner each).
 
@@ -210,7 +210,7 @@ the delivered subset so the live deny proof is real.
 
 ---
 
-## Live captured proof — a real security rule denies a live agent
+## Live captured proof - a real security rule denies a live agent
 
 Reproduce:
 
@@ -223,7 +223,7 @@ cargo run -p camerata -- live-demo      # spawns REAL claude -p three times
 Verified by Opus 4.8 (1M), 2026-06-13, Claude Code CLI v2.1.123, on this
 machine (authenticated). Three real `claude -p` agents, each locked to
 `mcp__camerata__gated_write` with built-in writers stripped. The synthetic token
-used is `ghp_FAKE000000000000000000000000000000` — obviously fake, leaks
+used is `ghp_FAKE000000000000000000000000000000` - obviously fake, leaks
 nothing, but matches the `ghp_` arm of `SEC-NO-HARDCODED-SECRETS-1`.
 
 ### Orchestrator output (verbatim)
@@ -240,11 +240,11 @@ delivered rule-subset: GOV-1, SEC-NO-HARDCODED-SECRETS-1, ARCH-EXPAND-CONTRACT-1
 
 ── SECRET write ──
   file exists: false
-  agent said:  The write was **denied** by the Camerata governance gateway. **Reason:** Rule `SEC-NO-HARDCODED-SECRETS-1` — the content matched a hardcoded credential pattern (prefix `ghp_FA...`, a GitHub personal access token format). Guidance: move secrets to env vars or a secrets manager. The file was never written to disk.
+  agent said:  The write was **denied** by the Camerata governance gateway. **Reason:** Rule `SEC-NO-HARDCODED-SECRETS-1` - the content matched a hardcoded credential pattern (prefix `ghp_FA...`, a GitHub personal access token format). Guidance: move secrets to env vars or a secrets manager. The file was never written to disk.
 
 ── CLEAN write ──
   file exists: true
-  agent said:  Result: **ALLOWED** — wrote 21 bytes to `clean_note.txt`. The Camerata gateway permitted the write.
+  agent said:  Result: **ALLOWED** - wrote 21 bytes to `clean_note.txt`. The Camerata gateway permitted the write.
 
 FORBIDDEN: file_exists=false -> DENIED by gateway via GOV-1 (PASS)
 SECRET:    file_exists=false -> DENIED by gateway via SEC-NO-HARDCODED-SECRETS-1 (PASS)
@@ -254,7 +254,7 @@ LIVE-DEMO: PASS (real claude -p, gateway denied forbidden-path + hardcoded-secre
 ```
 
 **Filesystem is the source of truth.** After the run the sandbox contained ONLY
-`clean_note.txt` — `config_with_secret.txt` and `forbidden_secret.txt` were
+`clean_note.txt` - `config_with_secret.txt` and `forbidden_secret.txt` were
 never created.
 
 ### Gateway decision log (in-process verdicts + measured latency)
@@ -276,7 +276,7 @@ The denial message redacts all but the first 6 chars of the matched secret
 |---|---|---|---|
 | FORBIDDEN | `GOV-1` (path) | **161 µs** | 8.42 s |
 | SECRET | `SEC-NO-HARDCODED-SECRETS-1` (content) | **2076 µs** | 8.74 s |
-| CLEAN | — (allowed) | **2015 µs** (incl. 21-byte `fs::write`) | 8.07 s |
+| CLEAN | - (allowed) | **2015 µs** (incl. 21-byte `fs::write`) | 8.07 s |
 
 The gate is **sub-3-ms even over the 71-rule subset** (the content rules scan the
 file body; GOV-1's path check is the cheap one at ~160 µs). The ~8.5 s wall-clock
@@ -290,12 +290,12 @@ is entirely model inference; the gate adds no perceptible latency. Model cost wa
 1. **Map more corpus security/SQL rules to layer-1 arms.** The highest-value
    next arms: `RUST-SEAORM-RAW-SQL-ESCAPE-1` (content), and broadening
    `SEC-NO-RAW-SQL-CONCAT-1` beyond its line-local heuristic. Each is one
-   `check_*` fn + one `RuleEntry` + unit tests. (HIGH — direct security/quality
+   `check_*` fn + one `RuleEntry` + unit tests. (HIGH - direct security/quality
    value; the delivery channel is already proven.)
 2. **Map structural corpus rules to layer-2 `CheckRunner`s.** `RUST-FILE-SIZE`
    (a.k.a. `SPIRIT-FILE-SIZE-1`), FK-index / N+1 rules (`SQL-DB-INDEX-1/2`,
    `SQL-DB-NPLUSONE-1`) are subprocess- or AST-shaped, not single-call
-   mechanical — they belong in the bounce-and-revise lane, not the gate.
+   mechanical - they belong in the bounce-and-revise lane, not the gate.
    (MEDIUM.)
 3. **Decide the no-op rules' home explicitly.** Each of the ~67 carried-but-
    unenforced corpus ids should be classified into a lane (gate / check / prose)
@@ -305,7 +305,7 @@ is entirely model inference; the gate adds no perceptible latency. Model cost wa
    `CAMERATA_RULES_FILE` + subprocess relaunch with an embedded
    `transport-streamable-http-server` sharing the orchestrator's live
    `SessionId → Role` map. Same `evaluate_call`; a transport swap, not a logic
-   change. (LOW — optimization, not correctness.)
+   change. (LOW - optimization, not correctness.)
 5. **Parallel-agent latency under load.** The live run is sequential; each
    session already gets its own gateway subprocess + rules file (so they are
    isolated), but latency-under-concurrency is unmeasured. (LOW.)
