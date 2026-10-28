@@ -1829,4 +1829,30 @@ mod tests {
             .iter()
             .all(|f| f.rule_id == "SEC-NO-SECRET-FILE-1" && f.line == 0));
     }
+
+    #[test]
+    fn h8_a_tfstate_with_a_single_line_json_escaped_pem_is_flagged_and_never_quoted() {
+        let dir = tempfile::tempdir().unwrap();
+        let body = "MIIBOgIBAAJBAKj34GkxFhD90vcNLYLInFEX6Ppy1tPf9Cnzj4p4WGeKLs1Pt8QuKUpRKfFLfRYC9AIKjbJTWit";
+        // Terraform state writes a PEM on one line, newlines as JSON escapes.
+        let state = format!(
+            "{{\"resources\":[{{\"instances\":[{{\"attributes\":{{\"private_key_pem\":\
+             \"-----BEGIN RSA PRIVATE KEY-----\\n{body}\\n-----END RSA PRIVATE KEY-----\\n\"}}}}]}}]}}\n"
+        );
+        write(dir.path(), "infra/terraform.tfstate", &state);
+        let extracted = scan(dir.path());
+        assert_eq!(paths(&extracted), ["infra/terraform.tfstate"]);
+        let findings = crate::onboard::audit::audit_files("o/r", &extracted.files);
+        assert!(
+            findings.iter().any(|f| f.path == "infra/terraform.tfstate"),
+            "the state file is flagged: {findings:#?}"
+        );
+        for f in &findings {
+            let shown = format!("{} {} {:?}", f.snippet, f.detail, f.captures);
+            assert!(
+                !shown.contains(&body[..24]),
+                "the key material must not be quoted: {shown}"
+            );
+        }
+    }
 }

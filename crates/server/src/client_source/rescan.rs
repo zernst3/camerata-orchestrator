@@ -100,7 +100,7 @@ pub fn parse_porcelain_z(stdout: &[u8]) -> HashSet<String> {
 /// treated as "the AI looked and found nothing".
 fn ai_covered(report: &ScanReport) -> bool {
     report.provenance.audit_model.is_some()
-        && report.ai_error.is_none()
+        && report.ai_review_complete()
         && report.ai_blocked_reason.is_none()
         && !report.blocked
 }
@@ -461,6 +461,31 @@ mod tests {
             ]
         );
         assert!(parse_name_status_z(b"").is_empty());
+    }
+
+    /// An inspection with a failed scan pass over files is not a baseline: carrying its findings
+    /// for "unchanged" files would present the files that pass never reviewed as reviewed and
+    /// clean. The same predicate the scan's own manifest uses decides it.
+    #[test]
+    fn an_inspection_with_a_failed_chunk_is_not_an_ai_covered_baseline() {
+        let mut report = super::super::test_support::report_at("acme/app", &"a".repeat(40));
+        report.provenance.audit_model = Some("model-x".to_string());
+        assert!(ai_covered(&report), "a complete inspection is a baseline");
+
+        report.failed_passes.push(crate::ai_audit::FailedPass {
+            repo: "acme/app".to_string(),
+            pass: "scan".to_string(),
+            reason: "scripted".to_string(),
+            files_not_reviewed: 3,
+        });
+        assert!(!ai_covered(&report), "a chunk of files was never reviewed");
+
+        // A failed pass that is not over files leaves every file's review intact.
+        report.failed_passes[0].files_not_reviewed = 0;
+        assert!(ai_covered(&report));
+
+        report.ai_error = Some("acme/app: AI audit skipped".to_string());
+        assert!(!ai_covered(&report));
     }
 
     #[test]

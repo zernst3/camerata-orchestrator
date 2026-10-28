@@ -1819,6 +1819,41 @@ fn write_coverage_sheet(
             ws.write_string_with_format(next_r, 0, line, &fmts.cell(None, true, false))?;
             next_r += 1;
         }
+        // H10: rules checked against only the files in their language or declared scope.
+        if let Some(note) = &gaps.scope_limited_note {
+            ws.write_string_with_format(next_r, 0, note, &fmts.cell(None, true, false))?;
+            next_r += 1;
+            for (c, h) in [
+                "Rule ID",
+                "Files checked",
+                "Files in the repositories",
+                "Scope",
+            ]
+            .iter()
+            .enumerate()
+            {
+                ws.write_string_with_format(next_r, c as u16, *h, &fmts.header)?;
+            }
+            next_r += 1;
+            for rule in &gaps.scope_limited_rules {
+                ws.write_string_with_format(
+                    next_r,
+                    0,
+                    &rule.rule_id,
+                    &fmts.cell(None, false, false),
+                )?;
+                ws.write_number(next_r, 1, rule.files_checked as f64)?;
+                ws.write_number(next_r, 2, rule.files_total as f64)?;
+                ws.write_string_with_format(
+                    next_r,
+                    3,
+                    &rule.scope,
+                    &fmts.cell(None, false, false),
+                )?;
+                next_r += 1;
+            }
+            next_r += 1;
+        }
         if !gaps.skipped_files.is_empty() || gaps.skipped_beyond_cap_total > 0 {
             for (c, h) in ["Repo", "File", "Why it was not read"].iter().enumerate() {
                 ws.write_string_with_format(next_r, c as u16, *h, &fmts.header)?;

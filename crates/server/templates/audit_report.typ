@@ -882,7 +882,7 @@ Not performed in this engagement:
 // skipped files and points to the full list, which itself holds the first 1,000 per reason; the
 // rest are counted ("and K more").
 #let gaps = d.coverage_gaps
-#if gaps.failed_ai_passes.len() > 0 or gaps.dependency_gaps.len() > 0 or gaps.skipped_files.len() > 0 or gaps.skipped_beyond_cap_total > 0 [
+#if gaps.failed_ai_passes.len() > 0 or gaps.dependency_gaps.len() > 0 or gaps.skipped_files.len() > 0 or gaps.skipped_beyond_cap_total > 0 or "scope_limited_note" in gaps [
   #v(0.2cm)
   #card[
     #subheading[Coverage, not reviewed this scan]
@@ -902,6 +902,9 @@ Not performed in this engagement:
     ]
     #if "skipped_beyond_cap_note" in gaps [
       - #gaps.skipped_beyond_cap_note
+    ]
+    #if "scope_limited_note" in gaps [
+      - #gaps.scope_limited_note
     ]
   ]
 ]

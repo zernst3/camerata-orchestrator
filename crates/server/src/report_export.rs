@@ -5436,6 +5436,9 @@ mod engine_identity_tests;
 mod fix_text_tests;
 
 #[cfg(test)]
+mod fn_batch_b_tests;
+
+#[cfg(test)]
 mod fn_batch_c_adjust_tests;
 
 #[cfg(test)]

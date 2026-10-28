@@ -219,6 +219,12 @@ const LANGUAGE_PREFIXES: &[(&str, &str)] = &[
 /// process, or unknown) is [`Scope::All`] so it audits every file. Ignores `applies_to`; see
 /// [`scope_of`] for the full classification.
 pub fn rule_scope(rule_id: &str) -> Scope {
+    // The corpus's Spring rules are `JAVA-SPRING-*`: the leading token says Java, but Spring is as
+    // often written in Kotlin, so these take the JVM scope (Java and Kotlin files) rather than
+    // the Java-only one the leading token alone gives.
+    if rule_id.to_ascii_uppercase().starts_with("JAVA-SPRING-") {
+        return Scope::Language(JVM_SCOPE);
+    }
     let head = rule_id
         .split(['-', '_', ':'])
         .next()
@@ -297,47 +303,63 @@ pub fn file_in_scope(path: &str, content: &str, scope: &Scope) -> bool {
     }
 }
 
-/// Build and configuration files a language-scoped rule needs to see beside its language's
-/// source: the dependency manifest names the framework and versions (`Cargo.toml`,
-/// `package.json`) and the application config holds the settings Spring and Django rules judge
-/// (`application.yml`). They have no routed language, so an id-prefix language scope used to skip
-/// them. Matched on the file name, at any depth.
-const MANIFEST_BASENAMES: &[&str] = &[
-    "Cargo.toml",
-    "package.json",
-    "pyproject.toml",
-    "requirements.txt",
-    "go.mod",
-    "pom.xml",
-    "build.gradle",
-    "build.gradle.kts",
-    "settings.gradle",
-    "settings.gradle.kts",
-    "composer.json",
-    "Gemfile",
-    "Package.swift",
-    "application.yml",
-    "application.yaml",
-    "application.properties",
-    "settings.py",
-];
-
-fn is_manifest_file(path: &str) -> bool {
+/// The language a build or configuration file belongs to, by file name at any depth: the
+/// dependency manifest names the framework and versions (`Cargo.toml`, `package.json`) and the
+/// application config holds the settings Spring and Django rules judge (`application.yml`). They
+/// have no routed language of their own, so an id-prefix language scope used to skip them. The
+/// JVM files carry the `jvm` scope key, which the Java, Kotlin and Spring scopes all take.
+fn manifest_language(path: &str) -> Option<&'static str> {
     let basename = path.rsplit('/').next().unwrap_or(path);
-    MANIFEST_BASENAMES.contains(&basename)
-        || (basename.starts_with("application-")
-            && [".yml", ".yaml", ".properties"]
+    Some(match basename {
+        "Cargo.toml" => "rust",
+        "package.json" => "web",
+        "pom.xml"
+        | "build.gradle"
+        | "build.gradle.kts"
+        | "settings.gradle"
+        | "settings.gradle.kts" => JVM_SCOPE,
+        "pyproject.toml" | "requirements.txt" | "setup.py" | "settings.py" => "python",
+        "go.mod" => "go",
+        "Gemfile" => "ruby",
+        "composer.json" => "php",
+        "Package.swift" => "swift",
+        _ if basename.starts_with("application.") || basename.starts_with("application-") => {
+            if [".yml", ".yaml", ".properties"]
                 .iter()
-                .any(|ext| basename.ends_with(ext)))
-        || basename.ends_with(".csproj")
+                .any(|ext| basename.ends_with(ext))
+            {
+                JVM_SCOPE
+            } else {
+                return None;
+            }
+        }
+        _ if basename.starts_with("requirements") && basename.ends_with(".txt") => "python",
+        _ if basename.ends_with(".csproj") => "csharp",
+        _ => return None,
+    })
+}
+
+/// Whether a scope's language key takes a manifest of `manifest_lang`: the same language, or a
+/// JVM manifest for the Java, Kotlin and JVM scopes.
+fn scope_takes_manifest(scope_lang: &str, manifest_lang: &str) -> bool {
+    scope_lang == manifest_lang
+        || (manifest_lang == JVM_SCOPE && matches!(scope_lang, "java" | "kotlin"))
+}
+
+/// Whether `path` is a manifest the language scope `scope` takes.
+fn is_scope_manifest(path: &str, scope: &Scope) -> bool {
+    match (scope, manifest_language(path)) {
+        (Scope::Language(lang), Some(manifest)) => scope_takes_manifest(lang, manifest),
+        _ => false,
+    }
 }
 
 /// The files of `files` a scope covers, owned (what a group's passes are chunked from).
 ///
 /// H10: a language scope that matched at least one source file also receives the repo's manifest
-/// and application config files ([`MANIFEST_BASENAMES`]). With no source file of its language the
-/// group stays empty, so it is still reported as not assessed rather than "ran, found nothing" on
-/// a lone `package.json`.
+/// and application config files of that language ([`manifest_language`]). With no source file of
+/// its language the group stays empty, so it is still reported as not assessed rather than "ran,
+/// found nothing" on a lone `package.json`.
 pub fn files_in_scope(files: &[(String, String)], scope: &Scope) -> Vec<(String, String)> {
     let covered: Vec<(String, String)> = files
         .iter()
@@ -347,7 +369,7 @@ pub fn files_in_scope(files: &[(String, String)], scope: &Scope) -> Vec<(String,
     if matches!(scope, Scope::Language(_)) && !covered.is_empty() {
         return files
             .iter()
-            .filter(|(p, c)| file_in_scope(p, c, scope) || is_manifest_file(p))
+            .filter(|(p, c)| file_in_scope(p, c, scope) || is_scope_manifest(p, scope))
             .cloned()
             .collect();
     }
@@ -365,7 +387,9 @@ pub fn files_for_rule<'a>(
     let with_manifests = matches!(scope, Scope::Language(_)) && language_hit;
     files
         .iter()
-        .filter(|(p, c)| file_in_scope(p, c, &scope) || (with_manifests && is_manifest_file(p)))
+        .filter(|(p, c)| {
+            file_in_scope(p, c, &scope) || (with_manifests && is_scope_manifest(p, &scope))
+        })
         .collect()
 }
 
@@ -932,6 +956,11 @@ mod tests {
             &scope_of(&r("KOTLIN-1"), true)
         ));
         assert!(!file_in_scope("src/c.py", "", &scope));
+        // The corpus names its Spring rules JAVA-SPRING-*: the same JVM scope, not Java alone.
+        let corpus_spring = scope_of(&r("JAVA-SPRING-CONSTRUCTOR-INJECTION-1"), true);
+        assert_eq!(corpus_spring, Scope::Language("jvm"));
+        assert!(file_in_scope("src/B.kt", "", &corpus_spring));
+        assert!(file_in_scope("src/A.java", "", &corpus_spring));
         // A plain Java rule stays Java-only.
         assert!(!file_in_scope(
             "src/B.kt",
@@ -941,36 +970,79 @@ mod tests {
     }
 
     #[test]
-    fn a_language_group_also_receives_the_manifests_and_application_config() {
+    fn a_language_group_receives_the_manifests_of_its_own_language_only() {
         let files = vec![
             f("src/main.rs", 10),
             f("Cargo.toml", 10),
+            f("web/app.ts", 10),
             f("web/package.json", 10),
-            f("src/main/resources/application.yml", 10),
+            f("svc/App.java", 10),
+            f("svc/pom.xml", 10),
+            f("svc/build.gradle.kts", 10),
+            f("svc/src/main/resources/application.yml", 10),
+            f("api/main.py", 10),
+            f("api/pyproject.toml", 10),
+            f("api/requirements-dev.txt", 10),
             f("README.md", 10),
         ];
-        let rust = r("RUST-1");
-        let picked: Vec<&str> = files_for_rule(&rust, true, &files)
-            .into_iter()
-            .map(|(p, _)| p.as_str())
-            .collect();
+        let picked = |id: &str| -> Vec<String> {
+            files_for_rule(&r(id), true, &files)
+                .into_iter()
+                .map(|(p, _)| p.clone())
+                .collect()
+        };
+        // Each language group gets its own manifests, not every manifest in the repo.
+        assert_eq!(picked("RUST-1"), ["src/main.rs", "Cargo.toml"]);
+        assert_eq!(picked("REACT-1"), ["web/app.ts", "web/package.json"]);
         assert_eq!(
-            picked,
+            picked("SPRING-1"),
             [
-                "src/main.rs",
-                "Cargo.toml",
-                "web/package.json",
-                "src/main/resources/application.yml"
+                "svc/App.java",
+                "svc/pom.xml",
+                "svc/build.gradle.kts",
+                "svc/src/main/resources/application.yml"
             ]
         );
-        let scope = scope_of(&rust, true);
-        let group: Vec<String> = files_in_scope(&files, &scope)
-            .into_iter()
-            .map(|(p, _)| p)
-            .collect();
-        assert_eq!(group.len(), 4, "{group:?}");
-        let plan = plan_routes(&[rust], &files, true);
-        assert_eq!(plan.routed_chars, 40);
+        assert_eq!(
+            picked("PY-1"),
+            [
+                "api/main.py",
+                "api/pyproject.toml",
+                "api/requirements-dev.txt"
+            ]
+        );
+        // The group and the plan agree with the per-rule view.
+        let rust = r("RUST-1");
+        let group = files_in_scope(&files, &scope_of(&rust, true));
+        assert_eq!(group.len(), 2, "{group:?}");
+        assert_eq!(plan_routes(&[rust], &files, true).routed_chars, 20);
+    }
+
+    #[test]
+    fn manifest_names_map_to_their_language() {
+        for (path, lang) in [
+            ("Cargo.toml", "rust"),
+            ("web/package.json", "web"),
+            ("pom.xml", "jvm"),
+            ("build.gradle", "jvm"),
+            ("build.gradle.kts", "jvm"),
+            ("src/main/resources/application.properties", "jvm"),
+            ("src/main/resources/application-prod.yml", "jvm"),
+            ("pyproject.toml", "python"),
+            ("requirements.txt", "python"),
+            ("requirements-dev.txt", "python"),
+            ("setup.py", "python"),
+            ("proj/settings.py", "python"),
+            ("App/App.csproj", "csharp"),
+            ("go.mod", "go"),
+            ("Gemfile", "ruby"),
+            ("composer.json", "php"),
+        ] {
+            assert_eq!(manifest_language(path), Some(lang), "{path}");
+        }
+        for path in ["README.md", "src/main.rs", "notes.txt", "package.json.bak"] {
+            assert_eq!(manifest_language(path), None, "{path}");
+        }
     }
 
     #[test]
