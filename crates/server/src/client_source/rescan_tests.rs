@@ -591,6 +591,7 @@ fn synthetic_prior_fingerprints_equal_partition_fingerprints() {
         ..crate::onboard::Finding::default()
     });
     report.ledger.record_rule(
+        "",
         "SEC-NO-HARDCODED-SECRETS-1".to_string(),
         crate::scan_ledger::RuleTier::Deterministic,
         true,
@@ -671,6 +672,7 @@ fn an_ai_finding_under_a_floor_rule_id_survives_the_delta() {
     // Saved before the producer was recorded: judged by the ledger tier, as before.
     report.findings.push(finding("legacy.rs", None));
     report.ledger.record_rule(
+        "",
         FLOOR_RULE.to_string(),
         crate::scan_ledger::RuleTier::Deterministic,
         true,

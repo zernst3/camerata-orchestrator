@@ -64,6 +64,8 @@ fn finding(rule_id: &str, path: &str, line: usize, severity: &str) -> Finding {
 
 fn report_with(findings: Vec<Finding>, audited_rule_ids: Vec<&str>) -> ScanReport {
     ScanReport {
+        repos_not_inspected: Vec::new(),
+        recommendations_by_repo: Vec::new(),
         repos: vec!["owner/repo".to_string()],
         stacks: Vec::new(),
         files_scanned: 10,

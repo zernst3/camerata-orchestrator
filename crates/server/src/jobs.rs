@@ -128,6 +128,18 @@ pub struct JobStore {
     job_meta: Arc<Mutex<HashMap<String, JobMeta>>>,
 }
 
+/// The key a deterministic tool is tracked under in a job's progress. A one-repo scan keeps the
+/// tool's own name. A scan over several repos keys it by repo and tool (`owner/repo:eslint`), so
+/// the second repo's run of a tool starts its own row instead of overwriting the first's count.
+#[must_use]
+pub fn progress_tool_key(repo: &str, tool: &str, multi_repo: bool) -> String {
+    if multi_repo && !repo.is_empty() {
+        format!("{repo}:{tool}")
+    } else {
+        tool.to_string()
+    }
+}
+
 impl JobStore {
     #[must_use]
     pub fn new() -> Self {
@@ -308,6 +320,15 @@ impl JobStore {
     pub fn declare_tools(&self, id: &str, tools: &[&str]) {
         for tool in tools {
             self.det_register_tool(id, tool);
+        }
+    }
+
+    /// [`Self::declare_tools`] for one repo of a multi-repo scan: each tool is declared under the
+    /// key [`progress_tool_key`] gives it for that repo, so the denominator counts a tool once
+    /// per repo it will run on.
+    pub fn declare_repo_tools(&self, id: &str, repo: &str, tools: &[&str]) {
+        for tool in tools {
+            self.det_register_tool(id, &progress_tool_key(repo, tool, true));
         }
     }
 

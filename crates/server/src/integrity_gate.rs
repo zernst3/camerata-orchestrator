@@ -476,7 +476,7 @@ pub fn evaluate(ledger: &ScanLedger, opts: &IntegrityGateOptions) -> IntegrityVe
     // `scan_ledger` to add a derive it does not otherwise need.
     let required: HashSet<RuleTier> = opts.required_tiers.iter().copied().collect();
     for tier in RuleTier::all() {
-        let rules: Vec<_> = ledger.rules().filter(|r| r.tier == tier).collect();
+        let rules: Vec<_> = ledger.rules_merged().filter(|r| r.tier == tier).collect();
         let rules_ran = rules.iter().filter(|r| r.ran).count();
         let findings_emitted: usize = rules.iter().map(|r| r.findings_emitted).sum();
         tier_summary.push(TierSummary {
@@ -515,8 +515,46 @@ pub fn evaluate(ledger: &ScanLedger, opts: &IntegrityGateOptions) -> IntegrityVe
         }
     }
 
+    // ── 2b. Tier coverage, repo by repo. ─────────────────────────────────────────────────
+    // A tier that ran on one repo and was dark on another is a failure for the second: the
+    // project-wide count above reads "ran", which is true of the first repo only. Only a tier
+    // that ran somewhere is judged here; one that ran nowhere is already a `dark_tier` failure.
+    let repos = ledger.repos();
+    if repos.len() > 1 {
+        for tier in RuleTier::all() {
+            if !required.contains(&tier) {
+                continue;
+            }
+            let ran_somewhere = ledger.rules().any(|r| r.tier == tier && r.ran);
+            if !ran_somewhere {
+                continue;
+            }
+            for repo in &repos {
+                let in_tier: Vec<_> = ledger
+                    .rules()
+                    .filter(|r| r.tier == tier && r.repo == *repo)
+                    .collect();
+                if !in_tier.is_empty() && in_tier.iter().all(|r| !r.ran) {
+                    failures.push(IntegrityFailure {
+                        code: "dark_tier".to_string(),
+                        detail: format!(
+                            "all {} rule(s) recorded for the `{}` tier ({}) on {repo} were \
+                             skipped; the tier ran on other repos of this scan, not on this one",
+                            in_tier.len(),
+                            tier_key(tier),
+                            tier.family_label(),
+                        ),
+                    });
+                }
+            }
+        }
+    }
+
     // ── 3. Per-rule skip justification (H1). ─────────────────────────────────────────────
-    for rule in ledger.rules() {
+    // Read over the rules merged across repos: a rule that ran on some repos and not on others
+    // arrives here with `partial_reason` naming the repos it missed, and a rule that ran on none
+    // arrives with the reason that matters (a failure beats a scope note).
+    for rule in ledger.rules_merged() {
         // Incomplete coverage: the rule ran, but the scan was stopped (the spend limit) before it
         // ran everywhere. Its findings are real and not a contradiction; what it cannot support
         // is any claim that the rest of the code is clean, so the gate fails on it.
@@ -762,9 +800,25 @@ mod tests {
     /// every stage reconciled.
     fn healthy_ledger() -> ScanLedger {
         let mut l = ScanLedger::new();
-        l.record_rule("SEC-FLOOR-1", RuleTier::Deterministic, true, None, 10, 1);
-        l.record_rule("TAINT-SQLI-1", RuleTier::ExternalTool, true, None, 10, 2);
-        l.record_rule("AI-ADVISORY-1", RuleTier::Semantic, true, None, 10, 0);
+        l.record_rule(
+            "",
+            "SEC-FLOOR-1",
+            RuleTier::Deterministic,
+            true,
+            None,
+            10,
+            1,
+        );
+        l.record_rule(
+            "",
+            "TAINT-SQLI-1",
+            RuleTier::ExternalTool,
+            true,
+            None,
+            10,
+            2,
+        );
+        l.record_rule("", "AI-ADVISORY-1", RuleTier::Semantic, true, None, 10, 0);
         let mut acc = StageAccounting::default();
         acc.push_merge("AI-ADVISORY-DUP-1", "SEC-FLOOR-1");
         l.record_stage("cross-family-merge", 4, 3, acc);
@@ -815,11 +869,20 @@ mod tests {
     fn req_i2_a_tier_that_recorded_rules_but_ran_none_fails_as_a_dark_tier() {
         let mut l = ScanLedger::new();
         l.record_input(healthy_input());
-        l.record_rule("SEC-FLOOR-1", RuleTier::Deterministic, true, None, 10, 0);
-        l.record_rule("AI-ADVISORY-1", RuleTier::Semantic, true, None, 10, 0);
+        l.record_rule(
+            "",
+            "SEC-FLOOR-1",
+            RuleTier::Deterministic,
+            true,
+            None,
+            10,
+            0,
+        );
+        l.record_rule("", "AI-ADVISORY-1", RuleTier::Semantic, true, None, 10, 0);
         // 41 taint rules selected; not one of them ran.
         for i in 0..41 {
             l.record_rule(
+                "",
                 format!("TAINT-{i}"),
                 RuleTier::ExternalTool,
                 false,
@@ -843,8 +906,16 @@ mod tests {
     fn req_i2_a_required_tier_that_recorded_nothing_at_all_fails_as_absent() {
         let mut l = ScanLedger::new();
         l.record_input(healthy_input());
-        l.record_rule("SEC-FLOOR-1", RuleTier::Deterministic, true, None, 10, 0);
-        l.record_rule("AI-ADVISORY-1", RuleTier::Semantic, true, None, 10, 0);
+        l.record_rule(
+            "",
+            "SEC-FLOOR-1",
+            RuleTier::Deterministic,
+            true,
+            None,
+            10,
+            0,
+        );
+        l.record_rule("", "AI-ADVISORY-1", RuleTier::Semantic, true, None, 10, 0);
         // Nothing whatsoever recorded for ExternalTool.
         let verdict = evaluate(&l, &IntegrityGateOptions::default());
         assert!(!verdict.passed());
@@ -868,6 +939,7 @@ mod tests {
     fn req_i2_h1_a_rule_irrelevant_to_the_scanned_stack_is_a_justified_skip_not_a_failure() {
         let mut l = healthy_ledger();
         l.record_rule(
+            "",
             "PYTHON-PARAMETERIZED-SQL-1",
             RuleTier::Deterministic,
             false,
@@ -876,6 +948,7 @@ mod tests {
             0,
         );
         l.record_rule(
+            "",
             "VUE-COMPONENT-API-STYLE-1",
             RuleTier::Deterministic,
             false,
@@ -909,6 +982,7 @@ mod tests {
     fn req_i2_h1_a_rule_with_no_wired_detector_is_never_a_justified_skip() {
         let mut l = healthy_ledger();
         l.record_rule(
+            "",
             "RUBY-FROZEN-STRING-LITERAL-1",
             RuleTier::Deterministic,
             false,
@@ -945,6 +1019,7 @@ mod tests {
         let mut l = healthy_ledger();
         for id in ["JS-EQEQEQ-1", "JS-NO-VAR-1", "TS-NO-EXPLICIT-ANY-1"] {
             l.record_rule(
+                "",
                 id,
                 RuleTier::ExternalTool,
                 false,
@@ -1053,6 +1128,7 @@ mod tests {
     fn req_i2_an_unrecognised_skip_reason_fails_closed() {
         let mut l = healthy_ledger();
         l.record_rule(
+            "",
             "SOME-NEW-RULE-1",
             RuleTier::Deterministic,
             false,
@@ -1080,7 +1156,7 @@ mod tests {
     #[test]
     fn req_i2_a_skip_with_no_reason_recorded_fails_closed() {
         let mut l = healthy_ledger();
-        l.record_rule("MYSTERY-1", RuleTier::Deterministic, false, None, 0, 0);
+        l.record_rule("", "MYSTERY-1", RuleTier::Deterministic, false, None, 0, 0);
         let verdict = evaluate(&l, &IntegrityGateOptions::default());
         assert!(!verdict.passed());
         assert!(verdict
@@ -1310,9 +1386,26 @@ mod tests {
     ) {
         let mut l = ScanLedger::new();
         l.record_input(healthy_input());
-        l.record_rule("SEC-FLOOR-1", RuleTier::Deterministic, true, None, 10, 1);
-        l.record_rule("TAINT-SQLI-1", RuleTier::ExternalTool, true, None, 10, 0);
         l.record_rule(
+            "",
+            "SEC-FLOOR-1",
+            RuleTier::Deterministic,
+            true,
+            None,
+            10,
+            1,
+        );
+        l.record_rule(
+            "",
+            "TAINT-SQLI-1",
+            RuleTier::ExternalTool,
+            true,
+            None,
+            10,
+            0,
+        );
+        l.record_rule(
+            "",
             "AI-ADVISORY-1",
             RuleTier::Semantic,
             false,
@@ -1458,8 +1551,8 @@ mod tests {
     #[test]
     fn req_i2_the_verdict_is_deterministic_and_its_failures_are_stably_ordered() {
         let mut l = healthy_ledger();
-        l.record_rule("ZZZ-1", RuleTier::Deterministic, false, None, 0, 0);
-        l.record_rule("AAA-1", RuleTier::Deterministic, false, None, 0, 0);
+        l.record_rule("", "ZZZ-1", RuleTier::Deterministic, false, None, 0, 0);
+        l.record_rule("", "AAA-1", RuleTier::Deterministic, false, None, 0, 0);
         l.record_stage("lossy", 5, 3, StageAccounting::default());
         let a = evaluate(&l, &IntegrityGateOptions::default());
         let b = evaluate(&l, &IntegrityGateOptions::default());
@@ -1649,6 +1742,7 @@ mod tests {
         l.record_corpus_load_failure("NEW-RULE-1");
         // Case 2: a prior not-run entry with an incidental reason.
         l.record_rule(
+            "",
             "SCOPED-RULE-1",
             RuleTier::Semantic,
             false,
@@ -1720,5 +1814,137 @@ mod tests {
             "the Unloaded tier must never be a REQUIRED tier — requiring it would demand that \
              every scan have a broken rule file"
         );
+    }
+
+    // ── per repo ─────────────────────────────────────────────────────────────────────────
+
+    fn two_repo_ledger() -> ScanLedger {
+        let mut l = ScanLedger::new();
+        l.record_input(healthy_input());
+        for repo in ["acme/one", "acme/two"] {
+            l.record_rule(
+                repo,
+                "SEC-FLOOR-1",
+                RuleTier::Deterministic,
+                true,
+                None,
+                10,
+                0,
+            );
+            l.record_rule(repo, "TAINT-1", RuleTier::ExternalTool, true, None, 10, 0);
+            l.record_rule(repo, "AI-1", RuleTier::Semantic, true, None, 10, 0);
+        }
+        l
+    }
+
+    #[test]
+    fn a_healthy_two_repo_ledger_passes() {
+        let verdict = evaluate(&two_repo_ledger(), &IntegrityGateOptions::default());
+        assert!(verdict.passed(), "{:#?}", verdict.failures);
+    }
+
+    /// The headline: the semantic tier ran on repo one and was dark on repo two. The project-wide
+    /// count says "ran", which is true of repo one only, so the gate fails repo two by name.
+    #[test]
+    fn a_tier_that_is_dark_on_one_repo_fails_for_that_repo() {
+        let mut l = ScanLedger::new();
+        l.record_input(healthy_input());
+        l.record_rule(
+            "acme/one",
+            "SEC-FLOOR-1",
+            RuleTier::Deterministic,
+            true,
+            None,
+            10,
+            0,
+        );
+        l.record_rule(
+            "acme/one",
+            "TAINT-1",
+            RuleTier::ExternalTool,
+            true,
+            None,
+            10,
+            0,
+        );
+        l.record_rule("acme/one", "AI-1", RuleTier::Semantic, true, None, 10, 0);
+        l.record_rule(
+            "acme/two",
+            "SEC-FLOOR-1",
+            RuleTier::Deterministic,
+            true,
+            None,
+            10,
+            0,
+        );
+        l.record_rule(
+            "acme/two",
+            "TAINT-1",
+            RuleTier::ExternalTool,
+            true,
+            None,
+            10,
+            0,
+        );
+        l.record_rule(
+            "acme/two",
+            "AI-1",
+            RuleTier::Semantic,
+            false,
+            Some("AI/semantic audit pass failed for this repo: timed out".into()),
+            0,
+            0,
+        );
+        let verdict = evaluate(&l, &IntegrityGateOptions::default());
+        assert!(!verdict.passed());
+        let dark: Vec<_> = verdict
+            .failures
+            .iter()
+            .filter(|f| f.code == "dark_tier")
+            .collect();
+        assert_eq!(dark.len(), 1, "{:#?}", verdict.failures);
+        assert!(dark[0].detail.contains("acme/two"), "{}", dark[0].detail);
+        assert!(!dark[0].detail.contains("acme/one"), "{}", dark[0].detail);
+    }
+
+    #[test]
+    fn a_rule_that_ran_on_one_repo_and_failed_on_another_fails_as_partial_coverage() {
+        let mut l = two_repo_ledger();
+        l.record_rule("acme/one", "AI-2", RuleTier::Semantic, true, None, 10, 0);
+        l.record_rule(
+            "acme/two",
+            "AI-2",
+            RuleTier::Semantic,
+            false,
+            Some("AI/semantic audit pass failed for this repo: x".into()),
+            0,
+            0,
+        );
+        let verdict = evaluate(&l, &IntegrityGateOptions::smoke());
+        assert!(
+            verdict
+                .failures
+                .iter()
+                .any(|f| f.code == "partial_coverage" && f.detail.contains("acme/two")),
+            "{:#?}",
+            verdict.failures
+        );
+    }
+
+    #[test]
+    fn a_repo_with_nothing_the_rule_covers_does_not_fail_the_gate() {
+        let mut l = two_repo_ledger();
+        l.record_rule("acme/one", "RUST-1", RuleTier::Semantic, true, None, 10, 0);
+        l.record_rule(
+            "acme/two",
+            "RUST-1",
+            RuleTier::Semantic,
+            false,
+            Some("no rust files matched this scan's file set".into()),
+            0,
+            0,
+        );
+        let verdict = evaluate(&l, &IntegrityGateOptions::smoke());
+        assert!(verdict.passed(), "{:#?}", verdict.failures);
     }
 }

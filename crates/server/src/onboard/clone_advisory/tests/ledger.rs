@@ -19,7 +19,7 @@ async fn offline_records_the_rule_as_not_run_with_the_advisory_note() {
     let all = discount_repo("0.2", "0.15");
     let outcome = judge(None, &all, set_for(&all, &[RULE])).await;
     let mut ledger = ScanLedger::new();
-    record_in_ledger(&mut ledger, &outcome);
+    record_in_ledger(&mut ledger, "", &outcome);
     let entry = ledger.rule(RULE.id()).expect("recorded");
     assert!(!entry.ran);
     assert_eq!(entry.tier, RuleTier::Architectural);
@@ -49,7 +49,7 @@ async fn zero_candidates_credits_the_rule_as_run_and_clean() {
     let all = files(&[("src/a.ts", "export const a = 1;\n")]);
     let outcome = judge(None, &all, set_for(&all, &[RULE])).await;
     let mut ledger = ScanLedger::new();
-    record_in_ledger(&mut ledger, &outcome);
+    record_in_ledger(&mut ledger, "", &outcome);
     let entry = ledger.rule(RULE.id()).unwrap();
     assert!(entry.ran);
     assert!(entry.skip_reason.is_none() && entry.coverage_note.is_none());
@@ -62,7 +62,7 @@ async fn a_fully_judged_rule_ran_and_counts_its_confirmed_findings() {
     let stub = StubJudge::answering("same_decision", "the discount");
     let outcome = judge(Some(&stub), &all, set_for(&all, &[RULE])).await;
     let mut ledger = ScanLedger::new();
-    record_in_ledger(&mut ledger, &outcome);
+    record_in_ledger(&mut ledger, "", &outcome);
     let entry = ledger.rule(RULE.id()).unwrap();
     assert!(entry.ran);
     assert_eq!(entry.findings_emitted, 1);
@@ -75,7 +75,7 @@ async fn a_partly_judged_rule_is_not_credited_as_run_and_says_why() {
     let stub = StubJudge::answering("different", "");
     let outcome = judge(Some(&stub), &all, set).await;
     let mut ledger = ScanLedger::new();
-    record_in_ledger(&mut ledger, &outcome);
+    record_in_ledger(&mut ledger, "", &outcome);
     let entry = ledger.rule(RULE.id()).unwrap();
     assert!(!entry.ran);
     assert_eq!(entry.coverage_note.as_deref(), Some(ADVISORY_PARTIAL_NOTE));
@@ -97,8 +97,8 @@ async fn a_later_pass_that_ran_settles_ran_but_the_note_survives() {
     let all = discount_repo("0.2", "0.15");
     let outcome = judge(None, &all, set_for(&all, &[RULE])).await;
     let mut ledger = ScanLedger::new();
-    record_in_ledger(&mut ledger, &outcome);
-    ledger.record_rule(RULE.id(), RuleTier::Semantic, true, None, 2, 0);
+    record_in_ledger(&mut ledger, "", &outcome);
+    ledger.record_rule("", RULE.id(), RuleTier::Semantic, true, None, 2, 0);
     let entry = ledger.rule(RULE.id()).unwrap();
     assert!(entry.ran);
     assert_eq!(
@@ -126,7 +126,7 @@ async fn a_clean_rule_is_credited_in_the_ledger_but_claims_nothing_to_the_client
     let outcome = judge(None, &all, set_for(&all, &CloneRule::ALL)).await;
     assert!(outcome.findings.is_empty() && outcome.not_assessed.is_empty());
     let mut ledger = ScanLedger::new();
-    record_in_ledger(&mut ledger, &outcome);
+    record_in_ledger(&mut ledger, "", &outcome);
     for rule in CloneRule::ALL {
         let entry = ledger.rule(rule.id()).expect("recorded");
         assert!(entry.ran, "{}", rule.id());

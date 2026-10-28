@@ -354,7 +354,7 @@ async fn a_later_repo_after_the_cap_is_reached_runs_nothing_and_is_recorded() {
         ("acme/two".to_string(), b.path().to_path_buf()),
     ];
     let llm = Stub::new(10.0);
-    let (report, _m) = onboard::audit_repos_with_llm_controlled(
+    let (report, manifest) = onboard::audit_repos_with_llm_controlled(
         &llm,
         &sources,
         &selected(),
@@ -380,7 +380,20 @@ async fn a_later_repo_after_the_cap_is_reached_runs_nothing_and_is_recorded() {
     assert_eq!(llm.calls(), 1);
     assert!(report.ledger.is_cost_capped());
     let cap = report.ledger.cost_cap().unwrap();
-    assert!(cap.not_run_passes.iter().any(|p| p.repo == "acme/two"));
+    // The cap had bitten before repo two began, so its model work is not started at all: no pass
+    // is refused one by one, and the repo is named as unfinished instead.
+    assert_eq!(cap.repos_not_finished, vec!["acme/two".to_string()]);
+    // The repo the cap never reached is not recorded as audited, so the next scan audits it
+    // instead of carrying it on as reviewed and clean.
+    assert!(
+        manifest.files.get("acme/two").is_none_or(|f| f.is_empty()),
+        "{:?}",
+        manifest.files
+    );
+    assert!(manifest
+        .files
+        .get("acme/one")
+        .is_some_and(|f| !f.is_empty()));
     assert!(report
         .failed_passes
         .iter()

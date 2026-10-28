@@ -229,6 +229,12 @@ fn failed_pass_rows(repo: &str, answered: usize, failures: &[PassFailure]) -> Ve
 pub struct RuleRecommendation {
     /// The rule id this recommendation is for (uppercased).
     pub rule_id: String,
+    /// The repo (`owner/repo`) this recommendation was made for. Each repo of a multi-repo scan
+    /// is assessed on its own, so the convention found in one is not the convention of another.
+    /// Empty for a recommendation made without a repo in view (an older report, a targeted
+    /// re-assessment that has not been given one).
+    #[serde(default)]
+    pub repo: String,
     /// The option id violations were (or will be) reported against.
     pub recommended_option_id: String,
     /// 1-3 sentences explaining the pick, grounded in the codebase evidence the model saw.
@@ -339,6 +345,7 @@ impl Default for RuleRecommendation {
     /// contradict the field's own documented default.
     fn default() -> Self {
         RuleRecommendation {
+            repo: String::new(),
             rule_id: String::new(),
             recommended_option_id: String::new(),
             recommendation_reasoning: String::new(),
@@ -578,6 +585,31 @@ impl UsageMeter {
         true
     }
 
+    /// Repo boundary check: true (and the repo is recorded as not finished) when the cap has
+    /// been reached or has already stopped something, so the caller skips the repo's model work
+    /// without reading its files into digests first. The repo's own token-free checks are not
+    /// affected; the caller still runs them. A run with no cap never blocks a repo.
+    pub fn repo_blocked(&self, repo: &str) -> bool {
+        let Some(_) = self.controls.max_cost_usd else {
+            return false;
+        };
+        let already_stopped = {
+            let budget = self.budget();
+            !budget.not_run_passes.is_empty()
+                || !budget.not_run_stages.is_empty()
+                || !budget.repos_not_finished.is_empty()
+                || budget.cost_unknown
+        };
+        if !self.cap_reached() && !already_stopped {
+            return false;
+        }
+        let mut budget = self.budget();
+        if !budget.repos_not_finished.iter().any(|r| r == repo) {
+            budget.repos_not_finished.push(repo.to_string());
+        }
+        true
+    }
+
     /// Batch gate: a submitted Message Batch cannot be cancelled cheaply, so the cap is checked
     /// BEFORE submitting. Returns the operator-facing reason to refuse, or `None` to submit.
     /// `projected_usd` is the caller's projection of what this submission commits (its exact
@@ -631,6 +663,7 @@ impl UsageMeter {
             not_run_passes: budget.not_run_passes.clone(),
             not_run_stages: budget.not_run_stages.clone(),
             notes: budget.notes.clone(),
+            repos_not_finished: budget.repos_not_finished.clone(),
         })
     }
 }
@@ -3425,6 +3458,7 @@ fn fallback_recommendations(
                 .clone()
                 .or_else(|| a.options.first().map(|o| o.id.clone()))?;
             Some(RuleRecommendation {
+                repo: String::new(),
                 rule_id: a.rule_id.clone(),
                 recommended_option_id: id,
                 recommendation_reasoning: reason.to_string(),
@@ -3618,6 +3652,7 @@ pub fn parse_alternative_recommendations(
                     && (!observed_options.is_empty() || evidence.is_some())
                 {
                     out.push(RuleRecommendation {
+                        repo: String::new(),
                         rule_id: a.rule_id.clone(),
                         // Kept only so the field is never a meaningless empty string; a
                         // no-convention rule is never judged against ANY option (audit_repo
@@ -3654,6 +3689,7 @@ pub fn parse_alternative_recommendations(
                         reasoning
                     };
                     RuleRecommendation {
+                        repo: String::new(),
                         rule_id: a.rule_id.clone(),
                         recommended_option_id: fallback_id(),
                         recommendation_reasoning,
@@ -3672,6 +3708,7 @@ pub fn parse_alternative_recommendations(
                     }
                 } else if !raw_id.is_empty() && real_ids.contains(raw_id.as_str()) {
                     RuleRecommendation {
+                        repo: String::new(),
                         rule_id: a.rule_id.clone(),
                         recommended_option_id: raw_id,
                         recommendation_reasoning: reasoning,
@@ -3686,6 +3723,7 @@ pub fn parse_alternative_recommendations(
                     }
                 } else if raw_id.is_empty() {
                     RuleRecommendation {
+                        repo: String::new(),
                         rule_id: a.rule_id.clone(),
                         recommended_option_id: fallback_id(),
                         recommendation_reasoning: "The model did not return a valid option id \
@@ -3702,6 +3740,7 @@ pub fn parse_alternative_recommendations(
                     }
                 } else {
                     RuleRecommendation {
+                        repo: String::new(),
                         rule_id: a.rule_id.clone(),
                         recommended_option_id: fallback_id(),
                         recommendation_reasoning: format!(
@@ -3738,6 +3777,7 @@ pub fn parse_alternative_recommendations(
                 rec
             }
             None => RuleRecommendation {
+                repo: String::new(),
                 rule_id: a.rule_id.clone(),
                 recommended_option_id: fallback_id(),
                 recommendation_reasoning: "The model did not return a recommendation for this \
@@ -5767,6 +5807,7 @@ async fn run_passes(
                             rule_batch: bi + 1,
                             n_rule_batches: n_b,
                             rule_ids: batch.iter().map(|(id, _)| id.clone()).collect(),
+                            files: chunks[ci].iter().map(|(path, _)| path.clone()).collect(),
                         });
                     }
                     if let Some((jstore, jid)) = job {
@@ -6139,6 +6180,7 @@ async fn run_passes_batch(
         model: &model,
         n_c,
         n_b,
+        chunks,
         batches,
         job,
         meter,
@@ -9606,6 +9648,7 @@ pub async fn audit_repo(
                 (fb, true)
             };
             recommendations.push(RuleRecommendation {
+                repo: String::new(),
                 rule_id: a.rule_id.clone(),
                 recommended_option_id: final_id.clone(),
                 recommendation_reasoning: if hallucinated {
@@ -17133,6 +17176,7 @@ mod tests {
             kind: rule.kind(),
         }];
         let recommendations = vec![RuleRecommendation {
+            repo: String::new(),
             rule_id: RULE_ID.to_string(),
             recommended_option_id: rejected.id.clone(),
             recommendation_reasoning: "the repo keeps the client filename as the key".to_string(),
@@ -17260,6 +17304,7 @@ mod tests {
             .filter(|f| f.rule_id == "MULTI-RULE-1")
             .count();
         ledger.record_rule(
+            "",
             "MULTI-RULE-1",
             crate::scan_ledger::RuleTier::Semantic,
             true,
@@ -17300,6 +17345,7 @@ mod tests {
         assessed_sites: Option<usize>,
     ) -> RuleRecommendation {
         RuleRecommendation {
+            repo: String::new(),
             rule_id: rule.to_string(),
             recommended_option_id: option.to_string(),
             recommendation_reasoning: "the repo does it the A way nearly everywhere".to_string(),
@@ -17426,6 +17472,7 @@ mod tests {
     fn req_a5_3_no_convention_findings_emit_exactly_one_row_per_rule() {
         use camerata_api_types::audit::ObservedOptionUsage;
         let mk = |sites: Option<usize>| RuleRecommendation {
+            repo: String::new(),
             rule_id: "MULTI-RULE-1".to_string(),
             recommended_option_id: "opt-a".to_string(),
             recommendation_reasoning: "used both ways with no majority".to_string(),

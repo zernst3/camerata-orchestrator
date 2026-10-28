@@ -98,6 +98,8 @@ fn minimal_report(ledger: ScanLedger, audited_rule_ids: Vec<String>) -> ScanRepo
         ..onboard::ScanProvenance::default()
     };
     ScanReport {
+        repos_not_inspected: Vec::new(),
+        recommendations_by_repo: Vec::new(),
         repos: vec!["acme/api".to_string()],
         stacks: Vec::new(),
         files_scanned: 1,
@@ -258,7 +260,15 @@ async fn req_w16_emit_only_rule_never_reaches_the_scan_or_the_healthy_list() {
     // suppressed would still pollute the accounting.)
     let mut ledger = ScanLedger::new();
     for (rid, _) in &semantic {
-        ledger.record_rule(rid.clone(), RuleTier::Semantic, true, None, files.len(), 0);
+        ledger.record_rule(
+            "",
+            rid.clone(),
+            RuleTier::Semantic,
+            true,
+            None,
+            files.len(),
+            0,
+        );
     }
     assert!(
         ledger.rule(EMIT_ONLY_RULE).is_none(),

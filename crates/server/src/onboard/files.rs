@@ -567,6 +567,14 @@ impl ExtractedRepo {
 /// Paths are relative to the repo root, forward-slashed. Synchronous (blocking IO) —
 /// call via `tokio::task::spawn_blocking`.
 pub fn read_local_repo_files(root: &std::path::Path) -> anyhow::Result<ExtractedRepo> {
+    // A folder that is gone, or a path that is not a folder, is a repo that could not be read.
+    // Walking it would return no files and no error, which reads as an empty repo with nothing
+    // wrong in it.
+    if !root.is_dir() {
+        anyhow::bail!(
+            "the repository folder could not be read: it is not a folder on this machine"
+        );
+    }
     let extra_dirs = extra_exclude_dirs();
     if root.join(".git").exists() {
         read_local_repo_files_gitignore(root, &extra_dirs, HARD_CAP_FILES)

@@ -47,6 +47,8 @@ fn report_with_one_finding_per_shape() -> SealedReport {
         })
         .collect();
     ScanReport {
+        repos_not_inspected: Vec::new(),
+        recommendations_by_repo: Vec::new(),
         repos: vec!["acme/portal".to_string()],
         stacks: Vec::new(),
         files_scanned: 10,
