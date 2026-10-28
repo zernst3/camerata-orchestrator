@@ -25,10 +25,10 @@ I architected Camerata and orchestrated its build: supervised AI agents wrote th
 | | |
 |---|---|
 | Rust | about 460,000 lines across 28 crates, including tests |
-| Tests | 7,600+ automated tests; test code is roughly 45% of all code |
+| Tests | 8,500+ automated tests; test code is roughly 45% of all code |
 | Test quality | mutation testing on the deterministic checkers: the suite catches 97.9% of deliberately injected faults |
 | Rule library | 437 rules across 22 domains, each one versioned and locked by content hash so no rule can change silently |
-| Commits | 1,800+, every merge gated on formatting, zero-warning lints and the full test suite |
+| Commits | 1,900+, every merge gated on formatting, zero-warning lints and the full test suite |
 
 What I am proudest of is the discipline behind those numbers, not the numbers themselves:
 
@@ -67,7 +67,7 @@ The fastest way to see it: `cargo run -p camerata-ui` (the Enterprise Cockpit, a
       credentials (keychain-backed, masked) + Bombe animation controls, and
       per-project model configuration. The Rules page is rules-only.
     ▸ 29-member Rust workspace (28 app crates + one maintainer-only tool) ·
-      7,600+ tests · governs its OWN source in CI.
+      8,500+ tests · governs its OWN source in CI.
     ▸ ADAPTER LADDER: a typed `camerata-client`, a first `camerata-mcp` server (stdio),
       and `camerata-cli` as a real HTTP adapter all drive the same BFF surface the
       cockpit does. `camerata-ui` now spawns `camerata-server` as a subprocess instead
@@ -178,7 +178,7 @@ A compiling, tested, all-Rust workspace, not a design folder.
 
 **Verified at runtime (you can reproduce it):**
 
-- A **29-member workspace** (28 app crates plus the maintainer-only `tools/corpus-verifier`) with **7,600+ automated tests**, `clippy -D warnings` + `unsafe`-forbidden + fmt enforced in CI, governing its OWN source ([`docs/ENFORCEMENT.md`](docs/ENFORCEMENT.md)). A named **self-measurement gate** (`./scripts/self-measurement.sh`) runs ahead of the full suite; see [`docs/TECHNICAL.md`](docs/TECHNICAL.md) §6b.
+- A **29-member workspace** (28 app crates plus the maintainer-only `tools/corpus-verifier`) with **8,500+ automated tests**, `clippy -D warnings` + `unsafe`-forbidden + fmt enforced in CI, governing its OWN source ([`docs/ENFORCEMENT.md`](docs/ENFORCEMENT.md)). A named **self-measurement gate** (`./scripts/self-measurement.sh`) runs ahead of the full suite; see [`docs/TECHNICAL.md`](docs/TECHNICAL.md) §6b.
 - **Brownfield onboarding, end to end** on fixture repos: per-repo detection and rule proposal, the two-tier audit with calibration and dedup, the triage tables, Process emitting baseline waivers and GitHub issues, and Apply writing the governance branch.
 - **The gate denies a real agent (standalone)** via `camerata -- live-demo`, with the gateway's verdict + jail tests covered by `cargo test`.
 - **The governed development console** — issue pull + Epic/sub-issue tree, UoW creation and the full lifecycle UI, the project-aware chat assistant, and the deterministic gate self-check — wired and unit-tested in-app.
