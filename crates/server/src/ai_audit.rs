@@ -86,6 +86,74 @@ pub struct FailedPass {
     pub reason: String,
 }
 
+/// One scan pass (a file chunk x rule batch) that produced NO answer, and why. Collected by
+/// every pass runner ([`run_passes`], [`run_passes_batch`], [`run_routed_passes`],
+/// [`run_security_passes`]) instead of keeping only the last error, so a round where 1 of 40
+/// passes failed and one where 39 of 40 failed are distinguishable, and every failed pass is
+/// named. A model REFUSAL (`stop_reason: "refusal"`) is one of these, never an empty finding list.
+#[derive(Debug, Clone)]
+struct PassFailure {
+    /// Human-readable pass name, e.g. `pass[rust] 2/3 · rules 1/4`.
+    pass: String,
+    /// The error text (for a refusal, it says so).
+    error: String,
+}
+
+impl PassFailure {
+    /// A failure of rule-batch `bi` of `n_b` on file chunk `ci` of `n_c` in round `label`.
+    fn at(
+        label: &str,
+        ci: usize,
+        n_c: usize,
+        bi: usize,
+        n_b: usize,
+        error: &dyn std::fmt::Display,
+    ) -> Self {
+        Self {
+            pass: format!("{label} {}/{n_c} · rules {}/{n_b}", ci + 1, bi + 1),
+            error: error.to_string(),
+        }
+    }
+
+    /// A failure with an already-built pass name.
+    fn named(pass: String, error: &dyn std::fmt::Display) -> Self {
+        Self {
+            pass,
+            error: error.to_string(),
+        }
+    }
+}
+
+/// What every pass runner returns: `(findings, proposed rules, requested files, passes that
+/// answered, passes that did not)`.
+type PassesOut = (
+    Vec<Finding>,
+    Vec<ProposedRule>,
+    std::collections::HashSet<String>,
+    usize,
+    Vec<PassFailure>,
+);
+
+/// One [`FailedPass`] row per failed pass, each naming the pass and carrying the real error,
+/// plus how many passes in the round answered (so 1-of-40 reads differently from 39-of-40).
+/// The ONE place a runner's failures become disclosure; used by the scan rounds and the
+/// resolution round alike.
+fn failed_pass_rows(repo: &str, answered: usize, failures: &[PassFailure]) -> Vec<FailedPass> {
+    let total = answered + failures.len();
+    failures
+        .iter()
+        .map(|f| FailedPass {
+            repo: repo.to_string(),
+            pass: format!("audit {}", f.pass),
+            reason: format!(
+                "{} ({answered} of {total} passes in this round answered; the findings this \
+                 pass would have produced are missing)",
+                f.error
+            ),
+        })
+        .collect()
+}
+
 /// One rule's recommendation: which option the AI judged best-fitting for this codebase (or
 /// the operator's forced choice for a targeted rescan), plus the reasoning, plus whether the
 /// raw model answer had to be corrected.
@@ -325,6 +393,10 @@ impl UsageMeter {
     fn try_admit(&self) -> Admission<'_> {
         let mut budget = self.budget();
         if let Some(cap) = self.controls.max_cost_usd {
+            // A call's cost was unknowable, so the cap cannot be enforced: admit nothing more.
+            if budget.cost_unknown {
+                return Admission::CapReached;
+            }
             let reserve_micro = self.max_call_micro_usd.load(Ordering::Relaxed);
             // Until one call has reported a cost there is nothing to reserve against, so only
             // ONE pass may be in flight: a cap must never be a number that concurrent passes
@@ -410,7 +482,9 @@ impl UsageMeter {
         };
         let already_stopped = {
             let budget = self.budget();
-            !budget.not_run_passes.is_empty() || !budget.not_run_stages.is_empty()
+            !budget.not_run_passes.is_empty()
+                || !budget.not_run_stages.is_empty()
+                || budget.cost_unknown
         };
         if !self.cap_reached() && !already_stopped {
             return false;
@@ -473,6 +547,13 @@ impl UsageMeter {
             not_run_stages: budget.not_run_stages.clone(),
             notes: budget.notes.clone(),
         })
+    }
+}
+
+/// [`UsageMeter::record_failed`] for a call site that may have no meter.
+fn meter_failed(meter: Option<&UsageMeter>, stage: Stage, error: &anyhow::Error) {
+    if let Some(m) = meter {
+        m.record_failed(stage, error);
     }
 }
 
@@ -579,8 +660,34 @@ impl UsageMeter {
         if let Some(o) = r.output_tokens {
             self.output_tokens.fetch_add(o, Ordering::Relaxed);
         }
-        if let Some(c) = r.cost_usd {
-            let micro = (c * 1_000_000.0) as u64;
+        // With a cap set a call's cost MUST be known. A reported figure is used as is; a call that
+        // reported tokens but no dollars is priced from them (the same function every other cost
+        // path uses); a call that cannot be priced either way makes the cap unenforceable.
+        let cost = match r.cost_usd {
+            Some(c) => Some(c),
+            None if self.controls.max_cost_usd.is_some() => {
+                let derived = crate::llm::usage_cost_usd(
+                    &r.model,
+                    &crate::llm::CallUsage {
+                        input: r.input_tokens,
+                        output: r.output_tokens,
+                        cache_read: r.cache_read_input_tokens,
+                        cache_creation: r.cache_creation_input_tokens,
+                        cache_creation_1h: None,
+                    },
+                    crate::llm::PriceBasis::for_response(r),
+                );
+                if derived.is_none() {
+                    self.mark_cost_unknown(&r.model);
+                }
+                derived
+            }
+            None => None,
+        };
+        if let Some(c) = cost {
+            // Rounded UP: this feeds the cap, and flooring could read a run that is over the
+            // limit by a fraction of a micro-dollar as under it.
+            let micro = crate::llm::usd_to_micro_ceil(c);
             self.cost_micro_usd.fetch_add(micro, Ordering::Relaxed);
             let before = self.max_call_micro_usd.fetch_max(micro, Ordering::Relaxed);
             if before == 0 && micro > 0 {
@@ -595,6 +702,34 @@ impl UsageMeter {
         self.cache_creation_input_tokens
             .fetch_add(r.cache_creation_input_tokens, Ordering::Relaxed);
         self.calls.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A call's cost could not be determined while a cap is set: remember that the cap is no
+    /// longer enforceable (nothing further is admitted) and say so once, in the cap's record.
+    fn mark_cost_unknown(&self, model: &str) {
+        {
+            let mut budget = self.budget();
+            if budget.cost_unknown {
+                return;
+            }
+            budget.cost_unknown = true;
+            budget.notes.push(format!(
+                "The spend limit could not be enforced past this point: a call to `{model}` \
+                 reported no cost and its tokens could not be priced, so what it cost is unknown. \
+                 No further passes were started (NOT RUN)."
+            ));
+        }
+        self.admission.notify_waiters();
+    }
+
+    /// Count a call that FAILED but was still billed: a model refusal carries the usage it was
+    /// charged (see [`crate::llm::ModelRefusal`]). A refused call costs what any other call
+    /// costs, so the cap must see it; without this a run of refusals reads as $0 spent and never
+    /// stops. A failure that carries no usage (a transport error) changes nothing.
+    pub fn record_failed(&self, stage: Stage, error: &anyhow::Error) {
+        if let Some(billed) = crate::llm::refusal_billed(error) {
+            self.record_stage(stage, billed);
+        }
     }
 
     pub fn snapshot(&self) -> ActualUsage {
@@ -2572,7 +2707,11 @@ pub async fn verify_findings(
             // is still recorded post-hoc below, unchanged, so `feedback = Some` behavior is
             // byte-for-byte identical to before this change.
             let mut on_delta = |_: &str| {};
-            if let Ok(resp) = llm.complete_streaming(build_req(), &mut on_delta).await {
+            let calibration = llm.complete_streaming(build_req(), &mut on_delta).await;
+            if let Err(e) = &calibration {
+                meter_failed(meter, Stage::Calibration, e);
+            }
+            if let Ok(resp) = calibration {
                 if let Some(m) = meter {
                     m.record_stage(Stage::Calibration, &resp);
                 }
@@ -3373,7 +3512,13 @@ async fn recommend_alternatives(
                 },
             );
         }
-        let resp = resp_result?;
+        let resp = match resp_result {
+            Ok(r) => r,
+            Err(e) => {
+                meter_failed(meter, Stage::Alternatives, &e);
+                return Err(e);
+            }
+        };
         if let Some(m) = meter {
             m.record_stage(Stage::Alternatives, &resp);
         }
@@ -3801,7 +3946,8 @@ async fn run_fix_specifics_round(
             // Re-queue exactly this chunk's findings so the next round retries them (or,
             // on the last round, the instantiated-fallback below picks them up) — a
             // failure never re-queues findings OUTSIDE this chunk.
-            Err(_) => {
+            Err(e) => {
+                meter_failed(meter, Stage::FixGeneration, &e);
                 still_pending.extend(batch.iter().copied());
                 continue;
             }
@@ -4405,7 +4551,13 @@ async fn audit_pass(
     if !cache_breakpoints.is_empty() {
         req = req.with_cache_breakpoints(cache_breakpoints);
     }
-    let mut resp = send_audit_request(llm, req.clone(), feedback, session).await?;
+    let mut resp = match send_audit_request(llm, req.clone(), feedback, session).await {
+        Ok(r) => r,
+        Err(e) => {
+            meter_failed(meter, Stage::ScanPass, &e);
+            return Err(e);
+        }
+    };
     if let Some(m) = meter {
         m.record_stage(Stage::ScanPass, &resp);
     }
@@ -4426,14 +4578,16 @@ async fn audit_pass(
             .max_tokens
             .saturating_mul(2)
             .min(AGGREGATE_MAX_TOKENS_CEILING);
-        if let Ok(retry) =
-            send_audit_request(llm, req.with_max_tokens(retry_cap), feedback, session).await
-        {
-            if let Some(m) = meter {
-                m.record_stage(Stage::ScanPass, &retry);
+        match send_audit_request(llm, req.with_max_tokens(retry_cap), feedback, session).await {
+            Ok(retry) => {
+                if let Some(m) = meter {
+                    m.record_stage(Stage::ScanPass, &retry);
+                }
+                resp = retry;
+                wasted_counted = false;
             }
-            resp = retry;
-            wasted_counted = false;
+            // The retry failed (possibly refused, and billed): the first reply stands.
+            Err(e) => meter_failed(meter, Stage::ScanPass, &e),
         }
     }
     // Whatever reply the pass ends up using: if it is still unusable (cut off again, or not JSON
@@ -4652,13 +4806,7 @@ async fn run_passes(
     session_prefix: &str,
     meter: Option<&UsageMeter>,
     advisory_disabled: bool,
-) -> (
-    Vec<Finding>,
-    Vec<ProposedRule>,
-    std::collections::HashSet<String>,
-    usize,
-    Option<anyhow::Error>,
-) {
+) -> PassesOut {
     let digests: Vec<String> = chunks.iter().map(|c| build_digest(c)).collect();
     let n_c = chunks.len();
     let n_b = batches.len();
@@ -4810,8 +4958,8 @@ async fn run_passes(
     let mut proposed = Vec::new();
     let mut requested = std::collections::HashSet::new();
     let mut ok = 0usize;
-    let mut last_err = None;
-    for (_ci, _bi, r) in results {
+    let mut failures: Vec<PassFailure> = Vec::new();
+    for (ci, bi, r) in results {
         match r {
             Some(Ok((f, p, needs))) => {
                 findings.extend(f);
@@ -4819,12 +4967,12 @@ async fn run_passes(
                 requested.extend(needs);
                 ok += 1;
             }
-            Some(Err(e)) => last_err = Some(e),
+            Some(Err(e)) => failures.push(PassFailure::at(label, ci, n_c, bi, n_b, &e)),
             // Refused by the spend cap: already recorded as NOT RUN on the meter.
             None => {}
         }
     }
-    (findings, proposed, requested, ok, last_err)
+    (findings, proposed, requested, ok, failures)
 }
 
 /// How many CONSECUTIVE poll failures `poll_batch_until_ended` tolerates before giving up.
@@ -4923,13 +5071,7 @@ async fn run_passes_batch(
     // every (chunk, batch) pair, so batch mode does not re-introduce duplicate novel
     // findings when called from a language-scoped routing group.
     advisory_disabled: bool,
-) -> anyhow::Result<(
-    Vec<Finding>,
-    Vec<ProposedRule>,
-    std::collections::HashSet<String>,
-    usize,
-    Option<anyhow::Error>,
-)> {
+) -> anyhow::Result<PassesOut> {
     use crate::llm::{build_batch_item, reassemble_batch_results, LlmRequest};
 
     // Rank 3 `batch_long_cache`: ON asks for the 1-hour cache (items outlive the 5-minute one).
@@ -5066,8 +5208,10 @@ async fn run_passes_batch(
 
     // Submit all sub-batches (sequentially — the API is async so there's no rate-limit
     // pressure; we just need the batch_id from each one).
-    let mut all_responses: std::collections::HashMap<String, crate::llm::LlmResponse> =
-        std::collections::HashMap::new();
+    // Every sub-batch's outcomes: the answers, the per-item reasons for items that came back
+    // without one (errored, expired, or a model refusal, so a failure names the real cause
+    // instead of "missing"), and the usage of failed items that were nevertheless billed.
+    let mut all_results = crate::llm::BatchResults::default();
     for (sub_idx, sub_items) in sub_batches.iter().enumerate() {
         // Checked again for every sub-batch: the spend of the ones before it is known by now.
         if let Some(m) = meter {
@@ -5130,18 +5274,50 @@ async fn run_passes_batch(
 
         // Fetch + parse results.
         let rows = llm.fetch_batch_results(&batch_id, batch_ttl).await?;
-        let sub_map = reassemble_batch_results(rows);
-        all_responses.extend(sub_map);
+        all_results.extend(reassemble_batch_results(rows));
     }
 
     // Reassemble: look up each (ci, bi) pair's response by its deterministic custom_id.
+    let pairs: Vec<(usize, usize)> = work_meta.iter().map(|(ci, bi, _, _)| (*ci, *bi)).collect();
+    Ok(reassemble_batch_passes(
+        repo,
+        label,
+        n_c,
+        n_b,
+        &pairs,
+        &all_results,
+        &refused_ids,
+        adopted,
+        meter,
+        job,
+    ))
+}
+
+/// Turn a finished batch's per-item outcomes into the shared pass result: each (chunk,
+/// rule-batch) pair's answer is parsed, and each pair WITHOUT one becomes a [`PassFailure`]
+/// carrying the per-item reason the API gave (`errors`), so a model refusal reads as a refusal
+/// rather than a generic "missing from results". Pure apart from the optional meter/job sinks,
+/// so the failure naming is unit-testable without a live batch.
+#[allow(clippy::too_many_arguments)]
+fn reassemble_batch_passes(
+    repo: &str,
+    label: &str,
+    n_c: usize,
+    n_b: usize,
+    pairs: &[(usize, usize)],
+    results: &crate::llm::BatchResults,
+    refused_ids: &std::collections::HashSet<String>,
+    adopted: &std::collections::HashSet<String>,
+    meter: Option<&UsageMeter>,
+    job: Option<(&crate::jobs::JobStore, &str)>,
+) -> PassesOut {
     let mut findings = Vec::new();
     let mut proposed = Vec::new();
     let mut requested = std::collections::HashSet::new();
     let mut ok = 0usize;
-    let mut last_err: Option<anyhow::Error> = None;
+    let mut failures: Vec<PassFailure> = Vec::new();
 
-    for (ci, bi, _prompt, _cache_bps) in &work_meta {
+    for &(ci, bi) in pairs {
         let custom_id = format!("c{ci}-b{bi}");
         if refused_ids.contains(&custom_id) {
             // Refused by the spend cap before submission: recorded as NOT RUN on the meter.
@@ -5150,7 +5326,7 @@ async fn run_passes_batch(
             }
             continue;
         }
-        match all_responses.get(&custom_id) {
+        match results.responses.get(&custom_id) {
             Some(resp) => {
                 if let Some(m) = meter {
                     m.record_stage(Stage::ScanPass, resp);
@@ -5168,12 +5344,22 @@ async fn run_passes_batch(
                 ok += 1;
             }
             None => {
-                // The item failed or was not in the result set.
-                let e = anyhow::anyhow!(
-                    "batch item {custom_id} missing from results (chunk {ci}, rule-batch {bi})"
+                // The item failed or was not in the result set. Prefer the per-item reason
+                // the API gave (a refusal reads as a refusal) over a generic "missing".
+                // A failed item that was still billed (a refusal) counts toward the spend cap.
+                if let (Some(m), Some(billed)) = (meter, results.billed.get(&custom_id)) {
+                    m.record_stage(Stage::ScanPass, billed);
+                }
+                let reason = results
+                    .errors
+                    .get(&custom_id)
+                    .cloned()
+                    .unwrap_or_else(|| format!("batch item {custom_id} missing from results"));
+                eprintln!(
+                    "[camerata-server] batch item {custom_id} (chunk {ci}, rule-batch {bi}) \
+                     failed: {reason}"
                 );
-                eprintln!("[camerata-server] {e}");
-                last_err = Some(e);
+                failures.push(PassFailure::at(label, ci, n_c, bi, n_b, &reason));
                 // Still count as done so the progress bar can reach 100%.
                 if let Some((jstore, jid)) = job {
                     jstore.inc_done(jid, 1);
@@ -5182,7 +5368,7 @@ async fn run_passes_batch(
         }
     }
 
-    Ok((findings, proposed, requested, ok, last_err))
+    (findings, proposed, requested, ok, failures)
 }
 
 /// Severity rank for keeping the most-severe representative when merging duplicates.
@@ -7078,7 +7264,7 @@ fn strip_headline_cross_references(mut findings: Vec<Finding>) -> Vec<Finding> {
 /// When routing produces no savings (all rules are cross-cutting, or only one group), this
 /// degenerates to the previous single-group behavior with no overhead.
 ///
-/// Returns the same tuple as [`run_passes`]: `(findings, proposed, requested, ok, last_err)`.
+/// Returns the same tuple as [`run_passes`]: `(findings, proposed, requested, ok, failures)`.
 #[allow(clippy::too_many_arguments)]
 async fn run_routed_passes(
     llm: &dyn LlmPort,
@@ -7099,13 +7285,7 @@ async fn run_routed_passes(
     // for the caller (`audit_repo`) to synthesize one honest `not_assessed` row per rule,
     // rather than leaving "never evaluated" indistinguishable from "assessed and clean".
     skipped_rules: &mut Vec<(String, String)>,
-) -> (
-    Vec<Finding>,
-    Vec<ProposedRule>,
-    std::collections::HashSet<String>,
-    usize,
-    Option<anyhow::Error>,
-) {
+) -> PassesOut {
     use crate::scan_routing::Scope;
 
     // When there are no rules (free-form audit), skip routing and run one pass over all files.
@@ -7170,7 +7350,7 @@ async fn run_routed_passes(
     let mut all_proposed: Vec<ProposedRule> = Vec::new();
     let mut all_requested: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut total_ok: usize = 0;
-    let mut last_err: Option<anyhow::Error> = None;
+    let mut failures: Vec<PassFailure> = Vec::new();
 
     // W2 (closes a real zero-row semantic-tier defect, previously documented as an accepted
     // "known limitation" in `routing_single_language_repo_with_language_rules`): a project whose
@@ -7261,9 +7441,7 @@ async fn run_routed_passes(
         all_proposed.extend(gp);
         all_requested.extend(gr);
         total_ok += gok;
-        if ge.is_some() {
-            last_err = ge;
-        }
+        failures.extend(ge);
     }
 
     (
@@ -7271,7 +7449,7 @@ async fn run_routed_passes(
         all_proposed,
         all_requested,
         total_ok,
-        last_err,
+        failures,
     )
 }
 
@@ -8029,7 +8207,7 @@ pub async fn audit_repo(
     }
 
     // ── Dispatch to the appropriate execution engine ─────────────────────────────────
-    let (mut all_findings, mut all_proposed, requested, ok_passes, last_err) =
+    let (mut all_findings, mut all_proposed, requested, ok_passes, pass_failures) =
         if mode == ScanMode::Batch {
             // Batch path: submit all (chunk × rule-batch) pairs as one Message Batch, poll to
             // completion, reassemble by custom_id. The job's add_total is called inside
@@ -8099,9 +8277,20 @@ pub async fn audit_repo(
     // (the deterministic findings still return independently). Each pass already finalized
     // its own transcript status, so the UI spinner stops regardless.
     if ok_passes == 0 {
-        if let Some(e) = last_err {
-            return Err(e);
+        if let Some(last) = pass_failures.last() {
+            return Err(anyhow::anyhow!(
+                "all {} audit pass(es) failed; last: {}: {}",
+                pass_failures.len(),
+                last.pass,
+                last.error
+            ));
         }
+    } else {
+        // PARTIAL failure: some passes answered, others did not (a timeout, an HTTP error, or
+        // a model REFUSAL, `stop_reason: "refusal"`). Those passes' findings are missing from
+        // this result, so the export must say so, naming every failed pass, rather than
+        // present the survivors as the whole audit.
+        failed_passes.extend(failed_pass_rows(repo, ok_passes, &pass_failures));
     }
 
     // ── Resolution round ────────────────────────────────────────────────────────────
@@ -8148,7 +8337,7 @@ pub async fn audit_repo(
         } else {
             concurrency
         };
-        let (rf, rp, _rn, _rok, _re) = run_passes(
+        let (rf, rp, _rn, res_ok, res_failures) = run_passes(
             llm,
             repo,
             &repo_map,
@@ -8167,6 +8356,11 @@ pub async fn audit_repo(
         .await;
         all_findings.extend(rf);
         all_proposed.extend(rp);
+        // The resolution round's failures are disclosed the same way as the scan passes': a
+        // refused or timed-out resolution pass yields zero findings for the files it was to
+        // re-judge, which must never read as "resolved clean". The main round answered, so even
+        // a total resolution failure is a disclosure row, not an `Err`.
+        failed_passes.extend(failed_pass_rows(repo, res_ok, &res_failures));
     }
 
     // Resolve each finding's line DETERMINISTICALLY from its verbatim snippet before dedup,
@@ -8934,6 +9128,7 @@ async fn run_prose_lens(
             }
         }
         Err(e) => {
+            meter_failed(meter, Stage::DeepTier, &e);
             result.error = Some(format!("{e}"));
             if let Some((store, key)) = feedback {
                 store.set_status(key, &session, "blocked");
@@ -8971,7 +9166,7 @@ async fn run_security_lens(
     let empty_batch: &[(String, String)] = &[];
     let batches: Vec<&[(String, String)]> = vec![empty_batch];
     let adopted: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let (findings, _proposed, _requested, _ok, _err) = run_security_passes(
+    let (findings, _proposed, _requested, sec_ok, sec_failures) = run_security_passes(
         llm,
         repo,
         repo_map,
@@ -9012,6 +9207,20 @@ async fn run_security_lens(
         findings
     };
     result.security_findings = findings;
+    // A failed (or refused) security pass must not read as "no security findings": say so on
+    // the lens result, the same field the other lenses use when they fail.
+    if !sec_failures.is_empty() {
+        result.error = Some(format!(
+            "{} of {} security pass(es) failed, so findings from them are missing: {}",
+            sec_failures.len(),
+            sec_ok + sec_failures.len(),
+            sec_failures
+                .iter()
+                .map(|f| format!("{}: {}", f.pass, f.error))
+                .collect::<Vec<_>>()
+                .join("; ")
+        ));
+    }
     result
 }
 
@@ -9031,13 +9240,7 @@ async fn run_security_passes(
     batches: &[&[(String, String)]],
     concurrency: usize,
     meter: Option<&UsageMeter>,
-) -> (
-    Vec<Finding>,
-    Vec<ProposedRule>,
-    std::collections::HashSet<String>,
-    usize,
-    Option<anyhow::Error>,
-) {
+) -> PassesOut {
     use futures::stream::StreamExt;
     let digests: Vec<String> = chunks.iter().map(|c| build_digest(c)).collect();
     let n_c = chunks.len();
@@ -9091,14 +9294,22 @@ async fn run_security_passes(
                     req = req.with_model(m.to_string());
                 }
                 let r: anyhow::Result<(Vec<Finding>, Vec<ProposedRule>, Vec<String>)> = async {
-                    let resp = if let Some((store, key)) = feedback {
+                    let call = if let Some((store, key)) = feedback {
                         let mut on_delta = |t: &str| store.append_output_raw(key, &session, t);
-                        llm.complete_streaming(req, &mut on_delta).await?
+                        llm.complete_streaming(req, &mut on_delta).await
                     } else {
                         let cap = total_backstop();
                         tokio::time::timeout(cap, llm.complete(req))
                             .await
-                            .map_err(|_| anyhow::anyhow!("security pass exceeded the {}s backstop", cap.as_secs()))??
+                            .map_err(|_| anyhow::anyhow!("security pass exceeded the {}s backstop", cap.as_secs()))
+                            .and_then(|r| r)
+                    };
+                    let resp = match call {
+                        Ok(r) => r,
+                        Err(e) => {
+                            meter_failed(meter, Stage::DeepTier, &e);
+                            return Err(e);
+                        }
                     };
                     if let Some(m) = meter {
                         m.record_stage(Stage::DeepTier, &resp);
@@ -9122,8 +9333,8 @@ async fn run_security_passes(
     let mut proposed = Vec::new();
     let mut requested = std::collections::HashSet::new();
     let mut ok = 0usize;
-    let mut last_err = None;
-    for (_ci, r) in results {
+    let mut failures: Vec<PassFailure> = Vec::new();
+    for (ci, r) in results {
         match r {
             Ok((f, p, needs)) => {
                 findings.extend(f);
@@ -9131,11 +9342,14 @@ async fn run_security_passes(
                 requested.extend(needs);
                 ok += 1;
             }
-            Err(e) => last_err = Some(e),
+            Err(e) => failures.push(PassFailure::named(
+                format!("deep security {}/{n_c}", ci + 1),
+                &e,
+            )),
         }
     }
     let _ = n_b; // single batch; kept for parity/readability with run_passes.
-    (findings, proposed, requested, ok, last_err)
+    (findings, proposed, requested, ok, failures)
 }
 
 /// Run the full DEEP COMPLIANCE & SECURITY tier (#55) over one repo's files: the three lenses
@@ -13675,7 +13889,7 @@ mod tests {
             false,
         )
         .await;
-        assert!(err.is_none(), "no pass should fail: {err:?}");
+        assert!(err.is_empty(), "no pass should fail: {err:?}");
         assert_eq!(ok, 4, "2 chunks x 2 rule-batches = 4 passes");
 
         let seen = completer.seen.lock().unwrap();
@@ -13781,7 +13995,7 @@ mod tests {
             false,
         )
         .await;
-        assert!(err.is_none(), "no pass should fail: {err:?}");
+        assert!(err.is_empty(), "no pass should fail: {err:?}");
         assert_eq!(ok, 2, "2 chunks x 1 rule-batch = 2 passes");
 
         let seen = completer.seen.lock().unwrap();
@@ -13874,6 +14088,315 @@ mod tests {
         assert!(
             err.to_string().contains("simulated LLM unavailable"),
             "streaming-path error should carry the underlying failure, got: {err}"
+        );
+    }
+
+    /// A completer whose FIRST call comes back as a model refusal (`stop_reason: "refusal"`,
+    /// which the transport turns into an error via `refusal_error`) and whose later calls
+    /// answer `{"findings":[]}`. `refuse_all` makes every call refuse.
+    struct RefusingCompleter {
+        calls: std::sync::atomic::AtomicUsize,
+        refuse_all: bool,
+    }
+
+    impl RefusingCompleter {
+        fn respond(&self) -> anyhow::Result<LlmResponse> {
+            let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if self.refuse_all || n == 0 {
+                let refusal = crate::llm::refusal_error(&serde_json::json!({
+                    "stop_reason": "refusal", "content": []
+                }))
+                .expect("a refusal stop_reason is an error");
+                return Err(refusal);
+            }
+            Ok(LlmResponse {
+                text: r#"{"findings":[]}"#.to_string(),
+                model: "stub".to_string(),
+                backend: "stub".to_string(),
+                cost_usd: None,
+                input_tokens: None,
+                output_tokens: None,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+                or_cache_discount: None,
+                truncated: false,
+            })
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl LlmPort for RefusingCompleter {
+        async fn complete(&self, _req: LlmRequest) -> anyhow::Result<LlmResponse> {
+            self.respond()
+        }
+        async fn complete_streaming(
+            &self,
+            _req: LlmRequest,
+            _on_delta: &mut (dyn for<'a> FnMut(&'a str) + Send),
+        ) -> anyhow::Result<LlmResponse> {
+            self.respond()
+        }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+    }
+
+    /// A model REFUSAL is a failed pass, never an empty finding list: when every pass is
+    /// refused the audit returns `Err` (it does not report a clean Ok([])).
+    #[tokio::test]
+    async fn audit_repo_treats_a_total_refusal_as_failure_not_a_clean_scan() {
+        let llm = RefusingCompleter {
+            calls: Default::default(),
+            refuse_all: true,
+        };
+        let files = vec![(
+            "src/lib.rs".to_string(),
+            "fn handler() { db.execute(query); }\n".to_string(),
+        )];
+        let selected = vec![(
+            "ARCH-NO-DIRECT-DB-1".to_string(),
+            "Controllers must not call the database directly.".to_string(),
+        )];
+        let res = audit_repo(
+            &llm,
+            "me/api",
+            &files,
+            &selected,
+            &[],
+            &std::collections::HashMap::new(),
+            None,
+            None,
+            ScanMode::Parallel,
+            false,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+        let err = res.expect_err("every pass refused -> Err, never Ok([])");
+        assert!(err.to_string().contains("refus"), "{err}");
+    }
+
+    /// One refused pass among several that answered: the survivors' findings are returned but
+    /// the gap is DISCLOSED in `failed_passes` (so the export is marked incomplete), not
+    /// swallowed.
+    #[tokio::test]
+    async fn audit_repo_discloses_a_single_refused_pass_as_a_failed_pass() {
+        let llm = RefusingCompleter {
+            calls: Default::default(),
+            refuse_all: false,
+        };
+        let files = vec![(
+            "src/lib.rs".to_string(),
+            "fn handler() { db.execute(query); }\n".to_string(),
+        )];
+        // More rules than one rule-batch holds, so Parallel mode issues more than one pass.
+        let selected: Vec<(String, String)> = (0..(RULE_BATCH_SIZE + 1))
+            .map(|i| {
+                (
+                    format!("ARCH-NO-DIRECT-DB-{i}"),
+                    "Controllers must not call the database directly.".to_string(),
+                )
+            })
+            .collect();
+        let (_findings, _proposed, _recs, failed_passes, _samples) = audit_repo(
+            &llm,
+            "me/api",
+            &files,
+            &selected,
+            &[],
+            &std::collections::HashMap::new(),
+            None,
+            None,
+            ScanMode::Parallel,
+            false,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("some passes answered -> Ok with the gap disclosed");
+        let rows: Vec<_> = failed_passes
+            .iter()
+            .filter(|f| f.reason.contains("refus"))
+            .collect();
+        assert_eq!(
+            rows.len(),
+            1,
+            "exactly the one refused pass is disclosed, by name: {failed_passes:?}"
+        );
+        assert!(
+            rows[0].pass.starts_with("audit pass[all] "),
+            "{}",
+            rows[0].pass
+        );
+        assert!(
+            rows[0]
+                .reason
+                .contains("1 of 2 passes in this round answered"),
+            "the row says how many passes answered: {}",
+            rows[0].reason
+        );
+    }
+
+    /// Every failed pass gets its own named row, and the row carries how many passes answered,
+    /// so 2-of-40 and 39-of-40 are told apart.
+    #[test]
+    fn failed_pass_rows_name_every_failed_pass_and_the_round_size() {
+        let failures: Vec<PassFailure> = (0..2)
+            .map(|i| PassFailure::at("pass[rust]", i, 5, 0, 8, &"model refused (refusal)"))
+            .collect();
+        let rows = failed_pass_rows("me/api", 38, &failures);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].pass, "audit pass[rust] 1/5 · rules 1/8");
+        assert_eq!(rows[1].pass, "audit pass[rust] 2/5 · rules 1/8");
+        for r in &rows {
+            assert_eq!(r.repo, "me/api");
+            assert!(r.reason.contains("38 of 40 passes in this round answered"));
+            assert!(r.reason.contains("refus"));
+        }
+        let all_but_one = failed_pass_rows("me/api", 1, &failures);
+        assert!(all_but_one[0].reason.contains("1 of 3 passes"));
+    }
+
+    /// BATCH: a refused item's per-item reason reaches the failed pass. It must say it was a
+    /// refusal, not "missing from results".
+    #[test]
+    fn a_refused_batch_item_is_reported_as_a_refusal_not_as_missing() {
+        let mut results = crate::llm::BatchResults::default();
+        results.responses.insert(
+            "c0-b0".to_string(),
+            LlmResponse {
+                text: r#"{"findings":[]}"#.to_string(),
+                model: "m".to_string(),
+                backend: "api/batch".to_string(),
+                cost_usd: None,
+                input_tokens: None,
+                output_tokens: None,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+                or_cache_discount: None,
+                truncated: false,
+            },
+        );
+        results.errors.insert(
+            "c0-b1".to_string(),
+            crate::llm::refusal_error(&serde_json::json!({"stop_reason": "refusal"}))
+                .unwrap()
+                .to_string(),
+        );
+        // c0-b2 is in neither map: genuinely missing.
+        let (_f, _p, _r, ok, failures) = reassemble_batch_passes(
+            "me/api",
+            "pass",
+            1,
+            3,
+            &[(0, 0), (0, 1), (0, 2)],
+            &results,
+            &std::collections::HashSet::new(),
+            &std::collections::HashSet::new(),
+            None,
+            None,
+        );
+        assert_eq!(ok, 1);
+        assert_eq!(failures.len(), 2);
+        assert_eq!(failures[0].pass, "pass 1/1 · rules 2/3");
+        assert!(failures[0].error.contains("refus"), "{}", failures[0].error);
+        assert!(failures[1].error.contains("missing from results"));
+        let rows = failed_pass_rows("me/api", ok, &failures);
+        assert!(rows[0].reason.contains("refus"));
+    }
+
+    /// First call answers and asks for another file; every later call (the resolution round)
+    /// is refused.
+    struct NeedsFileThenRefuses {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl NeedsFileThenRefuses {
+        fn respond(&self) -> anyhow::Result<LlmResponse> {
+            let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if n > 0 {
+                return Err(crate::llm::refusal_error(&serde_json::json!({
+                    "stop_reason": "refusal"
+                }))
+                .unwrap());
+            }
+            Ok(LlmResponse {
+                text: r#"{"findings":[],"needs_files":["src/b.rs"]}"#.to_string(),
+                model: "stub".to_string(),
+                backend: "stub".to_string(),
+                cost_usd: None,
+                input_tokens: None,
+                output_tokens: None,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+                or_cache_discount: None,
+                truncated: false,
+            })
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl LlmPort for NeedsFileThenRefuses {
+        async fn complete(&self, _req: LlmRequest) -> anyhow::Result<LlmResponse> {
+            self.respond()
+        }
+        async fn complete_streaming(
+            &self,
+            _req: LlmRequest,
+            _on_delta: &mut (dyn for<'a> FnMut(&'a str) + Send),
+        ) -> anyhow::Result<LlmResponse> {
+            self.respond()
+        }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+    }
+
+    /// H2: a refused RESOLUTION pass yields zero findings for the files it was to re-judge;
+    /// that must be a disclosed failed pass, never "resolved clean".
+    #[tokio::test]
+    async fn a_refused_resolution_pass_is_disclosed_as_a_failed_pass() {
+        let llm = NeedsFileThenRefuses {
+            calls: Default::default(),
+        };
+        let files = vec![
+            ("src/a.rs".to_string(), "fn a() {}\n".to_string()),
+            (
+                "src/b.rs".to_string(),
+                "fn b() { db.execute(q); }\n".to_string(),
+            ),
+        ];
+        let selected = vec![(
+            "ARCH-NO-DIRECT-DB-1".to_string(),
+            "Controllers must not call the database directly.".to_string(),
+        )];
+        let (_findings, _proposed, _recs, failed_passes, _samples) = audit_repo(
+            &llm,
+            "me/api",
+            &files,
+            &selected,
+            &[],
+            &std::collections::HashMap::new(),
+            None,
+            None,
+            ScanMode::Parallel,
+            false,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("the main round answered, so the audit returns");
+        assert!(
+            failed_passes
+                .iter()
+                .any(|f| f.pass.starts_with("audit resolution") && f.reason.contains("refus")),
+            "the refused resolution pass must be disclosed: {failed_passes:?}"
         );
     }
 

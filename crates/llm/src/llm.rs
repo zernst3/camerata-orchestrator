@@ -546,7 +546,7 @@ async fn read_cli_stream(
                                 // ABSENT `result` field is weaker evidence: when real
                                 // content already streamed, that content IS the answer, so
                                 // defer to the SALVAGE rule below rather than discard it.
-                                let fatal = v["is_error"].as_bool() == Some(true);
+                                let fatal = v["is_error"].as_bool() == Some(true) || is_refusal(&e);
                                 result_failure = Some((e, fatal));
                             }
                         }
@@ -894,12 +894,15 @@ fn messages_response(
         })
         .unwrap_or_default();
     let (input_tokens, output_tokens, cache_read, cache_creation) = usage_tokens(&msg["usage"]);
-    let cost_usd = compute_cost_usd(
+    let cost_usd = usage_cost_usd(
         model,
-        input_tokens,
-        output_tokens,
-        cache_read,
-        cache_creation,
+        &CallUsage {
+            input: input_tokens,
+            output: output_tokens,
+            cache_read,
+            cache_creation,
+            cache_creation_1h: msg["usage"]["cache_creation"]["ephemeral_1h_input_tokens"].as_u64(),
+        },
         basis,
     );
     LlmResponse {
@@ -916,6 +919,65 @@ fn messages_response(
     }
 }
 
+/// The error for a Messages response that ended with `stop_reason: "refusal"`. These models
+/// can decline a request with HTTP 200 and no usable content; read as a normal response that
+/// is an empty answer, which a scan would take for "no findings" and report a clean pass.
+/// Returning an error instead makes the pass a FAILED PASS (disclosed, export incomplete).
+/// `None` for any other stop reason. This form carries no usage; use
+/// [`refusal_error_billed`] where the response's usage is known.
+pub fn refusal_error(msg: &serde_json::Value) -> Option<anyhow::Error> {
+    (msg["stop_reason"].as_str() == Some("refusal"))
+        .then(|| anyhow::Error::new(ModelRefusal { billed: None }))
+}
+
+/// [`refusal_error`] for a response whose usage is known: the error carries the call's
+/// [`LlmResponse`] (empty text, the tokens and the dollars the call was BILLED), so a caller
+/// that meters spend (the cumulative ledger, the run's spend cap) can count it before
+/// propagating the failure. A refused call costs what any other call costs.
+pub fn refusal_error_billed(
+    msg: &serde_json::Value,
+    model: &str,
+    backend: &str,
+    basis: PriceBasis,
+) -> Option<anyhow::Error> {
+    (msg["stop_reason"].as_str() == Some("refusal")).then(|| {
+        anyhow::Error::new(ModelRefusal {
+            billed: Some(Box::new(messages_response(msg, model, backend, basis))),
+        })
+    })
+}
+
+/// The typed error behind a refusal, so a caller that must react differently to "the model
+/// declined" than to "the call broke" (the agentic loop keeps its partial work on the first)
+/// can tell them apart with [`is_refusal`] instead of matching message text.
+#[derive(Debug)]
+pub struct ModelRefusal {
+    /// What the refused call was billed, when the transport knew it.
+    pub billed: Option<Box<LlmResponse>>,
+}
+
+impl std::fmt::Display for ModelRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(
+            "model refused the request (stop_reason: refusal); this pass produced no answer",
+        )
+    }
+}
+
+impl std::error::Error for ModelRefusal {}
+
+/// Whether `e` (or anything it wraps) is a [`ModelRefusal`].
+pub fn is_refusal(e: &anyhow::Error) -> bool {
+    e.chain().any(|c| c.is::<ModelRefusal>())
+}
+
+/// The usage a refused call was billed, when `e` is a refusal that carries it.
+pub fn refusal_billed(e: &anyhow::Error) -> Option<&LlmResponse> {
+    e.chain()
+        .find_map(|c| c.downcast_ref::<ModelRefusal>())
+        .and_then(|r| r.billed.as_deref())
+}
+
 fn usage_tokens(usage: &serde_json::Value) -> (Option<u64>, Option<u64>, u64, u64) {
     let base = usage["input_tokens"].as_u64();
     let cache_read = usage["cache_read_input_tokens"].as_u64().unwrap_or(0);
@@ -930,6 +992,12 @@ fn usage_tokens(usage: &serde_json::Value) -> (Option<u64>, Option<u64>, u64, u6
 /// (execution error, max-turns abort, etc.) or omit `result` entirely; accepting that as a
 /// successful empty completion masks a backend failure as a low-quality result, so bail.
 fn cli_result_text(v: &serde_json::Value) -> anyhow::Result<&str> {
+    // The CLI's `result` event carries the final `stop_reason` of the run. A model REFUSAL
+    // can arrive with `is_error:false` and prose in `result`, which would parse as a clean
+    // "no findings" pass; the explicit stop reason is the signal (no text heuristic).
+    if v["stop_reason"].as_str() == Some("refusal") {
+        return Err(anyhow::Error::new(ModelRefusal { billed: None }));
+    }
     if v["is_error"].as_bool() == Some(true) {
         anyhow::bail!(
             "claude CLI returned is_error=true (subtype {}): {}",
@@ -945,14 +1013,22 @@ fn cli_result_text(v: &serde_json::Value) -> anyhow::Result<&str> {
     })
 }
 
-/// List price ($/Mtok input, $/Mtok output) for a model id, from
-/// [`crate::model_registry::CLAUDE_REGISTRY_MODELS`] (the live registry — see [`models`]'s
-/// doc comment for why this must not be a second, independently-maintained price list).
-fn price_for(model_id: &str) -> Option<(f64, f64)> {
-    crate::model_registry::CLAUDE_REGISTRY_MODELS
-        .iter()
-        .find(|m| m.id == model_id)
-        .map(|m| (m.price_in, m.price_out))
+/// Whether `model_id` has a list price in the model registry (the exact id, a dated snapshot of
+/// it, or the undated alias of a dated entry, the one resolution [`rates_for`] uses). The
+/// spend-cap refusal for an unpriced model asks this, so a model the cost arithmetic CAN price
+/// is never refused as unpriced.
+pub fn is_priced(model_id: &str) -> bool {
+    crate::model_registry::registry_entry_for(model_id)
+        .is_some_and(|e| e.price_in > 0.0 && e.price_out > 0.0)
+}
+
+/// Dollars to whole micro-dollars, ROUNDED UP, for anything that feeds a spend cap: flooring
+/// would let a run that is a fraction of a micro-dollar over the limit read as under it. The
+/// product is first rounded to the nearest nano-dollar so float noise (`0.25 * 1e6` landing a
+/// hair above `250000`) cannot add a phantom micro-dollar.
+pub fn usd_to_micro_ceil(usd: f64) -> u64 {
+    let micro = usd * 1_000_000.0;
+    ((micro * 1_000.0).round() / 1_000.0).ceil().max(0.0) as u64
 }
 
 /// How a call was billed, which decides the multipliers [`compute_cost_usd`] applies on top of
@@ -974,6 +1050,17 @@ impl PriceBasis {
         Self {
             batch: false,
             cache_ttl: CacheTtl::from_env(),
+        }
+    }
+
+    /// The basis a finished response was billed on, read from the backend that produced it
+    /// (`api/batch` is a Message Batch item at [`BATCH_CACHE_TTL`]). For pricing a response that
+    /// reports tokens but no dollar figure.
+    pub fn for_response(r: &LlmResponse) -> Self {
+        if r.backend == "api/batch" {
+            Self::batch(BATCH_CACHE_TTL)
+        } else {
+            Self::realtime()
         }
     }
 
@@ -1015,12 +1102,57 @@ impl CacheTtl {
     }
 }
 
-/// Compute the dollar cost from token usage and list price. `input` folds in cache-read and
-/// cache-creation tokens, which are NOT billed at the full input rate: cache reads are 0.1x
-/// and cache writes 1.25x (5-minute TTL) or 2x (1-hour TTL). Price the three input components
-/// separately so cached reads are not over-billed ~10x, then halve the whole figure for a
-/// Message Batch item ([`PriceBasis::batch`]). Returns `None` unless the model is priced and
-/// both token counts are present.
+/// The usage one call reported, as the cost arithmetic needs it. `input` folds in the cache
+/// read and cache write tokens (so it is also the prompt size that picks a long-prompt price
+/// tier); `cache_creation_1h` is how many of the cache-WRITE tokens were 1-hour writes when the
+/// API said (`usage.cache_creation.ephemeral_1h_input_tokens`), else `None`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CallUsage {
+    pub input: Option<u64>,
+    pub output: Option<u64>,
+    pub cache_read: u64,
+    pub cache_creation: u64,
+    pub cache_creation_1h: Option<u64>,
+}
+
+/// THE dollar cost of one call: the single function the real-time/batch response parser
+/// ([`compute_cost_usd`]) and the usage ledger's fallback both price through, so the printed
+/// cost, the telemetry, the spend cap and the cumulative meter cannot disagree.
+///
+/// Rates come from [`crate::model_registry::rates_for`] for the prompt size (the model's own
+/// cache-read price, and its long-prompt tier above the threshold). The fresh input (`input`
+/// minus the cache read and cache creation tokens) is billed at the input rate; cache reads at the cache-read rate; cache
+/// writes at the 1-hour rate for the `cache_creation_1h` tokens and the 5-minute rate for the
+/// rest (when the API did not split them, every write takes `basis.cache_ttl`'s rate); output
+/// at the output rate. A Message Batch item ([`PriceBasis::batch`]) is billed at
+/// [`BATCH_MULT`] of the whole figure. `None` unless the model is priced and both the input and
+/// output token counts are present.
+pub fn usage_cost_usd(model_id: &str, usage: &CallUsage, basis: PriceBasis) -> Option<f64> {
+    let (i, o) = (usage.input?, usage.output?);
+    let r = crate::model_registry::rates_for(model_id, i)?;
+    let fresh = i
+        .saturating_sub(usage.cache_read)
+        .saturating_sub(usage.cache_creation);
+    let writes_1h = usage
+        .cache_creation_1h
+        .unwrap_or(if basis.cache_ttl == CacheTtl::OneHour {
+            usage.cache_creation
+        } else {
+            0
+        })
+        .min(usage.cache_creation);
+    let writes_5m = usage.cache_creation - writes_1h;
+    let list = fresh as f64 * r.input
+        + usage.cache_read as f64 * r.cache_read
+        + writes_5m as f64 * r.cache_write_5m
+        + writes_1h as f64 * r.cache_write_1h
+        + o as f64 * r.output;
+    Some(if basis.batch { list * BATCH_MULT } else { list })
+}
+
+/// [`usage_cost_usd`] for a call whose cache writes are not split by TTL (every write is priced
+/// at `basis.cache_ttl`). Returns `None` unless the model is priced and both token counts are
+/// present.
 fn compute_cost_usd(
     model_id: &str,
     input: Option<u64>,
@@ -1029,17 +1161,17 @@ fn compute_cost_usd(
     cache_creation: u64,
     basis: PriceBasis,
 ) -> Option<f64> {
-    price_for(model_id).and_then(|(pin, pout)| match (input, output) {
-        (Some(i), Some(o)) => {
-            let fresh_input = i.saturating_sub(cache_read).saturating_sub(cache_creation);
-            let input_cost = fresh_input as f64 * pin
-                + cache_read as f64 * pin * CACHE_READ_MULT
-                + cache_creation as f64 * pin * basis.cache_ttl.write_multiplier();
-            let list = (input_cost + o as f64 * pout) / 1_000_000.0;
-            Some(if basis.batch { list * BATCH_MULT } else { list })
-        }
-        _ => None,
-    })
+    usage_cost_usd(
+        model_id,
+        &CallUsage {
+            input,
+            output,
+            cache_read,
+            cache_creation,
+            cache_creation_1h: None,
+        },
+        basis,
+    )
 }
 
 /// The shared `reqwest::Client` for every Anthropic API call (`complete_api` + the
@@ -1576,17 +1708,7 @@ impl Llm {
         })?;
 
         let basis = PriceBasis::realtime();
-        let user_content =
-            cached_user_content(&req.prompt, &req.cache_breakpoints, true, basis.cache_ttl);
-
-        let mut body = serde_json::json!({
-            "model": model,
-            "max_tokens": req.max_tokens,
-            "messages": [{ "role": "user", "content": user_content }],
-        });
-        if let Some(system) = &req.system {
-            body["system"] = serde_json::json!(system);
-        }
+        let body = messages_request_body(req, model, basis.cache_ttl);
 
         // NOTE: no `anthropic-beta` header — `prompt-caching-2024-07-31` is GA now (the
         // feature activates whenever a `cache_control` block is present, beta or not).
@@ -1604,7 +1726,27 @@ impl Llm {
         }
         let v: serde_json::Value =
             serde_json::from_str(&text).map_err(|e| anyhow::anyhow!("parse API JSON: {e}"))?;
-        Ok(messages_response(&v, model, "api", basis))
+        self.api_response_or_refusal(&v, model, basis)
+    }
+
+    /// Turn a parsed Messages response into the call's result. A refusal is an `Err`, but a
+    /// refused call is still BILLED, so its usage is folded into the ledger first
+    /// (`complete` only records successes).
+    fn api_response_or_refusal(
+        &self,
+        v: &serde_json::Value,
+        model: &str,
+        basis: PriceBasis,
+    ) -> anyhow::Result<LlmResponse> {
+        if let Some(refusal) = refusal_error_billed(v, model, "api", basis) {
+            // A refused call is billed: the ledger counts it now, and the error carries the
+            // same usage so a run's spend cap can count it too.
+            if let Some(billed) = refusal_billed(&refusal) {
+                self.ledger_record(billed);
+            }
+            return Err(refusal);
+        }
+        Ok(messages_response(v, model, "api", basis))
     }
 }
 
@@ -1660,6 +1802,10 @@ pub struct BatchItemParams {
     pub max_tokens: u32,
     pub system: Option<String>,
     pub messages: Vec<BatchMessage>,
+    /// `output_config` (effort) for models whose default effort is not the one the audit was
+    /// tuned for; absent otherwise. Filled by [`build_batch_item`] from the model registry.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_config: Option<serde_json::Value>,
 }
 
 /// One message in the `messages` array of a batch item.
@@ -1667,6 +1813,25 @@ pub struct BatchItemParams {
 pub struct BatchMessage {
     pub role: String,
     pub content: serde_json::Value,
+}
+
+/// Pure request-body builder for [`Llm::complete_api`]: the user message (split into cached
+/// blocks per `req.cache_breakpoints`), the optional system prompt, and then
+/// [`crate::model_registry::conform_messages_body`], the one place a body is made valid for
+/// its model (effort default, fields the model rejects). Kept separate from the HTTP call so
+/// the exact request shape is unit-testable without a network.
+fn messages_request_body(req: &LlmRequest, model: &str, cache_ttl: CacheTtl) -> serde_json::Value {
+    let user_content = cached_user_content(&req.prompt, &req.cache_breakpoints, true, cache_ttl);
+    let mut body = serde_json::json!({
+        "model": model,
+        "max_tokens": req.max_tokens,
+        "messages": [{ "role": "user", "content": user_content }],
+    });
+    if let Some(system) = &req.system {
+        body["system"] = serde_json::json!(system);
+    }
+    crate::model_registry::conform_messages_body(model, &mut body);
+    body
 }
 
 /// Pure request-body builder for [`Llm::count_tokens`] — mirrors `complete_api`'s content
@@ -1688,6 +1853,13 @@ fn count_tokens_body(req: &LlmRequest, model: &str) -> serde_json::Value {
     });
     if let Some(system) = &req.system {
         body["system"] = serde_json::json!(system);
+    }
+    // Same conformer as every other body (one path), then drop the one thing it adds that
+    // cannot change a token count: `output_config.effort` is a generation setting, and this
+    // endpoint only needs the token-bearing content.
+    crate::model_registry::conform_messages_body(model, &mut body);
+    if let Some(obj) = body.as_object_mut() {
+        obj.remove("output_config");
     }
     body
 }
@@ -1731,6 +1903,11 @@ pub fn build_batch_item(
     cache_ttl: CacheTtl,
 ) -> BatchItem {
     let content = cached_user_content(&req.prompt, &req.cache_breakpoints, true, cache_ttl);
+    // Run the SAME conformer `complete_api` uses on the equivalent body, then lift what it
+    // added (`output_config`) onto the typed params. The typed struct has no field for any
+    // rejected parameter, so there is nothing to strip.
+    let mut shape = serde_json::json!({ "messages": [{ "role": "user", "content": "" }] });
+    crate::model_registry::conform_messages_body(model, &mut shape);
     BatchItem {
         custom_id: custom_id.into(),
         params: BatchItemParams {
@@ -1741,6 +1918,7 @@ pub fn build_batch_item(
                 role: "user".to_string(),
                 content,
             }],
+            output_config: shape.get("output_config").cloned(),
         },
     }
 }
@@ -1783,6 +1961,10 @@ pub struct BatchResultRow {
     pub response: Option<LlmResponse>,
     /// The error message when `result_type != "succeeded"`.
     pub error: Option<String>,
+    /// What the item was BILLED when it failed after running (a model refusal): empty text, the
+    /// tokens and dollars of the call. `None` for an item that never ran or whose usage the API
+    /// did not report.
+    pub billed: Option<LlmResponse>,
 }
 
 impl Llm {
@@ -2006,6 +2188,23 @@ pub fn parse_batch_results_jsonl(
         if result_type == "succeeded" {
             // The response mirrors the /v1/messages response shape.
             let msg = &v["result"]["message"];
+            if let Some(refusal) = refusal_error_billed(
+                msg,
+                msg["model"].as_str().unwrap_or(""),
+                "api/batch",
+                PriceBasis::batch(cache_ttl),
+            ) {
+                // A refusal is a failed item, never an empty answer: no response, so the
+                // reassembler reports it missing and the pass is disclosed as failed. Its
+                // usage is kept: the item was billed.
+                rows.push(BatchResultRow {
+                    custom_id,
+                    response: None,
+                    error: Some(refusal.to_string()),
+                    billed: refusal_billed(&refusal).cloned(),
+                });
+                continue;
+            }
             let model_id = msg["model"].as_str().unwrap_or("");
             rows.push(BatchResultRow {
                 custom_id,
@@ -2016,6 +2215,7 @@ pub fn parse_batch_results_jsonl(
                     PriceBasis::batch(cache_ttl),
                 )),
                 error: None,
+                billed: None,
             });
         } else {
             let error_msg = v["result"]["error"]["message"]
@@ -2026,26 +2226,60 @@ pub fn parse_batch_results_jsonl(
                 custom_id,
                 response: None,
                 error: Some(error_msg),
+                billed: None,
             });
         }
     }
     Ok(rows)
 }
 
-/// Build a `custom_id -> LlmResponse` map from a flat list of `BatchResultRow`s (the
-/// unordered JSONL stream from [`Llm::fetch_batch_results`]). Items whose result was an
-/// error (no `response`) are absent from the map, so the caller's reassembler can detect
-/// which (chunk, batch) pairs failed and handle them (log, skip, surface as partial).
+/// The batch results keyed by `custom_id`: the answers, and the per-item reason for every
+/// item that has none (errored, expired, canceled, or REFUSED).
+#[derive(Debug, Default)]
+pub struct BatchResults {
+    pub responses: std::collections::HashMap<String, LlmResponse>,
+    /// `custom_id -> reason` for each row without a response. A caller that finds an item in
+    /// neither map reports it as missing from the results; one that finds it here reports the
+    /// real reason (a refusal reads as a refusal).
+    pub errors: std::collections::HashMap<String, String>,
+    /// `custom_id -> usage` for failed items that were nevertheless BILLED (a refusal). A caller
+    /// that meters spend counts these before reporting the failure.
+    pub billed: std::collections::HashMap<String, LlmResponse>,
+}
+
+impl BatchResults {
+    /// Fold another sub-batch's results into this one.
+    pub fn extend(&mut self, other: BatchResults) {
+        self.responses.extend(other.responses);
+        self.errors.extend(other.errors);
+        self.billed.extend(other.billed);
+    }
+}
+
+/// Build the `custom_id -> LlmResponse` map (and the `custom_id -> reason` map for failed
+/// items) from a flat list of `BatchResultRow`s (the unordered JSONL stream from
+/// [`Llm::fetch_batch_results`]).
 ///
 /// This is the KEY STEP that undoes the unordered delivery: the caller assigned
 /// deterministic `custom_id`s of the form `c{ci}-b{bi}` when building the batch, and this
-/// map lets it look up each (ci, bi) pair's response in O(1).
-pub fn reassemble_batch_results(
-    rows: Vec<BatchResultRow>,
-) -> std::collections::HashMap<String, LlmResponse> {
-    rows.into_iter()
-        .filter_map(|r| r.response.map(|resp| (r.custom_id, resp)))
-        .collect()
+/// lets it look up each (ci, bi) pair's outcome in O(1).
+pub fn reassemble_batch_results(rows: Vec<BatchResultRow>) -> BatchResults {
+    let mut out = BatchResults::default();
+    for r in rows {
+        match (r.response, r.error) {
+            (Some(resp), _) => {
+                out.responses.insert(r.custom_id, resp);
+            }
+            (None, Some(err)) => {
+                if let Some(billed) = r.billed {
+                    out.billed.insert(r.custom_id.clone(), billed);
+                }
+                out.errors.insert(r.custom_id, err);
+            }
+            (None, None) => {}
+        }
+    }
+    out
 }
 
 // ════════════════════════════════════════════════════════════════════════════════════
@@ -2926,36 +3160,213 @@ mod tests {
         assert!((price(CacheTtl::FiveMinutes) - (5.0 + 5.0 * 1.25 + 25.0) * 0.5).abs() < 1e-9);
     }
 
-    // Regression for the stale-pricing bug: `price_for` (and everything built on it —
-    // `compute_cost_usd`, the usage ledger's cost fallback, and the legacy `/api/models`
-    // list) must agree EXACTLY with the live registry, never a second hand-maintained
-    // number. Locks Opus's price at the registry's $5/$25 rather than the old $15/$75.
+    // Regression for the stale-pricing bug: the rates the billing path uses (and everything
+    // built on them, `compute_cost_usd`, the usage ledger's cost fallback, and the legacy
+    // `/api/models` list) must agree EXACTLY with the live registry, never a second
+    // hand-maintained number. Locks Opus's price at the registry's $5/$25 rather than the old
+    // $15/$75.
     #[test]
-    fn price_for_matches_the_live_model_registry_exactly() {
+    fn billing_rates_match_the_live_model_registry_exactly() {
         for reg in crate::model_registry::CLAUDE_REGISTRY_MODELS {
-            let (pin, pout) = price_for(reg.id).unwrap_or_else(|| {
+            let r = crate::model_registry::rates_for(reg.id, 0).unwrap_or_else(|| {
                 panic!(
-                    "price_for must resolve every registry model id, missing {}",
+                    "rates_for must resolve every registry model id, missing {}",
                     reg.id
                 )
             });
-            assert_eq!(
-                pin, reg.price_in,
-                "{} price_in must match the registry",
+            assert!(
+                (r.input * 1e6 - reg.price_in).abs() < 1e-9,
+                "{} input rate must match the registry",
                 reg.id
             );
-            assert_eq!(
-                pout, reg.price_out,
-                "{} price_out must match the registry",
+            assert!(
+                (r.output * 1e6 - reg.price_out).abs() < 1e-9,
+                "{} output rate must match the registry",
                 reg.id
             );
         }
-        let (opus_in, opus_out) = price_for("claude-opus-5").unwrap();
-        assert_eq!(
-            (opus_in, opus_out),
-            (5.0, 25.0),
+        let r = crate::model_registry::rates_for("claude-opus-5", 0).unwrap();
+        assert!(
+            (r.input * 1e6 - 5.0).abs() < 1e-9 && (r.output * 1e6 - 25.0).abs() < 1e-9,
             "Opus must price at the current $5/$25, not the stale $15/$75"
         );
+    }
+
+    // ---- the billing path prices through the registry's per-model rates ------------------------
+
+    fn usd(model: &str, usage: CallUsage, basis: PriceBasis) -> f64 {
+        usage_cost_usd(model, &usage, basis).expect("priced model")
+    }
+
+    fn rt() -> PriceBasis {
+        PriceBasis {
+            batch: false,
+            cache_ttl: CacheTtl::FiveMinutes,
+        }
+    }
+
+    /// Fable 5.1 reads cache at $0.25/M (0.025x), not the usual 0.1x ($1.00/M).
+    #[test]
+    fn fable_5_1_cache_reads_bill_at_its_own_rate() {
+        // 1M prompt tokens, all of them cache reads, 0 output: $0.25.
+        let c = usd(
+            "claude-fable-5-1",
+            CallUsage {
+                input: Some(1_000_000),
+                output: Some(0),
+                cache_read: 1_000_000,
+                ..Default::default()
+            },
+            rt(),
+        );
+        assert!((c - 0.25).abs() < 1e-9, "got {c}");
+        // The same usage on Fable 5 (no override) is the 0.1x default.
+        let legacy = usd(
+            "claude-fable-5",
+            CallUsage {
+                input: Some(1_000_000),
+                output: Some(0),
+                cache_read: 1_000_000,
+                ..Default::default()
+            },
+            rt(),
+        );
+        assert!((legacy - 1.0).abs() < 1e-9, "got {legacy}");
+    }
+
+    /// Haiku 5.5: a prompt above 100K tokens moves the WHOLE request to the higher tier.
+    #[test]
+    fn haiku_5_5_bills_the_long_prompt_tier_above_100k() {
+        let at = |input: u64| {
+            usd(
+                "claude-haiku-5-5",
+                CallUsage {
+                    input: Some(input),
+                    output: Some(1_000_000),
+                    ..Default::default()
+                },
+                rt(),
+            )
+        };
+        // 100K prompt: 0.1M * $0.10 + 1M * $0.50.
+        assert!(
+            (at(100_000) - (0.01 + 0.50)).abs() < 1e-9,
+            "{}",
+            at(100_000)
+        );
+        // 100,001 prompt tokens: every token at $0.50 / $2.50.
+        let long = at(100_001);
+        assert!(
+            (long - (100_001.0 * 0.50 / 1e6 + 2.50)).abs() < 1e-9,
+            "{long}"
+        );
+    }
+
+    /// Cache writes split by TTL when the API says how many were 1-hour writes; otherwise the
+    /// request's TTL decides.
+    #[test]
+    fn cache_writes_split_by_the_apis_one_hour_count() {
+        let usage = |one_hour: Option<u64>| CallUsage {
+            input: Some(1_000_000),
+            output: Some(0),
+            cache_creation: 1_000_000,
+            cache_creation_1h: one_hour,
+            ..Default::default()
+        };
+        // Opus 5.5 is $4/M: 5m write 1.25x = $5, 1h write 2x = $8.
+        let all_5m = usd("claude-opus-5-5", usage(None), rt());
+        assert!((all_5m - 5.0).abs() < 1e-9, "{all_5m}");
+        let half = usd("claude-opus-5-5", usage(Some(500_000)), rt());
+        assert!((half - (2.5 + 4.0)).abs() < 1e-9, "{half}");
+        let all_1h = usd(
+            "claude-opus-5-5",
+            usage(None),
+            PriceBasis {
+                batch: false,
+                cache_ttl: CacheTtl::OneHour,
+            },
+        );
+        assert!((all_1h - 8.0).abs() < 1e-9, "{all_1h}");
+    }
+
+    /// Through the real response parser: the API's `cache_creation.ephemeral_1h_input_tokens`
+    /// reaches the cost, and a batch row is halved.
+    #[test]
+    fn the_response_parser_prices_the_one_hour_split_and_the_batch_discount() {
+        let msg = serde_json::json!({
+            "model": "claude-opus-5-5", "content": [], "stop_reason": "end_turn",
+            "usage": {
+                "input_tokens": 0,
+                "cache_creation_input_tokens": 1_000_000,
+                "cache_creation": {
+                    "ephemeral_5m_input_tokens": 500_000,
+                    "ephemeral_1h_input_tokens": 500_000
+                },
+                "output_tokens": 1_000_000
+            }
+        });
+        let real = messages_response(&msg, "claude-opus-5-5", "api", rt());
+        // 0.5M * $5 + 0.5M * $8 + 1M * $20 = 2.5 + 4 + 20.
+        assert!(
+            (real.cost_usd.unwrap() - 26.5).abs() < 1e-9,
+            "{:?}",
+            real.cost_usd
+        );
+        let batch = messages_response(
+            &msg,
+            "claude-opus-5-5",
+            "api/batch",
+            PriceBasis::batch(CacheTtl::OneHour),
+        );
+        assert!(
+            (batch.cost_usd.unwrap() - 13.25).abs() < 1e-9,
+            "a batch row is half price: {:?}",
+            batch.cost_usd
+        );
+    }
+
+    /// A batch RESULT row (the JSONL the batch path really parses) for Fable 5.1 with cache
+    /// reads: per-model cache-read rate, then the 0.5x batch discount.
+    #[test]
+    fn a_fable_5_1_batch_row_prices_cache_reads_then_halves() {
+        let row = r#"{"custom_id":"c0-b0","result":{"type":"succeeded","message":{"model":"claude-fable-5-1","content":[{"type":"text","text":"{}"}],"stop_reason":"end_turn","usage":{"input_tokens":0,"cache_read_input_tokens":1000000,"output_tokens":0}}}}"#;
+        let rows = parse_batch_results_jsonl(row, BATCH_CACHE_TTL).unwrap();
+        let cost = rows[0].response.as_ref().unwrap().cost_usd.unwrap();
+        assert!((cost - 0.125).abs() < 1e-9, "$0.25 x 0.5, got {cost}");
+    }
+
+    /// The usage ledger's fallback prices a response with no reported cost through the SAME
+    /// function (here: Haiku 5.5, 100,001 prompt tokens -> the long-prompt tier).
+    #[test]
+    fn the_ledger_fallback_prices_through_the_same_function() {
+        let ledger = crate::usage_ledger::UsageLedger::new();
+        let resp = LlmResponse {
+            text: String::new(),
+            model: "claude-haiku-5-5".to_string(),
+            backend: "api".to_string(),
+            cost_usd: None,
+            input_tokens: Some(100_001),
+            output_tokens: Some(0),
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+            or_cache_discount: None,
+            truncated: false,
+        };
+        ledger.record("claude-haiku-5-5", &resp);
+        let expected = usd(
+            "claude-haiku-5-5",
+            CallUsage {
+                input: Some(100_001),
+                output: Some(0),
+                ..Default::default()
+            },
+            PriceBasis::realtime(),
+        );
+        assert!((ledger.snapshot().total_cost_usd - expected).abs() < 2e-6);
+        // An undated alias of a dated entry is priced too, and is "priced" for the spend cap.
+        assert!(is_priced("claude-haiku-4-5"));
+        assert!(is_priced("claude-opus-5-5-20261001"));
+        assert!(!is_priced("some-unlisted-model"));
     }
 
     #[test]
@@ -3263,11 +3674,13 @@ malformed line, not json
                     truncated: false,
                 }),
                 error: None,
+                billed: None,
             },
             BatchResultRow {
                 custom_id: "c1-b0".to_string(),
                 response: None,
                 error: Some("limit exceeded".to_string()),
+                billed: None,
             },
             BatchResultRow {
                 custom_id: "c0-b1".to_string(),
@@ -3284,9 +3697,16 @@ malformed line, not json
                     truncated: false,
                 }),
                 error: None,
+                billed: None,
             },
         ];
-        let map = reassemble_batch_results(rows);
+        let results = reassemble_batch_results(rows);
+        assert_eq!(
+            results.errors.get("c1-b0").map(String::as_str),
+            Some("limit exceeded"),
+            "the error row's reason is kept"
+        );
+        let map = results.responses;
         assert_eq!(map.len(), 2, "two succeeded rows in map");
         assert!(map.contains_key("c0-b0"));
         assert!(map.contains_key("c0-b1"));
@@ -3995,6 +4415,146 @@ exit 1
         assert_eq!(resp.text, "half an answer");
     }
 
+    /// A refused call is billed: its usage reaches the ledger even though the call is an `Err`.
+    #[test]
+    fn a_refused_api_call_is_recorded_in_the_ledger_before_it_fails() {
+        let ledger = std::sync::Arc::new(crate::usage_ledger::UsageLedger::new());
+        let llm = Llm {
+            vendor: Vendor::Anthropic,
+            backend: Backend::Api,
+            default_model: "claude-opus-5-5".to_string(),
+            api_key: Some("k".to_string()),
+            ledger: Some(ledger.clone()),
+            sessions: None,
+        };
+        let refused = serde_json::json!({
+            "model": "claude-opus-5-5", "content": [], "stop_reason": "refusal",
+            "usage": {"input_tokens": 1000, "output_tokens": 7}
+        });
+        let err = llm
+            .api_response_or_refusal(&refused, "claude-opus-5-5", rt())
+            .expect_err("a refusal is an error");
+        assert!(is_refusal(&err));
+        let snap = ledger.snapshot();
+        assert_eq!(snap.calls, 1, "the refused call is counted");
+        assert_eq!(snap.input_tokens, 1000);
+        assert_eq!(snap.output_tokens, 7);
+        // A normal response is returned (and left for `complete` to record).
+        let fine = serde_json::json!({
+            "model": "claude-opus-5-5", "content": [{"type": "text", "text": "x"}],
+            "stop_reason": "end_turn", "usage": {"input_tokens": 1, "output_tokens": 1}
+        });
+        assert_eq!(
+            llm.api_response_or_refusal(&fine, "claude-opus-5-5", rt())
+                .unwrap()
+                .text,
+            "x"
+        );
+        assert_eq!(ledger.snapshot().calls, 1);
+    }
+
+    /// A refusal error carries what the call was billed, for any caller that meters spend.
+    #[test]
+    fn a_refusal_error_carries_the_billed_usage() {
+        let msg = serde_json::json!({
+            "model": "claude-fable-5-1", "content": [], "stop_reason": "refusal",
+            "usage": { "input_tokens": 1_000_000, "output_tokens": 0 }
+        });
+        let e = refusal_error_billed(&msg, "claude-fable-5-1", "api", rt()).unwrap();
+        assert!(is_refusal(&e));
+        let billed = refusal_billed(&e).expect("the error carries the usage");
+        assert!((billed.cost_usd.unwrap() - 10.0).abs() < 1e-9);
+        assert_eq!(billed.input_tokens, Some(1_000_000));
+        // The plain form carries none, and a non-refusal is not an error at all.
+        assert!(refusal_billed(&refusal_error(&msg).unwrap()).is_none());
+        assert!(refusal_error_billed(
+            &serde_json::json!({"stop_reason": "end_turn"}),
+            "m",
+            "api",
+            rt()
+        )
+        .is_none());
+        // Still found through added context.
+        let wrapped = e.context("provider call failed");
+        assert!(refusal_billed(&wrapped).is_some());
+    }
+
+    #[test]
+    fn a_refused_batch_row_keeps_its_billed_usage() {
+        let row = r#"{"custom_id":"c0-b0","result":{"type":"succeeded","message":{"model":"claude-opus-5-5","content":[],"stop_reason":"refusal","usage":{"input_tokens":1000000,"output_tokens":0}}}}"#;
+        let rows = parse_batch_results_jsonl(row, BATCH_CACHE_TTL).unwrap();
+        let results = reassemble_batch_results(rows);
+        let billed = &results.billed["c0-b0"];
+        // $4/M input, halved for a batch item.
+        assert!((billed.cost_usd.unwrap() - 2.0).abs() < 1e-9);
+        assert!(results.errors["c0-b0"].contains("refus"));
+    }
+
+    #[test]
+    fn micro_dollars_round_up_but_float_noise_does_not_add_one() {
+        assert_eq!(usd_to_micro_ceil(0.0), 0);
+        assert_eq!(usd_to_micro_ceil(0.0000001), 1);
+        assert_eq!(usd_to_micro_ceil(0.25), 250_000);
+        assert_eq!(usd_to_micro_ceil(0.60), 600_000);
+        assert_eq!(usd_to_micro_ceil(1.0000004), 1_000_001);
+        assert_eq!(usd_to_micro_ceil(-1.0), 0);
+    }
+
+    #[test]
+    fn a_model_is_priced_only_with_non_zero_input_and_output_prices() {
+        assert!(is_priced("claude-opus-5"));
+        assert!(is_priced("claude-haiku-5-5"));
+        assert!(!is_priced(""));
+        assert!(!is_priced("some-free-model:free"));
+        // Every catalog entry that counts as priced really has both prices.
+        for e in crate::model_registry::CLAUDE_REGISTRY_MODELS {
+            assert!(e.price_in > 0.0 && e.price_out > 0.0, "{}", e.id);
+            assert!(is_priced(e.id), "{}", e.id);
+        }
+    }
+
+    /// `count_tokens` goes through the same conformer as every other body, minus the
+    /// generation-only `output_config`.
+    #[test]
+    fn count_tokens_body_is_conformed_and_carries_no_output_config() {
+        let body = count_tokens_body(&shape_request(), "claude-opus-5-5");
+        assert!(body.get("output_config").is_none());
+        assert!(body.get("max_tokens").is_none());
+        assert_eq!(body["model"], "claude-opus-5-5");
+    }
+
+    /// A CLI `result` event whose `stop_reason` is `refusal` is a failed call even though
+    /// `is_error` is false and the prose in `result` (or already-streamed text) looks like an
+    /// answer: it must never parse as a clean pass.
+    #[tokio::test]
+    async fn a_cli_result_with_refusal_stop_reason_is_a_refusal_error() {
+        let child = spawn_scripted_cli(
+            r#"printf '%s\n' '{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"I cannot help with that."}}}'
+printf '%s\n' '{"type":"result","is_error":false,"stop_reason":"refusal","result":"I cannot help with that."}'
+"#,
+        );
+        let err = read_cli_stream(
+            child,
+            "m",
+            std::time::Duration::from_secs(30),
+            std::time::Duration::from_secs(30),
+            &mut |_| {},
+        )
+        .await
+        .expect_err("a refusal stop_reason is a failure");
+        assert!(is_refusal(&err), "{err}");
+    }
+
+    #[test]
+    fn cli_result_text_accepts_other_stop_reasons() {
+        for sr in ["end_turn", "max_tokens", "tool_use"] {
+            let v = serde_json::json!({"is_error": false, "stop_reason": sr, "result": "ok"});
+            assert_eq!(cli_result_text(&v).unwrap(), "ok", "{sr}");
+        }
+        let v = serde_json::json!({"is_error": false, "stop_reason": null, "result": "ok"});
+        assert_eq!(cli_result_text(&v).unwrap(), "ok");
+    }
+
     /// ...but a non-zero exit with NOTHING streamed is still a hard failure.
     #[tokio::test]
     async fn read_cli_stream_fails_when_a_non_zero_exit_left_nothing_to_salvage() {
@@ -4433,5 +4993,148 @@ printf '%s\n' '{"type":"result","is_error":false,"result":"LIVE-DONE","total_cos
             elapsed < std::time::Duration::from_secs(15),
             "the wedged call must die in BOUNDED time, took {elapsed:?}"
         );
+    }
+
+    // ── Request shape for the strict models (HTTP 400 if wrong) ───────────────────────────
+
+    const STRICT_MODELS: [&str; 4] = [
+        "claude-fable-5-1",
+        "claude-opus-5-5",
+        "claude-sonnet-5-5",
+        "claude-haiku-5-5",
+    ];
+
+    /// Every field the strict models answer with HTTP 400, asserted absent from a body.
+    fn assert_no_rejected_fields(body: &serde_json::Value, what: &str) {
+        for key in ["thinking", "temperature", "top_p", "top_k"] {
+            assert!(body.get(key).is_none(), "{what}: `{key}` must not be sent");
+        }
+        let tc = body.get("tool_choice");
+        assert!(
+            tc.is_none() || tc.unwrap()["type"] == "auto",
+            "{what}: tool_choice must be absent or auto, got {tc:?}"
+        );
+        if let Some(msgs) = body["messages"].as_array() {
+            assert_ne!(
+                msgs.last().and_then(|m| m["role"].as_str()),
+                Some("assistant"),
+                "{what}: the last message must not be an assistant prefill"
+            );
+        }
+    }
+
+    fn shape_request() -> LlmRequest {
+        LlmRequest::new("review this code\nsecond segment\ntail")
+            .with_system("You are an auditor.")
+            .with_max_tokens(8192)
+            .with_cache_breakpoints(vec![17, 32])
+    }
+
+    #[test]
+    fn complete_request_for_every_new_model_has_no_rejected_fields() {
+        for model in STRICT_MODELS {
+            let body = messages_request_body(&shape_request(), model, CacheTtl::FiveMinutes);
+            assert_no_rejected_fields(&body, &format!("complete/{model}"));
+            assert_eq!(body["model"], model);
+            assert_eq!(body["max_tokens"], 8192);
+        }
+    }
+
+    #[test]
+    fn batch_item_for_every_new_model_has_no_rejected_fields() {
+        for model in STRICT_MODELS {
+            let item = build_batch_item("c0-b0", &shape_request(), model, BATCH_CACHE_TTL);
+            let v = serde_json::to_value(&item).unwrap();
+            assert_no_rejected_fields(&v["params"], &format!("batch/{model}"));
+        }
+    }
+
+    #[test]
+    fn count_tokens_request_for_every_new_model_has_no_rejected_fields() {
+        for model in STRICT_MODELS {
+            let body = count_tokens_body(&shape_request(), model);
+            assert_no_rejected_fields(&body, &format!("count_tokens/{model}"));
+        }
+    }
+
+    /// Opus 5.5 and Haiku 5.5 default to `medium` effort; every audit call was tuned on the old
+    /// `high` default, so both request kinds that run the model must ask for `high` explicitly.
+    /// The other two default to the effort we want and must not carry an `output_config`.
+    #[test]
+    fn effort_is_set_high_only_where_the_model_defaults_lower() {
+        for model in STRICT_MODELS {
+            let wants_high = matches!(model, "claude-opus-5-5" | "claude-haiku-5-5");
+            let complete = messages_request_body(&shape_request(), model, CacheTtl::FiveMinutes);
+            let batch = serde_json::to_value(build_batch_item(
+                "c0-b0",
+                &shape_request(),
+                model,
+                BATCH_CACHE_TTL,
+            ))
+            .unwrap();
+            if wants_high {
+                assert_eq!(complete["output_config"]["effort"], "high", "{model}");
+                assert_eq!(
+                    batch["params"]["output_config"]["effort"], "high",
+                    "{model}"
+                );
+            } else {
+                assert!(complete.get("output_config").is_none(), "{model}");
+                assert!(batch["params"].get("output_config").is_none(), "{model}");
+            }
+        }
+    }
+
+    #[test]
+    fn legacy_models_get_the_request_they_always_got() {
+        for model in [
+            "claude-opus-5",
+            "claude-sonnet-5",
+            "claude-haiku-4-5-20251001",
+        ] {
+            let body = messages_request_body(&shape_request(), model, CacheTtl::FiveMinutes);
+            assert!(body.get("output_config").is_none(), "{model}");
+        }
+    }
+
+    // ── Refusal: stop_reason "refusal" with HTTP 200 is a FAILED pass, never "no findings" ──
+
+    #[test]
+    fn a_refusal_stop_reason_is_an_error() {
+        let msg = serde_json::json!({
+            "model": "claude-opus-5-5",
+            "content": [],
+            "stop_reason": "refusal",
+            "usage": {"input_tokens": 10, "output_tokens": 0}
+        });
+        let err = refusal_error(&msg).expect("refusal must be an error");
+        assert!(err.to_string().contains("refus"), "{err}");
+        for ok in ["end_turn", "max_tokens", "tool_use", "stop_sequence"] {
+            let m = serde_json::json!({"stop_reason": ok});
+            assert!(refusal_error(&m).is_none(), "{ok} is not a refusal");
+        }
+        assert!(refusal_error(&serde_json::json!({})).is_none());
+    }
+
+    #[test]
+    fn a_refused_batch_item_is_an_error_row_and_is_absent_from_the_results_map() {
+        let refused = r#"{"custom_id":"c0-b0","result":{"type":"succeeded","message":{"model":"claude-opus-5-5","content":[],"stop_reason":"refusal","usage":{"input_tokens":1,"output_tokens":0}}}}"#;
+        let fine = r#"{"custom_id":"c0-b1","result":{"type":"succeeded","message":{"model":"claude-opus-5-5","content":[{"type":"text","text":"{}"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":2}}}}"#;
+        let rows =
+            parse_batch_results_jsonl(&format!("{refused}\n{fine}\n"), BATCH_CACHE_TTL).unwrap();
+        assert_eq!(rows.len(), 2);
+        let r0 = rows.iter().find(|r| r.custom_id == "c0-b0").unwrap();
+        assert!(r0.response.is_none(), "a refusal carries no response");
+        assert!(r0.error.as_deref().unwrap().contains("refus"));
+        let results = reassemble_batch_results(rows);
+        assert!(
+            !results.responses.contains_key("c0-b0"),
+            "the refused item has no response"
+        );
+        assert!(
+            results.errors["c0-b0"].contains("refus"),
+            "its reason is kept and names the refusal"
+        );
+        assert!(results.responses.contains_key("c0-b1"));
     }
 }

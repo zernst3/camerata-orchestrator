@@ -19891,9 +19891,9 @@ mod tests {
         assert_eq!(json["calls"], 2);
         assert_eq!(json["rate_limited"], false);
         assert!(json["last_rate_limit"].is_null());
-        // 0.05 (reported) + 18.0 (derived sonnet) = 18.05.
+        // 0.05 (reported) + 12.0 (derived sonnet, $2/$10) = 12.05.
         let cost = json["total_cost_usd"].as_f64().unwrap();
-        assert!((cost - 18.05).abs() < 1e-6, "got {cost}");
+        assert!((cost - 12.05).abs() < 1e-6, "got {cost}");
         // by_model array of {model,tokens,cost,calls}, sorted by descending cost (sonnet first).
         let by_model = json["by_model"].as_array().unwrap();
         assert_eq!(by_model.len(), 2);

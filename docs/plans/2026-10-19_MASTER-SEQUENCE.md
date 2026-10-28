@@ -28,12 +28,12 @@ everything in sequence until we are ready to start the cycle again."*
 > | 14 W26 | corpus half DONE | `155cab1`, `7bee157`; runtime half rides with W27 |
 > | 15 W27 PDF rebuild | Phase-A unblocked (`f6df35d`); template rewrite OPEN (needs Zach's eye) | |
 > | 16 W32 | (a) DONE `05d94df`; (b) dropped, see note | |
-> | 16b exports + manifest | BUILT (`524a29b`, `54ac30f`, `9209482`, `b2d8524`, `4177244`); 3 of 7 design gates still missing, see 21 | |
-> | 16c corpus staleness | BUILT incl. CLI; LLM sweep agent + load/digest nag OPEN | `41fcb1d` et al. |
-> | 17 W29 | NEXT. Design corrected 2026-10-21 (`2f45aae`) | |
+> | 16b exports + manifest | BUILT (`524a29b`, `54ac30f`, `9209482`, `b2d8524`, `4177244`); design gates 2, 6, 7 DONE (`bc121134`, `98a61091`), see 21 | |
+> | 16c corpus staleness | BUILT incl. CLI and load/digest nag (`da85cfe9`); LLM sweep agent OPEN | `41fcb1d` et al. |
+> | 17 W29 | PARTIAL: 7 of 9 rules built (Waves A to C, latest `515de82e`); UI-STATE-SHAPE-1 and STYLE-NEEDLESS-COMPLEXITY-1 (Wave D) not in corpus. Design corrected 2026-10-21 (`2f45aae`) | |
 > | 18 W30 residuals | eslint pin: caret majors `f52fb48`, EXACT versions + committed lockfile (`npm ci`) 2026-10-22; other residuals OPEN | |
-> | 19 engine/doc items | `Rejected:` strip DONE `a140459`; `resolve_fix` comment DONE (correction note in place); rest OPEN | |
-> | 19a env-var flake | OPEN (40 env mutations, 3 `#[serial]`) | |
+> | 19 engine/doc items | `Rejected:` strip DONE `a140459`; `resolve_fix` comment DONE (correction note in place); onboard.rs comments and RULES_REFERENCE §5.3 DONE (`f612ef22`); rest OPEN | |
+> | 19a env-var flake | DONE (`79640ede`) (40 env mutations, 3 `#[serial]`) | |
 > | 19b eslint residual | DONE: real cause was version drift + macOS symlink canonicalization | `f52fb48`, `b8941a9`, `b76e8b1` |
 > | 19c supabase option rewrite | DONE | `910697d` |
 > | 19d per-branch severity | OPEN (schema question) | |
@@ -193,7 +193,7 @@ _Doc step (standing): update `OVERVIEW.md` + the relevant deep doc before markin
     flagging. The schema field stays (harmless, zero rules use it); we revisit only if a
     specific rule is ever found to teach something the ecosystem abandoned.
 
-16b. ✅ DONE **Machine-readable exports (CSV + JSON per dataset) in the product ZIP** (Zach, 2026-10-20).
+16b. ✅ DONE (`9209482d`) **Machine-readable exports (CSV + JSON per dataset) in the product ZIP** (Zach, 2026-10-20).
     Every xlsx DATA worksheet (All Findings, Deviations, Conventions, Dependencies, False
     Positives, Coverage; NOT Index or the per-category duplicates) emitted as BOTH a CSV and a
     JSON, in nested `csv/` and `json/` folders inside the export ZIP, PLUS a root `manifest.json` (file index + per-file sha256 + schema versions + provenance: commit, engine version, corpus-content digest, and the client-visible rules-last-reviewed staleness date), as additional serializers
@@ -281,7 +281,7 @@ _Doc step (standing): update `OVERVIEW.md` + the relevant deep doc before markin
     all, and a relative severity ordering that survives only as prose in `[decision].why`. It
     is the one place in the pack where a severity claim has no structured home.
 
-19b. **[DONE 2026-10-21; the narrative below is SUPERSEDED.]** The real root cause had two factors:
+19b. **[DONE 2026-10-21 (`f52fb48`, `b8941a9`, `b76e8b1`); the narrative below is SUPERSEDED.]** The real root cause had two factors:
     eslint plugin version drift (fixed by pinning, `f52fb48`) and macOS symlink canonicalization in
     the repo-scope check (`b8941a9`). The "selector-to-package mapping" suspicion below was wrong.
     Kept for the record of disproved theories.
@@ -318,7 +318,7 @@ _Doc step (standing): update `OVERVIEW.md` + the relevant deep doc before markin
     manifest. `package.json` currently carries `"eslint":"^10.12.0"`, so an unpinned
     reinstall can move a major version under the engine with no signal.
 
-19a. **Test-isolation residual (found 2026-10-20).**
+19a. **Test-isolation residual (found 2026-10-20).** DONE (`79640ede`).
     `rescan_alternatives_blocked_when_project_is_api_backend_with_no_key` fails intermittently
     under the parallel harness because it calls `std::env::remove_var("ANTHROPIC_API_KEY")`.
     There are **40 process-global env mutations in `crates/server/src/lib.rs` alone**. Zach
@@ -329,13 +329,13 @@ _Doc step (standing): update `OVERVIEW.md` + the relevant deep doc before markin
     another one-off.
 
 19. **Engine/doc items surfaced by the corpus audit:**
-    - strip `Rejected:` at render (D7)
+    - strip `Rejected:` at render (D7) DONE (`a1404595`).
     - `report_export.rs:2042-2050` — `resolve_fix` doc comment still carries the repudiated
       "internal, agent-facing instructions" framing
     - `RULES_REFERENCE.md` §5.3 — same stale sentence; an author reading only §5.3 reproduces
-      the original defect
+      the original defect. DONE (`f612ef22`).
     - `onboard.rs:1366-1373` and `:1425-1427` — two comments claim governance/process families
-      are dropped from the code audit; they are not
+      are dropped from the code audit; they are not. DONE (`f612ef22`).
     - three field-interaction rules to ADD to the guide: `enforcement` × multi-option (the most
       consequential and entirely absent), `remediation` × `violates`, `inspectable` scope
       (working tree vs VCS metadata)
@@ -370,16 +370,16 @@ _Doc step (standing): update `OVERVIEW.md` + the relevant deep doc before markin
 ### 2b. Item 21: follow-ups from the 2026-10-21 Fable audit (nothing dropped)
 
 - **CI gate.** HEAD failed fmt (220 files), clippy (11 `unwrap_used` denials + ~64 warnings), and
-  `test --locked` (lockfile, fixed `4eb3276`). CI never ran on feature branches. Being fixed:
+  `test --locked` (lockfile, fixed `4eb3276`). CI never ran on feature branches. DONE (`b0b543c4`, `9c2466b6`, `69be0730`):
   rustfmt config + one format commit, all clippy diagnostics, feature-branch push trigger.
 - **Export gates 2, 6 (corrupted-byte clause), 7** from `2026-10-20_machine-readable-exports.md`
-  §Testing are unbuilt. Also update that design's Status line and dataset count (8).
-- **Staleness nag** at corpus load and in the digest (only `camerata corpus check` exists).
+  §Testing are DONE (`bc121134`, `98a61091`; gate 6 corruption test in `tests/product_export_manifest_gates.rs`). Also update that design's Status line and dataset count (8): DONE (`05c51b6a`).
+- **Staleness nag** at corpus load and in the digest (only `camerata corpus check` exists). DONE (`da85cfe9`).
 - **`is_in_repo_scope` symlink fix** has no direct unit test with a real symlinked root.
 - **Ownership:** `Generated`/`Vendored` have no producer; `PlatformManaged` dormant by design.
 - **C5-6** is tracked only in an `#[ignore]` reason (`report_export.rs`); give it a ledger line.
 - ~~W29 corpus rules need Zach's go~~ GIVEN 2026-10-21 (all nine).
-- **`domain_to_glob("ui")` excludes `.jsx`**; fix with the first `ui` W29 rule.
+- **`domain_to_glob("ui")` excludes `.jsx`**; fix with the first `ui` W29 rule. DONE (`4695efa5`).
 - **Memory location:** Camerata memory lives under the agora-mono project dir, so a session
   started in this repo does not auto-load it.
 - **`stash@{0}`** (09-28 dead-P1 partial): checked 2026-10-21, fully superseded (every function
@@ -390,7 +390,7 @@ _Doc step (standing): update `OVERVIEW.md` + the relevant deep doc before markin
   `deviation_ceiling` are applied only at export (`report_export.rs` `build_report_json`,
   `xlsx_export.rs`). The app's triage view and the billed PDF can disagree for all 12 rules
   that declare a ceiling. Fix: one `apply_corpus_severity_bounds` after `classify_repo_findings`
-  in `onboard.rs`, export clamps kept as idempotent backstops, plus a live-report ceiling test.
+  in `onboard.rs`, export clamps kept as idempotent backstops, plus a live-report ceiling test. DONE (`fa6f004a`, merged in `7fc5d993`).
 - **ONE-IMPORT-PATH known false negative:** the union barrel exclusion hides intra-package splits
   in monorepos where every package has a root barrel. A per-chain exclusion that keeps the
   barrel-internal safe twin silent is an open design question.
@@ -404,7 +404,7 @@ _Doc step (standing): update `OVERVIEW.md` + the relevant deep doc before markin
   re-apply. So "a rule you applied changed upstream" silently covers nothing for a freshly applied
   rule. The June feature spec intends detection from apply time. Decision (Opus, per the
   never-defer-hardening directive): baseline at apply time and preserve baselines across
-  re-apply. Queued.
+  re-apply. PARTIAL (`e31d1ef8`: baseline at apply and save; preservation across re-apply not confirmed).
 
 - **CI gate binary (`camerata-check`) ignores corpus severity bounds** (found 2026-10-21 merging
   the W29 detectors): it reported ARCH-DEAD-CODE-1 at `medium` though the corpus ceiling is `low`,
@@ -427,7 +427,7 @@ _Doc step (standing): update `OVERVIEW.md` + the relevant deep doc before markin
   6h, no model tokens).** 6,380 mutants: 2,062 caught, 44 missed, 93 timeouts (effectively
   caught), 4,181 unviable. Fault-catch rate 97.9% (caught / caught+missed), counting the checks
   crate's own tests only. Full list: `mutants.out/missed.txt` (gitignored; rerun to regenerate).
-  **MAJOR, V1 (after the two client-trust blockers): 26 misses in client-facing checkers.**
+  **MAJOR, V1 (after the two client-trust blockers): 26 misses in client-facing checkers.** DONE (`6a870e19`).
   query_grammar_injection (10: split_top_level_plus, classify_expr, extract_call_inner,
   split_top_level_args, find_first_needle, extract_property_value), weak_randomness (7:
   forward_taint_identifiers, find_word, find_prng_call, assignment_target, strip_comments),
@@ -442,6 +442,17 @@ _Doc step (standing): update `OVERVIEW.md` + the relevant deep doc before markin
   heartbeat, diagnostics_for `||`; fold into the V2 dev-time parity audit), cosmetic
   (LayerConflict Display, describe_path boundary, clone_rules skip_count).
 
+- **CLI-backend refusal signal is unverified against a live refusal (added 2026-10-27, model
+  registry work).** The API paths treat `stop_reason: "refusal"` (HTTP 200, no content) as a
+  failed pass. The CLI backend (`claude -p`, `cli_result_text` in `crates/llm/src/llm.rs`) now
+  treats a `result` event whose `stop_reason` is `"refusal"` the same way: the installed CLI
+  (2.1.285) declares a `stop_reason` field on its `result` message and documents the refusal stop
+  reason, but no live refusal has been captured, so whether the CLI populates that field with
+  `"refusal"` on a refused turn is unconfirmed. Until one is captured (a unit test with a scripted
+  `result` event exists), a refusal that the CLI renders as prose with `stop_reason` null reads as
+  an ordinary answer. Do NOT add a text heuristic; capture a real refusal, then pin its exact
+  shape in a test.
+
 ### 2c. Item 22: implementer-handoff items not yet built (added 2026-10-24, Zach)
 
 From `_workspace/brownfield-audits/IMPLEMENTER_HANDOFF_2026-10-24.md`. Its header said these were
@@ -449,12 +460,12 @@ From `_workspace/brownfield-audits/IMPLEMENTER_HANDOFF_2026-10-24.md`. Its heade
 Slotted RIGHT AFTER the delete/re-fetch blocker, blocking items first, all before the graded run.
 
 - **22a (handoff item 2, BLOCKING before any client): client inspections run on the Anthropic API,
-  not the Claude Code subscription.** Today every inspection logs `backend: cli`. Make an API backend
+  not the Claude Code subscription.** DONE (`23daf03a`). Today every inspection logs `backend: cli`. Make an API backend
   the default for client inspections (the CLI backend may stay for internal benchmark runs). Record
   the backend and provider in the export (manifest + README). If credits later come through AWS
   Bedrock, Bedrock is acceptable but must be recorded the same way. Side benefit: the API backend
   writes no Claude Code session files, so source deletion has less to purge.
-- **22b (handoff item 3, BLOCKING): `camerata count`.** Runs ONLY the inspection's own file filter
+- **22b (handoff item 3, BLOCKING): `camerata count`.** DONE (`c4228ccf`). Runs ONLY the inspection's own file filter
   (`crates/server/src/onboard/files.rs`: gitignore + noise denylist + extension allowlist + git
   ls-files union) on a repo and prints counted lines and files per language plus the
   excluded-noise count. No model, no tokens, seconds to run. It is the number quotes are priced on,
@@ -475,7 +486,7 @@ Slotted RIGHT AFTER the delete/re-fetch blocker, blocking items first, all befor
   `_workspace/brownfield-audits/CORPUS_FRESHNESS_WORK_ORDER.md` (monthly source check command;
   quarterly review). `camerata corpus check` and the due-soon warning exist; build what the work
   order still needs (the source-check command / sweep). Slotted with the item-21 engine follow-ups.
-  **Part A built (2026-10-27):** `camerata corpus check-sources` (crate `camerata-source-check`),
+  **Part A built (2026-10-27, `b33c134f`); Part B runbook DONE (`46afcd64`); export wiring OPEN:** `camerata corpus check-sources` (crate `camerata-source-check`),
   sidecar `crates/rules/CORPUS_SOURCE_HASHES.json`, text + JSON report. Part B is a runbook in
   `docs/USER_GUIDE.md` §9. NOT yet wired into exports: the export builder calls
   `camerata_source_check::source_confidence(rule, &sidecar, today, DEFAULT_CHANGED_WINDOW_DAYS)`
@@ -483,7 +494,7 @@ Slotted RIGHT AFTER the delete/re-fetch blocker, blocking items first, all befor
   section is never silently re-baselined: it stays "changed, not yet reviewed" on every run until
   `--accept <url#anchor>` / `--accept-all` (who and when recorded in the sidecar); an unaccepted
   change lowers confidence with no time limit, and the 100-day window runs from the accept date.
-- **22g (handoff item 16, protected: corpus, Zach already asked): clean three showcase rule files**
+- **22g (handoff item 16, protected: corpus, Zach already asked): clean three showcase rule files** PARTIAL (`18d4ae40`; two of three rules still open).
   of internal notes for the website overlay: SEC-NO-HARDCODED-SECRETS-1 (drop the internal
   docs/ENFORCEMENT.md source or relabel it), ARCH-IDEMPOTENCY-KEYS-1 (replace the boilerplate
   decision question), ARCH-OBSERVABILITY-LOG-CONSISTENCY-1 (move internal module notes out of
@@ -537,7 +548,7 @@ fix-specific retries paid with no output kept.
   no-code fix pre-filter. Rules-first prompt order deliberately not built (see
   `build_pass_prompt`). Still to do with a key: the API-backend fixture baseline run, and
   recall/decoy confirmation on the five fixtures for ranks 3 and 6. Rank 2 (batch default) and
-  the rest remain unbuilt.
+  the rest remain unbuilt, except rank 9, which is BUILT (`9144e86c`, merged in `7a39daf7`).
 
 ### 2e. Item 24: Firebase / Firestore rules (added 2026-10-25, Zach, V1; corpus scope approved)
 
@@ -545,13 +556,13 @@ Spec: `_workspace/brownfield-audits/WORK_ORDER_FIREBASE_RULES.md`. The corpus ha
 rules, and Firebase is the second default backend for AI-built apps. Zach: the site claims
 Firebase (including Flutter apps) once this ships; if a Firebase or Flutter client signs before
 V2, the V2 items (keyed fixture, Dart grammar, Flutter rules) move to the front.
-- **24a (blocking, small, first):** admit `firestore.rules` / `storage.rules` in
+- **24a (blocking, small, first):** DONE (`d688ea5e`, `b8ddd0fc`). Admit `firestore.rules` / `storage.rules` in
   `crates/server/src/onboard/files.rs` (they are filtered out today, so every check would see
   nothing), and add `dart` to CODE_EXTS (Zach GO) so the secret floor and advisory tier read
   Flutter client code. Tests for both. Also the Firebase web-config `apiKey` safe twin in the
   shared secret detector (an identifier, not a secret, per Firebase's docs) so every Firebase app
   does not get a false critical.
-- **24b:** new `firebase` domain + stack detection; about 13 rules (open rules, test-mode rules,
+- **24b:** DONE (`79714245`). New `firebase` domain + stack detection; about 13 rules (open rules, test-mode rules,
   auth-only, ownership, field validation, recursive wildcard, storage open, RTDB open, admin
   claims, Functions auth, Admin SDK in client code, App Check, rules tests), each grounded in
   Firebase's own docs with a positive test and a safe twin. Rule files are a DSL with no grammar:
@@ -561,7 +572,7 @@ V2, the V2 items (keyed fixture, Dart grammar, Flutter rules) move to the front.
   false critical on the apiKey. Keyed calibration fixture: V2.
 - **Slot:** with W29 Wave D and 22e (the corpus/detector block), after token efficiency.
 
-### 2f. Item 25: inspection walkthrough (added 2026-10-27, Zach, V1)
+### 2f. Item 25: inspection walkthrough (added 2026-10-27, Zach, V1) DONE (`dfe85434`)
 
 A guided mode that points at each real control in the Inspection flow with a short explanation,
 from an empty app to an exported package. Turned on by a "Guided inspection" switch, offered once
