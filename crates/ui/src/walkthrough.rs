@@ -32,9 +32,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use camerata_ui_core::walkthrough::{
-    guided_word, parse_prefs, place, popup_mode, should_offer, start_gate, tour_gate, Offer,
-    PopupMode, Progress, Rect, Side, StartSource, Tour, TourGate, TourPrefs, Viewport, KEY_GUIDED,
-    KEY_OFFER, TOUR_ATTRIBUTE,
+    guided_word, parse_prefs, place, popup_mode, should_offer, start_gate, tour_gate, ExitFocus,
+    Offer, PopupMode, Progress, Rect, Side, StartSource, Tour, TourGate, TourPrefs, Viewport,
+    KEY_GUIDED, KEY_OFFER, TOUR_ATTRIBUTE,
 };
 use dioxus::prelude::*;
 
@@ -240,17 +240,29 @@ pub(crate) fn refocus_after(step_changed: bool, focus_was_in_popup: bool) -> boo
     step_changed && focus_was_in_popup
 }
 
-/// Put the keyboard back on the control the popup was pointing at, and ONLY that control. A
-/// control that takes focus itself (a button, a field, a link) gets it. Anything else (a block, a
-/// bar, a banner) gets focus on the block itself, made focusable for the purpose, and never on
-/// something inside it: the first button inside the review queue's toolbar is Confirm, and a
-/// reflex Enter must not decide a finding. Nothing when the control is gone.
-pub(crate) fn focus_control_js(target: &str) -> String {
+/// Put the keyboard back where the popup was pointing, as the step's table row says.
+///
+/// `ExitFocus::Control`: on the control, and ONLY that control. A control that takes focus itself
+/// (a button, a field, a link) gets it. Anything else (a block, a bar, a banner) gets focus on the
+/// block itself, made focusable for the purpose, and never on something inside it: the first
+/// button inside the review queue's toolbar is Confirm, and a reflex Enter must not decide a
+/// finding.
+///
+/// `ExitFocus::Block`: on the block AROUND the control (its parent), made focusable the same way,
+/// and never on the control: for a control whose activation starts a paid run, an export or any
+/// other write.
+///
+/// Nothing when the control is gone.
+pub(crate) fn focus_control_js(target: &str, mode: ExitFocus) -> String {
     let target = serde_json::to_string(target).unwrap_or_else(|_| "\"\"".to_string());
+    let to_block = match mode {
+        ExitFocus::Control => "",
+        ExitFocus::Block => "  if (el.parentElement) el = el.parentElement;\n",
+    };
     format!(
         r#"var el = document.querySelector('[{TOUR_ATTRIBUTE}=' + JSON.stringify({target}) + ']');
 if (el) {{
-  if (!el.matches('button, [href], input, select, textarea') && !el.hasAttribute('tabindex')) {{
+{to_block}  if (!el.matches('button, [href], input, select, textarea') && !el.hasAttribute('tabindex')) {{
     el.setAttribute('tabindex', '-1');
   }}
   if (typeof el.focus === 'function') el.focus();
@@ -406,24 +418,24 @@ impl TourHandle {
     /// back on the control the popup was pointing at (Exit, Done and Esc); turning the switch off
     /// from the switch itself leaves it where it is.
     pub(crate) fn exit(mut self, restore_focus: bool) {
-        let target = self.tour.peek().step().map(|s| s.target);
+        let step = self.tour.peek().step();
         self.tour.write().exit();
         self.set_guided_off();
         if restore_focus {
-            if let Some(target) = target {
-                let _ = dioxus::document::eval(&focus_control_js(target));
+            if let Some(step) = step {
+                let _ = dioxus::document::eval(&focus_control_js(step.target, step.focus_on_exit));
             }
         }
     }
 
     /// The Next button. On the last step it ends the walkthrough like Exit.
     fn next(mut self) {
-        let target = self.tour.peek().step().map(|s| s.target);
+        let step = self.tour.peek().step();
         let progress = self.tour.write().go_next();
         if progress == Progress::Finished {
             self.set_guided_off();
-            if let Some(target) = target {
-                let _ = dioxus::document::eval(&focus_control_js(target));
+            if let Some(step) = step {
+                let _ = dioxus::document::eval(&focus_control_js(step.target, step.focus_on_exit));
             }
         }
     }
@@ -1053,8 +1065,12 @@ console.log(JSON.stringify(out));"#,
 
     #[test]
     fn the_keyboard_goes_back_to_the_control_and_never_to_something_inside_it() {
-        let js = focus_control_js(target::REPO_ADD);
+        let js = focus_control_js(target::REPO_ADD, ExitFocus::Control);
         assert!(js.contains("\"repo-add\""));
+        assert!(!js.contains("parentElement"), "{js}");
+        let block = focus_control_js(target::RUN_INSPECTION, ExitFocus::Block);
+        assert!(block.contains("el = el.parentElement"), "{block}");
+        assert_eq!(block.matches("querySelector").count(), 1, "{block}");
         // Nothing is looked up inside the control, so nothing inside it can be focused.
         assert!(!js.contains("querySelector(focusable"), "{js}");
         assert_eq!(js.matches("querySelector").count(), 1, "{js}");
@@ -1074,17 +1090,23 @@ console.log(JSON.stringify(out));"#,
     }
 
     #[test]
-    fn closing_on_any_step_leaves_the_keyboard_on_the_control_never_on_a_button_inside_it() {
-        // For every step's target: a block that holds a button (like the review queue's toolbar,
-        // whose first button is Confirm). The script must focus the block, and looking inside it
-        // throws. A control that takes focus itself gets it.
+    fn closing_on_any_step_leaves_the_keyboard_where_the_table_says_never_on_a_button_inside() {
+        // For every step's target, per its table row. The stubs: a block that holds a button
+        // (like the review queue's toolbar, whose first button is Confirm), and a control that
+        // takes focus itself, sitting in a parent block. Looking inside any element throws.
+        //  - Control: a block target gets focus on the block; a control target gets it itself.
+        //  - Block (Run, Export): focus lands on the parent block, never on the control.
         let mut cases = String::new();
         for step in &STEPS {
+            let mode = format!("{:?}", step.focus_on_exit);
             cases.push_str(&format!(
                 r#"(function () {{
+  var mode = "{mode}";
   var focused = null;
+  var parent = null;
   var make = function (takesFocus) {{
     return {{
+      parentElement: parent,
       matches: function () {{ return takesFocus; }},
       hasAttribute: function () {{ return false; }},
       setAttribute: function (k, v) {{ this.attr = k + "=" + v; }},
@@ -1092,25 +1114,28 @@ console.log(JSON.stringify(out));"#,
       querySelector: function () {{ throw new Error("looked inside"); }}
     }};
   }};
+  parent = make(false);
   var block = make(false);
   var control = make(true);
   var current = block;
   global.document = {{ querySelector: function () {{ return current; }} }};
   {script}
-  var onBlock = focused === block && block.attr === "tabindex=-1";
-  focused = null; current = control;
+  var onBlockTarget = mode === "Block"
+    ? focused === parent && parent.attr === "tabindex=-1"
+    : focused === block && block.attr === "tabindex=-1";
+  focused = null; parent.attr = undefined; current = control;
   {script}
-  results.push({{ target: {target:?}, onBlock: onBlock, onControl: focused === control && !control.attr }});
+  var onControlTarget = mode === "Block"
+    ? focused === parent && parent.attr === "tabindex=-1" && !control.attr
+    : focused === control && !control.attr;
+  results.push({{ target: {target:?}, mode: mode, onBlockTarget: onBlockTarget, onControlTarget: onControlTarget, controlFocused: focused === control }});
 }})();
 "#,
-                script = focus_control_js(step.target),
-                target = step.target
+                script = focus_control_js(step.target, step.focus_on_exit),
+                target = step.target,
             ));
         }
-        let script = format!(
-            "var results = [];
-{cases}console.log(JSON.stringify(results));"
-        );
+        let script = format!("var results = [];\n{cases}console.log(JSON.stringify(results));");
         let Some(out) = node(&script) else {
             eprintln!("node is not installed: the behavioural half of this test was skipped");
             return;
@@ -1118,8 +1143,14 @@ console.log(JSON.stringify(out));"#,
         let rows = out.as_array().expect("one row per step");
         assert_eq!(rows.len(), STEPS.len());
         for row in rows {
-            assert_eq!(row["onBlock"], json!(true), "{row}");
-            assert_eq!(row["onControl"], json!(true), "{row}");
+            assert_eq!(row["onBlockTarget"], json!(true), "{row}");
+            assert_eq!(row["onControlTarget"], json!(true), "{row}");
+        }
+        // The two steps that start a run or an export never put the keyboard on their button.
+        for id in [target::RUN_INSPECTION, target::EXPORT_PACKAGE] {
+            let row = rows.iter().find(|r| r["target"] == json!(id)).expect("row");
+            assert_eq!(row["mode"], json!("Block"), "{row}");
+            assert_eq!(row["controlFocused"], json!(false), "{row}");
         }
     }
 

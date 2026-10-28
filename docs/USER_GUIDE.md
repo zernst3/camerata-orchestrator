@@ -218,7 +218,8 @@ never clicks, types or decides anything for you.
 - Keyboard and screen readers: starting it moves the keyboard into the popup, each step is
   announced, and closing it puts the keyboard back on the control it was pointing at (on a bar or
   a block, the block itself, never on a button inside it, so a stray Enter cannot decide a
-  finding). The popup only listens for clicks and Esc while it is running, so a key pressed
+  finding). For the run and export steps it leaves the keyboard on the area around the button, not
+  the button, so a stray Enter cannot start a paid run or an export. The popup only listens for clicks and Esc while it is running, so a key pressed
   between walkthroughs does nothing to the next one.
 
 **What it covers (twelve steps).** Create or open a project; add the client repository; the client

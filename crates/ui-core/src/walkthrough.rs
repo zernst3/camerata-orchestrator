@@ -75,6 +75,17 @@ pub enum Advance {
     Appears(&'static str),
 }
 
+/// Where the keyboard goes when the walkthrough closes on a step.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExitFocus {
+    /// Back on the highlighted control itself (when it takes focus), as the user left it.
+    Control,
+    /// On the block around the control, never on the control. For a control whose activation
+    /// starts a paid run, an export, a deletion or any other write: a reflex Enter after closing
+    /// must not trigger it.
+    Block,
+}
+
 /// The screen a step's control lives on. It exists so a test can render each screen and check
 /// the control is there; nothing at run time reads it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -108,9 +119,15 @@ pub struct Step {
     pub how_to_get_there: &'static str,
     /// What moves the step on by itself.
     pub advance: Advance,
+    /// Where the keyboard goes when the walkthrough closes on this step.
+    pub focus_on_exit: ExitFocus,
 }
 
 /// THE STEP TABLE: the inspection, from an empty app to an exported package. Twelve steps.
+///
+/// `focus_on_exit` is [`ExitFocus::Block`] for the steps whose control starts a paid run or an
+/// export (Run, Export): closing the walkthrough there leaves the keyboard on the block around
+/// the button, so a reflex Enter cannot start it.
 ///
 /// Where a step's own control does not exist yet, it points at the closest one that does (the
 /// client name rides on the export panel's field; the spending cap is described beside the cost
@@ -124,6 +141,7 @@ pub const STEPS: [Step; 12] = [
         body: "A project holds one client's repository, rules and results. Create one here, or open one you already have.",
         how_to_get_there: "Press Projects in the top bar, or the Back to Projects arrow inside a project.",
         advance: Advance::Appears(target::NAV_ONBOARD),
+        focus_on_exit: ExitFocus::Control,
     },
     Step {
         id: "repository",
@@ -133,6 +151,7 @@ pub const STEPS: [Step; 12] = [
         body: "Browse to the local copy of the client's repository, which Camerata only reads. That copy is deleted after delivery.",
         how_to_get_there: "Open the project, press Onboard repos in the top bar, and choose Brownfield.",
         advance: Advance::Click,
+        focus_on_exit: ExitFocus::Control,
     },
     Step {
         id: "client",
@@ -142,6 +161,7 @@ pub const STEPS: [Step; 12] = [
         body: "The client name fills the confidentiality line on the report. Fill it in before you export.",
         how_to_get_there: "Scan the repository first. The report fields appear below the results.",
         advance: Advance::Next,
+        focus_on_exit: ExitFocus::Control,
     },
     Step {
         id: "backend",
@@ -151,6 +171,7 @@ pub const STEPS: [Step; 12] = [
         body: "Use the API for client work, with the key saved in your Keychain. Open Settings, then Chat backend, to check it.",
         how_to_get_there: "Open a project to see the Settings tab in the top bar.",
         advance: Advance::Click,
+        focus_on_exit: ExitFocus::Control,
     },
     Step {
         id: "rules",
@@ -160,6 +181,7 @@ pub const STEPS: [Step; 12] = [
         body: "These rules were picked for the stack Camerata found, and each one says why. Leave the defaults unless you have a reason.",
         how_to_get_there: "Open Onboard repos and scan the repository to see the proposed rules.",
         advance: Advance::Next,
+        focus_on_exit: ExitFocus::Control,
     },
     Step {
         id: "estimate",
@@ -169,6 +191,7 @@ pub const STEPS: [Step; 12] = [
         body: "The line count is what the quote is priced on, and the estimate is the model cost of this run. Check both against your spending cap before you run.",
         how_to_get_there: "Scan the repository first. The estimate appears above the run button.",
         advance: Advance::Next,
+        focus_on_exit: ExitFocus::Control,
     },
     Step {
         id: "run",
@@ -178,6 +201,7 @@ pub const STEPS: [Step; 12] = [
         body: "Press the highlighted button to start. The progress view shows each pass, and the run can go unattended.",
         how_to_get_there: "Open Onboard repos and scan the repository. The run button is under the proposed rules.",
         advance: Advance::Click,
+        focus_on_exit: ExitFocus::Block,
     },
     Step {
         id: "failed",
@@ -187,6 +211,7 @@ pub const STEPS: [Step; 12] = [
         body: "A warning here means a pass failed or did not run. The export says so too, so nothing is hidden.",
         how_to_get_there: "This warning shows under the results only when a pass failed or was skipped.",
         advance: Advance::Next,
+        focus_on_exit: ExitFocus::Control,
     },
     Step {
         id: "queue",
@@ -196,6 +221,7 @@ pub const STEPS: [Step; 12] = [
         body: "Decide each finding with C to confirm, I to ignore, T for tech debt or F for a false positive. Ignore and false positive ask for a reason, and Undo lasts five seconds.",
         how_to_get_there: "Run the inspection. The review queue appears under the results.",
         advance: Advance::Next,
+        focus_on_exit: ExitFocus::Control,
     },
     Step {
         id: "speed",
@@ -205,6 +231,7 @@ pub const STEPS: [Step; 12] = [
         body: "Stack a whole group to decide it at once, open the code viewer, or press Cmd+K for every command in one list. This button opens that list.",
         how_to_get_there: "Run the inspection. The Commands button is in the toolbar above the queue.",
         advance: Advance::Click,
+        focus_on_exit: ExitFocus::Control,
     },
     Step {
         id: "time",
@@ -214,6 +241,7 @@ pub const STEPS: [Step; 12] = [
         body: "Your review time and counts are for you only. They never appear in the export.",
         how_to_get_there: "Run the inspection. The Review time button is in the progress line above the queue.",
         advance: Advance::Click,
+        focus_on_exit: ExitFocus::Control,
     },
     Step {
         id: "export",
@@ -223,6 +251,7 @@ pub const STEPS: [Step; 12] = [
         body: "The ZIP holds the PDF report, the Excel workbook and the JSON, with a README that explains each file. The release checks run first.",
         how_to_get_there: "Run the inspection. The export is below the review queue.",
         advance: Advance::Click,
+        focus_on_exit: ExitFocus::Block,
     },
 ];
 
@@ -655,6 +684,27 @@ mod tests {
         assert_eq!(STEPS.len(), 12);
         let unique: BTreeSet<_> = STEPS.iter().map(|s| s.id).collect();
         assert_eq!(unique.len(), STEPS.len());
+    }
+
+    #[test]
+    fn a_control_that_starts_a_paid_run_or_an_export_never_gets_the_keyboard_back() {
+        // The controls whose activation starts a paid run, an export, a deletion or any other
+        // write. Add to this list when a step points at one; the table must say Block for it.
+        let writes = [target::RUN_INSPECTION, target::EXPORT_PACKAGE];
+        for step in &STEPS {
+            let expected = if writes.contains(&step.target) {
+                ExitFocus::Block
+            } else {
+                ExitFocus::Control
+            };
+            assert_eq!(step.focus_on_exit, expected, "{}", step.id);
+        }
+        for id in writes {
+            assert!(
+                STEPS.iter().any(|s| s.target == id),
+                "{id} is in the list but no step points at it"
+            );
+        }
     }
 
     #[test]
