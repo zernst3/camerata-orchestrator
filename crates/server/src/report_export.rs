@@ -4966,6 +4966,25 @@ pub async fn compile_pdf(json: &AuditReportJson) -> anyhow::Result<Vec<u8>> {
     compile_pdf_from_data(&render_data_json(json)?).await
 }
 
+// Test-only seam: a test that needs a different `typst` (a recording fake) scopes it onto ITS
+// OWN task with `TYPST_PROGRAM.scope(path, fut)`. The override is task-local, so it can neither
+// leak into a concurrently running test nor require changing the process-wide `PATH`, which is
+// what made unrelated typst-using tests flaky when a sibling swapped `PATH` for a fake.
+#[cfg(test)]
+tokio::task_local! {
+    pub(crate) static TYPST_PROGRAM: std::path::PathBuf;
+}
+
+/// The `typst` executable to run: the task-local test override if one is scoped, else `typst`
+/// from `PATH`.
+fn typst_program() -> std::ffi::OsString {
+    #[cfg(test)]
+    if let Ok(p) = TYPST_PROGRAM.try_with(|p| p.clone()) {
+        return p.into_os_string();
+    }
+    "typst".into()
+}
+
 /// Compile `data_json` (from [`render_data_json`]) into a PDF via a bundled Typst template.
 /// Self-contained: the template
 /// text is embedded in the binary (`include_str!`), so no external file needs to ship
@@ -4992,7 +5011,7 @@ pub async fn compile_pdf_from_data(data_json: &str) -> anyhow::Result<Vec<u8>> {
     .await
     .context("could not write report.typ")?;
 
-    let mut cmd = tokio::process::Command::new("typst");
+    let mut cmd = tokio::process::Command::new(typst_program());
     cmd.current_dir(tmp.path())
         .arg("compile")
         .arg("report.typ")

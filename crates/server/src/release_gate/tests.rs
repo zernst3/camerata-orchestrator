@@ -933,7 +933,6 @@ async fn export_audit_report_pdf_route_is_gated_on_data_json() {
 }
 
 #[tokio::test]
-#[serial_test::serial(process_env)]
 async fn export_product_returns_422_with_the_problem_list_when_blocked() {
     if !typst_on_path() {
         eprintln!("export_product 422 test: skipping, typst is not on PATH");
@@ -971,10 +970,7 @@ async fn export_product_returns_422_with_the_problem_list_when_blocked() {
     );
 }
 
-// Serial with the tests that swap PATH for a fake `typst`: run concurrently with one of them,
-// this test would find the fake (which exits 1) and the export would answer 500.
 #[tokio::test]
-#[serial_test::serial(process_env)]
 async fn export_product_success_names_the_release_checks_in_a_header() {
     if !typst_on_path() {
         eprintln!("export_product success test: skipping, typst is not on PATH");
@@ -1003,8 +999,10 @@ async fn export_product_success_names_the_release_checks_in_a_header() {
 
 // ---- the secrets check runs BEFORE the PDF compile --------------------------------------------
 
-/// A `typst` on PATH that records that it ran and fails, so a test can prove the compiler was
-/// (or was not) reached. Returns the directory to put on PATH and the marker file it touches.
+/// A fake `typst` that records that it ran and fails, so a test can prove the compiler was
+/// (or was not) reached. Returns the directory holding it (`<dir>/typst`, handed to the
+/// task-local `report_export::TYPST_PROGRAM` seam, never put on PATH) and the marker file it
+/// touches.
 #[cfg(unix)]
 fn recording_typst() -> (tempfile::TempDir, std::path::PathBuf) {
     use std::os::unix::fs::PermissionsExt;
@@ -1022,10 +1020,9 @@ fn recording_typst() -> (tempfile::TempDir, std::path::PathBuf) {
 
 #[cfg(unix)]
 #[tokio::test]
-#[serial_test::serial(process_env)]
 async fn a_secret_in_the_pdf_data_blocks_the_package_before_typst_is_ever_run() {
     let (fake_bin, marker) = recording_typst();
-    let _path = camerata_test_env::EnvGuard::set("PATH", fake_bin.path());
+    let fake_typst = fake_bin.path().join("typst");
     let p = planted(SecretShape::StripeLiveSecretKey);
     // The report options are free text the operator or the export dialog supplies; they reach
     // `data.json` without passing through the finding redactor.
@@ -1033,11 +1030,20 @@ async fn a_secret_in_the_pdf_data_blocks_the_package_before_typst_is_ever_run() 
         prepared_by: format!("Prepared with {}", p.value),
         ..ReportOptions::default()
     };
-    let error =
-        build_product_package_with_stem(&sealed_report(), &HashMap::new(), None, &options, STEM)
-            .await
-            .err()
-            .expect("the package must be refused");
+    let error = crate::report_export::TYPST_PROGRAM
+        .scope(
+            fake_typst,
+            build_product_package_with_stem(
+                &sealed_report(),
+                &HashMap::new(),
+                None,
+                &options,
+                STEM,
+            ),
+        )
+        .await
+        .err()
+        .expect("the package must be refused");
     let failure = gate_failure_of(&error).expect("the refusal is the gate's, not a compile error");
     assert!(
         !failure.to_string().contains(&p.value),
@@ -1055,20 +1061,23 @@ async fn a_secret_in_the_pdf_data_blocks_the_package_before_typst_is_ever_run() 
 
 #[cfg(unix)]
 #[tokio::test]
-#[serial_test::serial(process_env)]
 async fn a_clean_package_still_reaches_the_compiler() {
     let (fake_bin, marker) = recording_typst();
-    let _path = camerata_test_env::EnvGuard::set("PATH", fake_bin.path());
-    let error = build_product_package_with_stem(
-        &sealed_report(),
-        &HashMap::new(),
-        None,
-        &ReportOptions::default(),
-        STEM,
-    )
-    .await
-    .err()
-    .expect("the fake typst fails the compile");
+    let fake_typst = fake_bin.path().join("typst");
+    let error = crate::report_export::TYPST_PROGRAM
+        .scope(
+            fake_typst,
+            build_product_package_with_stem(
+                &sealed_report(),
+                &HashMap::new(),
+                None,
+                &ReportOptions::default(),
+                STEM,
+            ),
+        )
+        .await
+        .err()
+        .expect("the fake typst fails the compile");
     assert!(gate_failure_of(&error).is_none(), "{error}");
     assert!(marker.exists(), "a clean package is compiled");
 }
