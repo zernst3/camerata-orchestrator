@@ -73,10 +73,13 @@ impl LlmPort for Realtime {
     }
 }
 
+/// Answers one item: (submission round, custom id) -> reply.
+type Script = dyn Fn(usize, &str) -> Reply + Send + Sync;
+
 /// A Message Batches API that answers each item by a script keyed on (round, custom id), and
 /// logs every submission.
 struct FakeBatch {
-    script: Box<dyn Fn(usize, &str) -> Reply + Send + Sync>,
+    script: Box<Script>,
     submissions: Mutex<Vec<Vec<BatchItem>>>,
     pending: Mutex<HashMap<String, Vec<String>>>,
     realtime: Realtime,
