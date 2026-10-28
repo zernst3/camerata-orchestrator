@@ -2708,6 +2708,11 @@ pub(super) fn L3ReviewEditor(project: ProjectView) -> Element {
     let mut enabled = use_signal(|| project.l3_review.enabled);
     // Empty string = "use balanced tier" (the serde/server default).
     let mut model = use_signal(|| project.l3_review.model.clone());
+    // Reviewer policy: what a reviewer outage does, how many extra implementer passes a bounce
+    // gets, and which tier runs the review when no model is pinned. Defaults match today.
+    let mut on_error = use_signal(|| project.l3_review.on_error);
+    let mut fix_rounds = use_signal(|| project.l3_review.fix_rounds);
+    let mut tier = use_signal(|| project.l3_review.tier);
     let mut saving = use_signal(|| false);
 
     rsx! {
@@ -2779,6 +2784,83 @@ pub(super) fn L3ReviewEditor(project: ProjectView) -> Element {
                         }
                     }
                 }
+
+                // ── Reviewer policy ──────────────────────────────────────────
+                div { class: "tier-map-row l3-review-on-error-row",
+                    label { class: "tier-map-band-label", "On reviewer error" }
+                    select {
+                        class: "tier-map-input run-model-select",
+                        disabled: saving(),
+                        onchange: move |e| {
+                            on_error
+                                .set(
+                                    if e.value() == "fail_closed" {
+                                        ReviewOnError::FailClosed
+                                    } else {
+                                        ReviewOnError::Advisory
+                                    },
+                                );
+                        },
+                        option {
+                            value: "advisory",
+                            selected: on_error() == ReviewOnError::Advisory,
+                            "Advisory (run continues)"
+                        }
+                        option {
+                            value: "fail_closed",
+                            selected: on_error() == ReviewOnError::FailClosed,
+                            "Fail closed (run stops)"
+                        }
+                    }
+                }
+                div { class: "tier-map-row l3-review-fix-rounds-row",
+                    label { class: "tier-map-band-label", "Fix rounds after a bounce" }
+                    select {
+                        class: "tier-map-input run-model-select",
+                        disabled: saving(),
+                        onchange: move |e| {
+                            fix_rounds.set(e.value().parse::<u8>().unwrap_or(0).min(2));
+                        },
+                        for n in 0u8..=2 {
+                            option {
+                                key: "{n}",
+                                value: "{n}",
+                                selected: fix_rounds() == n,
+                                "{n}"
+                            }
+                        }
+                    }
+                }
+                div { class: "tier-map-row l3-review-tier-row",
+                    label { class: "tier-map-band-label", "Reviewer model tier" }
+                    select {
+                        class: "tier-map-input run-model-select",
+                        disabled: saving(),
+                        onchange: move |e| {
+                            tier.set(
+                                if e.value() == "strongest" {
+                                    ReviewTier::Strongest
+                                } else {
+                                    ReviewTier::Balanced
+                                },
+                            );
+                        },
+                        option {
+                            value: "balanced",
+                            selected: tier() == ReviewTier::Balanced,
+                            "Balanced"
+                        }
+                        option {
+                            value: "strongest",
+                            selected: tier() == ReviewTier::Strongest,
+                            "Strongest (unless a model is pinned above)"
+                        }
+                    }
+                }
+            }
+            p { class: "section-hint tier-map-hint",
+                "Each review is one model call with the whole diff as input, once per pass. \
+                 Fix rounds add implementer passes. Strongest costs more per call than balanced."
             }
 
             button {
@@ -2786,9 +2868,16 @@ pub(super) fn L3ReviewEditor(project: ProjectView) -> Element {
                 disabled: saving(),
                 onclick: move |_| {
                     let (pid, en, mo) = (pid.clone(), enabled(), model());
+                    let config = L3ReviewView {
+                        enabled: en,
+                        model: mo.clone(),
+                        on_error: on_error(),
+                        fix_rounds: fix_rounds(),
+                        tier: tier(),
+                    };
                     saving.set(true);
                     spawn(async move {
-                        if set_project_l3_review(&pid, en, &mo).await {
+                        if set_project_l3_review(&pid, &config).await {
                             let msg = if en {
                                 if mo.is_empty() {
                                     "L3 review enabled (using Balanced tier model)."
