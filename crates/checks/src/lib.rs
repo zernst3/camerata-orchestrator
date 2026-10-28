@@ -175,6 +175,13 @@ pub mod clone_rules;
 /// `crates/rules/principles/javascript/react/ui-react-hooks-lint-1.toml`.
 pub mod react_hooks_lint_checker;
 
+/// `UI-STATE-SHAPE-1` (W29 Wave D, `docs/design/2026-10-21_w29-detector-implementation.md`):
+/// React state shaped so one fact is stored twice. Proves two shapes deterministically
+/// (boolean flags that are pairwise exclusive by construction; state whose only writer is an
+/// effect copying a pure expression of its dependencies) and leaves the rest of the rule to the
+/// semantic pass. See `crates/rules/principles/ui/ui-state-shape-1.toml`.
+pub mod state_shape_checker;
+
 /// The Layer-2 (Governed Development write-time gate) executor for [`arch_checker`]'s
 /// checker registry — "Plug point B" in
 /// `docs/design/2026-07-26_architectural-executor-feasibility.md` §2.3. Composed into

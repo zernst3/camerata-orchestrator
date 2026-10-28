@@ -447,4 +447,5 @@
 "UI-QUERY-LIBRARY-1" = { version = 1, hash = "sha256:5ab942c313ed9523997f1ca14a68129b7564b0f4d59173f7edd11bf6277102f7" }
 "UI-REACT-HOOKS-LINT-1" = { version = 2, hash = "sha256:1f090815f828a8076b2451c8617feaa7f5323eadd53b9f9e1aea40e742d3e863" }
 "UI-SHARED-PRIMITIVE-1" = { version = 2, hash = "sha256:6978aa5186ba37ad7e1c10f7a3d249861762471ce00e201c613d0ffba94031bc" }
+"UI-STATE-SHAPE-1" = { version = 1, hash = "sha256:7b96b53a20c4025b7eb88d9b952c571e4fd082e29abe09ecec22a8d9585e48cd" }
 "UI-UTC-DATES-1" = { version = 1, hash = "sha256:4732b95885a63d6de9c2fe542cdd92aedd4532b1849e7a319a4ecf670efa43e4" }

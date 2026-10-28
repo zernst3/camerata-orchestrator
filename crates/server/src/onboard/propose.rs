@@ -1939,6 +1939,48 @@ mod tests {
         );
     }
 
+    /// `UI-STATE-SHAPE-1` (Wave D) lives in the `ui` domain, which a React stack arms, so no
+    /// `domains_for_stack` edit is needed. Proved for React on JavaScript and on TypeScript (the
+    /// checker reads `.jsx`, `.tsx`, `.js` and `.ts`); a Python-only repo is not handed it.
+    #[tokio::test]
+    async fn ui_state_shape_is_proposed_for_react_stacks_and_not_for_python() {
+        const ID: &str = "UI-STATE-SHAPE-1";
+        for (repo, source) in [
+            ("acme/web-js", "src/app.jsx"),
+            ("acme/web-ts", "src/App.tsx"),
+        ] {
+            let repo_files = files(&[
+                (source, ""),
+                ("package.json", r#"{"dependencies":{"react":"18.2.0"}}"#),
+            ]);
+            let stack = detect_stack(repo, &repo_files);
+            let domains = domains_for_stack(&stack);
+            assert!(domains.contains(&"ui".to_string()), "{repo}: {domains:?}");
+            let proposed = propose_corpus_rules(&[(repo.to_string(), domains)]).await;
+            let rule = proposed
+                .iter()
+                .find(|r| r.id == ID)
+                .unwrap_or_else(|| panic!("{ID} must be proposed for {repo}"));
+            assert_eq!(rule.domain, "ui");
+            assert!(rule.recommended, "{repo}: suggested, not merely available");
+            assert!(
+                rule.is_auto_recommended,
+                "{repo}: a grounded rule is auto-recommended (pre-checked)"
+            );
+            assert_eq!(rule.repos, vec![repo.to_string()]);
+        }
+
+        let py_files = files(&[("app/main.py", "print('hi')")]);
+        let stack = detect_stack("acme/py-app", &py_files);
+        let domains = domains_for_stack(&stack);
+        let proposed = propose_corpus_rules(&[("acme/py-app".to_string(), domains)]).await;
+        let rule = proposed.iter().find(|r| r.id == ID);
+        assert!(
+            rule.is_none_or(|r| !r.recommended),
+            "a Python-only repo must not have {ID} suggested: {rule:?}"
+        );
+    }
+
     /// req_a6: a plain Rust + Axum + Tokio + sqlx service must arm `rust:axum`, `rust:tokio`
     /// and `rust:sqlx` — the three Rust families the audit named, 15 rules between them.
     #[test]

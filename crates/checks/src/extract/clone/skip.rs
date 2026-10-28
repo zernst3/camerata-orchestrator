@@ -92,7 +92,7 @@ impl LangFamily {
 }
 
 /// The language of a file that passes every path guard, or why it does not.
-pub(super) fn classify_path(
+pub(crate) fn classify_path(
     path: &str,
     emitted_js: &HashSet<&str>,
 ) -> Result<SourceLang, SkipReason> {
