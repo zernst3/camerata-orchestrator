@@ -51,4 +51,6 @@ H. By 08:30: morning summary at the top of `docs/OVERNIGHT_DECISIONS.md`; the PR
 
 ## Status log (newest first)
 
+- 22:45: cost-cap metering fixes gated green (8,827 passed, 0 failed) and pushed; this also
+  confirms the docs commits pushed early with them.
 - 2026-10-27 night: plan written; recurring check scheduled; Mac kept awake.
