@@ -1,6 +1,6 @@
 id = "JAVA-EXCEPTION-HANDLING-1"
-version = 2
-title = "Exceptions are never silently swallowed; every catch block either re-throws, logs, or transforms the exception with context"
+version = 3
+title = "Exceptions are never silently swallowed; every catch block either re-throws, logs or transforms the exception with context"
 domain = "java"
 layer = "language"
 enforcement = "mechanical"
@@ -32,9 +32,9 @@ title = "Google Java Style Guide: Section 6.2 (Caught exceptions: not ignored)"
 [[option]]
 id = "log-or-rethrow-with-context"
 label = "log with context or re-throw (preserving cause)"
-directive = "Every catch block contains exactly one of: (1) a log statement (error, warn, or debug level) with the exception and relevant context variables, (2) a re-throw of the original or transformed exception, or (3) a throw of a new exception with the original as the cause (.initCause(...) or new Exception(..., cause)). Empty catch blocks are forbidden. Catch blocks that return a default value must still log the exception first."
+directive = "Every catch block contains exactly one of: (1) a log statement (error, warn or debug level) with the exception and relevant context variables, (2) a re-throw of the original or transformed exception or (3) a throw of a new exception with the original as the cause (.initCause(...) or new Exception(..., cause)). Empty catch blocks are forbidden. Catch blocks that return a default value must still log the exception first."
 remediation = """
-Change the catch block so it either logs the exception with its stack trace and relevant context variables, re-throws it, or wraps it in a new exception with the original set as the cause, instead of continuing silently or returning a default value. Verify by triggering the failure path in a test and confirming the exception is visible in the logs or propagates rather than disappearing.
+Change the catch block so it either logs the exception with its stack trace and relevant context variables, re-throws it or wraps it in a new exception with the original set as the cause, instead of continuing silently or returning a default value. Verify by triggering the failure path in a test and confirming the exception is visible in the logs or propagates rather than disappearing.
 """
 effort = "medium"
 why = "Logging or re-throwing preserves diagnostic information and ensures failures are visible to operators and developers."
@@ -43,7 +43,7 @@ why = "Logging or re-throwing preserves diagnostic information and ensures failu
 id = "silent-catch-and-continue"
 violates = true
 label = "catch and silently continue without logging or re-throwing"
-directive = "Exceptions are caught and the block continues or returns without logging, re-throwing, or preserving the cause."
+directive = "Exceptions are caught and the block continues or returns without logging, re-throwing or preserving the cause."
 why = "Hides failures and breaks the causal chain; debugging is impossible when the error context is lost. Later failures appear unrelated to the original root cause."
 
 [[option]]

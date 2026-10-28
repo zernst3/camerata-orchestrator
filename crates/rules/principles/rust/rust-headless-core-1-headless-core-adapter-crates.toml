@@ -1,5 +1,5 @@
 id = "RUST-HEADLESS-CORE-1"
-version = 2
+version = 3
 title = "UI logic and state live in a framework-agnostic core; the rendering framework is a thin adapter (applications, not just libraries)"
 domain = "rust"
 layer = "library"
@@ -25,9 +25,9 @@ why = "A UI's logic (its state, its computations, its interaction rules) is inde
 [[option]]
 id = "headless-core-plus-adapters"
 label = "framework-agnostic core crate plus thin per-framework adapter crate(s)"
-directive = "A UI's logic, state, and computation live in a framework-agnostic core that carries NO dependency on any rendering framework, with the rendering framework confined to a thin adapter that wires the core's state and behavior to that framework's primitives. This applies to BOTH a reusable component/UI library AND a first-party application UI. The enforceable form is a separate core crate, which the compiler then guarantees stays renderer-free: a reusable library MUST use separate core plus per-framework adapter crates, and an application SHOULD too (a strict, dependency-enforced internal module boundary is the weaker minimum, since nothing stops a plain module from importing the renderer). Framework-specific code lives only in the adapter. Pairs with RUST-PURE-STATE-TRANSITIONS-1, which constrains the form of the core's transitions."
+directive = "A UI's logic, state and computation live in a framework-agnostic core that carries NO dependency on any rendering framework, with the rendering framework confined to a thin adapter that wires the core's state and behavior to that framework's primitives. This applies to BOTH a reusable component/UI library AND a first-party application UI. The enforceable form is a separate core crate, which the compiler then guarantees stays renderer-free: a reusable library MUST use separate core plus per-framework adapter crates, and an application SHOULD too (a strict, dependency-enforced internal module boundary is the weaker minimum, since nothing stops a plain module from importing the renderer). Framework-specific code lives only in the adapter. Pairs with RUST-PURE-STATE-TRANSITIONS-1, which constrains the form of the core's transitions."
 remediation = """
-Extract the UI's logic, state, and computation out of the framework-coupled crate and into a framework-agnostic core crate with no dependency on any rendering framework, and confine the rendering framework to a thin adapter crate that wires the core's state to that framework's primitives. Verify by confirming the core crate compiles with no rendering-framework dependency in its Cargo.toml.
+Extract the UI's logic, state and computation out of the framework-coupled crate and into a framework-agnostic core crate with no dependency on any rendering framework and confine the rendering framework to a thin adapter crate that wires the core's state to that framework's primitives. Verify by confirming the core crate compiles with no rendering-framework dependency in its Cargo.toml.
 """
 why = "The adopted default. Keeping logic in a renderer-free core lets it be written and tested once (no virtual DOM) and reused by every adapter, with framework-specific code confined to the thin adapter. Applies to applications too, not just shipped libraries: the point is a testable, renderer-independent logic/state layer. The cost is the core/adapter boundary, which is real work to design and uphold."
 

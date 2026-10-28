@@ -1,5 +1,5 @@
 id = "SEC-NO-UNSAFE-HTML-SINK-1"
-version = 2
+version = 3
 title = "User- or attacker-influenced data is never rendered through a raw-HTML sink without sanitization"
 domain = "universal"
 layer = "universal"
@@ -40,11 +40,11 @@ entirely in favor of the framework's default escaped-text rendering.
 [[option]]
 id = "sanitize-before-raw-html-sink"
 label = "Sanitize with an allowlist HTML sanitizer immediately before any raw-HTML sink"
-directive = "Any value reaching dangerouslySetInnerHTML, innerHTML, document.write, v-html, or an autoescape-disabled template block is passed through an allowlist HTML sanitizer (e.g. DOMPurify) at the point of use; content that never needs to carry real markup is rendered as plain escaped text instead of routed through a raw-HTML sink at all."
+directive = "Any value reaching dangerouslySetInnerHTML, innerHTML, document.write, v-html or an autoescape-disabled template block is passed through an allowlist HTML sanitizer (e.g. DOMPurify) at the point of use; content that never needs to carry real markup is rendered as plain escaped text instead of routed through a raw-HTML sink at all."
 remediation = """
-Wrap the value passed to the raw-HTML sink (dangerouslySetInnerHTML, innerHTML, or an
+Wrap the value passed to the raw-HTML sink (dangerouslySetInnerHTML, innerHTML or an
 autoescape-disabled template block) in an allowlist sanitizer such as DOMPurify.sanitize(...) at
-the point of use, or switch to the framework's default escaped-text rendering if the content
+the point of use or switch to the framework's default escaped-text rendering if the content
 never needs to carry real markup. Verify by confirming a payload like
 <img src=x onerror=alert(1)> renders as inert text or is stripped, never executes.
 """

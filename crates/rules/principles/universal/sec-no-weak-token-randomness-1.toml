@@ -1,6 +1,6 @@
 id = "SEC-NO-WEAK-TOKEN-RANDOMNESS-1"
-version = 1
-title = "Tokens, nonces, and session/access identifiers are generated from a cryptographically secure random source, never a general-purpose PRNG"
+version = 2
+title = "Tokens, nonces and session/access identifiers are generated from a cryptographically secure random source, never a general-purpose PRNG"
 domain = "universal"
 layer = "universal"
 enforcement = "structured"
@@ -40,10 +40,10 @@ functions as a credential.
 [[option]]
 id = "use-csprng-for-security-tokens"
 label = "Generate every security-sensitive token from a CSPRNG"
-directive = "Any value that functions as an access credential on its own (a password-reset token, session id, API key, or share-link secret) is generated using a cryptographically secure random source (crypto.randomBytes/crypto.randomUUID in Node, the secrets module in Python, SecureRandom on the JVM, or the platform's equivalent) with at least 128 bits of entropy, never a general-purpose PRNG."
+directive = "Any value that functions as an access credential on its own (a password-reset token, session id, API key or share-link secret) is generated using a cryptographically secure random source (crypto.randomBytes/crypto.randomUUID in Node, the secrets module in Python, SecureRandom on the JVM or the platform's equivalent) with at least 128 bits of entropy, never a general-purpose PRNG."
 remediation = """
 Replace the general-purpose PRNG call generating this token with a cryptographically secure source
-(e.g. crypto.randomBytes(32) or crypto.randomUUID() in Node, Python's secrets.token_urlsafe(), or
+(e.g. crypto.randomBytes(32) or crypto.randomUUID() in Node, Python's secrets.token_urlsafe() or
 SecureRandom on the JVM) and confirm the resulting token has at least 128 bits of entropy. Verify
 by confirming the generator import is the crypto/secrets module, not Math.random or the language's
 default random module.

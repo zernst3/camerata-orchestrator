@@ -1,5 +1,5 @@
 id = "ARCH-OBSERVABILITY-CORRELATION-ID-1"
-version = 3
+version = 4
 title = "A single request's handling path carries one correlation/request id across every log line it writes and every downstream call it makes"
 domain = "universal"
 layer = "universal"
@@ -40,14 +40,14 @@ incident investigation would need it intact.
 
 [[option]]
 id = "one-id-generated-at-the-edge-and-threaded-through"
-label = "Generate/extract one correlation id at the request's entry point, attach it to every log line for that request, and forward it on every downstream call"
-directive = "A single request's handling path (an HTTP handler, a message consumer, a job's execution path) carries one correlation/request id end to end: (1) it is generated or extracted once at the entry point (the first middleware, or the consumer's own dispatch code) rather than minted ad hoc per-handler; (2) it is attached to the logger's per-request context (MDC, a structured-log field, or an explicit argument) so every log line written while handling that request carries it, not just some of them; and (3) it is forwarded as a header (or equivalent) on every outbound HTTP/RPC call the handler makes, so a downstream service's own logs join back to the same originating request. A handler neither logs without the shared id, drops it on an outbound call, nor replaces it with a freshly minted id instead of reusing (or deriving a child span from) the one generated at the edge."
+label = "Generate/extract one correlation id at the request's entry point, attach it to every log line for that request and forward it on every downstream call"
+directive = "A single request's handling path (an HTTP handler, a message consumer, a job's execution path) carries one correlation/request id end to end: (1) it is generated or extracted once at the entry point (the first middleware, or the consumer's own dispatch code) rather than minted ad hoc per-handler; (2) it is attached to the logger's per-request context (MDC, a structured-log field or an explicit argument) so every log line written while handling that request carries it, not just some of them; and (3) it is forwarded as a header (or equivalent) on every outbound HTTP/RPC call the handler makes, so a downstream service's own logs join back to the same originating request. A handler neither logs without the shared id, drops it on an outbound call, nor replaces it with a freshly minted id instead of reusing (or deriving a child span from) the one generated at the edge."
 remediation = """
 Add (or reuse, if one already exists elsewhere in the repo) a middleware/entry-point step that generates
 a correlation/request id when none is present on the incoming request (or extracts one from a standard
 incoming header, e.g. traceparent/X-Request-Id, when the caller already supplied one), attaches it to the
 logger's per-request context so every subsequent log call in that request's handling path includes it
-automatically, and forwards it as a header on every outbound call the handler makes. Verify by triggering
+automatically and forwards it as a header on every outbound call the handler makes. Verify by triggering
 a request that fans out to a downstream call and confirming every log line across the whole path (the
 entry point, any intermediate handler and the downstream service's own logs, if reachable in the same
 test) carries the identical id.

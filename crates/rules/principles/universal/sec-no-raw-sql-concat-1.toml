@@ -1,5 +1,5 @@
 id = "SEC-NO-RAW-SQL-CONCAT-1"
-version = 2
+version = 3
 title = "SQL queries are never built by string concatenation or format-string interpolation; use parameterized queries or a query builder"
 domain = "universal"
 layer = "universal"
@@ -47,7 +47,7 @@ Rewrite the query in the affected file to use a parameterized placeholder ($1/?/
 effort = "low"
 finding_headline = "Your `<path>` file builds a SQL query by pasting a value directly into the query text."
 finding_detail = """
-When part of a query's text comes from outside input pasted straight into the SQL string, an attacker can rewrite the query itself: reading other users' data, bypassing a login check, or changing and deleting records (a SQL injection). Rewrite the query in `<path>` to use a parameterized placeholder or a query-builder method, so untrusted values are always passed as data, never as part of the query text.
+When part of a query's text comes from outside input pasted straight into the SQL string, an attacker can rewrite the query itself: reading other users' data, bypassing a login check or changing and deleting records (a SQL injection). Rewrite the query in `<path>` to use a parameterized placeholder or a query-builder method, so untrusted values are always passed as data, never as part of the query text.
 """
 why = "Bound parameters are the industry-standard defense (OWASP's #1 SQL-injection prevention) because they remove the ambiguity entirely: the database driver receives the query grammar and the data values through separate channels, so no value — regardless of its content — can ever be interpreted as part of the grammar. String concatenation and format interpolation put both in the SAME channel, so escaping is the only defense, and escaping is routinely incomplete (encoding edge cases, a forgotten call site, a new special character in a future DB version)."
 

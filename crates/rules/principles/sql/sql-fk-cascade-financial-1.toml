@@ -1,6 +1,6 @@
 id = "SQL-FK-CASCADE-FINANCIAL-1"
-version = 3
-title = "A foreign key from a mutable user table into a financial, audit, or historical record never cascades deletes onto that record"
+version = 4
+title = "A foreign key from a mutable user table into a financial, audit or historical record never cascades deletes onto that record"
 domain = "sql"
 layer = "universal"
 enforcement = "structured"
@@ -58,9 +58,9 @@ applies to SUPABASE-STORAGE-PUBLIC-BUCKET-1's bucket-naming heuristic.
 id = "restrict-or-null-cascades-into-financial-records"
 label = "Flag ON DELETE CASCADE from a routine table into a financial/audit/historical-named table; prefer RESTRICT or SET NULL"
 directive = """
-A foreign key from a routine, user-mutable table (a session, cart, profile edit, or anything deleted in the
-ordinary course of the product) into a financial, audit, or historical record (an invoice, payment, transaction,
-order, ledger entry, audit log, charge, receipt, or statement) never uses `ON DELETE CASCADE`; it uses `ON DELETE
+A foreign key from a routine, user-mutable table (a session, cart, profile edit or anything deleted in the
+ordinary course of the product) into a financial, audit or historical record (an invoice, payment, transaction,
+order, ledger entry, audit log, charge, receipt or statement) never uses `ON DELETE CASCADE`; it uses `ON DELETE
 RESTRICT`/`NO ACTION`, or a nullable FK with `ON DELETE SET NULL`. Deleting the routine-course row therefore can
 never silently and irreversibly destroy the financial or audit record that exists to document what happened: the
 delete is either blocked until the reference is handled explicitly, or the reference is nulled, rather than
@@ -82,5 +82,5 @@ why = "A cascading delete into a financial or audit table converts an everyday, 
 id = "cascade-deletes-uniformly-regardless-of-referenced-table-semantics"
 violates = true
 label = "Apply ON DELETE CASCADE uniformly to every foreign key, regardless of what the referenced table represents"
-directive = "Use ON DELETE CASCADE as the default referential action for every foreign key relationship, including ones that reference financial, audit, or historical tables, without a naming-based or semantic carve-out."
+directive = "Use ON DELETE CASCADE as the default referential action for every foreign key relationship, including ones that reference financial, audit or historical tables, without a naming-based or semantic carve-out."
 why = "Rejected: CASCADE is the correct default for genuinely dependent data, but applying it uniformly treats a financial or audit record as equally disposable as a comment or a cache row. The entire point of an audit or financial record is that it outlives the routine-course row that happened to reference it; a uniform cascade policy removes that guarantee silently, with no error at delete time pointing at what was actually destroyed."

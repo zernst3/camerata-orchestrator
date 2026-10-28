@@ -1,5 +1,5 @@
 id = "JAVASCRIPT-NEST-MODULES-PROVIDERS-DI-1"
-version = 3
+version = 4
 title = "Use NestJS modules and dependency injection to organize and inject services"
 domain = "javascript:nest"
 layer = "framework"
@@ -34,7 +34,7 @@ id = "modules-providers-di"
 label = "Use NestJS modules and dependency injection"
 directive = "Services are decorated with @Injectable() and declared as providers in a module. Controllers and services receive dependencies via constructor injection. The NestJS DI container manages instantiation and injection. Testing uses NestJS's Test.createTestingModule() to configure a DI container for the test."
 remediation = """
-Decorate the manually-instantiated service with @Injectable(), declare it as a provider in its module, and have consumers receive it via constructor injection instead of calling `new` or reading a static property. Verify by confirming the service can be resolved from the module's testing setup (Test.createTestingModule) rather than being constructed directly.
+Decorate the manually-instantiated service with @Injectable(), declare it as a provider in its module and have consumers receive it via constructor injection instead of calling `new` or reading a static property. Verify by confirming the service can be resolved from the module's testing setup (Test.createTestingModule) rather than being constructed directly.
 """
 why = "DI makes services composable, testable, and easy to wire together."
 

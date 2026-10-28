@@ -1,5 +1,5 @@
 id = "FIREBASE-FUNCTIONS-AUTH-1"
-version = 2
+version = 3
 title = "HTTP functions verify the caller's token and callable functions check the caller's auth before privileged work"
 domain = "firebase"
 layer = "platform"
@@ -33,7 +33,7 @@ why = "The Admin SDK ignores security rules, so a function that writes with it i
 [[option]]
 id = "functions-verify-the-caller-before-privileged-work"
 label = "HTTP functions verify a Firebase ID token or App Check token before acting, and callable functions check `request.auth` before privileged work"
-directive = "An HTTP function that acts with the Admin SDK reads the Authorization bearer ID token and verifies it (verifyIdToken), answering 403 on failure, or verifies an App Check token. A callable function rejects a caller whose request.auth is missing, with an HttpsError, before it writes or reads by a caller supplied id. Functions that are public on purpose, such as webhooks, verify a signature instead."
+directive = "An HTTP function that acts with the Admin SDK reads the Authorization bearer ID token and verifies it (verifyIdToken), answering 403 on failure or verifies an App Check token. A callable function rejects a caller whose request.auth is missing, with an HttpsError, before it writes or reads by a caller supplied id. Functions that are public on purpose, such as webhooks, verify a signature instead."
 remediation = "In `<function-name>`, verify the caller before writing: for an HTTP function read the Authorization bearer ID token and call `verifyIdToken`, answering 403 if it fails; for a callable function throw an `HttpsError('unauthenticated', ...)` when `request.auth` is missing. If the function is meant to be public, limit what it can write and say so in a comment. Deploy and confirm an unauthenticated call is rejected."
 effort = "medium"
 why = "Verifying the caller turns an open endpoint into one that acts only for known users."

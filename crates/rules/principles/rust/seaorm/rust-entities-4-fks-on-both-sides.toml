@@ -1,5 +1,5 @@
 id = "RUST-ENTITIES-4"
-version = 3
+version = 4
 title = "FK relations declared on BOTH sides"
 domain = "rust:seaorm"
 layer = "library"
@@ -35,7 +35,7 @@ id = "the-entities-crate-declares-no-foreign-key-relat"
 violates = true
 label = "No foreign-key relations declared at all"
 directive = "the entities crate declares no foreign-key relations at all and relies entirely on database-level FK enforcement, so all joined reads are hand-built rather than going through find_related"
-why = "find_related ergonomics are gone entirely: every read that needs joined data has to be hand-built with explicit joins, which is verbose, error-prone, and bypasses the compile-time relation checks the ORM provides. The database still rejects bad writes, so the cost lands on readers, not on integrity."
+why = "find_related ergonomics are gone entirely: every read that needs joined data has to be hand-built with explicit joins, which is verbose, error-prone and bypasses the compile-time relation checks the ORM provides. The database still rejects bad writes, so the cost lands on readers, not on integrity."
 
 [[option]]
 id = "foreign-key-relations-are-added-on-each-side-onl"

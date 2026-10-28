@@ -1,5 +1,5 @@
 id = "SUPABASE-STORAGE-PUBLIC-BUCKET-1"
-version = 2
+version = 3
 title = "A storage bucket created public bypasses auth/RLS for object retrieval; every public bucket is named and reviewed"
 domain = "supabase:storage"
 layer = "platform"
@@ -61,13 +61,13 @@ directive = """
 Marking a bucket public (`public = true` in a `storage.buckets` insert or update, or
 `createBucket(name, { public: true })`) bypasses access control for retrieving and serving its
 files. Every object inside becomes downloadable by anyone who has or can guess its URL: no signed
-URL, no auth header, and no RLS evaluation on that read path, whatever policies exist on
+URL, no auth header and no RLS evaluation on that read path, whatever policies exist on
 `storage.objects` (those still gate upload, delete and move, but not public reads).
 
 So publicness is a per-bucket decision about contents, made deliberately. Avatars, product photos
 and marketing assets are genuinely public and belong in a public bucket. Anything a user would
 expect to be theirs (documents, invoices, uploads) goes in a private bucket with owner-scoped
-policies for the operations the app actually performs, and is served through signed URLs. A bucket
+policies for the operations the app actually performs and is served through signed URLs. A bucket
 whose name says `avatars` but holds user documents is private; the contents decide, not the name.
 """
 remediation = """

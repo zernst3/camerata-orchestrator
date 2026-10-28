@@ -1,5 +1,5 @@
 id = "JAVA-SMALL-INTERFACES-1"
-version = 2
+version = 3
 title = "Interfaces are small and focused; each interface has a single responsibility, not a god-interface"
 domain = "java"
 layer = "architecture"
@@ -41,4 +41,4 @@ id = "no-interfaces"
 violates = true
 label = "use concrete classes directly instead of interfaces"
 directive = "Callers depend on concrete classes rather than abstract interfaces."
-why = "Tightly couples code to a specific implementation and makes swapping implementations impossible (no seam for a second implementation, e.g. a different persistence backend or a test double with real substitutable behavior). This is the real cost, not mockability: modern mocking frameworks can mock concrete classes directly (Mockito has been able to mock non-final, non-static concrete classes via subclassing since 1.10+, and does so by default since Mockito 2), so 'cannot mock' is not an accurate reason to require an interface: decoupling from a concrete implementation is."
+why = "Tightly couples code to a specific implementation and makes swapping implementations impossible (no seam for a second implementation, e.g. a different persistence backend or a test double with real substitutable behavior). This is the real cost, not mockability: modern mocking frameworks can mock concrete classes directly (Mockito has been able to mock non-final, non-static concrete classes via subclassing since 1.10+ and does so by default since Mockito 2), so 'cannot mock' is not an accurate reason to require an interface: decoupling from a concrete implementation is."

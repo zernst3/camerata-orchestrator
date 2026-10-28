@@ -1,5 +1,5 @@
 id = "ARCH-REPO-RETURNS-DOMAIN-1"
-version = 3
+version = 4
 title = "Repositories return domain types, never persistence representations"
 domain = "api-layer"
 layer = "universal"
@@ -25,7 +25,7 @@ why = "Keeping the persistence representation an infrastructure detail is what m
 [[option]]
 id = "repositories-return-domain-types-never-persistence-representations"
 label = "Repositories return domain types, never persistence representations"
-directive = "Repository methods take and return domain types only. The translation between the persistence library's row, entity, or document representation and the domain type happens inside the repository implementation (via a mapping layer). The domain layer never imports or names a persistence representation."
+directive = "Repository methods take and return domain types only. The translation between the persistence library's row, entity or document representation and the domain type happens inside the repository implementation (via a mapping layer). The domain layer never imports or names a persistence representation."
 remediation = """
 Add a mapping step inside the repository implementation that translates the persistence library's row/entity/document into the domain type before returning it. Remove any place the domain layer imports or names the persistence representation directly. Verify by confirming the repository method's return type is the domain type and no persistence-library type leaks past the repository boundary.
 """
@@ -42,8 +42,8 @@ why = "Returning the library's row type directly turns every persistence upgrade
 id = "repository-methods-return-a-thin-wrapper-over-th"
 violates = true
 label = "Thin wrapper over persistence"
-directive = "repository methods return a thin wrapper over the persistence type that exposes additional helper methods on top of the underlying library's row representation, lifecycle, and fetch semantics"
-why = "Consumers stay coupled to the underlying library's lifecycle, fetch semantics, and inheritance shape, so the domain is not actually decoupled from persistence, even though the wrapper looks lightweight."
+directive = "repository methods return a thin wrapper over the persistence type that exposes additional helper methods on top of the underlying library's row representation, lifecycle and fetch semantics"
+why = "Consumers stay coupled to the underlying library's lifecycle, fetch semantics and inheritance shape, so the domain is not actually decoupled from persistence, even though the wrapper looks lightweight."
 
 [[option]]
 id = "repository-methods-return-persistence-types-from"

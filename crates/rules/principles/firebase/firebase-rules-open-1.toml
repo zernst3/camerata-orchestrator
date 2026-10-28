@@ -1,5 +1,5 @@
 id = "FIREBASE-RULES-OPEN-1"
-version = 2
+version = 3
 title = "Firestore rules grant no unconditional access to private data: an allow with an always true condition appears only on paths whose contents are meant to be public"
 domain = "firebase"
 layer = "platform"
@@ -33,8 +33,8 @@ why = "Firestore rules are the only access control between a client holding the 
 [[option]]
 id = "no-unconditional-grant-on-private-data"
 label = "No Firestore rule grants read or write access with an unconditional `true` condition except on paths whose contents are meant to be public"
-directive = "No Firestore allow statement carries an always true condition (an if true, no if clause, or a condition with a true alternative) except on paths whose contents are meant to be public, such as a public collection. Every other rule names who may use it: the signed in owner, a verified role, or a stated property of the document."
-remediation = "Replace the unconditional condition on `<path>` with one that names who may use it, for example `request.auth != null && request.auth.uid == resource.data.ownerId` for documents that belong to a user, and keep `if true` only on collections that are meant to be public. Deploy the changed rules and confirm in the emulator that an unauthenticated request to `<path>` is now rejected."
+directive = "No Firestore allow statement carries an always true condition (an if true, no if clause or a condition with a true alternative) except on paths whose contents are meant to be public, such as a public collection. Every other rule names who may use it: the signed in owner, a verified role or a stated property of the document."
+remediation = "Replace the unconditional condition on `<path>` with one that names who may use it, for example `request.auth != null && request.auth.uid == resource.data.ownerId` for documents that belong to a user and keep `if true` only on collections that are meant to be public. Deploy the changed rules and confirm in the emulator that an unauthenticated request to `<path>` is now rejected."
 effort = "low"
 why = "A rule that names its caller keeps private data private even when the project id is public, and the change is a single condition per path."
 

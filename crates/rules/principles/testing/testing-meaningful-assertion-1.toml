@@ -1,5 +1,5 @@
 id = "TESTING-MEANINGFUL-ASSERTION-1"
-version = 1
+version = 2
 title = "Every test asserts on the behavior of the code under test: a test with no assertion, or one that asserts only on what its own stub returns, is not a test"
 domain = "testing"
 layer = "universal"
@@ -40,9 +40,9 @@ why = "A test runner reports a test as passed when nothing in it fails. A test w
 [[option]]
 id = "every-test-asserts-on-real-behavior"
 label = "Every test asserts on a result or an effect of the code under test"
-directive = "Every test asserts on something the code under test produced: a returned value, a raised error, a rendered output, a call it made to a collaborator, or a change of state. A test that only runs code to show it does not throw states that expectation explicitly (for example, an assertion that the call does not raise). Never assert only on a value the test's own mock or stub returns; assert on what the code under test did with it."
+directive = "Every test asserts on something the code under test produced: a returned value, a raised error, a rendered output, a call it made to a collaborator or a change of state. A test that only runs code to show it does not throw states that expectation explicitly (for example, an assertion that the call does not raise). Never assert only on a value the test's own mock or stub returns; assert on what the code under test did with it."
 remediation = """
-Add an assertion to the test named in the finding that checks the behavior its name describes: the value the code under test returns, the error it raises, the output it renders, or the call it makes to a collaborator. If the test exists only to show the code does not fail, make that explicit with an assertion, or remove the test. Verify by breaking the behavior on purpose (change the returned value) and confirming the test now fails, then restore it.
+Add an assertion to the test named in the finding that checks the behavior its name describes: the value the code under test returns, the error it raises, the output it renders or the call it makes to a collaborator. If the test exists only to show the code does not fail, make that explicit with an assertion or remove the test. Verify by breaking the behavior on purpose (change the returned value) and confirming the test now fails, then restore it.
 """
 effort = "low"
 why = "Adding the missing assertion is a local edit to one test, and the deliberate break proves the test now guards the behavior it is named for."

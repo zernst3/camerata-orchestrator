@@ -1,6 +1,6 @@
 id = "ARCH-OBSERVABILITY-SILENT-FAILURE-1"
-version = 3
-title = "A caught or inspected error is never discarded with zero action; it is logged, rethrown, transformed, or its silence is explicitly justified"
+version = 4
+title = "A caught or inspected error is never discarded with zero action; it is logged, rethrown, transformed or its silence is explicitly justified"
 domain = "universal"
 layer = "universal"
 enforcement = "architectural"
@@ -48,23 +48,23 @@ Low rather than letting a model's rating inflate it.
 
 [[option]]
 id = "log-or-justify-every-caught-error"
-label = "Every caught/inspected error is logged, rethrown, transformed, or explicitly justified; no empty catch/except/rescue bodies"
-directive = "A caught or inspected error is never discarded with zero action. Every catch/except/rescue block that does not rethrow or return the error upward, and every explicit error-value check (Go's `if err != nil`, a Rust `Err(e)` match arm) that does not propagate it, either calls the project's logger with the error or carries an inline comment that explicitly justifies the silence (a best-effort cleanup step, a known-benign race). A block that is empty, holds only a comment, or merely discards the error binding (a bare `pass`, `_ = err`, a caught variable never referenced) is exactly the lost-signal case this forbids; a block that logs the error, propagates it, or carries a justifying comment is conforming regardless of what else it does."
+label = "Every caught/inspected error is logged, rethrown, transformed or explicitly justified; no empty catch/except/rescue bodies"
+directive = "A caught or inspected error is never discarded with zero action. Every catch/except/rescue block that does not rethrow or return the error upward, and every explicit error-value check (Go's `if err != nil`, a Rust `Err(e)` match arm) that does not propagate it, either calls the project's logger with the error or carries an inline comment that explicitly justifies the silence (a best-effort cleanup step, a known-benign race). A block that is empty, holds only a comment or merely discards the error binding (a bare `pass`, `_ = err`, a caught variable never referenced) is exactly the lost-signal case this forbids; a block that logs the error, propagates it or carries a justifying comment is conforming regardless of what else it does."
 remediation = """
 Add a call to the project's existing logger (passing the caught error/exception so its message and
 stack trace are captured) inside the empty block, OR rethrow/return the error (or a wrapped, more
 specific version of it) to the caller, OR, if the silence is genuinely intentional, add a short inline
 comment explaining why (e.g. "intentionally ignored: best-effort cache invalidation"). Verify by
 triggering the failure path in a test and confirming the error now appears in the logs, propagates to
-the caller, or is visibly, deliberately justified in the code; it never silently vanishes.
+the caller or is visibly, deliberately justified in the code; it never silently vanishes.
 """
 effort = "low"
 why = "Logging (or explicitly justifying) a caught error is the minimum action that keeps the failure visible to whoever debugs the system next; the fix is almost always a single line, and it is the only way an empty catch block can be distinguished from a genuinely considered, locally-justified no-op after the fact."
 
 [[option]]
 id = "allow-silent-discards"
-label = "Allow a caught or inspected error to be discarded with no log call, no propagation, and no comment"
-directive = "Catch/except/rescue blocks and error-value checks may be left empty, or may discard the error binding, with no logging, rethrow, or explanatory comment required."
+label = "Allow a caught or inspected error to be discarded with no log call, no propagation and no comment"
+directive = "Catch/except/rescue blocks and error-value checks may be left empty, or may discard the error binding, with no logging, rethrow or explanatory comment required."
 # This option IS the fault (CWE-390's "detection of error condition without action"), not
 # an alternative a project may adopt; its own `why` opens with `Rejected:`. The flag sits here
 # and ONLY here; the conforming option above must never carry it, or conforming code would be

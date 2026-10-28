@@ -1,5 +1,5 @@
 id = "SQL-ENUM-TEXT-CONSTRAINT-1"
-version = 3
+version = 4
 title = "A column representing a closed set of values is constrained by a native enum, a CHECK list or a lookup-table FK, never a bare unconstrained text column"
 domain = "sql"
 layer = "universal"
@@ -60,20 +60,20 @@ schema itself silently accepting anything.
 
 [[option]]
 id = "pick-one-enum-strategy-by-volatility-and-cross-table-reuse"
-label = "Constrain closed-set columns via native enum, CHECK list, or lookup-table FK, chosen by how often the set changes and whether it's reused"
+label = "Constrain closed-set columns via native enum, CHECK list or lookup-table FK, chosen by how often the set changes and whether it's reused"
 directive = """
-A column that represents a closed set of values (a status, state, role, type, kind, tier, or category) is
+A column that represents a closed set of values (a status, state, role, type, kind, tier or category) is
 constrained at the database by one of three mechanisms rather than left as a bare, unconstrained text/varchar
 column whose valid set lives only in application code: a native PostgreSQL enum type, a `CHECK (<column> IN (...))`
-list, or a foreign key to a lookup table. The mechanism is chosen by how the set behaves: a small, stable,
-single-table set fits a native enum or CHECK list; a set that changes often, needs descriptive metadata, or is
+list or a foreign key to a lookup table. The mechanism is chosen by how the set behaves: a small, stable,
+single-table set fits a native enum or CHECK list; a set that changes often, needs descriptive metadata or is
 shared across multiple tables fits a lookup-table FK. Whichever is chosen, an out-of-set value (a typo, a bad
 migration, a write from another service) is rejected by the database itself, not merely by whichever application
 validator happens to run.
 """
 remediation = """
 Add a `CHECK (<column> IN (...))` constraint listing the valid values, convert `<column>` to a native PostgreSQL
-enum type, or introduce a lookup table and a foreign key to it: whichever mechanism matches how often this
+enum type or introduce a lookup table and a foreign key to it: whichever mechanism matches how often this
 particular set changes and whether other tables need to reference the same set of values. Verify by attempting to
 insert a row with a value outside the valid set through a path that bypasses your application's own validation (a
 raw SQL statement or migration script) and confirming the database itself rejects it.

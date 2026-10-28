@@ -1,6 +1,6 @@
 id = "ARCH-SERVER-CLIENT-PROJECTION-1"
-version = 3
-title = "Server-rendered output and hydration payloads carry only the client-facing projected fields, never a full raw row, internal id, or token"
+version = 4
+title = "Server-rendered output and hydration payloads carry only the client-facing projected fields, never a full raw row, internal id or token"
 domain = "fullstack"
 layer = "universal"
 enforcement = "structured"
@@ -54,9 +54,9 @@ directive = "Every value that crosses from server-side data fetching (a Server C
 remediation = """
 Add an explicit projection type or mapping function for this resource's client-facing shape, and change the server
 component/loader/data-fetching function to apply it to the query result before passing the value as a prop, into
-hydration state, or into server-rendered markup, rather than passing the raw query result or ORM entity through
+hydration state or into server-rendered markup, rather than passing the raw query result or ORM entity through
 directly. Verify by inspecting the actual RSC/hydration payload or page source (not just the rendered UI) and
-confirming it contains only the projected fields, with no hidden column, internal id, or token present even though
+confirming it contains only the projected fields, with no hidden column, internal id or token present even though
 the UI never displays it.
 """
 effort = "medium"
@@ -67,7 +67,7 @@ id = "pass-raw-query-result-rely-on-ui-to-not-render-extra-fields"
 violates = true
 label = "Pass the raw query result/ORM entity through to the client, relying on the UI to render only the fields it needs"
 directive = "Server components/loaders pass the full database row or ORM entity returned by the query directly as a prop or into hydration state, trusting that the client-side rendering code simply chooses not to display fields the user shouldn't see."
-why = "Rejected: whatever the UI chooses to render says nothing about what was actually shipped to the browser. The full object is present in the RSC payload, the hydration state blob, or the inline JSON on the page regardless of which fields the component happens to read, and is trivially visible via devtools or view-source to any visitor, including every hidden column, internal id, and any token or secret that was accidentally still attached to the entity at fetch time."
+why = "Rejected: whatever the UI chooses to render says nothing about what was actually shipped to the browser. The full object is present in the RSC payload, the hydration state blob or the inline JSON on the page regardless of which fields the component happens to read and is trivially visible via devtools or view-source to any visitor, including every hidden column, internal id and any token or secret that was accidentally still attached to the entity at fetch time."
 
 [[option]]
 id = "strip-sensitive-fields-client-side-after-hydration"

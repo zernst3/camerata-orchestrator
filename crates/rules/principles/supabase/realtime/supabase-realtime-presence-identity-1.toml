@@ -1,6 +1,6 @@
 id = "SUPABASE-REALTIME-PRESENCE-IDENTITY-1"
-version = 2
-title = "A Presence payload carries only the identity a feature genuinely needs, not a user's email, full name, or other PII broadcast to every channel subscriber"
+version = 3
+title = "A Presence payload carries only the identity a feature genuinely needs, not a user's email, full name or other PII broadcast to every channel subscriber"
 domain = "supabase:realtime"
 layer = "platform"
 enforcement = "prose"
@@ -51,7 +51,7 @@ id = "presence-payload-scoped-to-what-the-feature-needs"
 label = "Presence payloads carry only the fields the consuming UI displays, never a whole user or session object"
 directive = """
 The object passed to `channel.track(...)` is built for presence specifically: a display name or
-pseudonymous handle, an avatar URL, and whatever status the feature shows (online, typing, viewing).
+pseudonymous handle, an avatar URL and whatever status the feature shows (online, typing, viewing).
 Nothing else. An existing user or session object is never passed straight through because it was
 already in scope: `channel.track(currentUser)` is the shortcut this avoids.
 
@@ -64,7 +64,7 @@ time, so what the receiving UI chooses to display does not bound it.
 """
 remediation = """
 Replace the object passed to `track()` at `<call site>` with a minimal payload constructed specifically for
-presence: a display name or pseudonymous handle, an avatar URL, and whatever status field the feature needs
+presence: a display name or pseudonymous handle, an avatar URL and whatever status field the feature needs
 (typing, viewing, online), rather than passing the full user/session object. Verify by joining the channel as a
 second user and confirming the received presence state for the first user contains only the fields your UI
 actually displays, not the full set of fields on that user's underlying record.
@@ -77,4 +77,4 @@ id = "pass-the-full-user-object-to-track-for-convenience"
 violates = true
 label = "The full user or session object is passed to track(), with the receiving UI rendering only what it needs"
 directive = "`channel.track(currentUser)` (or an equivalent full user or session object already in scope) is passed straight through instead of a minimal presence-specific payload, and the receiving client's UI selects which of those fields to render."
-why = "Rejected: every OTHER subscriber's client receives the full payload over the wire the instant it's tracked, regardless of what that client's UI chooses to render: a client-side rendering choice provides zero protection against the data already having been transmitted to, and readable by, every other participant (via dev tools, a modified client, or simply reading the merged presence state object directly in application code). The exposure happens at broadcast time, not at render time, so scoping the fix to the UI layer leaves the actual leak fully intact."
+why = "Rejected: every OTHER subscriber's client receives the full payload over the wire the instant it's tracked, regardless of what that client's UI chooses to render: a client-side rendering choice provides zero protection against the data already having been transmitted to, and readable by, every other participant (via dev tools, a modified client or simply reading the merged presence state object directly in application code). The exposure happens at broadcast time, not at render time, so scoping the fix to the UI layer leaves the actual leak fully intact."

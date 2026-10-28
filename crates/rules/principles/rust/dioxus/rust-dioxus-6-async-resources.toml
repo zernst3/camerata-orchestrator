@@ -1,5 +1,5 @@
 id = "RUST-DIOXUS-6"
-version = 3
+version = 4
 title = "Async UI data goes through the resource hook; fire-and-forget work goes through spawn"
 domain = "rust:dioxus"
 layer = "framework"
@@ -27,7 +27,7 @@ why = "Conflating data fetching with side effects is the largest single source o
 id = "ui-data-fetching-is-expressed-as-a-manual-effect"
 violates = true
 label = "Manual effect writing loading state to signals"
-directive = "UI data fetching is expressed as a manual effect that spawns an async task and writes the loading, success, and error states into separate signals by hand, rather than going through the resource hook"
+directive = "UI data fetching is expressed as a manual effect that spawns an async task and writes the loading, success and error states into separate signals by hand, rather than going through the resource hook"
 why = "Forces every component to re-implement the loading-state plumbing: bugs hide in the boilerplate, the pattern diverges across components as each re-implementation makes slightly different choices, and the result is more code for the same three-state value the resource hook gives back directly."
 
 [[option]]
@@ -42,7 +42,7 @@ id = "the-project-adopts-a-global-request-cache-librar"
 violates = true
 label = "Global request-cache library adopted from day one"
 directive = "the project adopts a global request-cache library on top of resource hooks from day one, regardless of whether a specific caching need has surfaced"
-why = "Premature complexity: the resource hook is sufficient for the common data-fetching shapes, and a cache layer adds a dependency, a new mental model, and a new failure surface before any specific caching need has been demonstrated, increasing onboarding cost with no concrete payoff at this scale."
+why = "Premature complexity: the resource hook is sufficient for the common data-fetching shapes, and a cache layer adds a dependency, a new mental model and a new failure surface before any specific caching need has been demonstrated, increasing onboarding cost with no concrete payoff at this scale."
 
 [[sources]]
 url = "https://dioxuslabs.com/learn/0.6/essentials/async/"

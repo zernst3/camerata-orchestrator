@@ -1,6 +1,6 @@
 id = "SUPABASE-AUTH-USERS-EXPOSED-1"
-version = 4
-title = "auth.users must never be exposed to anon/authenticated via a view, materialized view, or grant in an exposed schema"
+version = 5
+title = "auth.users must never be exposed to anon/authenticated via a view, materialized view or grant in an exposed schema"
 domain = "supabase:auth"
 layer = "platform"
 enforcement = "structured"
@@ -48,7 +48,7 @@ auth schema itself.
 
 [[option]]
 id = "flag-any-exposed-auth-users-reference"
-label = "No API-exposed view, materialized view, or grant reads from auth.users"
+label = "No API-exposed view, materialized view or grant reads from auth.users"
 directive = """
 Nothing in an API-exposed schema selects from `auth.users` or grants access to it. That table is
 Supabase's internal identity store (every account's email, phone number and `raw_user_meta_data`)
@@ -63,7 +63,7 @@ Drop or restrict the exposed-schema object referencing `auth.users` in `<file>`.
 an application-owned `public.profiles` table, populated by a trigger on `auth.users` inserts,
 that exposes only the specific non-sensitive columns your app actually needs (never email or
 other identifying fields unless the feature requires them). Verify by confirming no exposed-schema
-view, materialized view, or grant references `auth.users` directly anymore.
+view, materialized view or grant references `auth.users` directly anymore.
 """
 why = "There is no legitimate reason for an exposed-schema object to reference auth.users directly — the correct pattern (a curated profiles table) exists precisely to avoid this, so an unconditional critical with no carve-out is the right severity."
 

@@ -1,5 +1,5 @@
 id = "ARCH-SHARED-CONSTANT-1"
-version = 4
+version = 5
 title = "A domain value such as a queue name, a route or a rate is defined once as a named constant and imported wherever it is used, never repeated as a bare literal across modules"
 domain = "universal"
 layer = "universal"
@@ -50,9 +50,9 @@ why = "A value that several modules write out as a literal has no single address
 [[option]]
 id = "domain-literals-have-one-exported-home"
 label = "Each queue name, route, event name and rate that several modules use is defined once as a named constant and imported wherever it is used"
-directive = "Define each domain value that more than one module uses (a queue, topic, channel or bucket name, a feature flag, a route, an event name, a fee or other rate) once, as a named constant in the module that owns the concept, and export it. Import that constant at every use instead of writing the literal again, so that changing the value is one edit and a search for the constant's name finds every user. Protocol text, translation keys, class names, environment variable names, enum and union members, and per-environment configuration are not domain values and stay where their framework expects them."
+directive = "Define each domain value that more than one module uses (a queue, topic, channel or bucket name, a feature flag, a route, an event name, a fee or other rate) once, as a named constant in the module that owns the concept and export it. Import that constant at every use instead of writing the literal again, so that changing the value is one edit and a search for the constant's name finds every user. Protocol text, translation keys, class names, environment variable names, enum and union members and per-environment configuration are not domain values and stay where their framework expects them."
 remediation = """
-Define the value once, as a named constant, in the module that owns the concept, and export it. Replace each bare copy listed in the finding with an import of that constant. Verify by searching the repository for the quoted value: the only remaining occurrence should be the constant's definition, and the project should still build and its tests pass.
+Define the value once, as a named constant, in the module that owns the concept and export it. Replace each bare copy listed in the finding with an import of that constant. Verify by searching the repository for the quoted value: the only remaining occurrence should be the constant's definition, and the project should still build and its tests pass.
 """
 effort = "low"
 why = "The fix is a mechanical edit: one definition and one import per listed location. The result is a single address for the value, so a later change cannot leave two modules disagreeing."

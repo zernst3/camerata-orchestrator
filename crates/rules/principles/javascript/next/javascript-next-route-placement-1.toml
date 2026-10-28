@@ -7,7 +7,7 @@
 # convention it never needed. Kept opt-in (never pre-checked/auto-recommended) until the option
 # set is redesigned to separate "how routes are organized" from "how auth is actually enforced".
 id = "JAVASCRIPT-NEXT-ROUTE-PLACEMENT-1"
-version = 3
+version = 4
 title = "App Router pages are organized into route groups by access tier, but auth is enforced in middleware/data layer, not by folder placement"
 domain = "javascript:next"
 layer = "framework"
@@ -43,5 +43,5 @@ why = "Route groups in App Router are how layout composition is opt-in, but only
 [[option]]
 id = "pages-live-anywhere-under-app-that-is-convenient"
 label = "pages live anywhere under app/ with no access-tier grouping, and auth is asserted only by folder placement"
-directive = "pages live anywhere under app/ that is convenient at the time, with no route-group convention signaling access tier, and with folder placement (rather than middleware or an explicit data-layer check) treated as the mechanism that keeps a page from rendering unauthenticated"
+directive = "pages live anywhere under app/ that is convenient at the time, with no route-group convention signaling access tier and with folder placement (rather than middleware or an explicit data-layer check) treated as the mechanism that keeps a page from rendering unauthenticated"
 why = "Two failure modes compound here. First, with no access-tier grouping convention, a page's intended auth/chrome requirements aren't visible from the file tree, so a new page is easy to place inconsistently. Second, and more importantly, treating file placement itself as the auth enforcement mechanism is unsound regardless of grouping: a layout can be bypassed for a given request, and even a well-organized route group gives no compile-time or runtime guarantee that its layout's auth check ran. Without middleware or an explicit session check in the data-fetching layer, a misplaced or bypassed page renders unauthenticated with no error, and the bug surfaces in production on whichever page slipped through rather than at compile time or in code review."

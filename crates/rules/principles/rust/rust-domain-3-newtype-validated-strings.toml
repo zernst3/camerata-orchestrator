@@ -1,6 +1,6 @@
 id = "RUST-DOMAIN-3"
-version = 2
-title = "How validated text is represented: newtype with fallible constructor, inline call-site checks, runtime tag, or plain String"
+version = 3
+title = "How validated text is represented: newtype with fallible constructor, inline call-site checks, runtime tag or plain String"
 domain = "rust"
 layer = "language"
 enforcement = "structured"
@@ -26,7 +26,7 @@ id = "newtype-validated-strings-email-url-slug"
 label = "Newtype validated strings (Email, Url, Slug, …)"
 directive = "Constrained string types are newtypes with a fallible constructor (Email::try_new); the type itself is proof of validation. Free-form text stays as String."
 remediation = """
-Wrap the constrained string in a newtype with a fallible constructor (Email::try_new, and similar), so the type itself proves the value has been validated, instead of validating inline at each call site, tagging it at runtime, or leaving it as a plain String. Verify by confirming the compiler rejects passing an unvalidated String where the newtype is expected, and the constructor is the only way to obtain a valid instance.
+Wrap the constrained string in a newtype with a fallible constructor (Email::try_new, and similar), so the type itself proves the value has been validated, instead of validating inline at each call site, tagging it at runtime or leaving it as a plain String. Verify by confirming the compiler rejects passing an unvalidated String where the newtype is expected, and the constructor is the only way to obtain a valid instance.
 """
 why = "Makes the type itself proof that validation ran, so a value of the type cannot exist without having passed its constructor and 'is this validated?' stops being a question at every call site. The strongest fit when a project wants the type system to carry the invariant; its trade-off is a newtype and fallible constructor per constrained kind, with free-form text left as plain String."
 

@@ -1,5 +1,5 @@
 id = "SUPABASE-FUNC-DEFINER-CROSS-TENANT-READ-1"
-version = 5
+version = 6
 title = "A SECURITY DEFINER function that returns rows filtered only by its own caller-supplied parameter, and is granted EXECUTE to anon/public/authenticated, must check that id against the caller's identity"
 domain = "supabase:database-functions"
 # General Postgres/PostgREST, not just Supabase: a SECURITY DEFINER function that reads data
@@ -84,11 +84,11 @@ label = "A SECURITY DEFINER function that filters rows by a caller-supplied id c
 directive = """
 A SECURITY DEFINER function runs with its creator's privileges, so the Row Level Security that would
 normally decide which rows a caller may see never runs. When such a function is granted EXECUTE to
-`anon`, `public` or `authenticated`, and selects rows by matching a column against one of its own
+`anon`, `public` or `authenticated` and selects rows by matching a column against one of its own
 parameters, the function body is the only place entitlement can be established, and it establishes
 it, before returning anything. A session or JWT identity read (`auth.uid()`, `auth.jwt()`,
 `current_user`, `session_user`, a `request.jwt` claims read) compared against the owner or tenant
-column, a call to a role/ownership-check function, or a caller-supplied shared secret compared
+column, a call to a role/ownership-check function or a caller-supplied shared secret compared
 against a stored value all satisfy this; any of the three makes the supplied id's relationship to
 the caller provable. Where the function is only ever meant to return the caller's OWN rows, the
 better shape is to derive the id from `auth.uid()` and not accept it as a parameter at all.
@@ -102,7 +102,7 @@ remediation = """
 For `<function-name>`, add a server-side identity check as the FIRST statement in the function
 body, before returning any rows: compare `auth.uid()` (or `current_user`/`session_user`, or a
 custom JWT claim read via `current_setting('request.jwt.claims', true)`) against the row's
-owner/tenant column for the id supplied, and `raise exception` on mismatch, or call a role-check
+owner/tenant column for the id supplied and `raise exception` on mismatch or call a role-check
 helper (e.g. `has_role(auth.uid(), 'admin')`) and `raise exception` when it returns false. If the
 function is only ever meant to return the CALLER's own data, consider deriving the id from
 `auth.uid()` directly instead of accepting it as a parameter, removing the substitution risk
@@ -118,5 +118,5 @@ why = "Postgres already has the primitives this fix needs (auth.uid()/current_us
 id = "definer-read-trusts-caller-supplied-id"
 violates = true
 label = "A broadly-granted SECURITY DEFINER read filters rows by a caller-supplied id with no check tying it to the caller"
-directive = "A SECURITY DEFINER function that returns rows filtered by one of its own caller-supplied parameters, granted to anon/public/authenticated, performs no check tying that parameter to the caller's own identity, role, or a validated secret."
+directive = "A SECURITY DEFINER function that returns rows filtered by one of its own caller-supplied parameters, granted to anon/public/authenticated, performs no check tying that parameter to the caller's own identity, role or a validated secret."
 why = "Rejected: SECURITY DEFINER bypasses the caller's RLS, so the function body is the only place the ownership check can live. Without it, the broad grant lets any caller substitute any id and read another tenant's rows."

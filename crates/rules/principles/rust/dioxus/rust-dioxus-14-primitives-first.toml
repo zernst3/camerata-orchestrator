@@ -1,6 +1,6 @@
 id = "RUST-DIOXUS-14"
-version = 2
-title = "Where common UI elements come from: a shared primitives layer, per-feature elements, a third-party library, or inline markup"
+version = 3
+title = "Where common UI elements come from: a shared primitives layer, per-feature elements, a third-party library or inline markup"
 domain = "rust:dioxus"
 layer = "framework"
 enforcement = "structured"
@@ -21,7 +21,7 @@ why = "All of these are legitimate sources for common UI elements, and the right
 [[option]]
 id = "common-ui-elements-have-one-canonical-primitive-implementation"
 label = "Common UI elements have one canonical implementation in a primitives layer; views compose primitives"
-directive = "The UI crate has two distinct kinds of components: primitives (Button, Modal, Toast, Card, Input, and similar reusable elements) and views (page-level components that compose primitives to express a feature). Every primitive has exactly one canonical implementation in a shared components directory. Views compose those primitives; views never reimplement a primitive inline or fork one for local convenience. Design-system decisions (color palette, corner radii, type system, focus rings, motion) live in the primitive component, so every view that composes the primitive inherits those decisions for free. A view that needs behavior a primitive does not yet expose extends the primitive's API rather than copying the primitive."
+directive = "The UI crate has two distinct kinds of components: primitives (Button, Modal, Toast, Card, Input and similar reusable elements) and views (page-level components that compose primitives to express a feature). Every primitive has exactly one canonical implementation in a shared components directory. Views compose those primitives; views never reimplement a primitive inline or fork one for local convenience. Design-system decisions (color palette, corner radii, type system, focus rings, motion) live in the primitive component, so every view that composes the primitive inherits those decisions for free. A view that needs behavior a primitive does not yet expose extends the primitive's API rather than copying the primitive."
 remediation = """
 Move the duplicated button/modal/toast/input implementation out of the feature folder (or out of inline utility-class markup, or off a wholesale third-party library) and into a single canonical primitive in the shared components directory, then have the view compose that primitive instead of reimplementing it. Verify by confirming only one implementation of this UI element exists in the codebase and every view that needs it imports the shared primitive.
 """
@@ -30,7 +30,7 @@ why = "Gives each common element one canonical implementation that every view co
 [[option]]
 id = "the-ui-is-organized-into-feature-folders-where-e"
 label = "Each feature owns bespoke UI elements"
-directive = "the UI is organized into feature folders where each feature owns its own bespoke buttons, modals, toasts, and other UI elements, rather than sharing a single primitives layer"
+directive = "the UI is organized into feature folders where each feature owns its own bespoke buttons, modals, toasts and other UI elements, rather than sharing a single primitives layer"
 remediation = """
 Move the shared primitive out of the common components directory and into the feature folder that owns it, so each feature maintains its own bespoke version of the UI element rather than depending on a cross-feature shared primitive. Verify by confirming the feature's UI elements are self-contained within its own folder with no import from a shared primitives directory.
 """

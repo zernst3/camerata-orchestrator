@@ -1,5 +1,5 @@
 id = "PYTHON-FLASK-APP-FACTORY-1"
-version = 2
+version = 3
 title = "Flask apps are created with an application factory and blueprints, not a module-level app instance"
 domain = "python:flask"
 layer = "framework"
@@ -17,7 +17,7 @@ why = "A module-level `app = Flask(__name__)` created at import time makes testi
 [[option]]
 id = "app-factory-plus-blueprints"
 label = "create_app() factory + Blueprint per feature area"
-directive = "The Flask application is created inside a `create_app(config=None)` factory function in `app/__init__.py` (or equivalent). Routes are organized as Blueprints (`auth_bp`, `api_bp`, etc.), each in its own module, and registered on the app inside `create_app`. Extensions (SQLAlchemy, Migrate, LoginManager) are instantiated at module level without an app and initialized with `ext.init_app(app)` inside the factory. A module-level `app = Flask(__name__)` outside the factory is forbidden; route decorators (`@app.route(...)`) that reference the global app rather than a Blueprint are forbidden."
+directive = "The Flask application is created inside a `create_app(config=None)` factory function in `app/__init__.py` (or equivalent). Routes are organized as Blueprints (`auth_bp`, `api_bp`, etc.), each in its own module and registered on the app inside `create_app`. Extensions (SQLAlchemy, Migrate, LoginManager) are instantiated at module level without an app and initialized with `ext.init_app(app)` inside the factory. A module-level `app = Flask(__name__)` outside the factory is forbidden; route decorators (`@app.route(...)`) that reference the global app rather than a Blueprint are forbidden."
 remediation = """
 Move the module-level Flask app creation and route registration into a create_app(config=None) factory function, and reorganize the routes into Blueprints registered inside that factory. Verify by confirming a second app instance can be created (for example in tests) with different configuration, without import-time side effects from a single global app object.
 """

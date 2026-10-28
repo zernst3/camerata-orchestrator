@@ -1,6 +1,6 @@
 id = "SEC-NO-SENSITIVE-DATA-IN-LOGS-1"
-version = 3
-title = "A secret, credential, or regulated PII value never reaches a logging sink unredacted"
+version = 4
+title = "A secret, credential or regulated PII value never reaches a logging sink unredacted"
 domain = "universal"
 layer = "universal"
 enforcement = "mechanical"
@@ -22,7 +22,7 @@ title = "CWE-532: Insertion of Sensitive Information into Log File"
 
 [[sources]]
 url = "https://cheatsheetseries.owasp.org/cheatsheets/Logging_Cheat_Sheet.html"
-title = "OWASP Logging Cheat Sheet: 'Which events to log' and 'Data to exclude': never log authentication credentials, session identifiers, access tokens, or regulated personal data in cleartext"
+title = "OWASP Logging Cheat Sheet: 'Which events to log' and 'Data to exclude': never log authentication credentials, session identifiers, access tokens or regulated personal data in cleartext"
 
 [[sources]]
 url = "https://cheatsheetseries.owasp.org/cheatsheets/Logging_Vocabulary_Cheat_Sheet.html"
@@ -54,10 +54,10 @@ and the sink.
 
 [[option]]
 id = "redact-sensitive-values-before-logging"
-label = "Redact, mask, hash, or omit a secret/credential or regulated-PII value before any log call that could emit it"
-directive = "A secret, credential, or regulated PII value never reaches a logging sink unredacted. Before any logging call that could emit it (console.log/warn/error/debug, a logger.*/log.* call, print/pprint, println!/eprintln!/dbg!, System.out/err.*, fmt.Print*, Rails.logger.*), a value whose own identity marks it as a secret or credential (a field or identifier matching token/secret/password/passwd/api_key/apikey/private_key/access_token/authorization/session/cookie, or a value read from a secret-shaped environment variable) or as regulated PII (ssn, social_security, credit_card/card_number, PAN, cvv/cvc) is passed through a redact/mask/scrub/sanitize/hash/truncate helper, reduced to a `[REDACTED]`-style placeholder or dropped from the call's arguments entirely, whether it would flow in directly, through string concatenation/interpolation or through an intermediate variable. A logged credential is the graver case, since it hands any reader of that log a live, reusable credential; logged regulated PII is a serious exposure and compliance breach but is not itself a reusable credential."
+label = "Redact, mask, hash or omit a secret/credential or regulated-PII value before any log call that could emit it"
+directive = "A secret, credential or regulated PII value never reaches a logging sink unredacted. Before any logging call that could emit it (console.log/warn/error/debug, a logger.*/log.* call, print/pprint, println!/eprintln!/dbg!, System.out/err.*, fmt.Print*, Rails.logger.*), a value whose own identity marks it as a secret or credential (a field or identifier matching token/secret/password/passwd/api_key/apikey/private_key/access_token/authorization/session/cookie, or a value read from a secret-shaped environment variable) or as regulated PII (ssn, social_security, credit_card/card_number, PAN, cvv/cvc) is passed through a redact/mask/scrub/sanitize/hash/truncate helper, reduced to a `[REDACTED]`-style placeholder or dropped from the call's arguments entirely, whether it would flow in directly, through string concatenation/interpolation or through an intermediate variable. A logged credential is the graver case, since it hands any reader of that log a live, reusable credential; logged regulated PII is a serious exposure and compliance breach but is not itself a reusable credential."
 remediation = """
-Redact, mask, hash, or drop the sensitive value before it reaches the log call: pass it through the
+Redact, mask, hash or drop the sensitive value before it reaches the log call: pass it through the
 project's existing redaction/masking helper (or add one: a thin wrapper that replaces a secret with
 `[REDACTED]` and a PII value with a masked/truncated form, e.g. the last 4 digits only) rather than
 handing the logger the raw value or a format string that embeds it. For a value that does not need to
@@ -72,5 +72,5 @@ why = "Redaction at the log call site is a narrow, mechanical fix (wrap the valu
 id = "log-values-as-is-rely-on-log-store-access-controls"
 violates = true
 label = "Log values as-is and rely on the log storage/aggregation system's own access controls"
-directive = "Secret/credential and PII values are passed to logging calls without redaction, masking, or omission, relying entirely on the log aggregator's or log file's own access controls (who can read the logs) to keep the value confidential."
-why = "Rejected: the log pipeline (aggregator, APM tool, on-disk file, a third-party log-shipping vendor) is routinely broader-access and less audited than the datastore the value came from in the first place, and CWE-532 treats the insertion into the log as the defect regardless of whether the log store is later breached. A single retention-policy change, a misconfigured log-export integration, or a support engineer with broad log read access is enough to expose every credential or PII value this option chose not to redact, and unlike the datastore, nobody scoped the log pipeline as a place sensitive values were meant to live."
+directive = "Secret/credential and PII values are passed to logging calls without redaction, masking or omission, relying entirely on the log aggregator's or log file's own access controls (who can read the logs) to keep the value confidential."
+why = "Rejected: the log pipeline (aggregator, APM tool, on-disk file, a third-party log-shipping vendor) is routinely broader-access and less audited than the datastore the value came from in the first place, and CWE-532 treats the insertion into the log as the defect regardless of whether the log store is later breached. A single retention-policy change, a misconfigured log-export integration or a support engineer with broad log read access is enough to expose every credential or PII value this option chose not to redact, and unlike the datastore, nobody scoped the log pipeline as a place sensitive values were meant to live."

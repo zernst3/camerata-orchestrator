@@ -1,5 +1,5 @@
 id = "SUPABASE-RLS-USER-METADATA-1"
-version = 5
+version = 6
 title = "An RLS policy predicate must never authorize against user_metadata / raw_user_meta_data"
 domain = "supabase:rls"
 layer = "platform"
@@ -89,4 +89,4 @@ id = "allow-with-additional-server-side-validation"
 violates = true
 label = "Policy predicates authorize on user_metadata, with an application-layer check before privileged actions"
 directive = "Policies read `user_metadata` / `raw_user_meta_data` as an authorization input, and the application layer performs its own server-side check before treating the user as privileged."
-why = "Rejected: RLS is the database's OWN access-control layer specifically so that no code path (including one that forgets or gets the extra check wrong) can bypass it. Requiring a compensating server-side check to make an unsafe policy predicate 'safe' reintroduces exactly the footgun RLS exists to remove, and a static scan cannot verify the compensating check exists, is complete, or survives the next refactor. The safe alternative (app_metadata or a dedicated roles table) provides the same capability with no such fragility."
+why = "Rejected: RLS is the database's OWN access-control layer specifically so that no code path (including one that forgets or gets the extra check wrong) can bypass it. Requiring a compensating server-side check to make an unsafe policy predicate 'safe' reintroduces exactly the footgun RLS exists to remove, and a static scan cannot verify the compensating check exists, is complete or survives the next refactor. The safe alternative (app_metadata or a dedicated roles table) provides the same capability with no such fragility."

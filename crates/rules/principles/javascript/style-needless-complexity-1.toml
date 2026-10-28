@@ -1,5 +1,5 @@
 id = "STYLE-NEEDLESS-COMPLEXITY-1"
-version = 1
+version = 2
 title = "Code says what it means directly: a conditional is not negated just to swap its branches, and a component prop that every caller supplies is not declared optional"
 domain = "javascript"
 layer = "language"
@@ -43,7 +43,7 @@ id = "conditions-and-props-say-what-they-mean"
 label = "Conditions are not negated just to swap branches, and props every caller supplies are required"
 directive = "Write a conditional expression on its positive condition: `ready ? 'go' : 'wait'`, not `!ready ? 'wait' : 'go'`. Keep a negated form only where it reads better, such as a guard that handles the empty case first over several lines. Declare a component prop optional only when some caller genuinely omits it; when every caller supplies it, declare it required and remove the fallback for the missing value."
 remediation = """
-For a negated conditional: remove the `!` and swap the two branches, as the finding shows. For an optional prop: remove the `?` from the prop in the props type, delete the fallback the component uses for the missing value (a default, a `??` or an `undefined` check), and run the type checker, which confirms that every call site already passes it.
+For a negated conditional: remove the `!` and swap the two branches, as the finding shows. For an optional prop: remove the `?` from the prop in the props type, delete the fallback the component uses for the missing value (a default, a `??` or an `undefined` check) and run the type checker, which confirms that every call site already passes it.
 """
 effort = "low"
 why = "Each fix is a local edit the type checker verifies. Afterwards the condition reads the way it runs, and the props type tells the next caller that the prop is required."

@@ -1,5 +1,5 @@
 id = "RUST-DIOXUS-12"
-version = 3
+version = 4
 title = "Icons render as inline SVG from static string constants; no runtime icon-library fetches"
 domain = "rust:dioxus"
 layer = "framework"
@@ -22,9 +22,9 @@ why = "Inline SVG is the smallest-bundle, fastest-first-paint approach. It has n
 [[option]]
 id = "icons-render-as-inline-svg-from-static-string-constants"
 label = "Icons render as inline SVG from static string constants; no runtime icon-library fetches"
-directive = "Icons live in a single icons module as static SVG string constants. A single Icon component takes a name (an enum variant) and a class string, looks up the corresponding SVG, and renders it inline through the framework's raw-inner-html attribute. Sources for the SVG strings are extracted once from whichever icon set the design system uses, stripped of any framework wrapper, and stored as the raw inner SVG. Runtime fetching of an icon library, icon-font web fonts, and large icon-set crates that pull every icon into the binary are all forbidden."
+directive = "Icons live in a single icons module as static SVG string constants. A single Icon component takes a name (an enum variant) and a class string, looks up the corresponding SVG and renders it inline through the framework's raw-inner-html attribute. Sources for the SVG strings are extracted once from whichever icon set the design system uses, stripped of any framework wrapper and stored as the raw inner SVG. Runtime fetching of an icon library, icon-font web fonts and large icon-set crates that pull every icon into the binary are all forbidden."
 remediation = """
-Move the icon out of a runtime-fetched web font, sprite sheet, or full icon-library crate and into a static SVG string constant in the icons module, rendered inline through a single Icon component. Verify by confirming the icon renders with no network request and no dependency on a bundled icon-library crate beyond what's actually used.
+Move the icon out of a runtime-fetched web font, sprite sheet or full icon-library crate and into a static SVG string constant in the icons module, rendered inline through a single Icon component. Verify by confirming the icon renders with no network request and no dependency on a bundled icon-library crate beyond what's actually used.
 """
 why = "Inline SVG is the smallest-bundle, fastest-first-paint approach."
 
@@ -40,7 +40,7 @@ id = "icons-are-rendered-as-glyphs-from-a-web-font-con"
 violates = true
 label = "Icon font glyphs via CSS class names"
 directive = "icons are rendered as glyphs from a web font containing the icon set, with the font fetched at runtime and the icons rendered through CSS class names"
-why = "Adds a runtime font fetch, produces a flash of invisible text on slow networks, and breaks the server-rendered first paint: none of those costs exist with inline SVG, and the glyph approach also limits icon customization to whatever the font file encodes."
+why = "Adds a runtime font fetch, produces a flash of invisible text on slow networks and breaks the server-rendered first paint: none of those costs exist with inline SVG, and the glyph approach also limits icon customization to whatever the font file encodes."
 
 [[option]]
 id = "icons-are-loaded-from-an-external-svg-sprite-she"

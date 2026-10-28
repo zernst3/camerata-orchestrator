@@ -1,5 +1,5 @@
 id = "ARCH-REFUND-AUTHORIZATION-1"
-version = 3
+version = 4
 title = "A refund or credit is authorized against the specific charge's owner and bounded by that charge's remaining refundable amount"
 domain = "api-layer"
 layer = "universal"
@@ -44,7 +44,7 @@ directive = "Every refund or credit endpoint performs two independent checks ser
 remediation = """
 In the refund endpoint, add a lookup of the referenced charge/order and verify it belongs to the caller's
 authorized scope before processing the refund: reject with 403/404 if it does not. Separately, track (or query
-the provider for) the amount already refunded against that charge, and reject any request whose amount would push
+the provider for) the amount already refunded against that charge and reject any request whose amount would push
 the cumulative refunded total past the original charge amount. Verify by attempting to refund a charge that does
 not belong to the caller's scope (expect rejection) and by attempting to refund more than once against the same
 charge until the cumulative total exceeds the original amount (expect the excess rejected).

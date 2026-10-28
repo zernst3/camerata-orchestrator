@@ -1,5 +1,5 @@
 id = "JAVASCRIPT-EXPRESS-THIN-CONTROLLERS-1"
-version = 3
+version = 4
 title = "Route handlers stay thin; business logic and data access live in a service layer"
 domain = "javascript:express"
 layer = "framework"
@@ -27,14 +27,14 @@ why = "A route handler's job is HTTP-shaped: read the validated request, call in
 [[option]]
 id = "route-handlers-stay-thin-business-logic-and-data"
 label = "Route handlers stay thin; business logic and data access live in a service layer"
-directive = "Route handlers are limited to HTTP concerns: invoke input validation, call a service/use-case function, and map its result or error onto a response. Business rules and data access (database queries, ORM calls, external API calls) live in a service or repository layer the handler delegates to, not inline in the route. A direct database query or business-rule computation written inside a route handler is forbidden; it moves behind the service layer the handler calls."
+directive = "Route handlers are limited to HTTP concerns: invoke input validation, call a service/use-case function and map its result or error onto a response. Business rules and data access (database queries, ORM calls, external API calls) live in a service or repository layer the handler delegates to, not inline in the route. A direct database query or business-rule computation written inside a route handler is forbidden; it moves behind the service layer the handler calls."
 remediation = """
-Move the business logic and direct database access out of the route handler and into a service or repository function that the handler calls, leaving the handler to validate input, call the service, and map the result to a response. Verify by confirming the route handler function contains no direct database query and the business rule can be tested against the service alone.
+Move the business logic and direct database access out of the route handler and into a service or repository function that the handler calls, leaving the handler to validate input, call the service and map the result to a response. Verify by confirming the route handler function contains no direct database query and the business rule can be tested against the service alone.
 """
 why = "Logic and data access inline in a handler can only be reached through an HTTP request, so it cannot be unit-tested or reused by a job or another route, and it mixes transport concerns with domain concerns in one place."
 
 [[option]]
 id = "route-handlers-contain-business-logic-and-direct"
 label = "Business logic and DB access in route handlers"
-directive = "route handlers contain business logic and direct database access inline, handling validation, rules, and data access together in the route, rather than delegating to a separate service or repository layer"
+directive = "route handlers contain business logic and direct database access inline, handling validation, rules and data access together in the route, rather than delegating to a separate service or repository layer"
 why = "Business logic and database queries inline in a route handler are reachable only through an HTTP request, so the logic cannot be unit-tested or reused by a background job or another route without spinning up the web layer, and a rule duplicated into a second handler drifts out of sync. The handler mixes transport concerns with domain concerns so that a change to either touches code that does both."

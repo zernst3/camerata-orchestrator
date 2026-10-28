@@ -1,5 +1,5 @@
 id = "PYTHON-FASTAPI-DI-SESSION-1"
-version = 2
+version = 3
 title = "Database sessions are dependency-injected with a per-request lifecycle"
 domain = "python:fastapi"
 layer = "framework"
@@ -17,7 +17,7 @@ why = "A path operation that opens its own session, or pulls one from a module-l
 [[option]]
 id = "inject-per-request-session"
 label = "inject a per-request session via Depends"
-directive = "Path operations receive their database session through a `Depends`-injected dependency that yields a session scoped to the single request and guarantees close (and rollback-on-error) afterward. Handlers never construct a session, open a connection, or read a module-level session global. The session dependency is overridable in tests through `app.dependency_overrides` so handlers run against a transactional test session."
+directive = "Path operations receive their database session through a `Depends`-injected dependency that yields a session scoped to the single request and guarantees close (and rollback-on-error) afterward. Handlers never construct a session, open a connection or read a module-level session global. The session dependency is overridable in tests through `app.dependency_overrides` so handlers run against a transactional test session."
 remediation = """
 Replace the handler's manual session construction (or the shared global session) with a Depends-injected dependency that yields a session scoped to the single request and closes (with rollback on error) afterward. Verify by making two concurrent requests and confirming they operate on distinct session instances, with no shared state leaking between them.
 """
@@ -28,7 +28,7 @@ id = "session-in-handler"
 violates = true
 label = "construct a session inside each handler"
 directive = "Each path operation opens and closes its own database session in the handler body, managing the lifecycle manually."
-why = "Couples every handler to the engine, reinvents lifecycle management per site, and leaks connections on early return or exception."
+why = "Couples every handler to the engine, reinvents lifecycle management per site and leaks connections on early return or exception."
 
 [[option]]
 id = "global-session"

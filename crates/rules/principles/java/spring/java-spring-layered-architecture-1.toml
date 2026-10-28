@@ -1,5 +1,5 @@
 id = "JAVA-SPRING-LAYERED-ARCHITECTURE-1"
-version = 3
+version = 4
 title = "Spring components follow a strict layered hierarchy: @RestController calls @Service; @Service calls @Repository; no layer calls a higher layer"
 domain = "java:spring"
 layer = "framework"
@@ -49,4 +49,4 @@ id = "no-formal-layering"
 violates = true
 label = "no enforced layering; classes handle multiple concerns"
 directive = "Services and repositories are mixed; a single @Service class both handles business logic and queries the database directly instead of delegating to a @Repository."
-why = "Code is difficult to test (every test needs a database), hard to reuse (CLI or worker clients cannot call business logic without going through HTTP), and tightly coupled across concerns."
+why = "Code is difficult to test (every test needs a database), hard to reuse (CLI or worker clients cannot call business logic without going through HTTP) and tightly coupled across concerns."

@@ -1,5 +1,5 @@
 id = "SUPABASE-FUNC-PRIVILEGED-NO-AUTHZ-1"
-version = 5
+version = 6
 title = "A SECURITY DEFINER function that writes data and is granted EXECUTE to anon/public/authenticated must check caller identity/role/ownership before writing"
 domain = "supabase:database-functions"
 # General Postgres/PostgREST, not just Supabase: a SECURITY DEFINER function that performs a write
@@ -101,7 +101,7 @@ remediation = """
 For `<function-name>`, add a server-side authorization check as the FIRST statement in the
 function body, before any write: compare `auth.uid()` (or `current_user`/`session_user`, or a
 custom JWT claim read via `current_setting('request.jwt.claims', true)`) against the row's
-owner/tenant column and `raise exception` on mismatch, or call a role-check helper (e.g.
+owner/tenant column and `raise exception` on mismatch or call a role-check helper (e.g.
 `has_role(auth.uid(), 'admin')`) and `raise exception` when it returns false. If the function is
 not meant to be callable by any end-user role at all, instead run `revoke execute on function
 <function-name> from anon, authenticated, public;` and invoke it only from a trusted server-side
@@ -116,6 +116,6 @@ why = "Postgres already has the primitives this fix needs (auth.uid()/current_us
 [[option]]
 id = "privileged-mutating-function-without-authz-check"
 violates = true
-label = "A broadly-granted SECURITY DEFINER function writes with no identity, role, or ownership check"
+label = "A broadly-granted SECURITY DEFINER function writes with no identity, role or ownership check"
 directive = "A SECURITY DEFINER function whose body performs an INSERT/UPDATE/DELETE/TRUNCATE, granted to anon/public/authenticated, checks nothing about the caller before writing: no identity, no role, no ownership, no validated secret."
 why = "Rejected: the DEFINER's privileges bypass RLS, so nothing else gates the write, and the PostgREST RPC endpoint reaches the function directly regardless of what the UI exposes."

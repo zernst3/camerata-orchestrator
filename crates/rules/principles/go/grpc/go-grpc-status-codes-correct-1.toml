@@ -1,5 +1,5 @@
 id = "GO-GRPC-STATUS-CODES-CORRECT-1"
-version = 2
+version = 3
 title = "gRPC status codes are used correctly: INTERNAL for unexpected errors, INVALID_ARGUMENT for validation failures, PERMISSION_DENIED for auth, NOT_FOUND for missing resources"
 domain = "go:grpc"
 layer = "framework"
@@ -43,7 +43,7 @@ why = "gRPC status codes (codes.OK, codes.INVALID_ARGUMENT, codes.NOT_FOUND, cod
 [[option]]
 id = "status-codes-semantically-correct"
 label = "Status codes are assigned semantically: NOT_FOUND for missing resources, INVALID_ARGUMENT for validation, etc."
-directive = "Each RPC implementation maps domain and infrastructure errors to the correct gRPC status code. Validation errors are codes.InvalidArgument, missing resources are codes.NotFound, authentication failures are codes.Unauthenticated, permission failures are codes.PermissionDenied, transient/overloaded-dependency failures (the service is temporarily down, out of capacity, or the request timed out waiting on it) are codes.Unavailable, internal invariant violations (an unexpected nil, a broken assumption, a serious bug) are codes.Internal, input-parsing errors are codes.InvalidArgument. Status messages provide additional context (why the input was invalid, what was not found). A helper or middleware pattern ensures consistent error mapping across handlers."
+directive = "Each RPC implementation maps domain and infrastructure errors to the correct gRPC status code. Validation errors are codes.InvalidArgument, missing resources are codes.NotFound, authentication failures are codes.Unauthenticated, permission failures are codes.PermissionDenied, transient/overloaded-dependency failures (the service is temporarily down, out of capacity or the request timed out waiting on it) are codes.Unavailable, internal invariant violations (an unexpected nil, a broken assumption, a serious bug) are codes.Internal, input-parsing errors are codes.InvalidArgument. Status messages provide additional context (why the input was invalid, what was not found). A helper or middleware pattern ensures consistent error mapping across handlers."
 remediation = """
 Change the RPC's error mapping so it returns the status code that matches the failure's actual cause: codes.NotFound for a missing resource, codes.InvalidArgument for a validation failure, codes.PermissionDenied for an authorization failure, codes.Internal only for unexpected errors. Verify by triggering each failure case from a client and confirming it receives the corresponding, distinct status code rather than a blanket Internal.
 """
@@ -54,7 +54,7 @@ id = "status-all-internal"
 violates = true
 label = "All errors are returned as INTERNAL"
 directive = "Every error, regardless of cause, is wrapped as a gRPC status.Internal. The error message contains the full detail."
-why = "Every failure returns the same code, so callers cannot tell a bad request they should fix from a transient fault they should retry. Clients either retry everything, hammering the server with input that will never succeed, or retry nothing and surface permanent errors for faults that would have cleared on their own."
+why = "Every failure returns the same code, so callers cannot tell a bad request they should fix from a transient fault they should retry. Clients either retry everything, hammering the server with input that will never succeed or retry nothing and surface permanent errors for faults that would have cleared on their own."
 
 [[option]]
 id = "status-inconsistent"

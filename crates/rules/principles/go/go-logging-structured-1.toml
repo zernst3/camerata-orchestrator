@@ -1,5 +1,5 @@
 id = "GO-LOGGING-STRUCTURED-1"
-version = 2
+version = 3
 title = "Logging is structured using a logger interface (slog, zap); log lines are not built with string concatenation or Printf"
 domain = "go"
 layer = "language"
@@ -37,5 +37,5 @@ why = "Structured logs are machine-parseable and searchable in aggregation syste
 id = "unstructured-printf-logging"
 violates = true
 label = "use Printf-style logging"
-directive = "Logs are written using fmt.Printf, log.Printf, or Printf methods, building the entire log line as a formatted string."
+directive = "Logs are written using fmt.Printf, log.Printf or Printf methods, building the entire log line as a formatted string."
 why = "Produces flat, unstructured text that requires regex parsing; harder to search and aggregate."

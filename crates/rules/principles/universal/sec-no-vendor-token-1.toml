@@ -1,5 +1,5 @@
 id = "SEC-NO-VENDOR-TOKEN-1"
-version = 2
+version = 3
 title = "Vendor credential tokens (AWS, GitHub, Slack, Stripe, Google, Anthropic, Supabase) are never hardcoded; they live in a secrets manager or environment variables"
 domain = "universal"
 layer = "universal"
@@ -68,9 +68,9 @@ the rule's tier or its enforcement status; it remains `AUDIT_RULES`-enforced exa
 [[option]]
 id = "env-or-secrets-manager"
 label = "Vendor tokens in env vars or a secrets manager, never source"
-directive = "AWS access key IDs, GitHub PATs, Slack tokens, Stripe live keys, Google API keys, Anthropic API keys, Supabase sb_secret_/service_role keys, and Supabase Postgres connection strings with an inline password are never written into source files, config files, or any file committed to the repository. Tests that require a vendor token use a test-doubles pattern (recorded cassettes, mocked HTTP, stub services) or retrieve a short-lived token from the secrets manager at test startup. The gate enforces this by matching known vendor token shapes (including a decode-at-match-time check for service_role JWTs) and denying any write that includes them. The anon/publishable Supabase key is explicitly NOT matched: it is designed to be public, and its downstream risk is RLS quality, not its own presence (see the supabase/rls/* rule group)."
+directive = "AWS access key IDs, GitHub PATs, Slack tokens, Stripe live keys, Google API keys, Anthropic API keys, Supabase sb_secret_/service_role keys and Supabase Postgres connection strings with an inline password are never written into source files, config files or any file committed to the repository. Tests that require a vendor token use a test-doubles pattern (recorded cassettes, mocked HTTP, stub services) or retrieve a short-lived token from the secrets manager at test startup. The gate enforces this by matching known vendor token shapes (including a decode-at-match-time check for service_role JWTs) and denying any write that includes them. The anon/publishable Supabase key is explicitly NOT matched: it is designed to be public, and its downstream risk is RLS quality, not its own presence (see the supabase/rls/* rule group)."
 remediation = """
-Remove the hardcoded vendor credential (an AWS key, GitHub PAT, Slack token, Stripe key, Google API key, Anthropic API key, Supabase key, or a Postgres connection string with an inline password) from the source or config file, and load it from an environment variable or secrets manager instead. Rotate the exposed token, since it was committed to version control. Verify by searching the codebase for the literal token value and confirming it no longer appears, while the integration still authenticates using the externally-loaded value.
+Remove the hardcoded vendor credential (an AWS key, GitHub PAT, Slack token, Stripe key, Google API key, Anthropic API key, Supabase key or a Postgres connection string with an inline password) from the source or config file and load it from an environment variable or secrets manager instead. Rotate the exposed token, since it was committed to version control. Verify by searching the codebase for the literal token value and confirming it no longer appears, while the integration still authenticates using the externally-loaded value.
 """
 effort = "low"
 finding_headline = "Your `<path>` file contains a live <secret-kind>."
