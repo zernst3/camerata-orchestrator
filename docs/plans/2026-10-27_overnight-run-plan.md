@@ -50,7 +50,14 @@ I. Repo hardening work order (`_workspace/brownfield-audits/WORK_ORDER_REPO_HARD
    file CLOUD_BRIEFS.md): before starting any H section locally, check `git ls-remote origin
    'cloud/*'` for cloud/hygiene, cloud/client-lock, cloud/injection, cloud/coverage,
    cloud/citations and skip any that exists (it is running in the cloud). Waiting on
-   Zach: D1 (where working notes go; blocks Phase 1 item 5), D3 branch protection (his GitHub
+   Zach: D1 DECIDED 23:50 (Zach): option (a), a private companion repo stored on GitHub, not only
+   locally. Created: github.com/zernst3/camerata-internal (private, verified 404 anonymously). The
+   move happens in the morning wrap-up (this plan and the decisions log are in use overnight):
+   clone it to ~/Documents/Repos/camerata-internal, copy the working notes in (session logs,
+   overnight notes and this plan, TEST_WHEN_BACK.md, staged-issues/, dated plans/ and audits/,
+   the decisions log), commit and push there, then remove them from the public tree in one
+   commit; design docs, architecture, technical, rules reference, rule authoring, user guide and
+   decision records stay public. Formerly: D3 branch protection (his GitHub
    step), the `.claude/settings.json` deny-list move (needs his user settings; the permission
    classifier blocks the agent from editing them), the release tag (with the morning PR).
 H. By 08:30: morning summary at the top of `docs/OVERNIGHT_DECISIONS.md`; the PR from the
