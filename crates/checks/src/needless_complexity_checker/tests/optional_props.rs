@@ -420,3 +420,33 @@ fn javascript_components_have_no_optional_props_to_read() {
     ]);
     assert!(vs.is_empty());
 }
+
+#[test]
+fn a_component_a_framework_router_renders_has_a_caller_no_import_shows() {
+    let page = "\
+export default function Page(props: { title?: string }) {
+  return <h1>{props.title}</h1>;
+}
+";
+    let a =
+        "import Page from '../app/orders/page';\nexport const A = () => <Page title=\"a\" />;\n";
+    let b =
+        "import Page from '../app/orders/page';\nexport const B = () => <Page title=\"b\" />;\n";
+    let files = |manifest: &'static str| {
+        run(&[
+            ("package.json", manifest),
+            ("app/orders/page.tsx", page),
+            ("tests/A.tsx", a),
+            ("tests/B.tsx", b),
+        ])
+    };
+    assert!(files(
+        r#"{ "private": true, "dependencies": { "next": "14.0.0", "react": "18.2.0" } }"#
+    )
+    .is_empty());
+    // The same folder layout without a file-system router is ordinary code.
+    assert_eq!(
+        files(r#"{ "private": true, "dependencies": { "react": "18.2.0" } }"#).len(),
+        1
+    );
+}

@@ -6,14 +6,16 @@
 //! component is accounted for. A component is left alone when any file uses it other than as a
 //! JSX tag (as a value, in a type, through a namespace import, a dynamic import or a computed
 //! load), when a file names it without an import the resolver can follow, when a file the check
-//! does not parse names it, when a call site spreads props, and when its package declares entry
-//! points other code could import it through.
+//! does not parse names it, when a call site spreads props, when its package declares entry
+//! points other code could import it through, and when a framework's router renders its file
+//! (a Next.js page or layout, a Remix route), which is a caller no import shows.
 
 use std::collections::HashSet;
 
 use tree_sitter::{Node, Tree};
 
 use super::optional_props::Candidate;
+use crate::dead_code_checker::conventions::Conventions;
 use crate::dead_code_checker::manifests::Packages;
 use crate::extract::ecma_walk::{
     descendants, import_bindings, is_binding_position, line, named_children, namespace_imports,
@@ -132,6 +134,8 @@ pub(super) struct Repo<'a> {
     unread: Vec<&'a str>,
     /// Every computed load, by the file that makes it.
     computed: Vec<(&'a str, Vec<ComputedLoad>)>,
+    /// Files a framework's file-system router loads (and renders) by itself.
+    framework_loaded: HashSet<&'a str>,
     packages: Packages,
     graph: Model,
 }
@@ -168,10 +172,17 @@ impl<'a> Repo<'a> {
                 (!loads.is_empty()).then_some((path.as_str(), loads))
             })
             .collect();
+        let conventions = Conventions::new(files, &packages);
+        let framework_loaded = files
+            .iter()
+            .map(|(path, _)| path.as_str())
+            .filter(|path| conventions.framework_loads(path))
+            .collect();
         Self {
             parsed,
             unread,
             computed,
+            framework_loaded,
             packages,
             graph,
         }
@@ -183,6 +194,7 @@ impl<'a> Repo<'a> {
         let home_path = self.parsed[home].path;
         let package = self.packages.nearest(home_path)?;
         if package.declares_entry_points()
+            || self.framework_loaded.contains(home_path)
             || self.computed_load_reaches(home_path, &package.dir)
             || self.mentioned_where_unread(&candidate.name)
         {

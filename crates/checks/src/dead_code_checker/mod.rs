@@ -79,7 +79,7 @@ use crate::arch_checker::{ArchChecker, ArchViolation, RepoView};
 use crate::extract::{self, SourceLang};
 
 mod analysis;
-mod conventions;
+pub(crate) mod conventions;
 mod dynamic;
 mod emit;
 // `pub(crate)`: the clone detector reuses the generated-file, declaration-file and test-file
