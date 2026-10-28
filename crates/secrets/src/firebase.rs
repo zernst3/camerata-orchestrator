@@ -248,6 +248,15 @@ fn inside_init_span(window: &str, at: usize) -> bool {
 /// Byte offsets of the brackets (`{` or `(`) still open at byte `at`, outermost first. Strings
 /// (`'`, `"`, backtick) and comments are skipped.
 fn open_brackets(window: &str, at: usize) -> Vec<usize> {
+    scan_to(window, at).0
+}
+
+/// [`open_brackets`], plus where a forward scan from `at` must resume: the first byte at or after
+/// `at` outside the string or comment the scan was in when it reached `at`. The value usually sits
+/// inside a quoted string, and starting a forward scan inside it would read its CLOSING quote as
+/// an opening one, flipping every string after it (a `}` outside a string skipped, one inside a
+/// string counted).
+fn scan_to(window: &str, at: usize) -> (Vec<usize>, usize) {
     let bytes = window.as_bytes();
     let mut open: Vec<usize> = Vec::new();
     let mut i = 0;
@@ -264,7 +273,7 @@ fn open_brackets(window: &str, at: usize) -> Vec<usize> {
         }
         i += 1;
     }
-    open
+    (open, i.max(at))
 }
 
 /// The smallest balanced `{...}` or `(...)` span of `window` that contains byte `at`, or `None`
@@ -272,10 +281,11 @@ fn open_brackets(window: &str, at: usize) -> Vec<usize> {
 /// to the window's edge.
 fn enclosing_span(window: &str, at: usize) -> Option<&str> {
     let bytes = window.as_bytes();
-    let start = *open_brackets(window, at).last()?;
-    // Forward from the value to the closer that matches the opener.
+    let (open, resume) = scan_to(window, at);
+    let start = *open.last()?;
+    // Forward from the value (past the string it sits in) to the closer that matches the opener.
     let mut depth = 0usize;
-    let mut j = at.min(bytes.len());
+    let mut j = resume.min(bytes.len());
     while j < bytes.len() {
         match bytes[j] {
             b'{' | b'(' => depth += 1,

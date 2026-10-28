@@ -541,7 +541,7 @@ fn a_readable_name_on_a_code_constant_identifier_stays_readable() {
 /// A runtime-built `AIza` key: the repository holds no 39-character literal. It ends on a letter
 /// or digit, because the shape is word-bounded (`\b`) and a key ending in `-` or `_` is not
 /// matched as a Google key at all.
-fn google_key(seed: u64) -> String {
+pub(super) fn google_key(seed: u64) -> String {
     let mut key = format!(
         "AIza{}",
         body(
@@ -557,19 +557,19 @@ fn google_key(seed: u64) -> String {
     key
 }
 
-fn assert_firebase_twin(text: &str) {
+pub(super) fn assert_firebase_twin(text: &str) {
     let twin = assert_twin(text, SecretShape::GoogleApiKey);
     assert_eq!(twin, Twin::FirebaseWebApiKey, "{text}");
 }
 
-fn assert_google_secret(text: &str, expected: &str) {
+pub(super) fn assert_google_secret(text: &str, expected: &str) {
     let secrets = detect_secrets(text);
     assert_eq!(secrets.len(), 1, "expected one secret in: {text}");
     assert_eq!(secrets[0].shape, SecretShape::GoogleApiKey);
     assert_eq!(&text[secrets[0].value.clone()], expected);
 }
 
-fn js_config(key: &str) -> String {
+pub(super) fn js_config(key: &str) -> String {
     format!(
         "const firebaseConfig = {{\n  apiKey: \"{key}\",\n  authDomain: \"x.firebaseapp.com\",\n  projectId: \"x\",\n  appId: \"1:2:web:3\"\n}};\n"
     )
