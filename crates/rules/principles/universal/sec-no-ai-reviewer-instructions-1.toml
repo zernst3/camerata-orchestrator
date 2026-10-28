@@ -1,5 +1,5 @@
 id = "SEC-NO-AI-REVIEWER-INSTRUCTIONS-1"
-version = 1
+version = 2
 title = "Source code carries no text addressed to an AI code reviewer telling it what to report or what to ignore"
 domain = "universal"
 layer = "universal"
@@ -11,7 +11,7 @@ min_severity = "medium"
 max_severity = "high"
 default = true
 verification = "grounded"
-qualifies = "Deterministic over comments and string literals only, matched against one fixed list of phrases (case does not matter and runs of spaces count as one). A phrase must read as an instruction to a reviewer on its own: text that only mentions AI or an AI reviewer is never matched. Rust, TypeScript, JavaScript, Python and SQL are read through a syntax highlighter; Go, Java, Kotlin, C#, Ruby, PHP, Swift, C, C++ and shell scripts are read by whole-line comments and double-quoted text. A phrase broken across two lines is not matched. Vendored and built code is skipped."
+qualifies = "Deterministic over comments and string literals only, matched against one fixed list of phrases (case does not matter and runs of spaces count as one). A phrase must read as an instruction to a reviewer on its own: text that only mentions AI or an AI reviewer is never matched. A few phrases that are also ordinary comment wording (such as the words do not flag this) count only when the same comment or string names an AI, a reviewer, an LLM, a model, an assistant or Claude as a whole word. Test files are not read, so a deliberate fixture for an injection filter belongs in test code. Rust, TypeScript, JavaScript, Python and SQL are read through a syntax highlighter; Go, Java, Kotlin, C#, Ruby, PHP, Swift, C, C++ and shell scripts are read by whole-line comments and double-quoted text. A phrase broken across two lines is not matched. Vendored and built code is skipped."
 
 [[sources]]
 url = "https://genai.owasp.org/llmrisk/llm01-prompt-injection/"
@@ -22,7 +22,7 @@ url = "https://cwe.mitre.org/data/definitions/1427.html"
 title = "CWE-1427: Improper Neutralization of Input Used for LLM Prompting"
 
 [decision]
-question = "Does a comment or a string in the code address an AI code reviewer, telling it to report no findings, to ignore its instructions or to skip a file, or imitate the delimiters a review tool puts around a file?"
+question = "Does a comment or a string in the code address an AI code reviewer (telling it to report no findings, to ignore its instructions or to skip a file) or imitate the delimiters a review tool puts around a file?"
 default = "no-instructions-to-ai-reviewers-in-code"
 why = """
 Code is now routinely read by AI models during review: an assistant in a pull request, an automated
