@@ -2251,6 +2251,11 @@ async fn a_build_argument_image_reaches_coverage_and_the_stamp_says_why() {
         panic!("expected a not-checked stamp, got {:?}", audit.eol);
     };
     assert_eq!(reason, "every version found was excluded (see Coverage)");
+    // The vulnerability stamp on the same report must not contradict it.
+    let FeedStamp::NotChecked { reason } = &audit.nvd else {
+        panic!("expected a not-checked NVD stamp, got {:?}", audit.nvd);
+    };
+    assert_eq!(reason, "every version found was excluded (see Coverage)");
 }
 
 #[tokio::test]

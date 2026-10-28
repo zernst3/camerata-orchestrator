@@ -1917,8 +1917,8 @@ the final stage is built on counts, because an earlier build stage never ships; 
 itself a build argument (`FROM ${BASE}`) cannot be named, so it is listed as not checked. A framework counts
 only when your project file beside the lockfile lists it as a direct, non-dev dependency (in a
 workspace project, the `package.json` of a listed workspace package counts); one that
-is only pulled in by something else, only used in development, or only an optional or peer
-dependency, is listed as not checked. If either source cannot be
+is only pulled in by something else, only used in development or only an optional or peer
+dependency is listed as not checked. If either source cannot be
 reached, Coverage says "Runtime end-of-life data unavailable in this scan" or "Runtime vulnerability
 data unavailable in this scan", and the report makes no claim about what was not checked. What a
 repository declares is not proof of what runs in production.

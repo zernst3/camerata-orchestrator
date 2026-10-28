@@ -617,12 +617,13 @@ pub async fn audit_runtimes(
         eol_tally.add(product.label(), &state);
         feeds_by_product.insert(product, state);
     }
+    // Versions that were read and then left out are not the same as versions never found; both
+    // stamps say so the same way.
+    let every_one_excluded = !found.is_empty()
+        && found
+            .iter()
+            .all(|f| matches!(f.decl.version, Version::Excluded(_)));
     let eol_stamp = if products.is_empty() {
-        // Versions that were read and then left out are not the same as versions never found.
-        let every_one_excluded = !found.is_empty()
-            && found
-                .iter()
-                .all(|f| matches!(f.decl.version, Version::Excluded(_)));
         FeedStamp::NotChecked {
             reason: if every_one_excluded {
                 REASON_ALL_EXCLUDED
@@ -812,7 +813,9 @@ pub async fn audit_runtimes(
     }
     let nvd_stamp = if lookups.is_empty() {
         FeedStamp::NotChecked {
-            reason: if release_only.is_empty() && known.is_empty() {
+            reason: if every_one_excluded {
+                REASON_ALL_EXCLUDED.to_string()
+            } else if release_only.is_empty() && known.is_empty() {
                 REASON_NOTHING_DECLARED.to_string()
             } else {
                 REASON_NO_EXACT_RUNTIME.to_string()
