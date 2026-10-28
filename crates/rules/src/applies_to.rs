@@ -56,16 +56,17 @@ pub const ROUTING_LANGUAGES: &[&str] = &[
 pub fn lang_for_extension(ext: &str) -> Option<&'static str> {
     Some(match ext {
         "rs" => "rust",
-        "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs" | "mts" | "cts" => "web",
+        "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs" | "mts" | "cts" | "vue" | "svelte"
+        | "astro" => "web",
         "py" => "python",
         "go" => "go",
         "java" => "java",
-        "kt" => "kotlin",
+        "kt" | "kts" => "kotlin",
         "rb" => "ruby",
         "php" => "php",
         "cs" | "cshtml" | "razor" => "csharp",
         "swift" => "swift",
-        "c" | "h" | "cpp" => "cpp",
+        "c" | "h" | "cpp" | "cc" | "cxx" | "hpp" | "hh" => "cpp",
         _ => return None,
     })
 }

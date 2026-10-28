@@ -19,8 +19,8 @@ use crate::scan_ledger::{SkipReason, SKIPPED_FILES_LISTED_PER_REASON};
 pub const AI_REVIEW_ALL_PASSES: &str = "AI review (all passes)";
 
 /// The repos the advisory language-model tier did not run for, in report order. Two sources:
-/// a run-wide block or error (the whole AI review produced nothing, so every repo is listed)
-/// and a whole-repo failure recorded as a failed pass named [`AI_REVIEW_ALL_PASSES`].
+/// a run-wide block or no model call at all (the whole AI review produced nothing, so every repo
+/// is listed) and a whole-repo failure recorded as a failed pass named [`AI_REVIEW_ALL_PASSES`].
 pub fn repos_without_ai_review(report: &crate::onboard::ScanReport) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let mut add = |repo: &str| {
@@ -30,9 +30,21 @@ pub fn repos_without_ai_review(report: &crate::onboard::ScanReport) -> Vec<Strin
     };
     // `provenance.audit_model` is stamped only when a model call was made, so `None` means no
     // model reviewed anything in this run (a deterministic-only scan, or every call blocked).
+    //
+    // An `ai_error` alone does not list every repo: it is the first whole-repo failure, and the
+    // other repos may have been reviewed and carry findings. The repos that failed are the ones
+    // with an [`AI_REVIEW_ALL_PASSES`] row below, so only those are listed. Saying the model did
+    // not run for a repo whose AI findings are in the table would be a false claim the other way.
+    //
+    // The exception is an `ai_error` with no row at all (a report saved before the rows existed):
+    // nothing says which repo failed, so none is assumed to have been reviewed.
+    let has_row = report
+        .failed_passes
+        .iter()
+        .any(|f| f.pass == AI_REVIEW_ALL_PASSES);
     if report.ai_blocked_reason.is_some()
-        || report.ai_error.is_some()
         || report.provenance.audit_model.is_none()
+        || (report.ai_error.is_some() && !has_row)
     {
         for repo in &report.repos {
             add(repo);
@@ -65,6 +77,49 @@ pub struct CoverageGapsJson {
     /// when the list is complete.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub skipped_beyond_cap_note: Option<String>,
+    /// H10: the rules that were checked against only the files in their language or declared
+    /// scope, with how many, summed over the repos of the scan. Empty when every rule saw every
+    /// file it could apply to.
+    #[serde(default)]
+    pub scope_limited_rules: Vec<ScopeLimitedRuleJson>,
+    /// The one sentence every renderer prints for them; `None` when the list is empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope_limited_note: Option<String>,
+}
+
+/// One rule that was checked against only part of the files, because of its scope.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ScopeLimitedRuleJson {
+    pub rule_id: String,
+    /// Files the rule was checked against.
+    pub files_checked: usize,
+    /// Files the audit was handed: every file of the repositories, or on an incremental run
+    /// only the files changed since the earlier inspection ([`Self::changed_files_only`]).
+    pub files_total: usize,
+    /// True when the counts are over the changed files of an incremental run, not all files.
+    pub changed_files_only: bool,
+    /// `language` or `declared`.
+    pub scope: String,
+}
+
+/// The sentence for `rules` (non-empty), in plain words.
+fn scope_limited_sentence(rules: &[ScopeLimitedRuleJson]) -> Option<String> {
+    let first = rules.first()?;
+    let count = rules.len();
+    Some(format!(
+        "{count} {} checked only against the files in {} scope, not every file in the \
+         repositories (for example {}: {} of {}). The counts per rule are on the workbook's \
+         Coverage sheet and in findings.json.",
+        if count == 1 { "rule was" } else { "rules were" },
+        if count == 1 { "its" } else { "their" },
+        first.rule_id,
+        first.files_checked,
+        if first.changed_files_only {
+            format!("the {} changed files", first.files_total)
+        } else {
+            format!("{} files", first.files_total)
+        },
+    ))
 }
 
 /// The "and K more" sentence for `omitted` skipped files that are named nowhere.
@@ -95,6 +150,7 @@ impl CoverageGapsJson {
             && self.dependency_gaps.is_empty()
             && self.skipped_files.is_empty()
             && self.skipped_beyond_cap_total == 0
+            && self.scope_limited_rules.is_empty()
     }
 }
 
@@ -131,12 +187,26 @@ pub fn coverage_gaps(report: &crate::onboard::ScanReport) -> CoverageGapsJson {
             reason: s.reason.label().to_string(),
         })
         .collect();
+    let scope_limited_rules: Vec<ScopeLimitedRuleJson> = report
+        .ledger
+        .scope_limited_rules()
+        .into_iter()
+        .map(|(rule_id, scope)| ScopeLimitedRuleJson {
+            rule_id: rule_id.to_string(),
+            files_checked: scope.checked,
+            files_total: scope.of,
+            changed_files_only: scope.changed_files_only,
+            scope: scope.kind.clone(),
+        })
+        .collect();
     CoverageGapsJson {
         failed_ai_passes,
         dependency_gaps,
         skipped_files,
         skipped_beyond_cap_total: input.skipped_beyond_cap_total,
         skipped_beyond_cap_note: skipped_beyond_cap_sentence(input.skipped_beyond_cap_total),
+        scope_limited_note: scope_limited_sentence(&scope_limited_rules),
+        scope_limited_rules,
     }
 }
 

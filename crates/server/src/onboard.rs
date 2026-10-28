@@ -89,6 +89,99 @@ pub const AUDIT_RULES: &[&str] = &[
     "SEC-NO-UNSAFE-DESERIALIZATION-1",
 ];
 
+/// The `Finding::captures` key recording which kind of producer made a finding: `semantic` for
+/// the language-model review, `deterministic` for the content floor. The incremental delta rescan
+/// carries the model's findings forward for unchanged files and recomputes the deterministic ones,
+/// and it must decide that from who produced the finding, not from the tier its rule id was first
+/// recorded under: the model can report under a floor rule id (H12). Absent on a finding saved
+/// before this existed, which the rescan then classifies by its rule's ledger tier as before.
+pub const PRODUCED_TIER_CAPTURE: &str = "produced_tier";
+
+/// The `captures` keys that are bookkeeping about a finding, not names of objects it is about:
+/// the producer ([`PRODUCED_TIER_CAPTURE`]) and the commit a carried finding came from
+/// (`report_export::CARRIED_FROM_CAPTURE`).
+///
+/// Captured VALUES are an identity signal: the merge stages treat two findings that share a
+/// captured value of three or more characters as the same root cause, even across files. A value
+/// like `semantic`, or the commit every carried finding names, would fuse unrelated findings into
+/// one row. So these keys are held aside across the merge stages ([`BookkeepingCaptures`]) and put
+/// back on the surviving rows.
+const BOOKKEEPING_CAPTURE_KEYS: &[&str] = &[
+    PRODUCED_TIER_CAPTURE,
+    crate::report_export::CARRIED_FROM_CAPTURE,
+    // The sentence a severity bound or verdict leaves when it moves a severity. The AI tier writes
+    // it inside `audit_repo`, before the cross-family merge; the same sentence on two findings
+    // says the same bound applied, not that they are about the same object.
+    crate::severity_bounds::SEVERITY_ADJUSTMENTS_CAPTURE,
+    // The templated history sentence every secret finding gets from `attach_secret_history_capture`.
+    HISTORY_STATUS_CAPTURE,
+];
+
+/// The `captures` key holding a secret finding's commit-history status.
+const HISTORY_STATUS_CAPTURE: &str = "history-status";
+
+/// Bookkeeping captures taken off findings before the merge stages and restored after them, keyed
+/// by what identifies a row there (repo, path, rule and snippet; not the line, which a merge may
+/// move).
+#[derive(Debug, Default)]
+struct BookkeepingCaptures {
+    held: std::collections::HashMap<RowIdentity, Vec<(String, String)>>,
+}
+
+/// What identifies a row across the merge stages: repo, path, rule id and snippet.
+type RowIdentity = (String, String, String, String);
+
+impl BookkeepingCaptures {
+    fn key(f: &Finding) -> RowIdentity {
+        (
+            f.repo.clone(),
+            f.path.clone(),
+            f.rule_id.clone(),
+            f.snippet.clone(),
+        )
+    }
+
+    /// Remove the bookkeeping keys from `findings`, remembering them.
+    fn take(&mut self, findings: &mut [Finding]) {
+        for f in findings {
+            let mut taken = Vec::new();
+            for key in BOOKKEEPING_CAPTURE_KEYS {
+                if let Some(value) = f.captures.remove(*key) {
+                    taken.push(((*key).to_string(), value));
+                }
+            }
+            if !taken.is_empty() {
+                self.held.entry(Self::key(f)).or_default().extend(taken);
+            }
+        }
+    }
+
+    /// Put the remembered keys back on the rows that survived. A key a row already carries is
+    /// left alone, except the severity adjustments, which are one sentence per line: the ones
+    /// held come first and any a later stage added after them are kept, so none is lost.
+    fn restore(&self, findings: &mut [Finding]) {
+        for f in findings {
+            let Some(held) = self.held.get(&Self::key(f)) else {
+                continue;
+            };
+            for (key, value) in held {
+                let slot = f.captures.entry(key.clone()).or_default();
+                if key == crate::severity_bounds::SEVERITY_ADJUSTMENTS_CAPTURE {
+                    let mut lines: Vec<String> = Vec::new();
+                    for line in value.lines().chain(slot.lines()) {
+                        if !line.trim().is_empty() && !lines.iter().any(|l| l == line) {
+                            lines.push(line.to_string());
+                        }
+                    }
+                    *slot = lines.join("\n");
+                } else if slot.is_empty() {
+                    *slot = value.clone();
+                }
+            }
+        }
+    }
+}
+
 /// One violation already present in the repo.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Finding {
@@ -921,6 +1014,19 @@ pub struct ScanReport {
 }
 
 impl ScanReport {
+    /// Whether the AI review covered every file it was handed: no fatal AI error, no scan pass
+    /// that failed over files (`files_not_reviewed > 0`), and the spend limit did not stop the
+    /// run. The ONE completeness predicate: a scan manifest's `ai_covered` and the delta rescan's
+    /// reading of a saved inspection both use it, so neither can carry the absent findings of an
+    /// unreviewed file forward as "reviewed, found nothing". A failed pass that is not over
+    /// files (recommendations, fix text, the clone judge) leaves every file's review intact and
+    /// does not count. This does not say whether the review was on at all; callers add that.
+    pub fn ai_review_complete(&self) -> bool {
+        self.ai_error.is_none()
+            && self.failed_passes.iter().all(|f| f.files_not_reviewed == 0)
+            && !self.ledger.is_cost_capped()
+    }
+
     /// Redact every finding and every report-level string in place; returns how many secret
     /// values had to be replaced. Zero on a healthy pipeline (every producer redacts at
     /// construction), so a non-zero count is a missed producer. Idempotent.
@@ -1820,6 +1926,12 @@ pub async fn audit_repos_with_llm_controlled(
     // the FIRST is kept (matching `ai_blocked_reason`'s single-reason shape); it is still
     // also folded into `notes` below so it is not lost from the human-readable message either.
     let mut first_ai_error: Option<String> = None;
+    // H11: what the incremental run re-audited and carried forward, summed over every repo, for
+    // the one `IncrementalCarry` record the exporters read.
+    let mut incremental_carry = crate::scan_cache::CarryTally::default();
+    // Producer and carried-from marks held aside while the merge stages run (see
+    // [`BookkeepingCaptures`]), restored once the whole scan's rows are final.
+    let mut bookkeeping = BookkeepingCaptures::default();
     // Aggregates REAL usage across every repo's audit (passes + calibration) for the
     // actual-vs-estimated readout.
     // The model the fix stage calls (rank 10): resolved once, from the same controls the
@@ -1937,11 +2049,20 @@ pub async fn audit_repos_with_llm_controlled(
                     reference_truncated,
                     skipped_oversize,
                     skipped_beyond_cap,
+                    skipped_unreadable,
                     excluded_noise,
                     excluded_noise_paths: _,
                 },
                 noise_lines,
             )) => {
+                // H9: the path-only floor rules still run over every file the walk named but
+                // could not read: a 2 MB `.pem` or a binary `.p12` is a secret file by its name.
+                let unread_paths: Vec<String> = skipped_oversize
+                    .iter()
+                    .chain(&skipped_beyond_cap)
+                    .chain(&skipped_unreadable)
+                    .cloned()
+                    .collect();
                 files_total += files.len();
                 files_excluded_total += excluded_noise;
                 excluded_noise_lines_total += noise_lines;
@@ -1952,6 +2073,7 @@ pub async fn audit_repos_with_llm_controlled(
                         skipped_beyond_cap,
                         crate::scan_ledger::SkipReason::BeyondFileCap,
                     ),
+                    (skipped_unreadable, crate::scan_ledger::SkipReason::NotText),
                 ] {
                     let repo_name = spec.to_string();
                     for path in paths {
@@ -2057,6 +2179,7 @@ pub async fn audit_repos_with_llm_controlled(
                         jstore.det_tool_running(jid, "floor");
                     }
                     let mut floor = audit_files(spec, &files);
+                    floor.extend(audit::audit_unread_paths(spec, &unread_paths, &files));
                     // P4: the ONE context fact that needs real git plumbing (whether a
                     // committed secret also appears in an EARLIER commit) rather than just
                     // the already-fetched file set `audit_files` works from — see
@@ -2081,6 +2204,11 @@ pub async fn audit_repos_with_llm_controlled(
                             files.len(),
                             emitted,
                         );
+                    }
+                    for f in &mut floor {
+                        f.captures
+                            .entry(PRODUCED_TIER_CAPTURE.to_string())
+                            .or_insert_with(|| "deterministic".to_string());
                     }
                     repo_findings = floor;
 
@@ -2335,16 +2463,30 @@ pub async fn audit_repos_with_llm_controlled(
                 if let (Some(prior), None) = (incremental_prior, effective_prior) {
                     // The prior matched on schema, rule selection and AI coverage, so what
                     // differs is the question it answered (model, prompt, rule wording).
-                    let question_changed =
-                        prior.is_current() && prior.matches_rules(&rules_fp) && prior.ai_covered;
+                    let rules_match = prior.is_current() && prior.matches_rules(&rules_fp);
+                    let question_changed = rules_match && prior.ai_covered;
                     notes.push(if !controls.efficiency.result_cache {
-                        format!("{spec}: result cache switched off — full re-scan")
+                        format!("{spec}: result cache switched off (full re-scan)")
+                    } else if run_ai_review && rules_match && !prior.ai_covered {
+                        // H3: the earlier scan left files unreviewed (a failed pass, a spend
+                        // stop, an AI error or no AI at all). Its fingerprints are not evidence
+                        // that those files were looked at, so the review runs over everything.
+                        format!(
+                            "{spec}: prior scan incomplete, full AI review re-run (full re-scan)"
+                        )
+                    } else if rules_match && !prior.ai_covered {
+                        // The AI review is off in this run, so nothing is re-run in full: the
+                        // earlier scan has no complete AI review to reuse, and that is all this
+                        // run can say about it.
+                        format!(
+                            "{spec}: prior scan had no complete AI review, so nothing is reused (full re-scan)"
+                        )
                     } else if question_changed {
                         format!(
-                            "{spec}: model, prompt or rule wording changed since last scan — full re-scan"
+                            "{spec}: model, prompt or rule wording changed since last scan (full re-scan)"
                         )
                     } else {
-                        format!("{spec}: rule selection changed since last scan — full re-scan")
+                        format!("{spec}: rule selection changed since last scan (full re-scan)")
                     });
                 }
                 if effective_prior.is_some() && part.unchanged_count > 0 {
@@ -2363,11 +2505,23 @@ pub async fn audit_repos_with_llm_controlled(
                 // tokens. A deterministic-only scan therefore never touches the LLM.
                 let mut ai_for_repo: Vec<Finding> = Vec::new();
                 if run_ai_review {
-                    ai_for_repo = part.carried.clone();
+                    // H11: every carried finding names the commit it was last found at, so a
+                    // reader can tell it was not re-audited this run. A finding carried on from
+                    // an earlier incremental run keeps the commit it was last actually audited at.
+                    let prior_commit = effective_prior.and_then(|m| m.commits.get(spec)).cloned();
+                    let mut carried = part.carried.clone();
+                    crate::scan_cache::mark_carried(&mut carried, prior_commit.as_deref());
+                    incremental_carry.add_repo(
+                        part.changed.len(),
+                        part.unchanged_count,
+                        carried.len(),
+                        prior_commit,
+                    );
+                    ai_for_repo = carried.clone();
                     if let Some((jstore, jid)) = job {
                         // Carried findings are real results for this run — surface them in the
                         // live preview alongside the floor.
-                        jstore.add_findings(jid, part.carried.clone());
+                        jstore.add_findings(jid, carried);
                     }
                     // AI audit parameterized by THIS repo's SEMANTIC rules only: ADVISORY
                     // findings. Skipped when nothing changed (a fully-cached repo costs zero
@@ -2425,12 +2579,18 @@ pub async fn audit_repos_with_llm_controlled(
                             .await;
                         match audited {
                             Ok((
-                                ai_findings,
+                                mut ai_findings,
                                 _ai_rules,
                                 repo_recs,
                                 repo_failed_passes,
                                 repo_stage_samples,
                             )) => {
+                                // H12: whoever the rule id belongs to, these came from the model.
+                                for f in &mut ai_findings {
+                                    f.captures
+                                        .entry(PRODUCED_TIER_CAPTURE.to_string())
+                                        .or_insert_with(|| "semantic".to_string());
+                                }
                                 for sample in repo_stage_samples {
                                     pipeline_ledger.record_stage_sample(sample);
                                 }
@@ -2528,6 +2688,46 @@ pub async fn audit_repos_with_llm_controlled(
                                         emitted,
                                     );
                                 }
+                                // H10: a rule whose scope held back part of the files says so. The
+                                // routing is recomputed here from the same rules and files the
+                                // audit was handed; `audit_repo` is not changed to report it.
+                                let route_plan = crate::scan_routing::plan_routes(
+                                    &audit_rules,
+                                    &part.changed,
+                                    controls.efficiency.applies_to_routing,
+                                );
+                                for group in &route_plan.groups {
+                                    let kind = match group.scope {
+                                        crate::scan_routing::Scope::Language(_) => "language",
+                                        crate::scan_routing::Scope::Declared { .. } => "declared",
+                                        crate::scan_routing::Scope::All => continue,
+                                    };
+                                    let evaluated = crate::scan_routing::files_in_scope(
+                                        &part.changed,
+                                        &group.scope,
+                                    )
+                                    .len();
+                                    // A group with no file was not run (it is recorded as not
+                                    // assessed). A group that saw every file counts too: the
+                                    // ledger sums over repos, so another repo's subset is judged
+                                    // against the whole.
+                                    if evaluated == 0 {
+                                        continue;
+                                    }
+                                    // On an incremental run the audit is handed only the changed
+                                    // files, so the count is over those, and the ledger says so.
+                                    let changed_files_only =
+                                        effective_prior.is_some() && part.unchanged_count > 0;
+                                    for rule in &group.rules {
+                                        pipeline_ledger.note_scope_subset(
+                                            &rule.id,
+                                            evaluated,
+                                            part.changed.len(),
+                                            kind,
+                                            changed_files_only,
+                                        );
+                                    }
+                                }
                                 ai_for_repo.extend(ai_findings);
                                 for rec in repo_recs {
                                     recommendations.insert(rec.rule_id.clone(), rec);
@@ -2555,7 +2755,26 @@ pub async fn audit_repos_with_llm_controlled(
                                         0,
                                         0,
                                     );
+                                    // H4: `record_rule` ORs `ran` across repos, so a rule that
+                                    // ran on another repo of this scan would otherwise read as
+                                    // "ran, found nothing" with this repo never reviewed.
+                                    pipeline_ledger.note_rule_not_run_for_repo(
+                                        rid,
+                                        spec,
+                                        &format!("the AI review failed ({e})"),
+                                    );
                                 }
+                                // H4: a whole-repo failure is a failed pass over every file of
+                                // the repo, so Coverage lists it and the methodology never claims
+                                // the advisory tier ran here. The pass name is the one the
+                                // exporters read (`coverage_gaps::AI_REVIEW_ALL_PASSES`).
+                                all_failed_passes.push(crate::ai_audit::FailedPass {
+                                    repo: spec.to_string(),
+                                    pass: crate::report_export::coverage_gaps::AI_REVIEW_ALL_PASSES
+                                        .to_string(),
+                                    reason: e.to_string(),
+                                    files_not_reviewed: files.len(),
+                                });
                                 let msg = format!("{spec}: AI audit skipped ({e})");
                                 if first_ai_error.is_none() {
                                     first_ai_error = Some(msg.clone());
@@ -2566,21 +2785,45 @@ pub async fn audit_repos_with_llm_controlled(
                     }
                 } else if !files.is_empty() {
                     notes.push(format!("{spec}: AI review deselected — deterministic only"));
+                    // H4: a compliance block is not a choice to skip the review. The block
+                    // reason is the skip reason, and the repo's files are listed as unreviewed
+                    // by the AI pass, like any other whole-repo failure.
+                    let skip_reason = ai_blocked_reason.as_ref().map_or_else(
+                        || "AI/semantic review not requested this run".to_string(),
+                        |why| format!("AI/semantic review blocked: {why}"),
+                    );
                     for (rid, _) in &semantic {
                         pipeline_ledger.record_rule(
                             rid.clone(),
                             crate::scan_ledger::RuleTier::Semantic,
                             false,
-                            Some("AI/semantic review not requested this run".to_string()),
+                            Some(skip_reason.clone()),
                             0,
                             0,
                         );
+                    }
+                    if let Some(why) = &ai_blocked_reason {
+                        all_failed_passes.push(crate::ai_audit::FailedPass {
+                            repo: spec.to_string(),
+                            pass: crate::report_export::coverage_gaps::AI_REVIEW_ALL_PASSES
+                                .to_string(),
+                            reason: why.clone(),
+                            files_not_reviewed: files.len(),
+                        });
                     }
                 }
 
                 // Record this repo into the fresh manifest: fingerprints of EVERY current file
                 // (so next run can tell what changed) + the repo's AI findings (carried ∪ fresh).
                 manifest_builder.record_repo(spec, &files, &ai_for_repo);
+                // A dirty tree is not the commit: recording HEAD would name a state that was not audited.
+                if let Some(sha) = audited_refs
+                    .last()
+                    .filter(|r| !r.dirty)
+                    .and_then(|r| r.sha.as_deref())
+                {
+                    manifest_builder.record_commit(spec, sha);
+                }
 
                 repo_findings.extend(ai_for_repo);
                 // P7: drop any finding whose rule carries a stack exception that applies to
@@ -2626,6 +2869,7 @@ pub async fn audit_repos_with_llm_controlled(
                 // undercounts, or entirely drops, an absorption whose rule id collides with the
                 // primary's or with another absorbed member's — the exact shape of the
                 // 45-rows-in/32-out/8-merged/5-unaccounted defect this fixes).
+                bookkeeping.take(&mut repo_findings);
                 let pre_merge_findings = repo_findings.clone();
                 let rows_in = repo_findings.len();
                 let mut repo_findings =
@@ -2728,7 +2972,8 @@ pub async fn audit_repos_with_llm_controlled(
     // `cross-family-merge`, via `account_location_merge` over `also_locations`.
     let pre_structural_group = all_findings.clone();
     let rows_in = all_findings.len();
-    let all_findings = crate::ai_audit::group_structural_needs_review(all_findings);
+    let mut all_findings = crate::ai_audit::group_structural_needs_review(all_findings);
+    bookkeeping.restore(&mut all_findings);
     let rows_out = all_findings.len();
     if rows_in != rows_out {
         let acc = account_location_merge(&pre_structural_group, &all_findings);
@@ -2785,6 +3030,9 @@ pub async fn audit_repos_with_llm_controlled(
         }
     }
     report.ledger = pipeline_ledger;
+    if let Some(carry) = incremental_carry.finish() {
+        report.ledger.record_incremental(carry);
+    }
     // The question this scan's AI findings answered, kept on the (persisted) inspection so the
     // delta rescan can prove its carried findings are still current. See `ScanLedger::ai_key`.
     report.ledger.record_ai_key(ai_key);
@@ -2897,7 +3145,13 @@ pub async fn audit_repos_with_llm_controlled(
     // manifest (the file fingerprints are always worth caching), but with `ai_covered = false` so
     // a later AI-on scan ignores its (empty/partial) AI findings as a baseline rather than
     // trusting them (see `effective_prior` above).
-    let ai_covered = run_ai_review && report.ai_error.is_none();
+    //
+    // H3: also false when any scan pass failed over files (`files_not_reviewed > 0`) or the
+    // spend limit stopped part of the run. Those files' fingerprints are still recorded, so
+    // were this manifest called complete the next run would treat them as reviewed and carry
+    // their (absent) findings forever. A failed pass that is not over files (recommendations,
+    // fix text, the clone judge) leaves the review of every file intact and does not count.
+    let ai_covered = run_ai_review && report.ai_review_complete();
     (
         report,
         manifest_builder
@@ -3317,6 +3571,66 @@ mod tests {
                 "{id} must reach the model's rule set — no prefix may exclude a rule from the \
                  only tier that can evaluate it: {semantic:?}"
             );
+        }
+    }
+
+    /// A capture that records bookkeeping (a severity-adjustment sentence, a history status, the
+    /// producer, the carried-from commit) must not read as "the same captured object": two
+    /// unrelated findings in different files that share one stay separate rows through the merge
+    /// stages, and get their bookkeeping back afterwards.
+    #[test]
+    fn bookkeeping_captures_do_not_fuse_unrelated_findings_and_are_restored() {
+        let adjusted = |path: &str, snippet: &str| {
+            let mut f = Finding {
+                repo: "acme/api".to_string(),
+                path: path.to_string(),
+                line: 3,
+                rule_id: "SEC-NO-HARDCODED-SECRETS-1".to_string(),
+                severity: "high".to_string(),
+                snippet: snippet.to_string(),
+                detail: format!("a secret in {path}"),
+                ..Finding::default()
+            };
+            f.captures.insert(
+                crate::severity_bounds::SEVERITY_ADJUSTMENTS_CAPTURE.to_string(),
+                "severity lowered from critical to high: the rule's authored ceiling".to_string(),
+            );
+            f.captures.insert(
+                "history-status".to_string(),
+                "committed once so far in this repository's history".to_string(),
+            );
+            f
+        };
+        let findings = vec![
+            adjusted("src/a.ts", "const a = loadSettings();"),
+            adjusted("deploy/b.py", "B = read_config()"),
+        ];
+
+        let mut guarded = findings.clone();
+        let mut held = BookkeepingCaptures::default();
+        held.take(&mut guarded);
+        assert!(guarded.iter().all(|f| f.captures.is_empty()), "{guarded:?}");
+        let mut merged = crate::ai_audit::merge_semantic_groups(guarded, &[]);
+        assert_eq!(
+            merged.len(),
+            2,
+            "unrelated findings stay separate: {merged:?}"
+        );
+        // A stage that runs after the merge adds its own sentence to the first row.
+        merged[0].captures.insert(
+            crate::severity_bounds::SEVERITY_ADJUSTMENTS_CAPTURE.to_string(),
+            "severity lowered from high to medium: a later bound".to_string(),
+        );
+        held.restore(&mut merged);
+        let notes = crate::severity_bounds::recorded_adjustments(&merged[0]);
+        assert_eq!(notes.len(), 2, "both sentences are kept: {notes:?}");
+        assert!(notes[0].contains("authored ceiling") && notes[1].contains("later bound"));
+        for f in &merged {
+            assert_eq!(f.captures.len(), 2, "{f:?}");
+            assert!(f
+                .captures
+                .contains_key(crate::severity_bounds::SEVERITY_ADJUSTMENTS_CAPTURE));
+            assert!(f.captures.contains_key("history-status"));
         }
     }
 
@@ -5752,6 +6066,21 @@ mod tests {
             msg.contains("full re-scan"),
             "a matching-rules but ai_covered=false prior must be treated as no usable cache \
              (the SAME 'no effective prior' path a rules mismatch takes), not silently reused: {msg}"
+        );
+        // The earlier scan was incomplete and this run has the AI review off: the note says that,
+        // not that the rule selection changed.
+        assert!(
+            msg.contains("prior scan had no complete AI review"),
+            "an incomplete prior with the AI off gets its own true note: {msg}"
+        );
+        assert!(
+            !msg.contains("rule selection changed"),
+            "the rules did not change: {msg}"
+        );
+        // This run has the AI review off, so it re-runs nothing: the note must not claim it did.
+        assert!(
+            !msg.contains("full AI review re-run"),
+            "an AI-off run must not claim a full AI review was re-run: {msg}"
         );
         // A fresh manifest is still produced (and, since this run's AI was off, still correctly
         // stamped ai_covered = false again).
