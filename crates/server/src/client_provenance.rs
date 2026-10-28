@@ -10,6 +10,8 @@
 //! - **corpus version**: [`camerata_rules::corpus_version`], a content digest of the rule corpus.
 //! - **rules last reviewed**: [`camerata_rules::client_rules_last_reviewed`], the oldest review
 //!   date across the rules the scan used, `None` while any of them has never been reviewed.
+//! - **vulnerability data as of**: the scan's own `ScanProvenance::vulnerability_data` stamp
+//!   (CISA KEV, FIRST EPSS, OSV), see [`crate::vuln_intel`].
 //!
 //! # The one sanctioned freshness path
 //!
@@ -74,6 +76,7 @@ pub fn export_provenance_with(
 ) -> ManifestProvenance {
     let mut provenance = ManifestProvenance::from_cover(cover);
     provenance.cost_cap_reached = report.ledger.is_cost_capped();
+    provenance.vulnerability_data = report.provenance.vulnerability_data.clone();
     provenance.corpus_version = corpus.map(corpus_version);
     provenance.rules_last_reviewed = match (watermark, rules_used_by_scan(report, corpus)) {
         (Some(watermark), Some(used)) => client_rules_last_reviewed(watermark, &used),

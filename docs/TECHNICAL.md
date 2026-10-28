@@ -2829,6 +2829,26 @@ thing:
   reused verbatim from the PDF's own `AuditReportJson` rather than re-derived.
 - **`README.txt`**, the orientation note.
 
+**Vulnerability intelligence on dependency rows** (`crates/server/src/vuln_intel.rs`). After the
+osv-scanner pass over every repo, `onboard_audit`, `onboard_audit_start` and `camerata inspect`
+each call `vuln_intel::enrich_dependency_findings` once over the rows that pass added (one
+implementation for the desktop app and the CLI). It fetches two deterministic feeds, nothing
+scraped: the CISA KEV catalog (JSON) and the FIRST.org EPSS API, queried by CVE in batches of
+100. Matching is by CVE: `dep_audit::parse_osv_json` records each advisory's own CVE id plus its
+CVE aliases in the `osv_cve_ids` capture, so a GHSA or RUSTSEC advisory matches through its alias.
+A KEV hit is labelled "Known exploited" in `detail` (capture `vuln_known_exploited`) and its
+severity is floored to `critical`; an EPSS score and percentile are appended to `detail` (captures
+`vuln_epss_*`). Each feed is fetched once per run and cached under `<data dir>/camerata/vuln-intel/`
+with its fetch time. A failed fetch falls back to a cache fetched within `MAX_CACHE_AGE_DAYS` (7);
+otherwise nothing is labelled from that feed, a `vulnerability-intel` coverage note is recorded,
+and the stamp says the feed was not checked. The stamp (`ScanProvenance::vulnerability_data`)
+carries, per feed (KEV `dateReleased`, the EPSS score date, the OSV query date), either "as of
+<date>" or "not checked (<reason>)". It reaches `README.txt` as `Vulnerability data (<feed>) ...`
+lines and `manifest.json` as `inspection.vulnerability_data.<feed>` (`status`, `as_of`, `stamp`);
+the release gate's README/manifest agreement check compares the two. A report with no stamp
+(no dependency audit, or persisted before the stamp existed) renders every feed as not checked.
+Tests use fixture feeds under `crates/server/tests/fixtures/vuln_intel/` and no network.
+
 **The workbook is partitioned by finding KIND**, which replaced a single flat
 findings sheet on 2026-10-11. A row renders where its own columns mean something,
 and in exactly one place. Worksheets, in the order `build_workbook` adds them:

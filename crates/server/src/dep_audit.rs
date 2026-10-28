@@ -75,6 +75,17 @@ pub const DEP_AUDIT_RULE_ID: &str = "DEP-AUDIT-1";
 /// The tool name carried on every dep-audit finding and coverage note.
 const TOOL_NAME: &str = "osv-scanner";
 
+/// The phrase in the coverage note osv-scanner's "no lockfiles" outcome produces. That outcome is
+/// a completed scan with nothing to report, unlike every other note this module emits (the scan
+/// did not run); [`note_means_scanned`] tells the two apart.
+const NO_LOCKFILES: &str = "found no lockfiles";
+
+/// True when a dep-audit coverage note still means osv-scanner scanned the repo (it found no
+/// lockfiles); false for every "did not run" outcome (provisioning, spawn, timeout, parse).
+pub fn note_means_scanned(note: &CoverageNote) -> bool {
+    note.message.contains(NO_LOCKFILES)
+}
+
 // ─── JSON parser (pure, unit-tested) ─────────────────────────────────────────
 
 /// Parse the JSON output of `osv-scanner --format json` into a flat list of
@@ -142,6 +153,19 @@ fn semver_sort_key(v: &str) -> (u64, u64, u64, String) {
         parts.next().unwrap_or(0),
         v.to_string(),
     )
+}
+
+/// The CVE ids an OSV advisory is known by: its own id when it is a CVE, plus every `CVE-`
+/// alias, upper-cased, de-duplicated, in first-seen order.
+fn advisory_cve_ids(advisory_id: &str, aliases: &[&str]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for id in std::iter::once(advisory_id).chain(aliases.iter().copied()) {
+        let id = id.trim().to_ascii_uppercase();
+        if id.starts_with("CVE-") && !out.contains(&id) {
+            out.push(id);
+        }
+    }
+    out
 }
 
 pub fn parse_osv_json(repo: &str, repo_root: &Path, output: &str) -> anyhow::Result<Vec<Finding>> {
@@ -242,6 +266,23 @@ pub fn parse_osv_json(repo: &str, repo_root: &Path, output: &str) -> anyhow::Res
                     format!("{advisory_id}{aliases_str}: {title} (affects {coord}){fixed_clause}")
                 };
 
+                // W33: carry OSV's patched version (when any) so `ownership::ownership_of`
+                // can split fixable-by-upgrade (ClientOwned) from not-yet-fixable
+                // (ExternalDependency). A structured capture key, not prose in `detail`.
+                let mut captures = std::collections::BTreeMap::new();
+                if let Some(v) = &fixed_version {
+                    captures.insert("osv_fixed_version".to_string(), v.clone());
+                }
+                // The advisory's CVE ids (its own id when it is a CVE, plus every CVE alias), so
+                // `vuln_intel` can match a GHSA/RUSTSEC advisory against KEV and EPSS by CVE.
+                let cve_ids = advisory_cve_ids(&advisory_id, &aliases);
+                if !cve_ids.is_empty() {
+                    captures.insert(
+                        crate::vuln_intel::CVE_IDS_CAPTURE.to_string(),
+                        cve_ids.join(","),
+                    );
+                }
+
                 let mut finding = Finding {
                     could_be_intentional: false,
                     repo: repo.to_string(),
@@ -263,16 +304,7 @@ pub fn parse_osv_json(repo: &str, repo_root: &Path, output: &str) -> anyhow::Res
                     effort: None,
                     category: None,
                     located: true,
-                    // W33: carry OSV's patched version (when any) so `ownership::ownership_of`
-                    // can split fixable-by-upgrade (ClientOwned) from not-yet-fixable
-                    // (ExternalDependency). A structured capture key, not prose in `detail`.
-                    captures: match &fixed_version {
-                        Some(v) => std::collections::BTreeMap::from([(
-                            "osv_fixed_version".to_string(),
-                            v.clone(),
-                        )]),
-                        None => Default::default(),
-                    },
+                    captures,
                     // Not a multi-option semantic rule finding — never evaluated under an
                     // alternative option.
                     evaluated_option_id: None,
@@ -471,7 +503,7 @@ async fn run_dep_audit_with_tooling(
             || stderr.to_ascii_lowercase().contains("no packages")
         {
             format!(
-                "dependency audit (osv-scanner) found no lockfiles in {repo} — \
+                "dependency audit (osv-scanner) {NO_LOCKFILES} in {repo}; \
                  no dependency exposure detected (or no supported lockfile present)"
             )
         } else if !exit_ok {
@@ -481,7 +513,7 @@ async fn run_dep_audit_with_tooling(
             )
         } else {
             // Exit OK but empty stdout — treat as no lockfiles.
-            format!("dependency audit (osv-scanner) found no lockfiles in {repo}")
+            format!("dependency audit (osv-scanner) {NO_LOCKFILES} in {repo}")
         };
 
         return (
