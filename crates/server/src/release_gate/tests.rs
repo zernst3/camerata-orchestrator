@@ -932,7 +932,10 @@ async fn export_audit_report_pdf_route_is_gated_on_data_json() {
         .is_some_and(|m| m.starts_with("EXPORT BLOCKED by the release gate")));
 }
 
+// Serial with the tests that swap PATH to a failing fake `typst`: this test runs the real
+// compiler and would otherwise pick up the fake one mid-swap.
 #[tokio::test]
+#[serial_test::serial(process_env)]
 async fn export_product_returns_422_with_the_problem_list_when_blocked() {
     if !typst_on_path() {
         eprintln!("export_product 422 test: skipping, typst is not on PATH");
@@ -970,7 +973,9 @@ async fn export_product_returns_422_with_the_problem_list_when_blocked() {
     );
 }
 
+// Serial for the same reason as the test above.
 #[tokio::test]
+#[serial_test::serial(process_env)]
 async fn export_product_success_names_the_release_checks_in_a_header() {
     if !typst_on_path() {
         eprintln!("export_product success test: skipping, typst is not on PATH");
