@@ -440,6 +440,15 @@ impl ClaudeCliDriver {
             // The governed dev agent that can self-escalate can also propose project memory.
             allowed.push(PROPOSE_MEMORY_TOOL.to_string());
         }
+        // The CLI runs with --dangerously-skip-permissions, under which --allowedTools is
+        // advisory only. So a recording tool that was NOT granted is denied outright: the
+        // clarification and decision tools exist on every session's gateway, but only the
+        // investigation agent may call them.
+        let mut disallowed = self.disallowed_builtins.clone();
+        if !self.clarification {
+            disallowed.push(ASK_CLARIFICATION_TOOL.to_string());
+            disallowed.push(PROPOSE_DECISION_TOOL.to_string());
+        }
         let mut args: Vec<String> = vec![
             "-p".to_string(),
             task.to_string(),
@@ -449,7 +458,7 @@ impl ClaudeCliDriver {
             "--allowedTools".to_string(),
             allowed.join(" "),
             "--disallowedTools".to_string(),
-            self.disallowed_builtins.join(" "),
+            disallowed.join(" "),
             "--dangerously-skip-permissions".to_string(),
             "--output-format".to_string(),
             "json".to_string(),
@@ -800,6 +809,48 @@ mod tests {
         assert_eq!(PROPOSE_DECISION_TOOL, "mcp__camerata__propose_decision");
         for tool in ["Bash", "Write", "Edit", "MultiEdit", "NotebookEdit", "Task"] {
             assert!(!inv.split(' ').any(|t| t == tool));
+        }
+    }
+
+    #[test]
+    fn clarification_and_decision_tools_are_denied_outright_unless_granted() {
+        // The CLI runs with --dangerously-skip-permissions, under which --allowedTools is
+        // advisory only, so a tool that is not granted must be on --disallowedTools too.
+        let disallowed_of = |d: &ClaudeCliDriver, role: &Role| {
+            let args = d.build_args(role, "task");
+            let i = args.iter().position(|a| a == "--disallowedTools").unwrap();
+            args[i + 1].clone()
+        };
+        for name in ["Implementer", "Reviewer"] {
+            let r = Role {
+                name: name.to_string(),
+                ..role()
+            };
+            for d in [
+                ClaudeCliDriver::new("/tmp/mcp.json"),
+                ClaudeCliDriver::new("/tmp/mcp.json").with_escalation(true),
+            ] {
+                let dis = disallowed_of(&d, &r);
+                assert!(
+                    dis.split(' ').any(|t| t == PROPOSE_DECISION_TOOL),
+                    "{name}: {dis}"
+                );
+                assert!(
+                    dis.split(' ').any(|t| t == ASK_CLARIFICATION_TOOL),
+                    "{name}: {dis}"
+                );
+            }
+        }
+        // Granted (the investigation agent): neither tool is denied.
+        let inv = disallowed_of(
+            &ClaudeCliDriver::new("/tmp/mcp.json").with_clarification(true),
+            &role(),
+        );
+        assert!(!inv.split(' ').any(|t| t == PROPOSE_DECISION_TOOL));
+        assert!(!inv.split(' ').any(|t| t == ASK_CLARIFICATION_TOOL));
+        // The built-in denylist is unchanged either way.
+        for tool in ["Bash", "Write", "Edit", "MultiEdit", "NotebookEdit", "Task"] {
+            assert!(inv.split(' ').any(|t| t == tool));
         }
     }
 

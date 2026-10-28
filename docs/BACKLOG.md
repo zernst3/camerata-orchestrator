@@ -3,6 +3,16 @@
 Deferred work and known gaps not yet scheduled. Newest intent at the top. UI-only
 follow-ups live in `UI_BACKLOG.md`; this file is for engine + cross-cutting items.
 
+## Decisions: the investigation's merge can overwrite a ruling made in the same instant (2026-10-28, OPEN)
+
+When an investigation pass ends, `record_proposed_decisions` (`crates/server/src/investigation_run.rs`)
+reads the story's decisions, merges the agent's proposals in and writes the whole list back, with no
+lock across the three steps. A decision the architect approves or rejects in the console between the
+read and the write is overwritten by the older list. The window is short (the end of a pass) and the
+server's gate still blocks on any Pending decision, so the worst case is a ruling that has to be made
+again. Fix: a compare-and-swap on the list (write only if it is unchanged since the read, else merge
+again), in `UowStore` beside `set_decisions`.
+
 ## Coverage: a reply still cut off after its one retry parses as zero findings (2026-10-28, OPEN)
 
 A scan reply cut off at the output limit gets one retry at a higher cap (`retry_unusable_scan_reply`

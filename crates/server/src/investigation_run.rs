@@ -178,6 +178,36 @@ pub(crate) struct DecisionMerge {
     pub(crate) ruled_already: usize,
     /// One plain-language line per proposal that was dropped as unusable.
     pub(crate) dropped: Vec<String>,
+    /// One plain-language line per proposal that was kept but had oversized parts cut down.
+    pub(crate) trimmed: Vec<String>,
+}
+
+/// Size caps on what the agent may file (the sink is agent output, so it is bounded before it
+/// reaches the decisions store and the console).
+const MAX_LABEL_CHARS: usize = 200;
+const MAX_TEXT_BYTES: usize = 4096;
+const MAX_OPTIONS: usize = 10;
+const MAX_OPTION_CHARS: usize = 200;
+const MAX_OPTION_DESCRIPTION_CHARS: usize = 500;
+
+/// `s` cut to at most `max` characters; the flag says whether anything was cut.
+fn cut_chars(s: &str, max: usize) -> (String, bool) {
+    match s.char_indices().nth(max) {
+        Some((i, _)) => (s[..i].trim_end().to_string(), true),
+        None => (s.to_string(), false),
+    }
+}
+
+/// `s` cut to at most `max` bytes on a character boundary; the flag says whether anything was cut.
+fn cut_bytes(s: &str, max: usize) -> (String, bool) {
+    if s.len() <= max {
+        return (s.to_string(), false);
+    }
+    let mut end = max;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    (s[..end].trim_end().to_string(), true)
 }
 
 /// Merge the agent's proposals into the story's existing decisions. Pure.
@@ -187,12 +217,15 @@ pub(crate) struct DecisionMerge {
 /// - An existing `Approved` or `Rejected` record with that id is kept as is: the architect
 ///   already ruled. An existing `Pending` one is replaced in place by the new proposal.
 ///   Existing records no proposal mentions stay untouched; new ones are appended.
-/// - A proposal with a blank label, a blank recommendation or fewer than two named options is
-///   dropped (with a line saying why). Two proposals with the same artifact id in one pass:
-///   the first wins.
+/// - A proposal with a blank label, a blank option label, fewer than two distinct options, or
+///   a recommended option that is none of its options is dropped (with a line saying why).
+///   Two proposals with the same artifact id in one pass: the first wins.
+/// - Sizes are capped (label 200 characters, question and rationale 4 KB, at most 10 options of
+///   200 characters each, descriptions 500 characters); anything cut gets a `trimmed` line.
 /// - `DecisionRecord` has no field for the recommended option, so the rationale starts
-///   `Recommended: {option}.` and `alternatives_considered` holds the other option labels.
-///   The console reads that back with `parse_recommended_rationale`.
+///   `Recommended: {option}.`, `alternatives_considered` holds the other option labels and
+///   `option_descriptions` the one-line descriptions (recommended first). The console reads
+///   that back with `parse_recommended_rationale`.
 pub(crate) fn merge_proposed_decisions(
     story_id: &str,
     existing: Vec<DecisionRecord>,
@@ -206,63 +239,113 @@ pub(crate) fn merge_proposed_decisions(
     let mut replaced = 0usize;
     let mut ruled_already = 0usize;
     let mut dropped: Vec<String> = Vec::new();
+    let mut trimmed: Vec<String> = Vec::new();
 
     for p in proposals {
-        let label = p.label.trim();
-        let name = if label.is_empty() {
-            "(no label)"
-        } else {
-            label
-        };
+        let mut cut: Vec<String> = Vec::new();
+        let (label, label_cut) = cut_chars(p.label.trim(), MAX_LABEL_CHARS);
         if label.is_empty() {
             dropped.push("Dropped a proposed decision: it had no label.".to_string());
             continue;
         }
-        let option_labels: Vec<&str> = p
-            .options
-            .iter()
-            .map(|o| o.label.trim())
-            .filter(|l| !l.is_empty())
-            .collect();
-        if option_labels.len() < 2 || option_labels.len() != p.options.len() {
+        if label_cut {
+            cut.push("the label".to_string());
+        }
+        let name = label.as_str();
+
+        // Options: every label must be present; repeats (ignoring case) count once.
+        let mut options: Vec<(String, String)> = Vec::new();
+        let mut blank_option = false;
+        let (mut labels_cut, mut descriptions_cut) = (false, false);
+        for o in &p.options {
+            let (l, lc) = cut_chars(o.label.trim(), MAX_OPTION_CHARS);
+            if l.is_empty() {
+                blank_option = true;
+                break;
+            }
+            let (d, dc) = cut_chars(o.description.trim(), MAX_OPTION_DESCRIPTION_CHARS);
+            labels_cut |= lc;
+            descriptions_cut |= dc;
+            if !options.iter().any(|(e, _)| e.eq_ignore_ascii_case(&l)) {
+                options.push((l, d));
+            }
+        }
+        if blank_option || options.len() < 2 {
             dropped.push(format!(
                 "Dropped the proposed decision \"{name}\": it needs at least two options, each with a label."
             ));
             continue;
         }
-        // The recommendation must name one of the options (ignoring case); use that option's
-        // own spelling. A recommendation that matches none is kept as the agent wrote it.
-        let recommended_given = p.recommended.trim();
+        if labels_cut {
+            cut.push("option labels".to_string());
+        }
+        if descriptions_cut {
+            cut.push("option descriptions".to_string());
+        }
+
+        let (recommended_given, _) = cut_chars(p.recommended.trim(), MAX_OPTION_CHARS);
         if recommended_given.is_empty() {
             dropped.push(format!(
                 "Dropped the proposed decision \"{name}\": it named no recommended option."
             ));
             continue;
         }
-        let recommended = option_labels
+        // The recommendation must be one of the options (ignoring case); the option's own
+        // spelling is used. One that matches none cannot be shown or approved honestly.
+        let Some(rec_at) = options
             .iter()
-            .find(|o| o.eq_ignore_ascii_case(recommended_given))
-            .copied()
-            .unwrap_or(recommended_given);
-        let alternatives: Vec<String> = option_labels
-            .iter()
-            .filter(|o| !o.eq_ignore_ascii_case(recommended))
-            .map(|o| (*o).to_string())
+            .position(|(l, _)| l.eq_ignore_ascii_case(&recommended_given))
+        else {
+            dropped.push(format!(
+                "Dropped the proposed decision \"{name}\": its recommended option \"{recommended_given}\" is not one of its options."
+            ));
+            continue;
+        };
+        let (recommended, rec_description) = options.remove(rec_at);
+        let option_count = options.len() + 1;
+        if option_count > MAX_OPTIONS {
+            cut.push(format!("options (kept {MAX_OPTIONS} of {option_count})"));
+            options.truncate(MAX_OPTIONS - 1);
+        }
+        let alternatives: Vec<String> = options.iter().map(|(l, _)| l.clone()).collect();
+        let descriptions: Vec<String> = std::iter::once(rec_description)
+            .chain(options.iter().map(|(_, d)| d.clone()))
             .collect();
+        let descriptions = if descriptions.iter().all(|d| d.is_empty()) {
+            Vec::new()
+        } else {
+            descriptions
+        };
 
-        let artifact_id = format!("{story_id}/decision/{}", slugify_decision_label(label));
+        let (question, question_cut) = cut_bytes(p.question.trim(), MAX_TEXT_BYTES);
+        let (reasoning, reasoning_cut) = cut_bytes(p.rationale.trim(), MAX_TEXT_BYTES);
+        if question_cut {
+            cut.push("the question".to_string());
+        }
+        if reasoning_cut {
+            cut.push("the rationale".to_string());
+        }
+
+        let artifact_id = format!("{story_id}/decision/{}", slugify_decision_label(&label));
         if !seen.insert(artifact_id.clone()) {
             continue;
+        }
+        if !cut.is_empty() {
+            trimmed.push(format!(
+                "Trimmed the proposed decision \"{name}\": cut down {}.",
+                cut.join(", ")
+            ));
         }
         let record = DecisionRecord::ai_proposed(
             story_id,
             artifact_id.clone(),
-            label,
-            p.question.trim(),
-            recommended_rationale(recommended, &p.rationale),
+            label.as_str(),
+            question,
+            recommended_rationale(&recommended, &reasoning),
             alternatives,
             now,
-        );
+        )
+        .with_option_descriptions(descriptions);
         match decisions.iter().position(|d| d.artifact_id == artifact_id) {
             Some(i) => match decisions[i].outcome {
                 DecisionOutcome::Pending => {
@@ -287,6 +370,7 @@ pub(crate) fn merge_proposed_decisions(
         kept: existing_count - replaced,
         ruled_already,
         dropped,
+        trimmed,
     }
 }
 
@@ -775,45 +859,82 @@ async fn run_one_investigation_pass(
         return;
     }
 
-    // Phase 3b: did the agent raise a clarifying question this pass? If so, PAUSE — post
-    // the question into the 3a store (auto-saved), persist the resume context, and park the
-    // run at AwaitingClarification. The agent already STOPped (the question was its last
-    // act), so there is no hung process to long-poll. Only reachable on `Ok` (an error has
-    // no session output to read the question back out of).
+    // Both sinks are read inside `finish_investigation_pass`, before the session dir goes away.
+    finish_investigation_pass(
+        &runs,
+        &uow,
+        &clarifications,
+        &resume,
+        &run_id,
+        &story_id,
+        &story_title,
+        &story_desc,
+        &model,
+        &task,
+        _session_dir.path(),
+        agent_result,
+        &next_seq,
+    );
+    // _session_dir (TempDir) removes the session dir automatically on drop here.
+}
+
+/// What happens once the agent has returned: read its two sinks, then either PAUSE on a raised
+/// clarification or record the note. Extracted from [`run_one_investigation_pass`] so the
+/// wiring is unit-testable without an agent; the pause and resume functions are unchanged.
+///
+/// Phase 3b: if the agent raised a clarifying question, PAUSE (post the question into the 3a
+/// store, persist the resume context, park the run at `AwaitingClarification`). The agent
+/// already STOPped (the question was its last act). Only reachable on `Ok` (an error has no
+/// session output to read the question back out of). Decisions the agent proposed BEFORE
+/// asking are filed first, so the pause does not throw them away.
+#[allow(clippy::too_many_arguments)]
+fn finish_investigation_pass(
+    runs: &RunStore,
+    uow: &UowStore,
+    clarifications: &ClarificationStore,
+    resume: &ClarifyResumeStore,
+    run_id: &str,
+    story_id: &str,
+    story_title: &str,
+    story_desc: &str,
+    model: &str,
+    task: &str,
+    session_dir: &Path,
+    agent_result: anyhow::Result<camerata_core::AgentOutcome>,
+    next_seq: &impl Fn() -> usize,
+) {
+    // The decisions the agent filed through `propose_decision` this pass.
+    let proposed = read_proposed_decisions(session_dir);
     if agent_result.is_ok() {
-        if let Some(req) = read_first_clarify_request(_session_dir.path()) {
+        if let Some(req) = read_first_clarify_request(session_dir) {
+            if !proposed.is_empty() {
+                record_proposed_decisions(runs, uow, run_id, story_id, &proposed, next_seq);
+            }
             pause_run_on_clarification(
-                &runs,
-                &uow,
-                &clarifications,
-                &resume,
-                &run_id,
-                &story_id,
-                &story_title,
-                &story_desc,
-                &model,
-                &task,
+                runs,
+                uow,
+                clarifications,
+                resume,
+                run_id,
+                story_id,
+                story_title,
+                story_desc,
+                model,
+                task,
                 req,
                 next_seq(),
             );
-            // spawn is dropped here; _dir (TempDir) removes the session dir automatically.
             return;
         }
     }
-    // The decisions the agent filed through `propose_decision` this pass. Read before the
-    // session dir goes away.
-    let proposed = read_proposed_decisions(_session_dir.path());
-    // _session_dir (TempDir) removes the session dir automatically on drop here — nothing
-    // below this point needs it (the clarify-sink and decisions reads were the last uses).
-    drop(_session_dir);
     record_investigation_outcome(
-        &runs,
-        &uow,
-        &run_id,
-        &story_id,
+        runs,
+        uow,
+        run_id,
+        story_id,
         agent_result,
         proposed,
-        &next_seq,
+        next_seq,
     );
 }
 
@@ -934,6 +1055,10 @@ fn record_proposed_decisions(
     proposed: &[ProposedDecisionRecord],
     next_seq: &impl Fn() -> usize,
 ) {
+    // KNOWN RACE (docs/BACKLOG.md): this reads the decision list, merges, then writes the whole
+    // list back with no lock across the three steps. A decision the architect rules on in the
+    // console between the read and the write can be overwritten by the stale list. The window
+    // is one pass's end, short and rare; a compare-and-swap on the list is the fix.
     let existing = uow.decisions_for(story_id);
     let had_existing = !existing.is_empty();
     let merge = merge_proposed_decisions(story_id, existing, proposed, chrono::Utc::now());
@@ -946,7 +1071,7 @@ fn record_proposed_decisions(
         content_hash: None,
     };
 
-    for line in &merge.dropped {
+    for line in merge.dropped.iter().chain(merge.trimmed.iter()) {
         runs.push_event(run_id, info(line.clone(), next_seq()));
     }
     if !proposed.is_empty() {
@@ -1835,5 +1960,202 @@ mod tests {
             .and_then(|r| r.split("4. ").next())
             .unwrap();
         assert!(!section3.contains('\u{2014}'));
+    }
+
+    // ── Gap 9 review fixes ──────────────────────────────────────────────────
+
+    #[test]
+    fn a_proposal_whose_recommended_option_matches_none_of_its_options_is_dropped_by_name() {
+        let proposals = vec![
+            proposal("Wrong pick", &["Cookies", "JWT"], "Carrier pigeon"),
+            proposal("Right pick", &["Cookies", "JWT"], "jwt"),
+        ];
+        let merge = merge_proposed_decisions("CAM-1", Vec::new(), &proposals, at());
+        assert_eq!(merge.decisions.len(), 1);
+        assert_eq!(merge.decisions[0].label, "Right pick");
+        assert_eq!(merge.dropped.len(), 1);
+        assert!(
+            merge.dropped[0].contains("Wrong pick"),
+            "{:?}",
+            merge.dropped
+        );
+        assert!(
+            merge.dropped[0].contains("Carrier pigeon"),
+            "names the bad recommendation: {:?}",
+            merge.dropped
+        );
+    }
+
+    #[test]
+    fn oversized_proposals_are_trimmed_with_an_event_line() {
+        let long_label = "L".repeat(300);
+        let mut big = proposal(&long_label, &[], "Opt11");
+        big.question = "q".repeat(5000);
+        big.rationale = "é".repeat(3000); // 6000 bytes, two bytes per character
+        big.options = (0..12)
+            .map(|i| ProposedOptionRecord {
+                label: format!("Opt{i}"),
+                description: "d".repeat(600),
+            })
+            .collect();
+        let merge = merge_proposed_decisions("CAM-1", Vec::new(), &[big], at());
+        assert_eq!(merge.decisions.len(), 1, "trimmed, not dropped");
+        let d = &merge.decisions[0];
+        assert_eq!(d.label.chars().count(), 200);
+        assert!(d.question.len() <= 4096);
+        let (rec, reasoning) =
+            camerata_worktracker::investigation::parse_recommended_rationale(&d.rationale).unwrap();
+        assert_eq!(rec, "Opt11", "the recommendation survives the option cap");
+        assert!(reasoning.len() <= 4096 && reasoning.chars().all(|c| c == 'é'));
+        assert_eq!(d.alternatives_considered.len(), 9, "10 options in all");
+        assert_eq!(d.alternatives_considered[0], "Opt0");
+        assert_eq!(d.option_descriptions.len(), 10);
+        assert!(d
+            .option_descriptions
+            .iter()
+            .all(|x| x.chars().count() == 500));
+        assert_eq!(merge.trimmed.len(), 1);
+        let line = &merge.trimmed[0];
+        for part in [
+            "the label",
+            "the question",
+            "the rationale",
+            "option descriptions",
+            "kept 10 of 12",
+        ] {
+            assert!(line.contains(part), "{part} missing from: {line}");
+        }
+        // Small proposals produce no trim line.
+        let ok = merge_proposed_decisions(
+            "CAM-1",
+            Vec::new(),
+            &[proposal("Fine", &["A", "B"], "A")],
+            at(),
+        );
+        assert!(ok.trimmed.is_empty());
+    }
+
+    #[test]
+    fn option_descriptions_are_kept_recommended_first() {
+        let mut p = proposal("Storage", &[], "JWT");
+        p.options = vec![
+            ProposedOptionRecord {
+                label: "Cookies".to_string(),
+                description: "server side".to_string(),
+            },
+            ProposedOptionRecord {
+                label: "JWT".to_string(),
+                description: "stateless".to_string(),
+            },
+            ProposedOptionRecord {
+                label: "Sessions".to_string(),
+                description: String::new(),
+            },
+        ];
+        let merge = merge_proposed_decisions("CAM-1", Vec::new(), &[p], at());
+        let d = &merge.decisions[0];
+        assert_eq!(d.alternatives_considered, vec!["Cookies", "Sessions"]);
+        assert_eq!(d.option_descriptions, vec!["stateless", "server side", ""]);
+    }
+
+    #[test]
+    fn proposals_filed_before_a_clarification_pause_are_recorded() {
+        let dir = session_dir_for("pause");
+        let decision = serde_json::json!({
+            "label": "Session storage",
+            "question": "Where do sessions live?",
+            "options": [{"label": "Cookies"}, {"label": "JWT"}],
+            "recommended": "Cookies",
+            "rationale": "src/auth.rs sets a cookie.",
+            "ts_ms": 1u64
+        })
+        .to_string();
+        std::fs::write(dir.join("decisions.jsonl"), format!("{decision}\n")).unwrap();
+        let clarify = serde_json::json!({
+            "question": "Include archived members?",
+            "options": [{"label": "Yes"}, {"label": "No"}],
+            "multi_select": false,
+            "allow_free_text": true,
+            "ts_ms": 2u64
+        })
+        .to_string();
+        std::fs::write(dir.join("clarify-requests.jsonl"), format!("{clarify}\n")).unwrap();
+
+        let runs = RunStore::new();
+        let uow = UowStore::new();
+        let clarifications = ClarificationStore::new();
+        let resume = ClarifyResumeStore::new();
+        let story = "acme/api#12";
+        let run_id = runs.create(story, "investigation", crate::run::RunKind::Watched);
+        let seq = std::sync::atomic::AtomicUsize::new(0);
+        let next_seq = || seq.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+        let outcome = camerata_core::AgentOutcome {
+            session_id: "sess".to_string(),
+            result: "partial note".to_string(),
+            cost_usd: None,
+            denials: Vec::new(),
+        };
+        finish_investigation_pass(
+            &runs,
+            &uow,
+            &clarifications,
+            &resume,
+            &run_id,
+            story,
+            "Add export",
+            "Members CSV export.",
+            "claude-opus-5",
+            "the task",
+            &dir,
+            Ok(outcome),
+            &next_seq,
+        );
+
+        // The run paused on the question...
+        assert_eq!(
+            runs.get(&run_id).unwrap().status,
+            RunStatus::AwaitingClarification
+        );
+        assert_eq!(clarifications.for_story(story).len(), 1);
+        // ...and the decision filed before it was kept, still Pending.
+        let decisions = uow.decisions_for(story);
+        assert_eq!(decisions.len(), 1);
+        assert_eq!(decisions[0].label, "Session storage");
+        assert_eq!(decisions[0].outcome, DecisionOutcome::Pending);
+        assert_eq!(decisions[0].provenance.actor, RevisionActor::Ai);
+
+        // A pause with nothing proposed files nothing and writes no "add one by hand" note.
+        let dir2 = session_dir_for("pause-empty");
+        std::fs::write(dir2.join("clarify-requests.jsonl"), format!("{clarify}\n")).unwrap();
+        let story2 = "acme/api#13";
+        let run2 = runs.create(story2, "investigation", crate::run::RunKind::Watched);
+        finish_investigation_pass(
+            &runs,
+            &uow,
+            &clarifications,
+            &resume,
+            &run2,
+            story2,
+            "t",
+            "d",
+            "m",
+            "task",
+            &dir2,
+            Ok(camerata_core::AgentOutcome {
+                session_id: "s".to_string(),
+                result: "n".to_string(),
+                cost_usd: None,
+                denials: Vec::new(),
+            }),
+            &next_seq,
+        );
+        assert!(uow.decisions_for(story2).is_empty());
+        assert!(!uow
+            .get_or_create(story2)
+            .history
+            .iter()
+            .any(|h| h.text.contains("by hand")));
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&dir2);
     }
 }

@@ -25,6 +25,8 @@ pub(super) struct ProposedDecisionVm {
     pub options: Vec<String>,
     /// The agent's reasoning, without the `Recommended:` prefix.
     pub reasoning: String,
+    /// One-line description per option, in `options` order; empty strings when unknown.
+    pub descriptions: Vec<String>,
 }
 
 /// The card model for `d`, or `None` when `d` is not an AI proposal waiting on the architect:
@@ -42,10 +44,23 @@ pub(super) fn proposed_decision_vm(d: &DecisionRecordView) -> Option<ProposedDec
             options.push(alt.to_string());
         }
     }
+    // Descriptions line up with [recommended] + alternatives_considered. Use them only when
+    // that alignment is certain (no option was skipped above and the counts match).
+    let aligned = d.option_descriptions.len() == options.len()
+        && options.len() == 1 + d.alternatives_considered.len();
+    let descriptions = if aligned {
+        d.option_descriptions
+            .iter()
+            .map(|x| x.trim().to_string())
+            .collect()
+    } else {
+        vec![String::new(); options.len()]
+    };
     Some(ProposedDecisionVm {
         recommended,
         options,
         reasoning,
+        descriptions,
     })
 }
 
@@ -65,6 +80,21 @@ pub(super) fn approve_recommended(d: &DecisionRecordView, now_rfc3339: &str) -> 
     r
 }
 
+/// What the "Approve" button does: approve the recommended option, and only when the recommended
+/// option is the one selected on screen. `None` when another radio is picked, so "Approve" can
+/// never approve something other than what the card shows (use [`approve_other`] for that).
+pub(super) fn approve_selected(
+    d: &DecisionRecordView,
+    selected: &str,
+    now_rfc3339: &str,
+) -> Option<DecisionRecordView> {
+    let vm = proposed_decision_vm(d)?;
+    if !vm.recommended.eq_ignore_ascii_case(selected.trim()) {
+        return None;
+    }
+    Some(approve_recommended(d, now_rfc3339))
+}
+
 /// The architect picks a different option: `Approved` with the rationale
 /// `Chosen: {option}. {architect text}` and every other option (the old recommendation
 /// included) listed as an alternative. `None` when `option` is the recommended one (use
@@ -76,17 +106,31 @@ pub(super) fn approve_other(
     now_rfc3339: &str,
 ) -> Option<DecisionRecordView> {
     let vm = proposed_decision_vm(d)?;
-    let chosen = vm
+    let chosen_at = vm
         .options
         .iter()
-        .find(|o| o.eq_ignore_ascii_case(option.trim()))?
-        .clone();
+        .position(|o| o.eq_ignore_ascii_case(option.trim()))?;
+    let chosen = vm.options[chosen_at].clone();
     if chosen.eq_ignore_ascii_case(&vm.recommended) {
         return None;
     }
     let mut r = d.clone();
     r.outcome = DecisionOutcomeView::Approved;
     r.rationale = chosen_rationale(&chosen, architect_text);
+    // Keep the descriptions lined up: the chosen option first, then the rest.
+    if vm.descriptions.iter().any(|x| !x.is_empty()) {
+        let mut descs = vec![vm.descriptions[chosen_at].clone()];
+        descs.extend(
+            vm.descriptions
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| *i != chosen_at)
+                .map(|(_, x)| x.clone()),
+        );
+        r.option_descriptions = descs;
+    } else {
+        r.option_descriptions = Vec::new();
+    }
     r.alternatives_considered = vm.options.into_iter().filter(|o| *o != chosen).collect();
     r.provenance = user_provenance(now_rfc3339);
     Some(r)
@@ -197,9 +241,10 @@ pub(super) fn ProposedDecisionCard(
                 p { class: "uow-decision-q", "Q: {d.question}" }
             }
             div { class: "uow-decision-options",
-                for opt in vm.options.iter() {
+                for (n, opt) in vm.options.iter().enumerate() {
                     {
                         let is_recommended = *opt == vm.recommended;
+                        let description = vm.descriptions.get(n).cloned().unwrap_or_default();
                         let checked = *opt == selected();
                         let name = format!("decision-{}", d.artifact_id);
                         let value = opt.clone();
@@ -217,6 +262,9 @@ pub(super) fn ProposedDecisionCard(
                                 span { " {value}" }
                                 if is_recommended {
                                     span { class: "uow-decision-recommended", " (recommended)" }
+                                }
+                                if !description.is_empty() {
+                                    span { class: "uow-decision-option-desc", ": {description}" }
                                 }
                             }
                         }
@@ -236,21 +284,26 @@ pub(super) fn ProposedDecisionCard(
             div { class: "uow-decision-actions",
                 button {
                     class: "btn-run",
-                    disabled: busy(),
+                    // "Approve" approves the recommended option, so it is off while another
+                    // radio is selected; "Approve another option" is the button for that.
+                    disabled: busy() || other_picked,
                     onclick: {
                         let d = d.clone();
                         let decisions = decisions.clone();
                         let sid = story_id.clone();
                         move |_| {
-                            let record = approve_recommended(&d, &chrono::Utc::now().to_rfc3339());
-                            submit(
-                                sid.clone(),
-                                &decisions,
-                                index,
-                                record,
-                                wiring,
-    "Could not approve the decision.",
-                            );
+                            if let Some(record) =
+                                approve_selected(&d, &selected(), &chrono::Utc::now().to_rfc3339())
+                            {
+                                submit(
+                                    sid.clone(),
+                                    &decisions,
+                                    index,
+                                    record,
+                                    wiring,
+                                    "Could not approve the decision.",
+                                );
+                            }
                         }
                     },
                     "Approve"
@@ -271,7 +324,7 @@ pub(super) fn ProposedDecisionCard(
                                     index,
                                     record,
                                     wiring,
-    "Could not approve the decision.",
+                                    "Could not approve the decision.",
                                 );
                             }
                         }
@@ -308,7 +361,7 @@ pub(super) fn ProposedDecisionCard(
                                     index,
                                     record,
                                     wiring,
-    "Could not reject the decision.",
+                                    "Could not reject the decision.",
                                 ),
                                 Err(msg) => crate::toast::push_toast(
                                     toasts,
@@ -346,6 +399,7 @@ mod tests {
                 actor: "ai".to_string(),
                 at: "2026-10-28T11:00:00+00:00".to_string(),
             },
+            option_descriptions: Vec::new(),
         }
     }
 
@@ -490,5 +544,86 @@ mod tests {
             html[button_open..another].contains("disabled"),
             "Approve another option starts disabled: {html}"
         );
+    }
+
+    #[test]
+    fn approve_only_approves_the_option_the_card_shows_as_selected() {
+        let d = pending_ai();
+        // The recommended radio is selected: Approve approves it (case does not matter).
+        let ok = approve_selected(&d, "cookies", NOW).expect("recommended is selected");
+        assert_eq!(ok.outcome, DecisionOutcomeView::Approved);
+        assert_eq!(ok.rationale, d.rationale);
+        // Another radio is selected: Approve refuses, so it cannot approve the wrong option.
+        assert!(approve_selected(&d, "JWT", NOW).is_none());
+        assert!(approve_selected(&d, "", NOW).is_none());
+    }
+
+    fn with_descriptions() -> DecisionRecordView {
+        let mut d = pending_ai();
+        d.option_descriptions = vec![
+            "server side".to_string(),
+            "stateless tokens".to_string(),
+            "in memory".to_string(),
+        ];
+        d
+    }
+
+    #[test]
+    fn option_descriptions_show_on_the_card_and_survive_choosing_another_option() {
+        let d = with_descriptions();
+        let vm = proposed_decision_vm(&d).unwrap();
+        assert_eq!(
+            vm.descriptions,
+            vec!["server side", "stateless tokens", "in memory"]
+        );
+        // Misaligned descriptions are ignored rather than shown against the wrong option.
+        let mut bad = d.clone();
+        bad.option_descriptions = vec!["only one".to_string()];
+        assert_eq!(
+            proposed_decision_vm(&bad).unwrap().descriptions,
+            vec![String::new(); 3]
+        );
+        // Choosing another option keeps the lists lined up: chosen first, then the rest.
+        let other = approve_other(&d, "Server sessions", "x", NOW).unwrap();
+        assert_eq!(other.alternatives_considered, vec!["Cookies", "JWT"]);
+        assert_eq!(
+            other.option_descriptions,
+            vec!["in memory", "server side", "stateless tokens"]
+        );
+        // The descriptions render next to their options.
+        fn harness() -> Element {
+            use_context_provider(|| Signal::new(Vec::<crate::toast::Toast>::new()));
+            let busy = use_signal(|| false);
+            let local_refresh = use_signal(|| 0u32);
+            rsx! {
+                ProposedDecisionCard {
+                    story_id: "acme/api#4".to_string(),
+                    decisions: vec![with_descriptions()],
+                    index: 0usize,
+                    busy,
+                    local_refresh,
+                }
+            }
+        }
+        let mut vdom = VirtualDom::new(harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        assert!(html.contains("server side"), "{html}");
+        assert!(html.contains("stateless tokens"), "{html}");
+        assert!(html.contains("in memory"), "{html}");
+    }
+
+    #[test]
+    fn the_record_round_trips_option_descriptions_so_posting_the_list_keeps_them() {
+        let d = with_descriptions();
+        let json = serde_json::to_string(&d).unwrap();
+        let back: DecisionRecordView = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.option_descriptions, d.option_descriptions);
+        // A record from an older server (no field) still loads.
+        let old = r#"{"artifact_id":"S/decision/x","story_id":"S","outcome":{"state":"pending"}}"#;
+        assert!(serde_json::from_str::<DecisionRecordView>(old)
+            .unwrap()
+            .option_descriptions
+            .is_empty());
     }
 }

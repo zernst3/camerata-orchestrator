@@ -2267,6 +2267,10 @@ pub(super) struct DecisionRecordView {
     pub outcome: DecisionOutcomeView,
     #[serde(default)]
     pub provenance: RevisionProvenanceView,
+    /// One-line option descriptions (recommended or chosen first, then the alternatives).
+    /// Carried so posting the whole list back does not erase them.
+    #[serde(default)]
+    pub option_descriptions: Vec<String>,
 }
 
 /// The `GET /api/uow/:id/investigation` envelope.
@@ -7172,7 +7176,9 @@ pub(super) fn DecisionsReviewPanel(
                 for (i, d) in decisions.iter().enumerate() {
                     if super::decision_cards::proposed_decision_vm(d).is_some() {
                         super::decision_cards::ProposedDecisionCard {
-                            key: "{d.artifact_id}",
+                            // Keyed on the rationale too, so a new pass that changes the
+                            // recommendation remounts the card with a fresh preselection.
+                            key: "{d.artifact_id}|{d.rationale}",
                             story_id: story_id.clone(),
                             decisions: decisions.clone(),
                             index: i,
@@ -7327,6 +7333,7 @@ pub(super) fn DecisionsReviewPanel(
                                     question: new_question().trim().to_string(),
                                     rationale: new_rationale().trim().to_string(),
                                     alternatives_considered: Vec::new(),
+                                    option_descriptions: Vec::new(),
                                     outcome: DecisionOutcomeView::Approved,
                                     // Stamp a real provenance: an empty {actor:"",at:""} fails to
                                     // deserialize server-side (actor enum + DateTime), which 422'd
@@ -8215,6 +8222,7 @@ mod bff_tests {
             question: String::new(),
             rationale: rationale.to_string(),
             alternatives_considered: vec![],
+            option_descriptions: Vec::new(),
             outcome,
             provenance: RevisionProvenanceView::default(),
         };
@@ -9364,6 +9372,7 @@ mod bff_tests {
             question: "Which backend?".into(),
             rationale: "fast".into(),
             alternatives_considered: vec!["sql".into()],
+            option_descriptions: Vec::new(),
             outcome: DecisionOutcomeView::Approved,
             provenance: RevisionProvenanceView::default(),
         }];

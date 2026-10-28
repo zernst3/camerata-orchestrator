@@ -293,6 +293,12 @@ pub struct DecisionRecord {
     /// cannot stamp provenance does not 422 the whole decision set.
     #[serde(default)]
     pub provenance: RevisionProvenance,
+    /// One-line descriptions of the options, in the order: the recommended or chosen option
+    /// first, then `alternatives_considered`. Empty when unknown (hand-typed decisions and
+    /// records written before this field existed). Consumers use it only when its length
+    /// matches the option count.
+    #[serde(default)]
+    pub option_descriptions: Vec<String>,
 }
 
 impl DecisionRecord {
@@ -316,7 +322,15 @@ impl DecisionRecord {
             alternatives_considered,
             outcome: DecisionOutcome::Pending,
             provenance: RevisionProvenance::new(RevisionActor::Ai, at),
+            option_descriptions: Vec::new(),
         }
+    }
+
+    /// Return a copy carrying the options' one-line descriptions (see
+    /// [`DecisionRecord::option_descriptions`] for the order).
+    pub fn with_option_descriptions(mut self, descriptions: Vec<String>) -> Self {
+        self.option_descriptions = descriptions;
+        self
     }
 
     /// Return a copy with the outcome set to `Approved` and provenance
@@ -1043,5 +1057,22 @@ mod tests {
             "Chosen: JWT. We run stateless workers."
         );
         assert_eq!(chosen_rationale("JWT", "  "), "Chosen: JWT.");
+    }
+
+    #[test]
+    fn option_descriptions_default_empty_on_old_records_and_round_trip() {
+        // A record written before the field existed still loads.
+        let old = r#"{"artifact_id":"S/decision/x","story_id":"S","label":"L","question":"Q",
+            "rationale":"R","alternatives_considered":[],"outcome":{"state":"pending"}}"#;
+        let d: DecisionRecord = serde_json::from_str(old).unwrap();
+        assert!(d.option_descriptions.is_empty());
+        // ai_proposed does not set it; the builder does, and it survives a round trip.
+        let t = Utc::now();
+        let d = DecisionRecord::ai_proposed("S", "S/decision/x", "L", "Q", "R", vec![], t)
+            .with_option_descriptions(vec!["one".to_string(), "two".to_string()]);
+        let back: DecisionRecord =
+            serde_json::from_str(&serde_json::to_string(&d).unwrap()).unwrap();
+        assert_eq!(back.option_descriptions, vec!["one", "two"]);
+        assert_eq!(back, d);
     }
 }
