@@ -137,6 +137,8 @@ async fn plain_postgres_repo_fires_both_rules_through_camerata_inspect_end_to_en
 
     let args = InspectArgs {
         repo: repo_dir.path().to_path_buf(),
+        also_repos: Vec::new(),
+        repo_names: Vec::new(),
         export: export_path,
         // `Api` + `has_api_key: false` resolves to `Blocked` — the real compliance gate, not a
         // test-only bypass (mirrors `inspect_e2e.rs`). The deterministic floor AND the

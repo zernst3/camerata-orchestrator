@@ -360,9 +360,248 @@ pub fn estimate_audit_cost(
     (total_tokens, dollars, total_passes)
 }
 
+/// What one repo contributes to a multi-repo estimate.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RepoEstimateInput {
+    pub repo: String,
+    /// Characters of code the scan will read from this repo.
+    pub code_chars: usize,
+    /// Rules selected for this repo.
+    pub selected: usize,
+    /// Of those, how many offer 2+ alternatives.
+    pub multi_option_selected: usize,
+}
+
+/// One repo's line of a multi-repo estimate: [`estimate_audit_cost`]'s result for that repo.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RepoEstimate {
+    pub repo: String,
+    pub tokens: u64,
+    pub dollars: f64,
+    pub passes: usize,
+}
+
+/// A multi-repo estimate: one row per repo and their sum.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AuditEstimate {
+    pub rows: Vec<RepoEstimate>,
+    pub tokens: u64,
+    pub dollars: f64,
+    pub passes: usize,
+}
+
+/// [`estimate_audit_cost`] for a project of several repos: one estimate PER REPO, summed.
+///
+/// The scan digests, chunks and calibrates each repo on its own (`ai_audit`), so pricing the
+/// project as one stream of code under-counts: eleven repos of 360,000 characters each are two
+/// chunks apiece (22 passes), not one stream of 3,960,000 characters (12 chunks). Every other
+/// argument means what it does for [`estimate_audit_cost`].
+#[allow(clippy::too_many_arguments)]
+pub fn estimate_audit_cost_by_repo(
+    repos: &[RepoEstimateInput],
+    mode: &str,
+    audit_in: f64,
+    audit_out: f64,
+    calib_in: f64,
+    calib_out: f64,
+    thorough: bool,
+    incremental: bool,
+    deep: bool,
+    backend: ProjectBackend,
+    terse_output: bool,
+) -> AuditEstimate {
+    let rows: Vec<RepoEstimate> = repos
+        .iter()
+        .map(|r| {
+            let (tokens, dollars, passes) = estimate_audit_cost(
+                r.code_chars,
+                r.selected,
+                mode,
+                audit_in,
+                audit_out,
+                calib_in,
+                calib_out,
+                thorough,
+                incremental,
+                deep,
+                backend,
+                r.multi_option_selected,
+                terse_output,
+            );
+            RepoEstimate {
+                repo: r.repo.clone(),
+                tokens,
+                dollars,
+                passes,
+            }
+        })
+        .collect();
+    AuditEstimate {
+        tokens: rows.iter().map(|r| r.tokens).sum(),
+        dollars: rows.iter().map(|r| r.dollars).sum(),
+        passes: rows.iter().map(|r| r.passes).sum(),
+        rows,
+    }
+}
+
+/// One repo's line under the pre-audit estimate:
+/// `acme/api: 360,000 characters in 41 file(s), about $1.20 (4 model calls)`.
+pub fn repo_estimate_line(
+    repo: &str,
+    files: usize,
+    code_chars: usize,
+    row: &RepoEstimate,
+) -> String {
+    let dollars = if row.dollars < 0.01 {
+        "<$0.01".to_string()
+    } else {
+        format!("~${:.2}", row.dollars)
+    };
+    format!(
+        "{repo}: {code_chars} characters in {files} file(s), {dollars} ({} model calls)",
+        row.passes
+    )
+}
+
+/// The line for a repo whose rule choice is not known yet. It is left out of the estimate rather
+/// than priced on a guessed number of rules.
+pub fn unknown_rules_repo_line(repo: &str) -> String {
+    format!(
+        "{repo}: rules chosen: unknown. Open this repo's rule list to include it in the estimate."
+    )
+}
+
+/// The line for a repo that could not be read. It is left out of the estimate, and the line says
+/// so: a repo missing from the figure must not read as a cheap one.
+pub fn unreadable_repo_line(repo: &str, why: &str) -> String {
+    format!("{repo}: could not be read ({why}). It is not in this estimate.")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_per_repo_lines_say_what_each_repo_costs_and_name_a_missing_one() {
+        let row = RepoEstimate {
+            repo: "acme/api".into(),
+            tokens: 1000,
+            dollars: 1.234,
+            passes: 4,
+        };
+        assert_eq!(
+            repo_estimate_line("acme/api", 41, 360_000, &row),
+            "acme/api: 360000 characters in 41 file(s), ~$1.23 (4 model calls)"
+        );
+        let cheap = RepoEstimate {
+            dollars: 0.001,
+            ..row
+        };
+        assert!(repo_estimate_line("acme/api", 1, 10, &cheap).contains("<$0.01"));
+        let unknown = unknown_rules_repo_line("acme/jobs");
+        assert!(unknown.starts_with("acme/jobs: ") && unknown.contains("unknown"));
+        assert!(!unknown.contains('\u{2014}'));
+        let gone = unreadable_repo_line("acme/web", "no local folder set");
+        assert!(gone.contains("not in this estimate") && gone.starts_with("acme/web: "));
+        assert!(!gone.contains('\u{2014}'));
+    }
+
+    /// M1: the scan chunks each repo on its own, so the estimate must too. Eleven repos of
+    /// 360,000 characters are 22 chunks of scan, not the 12 a single 3,960,000-character stream
+    /// gives.
+    #[test]
+    fn a_multi_repo_estimate_chunks_each_repo_separately() {
+        let repos: Vec<RepoEstimateInput> = (0..11)
+            .map(|i| RepoEstimateInput {
+                repo: format!("acme/svc-{i}"),
+                code_chars: 360_000,
+                selected: 1,
+                multi_option_selected: 0,
+            })
+            .collect();
+        let est = estimate_audit_cost_by_repo(
+            &repos,
+            "parallel",
+            3.0,
+            15.0,
+            3.0,
+            15.0,
+            false,
+            false,
+            false,
+            ProjectBackend::Api,
+            false,
+        );
+        assert_eq!(est.rows.len(), 11, "one row per repo");
+        let merged = estimate_audit_cost(
+            11 * 360_000,
+            1,
+            "parallel",
+            3.0,
+            15.0,
+            3.0,
+            15.0,
+            false,
+            false,
+            false,
+            ProjectBackend::Api,
+            0,
+            false,
+        );
+        assert!(
+            est.passes > merged.2,
+            "per repo {} passes vs one stream {}",
+            est.passes,
+            merged.2
+        );
+        assert!(est.dollars > merged.1, "{} vs {}", est.dollars, merged.1);
+        // The total is the sum of the rows, exactly.
+        assert_eq!(est.passes, est.rows.iter().map(|r| r.passes).sum::<usize>());
+        assert_eq!(est.tokens, est.rows.iter().map(|r| r.tokens).sum::<u64>());
+        // Two repos with the same file name and the same size are two rows, not one.
+        assert_eq!(est.rows[0].repo, "acme/svc-0");
+        assert_eq!(est.rows[10].repo, "acme/svc-10");
+    }
+
+    /// One repo prices exactly as `estimate_audit_cost` does (the single-repo path is unchanged).
+    #[test]
+    fn a_single_repo_estimate_equals_the_plain_estimate() {
+        let one = [RepoEstimateInput {
+            repo: "acme/a".into(),
+            code_chars: 500_000,
+            selected: 20,
+            multi_option_selected: 3,
+        }];
+        let est = estimate_audit_cost_by_repo(
+            &one,
+            "batch",
+            3.0,
+            15.0,
+            3.0,
+            15.0,
+            false,
+            true,
+            false,
+            ProjectBackend::Api,
+            true,
+        );
+        let plain = estimate_audit_cost(
+            500_000,
+            20,
+            "batch",
+            3.0,
+            15.0,
+            3.0,
+            15.0,
+            false,
+            true,
+            false,
+            ProjectBackend::Api,
+            3,
+            true,
+        );
+        assert_eq!((est.tokens, est.dollars, est.passes), plain);
+    }
 
     #[test]
     fn the_default_mode_is_priced_as_batch_on_the_api_backend_only() {

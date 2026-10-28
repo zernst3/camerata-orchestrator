@@ -1406,6 +1406,10 @@ pub fn router(state: AppState) -> Router {
             "/api/onboard/audit/start",
             post(onboard_audit_start).layer(source_gate.clone()),
         )
+        .route(
+            "/api/onboard/preflight",
+            post(preflight::onboard_preflight).layer(source_gate.clone()),
+        )
         .route("/api/onboard/audit/job/:id", get(onboard_audit_job))
         .route("/api/onboard/audit/job/:id/cancel", post(cancel_audit_job))
         .route("/api/onboard/finding-context", get(onboard_finding_context))
@@ -8211,8 +8215,9 @@ async fn detect_repo(
     State(state): State<AppState>,
     Json(req): Json<DetectRepoReq>,
 ) -> Json<serde_json::Value> {
-    match crate::workspace::detect_remote_repo(std::path::Path::new(&req.path)).await {
-        Ok(repo) => {
+    match crate::workspace::detect_inspection_repo(std::path::Path::new(&req.path)).await {
+        Ok(found) => {
+            let repo = found.name;
             // #50: onboarding is one-time per repo. Report whether this repo is ALREADY onboarded
             // (in any project's onboarded list) so the UI can block a re-onboard and route the
             // user to the workspace instead of producing a duplicate set of issues + branch.
@@ -8227,6 +8232,9 @@ async fn detect_repo(
                 "repo": repo,
                 "onboarded": onboarded_in.is_some(),
                 "onboarded_project": onboarded_in,
+                // A folder not on GitHub is added for inspection only; the UI says so.
+                "github": found.github,
+                "note": found.note,
             }))
         }
         Err(message) => Json(serde_json::json!({ "ok": false, "message": message })),
