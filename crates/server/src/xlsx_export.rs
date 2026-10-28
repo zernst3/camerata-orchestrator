@@ -197,6 +197,14 @@ pub struct FindingRow {
     /// that produced the hearth 0/12 result.
     #[serde(flatten)]
     kind: camerata_api_types::audit::KindOnWire,
+    /// M2/M8: what moved this row's severity and why, as finished sentences (for example
+    /// "Severity lowered from high to info: no file or line was identified for this
+    /// finding."). Empty when nothing moved it. Always present, so every row carries the same
+    /// keys.
+    severity_adjustments: String,
+    /// H11: the commit of the earlier inspection this row was carried forward from, when this
+    /// run re-audited only the changed files. Empty when the row was found this run.
+    carried_from: String,
 }
 
 /// One row of the `Dependencies` sheet — the `DEP_AUDIT_RULE_ID` carve-out, same as the
@@ -482,6 +490,9 @@ fn partition_rows(
             also_locations: f.also_locations.clone(),
             site_count: 1 + f.also_locations.len(),
             kind: camerata_api_types::audit::KindOnWire(f.kind.clone()),
+            severity_adjustments: crate::severity_bounds::severity_adjustment_lines(f, corpus)
+                .join(" "),
+            carried_from: crate::report_export::carried_from(f).unwrap_or_default(),
         });
     }
 
@@ -1082,7 +1093,7 @@ impl Formats {
 
 // ── The ~21(+2)-column findings schema (All Findings / category sheets / False Positives) ──
 
-const HEADERS: [&str; 26] = [
+const HEADERS: [&str; 28] = [
     "Severity",
     "Headline",
     "Repo",
@@ -1118,16 +1129,23 @@ const HEADERS: [&str; 26] = [
     // columns that make a merged row say "3 sites" instead of silently reading as one.
     "Sites",
     "Also found at",
+    // M2/M8: why the severity above is not the one the finding was first rated at.
+    "Severity adjustments",
+    // H11: the earlier inspection a carried-forward row came from.
+    "Carried from",
 ];
 
-const WIDTHS: [f64; 26] = [
+const WIDTHS: [f64; 28] = [
     10.0, 50.0, 18.0, 40.0, 7.0, 28.0, 16.0, 10.0, 30.0, 9.0, 16.0, 12.0, 12.0, 16.0, 16.0, 34.0,
-    30.0, 24.0, 18.0, 55.0, 70.0, 45.0, 45.0, 20.0, 8.0, 44.0,
+    30.0, 24.0, 18.0, 55.0, 70.0, 45.0, 45.0, 20.0, 8.0, 44.0, 50.0, 18.0,
 ];
+
+/// The column after the last of [`HEADERS`]: where the False Positives sheet puts its reason.
+const FP_REASON_COL: u16 = HEADERS.len() as u16;
 
 /// Columns that wrap (matches the design's wrap-column list, plus the Fix-specific and
 /// Recommended-Fix columns at the end, and W7's "Also found at" site list).
-const WRAP_COLS: [u16; 8] = [1, 8, 15, 16, 20, 21, 22, 25];
+const WRAP_COLS: [u16; 9] = [1, 8, 15, 16, 20, 21, 22, 25, 26];
 const SNIPPET_COL: u16 = 19;
 const NEEDS_REVIEW_COL: u16 = 12;
 
@@ -1223,6 +1241,13 @@ fn write_finding_row(
         .collect::<Vec<_>>()
         .join("\n");
     ws.write_string_with_format(r, 25, &also_found_at, &fmts.cell(bg, true, false))?;
+    ws.write_string_with_format(
+        r,
+        26,
+        &row.severity_adjustments,
+        &fmts.cell(bg, true, false),
+    )?;
+    ws.write_string_with_format(r, 27, &row.carried_from, &fmts.cell(bg, false, false))?;
 
     Ok(())
 }
@@ -1248,7 +1273,7 @@ fn write_findings_sheet(
         ws.write_string_with_format(0, c as u16, *h, &fmts.header)?;
     }
     if fp_reason_col {
-        ws.write_string_with_format(0, 26, "FP Reason", &fmts.header)?;
+        ws.write_string_with_format(0, FP_REASON_COL, "FP Reason", &fmts.header)?;
     }
     ws.set_row_height(0, 28)?;
 
@@ -1256,7 +1281,7 @@ fn write_findings_sheet(
         ws.set_column_width(c as u16, *w)?;
     }
     if fp_reason_col {
-        ws.set_column_width(26, 40.0)?;
+        ws.set_column_width(FP_REASON_COL, 40.0)?;
     }
 
     for (i, row) in rows.iter().enumerate() {
@@ -1271,12 +1296,21 @@ fn write_findings_sheet(
             } else {
                 None
             };
-            ws.write_string_with_format(r, 26, &row.fp_reason, &fmts.cell(bg, true, false))?;
+            ws.write_string_with_format(
+                r,
+                FP_REASON_COL,
+                &row.fp_reason,
+                &fmts.cell(bg, true, false),
+            )?;
         }
     }
 
     let last_row = rows.len() as u32;
-    let last_col: u16 = if fp_reason_col { 26 } else { 25 };
+    let last_col: u16 = if fp_reason_col {
+        FP_REASON_COL
+    } else {
+        FP_REASON_COL - 1
+    };
     ws.autofilter(0, 0, last_row, last_col)?;
     ws.set_freeze_panes(1, 0)?;
 
@@ -1781,7 +1815,7 @@ fn write_coverage_sheet(
     if !gaps.is_empty() {
         ws.write_string_with_format(next_r, 0, "Not reviewed this scan", &fmts.section_title)?;
         next_r += 1;
-        for line in &gaps.failed_ai_passes {
+        for line in gaps.failed_ai_passes.iter().chain(&gaps.dependency_gaps) {
             ws.write_string_with_format(next_r, 0, line, &fmts.cell(None, true, false))?;
             next_r += 1;
         }
@@ -2959,7 +2993,12 @@ mod tests {
         // data-structure change this test adapts to; tracker test-discipline exception (a)).
         // Pass-1 W7 (C5): 24 -> 26 — the Sites + "Also found at" columns append after Kind
         // (same exception (a): absorbed merge sites must be observable in the workbook).
-        assert_eq!(HEADERS.len(), 26);
+        // False-negative audit (M2/M8, H11): 26 -> 28 — "Severity adjustments" and "Carried
+        // from" append after "Also found at" (same exception (a): a lowered severity and a
+        // carried-forward row must be observable in the workbook).
+        assert_eq!(HEADERS.len(), 28);
+        assert_eq!(HEADERS[26], "Severity adjustments");
+        assert_eq!(HEADERS[27], "Carried from");
         assert_eq!(HEADERS[0], "Severity");
         // P2: the specific fix comes BEFORE the generic Recommended Fix — same
         // primary-then-secondary ordering as the PDF template.

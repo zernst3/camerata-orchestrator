@@ -293,10 +293,22 @@ pub(crate) fn sanitize_report_findings(report: &ScanReport) -> ScanReport {
 /// round-trip test below (`finding_key_matches_ui_core_format`) pins the format so the two
 /// can never silently drift apart.
 pub fn finding_key(f: &Finding) -> String {
-    format!(
+    let key = format!(
         "{}\u{0}{}\u{0}{}\u{0}{}\u{0}{}",
         f.repo, f.rule_id, f.path, f.line, f.snippet
-    )
+    );
+    // M9: a dependency row's snippet is `package@version`, so two advisories on one package
+    // version in one lockfile share the whole key, and dispositioning one used to bury the other.
+    // The advisory id (kept for dependency rows only) tells them apart. Every other row's key
+    // is unchanged. `camerata_ui_core::triage::finding_key` appends the same suffix.
+    match f.captures.get(crate::dep_audit::ADVISORY_CAPTURE) {
+        Some(advisory)
+            if f.rule_id == crate::dep_audit::DEP_AUDIT_RULE_ID && !advisory.is_empty() =>
+        {
+            format!("{key}\u{0}{advisory}")
+        }
+        _ => key,
+    }
 }
 
 // ── Effective disposition (status + wire, reconciled) ───────────────────────────
@@ -737,6 +749,40 @@ pub struct CoverJson {
     /// `docs/design/2026-09-13_audit-deliverable-review-fixes.md`.
     pub brand: Option<String>,
     pub stats: CoverStatsJson,
+    /// H11: set when this run re-audited only the changed files and carried the earlier
+    /// inspection's other findings forward ("12 files re-audited this run, 3 findings carried
+    /// from the inspection at abc1234."). `None` for a full scan, and the cover then prints
+    /// nothing extra.
+    pub incremental_note: Option<String>,
+}
+
+/// H11: the cover sentence for an incremental run. Plain words; each count is the ledger's.
+pub fn incremental_cover_note(carry: &crate::scan_ledger::IncrementalCarry) -> String {
+    let files = |n: usize| {
+        if n == 1 {
+            "1 file".to_string()
+        } else {
+            format!("{n} files")
+        }
+    };
+    let findings = if carry.carried_findings == 1 {
+        "1 finding".to_string()
+    } else {
+        format!("{} findings", carry.carried_findings)
+    };
+    let source = match carry.prior_sha.as_deref().map(str::trim) {
+        Some(sha) if !sha.is_empty() => {
+            let short: String = sha.chars().take(7).collect();
+            format!("the inspection at {short}")
+        }
+        _ => "an earlier inspection".to_string(),
+    };
+    format!(
+        "{} re-audited this run. {} not re-audited; {} carried from {source}.",
+        files(carry.changed),
+        files(carry.carried_files),
+        findings
+    )
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1136,9 +1182,18 @@ pub struct CuratedSiteJson {
     /// artifacts describe the same site multiplicity. Before W7 this reached NO artifact:
     /// a row representing three detected sites exported as one line at one `path:line`, so
     /// an over-merge was observationally identical to a detection miss (tracker C5). The
-    /// template does not render it yet (the PDF is the summary — Pass 3 owns presentation);
-    /// the data is here so it CAN, and so the report JSON is complete.
+    /// template renders it from [`Self::also_sites`], which adds the rule titles; this field
+    /// keeps the verbatim records so the report JSON is complete.
     pub also_locations: Vec<crate::onboard::MergedLocation>,
+    /// H6: the same absorbed sites, ready to print: location plus the human title of the rule
+    /// each was flagged under (never the raw rule id). The PDF renders these as "Also found at".
+    /// Empty for an un-merged row.
+    pub also_sites: Vec<AlsoSiteJson>,
+    /// M2/M8: one finished sentence for every bound that moved this row's severity ("Severity
+    /// lowered from high to info: no file or line was identified for this finding."). The
+    /// severity shown is the adjusted one; this says what it was and why it changed. Empty
+    /// when nothing moved it, and the PDF then prints nothing.
+    pub severity_adjustments: Vec<String>,
     /// Pass-1 W7 (C5): total distinct evidence sites this row represents — its own
     /// `path:line` plus every `also_locations` entry. `1` for an un-merged row.
     pub site_count: usize,
@@ -1147,6 +1202,51 @@ pub struct CuratedSiteJson {
     /// too (the PDF renders what it already renders; Pass 2/3 own presentation).
     #[serde(flatten)]
     pub kind: camerata_api_types::audit::KindOnWire,
+}
+
+/// H6: one absorbed evidence site as the PDF prints it.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct AlsoSiteJson {
+    pub repo: String,
+    pub path: String,
+    pub line: usize,
+    /// The corpus title of the rule this site was flagged under; `None` when the id has no
+    /// corpus entry (an AI-invented id), so a raw id is never printed.
+    pub title: Option<String>,
+    /// True for a site that is only a consequence of the row's root cause.
+    pub consequence: bool,
+}
+
+/// The `Finding::captures` key an incremental run writes on a finding it carried forward from the
+/// earlier inspection: the commit it was last found at.
+pub const CARRIED_FROM_CAPTURE: &str = "carried_from";
+
+/// H11: the commit of the earlier inspection `f` was carried forward from, when this run did not
+/// re-audit its file. `None` for a row found this run.
+pub fn carried_from(f: &Finding) -> Option<String> {
+    f.captures
+        .get(CARRIED_FROM_CAPTURE)
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// H6: the absorbed sites of `f`, titled from the corpus.
+pub(crate) fn also_sites_for(
+    f: &Finding,
+    corpus: Option<&camerata_rules::RuleSet>,
+) -> Vec<AlsoSiteJson> {
+    f.also_locations
+        .iter()
+        .map(|l| AlsoSiteJson {
+            repo: l.repo.clone(),
+            path: l.path.clone(),
+            line: l.line,
+            title: corpus
+                .and_then(|c| c.get_by_id(&l.rule_id))
+                .map(|r| r.title.clone()),
+            consequence: l.consequence,
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -3548,8 +3648,23 @@ fn default_narrative(
 /// appears here", which is a flat fabrication on a raw, pre-review export. Neither branch
 /// contains the literal phrases "reviewed by a human reviewer" or "dispositioned by a human
 /// reviewer" in the `Raw` case — grep-tested alongside `default_narrative`'s own gate.
-fn ai_tier_note_for(review_state: ReviewState) -> String {
-    match review_state {
+fn ai_tier_note_for(review_state: ReviewState, repos_not_run: usize, total_repos: usize) -> String {
+    let repos = |n: usize| {
+        if n == 1 {
+            "1 repo".to_string()
+        } else {
+            format!("{n} repos")
+        }
+    };
+    if repos_not_run > 0 && repos_not_run >= total_repos {
+        // The tier ran nowhere: say so, and make no claim about a review that did not happen.
+        return format!(
+            "The advisory language-model tier did not run for {}; see Coverage. Every finding \
+             produced in this run came from the deterministic tier.",
+            repos(repos_not_run)
+        );
+    }
+    let ran = match review_state {
         ReviewState::Reviewed => {
             "A second, advisory tier uses a calibrated language-model review for findings that \
              require semantic judgment. Every advisory finding in this export has been \
@@ -3565,6 +3680,14 @@ fn ai_tier_note_for(review_state: ReviewState) -> String {
              Lower-confidence items are marked needs-review."
                 .to_string()
         }
+    };
+    if repos_not_run == 0 {
+        ran
+    } else {
+        format!(
+            "{ran} The advisory language-model tier did not run for {}; see Coverage.",
+            repos(repos_not_run)
+        )
     }
 }
 
@@ -4417,6 +4540,10 @@ pub fn build_report_json(
                     fix_for_this_finding: specific_fix,
                     // W7 (C5): the absorbed sites, verbatim — see the field's doc comment.
                     also_locations: f.also_locations.clone(),
+                    also_sites: also_sites_for(f, corpus),
+                    severity_adjustments: crate::severity_bounds::severity_adjustment_lines(
+                        f, corpus,
+                    ),
                     site_count: 1 + f.also_locations.len(),
                     kind: camerata_api_types::audit::KindOnWire(f.kind.clone()),
                 }
@@ -4501,6 +4628,15 @@ pub fn build_report_json(
                 .entry(category_for(also_id, corpus))
                 .or_default()
                 .insert(also_id.clone());
+        }
+        // H6: a rule that survived only as an absorbed site (`also_locations`) fired just as
+        // genuinely as one demoted into `also_matches`; counting it clean in its own category
+        // was the same false statement one channel over.
+        for site in &f.also_locations {
+            matched_rule_ids_by_category
+                .entry(category_for(&site.rule_id, corpus))
+                .or_default()
+                .insert(site.rule_id.clone());
         }
     }
     let mut scorecard_rows: Vec<CategoryRowJson> = Vec::new();
@@ -4713,7 +4849,19 @@ pub fn build_report_json(
         .filter(|n| n.tool == "osv-scanner")
         .map(|n| n.message.clone())
         .collect();
-    let dependency_clean = dep_rows.is_empty();
+    // M11: "clean" means checked and nothing found. A dependency audit that did not run (no
+    // network, a timeout, an unreadable result) or that left manifests unaudited used to leave
+    // the rows empty and so read as clean. Only a run that proves it checked everything may say
+    // so.
+    // An AI-only scan never started osv-scanner (`osv_scanner_version` is `None`): it checked
+    // nothing, so it cannot say nothing was found.
+    let dependency_clean = dep_rows.is_empty()
+        && report.provenance.osv_scanner_version.is_some()
+        && report
+            .coverage_notes
+            .iter()
+            .filter(|n| n.tool == "osv-scanner")
+            .all(crate::dep_audit::note_proves_clean);
     let dependency_snapshot = DependencySnapshotJson {
         rows: dep_rows,
         coverage_notes: dep_coverage_notes,
@@ -4989,6 +5137,7 @@ pub fn build_report_json(
         prepared_by: resolve_prepared_by(opts, None),
         brand: resolve_brand(opts, None),
         stats,
+        incremental_note: report.ledger.incremental().map(incremental_cover_note),
     };
 
     // ── Methodology (M4: ported from the better sample copy, no dashes per S12) ────────
@@ -5009,7 +5158,11 @@ pub fn build_report_json(
              produces findings that either hold or do not, with no model judgment. These are \
              labeled deterministic in the report."
                 .to_string(),
-        ai_tier_note: ai_tier_note_for(review_state),
+        ai_tier_note: ai_tier_note_for(
+            review_state,
+            coverage_gaps::repos_without_ai_review(report).len(),
+            report.repos.len(),
+        ),
         citation_note: RELATED_STANDARD_NOTE.to_string(),
         not_done: vec![
             "No penetration testing or live exploitation was performed.".to_string(),
@@ -5281,6 +5434,24 @@ mod engine_identity_tests;
 
 #[cfg(test)]
 mod fix_text_tests;
+
+#[cfg(test)]
+mod fn_batch_c_adjust_tests;
+
+#[cfg(test)]
+mod fn_batch_c_dep_tests;
+
+#[cfg(test)]
+mod fn_batch_c_followup_tests;
+
+#[cfg(test)]
+mod fn_batch_c_incremental_tests;
+
+#[cfg(test)]
+mod fn_batch_c_sites_tests;
+
+#[cfg(test)]
+mod fn_batch_c_tests;
 
 #[cfg(test)]
 mod tests {
@@ -13454,8 +13625,10 @@ mod tests {
             AUDIT_REPORT_DISCLAIMER.to_string(),
             next_steps_note(ReviewState::Reviewed, 10, 7, 0, 3),
             next_steps_note(ReviewState::Raw, 0, 0, 0, 0),
-            ai_tier_note_for(ReviewState::Raw),
-            ai_tier_note_for(ReviewState::Reviewed),
+            ai_tier_note_for(ReviewState::Raw, 0, 1),
+            ai_tier_note_for(ReviewState::Reviewed, 0, 1),
+            ai_tier_note_for(ReviewState::Raw, 1, 2),
+            ai_tier_note_for(ReviewState::Reviewed, 2, 2),
             default_narrative(ReviewState::Raw, 10, 3, 1, 1, 1, 0, 1, 0, 0, 0),
             default_narrative(ReviewState::Reviewed, 10, 3, 1, 1, 1, 0, 1, 0, 0, 0),
             disposition_label(Disposition::Ignored, "some reason", "accepted", false),

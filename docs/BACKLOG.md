@@ -3,6 +3,15 @@
 Deferred work and known gaps not yet scheduled. Newest intent at the top. UI-only
 follow-ups live in `UI_BACKLOG.md`; this file is for engine + cross-cutting items.
 
+## Dependency rows: dispositions saved before 2026-10-28 reappear as unresolved (2026-10-28, KNOWN)
+
+A dependency finding's identity now includes its advisory id (`finding_key` in
+`crates/server/src/report_export.rs` and `crates/ui-core/src/triage.rs`), so two advisories on one
+package version no longer share a disposition. A disposition saved against a dependency row before
+this change used the old key and no longer matches: those rows come back as unresolved and need
+triaging again. Other rows are unaffected. No migration is written, because the failure is safe (a
+row is shown, never hidden). Mention it in the release note for the version that carries the change.
+
 ## Decisions: the investigation's merge can overwrite a ruling made in the same instant (2026-10-28, OPEN)
 
 When an investigation pass ends, `record_proposed_decisions` (`crates/server/src/investigation_run.rs`)
