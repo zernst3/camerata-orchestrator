@@ -1986,6 +1986,7 @@ fn build_change_summary(
         let steps = [
             ("audit", &project.step_models.audit),
             ("calibration", &project.step_models.calibration),
+            ("fix", &project.step_models.fix),
             ("research_chat", &project.step_models.research_chat),
             ("story_authoring", &project.step_models.story_authoring),
             ("decomposition", &project.step_models.decomposition),
@@ -2474,7 +2475,9 @@ pub(super) fn TierMapEditor(project: ProjectView) -> Element {
 }
 
 /// Per-step model editor: one labeled `<select>` per NON-FLEET AI step (audit,
-/// calibration, research chat, story authoring, decomposition, escalation, clarification).
+/// calibration, fix, research chat, story authoring, decomposition, escalation, clarification).
+/// The fix row alone offers "Default" (an empty model id): its default is decided at run time by
+/// the `fix_on_haiku` efficiency switch, so it is not seeded with a model like the others.
 ///
 /// Reads each current value from `project.step_models` and saves on change via
 /// `POST /api/projects/:id/step-models` (one step per round-trip — patch semantics, mirrors
@@ -2486,25 +2489,29 @@ pub(super) fn StepModelsEditor(project: ProjectView) -> Element {
     let models = use_resource(|| async move { fetch_audit_models().await });
     let models = models.read().clone().flatten();
 
-    // The (step-key, human label, current model id, tooltip hint) tuples, in display order.
+    // The (step-key, human label, current model id, tooltip hint, unset label) tuples, in
+    // display order. Only a step with an unset label may be left with no model.
     let sm = &project.step_models;
-    let rows: Vec<(&'static str, &'static str, String, &'static str)> = vec![
+    let rows: Vec<(&'static str, &'static str, String, &'static str, Option<&'static str>)> = vec![
         ("audit", "Audit", sm.audit.clone(),
-            "Onboarding scan that proposes governance rules for this project."),
+            "Onboarding scan that proposes governance rules for this project.", None),
         ("calibration", "Calibration", sm.calibration.clone(),
-            "Onboarding calibration: fine-tunes the proposed rule set to the project's actual patterns."),
+            "Onboarding calibration: fine-tunes the proposed rule set to the project's actual patterns.", None),
+        ("fix", "Fix", sm.fix.clone(),
+            "Writes one concrete fix per finding after calibration. Default: Claude Haiku 5.5, or the calibration model when the fix_on_haiku efficiency measure is off.",
+            Some("Default")),
         // NOTE: Research chat (the global assistant) is intentionally NOT listed here. Its model
         // is now an APP-LEVEL (cross-project) setting — see the "Chat assistant model" selector in
         // the cross-project Settings section. The `step_models.research_chat` field is retained for
         // back-compat but is no longer surfaced per-project nor used to resolve the chat model.
         ("story_authoring", "Story authoring", sm.story_authoring.clone(),
-            "The author-a-story screen: structures requirements into a governed work item."),
+            "The author-a-story screen: structures requirements into a governed work item.", None),
         ("decomposition", "Decomposition", sm.decomposition.clone(),
-            "Splits a story or issue into sub-issues for parallel fleet execution."),
+            "Splits a story or issue into sub-issues for parallel fleet execution.", None),
         ("escalation", "Escalation", sm.escalation.clone(),
-            "Restates your escalation answer as a resume directive the fleet can act on."),
+            "Restates your escalation answer as a resume directive the fleet can act on.", None),
         ("clarification", "Clarification", sm.clarification.clone(),
-            "Generates the investigation clarification questions sent to the requester."),
+            "Generates the investigation clarification questions sent to the requester.", None),
     ];
 
     rsx! {
@@ -2518,7 +2525,7 @@ pub(super) fn StepModelsEditor(project: ProjectView) -> Element {
                  Each change saves immediately."
             }
             div { class: "tier-map-rows",
-                for (step_key , label , current , hint) in rows.into_iter() {
+                for (step_key , label , current , hint , unset_label) in rows.into_iter() {
                     StepModelRow {
                         key: "{project.id}-{step_key}",
                         project_id: project.id.clone(),
@@ -2526,6 +2533,7 @@ pub(super) fn StepModelsEditor(project: ProjectView) -> Element {
                         label,
                         current,
                         hint,
+                        unset_label,
                         models: models.clone(),
                     }
                 }
@@ -2536,7 +2544,8 @@ pub(super) fn StepModelsEditor(project: ProjectView) -> Element {
 
 /// One row of [`StepModelsEditor`]: a label + a model `<select>` that POSTs the chosen model
 /// for its single step on change. Self-contained (owns its local selection + saving signals)
-/// so a save on one step never touches another.
+/// so a save on one step never touches another. `unset_label`, when given, adds a first option
+/// with an empty model id (the step's run-time default; only the fix step has one).
 #[component]
 pub(super) fn StepModelRow(
     project_id: String,
@@ -2544,6 +2553,7 @@ pub(super) fn StepModelRow(
     label: &'static str,
     current: String,
     hint: &'static str,
+    unset_label: Option<&'static str>,
     models: Option<AuditModelsResp>,
 ) -> Element {
     let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
@@ -2579,6 +2589,9 @@ pub(super) fn StepModelRow(
                             saving.set(false);
                         });
                     },
+                    if let Some(unset) = unset_label {
+                        option { value: "", selected: selected().is_empty(), "{unset}" }
+                    }
                     for (group_label , opts) in m.grouped().into_iter() {
                         optgroup { label: "{group_label}",
                             for opt in opts.into_iter() {

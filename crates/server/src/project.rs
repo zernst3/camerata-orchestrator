@@ -778,6 +778,8 @@ mod tests {
         assert_eq!(p.step_models.decomposition, DEFAULT_MODEL);
         assert_eq!(p.step_models.escalation, DEFAULT_MODEL);
         assert_eq!(p.step_models.clarification, DEFAULT_MODEL);
+        // The one exception: the fix step starts unset, so the `fix_on_haiku` switch decides.
+        assert_eq!(p.model_for_step(StepKind::Fix), "");
         // model_for_step agrees with the field for every kind.
         for step in [
             StepKind::Audit,

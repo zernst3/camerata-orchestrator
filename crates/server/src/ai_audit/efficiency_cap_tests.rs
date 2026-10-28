@@ -83,6 +83,7 @@ fn meter(efficiency: EfficiencyConfig, cap: Option<f64>) -> UsageMeter {
         efficiency,
         max_cost_usd: cap,
         estimate_hint_usd: None,
+        fix_model: None,
     })
 }
 
@@ -234,6 +235,8 @@ async fn truncated_pass_calls(efficiency: EfficiencyConfig) -> usize {
 async fn truncation_retry_off_makes_a_single_call() {
     assert_eq!(truncated_pass_calls(EfficiencyConfig::default()).await, 2);
     assert_eq!(truncated_pass_calls(off("truncation_retry")).await, 1);
+    // Rank 10's switch is the fix stage's alone: the scan's truncation retry is unchanged by it.
+    assert_eq!(truncated_pass_calls(off("fix_on_haiku")).await, 2);
 }
 
 #[tokio::test]
@@ -370,6 +373,7 @@ fn with_cap(cap: f64, hint: Option<f64>) -> UsageMeter {
         efficiency: EfficiencyConfig::default(),
         max_cost_usd: Some(cap),
         estimate_hint_usd: hint,
+        fix_model: None,
     })
 }
 
@@ -477,6 +481,7 @@ async fn a_batch_the_cap_refuses_is_never_submitted_and_every_pair_is_not_run() 
         efficiency: EfficiencyConfig::default(),
         max_cost_usd: Some(1.0),
         estimate_hint_usd: Some(50.0),
+        fix_model: None,
     });
     let files = vec![("a.rs".to_string(), "fn a() {}".to_string())];
     let chunks: Vec<&[(String, String)]> = vec![files.as_slice()];
