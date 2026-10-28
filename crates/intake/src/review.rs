@@ -57,15 +57,29 @@ pub enum ReviewError {
 
 /// REVIEWER SEAM — review a live [`RefinementSession`] and produce a
 /// [`RefinementReview`] to fold in. Provider / model / tier live behind this seam.
-#[async_trait]
+// Written in the form `#[async_trait]` expands to, so implementations keep using the
+// macro unchanged. Declaring it with the macro adds a bare `#[must_use]` to each method,
+// which clippy (Rust 1.99+) reports as `double_must_use`: the boxed future is already
+// `#[must_use]`.
 pub trait RefinementReviewer: Send + Sync {
     /// Review the session (in the light of the original form) and return the
     /// changes to apply this turn.
-    async fn review(
-        &self,
-        session: &RefinementSession,
-        form: &IntakeForm,
-    ) -> Result<RefinementReview, ReviewError>;
+    fn review<'life0, 'life1, 'life2, 'async_trait>(
+        &'life0 self,
+        session: &'life1 RefinementSession,
+        form: &'life2 IntakeForm,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<RefinementReview, ReviewError>>
+                + Send
+                + 'async_trait,
+        >,
+    >
+    where
+        'life0: 'async_trait,
+        'life1: 'async_trait,
+        'life2: 'async_trait,
+        Self: 'async_trait;
 }
 
 // ─── deterministic stub ──────────────────────────────────────────────────────

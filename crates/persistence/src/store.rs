@@ -62,37 +62,84 @@ CREATE INDEX IF NOT EXISTS idx_provenance_log_session_id
 // ---------------------------------------------------------------------------
 
 /// Async persistence seam. Every method is async (RUST-DOMAIN-5).
-#[async_trait]
+// Written in the form `#[async_trait]` expands to, so implementations keep using the
+// macro unchanged. Declaring it with the macro adds a bare `#[must_use]` to each method,
+// which clippy (Rust 1.99+) reports as `double_must_use`: the boxed future is already
+// `#[must_use]`.
 pub trait Store: Send + Sync {
     /// Create / migrate the schema. Idempotent — safe to call on every startup.
-    async fn migrate(&self) -> Result<(), PersistenceError>;
+    fn migrate<'life0, 'async_trait>(
+        &'life0 self,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<(), PersistenceError>> + Send + 'async_trait>,
+    >
+    where
+        'life0: 'async_trait,
+        Self: 'async_trait;
 
     /// Persist a new agent session. `started_at` is caller-supplied so tests
     /// can inject deterministic timestamps (RUST-PURE-STATE-TRANSITIONS-1).
-    async fn record_session(
-        &self,
-        session_id: &SessionId,
-        role: &Role,
+    fn record_session<'life0, 'life1, 'life2, 'async_trait>(
+        &'life0 self,
+        session_id: &'life1 SessionId,
+        role: &'life2 Role,
         started_at: DateTime<Utc>,
-    ) -> Result<(), PersistenceError>;
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<(), PersistenceError>> + Send + 'async_trait>,
+    >
+    where
+        'life0: 'async_trait,
+        'life1: 'async_trait,
+        'life2: 'async_trait,
+        Self: 'async_trait;
 
     /// Append one provenance entry. Returns the auto-assigned row id.
-    async fn append_provenance(
-        &self,
-        entry: &ProvenanceEntry,
-    ) -> Result<ProvenanceId, PersistenceError>;
+    fn append_provenance<'life0, 'life1, 'async_trait>(
+        &'life0 self,
+        entry: &'life1 ProvenanceEntry,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<ProvenanceId, PersistenceError>>
+                + Send
+                + 'async_trait,
+        >,
+    >
+    where
+        'life0: 'async_trait,
+        'life1: 'async_trait,
+        Self: 'async_trait;
 
     /// Read all provenance entries for a session, ordered by `created_at ASC`.
-    async fn provenance_by_session(
-        &self,
-        session_id: &SessionId,
-    ) -> Result<Vec<ProvenanceEntry>, PersistenceError>;
+    fn provenance_by_session<'life0, 'life1, 'async_trait>(
+        &'life0 self,
+        session_id: &'life1 SessionId,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<Vec<ProvenanceEntry>, PersistenceError>>
+                + Send
+                + 'async_trait,
+        >,
+    >
+    where
+        'life0: 'async_trait,
+        'life1: 'async_trait,
+        Self: 'async_trait;
 
     /// Read a session record. Returns `None` if not found.
-    async fn session_by_id(
-        &self,
-        session_id: &SessionId,
-    ) -> Result<Option<SessionRecord>, PersistenceError>;
+    fn session_by_id<'life0, 'life1, 'async_trait>(
+        &'life0 self,
+        session_id: &'life1 SessionId,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<Option<SessionRecord>, PersistenceError>>
+                + Send
+                + 'async_trait,
+        >,
+    >
+    where
+        'life0: 'async_trait,
+        'life1: 'async_trait,
+        Self: 'async_trait;
 }
 
 // ---------------------------------------------------------------------------

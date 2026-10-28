@@ -308,11 +308,27 @@ pub enum LeadEngineerError {
 /// investigation agent is to a Story in architect mode. It returns an [`Intake`]
 /// so a future multi-turn clarify loop can branch on
 /// [`Intake::NeedsClarification`]; V1 drives the [`Intake::Ready`] arm.
-#[async_trait]
+// Written in the form `#[async_trait]` expands to, so implementations keep using the
+// macro unchanged. Declaring it with the macro adds a bare `#[must_use]` to each method,
+// which clippy (Rust 1.99+) reports as `double_must_use`: the boxed future is already
+// `#[must_use]`.
 pub trait LeadEngineer: Send + Sync {
     /// Evaluate `form` and return either a buildable plan or clarifying
     /// questions.
-    async fn evaluate(&self, form: &IntakeForm) -> Result<Intake, LeadEngineerError>;
+    fn evaluate<'life0, 'life1, 'async_trait>(
+        &'life0 self,
+        form: &'life1 IntakeForm,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<Intake, LeadEngineerError>>
+                + Send
+                + 'async_trait,
+        >,
+    >
+    where
+        'life0: 'async_trait,
+        'life1: 'async_trait,
+        Self: 'async_trait;
 }
 
 // ─── deterministic fallback ──────────────────────────────────────────────────

@@ -63,10 +63,21 @@ pub enum FetchOutcome {
 
 /// Fetch one page. `want_body` is false when only the link's health matters, so the body is
 /// dropped instead of read.
-#[async_trait]
+// Written in the form `#[async_trait]` expands to, so implementations keep using the
+// macro unchanged. Declaring it with the macro adds a bare `#[must_use]` to each method,
+// which clippy (Rust 1.99+) reports as `double_must_use`: the boxed future is already
+// `#[must_use]`.
 pub trait Fetcher: Send + Sync {
     /// Fetch `url` (fragment already stripped by the caller).
-    async fn fetch(&self, url: &str, want_body: bool) -> FetchOutcome;
+    fn fetch<'life0, 'life1, 'async_trait>(
+        &'life0 self,
+        url: &'life1 str,
+        want_body: bool,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = FetchOutcome> + Send + 'async_trait>>
+    where
+        'life0: 'async_trait,
+        'life1: 'async_trait,
+        Self: 'async_trait;
 }
 
 // ---------------------------------------------------------------------------------------------

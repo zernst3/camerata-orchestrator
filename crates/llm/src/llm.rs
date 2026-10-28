@@ -623,19 +623,36 @@ async fn read_cli_stream(
 /// of this minimal seam, so `audit_repo`'s batch branch downcasts back to `&Llm`. In
 /// production the value is always a real `Llm`, so the downcast always succeeds and the
 /// behavior is unchanged; a non-`Llm` stub (tests) drives only the non-batch paths.
-#[async_trait::async_trait]
+// Written in the form `#[async_trait]` expands to, so implementations keep using the
+// macro unchanged. Declaring it with the macro adds a bare `#[must_use]` to each method,
+// which clippy (Rust 1.99+) reports as `double_must_use`: the boxed future is already
+// `#[must_use]`.
 pub trait LlmPort: Send + Sync {
     /// Run a completion. Mirrors [`Llm::complete`].
-    async fn complete(&self, req: LlmRequest) -> anyhow::Result<LlmResponse>;
+    fn complete<'life0, 'async_trait>(
+        &'life0 self,
+        req: LlmRequest,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = anyhow::Result<LlmResponse>> + Send + 'async_trait>,
+    >
+    where
+        'life0: 'async_trait,
+        Self: 'async_trait;
 
     /// Run a completion, streaming text deltas to `on_delta`. Mirrors
     /// [`Llm::complete_streaming`]; the callback is a `&mut dyn` so the trait stays
     /// object-safe.
-    async fn complete_streaming(
-        &self,
+    fn complete_streaming<'life0, 'life1, 'async_trait>(
+        &'life0 self,
         req: LlmRequest,
-        on_delta: &mut (dyn for<'a> FnMut(&'a str) + Send),
-    ) -> anyhow::Result<LlmResponse>;
+        on_delta: &'life1 mut (dyn for<'a> FnMut(&'a str) + Send),
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = anyhow::Result<LlmResponse>> + Send + 'async_trait>,
+    >
+    where
+        'life0: 'async_trait,
+        'life1: 'async_trait,
+        Self: 'async_trait;
 
     /// Downcast hook for the concrete-only batch path. See the trait doc.
     fn as_any(&self) -> &dyn std::any::Any;
