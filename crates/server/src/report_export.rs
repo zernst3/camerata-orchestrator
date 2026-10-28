@@ -5063,6 +5063,10 @@ pub async fn compile_pdf_from_data(data_json: &str) -> anyhow::Result<Vec<u8>> {
         .context("typst reported success but report.pdf was not found")
 }
 
+/// Killing tests for the cargo-mutants survivors of 2026-10-28 (docs/MUTATION_TESTING.md).
+#[cfg(test)]
+mod mutation_tests;
+
 #[cfg(test)]
 mod tests {
     use super::*;
