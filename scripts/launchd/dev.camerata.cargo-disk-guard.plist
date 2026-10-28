@@ -4,10 +4,10 @@
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>dev.zachernst.cargo-disk-guard</string>
+  <string>dev.camerata.cargo-disk-guard</string>
 
   <!-- Runs scripts/cargo-disk-guard.sh every 30 minutes. See the script header for what it
-       removes and why. Complements (does not replace) dev.zachernst.cargo-sweep, the weekly
+       removes and why. Complements (does not replace) the weekly cargo-sweep job, the
        7-day sweep, which cannot catch same-day growth from agent worktrees.
        Install:  scripts/install-cargo-disk-guard.sh -->
   <key>ProgramArguments</key>
