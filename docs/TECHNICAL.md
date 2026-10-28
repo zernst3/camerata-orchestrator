@@ -2913,7 +2913,16 @@ estimator; there is no second one. `camerata_server::preflight` gathers the fact
 it needs with the scan's own functions (the same file collection, the same rule
 selection and alternatives join). On the API backend the exact input size of one
 representative scan pass is counted through `count_tokens` (free, not billed), built
-by the same `representative_scan_sample` the batch path samples with. The output
+by the same `representative_scan_sample` the batch path samples with. With
+`terse_output` on, the estimate adds the detail regeneration step
+(`camerata_ui_core::scan::regeneration_estimate`): the findings are sized from the
+scan's output, and the step is priced as an upper bound by its own limits (25
+findings to a call, 160 output tokens per finding, both rounds run on every finding),
+in real time with no batch discount. The batch spend-limit gate's fallback estimate
+and the hint `camerata inspect` hands the meter use the same figure, so neither
+under-estimates a run with the switch on. `applies_to` routing is NOT modelled: it
+only ever sends fewer (chunk, rule) pairs, so leaving it out keeps the estimate an
+over-estimate, the safe side. The output
 states it is an estimate and gives its basis; an unpriced model prints "unavailable"
 rather than $0; a run that will make no model call (the compliance gate blocked the
 AI review) prints none.
@@ -3115,6 +3124,9 @@ as false): findings written under the other setting answered a different questio
 baseline from one setting is not reused under the other. This is what lets the sweep flip
 the switch without `--full`. `AUDIT_PROMPT_SCHEMA_VERSION` is unchanged because
 `audit_system_prompt()` (the OFF form) is byte-identical; the pin test still holds.
+`AiScanKey` also carries `applies_to_routing` (rank 7; absent in a key stored before it,
+read as false), so findings produced with `applies_to` routing on are not reused by a
+scan with it off, and the reverse. The first scan after this change re-scans in full.
 
 **What the API sweep must compare** (switch on against the sweep5b grades, per fixture):
 recall per fixture and the decoy numbers (a borderline finding the one-sentence rule
