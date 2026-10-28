@@ -820,6 +820,9 @@ pub struct CoverJson {
     pub audited_refs: Vec<AuditedRefJson>,
     pub audit_model: Option<String>,
     pub calibration_model: Option<String>,
+    /// The model backend (`api` / `cli`) and provider that ran the inspection, e.g.
+    /// `api (anthropic)`, from [`ReportOptions::model`]. `None` when the caller recorded none.
+    pub model_backend: Option<String>,
     pub camerata_version: String,
     /// `%Y-%m-%d %H:%M UTC` (M5) — of when this PDF was generated (NOT the scan time —
     /// that's `audited_refs`/provenance; this is "as-of" for the export itself).
@@ -4848,6 +4851,10 @@ pub fn build_report_json(
         audited_refs,
         audit_model: report.provenance.audit_model.clone(),
         calibration_model: report.provenance.calibration_model.clone(),
+        model_backend: opts
+            .model
+            .as_ref()
+            .map(|m| format!("{} ({})", m.backend, m.provider)),
         camerata_version: report.provenance.camerata_version.clone(),
         // The SCAN time, not the wall clock at serialization — see `generated_at_label`.
         generated_at: generated_at_label(&report.provenance),
@@ -5065,6 +5072,8 @@ pub async fn compile_pdf_from_data(data_json: &str) -> anyhow::Result<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
+
+
     use super::*;
     use crate::onboard::{AuditedRef, CoverageNote, LanguageVolume, ScanProvenance};
 

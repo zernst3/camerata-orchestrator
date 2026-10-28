@@ -645,7 +645,7 @@
 // on the cover; they now render here instead. Camerata is the inspecting INSTRUMENT,
 // legitimately named where methodology is discussed, never on the client-facing cover (see
 // `brand_title` above) and never a substitute for the agency's own resolved brand.
-Scanned with Camerata v#or_na(d.cover.camerata_version). Inspection model: #or_na(d.cover.audit_model). Calibration model: #or_na(d.cover.calibration_model).
+Scanned with Camerata v#or_na(d.cover.camerata_version). Inspection model: #or_na(d.cover.audit_model). Calibration model: #or_na(d.cover.calibration_model). Model backend: #or_na(d.cover.model_backend).
 
 // P5: this reconciling line must never claim a human "reviewed"/"dispositioned" a finding
 // unless `d.review_state == "reviewed"` (at least one finding this session carries an explicit

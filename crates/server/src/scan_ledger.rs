@@ -390,6 +390,12 @@ pub struct ScanLedger {
     /// "capped" fact. See [`crate::cost_cap`].
     #[serde(default)]
     cost_cap: Option<crate::cost_cap::CostCapRecord>,
+    /// The engagement the scan ran under: client engagement or not, the backend, provider and
+    /// models, and whether the client's own tooling was allowed to run (see
+    /// [`crate::client_lock`]). Operator-only. `None` for a ledger written before the record
+    /// existed, or by a caller that does not record one.
+    #[serde(default)]
+    engagement: Option<crate::client_lock::EngagementRecord>,
 }
 
 /// The facts about a scan's INPUT, recorded so the integrity gate can judge them.
@@ -609,6 +615,16 @@ impl ScanLedger {
     /// Record what the spend cap did. Overwrites: one scan, one record.
     pub fn record_cost_cap(&mut self, record: crate::cost_cap::CostCapRecord) {
         self.cost_cap = Some(record);
+    }
+
+    /// Record the engagement this scan ran under. Overwrites: one scan, one record.
+    pub fn record_engagement(&mut self, record: crate::client_lock::EngagementRecord) {
+        self.engagement = Some(record);
+    }
+
+    /// The engagement this scan ran under, when it recorded one.
+    pub fn engagement(&self) -> Option<&crate::client_lock::EngagementRecord> {
+        self.engagement.as_ref()
     }
 
     /// What the spend cap did, when one was set.

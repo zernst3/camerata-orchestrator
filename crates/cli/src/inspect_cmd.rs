@@ -95,9 +95,27 @@ pub struct InspectArgs {
     /// `--efficiency name=on|off` entries (applied over `CAMERATA_EFFICIENCY`). See
     /// [`camerata_server::efficiency`].
     pub efficiency: Vec<String>,
+    /// The run is a client engagement ([`camerata_server::client_lock`]): ON unless the operator
+    /// passed `--internal` (the maintainer's own development). A client engagement refuses the
+    /// `cli` backend and any non-Anthropic model before any file is read ([`validate_args`]),
+    /// and skips every step that executes the client's own code unless `run_client_tooling`.
+    pub client_engagement: bool,
+    /// `--run-client-tooling`: the operator's explicit opt-in to run steps that execute the
+    /// client's own code (today the `cargo clippy` scan preview, which builds the crate) in a
+    /// client engagement. Recorded in the ledger and stated in the report either way.
+    pub run_client_tooling: bool,
 }
 
 impl InspectArgs {
+    /// The client-tooling decision this run carries into the preview pass, the ledger and the
+    /// report.
+    pub fn client_tooling(&self) -> camerata_server::client_lock::ClientTooling {
+        camerata_server::client_lock::ClientTooling::new(
+            self.client_engagement,
+            self.run_client_tooling,
+        )
+    }
+
     /// The run's controls: the environment's efficiency switches, then the flags over them, and
     /// the validated cap. `Err` on an unknown measure, a malformed entry or a bad cap, before
     /// anything is read or spent.
@@ -228,6 +246,7 @@ impl From<String> for InspectError {
 /// the app first, `ANTHROPIC_API_KEY` as the fallback; see [`api_key_present`]).
 pub fn validate_args(args: &InspectArgs, has_api_key: bool) -> Result<(), String> {
     args.run_controls()?;
+    require_client_lock(args)?;
     if !args.repo.is_dir() {
         return Err(format!(
             "--repo {} does not exist or is not a directory",
@@ -260,6 +279,25 @@ pub fn validate_args(args: &InspectArgs, has_api_key: bool) -> Result<(), String
         );
     }
     Ok(())
+}
+
+/// The client-engagement lock ([`camerata_server::client_lock::refusal`]) for this run: the
+/// backend and every model the scan may use (each resolved exactly as the scan resolves it,
+/// environment overrides included). Pure apart from those environment reads; runs before any
+/// file is read.
+pub fn require_client_lock(args: &InspectArgs) -> Result<(), String> {
+    let models = camerata_server::client_lock::models_a_scan_may_use(
+        args.model.as_deref(),
+        args.calibration_model.as_deref(),
+        false,
+    );
+    match camerata_server::client_lock::refusal(args.client_engagement, args.backend, &models) {
+        None => Ok(()),
+        Some(why) => Err(format!(
+            "{why} Run it with `--backend api` and Anthropic models (`--model claude-...`), or \
+             pass `--internal` if this is your own development and not client work."
+        )),
+    }
 }
 
 /// The rule ids/directives a FRESH onboarding scan pre-checks with no human override — i.e.
@@ -820,6 +858,16 @@ pub async fn run_inspect_pipeline_with(
     // W6 / I2: persist the ledger at the SAME point the summary is computed — fully
     // reconciled, before sealing — so `camerata integrity-gate` evaluates exactly the facts
     // this run's summary describes, never a different snapshot. See `ledger_path`.
+    // The engagement this run was made under, with the models that actually ran.
+    let model_record = camerata_server::ModelRecord::anthropic(args.backend)
+        .with_client_engagement(args.client_engagement)
+        .with_models_from(&report.provenance);
+    report
+        .ledger
+        .record_engagement(camerata_server::client_lock::EngagementRecord::new(
+            &model_record,
+            args.client_tooling(),
+        ));
     save_ledger(&args.repo, &report.ledger);
 
     // Pass-1 W1 seal fix: THE sealing point — every row-adding pass above has already run, and
@@ -831,12 +879,7 @@ pub async fn run_inspect_pipeline_with(
     // ── Phase 5: export — the exact `export_product` HTTP handler's assembly ───────────
     // `release_product_export` is the release gate: it returns bytes only when every check
     // passed, and `std::fs::write` below runs only on `Ok`, so a blocked export is never on disk.
-    let released = release_product_export(
-        &report,
-        corpus.as_ref(),
-        Some(camerata_server::ModelRecord::anthropic(args.backend)),
-    )
-    .await?;
+    let released = release_product_export(&report, corpus.as_ref(), Some(model_record)).await?;
     let zip_bytes = released.bytes;
     let release_gate = format!(
         "release gate: passed ({} checks)",
@@ -1053,8 +1096,8 @@ pub fn require_api_key_for_client_inspection(
         return Err(InspectError::Failed(
             "client inspections run on the Anthropic API, but no API key is configured. Add an \
              Anthropic API key in the app (Settings, Chat backend, API) or set ANTHROPIC_API_KEY, \
-             and re-run. For an internal benchmark run only, choose the Claude Code subscription \
-             explicitly with `--backend cli`."
+             and re-run. For your own development only (never client work), choose the Claude \
+             Code subscription explicitly with `--internal --backend cli`."
                 .to_string(),
         ));
     }
@@ -1169,6 +1212,9 @@ mod tests {
             verbose: false,
             max_cost_usd: None,
             efficiency: Vec::new(),
+            // The maintainer's own run: these tests exercise the `cli` backend's validation.
+            client_engagement: false,
+            run_client_tooling: false,
         }
     }
 

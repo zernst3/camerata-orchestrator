@@ -135,6 +135,98 @@ fn the_backend_and_provider_in_the_options_reach_the_manifest_and_readme() {
     release(package).expect("the gate's agreement check passes with the model lines");
 }
 
+/// The fixture scan with the AI passes recorded as having run.
+fn report_with_models() -> ScanReport {
+    let mut report = scan_report();
+    report.provenance.audit_model = Some("claude-sonnet-5".to_string());
+    report.provenance.calibration_model = Some("claude-opus-5".to_string());
+    report
+}
+
+/// H2: the models the scan ran and the client-engagement flag reach the manifest and the
+/// README alike, and the gate's agreement check holds them equal.
+#[test]
+fn the_models_that_ran_and_the_engagement_flag_reach_the_manifest_and_readme() {
+    let sealed = report_with_models().seal();
+    let options = ReportOptions {
+        model: Some(
+            crate::ModelRecord::anthropic(crate::llm::ProjectBackend::Api)
+                .with_client_engagement(true),
+        ),
+        ..ReportOptions::default()
+    };
+    let json = build_report_json(&sealed, &HashMap::new(), None, &options);
+    let data = render_data_json(&json).expect("data.json renders");
+    let package = assemble_package(
+        &sealed,
+        &HashMap::new(),
+        None,
+        &options,
+        STEM,
+        (json, data, STAND_IN_PDF.to_vec()),
+    )
+    .expect("the package assembles");
+    let scan_model = sealed
+        .provenance
+        .audit_model
+        .clone()
+        .expect("the fixture records a scan model");
+    assert!(
+        package
+            .readme
+            .contains(&format!("Model (the scan): {scan_model}\n")),
+        "{}",
+        package.readme
+    );
+    assert!(package.readme.contains("Client engagement: yes\n"));
+    let manifest = package.provenance.inspection_json();
+    assert_eq!(manifest["client_engagement"], true);
+    assert_eq!(manifest["models"][0]["role"], "the scan");
+    assert_eq!(manifest["models"][0]["model"], scan_model.as_str());
+    // The PDF and findings.json carry the backend on the report cover.
+    assert_eq!(
+        package.report_json.cover.model_backend.as_deref(),
+        Some("api (anthropic)")
+    );
+    release(package).expect("the gate's agreement check passes with the model lines");
+}
+
+/// H2: a README whose model line disagrees with the manifest is blocked by the agreement check.
+#[test]
+fn a_readme_model_line_that_disagrees_with_the_manifest_is_blocked() {
+    let sealed = report_with_models().seal();
+    let options = ReportOptions {
+        model: Some(crate::ModelRecord::anthropic(
+            crate::llm::ProjectBackend::Api,
+        )),
+        ..ReportOptions::default()
+    };
+    let json = build_report_json(&sealed, &HashMap::new(), None, &options);
+    let data = render_data_json(&json).expect("data.json renders");
+    let mut package = assemble_package(
+        &sealed,
+        &HashMap::new(),
+        None,
+        &options,
+        STEM,
+        (json, data, STAND_IN_PDF.to_vec()),
+    )
+    .expect("the package assembles");
+    let scan_model = sealed.provenance.audit_model.clone().unwrap();
+    package.readme = package.readme.replace(
+        &format!("Model (the scan): {scan_model}"),
+        "Model (the scan): deepseek/deepseek-chat",
+    );
+    let failure = blocked(package);
+    assert!(
+        failure
+            .report
+            .problems()
+            .any(|(_, p)| p.location == "Model"),
+        "{failure:?}"
+    );
+}
+
 fn blocked(package: ProductPackage) -> GateFailure {
     match release(package) {
         Err(ReleaseError::Blocked(failure)) => failure,
