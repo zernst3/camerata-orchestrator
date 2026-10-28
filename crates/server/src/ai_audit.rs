@@ -425,6 +425,23 @@ impl UsageMeter {
             .is_some_and(|cap| self.spent_usd() >= cap)
     }
 
+    /// True when one MORE call from a pass that already holds its permit would go past the
+    /// limit: the same test [`Self::admit`] applies to a new pass (spend so far plus one call's
+    /// reserve for every pass in flight, this one included, against the cap), without taking a
+    /// permit. A retry of a cut-off or malformed reply checks this before it is sent. Always
+    /// false with no cap; true once any call's cost was unknowable (the cap cannot be enforced).
+    pub fn retry_blocked(&self) -> bool {
+        let Some(cap) = self.controls.max_cost_usd else {
+            return false;
+        };
+        let budget = self.budget();
+        if budget.cost_unknown {
+            return true;
+        }
+        let reserve = self.max_call_micro_usd.load(Ordering::Relaxed) as f64 / 1_000_000.0;
+        self.spent_usd() + budget.in_flight.max(1) as f64 * reserve >= cap
+    }
+
     fn budget(&self) -> std::sync::MutexGuard<'_, crate::cost_cap::BudgetState> {
         self.budget
             .lock()
@@ -4862,7 +4879,7 @@ async fn retry_unusable_scan_reply(
     meter: Option<&UsageMeter>,
     malformed_retries_allowed: usize,
 ) -> ScanReply {
-    let cap_reached = || meter.is_some_and(UsageMeter::cap_reached);
+    let cap_reached = || meter.is_some_and(UsageMeter::retry_blocked);
     let mut wasted_counted = false;
     let mut stopped_by_cap = false;
     if resp.truncated && efficiency_of(meter).truncation_retry {

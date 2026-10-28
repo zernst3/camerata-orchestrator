@@ -74,6 +74,10 @@ impl LlmPort for ScriptedLlm {
 
 /// One chunk of `n_files` files and one rule-batch through the real `run_passes`.
 async fn scan(llm: &ScriptedLlm, n_files: usize) -> PassesOut {
+    scan_metered(llm, n_files, None).await
+}
+
+async fn scan_metered(llm: &ScriptedLlm, n_files: usize, meter: Option<&UsageMeter>) -> PassesOut {
     let files: Vec<(String, String)> = (0..n_files)
         .map(|i| (format!("f{i}.rs"), format!("fn f{i}() {{}}")))
         .collect();
@@ -82,7 +86,7 @@ async fn scan(llm: &ScriptedLlm, n_files: usize) -> PassesOut {
     let batches: Vec<&[(String, String)]> = vec![rules.as_slice()];
     let adopted: std::collections::HashSet<String> = ["RULE-0".to_string()].into();
     run_passes(
-        llm, REPO, REPO_MAP, &adopted, None, None, None, &chunks, &batches, 1, "pass", "mal", None,
+        llm, REPO, REPO_MAP, &adopted, None, None, None, &chunks, &batches, 1, "pass", "mal", meter,
         false,
     )
     .await
@@ -131,9 +135,81 @@ async fn a_well_formed_empty_answer_is_zero_findings_and_is_not_retried() {
     assert_eq!(llm.calls(), 1);
 }
 
-#[test]
-fn the_retry_bound_is_small_and_nonzero() {
-    assert!((1..=3).contains(&MALFORMED_REPLY_RETRIES));
+/// The failure reason states how many sends were spent, so an operator can tell a reply that
+/// was tried once from one tried three times.
+#[tokio::test]
+async fn the_failure_reason_states_the_attempt_count() {
+    let llm = ScriptedLlm::new(&[(MALFORMED, false)]);
+    let (_f, _p, _r, _ok, failures) = scan(&llm, 1).await;
+    let attempts = 1 + MALFORMED_REPLY_RETRIES;
+    assert_eq!(llm.calls(), attempts);
+    assert_eq!(failures.len(), 1, "{failures:?}");
+    assert!(
+        failures[0]
+            .error
+            .contains(&format!("not valid JSON after {attempts} attempts")),
+        "{}",
+        failures[0].error
+    );
+    assert_eq!(
+        malformed_reply_reason(1),
+        "the model's reply was not valid JSON after 1 attempt"
+    );
+}
+
+fn capped_meter(cap: f64) -> UsageMeter {
+    UsageMeter::with_controls(crate::cost_cap::RunControls {
+        max_cost_usd: Some(cap),
+        ..crate::cost_cap::RunControls::default()
+    })
+}
+
+/// Each stub call costs 0.01. A cap just above one call's cost leaves room for the first call
+/// and not for a second, so the malformed reply must NOT be sent again.
+#[tokio::test]
+async fn a_malformed_retry_is_not_sent_when_it_would_pass_the_spend_limit() {
+    let llm = ScriptedLlm::new(&[(MALFORMED, false)]);
+    let meter = capped_meter(0.015);
+    let (findings, _p, _r, ok, failures) = scan_metered(&llm, 3, Some(&meter)).await;
+    assert_eq!(llm.calls(), 1, "no retry past the limit");
+    assert_eq!(ok, 0);
+    assert!(findings.is_empty());
+    assert_eq!(failures.len(), 1, "{failures:?}");
+    assert!(
+        failures[0]
+            .error
+            .contains("spend limit reached before the reply could be retried"),
+        "{}",
+        failures[0].error
+    );
+    assert_eq!(failures[0].files, 3);
+}
+
+#[tokio::test]
+async fn a_truncation_retry_is_not_sent_when_it_would_pass_the_spend_limit() {
+    let llm = ScriptedLlm::new(&[(MALFORMED, true)]);
+    let meter = capped_meter(0.015);
+    let (_f, _p, _r, ok, failures) = scan_metered(&llm, 2, Some(&meter)).await;
+    assert_eq!(llm.calls(), 1, "no retry past the limit");
+    assert_eq!(ok, 0);
+    assert_eq!(failures.len(), 1, "{failures:?}");
+    assert!(
+        failures[0]
+            .error
+            .contains("spend limit reached before the reply could be retried"),
+        "{}",
+        failures[0].error
+    );
+}
+
+/// Anti-vacuity: with room under the limit the same script is retried as before.
+#[tokio::test]
+async fn a_malformed_retry_is_sent_when_the_spend_limit_has_room() {
+    let llm = ScriptedLlm::new(&[(MALFORMED, false), (ONE_FINDING, false)]);
+    let meter = capped_meter(5.0);
+    let (findings, _p, _r, ok, failures) = scan_metered(&llm, 1, Some(&meter)).await;
+    assert!(failures.is_empty(), "{failures:?}");
+    assert_eq!((ok, findings.len(), llm.calls()), (1, 1, 2));
 }
 
 #[test]
