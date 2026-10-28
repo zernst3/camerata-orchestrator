@@ -2028,8 +2028,10 @@ mod tests {
     /// capped below that, and the cap must never be lower than the flat 8192 it replaces.
     #[test]
     fn the_per_rule_scan_budget_covers_the_measured_batch() {
-        assert!(SCAN_OUTPUT_TOKENS_PER_RULE >= 634);
-        assert!(SCAN_OUTPUT_TOKENS_PER_RULE * 15 >= 9_516);
-        assert_eq!(SCAN_MAX_TOKENS_FLOOR, 8_192);
+        const {
+            assert!(SCAN_OUTPUT_TOKENS_PER_RULE >= 634);
+            assert!(SCAN_OUTPUT_TOKENS_PER_RULE * 15 >= 9_516);
+            assert!(SCAN_MAX_TOKENS_FLOOR == 8_192);
+        }
     }
 }

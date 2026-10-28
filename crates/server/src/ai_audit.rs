@@ -8156,6 +8156,67 @@ fn description_overlap_score(a: &Finding, b: &Finding) -> f64 {
 /// policies) are still kept apart.
 const DESCRIPTION_OVERLAP_THRESHOLD: f64 = 0.5;
 
+/// Whether a row is about an exposed secret (the `secret-exposure` category the merge pass
+/// backfills from the rule id, or the model or calibration set).
+fn is_secret_exposure(f: &Finding) -> bool {
+    f.category.as_deref() == Some("secret-exposure")
+}
+
+/// The redacted fingerprints of the credential values a row's snippet holds: the prefix and last
+/// four characters [`camerata_secrets::redact_str`] leaves (`sk_live_…ab12`), and for a value too
+/// short to show a tail the prefix and the length (`…|12`). A raw value is redacted first, so a
+/// floor row that kept the raw line and an AI row that quoted the redacted line give the same
+/// fingerprint. Empty when the snippet holds no credential value.
+fn credential_fingerprints(f: &Finding) -> std::collections::BTreeSet<String> {
+    const ELLIPSIS: char = '\u{2026}';
+    let redacted = camerata_secrets::redact_str(&f.snippet);
+    let chars: Vec<char> = redacted.chars().collect();
+    let is_body = |c: char| c.is_ascii_alphanumeric() || c == '_' || c == '-';
+    let mut out = std::collections::BTreeSet::new();
+    for (i, &c) in chars.iter().enumerate() {
+        if c != ELLIPSIS {
+            continue;
+        }
+        let mut start = i;
+        while start > 0 && is_body(chars[start - 1]) {
+            start -= 1;
+        }
+        let mut end = i + 1;
+        while end < chars.len() && is_body(chars[end]) {
+            end += 1;
+        }
+        let prefix: String = chars[start..i].iter().collect();
+        let tail: String = chars[i + 1..end].iter().collect();
+        let mut print = format!("{prefix}{ELLIPSIS}{tail}");
+        if tail.is_empty() {
+            let rest: String = chars[end..].iter().collect();
+            if let Some(count) = rest.strip_prefix(" (") {
+                let digits: String = count.chars().take_while(char::is_ascii_digit).collect();
+                print.push_str(&format!("|{digits}"));
+            }
+        }
+        out.insert(print);
+    }
+    out
+}
+
+/// Whether two secret rows are the same credential: the same exact location in one repository,
+/// or a shared redacted fingerprint ([`credential_fingerprints`]). A row that cites no credential
+/// value, at a different place, is not proven to be the same credential.
+fn same_credential(a: &Finding, b: &Finding) -> bool {
+    if a.repo != b.repo {
+        return false;
+    }
+    if a.path == b.path && a.line != 0 && a.line == b.line {
+        return true;
+    }
+    let a_prints = credential_fingerprints(a);
+    !a_prints.is_empty()
+        && credential_fingerprints(b)
+            .iter()
+            .any(|print| a_prints.contains(print))
+}
+
 /// The pairwise semantic-merge predicate (design §1b, extended by P1 design point 2, the MERGE
 /// cycle-2/cycle-3 hardening passes, and C4-P1's defect-shaped merge redesign). `a` and `b`
 /// cluster as the same defect when ANY of SIX GENERAL signals fires (never a seventh,
@@ -8277,6 +8338,19 @@ fn semantic_pair_merges(a: &Finding, b: &Finding, content: Option<&str>) -> bool
 
     // Signal (b): a shared captured object, general and cross-file (design point 2b).
     let shared_object = shared_captured_object(a, b);
+
+    // Credential-identity guard: two secret rows are one finding only when they are the same
+    // credential. "Both are a leaked secret" and "a few lines apart in one file" prove nothing,
+    // and fusing two credentials lets one reviewer decision dispose of both. A shared named
+    // credential (signal (b)) still links two rows; a row never links across repositories.
+    if is_secret_exposure(a) && is_secret_exposure(b) {
+        if a.repo != b.repo {
+            return false;
+        }
+        if !shared_object && !same_credential(a, b) {
+            return false;
+        }
+    }
 
     // Signal (c): near-identical description prose, general and same-file-only (design MERGE
     // gap (i)).

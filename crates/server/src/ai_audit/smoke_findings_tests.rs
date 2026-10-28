@@ -423,7 +423,7 @@ fn the_real_secret_is_the_headline_row_whichever_order_the_rows_arrive_in() {
         vec![real_row(), placeholder_row()],
     ] {
         // The group as the cross-family merge forms it; which row leads is what is under test.
-        let out = vec![merge_semantic_group(rows)];
+        let out = [merge_semantic_group(rows)];
         assert_eq!(out[0].path, ".env.production", "the real secret leads");
         assert_eq!(out[0].severity, "critical");
         let absorbed = out[0]
@@ -470,4 +470,116 @@ fn a_real_secret_alone_keeps_its_rating_and_a_non_secret_rule_in_an_example_file
     other.detail = "A layering violation.".to_string();
     let out = merge_semantic_groups(vec![other], &[]);
     assert_eq!(out[0].severity, "critical", "only secret rules are lowered");
+}
+
+// ── 4. Two different credentials near each other stay two rows ──────────────────────────────
+
+/// A redacted password (no prefix, no tail) and a redacted Stripe-shaped key: two different
+/// credentials. No secret-shaped literal in the source; these are the redacted forms a finding
+/// carries.
+const PASSWORD_LINE: &str = "const dbPassword = \"\u{2026} (12 chars)\";";
+const STRIPE_LINE: &str = "const stripeKey = \"sk_live_\u{2026}ab12 (32 chars)\";";
+
+fn credential_row(rule: &str, line: usize, snippet: &str, detail: &str) -> Finding {
+    Finding {
+        repo: REPO.to_string(),
+        path: "src/config.ts".to_string(),
+        line,
+        rule_id: rule.to_string(),
+        severity: "critical".to_string(),
+        snippet: snippet.to_string(),
+        detail: detail.to_string(),
+        ..Finding::default()
+    }
+}
+
+#[test]
+fn a_floor_password_and_an_ai_stripe_key_two_lines_apart_stay_two_rows() {
+    let floor = credential_row(
+        "SEC-NO-HARDCODED-SECRETS-1",
+        5,
+        PASSWORD_LINE,
+        "A database password is written into the source.",
+    );
+    let ai = credential_row(
+        "AI-HARDCODED-STRIPE-KEY",
+        7,
+        STRIPE_LINE,
+        "A live payment key is written into the source.",
+    );
+    for rows in [vec![floor.clone(), ai.clone()], vec![ai, floor]] {
+        let out = merge_semantic_groups(rows, &[]);
+        assert_eq!(out.len(), 2, "two credentials, two decisions: {out:?}");
+        assert!(out.iter().all(|f| f.also_locations.is_empty()), "{out:?}");
+    }
+}
+
+#[test]
+fn two_ai_rows_for_different_credentials_with_one_rule_id_stay_two_rows() {
+    let one = credential_row(
+        "AI-HARDCODED-SECRET-1",
+        5,
+        PASSWORD_LINE,
+        "A database password is written into the source.",
+    );
+    let two = credential_row(
+        "AI-HARDCODED-SECRET-1",
+        7,
+        STRIPE_LINE,
+        "A live payment key is written into the source.",
+    );
+    let out = merge_semantic_groups(vec![one, two], &[]);
+    assert_eq!(out.len(), 2, "{out:?}");
+}
+
+#[test]
+fn the_same_credential_flagged_by_the_floor_and_the_ai_on_adjacent_lines_is_one_row() {
+    let floor = credential_row(
+        "SEC-NO-HARDCODED-SECRETS-1",
+        5,
+        STRIPE_LINE,
+        "A payment key is written into the source.",
+    );
+    let ai = credential_row(
+        "AI-HARDCODED-STRIPE-KEY",
+        6,
+        "stripeKey = \"sk_live_\u{2026}ab12 (32 chars)\"",
+        "A live payment key is written into the source.",
+    );
+    let out = merge_semantic_groups(vec![floor, ai], &[]);
+    assert_eq!(out.len(), 1, "one credential, one row: {out:?}");
+    assert_eq!(out[0].also_locations.len(), 1);
+}
+
+#[test]
+fn a_row_that_cites_no_credential_value_is_not_proven_to_be_the_same_credential() {
+    let floor = credential_row(
+        "SEC-NO-HARDCODED-SECRETS-1",
+        5,
+        STRIPE_LINE,
+        "A payment key is written into the source.",
+    );
+    let ai = credential_row(
+        "AI-HARDCODED-STRIPE-KEY",
+        6,
+        "",
+        "A live payment key is written into the source.",
+    );
+    let out = merge_semantic_groups(vec![floor, ai], &[]);
+    assert_eq!(out.len(), 2, "{out:?}");
+}
+
+#[test]
+fn a_credential_seen_in_two_repositories_is_never_one_row() {
+    let here = credential_row(
+        "SEC-NO-HARDCODED-SECRETS-1",
+        5,
+        STRIPE_LINE,
+        "A payment key is written into the source.",
+    );
+    let mut there = here.clone();
+    there.repo = "acme/other".to_string();
+    there.rule_id = "AI-HARDCODED-STRIPE-KEY".to_string();
+    let out = merge_semantic_groups(vec![here, there], &[]);
+    assert_eq!(out.len(), 2, "{out:?}");
 }
