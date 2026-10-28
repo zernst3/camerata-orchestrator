@@ -508,8 +508,10 @@ async fn req_w18_the_nineteen_migrated_annotations_are_loaded_from_the_corpus() 
     // each carrying a note on what the source does and does not establish (for example, that a
     // cited page documents a mechanism while the rule's requirement is the project's own
     // policy). Same author-facing use as the W25 moves. Rules: PROC-PR-CONCURRENCY-1 (2),
-    // UI-UTC-DATES-1 (2), JAVASCRIPT-ANGULAR-SMART-PRESENTATIONAL-PATTERN-1 (1).
-    const CORPUS_TEXT_SOURCE_NOTES: usize = 5;
+    // UI-UTC-DATES-1 (2), JAVASCRIPT-ANGULAR-SMART-PRESENTATIONAL-PATTERN-1 (1),
+    // SPIRIT-OPTIMIZE-1 (3: the CWE pages define weaknesses to avoid, not a build-in-by-default
+    // directive, which is why that rule is labelled policy).
+    const CORPUS_TEXT_SOURCE_NOTES: usize = 8;
     let total: usize = set
         .iter()
         .map(|r| r.sources.iter().filter(|s| s.relevance.is_some()).count())

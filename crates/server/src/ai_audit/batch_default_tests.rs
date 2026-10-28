@@ -24,8 +24,10 @@ const REPO_MAP: &str = "REPO MAP:\nfoo.rs: fn foo()\n";
 
 /// What the fake answers for one item in one submission round (0-based).
 #[derive(Clone)]
-enum Reply {
+pub(super) enum Reply {
     Ok,
+    /// A reply with no findings (for tests that look at what was SENT, not what came back).
+    Empty,
     Truncated,
     Errored,
     Missing,
@@ -80,9 +82,14 @@ type Script = dyn Fn(usize, &str) -> Reply + Send + Sync;
 
 /// A Message Batches API that answers each item by a script keyed on (round, custom id), and
 /// logs every submission.
-struct FakeBatch {
+pub(super) struct FakeBatch {
     script: Box<Script>,
     submissions: Mutex<Vec<Vec<BatchItem>>>,
+    /// The system prompt and prompt of every `count_input_tokens` request.
+    counted: Mutex<Vec<(Option<String>, String)>>,
+    /// `submit` calls so far, and the 0-based call that fails (nothing is accepted).
+    submit_attempts: AtomicUsize,
+    submit_fails_on: Option<usize>,
     pending: Mutex<HashMap<String, Vec<String>>>,
     realtime: Realtime,
     cost: f64,
@@ -92,10 +99,13 @@ struct FakeBatch {
 }
 
 impl FakeBatch {
-    fn new(script: impl Fn(usize, &str) -> Reply + Send + Sync + 'static) -> Self {
+    pub(super) fn new(script: impl Fn(usize, &str) -> Reply + Send + Sync + 'static) -> Self {
         Self {
             script: Box::new(script),
             submissions: Mutex::new(Vec::new()),
+            counted: Mutex::new(Vec::new()),
+            submit_attempts: AtomicUsize::new(0),
+            submit_fails_on: None,
             pending: Mutex::new(HashMap::new()),
             realtime: Realtime {
                 calls: AtomicUsize::new(0),
@@ -105,6 +115,37 @@ impl FakeBatch {
             poll_fails: false,
             polls: AtomicUsize::new(0),
         }
+    }
+    /// The `n`th (0-based) `submit` call fails outright, as a provider outage would.
+    pub(super) fn failing_submit_on(mut self, n: usize) -> Self {
+        self.submit_fails_on = Some(n);
+        self
+    }
+    /// Every item of every submission, in order, as `(custom id, system prompt, prompt text)`.
+    pub(super) fn submitted_items(&self) -> Vec<Vec<(String, Option<String>, String)>> {
+        self.submissions
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|items| {
+                items
+                    .iter()
+                    .map(|i| {
+                        let content = serde_json::to_value(&i.params.messages[0].content).unwrap();
+                        let text = match content.as_str() {
+                            Some(t) => t.to_string(),
+                            None => content
+                                .as_array()
+                                .into_iter()
+                                .flatten()
+                                .filter_map(|b| b["text"].as_str())
+                                .collect::<String>(),
+                        };
+                        (i.custom_id.clone(), i.params.system.clone(), text)
+                    })
+                    .collect()
+            })
+            .collect()
     }
     fn submitted_ids(&self) -> Vec<Vec<String>> {
         self.submissions
@@ -131,10 +172,18 @@ impl BatchApi for FakeBatch {
     fn realtime(&self) -> &dyn LlmPort {
         &self.realtime
     }
-    async fn count_input_tokens(&self, _req: &LlmRequest, _model: &str) -> Option<u64> {
+    async fn count_input_tokens(&self, req: &LlmRequest, _model: &str) -> Option<u64> {
+        self.counted
+            .lock()
+            .unwrap()
+            .push((req.system.clone(), req.prompt.clone()));
         Some(1_000)
     }
     async fn submit(&self, items: Vec<BatchItem>) -> anyhow::Result<String> {
+        let attempt = self.submit_attempts.fetch_add(1, Ordering::SeqCst);
+        if self.submit_fails_on == Some(attempt) {
+            anyhow::bail!("Message Batches API HTTP 503: submission refused");
+        }
         let mut subs = self.submissions.lock().unwrap();
         let id = format!("msgbatch_{}", subs.len());
         self.pending.lock().unwrap().insert(
@@ -170,6 +219,14 @@ impl BatchApi for FakeBatch {
                     Reply::Ok => Some(row(
                         Some(response(
                             &finding_json(&format!("R{round}")),
+                            false,
+                            self.cost,
+                        )),
+                        None,
+                    )),
+                    Reply::Empty => Some(row(
+                        Some(response(
+                            r#"{"findings":[],"needs_files":[]}"#,
                             false,
                             self.cost,
                         )),
@@ -744,5 +801,54 @@ async fn a_billed_batch_refusal_counts_toward_the_cap_and_is_reported_as_a_refus
         (m.spent_usd() - 4.0).abs() < 1e-9,
         "three replies and the billed refusal: {}",
         m.spent_usd()
+    );
+}
+
+// ── a batch item carries the same system prompt a real-time pass would ──────────────────────
+
+/// Every submitted item's system prompt, and every `count_input_tokens` request's.
+fn systems_sent(api: &FakeBatch) -> (Vec<Option<String>>, Vec<Option<String>>) {
+    let items = api
+        .submitted_items()
+        .into_iter()
+        .flatten()
+        .map(|(_, system, _)| system)
+        .collect();
+    let counted = api
+        .counted
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(system, _)| system.clone())
+        .collect();
+    (items, counted)
+}
+
+#[tokio::test(start_paused = true)]
+async fn batch_items_carry_the_terse_system_prompt_and_the_token_count_uses_the_same_one() {
+    for terse in [true, false] {
+        let mut config = eff(true);
+        config.set("terse_output", terse).unwrap();
+        let api = FakeBatch::new(|_round, _id| Reply::Empty);
+        let m = meter(config, None);
+        let (_findings, ok, failures) = run(&api, &m).await;
+        assert_eq!(ok, 4, "{failures:?}");
+        let expected = Some(audit_system_prompt_with(terse));
+        let (items, counted) = systems_sent(&api);
+        assert_eq!(items.len(), 4, "all four items were submitted");
+        assert!(
+            items.iter().all(|s| *s == expected),
+            "terse_output={terse}: every batch item carries audit_system_prompt_with({terse})"
+        );
+        assert_eq!(
+            counted,
+            vec![expected],
+            "terse_output={terse}: the exact token count is taken on the same system prompt"
+        );
+    }
+    assert_ne!(
+        audit_system_prompt_with(true),
+        audit_system_prompt_with(false),
+        "the two forms differ, so the loop above tells them apart"
     );
 }

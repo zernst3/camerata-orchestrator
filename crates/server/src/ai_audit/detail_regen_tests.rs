@@ -715,6 +715,89 @@ async fn the_spend_limit_stopping_the_step_leaves_every_finding_marked() {
     );
 }
 
+/// Every regeneration call is a billed model refusal ($0.60 on Opus 5.5).
+struct RefusesAndCounts {
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl LlmPort for RefusesAndCounts {
+    async fn complete(&self, _req: LlmRequest) -> anyhow::Result<LlmResponse> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Err(crate::llm::refusal_error_billed(
+            &serde_json::json!({
+                "model": "claude-opus-5-5",
+                "content": [],
+                "stop_reason": "refusal",
+                "usage": { "input_tokens": 100_000, "output_tokens": 10_000 }
+            }),
+            "claude-opus-5-5",
+            "api",
+            crate::llm::PriceBasis {
+                batch: false,
+                cache_ttl: crate::llm::CacheTtl::FiveMinutes,
+            },
+        )
+        .expect("a refusal stop_reason is an error"))
+    }
+    async fn complete_streaming(
+        &self,
+        req: LlmRequest,
+        _on_delta: &mut (dyn for<'a> FnMut(&'a str) + Send),
+    ) -> anyhow::Result<LlmResponse> {
+        self.complete(req).await
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+#[tokio::test]
+async fn a_billed_refusal_in_regeneration_counts_toward_the_cap_and_is_named_in_the_reason() {
+    let llm = RefusesAndCounts {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+    };
+    // One refusal is $0.60 against a $0.50 cap: the cap trips on the first, so the repeat round
+    // is not started.
+    let meter = UsageMeter::with_controls(RunControls {
+        efficiency: EfficiencyConfig::default(),
+        max_cost_usd: Some(0.50),
+        fix_model: None,
+        estimate_hint_usd: None,
+    });
+    let (out, failed) = regenerate_full_details(
+        &llm,
+        REPO,
+        vec![finding(&format!("{TITLE}{HEADLINE_SEP}{SHORT}"))],
+        &files(),
+        &selected(),
+        None,
+        Some(&meter),
+    )
+    .await;
+    assert!(
+        (meter.spent_usd() - 0.60).abs() < 1e-9,
+        "the billed refusal counts: {}",
+        meter.spent_usd()
+    );
+    assert!(meter.cap_reached(), "and can trip the cap");
+    assert_eq!(
+        llm.calls.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "the cap stopped the repeat round"
+    );
+    assert!(out[0].detail.contains(DETAIL_INCOMPLETE_MARKER));
+    let pass = failed
+        .iter()
+        .find(|f| f.pass == STAGE_DETAIL)
+        .expect("a failed pass is reported");
+    assert!(
+        pass.reason.contains("model refused the request"),
+        "the failed row states why: {}",
+        pass.reason
+    );
+}
+
 #[tokio::test]
 async fn regeneration_alone_keeps_the_headline_and_replaces_only_the_explanation() {
     let llm = RoleLlm::new("{}", Regen::Writes);

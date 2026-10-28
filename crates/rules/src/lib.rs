@@ -425,8 +425,9 @@ pub enum Verification {
     /// [`Rule::is_auto_recommended`] returns `true` for
     /// `Grounded | Verified | Policy` (see its body), so a `policy` rule is
     /// pre-checked in the onboarding proposal and IS selected by an unattended
-    /// scan via `camerata_cli::inspect_cmd::curated_rule_selection`. 21 corpus
-    /// rules carry this value and all 21 arm.
+    /// scan via `camerata_cli::inspect_cmd::curated_rule_selection`. Every corpus
+    /// rule carrying this value arms (the count moves as rules gain outside
+    /// sources; `req_w17_every_policy_rule_in_the_corpus_arms` enforces it).
     ///
     /// W17 corrected a stale claim here. This comment used to read "kept out of
     /// the armed ruleset like `draft`, but labeled honestly rather than as
@@ -1627,8 +1628,13 @@ pub const DEFAULT_CORPUS_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/prin
 /// The corpus directory to load: the `CAMERATA_CORPUS_PATH` env override if set and
 /// non-empty, else the bundled [`DEFAULT_CORPUS_PATH`].
 pub fn corpus_path() -> std::path::PathBuf {
-    std::env::var("CAMERATA_CORPUS_PATH")
-        .ok()
+    corpus_path_from(std::env::var("CAMERATA_CORPUS_PATH").ok())
+}
+
+/// [`corpus_path`] given the override's value: a non-blank override wins, anything else is the
+/// bundled corpus. Split out so it is testable without mutating the process environment.
+fn corpus_path_from(override_value: Option<String>) -> std::path::PathBuf {
+    override_value
         .filter(|p| !p.trim().is_empty())
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| std::path::PathBuf::from(DEFAULT_CORPUS_PATH))
@@ -3393,6 +3399,20 @@ mod tests {
             last_reviewed: None,
             applies_to: None,
             candidates: None,
+        }
+    }
+
+    #[test]
+    fn corpus_path_honours_a_non_blank_override_and_ignores_a_blank_one() {
+        assert_eq!(
+            corpus_path_from(Some("/override/corpus".to_owned())),
+            std::path::PathBuf::from("/override/corpus")
+        );
+        for blank in [None, Some(String::new()), Some("   ".to_owned())] {
+            assert_eq!(
+                corpus_path_from(blank),
+                std::path::PathBuf::from(DEFAULT_CORPUS_PATH)
+            );
         }
     }
 

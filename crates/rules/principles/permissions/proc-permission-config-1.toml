@@ -1,5 +1,5 @@
 id = "PROC-PERMISSION-CONFIG-1"
-version = 2
+version = 3
 title = "A missing grant is configuration; a missing permission is code"
 domain = "permissions"
 layer = "universal"
@@ -11,7 +11,7 @@ verification = "policy"
 
 [[sources]]
 url = "CONVENTIONS.md"
-title = "CONVENTIONS.md — permission model: per-resource _can flags + §ARCH-SERVER-AUTHZ-1 domain"
+title = "Project policy: a missing grant is fixed by configuration and a missing permission is fixed by code"
 
 [decision]
 question = "When someone reports they cannot perform an action, how does the team decide whether the fix is a grant or new code?"

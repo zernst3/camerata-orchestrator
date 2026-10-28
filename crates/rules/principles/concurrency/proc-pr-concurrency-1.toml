@@ -1,5 +1,5 @@
 id = "PROC-PR-CONCURRENCY-1"
-version = 2
+version = 3
 title = "PR template forces a concurrency story"
 domain = "concurrency"
 layer = "universal"
@@ -7,6 +7,10 @@ enforcement = "structured"
 kind = "defect"
 inspectable = true
 default = true
+# `policy`, not `grounded`: the only source that states the requirement is this project's own convention. A pull request
+# template is a host feature (GitHub documents how to add one) but no external authority states
+# that a change touching shared mutable state must carry a concurrency section, so citing the
+# template docs would ground the mechanism, not the rule. Only the owner sets `verified`.
 verification = "policy"
 
 [[sources]]
@@ -18,6 +22,10 @@ relevance = "Documents the mechanism the default option relies on (a repository-
 url = "https://go.dev/doc/articles/race_detector"
 title = "Go: Data Race Detector"
 relevance = "Supports the automated-race-detection-in-ci option: documents go test -race and its main limit, that it only reports races on code paths the tests actually execute."
+
+[[sources]]
+url = "CONVENTIONS.md"
+title = "Project policy: a pull request that touches shared mutable state documents its locking strategy and concurrency testing"
 
 [decision]
 question = "How does a pull request that touches shared mutable state show its locking strategy and concurrency testing?"

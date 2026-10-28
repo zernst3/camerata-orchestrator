@@ -66,6 +66,66 @@ pub fn estimate_mode(mode: &str, backend: ProjectBackend) -> &str {
     }
 }
 
+/// How many findings one detail-regeneration call covers (rank 4, `terse_output`). The server's
+/// regeneration stage (`camerata_server::ai_audit::detail_regen`) takes its batch size from here,
+/// so the estimate and the stage cannot drift apart.
+pub const REGEN_BATCH_SIZE: usize = 25;
+
+/// The output budget per finding of a regeneration call (the stage's `max_tokens` per finding).
+pub const REGEN_TOKENS_PER_FINDING: u32 = 160;
+
+/// Attempts per finding: the first, and one repeat for what the first left out or failed.
+pub const REGEN_ROUNDS: usize = 2;
+
+/// Estimator assumption: input tokens per finding of a regeneration call (the finding's rule
+/// directive, short statement, snippet, six lines of code either side and at most 20 excerpt
+/// lines from the files it names). An estimate, not a measurement.
+const REGEN_INPUT_TOKENS_PER_FINDING: f64 = 900.0;
+
+/// Estimator assumption: the regeneration system prompt, sent once per call.
+const REGEN_SYSTEM_PROMPT_TOKENS: f64 = 450.0;
+
+/// Estimator assumption: scan output tokens per reported finding (a finding with its full detail,
+/// which is what the estimator's scan output models). The finding count the regeneration term is
+/// sized from is the scan output divided by this, rounded up; the lower this is the more findings
+/// are assumed, so the term errs high.
+pub const REGEN_SCAN_TOKENS_PER_FINDING: f64 = 300.0;
+
+/// The detail-regeneration stage's share of a pre-flight estimate (rank 4, `terse_output`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RegenerationEstimate {
+    /// Findings the stage is assumed to write the detail of.
+    pub findings: f64,
+    /// Model calls, over every round the stage may run.
+    pub calls: usize,
+    /// Input tokens, over every round.
+    pub input_tokens: f64,
+    /// Output tokens, over every round.
+    pub output_tokens: f64,
+}
+
+/// The cost of regenerating the full `detail` of the findings a scan of `scan_out_tokens` output
+/// tokens implies. An UPPER bound by the stage's own limits: every one of the `REGEN_ROUNDS`
+/// rounds is assumed to run on every finding (the real repeat round covers only what the first
+/// left out), each finding is assumed to use its whole `REGEN_TOKENS_PER_FINDING` output budget,
+/// and calls hold `REGEN_BATCH_SIZE` findings. It is added to a pre-flight estimate so that the
+/// spend-limit gate and the batch refusal never UNDER-estimate a run with `terse_output` on.
+pub fn regeneration_estimate(scan_out_tokens: f64) -> RegenerationEstimate {
+    let findings = (scan_out_tokens / REGEN_SCAN_TOKENS_PER_FINDING)
+        .ceil()
+        .max(0.0);
+    let rounds = REGEN_ROUNDS as f64;
+    let calls_per_round = (findings as usize).div_ceil(REGEN_BATCH_SIZE);
+    RegenerationEstimate {
+        findings,
+        calls: calls_per_round * REGEN_ROUNDS,
+        input_tokens: (findings * REGEN_INPUT_TOKENS_PER_FINDING
+            + calls_per_round as f64 * REGEN_SYSTEM_PROMPT_TOKENS)
+            * rounds,
+        output_tokens: findings * f64::from(REGEN_TOKENS_PER_FINDING) * rounds,
+    }
+}
+
 /// Estimate the token + dollar cost of a governed audit run over `code_chars` of code with
 /// `selected` rules, returning `(total_tokens, dollars, passes)`. PURE so the readout is
 /// unit-testable without rendering. Pricing is per-million-token model rates; the mode string
@@ -92,6 +152,14 @@ pub fn estimate_mode(mode: &str, backend: ProjectBackend) -> &str {
 /// cache-WRITE surcharge paid on every single pass, not a discount. Treat this as an
 /// approximation, not a quote: model output volume varies by codebase and can't be predicted
 /// exactly.
+///
+/// `terse_output` is the server's rank 4 measure (`terse_output`): the scan writes a one-sentence
+/// detail and the full one is regenerated afterwards for the findings that survive. With it on,
+/// the estimate adds the regeneration stage ([`regeneration_estimate`], real time at the audit
+/// model, no batch discount) so a figure used to gate a spend limit is not low by that stage. The
+/// scan's own output is NOT reduced for the shorter detail (an over-estimate, which is the safe
+/// side), and rank 7's `applies_to` routing is not modelled at all (it only ever sends fewer
+/// pairs, so the estimate stays an over-estimate).
 #[allow(clippy::too_many_arguments)]
 pub fn estimate_audit_cost(
     code_chars: usize,
@@ -106,6 +174,7 @@ pub fn estimate_audit_cost(
     deep: bool,
     backend: ProjectBackend,
     multi_option_selected: usize,
+    terse_output: bool,
 ) -> (u64, f64, usize) {
     const CHUNK_DIGEST_CHARS: usize = 350_000;
     const RULE_BATCH_SIZE: usize = 15;
@@ -244,6 +313,19 @@ pub fn estimate_audit_cost(
     let resolution_in = cacheable_pass_tokens(RESOLUTION_FILES_CHARS as f64, resolution_calls);
     let resolution_out = OUT_TOKENS_PER_PASS * resolution_calls as f64;
 
+    // ── Detail regeneration (rank 4, `terse_output`): real time at the audit model, no batch
+    // discount, sized from the scan's output (the findings it implies). Zero with the switch off.
+    let regen = if terse_output {
+        regeneration_estimate(scan_out)
+    } else {
+        RegenerationEstimate {
+            findings: 0.0,
+            calls: 0,
+            input_tokens: 0.0,
+            output_tokens: 0.0,
+        }
+    };
+
     // Incremental scope (only changed files actually billed) would lower the scan portion, but
     // the client has no changed-file token breakdown today (see fn doc + followup), so we keep
     // the full-scan price and let the readout flag incremental as an over-estimate. Bind the
@@ -254,7 +336,8 @@ pub fn estimate_audit_cost(
         + (cal_in * eff_calib_in + cal_out * eff_calib_out)
         + (deep_in * audit_in + deep_out * audit_out)
         + (rec_in * audit_in + rec_out * audit_out)
-        + (resolution_in * audit_in + resolution_out * audit_out))
+        + (resolution_in * audit_in + resolution_out * audit_out)
+        + (regen.input_tokens * audit_in + regen.output_tokens * audit_out))
         / 1_000_000.0
         * FUDGE;
     let total_tokens = ((scan_in
@@ -266,9 +349,11 @@ pub fn estimate_audit_cost(
         + rec_in
         + rec_out
         + resolution_in
-        + resolution_out)
+        + resolution_out
+        + regen.input_tokens
+        + regen.output_tokens)
         * FUDGE) as u64;
-    let total_passes = passes + rec_calls + resolution_calls;
+    let total_passes = passes + rec_calls + resolution_calls + regen.calls;
     (total_tokens, dollars, total_passes)
 }
 
@@ -344,6 +429,7 @@ mod tests {
             false,
             ProjectBackend::Api,
             0,
+            false,
         );
         assert_eq!(passes, 1, "0 rules + sequential = one pass");
         assert!(toks > 0, "some tokens");
@@ -370,6 +456,7 @@ mod tests {
             false,
             ProjectBackend::Api,
             0,
+            false,
         );
         assert_eq!(
             passes_parallel, 4,
@@ -391,6 +478,7 @@ mod tests {
             false,
             ProjectBackend::Api,
             0,
+            false,
         );
         let naive_two_passes = dollars_seq_single * 2.0;
 
@@ -418,6 +506,7 @@ mod tests {
             false,
             ProjectBackend::Api,
             0,
+            false,
         );
         let (toks_seq, dollars_seq, passes_seq) = estimate_audit_cost(
             350_000,
@@ -432,6 +521,7 @@ mod tests {
             false,
             ProjectBackend::Api,
             0,
+            false,
         );
         // 1 main pass + 1 resolution-round pass (selected > 0, so the bounded resolution round
         // fires — see the fn doc's "Resolution round" section) = 2 for both modes (1 rule needs
@@ -465,6 +555,7 @@ mod tests {
             false,
             ProjectBackend::Api,
             0,
+            false,
         );
         let (_, dollars_thorough, _) = estimate_audit_cost(
             200_000,
@@ -479,6 +570,7 @@ mod tests {
             false,
             ProjectBackend::Api,
             0,
+            false,
         );
         assert!(
             dollars_thorough > dollars_default,
@@ -505,6 +597,7 @@ mod tests {
             false,
             ProjectBackend::Api,
             0,
+            false,
         );
         let (_, dollars_batch, passes_batch) = estimate_audit_cost(
             350_000,
@@ -519,6 +612,7 @@ mod tests {
             false,
             ProjectBackend::Api,
             0,
+            false,
         );
         assert_eq!(
             passes_parallel, passes_batch,
@@ -555,6 +649,7 @@ mod tests {
             false,
             ProjectBackend::Api,
             0,
+            false,
         );
         let (_, dollars_batch, _) = estimate_audit_cost(
             200_000,
@@ -569,6 +664,7 @@ mod tests {
             false,
             ProjectBackend::Api,
             0,
+            false,
         );
         assert!(
             dollars_batch < dollars_parallel,
@@ -594,6 +690,7 @@ mod tests {
                 deep,
                 ProjectBackend::Api,
                 0,
+                false,
             )
             .1
         };
@@ -625,6 +722,7 @@ mod tests {
             false,
             ProjectBackend::Api,
             0,
+            false,
         );
         let incremental = estimate_audit_cost(
             350_000,
@@ -639,6 +737,7 @@ mod tests {
             false,
             ProjectBackend::Api,
             0,
+            false,
         );
         assert_eq!(
             full.1, incremental.1,
@@ -666,6 +765,7 @@ mod tests {
             false,
             ProjectBackend::Api,
             0,
+            false,
         );
         assert_eq!(
             dollars, 0.0,
@@ -695,6 +795,7 @@ mod tests {
             false,
             ProjectBackend::Api,
             0,
+            false,
         );
         assert_eq!(
             dollars, 0.0,
@@ -719,6 +820,7 @@ mod tests {
             false,
             ProjectBackend::Api,
             0,
+            false,
         );
         let (_, dollars_double, _) = estimate_audit_cost(
             200_000,
@@ -733,6 +835,7 @@ mod tests {
             false,
             ProjectBackend::Api,
             0,
+            false,
         );
         assert!(
             dollars_base > 0.0,
@@ -764,6 +867,7 @@ mod tests {
             false,
             ProjectBackend::Api,
             0,
+            false,
         );
         assert!(
             dollars > 0.0,
@@ -804,6 +908,7 @@ mod tests {
                                 deep,
                                 ProjectBackend::Api,
                                 0,
+                                false,
                             );
                             assert!(
                                 toks >= prev_toks,
@@ -851,6 +956,7 @@ mod tests {
                     false,
                     ProjectBackend::Api,
                     0,
+                    false,
                 );
                 assert!(
                     passes >= prev_passes,
@@ -895,6 +1001,7 @@ mod tests {
                         false,
                         ProjectBackend::Api,
                         0,
+                        false,
                     );
                     let (_tb, db, passes_b) = estimate_audit_cost(
                         code_chars,
@@ -909,6 +1016,7 @@ mod tests {
                         false,
                         ProjectBackend::Api,
                         0,
+                        false,
                     );
                     assert_eq!(
                         passes_p, passes_b,
@@ -950,6 +1058,7 @@ mod tests {
                             deep,
                             ProjectBackend::Api,
                             0,
+                            false,
                         )
                         .1
                     };
@@ -995,6 +1104,7 @@ mod tests {
                         false,
                         ProjectBackend::Api,
                         0,
+                        false,
                     );
                     let (_, dollars_thorough, _) = estimate_audit_cost(
                         code_chars,
@@ -1009,6 +1119,7 @@ mod tests {
                         false,
                         ProjectBackend::Api,
                         0,
+                        false,
                     );
                     assert!(
                         dollars_thorough > dollars_default,
@@ -1045,6 +1156,7 @@ mod tests {
                                     deep,
                                     ProjectBackend::Api,
                                     0,
+                                    false,
                                 );
                                 assert_eq!(
                                     dollars, 0.0,
@@ -1086,6 +1198,7 @@ mod tests {
                                 deep,
                                 ProjectBackend::Api,
                                 0,
+                                false,
                             );
                             let (_, dollars_double, _) = estimate_audit_cost(
                                 code_chars,
@@ -1100,6 +1213,7 @@ mod tests {
                                 deep,
                                 ProjectBackend::Api,
                                 0,
+                                false,
                             );
                             // Doubling all prices must double the dollar figure.
                             let expected = dollars_base * 2.0;
@@ -1147,6 +1261,7 @@ mod tests {
                                 deep,
                                 ProjectBackend::Api,
                                 0,
+                                false,
                             );
                             let (toks_i, dollars_i, passes_i) = estimate_audit_cost(
                                 code_chars,
@@ -1161,6 +1276,7 @@ mod tests {
                                 deep,
                                 ProjectBackend::Api,
                                 0,
+                                false,
                             );
                             assert_eq!(
                                 dollars_f, dollars_i,
@@ -1199,6 +1315,7 @@ mod tests {
             false,
             ProjectBackend::Api,
             0,
+            false,
         );
         assert!(tokens > 0, "tokens estimated");
         assert!(dollars > 0.0, "dollars estimated");
@@ -1220,6 +1337,7 @@ mod tests {
             false,
             ProjectBackend::Api,
             0,
+            false,
         );
         let (_, batch, _) = estimate_audit_cost(
             400_000,
@@ -1234,6 +1352,7 @@ mod tests {
             false,
             ProjectBackend::Api,
             0,
+            false,
         );
         assert!(
             batch < parallel,
@@ -1256,6 +1375,7 @@ mod tests {
             false,
             ProjectBackend::Api,
             0,
+            false,
         );
         let (_, with_deep, _) = estimate_audit_cost(
             400_000,
@@ -1270,6 +1390,7 @@ mod tests {
             true,
             ProjectBackend::Api,
             0,
+            false,
         );
         assert!(
             with_deep > without,
@@ -1302,6 +1423,7 @@ mod tests {
             false,
             ProjectBackend::Cli,
             0,
+            false,
         );
         let (_, dollars_api, passes_api) = estimate_audit_cost(
             350_000,
@@ -1316,6 +1438,7 @@ mod tests {
             false,
             ProjectBackend::Api,
             0,
+            false,
         );
         assert_eq!(
             passes_cli, passes_api,
@@ -1353,6 +1476,7 @@ mod tests {
             false,
             ProjectBackend::Cli,
             0,
+            false,
         );
         let (_, dollars_api, passes_api) = estimate_audit_cost(
             350_000,
@@ -1367,6 +1491,7 @@ mod tests {
             false,
             ProjectBackend::Api,
             0,
+            false,
         );
         assert_eq!(passes_cli, passes_api);
         assert!(
@@ -1406,6 +1531,7 @@ mod tests {
                             false,
                             ProjectBackend::Cli,
                             multi_option.min(selected),
+                            false,
                         );
                         let (_, dollars_api, _) = estimate_audit_cost(
                             code_chars,
@@ -1420,6 +1546,7 @@ mod tests {
                             false,
                             ProjectBackend::Api,
                             multi_option.min(selected),
+                            false,
                         );
                         assert!(
                             dollars_cli >= dollars_api,
@@ -1453,6 +1580,7 @@ mod tests {
             false,
             ProjectBackend::Api,
             0,
+            false,
         );
         let (_, dollars_some, passes_some) = estimate_audit_cost(
             200_000,
@@ -1467,6 +1595,7 @@ mod tests {
             false,
             ProjectBackend::Api,
             5,
+            false,
         );
         assert_eq!(
             passes_some,
@@ -1505,6 +1634,7 @@ mod tests {
                 false,
                 ProjectBackend::Api,
                 multi_option,
+                false,
             );
             let expected_extra_pass = if multi_option > 0 { 1 } else { 0 };
             let (_, _, passes_baseline) = estimate_audit_cost(
@@ -1520,6 +1650,7 @@ mod tests {
                 false,
                 ProjectBackend::Api,
                 0,
+                false,
             );
             assert_eq!(
                 passes,
@@ -1547,6 +1678,7 @@ mod tests {
             false,
             ProjectBackend::Api,
             30,
+            false,
         );
         let (_, dollars_zero, _) = estimate_audit_cost(
             200_000,
@@ -1561,6 +1693,7 @@ mod tests {
             false,
             ProjectBackend::Api,
             0,
+            false,
         );
         assert!(
             dollars_max > dollars_zero,
@@ -1590,6 +1723,7 @@ mod tests {
             false,
             ProjectBackend::Api,
             0,
+            false,
         );
         // main = chunks(1) * batches(3) = 3; resolution = batches(3); rec = 0. Total = 6.
         assert_eq!(
@@ -1611,6 +1745,7 @@ mod tests {
             false,
             ProjectBackend::Api,
             0,
+            false,
         );
         assert_eq!(passes_zero, 1, "0 rules: 1 main pass, no resolution round");
     }
@@ -1636,6 +1771,7 @@ mod tests {
             false,
             ProjectBackend::Api,
             0,
+            false,
         )
         .1;
         // A run with the SAME shape but $0 audit/calib prices must be $0 regardless of the
@@ -1653,6 +1789,7 @@ mod tests {
             false,
             ProjectBackend::Api,
             0,
+            false,
         )
         .1;
         assert!(with_prices > 0.0);
@@ -1693,6 +1830,7 @@ mod tests {
             false,
             ProjectBackend::Cli,
             FAKTURA_MULTI_OPTION_RULES,
+            false,
         );
         let ratio = dollars / FAKTURA_ACTUAL_USD;
         // The OLD (backend-blind) formula for this shape was ~3.5x UNDER (ratio ~0.29). The
@@ -1728,6 +1866,7 @@ mod tests {
             false,
             ProjectBackend::Cli,
             FAKTURA_MULTI_OPTION_RULES,
+            false,
         );
         let (_, dollars_api, _) = estimate_audit_cost(
             FAKTURA_CODE_CHARS,
@@ -1742,6 +1881,7 @@ mod tests {
             false,
             ProjectBackend::Api,
             FAKTURA_MULTI_OPTION_RULES,
+            false,
         );
         assert!(
             dollars_api < dollars_cli,
@@ -1751,5 +1891,81 @@ mod tests {
         // The API estimate should also be a PLAUSIBLE figure (not degenerate/zero) and in a
         // sane neighborhood of the real bill.
         assert!(dollars_api > 0.5 && dollars_api < FAKTURA_ACTUAL_USD * 2.0);
+    }
+
+    // ── rank 4 (`terse_output`): the detail-regeneration term ───────────────────────────
+
+    /// `estimate_audit_cost` with the regeneration switch as given; everything else fixed at a
+    /// small API/batch scan: no code, 15 rules, so exactly one scan pass, no multi-option rules.
+    fn terse_estimate(mode: &str, terse_output: bool) -> (u64, f64, usize) {
+        estimate_audit_cost(
+            0,
+            15,
+            mode,
+            3.0,
+            15.0,
+            3.0,
+            15.0,
+            false,
+            false,
+            false,
+            ProjectBackend::Api,
+            0,
+            terse_output,
+        )
+    }
+
+    /// With the switch on the estimate includes a regeneration term, and it is exactly the term
+    /// [`regeneration_estimate`] computes for the findings the scan's output implies, priced at
+    /// the audit model with NO batch discount (the stage is real time).
+    #[test]
+    fn terse_output_on_adds_the_regeneration_term_and_off_leaves_it_out() {
+        for mode in ["parallel", "batch"] {
+            let (tokens_off, dollars_off, passes_off) = terse_estimate(mode, false);
+            let (tokens_on, dollars_on, passes_on) = terse_estimate(mode, true);
+            // One pass, no code: the scan writes OUT_TOKENS_PER_PASS (2_600) tokens of findings.
+            let regen = regeneration_estimate(2_600.0);
+            assert!(regen.findings >= 1.0 && regen.calls >= 1, "{regen:?}");
+            assert_eq!(passes_on, passes_off + regen.calls, "{mode}");
+            let added = tokens_on as i64 - tokens_off as i64;
+            let term = (regen.input_tokens + regen.output_tokens) as i64;
+            assert!(
+                (added - term).abs() <= 1,
+                "{mode}: the added tokens ({added}) are the regeneration term ({term})"
+            );
+            let expected = (regen.input_tokens * 3.0 + regen.output_tokens * 15.0) / 1_000_000.0;
+            assert!(
+                (dollars_on - dollars_off - expected).abs() < 1e-9,
+                "{mode}: on {dollars_on} off {dollars_off} term {expected}"
+            );
+        }
+    }
+
+    /// The term is bounded by the regeneration stage's own limits: at most `REGEN_ROUNDS` rounds,
+    /// each finding written at most once per round within `REGEN_TOKENS_PER_FINDING` output
+    /// tokens, `REGEN_BATCH_SIZE` findings to a call.
+    #[test]
+    fn the_regeneration_term_stays_within_the_stages_own_limits() {
+        for scan_out in [0.0, 300.0, 2_600.0, 50_000.0, 5_000_000.0] {
+            let r = regeneration_estimate(scan_out);
+            assert!(
+                r.output_tokens
+                    <= r.findings * f64::from(REGEN_TOKENS_PER_FINDING) * REGEN_ROUNDS as f64
+            );
+            assert_eq!(
+                r.calls,
+                (r.findings as usize).div_ceil(REGEN_BATCH_SIZE) * REGEN_ROUNDS
+            );
+        }
+        let none = regeneration_estimate(0.0);
+        assert_eq!(
+            (none.calls, none.input_tokens, none.output_tokens),
+            (0, 0.0, 0.0)
+        );
+        // More scan output never means a smaller term.
+        assert!(
+            regeneration_estimate(50_000.0).output_tokens
+                >= regeneration_estimate(2_600.0).output_tokens
+        );
     }
 }

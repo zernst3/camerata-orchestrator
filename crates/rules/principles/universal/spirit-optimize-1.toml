@@ -1,5 +1,5 @@
 id = "SPIRIT-OPTIMIZE-1"
-version = 2
+version = 3
 title = "Optimization by default"
 domain = "universal"
 layer = "universal"
@@ -7,11 +7,30 @@ enforcement = "prose"
 kind = "defect"
 inspectable = true
 default = true
+# `policy`, not `grounded`: the CWE pages below define the inefficiency weaknesses to avoid (N+1
+# style data access, excessive loop resource consumption); none of them says new code should be
+# built with parallel async, caching or indexing from day one. That default is this project's own
+# stance, and CWE-1089 in fact warns against too many indices. Only the owner sets `verified`.
 verification = "policy"
 
 [[sources]]
+url = "https://cwe.mitre.org/data/definitions/1073.html"
+title = "MITRE CWE-1073: Non-SQL Invokable Control Element with Excessive Number of Data Resource Accesses"
+relevance = "Defines the N+1 style weakness the default option's batched-queries wording avoids (a function that issues a large number of data accesses through a data manager instead of using efficient database capabilities). It describes a weakness to avoid; it does not say the efficient pattern must be built in from day one."
+
+[[sources]]
+url = "https://cwe.mitre.org/data/definitions/1050.html"
+title = "MITRE CWE-1050: Excessive Platform Resource Consumption within a Loop"
+relevance = "Defines the weakness of a loop body or condition that consumes platform resources such as sessions, locks or file descriptors. Supports avoiding per-iteration resource use; it says nothing about caching or parallelism as a default."
+
+[[sources]]
+url = "https://cwe.mitre.org/data/definitions/1049.html"
+title = "MITRE CWE-1049: Excessive Data Query Operations in a Large Data Table"
+relevance = "Defines the weakness of a query with many joins and sub-queries on a large table. Related to the query-shape half of the rule; it does not prescribe indexing, and CWE-1089 (a large table with an excessive number of indices) shows the standard treats over-indexing as a weakness too."
+
+[[sources]]
 url = "AGENTS.md"
-title = "AGENTS.md — SPIRIT-OPTIMIZE-1 (optimization by default)"
+title = "Project policy: performant patterns such as parallel async work, caching, indexing and avoiding N+1 queries are the default shape of new code"
 
 [decision]
 question = "When are performant patterns such as parallel async, caching, and indexing introduced into new code?"

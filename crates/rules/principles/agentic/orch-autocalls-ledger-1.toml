@@ -1,5 +1,5 @@
 id = "ORCH-AUTOCALLS-LEDGER-1"
-version = 2
+version = 3
 title = "Auto-calls ledger + periodic judgment review"
 domain = "agentic"
 layer = "universal"
@@ -7,11 +7,15 @@ enforcement = "structured"
 kind = "decision"
 inspectable = false
 default = true
-verification = "policy"
+verification = "grounded"
+
+[[sources]]
+url = "https://genai.owasp.org/llmrisk/llm062025-excessive-agency/"
+title = "OWASP Top 10 for LLM Applications, LLM06:2025 Excessive Agency (log and monitor what an agent does, and require human approval for high-impact actions)"
 
 [[sources]]
 url = "AGENTS.md"
-title = "AGENTS.md — ORCH-AUTOCALLS-LEDGER-1 (auto-calls ledger + periodic judgment review)"
+title = "Project policy: log every decision an agent makes on its own and have a person review the batch each week"
 
 [decision]
 question = "How are the choices agents make on their own recorded and later reviewed for drift?"

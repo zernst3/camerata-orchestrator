@@ -1,5 +1,5 @@
 id = "ORCH-PRECISION-RECALL-1"
-version = 2
+version = 3
 title = "Autonomous detection defaults to recall, precision-tuning is a per-signal opt-in"
 domain = "agentic"
 layer = "universal"
@@ -7,11 +7,15 @@ enforcement = "prose"
 kind = "defect"
 inspectable = false
 default = true
-verification = "policy"
+verification = "grounded"
+
+[[sources]]
+url = "https://developers.google.com/machine-learning/crash-course/classification/accuracy-precision-recall"
+title = "Google Machine Learning Crash Course: accuracy, recall, precision and related metrics (favor recall when a missed positive costs more than a false alarm)"
 
 [[sources]]
 url = "AGENTS.md"
-title = "AGENTS.md — ORCH-PRECISION-RECALL-1 (autonomous detection defaults to recall)"
+title = "Project policy: autonomous detection flags anything that could plausibly be a real issue and lets the escalation tier decide what halts the run"
 
 [decision]
 question = "How should autonomous detection signals balance false positives against false negatives?"
