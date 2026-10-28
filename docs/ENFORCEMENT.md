@@ -1,7 +1,7 @@
 # ENFORCEMENT.md — how Camerata rules become real
 
-Camerata holds a large corpus of *principles*: **417 TOML rules, vendored into
-this repo** at `crates/rules/principles/` (417 as of 2026-10-11). That is what
+Camerata holds a large corpus of *principles*: **437 rules across 22 domains**, vendored
+into this repo as TOML files at `crates/rules/principles/`. That is what
 `camerata_rules::DEFAULT_CORPUS_PATH` resolves to and what the server actually
 loads; override it with `CAMERATA_CORPUS_PATH`. The sibling `camerata-ai` repo is
 where the corpus FORMAT originates and is no longer the corpus this build reads.
