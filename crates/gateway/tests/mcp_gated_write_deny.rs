@@ -92,6 +92,25 @@ fn mcp_transport_denies_a_forbidden_gated_write_with_no_file_created() {
     // test's planted violation (a "forbidden" path) exercises. Stderr is discarded
     // (`Stdio::null()`): the binary traces every decision there, and this test only
     // cares about the stdout MCP transport.
+    // Run the binary once with no input before the timed exchange. macOS security-checks a
+    // newly built executable on its first launch (seconds on a loaded machine), which landed
+    // inside the 10s initialize window below and failed this test with a timeout. With stdin
+    // closed the server sees end of input and exits; it is killed after 30s regardless.
+    if let Ok(mut warm) = Command::new(bin)
+        .env("CAMERATA_WORKTREE_ROOT", &jail)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while warm.try_wait().ok().flatten().is_none() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let _ = warm.kill();
+        let _ = warm.wait();
+    }
+
     let child = match Command::new(bin)
         .env("CAMERATA_WORKTREE_ROOT", &jail)
         .env_remove("CAMERATA_RULES_FILE")

@@ -9301,6 +9301,7 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                 // dispositions map come from this component's own state.
                 {
                     let pid_report = project_id.clone();
+                    let pid_remediation = project_id.clone();
                     rsx! {
                         IncompletePassesBanner {
                             failed_passes: audited.as_ref().map(|a| a.failed_passes.clone()).unwrap_or_default(),
@@ -9310,6 +9311,7 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                             project_id: pid_report,
                             dispositions,
                         }
+                        super::remediation::RemediationPlanPanel { project_id: pid_remediation, dispositions }
                     }
                 }
 

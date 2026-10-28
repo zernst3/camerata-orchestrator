@@ -1,4 +1,81 @@
-# Overnight autonomous run — decisions needed + progress log
+# Overnight autonomous run: decisions needed and progress log
+
+## Morning summary, 2026-10-28 (read this first)
+
+**Where things stand.** The working branch `feat/audit-report-export` is green and pushed: the
+last full gate passed 9,694 tests with 0 failures, and GitHub CI is green again. 64 merges
+landed overnight (260 commits). A final gate on the prompt-injection merge was running at
+08:00; its result is in the status log of the overnight plan.
+
+**Merged overnight (each reviewed by Fable, fixed, then gated):**
+- Repo hardening work order: hygiene (H1), corpus phase 0 (H0), client lock and execution
+  isolation with DATA_HANDLING.md (H2), prompt-injection defense (H3), no silent loss (H4),
+  honest citations and `camerata repeatability` (H5), README and PLATFORM split (H6).
+- Token efficiency ranks 2, 4, 7, 8, 9 and 10, item 21, and a Fable integration review of the
+  switches together (one metering hole and untested joins fixed).
+- PDF rebuild (W27) plus a fix-text polish (paragraphs, code in mono), Wave D, KEV/EPSS, the
+  model registry, rule sources (22f), the mutation-testing kills, the GitHub CI fix.
+- Development console (V2): console gaps 1 and 2, boards optional (native units), the per-rule
+  PR planner, the adversarial reviewer contract and structured investigation decisions.
+- Corpus: 441 rules (one new prompt-injection rule). No em dashes and no serial commas in
+  client-facing rule text (both now enforced by tests); eight rules honestly relabelled policy.
+- A real speedup: every report build re-hashed all 440 rules; now cached (one test went from
+  24.5 minutes to 3.7 seconds).
+- Two test flakes root-caused: macOS security-checks every newly written executable on first
+  run (2.2 seconds measured); the fake-CLI helper now warms each fake before timing it.
+
+**Still running (local, none in the cloud):** false-negative batches A and B, review fix-ups
+for false-negative batch C and for findings-to-units of work (V2 2c). Every cloud session has
+finished; new ones start only from a message typed in the desktop app.
+
+**Numbers for the site.** 441 rules across 22 domains. 416 cite an outside standard (the rule
+format's "grounded") and 25 are project policy. A Fable audit found that about 323 of the 440
+(now about 324 of 441 with the new LLM01 rule) cite a source that itself states the rule's
+directive, plus or minus 10; the earlier "419 strict" figure was wrong. Suggested sentence:
+"323 of Camerata's 440 rules trace to an outside standard that states the rule itself, not just
+its topic." The full list is in `_workspace/brownfield-audits/2026-10-28_strict-source-audit.txt`.
+
+**Decisions made overnight (all reversible; details in the status log):** temperature 0 stays
+on Haiku 4.5; the prompt-injection checker skips test files and lint-style "do not flag this"
+needs an AI word on the line; a reviewer finding closes only on an explicit confirmed fix;
+merged findings stay in one list with a `merged_into` key; bundled-only PDF fonts were NOT
+forced (they would drop CJK and emoji from client PDFs); a retest whose AI pass failed never
+marks AI findings fixed; the walkthrough's step 6 points at the real spend limit field.
+
+### Needs Zach
+
+1. **Keychain approval for the API sweep** (the morning sweep runbook is ready; see the
+   overnight plan). The candidates pre-filter (rank 8) ships ON: the sweep's per-rule recall
+   check is a release blocker; any finding lost with it on means turning it off by default.
+2. **Site numbers:** which count to publish (above).
+3. **`.claude/settings.json`:** move the machine-specific deny rules to your user settings and
+   keep only generic globs in the tracked file (the personal-path check excludes it until then).
+4. **Branch protection on `main` (D3)** and **the release tag** with the PR into main (drafted,
+   not merged).
+5. **Defaults that cost money or change behaviour, all left at today's behaviour:** Layer 3
+   review on by default, one fix round after a bounce, reviewer on the strongest tier, fail
+   closed on reviewer error, remediation from Confirmed findings only, dependency ordering
+   advisory only, which finding id the PR body shows.
+6. **Client lock side effects:** every saved project, yours included, becomes a client
+   engagement on upgrade; the chat then refuses the `cli` backend until you switch it to the API
+   or turn the flag off for your own projects; `.env.example` defaults to `api`; client
+   README.txt prints "Client engagement: yes/no"; DATA_HANDLING.md is a public claims document.
+7. **Severity decisions:** which severity wins when findings merge at one location (H5) and the
+   self-hedge cap (H7). Builders did only the safe half (keep absorbed findings visible).
+8. **Disclosure choices:** the engine's short build commit is printed in client PDFs and
+   findings.json; temperature 0 on Haiku 4.5.
+9. **Licences and names:** MPL-2.0 exceptions in `deny.toml` (CI green with them); whether the
+   benchmark fixture names (tutorly, lumen, hearth, membersclub, faktura, supabase-portal) are
+   private.
+10. **Machine:** run `gh auth login`; boot out the old `dev.zachernst.cargo-disk-guard` launchd
+    job after reinstalling the renamed one; consider excluding the repo's `target` folders from
+    XProtect and Spotlight (a security setting, so your call; it was the biggest load source).
+11. **Security notes (pre-existing, not urgent while the app is local-only):** agent runs pass
+    the Claude CLI `--dangerously-skip-permissions`, so tool allowlists are advisory and only
+    deny lists bind (the new investigation tools are now denied to other roles); the uow routes
+    have no auth or project-membership layer. A placeholder-word rule hides a random key that
+    contains a run like "9fake" (false-negative list).
+
 
 > ## ▶ RESUME HERE (paused 2026-10-26 at Zach's request, after code viewer step 4)
 > **CURRENT (newest first; older entries below are history):** 2026-10-27 (Opus, from Fable

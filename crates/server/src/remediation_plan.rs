@@ -568,10 +568,6 @@ pub struct PrContext {
     pub story_id: Option<String>,
     /// The units this one should land after, as `(uow-N, title)`, resolved by the caller.
     pub depends_on: Vec<(String, String)>,
-    /// The unit's merged findings (`PlannedUnit::merged`, as `SourceFinding`s). They are listed
-    /// in the table beside the finding at the same location, so the PR names every finding it
-    /// closes.
-    pub merged: Vec<SourceFinding>,
 }
 
 /// The traceable PR body with no caller context.
@@ -621,7 +617,7 @@ pub fn pr_body_with(
 
     out.push_str("\n## Findings closed\n");
     let mut repos: Vec<&str> = Vec::new();
-    for f in source.findings.iter().chain(context.merged.iter()) {
+    for f in &source.findings {
         if !repos.contains(&f.repo.as_str()) {
             repos.push(f.repo.as_str());
         }
@@ -656,33 +652,42 @@ pub fn pr_body_with(
         out.push('\n');
         out.push_str("| # | File | Line | Rule | Severity | Finding |\n");
         out.push_str("| --- | --- | --- | --- | --- | --- |\n");
-        // A merged finding is listed straight after the first finding at its location.
-        let mut placed = vec![false; context.merged.len()];
-        for f in source.findings.iter().filter(|f| f.repo == *repo) {
+        // A finding a shared-fix group absorbed (`merged_into`) is listed straight under the
+        // finding that stands for the group; one whose stand-in is not in this PR gets a row
+        // after the others, so every finding the PR closes has a row.
+        let in_repo: Vec<&SourceFinding> =
+            source.findings.iter().filter(|f| f.repo == *repo).collect();
+        let stands_for = |key: &str| {
+            in_repo
+                .iter()
+                .any(|f| f.merged_into.is_none() && f.key == key)
+        };
+        for f in in_repo.iter().filter(|f| f.merged_into.is_none()) {
             number += 1;
             push_row(&mut out, number, f, None);
-            for (m, done) in context.merged.iter().zip(placed.iter_mut()) {
-                if !*done && m.repo == f.repo && m.path == f.path && m.line == f.line {
-                    *done = true;
-                    number += 1;
-                    push_row(&mut out, number, m, Some("merged into the row above"));
-                }
+            for m in in_repo
+                .iter()
+                .filter(|m| m.merged_into.as_deref() == Some(f.key.as_str()))
+            {
+                number += 1;
+                push_row(&mut out, number, m, Some("merged into the row above"));
             }
         }
-        for (m, done) in context.merged.iter().zip(placed.iter()) {
-            if !*done && m.repo == *repo {
-                number += 1;
-                push_row(
-                    &mut out,
-                    number,
-                    m,
-                    Some("merged into another finding of this PR"),
-                );
-            }
+        for m in in_repo
+            .iter()
+            .filter(|m| m.merged_into.as_deref().is_some_and(|k| !stands_for(k)))
+        {
+            number += 1;
+            push_row(
+                &mut out,
+                number,
+                m,
+                Some("merged into another finding of this PR"),
+            );
         }
     }
 
-    let n = source.findings.len() + context.merged.len();
+    let n = source.findings.len();
     let noun = if n == 1 { "finding" } else { "findings" };
     out.push_str(&format!(
         "\n{n} {noun}. A finding counts as closed when the next delta retest no longer reports it.\n"
@@ -1080,6 +1085,7 @@ mod tests {
             rule_id: rule.to_string(),
             severity: sev.to_string(),
             snippet,
+            merged_into: None,
         }
     }
 
@@ -1103,6 +1109,7 @@ mod tests {
                 sf("src/db.rs", 40, "SEC-2", "high"),
             ],
             depends_on: Vec::new(),
+            rules_fingerprint: String::new(),
         }
     }
 
@@ -1169,7 +1176,6 @@ Inspection insp-proj-1700000000-ab12cd; o/a at 0123abcd.\n\
         let ctx = PrContext {
             story_id: Some("story-77".to_string()),
             depends_on: vec![("uow-12".to_string(), "Fix SEC-9".to_string())],
-            merged: Vec::new(),
         };
         let with = pr_body_with(&src, &body_rules(), &ctx);
         assert!(
@@ -1423,8 +1429,10 @@ Inspection insp-proj-1700000000-ab12cd; o/a at 0123abcd.\n\
     #[test]
     fn the_pr_body_lists_merged_findings_next_to_the_finding_they_were_merged_into() {
         let main = sf("src/auth.rs", 10, "A-RULE", "critical");
-        let m1 = sf("src/auth.rs", 10, "B-RULE", "medium");
-        let m2 = sf("src/auth.rs", 10, "B-RULE-2", "medium");
+        let mut m1 = sf("src/auth.rs", 10, "B-RULE", "medium");
+        let mut m2 = sf("src/auth.rs", 10, "B-RULE-2", "medium");
+        m1.merged_into = Some(main.key.clone());
+        m2.merged_into = Some(main.key.clone());
         let src = FindingsSource {
             inspection_id: "insp-x".to_string(),
             audited: vec![AuditedCommit {
@@ -1432,14 +1440,16 @@ Inspection insp-proj-1700000000-ab12cd; o/a at 0123abcd.\n\
                 sha: Some("abc123".to_string()),
             }],
             rule_ids: vec!["A-RULE".to_string(), "B-RULE".to_string()],
-            findings: vec![main.clone(), sf("src/other.rs", 3, "A-RULE", "high")],
+            // The merged findings sit at the end of the list; the body places them under theirs.
+            findings: vec![
+                main.clone(),
+                sf("src/other.rs", 3, "A-RULE", "high"),
+                m1.clone(),
+                m2.clone(),
+            ],
             ..Default::default()
         };
-        let ctx = PrContext {
-            merged: vec![m1.clone(), m2.clone()],
-            ..PrContext::default()
-        };
-        let body = pr_body_with(&src, &HashMap::new(), &ctx);
+        let body = pr_body(&src, &HashMap::new());
         for f in [&main, &m1, &m2] {
             assert!(
                 body.contains(&f.fingerprint),
@@ -1478,12 +1488,11 @@ Inspection insp-proj-1700000000-ab12cd; o/a at 0123abcd.\n\
             findings: vec![sf("src/a.rs", 1, "A-RULE", "high")],
             ..Default::default()
         };
-        let stray = sf("src/elsewhere.rs", 9, "B-RULE", "low");
-        let ctx = PrContext {
-            merged: vec![stray.clone()],
-            ..PrContext::default()
-        };
-        let body = pr_body_with(&src, &HashMap::new(), &ctx);
+        let mut stray = sf("src/elsewhere.rs", 9, "B-RULE", "low");
+        stray.merged_into = Some("a key no row has".to_string());
+        let mut src = src;
+        src.findings.push(stray.clone());
+        let body = pr_body(&src, &HashMap::new());
         let row = body
             .lines()
             .find(|l| l.contains(&stray.fingerprint))
@@ -1514,7 +1523,6 @@ Inspection insp-proj-1700000000-ab12cd; o/a at 0123abcd.\n\
         let ctx = PrContext {
             story_id: Some("story-77".to_string()),
             depends_on: vec![("uow-12".to_string(), "Fix SEC-9".to_string())],
-            merged: Vec::new(),
         };
         let body = pr_body_with(&src, &body_rules(), &ctx);
         let lines: Vec<&str> = body.lines().collect();
@@ -1555,7 +1563,6 @@ Inspection insp-proj-1700000000-ab12cd; o/a at 0123abcd.\n\
         let ctx = PrContext {
             story_id: None,
             depends_on: vec![("uow-3".to_string(), "Fix|it\nnow".to_string())],
-            merged: Vec::new(),
         };
         let mut src = source();
         src.rule_ids = vec!["SEC-1".to_string()];
