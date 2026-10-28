@@ -1752,8 +1752,11 @@ handling note (who the report is for, and not to forward it outside that company
 The client name is part of the inspection setup: the **Client name** field above the cost estimate
 on the scan screen, saved with the project as you leave the field. An export with no client name is
 refused with a message saying where to enter it. On the command line, `--client` is required and is
-checked before anything is read or spent. A project imported from someone else's export starts with
-no client name, so a report is never marked for the wrong client.
+checked before anything is read or spent. A project export file leaves the client name blank, so a
+client's name does not travel in a backup, and a project imported from an export starts with no client
+name, so a report is never marked for the wrong client. The name is at most 100 characters, and shorter
+when it holds many "&" signs, because the workbook footer has room for 255 characters and writes each
+"&" twice; a name that does not fit is refused with a message saying so.
 
 Useful flags: `--backend api|cli` (the same API-vs-CLI compliance setting a project carries; `api`, the
 Anthropic API, is the default and uses the Anthropic key you saved in the app (Settings), with the

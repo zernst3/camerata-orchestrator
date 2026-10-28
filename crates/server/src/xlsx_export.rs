@@ -1807,8 +1807,9 @@ fn write_index_sheet(
         ws.write_string(r, 0, &opts.project_title)?;
         r += 1;
     }
-    if !opts.client_name.is_empty() {
-        ws.write_string(r, 0, format!("Prepared for {}", opts.client_name))?;
+    let client = crate::report_export::clean_client_name(&opts.client_name);
+    if !client.is_empty() {
+        ws.write_string(r, 0, format!("Prepared for {client}"))?;
         r += 1;
     }
     if !opts.prepared_by.is_empty() {

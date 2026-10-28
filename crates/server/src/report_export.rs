@@ -1419,9 +1419,31 @@ pub struct ConfidentialityJson {
 }
 
 /// The longest client name the inspection setup accepts. The name is printed in every PDF
-/// footer and every workbook sheet footer, and a workbook footer holds at most 255 characters
-/// including its layout codes, so a bound here keeps the marking whole everywhere.
+/// footer and every workbook sheet footer, so this is the plain length cap; the workbook
+/// footer's own limit (which counts each `&` twice) is checked on top of it, see
+/// [`validate_client_name`].
 pub const CLIENT_NAME_MAX_CHARS: usize = 100;
+
+/// The most characters Excel keeps in one header or footer string, layout codes included.
+pub(crate) const EXCEL_FOOTER_MAX_CHARS: usize = 255;
+
+/// The widest date the marking line can carry ("%-d %B %Y": two digits, the longest month
+/// name, four digits). The footer bound is measured with it, so a name accepted today still
+/// fits whatever day the inspection is dated.
+pub(crate) const WORST_MARKING_DATE: &str = "30 September 2026";
+
+/// The confidentiality line for `client` (already cleaned) and `date`: the one place its
+/// wording lives, shared by the marking and the footer-length bound.
+fn marking_line(client: &str, date: &str) -> String {
+    format!("Confidential, prepared for {client} on {date}")
+}
+
+/// A client name as every artifact prints it: invisible zero-width characters removed, then
+/// trimmed. The one cleaning step, so the PDF, the workbook and the manifest can never print
+/// different strings for the same name.
+pub(crate) fn clean_client_name(raw: &str) -> String {
+    strip_zero_width(raw).trim().to_string()
+}
 
 /// Why an export refused to start: the inspection setup has no usable client name. Its
 /// `Display` is the plain message the operator sees (HTTP 422 body, CLI stderr).
@@ -1436,12 +1458,14 @@ impl std::fmt::Display for ClientNameRequired {
 
 impl std::error::Error for ClientNameRequired {}
 
-/// Check a client name as the inspection setup saves it: trimmed, at most
-/// [`CLIENT_NAME_MAX_CHARS`] characters, no line breaks or other control characters (it is
-/// one line of a page footer). Blank is allowed here (the operator may clear the field);
+/// Check a client name as the inspection setup saves it: zero-width characters removed and
+/// trimmed ([`clean_client_name`]), at most [`CLIENT_NAME_MAX_CHARS`] characters, no line breaks
+/// or other control characters (it is one line of a page footer), and short enough that the
+/// workbook footer holds the whole confidentiality line (Excel keeps 255 characters, and a
+/// literal `&` is written twice). Blank is allowed here (the operator may clear the field);
 /// exporting with a blank name is refused by [`require_client_name`].
 pub fn validate_client_name(name: &str) -> Result<String, ClientNameRequired> {
-    let name = name.trim();
+    let name = clean_client_name(name);
     if name.chars().count() > CLIENT_NAME_MAX_CHARS {
         return Err(ClientNameRequired(format!(
             "The client name is longer than {CLIENT_NAME_MAX_CHARS} characters. Shorten it in \
@@ -1455,7 +1479,18 @@ pub fn validate_client_name(name: &str) -> Result<String, ClientNameRequired> {
                 .to_string(),
         ));
     }
-    Ok(name.to_string())
+    if !name.is_empty() {
+        let footer = crate::xlsx_export::sheet_footer(&marking_line(&name, WORST_MARKING_DATE));
+        let used = footer.encode_utf16().count();
+        if used > EXCEL_FOOTER_MAX_CHARS {
+            return Err(ClientNameRequired(format!(
+                "The client name is too long for the workbook footer: Excel keeps \
+                 {EXCEL_FOOTER_MAX_CHARS} characters there and this name needs {used} (each \
+                 & counts twice). Shorten it in the inspection setup."
+            )));
+        }
+    }
+    Ok(name)
 }
 
 /// The export-time check: a valid, NON-BLANK client name, or the message that blocks the
@@ -1493,7 +1528,7 @@ pub fn confidentiality_marking(
     provenance: &crate::onboard::ScanProvenance,
     opts: &ReportOptions,
 ) -> ConfidentialityJson {
-    let client = strip_zero_width(opts.client_name.trim()).into_owned();
+    let client = clean_client_name(&opts.client_name);
     let date = marking_date(provenance);
     let consent_from = resolve_brand(opts, None).unwrap_or_else(|| resolve_prepared_by(opts, None));
     if client.is_empty() {
@@ -1506,7 +1541,7 @@ pub fn confidentiality_marking(
         };
     }
     ConfidentialityJson {
-        line: format!("Confidential, prepared for {client} on {date}"),
+        line: marking_line(&client, &date),
         handling_note: format!(
             "This report is confidential and was prepared for {client} only. Please do not \
              forward it outside {client} without the written consent of {consent_from}."
@@ -4983,7 +5018,7 @@ pub fn build_report_json(
         camerata_version: report.provenance.camerata_version.clone(),
         // The SCAN time, not the wall clock at serialization — see `generated_at_label`.
         generated_at: generated_at_label(&report.provenance),
-        client_name: opts.client_name.clone(),
+        client_name: clean_client_name(&opts.client_name),
         project_title: opts.project_title.clone(),
         // `build_report_json` stays pure/no-I/O (per its own doc comment): it does NOT read
         // `CAMERATA_REPORT_BRAND`/`CAMERATA_REPORT_PREPARED_BY` itself. By the time `opts`
@@ -5155,19 +5190,6 @@ const TEMPLATE_ASSETS: [(&str, &[u8]); 7] = [
     ),
 ];
 
-/// Which fonts Typst may draw from. Production uses [`FontSources::BundledFirst`]; the
-/// embedding test uses [`FontSources::BundledOnly`] to prove the bundle alone renders the
-/// report on a machine with no Inter or JetBrains Mono installed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum FontSources {
-    /// `--font-path fonts`: Typst searches the bundled files BEFORE system fonts, so Inter
-    /// and JetBrains Mono always come from the bundle, and a glyph neither has (a CJK path, an
-    /// emoji) still falls back to a system font instead of rendering as a missing box.
-    BundledFirst,
-    /// `--font-path fonts --ignore-system-fonts`.
-    BundledOnly,
-}
-
 /// Compile `data_json` (from [`render_data_json`]) into a PDF via a bundled Typst template.
 /// Self-contained: the template
 /// text is embedded in the binary (`include_str!`), so no external file needs to ship
@@ -5178,8 +5200,13 @@ enum FontSources {
 /// cleanup on drop) with a 30s timeout, with `SOURCE_DATE_EPOCH` pinned to the report's own
 /// generation time (see [`creation_epoch`]). The template reads `data.json` via Typst's own
 /// `json()` builtin — no `--input` plumbing needed.
+///
+/// Fonts: the bundled Inter and JetBrains Mono ONLY (`--font-path fonts --ignore-system-fonts`).
+/// A client PDF must look the same whichever machine exports it, so it never draws from the
+/// exporting machine's installed fonts. A character the bundle lacks (a CJK file name, an
+/// emoji) falls back to the faces Typst itself embeds and may render as a missing-glyph box.
 pub async fn compile_pdf_from_data(data_json: &str) -> anyhow::Result<Vec<u8>> {
-    let (pdf, warnings) = run_typst(data_json, FontSources::BundledFirst).await?;
+    let (pdf, warnings) = run_typst(data_json).await?;
     if !warnings.trim().is_empty() {
         tracing::warn!(%warnings, "typst reported warnings while compiling the report");
     }
@@ -5187,7 +5214,7 @@ pub async fn compile_pdf_from_data(data_json: &str) -> anyhow::Result<Vec<u8>> {
 }
 
 /// The compile itself: the PDF bytes and Typst's stderr (its warnings, on success).
-async fn run_typst(data_json: &str, fonts: FontSources) -> anyhow::Result<(Vec<u8>, String)> {
+async fn run_typst(data_json: &str) -> anyhow::Result<(Vec<u8>, String)> {
     let tmp = tempfile::tempdir().context("could not create a temp dir for the PDF export")?;
     let data_path = tmp.path().join("data.json");
     let template_path = tmp.path().join("report.typ");
@@ -5220,10 +5247,8 @@ async fn run_typst(data_json: &str, fonts: FontSources) -> anyhow::Result<(Vec<u
         .arg(tmp.path())
         .arg("--font-path")
         .arg(tmp.path().join("fonts"))
+        .arg("--ignore-system-fonts")
         .kill_on_drop(true);
-    if fonts == FontSources::BundledOnly {
-        cmd.arg("--ignore-system-fonts");
-    }
     // Reproducibility: pin the PDF's creation timestamp instead of letting Typst read the wall
     // clock. Typst stamps that clock into FIVE places — the Info dict's `/CreationDate` and
     // `/ModDate`, the XMP packet's `xmp:CreateDate`, `xmp:ModifyDate`, `xmpMM:InstanceID` and
@@ -10679,12 +10704,9 @@ mod tests {
         let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &opts);
         assert!(json.brand_mark, "the kit's own brand renders the mark");
 
-        let (pdf, warnings) = run_typst(
-            &render_data_json(&json).expect("serialize"),
-            FontSources::BundledOnly,
-        )
-        .await
-        .expect("the report compiles from the bundled fonts alone");
+        let (pdf, warnings) = run_typst(&render_data_json(&json).expect("serialize"))
+            .await
+            .expect("the report compiles from the bundled fonts alone");
         assert!(
             !warnings.contains("unknown font family"),
             "a bundled family is missing: {warnings}"
@@ -10696,6 +10718,38 @@ mod tests {
                 "the PDF does not embed {face}"
             );
         }
+    }
+
+    /// A client PDF is compiled from the bundled fonts alone, so its look never depends on which
+    /// fonts the exporting machine has installed. Needs no real Typst: a recording stand-in
+    /// (scoped onto this task, never put on `PATH`) writes down the arguments it was run with.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_client_pdf_is_compiled_with_system_fonts_ignored() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let recorded = dir.path().join("arguments");
+        let script = dir.path().join("typst");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\necho \"$@\" > '{}'\nexit 1\n",
+                recorded.display()
+            ),
+        )
+        .expect("write the stand-in typst");
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+
+        let _ = TYPST_PROGRAM
+            .scope(script, compile_pdf_from_data("{}"))
+            .await;
+
+        let arguments = std::fs::read_to_string(&recorded).expect("the stand-in typst ran");
+        assert!(arguments.contains("--font-path"), "{arguments}");
+        assert!(
+            arguments.contains("--ignore-system-fonts"),
+            "installed fonts must not reach a client PDF: {arguments}"
+        );
     }
 
     /// Confidentiality (2026-10-24 decision): the marking names the client and the SCAN date
@@ -10764,6 +10818,91 @@ mod tests {
             require_client_name(&opts).as_deref(),
             Ok("Example Client Ltd")
         );
+    }
+
+    /// Invisible characters are not part of a client's name: they are stripped where the name is
+    /// saved, so the manifest, the workbook and the PDF can never print different strings, and a
+    /// name made only of them is blank (and refused with the message that says so).
+    #[test]
+    fn zero_width_characters_are_stripped_from_the_client_name() {
+        assert_eq!(
+            validate_client_name("Ex\u{200B}ample\u{FEFF} Client\u{2060} Ltd\u{200D}").as_deref(),
+            Ok("Example Client Ltd")
+        );
+        assert_eq!(
+            validate_client_name("\u{200B}  \u{200C}\u{2060}").as_deref(),
+            Ok("")
+        );
+        let mut opts = empty_opts();
+        opts.client_name = "\u{200B}\u{200D}".to_string();
+        let refused = require_client_name(&opts).expect_err("an invisible name is a blank name");
+        assert!(
+            refused.to_string().contains("Enter the client name"),
+            "the refusal says the name is missing: {refused}"
+        );
+        // The marking prints the same string the setup saved.
+        opts.client_name = "Acme\u{200B} Ltd".to_string();
+        assert_eq!(
+            confidentiality_marking(&ScanProvenance::default(), &opts)
+                .line
+                .split(" on ")
+                .next(),
+            Some("Confidential, prepared for Acme Ltd")
+        );
+    }
+
+    /// The workbook footer holds 255 characters, with each `&` written twice, so a name made of
+    /// ampersands has the least room. The bound is measured on the real footer, with the longest
+    /// date the marking can print, and refused with a message that says what to shorten.
+    #[test]
+    fn a_client_name_that_would_overflow_the_workbook_footer_is_refused() {
+        assert!(validate_client_name(&"x".repeat(CLIENT_NAME_MAX_CHARS)).is_ok());
+        // 80 characters with several ampersands is a realistic long name.
+        let long = format!("{} & Sons & Daughters & Partners", "A".repeat(49));
+        assert!(long.chars().count() <= 80);
+        assert!(validate_client_name(&long).is_ok());
+
+        let footer_len = |name: &str| {
+            let line = marking_line(name, WORST_MARKING_DATE);
+            crate::xlsx_export::sheet_footer(&line)
+                .encode_utf16()
+                .count()
+        };
+        let widest_accepted = (1..=CLIENT_NAME_MAX_CHARS)
+            .take_while(|n| validate_client_name(&"&".repeat(*n)).is_ok())
+            .last()
+            .expect("a short name of ampersands is accepted");
+        assert!(widest_accepted < CLIENT_NAME_MAX_CHARS, "the bound bites");
+        assert!(footer_len(&"&".repeat(widest_accepted)) <= EXCEL_FOOTER_MAX_CHARS);
+        assert!(
+            footer_len(&"&".repeat(widest_accepted + 1)) > EXCEL_FOOTER_MAX_CHARS,
+            "the bound is exact, not merely safe"
+        );
+        let refused = validate_client_name(&"&".repeat(CLIENT_NAME_MAX_CHARS))
+            .expect_err("a hundred ampersands cannot fit a footer");
+        assert!(refused.to_string().contains("footer"), "{refused}");
+        assert!(refused.to_string().contains("Shorten"), "{refused}");
+    }
+
+    /// The longest date the marking can print is the one the bound is measured with.
+    #[test]
+    fn the_worst_marking_date_is_the_longest_the_marking_can_print() {
+        use chrono::TimeZone;
+        let longest = (1..=12u32)
+            .flat_map(|month| {
+                (1..=28u32).map(move |day| {
+                    chrono::Utc
+                        .with_ymd_and_hms(2026, month, day, 0, 0, 0)
+                        .unwrap()
+                        .format("%-d %B %Y")
+                        .to_string()
+                })
+            })
+            .map(|date| date.chars().count())
+            .max()
+            .unwrap();
+        // Days 29 to 31 add no width over 28 (both are two digits).
+        assert_eq!(WORST_MARKING_DATE.chars().count(), longest);
     }
 
     /// W27: the logo mark belongs to the bundled brand kit, so it renders for that brand only.

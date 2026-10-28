@@ -2886,17 +2886,23 @@ thing:
   at the top of the template. The fonts (Inter for text, JetBrains Mono for code, SIL
   OFL, licence files beside them in `templates/fonts/`) and the two logo marks
   (`docs/design/brand/`) are compiled into the binary (`TEMPLATE_ASSETS`), written next
-  to the template on every compile, and passed with `--font-path`, which Typst searches
-  before system fonts. The logo mark renders only when the resolved brand is the brand
-  kit's own (`BRAND_KIT_NAME`, `AuditReportJson::brand_mark`); another agency's brand
-  gets the text wordmark alone. A test compiles with system fonts ignored to prove the
-  bundle alone renders the report.
+  to the template on every compile, and passed with `--font-path fonts
+  --ignore-system-fonts`, so a client PDF never depends on the fonts installed on the
+  exporting machine (a character the bundle lacks falls back to Typst's own embedded faces
+  and may show as a missing-glyph box). The logo mark renders only when the resolved brand
+  is the brand kit's own (`BRAND_KIT_NAME`, `AuditReportJson::brand_mark`); another agency's
+  brand gets the text wordmark alone. A test compiles with system fonts ignored to prove the
+  bundle alone renders the report, and another records the arguments the production compile
+  passes.
 - **Confidentiality marking** (2026-10-24 decision): `report_export::confidentiality_marking`
   is the one producer of "Confidential, prepared for <client> on <date>" (the scan date) and
   the first page's handling note; the PDF prints them from `AuditReportJson::confidentiality`
   and `xlsx_export::build_workbook` puts the same line in every sheet's footer. The client name
   is `Project::client_name` (inspection setup, `POST /api/projects/:id/client-name`, not
-  carried by project import); the export routes fill `ReportOptions::client_name` from it
+  carried by project import, and left blank in a project export file, so a client's name does
+  not travel in a backup); `validate_client_name` strips zero-width characters (one cleaned
+  string for the PDF, workbook and manifest) and refuses a name whose workbook footer would
+  pass Excel's 255-character limit, counting each `&` twice; the export routes fill `ReportOptions::client_name` from it
   (`serde(skip)`, never client-supplied), and `require_client_name` refuses a blank one in
   `build_product_package_with_stem` and the PDF-only route (HTTP 422, `gate: "client_name"`).
   `camerata inspect` takes `--client`. The release gate scans sheet headers and footers for

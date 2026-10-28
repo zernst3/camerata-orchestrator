@@ -3931,6 +3931,11 @@ async fn export_project(
         .get(&id)
         .ok_or_else(|| AppError::not_found(anyhow::anyhow!("project not found: {id}")))?;
     let routines = state.routines.list_for_project(&id);
+    // A project export is a backup file that moves between machines, not a client deliverable,
+    // and a client's name should not travel in a file by default: it is left blank here (the
+    // stored project keeps it) and the operator sets it again for the engagement on import.
+    let mut project = project;
+    project.client_name.clear();
     Ok(Json(ProjectExportDoc { project, routines }))
 }
 
@@ -19391,6 +19396,49 @@ mod tests {
         assert!(
             item.get("has_gate_provenance").is_none(),
             "stale boolean `has_gate_provenance` must be replaced by `gate_provenance`"
+        );
+    }
+
+    /// A project export is a backup file Zach moves between machines, not a client deliverable,
+    /// and a client's name should not travel in a file by default: the export carries every
+    /// project setting except the client name, which is left blank (and so is blank again on
+    /// import, where the operator sets it for that engagement).
+    #[tokio::test]
+    async fn a_project_export_file_does_not_carry_the_client_name() {
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        let p = state
+            .projects
+            .create("Acme", vec!["acme/portal".to_string()])
+            .expect("project created");
+        state
+            .projects
+            .update(&p.id, |p| p.client_name = "Example Client Ltd".to_string())
+            .expect("project updated");
+        let app = router(state.clone());
+
+        let exp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/projects/{}/export", p.id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(exp.status(), StatusCode::OK);
+        let doc = body_json(exp).await;
+        assert_eq!(doc["client_name"], "", "{doc}");
+        assert!(
+            !doc.to_string().contains("Example Client Ltd"),
+            "the client name must not appear anywhere in the export: {doc}"
+        );
+        // The rest of the project still travels.
+        assert_eq!(doc["name"], "Acme");
+        assert_eq!(doc["repos"][0], "acme/portal");
+        // The stored project is untouched: only the file is redacted.
+        assert_eq!(
+            state.projects.get(&p.id).expect("project").client_name,
+            "Example Client Ltd"
         );
     }
 

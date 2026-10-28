@@ -1387,6 +1387,44 @@ fn rewrite_xlsx(xlsx: &[u8], f: impl Fn(&str, &str) -> String) -> Vec<u8> {
     out.finish().expect("finish zip").into_inner()
 }
 
+/// The client is named by one string everywhere. A name typed with invisible characters in it
+/// used to reach the PDF without them and the manifest with them, so the same package named the
+/// client two ways.
+#[test]
+fn the_manifest_the_pdf_and_the_workbook_name_the_client_identically() {
+    let sealed = sealed_report();
+    let options = ReportOptions {
+        client_name: " Acme\u{200B} Ltd\u{FEFF} ".to_string(),
+        ..ReportOptions::default()
+    };
+    let json = build_report_json(&sealed, &HashMap::new(), None, &options);
+    let data = render_data_json(&json).expect("data.json renders");
+    let package = assemble_package(
+        &sealed,
+        &HashMap::new(),
+        None,
+        &options,
+        STEM,
+        (json, data, STAND_IN_PDF.to_vec()),
+    )
+    .expect("the package assembles");
+
+    assert_eq!(package.report_json.cover.client_name, "Acme Ltd");
+    assert!(package
+        .report_json
+        .confidentiality
+        .line
+        .contains("prepared for Acme Ltd on "));
+    assert_eq!(package.provenance.client_name.as_deref(), Some("Acme Ltd"));
+    let index = archive::xlsx_sheet_grid(&package.xlsx, "Index").expect("the Index sheet");
+    assert!(
+        index
+            .iter()
+            .any(|row| row.first().is_some_and(|c| c == "Prepared for Acme Ltd")),
+        "the workbook Index names the client the same way"
+    );
+}
+
 /// The marking goes through the release gate like every other string: a secret-shaped value
 /// typed into the client name is caught in the workbook's sheet footers too, not only in the
 /// PDF's data.
