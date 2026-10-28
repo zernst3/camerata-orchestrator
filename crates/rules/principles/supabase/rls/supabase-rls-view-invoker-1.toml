@@ -64,7 +64,7 @@ sitting beside them is not, and nothing in the migration diff says so.
 `security_invoker` (Postgres 15+, which Supabase runs) makes the view re-check privileges, RLS
 included, against the actual invoking role, which costs nothing and removes the bypass. Where a
 view is deliberately meant to be a narrower curated surface over a locked-down base table (a
-reviewed read-convenience view excluding sensitive columns), that is a real design, but it is one
+reviewed read-convenience view excluding sensitive columns) that is a real design, but it is one
 the project states and reviews rather than one that arises from leaving the option off.
 """
 remediation = """

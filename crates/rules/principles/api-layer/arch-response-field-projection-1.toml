@@ -12,7 +12,7 @@ qualifies = "Deterministically checkable, but no off-the-shelf linter enforces i
 
 [[sources]]
 url = "https://owasp.org/www-project-api-security/"
-title = "OWASP API Security Top 10 (2023): API3: Broken Object Property Level Authorization (formerly API3:2019 Excessive Data Exposure): 'Looking forward to shiny new gadgets... developers tend to expose all object properties without considering their individual sensitivity, relying on clients to filter the data'"
+title = "OWASP API Security Top 10 (2023), API3: Broken Object Property Level Authorization (formerly API3:2019 Excessive Data Exposure): 'Looking forward to shiny new gadgets... developers tend to expose all object properties without considering their individual sensitivity, relying on clients to filter the data'"
 
 [[sources]]
 url = "https://cwe.mitre.org/data/definitions/213.html"

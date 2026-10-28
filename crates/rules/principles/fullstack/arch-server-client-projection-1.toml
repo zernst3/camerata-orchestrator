@@ -16,7 +16,7 @@ title = "Next.js docs: Server and Client Components: props passed from a Server 
 
 [[sources]]
 url = "https://owasp.org/www-project-api-security/"
-title = "OWASP API Security Top 10 (2023): API3: Broken Object Property Level Authorization (excessive data exposure): returning a full object representation rather than fields the client actually needs"
+title = "OWASP API Security Top 10 (2023), API3: Broken Object Property Level Authorization (excessive data exposure): returning a full object representation rather than fields the client actually needs"
 
 [[sources]]
 url = "https://cwe.mitre.org/data/definitions/213.html"

@@ -36,7 +36,7 @@ id = "no-integration-tests"
 violates = true
 label = "rely solely on unit tests; skip integration tests"
 directive = "Only unit tests are written; the HTTP pipeline and DI registrations are never integration-tested."
-why = "Skips an entire class of bugs (middleware ordering, routing, DI wiring), that only manifest in the real pipeline. Microsoft's documentation explicitly states that integration tests should complement unit tests, not be skipped."
+why = "Skips an entire class of bugs (middleware ordering, routing, DI wiring) that only manifest in the real pipeline. Microsoft's documentation explicitly states that integration tests should complement unit tests, not be skipped."
 
 
 [[sources]]

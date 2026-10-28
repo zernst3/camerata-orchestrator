@@ -27,7 +27,7 @@ linter = "Checkstyle: EmptyCatchBlock"
 
 [[sources]]
 url = "https://google.github.io/styleguide/javaguide.html#s6.2-caught-exceptions"
-title = "Google Java Style Guide: Section 6.2: Caught exceptions: not ignored"
+title = "Google Java Style Guide: Section 6.2 (Caught exceptions: not ignored)"
 
 [[option]]
 id = "log-or-rethrow-with-context"

@@ -1,6 +1,6 @@
 id = "SQL-ENUM-TEXT-CONSTRAINT-1"
 version = 2
-title = "A column representing a closed set of values is constrained (a native enum, a CHECK list, or a lookup-table FK), never a bare, unconstrained text column"
+title = "A column representing a closed set of values is constrained (a native enum, a CHECK list, or a lookup-table FK) never a bare, unconstrained text column"
 domain = "sql"
 layer = "universal"
 enforcement = "structured"

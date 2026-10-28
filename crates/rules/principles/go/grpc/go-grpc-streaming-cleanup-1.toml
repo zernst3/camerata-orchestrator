@@ -11,7 +11,7 @@ verification = "grounded"
 
 [[sources]]
 url = "https://grpc.io/docs/languages/go/basics/"
-title = "gRPC: Basics tutorial (Go): Bidirectional streaming"
+title = "gRPC: Basics tutorial (Go), Bidirectional streaming"
 
 [[sources]]
 url = "https://go.dev/wiki/CodeReviewComments#goroutine-lifetimes"

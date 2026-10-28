@@ -17,7 +17,7 @@ qualifies = "Whether a channel's topic string is constructed in a way that an at
 
 [[sources]]
 url = "https://supabase.com/docs/guides/realtime/channels"
-title = "Supabase docs: Channels: topics are arbitrary client-chosen strings (e.g. 'realtime:chat-room'); for public channels, the documentation provides no restriction beyond knowing the topic name: topic secrecy is not an access control, only `private: true` plus a realtime.messages policy is"
+title = "Supabase docs: Channels: topics are arbitrary client-chosen strings (e.g. 'realtime:chat-room'); for public channels, the documentation provides no restriction beyond knowing the topic name (topic secrecy is not an access control, only `private: true` plus a realtime.messages policy is)"
 
 [[sources]]
 url = "https://cwe.mitre.org/data/definitions/639.html"
@@ -61,7 +61,7 @@ values into channels meant for other users. And the server, not the client, deci
 given authenticated user may request: a raw route parameter or query string is never passed
 through as a topic without a server-side check that the caller is entitled to that resource.
 
-Unguessability is not the access control, though. Topic names leak through entirely ordinary paths (a shared link, browser history, a referrer header, a support screenshot, a log line), so every
+Unguessability is not the access control, though. Topic names leak through entirely ordinary paths (a shared link, browser history, a referrer header, a support screenshot, a log line) so every
 non-public topic is also a `private: true` channel with a matching `realtime.messages` policy, so
 that knowing the name is insufficient on its own. The two solve different problems: an unguessable
 topic with no policy is obscurity, and an authorized but sequentially-numbered topic is still

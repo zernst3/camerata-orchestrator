@@ -51,7 +51,7 @@ id = "flag-any-exposed-auth-users-reference"
 label = "No API-exposed view, materialized view, or grant reads from auth.users"
 directive = """
 Nothing in an API-exposed schema selects from `auth.users` or grants access to it. That table is
-Supabase's internal identity store (every account's email, phone number and `raw_user_meta_data`),
+Supabase's internal identity store (every account's email, phone number and `raw_user_meta_data`)
 and any exposed object reading it makes the whole user directory readable through PostgREST, which
 is a full account-list leak rather than a partial one. Where the application needs user information
 of its own, it keeps an application-owned table (a `public.profiles` or similar) populated by a

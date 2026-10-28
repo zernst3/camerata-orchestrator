@@ -50,7 +50,7 @@ severity) or a description of the check that exists.
 id = "require-explicit-authz-on-service-role-paths"
 label = "Every user-reachable handler that uses a service_role client performs its own authorization check"
 directive = """
-Any handler a regular end user can reach (an API route, a server action, an Edge Function), that
+Any handler a regular end user can reach (an API route, a server action, an Edge Function) that
 constructs or receives a service_role-backed Supabase client validates the caller's entitlement to
 the specific action and row before performing it. service_role carries BYPASSRLS: the moment that
 client is used, every Row Level Security policy that would have constrained the request stops

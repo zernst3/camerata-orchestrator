@@ -77,5 +77,5 @@ why = "Splitting mechanical evidence-gathering (the flag, which is deterministic
 id = "edge-function-disables-jwt-without-compensating-check"
 violates = true
 label = "An Edge Function disables JWT verification and its handler performs no compensating auth check"
-directive = "An Edge Function sets `verify_jwt = false` (or deploys with `--no-verify-jwt`) and its handler body performs no equivalent check of its own (no verified signature, no shared-secret check, no explicit authenticated-user gate), so it accepts requests from anyone on the internet."
+directive = "An Edge Function sets `verify_jwt = false` (or deploys with `--no-verify-jwt`) and its handler body performs no equivalent check of its own (no verified signature, no shared-secret check, no explicit authenticated-user gate) so it accepts requests from anyone on the internet."
 why = "Rejected: a function with JWT verification off and nothing in its place is unauthenticated by definition. The deliberately-public case (a webhook that validates the provider's own signature instead) carries that check inline; this is the case where nothing does."

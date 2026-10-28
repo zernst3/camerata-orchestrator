@@ -45,7 +45,7 @@ directive = "Any filter or query expression accepting user-controlled data uses 
 remediation = """
 Rewrite the concatenated filter expression to use the client library's bound-argument methods
 (PostgREST/Supabase: .eq(column, value) chains instead of a string-built .or()/.filter()
-expression; escape reserved characters: commas, parentheses, wildcards: for any value that must
+expression; escape reserved characters (commas, parentheses, wildcards) for any value that must
 still flow into a grammar string). Verify by confirming a payload containing the grammar's own
 reserved characters (e.g. a comma or closing paren) no longer changes which rows the query returns.
 """

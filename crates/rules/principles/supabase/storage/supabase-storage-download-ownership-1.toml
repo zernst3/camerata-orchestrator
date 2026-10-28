@@ -54,7 +54,7 @@ id = "require-ownership-check-before-signing"
 label = "Every handler signing or downloading a client-supplied object path first checks the caller owns that object"
 directive = """
 Wherever `createSignedUrl` or `download` is called with a path that came from the request (a route
-parameter, a query string, a body field), the handler first confirms the requesting user is
+parameter, a query string, a body field) the handler first confirms the requesting user is
 entitled to that EXACT object. In practice that is a lookup keyed on both the object identifier and
 the caller's user id (`where object_path = $1 and owner_id = $2`, not just the path), or an explicit
 `storage.objects` owner check. Signing a URL is functionally granting read access, so the check

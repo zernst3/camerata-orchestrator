@@ -16,7 +16,7 @@ title = "CWE-525: Use of Web Browser Cache Containing Sensitive Information"
 
 [[sources]]
 url = "https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Cache-Control#no-store"
-title = "MDN: Cache-Control: no-store: 'The no-store response directive indicates that any caches of any kind (private or shared) should not store this response'"
+title = "MDN: Cache-Control (no-store): 'The no-store response directive indicates that any caches of any kind (private or shared) should not store this response'"
 
 [[sources]]
 url = "https://cheatsheetseries.owasp.org/cheatsheets/Session_Management_Cheat_Sheet.html"

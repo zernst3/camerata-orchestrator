@@ -11,7 +11,7 @@ verification = "grounded"
 
 [[sources]]
 url = "https://expressjs.com/en/advanced/best-practice-security.html"
-title = "Express.js: Production best practices: Security: Use Helmet"
+title = "Express.js: Production best practices (Security: Use Helmet)"
 
 [decision]
 question = "How does the Express application set protective HTTP response headers?"

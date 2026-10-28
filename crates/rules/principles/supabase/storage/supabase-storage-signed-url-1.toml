@@ -48,7 +48,7 @@ directive = """
 A signed URL is a bearer credential: whoever holds the string can download the object until it
 expires, with no further authentication. `createSignedUrl`'s `expiresIn` is that credential's
 entire lifetime, so it is scoped to how long the recipient genuinely needs (a page load, an email
-click, a short download window), rather than set generously long against the risk of expiring too
+click, a short download window) rather than set generously long against the risk of expiring too
 soon. A long expiry mostly extends how long a forwarded or intercepted link keeps working. Where
 a deliberately long-lived share link IS the feature, the value reads as a decision, with the
 reason beside it.

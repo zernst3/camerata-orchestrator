@@ -59,7 +59,7 @@ exchanges the old refresh token on every refresh, so a leaked one stops working 
 legitimate holder refreshes; with it off, nothing in the system ever expires that token and it mints
 new access tokens indefinitely. It is a security control with no functional downside, so there is no
 general-purpose reason to turn it off. `jwt_expiry` is a genuine risk-profile judgement (a
-low-sensitivity consumer app and one handling financial or health data differ legitimately), so this
+low-sensitivity consumer app and one handling financial or health data differ legitimately) so this
 project either keeps it near Supabase's 3600-second default or records, in a comment beside the
 setting, why a longer-lived access token is right here. A longer expiry widens the window in which a
 stolen access token keeps working, so the number is chosen rather than inherited.

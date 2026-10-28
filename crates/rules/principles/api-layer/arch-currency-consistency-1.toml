@@ -12,7 +12,7 @@ verification = "grounded"
 
 [[sources]]
 url = "https://docs.stripe.com/currencies#zero-decimal"
-title = "Stripe: Currencies: zero-decimal currencies (e.g. JPY, KRW) take the integer charge amount directly, with no x100 minor-unit multiplication, a documented, frequently-mishandled exception to the usual minor-unit convention"
+title = "Stripe: Currencies, zero-decimal currencies (e.g. JPY, KRW) take the integer charge amount directly, with no x100 minor-unit multiplication (a documented, frequently-mishandled exception to the usual minor-unit convention)"
 
 [[sources]]
 url = "https://cwe.mitre.org/data/definitions/704.html"

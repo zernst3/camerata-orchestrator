@@ -55,7 +55,7 @@ handlers) is gated on a verified second factor before it proceeds: `(select auth
 'aal2'` in the RLS policy, or the `getAuthenticatorAssuranceLevel()` equivalent in a server-side
 handler. A password-only session carries `aal1` and does not reach these actions, whether or not
 that user has ever enrolled an MFA factor. Which actions count as privileged is this project's
-judgement (own-content edits in a notes app do not need the bar a role grant does), but the bar,
+judgement (own-content edits in a notes app do not need the bar a role grant does) but the bar,
 once set, is enforced by an `aal` check and not by enrollment being available.
 """
 remediation = """

@@ -56,7 +56,7 @@ Supabase CLI scaffolds `false` there deliberately, to spare local development a 
 and a config.toml that never leaves a developer's machine may keep that value; the line to hold is
 that the value reaching a real, internet-facing project is one somebody chose rather than one nobody
 revisited. With confirmations off, anyone can sign up with an address they do not own (including
-pre-registering someone else's real address), and use the app under that identity immediately.
+pre-registering someone else's real address) and use the app under that identity immediately.
 """
 remediation = """
 Set `enable_confirmations = true` under `[auth.email]` in the configuration that is actually applied to your

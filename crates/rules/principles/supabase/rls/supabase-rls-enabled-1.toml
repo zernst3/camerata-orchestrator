@@ -75,7 +75,7 @@ through PostgREST using the anon key, which ships inside the frontend bundle by 
 application firewall in front of PostgREST, so RLS is the only thing standing between an anonymous
 internet request and the table's rows. Whether RLS is on is a fact about the ORDERED migration
 history, not about any one file (a later migration can enable what an earlier one left off, or
-disable what an earlier one turned on), so the state that counts is the one the last relevant
+disable what an earlier one turned on) so the state that counts is the one the last relevant
 statement leaves behind, or the declarative `supabase/schemas/*.sql` snapshot where the project
 keeps one.
 """

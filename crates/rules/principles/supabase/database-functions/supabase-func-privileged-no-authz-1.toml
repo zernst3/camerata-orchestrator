@@ -80,7 +80,7 @@ directive = """
 A SECURITY DEFINER function executes with its creator's privileges whoever calls it, so the Row
 Level Security policies that would gate a write never run. When such a function performs an
 INSERT, UPDATE, DELETE, TRUNCATE or MERGE and is granted EXECUTE to `anon`, `public` or
-`authenticated` (roles reachable straight from the PostgREST RPC endpoint), its own body carries
+`authenticated` (roles reachable straight from the PostgREST RPC endpoint) its own body carries
 the authorization check, as the first statement, before the write. Three shapes satisfy that, all
 genuine server-side controls: a session or JWT identity read (`auth.uid()`, `auth.jwt()`,
 `current_user`, `session_user`, a `request.jwt` claims read) compared against an owner or role
