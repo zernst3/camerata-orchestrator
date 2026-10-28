@@ -21,8 +21,8 @@ A client engagement refuses two things before any file is read or any model is c
 <!-- crates/server/src/lib.rs: client_lock_refusal_for_scan refuses a scan with no project ("no active project") -->
 <!-- tests: crates/cli/tests/inspect_client_lock.rs; crates/server/src/lib.rs a_client_engagement_audit_is_refused_before_any_repository_is_read, a_scan_with_no_active_project_is_refused_as_a_client_engagement -->
 
-Three of Camerata's development runs can only use the Claude Code subscription (investigating a story, updating a branch and resolving PR feedback), so a client engagement refuses them.
-<!-- crates/server/src/lib.rs: cli_only_run_client_lock_refusal, called by spawn_investigation_agent_run, uow_update_branch and uow_pr_resolve; test a_client_engagement_refuses_the_cli_only_runs -->
+Three of Camerata's development runs can only use the Claude Code subscription (investigating a story, updating a branch and resolving PR feedback), so a client engagement refuses them. With no active project they are refused too, because nothing then says the work is not client work.
+<!-- crates/server/src/lib.rs: cli_only_run_client_lock_refusal, called by spawn_investigation_agent_run, uow_update_branch and uow_pr_resolve; tests a_client_engagement_refuses_the_cli_only_runs, the_cli_only_runs_are_refused_with_no_active_project -->
 
 If the API is selected and no API key is configured, the AI review does not run. It never falls back to the subscription.
 <!-- crates/llm/src/llm.rs: resolve_backend returns BackendResolution::Blocked for Api without a key -->
@@ -35,8 +35,8 @@ The backend, the provider and every model that ran are recorded in the export (`
 <!-- crates/server/src/report_export.rs: CoverJson::model_backend, audit_model, calibration_model; crates/server/templates/audit_report.typ methodology line -->
 <!-- crates/server/src/scan_ledger.rs: ScanLedger::record_engagement -->
 
-The chat assistant that is not tied to a project follows its own backend setting and is not part of an inspection. When a client engagement is the active project, the model chosen for the chat, for the escalation review chat and for drafting a routine prompt must also be an Anthropic model, or the request is refused.
-<!-- crates/server/src/lib.rs: AppState::chat_llm uses settings.chat_backend; AppState::client_lock_step_model_refusal, called by chat, chat_escalation and draft_routine_prompt; test a_client_engagement_refuses_a_non_anthropic_model_on_request_model_steps -->
+The chat assistant follows its own Chat backend setting and is not part of an inspection. When a client engagement is the active project, a chat set to the `cli` backend is refused, and the model chosen for the chat, for the escalation review chat and for drafting a routine prompt must also be an Anthropic model, or the request is refused. With no active project there is no client context, so the chat setting alone decides.
+<!-- crates/server/src/lib.rs: AppState::chat_llm uses settings.chat_backend and refuses the cli backend for an active client engagement; AppState::client_lock_step_model_refusal, called by chat, chat_escalation and draft_routine_prompt; tests a_client_engagement_refuses_a_chat_on_the_cli_backend, a_client_engagement_refuses_a_non_anthropic_model_on_request_model_steps -->
 
 ## Inspection model calls have no tools
 

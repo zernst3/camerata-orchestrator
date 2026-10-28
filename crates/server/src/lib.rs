@@ -450,7 +450,21 @@ impl AppState {
 
     /// The `Llm` for the project-less CHAT assistant: [`AppState::llm_for_project`] with no
     /// project, so `settings.chat_backend` decides.
+    ///
+    /// When the ACTIVE project is a client engagement, the chat backend setting must pass the
+    /// client-engagement lock too (a `cli` chat is refused with the lock's message): the chat can
+    /// carry that project's context, and the setting is global, not the project's own.
     pub fn chat_llm(&self) -> Result<crate::llm::Llm, String> {
+        if let Some(p) = self.projects.active() {
+            let backend = self.settings.chat_backend();
+            if let Some(why) = crate::client_lock::refusal(p.client_engagement, backend, &[]) {
+                return Err(format!(
+                    "{why} The chat assistant follows the Chat backend setting, which is `cli`. \
+                     Set the Chat backend to API in Settings, or turn off Client engagement in \
+                     this project's Settings if this is your own development."
+                ));
+            }
+        }
         self.llm_for_project(None)
     }
 
@@ -11352,9 +11366,18 @@ fn client_lock_refusal_for_scan(
 /// The client-engagement lock for a run that has only the `claude -p` CLI driver (the
 /// investigation, branch update and PR feedback runs): such a run always uses the Claude Code
 /// subscription, whatever the project's backend, so the ACTIVE project being a client engagement
-/// refuses it. `run` names the run in the message. `None` when it may start.
+/// refuses it, and so does having no active project (no setup says it is not client work, so it
+/// is a client engagement with no opt-in, like a scan). `run` names the run in the message.
+/// `None` when it may start.
 fn cli_only_run_client_lock_refusal(state: &AppState, run: &str) -> Option<String> {
-    let project = state.projects.active()?;
+    let Some(project) = state.projects.active() else {
+        return Some(format!(
+            "There is no active project, and {run} without one is treated as a client engagement. \
+             It runs only on the Claude Code subscription (the `cli` backend), which client work \
+             refuses. Nothing was run. Create or select a project first (in its Settings, turn \
+             off Client engagement if this is your own development)."
+        ));
+    };
     crate::client_lock::refusal(
         project.client_engagement,
         crate::project::ProjectBackend::Cli,
@@ -29624,6 +29647,89 @@ mod tests {
         state
     }
 
+    /// H2 review: with no active project there is no setup to say the work is not client work, so
+    /// the cli-only runs (investigation, branch update, PR feedback) are refused like a scan.
+    #[tokio::test]
+    async fn the_cli_only_runs_are_refused_with_no_active_project() {
+        let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
+        assert!(state.projects.active().is_none());
+        for run in [
+            "the investigation",
+            "the branch update",
+            "PR feedback resolution",
+        ] {
+            let why = cli_only_run_client_lock_refusal(&state, run)
+                .unwrap_or_else(|| panic!("{run} with no project must be refused"));
+            assert!(why.contains("no active project"), "{why}");
+        }
+        let run_id = spawn_investigation_agent_run(&state, "story-1", None).await;
+        let run = state.runs.get(&run_id).expect("the run exists");
+        assert!(run.done);
+        assert!(
+            run.failure_reason
+                .as_deref()
+                .unwrap_or_default()
+                .contains("no active project"),
+            "{:?}",
+            run.failure_reason
+        );
+    }
+
+    /// H2 review: the chat assistant follows the chat backend setting, which may be `cli`. When
+    /// the active project is a client engagement, a chat that would run on a backend the lock
+    /// forbids is refused with the lock's message; the maintainer's own project is not locked,
+    /// and neither is a chat with no active project (no client context).
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn a_client_engagement_refuses_a_chat_on_the_cli_backend() {
+        let _env = camerata_test_env::EnvGuard::set("ANTHROPIC_API_KEY", "sk-test-not-real");
+        let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
+        state
+            .settings
+            .set_chat_backend(crate::project::ProjectBackend::Cli);
+        // No project: the chat is not part of any engagement.
+        assert!(state.chat_llm().is_ok());
+
+        let p = state.projects.create("Client", vec![]).unwrap();
+        assert!(p.client_engagement);
+        let why = state
+            .chat_llm()
+            .expect_err("cli chat refused on client work");
+        assert!(why.contains("`cli` backend"), "{why}");
+
+        // Over HTTP the chat answers 409 with that message.
+        let resp = router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/chat")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"prompt":"hi"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        assert!(body_json(resp).await["error"]
+            .as_str()
+            .unwrap()
+            .contains("`cli` backend"));
+
+        // On the API backend the lock passes; off client work the cli chat passes.
+        state
+            .settings
+            .set_chat_backend(crate::project::ProjectBackend::Api);
+        assert!(state.chat_llm().is_ok());
+        state
+            .settings
+            .set_chat_backend(crate::project::ProjectBackend::Cli);
+        state
+            .projects
+            .set_client_engagement(&p.id, false, false)
+            .unwrap();
+        assert!(state.chat_llm().is_ok());
+    }
+
     /// H2: the investigation run has only the CLI driver, so a client engagement fails it at
     /// once with the reason; the maintainer's own project is not locked.
     #[tokio::test]
@@ -29689,6 +29795,10 @@ mod tests {
             .set_backend(&p.id, crate::project::ProjectBackend::Api)
             .unwrap();
         assert!(p.client_engagement, "a new project is a client engagement");
+        // The chat backend must pass the lock first (see the cli chat test); then the model.
+        state
+            .settings
+            .set_chat_backend(crate::project::ProjectBackend::Api);
 
         // The shared check.
         let why = state
