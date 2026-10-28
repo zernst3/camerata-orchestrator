@@ -13,6 +13,12 @@
 //! count as plain digits so the check can see it.
 //!
 //! A "domain" is a top-level folder of `principles/` (`rust/axum` belongs to `rust`).
+//!
+//! Beyond those two docs, EVERY markdown file in the repository is checked for the headline
+//! shape alone: "N rules across M domains". A user guide, a contributing note or a technical
+//! doc that quotes the headline must quote the real one. Other count shapes are only checked
+//! in `CHECKED_DOCS`, because dated plans and audit records legitimately say "all 417 rules"
+//! about the corpus as it stood on their date.
 
 use std::path::{Path, PathBuf};
 
@@ -72,6 +78,67 @@ fn count_claims(text: &str, nouns: &[&str]) -> Vec<(u64, String)> {
     out
 }
 
+/// Every "N rules across M domains" claim, as (rules, domains, the matched words).
+fn headline_claims(text: &str) -> Vec<(u64, u64, String)> {
+    let toks = words(text);
+    let mut out = Vec::new();
+    for i in 1..toks.len() {
+        if toks[i] != "rules" || toks.get(i + 1).map(String::as_str) != Some("across") {
+            continue;
+        }
+        if toks.get(i + 3).map(String::as_str) != Some("domains") {
+            continue;
+        }
+        if let (Some(n), Some(m)) = (as_count(&toks[i - 1]), as_count(&toks[i + 2])) {
+            out.push((n, m, toks[i - 1..=i + 3].join(" ")));
+        }
+    }
+    out
+}
+
+/// Directories the repo-wide walk never enters: build output, VCS internals, vendored
+/// packages and the private grading material that must never be read.
+const SKIPPED_DIRS: &[&str] = &["target", ".git", "node_modules", "_keys"];
+
+/// Every markdown file under the repo root, as a repo-relative path with `/` separators,
+/// sorted so a failure lists them in a stable order.
+fn markdown_docs() -> Vec<String> {
+    let root = repo_root();
+    let mut out = Vec::new();
+    let mut stack = vec![root.clone()];
+    while let Some(dir) = stack.pop() {
+        let entries = std::fs::read_dir(&dir)
+            .unwrap_or_else(|e| panic!("cannot list {}: {e}", dir.display()));
+        for entry in entries {
+            let entry = entry.unwrap_or_else(|e| panic!("cannot read an entry: {e}"));
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let file_type = entry
+                .file_type()
+                .unwrap_or_else(|e| panic!("cannot stat {}: {e}", path.display()));
+            if file_type.is_dir() {
+                if !SKIPPED_DIRS.contains(&name.as_str()) {
+                    stack.push(path);
+                }
+            } else if file_type.is_file()
+                && name.ends_with(".md")
+                && !name.ends_with("-ANSWER-KEY.md")
+            {
+                let rel = path
+                    .strip_prefix(&root)
+                    .expect("walked paths sit under the repo root")
+                    .components()
+                    .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                    .collect::<Vec<_>>()
+                    .join("/");
+                out.push(rel);
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
 async fn real_counts() -> (usize, usize) {
     let set = load_corpus(Path::new(DEFAULT_CORPUS_PATH))
         .await
@@ -122,6 +189,82 @@ async fn req_docs_state_the_real_rule_and_domain_count() {
          counted the way the loader counts them). Fix:\n  {}",
         problems.join("\n  ")
     );
+}
+
+#[tokio::test]
+async fn req_every_doc_quoting_the_headline_states_the_real_counts() {
+    let (rules, domains) = real_counts().await;
+    assert!(rules > 0 && domains > 0, "the corpus loaded empty");
+
+    let docs = markdown_docs();
+    assert!(
+        docs.iter().any(|d| d == "README.md"),
+        "the repo-wide walk did not find README.md, so it is not walking the repo root"
+    );
+
+    let mut problems: Vec<String> = Vec::new();
+    for doc in &docs {
+        let text = std::fs::read_to_string(repo_root().join(doc))
+            .unwrap_or_else(|e| panic!("cannot read {doc}: {e}"));
+        for (n, m, ctx) in headline_claims(&text) {
+            if n != rules as u64 || m != domains as u64 {
+                problems.push(format!(
+                    "{doc}: says \"{ctx}\". Change it to \"{rules} rules across {domains} domains\"."
+                ));
+            }
+        }
+    }
+
+    assert!(
+        problems.is_empty(),
+        "docs quote a stale headline count (the corpus holds {rules} rules across {domains} \
+         domains, counted the way the loader counts them). Fix:\n  {}",
+        problems.join("\n  ")
+    );
+}
+
+/// The headline scanner must see the shapes the docs actually use and nothing looser.
+#[test]
+fn req_headline_scanner_sees_only_the_exact_shape() {
+    let seen = [
+        (
+            "The library holds 437 rules across 22 domains, each one",
+            437,
+            22,
+        ),
+        (
+            "a corpus of **424 rules across 21 domains** covering",
+            424,
+            21,
+        ),
+        (
+            "(**417 rules across 20 domains** as of 2026-10-11)",
+            417,
+            20,
+        ),
+        ("(for example \"1,200 rules across 30 domains\")", 1200, 30),
+    ];
+    for (text, want_rules, want_domains) in seen {
+        let got = headline_claims(text);
+        assert_eq!(
+            got.first().map(|(n, m, _)| (*n, *m)),
+            Some((want_rules, want_domains)),
+            "headline scanner missed the claim in {text:?}"
+        );
+    }
+    let ignored = [
+        "all 417 rules were classified",
+        "417 TOML rules across 22 domains",
+        "13 rules across `RULE_REGISTRY`",
+        "enforces rules across four check layers",
+        "437 rules across many stacks",
+    ];
+    for text in ignored {
+        assert!(
+            headline_claims(text).is_empty(),
+            "headline scanner matched a shape it must ignore: {text:?}"
+        );
+    }
 }
 
 /// The parser must actually see stale numbers, or the test above could pass on a broken
