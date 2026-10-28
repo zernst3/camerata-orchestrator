@@ -20,7 +20,7 @@ For each Rust and C# rule, a minimal fixture file was written containing a
 clear violation, and the real semgrep binary was invoked:
 
 ```
-/Users/zacharyernst/Library/Application Support/camerata/tooling/semgrep-venv/bin/semgrep \
+/Users/auditor/Library/Application Support/camerata/tooling/semgrep-venv/bin/semgrep \
   --quiet --config crates/server/assets/semgrep-rules/security.yml \
   --no-git-ignore <fixture>
 ```

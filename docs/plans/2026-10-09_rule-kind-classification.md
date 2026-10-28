@@ -4,7 +4,7 @@ Generated 2026-10-09 as part of Pass-1 W2 (`docs/plans/2026-10-09_audit-findings
 
 **Method.** Every rule in `crates/rules/principles/` (417 files) was classified from its own
 `title`/`qualifies`/`[decision].why`/`[[option]]` text — never from what would score well against any
-benchmark repo (per the hard rule: the benchmark repos under "Camerata tests/" were never read,
+benchmark repo (per the hard rule: the benchmark repos in the private fixtures folder were never read,
 listed, or consulted for this classification). Classification combined a scripted heuristic
 (keyword/phrase signals for an option describing the absence/degenerate form of the rule's
 requirement, plus decision-framing phrases) with a full manual read of every rule the heuristic

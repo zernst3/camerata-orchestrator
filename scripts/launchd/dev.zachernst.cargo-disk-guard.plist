@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Template: scripts/install-cargo-disk-guard.sh fills in __REPO_DIR__ (this checkout) and __HOME__ (your home directory). -->
 <plist version="1.0">
 <dict>
   <key>Label</key>
@@ -12,7 +13,7 @@
   <key>ProgramArguments</key>
   <array>
     <string>/bin/bash</string>
-    <string>/Users/zacharyernst/Documents/Repos/camerata-orchestrator/scripts/cargo-disk-guard.sh</string>
+    <string>__REPO_DIR__/scripts/cargo-disk-guard.sh</string>
   </array>
 
   <key>StartInterval</key>
@@ -21,9 +22,9 @@
   <true/>
 
   <key>StandardOutPath</key>
-  <string>/Users/zacharyernst/Library/Logs/cargo-disk-guard.log</string>
+  <string>__HOME__/Library/Logs/cargo-disk-guard.log</string>
   <key>StandardErrorPath</key>
-  <string>/Users/zacharyernst/Library/Logs/cargo-disk-guard.log</string>
+  <string>__HOME__/Library/Logs/cargo-disk-guard.log</string>
 
   <key>LowPriorityIO</key>
   <true/>

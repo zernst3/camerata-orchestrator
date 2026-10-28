@@ -30,6 +30,12 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
+      # Gate 0: this repository is public, so no tracked file may name a personal home
+      # directory or the private fixture folder. Seconds long and needs no toolchain, so
+      # it runs before anything is installed.
+      - name: Personal path gate
+        run: ./scripts/ci-gate.sh "Personal path gate" ./scripts/check-personal-paths.sh
+
       - name: Free disk space
         run: ./scripts/ci-free-disk.sh
 
@@ -90,6 +96,19 @@ jobs:
       # Gate 4: the test suite must pass.
       - name: Test gate
         run: ./scripts/ci-gate.sh "Test gate" cargo test --workspace --locked
+
+  # Supply chain: known advisories (vulnerable, unsound, unmaintained or yanked crates),
+  # dependency licenses and dependency sources, all checked against deny.toml. Blocking. An
+  # advisory published tomorrow turns this red with no change here, which is the point:
+  # fix it, or add a reasoned exception to deny.toml.
+  deny:
+    name: Supply chain (cargo deny)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1 (cargo-deny 0.20.2)
+        with:
+          command: check advisories licenses sources
 
   # A non-blocking informational pass that surfaces the STRICTER bar Camerata is
   # working toward (expect/panic removal, pedantic), without failing the build

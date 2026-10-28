@@ -6,7 +6,7 @@ decisions (`docs/OVERNIGHT_DECISIONS.md`, DECISIONS MADE, 2026-10-22), `crates/g
 (the SEC arms), `crates/orchestrator/src/secrets.rs` (the chat scrubber), `crates/llm/src/
 credentials.rs`, every production `Finding` constructor and text-mutation site in `crates/server`,
 the three exporters, `templates/audit_report.typ`, the scan cache, the prompt builders, gates 1
-to 7, and the latest sweep exports under `~/Documents/Repos/Camerata tests/_runs/sweep5b-2026-10-16/`
+to 7, and the latest sweep exports under `$CAMERATA_FIXTURES_DIR/_runs/sweep5b-2026-10-16/`
 (faktura, hearth, supabase-portal-fixture; the 2026-10-18 hearth rerun agrees with sweep5b).
 Build-ready: every "decide" below is decided. The governing law, from the work order: **a value
 that matches a secret shape never appears in full in anything the client receives, and never
@@ -911,7 +911,7 @@ form and not the value in `snippet`, `detail`, `fix_specific`, `also_locations[*
 ### 8.7 Acceptance over the three real exports (`#[ignore]`, run by hand)
 
 `crates/server/tests/release_gate_acceptance.rs`, reading the directory in
-`CAMERATA_SWEEP_EXPORTS` (default `~/Documents/Repos/Camerata tests/_runs/sweep5b-2026-10-16`):
+`CAMERATA_SWEEP_EXPORTS` (default `$CAMERATA_FIXTURES_DIR/_runs/sweep5b-2026-10-16`):
 
 - `acceptance_known_leaks_are_flagged_in_the_old_exports`: for `faktura.zip` and `hearth.zip`,
   `audit_zip(bytes, Some(pdf_text))` reports at least the problems in section 10 (by file,

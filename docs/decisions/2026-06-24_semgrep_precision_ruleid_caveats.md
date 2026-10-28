@@ -14,7 +14,7 @@ semgrep binary (v1.167.0):
    `--config` path, it dotted-prefixes every rule id with the config
    path, e.g.:
    ```
-   Users.zacharyernst.Documents.Repos.camerata-orchestrator.crates.server.assets.semgrep-rules.camerata.security.sql-string-concat-rust
+   Users.auditor.Documents.Repos.camerata-orchestrator.crates.server.assets.semgrep-rules.camerata.security.sql-string-concat-rust
    ```
    This broke the UI display, portable baselines, AND
    `finding_security_category` dedup (which matches the clean

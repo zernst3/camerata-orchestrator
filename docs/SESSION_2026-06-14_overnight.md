@@ -9,7 +9,7 @@ The interactive session could not `git push` without an approval prompt (you wer
 asleep), so the most recent commits are LOCAL ONLY. To back them up when you wake:
 
 ```
-cd "/Users/zacharyernst/Documents/Repos/camerata-orchestrator"
+cd "/Users/auditor/Documents/Repos/camerata-orchestrator"
 git push origin main
 ```
 
