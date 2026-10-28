@@ -1,0 +1,54 @@
+id = "SEC-NO-END-OF-LIFE-RUNTIME-1"
+version = 1
+title = "Runtimes and frameworks the code declares are on a release line that still receives security fixes"
+domain = "universal"
+layer = "universal"
+enforcement = "structured"
+kind = "defect"
+inspectable = false
+cwe = ["CWE-1104"]
+default = true
+verification = "grounded"
+qualifies = "Deterministic, from declared versions only. A version is read from a Dockerfile FROM line, a version file (.nvmrc, .node-version, .python-version, .ruby-version, .tool-versions, runtime.txt, rust-toolchain), a manifest field (engines.node in package.json, requires-python in pyproject.toml, require.php in composer.json, the ruby line in a Gemfile, the go line in go.mod, global.json, TargetFramework in a project file) or a lockfile entry (Next.js, React, Express, Django, Rails, Laravel, Spring Boot). The release line is looked up on endoflife.date. The finding is high once the end-of-life date has passed and a low advisory when it falls within 90 days. A version that is a range or a moving tag (such as >=18, lts/* or node:latest) is never guessed: it is listed as not checked. What a repository declares is not proof of what runs in production. If endoflife.date cannot be reached the report says so under Coverage and makes no claim either way."
+
+[[sources]]
+url = "https://owasp.org/Top10/A06_2021-Vulnerable_and_Outdated_Components/"
+title = "OWASP Top 10 2021, A06: Vulnerable and Outdated Components"
+
+[[sources]]
+url = "https://endoflife.date/"
+title = "endoflife.date: release support and end-of-life dates for software products"
+
+[[sources]]
+url = "https://cwe.mitre.org/data/definitions/1104.html"
+title = "CWE-1104: Use of Unmaintained Third Party Components"
+
+[decision]
+question = "Is every runtime and major framework the code declares on a release line that its maintainers still support with security fixes?"
+default = "supported-release-lines-only"
+why = """
+A runtime or framework past its end-of-life date stops receiving security fixes. A vulnerability
+found after that date is never patched in that release line, so every later disclosure becomes
+a permanent weakness and the only cure is a move to a supported line. That move gets harder
+the longer it is put off, because each skipped release adds changes that have to be absorbed at
+once. The date is public and known years ahead, so a repository that declares a release line past
+its date has chosen, knowingly or not, to carry unpatched risk. OWASP lists the use of outdated
+components as its own risk category (A06).
+"""
+
+[[option]]
+id = "supported-release-lines-only"
+label = "Declared runtimes and frameworks are on release lines that still receive security fixes"
+directive = "Every runtime and major framework the repository declares (a Docker base image, a version file, a manifest field or a lockfile entry) is on a release line its maintainers still support with security fixes. A release line is replaced before its end-of-life date, and a declaration that cannot name one release line (a range or a moving tag) is replaced by one that can."
+remediation = """
+Move `<path>` from <runtime> to a release line that still receives security fixes, and update every other place the version is declared (the Dockerfile, the version file, the manifest and the CI configuration). Run the test suite on the new line and fix what the upgrade breaks before deploying it. Verify by rescanning: the declaration no longer appears under this rule.
+"""
+effort = "medium"
+why = "A supported release line keeps receiving fixes for newly found vulnerabilities, so staying on one turns each disclosure into a routine patch instead of a migration project."
+
+[[option]]
+id = "stay-on-end-of-life-release-lines"
+violates = true
+label = "Keep running a runtime or framework after its security support ends"
+directive = "Leave runtimes and frameworks on a release line after its maintainers stop issuing security fixes, and move only when something breaks."
+why = "Rejected: nothing breaks when support ends, which is the problem. Vulnerabilities disclosed afterwards stay open in that release line for good, and the longer the move is put off, the more change it has to absorb at once."

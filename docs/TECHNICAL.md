@@ -3443,6 +3443,35 @@ the release gate's README/manifest agreement check compares the two. A report wi
 (no dependency audit, or persisted before the stamp existed) renders every feed as not checked.
 Tests use fixture feeds under `crates/server/tests/fixtures/vuln_intel/` and no network.
 
+**Runtime and framework end of life, and runtime vulnerabilities** (`crates/server/src/runtime_audit.rs`
+and its `detect`, `eol` and `nvd` modules). The dependency audit cannot see the runtime the
+packages run on, so a second deterministic pass reads the versions a repository declares: Dockerfile
+`FROM` lines, `.nvmrc` and `.node-version`, `engines.node`, `.python-version`, `runtime.txt`,
+`requires-python`, `require.php`, `.ruby-version` and the Gemfile `ruby` line, `go.mod`,
+`rust-toolchain`, `global.json` and `TargetFramework`, `.tool-versions`, and framework versions from
+lockfiles (Next.js, React, Express, Django, Rails, Laravel, Spring Boot). Each declaration records
+its file and line. A declaration is exact (three or more numeric parts), a release line (`18`,
+`3.11`) or loose (a range, a moving tag, a build argument); a loose one is never guessed and is
+listed under Coverage. endoflife.date (`https://endoflife.date/api/<product>.json`, one fetch per
+product) gives a high finding under `SEC-NO-END-OF-LIFE-RUNTIME-1` once the release line's end date
+has passed and a low advisory within `WARN_DAYS` (90). The NVD CVE API 2.0 (by CPE name, only for a
+runtime declared with a patch version) gives one finding per runtime version under
+`SEC-NO-KNOWN-VULNERABLE-RUNTIME-1`, rated by its highest CVSS score with the dependency audit's own
+scorer; `vuln_intel::enrich_dependency_findings` then adds KEV and EPSS to those rows exactly as for
+dependency rows (a known-exploited runtime CVE is floored to critical). The pass uses the same
+fetch seam (`FeedFetcher`), per-item cache and `MAX_CACHE_AGE_DAYS` as KEV and EPSS, and
+`VulnDataStamp` carries two more feeds (`endoflife`, `nvd`), which reach `README.txt` and
+`manifest.json` as `Vulnerability data (End-of-life, endoflife.date)` and `Vulnerability data (NVD,
+runtimes)` lines. NVD's anonymous rate limit is respected (`NvdPolicy`: requests six seconds apart,
+back-off on 403, 429 and 503 honouring `Retry-After`, one shared 75 s budget) and exhausting it is an
+ordinary failed fetch, never a failed scan. A feed that cannot be fetched produces the Coverage
+lines "Runtime end-of-life data unavailable in this scan" and "Runtime vulnerability data
+unavailable in this scan", and a clean runtime produces no finding and no claim. The two rules are
+emit-only (`inspectable = false`): they never enter the AI pass or the scan ledger, so they can
+never be listed as verified clean. The pass runs before `enrich_dependency_findings` at each of the
+three scan call sites (`onboard_audit`, `onboard_audit_start`, `camerata inspect`). Tests use the
+recorded fixtures under `crates/server/tests/fixtures/runtime_audit/` and no network.
+
 **The workbook is partitioned by finding KIND**, which replaced a single flat
 findings sheet on 2026-10-11. A row renders where its own columns mean something,
 and in exactly one place. Worksheets, in the order `build_workbook` adds them:

@@ -849,7 +849,7 @@ Two tables:
 - **Project rules** — the rules the project has selected, in one table, **filterable by repo** (a repo
   single-select), with project-level rules shown too. Click a rule to switch its chosen option; remove
   a rule from a repo. Edits persist to the project's ruleset.
-- **All rules** - the full corpus (**441 rules across 22 domains** as of 2026-10-27: Rust,
+- **All rules** - the full corpus (**443 rules across 22 domains** as of 2026-10-27: Rust,
   Python, Go, JS/TS and its frameworks, Java/Spring, C#/ASP.NET, Ruby/Rails, SQL, fullstack, plus the
   always-on security floor and the agentic governance rules), viewable even when unassigned. Each row
   shows **which repos it's applied to**, with **"Add to repo"** (add a rule to any repo it's not yet
@@ -881,8 +881,8 @@ silence, and silence used to be indistinguishable from "we checked and it was cl
 meant a client report could open its healthy list with a rule about how *Camerata* runs its
 agents, presented as a verified property of *their* codebase.
 
-Those rules now carry a flag (`inspectable = false`) that separates the two roles. **26 of the
-441 corpus rules are emit-only.** For you, that means:
+Those rules now carry a flag (`inspectable = false`) that separates the two roles. **28 of the
+443 corpus rules are emit-only.** For you, that means:
 
 - They are still proposed, still selectable, and still written verbatim into the repo's
   `AGENTS.md` / `CONVENTIONS.md`. As governance directives they are unchanged.
@@ -893,6 +893,11 @@ Those rules now carry a flag (`inspectable = false`) that separates the two role
   legitimately differ, and the second is the honest one. On a TypeScript repo the checked
   count dropped from 167 to 145 when this landed; nothing stopped working, the report stopped
   over-claiming.
+- Two of the 28, the runtime end-of-life rule and the known-vulnerable runtime rule, are the one
+  exception to "never appear in a finding". They are not scanned by the AI pass either, but their
+  findings come from a dedicated check of the versions a repository declares (see "Runtime and
+  framework end of life" above). They still never appear in "what's healthy": a runtime with
+  nothing wrong produces no finding and no claim.
 
 The flag is set by the rule's author in the corpus, not per project. It is not a switch in the
 Rules view.
@@ -1896,6 +1901,21 @@ current each source was ("Vulnerability data (CISA KEV) as of 2026-10-27", likew
 OSV). When a feed cannot be reached, the scan still completes, a cached copy up to 7 days old is
 used and named as cached, and with no usable copy the line says plainly that the feed was not
 checked, and no finding is labelled from it.
+
+**Runtime and framework end of life, and runtime vulnerabilities.** The dependency audit looks at the
+packages in your lockfiles. A second check looks at the runtime and the major frameworks they run on.
+It reads the versions your repository declares (a Docker base image, a version file such as `.nvmrc`,
+a manifest field, a lockfile entry) and compares them with two public sources: endoflife.date for
+end-of-life dates and the National Vulnerability Database for known vulnerabilities in the runtime
+itself. A release line past its end of life is a high finding, worded like "Node.js 16 has received
+no security fixes since 2023-09-11". One that ends within 90 days is a low advisory. A runtime with a
+known vulnerability is rated by its highest CVSS score, and raised to critical when CISA lists the
+vulnerability as known exploited. A version that is a range or a moving tag (`>=18`, `node:latest`)
+is never guessed: the Coverage section lists it as not checked, and a runtime declared without a
+patch version is checked for end of life but not for vulnerabilities. If either source cannot be
+reached, Coverage says "Runtime end-of-life data unavailable in this scan" or "Runtime vulnerability
+data unavailable in this scan", and the report makes no claim about what was not checked. What a
+repository declares is not proof of what runs in production.
 
 The Coverage sheet opens with one plain summary sentence written for a client, and the Result column
 reads "Clean — nothing found" or "N sites found" rather than a bare integer. Two coverage honesty

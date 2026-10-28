@@ -12,7 +12,7 @@
 //!   exploited and its severity is floored to `critical`, the top of the scale.
 //! - **EPSS**: the finding shows the exploit-probability score and percentile of its CVE (the
 //!   highest-scoring one when the advisory has several).
-//! - **Stamp**: [`VulnDataStamp`] records, per feed (KEV, EPSS, OSV), the date the data was
+//! - **Stamp**: [`VulnDataStamp`] records, per feed (KEV, EPSS, OSV, end-of-life, NVD), the date the data was
 //!   current as of, or plainly that the feed was not checked and why. It rides on
 //!   `ScanProvenance::vulnerability_data` into the export's README and `manifest.json`.
 //!
@@ -36,7 +36,7 @@
 //! another project can use scores an earlier run already fetched. Every date the cache puts in a
 //! stamp is a UTC date, and the stamp text says so.
 
-mod feeds;
+pub(crate) mod feeds;
 #[cfg(test)]
 mod tests;
 
@@ -140,23 +140,37 @@ pub struct VulnDataStamp {
     pub cisa_kev: FeedStamp,
     pub first_epss: FeedStamp,
     pub osv: FeedStamp,
+    /// endoflife.date, for the runtime and framework end-of-life findings
+    /// (see [`crate::runtime_audit`]). A stamp written before this feed existed reads as not
+    /// checked.
+    #[serde(default = "not_recorded")]
+    pub endoflife: FeedStamp,
+    /// The NVD CVE API, for the runtime vulnerability findings.
+    #[serde(default = "not_recorded")]
+    pub nvd: FeedStamp,
+}
+
+fn not_recorded() -> FeedStamp {
+    FeedStamp::not_checked(REASON_NOT_RECORDED)
 }
 
 impl VulnDataStamp {
-    fn all_not_checked(reason: &str) -> Self {
+    pub(crate) fn all_not_checked(reason: &str) -> Self {
         Self {
             cisa_kev: FeedStamp::not_checked(reason),
             first_epss: FeedStamp::not_checked(reason),
             osv: FeedStamp::not_checked(reason),
+            endoflife: FeedStamp::not_checked(reason),
+            nvd: FeedStamp::not_checked(reason),
         }
     }
 }
 
-/// The stamp's three feeds in their fixed order: `(manifest key, human label, stamp)`. A report
+/// The stamp's feeds in their fixed order: `(manifest key, human label, stamp)`. A report
 /// with no stamp reads as every feed not checked, never as an omitted line.
 pub fn stamp_entries(
     stamp: Option<&VulnDataStamp>,
-) -> [(&'static str, &'static str, FeedStamp); 3] {
+) -> [(&'static str, &'static str, FeedStamp); 5] {
     let stamp = stamp
         .cloned()
         .unwrap_or_else(|| VulnDataStamp::all_not_checked(REASON_NOT_RECORDED));
@@ -164,6 +178,12 @@ pub fn stamp_entries(
         ("cisa_kev", "CISA KEV", stamp.cisa_kev),
         ("first_epss", "FIRST EPSS", stamp.first_epss),
         ("osv", "OSV", stamp.osv),
+        (
+            "end_of_life",
+            "End-of-life, endoflife.date",
+            stamp.endoflife,
+        ),
+        ("nvd", "NVD, runtimes", stamp.nvd),
     ]
 }
 
@@ -229,10 +249,40 @@ impl HttpFetcher {
     }
 }
 
+/// A feed answered with a non-success HTTP status. Kept as its own error type so a caller can tell
+/// a rate limit (403, 429 or 503, often with `Retry-After`) from an unreachable host and back off.
+#[derive(Debug)]
+pub struct FetchStatusError {
+    pub status: u16,
+    /// The `Retry-After` header in seconds, when the feed sent one.
+    pub retry_after_secs: Option<u64>,
+}
+
+impl std::fmt::Display for FetchStatusError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "the feed answered with HTTP status {}", self.status)
+    }
+}
+
+impl std::error::Error for FetchStatusError {}
+
 #[async_trait::async_trait]
 impl FeedFetcher for HttpFetcher {
     async fn get(&self, url: &str) -> anyhow::Result<String> {
-        let resp = self.client.get(url).send().await?.error_for_status()?;
+        let resp = self.client.get(url).send().await?;
+        let status = resp.status();
+        if !status.is_success() {
+            let retry_after_secs = resp
+                .headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.trim().parse().ok());
+            return Err(FetchStatusError {
+                status: status.as_u16(),
+                retry_after_secs,
+            }
+            .into());
+        }
         Ok(resp.text().await?)
     }
 }
@@ -287,8 +337,10 @@ fn finding_cves(f: &Finding) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// A finding KEV and EPSS apply to: a vulnerable dependency, or a vulnerable runtime (both carry
+/// their CVE ids under [`CVE_IDS_CAPTURE`]).
 fn is_dependency_finding(f: &Finding) -> bool {
-    f.rule_id == DEP_AUDIT_RULE_ID
+    f.rule_id == DEP_AUDIT_RULE_ID || f.rule_id == crate::runtime_audit::VULN_RULE_ID
 }
 
 async fn fetch_kev(fetcher: &dyn FeedFetcher) -> anyhow::Result<KevFeed> {
@@ -359,7 +411,7 @@ fn epss_stamp(data: &EpssBatch, cached_on: &Option<String>, now: DateTime<Utc>) 
 }
 
 /// Run `fetch` under `budget`; running out of time is an ordinary failed fetch.
-async fn within_budget<T>(
+pub(crate) async fn within_budget<T>(
     budget: Duration,
     fetch: impl std::future::Future<Output = anyhow::Result<T>>,
 ) -> anyhow::Result<T> {
@@ -483,19 +535,23 @@ async fn enrich_with_budget(
     budget: Duration,
 ) -> (VulnDataStamp, Vec<CoverageNote>) {
     let osv = osv_stamp(osv_runs, now);
-    if matches!(osv, FeedStamp::NotChecked { .. }) {
-        // Nothing was scanned, so there is nothing to look up and no reason to fetch.
+    let osv_ran = !matches!(osv, FeedStamp::NotChecked { .. });
+    // A runtime vulnerability is looked up whether or not osv-scanner ran; a dependency finding
+    // only counts when it did (without a scan there are none to look up).
+    let cves: BTreeSet<String> = findings
+        .iter()
+        .filter(|f| is_dependency_finding(f))
+        .filter(|f| osv_ran || f.rule_id == crate::runtime_audit::VULN_RULE_ID)
+        .flat_map(finding_cves)
+        .collect();
+    if !osv_ran && cves.is_empty() {
+        // Nothing was scanned (no dependency audit and no runtime vulnerability either), so
+        // there is nothing to look up and no reason to fetch.
         return (
             VulnDataStamp::all_not_checked(REASON_AUDIT_DID_NOT_RUN),
             Vec::new(),
         );
     }
-
-    let cves: BTreeSet<String> = findings
-        .iter()
-        .filter(|f| is_dependency_finding(f))
-        .flat_map(finding_cves)
-        .collect();
 
     // The two feeds do not depend on each other, so they are fetched at the same time, each under
     // the same budget (both start together, so it is one shared deadline).
@@ -563,6 +619,9 @@ async fn enrich_with_budget(
             cisa_kev,
             first_epss,
             osv,
+            // The runtime pass owns these two; `enrich_dependency_findings` carries them over.
+            endoflife: not_recorded(),
+            nvd: not_recorded(),
         },
         notes,
     )
@@ -583,9 +642,22 @@ pub async fn enrich_dependency_findings(
     let disabled = std::env::var(crate::dep_audit::DISABLE_ENV_VAR)
         .map(|v| !v.is_empty())
         .unwrap_or(false);
+    // The runtime pass (`runtime_audit`) runs first and leaves its two feeds' stamps here.
+    let runtime_stamps = report
+        .provenance
+        .vulnerability_data
+        .take()
+        .map(|s| (s.endoflife, s.nvd));
+    let carry = |mut stamp: VulnDataStamp| {
+        if let Some((endoflife, nvd)) = runtime_stamps.clone() {
+            stamp.endoflife = endoflife;
+            stamp.nvd = nvd;
+        }
+        stamp
+    };
     if disabled {
         report.provenance.vulnerability_data =
-            Some(VulnDataStamp::all_not_checked(REASON_DISABLED));
+            Some(carry(VulnDataStamp::all_not_checked(REASON_DISABLED)));
         return;
     }
     let first = first_dep_row.min(report.findings.len());
@@ -613,13 +685,13 @@ pub async fn enrich_dependency_findings(
             .await
         }
     };
-    report.provenance.vulnerability_data = Some(stamp);
+    report.provenance.vulnerability_data = Some(carry(stamp));
     report.coverage_notes.extend(notes);
 }
 
 /// A fetcher that always fails, used when no HTTP client could be built: the run then falls back
 /// to the cache exactly as it would on a network failure.
-struct Unreachable;
+pub(crate) struct Unreachable;
 
 #[async_trait::async_trait]
 impl FeedFetcher for Unreachable {

@@ -1,0 +1,58 @@
+id = "SEC-NO-KNOWN-VULNERABLE-RUNTIME-1"
+version = 1
+title = "The runtime version the code declares has no publicly known vulnerabilities"
+domain = "universal"
+layer = "universal"
+enforcement = "structured"
+kind = "defect"
+inspectable = false
+cwe = ["CWE-1395"]
+default = true
+verification = "grounded"
+qualifies = "Deterministic, from declared versions only. A runtime (Node.js, Python, PHP, Ruby, Go, Java, .NET or nginx) declared with a full version number, such as a Docker tag like node:18.17.0 or an exact line in a version file, is looked up by CPE name in the NVD CVE API. One finding is raised per runtime version, rated by its highest CVSS score, and raised to critical when any of its CVEs is on the CISA Known Exploited Vulnerabilities list. A runtime declared as a release line without a patch release (node:18) or as a range or a moving tag is not looked up, because a vulnerability is fixed in a specific patch release, and the report lists it under Coverage. What a repository declares is not proof of what runs in production. If the NVD cannot be reached the report says so under Coverage and makes no claim either way."
+
+[[sources]]
+url = "https://owasp.org/Top10/A06_2021-Vulnerable_and_Outdated_Components/"
+title = "OWASP Top 10 2021, A06: Vulnerable and Outdated Components"
+
+[[sources]]
+url = "https://nvd.nist.gov/developers/vulnerabilities"
+title = "NVD Vulnerability APIs: the CVE API, queried by CPE name"
+
+[[sources]]
+url = "https://www.cisa.gov/known-exploited-vulnerabilities-catalog"
+title = "CISA Known Exploited Vulnerabilities Catalog"
+
+[[sources]]
+url = "https://cwe.mitre.org/data/definitions/1395.html"
+title = "CWE-1395: Dependency on Vulnerable Third-Party Component"
+
+[decision]
+question = "Is the runtime version the code declares free of publicly known vulnerabilities that a newer patch release fixes?"
+default = "patched-runtime-releases"
+why = """
+A runtime sits under every line of the application, so a flaw in it is a flaw in everything that
+runs on it. Runtime vulnerabilities are published in the NVD with a severity score, and some are
+actively exploited in the wild (CISA tracks those). Maintainers fix them in patch releases within
+the same release line, which makes staying current inexpensive: a patch upgrade seldom changes
+behaviour. A repository that pins an older patch release carries every flaw fixed since, and
+anyone can look the version up and read the list. The dependency audit sees packages in a
+lockfile but not the runtime they run on, so the runtime needs its own check.
+"""
+
+[[option]]
+id = "patched-runtime-releases"
+label = "Declared runtime versions are current patch releases with no known open vulnerabilities"
+directive = "The runtime version the repository declares (a Docker base image tag or a version file) is a patch release with no publicly known vulnerability that a newer patch release in the same line fixes. Runtime patch releases are taken as they ship, and a declared version is moved forward when the NVD lists a vulnerability against it."
+remediation = """
+Upgrade <runtime> to the latest patch release of its line, or to a supported release line, and update `<path>` and every other place the version is declared (the Dockerfile, the version file and the CI configuration). Rebuild the images and run the test suite. Verify by rescanning: the version no longer appears under this rule.
+"""
+effort = "low"
+why = "Patch releases carry the fixes for published vulnerabilities and rarely change behaviour, so taking them promptly closes known holes for little work."
+
+[[option]]
+id = "pin-runtime-and-never-patch"
+violates = true
+label = "Pin a runtime patch release and leave it"
+directive = "Pin the runtime to one patch release and leave it unchanged until a feature needs a newer one."
+why = "Rejected: the pin gives repeatable builds but also freezes every vulnerability that exists at that release. Repeatable builds come from pinning and then moving the pin forward on a schedule, not from never moving it."
