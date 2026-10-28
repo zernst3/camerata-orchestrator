@@ -7384,6 +7384,11 @@ pub const BOOKKEEPING_CAPTURE_KEYS: &[&str] = &[
     crate::severity_bounds::SEVERITY_ADJUSTMENTS_CAPTURE,
     // The templated history sentence every secret finding gets from `attach_secret_history_capture`.
     crate::onboard::HISTORY_STATUS_CAPTURE,
+    // The templated sentences `enrich_secret_context` puts on every secret-shaped floor finding
+    // before the cross-family merge: two different secrets in two files share them, so they
+    // would otherwise read as one object and fuse the two findings.
+    "gitignore-status",
+    "secret-kind",
 ];
 
 /// The captures that name an object: every capture except the bookkeeping keys.

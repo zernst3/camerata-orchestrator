@@ -1113,11 +1113,13 @@ fn an_em_dash_in_a_model_headline_never_reaches_the_flagged_here_note() {
 
 /// The four captures that are bookkeeping about a row. Written out as text here so a key dropped
 /// from the one shared list fails this test instead of passing it.
-const BOOKKEEPING_KEY_NAMES: [&str; 4] = [
+const BOOKKEEPING_KEY_NAMES: [&str; 6] = [
     "severity_adjustments",
     "carried_from",
     "history-status",
     "produced_tier",
+    "gitignore-status",
+    "secret-kind",
 ];
 
 /// A value that would read as identity if it were counted: three or more characters, and shaped
@@ -1134,7 +1136,7 @@ fn row_with_one_bookkeeping_key(path: &str, key: &str) -> Finding {
 }
 
 #[test]
-fn the_one_list_holds_all_four_bookkeeping_keys() {
+fn the_one_list_holds_every_bookkeeping_key() {
     let mut listed: Vec<&str> = BOOKKEEPING_CAPTURE_KEYS.to_vec();
     listed.sort_unstable();
     let mut expected = BOOKKEEPING_KEY_NAMES.to_vec();
@@ -1187,7 +1189,7 @@ fn a_real_capture_beside_each_bookkeeping_key_is_still_an_object() {
 
 #[test]
 fn two_findings_sharing_only_history_status_or_produced_tier_are_not_root_cause_linked() {
-    for key in ["history-status", "produced_tier"] {
+    for key in BOOKKEEPING_KEY_NAMES {
         let a = row_with_one_bookkeeping_key("config/a.env", key);
         let b = row_with_one_bookkeeping_key("src/b.rs", key);
         let ids_a = root_cause_credential_identities(&a);
