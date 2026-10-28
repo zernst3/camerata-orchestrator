@@ -620,7 +620,7 @@ fn norm_severity(s: &str) -> String {
 /// When semgrep is invoked with an absolute `--config` path (as Camerata does when
 /// scanning an external repository), it prefixes every rule id with the config path,
 /// dotted. For example, scanning `/repos/myrepo` with
-/// `--config /Users/alice/camerata/tooling/semgrep-rules` produces:
+/// `--config /Users/auditor/camerata/tooling/semgrep-rules` produces:
 ///
 /// ```text
 /// Users.alice.camerata.tooling.semgrep-rules.camerata.security.sql-string-concat-rust
@@ -1038,7 +1038,7 @@ fn preview_finding(
 /// External linters are invoked with absolute paths and report absolute paths back. Nothing
 /// rewrote them, so every ESLint-preview row shipped the auditor's own filesystem layout to
 /// the client. Measured on the 2026-10-18 hearth export: **32 of 237 rows** carried a path
-/// like `/Users/<auditor>/Documents/Repos/Camerata tests/hearth/app/admin/page.tsx`, in the
+/// like `/Users/auditor/Documents/Repos/client fixtures/hearth/app/admin/page.tsx`, in the
 /// PDF and the workbook both. Every one of them was `Preview: eslint`; no other tier leaked.
 ///
 /// Two things are wrong with that beyond untidiness. It tells the client the auditor's
@@ -2166,7 +2166,7 @@ mod tests {
     #[test]
     fn normalize_strips_absolute_path_prefix() {
         // Real example from scanning an external repo with an absolute --config path.
-        let raw = "Users.zacharyernst.Documents.Repos.camerata-orchestrator.crates.server.assets.semgrep-rules.camerata.security.sql-string-concat-rust";
+        let raw = "Users.auditor.Documents.Repos.camerata-orchestrator.crates.server.assets.semgrep-rules.camerata.security.sql-string-concat-rust";
         assert_eq!(
             normalize_semgrep_rule_id(raw),
             "camerata.security.sql-string-concat-rust"
@@ -3182,11 +3182,11 @@ mod tests {
             "(scan preview)"
         );
         // Nested deeply, and a repo whose own path contains a space (the real fixture did).
-        let spaced = repo("/Users/auditor/Camerata tests/hearth");
+        let spaced = repo("/Users/auditor/client fixtures/hearth");
         assert_eq!(
             repo_relative_path(
                 &spaced,
-                "/Users/auditor/Camerata tests/hearth/app/listings/[id]/page.tsx"
+                "/Users/auditor/client fixtures/hearth/app/listings/[id]/page.tsx"
             ),
             "app/listings/[id]/page.tsx"
         );
@@ -3211,7 +3211,7 @@ mod tests {
         ] {
             let out = repo_relative_path(&root, raw);
             assert!(
-                !out.contains("/Users/") && !out.contains("auditor"),
+                !out.contains("/Users") && !out.contains("auditor"),
                 "`{out}` still discloses the auditor's filesystem"
             );
             assert!(

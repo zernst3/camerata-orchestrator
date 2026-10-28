@@ -728,12 +728,13 @@ mod tests {
     #[test]
     fn derive_shared_target_dir_canonical_layout() {
         // Canonical: <clone>/.camerata-worktrees/<branch-seg>
-        let worktree = Path::new("/Users/me/ws/acme/api/.camerata-worktrees/camerata__story-7");
+        let worktree =
+            Path::new("/Users/auditor/ws/acme/api/.camerata-worktrees/camerata__story-7");
         let got = derive_shared_target_dir(worktree);
         assert_eq!(
             got,
             Some(PathBuf::from(
-                "/Users/me/ws/acme/api/.camerata-shared-target"
+                "/Users/auditor/ws/acme/api/.camerata-shared-target"
             )),
             "derived target must be sibling of .camerata-worktrees under clone"
         );
@@ -820,7 +821,7 @@ mod tests {
     #[test]
     fn derive_shared_target_dir_two_worktrees_same_clone() {
         // Two different branch worktrees under the SAME clone must derive the SAME target dir.
-        let base = "/Users/me/ws/acme/api/.camerata-worktrees";
+        let base = "/Users/auditor/ws/acme/api/.camerata-worktrees";
         let wt_a = PathBuf::from(base).join("camerata__story-a");
         let wt_b = PathBuf::from(base).join("camerata__story-b");
         assert_eq!(

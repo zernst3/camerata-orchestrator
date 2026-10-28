@@ -19,6 +19,31 @@ RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets --locked -- -D wa
 RUSTFLAGS="-D warnings" cargo test --workspace --locked
 ```
 
+CI also runs `scripts/check-personal-paths.sh`, which fails when a tracked file names a personal
+home directory or the private fixture folder. Write example paths as `/Users/auditor/...`. Run
+the script before you push.
+
+## Running the benchmark tests locally
+
+Some tests grade the scanner against private fixture repositories that are not part of this
+repository, and one `#[ignore]`d test serves a local Dioxus app. They read the fixtures from the
+folder named by the `CAMERATA_FIXTURES_DIR` environment variable:
+
+```
+export CAMERATA_FIXTURES_DIR=/path/to/your/fixtures
+cargo test -p camerata-server --test benchmark_supabase_fixture
+```
+
+- Variable unset: the tests print `skipping: ...` and pass. That is the normal state on CI and
+  on a fresh clone.
+- Variable set but wrong (the folder is missing or does not hold the expected fixture): the
+  tests panic with a message that says what is missing. A mistyped path never passes silently.
+  Fix the variable or unset it.
+
+`CAMERATA_BENCHMARK_FIXTURE` points at the benchmark repository itself and wins over
+`CAMERATA_FIXTURES_DIR`. `CAMERATA_SWEEP_EXPORTS` names the sweep exports directory for
+`release_gate_acceptance`, which is `#[ignore]`d and run by hand with `-- --ignored`.
+
 ## Changing the rule corpus
 
 - Editing a rule means bumping its `version` and regenerating the lock with

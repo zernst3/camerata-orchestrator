@@ -139,10 +139,10 @@ mod tests {
         assert_eq!(
             dir_from(
                 None,
-                Some(OsStr::new("/Users/u")),
+                Some(OsStr::new("/Users/auditor")),
                 Some(OsStr::new("/ignored"))
             ),
-            PathBuf::from("/Users/u/Library/Caches/camerata")
+            PathBuf::from("/Users/auditor/Library/Caches/camerata")
         );
     }
 

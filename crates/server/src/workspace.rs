@@ -2045,10 +2045,10 @@ mod tests {
 
     #[test]
     fn repo_dir_nests_owner_and_repo_under_root() {
-        let root = Path::new("/Users/me/Camerata");
+        let root = Path::new("/Users/auditor/Camerata");
         let dir = repo_dir(root, "acme/api");
         assert!(dir.ends_with("acme/api"));
-        assert!(dir.starts_with("/Users/me/Camerata"));
+        assert!(dir.starts_with("/Users/auditor/Camerata"));
     }
 
     #[test]
@@ -2784,7 +2784,7 @@ mod tests {
     /// `shared_target_dir` is a sibling of `.camerata-worktrees/` under the clone.
     #[test]
     fn shared_target_dir_is_sibling_of_worktrees_root() {
-        let clone = Path::new("/Users/me/ws/acme/api");
+        let clone = Path::new("/Users/auditor/ws/acme/api");
         let target = shared_target_dir(clone);
         // Must live INSIDE the clone directory.
         assert!(target.starts_with(clone), "shared target under clone");
@@ -2806,7 +2806,7 @@ mod tests {
     /// canonical layout `<clone>/.camerata-worktrees/<branch>`.
     #[test]
     fn clone_derivation_from_worktree_path() {
-        let clone = Path::new("/Users/me/ws/acme/api");
+        let clone = Path::new("/Users/auditor/ws/acme/api");
         let branch_dir = worktrees_root(clone).join("camerata__story-7");
         // Derive clone root: parent() → .camerata-worktrees, parent() → clone.
         let derived_clone = branch_dir.parent().and_then(|p| p.parent());

@@ -2233,7 +2233,7 @@
               <div class="form-group">
                 <label class="form-label">Choose Local Repo Folder</label>
                 <div style="display: flex; gap: 8px; margin-bottom: 12px;">
-                  <input type="text" id="repoFolderPath" class="form-input" style="flex:1" value="/Users/zacharyernst/Documents/Repos/camerata-orchestrator">
+                  <input type="text" id="repoFolderPath" class="form-input" style="flex:1" value="/Users/auditor/Documents/Repos/camerata-orchestrator">
                   <button class="btn btn-outline" onclick="browseLocalFolder()">Browse Folder...</button>
                 </div>
               </div>
@@ -2277,7 +2277,7 @@
               <!-- GreenfieldResultView -->
               <div id="gfResultView" class="hidden" style="margin-top: 20px; padding: 20px; border-radius: 5px; background: rgba(16, 185, 129, 0.12); border: 1.5px solid rgba(16, 185, 129, 0.35);">
                 <h4 style="color: #34d399; margin-bottom: 8px;">✔ Repository Scaffolded</h4>
-                <p style="font-size: 13.5px; color: #a7f3d0; margin-bottom: 12px;" id="gfResultMsg">Scaffolded core-auth-service in /Users/zacharyernst/Documents/Repos/core-auth-service</p>
+                <p style="font-size: 13.5px; color: #a7f3d0; margin-bottom: 12px;" id="gfResultMsg">Scaffolded core-auth-service in /Users/auditor/Documents/Repos/core-auth-service</p>
                 <div style="font-size: 12px; font-family: var(--font-mono); background: rgba(0, 0, 0, 0.35); padding: 12px; border-radius: 6px; border: 1px solid rgba(16,185,129,0.3); color: #e2e8f0">
                   <strong>Files written:</strong>
                   <ul style="margin-left: 18px; margin-top: 4px;" id="gfResultFiles">
@@ -3238,7 +3238,7 @@
 
       // Scanned repo local resolutions (issue #33)
       repoResolutions: [
-        { repo: 'zernst/camerata-orchestrator', path: '/Users/zacharyernst/Documents/Repos/camerata-orchestrator', resolved: true, reason: '' },
+        { repo: 'zernst/camerata-orchestrator', path: '/Users/auditor/Documents/Repos/camerata-orchestrator', resolved: true, reason: '' },
         { repo: 'zernst/camerata-gates', path: null, resolved: false, reason: 'Folder not found on local disk. Please specify location.' }
       ],
 
@@ -3652,7 +3652,7 @@
     }
 
     function browseGfParentFolder() {
-      const destParent = "/Users/zacharyernst/Documents/Repos";
+      const destParent = "/Users/auditor/Documents/Repos";
       const nameVal = document.getElementById('gfRepoName').value.trim() || "new-scaffold-project";
       const fullPath = `${destParent}/${nameVal}`;
       

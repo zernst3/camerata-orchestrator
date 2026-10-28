@@ -90,7 +90,7 @@ benchmark repo. A brownfield client repo will never have that file either.
 
 ## GRADER UPGRADE — v2 shipped 2026-10-09 (prompt), ONE BLOCKER REMAINS
 
-`~/Documents/Repos/Camerata tests/_grader/GRADER_PROMPT.md` is now **v2**. It grades four axes instead
+`$CAMERATA_FIXTURES_DIR/_grader/GRADER_PROMPT.md` is now **v2**. It grades four axes instead
 of two, per Zach's decision that "the answer key should be abided by but the grader also needs to grade
 on presentation":
 

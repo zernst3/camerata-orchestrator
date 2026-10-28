@@ -13,7 +13,7 @@ certification.** So you are verifying **directional correctness**, not certifica
 
 > The Markdown export of this report is queued (product wave); today it is screen-only in the cockpit.
 
-## Test repos (in `~/Documents/Repos/sample apps/`)
+## Test repos (in a local `sample apps/` folder)
 
 Real, small, shipped apps to scan: **umami** (Next/React/TS), **linkding** & **healthchecks** (Django),
 **node-express-realworld** (Express), **spring-petclinic** (Java/Spring), **miniflux** (Go). `spring-petclinic`

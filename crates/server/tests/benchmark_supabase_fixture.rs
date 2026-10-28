@@ -9,8 +9,9 @@
 //! # Where the fixture and its answer key live
 //!
 //! Fixture repo (real git repo, external to this workspace):
-//!   `CAMERATA_BENCHMARK_FIXTURE` env var, or (default)
-//!   `/Users/zacharyernst/Documents/Repos/Camerata tests/supabase-portal-fixture`
+//!   `CAMERATA_BENCHMARK_FIXTURE` env var (the repo itself), or
+//!   `$CAMERATA_FIXTURES_DIR/supabase-portal-fixture` (the folder holding the private fixtures).
+//!   With neither set, every test prints why and skips.
 //!
 //! `GROUND_TRUTH.md` inside that repo is the authoritative answer key: 7 defects (D1-D7) with
 //! expected file:line + severity, and 4 innocents (I1-I4) with the rationale for why a
@@ -95,45 +96,172 @@
 //! architectural review. This is the baseline the full-grade test documents; upcoming
 //! scan-quality passes are graded by how much of the remainder turns green.
 
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use camerata_server::ai_audit::ScanMode;
 use camerata_server::onboard::{self, Finding, SelectedRule};
 
-const DEFAULT_FIXTURE_PATH: &str =
-    "/Users/zacharyernst/Documents/Repos/Camerata tests/supabase-portal-fixture";
 const FIXTURE_ENV_VAR: &str = "CAMERATA_BENCHMARK_FIXTURE";
+const FIXTURES_DIR_ENV_VAR: &str = "CAMERATA_FIXTURES_DIR";
+const FIXTURE_DIR_NAME: &str = "supabase-portal-fixture";
 const FIXTURE_REPO_SPEC: &str = "benchmark/supabase-portal-fixture";
 
-/// Locate the `supabase-portal-fixture` benchmark repo: the `CAMERATA_BENCHMARK_FIXTURE` env
-/// var when set, else the well-known path on the machine this benchmark was authored on.
-/// Returns `None` (never panics) when the fixture isn't present — every test below skips
-/// gracefully rather than failing, so this file is safe to ship into a `cargo test` gate that
-/// runs on machines without the (private, external) fixture checked out.
-fn fixture_dir() -> Option<PathBuf> {
-    let path = std::env::var(FIXTURE_ENV_VAR).unwrap_or_else(|_| DEFAULT_FIXTURE_PATH.to_string());
-    let path = PathBuf::from(path);
-    if path.is_dir() && path.join(".git").exists() && path.join("GROUND_TRUTH.md").exists() {
-        Some(path)
-    } else {
-        None
+/// Where the fixture should be, from the two env vars: the explicit repo override wins, else
+/// the fixture's folder inside the shared fixtures directory. `None` when neither is set: no
+/// machine-specific default is baked in, because this repository is public.
+fn fixture_path_from(
+    explicit: Option<OsString>,
+    fixtures_dir: Option<OsString>,
+) -> Option<PathBuf> {
+    explicit
+        .map(PathBuf::from)
+        .or_else(|| fixtures_dir.map(|dir| PathBuf::from(dir).join(FIXTURE_DIR_NAME)))
+}
+
+/// What the environment says about the fixture.
+#[derive(Debug, PartialEq, Eq)]
+enum FixtureResolution {
+    /// Neither variable is set: the fixture is not wanted on this machine.
+    Unconfigured,
+    /// A variable is set and the path is a usable fixture repo.
+    Ready(PathBuf),
+    /// A variable is set but the path is not a usable fixture repo (missing, not a git repo
+    /// or no `GROUND_TRUTH.md`). That is a mistake to report, not a reason to skip.
+    Misconfigured(PathBuf),
+}
+
+/// Validate a configured fixture path (`None` when no variable is set).
+fn resolve_fixture(configured: Option<PathBuf>) -> FixtureResolution {
+    match configured {
+        None => FixtureResolution::Unconfigured,
+        Some(path) => {
+            if path.is_dir() && path.join(".git").exists() && path.join("GROUND_TRUTH.md").exists()
+            {
+                FixtureResolution::Ready(path)
+            } else {
+                FixtureResolution::Misconfigured(path)
+            }
+        }
     }
 }
 
-/// Skip (not fail) the calling test when the fixture isn't present on this machine.
+/// `Some(dir)` for a ready fixture, `None` (a visible skip) when unconfigured. PANICS when a
+/// variable is set but the path is not a usable fixture: a typo in the variable must not make
+/// the whole benchmark pass silently without having graded anything.
+fn settle_fixture(resolution: FixtureResolution) -> Option<PathBuf> {
+    match resolution {
+        FixtureResolution::Unconfigured => None,
+        FixtureResolution::Ready(path) => Some(path),
+        FixtureResolution::Misconfigured(path) => panic!(
+            "{} (or {}) is set, but {} is not a usable {} checkout: it must be a directory \
+             holding a git repository and a GROUND_TRUTH.md. Fix the variable, or unset it to \
+             skip these tests.",
+            FIXTURES_DIR_ENV_VAR,
+            FIXTURE_ENV_VAR,
+            path.display(),
+            FIXTURE_DIR_NAME
+        ),
+    }
+}
+
+/// Locate the `supabase-portal-fixture` benchmark repo (see [`fixture_path_from`]).
+/// Returns `None` when neither variable is set, so every test below skips visibly on
+/// machines without the (private, external) fixture and the file is safe in a `cargo test`
+/// gate. Panics when a variable IS set but does not lead to a valid fixture (see
+/// [`settle_fixture`]).
+fn fixture_dir() -> Option<PathBuf> {
+    settle_fixture(resolve_fixture(fixture_path_from(
+        std::env::var_os(FIXTURE_ENV_VAR),
+        std::env::var_os(FIXTURES_DIR_ENV_VAR),
+    )))
+}
+
+/// Skip (not fail) the calling test when the fixture variables are unset. A set but wrong
+/// variable panics inside [`fixture_dir`].
 macro_rules! require_fixture {
     () => {
         match fixture_dir() {
             Some(dir) => dir,
             None => {
                 eprintln!(
-                    "skipping: supabase-portal-fixture not found — set {} or check it out at {}",
-                    FIXTURE_ENV_VAR, DEFAULT_FIXTURE_PATH
+                    "skipping: {} not configured; set {} to the folder holding the private \
+                     fixtures (or {} to the fixture repo itself)",
+                    FIXTURE_DIR_NAME, FIXTURES_DIR_ENV_VAR, FIXTURE_ENV_VAR
                 );
                 return;
             }
         }
     };
+}
+
+#[test]
+fn fixture_path_prefers_the_explicit_repo_override() {
+    assert_eq!(
+        fixture_path_from(Some("/x/portal".into()), Some("/fixtures".into())),
+        Some(PathBuf::from("/x/portal"))
+    );
+}
+
+#[test]
+fn fixture_path_falls_back_to_the_shared_fixtures_dir() {
+    assert_eq!(
+        fixture_path_from(None, Some("/fixtures".into())),
+        Some(PathBuf::from("/fixtures/supabase-portal-fixture"))
+    );
+}
+
+#[test]
+fn fixture_path_is_none_when_neither_env_var_is_set() {
+    assert_eq!(fixture_path_from(None, None), None);
+}
+
+/// Make a directory that passes the fixture validation: a git repo marker and the key file.
+fn make_valid_fixture(root: &Path) {
+    std::fs::create_dir_all(root.join(".git")).expect("temp fixture setup");
+    std::fs::write(root.join("GROUND_TRUTH.md"), "x").expect("temp fixture setup");
+}
+
+#[test]
+fn unset_fixture_variables_are_a_visible_skip_not_a_failure() {
+    assert_eq!(resolve_fixture(None), FixtureResolution::Unconfigured);
+    assert_eq!(settle_fixture(FixtureResolution::Unconfigured), None);
+}
+
+#[test]
+fn a_valid_fixture_directory_is_ready() {
+    let tmp = tempfile::tempdir().expect("temp fixture setup");
+    make_valid_fixture(tmp.path());
+    assert_eq!(
+        resolve_fixture(Some(tmp.path().to_path_buf())),
+        FixtureResolution::Ready(tmp.path().to_path_buf())
+    );
+}
+
+#[test]
+fn a_set_but_missing_fixture_directory_is_misconfigured() {
+    let tmp = tempfile::tempdir().expect("temp fixture setup");
+    let missing = tmp.path().join("not-here");
+    assert_eq!(
+        resolve_fixture(Some(missing.clone())),
+        FixtureResolution::Misconfigured(missing)
+    );
+}
+
+#[test]
+fn a_set_directory_without_ground_truth_is_misconfigured() {
+    let tmp = tempfile::tempdir().expect("temp fixture setup");
+    std::fs::create_dir_all(tmp.path().join(".git")).expect("temp fixture setup");
+    assert_eq!(
+        resolve_fixture(Some(tmp.path().to_path_buf())),
+        FixtureResolution::Misconfigured(tmp.path().to_path_buf())
+    );
+}
+
+#[test]
+#[should_panic(expected = "CAMERATA_FIXTURES_DIR")]
+fn a_misconfigured_fixture_fails_loudly_instead_of_skipping() {
+    settle_fixture(FixtureResolution::Misconfigured(PathBuf::from("/nowhere")));
 }
 
 /// Build the SAME rule selection the product's own onboarding flow would produce for this

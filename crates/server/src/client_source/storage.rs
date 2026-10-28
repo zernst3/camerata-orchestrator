@@ -231,10 +231,10 @@ mod tests {
 
     fn real() -> Vec<PathBuf> {
         vec![
-            PathBuf::from("/Users/zach/.claude"),
-            PathBuf::from("/Users/zach"),
-            PathBuf::from("/Users/zach/Library/Application Support"),
-            PathBuf::from("/Users/zach/Library/Caches"),
+            PathBuf::from("/Users/auditor/.claude"),
+            PathBuf::from("/Users/auditor"),
+            PathBuf::from("/Users/auditor/Library/Application Support"),
+            PathBuf::from("/Users/auditor/Library/Caches"),
         ]
     }
 
@@ -251,11 +251,11 @@ mod tests {
     fn a_test_binary_may_not_delete_under_the_real_home_data_cache_or_claude_dirs() {
         let temp = "/var/folders/xx/T";
         for path in [
-            "/Users/zach",
-            "/Users/zach/Documents/Repos/client/app",
-            "/Users/zach/.claude/projects/-Users-zach/abc.jsonl",
-            "/Users/zach/Library/Application Support/camerata/scan-cache.json",
-            "/Users/zach/Library/Caches/camerata/app-1.cache.json",
+            "/Users/auditor",
+            "/Users/auditor/Documents/Repos/client/app",
+            "/Users/auditor/.claude/projects/-Users-auditor/abc.jsonl",
+            "/Users/auditor/Library/Application Support/camerata/scan-cache.json",
+            "/Users/auditor/Library/Caches/camerata/app-1.cache.json",
         ] {
             assert!(blocked(path, TEST_EXE, temp), "{path} must be protected");
         }
@@ -276,12 +276,12 @@ mod tests {
     fn the_product_binary_is_never_restricted_by_this_guard() {
         // The real app deletes real locations: that is the feature. Only test binaries are held.
         assert!(!blocked(
-            "/Users/zach/.claude/projects/-x/abc.jsonl",
+            "/Users/auditor/.claude/projects/-x/abc.jsonl",
             APP_EXE,
             "/var/folders/xx/T"
         ));
         assert!(!test_process_may_not_delete(
-            Path::new("/Users/zach/x"),
+            Path::new("/Users/auditor/x"),
             &real(),
             None,
             Path::new("/tmp")
@@ -290,20 +290,24 @@ mod tests {
 
     #[test]
     fn a_temp_dir_that_is_inside_home_does_not_exempt_home_itself() {
-        // TMPDIR=/Users/zach/tmp: paths under it are still exempt (it is scratch)...
+        // TMPDIR=/Users/auditor/tmp: paths under it are still exempt (it is scratch)...
         assert!(!blocked(
-            "/Users/zach/tmp/job/x",
+            "/Users/auditor/tmp/job/x",
             TEST_EXE,
-            "/Users/zach/tmp"
+            "/Users/auditor/tmp"
         ));
         // ...but the rest of home is not.
         assert!(blocked(
-            "/Users/zach/Documents/x",
+            "/Users/auditor/Documents/x",
             TEST_EXE,
-            "/Users/zach/tmp"
+            "/Users/auditor/tmp"
         ));
         // And a TMPDIR that IS the home directory exempts nothing at all.
-        assert!(blocked("/Users/zach/Documents/x", TEST_EXE, "/Users/zach"));
+        assert!(blocked(
+            "/Users/auditor/Documents/x",
+            TEST_EXE,
+            "/Users/auditor"
+        ));
     }
 
     /// The proof the backstop is live in THIS test binary: with the real locations, a path under

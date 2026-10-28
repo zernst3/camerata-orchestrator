@@ -1,7 +1,7 @@
 # W29 execution plan — the nine consistency rules (2026-10-21)
 
 Turnkey plan for the Phase-4 coverage expansion. Authoritative source:
-`~/Documents/Repos/_workspace/brownfield-audits/CORPUS_WORK_ORDER_CONSISTENCY_RULES.md`.
+`<workspace>/brownfield-audits/CORPUS_WORK_ORDER_CONSISTENCY_RULES.md`.
 This file translates it into the build order + the per-rule deliverables, grounded against the
 current tree. W29 is a multi-detector build (tree-sitter passes + a cross-file clone detector),
 so it is sequenced as its own focused effort, not folded into a tail-of-session.

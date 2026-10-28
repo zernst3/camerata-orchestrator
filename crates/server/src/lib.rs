@@ -12893,9 +12893,9 @@ async fn uow_publish(
 // Attachments are stored inline in the UoW JSON, travel with the project export,
 // and are embedded in the published GitHub issue body as collapsed `<details>` blocks.
 //
-// Decided (2026-07-01): publish-embed uses inline `<details>` in the issue body.
-// The gist/CDN and repo-commit paths are deferred for Zach to confirm (see
-// .overnight-decisions_needed.md entry #1).
+// Decided (2026-07-01): publish-embed uses inline `<details>` in the issue body: the
+// content stays searchable and needs no extra GitHub scope. The gist/CDN and
+// repo-commit paths were deferred.
 
 /// `GET /api/uow/:story_id/attachments` -- list all attachments on a UoW
 /// (name + mime; content is omitted from the list for bandwidth). Returns
@@ -18176,14 +18176,14 @@ mod tests {
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
         state
             .settings
-            .set_repo_path("me/api", Some("/Users/z/Repos/api".to_string()));
+            .set_repo_path("me/api", Some("/Users/auditor/Repos/api".to_string()));
         let project = state
             .projects
             .create("P", vec!["me/api".to_string(), "me/other".to_string()])
             .unwrap();
         assert_eq!(
             effective_workspace_root(&state, &project).as_deref(),
-            Some("/Users/z/Repos")
+            Some("/Users/auditor/Repos")
         );
     }
 
@@ -18193,14 +18193,14 @@ mod tests {
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
         state
             .settings
-            .set_repo_path("me/second", Some("/Users/z/Repos/second".to_string()));
+            .set_repo_path("me/second", Some("/Users/auditor/Repos/second".to_string()));
         let project = state
             .projects
             .create("P", vec!["me/first".to_string(), "me/second".to_string()])
             .unwrap();
         assert_eq!(
             effective_workspace_root(&state, &project).as_deref(),
-            Some("/Users/z/Repos")
+            Some("/Users/auditor/Repos")
         );
     }
 
@@ -31751,7 +31751,7 @@ mod tests {
         let mut report = crate::onboard::ScanReport::gated(&["me/api".to_string()]);
         let failures = vec![CorpusLoadFailure {
             rule_id: "SUPABASE-RLS-ENABLED-1".to_string(),
-            path: std::path::PathBuf::from("/Users/someone/corpus/supabase/rls/x.toml"),
+            path: std::path::PathBuf::from("/Users/auditor/corpus/supabase/rls/x.toml"),
             error: "TOML parse error in x.toml: unknown variant `architectual`".to_string(),
         }];
 
@@ -31789,13 +31789,13 @@ mod tests {
         // 4. the operator detail: on the note (UI + ledger), never in the ledger's reason.
         let note = &report.coverage_notes[0].message;
         assert!(
-            note.contains("/Users/someone/corpus/supabase/rls/x.toml")
+            note.contains("/Users/auditor/corpus/supabase/rls/x.toml")
                 && note.contains("architectual"),
             "the operator must be able to find the file and the parse error: {note}"
         );
         let reason = entry.skip_reason.clone().unwrap_or_default();
         assert!(
-            !reason.contains("/Users/someone") && !reason.contains("architectual"),
+            !reason.contains("/Users/auditor") && !reason.contains("architectual"),
             "the client-facing reason must carry NEITHER the path nor the parser text: {reason}"
         );
     }

@@ -9833,14 +9833,14 @@ mod tests {
         report.coverage_notes = vec![
             CoverageNote {
                 tool: crate::RULE_CORPUS_COVERAGE_TOOL.to_string(),
-                message: "/Users/someone/corpus/supabase/rls/a.toml did not parse, so rule \
+                message: "/Users/auditor/corpus/supabase/rls/a.toml did not parse, so rule \
                           SUPABASE-RLS-ENABLED-1 was not loaded and did not run: TOML parse \
                           error in a.toml: unknown variant `architectual`"
                     .to_string(),
             },
             CoverageNote {
                 tool: crate::RULE_CORPUS_COVERAGE_TOOL.to_string(),
-                message: "/Users/someone/corpus/universal/b.toml did not parse, so rule \
+                message: "/Users/auditor/corpus/universal/b.toml did not parse, so rule \
                           SEC-NO-RAW-SQL-CONCAT-1 was not loaded and did not run: TOML parse \
                           error in b.toml: expected a value"
                     .to_string(),
@@ -9873,7 +9873,7 @@ mod tests {
 
         // G3's prohibition: never the raw diagnostics.
         for leak in [
-            "/Users/someone",
+            "/Users/auditor",
             ".toml",
             "TOML parse error",
             "architectual",

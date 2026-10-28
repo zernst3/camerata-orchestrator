@@ -283,10 +283,10 @@ mod tests {
     fn set_and_get_workspace_root() {
         let store = SettingsStore::new();
         assert!(store.workspace_root().is_none());
-        store.set_workspace_root(Some("/Users/me/Camerata".to_string()));
+        store.set_workspace_root(Some("/Users/auditor/Camerata".to_string()));
         assert_eq!(
             store.workspace_root().as_deref(),
-            Some("/Users/me/Camerata")
+            Some("/Users/auditor/Camerata")
         );
         // Empty / whitespace clears it.
         store.set_workspace_root(Some("   ".to_string()));

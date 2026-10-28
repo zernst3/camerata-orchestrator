@@ -53,7 +53,7 @@ I. Repo hardening work order (`_workspace/brownfield-audits/WORK_ORDER_REPO_HARD
    Zach: D1 DECIDED 23:50 (Zach): option (a), a private companion repo stored on GitHub, not only
    locally. Created: github.com/zernst3/camerata-internal (private, verified 404 anonymously). The
    move happens in the morning wrap-up (this plan and the decisions log are in use overnight):
-   clone it to ~/Documents/Repos/camerata-internal, copy the working notes in (session logs,
+   clone it next to this repository as camerata-internal, copy the working notes in (session logs,
    overnight notes and this plan, TEST_WHEN_BACK.md, staged-issues/, dated plans/ and audits/,
    the decisions log), commit and push there, then remove them from the public tree in one
    commit; design docs, architecture, technical, rules reference, rule authoring, user guide and
