@@ -432,6 +432,16 @@ fn confirm_in_text_handles_a_confirmed_table_on_the_first_line() {
 }
 
 #[test]
+fn confirm_in_text_inserts_after_the_last_entry_when_no_blank_line_ends_the_table() {
+    let text = "[confirmed]\ngo = \"2026-01-01\"\njavascript = \"2026-02-01\"\n[overrides]\n";
+    let out = confirm_in_text(text, "rust", "2026-10-28").unwrap();
+    assert_eq!(
+        out,
+        "[confirmed]\ngo = \"2026-01-01\"\njavascript = \"2026-02-01\"\nrust = \"2026-10-28\"\n[overrides]\n"
+    );
+}
+
+#[test]
 fn confirm_domain_writes_the_advanced_watermark_to_disk() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("CORPUS_FRESHNESS.toml");
