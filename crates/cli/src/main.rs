@@ -1032,6 +1032,8 @@ mod cli_parse_tests {
             "/tmp/r",
             "--export",
             "/tmp/o.zip",
+            "--client",
+            "Acme",
         ];
         let cli =
             Cli::try_parse_from(base.iter().copied().chain(["--realtime"])).expect("must parse");

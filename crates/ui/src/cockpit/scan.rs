@@ -8732,7 +8732,9 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                     }
                 }
                 // Spend limit: optional hard stop on the scan's AI spend, checked between passes.
-                div { class: "audit-model-row",
+                div {
+                    class: "audit-model-row",
+                    "data-tour": camerata_ui_core::walkthrough::target::SPEND_LIMIT,
                     label { class: "audit-model-label", "Spend limit (USD)" }
                     input {
                         r#type: "text",
@@ -8828,7 +8830,7 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                         // alternative-recommendation pass the audit will run.
                         let multi_option_selected =
                             report.proposed_rules.iter().filter(|r| r.options.len() >= 2).count();
-                        let (toks, dollars, passes) = estimate_audit_cost(report.code_chars, sel, camerata_ui_core::scan::estimate_mode(&audit_mode(), backend), a_in, a_out, c_in, c_out, audit_thorough(), incremental, deep, backend, multi_option_selected);
+                        let (toks, dollars, passes) = estimate_audit_cost(report.code_chars, sel, camerata_ui_core::scan::estimate_mode(&audit_mode(), backend), a_in, a_out, c_in, c_out, audit_thorough(), incremental, deep, backend, multi_option_selected, true);
                         let code_toks = human_tokens((report.code_chars as f64 / 4.0) as u64);
                         let dollar_str = if dollars < 0.01 { "<$0.01".to_string() } else { format!("~${dollars:.2}") };
                         // ACTUAL, once the audit finished and the backend reported usage.
@@ -8836,7 +8838,6 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                         rsx! {
                             div {
                                 class: "audit-cost",
-                                "data-tour": camerata_ui_core::walkthrough::target::COST_ESTIMATE,
                                 if let Some(u) = actual {
                                     {
                                         let act_toks = u.input_tokens + u.output_tokens;

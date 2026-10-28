@@ -30,7 +30,7 @@
 //! against fixtures. The HTTP calls reuse `github_issues.rs`, which in turn reuses the
 //! worktracker's `ReqwestTransport` (correct User-Agent + auth header in one place).
 
-use camerata_worktracker::CanonicalStory;
+use camerata_worktracker::{CanonicalStory, ExternalRef, Provider};
 use serde::{Deserialize, Serialize};
 
 use crate::github_issues::IssueDetail;
@@ -120,16 +120,7 @@ impl WorkItem {
         let ext = story.external_ref.as_ref()?;
         let repo = ext.container.clone()?;
         let number: u64 = ext.external_id.parse().ok()?;
-        let state = if matches!(
-            story.status,
-            camerata_worktracker::FeatureStatus::Done
-                | camerata_worktracker::FeatureStatus::SignedOff
-                | camerata_worktracker::FeatureStatus::Rejected
-        ) {
-            "closed"
-        } else {
-            "open"
-        };
+        let state = state_of(story);
         Some(Self {
             id: Self::github_id(&repo, number),
             provider: "github".to_string(),
@@ -146,6 +137,48 @@ impl WorkItem {
             assignees: Vec::new(),
             updated_at: String::new(),
         })
+    }
+}
+
+impl WorkItem {
+    /// Build the stable work-item id for a NATIVE unit: `native:<unit key>`. The id bridge
+    /// ([`work_item_id_to_story_id`]) strips the prefix back to the unit key.
+    pub fn native_id(story_id: &str) -> String {
+        format!("native:{story_id}")
+    }
+
+    /// Map a NATIVE unit's spine story (a [`CanonicalStory`] with no tracker link) into a work
+    /// item, so the console lists it like any other: provider `native`, the unit's repository
+    /// (empty when it names none yet), its native number, and no URL (there is no board).
+    pub fn from_native_story(story: &CanonicalStory, repo: Option<&str>, number: u64) -> Self {
+        Self {
+            id: Self::native_id(&story.id),
+            provider: "native".to_string(),
+            repo: repo.unwrap_or_default().to_string(),
+            number,
+            title: story.title.clone(),
+            body: story.description.clone(),
+            state: state_of(story).to_string(),
+            url: String::new(),
+            labels: Vec::new(),
+            parent_number: None,
+            assignees: Vec::new(),
+            updated_at: String::new(),
+        }
+    }
+}
+
+/// `"closed"` for a story whose canonical status is terminal, else `"open"`.
+fn state_of(story: &CanonicalStory) -> &'static str {
+    if matches!(
+        story.status,
+        camerata_worktracker::FeatureStatus::Done
+            | camerata_worktracker::FeatureStatus::SignedOff
+            | camerata_worktracker::FeatureStatus::Rejected
+    ) {
+        "closed"
+    } else {
+        "open"
     }
 }
 
@@ -171,12 +204,65 @@ pub fn story_id_for(work_item_id: &str) -> String {
     work_item_id_to_story_id(work_item_id)
 }
 
+// ── GitHub issue keys (the adapter's own parse) ─────────────────────────────────
+
+/// Parse a GitHub issue key `OWNER/REPO#NUMBER` into its repository and issue number.
+///
+/// A unit of work created from a GitHub issue has been keyed by this string since before units
+/// carried their own repository and tracker link, so existing records still have it as their
+/// key. This adapter is the ONLY place the `#` in such a key is interpreted: everything else
+/// reads the unit's own fields ([`crate::uow::UnitOfWork::repo`],
+/// [`crate::uow::UnitOfWork::external_ref`]), which the store fills from this parse when it
+/// loads or creates a GitHub-keyed unit. `None` when the key is not this shape (a native unit
+/// `uow-<token>`, a draft `draft-<token>`, a demo story id).
+pub fn parse_github_key(key: &str) -> Option<(String, u64)> {
+    let (repo, number) = key.rsplit_once('#')?;
+    camerata_worktracker::RepoCoord::parse(repo)?;
+    let number: u64 = number.parse().ok()?;
+    Some((repo.to_string(), number))
+}
+
+/// The tracker link for GitHub issue `number` in `repo` (`OWNER/REPO`): provider GitHub, the
+/// issue number as the external id, the repository as the container, and the issue's URL.
+pub fn github_issue_ref(repo: &str, number: u64) -> ExternalRef {
+    ExternalRef::new(
+        Provider::GitHub,
+        number.to_string(),
+        format!("https://github.com/{repo}/issues/{number}"),
+    )
+    .with_container(repo)
+}
+
+/// The tracker link for a unit key, when the key is a GitHub issue key (see
+/// [`parse_github_key`]). Used to give legacy GitHub-keyed units their link.
+pub fn github_issue_ref_for_key(key: &str) -> Option<ExternalRef> {
+    parse_github_key(key).map(|(repo, number)| github_issue_ref(&repo, number))
+}
+
+/// Parse a GitHub work-item id (`github:OWNER/REPO#NUMBER`) into `(repo, number)`, with a
+/// reason when the provider is not `github` or the shape is malformed.
+pub fn parse_github_work_item_id(work_item_id: &str) -> Result<(String, u64), String> {
+    let rest = work_item_id.strip_prefix("github:").ok_or_else(|| {
+        format!("work_item_id must be `github:OWNER/REPO#NUMBER`, got `{work_item_id}`")
+    })?;
+    let (repo, num) = rest
+        .rsplit_once('#')
+        .ok_or_else(|| format!("work_item_id missing `#NUMBER`: `{work_item_id}`"))?;
+    if camerata_worktracker::RepoCoord::parse(repo).is_none() {
+        return Err(format!("work_item_id repo is not `owner/repo`: `{repo}`"));
+    }
+    let number: u64 = num
+        .parse()
+        .map_err(|_| format!("work_item_id number is not a u64: `{num}`"))?;
+    Ok((repo.to_string(), number))
+}
+
 // ── tests ──────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use camerata_worktracker::{ExternalRef, FeatureStatus, Provider};
+    use camerata_worktracker::FeatureStatus;
 
     fn detail(number: u64, state: &str) -> IssueDetail {
         IssueDetail {
@@ -304,5 +390,157 @@ mod tests {
         story.external_ref =
             Some(ExternalRef::new(Provider::GitHub, "not-a-number", "u").with_container("o/r"));
         assert!(WorkItem::from_canonical_story(&story).is_none());
+    }
+
+    #[test]
+    fn parse_github_key_reads_repo_and_number() {
+        assert_eq!(
+            parse_github_key("acme/api#42"),
+            Some(("acme/api".to_string(), 42))
+        );
+        let link = github_issue_ref_for_key("acme/api#42").unwrap();
+        assert_eq!(link.provider, Provider::GitHub);
+        assert_eq!(link.external_id, "42");
+        assert_eq!(link.container.as_deref(), Some("acme/api"));
+        assert_eq!(link.url, "https://github.com/acme/api/issues/42");
+    }
+
+    #[test]
+    fn parse_github_key_rejects_keys_that_are_not_issue_keys() {
+        for key in [
+            "uow-18c2f-0",
+            "draft-abc",
+            "story-42",
+            "not-a-story-id",
+            "acme/api#",
+            "acme/api#x",
+            "noslash#3",
+            "a/b/c#3",
+        ] {
+            assert_eq!(parse_github_key(key), None, "{key}");
+        }
+    }
+
+    #[test]
+    fn parse_github_work_item_id_explains_each_malformed_shape() {
+        assert_eq!(
+            parse_github_work_item_id("github:o/r#20"),
+            Ok(("o/r".to_string(), 20))
+        );
+        assert!(parse_github_work_item_id("jira:X-1")
+            .unwrap_err()
+            .contains("must be"));
+        assert!(parse_github_work_item_id("github:o/r")
+            .unwrap_err()
+            .contains("missing"));
+        assert!(parse_github_work_item_id("github:nope#2")
+            .unwrap_err()
+            .contains("owner/repo"));
+        assert!(parse_github_work_item_id("github:o/r#x")
+            .unwrap_err()
+            .contains("u64"));
+    }
+
+    /// Unit keys are opaque outside this adapter: no source in the workspace splits a key on
+    /// `#` to find a repository or an issue number, with any of `split`, `rsplit`, `splitn`,
+    /// `rsplitn`, `split_once`, `rsplit_once`, `find` or `rfind`, in code or in tests. Every
+    /// other site reads the unit's own fields (`UnitOfWork::repo`, `external_ref`).
+    ///
+    /// Scans every crate's `src` and `tests` folders except two whose `#` is not a unit key
+    /// (`checks`: comment markers in scanned source; `source-check`: URL fragments). This file
+    /// is the GitHub adapter and is exempt.
+    #[test]
+    fn unit_keys_are_split_on_hash_only_in_the_github_adapter() {
+        fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return;
+            };
+            for entry in entries {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    walk(&path, out);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    out.push(path);
+                }
+            }
+        }
+        let crates = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let mut files = Vec::new();
+        for krate in std::fs::read_dir(&crates).unwrap() {
+            let krate = krate.unwrap().path();
+            let name = krate.file_name().unwrap().to_string_lossy().into_owned();
+            if matches!(name.as_str(), "checks" | "source-check") {
+                continue;
+            }
+            walk(&krate.join("src"), &mut files);
+            walk(&krate.join("tests"), &mut files);
+        }
+        assert!(
+            files.len() > 100,
+            "the scan must actually see the workspace, saw {} files",
+            files.len()
+        );
+        let mut patterns: Vec<String> = Vec::new();
+        for method in [
+            "split",
+            "rsplit",
+            "split_once",
+            "rsplit_once",
+            "split_terminator",
+            "find",
+            "rfind",
+        ] {
+            for quote in ['\'', '"'] {
+                patterns.push(format!("{method}({quote}#{quote}"));
+            }
+        }
+        for method in ["splitn", "rsplitn"] {
+            for n in 1..=4 {
+                for quote in ['\'', '"'] {
+                    patterns.push(format!("{method}({n}, {quote}#{quote}"));
+                }
+            }
+        }
+        let mut offenders: Vec<String> = Vec::new();
+        for file in files
+            .iter()
+            .filter(|f| !f.ends_with("server/src/workitems.rs"))
+        {
+            let text = std::fs::read_to_string(file).unwrap();
+            for (n, line) in text.lines().enumerate() {
+                if line.trim_start().starts_with("//") {
+                    continue;
+                }
+                if patterns.iter().any(|p| line.contains(p.as_str())) {
+                    offenders.push(format!("{}:{}", file.display(), n + 1));
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "split unit keys on `#` only in workitems.rs; found at: {offenders:#?}"
+        );
+    }
+
+    #[test]
+    fn from_native_story_lists_a_native_unit_with_no_board() {
+        let story = CanonicalStory {
+            id: "uow-1a-0".to_string(),
+            external_ref: None,
+            title: "Add rate limiting".to_string(),
+            description: "Limit the login endpoint.".to_string(),
+            status: FeatureStatus::Intake,
+            created_by: "camerata".to_string(),
+            targets: vec![],
+        };
+        let wi = WorkItem::from_native_story(&story, Some("acme/api"), 3);
+        assert_eq!(wi.id, "native:uow-1a-0");
+        assert_eq!(work_item_id_to_story_id(&wi.id), "uow-1a-0");
+        assert_eq!(wi.provider, "native");
+        assert_eq!(wi.repo, "acme/api");
+        assert_eq!(wi.number, 3);
+        assert_eq!(wi.title, "Add rate limiting");
+        assert_eq!(wi.state, "open");
+        assert!(wi.url.is_empty(), "a native unit has no board URL");
     }
 }

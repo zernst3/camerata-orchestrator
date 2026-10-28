@@ -986,6 +986,10 @@ pub(super) struct DevelopmentStateView {
 #[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize)]
 pub(super) struct UowView {
     pub story_id: String,
+    /// The repository the unit works in (the server's own field for the unit, not parsed from
+    /// the story id). `None` for a unit that names none yet.
+    #[serde(default)]
+    pub repo: Option<String>,
     #[serde(default)]
     pub branch: Option<String>,
     #[serde(default)]
@@ -1031,15 +1035,19 @@ pub(super) async fn fetch_uow(story_id: &str) -> Option<UowView> {
 }
 
 /// The branch a development run works on for this unit, derived from its Intake Repos in
-/// scope: the branch mode of the single in-scope repo or, with several, of the repo named in
-/// the unit's id (`OWNER/REPO#N`, the repo a run works in). `None` when no such repo is in
-/// scope. Uses the shared [`camerata_api_types::uow::BranchMode::branch_for_story`], so the
+/// scope: the branch mode of the single in-scope repo or, with several, of the unit's own
+/// repository (`unit_repo`, the `repo` the server reports for the unit: the repo a run works
+/// in; the unit's id is never parsed for it). `None` when no such repo is in scope. Uses the shared [`camerata_api_types::uow::BranchMode::branch_for_story`], so the
 /// branch matches the one the server derives for that repo's worktree.
-pub(super) fn run_branch_from_scope(story_id: &str, repos: &[RepoScopeView]) -> Option<String> {
+pub(super) fn run_branch_from_scope(
+    story_id: &str,
+    unit_repo: Option<&str>,
+    repos: &[RepoScopeView],
+) -> Option<String> {
     let entry = match repos {
         [only] => only,
         many => {
-            let (repo, _) = story_id.rsplit_once('#')?;
+            let repo = unit_repo?;
             many.iter().find(|r| r.repo == repo)?
         }
     };
@@ -1086,7 +1094,7 @@ pub(super) async fn ensure_run_branch(story_id: &str) -> Result<(), String> {
     if uow.branch.as_deref().is_some_and(|b| !b.trim().is_empty()) {
         return Ok(());
     }
-    match run_branch_from_scope(story_id, &uow.intake.repos) {
+    match run_branch_from_scope(story_id, uow.repo.as_deref(), &uow.intake.repos) {
         Some(branch) => set_uow_branch(story_id, &branch).await,
         None => Ok(()),
     }
@@ -1110,7 +1118,7 @@ mod run_branch_tests {
             serde_json::json!({ "mode": "new_from_base", "base": "main", "new_name": "" }),
         )];
         assert_eq!(
-            run_branch_from_scope("acme/api#7", &repos).as_deref(),
+            run_branch_from_scope("acme/api#7", Some("acme/api"), &repos).as_deref(),
             Some("camerata/acme/api#7")
         );
     }
@@ -1122,7 +1130,7 @@ mod run_branch_tests {
             serde_json::json!({ "mode": "existing", "branch_name": "feature/x" }),
         )];
         assert_eq!(
-            run_branch_from_scope("acme/api#7", &repos).as_deref(),
+            run_branch_from_scope("acme/api#7", Some("acme/api"), &repos).as_deref(),
             Some("feature/x")
         );
     }
@@ -1140,23 +1148,53 @@ mod run_branch_tests {
             ),
         ];
         assert_eq!(
-            run_branch_from_scope("acme/api#7", &repos).as_deref(),
+            run_branch_from_scope("acme/api#7", Some("acme/api"), &repos).as_deref(),
             Some("api-branch")
         );
-        assert_eq!(run_branch_from_scope("acme/other#7", &repos), None);
-        assert_eq!(run_branch_from_scope("draft-1", &repos), None);
+        assert_eq!(
+            run_branch_from_scope("acme/other#7", Some("acme/other"), &repos),
+            None
+        );
+        assert_eq!(run_branch_from_scope("draft-1", None, &repos), None);
+    }
+
+    /// The repo that decides is the unit's own, whatever its key looks like: a native unit
+    /// (`uow-3`) and a key that merely contains a `#` behave the same.
+    #[test]
+    fn the_unit_repo_decides_whatever_the_key_looks_like() {
+        let repos = [
+            scope(
+                "acme/web",
+                serde_json::json!({ "mode": "existing", "branch_name": "web-branch" }),
+            ),
+            scope(
+                "acme/api",
+                serde_json::json!({ "mode": "existing", "branch_name": "api-branch" }),
+            ),
+        ];
+        for key in ["uow-3", "other/repo#9", "no-separator"] {
+            assert_eq!(
+                run_branch_from_scope(key, Some("acme/web"), &repos).as_deref(),
+                Some("web-branch"),
+                "key {key:?}"
+            );
+        }
+        assert_eq!(run_branch_from_scope("uow-3", None, &repos), None);
     }
 
     #[test]
     fn no_repo_in_scope_gives_none() {
-        assert_eq!(run_branch_from_scope("acme/api#7", &[]), None);
+        assert_eq!(
+            run_branch_from_scope("acme/api#7", Some("acme/api"), &[]),
+            None
+        );
     }
 
     #[test]
     fn a_malformed_mode_reads_as_the_default_new_branch() {
         let repos = [scope("acme/api", serde_json::json!("bogus"))];
         assert_eq!(
-            run_branch_from_scope("acme/api#7", &repos).as_deref(),
+            run_branch_from_scope("acme/api#7", Some("acme/api"), &repos).as_deref(),
             Some("camerata/acme/api#7")
         );
     }

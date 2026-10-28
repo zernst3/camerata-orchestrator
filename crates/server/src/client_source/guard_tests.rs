@@ -484,16 +484,19 @@ async fn a_run_blocks_only_the_repos_it_is_working_on() {
     assert_eq!(code(&fx, delete_intent(false)).await, "ok");
 
     // A multi-repo UoW whose story id names a different repo but whose intake scope includes ours.
-    fx.state.uow.set_intake_repos(
-        "acme/other#3",
-        vec![crate::uow::RepoScope {
-            repo: REPO.to_string(),
-            branch: crate::uow::BranchMode::NewFromBase {
-                base: "main".into(),
-                new_name: String::new(),
-            },
-        }],
-    );
+    fx.state
+        .uow
+        .set_intake_repos(
+            "acme/other#3",
+            vec![crate::uow::RepoScope {
+                repo: REPO.to_string(),
+                branch: crate::uow::BranchMode::NewFromBase {
+                    base: "main".into(),
+                    new_name: String::new(),
+                },
+            }],
+        )
+        .unwrap();
     fx.state
         .runs
         .create("acme/other#3", "live", crate::run::RunKind::Watched);

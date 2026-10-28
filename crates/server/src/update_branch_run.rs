@@ -485,7 +485,9 @@ async fn resolve_conflicts_and_commit(
     // shape + substantive body + story-id reference in the project's format) and completes the
     // merge with `git commit -m`. The HARD-BLOCK path then guarantees a non-compliant machine
     // message surfaces as a real error rather than a silent bypass.
-    let numeric_id = crate::vcs_choke::numeric_story_id(story_id);
+    let unit = uow.get_or_default(story_id);
+    let vcs_config = &crate::vcs_choke::config_for_unit(vcs_config, &unit);
+    let numeric_id = unit.commit_reference();
     let merge_msg = crate::vcs_choke::compliant_machine_commit_message(
         vcs_config,
         "chore",

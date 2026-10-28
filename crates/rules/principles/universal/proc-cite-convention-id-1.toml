@@ -1,5 +1,5 @@
 id = "PROC-CITE-CONVENTION-ID-1"
-version = 2
+version = 3
 title = "Cite the convention ID in commit messages and PR descriptions"
 domain = "universal"
 layer = "universal"
@@ -11,7 +11,7 @@ verification = "policy"
 
 [[sources]]
 url = "CONVENTIONS.md"
-title = "CONVENTIONS.md — §PROC-CITE-CONVENTION-ID-1 + preamble (cite rule IDs in commit body)"
+title = "Project policy: a commit that applies a documented convention names that convention in the message body"
 
 [decision]
 question = "Where do commit messages and PR descriptions record which convention a change applies?"

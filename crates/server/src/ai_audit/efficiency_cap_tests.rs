@@ -470,8 +470,10 @@ fn the_batch_fallback_estimate_prices_a_known_model_and_gives_up_on_an_unknown_o
     let chunks: Vec<&[(String, String)]> = vec![files.as_slice()];
     let rules = vec![("R-1".to_string(), "d".to_string())];
     let batches: Vec<&[(String, String)]> = vec![rules.as_slice()];
-    assert!(batch_estimate_usd("claude-sonnet-5", &chunks, &batches).is_some_and(|d| d > 0.0));
-    assert!(batch_estimate_usd("no-such-model", &chunks, &batches).is_none());
+    assert!(
+        batch_estimate_usd("claude-sonnet-5", &chunks, &batches, false).is_some_and(|d| d > 0.0)
+    );
+    assert!(batch_estimate_usd("no-such-model", &chunks, &batches, false).is_none());
 }
 
 #[tokio::test]
@@ -909,5 +911,28 @@ fn a_fraction_of_a_micro_dollar_is_rounded_up_into_the_cap() {
         (m.spent_usd() - 0.000001).abs() < 1e-12,
         "{}",
         m.spent_usd()
+    );
+}
+
+/// Rank 4: the fallback estimate behind the batch spend-cap gate includes the detail
+/// regeneration step when `terse_output` is on and leaves it out when off, so a run the gate
+/// would refuse with the step counted is not admitted on an estimate that forgot it.
+#[test]
+fn the_batch_fallback_estimate_includes_detail_regeneration_only_with_terse_output_on() {
+    let files = vec![("a.rs".to_string(), "fn a() {}\n".repeat(2_000))];
+    let chunks: Vec<&[(String, String)]> = vec![files.as_slice()];
+    let rules = vec![("R-1".to_string(), "d".to_string())];
+    let batches: Vec<&[(String, String)]> = vec![rules.as_slice()];
+    let off = batch_estimate_usd("claude-sonnet-5", &chunks, &batches, false).unwrap();
+    let on = batch_estimate_usd("claude-sonnet-5", &chunks, &batches, true).unwrap();
+    assert!(on > off, "on {on} must exceed off {off}");
+
+    // A limit between the two: refused with the step counted, admitted on the estimate without it.
+    let cap = (on + off) / 2.0;
+    let meter = with_cap(cap, None);
+    assert!(meter.batch_refusal_reason(Some(off)).is_none());
+    assert!(
+        meter.batch_refusal_reason(Some(on)).is_some(),
+        "the estimate that includes the regeneration step is the one that trips the limit"
     );
 }

@@ -103,8 +103,13 @@ fn meter(applies_to_routing: bool) -> UsageMeter {
 
 /// The `(chunk's file paths, rule id)` pairs in the scan prompts the stub received.
 fn sent_pairs(rec: &Recorder) -> BTreeSet<(Vec<String>, String)> {
+    pairs_from_prompts(&rec.prompts.lock().unwrap())
+}
+
+/// [`sent_pairs`] for prompts however they were collected (a recorder, a fake batch API).
+fn pairs_from_prompts(prompts: &[String]) -> BTreeSet<(Vec<String>, String)> {
     let mut out = BTreeSet::new();
-    for prompt in rec.prompts.lock().unwrap().iter() {
+    for prompt in prompts {
         let paths: Vec<String> = prompt
             .lines()
             .filter_map(|l| l.strip_prefix("// ===== FILE: "))
@@ -248,9 +253,10 @@ async fn an_unknown_language_chunk_still_gets_a_language_scoped_rule() {
 #[tokio::test]
 async fn real_time_sends_the_pairs_the_shared_route_plan_names_and_batch_reads_the_same_plan() {
     // Real-time (`run_routed_passes`) and batch (`run_routed_passes_batch`) both take their
-    // work from `runnable_units`; `routed_pair_set` is that product. The batch path itself needs
-    // the live Message Batches API, so this pins the half that can run offline: what real-time
-    // actually sent is exactly the planned set.
+    // work from `runnable_units`; `routed_pair_set` is that product. This pins the real-time
+    // half: what it actually sent is exactly the planned set. The batch half is driven through
+    // `BatchSeam` and a fake Message Batches API (`batch_default_tests::FakeBatch`) by the
+    // `batch_mode_*` tests below, which read the submitted items back the same way.
     let rules = vec![
         plain("ARCH-1"),
         plain("RUST-X-1"),
@@ -470,4 +476,249 @@ fn the_switch_is_recorded_in_the_run_line() {
     assert!(efficiency(false)
         .render()
         .contains("applies_to_routing=off"));
+}
+
+// ── batch mode through the fake Message Batches API ─────────────────────────────────────────
+
+use super::batch_default_tests::{FakeBatch, Reply};
+
+/// `audit_repo` in `ScanMode::Batch` over [`files`], the model seam being a [`BatchSeam`] around
+/// a fake Message Batches API that answers by `script` (submission round, custom id).
+async fn run_batch(
+    rules: &[AuditRule],
+    applies_to_routing: bool,
+    script: impl Fn(usize, &str) -> Reply + Send + Sync + 'static,
+) -> (std::sync::Arc<FakeBatch>, Vec<FailedPass>) {
+    let api = std::sync::Arc::new(FakeBatch::new(script));
+    let seam = BatchSeam::new(api.clone());
+    let m = meter(applies_to_routing);
+    let (_f, _p, _r, failed, _s) = audit_repo(
+        &seam,
+        REPO,
+        &files(),
+        rules,
+        &[],
+        &std::collections::HashMap::new(),
+        None,
+        None,
+        ScanMode::Batch,
+        false,
+        None,
+        None,
+        Some(&m),
+        None,
+    )
+    .await
+    .expect("the fake batch API answers every item");
+    (api, failed)
+}
+
+/// Every submitted item's prompt, over every submission.
+fn submitted_prompts(api: &FakeBatch) -> Vec<String> {
+    api.submitted_items()
+        .into_iter()
+        .flatten()
+        .map(|(_, _, prompt)| prompt)
+        .collect()
+}
+
+#[tokio::test(start_paused = true)]
+async fn batch_mode_submits_the_planned_pairs_with_routing_on_and_one_unrouted_unit_off() {
+    let rules = vec![
+        plain("ARCH-1"),
+        plain("RUST-X-1"),
+        scoped("SUPA-RLS-1", &["**/*.sql"], &[]),
+        scoped("LANG-ONLY-1", &[], &["rust"]),
+    ];
+
+    // ON: exactly the (chunk paths, rule id) pairs `runnable_units` names, one submission per
+    // route group.
+    let plan = plan_routes(&rules, &files(), true);
+    let planned = pair_set_of(&runnable_units(&files(), &plan, None, &mut Vec::new()));
+    let (api, failed) = run_batch(&rules, true, |_, _| Reply::Empty).await;
+    assert!(failed.is_empty(), "{failed:?}");
+    assert_eq!(pairs_from_prompts(&submitted_prompts(&api)), planned);
+    assert_eq!(
+        api.submitted_items().len(),
+        runnable_units(&files(), &plan, None, &mut Vec::new()).len(),
+        "each route group is its own Message Batch"
+    );
+    let flat = rule_file_pairs(&planned);
+    assert!(
+        !has(&flat, "src/app.tsx", "SUPA-RLS-1"),
+        "the routed plan really is narrower than the unrouted one"
+    );
+
+    // OFF: the single unrouted unit, every rule with every chunk, in ONE submission.
+    let plan_off = plan_routes(&rules, &files(), false);
+    let units = batch_units(&files(), &rules, &plan_off, false, None, &mut Vec::new());
+    assert_eq!(units.len(), 1);
+    let every_pair: BTreeSet<(Vec<String>, String)> = chunk_files(&files(), CHUNK_DIGEST_CHARS)
+        .iter()
+        .flat_map(|c| {
+            let paths: Vec<String> = c.iter().map(|(p, _)| p.clone()).collect();
+            rules.iter().map(move |r| (paths.clone(), r.id.clone()))
+        })
+        .collect();
+    let (api, failed) = run_batch(&rules, false, |_, _| Reply::Empty).await;
+    assert!(failed.is_empty(), "{failed:?}");
+    assert_eq!(api.submitted_items().len(), 1, "one unrouted submission");
+    let sent = pairs_from_prompts(&submitted_prompts(&api));
+    assert_eq!(sent, pair_set_of(&units));
+    assert_eq!(sent, every_pair, "OFF: every rule with every chunk");
+}
+
+/// Three groups, in plan order: the `rust` language group, the declared-scope group, and the
+/// cross-cutting `All` group last.
+fn three_group_rules() -> Vec<AuditRule> {
+    vec![
+        plain("ARCH-1"),
+        plain("RUST-X-1"),
+        scoped("SUPA-RLS-1", &["**/*.sql"], &[]),
+    ]
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_errored_item_in_the_second_group_is_a_failed_pass_naming_that_group() {
+    let rules = three_group_rules();
+    let units = routed_units(&files(), &plan_routes(&rules, &files(), true));
+    assert_eq!(units.len(), 3);
+    let second = &units[1];
+    // Submission round 0 is group 1, rounds 1 and 2 are group 2's first submission and its one
+    // resubmission, round 3 is group 3.
+    let (api, failed) = run_batch(&rules, true, |round, id| {
+        if (1..=2).contains(&round) && id == "c0-b0" {
+            Reply::Errored
+        } else {
+            Reply::Empty
+        }
+    })
+    .await;
+    assert_eq!(api.submitted_items().len(), 4, "3 groups + 1 resubmission");
+    assert_eq!(failed.len(), 1, "{failed:?}");
+    assert!(
+        failed[0].pass.contains(&second.label),
+        "the row names the second group {}: {}",
+        second.label,
+        failed[0].pass
+    );
+    for other in [&units[0], &units[2]] {
+        assert!(
+            !failed[0].pass.contains(&other.label),
+            "and not {}: {}",
+            other.label,
+            failed[0].pass
+        );
+    }
+    assert!(
+        failed[0]
+            .reason
+            .contains("resubmitted once and failed again"),
+        "{}",
+        failed[0].reason
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn advisory_disabled_reaches_the_task_line_of_every_batch_group() {
+    let rules = three_group_rules();
+    let units = routed_units(&files(), &plan_routes(&rules, &files(), true));
+    assert!(
+        units[0].advisory_disabled && units[1].advisory_disabled && !units[2].advisory_disabled,
+        "only the All group runs the novel-issue pass"
+    );
+    let (api, failed) = run_batch(&rules, true, |_, _| Reply::Empty).await;
+    assert!(failed.is_empty(), "{failed:?}");
+    let submissions = api.submitted_items();
+    assert_eq!(submissions.len(), 3);
+    for (unit, items) in units.iter().zip(&submissions) {
+        for (_, _, prompt) in items {
+            assert!(
+                prompt.contains(&pass_task_line(!unit.advisory_disabled, 0, 1, true)),
+                "{}: the task line follows advisory_disabled={}: {prompt}",
+                unit.label,
+                unit.advisory_disabled
+            );
+            assert_eq!(
+                prompt.contains("ALSO flag any other genuine issues"),
+                !unit.advisory_disabled,
+                "{}",
+                unit.label
+            );
+        }
+    }
+}
+
+// ── batch_default off: a later group's failure keeps the earlier groups' paid replies ───────
+
+/// `run_routed_passes_batch` over [`three_group_rules`] with `batch_default` OFF (where a failed
+/// submit is fatal to its `run_passes_batch` call). Routing is on or off as asked.
+async fn run_routed_batch_default_off(
+    api: &FakeBatch,
+    applies_to_routing: bool,
+) -> anyhow::Result<PassesOut> {
+    let mut config = efficiency(applies_to_routing);
+    config.batch_default = false;
+    let m = UsageMeter::with_controls(RunControls {
+        efficiency: config,
+        max_cost_usd: None,
+        estimate_hint_usd: None,
+        fix_model: None,
+    });
+    let rules = three_group_rules();
+    let plan = plan_routes(&rules, &files(), applies_to_routing);
+    run_routed_passes_batch(
+        api,
+        REPO,
+        &files(),
+        &rules,
+        &plan,
+        "",
+        &std::collections::HashSet::new(),
+        None,
+        None,
+        15,
+        Some(&m),
+        &mut Vec::new(),
+    )
+    .await
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_later_groups_batch_failure_keeps_the_earlier_groups_paid_replies() {
+    let units = routed_units(&files(), &plan_routes(&three_group_rules(), &files(), true));
+    // Group 2's submission is refused; groups 1 and 3 answer with one finding each.
+    let api = FakeBatch::new(|_, _| Reply::Ok).failing_submit_on(1);
+    let (findings, _proposed, _requested, ok, failures) = run_routed_batch_default_off(&api, true)
+        .await
+        .expect("one group failing must not discard the others");
+    assert_eq!(ok, 2, "groups 1 and 3 answered");
+    assert_eq!(
+        findings.len(),
+        2,
+        "the completed groups' findings are kept: {findings:?}"
+    );
+    assert_eq!(failures.len(), 1);
+    assert!(
+        failures[0].pass.contains(&units[1].label),
+        "the failed row names group 2 ({}): {}",
+        units[1].label,
+        failures[0].pass
+    );
+    assert!(
+        failures[0].error.contains("submission refused"),
+        "and carries the real error: {}",
+        failures[0].error
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn when_no_group_completes_the_error_still_propagates() {
+    // Routing off: one unrouted group, so its failure is every group's failure. Nothing was
+    // paid for, so there is nothing to keep, and the caller gets the error as before.
+    let api = FakeBatch::new(|_, _| Reply::Ok).failing_submit_on(0);
+    let err = run_routed_batch_default_off(&api, false)
+        .await
+        .expect_err("no group completed");
+    assert!(format!("{err:#}").contains("submission refused"), "{err:#}");
 }

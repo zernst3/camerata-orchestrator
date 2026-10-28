@@ -1,5 +1,5 @@
 id = "ARCH-SHARED-CONSTANT-1"
-version = 3
+version = 4
 title = "A domain value such as a queue name, a route or a rate is defined once as a named constant and imported wherever it is used, never repeated as a bare literal across modules"
 domain = "universal"
 layer = "universal"
@@ -14,27 +14,33 @@ inspectable = true
 # does not make.
 max_severity = "low"
 default = true
-# `policy`, not `grounded`: the convention that a domain value has one named home is deliberate
-# project policy, and no external authority states it. Related controls (not citations, and
-# deliberately not in `[[sources]]`): SonarSource S1192 ("String literals should not be
-# duplicated") counts repeats per file against a threshold of three, and eslint
-# `no-magic-numbers` flags unnamed numbers per file; neither states the cross-file rule for a
-# domain value, and neither separates a queue name from a translation key or a class name.
+# `grounded`: CWE-1106 states the principle, that a literal used where a named constant belongs
+# is a maintainability weakness. The cross-module form and the narrow four-shape definition of a
+# domain value specified here are this project's own.
+# Related controls (not citations, and deliberately not in `[[sources]]`): SonarSource S1192
+# ("String literals should not be duplicated") counts repeats per file against a threshold of
+# three, and eslint `no-magic-numbers` flags unnamed numbers per file; neither states the
+# cross-file rule for a domain value, and neither separates a queue name from a translation key
+# or a class name.
 # Only the owner sets `verified`.
-verification = "policy"
+verification = "grounded"
 qualifies = "Deterministically checkable, with no judgment involved, but deliberately narrow: only four kinds of value are treated as domain values, so the check misses most of what a person would call one rather than reporting something that is not. The four are a lowercase name split by a hyphen, a colon or a slash (a queue, topic, channel, bucket, feature flag, cache-key prefix or analytics event such as `orders-high` or `user:signup`), a route template (`/api/v1/orders`, `/orders/:id`), a multi-word upper-case token (`ORDER_CREATED`), and a decimal rate strictly between 0 and 1 with at least two significant digits (so `0.12` and `0.075`, not `0.9` or `0.001`; never 0.5, 0.25 or 0.75) that appears only as an operand of arithmetic (`total * 0.12`; string concatenation is not arithmetic). A value qualifies when it is written as a bare literal in at least two files of the same language family and the same package, or when it already has a named constant and is written as a bare literal in at least one other file of that package. A package is the nearest directory with a package manifest, or one application of a monorepo (`apps/web`, `packages/api`); two applications that cannot share code are not compared. The same text in two different languages is a shared contract, not a shared constant, and is never reported. A constant counts as the home when it is the initializer of a module-level constant, including inside an object or array, through `as const`, `Object.freeze`, a lazily initialised static, an enum member, a namespace member, a default or CommonJS export, a function that only returns the value, or an attribute of a module-level class. A file that holds the constant is not counted as a copy of it, and a constant defined in a configuration file counts as the home although copies in configuration files are never counted. Not reported: protocol text (header names, MIME types, encodings, cache and fetch tokens, locale tags, version numbers, identifiers), platform names, translation keys (a value passed to a translation function, or present as a key in a translation catalogue), CSS class names, utility class names and CSS keywords, HTML attribute values other than a route, DOM element ids and selectors, environment variable names (including those read from a request's metadata), URL names passed to a reverse or redirect call, cipher, model, region and error-code identifiers, members of a type union, enum or literal type, module specifiers, logger and span names, query-builder fragments, DOM and runtime event names, the keys of an object or a subscript, attribute arguments other than routes, file paths and URLs. Test code (test files and test-only modules and functions), fixture, seed, configuration and settings files, migrations, scripts, documentation, examples, generated code, declaration files and committed build output are not counted. Single words, dotted keys, snake_case strings and integers are out of scope, as are values inside Rust macro bodies, interpolated strings and string concatenations. A value that has two or more named homes and no bare copy is not reported. No off-the-shelf linter rule compares a domain value across modules, so this check has no external equivalent."
 
 [[sources]]
+url = "https://cwe.mitre.org/data/definitions/1106.html"
+title = "MITRE CWE-1106: Insufficient Use of Symbolic Constants (literal values used where a named constant belongs make the code harder to maintain)"
+
+[[sources]]
 url = "docs/design/2026-10-21_w29-detector-implementation.md"
-title = "Design: the W29 detector layer, ARCH-SHARED-CONSTANT-1, the algorithm and its traps"
+title = "Design notes: how the check finds a domain value repeated as a bare literal across modules, and the cases it must not report"
 
 [[sources]]
 url = "CORPUS_WORK_ORDER_CONSISTENCY_RULES.md"
-title = "Corpus work order: consistency rules, section 3, a domain value has one named home"
+title = "Project policy: a domain value has one named home"
 
 [[sources]]
 url = "docs/OVERNIGHT_DECISIONS.md"
-title = "Decisions log, DECISIONS MADE, 2026-10-21: the narrow four-shape definition of a domain literal; two homes with no bare copy is not a finding"
+title = "Decision record: only four narrow shapes count as a domain value, and two named homes with no bare copy are not a finding"
 
 [decision]
 question = "Where does the codebase define a queue name, a route, an event name or a rate that several modules use?"
