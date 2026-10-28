@@ -74,6 +74,14 @@ H. By 08:30: morning summary at the top of `docs/OVERNIGHT_DECISIONS.md`; the PR
 
 ## Status log (newest first)
 
+- 00:10: corpus text + Phase 0 done in its worktree (190 rules bumped; 415 rules tests green);
+  added as a fifth branch to the integration merge. Showcased rules final: log-consistency v3
+  (approved em-dash removal changed two clauses vs the site's earlier word-for-word text, so the
+  site must refresh from the file), hardcoded-secrets v2 (sources now CWE-798 + OWASP Secrets
+  Management; the "secret-detection tool" edit landed in the option directive because the rule
+  has no qualifies field), idempotency-keys v2. Left for later (outside the brief): ~14
+  pre-existing em dashes in untouched directives, three rules' sources still citing an internal
+  ADR, sibling observability rules' qualifies wording, a few Oxford commas in untouched lines.
 - 00:05: Wave D merged in its worktree with all 9 review fixes (5,597 tests; 440 rules). One
   integration builder now combines rank 4, item 21 + rank 2, rank 7 and Wave D onto the working
   branch (resolving the overlapping ai_audit/batch/corpus conflicts once) so a single full gate
