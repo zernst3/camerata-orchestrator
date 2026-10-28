@@ -4,13 +4,13 @@
 
 ## What Camerata does for an inspection
 
-Camerata inspects a codebase. It reads the code against a library of written, versioned rules and produces a report of findings. Every finding names the rule it was raised under, and each rule points to the standard it rests on: a published style guide, a security reference or a vendor's own documentation. Any rule that can raise a high or critical finding must carry a citation and a fix, and a corpus test enforces that. A person reviews every finding in a triage queue (confirm, ignore, false positive or tech debt) before it goes into a deliverable.
+Camerata inspects a codebase. It reads the code against a library of written, versioned rules and produces a report of findings. Every finding names the rule it was raised under, and rules point to the standard they rest on (a published style guide, a security reference or a vendor's own documentation), and the few without an outside standard say why. Any rule that can raise a high or critical finding must carry a citation and a fix, and a corpus test enforces that. In the desktop app a person reviews findings in a triage queue (confirm, ignore, false positive or tech debt) before export. The headless `camerata inspect` export carries every finding untriaged and says so: the report is stamped as an unreviewed draft.
 
 Two kinds of check run. A deterministic scan answers the questions that have a provable answer: hardcoded secrets, SQL built by string concatenation, file paths that escape their directory, plus the project's own linters. An AI pass handles the judgment calls, such as a write path with no authorization check or a service that bypasses the repository layer. No AI-raised candidate becomes a finding until it has passed severity calibration and de-duplication, and anything the engine is unsure of is held for a person to decide.
 
 The rules are plain TOML files in [`crates/rules/principles/`](crates/rules/principles/), so you can read exactly what an inspection checks. The library holds 440 rules across 22 domains, each one versioned and locked by content hash so no rule can change silently. [`docs/RULES_REFERENCE.md`](docs/RULES_REFERENCE.md) documents the format and [`docs/RULE_AUTHORING.md`](docs/RULE_AUTHORING.md) the authoring workflow.
 
-- **A sample report:** the real report pipeline builds the PDF, the workbook and `findings.json` from a hand-built fixture (not a scan of a real codebase). `cargo test -p camerata-server --test generate_sample_report -- --ignored` writes them to `sample-report/` and needs Typst 0.15 on `PATH`.
+- **Generate a sample report:** the real report pipeline builds the PDF, the workbook and `findings.json` from a hand-built fixture (not a scan of a real codebase). `cargo test -p camerata-server --test generate_sample_report -- --ignored` writes them to `sample-report/` and needs Typst 0.15 on `PATH`.
 - **Data handling:** [`DATA_HANDLING.md`](DATA_HANDLING.md) covers what leaves your machine during an inspection and how to delete what stays.
 
 **The honest boundary.** What this repository can show you is the engine's behavior on fixture repositories and the test suite that pins it. It does not claim, and the repo holds no published measurement of, how precise or complete the AI pass is on a large real-world codebase, so treat results at that scale as unproven until you have run it on your own code and reviewed the findings yourself.
@@ -29,8 +29,7 @@ In the desktop app the findings then go to triage, and onboarding can turn the t
 
 ### What a finding IS: five kinds, not a yes/no
 
-Until 2026-10-09 the post-inspection data model was binary: a row was a violation or it was not.
-It is not binary any more. Every exported row now carries an explicit `kind`, and the five kinds
+A finding is not a yes/no. Every exported row carries an explicit `kind`, and the five kinds
 are different statements about the codebase, not five severities:
 
 | Kind | What it says | Ships at |
@@ -50,7 +49,7 @@ rather than silently counted as an accusation. The taxonomy is defined once, in
 ## Run an inspection headless
 
 `camerata inspect` runs the whole inspection pipeline in-process with no server and no UI, and
-writes the same product-export ZIP the cockpit's export button produces. This costs real model
+writes the same product-export ZIP the cockpit's export button produces, with no triage decisions applied. This costs real model
 tokens, so the two commands below are a pair: run the gate before you pay for anything.
 
 ```
@@ -86,9 +85,9 @@ I architected Camerata and orchestrated its build: supervised AI agents wrote th
 |---|---|
 | Rust | about 475,000 lines across 29 crates and one maintainer tool, including tests |
 | Tests | 8,500+ automated tests; test code is roughly 45% of all code |
-| Test quality | mutation testing on the deterministic checkers: the suite catches 97.9% of deliberately injected faults |
+| Test quality | mutation testing on the checks crate: the suite catches 97.9% of deliberately injected faults |
 | Rule library | 440 rules across 22 domains, each one versioned and locked by content hash so no rule can change silently |
-| Commits | 1,900+, every merge gated on formatting, zero-warning lints and the full test suite |
+| Commits | 1,900+, and every push to the main branches runs formatting, zero-warning lints and the full test suite in CI |
 
 What I am proudest of is the discipline behind those numbers, not the numbers themselves:
 
@@ -108,8 +107,8 @@ What I am proudest of is the discipline behind those numbers, not the numbers th
 
 ## Family
 
-- [camerata-ai](../camerata-ai): the conventions engine the corpus format originates from. The corpus is vendored into this repo at `crates/rules/principles/` (440 TOML rules as of 2026-10-28), so the workspace is self-contained; override with `CAMERATA_CORPUS_PATH`. Field-by-field reference for the rule schema: [`docs/RULES_REFERENCE.md`](docs/RULES_REFERENCE.md); the authoring workflow is [`docs/RULE_AUTHORING.md`](docs/RULE_AUTHORING.md).
-- [rust-chorale](../rust-chorale): the headless, virtualized Dioxus / Leptos table library used for tabular surfaces.
+- camerata-ai: the conventions engine the corpus format originates from. The corpus is vendored into this repo at `crates/rules/principles/` (440 TOML rules as of 2026-10-28), so the workspace is self-contained; override with `CAMERATA_CORPUS_PATH`. Field-by-field reference for the rule schema: [`docs/RULES_REFERENCE.md`](docs/RULES_REFERENCE.md); the authoring workflow is [`docs/RULE_AUTHORING.md`](docs/RULE_AUTHORING.md).
+- rust-chorale: the headless, virtualized Dioxus / Leptos table library used for tabular surfaces.
 - this repo: the conductor that leads the ensemble.
 
 ## License
