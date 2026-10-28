@@ -132,6 +132,17 @@ struct ProjectView {
     /// older server -> empty.
     #[serde(default)]
     client_name: String,
+    /// The project is a client engagement (`camerata_server::client_lock`). Absent → on, the
+    /// server's own default for a project persisted before the field existed.
+    #[serde(default = "default_client_engagement")]
+    client_engagement: bool,
+    /// The operator's opt-in to run the client's own tooling for this engagement. Absent → off.
+    #[serde(default)]
+    client_tooling_opt_in: bool,
+}
+
+fn default_client_engagement() -> bool {
+    true
 }
 
 /// One project-memory entry as the BFF reports it (mirrors the server's `MemoryEntry`). Enum-ish
@@ -576,6 +587,43 @@ pub(super) async fn set_project_backend(
         return None;
     }
     serde_json::from_value(body.get("project")?.get("backend")?.clone()).ok()
+}
+
+/// Set whether a project is a client engagement and whether the operator opts in to running the
+/// client's own tooling (`POST /api/projects/:id/client-engagement`, see
+/// `set_client_engagement_handler`). Like [`set_project_backend`], this is compliance-relevant, so
+/// it returns the server's ECHOED `(client_engagement, client_tooling_opt_in)`, never the values
+/// asked for. `None` on any failure.
+pub(super) async fn set_project_client_engagement(
+    id: &str,
+    client_engagement: bool,
+    client_tooling_opt_in: bool,
+) -> Option<(bool, bool)> {
+    let resp = reqwest::Client::new()
+        .post(format!(
+            "{}/api/projects/{}/client-engagement",
+            crate::bff_base(),
+            id
+        ))
+        .json(&serde_json::json!({
+            "client_engagement": client_engagement,
+            "client_tooling_opt_in": client_tooling_opt_in,
+        }))
+        .send()
+        .await
+        .ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let body: serde_json::Value = resp.json().await.ok()?;
+    if body.get("ok").and_then(|v| v.as_bool()) != Some(true) {
+        return None;
+    }
+    let project = body.get("project")?;
+    Some((
+        project.get("client_engagement")?.as_bool()?,
+        project.get("client_tooling_opt_in")?.as_bool()?,
+    ))
 }
 
 /// Set the model for ONE non-fleet AI step on a project. Uses the
@@ -3083,6 +3131,12 @@ fn SettingsView(global_only: bool) -> Element {
                         p { class: "section-label settings-label", "Backend" }
                         rules::BackendEditor { project: p_owned.clone() }
 
+                        // ── Client engagement (per-project) ────────────────────
+                        // Right after the backend: it decides which backends and models this
+                        // project may use at all, and whether its own tooling may run.
+                        p { class: "section-label settings-label", "Client engagement" }
+                        rules::ClientEngagementEditor { project: p_owned.clone() }
+
                         // ── Loop guard ────────────────────────────────────────
                         LoopGuardControl {}
 
@@ -4771,6 +4825,40 @@ mod tests {
         let result = super::set_project_backend("p-1", ProjectBackend::Api).await;
 
         assert_eq!(result, Some(ProjectBackend::Api));
+    }
+
+    /// `set_project_client_engagement` POSTs both flags and hands back the server's ECHOED
+    /// values (here the server kept the opt-in off), never the values it asked for.
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn set_project_client_engagement_posts_both_flags_and_returns_echoed_values() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/projects/p-1/client-engagement"))
+            .and(body_json(serde_json::json!({
+                "client_engagement": true,
+                "client_tooling_opt_in": true,
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "project": {
+                    "id": "p-1",
+                    "name": "Acme",
+                    "client_engagement": true,
+                    "client_tooling_opt_in": false,
+                }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_BFF_URL", server.uri());
+        let result = super::set_project_client_engagement("p-1", true, true).await;
+
+        assert_eq!(result, Some((true, false)));
     }
 
     /// An `{ ok: false, message: "..." }` response (e.g. unknown project id) must NOT be read

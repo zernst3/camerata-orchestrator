@@ -58,9 +58,30 @@ impl RepoCheckout {
     }
 }
 
-/// Local path for a repo: `<root>/<owner>/<repo>`.
+/// Local path for a repo: `<root>/<owner>/<repo>`. Only meaningful for a spec that passes
+/// [`is_owner_repo_spec`]; [`resolve_repo_dir`] and [`clone_or_pull`] check that first.
 pub fn repo_dir(root: &Path, repo: &str) -> PathBuf {
     root.join(repo)
+}
+
+/// True when `repo` is exactly `owner/repo`: two non-empty components of letters, digits, `-`,
+/// `_` and `.`, neither of them `.` or `..`. Anything else could name a folder another repo also
+/// uses (a bare `owner` is the parent of every one of that owner's checkouts, `owner/repo/x` sits
+/// inside `owner/repo`) or one outside the workspace (`../x`), so it gets no checkout folder:
+/// each repo, and so each client, keeps its own.
+pub fn is_owner_repo_spec(repo: &str) -> bool {
+    let mut parts = repo.split('/');
+    let (Some(owner), Some(name), None) = (parts.next(), parts.next(), parts.next()) else {
+        return false;
+    };
+    let component_ok = |c: &str| {
+        !c.is_empty()
+            && c != "."
+            && c != ".."
+            && c.chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
+    };
+    component_ok(owner) && component_ok(name)
 }
 
 /// True if `dir` holds a git working copy.
@@ -126,12 +147,20 @@ pub fn git_vars_to_remove(mode: GitEnv, ambient: impl Iterator<Item = String>) -
     out
 }
 
+/// Arguments that stop git running a command the repository's own configuration names when it
+/// inspects the working tree. A checkout handed to Camerata (a client's folder, linked rather
+/// than cloned) carries its own `.git/config`, and `core.fsmonitor` there is an executable git
+/// runs on `git status` and other index refreshes. Passed before the subcommand on every git
+/// Camerata runs inside a checkout.
+pub const GIT_NO_REPO_COMMANDS: [&str; 2] = ["-c", "core.fsmonitor=false"];
+
 /// THE ONE way this crate starts `git`: in `cwd`, killed if the future is dropped
 /// (ARCH-RESOURCE-LIFECYCLE-1), with the repository-redirecting variables removed
 /// ([`REPO_REDIRECTING_VARS`], and `GIT_CONFIG*` per [`GitEnv`]) and `GIT_OPTIONAL_LOCKS=0` so a
 /// read never takes the index lock.
 pub fn git_command(cwd: Option<&Path>, mode: GitEnv) -> Command {
     let mut cmd = Command::new("git");
+    cmd.args(GIT_NO_REPO_COMMANDS);
     if let Some(dir) = cwd {
         cmd.current_dir(dir);
     }
@@ -381,6 +410,20 @@ pub async fn clone_or_pull(root: &Path, repo: &str, token: &str) -> RepoCheckout
             "invalid repo identifier (internal sentinel leaked) — reselect the rule".to_string(),
         );
     }
+    if !is_owner_repo_spec(repo) {
+        // Built directly, not through `RepoCheckout::error`, which would probe the folder the
+        // bad spec names.
+        return RepoCheckout {
+            repo: repo.to_string(),
+            cloned: false,
+            path: String::new(),
+            branch: None,
+            dirty: false,
+            detail: "invalid repo identifier: expected owner/repo, so each repo gets its own \
+                     folder"
+                .to_string(),
+        };
+    }
     let dir = repo_dir(root, repo);
     let authed = authed_url(repo, token);
 
@@ -628,6 +671,9 @@ pub fn resolve_repo_dir(
     camerata_api_types::uow::validate_repo_name(repo).ok()?;
     if let Some(p) = override_path.filter(|p| !p.trim().is_empty()) {
         return Some(PathBuf::from(p));
+    }
+    if !is_owner_repo_spec(repo) {
+        return None;
     }
     workspace_root
         .filter(|r| !r.trim().is_empty())
@@ -2178,6 +2224,59 @@ mod tests {
         let dir = repo_dir(root, "acme/api");
         assert!(dir.ends_with("acme/api"));
         assert!(dir.starts_with("/Users/auditor/Camerata"));
+    }
+
+    #[test]
+    fn only_a_plain_owner_repo_spec_names_a_checkout_folder() {
+        for ok in ["acme/api", "Acme-Corp/api.v2", "a_b/c-d"] {
+            assert!(is_owner_repo_spec(ok), "{ok}");
+        }
+        for refused in [
+            "acme",
+            "acme/",
+            "/api",
+            "acme/api/extra",
+            "../api",
+            "acme/..",
+            "acme/.",
+            "./api",
+            "acme\\api",
+            "acme/api\u{0}",
+            "",
+            " acme/api",
+        ] {
+            assert!(!is_owner_repo_spec(refused), "{refused:?}");
+        }
+    }
+
+    /// Each repo, and so each client, gets its own folder: two distinct specs never resolve to
+    /// the same folder or to one inside the other, and a spec that could (a bare owner, a
+    /// traversal) resolves to no folder at all.
+    #[test]
+    fn distinct_repos_never_share_or_nest_a_checkout_folder() {
+        let root = "/work";
+        let a = resolve_repo_dir(None, Some(root), "client-a/api").unwrap();
+        let b = resolve_repo_dir(None, Some(root), "client-b/api").unwrap();
+        let c = resolve_repo_dir(None, Some(root), "client-a/web").unwrap();
+        for (x, y) in [(&a, &b), (&a, &c), (&b, &c)] {
+            assert_ne!(x, y);
+            assert!(!x.starts_with(y) && !y.starts_with(x), "{x:?} vs {y:?}");
+        }
+        assert_eq!(resolve_repo_dir(None, Some(root), "client-a"), None);
+        assert_eq!(resolve_repo_dir(None, Some(root), "client-a/api/x"), None);
+        assert_eq!(resolve_repo_dir(None, Some(root), "../../etc"), None);
+    }
+
+    #[tokio::test]
+    async fn clone_or_pull_refuses_a_spec_that_is_not_owner_repo() {
+        let root = tempfile::tempdir().unwrap();
+        let out = clone_or_pull(root.path(), "../escape", "unused-token").await;
+        assert!(!out.cloned);
+        assert!(out.detail.contains("owner/repo"), "{}", out.detail);
+        assert!(
+            std::fs::read_dir(root.path()).unwrap().next().is_none(),
+            "nothing was created"
+        );
     }
 
     #[test]

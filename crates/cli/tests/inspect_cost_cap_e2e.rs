@@ -115,6 +115,8 @@ fn args(repo: &Path, export: &Path, cap: Option<f64>) -> InspectArgs {
         max_cost_usd: cap,
         efficiency: vec!["warm_schedule=off".to_string()],
         client: "Example Client Ltd".to_string(),
+        client_engagement: true,
+        run_client_tooling: false,
     }
 }
 
@@ -285,6 +287,9 @@ async fn a_spend_limit_with_an_unpriced_model_is_refused_before_the_estimate_and
         let mut a = args(repo.path(), &export, cap);
         a.model = Some("some-free-model:free".to_string());
         a.efficiency = Vec::new();
+        // Not an Anthropic model, so only the maintainer's own run may use it: a client
+        // engagement refuses it even earlier (see tests/inspect_client_lock.rs).
+        a.client_engagement = false;
         a
     };
     let log = Arc::new(Mutex::new(Vec::new()));

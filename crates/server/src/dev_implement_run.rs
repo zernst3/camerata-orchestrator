@@ -132,6 +132,38 @@ pub(crate) fn read_memory_proposals(session_dir: &std::path::Path) -> Vec<Memory
 /// exactly — this module has no `AppState` in scope, only the `Option<Arc<GovernanceLog>>`
 /// threaded in as a parameter). A `None` log is a silent no-op; a write error is
 /// `tracing::warn!`-logged and swallowed, never surfacing to the run.
+/// Why a governed dev run must not start on `project` with `model` under the client-engagement
+/// lock ([`crate::client_lock`]), or `None` when it may: the backend and model must pass the
+/// lock, and since the dev loop builds and tests the repository (its layer-2 checks execute the
+/// repository's own code), a client engagement also needs the operator's opt-in to run client
+/// tooling.
+pub(crate) fn dev_loop_client_lock_refusal(
+    project: &crate::project::Project,
+    model: &str,
+) -> Option<String> {
+    let models = [("the implementer".to_string(), model.to_string())];
+    if let Some(why) =
+        crate::client_lock::refusal(project.client_engagement, project.backend, &models)
+    {
+        return Some(format!(
+            "{why} In this project's Settings, set the backend to API and the model to a Claude \
+             model, or turn off Client engagement if this is your own development."
+        ));
+    }
+    if !crate::client_lock::client_tooling_allowed(
+        project.client_engagement,
+        project.client_tooling_opt_in,
+    ) {
+        return Some(
+            "This is a client engagement, and the dev loop builds and tests the client's code \
+             (its checks run the repository's own build, tests and scripts). Opt in to running \
+             client tooling in this project's Settings to allow it. Nothing was run."
+                .to_string(),
+        );
+    }
+    None
+}
+
 async fn record_governance(
     log: &Option<Arc<camerata_persistence::GovernanceLog>>,
     event: camerata_persistence::GovernanceEvent,
@@ -334,9 +366,8 @@ async fn worktree_diff_from_base(dir: &std::path::Path, base_commit: &str) -> St
     if base_commit.is_empty() {
         return String::new();
     }
-    match tokio::process::Command::new("git")
+    match crate::workspace::git_command(Some(dir), crate::workspace::GitEnv::Isolated)
         .args(["diff", &format!("{base_commit}..HEAD")])
-        .current_dir(dir)
         .output()
         .await
     {
@@ -1264,9 +1295,8 @@ pub async fn execute_dev_implement_run(
     // Capture the branch-point commit (HEAD before any agent work). This is the
     // base for `worktree_diff_from_base` — even after `commit_all`, we can diff
     // against this ref to see all changes introduced by the run.
-    let base_commit = tokio::process::Command::new("git")
+    let base_commit = crate::workspace::git_command(Some(&dir), crate::workspace::GitEnv::Isolated)
         .args(["rev-parse", "HEAD"])
-        .current_dir(&dir)
         .output()
         .await
         .ok()
@@ -1354,11 +1384,19 @@ pub async fn execute_dev_implement_run(
     // function for the project-memory sink above; a project-less run (no active project)
     // floors to `ProjectBackend::Cli` — the same zero-setup default a freshly-created
     // project gets.
-    let backend = project_id
-        .as_deref()
-        .and_then(|id| projects.get(id))
-        .map(|p| p.backend)
-        .unwrap_or_default();
+    let run_project = project_id.as_deref().and_then(|id| projects.get(id));
+    let backend = run_project.as_ref().map(|p| p.backend).unwrap_or_default();
+    // The client-engagement lock (`crate::client_lock`): a client engagement's dev loop runs only
+    // on the Anthropic API with an Anthropic model, and because it builds and tests the client's
+    // code (the layer-2 checks below run the repository's own `cargo test`, `npm` scripts and
+    // `.camerata/checks.toml` commands), only with the operator's opt-in to run client tooling.
+    if let Some(why) = run_project
+        .as_ref()
+        .and_then(|p| dev_loop_client_lock_refusal(p, &model))
+    {
+        fail(&runs, &uow, why);
+        return;
+    }
     let driver: Arc<dyn AgentDriver> = match build_agent_driver(
         &model,
         &registry,
@@ -2278,6 +2316,55 @@ mod tests {
     use super::*;
     use camerata_worktracker::investigation::{DecisionOutcome, DecisionRecord};
 
+    // ── H2: the client-engagement lock on the dev loop ──────────────────────
+
+    fn lock_project(backend: &str, client: bool, opt_in: bool) -> crate::project::Project {
+        serde_json::from_value(serde_json::json!({
+            "id": "proj-1",
+            "name": "Lock",
+            "backend": backend,
+            "client_engagement": client,
+            "client_tooling_opt_in": opt_in,
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_client_dev_loop_refuses_the_cli_and_openrouter_models() {
+        let cli = dev_loop_client_lock_refusal(&lock_project("cli", true, true), "claude-sonnet-5")
+            .expect("cli is refused");
+        assert!(cli.contains("`cli` backend"), "{cli}");
+        let or = dev_loop_client_lock_refusal(
+            &lock_project("api", true, true),
+            "deepseek/deepseek-chat",
+        )
+        .expect("an OpenRouter model is refused");
+        assert!(or.contains("`deepseek/deepseek-chat`"), "{or}");
+    }
+
+    #[test]
+    fn a_client_dev_loop_needs_the_tooling_opt_in_because_it_runs_the_client_code() {
+        let why =
+            dev_loop_client_lock_refusal(&lock_project("api", true, false), "claude-sonnet-5")
+                .expect("no opt-in: refused");
+        assert!(why.contains("Opt in to running client tooling"), "{why}");
+        assert_eq!(
+            dev_loop_client_lock_refusal(&lock_project("api", true, true), "claude-sonnet-5"),
+            None
+        );
+    }
+
+    #[test]
+    fn internal_development_dev_loop_is_not_locked() {
+        assert_eq!(
+            dev_loop_client_lock_refusal(
+                &lock_project("cli", false, false),
+                "deepseek/deepseek-chat"
+            ),
+            None
+        );
+    }
+
     // ── Helper: build a minimal approved DecisionRecord ───────────────────────
 
     fn approved_decision(label: &str, question: &str, rationale: &str) -> DecisionRecord {
@@ -3133,6 +3220,50 @@ mod tests {
         let diff = worktree_diff_from_base(&dir, "").await;
         assert!(diff.is_empty(), "empty base_commit must return empty diff");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// H2 review: the diff the dev loop collects goes through `workspace::git_command`, which
+    /// switches off `core.fsmonitor`, so a repository whose own git configuration names a program
+    /// never gets it run. The control step prints SKIPPED when this git does not honour
+    /// `core.fsmonitor`, in which case the assertion proves nothing on that machine.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn worktree_diff_from_base_never_runs_the_repositorys_fsmonitor_command() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = tmp.path().join("wt");
+        let base = crate::test_git::init_repo(&dir, &[("a.txt", "one\n")]);
+        crate::test_git::write_file(&dir, "b.txt", "two\n");
+        crate::test_git::commit_all(&dir, "work");
+        let marker = tmp.path().join("fsmonitor-ran");
+        let hook = tmp.path().join("hook.sh");
+        std::fs::write(
+            &hook,
+            format!("#!/bin/sh\ntouch '{}'\nexit 1\n", marker.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::test_git::git(
+            &dir,
+            &["config", "core.fsmonitor", &hook.display().to_string()],
+        );
+
+        let diff = worktree_diff_from_base(&dir, &base).await;
+        assert!(diff.contains("b.txt"), "the diff still ran: {diff}");
+        assert!(
+            !marker.exists(),
+            "the repository's fsmonitor command ran during the diff"
+        );
+
+        // Control: plain `git status` in the same repository does run it.
+        let _ = std::process::Command::new("git")
+            .current_dir(&dir)
+            .args(["status", "--porcelain"])
+            .output()
+            .unwrap();
+        if !marker.exists() {
+            eprintln!("SKIPPED control: this git does not run core.fsmonitor hooks");
+        }
     }
 
     /// In a real git repo, worktree_diff_from_base with the current HEAD returns an empty diff

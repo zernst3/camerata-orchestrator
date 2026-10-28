@@ -149,6 +149,10 @@ impl ProjectStore {
                 backend: ProjectBackend::for_new_project(),
                 // Set in the inspection setup; a new project has no client yet.
                 client_name: String::new(),
+                // Every new or imported project starts as a client engagement (see
+                // `Project::client_engagement`); the operator turns it off for their own development.
+                client_engagement: true,
+                client_tooling_opt_in: false,
             };
             s.projects.push(project.clone());
             s.active = Some(id);
@@ -261,6 +265,10 @@ impl ProjectStore {
                     // export must never mark a new report as prepared for the source project's
                     // client. An overwrite (above) keeps the existing project's own name.
                     client_name: String::new(),
+                    // Every new or imported project starts as a client engagement (see
+                    // `Project::client_engagement`); the operator turns it off for their own development.
+                    client_engagement: true,
+                    client_tooling_opt_in: false,
                 };
                 s.projects.push(project.clone());
                 s.active = Some(id);
@@ -348,6 +356,21 @@ impl ProjectStore {
     /// that id. Persisted to disk like every other per-project mutator.
     pub fn set_backend(&self, project_id: &str, backend: ProjectBackend) -> Option<Project> {
         self.update(project_id, |p| p.backend = backend)
+    }
+
+    /// Set whether a project is a client engagement and whether the operator opts in to running
+    /// the client's own tooling for it (see `Project::client_engagement`). `None` when no project
+    /// has that id.
+    pub fn set_client_engagement(
+        &self,
+        project_id: &str,
+        client_engagement: bool,
+        client_tooling_opt_in: bool,
+    ) -> Option<Project> {
+        self.update(project_id, |p| {
+            p.client_engagement = client_engagement;
+            p.client_tooling_opt_in = client_tooling_opt_in;
+        })
     }
 
     /// Write `chosen_option` onto `rule_id`'s selection for a single project by id — the

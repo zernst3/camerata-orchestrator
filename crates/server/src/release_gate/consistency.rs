@@ -921,6 +921,10 @@ pub struct ReadmeProvenance {
     pub rules_last_reviewed: Option<String>,
     pub model_backend: Option<String>,
     pub model_provider: Option<String>,
+    /// `(role, model)` pairs, in README order, from `Model (role): model`.
+    pub models: Vec<(String, String)>,
+    /// `Client engagement: yes|no`; `None` when the line is absent.
+    pub client_engagement: Option<bool>,
     /// The checks named by the `Release checks:` line, when it says they all passed.
     pub release_checks: Option<Vec<String>>,
     /// The spend-limit line is present (the inspection was stopped by the operator's limit).
@@ -984,6 +988,16 @@ pub fn parse_readme_provenance(readme: &str) -> ReadmeProvenance {
             p.model_provider = Some(v.to_string());
         } else if line.starts_with(crate::vuln_intel::README_PREFIX) {
             p.vulnerability_data.push(line.to_string());
+        } else if let Some(v) = line.strip_prefix("Model (") {
+            if let Some((role, model)) = v.split_once("): ") {
+                p.models.push((role.to_string(), model.to_string()));
+            }
+        } else if let Some(v) = line.strip_prefix("Client engagement: ") {
+            p.client_engagement = match v {
+                "yes" => Some(true),
+                "no" => Some(false),
+                _ => None,
+            };
         } else if line == crate::COST_CAP_README_LINE {
             p.cost_cap_reached = true;
         } else if let Some(v) = line.strip_prefix("Release checks: ") {
@@ -1069,6 +1083,25 @@ pub fn verify_readme_provenance(readme: &str, manifest: &Value) -> Vec<Problem> 
         .map(|files| (files, manifest_u64("excluded_noise_lines")));
     if parsed.excluded_noise != manifest_noise {
         mismatch("Excluded as noise");
+    }
+    let manifest_models: Vec<(String, String)> = manifest["inspection"]["models"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|m| {
+                    Some((
+                        m["role"].as_str()?.to_string(),
+                        m["model"].as_str()?.to_string(),
+                    ))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    if parsed.models != manifest_models {
+        mismatch("Model");
+    }
+    if parsed.client_engagement != manifest["inspection"]["client_engagement"].as_bool() {
+        mismatch("Client engagement");
     }
     let manifest_checks: Option<Vec<String>> = manifest["inspection"]["release_checks"]
         .as_array()

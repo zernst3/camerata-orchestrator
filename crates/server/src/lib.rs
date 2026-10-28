@@ -39,6 +39,7 @@ pub mod auto_fire;
 pub mod checkpoint;
 pub mod clarify;
 pub mod clarify_resume;
+pub mod client_lock;
 pub mod client_provenance;
 pub mod client_source;
 pub mod connections;
@@ -403,6 +404,14 @@ impl AppState {
         &self,
         project: Option<&crate::project::Project>,
     ) -> Result<crate::llm::Llm, String> {
+        // A client engagement never runs a model step on the subscription. The models are
+        // chosen per call (and this transport only reaches Anthropic), so only the backend is
+        // checked here.
+        if let Some(p) = project {
+            if let Some(why) = crate::client_lock::refusal(p.client_engagement, p.backend, &[]) {
+                return Err(format!("{why} {APP_CLIENT_LOCK_FIX}"));
+            }
+        }
         let key = crate::credentials::anthropic_api_key(self.credential_store.as_ref());
         let setting = project
             .map(|p| p.backend)
@@ -419,9 +428,43 @@ impl AppState {
         ))
     }
 
+    /// The client-engagement lock for a step whose model id comes from the request (the routine
+    /// prompt draft, the escalation review chat, the chat), checked against the ACTIVE project.
+    /// [`AppState::llm_for_project`] is handed no model and so cannot check one: without this a
+    /// non-Anthropic id would be routed to OpenRouter by `build_completer`. A blank id is the
+    /// server default (a Claude model) and passes; with no active project there is no client
+    /// code in the step's context and nothing is refused.
+    pub fn client_lock_step_model_refusal(&self, model: &str) -> Option<String> {
+        let model = model.trim();
+        if model.is_empty() {
+            return None;
+        }
+        let p = self.projects.active()?;
+        crate::client_lock::refusal(
+            p.client_engagement,
+            p.backend,
+            &[("this step".to_string(), model.to_string())],
+        )
+        .map(|why| format!("{why} {APP_CLIENT_LOCK_FIX}"))
+    }
+
     /// The `Llm` for the project-less CHAT assistant: [`AppState::llm_for_project`] with no
     /// project, so `settings.chat_backend` decides.
+    ///
+    /// When the ACTIVE project is a client engagement, the chat backend setting must pass the
+    /// client-engagement lock too (a `cli` chat is refused with the lock's message): the chat can
+    /// carry that project's context, and the setting is global, not the project's own.
     pub fn chat_llm(&self) -> Result<crate::llm::Llm, String> {
+        if let Some(p) = self.projects.active() {
+            let backend = self.settings.chat_backend();
+            if let Some(why) = crate::client_lock::refusal(p.client_engagement, backend, &[]) {
+                return Err(format!(
+                    "{why} The chat assistant follows the Chat backend setting, which is `cli`. \
+                     Set the Chat backend to API in Settings, or turn off Client engagement in \
+                     this project's Settings if this is your own development."
+                ));
+            }
+        }
         self.llm_for_project(None)
     }
 
@@ -1290,6 +1333,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/projects/:id/step-models", post(set_step_model))
         // Per-project backend (docs/design/2026-09-22_per-project-backend.md): Cli | Api.
         .route("/api/projects/:id/backend", post(set_backend_handler))
+        .route(
+            "/api/projects/:id/client-engagement",
+            post(set_client_engagement_handler),
+        )
         // Stall-detection thresholds: per-project idle timeout config.
         .route(
             "/api/projects/:id/stall-thresholds",
@@ -2281,23 +2328,20 @@ async fn revert_worktree(worktree_dir: &str, base_commit: Option<&str>) {
     // Drop the run's committed snapshots first: reset the branch back to the branch-point
     // commit so nothing the agent committed survives. Only when we actually have the base.
     if let Some(base) = base_commit.filter(|b| !b.trim().is_empty()) {
-        let _ = tokio::process::Command::new("git")
+        let _ = workspace::git_command(Some(dir), workspace::GitEnv::Isolated)
             .args(["reset", "--hard", base])
-            .current_dir(dir)
             .output()
             .await;
     } else {
         // No base commit recorded: discard tracked changes (uncommitted-only fallback).
-        let _ = tokio::process::Command::new("git")
+        let _ = workspace::git_command(Some(dir), workspace::GitEnv::Isolated)
             .args(["checkout", "--", "."])
-            .current_dir(dir)
             .output()
             .await;
     }
     // Remove any new untracked files the agent left behind (a reset --hard leaves these).
-    let _ = tokio::process::Command::new("git")
+    let _ = workspace::git_command(Some(dir), workspace::GitEnv::Isolated)
         .args(["clean", "-fd"])
-        .current_dir(dir)
         .output()
         .await;
 }
@@ -2541,9 +2585,8 @@ async fn spawn_brownfield_dev_run(
                 )
                 .await
                 {
-                    let base = tokio::process::Command::new("git")
+                    let base = workspace::git_command(Some(&wt_dir), workspace::GitEnv::Isolated)
                         .args(["rev-parse", "HEAD"])
-                        .current_dir(&wt_dir)
                         .output()
                         .await
                         .ok()
@@ -4735,6 +4778,32 @@ async fn set_backend_handler(
     }
 }
 
+/// Body for `POST /api/projects/:id/client-engagement`.
+#[derive(serde::Deserialize)]
+struct SetClientEngagementReq {
+    client_engagement: bool,
+    #[serde(default)]
+    client_tooling_opt_in: bool,
+}
+
+/// `POST /api/projects/:id/client-engagement` — mark a project as a client engagement or not,
+/// and set the operator's opt-in to run the client's own tooling (see `crate::client_lock`).
+/// Same `{ ok, project }` / `{ ok: false, message }` shape as `set_backend_handler`.
+async fn set_client_engagement_handler(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<SetClientEngagementReq>,
+) -> Json<serde_json::Value> {
+    match state.projects.set_client_engagement(
+        &id,
+        req.client_engagement,
+        req.client_tooling_opt_in,
+    ) {
+        Some(p) => Json(serde_json::json!({ "ok": true, "project": p })),
+        None => Json(serde_json::json!({ "ok": false, "message": "no such project" })),
+    }
+}
+
 /// Body for `POST /api/projects/:id/stall-thresholds`.
 #[derive(serde::Deserialize)]
 struct SetStallThresholdsReq {
@@ -4895,6 +4964,25 @@ async fn rescan_alternatives_handler(
         .filter(|(rid, _)| alternatives_by_rule.contains_key(rid))
         .collect();
 
+    // The client-engagement lock, before any repository is read (the same check the main
+    // audit runs, over the same step models this rescan uses below).
+    if let Some(why) = client_lock_refusal_for_scan(
+        Some(&project),
+        Some(&step_model_or(
+            &state,
+            crate::project::StepKind::Audit,
+            None,
+        )),
+        Some(&step_model_or(
+            &state,
+            crate::project::StepKind::Calibration,
+            None,
+        )),
+        false,
+        fix_step_model(&state).as_deref(),
+    ) {
+        return Json(serde_json::json!({ "ok": false, "message": why }));
+    }
     // The SAME compliance-safety gate the main audit uses.
     let backend_resolution = resolve_backend_for_project(&state, Some(&project));
     let llm_backend = match &backend_resolution {
@@ -6055,6 +6143,24 @@ async fn onboard_audit(
             return Json(r);
         }
     };
+    // The client-engagement lock, before any repository is located or read.
+    if let Some(why) = client_lock_refusal_for_scan(
+        state.projects.active().as_ref(),
+        Some(&step_model_or(
+            &state,
+            crate::project::StepKind::Audit,
+            req.model.as_deref(),
+        )),
+        Some(&step_model_or(
+            &state,
+            crate::project::StepKind::Calibration,
+            req.calibration_model.as_deref(),
+        )),
+        req.deep,
+        fix_step_model(&state).as_deref(),
+    ) {
+        return Json(client_lock_blocked_report(&repos, why));
+    }
     // Local-first: the audit reads the repos' local working trees, not GitHub.
     let (sources, mut notes) = resolve_local_sources(&state, &repos);
     let selected: Vec<crate::onboard::SelectedRule> = req
@@ -6177,12 +6283,24 @@ async fn onboard_audit(
         // client line and the operator log. Before this, those errors were discarded at the
         // load site and a rule with a typo'd enum value vanished from the scan silently.
         record_corpus_load_failures(&mut report, &corpus_load_failures);
+        // The engagement this scan ran under, with the models that actually ran.
+        report
+            .ledger
+            .record_engagement(engagement_record_for_scan(active_project.as_ref(), &report));
         // SCAN-TIME deterministic PREVIEW pass: run the selected mechanical rules' own tools
         // and fold their findings into triage as preview findings (advisory, not enforced).
         // Gated on the deterministic selection — deselecting deterministic scans skips it too.
         // (No job here, so no live deterministic progress on the synchronous path.)
         if run_deterministic {
-            merge_scan_preview(&mut report, &sources, &preview_rules, corpus.as_ref(), None).await;
+            merge_scan_preview(
+                &mut report,
+                &sources,
+                &preview_rules,
+                corpus.as_ref(),
+                None,
+                project_client_tooling(active_project.as_ref()),
+            )
+            .await;
         }
 
         // ── Always-on dep-audit (osv-scanner) — runs LAST, hard-bounded ──────────────
@@ -6804,6 +6922,9 @@ pub async fn merge_scan_preview(
     // on the synchronous path. When set, each preview tool registers + streams running → done
     // with its findings count, mirroring the floor's progress.
     job: Option<(&crate::jobs::JobStore, &str)>,
+    // Whether a preview tool that executes the repository's code (`cargo clippy`) may run: the
+    // engagement's client-tooling decision (see `crate::client_lock`).
+    tooling: crate::client_lock::ClientTooling,
 ) {
     // Every tool NAME this call actually attempted to invoke, across every repo in `sources`
     // (regardless of whether each attempt then succeeded or failed) — fed to
@@ -6850,6 +6971,7 @@ pub async fn merge_scan_preview(
                     &lookup,
                     Some(&present_languages),
                     job,
+                    tooling,
                 )
                 .await;
                 tools_attempted.extend(attempted);
@@ -7280,10 +7402,6 @@ pub(crate) async fn start_audit_job(
     // Scan-type selector: resolve the two flags (both-false coerces to both-true).
     let (run_ai_review, run_deterministic, _coerced) =
         effective_scan_modes(req.run_ai_review, req.run_deterministic);
-    // Local-first: resolve each repo's local working tree up front (the spawned job owns them).
-    let (sources, mut notes) = resolve_local_sources(&state, &repos);
-    notes.extend(options.extra_notes);
-    let delta = options.delta;
 
     // Capture the project up front (the named one, else the active one): the job is stamped
     // with it (ROUTES-5, so a project's deep-report export finds ITS OWN latest deep report)
@@ -7294,6 +7412,26 @@ pub(crate) async fn start_audit_job(
         .and_then(|id| state.projects.get(id))
         .or_else(|| state.projects.active());
     let project_id = active_project.as_ref().map(|p| p.id.clone());
+    // The client-engagement lock, before any repository is located or read: the job fails at
+    // once with the reason, and nothing is spawned.
+    if let Some(why) = client_lock_refusal_for_scan(
+        active_project.as_ref(),
+        model.as_deref(),
+        calibration_model.as_deref(),
+        deep,
+        fix_step_model(&state).as_deref(),
+    ) {
+        let job_id = state.jobs.create("audit", project_id);
+        state.jobs.fail(&job_id, why);
+        return job_id;
+    }
+    // Local-first: resolve each repo's local working tree up front (the spawned job owns them).
+    let (sources, mut notes) = resolve_local_sources(&state, &repos);
+    notes.extend(options.extra_notes);
+    let delta = options.delta;
+    let client_tooling = project_client_tooling(active_project.as_ref());
+    // Moved into the spawned task, which records the engagement in the scan's ledger.
+    let engagement_project = active_project.clone();
     let job_id = state.jobs.create("audit", project_id.clone());
     state.transcripts.clear(SCAN_AUDIT_KEY);
     // The compliance-safety gate: resolved up front (same as the synchronous `onboard_audit`
@@ -7448,6 +7586,10 @@ pub(crate) async fn start_audit_job(
             // corpus file that would not parse into the ledger, the integrity gate, one
             // concise client line and the operator log.
             record_corpus_load_failures(&mut report, &corpus_load_failures);
+            report.ledger.record_engagement(engagement_record_for_scan(
+                engagement_project.as_ref(),
+                &report,
+            ));
             // SCAN-TIME deterministic PREVIEW pass (advisory; not enforced until wired). Gated on
             // the deterministic selection; reports per-tool progress into the job so the cockpit's
             // deterministic progress view shows each preview tool start/run/done live.
@@ -7458,6 +7600,7 @@ pub(crate) async fn start_audit_job(
                     &preview_rules,
                     corpus.as_ref(),
                     Some((&body_jobs, &body_jid)),
+                    client_tooling,
                 )
                 .await;
             }
@@ -10441,6 +10584,11 @@ async fn draft_routine_prompt(
     let Ok(llm) = state.step_llm() else {
         return scaffold();
     };
+    // A client engagement never sends client context to a non-Anthropic model: the form gets
+    // the scaffold and no model is called.
+    if state.client_lock_step_model_refusal(&req.model).is_some() {
+        return scaffold();
+    }
     let llm = std::sync::Arc::new(llm);
     let completer = crate::llm::build_completer(
         &req.model,
@@ -10616,6 +10764,9 @@ async fn chat_escalation(
     // (the chat setting when there is none), not on the keyless CLI floor; `Api` with no key
     // refuses rather than downgrading.
     let chat_llm = state.step_llm().map_err(backend_refused)?;
+    if let Some(why) = state.client_lock_step_model_refusal(&req.model) {
+        return Err(backend_refused(why));
+    }
     let completer = crate::llm::build_completer(
         &req.model,
         &state.model_registry,
@@ -11164,6 +11315,9 @@ async fn chat(
     // The Anthropic side runs on the transport chosen in Settings (Chat backend), with the key
     // resolved now; `Api` with no key refuses rather than silently downgrading to the CLI.
     let chat_llm = state.chat_llm().map_err(backend_refused)?;
+    if let Some(why) = state.client_lock_step_model_refusal(&model) {
+        return Err(backend_refused(why));
+    }
     let completer = crate::llm::build_completer(
         &model,
         &state.model_registry,
@@ -11233,6 +11387,100 @@ fn resolve_backend_for_project(
     let has_api_key = anthropic_api_key_present(state.credential_store.as_ref());
     let backend = project.map(|p| p.backend).unwrap_or_default();
     crate::llm::resolve_backend(backend, has_api_key)
+}
+
+/// What the app tells the operator to change when the client-engagement lock refuses a run.
+const APP_CLIENT_LOCK_FIX: &str = "In this project's Settings, set the backend to API and the \
+     audit and calibration models to Claude models, or turn off Client engagement if this is \
+     your own development and not client work.";
+
+/// The client-engagement lock ([`crate::client_lock::refusal`]) for a scan of `project` with
+/// these (already resolved) models: the refusal text with the app's fix appended, or `None` when
+/// the scan may run. A scan with NO project is refused: there is no inspection setup to say it is
+/// not client work, so it is a client engagement with no opt-in (the lock is default-on), and the
+/// project-less backend floors to `Cli`, which that lock refuses anyway.
+fn client_lock_refusal_for_scan(
+    project: Option<&crate::project::Project>,
+    model: Option<&str>,
+    calibration_model: Option<&str>,
+    deep: bool,
+    fix_model: Option<&str>,
+) -> Option<String> {
+    let Some(project) = project else {
+        return Some(
+            "There is no active project, and a scan without one is treated as a client \
+             engagement, which runs only on the Anthropic API with Anthropic models. Create or \
+             select a project first (in its Settings, turn off Client engagement if this is your \
+             own development and not client work). Nothing was read and no model was called."
+                .to_string(),
+        );
+    };
+    let models =
+        crate::client_lock::models_a_scan_may_use(model, calibration_model, deep, fix_model);
+    crate::client_lock::refusal(project.client_engagement, project.backend, &models)
+        .map(|why| format!("{why} {APP_CLIENT_LOCK_FIX}"))
+}
+
+/// The client-engagement lock for a run that has only the `claude -p` CLI driver (the
+/// investigation, branch update and PR feedback runs): such a run always uses the Claude Code
+/// subscription, whatever the project's backend, so the ACTIVE project being a client engagement
+/// refuses it, and so does having no active project (no setup says it is not client work, so it
+/// is a client engagement with no opt-in, like a scan). `run` names the run in the message.
+/// `None` when it may start.
+fn cli_only_run_client_lock_refusal(state: &AppState, run: &str) -> Option<String> {
+    let Some(project) = state.projects.active() else {
+        return Some(format!(
+            "There is no active project, and {run} without one is treated as a client engagement. \
+             It runs only on the Claude Code subscription (the `cli` backend), which client work \
+             refuses. Nothing was run. Create or select a project first (in its Settings, turn \
+             off Client engagement if this is your own development)."
+        ));
+    };
+    crate::client_lock::refusal(
+        project.client_engagement,
+        crate::project::ProjectBackend::Cli,
+        &[],
+    )
+    .map(|_| {
+        format!(
+            "This is a client engagement, and {run} runs only on the Claude Code subscription \
+             (the `cli` backend), which client work refuses. Nothing was run. Turn off Client \
+             engagement in this project's Settings if this is your own development."
+        )
+    })
+}
+
+/// The report a scan refused by the client-engagement lock returns: nothing ran, under the same
+/// "Scan blocked" state the UI renders for the compliance gate.
+fn client_lock_blocked_report(repos: &[String], why: String) -> crate::onboard::ScanReport {
+    let mut r = crate::onboard::ScanReport::gated(repos);
+    r.gated = false;
+    r.blocked = true;
+    r.ai_blocked_reason = Some(why.clone());
+    r.message = Some(why);
+    r
+}
+
+/// The client-tooling decision for a scan of `project` (see [`crate::client_lock`]). A
+/// project-less scan is not a client engagement.
+fn project_client_tooling(
+    project: Option<&crate::project::Project>,
+) -> crate::client_lock::ClientTooling {
+    project.map_or(crate::client_lock::ClientTooling::INTERNAL, |p| {
+        crate::client_lock::ClientTooling::new(p.client_engagement, p.client_tooling_opt_in)
+    })
+}
+
+/// The engagement record a scan of `project` writes into its ledger, with the models the scan
+/// recorded as having run.
+fn engagement_record_for_scan(
+    project: Option<&crate::project::Project>,
+    report: &crate::onboard::ScanReport,
+) -> crate::client_lock::EngagementRecord {
+    let model = ModelRecord::anthropic(project.map(|p| p.backend).unwrap_or_default())
+        .with_client_engagement(project.is_some_and(|p| p.client_engagement))
+        .with_models_from(&report.provenance);
+    crate::client_lock::EngagementRecord::new(&model, project_client_tooling(project))
 }
 
 /// Every rule's PROJECT-level chosen alternative option, keyed by uppercased rule id —
@@ -15694,6 +15942,12 @@ async fn spawn_investigation_agent_run(
     let run_id = state
         .runs
         .create(story_id, "investigation", crate::run::RunKind::Watched);
+    // The client-engagement lock: this run has only the Claude Code CLI driver, so on a client
+    // engagement it fails at once with the reason and no agent starts.
+    if let Some(why) = cli_only_run_client_lock_refusal(state, "the investigation") {
+        state.runs.fail_with_reason(&run_id, why);
+        return run_id;
+    }
     {
         let runs = state.runs.clone();
         let uow = state.uow.clone();
@@ -16004,6 +16258,10 @@ async fn uow_update_branch(
         )
             .into_response()
     };
+    // The client-engagement lock: this run has only the Claude Code CLI driver.
+    if let Some(why) = cli_only_run_client_lock_refusal(&state, "the branch update") {
+        return bad(why);
+    }
 
     let Some(source_kind) = crate::update_branch_run::MergeSourceKind::from_wire(&req.source)
     else {
@@ -16338,6 +16596,10 @@ async fn uow_pr_resolve(
         )
             .into_response()
     };
+    // The client-engagement lock: this run has only the Claude Code CLI driver.
+    if let Some(why) = cli_only_run_client_lock_refusal(&state, "PR feedback resolution") {
+        return bad(why);
+    }
     let Some(token) = state.github_token() else {
         return bad(
             "no GitHub token — set CAMERATA_GITHUB_TOKEN to resolve PR feedback".to_string(),
@@ -17493,9 +17755,20 @@ async fn export_product(
     // `resolve_fix`'s chosen-option fallback (audit-integrated alternatives) — server-
     // populated, never client-supplied. Covers all three artifacts built below.
     req.options.chosen_options = project_chosen_options(&project);
-    // The backend the project's scans ran on, recorded in the manifest and README. Server-
-    // populated, never client-supplied.
-    req.options.model = Some(ModelRecord::anthropic(project.backend));
+    // The backend the scan ran on and whether it was a client engagement, recorded in the
+    // manifest and README. Server-populated, never client-supplied. The scan's own ledger record
+    // wins (the project's settings may have changed since); the project is the fallback for a
+    // scan recorded before the ledger carried it.
+    req.options.model = Some(match report.ledger.engagement() {
+        Some(e) => ModelRecord {
+            backend: e.backend.clone(),
+            provider: e.provider.clone(),
+            models: Vec::new(),
+            client_engagement: e.client_engagement,
+        },
+        None => ModelRecord::anthropic(project.backend)
+            .with_client_engagement(project.client_engagement),
+    });
     // Confidentiality: the client name comes from the project's inspection setup. The package
     // assembly refuses a blank one (mapped to a 422 below).
     req.options.client_name = project.client_name.clone();
@@ -17714,6 +17987,12 @@ pub struct ModelRecord {
     pub backend: String,
     /// The model provider, e.g. [`ModelRecord::ANTHROPIC`].
     pub provider: String,
+    /// Every model the inspection actually ran, by role, in a stable order. Filled from the
+    /// scan's own provenance by [`ModelRecord::with_models_from`] when the package is built, so
+    /// it states what ran, never what was configured. Empty when no model ran.
+    pub models: Vec<crate::client_lock::ModelRole>,
+    /// The inspection was a client engagement ([`crate::client_lock`]).
+    pub client_engagement: bool,
 }
 
 impl ModelRecord {
@@ -17724,12 +18003,40 @@ impl ModelRecord {
         Self {
             backend: backend.provenance_name().to_string(),
             provider: provider.to_string(),
+            models: Vec::new(),
+            client_engagement: false,
         }
     }
 
     /// `backend` served by Anthropic: today's only provider.
     pub fn anthropic(backend: crate::llm::ProjectBackend) -> Self {
         Self::new(backend, Self::ANTHROPIC)
+    }
+
+    /// This record, marked as a client engagement or not.
+    pub fn with_client_engagement(mut self, client_engagement: bool) -> Self {
+        self.client_engagement = client_engagement;
+        self
+    }
+
+    /// This record with `models` replaced by the models the scan recorded as having run: the
+    /// scan pass, calibration and the clone judge, each only when present.
+    pub fn with_models_from(mut self, provenance: &crate::onboard::ScanProvenance) -> Self {
+        self.models = [
+            ("the scan", &provenance.audit_model),
+            ("calibration", &provenance.calibration_model),
+            ("the clone judge", &provenance.clone_judge_model),
+        ]
+        .into_iter()
+        .filter_map(|(role, model)| {
+            let model = model.as_deref()?.trim();
+            (!model.is_empty()).then(|| crate::client_lock::ModelRole {
+                role: role.to_string(),
+                model: model.to_string(),
+            })
+        })
+        .collect();
+        self
     }
 }
 
@@ -17848,6 +18155,13 @@ impl ManifestProvenance {
             "rules_last_reviewed": self.rules_last_reviewed,
             "model_backend": self.model.as_ref().map(|m| &m.backend),
             "model_provider": self.model.as_ref().map(|m| &m.provider),
+            "models": self.model.as_ref().map(|m| {
+                m.models
+                    .iter()
+                    .map(|r| serde_json::json!({ "role": r.role, "model": r.model }))
+                    .collect::<Vec<_>>()
+            }),
+            "client_engagement": self.model.as_ref().map(|m| m.client_engagement),
             "cost_cap_reached": self.cost_cap_reached,
             "vulnerability_data": crate::vuln_intel::manifest_json(self.vulnerability_data.as_ref()),
             "client_name": self.client_name,
@@ -17919,6 +18233,13 @@ impl ManifestProvenance {
         if let Some(model) = &self.model {
             out.push_str(&format!("Model backend: {}\n", model.backend));
             out.push_str(&format!("Model provider: {}\n", model.provider));
+            for r in &model.models {
+                out.push_str(&format!("Model ({}): {}\n", r.role, r.model));
+            }
+            out.push_str(&format!(
+                "Client engagement: {}\n",
+                if model.client_engagement { "yes" } else { "no" }
+            ));
         }
         if self.cost_cap_reached {
             out.push_str(&format!("{COST_CAP_README_LINE}\n"));
@@ -18849,6 +19170,40 @@ mod tests {
         );
     }
 
+    /// H2: the same rescan on a client engagement's cli project is refused before any
+    /// repository is read.
+    #[tokio::test]
+    async fn client_engagement_rescan_refuses_the_cli_backend() {
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        let p = state
+            .projects
+            .create("Acme", vec!["me/api".to_string()])
+            .unwrap();
+        state
+            .projects
+            .set_backend(&p.id, crate::project::ProjectBackend::Cli);
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/projects/{}/rescan-alternatives", p.id))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"overrides":[{"rule_id":"RUST-DOMAIN-7","chosen_option_id":"explicit-unitofwork-parameter-on-transactional-repository-methods"}]}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let json = body_json(resp).await;
+        assert_eq!(json["ok"], false, "{json:?}");
+        assert!(
+            json["message"].as_str().unwrap().contains("`cli` backend"),
+            "{json:?}"
+        );
+    }
+
     /// A `Cli`-backend project's rescan is never blocked, regardless of key presence — no
     /// silent downgrade path exists anymore (the removed `CliFallbackWarn`), just a plain
     /// `Cli` resolution that proceeds straight to the (in this test env, failing) model call.
@@ -18866,6 +19221,9 @@ mod tests {
         state
             .projects
             .set_backend(&p.id, crate::project::ProjectBackend::Cli);
+        // The maintainer's own project: a client engagement refuses the cli backend (see
+        // `client_engagement_rescan_refuses_the_cli_backend` below).
+        state.projects.set_client_engagement(&p.id, false, false);
         let app = router(state);
 
         let resp = app
@@ -22150,6 +22508,52 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// H2 review: the dev loop's git calls go through `workspace::git_command`, which switches off
+    /// `core.fsmonitor`, so a repository whose own git configuration names a program never gets it
+    /// run by the revert (`reset --hard`, `clean`). Needs a git that honours `core.fsmonitor`: the
+    /// control step at the end prints SKIPPED when it does not, and the assertion above it then
+    /// proves nothing on that machine.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_dev_loop_revert_never_runs_the_repositorys_fsmonitor_command() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = tmp.path().join("wt");
+        let base_commit = crate::test_git::init_repo(&dir, &[("a.txt", "one\n")]);
+        std::fs::write(dir.join("b.txt"), "two\n").unwrap();
+        crate::test_git::commit_all(&dir, "camerata: snapshot iteration 0");
+        std::fs::write(dir.join("untracked.txt"), "x\n").unwrap();
+        let marker = tmp.path().join("fsmonitor-ran");
+        let hook = tmp.path().join("hook.sh");
+        std::fs::write(
+            &hook,
+            format!("#!/bin/sh\ntouch '{}'\nexit 1\n", marker.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::test_git::git(
+            &dir,
+            &["config", "core.fsmonitor", &hook.display().to_string()],
+        );
+
+        revert_worktree(&dir.to_string_lossy(), Some(&base_commit)).await;
+        assert!(
+            !marker.exists(),
+            "the repository's fsmonitor command ran during the revert"
+        );
+        assert!(!dir.join("untracked.txt").exists(), "the revert still ran");
+
+        // Control: plain `git status` in the same repository does run it.
+        let _ = std::process::Command::new("git")
+            .current_dir(&dir)
+            .args(["status", "--porcelain"])
+            .output()
+            .unwrap();
+        if !marker.exists() {
+            eprintln!("SKIPPED control: this git does not run core.fsmonitor hooks");
+        }
     }
 
     /// Without a base_commit (older checkpoints), revert_worktree falls back to the
@@ -26629,7 +27033,15 @@ mod tests {
         )
         .await;
         report.excluded_mechanical_rules = excluded_mechanical;
-        merge_scan_preview(&mut report, &sources, &preview_rules, Some(&corpus), None).await;
+        merge_scan_preview(
+            &mut report,
+            &sources,
+            &preview_rules,
+            Some(&corpus),
+            None,
+            crate::client_lock::ClientTooling::INTERNAL,
+        )
+        .await;
 
         let entry = report
             .ledger
@@ -29392,7 +29804,358 @@ mod tests {
         let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
         let p = state.projects.create("StepLlm", vec![]).unwrap();
         state.projects.set_backend(&p.id, backend).unwrap();
+        // These tests are about backend resolution, not the client lock: internal development.
         state
+            .projects
+            .set_client_engagement(&p.id, false, false)
+            .unwrap();
+        state
+    }
+
+    /// H2 review: with no active project there is no setup to say the work is not client work, so
+    /// the cli-only runs (investigation, branch update, PR feedback) are refused like a scan.
+    #[tokio::test]
+    async fn the_cli_only_runs_are_refused_with_no_active_project() {
+        let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
+        assert!(state.projects.active().is_none());
+        for run in [
+            "the investigation",
+            "the branch update",
+            "PR feedback resolution",
+        ] {
+            let why = cli_only_run_client_lock_refusal(&state, run)
+                .unwrap_or_else(|| panic!("{run} with no project must be refused"));
+            assert!(why.contains("no active project"), "{why}");
+        }
+        let run_id = spawn_investigation_agent_run(&state, "story-1", None).await;
+        let run = state.runs.get(&run_id).expect("the run exists");
+        assert!(run.done);
+        assert!(
+            run.failure_reason
+                .as_deref()
+                .unwrap_or_default()
+                .contains("no active project"),
+            "{:?}",
+            run.failure_reason
+        );
+    }
+
+    /// H2 review: the chat assistant follows the chat backend setting, which may be `cli`. When
+    /// the active project is a client engagement, a chat that would run on a backend the lock
+    /// forbids is refused with the lock's message; the maintainer's own project is not locked,
+    /// and neither is a chat with no active project (no client context).
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn a_client_engagement_refuses_a_chat_on_the_cli_backend() {
+        let _env = camerata_test_env::EnvGuard::set("ANTHROPIC_API_KEY", "sk-test-not-real");
+        let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
+        state
+            .settings
+            .set_chat_backend(crate::project::ProjectBackend::Cli);
+        // No project: the chat is not part of any engagement.
+        assert!(state.chat_llm().is_ok());
+
+        let p = state.projects.create("Client", vec![]).unwrap();
+        assert!(p.client_engagement);
+        let why = state
+            .chat_llm()
+            .expect_err("cli chat refused on client work");
+        assert!(why.contains("`cli` backend"), "{why}");
+
+        // Over HTTP the chat answers 409 with that message.
+        let resp = router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/chat")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"prompt":"hi"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        assert!(body_json(resp).await["error"]
+            .as_str()
+            .unwrap()
+            .contains("`cli` backend"));
+
+        // On the API backend the lock passes; off client work the cli chat passes.
+        state
+            .settings
+            .set_chat_backend(crate::project::ProjectBackend::Api);
+        assert!(state.chat_llm().is_ok());
+        state
+            .settings
+            .set_chat_backend(crate::project::ProjectBackend::Cli);
+        state
+            .projects
+            .set_client_engagement(&p.id, false, false)
+            .unwrap();
+        assert!(state.chat_llm().is_ok());
+    }
+
+    /// H2: the investigation run has only the CLI driver, so a client engagement fails it at
+    /// once with the reason; the maintainer's own project is not locked.
+    #[tokio::test]
+    async fn a_client_engagement_refuses_the_cli_only_runs() {
+        let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
+        let p = state.projects.create("Client", vec![]).unwrap();
+        let why = cli_only_run_client_lock_refusal(&state, "the investigation")
+            .expect("a new project is a client engagement");
+        assert!(why.contains("Claude Code subscription"), "{why}");
+
+        let run_id = spawn_investigation_agent_run(&state, "story-1", None).await;
+        let run = state.runs.get(&run_id).expect("the run exists");
+        assert!(run.done);
+        assert!(
+            run.failure_reason
+                .as_deref()
+                .unwrap_or_default()
+                .contains("client engagement"),
+            "the run failed with the lock's reason: {:?}",
+            run.failure_reason
+        );
+
+        state
+            .projects
+            .set_client_engagement(&p.id, false, false)
+            .unwrap();
+        assert_eq!(
+            cli_only_run_client_lock_refusal(&state, "the investigation"),
+            None
+        );
+    }
+
+    /// H2: a client engagement's model steps never run on the subscription.
+    #[test]
+    fn a_client_engagement_refuses_model_steps_on_the_cli_backend() {
+        let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
+        let p = state.projects.create("Client", vec![]).unwrap();
+        assert!(p.client_engagement, "a new project is a client engagement");
+        state
+            .projects
+            .set_backend(&p.id, crate::project::ProjectBackend::Cli)
+            .unwrap();
+        let refusal = state
+            .step_llm()
+            .expect_err("cli is refused for client work");
+        assert!(refusal.contains("`cli` backend"), "{refusal}");
+        assert!(refusal.contains("Client engagement"), "{refusal}");
+    }
+
+    /// H2 review: the model steps that take a model id from the request (the routine prompt
+    /// draft, the escalation review chat, the chat) check it against the active project's lock.
+    /// `llm_for_project` cannot (it is handed no model), so on a client engagement a non-Anthropic
+    /// id would otherwise reach OpenRouter. A blank id means the server default (a Claude model)
+    /// and passes; a project that is not a client engagement is never refused.
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn a_client_engagement_refuses_a_non_anthropic_model_on_request_model_steps() {
+        let _env = camerata_test_env::EnvGuard::set("ANTHROPIC_API_KEY", "sk-test-not-real");
+        let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
+        let p = state.projects.create("Client", vec![]).unwrap();
+        state
+            .projects
+            .set_backend(&p.id, crate::project::ProjectBackend::Api)
+            .unwrap();
+        assert!(p.client_engagement, "a new project is a client engagement");
+        // The chat backend must pass the lock first (see the cli chat test); then the model.
+        state
+            .settings
+            .set_chat_backend(crate::project::ProjectBackend::Api);
+
+        // The shared check.
+        let why = state
+            .client_lock_step_model_refusal("deepseek/deepseek-chat")
+            .expect("an OpenRouter id is refused on a client engagement");
+        assert!(why.contains("`deepseek/deepseek-chat`"), "{why}");
+        assert_eq!(state.client_lock_step_model_refusal(""), None);
+        assert_eq!(state.client_lock_step_model_refusal("  "), None);
+        assert_eq!(
+            state.client_lock_step_model_refusal("claude-sonnet-5"),
+            None
+        );
+
+        // Each site.
+        let app = router(state.clone());
+        let esc = state.escalations.raise(
+            crate::escalation::RaiseEscalationReq {
+                subject_kind: crate::escalation::SubjectKind::Uow,
+                checkpoint_id: None,
+                routine_id: "routine-1".to_string(),
+                reason: "r".to_string(),
+                stopped_for: "s".to_string(),
+                suggestions: vec![],
+                raw_context: String::new(),
+            },
+            "Add login",
+        );
+        let post = |uri: String, body: &'static str| {
+            let app = app.clone();
+            async move {
+                app.oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(uri)
+                        .header("content-type", "application/json")
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+            }
+        };
+        let chat = post(
+            "/api/chat".to_string(),
+            r#"{"prompt":"hi","model":"deepseek/deepseek-chat"}"#,
+        )
+        .await;
+        assert_eq!(chat.status(), StatusCode::CONFLICT, "the chat");
+        assert!(body_json(chat).await["error"]
+            .as_str()
+            .unwrap()
+            .contains("`deepseek/deepseek-chat`"));
+        let review = post(
+            format!("/api/escalations/{}/chat", esc.id),
+            r#"{"message":"hi","model":"qwen/qwen3-coder:free"}"#,
+        )
+        .await;
+        assert_eq!(review.status(), StatusCode::CONFLICT, "the review chat");
+        assert!(body_json(review).await["error"]
+            .as_str()
+            .unwrap()
+            .contains("`qwen/qwen3-coder:free`"));
+        // The draft has no error channel: a refused model gets the deterministic scaffold and no
+        // model call is made.
+        let draft = post(
+            "/api/routines/draft-prompt".to_string(),
+            r#"{"intent":"tidy the docs","scope":"read","model":"deepseek/deepseek-chat"}"#,
+        )
+        .await;
+        assert_eq!(draft.status(), StatusCode::OK);
+        assert_eq!(body_json(draft).await["authored_by"], "scaffold");
+
+        // Not a client engagement: never refused.
+        state
+            .projects
+            .set_client_engagement(&p.id, false, false)
+            .unwrap();
+        assert_eq!(
+            state.client_lock_step_model_refusal("deepseek/deepseek-chat"),
+            None
+        );
+    }
+
+    /// H2 review: a scan with no active project is not waved through. There is no inspection
+    /// setup to say it is not client work, so it is a client engagement with no opt-in (the lock
+    /// is default-on), and it is refused before any repository is read.
+    #[tokio::test]
+    async fn a_scan_with_no_active_project_is_refused_as_a_client_engagement() {
+        let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
+        assert!(state.projects.active().is_none());
+        let why = client_lock_refusal_for_scan(None, None, None, false, None)
+            .expect("no project means a client engagement");
+        assert!(why.contains("no active project"), "{why}");
+
+        let req = || AuditReq {
+            repos: vec!["acme/never-read".to_string()],
+            ..serde_json::from_value(serde_json::json!({ "repos": [] })).unwrap()
+        };
+        let Json(report) = onboard_audit(State(state.clone()), Json(req())).await;
+        assert!(report.blocked, "{:?}", report.message);
+        assert!(report
+            .message
+            .as_deref()
+            .unwrap()
+            .contains("no active project"));
+        assert_eq!(report.files_scanned, 0);
+
+        let job_id = start_audit_job(&state, req(), AuditJobOptions::default()).await;
+        let job = state.jobs.get(&job_id).expect("the job exists");
+        assert_eq!(job.status, "failed", "{:?}", job.message);
+        assert!(job
+            .message
+            .as_deref()
+            .unwrap_or_default()
+            .contains("no active project"));
+    }
+
+    /// H2: a client engagement's audit on the cli backend, or with an OpenRouter audit model, is
+    /// refused before any repository is located or read (the repo here does not even exist, so
+    /// reaching the scan would produce a "not found" note, not this refusal); on the API with
+    /// Claude models the lock lets it through.
+    #[tokio::test]
+    async fn a_client_engagement_audit_is_refused_before_any_repository_is_read() {
+        let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
+        let p = state
+            .projects
+            .create("Client", vec!["acme/never-read".to_string()])
+            .unwrap();
+        let req = |model: Option<&str>| AuditReq {
+            repos: vec!["acme/never-read".to_string()],
+            model: model.map(str::to_string),
+            ..serde_json::from_value(serde_json::json!({ "repos": [] })).unwrap()
+        };
+
+        state
+            .projects
+            .set_backend(&p.id, crate::project::ProjectBackend::Cli)
+            .unwrap();
+        let Json(report) = onboard_audit(State(state.clone()), Json(req(None))).await;
+        assert!(report.blocked, "{:?}", report.message);
+        assert!(report.message.as_deref().unwrap().contains("`cli` backend"));
+        assert_eq!(report.files_scanned, 0);
+
+        state
+            .projects
+            .set_backend(&p.id, crate::project::ProjectBackend::Api)
+            .unwrap();
+        let Json(report) = onboard_audit(
+            State(state.clone()),
+            Json(req(Some("deepseek/deepseek-chat"))),
+        )
+        .await;
+        assert!(report.blocked);
+        assert!(
+            report
+                .message
+                .as_deref()
+                .unwrap()
+                .contains("`deepseek/deepseek-chat`"),
+            "{:?}",
+            report.message
+        );
+
+        // The async job path refuses the same way: the job fails at once with the reason.
+        let job_id = start_audit_job(
+            &state,
+            req(Some("deepseek/deepseek-chat")),
+            AuditJobOptions::default(),
+        )
+        .await;
+        let job = state.jobs.get(&job_id).expect("the job exists");
+        assert_eq!(job.status, "failed", "{:?}", job.message);
+        assert!(
+            job.message
+                .as_deref()
+                .unwrap_or_default()
+                .contains("`deepseek/deepseek-chat`"),
+            "{:?}",
+            job.message
+        );
+
+        // API with Claude models: the lock passes.
+        assert_eq!(
+            client_lock_refusal_for_scan(
+                state.projects.active().as_ref(),
+                Some("claude-sonnet-5"),
+                Some("claude-sonnet-5"),
+                false,
+                None,
+            ),
+            None
+        );
     }
 
     /// The model steps of a project (decompose, clarify, authoring, escalation, diagrams, L3 ...)

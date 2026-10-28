@@ -718,6 +718,7 @@ fn read_local_repo_files_gitignore(
 /// still stands on its own.
 fn git_tracked_files(root: &std::path::Path) -> Option<Vec<String>> {
     let output = std::process::Command::new("git")
+        .args(crate::workspace::GIT_NO_REPO_COMMANDS)
         .args(["ls-files", "-z"])
         .current_dir(root)
         .output()
