@@ -294,6 +294,30 @@ pub(crate) async fn submit_round(
         );
     }
     for (sub_idx, sub) in work.chunks(BATCH_CAP).enumerate() {
+        // After an outage stop nothing more is submitted: every item is recorded NOT RUN (the
+        // meter classes it as an outage stop) and refused, as for the spend limit.
+        if ctx.meter.is_some_and(UsageMeter::outage_stopped) {
+            for w in sub {
+                out.refused.insert(w.custom_id.clone());
+                if let Some(m) = ctx.meter {
+                    m.record_not_run(crate::cost_cap::NotRunPass {
+                        repo: ctx.repo.to_string(),
+                        group: ctx.label.to_string(),
+                        chunk: w.ci + 1,
+                        n_chunks: ctx.n_c,
+                        rule_batch: w.bi + 1,
+                        n_rule_batches: ctx.n_b,
+                        rule_ids: ctx.batches[w.bi].iter().map(|(id, _)| id.clone()).collect(),
+                        files: ctx.chunks[w.ci]
+                            .iter()
+                            .map(|(path, _)| path.clone())
+                            .collect(),
+                        class: camerata_llm::failure::FailureClass::SpendLimit,
+                    });
+                }
+            }
+            continue;
+        }
         // Checked again for every sub-batch: the spend of the ones before it is known by now.
         if let Some(m) = ctx.meter {
             if let Some(why) =
@@ -418,6 +442,19 @@ struct SubBatchFailure {
     error: anyhow::Error,
 }
 
+/// Tell the run's outage counter how a Message Batches call went (submit, poll or fetch, after
+/// the transport's own retries): a success starts the streak over, a failure adds to it. A
+/// provider outage during batch mode therefore stops the run like one in real-time mode.
+fn note_batch_call<T>(meter: Option<&UsageMeter>, result: &anyhow::Result<T>) {
+    let Some(m) = meter else { return };
+    match result {
+        Ok(_) => m.health().note_success(),
+        Err(e) => m
+            .health()
+            .note_failure(classify_pass_error(e), &e.to_string()),
+    }
+}
+
 /// Submit one sub-batch, poll it until it has ended, and fetch its rows. A failed submit is
 /// reported with no batch id. After a successful submit, poll and fetch are attempted up to
 /// [`POST_SUBMIT_ATTEMPTS`] times (once when errors are fatal, the pre-rank-2 behavior), and a
@@ -430,14 +467,12 @@ async fn submit_poll_fetch(
     ttl: CacheTtl,
 ) -> Result<Vec<BatchResultRow>, SubBatchFailure> {
     let n_items = items.len();
-    let batch_id = ctx
-        .api
-        .submit(items)
-        .await
-        .map_err(|error| SubBatchFailure {
-            batch_id: None,
-            error,
-        })?;
+    let submitted = ctx.api.submit(items).await;
+    note_batch_call(ctx.meter, &submitted);
+    let batch_id = submitted.map_err(|error| SubBatchFailure {
+        batch_id: None,
+        error,
+    })?;
     eprintln!(
         "[camerata-server] batch mode: sub-batch {}/{n_subs} submitted as {batch_id} ({n_items} \
          items)",
@@ -470,7 +505,11 @@ async fn submit_poll_fetch(
             tokio::time::sleep(interval).await;
         }
         let polled = poll_batch_until_ended(
-            || ctx.api.poll(&batch_id),
+            || async {
+                let polled = ctx.api.poll(&batch_id).await;
+                note_batch_call(ctx.meter, &polled);
+                polled
+            },
             interval,
             MAX_CONSECUTIVE_POLL_FAILURES,
             |status| {
@@ -487,7 +526,11 @@ async fn submit_poll_fetch(
         )
         .await;
         let fetched = match polled {
-            Ok(()) => ctx.api.fetch(&batch_id, ttl).await,
+            Ok(()) => {
+                let fetched = ctx.api.fetch(&batch_id, ttl).await;
+                note_batch_call(ctx.meter, &fetched);
+                fetched
+            }
             Err(e) => Err(e),
         };
         match fetched {

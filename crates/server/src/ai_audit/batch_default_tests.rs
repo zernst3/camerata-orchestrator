@@ -92,6 +92,8 @@ pub(super) struct FakeBatch {
     /// `submit` calls so far, and the 0-based call that fails (nothing is accepted).
     submit_attempts: AtomicUsize,
     submit_fails_on: Option<usize>,
+    /// Every `submit` call fails, as a provider outage would.
+    submit_fails_always: bool,
     pending: Mutex<HashMap<String, Vec<String>>>,
     realtime: Realtime,
     cost: f64,
@@ -108,6 +110,7 @@ impl FakeBatch {
             counted: Mutex::new(Vec::new()),
             submit_attempts: AtomicUsize::new(0),
             submit_fails_on: None,
+            submit_fails_always: false,
             pending: Mutex::new(HashMap::new()),
             realtime: Realtime {
                 calls: AtomicUsize::new(0),
@@ -183,7 +186,7 @@ impl BatchApi for FakeBatch {
     }
     async fn submit(&self, items: Vec<BatchItem>) -> anyhow::Result<String> {
         let attempt = self.submit_attempts.fetch_add(1, Ordering::SeqCst);
-        if self.submit_fails_on == Some(attempt) {
+        if self.submit_fails_always || self.submit_fails_on == Some(attempt) {
             anyhow::bail!("Message Batches API HTTP 503: submission refused");
         }
         let mut subs = self.submissions.lock().unwrap();
@@ -898,4 +901,92 @@ async fn a_truncated_batch_reply_with_the_retry_off_is_counted_wasted() {
     run(&api, &m).await;
     assert_eq!(api.realtime.calls.load(Ordering::SeqCst), 0);
     assert_eq!(wasted_and_calls(&m), (4, 4));
+}
+
+// ── Run to completion: a provider outage during batch mode stops the run ─────────────────────
+
+/// Submit failures feed the outage counter: three in a row stop the run, and nothing is sent
+/// after that (the follow-up batch and any later route group are refused, recorded NOT RUN with
+/// class outage stop).
+#[tokio::test(start_paused = true)]
+async fn submit_failures_in_batch_mode_trip_the_outage_stop() {
+    let mut api = FakeBatch::new(|_round, _id| Reply::Ok);
+    api.submit_fails_always = true;
+    let m = meter(eff(true), None);
+
+    // Group 1: the submit fails, and so does the follow-up batch (two in a row).
+    let (_f, ok, failures) = run(&api, &m).await;
+    assert_eq!(ok, 0);
+    assert_eq!(failures.len(), 4);
+    assert!(
+        !m.outage_stopped(),
+        "two failures in a row are not yet an outage"
+    );
+    assert_eq!(api.submit_attempts.load(Ordering::SeqCst), 2);
+
+    // Group 2: its first submit is the third failure in a row, which stops the run; the
+    // follow-up batch is not sent.
+    let (_f, _ok, _failures) = run(&api, &m).await;
+    assert!(
+        m.outage_stopped(),
+        "the third failure in a row stops the run"
+    );
+    assert_eq!(api.submit_attempts.load(Ordering::SeqCst), 3);
+
+    // Group 3: nothing is sent at all.
+    let (_f, _ok, _failures) = run(&api, &m).await;
+    assert_eq!(
+        api.submit_attempts.load(Ordering::SeqCst),
+        3,
+        "no new work is dispatched after the stop"
+    );
+    let record = m.outage_record().expect("the stop is on record");
+    assert_eq!(record.trigger.class, FailureClass::Transport);
+    assert!(
+        record
+            .not_run_passes
+            .iter()
+            .all(|p| p.class == FailureClass::OutageStop),
+        "{record:?}"
+    );
+    assert_eq!(
+        record.not_run_passes.len(),
+        8,
+        "group 2's four follow-up items and group 3's four items were never sent"
+    );
+}
+
+/// Poll failures count too: a batch that was accepted but whose status cannot be read trips the
+/// stop, so the run does not go on to burn through more batches.
+#[tokio::test(start_paused = true)]
+async fn poll_failures_in_batch_mode_trip_the_outage_stop() {
+    let mut api = FakeBatch::new(|_round, _id| Reply::Ok);
+    api.poll_fails = true;
+    let m = meter(eff(true), None);
+    let (_f, _ok, failures) = run(&api, &m).await;
+    assert_eq!(failures.len(), 4);
+    assert!(m.outage_stopped(), "repeated poll failures are an outage");
+
+    // A later group sends nothing.
+    let submitted_before = api.submitted_ids().len();
+    let _ = run(&api, &m).await;
+    assert_eq!(api.submitted_ids().len(), submitted_before);
+}
+
+/// A poll that fails once and recovers is not an outage.
+#[tokio::test(start_paused = true)]
+async fn a_successful_batch_resets_the_streak() {
+    let api = FakeBatch::new(|_round, _id| Reply::Ok);
+    let m = meter(eff(true), None);
+    m.health().note_failure(FailureClass::Transport, "a");
+    m.health().note_failure(FailureClass::Transport, "b");
+    let (_f, ok, failures) = run(&api, &m).await;
+    assert_eq!(ok, 4);
+    assert!(failures.is_empty());
+    assert!(!m.outage_stopped());
+    assert_eq!(
+        m.health().streak(),
+        0,
+        "a clean batch starts the count over"
+    );
 }
