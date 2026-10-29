@@ -2520,15 +2520,27 @@ pub async fn audit_repos_with_llm_controlled(
                             corpus,
                         ) {
                             Some("arch_checker") => {
+                                // The files the rule's checker actually matched, not every file
+                                // the repo handed the audit: a rule with no file in scope had
+                                // nothing to look at, which is not a clean result.
+                                let scope = architectural::files_in_scope(rid, &files);
+                                let evaluated = match scope {
+                                    architectural::RuleScopeFiles::Files(n) => n,
+                                    architectural::RuleScopeFiles::RepoLevel
+                                    | architectural::RuleScopeFiles::Unknown => files.len(),
+                                };
                                 pipeline_ledger.record_rule(
                                     spec,
                                     *rid,
                                     crate::scan_ledger::RuleTier::Architectural,
                                     true,
                                     None,
-                                    files.len(),
+                                    evaluated,
                                     emitted,
                                 );
+                                if scope == architectural::RuleScopeFiles::RepoLevel {
+                                    pipeline_ledger.mark_repo_level_rule(spec, rid);
+                                }
                             }
                             Some("gateway_rule_registry") => {
                                 pipeline_ledger.record_rule(

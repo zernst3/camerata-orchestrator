@@ -80,6 +80,34 @@ impl PatternsView {
     pub fn count(&self) -> usize {
         self.rows.len()
     }
+
+    /// The rows the tab shows, each with the title it prints. With the rule library loaded
+    /// (`titles`: rule id to title) a row is shown under its rule's title and a row whose rule
+    /// is not in the library is dropped, exactly as the report's section does, so the two
+    /// agree. With no library loaded yet a row is shown under its rule id and none is dropped.
+    pub fn rows_with_titles<'a>(
+        &'a self,
+        titles: Option<&std::collections::HashMap<String, String>>,
+    ) -> Vec<(&'a PatternRowView, String)> {
+        self.rows
+            .iter()
+            .filter_map(|row| match titles {
+                Some(map) => map
+                    .iter()
+                    .find(|(id, _)| id.eq_ignore_ascii_case(&row.rule_id))
+                    .map(|(_, title)| (row, title.clone())),
+                None => Some((row, row.rule_id.clone())),
+            })
+            .collect()
+    }
+
+    /// The number beside the tab for the rows [`Self::rows_with_titles`] shows.
+    pub fn count_with_titles(
+        &self,
+        titles: Option<&std::collections::HashMap<String, String>>,
+    ) -> usize {
+        self.rows_with_titles(titles).len()
+    }
 }
 
 /// The fixed sentence that introduces a row. The same wording the report prints.
@@ -93,6 +121,45 @@ pub fn pattern_sentence(title: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn view_of(ids: &[&str]) -> PatternsView {
+        PatternsView {
+            repos: vec!["a".to_string(), "b".to_string()],
+            rows: ids
+                .iter()
+                .map(|id| PatternRowView {
+                    rule_id: (*id).to_string(),
+                    cells: Vec::new(),
+                })
+                .collect(),
+            themes: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn with_the_library_loaded_a_row_prints_its_title_and_an_unknown_rule_is_dropped() {
+        let view = view_of(&["ARCH-PAGINATION-1", "GONE-1"]);
+        let titles: std::collections::HashMap<String, String> = [(
+            "ARCH-PAGINATION-1".to_string(),
+            "Cursor pagination".to_string(),
+        )]
+        .into();
+        let rows = view.rows_with_titles(Some(&titles));
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].1, "Cursor pagination");
+        // The count beside the tab is the count of the rows shown, as in the report.
+        assert_eq!(view.count_with_titles(Some(&titles)), 1);
+        assert!(pattern_sentence(&rows[0].1).contains("Cursor pagination differently"));
+    }
+
+    #[test]
+    fn with_no_library_loaded_every_row_shows_under_its_rule_id() {
+        let view = view_of(&["ARCH-PAGINATION-1", "GONE-1"]);
+        let rows = view.rows_with_titles(None);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].1, "ARCH-PAGINATION-1");
+        assert_eq!(view.count_with_titles(None), 2);
+    }
 
     #[test]
     fn the_server_json_round_trips_into_the_view() {

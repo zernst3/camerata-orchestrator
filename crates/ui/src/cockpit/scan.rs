@@ -7637,8 +7637,14 @@ pub(super) fn NotAssessedPanel(
 /// or counted, and a service where a rule does not apply, or was not reviewed, is shown as such
 /// and never as clean. Mirrors the report's section (`camerata_ui_core::patterns`).
 #[component]
-pub(super) fn PatternsPanel(view: camerata_ui_core::patterns::PatternsView) -> Element {
-    if view.rows.is_empty() {
+pub(super) fn PatternsPanel(
+    view: camerata_ui_core::patterns::PatternsView,
+    titles: Option<std::collections::HashMap<String, String>>,
+) -> Element {
+    // The same rows the report prints: under the rule's title, and without a row whose rule is
+    // not in the loaded library.
+    let shown = view.rows_with_titles(titles.as_ref());
+    if shown.is_empty() {
         return rsx! {
             p { class: "kind-panel-empty",
                 "No rule was found violated in one service and clean in another."
@@ -7650,11 +7656,11 @@ pub(super) fn PatternsPanel(view: camerata_ui_core::patterns::PatternsView) -> E
             p { class: "kind-panel-sub",
                 "Where the services of this project differ on a rule. An observation, not a finding: it carries no severity and is in no count. A service where a rule does not apply, or was not reviewed, is shown as such and is never counted as clean."
             }
-            for row in view.rows.iter() {
+            for (row , title) in shown.iter() {
                 div { key: "{row.rule_id}", class: "kind-panel-group",
-                    p { class: "kind-panel-group-h", "{row.rule_id}" }
+                    p { class: "kind-panel-group-h", "{title}" }
                     p { class: "kind-panel-sub",
-                        "{camerata_ui_core::patterns::pattern_sentence(&row.rule_id)}"
+                        "{camerata_ui_core::patterns::pattern_sentence(title)}"
                     }
                     ul { class: "kind-panel-list",
                         for cell in row.cells.iter() {
@@ -7999,6 +8005,20 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
     // The "Patterns across services" tab of a multi-repo project. It is an observation, not a
     // kind of finding, so it is a lens of its own beside the kind switch and not a fifth kind.
     let mut patterns_open = use_signal(|| false);
+    // The rule library, for the titles the patterns tab prints (the report prints titles too).
+    let pattern_titles_res = use_resource(fetch_corpus_rules);
+    let pattern_titles = move || {
+        pattern_titles_res
+            .read()
+            .as_ref()
+            .and_then(|loaded| loaded.as_ref())
+            .map(|rules| {
+                rules
+                    .iter()
+                    .map(|r| (r.id.clone(), r.title.clone()))
+                    .collect::<std::collections::HashMap<String, String>>()
+            })
+    };
     // THE RULE HUB (design §8): which (repo, rule) the hub is open on, and the Queue jump it
     // can perform. Both session-local lenses like `kind_view`, and deliberately not persisted
     // for the same reason: an open modal is not a decision.
@@ -9332,7 +9352,7 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                             onclick: move |_| patterns_open.set(true),
                             "Patterns across services "
                             span { class: "triage-tab-count",
-                                "{audited.as_ref().map_or(0, |a| a.patterns_across_services.count())}"
+                                "{audited.as_ref().map_or(0, |a| a.patterns_across_services.count_with_titles(pattern_titles().as_ref()))}"
                             }
                         }
                     }
@@ -9344,6 +9364,7 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                             .as_ref()
                             .map(|a| a.patterns_across_services.clone())
                             .unwrap_or_default(),
+                        titles: pattern_titles(),
                     }
                 } else if kind_view() == KindSurface::Queue {
                     // Single-select over the triage tables, each with a live count. The set
@@ -13658,7 +13679,7 @@ mod render_tests {
                     "themes": []
                 }))
                 .unwrap();
-            rsx! { PatternsPanel { view } }
+            rsx! { PatternsPanel { view, titles: None } }
         }
         let mut vdom = VirtualDom::new(harness);
         vdom.rebuild_in_place();
@@ -13683,11 +13704,54 @@ mod render_tests {
         );
     }
 
+    /// With the rule library loaded the tab prints the rule's title (as the report does) and drops
+    /// a row whose rule is not in the library, so the two agree.
+    #[test]
+    fn the_patterns_panel_prints_the_rule_title_and_drops_an_unknown_rule() {
+        fn harness() -> Element {
+            let view: camerata_ui_core::patterns::PatternsView =
+                serde_json::from_value(serde_json::json!({
+                    "repos": ["acme/web", "acme/api"],
+                    "rows": [
+                        {"rule_id": "ARCH-PAGINATION-1", "cells": [
+                            {"repo": "acme/web", "state": "violated", "sites": 2},
+                            {"repo": "acme/api", "state": "clean"}]},
+                        {"rule_id": "GONE-1", "cells": [
+                            {"repo": "acme/web", "state": "violated", "sites": 1},
+                            {"repo": "acme/api", "state": "clean"}]}
+                    ],
+                    "themes": []
+                }))
+                .unwrap();
+            let titles: std::collections::HashMap<String, String> = [(
+                "ARCH-PAGINATION-1".to_string(),
+                "Cursor pagination".to_string(),
+            )]
+            .into();
+            rsx! { PatternsPanel { view, titles: Some(titles) } }
+        }
+        let mut vdom = VirtualDom::new(harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        assert!(
+            html.contains("These services handle Cursor pagination differently."),
+            "{html}"
+        );
+        assert!(
+            !html.contains("ARCH-PAGINATION-1"),
+            "no raw rule id: {html}"
+        );
+        assert!(
+            !html.contains("GONE-1"),
+            "an unknown rule is dropped: {html}"
+        );
+    }
+
     /// An empty section states its case in a sentence, never a blank area.
     #[test]
     fn the_patterns_panel_states_an_empty_case() {
         fn harness() -> Element {
-            rsx! { PatternsPanel { view: camerata_ui_core::patterns::PatternsView::default() } }
+            rsx! { PatternsPanel { view: camerata_ui_core::patterns::PatternsView::default(), titles: None } }
         }
         let mut vdom = VirtualDom::new(harness);
         vdom.rebuild_in_place();
