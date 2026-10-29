@@ -1229,6 +1229,11 @@ pub async fn run_inspect_pipeline_with(
     if report.incomplete_reasons().is_empty() {
         save_manifest(&manifest_path, &manifest);
     }
+    // The scan's own tools (a build) can leave files in the checkout. Record the tree as it stands
+    // now, so a run killed from here on (during the export, say) still resumes against it.
+    if let Some(store) = &store {
+        store.record_tree_end();
+    }
 
     // The ledger summary is rendered from `report.ledger`/`report.failed_passes` AS THEY STAND
     // right here — after `audit_repos` (Phase 3), `merge_scan_preview` (Phase 4, which runs
