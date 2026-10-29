@@ -306,6 +306,13 @@ fn strip_run_metadata(v: &mut serde_json::Value) {
 fn comparable(path: &Path) -> BTreeMap<String, String> {
     let mut out = BTreeMap::new();
     let short_commit = regex::Regex::new(r"-[0-9a-f]{7}-").unwrap();
+    let named_json = regex::Regex::new(r"acme-one-[0-9a-f]{7}([.-])").unwrap();
+    let xlsx_time = regex::Regex::new(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2} UTC").unwrap();
+    let on_main = regex::Regex::new(r"\b[0-9a-f]{7} on main").unwrap();
+    let any_time =
+        regex::Regex::new(r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(:\d{2})?Z?( UTC)?").unwrap();
+    let hash40 = regex::Regex::new(r"[0-9a-f]{40}").unwrap();
+    let named_text = regex::Regex::new(r"-[0-9a-f]{7}([.-])").unwrap();
     for (name, bytes) in entries(path) {
         // The file names carry the short commit, which differs between two checkouts.
         let name = short_commit.replace(&name, "-<commit>-").into_owned();
@@ -316,10 +323,11 @@ fn comparable(path: &Path) -> BTreeMap<String, String> {
             let mut v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
             strip_run_metadata(&mut v);
             let text = serde_json::to_string_pretty(&v).unwrap();
-            let named = regex::Regex::new(r"acme-one-[0-9a-f]{7}([.-])").unwrap();
             out.insert(
                 name,
-                named.replace_all(&text, "acme-one-<commit>$1").into_owned(),
+                named_json
+                    .replace_all(&text, "acme-one-<commit>$1")
+                    .into_owned(),
             );
         } else if name.ends_with(".xlsx") {
             let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
@@ -331,23 +339,20 @@ fn comparable(path: &Path) -> BTreeMap<String, String> {
                 }
                 let mut text = String::new();
                 let _ = file.read_to_string(&mut text);
-                let re = regex::Regex::new(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2} UTC").unwrap();
-                let text = re.replace_all(&text, "<time>").into_owned();
-                let short = regex::Regex::new(r"\b[0-9a-f]{7} on main").unwrap();
+                let text = xlsx_time.replace_all(&text, "<time>").into_owned();
                 out.insert(
                     format!("{name}!{inner}"),
-                    short.replace_all(&text, "<commit> on main").into_owned(),
+                    on_main.replace_all(&text, "<commit> on main").into_owned(),
                 );
             }
         } else {
             let text = String::from_utf8_lossy(&bytes).into_owned();
-            let re =
-                regex::Regex::new(r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(:\d{2})?Z?( UTC)?").unwrap();
-            let text = re.replace_all(&text, "<time>").into_owned();
-            let commit = regex::Regex::new(r"[0-9a-f]{40}").unwrap();
-            let text = commit.replace_all(&text, "<commit>").into_owned();
-            let named = regex::Regex::new(r"-[0-9a-f]{7}([.-])").unwrap();
-            out.insert(name, named.replace_all(&text, "-<commit>$1").into_owned());
+            let text = any_time.replace_all(&text, "<time>").into_owned();
+            let text = hash40.replace_all(&text, "<commit>").into_owned();
+            out.insert(
+                name,
+                named_text.replace_all(&text, "-<commit>$1").into_owned(),
+            );
         }
     }
     out

@@ -140,9 +140,9 @@ pub(crate) fn tool_invoked_and_failed(error: &anyhow::Error) -> bool {
     if error.downcast_ref::<ToolNotRun>().is_some() {
         return false;
     }
-    !error
+    error
         .downcast_ref::<std::io::Error>()
-        .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound)
+        .is_none_or(|io| io.kind() != std::io::ErrorKind::NotFound)
 }
 
 /// The coverage note for `tool` skipped in a client engagement with no opt-in.
