@@ -1955,9 +1955,12 @@ pub(super) struct ResumePlanView {
 
 /// Fetch the resume plan of a saved run.
 pub(super) async fn resume_plan(run_id: &str) -> Result<ResumePlanView, String> {
-    let resp = reqwest::get(format!("{}/api/inspections/{run_id}/plan", crate::bff_base()))
-        .await
-        .map_err(|e| format!("could not reach the app's server: {e}"))?;
+    let resp = reqwest::get(format!(
+        "{}/api/inspections/{run_id}/plan",
+        crate::bff_base()
+    ))
+    .await
+    .map_err(|e| format!("could not reach the app's server: {e}"))?;
     if !resp.status().is_success() {
         let body: serde_json::Value = resp.json().await.unwrap_or_default();
         return Err(body["error"]
@@ -1973,7 +1976,10 @@ pub(super) async fn resume_plan(run_id: &str) -> Result<ResumePlanView, String> 
 /// Start the resume of a saved run as a background job; returns the job id, or the plain reason.
 pub(super) async fn resume_start(run_id: &str) -> Result<String, String> {
     let resp = reqwest::Client::new()
-        .post(format!("{}/api/inspections/{run_id}/resume", crate::bff_base()))
+        .post(format!(
+            "{}/api/inspections/{run_id}/resume",
+            crate::bff_base()
+        ))
         .send()
         .await
         .map_err(|e| format!("could not reach the app's server: {e}"))?;
@@ -5673,6 +5679,72 @@ pub(super) fn OnboardView(connection: Option<ProviderView>) -> Element {
     let scan_blocked = crate::source_ui::use_scan_block()
         .and_then(|b| camerata_ui_core::readiness::scan_block_for(&b, &scan_scope));
 
+    // Saved inspections of the open project: an inspection the app lost (it was closed, crashed
+    // or the machine died) or that ended with a part left is offered here, on app start and when
+    // a project is opened, with "Run what remains". Any interruption should cost minutes, never
+    // the run. The plan preview, the resume and the Bombe are the ones the incomplete-scan banner
+    // uses; this is the way in from a screen that has no report yet.
+    let mut saved_epoch = use_signal(|| 0u32);
+    let saved_res = use_resource(move || async move {
+        let _ = saved_epoch();
+        super::saved_inspections::fetch_saved_inspections().await
+    });
+    let saved: Vec<camerata_ui_core::saved_inspections::SavedInspection> =
+        saved_res.read().clone().unwrap_or_default();
+    let mut saved_plan = use_signal(|| Option::<(String, ResumePlanView)>::None);
+    let mut saved_busy = use_signal(|| false);
+    let mut saved_error = use_signal(|| Option::<String>::None);
+    let mut active_audit_job = use_context::<Signal<Option<String>>>();
+    // Captured here, in the render body, as `poll_job` requires (see BOMBE-SILENT-MISS there).
+    let loading_count = use_context::<crate::loading::LoadingCount>();
+    let saved_for_resume = saved.clone();
+    let on_saved_plan = EventHandler::new(move |run_id: String| {
+        saved_error.set(None);
+        spawn(async move {
+            let plan = match resume_plan(&run_id).await {
+                Ok(plan) => plan,
+                Err(why) => ResumePlanView {
+                    text: String::new(),
+                    refusal: Some(why),
+                },
+            };
+            saved_plan.set(Some((run_id, plan)));
+        });
+    });
+    let on_saved_resume = EventHandler::new(move |run_id: String| {
+        let repos = saved_for_resume
+            .iter()
+            .find(|r| r.id == run_id)
+            .map(|r| r.repos.clone())
+            .unwrap_or_default();
+        saved_plan.set(None);
+        saved_error.set(None);
+        saved_busy.set(true);
+        spawn(async move {
+            // The Bombe runs from the start request to the end of the job; the scan results
+            // mount while it runs and pick the job up from `active_audit_job` (as they do for a
+            // scan started before the view was left), so the report appears there.
+            let result = run_what_remains(
+                loading_count,
+                || async { resume_start(&run_id).await },
+                |jid| async move {
+                    active_audit_job.set(Some(jid.clone()));
+                    repo.set(repos.join("\n"));
+                    if let Some(report) = scan_repos(&repos).await {
+                        scan.set(Some(report));
+                    }
+                    super::saved_inspections::wait_for_audit_job(&jid).await;
+                },
+            )
+            .await;
+            saved_busy.set(false);
+            saved_epoch += 1;
+            if let Err(why) = result {
+                saved_error.set(Some(format!("Cannot resume now: {why}")));
+            }
+        });
+    });
+
     // Greenfield-specific state: the new repo's name, the local directory to create,
     // the selected corpus rules to bake in, the in-progress flag, and the scaffold result.
     // These signals are mutated inside the GreenfieldForm child component — the parent
@@ -5770,6 +5842,17 @@ pub(super) fn OnboardView(connection: Option<ProviderView>) -> Element {
 
             // ── Brownfield path: browse existing repos + scan ─────────────────
             if path() == OnboardPath::Brownfield {
+                // A saved inspection to finish comes before starting another.
+                if scan().is_none() {
+                    super::saved_inspections::SavedInspectionsPanel {
+                        saved: saved.clone(),
+                        plan: saved_plan(),
+                        busy: saved_busy(),
+                        error: saved_error(),
+                        on_plan: Some(on_saved_plan),
+                        on_resume: Some(on_saved_resume),
+                    }
+                }
                 div { class: "onboard-repo-block",
                     label { class: "onboard-repo-label", "Repositories — browse to each repo's local folder (a feature often spans several)" }
                     {

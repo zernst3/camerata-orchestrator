@@ -28,6 +28,7 @@ pub mod review_timer;
 pub mod rules;
 pub mod run;
 pub mod save_queue;
+pub mod saved_inspections;
 pub mod scan;
 pub mod schedule;
 pub mod source;
