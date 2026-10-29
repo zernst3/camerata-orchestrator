@@ -682,6 +682,20 @@ impl RunStore {
         &self.dir
     }
 
+    /// Keep the incremental-scan baseline the run started from. A resume starts from this one,
+    /// not from the cache file an attempt since may have replaced, so the resumed scan covers the
+    /// same files as the run it continues.
+    pub fn save_prior_manifest(&self, manifest: &crate::scan_cache::ScanManifest) {
+        if let Ok(bytes) = serde_json::to_vec(manifest) {
+            let _ = write_atomic(&self.dir.join("prior_manifest.json"), &bytes);
+        }
+    }
+
+    /// The baseline [`Self::save_prior_manifest`] kept, if the run started from one.
+    pub fn load_prior_manifest(&self) -> Option<crate::scan_cache::ScanManifest> {
+        read_json(&self.dir.join("prior_manifest.json"))
+    }
+
     pub fn run_id(&self) -> String {
         self.lock_state().record.run_id.clone()
     }

@@ -5,6 +5,7 @@ use super::*;
 
 fn outcome() -> InspectOutcome {
     InspectOutcome {
+        run_id: None,
         export_path: PathBuf::from("x.zip"),
         export_zip_bytes: 0,
         backend: ProjectBackend::Api,

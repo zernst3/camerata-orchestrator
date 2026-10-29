@@ -58,7 +58,7 @@ use camerata_server::usage_ledger::UsageLedger;
 
 /// Parsed + validated arguments for `camerata inspect`. Kept separate from clap's `Command`
 /// enum variant so the pipeline ([`run_inspect`]) and its tests never depend on clap at all.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct InspectArgs {
     /// The repo's local working tree to inspect. Must exist and be a directory
     /// ([`validate_args`] checks eagerly).
@@ -307,6 +307,9 @@ pub struct InspectOutcome {
     /// [`camerata_server::failure_report`]). The full report is at the path the ledger summary
     /// names.
     pub failure_lines: Vec<String>,
+    /// The saved run this inspection is (`camerata inspect --resume <id>` runs what remains).
+    /// `None` when the run could not be saved.
+    pub run_id: Option<String>,
 }
 
 impl InspectOutcome {
@@ -384,6 +387,8 @@ pub enum InspectError {
     Incomplete(camerata_server::report_export::RunIncomplete),
     /// The same refusal, with what the run did and did not do. No zip was written.
     IncompleteRun(Box<IncompleteRun>),
+    /// `--resume` was given a run that is already complete: nothing to do, and it says so.
+    AlreadyComplete(String),
 }
 
 /// A client export refused because the run did not complete, with the run's own account.
@@ -397,6 +402,8 @@ pub struct IncompleteRun {
     pub ledger_path: PathBuf,
     /// One structured line per failure, for stderr.
     pub failure_lines: Vec<String>,
+    /// The saved run, so the operator can resume it.
+    pub run_id: Option<String>,
 }
 
 impl InspectError {
@@ -411,6 +418,7 @@ impl InspectError {
             InspectError::IncompleteRun(run) => {
                 incomplete_exit_code(run.refusal.outage, run.refusal.cost_capped)
             }
+            InspectError::AlreadyComplete(_) => 0,
         }
     }
 }
@@ -428,6 +436,7 @@ impl std::fmt::Display for InspectError {
                 run.ledger_summary,
                 run.ledger_path.display()
             ),
+            InspectError::AlreadyComplete(message) => write!(f, "{message}"),
         }
     }
 }
@@ -819,6 +828,7 @@ async fn run_inspect_pipeline(
         has_api_key,
         creds,
         Seams {
+            resume: None,
             llm: None,
             preflight_sink: &|text| print!("{text}"),
         },
@@ -833,6 +843,8 @@ pub struct Seams<'a> {
     pub llm: Option<&'a dyn camerata_server::llm::LlmPort>,
     /// Receives the pre-flight estimate text BEFORE the first model call is made.
     pub preflight_sink: &'a (dyn Fn(&str) + Sync),
+    /// The id of a saved run to resume instead of starting a new one (see [`resume_inspect`]).
+    pub resume: Option<String>,
 }
 
 /// [`run_inspect_pipeline`] with its seams explicit.
@@ -925,10 +937,39 @@ pub async fn run_inspect_pipeline_with(
         );
     }
 
-    let incremental_prior = if args.full {
-        None
+    // ── The run store: a new run, or the saved run being resumed ───────────────────────────
+    let audit_model_resolved = camerata_server::ai_audit::resolve_audit_model(model);
+    let ai_scan_key = camerata_server::scan_cache::AiScanKey::new(
+        &audit_model_resolved,
+        calibration_model,
+        &selected,
+    );
+    let models_record = camerata_server::run_store::ModelsRecord {
+        audit: audit_model_resolved.clone(),
+        calibration: calibration_model.unwrap_or_default().to_string(),
+        fix: args.fix_model.clone().unwrap_or_default(),
+        backend: format!("{:?}", args.backend).to_ascii_lowercase(),
+        mode: format!("{mode:?}").to_ascii_lowercase(),
+    };
+    let project_key = if args.repo_dirs().len() == 1 {
+        camerata_server::scan_cache::state_dir::repo_state_key(&args.repo)
     } else {
-        load_prior_manifest(&manifest_path)
+        camerata_server::scan_cache::state_dir::project_state_key(&args.repo_dirs())
+    };
+    let resumed: Option<(Arc<camerata_server::run_store::RunStore>, String)> = match &seams.resume {
+        Some(run_id) => Some(open_for_resume(
+            run_id,
+            &sources,
+            &ai_scan_key,
+            &models_record,
+        )?),
+        None => None,
+    };
+    let incremental_prior = match &resumed {
+        // The baseline the run started from, not the one an attempt since may have replaced.
+        Some((store, _)) => store.load_prior_manifest(),
+        None if args.full => None,
+        None => load_prior_manifest(&manifest_path),
     };
 
     // A spend limit needs every model priced; refuse before the estimate, before any model call.
@@ -949,7 +990,11 @@ pub async fn run_inspect_pipeline_with(
     // ── Pre-flight: the estimate, printed BEFORE the first model call ──────────────────────
     // Skipped when no model call will be made (the compliance gate blocked the AI review).
     let mut preflight_text: Option<String> = None;
-    if !matches!(backend_resolution, BackendResolution::Blocked { .. }) {
+    if let Some((_, estimate_text)) = &resumed {
+        // A resume prices only what remains.
+        (seams.preflight_sink)(estimate_text);
+        preflight_text = Some(estimate_text.clone());
+    } else if !matches!(backend_resolution, BackendResolution::Blocked { .. }) {
         let facts =
             camerata_server::preflight::gather_scan_facts(&sources, &selected, corpus.as_ref())
                 .await;
@@ -1006,59 +1051,108 @@ pub async fn run_inspect_pipeline_with(
     // exact function `onboard_audit`'s HTTP handler calls. `chosen_options` stays empty: no
     // project-level override exists headlessly, so the model recommends fully automatically —
     // the curation-default state. ──
-    let (mut report, manifest) = match seams.llm {
-        Some(llm) => {
-            camerata_server::onboard::audit_repos_with_llm_controlled(
-                llm,
-                &sources,
-                &selected,
-                Vec::new(),
-                model,
-                calibration_model,
-                mode,
-                false,
-                None,
-                None,
-                incremental_prior.as_ref(),
-                false,
-                true,
-                true,
-                true,
-                backend_resolution,
-                corpus.as_ref(),
-                &HashMap::new(),
-                controls.clone(),
-            )
-            .await
-        }
+    // The run is saved from here on: every model reply is stored as it returns, so an
+    // interruption or a failed part costs only that part (see `camerata_server::run_store`).
+    let store: Option<Arc<camerata_server::run_store::RunStore>> = match resumed {
+        Some((store, _)) => Some(store),
         None => {
-            camerata_server::onboard::audit_repos_controlled(
-                creds,
-                &sources,
-                &selected,
-                Vec::new(),
-                model,
-                calibration_model,
-                mode,
-                false, // thorough — not exposed on Step 0's flag surface; matches AuditReq's default
-                None,  // feedback — no live transcript sink headlessly
-                None, // job — no job store headlessly (this call blocks until done, like `onboard_audit`)
-                incremental_prior.as_ref(),
-                false, // deep — the opt-in compliance tier; not exposed on Step 0's flag surface
-                true,  // soc2_enabled — irrelevant with `deep` off
-                true,  // run_ai_review
-                true,  // run_deterministic
-                Some(ledger.clone()),
-                backend_resolution,
-                corpus.as_ref(),
-                &HashMap::new(),
-                controls.clone(),
-            )
-            .await
+            match camerata_server::run_store::RunStore::create(camerata_server::run_store::NewRun {
+                project_key: project_key.clone(),
+                repos: sources.clone(),
+                models: models_record.clone(),
+                ai_scan_key: ai_scan_key.clone(),
+                args: serde_json::to_value(&args).unwrap_or(serde_json::Value::Null),
+                estimate_usd: controls.estimate_hint_usd,
+                include_alternatives: corpus.is_some(),
+            }) {
+                Ok(store) => {
+                    if let Some(prior) = &incremental_prior {
+                        store.save_prior_manifest(prior);
+                    }
+                    let _ = camerata_server::run_store::prune_runs(
+                        &project_key,
+                        camerata_server::run_store::DEFAULT_KEEP_RUNS,
+                    );
+                    Some(store)
+                }
+                Err(e) => {
+                    eprintln!(
+                        "camerata inspect: this run cannot be saved ({e}); it will run, but it \
+                         cannot be resumed if it is interrupted or a part fails"
+                    );
+                    None
+                }
+            }
         }
     };
+    // Delimiter tokens drawn from the run's own seed, so a resumed run asks the model the same
+    // questions as the run it resumes and a stored reply still matches its prompt.
+    let _token_seed = store
+        .as_ref()
+        .map(|s| camerata_server::prompt_frame::seed_tokens(s.nonce_seed()));
 
-    save_manifest(&manifest_path, &manifest);
+    let (mut report, manifest) = {
+        // The model this run asks: the scripted one a test hands in, else the real client for the
+        // resolved transport (EXACTLY the resolution's Cli/Api choice, as `audit_repos_controlled`
+        // builds it; every `claude -p` it spawns is remembered so source deletion can find the
+        // session files).
+        let sessions = camerata_server::llm::SessionSink::new();
+        let llm_backend = match &backend_resolution {
+            BackendResolution::Api => camerata_server::llm::Backend::Api,
+            BackendResolution::Cli | BackendResolution::Blocked { .. } => {
+                camerata_server::llm::Backend::Cli
+            }
+        };
+        let real = match seams.llm {
+            Some(_) => None,
+            None => Some(
+                camerata_server::onboard::build_llm(creds, llm_backend, Some(ledger.clone()))
+                    .with_session_sink(sessions.clone()),
+            ),
+        };
+        let base: &dyn camerata_server::llm::LlmPort = match (seams.llm, real.as_ref()) {
+            (Some(llm), _) => llm,
+            (None, Some(real)) => real,
+            (None, None) => {
+                return Err(InspectError::Failed(
+                    "no model client could be built for this run".to_string(),
+                ))
+            }
+        };
+        let journaled = store
+            .as_ref()
+            .map(|s| camerata_server::run_store::journal::wrap(base, s.clone()));
+        let model_seam: &dyn camerata_server::llm::LlmPort = match &journaled {
+            Some(j) => j.as_ref(),
+            None => base,
+        };
+        let (mut report, manifest) = camerata_server::onboard::audit_repos_with_llm_controlled(
+            model_seam,
+            &sources,
+            &selected,
+            Vec::new(),
+            model,
+            calibration_model,
+            mode,
+            false, // thorough: not exposed on Step 0's flag surface; matches AuditReq's default
+            None,  // feedback: no live transcript sink headlessly
+            None,  // job: no job store headlessly (this call blocks until done)
+            incremental_prior.as_ref(),
+            false, // deep: the opt-in compliance tier; not exposed on Step 0's flag surface
+            true,  // soc2_enabled: irrelevant with `deep` off
+            true,  // run_ai_review
+            true,  // run_deterministic
+            backend_resolution,
+            corpus.as_ref(),
+            &HashMap::new(),
+            controls.clone(),
+        )
+        .await;
+        if seams.llm.is_none() {
+            report.provenance.model_sessions = sessions.snapshot();
+        }
+        (report, manifest)
+    };
     report.excluded_mechanical_rules = excluded_mechanical;
     // W13: mirrors `onboard_audit`/`onboard_audit_start`'s own call site in
     // `camerata_server::lib` exactly — every corpus file that would not parse is disclosed
@@ -1129,6 +1223,13 @@ pub async fn run_inspect_pipeline_with(
         corpus.as_ref(),
     );
 
+    // The incremental baseline becomes reusable only when the scan is complete: a run with a
+    // failed or unrun part leaves the previous baseline in place, and its own stored replies are
+    // what a resume uses.
+    if report.incomplete_reasons().is_empty() {
+        save_manifest(&manifest_path, &manifest);
+    }
+
     // The ledger summary is rendered from `report.ledger`/`report.failed_passes` AS THEY STAND
     // right here — after `audit_repos` (Phase 3), `merge_scan_preview` (Phase 4, which runs
     // `reconcile_external_tool_ledger` and is the LAST thing that corrects the ledger's
@@ -1170,6 +1271,14 @@ pub async fn run_inspect_pipeline_with(
         None => ledger_summary,
     };
 
+    let run_id = store.as_ref().map(|s| s.run_id());
+    let ledger_summary = match &run_id {
+        Some(id) => format!(
+            "{ledger_summary}\nrun: {id} (camerata inspect --resume {id} runs only what remains)"
+        ),
+        None => ledger_summary,
+    };
+
     // Pass-1 W1 seal fix: THE sealing point — every row-adding pass above has already run, and
     // every exporter the rest of this function calls now takes `&SealedReport`, never
     // `&ScanReport` (see `ScanReport::seal`'s doc comment for the compile-time guarantee this
@@ -1179,7 +1288,7 @@ pub async fn run_inspect_pipeline_with(
     // ── Phase 5: export — the exact `export_product` HTTP handler's assembly ───────────
     // `release_product_export` is the release gate: it returns bytes only when every check
     // passed, and `std::fs::write` below runs only on `Ok`, so a blocked export is never on disk.
-    let released = release_product_export(
+    let released = match release_product_export(
         &report,
         corpus.as_ref(),
         Some(model_record),
@@ -1187,23 +1296,33 @@ pub async fn run_inspect_pipeline_with(
         !args.client_engagement,
     )
     .await
-    .map_err(|e| match e {
-        // The refusal still tells the operator what the run did and did not do.
-        InspectError::Incomplete(refusal) => InspectError::IncompleteRun(Box::new(IncompleteRun {
-            refusal,
-            ledger_summary: ledger_summary.clone(),
-            ledger_path: ledger_file.clone(),
-            failure_lines: failure_lines.clone(),
-        })),
-        other => other,
-    })?;
+    {
+        Ok(released) => released,
+        Err(e) => {
+            finish_run(store.as_ref(), &report, false);
+            return Err(match e {
+                // The refusal still tells the operator what the run did and did not do.
+                InspectError::Incomplete(refusal) => {
+                    InspectError::IncompleteRun(Box::new(IncompleteRun {
+                        refusal,
+                        ledger_summary: ledger_summary.clone(),
+                        ledger_path: ledger_file.clone(),
+                        failure_lines: failure_lines.clone(),
+                        run_id: run_id.clone(),
+                    }))
+                }
+                other => other,
+            });
+        }
+    };
     let zip_bytes = released.bytes;
     let release_gate = format!(
         "release gate: passed ({} checks)",
         released.report.checks.len()
     );
-    std::fs::write(&args.export, &zip_bytes)
-        .map_err(|e| format!("could not write {}: {e}", args.export.display()))?;
+    let written = std::fs::write(&args.export, &zip_bytes);
+    finish_run(store.as_ref(), &report, written.is_ok());
+    written.map_err(|e| format!("could not write {}: {e}", args.export.display()))?;
 
     Ok(InspectOutcome {
         export_path: args.export,
@@ -1222,7 +1341,144 @@ pub async fn run_inspect_pipeline_with(
         outage: report.ledger.outage().cloned(),
         incomplete_reasons: report.incomplete_reasons(),
         failure_lines,
+        run_id,
     })
+}
+
+/// Open the saved run `run_id` to resume it: refuse in plain words when anything its stored
+/// replies depend on differs now, and say what remains and what it should cost. Returns the
+/// opened store and the text to print before any work starts.
+fn open_for_resume(
+    run_id: &str,
+    sources: &[(String, PathBuf)],
+    ai_scan_key: &camerata_server::scan_cache::AiScanKey,
+    models: &camerata_server::run_store::ModelsRecord,
+) -> Result<(Arc<camerata_server::run_store::RunStore>, String), InspectError> {
+    use camerata_server::run_store as rs;
+    let as_error = |e: rs::RunStoreError| match e {
+        rs::RunStoreError::AlreadyComplete(m) => InspectError::AlreadyComplete(m),
+        other => InspectError::Failed(other.to_string()),
+    };
+    let record = rs::read_record(run_id).map_err(as_error)?;
+    let trees = sources
+        .iter()
+        .map(|(name, dir)| (name.clone(), rs::tree_state(dir)))
+        .collect();
+    rs::check_resume(&rs::ResumeCheck {
+        record: &record,
+        ai_scan_key,
+        models,
+        trees,
+    })
+    .map_err(as_error)?;
+    let estimate = rs::estimate_resume(run_id).map_err(as_error)?;
+    let store = rs::RunStore::open(run_id).map_err(as_error)?;
+    Ok((store, estimate.render()))
+}
+
+/// The end of an attempt: tell the store which parts failed and whether the run is complete.
+fn finish_run(
+    store: Option<&Arc<camerata_server::run_store::RunStore>>,
+    report: &camerata_server::onboard::ScanReport,
+    export_written: bool,
+) {
+    let Some(store) = store else {
+        return;
+    };
+    let reasons = report.incomplete_reasons();
+    store.finish(&camerata_server::run_store::FinishOutcome {
+        failures: report
+            .failed_passes
+            .iter()
+            .map(|f| camerata_server::run_store::FinishFailure {
+                repo: f.repo.clone(),
+                pass: f.pass.clone(),
+                class: f.class.as_str().to_string(),
+                files: f.files.clone(),
+                scope_note: f.scope_note,
+            })
+            .collect(),
+        not_run: Vec::new(),
+        scan_reached_end: true,
+        export_written,
+        complete: reasons.is_empty() && export_written,
+        incomplete_reasons: reasons,
+    });
+}
+
+/// Production entry point for `camerata inspect --resume`: the key and the credential store are
+/// the real ones, as for [`run_inspect`].
+pub async fn run_resume(
+    run: &str,
+    repos: &[PathBuf],
+    export: Option<PathBuf>,
+    max_cost_usd: Option<f64>,
+) -> Result<InspectOutcome, InspectError> {
+    let store = &camerata_server::credentials::KeyringCredentialStore;
+    let has_api_key = api_key_present(store);
+    resume_inspect(
+        run,
+        repos,
+        export,
+        max_cost_usd,
+        has_api_key,
+        store,
+        Seams {
+            resume: None,
+            llm: None,
+            preflight_sink: &|text| print!("{text}"),
+        },
+    )
+    .await
+}
+
+/// Resume the saved run `run` (an id, or `latest`): run only the parts that are not done and
+/// export once everything is. `args_override` carries what a resume may change: where the export
+/// goes and the spend limit for the work that remains.
+pub async fn resume_inspect(
+    run: &str,
+    repos: &[PathBuf],
+    export: Option<PathBuf>,
+    max_cost_usd: Option<f64>,
+    has_api_key: bool,
+    creds: &dyn camerata_server::credentials::CredentialStore,
+    seams: Seams<'_>,
+) -> Result<InspectOutcome, InspectError> {
+    use camerata_server::run_store as rs;
+    let project_key = match repos {
+        [] => None,
+        [one] => Some(camerata_server::scan_cache::state_dir::repo_state_key(one)),
+        many => Some(camerata_server::scan_cache::state_dir::project_state_key(
+            many,
+        )),
+    };
+    let run_id = rs::resolve_run(run, project_key.as_deref())
+        .map_err(|e| InspectError::Failed(e.to_string()))?;
+    let record = rs::read_record(&run_id).map_err(|e| InspectError::Failed(e.to_string()))?;
+    let mut args: InspectArgs = serde_json::from_value(record.args.clone()).map_err(|e| {
+        InspectError::Failed(format!(
+            "run {run_id} did not save the arguments it was started with ({e}); start a new run"
+        ))
+    })?;
+    if let Some(export) = export {
+        args.export = export;
+    }
+    if max_cost_usd.is_some() {
+        args.max_cost_usd = max_cost_usd;
+    }
+    if seams.llm.is_none() {
+        require_api_key_for_client_inspection(args.backend, has_api_key)?;
+    }
+    run_inspect_pipeline_with(
+        args,
+        has_api_key,
+        creds,
+        Seams {
+            resume: Some(run_id),
+            ..seams
+        },
+    )
+    .await
 }
 
 /// Render the scan's pipeline-integrity ledger (`crate::scan_ledger::ScanLedger`) into a
@@ -1632,6 +1888,7 @@ mod tests {
         let mut efficiency = camerata_server::efficiency::EfficiencyConfig::default();
         efficiency.set("result_cache", false).unwrap();
         let mut outcome = InspectOutcome {
+            run_id: None,
             export_path: PathBuf::from("/tmp/out.zip"),
             export_zip_bytes: 1,
             backend: ProjectBackend::Api,
@@ -2232,6 +2489,7 @@ mod tests {
     #[test]
     fn format_outcome_report_names_the_export_path_and_backend() {
         let outcome = InspectOutcome {
+            run_id: None,
             export_path: PathBuf::from("/tmp/out.zip"),
             export_zip_bytes: 4096,
             backend: ProjectBackend::Api,
@@ -2285,6 +2543,7 @@ mod tests {
             },
         );
         let outcome = InspectOutcome {
+            run_id: None,
             export_path: PathBuf::from("/tmp/out.zip"),
             export_zip_bytes: 1,
             backend: ProjectBackend::Api,

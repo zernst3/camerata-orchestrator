@@ -159,6 +159,7 @@ async fn run(
         true,
         &camerata_server::credentials::MemoryCredentialStore::new(),
         Seams {
+            resume: None,
             llm: Some(&llm),
             preflight_sink: &|_| {},
         },

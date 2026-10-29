@@ -148,6 +148,7 @@ async fn run(
         true,
         &camerata_server::credentials::MemoryCredentialStore::new(),
         Seams {
+            resume: None,
             llm: Some(&llm),
             preflight_sink: &|text| {
                 assert!(text.contains("PRE-FLIGHT ESTIMATE"), "{text}");
@@ -307,6 +308,7 @@ async fn a_spend_limit_with_an_unpriced_model_is_refused_before_the_estimate_and
         true,
         &camerata_server::credentials::MemoryCredentialStore::new(),
         Seams {
+            resume: None,
             llm: Some(&llm),
             preflight_sink: &|_| sink_log.lock().unwrap().push("preflight".to_string()),
         },

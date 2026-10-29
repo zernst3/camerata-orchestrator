@@ -135,6 +135,7 @@ async fn two_repos_with_the_same_path_are_one_project_one_report_one_cache() {
         true,
         &camerata_server::credentials::MemoryCredentialStore::new(),
         Seams {
+            resume: None,
             llm: Some(&llm),
             preflight_sink: &|_| {},
         },
@@ -235,6 +236,7 @@ async fn several_repos_without_names_are_refused_before_anything_runs() {
         true,
         &camerata_server::credentials::MemoryCredentialStore::new(),
         Seams {
+            resume: None,
             llm: Some(&llm),
             preflight_sink: &|_| panic!("no estimate before the arguments are valid"),
         },

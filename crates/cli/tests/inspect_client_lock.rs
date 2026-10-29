@@ -131,6 +131,7 @@ async fn run(args: InspectArgs) -> Run {
         true,
         &camerata_server::credentials::MemoryCredentialStore::new(),
         Seams {
+            resume: None,
             llm: Some(&llm),
             preflight_sink: &|_| {
                 printed.fetch_add(1, Ordering::SeqCst);

@@ -211,6 +211,7 @@ async fn run(backend: ProjectBackend, efficiency: Vec<String>) -> RunResult {
         true,
         &camerata_server::credentials::MemoryCredentialStore::new(),
         Seams {
+            resume: None,
             llm: Some(&seam),
             preflight_sink: &|text| {
                 assert_eq!(

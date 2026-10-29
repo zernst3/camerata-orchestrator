@@ -133,7 +133,7 @@ enum Command {
     Inspect {
         /// The repo's local working tree to inspect. Repeat it to inspect several repos as ONE
         /// project (one scan, one report, one cache); each then needs a `--repo-name`.
-        #[arg(long, required = true)]
+        #[arg(long, required_unless_present = "resume")]
         repo: Vec<PathBuf>,
         /// The repo's name as OWNER/REPO, one per `--repo` in the same order. It tags every
         /// finding, so two repos that both have a `src/index.ts` stay apart. Required when more
@@ -141,8 +141,9 @@ enum Command {
         #[arg(long = "repo-name", value_name = "OWNER/REPO")]
         repo_name: Vec<String>,
         /// Where to write the product-export ZIP. Its parent directory must already exist.
-        #[arg(long)]
-        export: PathBuf,
+        /// With `--resume`, defaults to where the saved run was to write it.
+        #[arg(long, required_unless_present = "resume")]
+        export: Option<PathBuf>,
         /// `api` (the Anthropic Messages API; uses the key saved in the app, or
         /// `ANTHROPIC_API_KEY` as the fallback; the DEFAULT, because
         /// a client inspection runs on a metered, single-party chain) or `cli` (the operator's
@@ -195,8 +196,8 @@ enum Command {
         /// Who the inspection is for. Printed in the export's confidentiality line ("Confidential,
         /// prepared for <client> on <date>") on every PDF page and workbook sheet. Required: it
         /// is checked before anything is read or spent.
-        #[arg(long, value_name = "NAME")]
-        client: String,
+        #[arg(long, value_name = "NAME", required_unless_present = "resume")]
+        client: Option<String>,
         /// Not a client engagement: the maintainer's own development. Without this flag every
         /// inspection is a client engagement, which runs only on the Anthropic API with
         /// Anthropic models (`--backend cli` and OpenRouter models are refused before any file
@@ -214,6 +215,17 @@ enum Command {
         /// dropped.
         #[arg(long)]
         consensus: bool,
+        /// Run only what remains of a saved run: `--resume <RUN-ID>` or `--resume latest` (the
+        /// newest run with work left; with `--repo`, the newest of those repos). Every inspection
+        /// is saved part by part, so a part that failed (the AI service was down) or a run that
+        /// was interrupted (a crash, a closed laptop) costs only that part. A resume prints what
+        /// remains and what it should cost, refuses in plain words if a repo's commit or files,
+        /// the models, the rules or this version of Camerata differ from the saved run, sends
+        /// again only the model calls that are not stored as good, then merges, ranks and
+        /// exports everything. `--export` and `--max-cost-usd` may be given again; everything
+        /// else is the saved run's. A run that is already complete says so and does nothing.
+        #[arg(long, value_name = "RUN-ID|latest")]
+        resume: Option<String>,
     },
 
     /// Measure run-to-run drift: run the full AI pass twice over `--repo` with every answer
@@ -479,15 +491,19 @@ async fn main() -> anyhow::Result<()> {
             internal,
             run_client_tooling,
             consensus,
+            resume,
         } => {
+            if let Some(run) = resume {
+                return run_resume_cmd(&run, &repo, export, max_cost_usd).await;
+            }
             let mut repos = repo.into_iter();
-            // `required = true` guarantees at least one.
+            // Without `--resume`, clap guarantees at least one repo, an export and a client.
             let first = repos.next().unwrap_or_default();
             run_inspect_cmd(InspectArgs {
                 repo: first,
                 also_repos: repos.collect(),
                 repo_names: repo_name,
-                export,
+                export: export.unwrap_or_default(),
                 backend,
                 batch,
                 realtime,
@@ -498,7 +514,7 @@ async fn main() -> anyhow::Result<()> {
                 verbose,
                 max_cost_usd,
                 efficiency,
-                client,
+                client: client.unwrap_or_default(),
                 client_engagement: !internal,
                 run_client_tooling,
                 consensus,
@@ -661,7 +677,24 @@ async fn run_repeatability_cmd(
 /// a non-zero exit — never a silent partial result (matches every other subcommand's
 /// error-handling shape in this file).
 async fn run_inspect_cmd(args: InspectArgs) -> anyhow::Result<()> {
-    match inspect_cmd::run_inspect(args).await {
+    report_inspect_result(inspect_cmd::run_inspect(args).await)
+}
+
+/// `inspect --resume`'s handler: the same report and exit codes as a run.
+async fn run_resume_cmd(
+    run: &str,
+    repos: &[PathBuf],
+    export: Option<PathBuf>,
+    max_cost_usd: Option<f64>,
+) -> anyhow::Result<()> {
+    report_inspect_result(inspect_cmd::run_resume(run, repos, export, max_cost_usd).await)
+}
+
+/// Print what a run (or a resume) came to and exit with its code.
+fn report_inspect_result(
+    result: Result<inspect_cmd::InspectOutcome, inspect_cmd::InspectError>,
+) -> anyhow::Result<()> {
+    match result {
         Ok(outcome) => {
             println!("{}", inspect_cmd::format_outcome_report(&outcome));
             for line in &outcome.failure_lines {
@@ -696,7 +729,7 @@ async fn run_inspect_cmd(args: InspectArgs) -> anyhow::Result<()> {
         }
         Err(e) => {
             // A refused export prints the gate's own block (which never carries a secret value)
-            // and exits 3; any other failure exits 1.
+            // and exits 3; any other failure exits 1. A run that is already complete says so.
             eprintln!("camerata inspect: {e}");
             if let inspect_cmd::InspectError::IncompleteRun(run) = &e {
                 for line in &run.failure_lines {
@@ -1123,8 +1156,10 @@ mod cli_parse_tests {
                 internal,
                 run_client_tooling,
                 consensus,
+                resume,
             } => {
-                assert_eq!(client, "Example Client Ltd");
+                assert!(resume.is_none(), "a new run unless --resume is given");
+                assert_eq!(client.as_deref(), Some("Example Client Ltd"));
                 assert!(repo_name.is_empty(), "a lone repo needs no name");
                 assert!(
                     !internal,
@@ -1132,7 +1167,7 @@ mod cli_parse_tests {
                 );
                 assert!(!run_client_tooling, "client tooling is opt-in");
                 assert_eq!(repo, vec![PathBuf::from("/tmp/r")]);
-                assert_eq!(export, PathBuf::from("/tmp/o.zip"));
+                assert_eq!(export, Some(PathBuf::from("/tmp/o.zip")));
                 assert_eq!(backend, ProjectBackend::Api);
                 assert!(!batch, "no mode forced: the run's default applies");
                 assert!(!realtime);
@@ -1166,6 +1201,49 @@ mod cli_parse_tests {
                 ..
             }
         ));
+    }
+
+    /// `--resume` stands in for the repo, export and client, which the saved run holds; without
+    /// it all three are still required.
+    #[test]
+    fn inspect_resume_replaces_the_repo_export_and_client() {
+        let cli = Cli::try_parse_from(["camerata", "inspect", "--resume", "latest"])
+            .expect("a resume needs no repo, export or client");
+        match cli.command {
+            Command::Inspect {
+                resume,
+                repo,
+                export,
+                client,
+                ..
+            } => {
+                assert_eq!(resume.as_deref(), Some("latest"));
+                assert!(repo.is_empty() && export.is_none() && client.is_none());
+            }
+            other => panic!("expected Command::Inspect: {other:?}"),
+        }
+        let cli = Cli::try_parse_from([
+            "camerata",
+            "inspect",
+            "--resume",
+            "20261029T101500Z-ab12cd",
+            "--max-cost-usd",
+            "5",
+            "--export",
+            "/tmp/o.zip",
+        ])
+        .expect("a resume may set a new limit and export path");
+        assert!(matches!(
+            cli.command,
+            Command::Inspect {
+                max_cost_usd: Some(_),
+                ..
+            }
+        ));
+        assert!(
+            Cli::try_parse_from(["camerata", "inspect"]).is_err(),
+            "without --resume the repo, export and client are required"
+        );
     }
 
     #[test]
