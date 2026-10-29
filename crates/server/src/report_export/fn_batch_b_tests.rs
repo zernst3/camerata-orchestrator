@@ -25,6 +25,10 @@ fn whole_repo_failure(repo: &str) -> crate::ai_audit::FailedPass {
         pass: AI_REVIEW_ALL_PASSES.to_string(),
         reason: "scripted".to_string(),
         files_not_reviewed: 4,
+        class: crate::ai_audit::FailureClass::Content,
+        files: Vec::new(),
+        attempts: Vec::new(),
+        scope_note: false,
     }
 }
 
@@ -188,6 +192,10 @@ fn failure_text_loses_machine_paths_when_the_report_is_sealed() {
         pass: AI_REVIEW_ALL_PASSES.to_string(),
         reason: "cannot open C:\\Users\\auditor\\two\\src\\a.rs".to_string(),
         files_not_reviewed: 4,
+        class: crate::ai_audit::FailureClass::Content,
+        files: Vec::new(),
+        attempts: Vec::new(),
+        scope_note: false,
     });
     let sealed = report.seal();
     let sealed: &crate::onboard::ScanReport = &sealed;

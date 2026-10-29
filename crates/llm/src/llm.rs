@@ -370,18 +370,67 @@ fn heartbeat_timeout_error(
     idle: std::time::Duration,
     overall_timeout: std::time::Duration,
 ) -> anyhow::Error {
-    match kind {
-        HeartbeatTimeout::Silent => anyhow::anyhow!(
+    let message = match kind {
+        HeartbeatTimeout::Silent => format!(
             "Claude CLI timed out after {}s (no output). The `claude` process may be \
              stuck waiting for authentication or input.",
             overall_timeout.as_secs()
         ),
-        HeartbeatTimeout::Stalled => anyhow::anyhow!(
+        HeartbeatTimeout::Stalled => format!(
             "claude produced no model output for {}s — treating as a hang (likely \
              rate-limited/queued; set CAMERATA_LLM_IDLE_SECS to tune)",
             idle.as_secs()
         ),
+    };
+    // A hung process is the CLI's form of an overloaded or unreachable provider: transport,
+    // and worth another attempt.
+    cli_failure(
+        "",
+        crate::failure::FailureClass::Transport,
+        true,
+        message,
+        None,
+        "",
+    )
+}
+
+/// The last lines of a CLI's stderr, scrubbed and capped, for the attempt record.
+fn stderr_tail(stderr: &str) -> Option<String> {
+    let lines: Vec<&str> = stderr
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+    if lines.is_empty() {
+        return None;
     }
+    let tail = lines[lines.len().saturating_sub(5)..].join(" | ");
+    Some(crate::failure::scrub_message(
+        &tail,
+        crate::failure::MAX_RECORD_MESSAGE_CHARS,
+    ))
+}
+
+/// A typed CLI failure: `message` is the text the CLI path has always returned, and the one
+/// attempt record carries the exit code and the stderr tail. `retryable` says whether another
+/// run could help; the retry loop in [`Llm::complete_cli_streaming`] reads it.
+fn cli_failure(
+    model: &str,
+    class: crate::failure::FailureClass,
+    retryable: bool,
+    message: String,
+    exit_code: Option<i32>,
+    stderr: &str,
+) -> anyhow::Error {
+    let mut record = crate::failure::AttemptRecord::new("cli", model);
+    record.message =
+        crate::failure::scrub_message(&message, crate::failure::MAX_RECORD_MESSAGE_CHARS);
+    record.exit_code = exit_code;
+    record.stderr_tail = stderr_tail(stderr);
+    let mut failure = crate::failure::LlmCallFailure::new(class, message);
+    failure.retryable = retryable;
+    failure.attempts = vec![record];
+    anyhow::Error::new(failure)
 }
 
 /// Map a `claude` CLI spawn error to a clear, actionable message. `NotFound` gets a
@@ -482,7 +531,16 @@ async fn read_cli_stream(
                 return Err(heartbeat_timeout_error(kind, idle, overall_timeout));
             }
             Ok(Ok(None)) => break, // EOF — the process finished
-            Ok(Err(e)) => anyhow::bail!("reading claude stdout: {e}"),
+            Ok(Err(e)) => {
+                return Err(cli_failure(
+                    model,
+                    crate::failure::FailureClass::Transport,
+                    true,
+                    format!("reading claude stdout: {e}"),
+                    None,
+                    "",
+                ))
+            }
             Ok(Ok(Some(line))) => {
                 // W6: ANY line at all — even one that fails to parse below, or a plain
                 // status/keepalive event — is proof the process is alive and writing, so
@@ -574,7 +632,22 @@ async fn read_cli_stream(
     };
     if let Some((e, fatal)) = result_failure {
         if fatal || full.trim().is_empty() {
-            return Err(e);
+            // A refusal keeps its own type (callers react to it); any other in-band failure is
+            // classified from its text, so an overloaded or rate-limited answer is retried and
+            // a login or billing failure is not.
+            if is_refusal(&e) {
+                return Err(e);
+            }
+            let message = e.to_string();
+            let (class, retryable) = crate::failure::classify_text(&message);
+            return Err(cli_failure(
+                model,
+                class,
+                retryable,
+                message,
+                status.code(),
+                &stderr_text,
+            ));
         }
     }
     // SALVAGE: if the process exited non-zero (e.g. SIGKILL from a timeout, or an
@@ -583,10 +656,25 @@ async fn read_cli_stream(
     // interruption is what made a fully-streamed audit collapse to "0/3 findings".
     // Only fail when there's genuinely nothing to salvage.
     if !status.success() && full.trim().is_empty() {
-        anyhow::bail!(
-            "claude CLI (stream) exited {status}: {}",
-            stderr_text.trim()
-        );
+        // Nothing streamed and the process died: transport, retried, unless its stderr says the
+        // login or the account is the problem.
+        let (class, retryable) = match crate::failure::classify_text(&stderr_text) {
+            (crate::failure::FailureClass::AuthOrBilling, _) => {
+                (crate::failure::FailureClass::AuthOrBilling, false)
+            }
+            _ => (crate::failure::FailureClass::Transport, true),
+        };
+        return Err(cli_failure(
+            model,
+            class,
+            retryable,
+            format!(
+                "claude CLI (stream) exited {status}: {}",
+                stderr_text.trim()
+            ),
+            status.code(),
+            &stderr_text,
+        ));
     }
     Ok(LlmResponse {
         text: full,
@@ -1461,6 +1549,9 @@ pub struct Llm {
     /// Collector for the Claude Code session every CLI spawn creates (see
     /// [`crate::session_sink`]). `None` = nobody is recording; the spawn is still tagged.
     sessions: Option<SessionSink>,
+    /// Waits between retry attempts. `None` = real sleeping; tests inject a recording sleeper so
+    /// the backoff schedule is asserted without waiting.
+    sleeper: Option<std::sync::Arc<dyn crate::retry::Sleeper>>,
 }
 
 impl std::fmt::Debug for Llm {
@@ -1503,6 +1594,7 @@ impl Llm {
             api_key,
             ledger: None,
             sessions: None,
+            sleeper: None,
         }
     }
 
@@ -1530,6 +1622,20 @@ impl Llm {
     /// Same as [`Llm::from_env`] but with the process-global usage ledger attached.
     pub fn from_env_with_ledger(ledger: std::sync::Arc<crate::usage_ledger::UsageLedger>) -> Self {
         Self::from_env().with_ledger(ledger)
+    }
+
+    /// Replace the sleeper retries wait with. Production sleeps for real; a test injects a
+    /// recorder and never waits.
+    pub fn with_sleeper(mut self, sleeper: std::sync::Arc<dyn crate::retry::Sleeper>) -> Self {
+        self.sleeper = Some(sleeper);
+        self
+    }
+
+    fn sleeper(&self) -> &dyn crate::retry::Sleeper {
+        match &self.sleeper {
+            Some(s) => s.as_ref(),
+            None => &crate::retry::TokioSleeper,
+        }
     }
 
     /// Attach (or replace) the process-global usage ledger on an existing instance.
@@ -1689,9 +1795,37 @@ impl Llm {
         model: &str,
         on_delta: &mut (dyn FnMut(&str) + Send),
     ) -> anyhow::Result<LlmResponse> {
+        // The streaming callback is shared by every attempt, so it sits behind an async mutex the
+        // attempt closure locks; one attempt runs at a time.
+        let on_delta = tokio::sync::Mutex::new(on_delta);
+        let outcome = crate::retry::drive(self.sleeper(), |_attempt| {
+            let on_delta = &on_delta;
+            async move {
+                let mut guard = on_delta.lock().await;
+                self.cli_attempt(req, model, &mut **guard).await
+            }
+        })
+        .await;
+        match outcome {
+            Ok((resp, _trail)) => Ok(resp),
+            Err((last, trail)) => Err(with_full_trail(last, trail)),
+        }
+    }
+
+    /// ONE spawn-and-read of the `claude` CLI, reported as a retry [`crate::retry::Step`]: a
+    /// missing binary or a failure waiting cannot fix stops the loop, a transport-class failure
+    /// (a non-zero exit with nothing streamed, a timeout, an overloaded or rate-limited answer)
+    /// asks for another run.
+    async fn cli_attempt(
+        &self,
+        req: &LlmRequest,
+        model: &str,
+        on_delta: &mut (dyn FnMut(&str) + Send),
+    ) -> crate::retry::Step<LlmResponse, anyhow::Error> {
+        use crate::retry::{RetryReason, Step};
         // Tag the call with an id of OUR choosing and record it BEFORE the spawn: a call that
         // times out or is killed has still written (part of) a session file, and "delete the
-        // client's source" must be able to find it.
+        // client's source" must be able to find it. Every attempt is its own session.
         let session_id = new_session_id();
         if let Some(sink) = &self.sessions {
             let cwd = match &req.repo_read_dir {
@@ -1705,7 +1839,24 @@ impl Llm {
             });
         }
         let mut cmd = build_cli_command(req, model, &session_id);
-        let child = cmd.spawn().map_err(map_spawn_error)?;
+        let child = match cmd.spawn() {
+            Ok(child) => child,
+            Err(e) => {
+                // A missing binary means no provider can be reached at all, so it stops the run;
+                // any other spawn failure is local.
+                let class = if e.kind() == std::io::ErrorKind::NotFound {
+                    crate::failure::FailureClass::AuthOrBilling
+                } else {
+                    crate::failure::FailureClass::Io
+                };
+                let message = map_spawn_error(e).to_string();
+                let err = cli_failure(model, class, false, message, None, "");
+                let record = crate::failure::call_failure_of(&err)
+                    .and_then(|f| f.attempts.first().cloned())
+                    .unwrap_or_default();
+                return Step::Stop { record, last: err };
+            }
+        };
         // Track the PID for the shutdown hook; the guard untracks on every exit path.
         let _pid_guard = child.id().map(ClaudePidGuard::new);
 
@@ -1724,7 +1875,43 @@ impl Llm {
         // long-but-live call is never killed merely for running past this window.
         let overall_timeout = cli_overall_timeout();
 
-        read_cli_stream(child, model, idle, overall_timeout, on_delta).await
+        match read_cli_stream(child, model, idle, overall_timeout, on_delta).await {
+            Ok(resp) => Step::Done(resp),
+            Err(e) => {
+                let Some(failure) = crate::failure::call_failure_of(&e) else {
+                    // A refusal or an error nobody typed: not worth another run.
+                    let mut record = crate::failure::AttemptRecord::new("cli", model);
+                    record.message = crate::failure::scrub_message(
+                        &e.to_string(),
+                        crate::failure::MAX_RECORD_MESSAGE_CHARS,
+                    );
+                    return Step::Stop { record, last: e };
+                };
+                let mut record = failure.attempts.first().cloned().unwrap_or_default();
+                if record.model.is_empty() {
+                    record.model = model.to_string();
+                }
+                if failure.retryable {
+                    let lower = failure.message.to_ascii_lowercase();
+                    let reason = if ["overloaded", "529", "503"]
+                        .iter()
+                        .any(|p| lower.contains(p))
+                    {
+                        RetryReason::Overloaded
+                    } else {
+                        RetryReason::Network
+                    };
+                    Step::Retry {
+                        reason,
+                        retry_after: None,
+                        record,
+                        last: e,
+                    }
+                } else {
+                    Step::Stop { record, last: e }
+                }
+            }
+        }
     }
 
     /// API path: POST the Anthropic Messages API with the key.
@@ -1769,10 +1956,11 @@ impl Llm {
                 .header("content-type", "application/json")
                 .json(&body)
         };
-        let (status, text) = crate::retry::execute_with_retry(make_request).await?;
-        if !status.is_success() {
-            anyhow::bail!("Anthropic API HTTP {status}: {text}");
+        let out = crate::retry::execute_traced(make_request, self.sleeper(), model).await?;
+        if !(200..300).contains(&out.status) {
+            return Err(api_http_failure(out));
         }
+        let text = out.body;
         let v: serde_json::Value =
             serde_json::from_str(&text).map_err(|e| anyhow::anyhow!("parse API JSON: {e}"))?;
         self.api_response_or_refusal(&v, model, basis)
@@ -1797,6 +1985,45 @@ impl Llm {
         }
         Ok(messages_response(v, model, "api", basis))
     }
+}
+
+/// `last` (the final attempt's error) carrying the whole trail of attempts. An error that is not a
+/// typed transport failure (a model refusal) passes through unchanged.
+fn with_full_trail(
+    last: anyhow::Error,
+    trail: Vec<crate::failure::AttemptRecord>,
+) -> anyhow::Error {
+    match crate::failure::call_failure_of(&last) {
+        Some(f) => {
+            let mut full = f.clone();
+            full.attempts = trail;
+            anyhow::Error::new(full)
+        }
+        None => last,
+    }
+}
+
+/// The typed error for a terminal non-success HTTP answer from the Messages API: the message is
+/// the one the transport has always returned, the class says what waiting or credentials could
+/// do about it, and the trail holds every attempt (status, provider error, request id, waits).
+fn api_http_failure(out: crate::retry::ApiOutcome) -> anyhow::Error {
+    let status = reqwest::StatusCode::from_u16(out.status)
+        .map(|s| s.to_string())
+        .unwrap_or_else(|_| out.status.to_string());
+    let (etype, emsg) = crate::failure::provider_error_of(&out.body);
+    let (class, retryable) = crate::failure::classify_http(
+        out.status,
+        etype.as_deref(),
+        emsg.as_deref().unwrap_or(&out.body),
+    );
+    let mut failure = crate::failure::LlmCallFailure::new(
+        class,
+        format!("Anthropic API HTTP {status}: {}", out.body),
+    );
+    failure.retryable = retryable;
+    failure.attempts = out.attempts;
+    failure.http = Some((out.status, out.body));
+    anyhow::Error::new(failure)
 }
 
 // ════════════════════════════════════════════════════════════════════════════════════
@@ -3015,6 +3242,7 @@ mod tests {
             api_key: None,
             ledger: None,
             sessions: None,
+            sleeper: None,
         };
         // Empty request model -> default.
         assert_eq!(llm.model_for(&LlmRequest::new("hi")), "claude-sonnet-5");
@@ -3497,6 +3725,7 @@ mod tests {
             api_key: None,
             ledger: None,
             sessions: None,
+            sleeper: None,
         };
         let err = llm.complete(LlmRequest::new("hi")).await.unwrap_err();
         assert!(err.to_string().contains("not wired yet"));
@@ -3963,6 +4192,7 @@ malformed line, not json
             api_key: None,
             ledger: None,
             sessions: None,
+            sleeper: None,
         })
     }
 
@@ -4579,6 +4809,7 @@ exit 1
             api_key: Some("k".to_string()),
             ledger: Some(ledger.clone()),
             sessions: None,
+            sleeper: None,
         };
         let refused = serde_json::json!({
             "model": "claude-opus-5-5", "content": [], "stop_reason": "refusal",
@@ -4932,6 +5163,7 @@ printf '%s\n' '{"type":"result","is_error":false,"stop_reason":"refusal","result
             api_key: None,
             ledger: None,
             sessions: None,
+            sleeper: None,
         }
     }
 
@@ -5072,6 +5304,7 @@ printf '%s\n' '{"type":"result","is_error":false,"result":"OK","total_cost_usd":
             api_key: None,
             ledger: None,
             sessions: None,
+            sleeper: None,
         }
         .with_session_sink(sink.clone());
         // No key: the call fails before any network, and must not have recorded a session.
@@ -5140,12 +5373,17 @@ printf '%s\n' '{"type":"result","is_error":false,"result":"LIVE-DONE","total_cos
         let fake = FakeClaude::new("wedged", "#!/bin/sh\nexec sleep 30\n");
         let _env = fake_cli_env(&fake.dir, 1);
 
+        // A hung process is retried like any transport failure, so the backoff sleeper is a
+        // recorder: the test measures the kills, not the waits.
+        let sleeper = std::sync::Arc::new(RecordingSleeper::default());
         let started = std::time::Instant::now();
         let err = cli_llm()
+            .with_sleeper(sleeper.clone())
             .complete(LlmRequest::new("this one wedges"))
             .await
             .expect_err("a silent process must still time out");
         let elapsed = started.elapsed();
+        assert_eq!(sleeper.waits(), vec![2, 8, 30], "four tries, each killed");
 
         let msg = err.to_string();
         assert!(
@@ -5160,6 +5398,200 @@ printf '%s\n' '{"type":"result","is_error":false,"result":"LIVE-DONE","total_cos
             elapsed < std::time::Duration::from_secs(15),
             "the wedged call must die in BOUNDED time, took {elapsed:?}"
         );
+    }
+
+    // ── Run to completion: the CLI backend retries like the API does ──────────────────────
+
+    /// Records the waits a retry asks for and returns at once.
+    #[derive(Default)]
+    struct RecordingSleeper {
+        waits: std::sync::Mutex<Vec<u64>>,
+    }
+
+    impl RecordingSleeper {
+        fn waits(&self) -> Vec<u64> {
+            self.waits.lock().unwrap().clone()
+        }
+    }
+
+    impl crate::retry::Sleeper for RecordingSleeper {
+        fn sleep<'a>(
+            &'a self,
+            d: std::time::Duration,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+            self.waits.lock().unwrap().push(d.as_secs());
+            Box::pin(async {})
+        }
+    }
+
+    const OK_RESULT: &str = r#"printf '%s\n' '{"type":"result","is_error":false,"result":"RECOVERED","total_cost_usd":0.01,"usage":{"input_tokens":1,"output_tokens":1}}'"#;
+
+    /// A fake `claude` whose first `failures` runs execute `failure_body` and whose later runs
+    /// answer. A counter file in the fake's folder counts the runs.
+    fn flaky_claude(tag: &str, failures: u32, failure_body: &str) -> FakeClaude {
+        let script = format!(
+            "#!/bin/sh\nc=\"`dirname \"$0\"`/count\"\nn=`cat \"$c\" 2>/dev/null || echo 0`\nn=`expr $n + 1`\necho $n > \"$c\"\nif [ $n -le {failures} ]; then\n{failure_body}\nfi\n{OK_RESULT}\n"
+        );
+        FakeClaude::new(tag, &script)
+    }
+
+    fn runs_of(fake: &FakeClaude) -> u32 {
+        std::fs::read_to_string(fake.dir.join("count"))
+            .unwrap_or_default()
+            .trim()
+            .parse()
+            .unwrap_or(0)
+    }
+
+    fn llm_with(sleeper: &std::sync::Arc<RecordingSleeper>) -> Llm {
+        cli_llm().with_sleeper(sleeper.clone())
+    }
+
+    /// A non-zero exit with nothing streamed is retried on the standard schedule.
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn cli_non_zero_exit_with_nothing_streamed_is_retried_then_succeeds() {
+        let fake = flaky_claude("cli-exit-retry", 1, "echo 'connection reset' >&2\nexit 1");
+        let _env = fake_cli_env(&fake.dir, 5);
+        let sleeper = std::sync::Arc::new(RecordingSleeper::default());
+
+        let resp = llm_with(&sleeper)
+            .complete(LlmRequest::new("p"))
+            .await
+            .expect("the second run answers");
+
+        assert_eq!(resp.text, "RECOVERED");
+        assert_eq!(runs_of(&fake), 2);
+        assert_eq!(
+            sleeper.waits(),
+            vec![2],
+            "the standard first wait, injected"
+        );
+    }
+
+    /// Overloaded or rate-limit text reported by the CLI is retried; overloaded takes the
+    /// longer schedule.
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn cli_overloaded_text_is_retried_on_the_longer_schedule() {
+        let fake = flaky_claude(
+            "cli-overloaded",
+            2,
+            r#"printf '%s\n' '{"type":"result","is_error":true,"result":"API Error: 529 overloaded_error"}'
+exit 1"#,
+        );
+        let _env = fake_cli_env(&fake.dir, 5);
+        let sleeper = std::sync::Arc::new(RecordingSleeper::default());
+
+        let resp = llm_with(&sleeper)
+            .complete(LlmRequest::new("p"))
+            .await
+            .expect("the third run answers");
+
+        assert_eq!(resp.text, "RECOVERED");
+        assert_eq!(runs_of(&fake), 3);
+        assert_eq!(sleeper.waits(), vec![5, 20]);
+    }
+
+    /// The silent and the stalled timeouts are retried: a hung process is the CLI's form of an
+    /// overloaded provider.
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn cli_timeout_is_retried() {
+        let fake = flaky_claude("cli-timeout-retry", 1, "exec sleep 30");
+        let _env = fake_cli_env(&fake.dir, 1);
+        let sleeper = std::sync::Arc::new(RecordingSleeper::default());
+
+        let resp = llm_with(&sleeper)
+            .complete(LlmRequest::new("p"))
+            .await
+            .expect("the second run answers");
+
+        assert_eq!(resp.text, "RECOVERED");
+        assert_eq!(runs_of(&fake), 2);
+        assert_eq!(sleeper.waits().len(), 1);
+    }
+
+    /// A login or billing failure is not retried: waiting does not log anyone in.
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn cli_auth_failure_is_not_retried_and_is_classed_auth_or_billing() {
+        let fake = flaky_claude(
+            "cli-auth",
+            9,
+            r#"printf '%s\n' '{"type":"result","is_error":true,"result":"Invalid API key. Please run /login"}'
+exit 1"#,
+        );
+        let _env = fake_cli_env(&fake.dir, 5);
+        let sleeper = std::sync::Arc::new(RecordingSleeper::default());
+
+        let err = llm_with(&sleeper)
+            .complete(LlmRequest::new("p"))
+            .await
+            .expect_err("auth failure surfaces");
+
+        assert_eq!(runs_of(&fake), 1, "one run, no retry");
+        assert!(sleeper.waits().is_empty());
+        assert_eq!(
+            crate::failure::classify_error(&err),
+            crate::failure::FailureClass::AuthOrBilling
+        );
+    }
+
+    /// A missing binary is not retried either.
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn cli_missing_binary_is_not_retried() {
+        let empty = std::env::temp_dir().join(format!("camerata-llm-nobin-{}", std::process::id()));
+        std::fs::create_dir_all(&empty).expect("dir");
+        let _path = camerata_test_env::EnvGuard::set("PATH", empty.display().to_string());
+        let sleeper = std::sync::Arc::new(RecordingSleeper::default());
+
+        let err = llm_with(&sleeper)
+            .complete(LlmRequest::new("p"))
+            .await
+            .expect_err("no claude on PATH");
+
+        assert!(err.to_string().contains("was not found on PATH"), "{err}");
+        assert!(sleeper.waits().is_empty());
+        assert_eq!(
+            crate::failure::classify_error(&err),
+            crate::failure::FailureClass::AuthOrBilling
+        );
+        let _ = std::fs::remove_dir_all(&empty);
+    }
+
+    /// When every attempt fails the error is a transport failure whose trail has one record per
+    /// attempt, each with the exit code, the stderr tail and the wait before the next one.
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn cli_exhausted_retries_leave_a_trail_with_exit_code_and_stderr() {
+        let fake = flaky_claude(
+            "cli-exhausted",
+            99,
+            "echo 'upstream connect error' >&2\necho 'key sk-ant-api03-AAAAAAAAAAAAAAAA1234' >&2\nexit 7",
+        );
+        let _env = fake_cli_env(&fake.dir, 5);
+        let sleeper = std::sync::Arc::new(RecordingSleeper::default());
+
+        let err = llm_with(&sleeper)
+            .complete(LlmRequest::new("p"))
+            .await
+            .expect_err("every run fails");
+
+        assert_eq!(runs_of(&fake), 4, "first run plus three retries");
+        assert_eq!(sleeper.waits(), vec![2, 8, 30]);
+        let failure = crate::failure::call_failure_of(&err).expect("typed failure");
+        assert_eq!(failure.class, crate::failure::FailureClass::Transport);
+        assert_eq!(failure.attempts.len(), 4);
+        let first = &failure.attempts[0];
+        assert_eq!(first.backend, "cli");
+        assert_eq!(first.exit_code, Some(7));
+        let tail = first.stderr_tail.as_deref().unwrap_or_default();
+        assert!(tail.contains("upstream connect error"), "{tail}");
+        assert!(!tail.contains("AAAAAAAA"), "secrets are scrubbed: {tail}");
+        assert_eq!(first.wait_secs, Some(2));
+        assert_eq!(failure.attempts[3].wait_secs, None);
     }
 
     // ── Request shape for the strict models (HTTP 400 if wrong) ───────────────────────────

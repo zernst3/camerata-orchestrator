@@ -24,6 +24,7 @@
 //! (Axum today, others later) can pull in the provider stack without a cycle.
 
 pub mod credentials;
+pub mod failure;
 pub mod llm;
 pub mod model_registry;
 pub mod provider_policy;

@@ -90,6 +90,10 @@ fn output(findings: Vec<Finding>, failed: &str) -> AuditRepoOutput {
             pass: failed.to_string(),
             reason: "r".to_string(),
             files_not_reviewed: 0,
+            class: crate::ai_audit::FailureClass::Content,
+            files: Vec::new(),
+            attempts: Vec::new(),
+            scope_note: false,
         }]
     };
     (findings, Vec::new(), Vec::new(), failed, Vec::new())

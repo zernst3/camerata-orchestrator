@@ -56,6 +56,8 @@ fn response(text: &str, truncated: bool, cost: f64) -> LlmResponse {
 struct Realtime {
     calls: AtomicUsize,
     max_tokens: Mutex<Vec<u32>>,
+    /// Every real-time call fails on the transport (the provider is unreachable).
+    fails: bool,
 }
 
 #[async_trait::async_trait]
@@ -63,6 +65,14 @@ impl LlmPort for Realtime {
     async fn complete(&self, req: LlmRequest) -> anyhow::Result<LlmResponse> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         self.max_tokens.lock().unwrap().push(req.max_tokens);
+        if self.fails {
+            return Err(anyhow::Error::new(
+                camerata_llm::failure::LlmCallFailure::new(
+                    FailureClass::Transport,
+                    "Anthropic API HTTP 529: overloaded",
+                ),
+            ));
+        }
         Ok(response(&finding_json("RETRIED-1"), false, 0.01))
     }
     async fn complete_streaming(
@@ -92,11 +102,15 @@ pub(super) struct FakeBatch {
     /// `submit` calls so far, and the 0-based call that fails (nothing is accepted).
     submit_attempts: AtomicUsize,
     submit_fails_on: Option<usize>,
+    /// Every `submit` call fails, as a provider outage would.
+    submit_fails_always: bool,
     pending: Mutex<HashMap<String, Vec<String>>>,
     realtime: Realtime,
     cost: f64,
     /// Every poll fails (the batch was accepted, but its status cannot be read).
     poll_fails: bool,
+    /// Every fetch fails (the batch ended, but its results cannot be read).
+    fetch_fails: bool,
     polls: AtomicUsize,
 }
 
@@ -108,15 +122,23 @@ impl FakeBatch {
             counted: Mutex::new(Vec::new()),
             submit_attempts: AtomicUsize::new(0),
             submit_fails_on: None,
+            submit_fails_always: false,
             pending: Mutex::new(HashMap::new()),
             realtime: Realtime {
                 calls: AtomicUsize::new(0),
                 max_tokens: Mutex::new(Vec::new()),
+                fails: false,
             },
             cost: 0.01,
             poll_fails: false,
+            fetch_fails: false,
             polls: AtomicUsize::new(0),
         }
+    }
+    /// Real-time calls (the end-of-run second try) fail on the transport too.
+    pub(super) fn with_realtime_failing(mut self) -> Self {
+        self.realtime.fails = true;
+        self
     }
     /// The `n`th (0-based) `submit` call fails outright, as a provider outage would.
     pub(super) fn failing_submit_on(mut self, n: usize) -> Self {
@@ -183,7 +205,7 @@ impl BatchApi for FakeBatch {
     }
     async fn submit(&self, items: Vec<BatchItem>) -> anyhow::Result<String> {
         let attempt = self.submit_attempts.fetch_add(1, Ordering::SeqCst);
-        if self.submit_fails_on == Some(attempt) {
+        if self.submit_fails_always || self.submit_fails_on == Some(attempt) {
             anyhow::bail!("Message Batches API HTTP 503: submission refused");
         }
         let mut subs = self.submissions.lock().unwrap();
@@ -206,6 +228,9 @@ impl BatchApi for FakeBatch {
         })
     }
     async fn fetch(&self, batch_id: &str, _ttl: CacheTtl) -> anyhow::Result<Vec<BatchResultRow>> {
+        if self.fetch_fails {
+            anyhow::bail!("Message Batches API HTTP 503: results unavailable");
+        }
         let round: usize = batch_id.trim_start_matches("msgbatch_").parse().unwrap();
         let ids = self.pending.lock().unwrap()[batch_id].clone();
         Ok(ids
@@ -328,13 +353,16 @@ async fn switch_on_resubmits_an_errored_item_once_in_a_follow_up_batch() {
 
 #[tokio::test(start_paused = true)]
 async fn an_item_that_fails_twice_is_a_failed_pass_and_the_export_says_incomplete() {
-    let api = FakeBatch::new(|_round, id| {
+    // Fails in the batch, in the follow-up batch and (the provider being down) on the
+    // end-of-run second try as well.
+    let mut api = FakeBatch::new(|_round, id| {
         if id == "c1-b1" {
             Reply::Errored
         } else {
             Reply::Ok
         }
     });
+    api.realtime.fails = true;
     let m = meter(eff(true), None);
     let (_findings, ok, failures) = run(&api, &m).await;
     assert_eq!(api.submitted_ids().len(), 2, "resubmitted exactly once");
@@ -629,7 +657,9 @@ async fn a_failed_real_time_pass_is_disclosed_too() {
     #[async_trait::async_trait]
     impl LlmPort for FailSecond {
         async fn complete(&self, _req: LlmRequest) -> anyhow::Result<LlmResponse> {
-            if self.0.fetch_add(1, Ordering::SeqCst) == 1 {
+            // Fails the second pass and, when it is tried once more at the end of the round,
+            // fails it again: the disclosure is for a pass that fails both tries.
+            if matches!(self.0.fetch_add(1, Ordering::SeqCst), 1 | 2) {
                 anyhow::bail!("HTTP 500 after retries");
             }
             Ok(response(r#"{"findings":[]}"#, false, 0.01))
@@ -896,4 +926,203 @@ async fn a_truncated_batch_reply_with_the_retry_off_is_counted_wasted() {
     run(&api, &m).await;
     assert_eq!(api.realtime.calls.load(Ordering::SeqCst), 0);
     assert_eq!(wasted_and_calls(&m), (4, 4));
+}
+
+// ── Run to completion: a provider outage during batch mode stops the run ─────────────────────
+
+/// Submit failures feed the outage counter: with the provider down, the submit and the follow-up
+/// batch fail (two in a row) and the first real-time second try is the third, which stops the
+/// run. Nothing is sent after that (the other second tries and any later route group are
+/// refused, recorded NOT RUN with class outage stop).
+#[tokio::test(start_paused = true)]
+async fn submit_failures_in_batch_mode_trip_the_outage_stop() {
+    let mut api = FakeBatch::new(|_round, _id| Reply::Ok);
+    api.submit_fails_always = true;
+    api.realtime.fails = true;
+    let m = meter(eff(true), None);
+
+    let (_f, ok, failures) = run(&api, &m).await;
+    assert_eq!(ok, 0);
+    assert_eq!(failures.len(), 4);
+    assert_eq!(
+        api.submit_attempts.load(Ordering::SeqCst),
+        2,
+        "submit, then the follow-up"
+    );
+    assert!(
+        m.outage_stopped(),
+        "the third failure in a row stops the run"
+    );
+    assert_eq!(
+        api.realtime.calls.load(Ordering::SeqCst),
+        1,
+        "the stop ends the second tries after the first one failed"
+    );
+
+    // A later route group sends nothing at all.
+    let (_f, _ok, _failures) = run(&api, &m).await;
+    assert_eq!(
+        api.submit_attempts.load(Ordering::SeqCst),
+        2,
+        "no new work is dispatched after the stop"
+    );
+    assert_eq!(api.realtime.calls.load(Ordering::SeqCst), 1);
+    let record = m.outage_record().expect("the stop is on record");
+    assert_eq!(record.trigger.class, FailureClass::Transport);
+    assert!(
+        record
+            .not_run_passes
+            .iter()
+            .all(|p| p.class == FailureClass::OutageStop),
+        "{record:?}"
+    );
+    assert_eq!(
+        record.not_run_passes.len(),
+        4,
+        "the later group's four items were never sent"
+    );
+}
+
+/// Poll failures count too: a batch that was accepted but whose status cannot be read trips the
+/// stop, so the run does not go on to burn through more batches.
+#[tokio::test(start_paused = true)]
+async fn poll_failures_in_batch_mode_trip_the_outage_stop() {
+    let mut api = FakeBatch::new(|_round, _id| Reply::Ok);
+    api.poll_fails = true;
+    let m = meter(eff(true), None);
+    let (_f, _ok, failures) = run(&api, &m).await;
+    assert_eq!(failures.len(), 4);
+    assert!(m.outage_stopped(), "repeated poll failures are an outage");
+
+    // A later group sends nothing.
+    let submitted_before = api.submitted_ids().len();
+    let _ = run(&api, &m).await;
+    assert_eq!(api.submitted_ids().len(), submitted_before);
+}
+
+/// A poll that fails once and recovers is not an outage.
+#[tokio::test(start_paused = true)]
+async fn a_successful_batch_resets_the_streak() {
+    let api = FakeBatch::new(|_round, _id| Reply::Ok);
+    let m = meter(eff(true), None);
+    m.health().note_failure(FailureClass::Transport, "a");
+    m.health().note_failure(FailureClass::Transport, "b");
+    let (_f, ok, failures) = run(&api, &m).await;
+    assert_eq!(ok, 4);
+    assert!(failures.is_empty());
+    assert!(!m.outage_stopped());
+    assert_eq!(
+        m.health().streak(),
+        0,
+        "a clean batch starts the count over"
+    );
+}
+
+// ── Run to completion: the end-of-run second try for a batch item ────────────────────────────
+
+/// An item that failed in the batch and again in the follow-up batch gets one more try, in real
+/// time, and its reply is used: no failed pass, so the client export is allowed.
+#[tokio::test(start_paused = true)]
+async fn a_batch_item_that_fails_twice_in_batch_succeeds_on_the_second_try() {
+    let api = FakeBatch::new(|_round, id| {
+        if id == "c1-b1" {
+            Reply::Errored
+        } else {
+            Reply::Ok
+        }
+    });
+    let m = meter(eff(true), None);
+    let (findings, ok, failures) = run(&api, &m).await;
+    assert_eq!(
+        api.submitted_ids().len(),
+        2,
+        "batch, then the follow-up batch"
+    );
+    assert_eq!(
+        api.realtime.calls.load(Ordering::SeqCst),
+        1,
+        "one real-time second try"
+    );
+    assert_eq!(ok, 4, "every item ended with a reply");
+    assert!(failures.is_empty(), "{failures:?}");
+    assert!(
+        findings.iter().any(|f| f.rule_id == "AI-RETRIED-1"),
+        "the second try's reply is used"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_batch_item_that_fails_the_second_try_too_records_it_with_the_class() {
+    let mut api = FakeBatch::new(|_round, id| {
+        if id == "c1-b1" {
+            Reply::Errored
+        } else {
+            Reply::Ok
+        }
+    });
+    api.realtime.fails = true;
+    let m = meter(eff(true), None);
+    let (_findings, ok, failures) = run(&api, &m).await;
+    assert_eq!(ok, 3);
+    assert_eq!(failures.len(), 1);
+    assert_eq!(failures[0].class, FailureClass::Transport);
+    assert!(
+        failures[0].attempts.iter().any(|a| a.second_try),
+        "{:?}",
+        failures[0].attempts
+    );
+    assert_eq!(
+        api.realtime.calls.load(Ordering::SeqCst),
+        1,
+        "exactly one second try"
+    );
+}
+
+/// A batch that ended but whose results could not be fetched (the polls succeeded, so this is not
+/// an outage and the run goes on): its items are not sent again, in real time or otherwise, since
+/// the batch may be billed, and each is recorded as a transport failure naming the batch id so a
+/// later resume can fetch it.
+#[tokio::test(start_paused = true)]
+async fn an_unfetched_batch_is_a_transport_failure_naming_the_batch_and_is_not_sent_again() {
+    let mut api = FakeBatch::new(|_round, _id| Reply::Ok);
+    api.fetch_fails = true;
+    let m = meter(eff(true), None);
+    let (_f, ok, failures) = run(&api, &m).await;
+    assert_eq!(ok, 0);
+    assert_eq!(failures.len(), 4);
+    assert!(
+        !m.outage_stopped(),
+        "every poll answered, so the provider is reachable: not an outage"
+    );
+    assert_eq!(
+        api.realtime.calls.load(Ordering::SeqCst),
+        0,
+        "an accepted batch's items are never sent again"
+    );
+    assert_eq!(
+        api.submitted_ids().len(),
+        1,
+        "and never resubmitted as a batch either"
+    );
+    for f in &failures {
+        assert_eq!(f.class, FailureClass::Transport, "{f:?}");
+        assert!(
+            f.error.contains("msgbatch_0"),
+            "names the batch: {}",
+            f.error
+        );
+        assert!(!f.attempts.is_empty(), "one record of what happened: {f:?}");
+    }
+}
+
+/// A batch that was accepted but whose results could not be retrieved is not sent again, in real
+/// time or otherwise: it may be running and billed.
+#[tokio::test(start_paused = true)]
+async fn an_accepted_batch_is_not_given_a_real_time_second_try() {
+    let mut api = FakeBatch::new(|_round, _id| Reply::Ok);
+    api.poll_fails = true;
+    let m = meter(eff(true), Some(1_000.0));
+    let (_f, _ok, failures) = run(&api, &m).await;
+    assert_eq!(failures.len(), 4);
+    assert_eq!(api.realtime.calls.load(Ordering::SeqCst), 0);
 }

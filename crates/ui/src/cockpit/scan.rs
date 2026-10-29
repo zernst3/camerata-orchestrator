@@ -1041,6 +1041,83 @@ pub(super) struct FailedPassView {
     pub pass: String,
     #[serde(default)]
     pub reason: String,
+    /// Why the part failed (transport, auth_or_billing, content, spend_limit, outage_stop, io).
+    /// Empty for a report from before the class existed.
+    #[serde(default)]
+    pub class: String,
+    /// The files the part was shown and did not review.
+    #[serde(default)]
+    pub files: Vec<String>,
+    /// What each attempt got back. Operator only; the cockpit shows it, no export carries it.
+    #[serde(default)]
+    pub attempts: Vec<AttemptView>,
+    /// A disclosed limit of the scope, not a failed part.
+    #[serde(default)]
+    pub scope_note: bool,
+}
+
+/// One attempt at a failed part (mirror of the transport's attempt record).
+#[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize, Default, Debug)]
+pub(super) struct AttemptView {
+    #[serde(default)]
+    pub at: String,
+    #[serde(default)]
+    pub backend: String,
+    #[serde(default)]
+    pub model: String,
+    #[serde(default)]
+    pub http_status: Option<u16>,
+    #[serde(default)]
+    pub error_type: Option<String>,
+    #[serde(default)]
+    pub message: String,
+    #[serde(default)]
+    pub request_id: Option<String>,
+    #[serde(default)]
+    pub retry_after_secs: Option<u64>,
+    #[serde(default)]
+    pub wait_secs: Option<u64>,
+    #[serde(default)]
+    pub exit_code: Option<i32>,
+    #[serde(default)]
+    pub stderr_tail: Option<String>,
+    #[serde(default)]
+    pub second_try: bool,
+}
+
+impl AttemptView {
+    /// The one-line form shown in the failure panel.
+    pub(super) fn line(&self) -> String {
+        let mut out = format!("{} {} {}", self.at, self.backend, self.model);
+        if self.second_try {
+            out.push_str(" (second try)");
+        }
+        if let Some(s) = self.http_status {
+            out.push_str(&format!(", HTTP {s}"));
+        }
+        if let Some(t) = &self.error_type {
+            out.push_str(&format!(", {t}"));
+        }
+        if let Some(r) = &self.request_id {
+            out.push_str(&format!(", request {r}"));
+        }
+        if let Some(r) = self.retry_after_secs {
+            out.push_str(&format!(", retry-after {r}s"));
+        }
+        if let Some(w) = self.wait_secs {
+            out.push_str(&format!(", waited {w}s"));
+        }
+        if let Some(c) = self.exit_code {
+            out.push_str(&format!(", exit {c}"));
+        }
+        if !self.message.is_empty() {
+            out.push_str(&format!(": {}", self.message));
+        }
+        if let Some(t) = &self.stderr_tail {
+            out.push_str(&format!(" [stderr: {t}]"));
+        }
+        out
+    }
 }
 
 #[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize)]
@@ -6782,8 +6859,44 @@ pub(super) fn IncompletePassesBanner(failed_passes: Vec<FailedPassView>, compact
                 }
                 ul { class: "scan-incomplete-list",
                     for (i , f) in failed_passes.iter().enumerate() {
-                        li { key: "{i}", "{f.repo}: {f.pass} \u{2014} {f.reason}" }
+                        li { key: "{i}",
+                            details { class: "scan-failure",
+                                summary { "{f.repo}: {f.pass} \u{2014} {f.reason}" }
+                                p { class: "scan-failure-meta",
+                                    "Class: {f.class}. Repo: {f.repo}. Part: {f.pass}. Files: {f.files.len()}."
+                                }
+                                if !f.files.is_empty() {
+                                    p { class: "scan-failure-files", "{f.files.join(\", \")}" }
+                                }
+                                ol { class: "scan-failure-attempts",
+                                    for (n , a) in f.attempts.iter().enumerate() {
+                                        li { key: "{n}", "{a.line()}" }
+                                    }
+                                }
+                                button {
+                                    class: "scan-failure-copy",
+                                    r#type: "button",
+                                    onclick: {
+                                        let entry = f.clone();
+                                        move |_| {
+                                            let text = serde_json::to_string_pretty(&entry).unwrap_or_default();
+                                            spawn(async move {
+                                                let _ = crate::source_ui::copy_to_clipboard(&text).await;
+                                            });
+                                        }
+                                    },
+                                    "Copy as JSON"
+                                }
+                            }
+                        }
                     }
+                }
+                button {
+                    class: "scan-run-what-remains",
+                    r#type: "button",
+                    disabled: true,
+                    title: "Resume is coming: it will run only the parts listed here.",
+                    "Run what remains"
                 }
                 p { class: "onboard-gate-hint",
                     "A clean result here does NOT mean the missing parts are clean. Raise the limit or re-run to cover them."
@@ -7524,8 +7637,14 @@ pub(super) fn NotAssessedPanel(
 /// or counted, and a service where a rule does not apply, or was not reviewed, is shown as such
 /// and never as clean. Mirrors the report's section (`camerata_ui_core::patterns`).
 #[component]
-pub(super) fn PatternsPanel(view: camerata_ui_core::patterns::PatternsView) -> Element {
-    if view.rows.is_empty() {
+pub(super) fn PatternsPanel(
+    view: camerata_ui_core::patterns::PatternsView,
+    titles: Option<std::collections::HashMap<String, String>>,
+) -> Element {
+    // The same rows the report prints: under the rule's title, and without a row whose rule is
+    // not in the loaded library.
+    let shown = view.rows_with_titles(titles.as_ref());
+    if shown.is_empty() {
         return rsx! {
             p { class: "kind-panel-empty",
                 "No rule was found violated in one service and clean in another."
@@ -7537,11 +7656,11 @@ pub(super) fn PatternsPanel(view: camerata_ui_core::patterns::PatternsView) -> E
             p { class: "kind-panel-sub",
                 "Where the services of this project differ on a rule. An observation, not a finding: it carries no severity and is in no count. A service where a rule does not apply, or was not reviewed, is shown as such and is never counted as clean."
             }
-            for row in view.rows.iter() {
+            for (row , title) in shown.iter() {
                 div { key: "{row.rule_id}", class: "kind-panel-group",
-                    p { class: "kind-panel-group-h", "{row.rule_id}" }
+                    p { class: "kind-panel-group-h", "{title}" }
                     p { class: "kind-panel-sub",
-                        "{camerata_ui_core::patterns::pattern_sentence(&row.rule_id)}"
+                        "{camerata_ui_core::patterns::pattern_sentence(title)}"
                     }
                     ul { class: "kind-panel-list",
                         for cell in row.cells.iter() {
@@ -7886,6 +8005,20 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
     // The "Patterns across services" tab of a multi-repo project. It is an observation, not a
     // kind of finding, so it is a lens of its own beside the kind switch and not a fifth kind.
     let mut patterns_open = use_signal(|| false);
+    // The rule library, for the titles the patterns tab prints (the report prints titles too).
+    let pattern_titles_res = use_resource(fetch_corpus_rules);
+    let pattern_titles = move || {
+        pattern_titles_res
+            .read()
+            .as_ref()
+            .and_then(|loaded| loaded.as_ref())
+            .map(|rules| {
+                rules
+                    .iter()
+                    .map(|r| (r.id.clone(), r.title.clone()))
+                    .collect::<std::collections::HashMap<String, String>>()
+            })
+    };
     // THE RULE HUB (design §8): which (repo, rule) the hub is open on, and the Queue jump it
     // can perform. Both session-local lenses like `kind_view`, and deliberately not persisted
     // for the same reason: an open modal is not a decision.
@@ -9219,7 +9352,7 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                             onclick: move |_| patterns_open.set(true),
                             "Patterns across services "
                             span { class: "triage-tab-count",
-                                "{audited.as_ref().map_or(0, |a| a.patterns_across_services.count())}"
+                                "{audited.as_ref().map_or(0, |a| a.patterns_across_services.count_with_titles(pattern_titles().as_ref()))}"
                             }
                         }
                     }
@@ -9231,6 +9364,7 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                             .as_ref()
                             .map(|a| a.patterns_across_services.clone())
                             .unwrap_or_default(),
+                        titles: pattern_titles(),
                     }
                 } else if kind_view() == KindSurface::Queue {
                     // Single-select over the triage tables, each with a live count. The set
@@ -12340,6 +12474,7 @@ mod render_tests {
             repo: "acme/api".to_string(),
             pass: pass.to_string(),
             reason: reason.to_string(),
+            ..FailedPassView::default()
         }
     }
 
@@ -12401,6 +12536,75 @@ mod render_tests {
         assert!(html.contains("The export will say so"), "{html}");
         // A failed pass of ANY cause shows, not only the spend limit.
         assert!(!html.contains("Stopped by the spend limit"), "{html}");
+    }
+
+    fn failure_detail_harness() -> Element {
+        rsx! {
+            IncompletePassesBanner {
+                failed_passes: vec![FailedPassView {
+                    repo: "acme/api".to_string(),
+                    pass: "audit pass[all] 1/2".to_string(),
+                    reason: "Anthropic API HTTP 529: overloaded".to_string(),
+                    class: "transport".to_string(),
+                    files: vec!["src/a.rs".to_string()],
+                    attempts: vec![AttemptView {
+                        at: "2026-10-28T10:00:00Z".to_string(),
+                        backend: "api".to_string(),
+                        model: "claude-x".to_string(),
+                        http_status: Some(529),
+                        error_type: Some("overloaded_error".to_string()),
+                        request_id: Some("req_9".to_string()),
+                        retry_after_secs: Some(30),
+                        wait_secs: Some(5),
+                        message: "Overloaded".to_string(),
+                        ..AttemptView::default()
+                    }],
+                    scope_note: false,
+                }],
+                compact: false,
+            }
+        }
+    }
+
+    #[test]
+    fn the_failure_panel_lists_class_repo_part_files_and_every_attempt_field() {
+        let mut vdom = VirtualDom::new(failure_detail_harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        for needle in [
+            "Class: transport",
+            "acme/api",
+            "audit pass[all] 1/2",
+            "src/a.rs",
+            "HTTP 529",
+            "overloaded_error",
+            "request req_9",
+            "retry-after 30s",
+            "waited 5s",
+            "claude-x",
+            "Copy as JSON",
+        ] {
+            assert!(html.contains(needle), "{needle} missing in {html}");
+        }
+        // One banner, not two.
+        assert_eq!(html.matches("scan-incomplete-banner").count(), 1, "{html}");
+    }
+
+    #[test]
+    fn run_what_remains_is_a_disabled_button_that_says_resume_is_coming() {
+        let mut vdom = VirtualDom::new(failure_detail_harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        assert!(html.contains("Run what remains"), "{html}");
+        assert!(html.contains("disabled"), "{html}");
+        assert!(html.contains("Resume is coming"), "{html}");
+    }
+
+    #[test]
+    fn an_old_report_without_the_new_fields_still_loads() {
+        let v: FailedPassView =
+            serde_json::from_str(r#"{"repo":"a/b","pass":"p","reason":"r"}"#).unwrap();
+        assert!(v.class.is_empty() && v.attempts.is_empty() && v.files.is_empty());
     }
 
     fn incomplete_none_harness() -> Element {
@@ -13475,7 +13679,7 @@ mod render_tests {
                     "themes": []
                 }))
                 .unwrap();
-            rsx! { PatternsPanel { view } }
+            rsx! { PatternsPanel { view, titles: None } }
         }
         let mut vdom = VirtualDom::new(harness);
         vdom.rebuild_in_place();
@@ -13500,11 +13704,54 @@ mod render_tests {
         );
     }
 
+    /// With the rule library loaded the tab prints the rule's title (as the report does) and drops
+    /// a row whose rule is not in the library, so the two agree.
+    #[test]
+    fn the_patterns_panel_prints_the_rule_title_and_drops_an_unknown_rule() {
+        fn harness() -> Element {
+            let view: camerata_ui_core::patterns::PatternsView =
+                serde_json::from_value(serde_json::json!({
+                    "repos": ["acme/web", "acme/api"],
+                    "rows": [
+                        {"rule_id": "ARCH-PAGINATION-1", "cells": [
+                            {"repo": "acme/web", "state": "violated", "sites": 2},
+                            {"repo": "acme/api", "state": "clean"}]},
+                        {"rule_id": "GONE-1", "cells": [
+                            {"repo": "acme/web", "state": "violated", "sites": 1},
+                            {"repo": "acme/api", "state": "clean"}]}
+                    ],
+                    "themes": []
+                }))
+                .unwrap();
+            let titles: std::collections::HashMap<String, String> = [(
+                "ARCH-PAGINATION-1".to_string(),
+                "Cursor pagination".to_string(),
+            )]
+            .into();
+            rsx! { PatternsPanel { view, titles: Some(titles) } }
+        }
+        let mut vdom = VirtualDom::new(harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        assert!(
+            html.contains("These services handle Cursor pagination differently."),
+            "{html}"
+        );
+        assert!(
+            !html.contains("ARCH-PAGINATION-1"),
+            "no raw rule id: {html}"
+        );
+        assert!(
+            !html.contains("GONE-1"),
+            "an unknown rule is dropped: {html}"
+        );
+    }
+
     /// An empty section states its case in a sentence, never a blank area.
     #[test]
     fn the_patterns_panel_states_an_empty_case() {
         fn harness() -> Element {
-            rsx! { PatternsPanel { view: camerata_ui_core::patterns::PatternsView::default() } }
+            rsx! { PatternsPanel { view: camerata_ui_core::patterns::PatternsView::default(), titles: None } }
         }
         let mut vdom = VirtualDom::new(harness);
         vdom.rebuild_in_place();

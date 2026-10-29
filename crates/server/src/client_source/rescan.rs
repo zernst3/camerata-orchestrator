@@ -477,6 +477,10 @@ mod tests {
             pass: "scan".to_string(),
             reason: "scripted".to_string(),
             files_not_reviewed: 3,
+            class: crate::ai_audit::FailureClass::Content,
+            files: Vec::new(),
+            attempts: Vec::new(),
+            scope_note: false,
         });
         assert!(!ai_covered(&report), "a chunk of files was never reviewed");
 

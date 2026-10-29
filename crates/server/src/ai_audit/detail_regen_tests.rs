@@ -75,6 +75,8 @@ enum Regen {
     Garbage,
     /// The transport fails.
     Down,
+    /// The transport fails on the first N regeneration calls, then writes normally.
+    DownFirst(usize),
     /// Writes [`FULL`] for the first finding of each batch only.
     FirstOnly,
     /// Numbers its entries from 1 instead of echoing the ids it was given.
@@ -176,6 +178,11 @@ impl LlmPort for RoleLlm {
                     let call = self
                         .regen_calls
                         .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    if let Regen::DownFirst(n) = self.regen {
+                        if call < n {
+                            anyhow::bail!("connection reset");
+                        }
+                    }
                     let mut rows = asked(&req.prompt);
                     match self.regen {
                         Regen::OnlySingles if rows.len() > 1 => rows.clear(),
@@ -715,8 +722,8 @@ async fn a_failed_regeneration_keeps_the_finding_marked_and_reports_a_failed_pas
         assert!(pass.reason.contains("2 of 2"), "{}", pass.reason);
         assert!(pass.reason.contains(DETAIL_INCOMPLETE_MARKER));
         // Three rounds were attempted before giving up: both findings in one call, again in
-        // one, then one call each.
-        assert_eq!(llm.prompts(Role::Regen).len(), 4);
+        // one, then one call each; then the second try, one call each again.
+        assert_eq!(llm.prompts(Role::Regen).len(), 6);
         // Calibration still ran: the failure does not stop the pipeline.
         assert!(llm.roles().contains(&Role::Calibrate));
     }
@@ -1351,8 +1358,9 @@ async fn each_round_is_smaller_and_the_last_is_one_finding_at_a_time() {
         None,
     )
     .await;
+    // Round 3 is twelve calls of one, and the end-of-run second try is twelve more.
     let mut expected = vec![10, 2, 5, 5, 2];
-    expected.extend([1; 12]);
+    expected.extend([1; 24]);
     assert_eq!(call_sizes(&llm), expected);
     assert_eq!(out.len(), 12, "none dropped");
     assert!(out
@@ -1524,38 +1532,38 @@ fn rejections(meter: &UsageMeter) -> crate::stage_telemetry::DetailRejections {
 
 #[tokio::test]
 async fn rejection_counts_by_reason_reach_the_operator_telemetry() {
-    // A wrong line is turned down once per round: 3 rounds, 1 finding.
+    // A wrong line is turned down once per attempt: 3 rounds and the second try, 1 finding.
     let llm = RoleLlm::new(&terse_scan(1), Regen::WrongLine);
     let meter = meter_with(EfficiencyConfig::default());
     let _ = audit(&llm, &meter).await;
     let r = rejections(&meter);
-    assert_eq!((r.mismatch, r.total()), (3, 3), "{r:?}");
+    assert_eq!((r.mismatch, r.total()), (4, 4), "{r:?}");
 
     let llm = RoleLlm::new(&terse_scan(1), Regen::InventsPrecondition);
     let meter = meter_with(EfficiencyConfig::default());
     let _ = audit(&llm, &meter).await;
     let r = rejections(&meter);
-    assert_eq!((r.invented_precondition, r.total()), (3, 3), "{r:?}");
+    assert_eq!((r.invented_precondition, r.total()), (4, 4), "{r:?}");
 
     // An id that is not the batch's is a missing id, charged to the finding the entry was meant
-    // for, which is then NOT also counted as left out: two findings over calls of 2, 2, 1 and 1
-    // are six attempts, so six counts, not twelve.
+    // for, which is then NOT also counted as left out: two findings over calls of 2, 2, 1, 1 and
+    // the second try's 1, 1 are eight attempts, so eight counts, not sixteen.
     let llm = RoleLlm::new(&terse_scan(2), Regen::OneIndexed);
     let meter = meter_with(EfficiencyConfig::default());
     let _ = audit(&llm, &meter).await;
-    assert_eq!(call_sizes(&llm), vec![2, 2, 1, 1]);
+    assert_eq!(call_sizes(&llm), vec![2, 2, 1, 1, 1, 1]);
     let r = rejections(&meter);
-    assert_eq!((r.missing_id, r.left_out, r.total()), (6, 0, 6), "{r:?}");
+    assert_eq!((r.missing_id, r.left_out, r.total()), (8, 0, 8), "{r:?}");
 
-    // A finding the reply simply left out: once per round (the last of a batch is dropped, and a
+    // A finding the reply simply left out: once per attempt, the second try's included (the last of a batch is dropped, and a
     // batch of one is dropped whole).
     let llm = RoleLlm::new(&terse_scan(2), Regen::DropsLast);
     let meter = meter_with(EfficiencyConfig::default());
     let _ = audit(&llm, &meter).await;
     let r = rejections(&meter);
-    assert_eq!((r.left_out, r.total()), (3, 3), "{r:?}");
+    assert_eq!((r.left_out, r.total()), (4, 4), "{r:?}");
     let table = meter.stage_telemetry(0).render_table();
-    assert!(table.contains("3 left out"), "{table}");
+    assert!(table.contains("4 left out"), "{table}");
 }
 
 #[tokio::test]
@@ -1605,9 +1613,9 @@ async fn an_id_used_twice_counts_once_for_the_finding_it_names() {
     .await;
     assert!(out[0].detail.contains(DETAIL_INCOMPLETE_MARKER), "{out:?}");
     let r = rejections(&meter);
-    assert_eq!((r.missing_id, r.total()), (3, 3), "{r:?}");
+    assert_eq!((r.missing_id, r.total()), (4, 4), "{r:?}");
     assert!(
-        failed[0].reason.contains("fell short 3 times"),
+        failed[0].reason.contains("fell short 4 times"),
         "{}",
         failed[0].reason
     );
@@ -1658,11 +1666,11 @@ async fn a_dropped_named_token_is_counted_under_its_own_reason() {
     )
     .await;
     let r = rejections(&meter);
-    assert_eq!((r.drops_named_token, r.total()), (3, 3), "{r:?}");
+    assert_eq!((r.drops_named_token, r.total()), (4, 4), "{r:?}");
     // The failed pass (which can reach a client) carries the total in plain words and none of
     // the breakdown.
     let reason = &failed[0].reason;
-    assert!(reason.contains("fell short 3 times"), "{reason}");
+    assert!(reason.contains("fell short 4 times"), "{reason}");
     assert!(
         !reason.to_ascii_lowercase().contains("mismatch"),
         "{reason}"
@@ -1876,4 +1884,80 @@ async fn regeneration_frames_each_findings_evidence_under_the_runs_token() {
         );
     }
     assert!(outside.contains("Rule: Verify the webhook signature."));
+}
+
+// ── Run to completion: the end-of-run second try ─────────────────────────────────────────────
+
+/// The three rounds all fail on the transport; the second try, one finding at a time, writes the
+/// explanation. No failed pass, so the client export is allowed.
+#[tokio::test]
+async fn a_detail_that_fails_every_round_then_succeeds_on_the_second_try_leaves_no_failed_pass() {
+    let llm = RoleLlm::new(&terse_scan(1), Regen::DownFirst(3));
+    let input = vec![finding(&format!("{TITLE}{HEADLINE_SEP}{SHORT}"))];
+    let (out, failed) = regenerate_full_details(
+        &llm,
+        REPO,
+        input,
+        &files(),
+        &selected(),
+        &nonce(),
+        None,
+        None,
+    )
+    .await;
+    assert!(failed.is_empty(), "{failed:?}");
+    assert!(out[0].detail.contains(FULL), "{}", out[0].detail);
+    assert!(!out[0].detail.contains(DETAIL_INCOMPLETE_MARKER));
+    assert_eq!(
+        llm.prompts(Role::Regen).len(),
+        4,
+        "three rounds and one second try"
+    );
+}
+
+#[tokio::test]
+async fn a_detail_that_fails_both_tries_records_both_with_the_class() {
+    let llm = RoleLlm::new(&terse_scan(1), Regen::DownFirst(usize::MAX));
+    let input = vec![finding(&format!("{TITLE}{HEADLINE_SEP}{SHORT}"))];
+    let (out, failed) = regenerate_full_details(
+        &llm,
+        REPO,
+        input,
+        &files(),
+        &selected(),
+        &nonce(),
+        None,
+        None,
+    )
+    .await;
+    assert!(
+        out[0].detail.contains(DETAIL_INCOMPLETE_MARKER),
+        "still marked"
+    );
+    assert_eq!(failed.len(), 1);
+    assert_eq!(failed[0].class, FailureClass::Transport);
+    assert!(failed[0].attempts.iter().any(|a| a.second_try));
+    assert!(failed[0].attempts.iter().any(|a| !a.second_try));
+    assert_eq!(llm.prompts(Role::Regen).len(), 4, "exactly one second try");
+}
+
+#[tokio::test]
+async fn a_stopped_run_sends_no_second_detail_try() {
+    let llm = RoleLlm::new(&terse_scan(1), Regen::DownFirst(usize::MAX));
+    let meter = UsageMeter::default();
+    let input = vec![finding(&format!("{TITLE}{HEADLINE_SEP}{SHORT}"))];
+    let (_out, failed) = regenerate_full_details(
+        &llm,
+        REPO,
+        input,
+        &files(),
+        &selected(),
+        &nonce(),
+        None,
+        Some(&meter),
+    )
+    .await;
+    assert!(meter.outage_stopped(), "three transport failures in a row");
+    assert_eq!(llm.prompts(Role::Regen).len(), 3);
+    assert_eq!(failed.len(), 1);
 }

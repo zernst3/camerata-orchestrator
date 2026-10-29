@@ -110,6 +110,12 @@ pub struct ReportOptions {
     /// (a one-off inspection) and only the report's own `repos_not_inspected` is checked.
     #[serde(skip)]
     pub expected_repos: Vec<String>,
+    /// The export is for the operator's own review (the project is not a client engagement, or
+    /// `camerata inspect --internal`). Only an internal export may be made from a run that did not
+    /// complete, and it is then marked INTERNAL INCOMPLETE on the cover and in `findings.json`.
+    /// Server-populated, never client-supplied (`serde(skip)`).
+    #[serde(skip)]
+    pub internal: bool,
 }
 
 /// Env var that turns the optional triage log on for an export when set to `1` or `true`
@@ -774,6 +780,11 @@ pub struct CoverJson {
     /// from the inspection at abc1234."). `None` for a full scan, and the cover then prints
     /// nothing extra.
     pub incremental_note: Option<String>,
+    /// Set only on an internal export of a run that did not complete: the line printed on the
+    /// cover and carried in `findings.json`. Absent otherwise, so a complete run's output is
+    /// unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub internal_incomplete: Option<String>,
 }
 
 /// H11: the cover sentence for an incremental run. Plain words; each count is the ledger's.
@@ -1699,6 +1710,73 @@ impl std::fmt::Display for RepositoriesMissing {
 
 impl std::error::Error for RepositoriesMissing {}
 
+/// The refusal for a client export of a run that did not complete.
+#[derive(Debug, Clone)]
+pub struct RunIncomplete {
+    /// The plain-language refusal, with the reasons.
+    pub message: String,
+    /// Why the run is incomplete (see [`crate::onboard::ScanReport::incomplete_reasons`]).
+    pub reasons: Vec<String>,
+    /// True when an outage stop is among the reasons (the CLI exits 5 rather than 6).
+    pub outage: bool,
+    /// True when the spend limit stopped the run (the CLI exits 4 rather than 6, so a script that
+    /// raises the limit and runs again keeps working).
+    pub cost_capped: bool,
+}
+
+impl std::fmt::Display for RunIncomplete {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for RunIncomplete {}
+
+/// Refuse a CLIENT export of a run that did not complete: any failed part, any part that did not
+/// run (spend limit or outage stop), a fatal AI error, or a repo not inspected. Nothing is built
+/// and no zip is written. An internal export is allowed and is marked instead
+/// ([`internal_incomplete_marking`]).
+pub fn require_complete_run(
+    report: &crate::onboard::ScanReport,
+    opts: &ReportOptions,
+) -> Result<(), RunIncomplete> {
+    if opts.internal {
+        return Ok(());
+    }
+    let reasons = report.incomplete_reasons();
+    if reasons.is_empty() {
+        return Ok(());
+    }
+    Err(RunIncomplete {
+        message: format!(
+            "This inspection did not run to completion, so it cannot be exported for a client: \
+             {}. Run it again; nothing was written.",
+            reasons.join("; ")
+        ),
+        reasons,
+        outage: report.ledger.is_outage_stopped(),
+        cost_capped: report.ledger.is_cost_capped(),
+    })
+}
+
+/// The cover line of an internal export of a run that did not complete; `None` for a complete run.
+pub fn internal_incomplete_marking(
+    report: &crate::onboard::ScanReport,
+    opts: &ReportOptions,
+) -> Option<String> {
+    if !opts.internal {
+        return None;
+    }
+    let reasons = report.incomplete_reasons();
+    if reasons.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "INTERNAL INCOMPLETE. This inspection did not run to completion and is not for a client: {}.",
+        reasons.join("; ")
+    ))
+}
+
 /// Refuse to package a report that covers fewer repos than the project holds. A deliverable for
 /// ten of eleven repos, read as the whole codebase, is worse than no deliverable: so a repo the
 /// scan could not inspect ([`crate::onboard::ScanReport::repos_not_inspected`]) and a project
@@ -1976,13 +2054,25 @@ fn client_tooling_text(notes: &[crate::onboard::CoverageNote], tool: &str) -> St
     seen.join(" ")
 }
 
-fn failed_pass_disclosures(failed_passes: &[crate::ai_audit::FailedPass]) -> Vec<String> {
+fn failed_pass_disclosures(
+    failed_passes: &[crate::ai_audit::FailedPass],
+    internal: bool,
+) -> Vec<String> {
     failed_passes
         .iter()
         .map(|f| {
             let mut pass = f.pass.clone();
             if let Some(first) = pass.get_mut(0..1) {
                 first.make_ascii_uppercase();
+            }
+            // A client export is refused for a run with a failed part, so this wording reaches
+            // only an internal export; the client-facing form carries no failure wording.
+            if f.scope_note {
+                // A disclosed limit of the scope (a tool not run), not a failed part.
+                return format!("{pass} for {}: not run ({}).", f.repo, f.reason);
+            }
+            if !internal {
+                return format!("{pass} for {}: did not complete.", f.repo);
             }
             format!(
                 "{pass} for {}: not computed — pass failed ({}).",
@@ -5406,7 +5496,7 @@ pub fn build_report_json(
             }
         }
     }
-    let mut failed_pass_notes = failed_pass_disclosures(&failed_passes_for_report);
+    let mut failed_pass_notes = failed_pass_disclosures(&failed_passes_for_report, opts.internal);
     // Client-report fix (2026-10-07 grading pass): a rule that declares mechanical/
     // architectural enforcement but has no wired detector IS a real pipeline gap worth
     // disclosing, but it is an ENGINEERING fact, not a client-facing one — the registry names
@@ -5577,6 +5667,7 @@ pub fn build_report_json(
         brand: resolve_brand(opts, None),
         stats,
         incremental_note: report.ledger.incremental().map(incremental_cover_note),
+        internal_incomplete: internal_incomplete_marking(report, opts),
     };
 
     // ── Methodology (M4: ported from the better sample copy, no dashes per S12) ────────
@@ -6052,6 +6143,14 @@ mod tests {
 
     pub(super) fn empty_opts() -> ReportOptions {
         ReportOptions::default()
+    }
+
+    /// Options for an internal export, the only kind that carries failure wording.
+    pub(super) fn internal_opts() -> ReportOptions {
+        ReportOptions {
+            internal: true,
+            ..ReportOptions::default()
+        }
     }
 
     // ── finding_key round-trip with ui-core's format ──────────────────────────
@@ -11677,6 +11776,10 @@ mod tests {
             pass: "rule-alternative recommendations".to_string(),
             reason: "Claude CLI timed out after 300s (no output).".to_string(),
             files_not_reviewed: 0,
+            class: crate::ai_audit::FailureClass::Content,
+            files: Vec::new(),
+            attempts: Vec::new(),
+            scope_note: false,
         }];
         let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
         assert_eq!(json.executive_summary.failed_passes.len(), 1);
@@ -13175,8 +13278,17 @@ mod tests {
             pass: "rule-alternative recommendations".to_string(),
             reason: "Claude CLI timed out after 300s (no output).".to_string(),
             files_not_reviewed: 0,
+            class: crate::ai_audit::FailureClass::Content,
+            files: Vec::new(),
+            attempts: Vec::new(),
+            scope_note: false,
         }];
-        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
+        let json = build_report_json(
+            &report.clone().seal(),
+            &HashMap::new(),
+            None,
+            &internal_opts(),
+        );
 
         assert_eq!(json.methodology.failed_passes.len(), 1);
         assert!(
@@ -13293,8 +13405,17 @@ mod tests {
                      any finding this run"
                 .to_string(),
             files_not_reviewed: 0,
+            class: crate::ai_audit::FailureClass::Content,
+            files: Vec::new(),
+            attempts: Vec::new(),
+            scope_note: false,
         }];
-        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
+        let json = build_report_json(
+            &report.clone().seal(),
+            &HashMap::new(),
+            None,
+            &internal_opts(),
+        );
 
         assert_eq!(json.methodology.failed_passes.len(), 1);
         assert!(

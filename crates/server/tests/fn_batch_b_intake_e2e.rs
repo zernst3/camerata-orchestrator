@@ -212,8 +212,9 @@ async fn a_scan_with_a_failed_pass_is_not_a_baseline_the_next_scan_reuses() {
     let dir = tempfile::tempdir().unwrap();
     stage_repo(dir.path(), &[("src/app.ts", "export const a = 1;\n")]);
 
-    // Run 1: one of the six rule-batch passes fails; the other five answer.
-    let first = Script::failing_calls(&[1]);
+    // Run 1: one of the seven rule-batch passes fails, and fails again when it is tried once more
+    // at the end of the round (call 8); the others answer.
+    let first = Script::failing_calls(&[1, 8]);
     let (report, manifest) = scan_one(&first, dir.path(), None).await;
     assert!(
         report

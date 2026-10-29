@@ -199,8 +199,8 @@ async fn the_chosen_model_and_effort_reach_the_completer_on_every_round() {
         let _ =
             generate_fix_specifics(&llm, "o/r", vec![f], &files, model, Some(&meter), None).await;
         let requests = llm.requests.lock().unwrap().clone();
-        // Every batched retry plus the solo retry: the parameter reaches each one.
-        assert_eq!(requests.len(), MAX_FIX_REGENERATIONS + 2, "{requests:?}");
+        // Every batched retry, the solo retry and the second try: the parameter reaches each one.
+        assert_eq!(requests.len(), MAX_FIX_REGENERATIONS + 3, "{requests:?}");
         for (m, effort) in &requests {
             assert_eq!(Some(m.as_str()), model, "{requests:?}");
             assert_eq!(effort.as_deref(), expected_effort, "{requests:?}");
@@ -322,7 +322,9 @@ async fn a_finding_whose_every_call_failed_is_not_a_give_up() {
             outcome.transport_failed,
             outcome.cap_stopped
         ),
-        (1, 0, 0, 1, 0),
+        // Three failed calls in a row stop the run (the outage stop), so the last retry is not
+        // sent: the finding was still never heard from, so it is not a give-up either way.
+        (1, 0, 0, 0, 1),
         "{outcome:?}"
     );
     assert_eq!(outcome.give_up_rate(), None, "the model answered nothing");

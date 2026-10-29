@@ -84,7 +84,7 @@ async fn cli_inspect_export_exits_3_and_writes_nothing_when_blocked() {
         max_cost_usd: None,
         efficiency: Vec::new(),
         client: "Example Client Ltd".to_string(),
-        client_engagement: true,
+        client_engagement: false,
         run_client_tooling: false,
         consensus: false,
     };

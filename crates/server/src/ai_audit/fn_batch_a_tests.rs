@@ -165,8 +165,9 @@ async fn a_reply_cut_off_after_the_retry_is_a_failed_pass_that_keeps_its_complet
     let (findings, _p, _r, ok, failures) = scan(&llm, 3).await;
     assert_eq!(
         llm.calls(),
-        2,
-        "the first send plus the one truncation retry"
+        4,
+        "the first send plus the one truncation retry, and the same again when the pass is tried \
+         once more at the end of the round"
     );
     assert_eq!(ok, 0, "a cut-off pass earns no `ran` credit");
     assert_eq!(

@@ -28,6 +28,10 @@ fn two_repo_report(failed_repo: Option<&str>) -> crate::onboard::ScanReport {
             pass: AI_REVIEW_ALL_PASSES.to_string(),
             reason: "the model service returned an error".to_string(),
             files_not_reviewed: 7,
+            class: crate::ai_audit::FailureClass::Content,
+            files: Vec::new(),
+            attempts: Vec::new(),
+            scope_note: false,
         });
     }
     report
@@ -93,6 +97,10 @@ fn coverage_has_a_line_for_every_repo_the_ai_tier_did_not_run_on() {
         pass: AI_REVIEW_ALL_PASSES.to_string(),
         reason: "boom".to_string(),
         files_not_reviewed: 0,
+        class: crate::ai_audit::FailureClass::Content,
+        files: Vec::new(),
+        attempts: Vec::new(),
+        scope_note: false,
     });
     let gaps = coverage_gaps(&report);
     assert!(

@@ -664,8 +664,19 @@ async fn run_inspect_cmd(args: InspectArgs) -> anyhow::Result<()> {
     match inspect_cmd::run_inspect(args).await {
         Ok(outcome) => {
             println!("{}", inspect_cmd::format_outcome_report(&outcome));
+            for line in &outcome.failure_lines {
+                eprintln!("{line}");
+            }
             // A run the spend limit cut short wrote an export (marked incomplete) but is not a
             // success: a script must not read it as one.
+            if outcome.outage_stopped() {
+                eprintln!(
+                    "camerata inspect: STOPPED BY AN OUTAGE; the model provider could not be \
+                     reached. The export is INCOMPLETE (see the passes listed as NOT RUN above). \
+                     Run it again when the provider is back."
+                );
+                std::process::exit(inspect_cmd::EXIT_OUTAGE_STOPPED);
+            }
             if outcome.cost_capped() {
                 eprintln!(
                     "camerata inspect: STOPPED BY THE SPEND LIMIT; the export is INCOMPLETE (see \
@@ -673,12 +684,25 @@ async fn run_inspect_cmd(args: InspectArgs) -> anyhow::Result<()> {
                 );
                 std::process::exit(inspect_cmd::EXIT_COST_CAPPED);
             }
+            if !outcome.incomplete_reasons.is_empty() {
+                eprintln!(
+                    "camerata inspect: THIS RUN DID NOT COMPLETE ({}); the export is INTERNAL \
+                     INCOMPLETE and is not for a client.",
+                    outcome.incomplete_reasons.join("; ")
+                );
+                std::process::exit(inspect_cmd::EXIT_INCOMPLETE_RUN);
+            }
             Ok(())
         }
         Err(e) => {
             // A refused export prints the gate's own block (which never carries a secret value)
             // and exits 3; any other failure exits 1.
             eprintln!("camerata inspect: {e}");
+            if let inspect_cmd::InspectError::IncompleteRun(run) = &e {
+                for line in &run.failure_lines {
+                    eprintln!("{line}");
+                }
+            }
             std::process::exit(e.exit_code());
         }
     }

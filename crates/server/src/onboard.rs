@@ -806,6 +806,10 @@ fn record_repo_not_inspected(
         pass: REPOSITORY_READ_PASS.to_string(),
         reason: reason.to_string(),
         files_not_reviewed: 0,
+        class: crate::ai_audit::FailureClass::Io,
+        files: Vec::new(),
+        attempts: Vec::new(),
+        scope_note: false,
     });
     // Every rule that would have run on this repo is on record as not run, so none of them can
     // read as "checked, found nothing" for it, and the rules that did run on other repos are
@@ -1112,7 +1116,79 @@ impl ScanReport {
         self.ai_error.is_none()
             && self.failed_passes.iter().all(|f| f.files_not_reviewed == 0)
             && !self.ledger.is_cost_capped()
+            && !self.ledger.is_outage_stopped()
             && self.repos_not_inspected.is_empty()
+    }
+
+    /// Why this inspection is not a complete run, in plain words for the operator; empty when it
+    /// is complete. A client export is refused, and a package that records any of these is
+    /// refused by the release gate, while this is not empty (Zach, 2026-10-28: "We can't ship a
+    /// product to anyone that didn't fully run end-to-end properly."). Counts every failed pass,
+    /// every part that did not run (spend limit or outage stop), a fatal AI error and any repo
+    /// not inspected. Files left out as scope (vendored, generated, binary, over the size limit)
+    /// are not failures and are not counted here.
+    pub fn incomplete_reasons(&self) -> Vec<String> {
+        use crate::ai_audit::FailureClass;
+        let mut out: Vec<String> = Vec::new();
+        if let Some(e) = &self.ai_error {
+            out.push(format!("the AI review failed: {e}"));
+        }
+        if !self.repos_not_inspected.is_empty() {
+            let names: Vec<&str> = self
+                .repos_not_inspected
+                .iter()
+                .map(|(repo, _)| repo.as_str())
+                .collect();
+            out.push(format!(
+                "{} repositor{} not inspected: {}",
+                names.len(),
+                if names.len() == 1 {
+                    "y was"
+                } else {
+                    "ies were"
+                },
+                names.join(", ")
+            ));
+        }
+        // A disclosed limit of the scope (a tool not run by policy) is not a failed part.
+        let parts = || self.failed_passes.iter().filter(|f| !f.scope_note);
+        let did_not_run = parts()
+            .filter(|f| matches!(f.class, FailureClass::SpendLimit | FailureClass::OutageStop))
+            .count();
+        let failed: Vec<&crate::ai_audit::FailedPass> = parts()
+            .filter(|f| !matches!(f.class, FailureClass::SpendLimit | FailureClass::OutageStop))
+            .collect();
+        if !failed.is_empty() {
+            let mut names: Vec<String> = failed
+                .iter()
+                .take(3)
+                .map(|f| format!("{}, {}", f.repo, f.pass))
+                .collect();
+            if failed.len() > 3 {
+                names.push(format!("and {} more", failed.len() - 3));
+            }
+            out.push(format!(
+                "{} part{} failed ({})",
+                failed.len(),
+                if failed.len() == 1 { "" } else { "s" },
+                names.join("; ")
+            ));
+        }
+        if did_not_run > 0 || self.ledger.is_outage_stopped() || self.ledger.is_cost_capped() {
+            let cause = if self.ledger.is_outage_stopped() {
+                "the run stopped because the model provider could not be reached"
+            } else if self.ledger.is_cost_capped() {
+                "the spend limit stopped the run"
+            } else {
+                "the spend limit or an outage stopped the run"
+            };
+            out.push(format!(
+                "{cause}; {did_not_run} part{} did not run and {} never checked",
+                if did_not_run == 1 { "" } else { "s" },
+                if did_not_run == 1 { "was" } else { "were" }
+            ));
+        }
+        out
     }
 
     /// Record a repo the scan was asked to inspect and could not (a folder that is gone, files
@@ -2444,15 +2520,27 @@ pub async fn audit_repos_with_llm_controlled(
                             corpus,
                         ) {
                             Some("arch_checker") => {
+                                // The files the rule's checker actually matched, not every file
+                                // the repo handed the audit: a rule with no file in scope had
+                                // nothing to look at, which is not a clean result.
+                                let scope = architectural::files_in_scope(rid, &files);
+                                let evaluated = match scope {
+                                    architectural::RuleScopeFiles::Files(n) => n,
+                                    architectural::RuleScopeFiles::RepoLevel
+                                    | architectural::RuleScopeFiles::Unknown => files.len(),
+                                };
                                 pipeline_ledger.record_rule(
                                     spec,
                                     *rid,
                                     crate::scan_ledger::RuleTier::Architectural,
                                     true,
                                     None,
-                                    files.len(),
+                                    evaluated,
                                     emitted,
                                 );
+                                if scope == architectural::RuleScopeFiles::RepoLevel {
+                                    pipeline_ledger.mark_repo_level_rule(spec, rid);
+                                }
                             }
                             Some("gateway_rule_registry") => {
                                 pipeline_ledger.record_rule(
@@ -2704,20 +2792,32 @@ pub async fn audit_repos_with_llm_controlled(
                     // started (no digests built, no calls), its rules are on record as not run
                     // and it is named as unfinished. Its token-free checks above still ran.
                     ai_all_unreviewed = true;
-                    notes.push(format!(
-                        "{spec}: AI review not run (the spend limit set for this run was reached)"
-                    ));
+                    notes.push(if meter.outage_stopped() {
+                        format!(
+                            "{spec}: AI review not run (the run stopped because the model \
+                             provider could not be reached)"
+                        )
+                    } else {
+                        format!(
+                            "{spec}: AI review not run (the spend limit set for this run was \
+                             reached)"
+                        )
+                    });
                     for (rid, _) in &semantic {
                         pipeline_ledger.record_rule(
                             spec,
                             rid.clone(),
                             crate::scan_ledger::RuleTier::Semantic,
                             false,
-                            Some(
+                            Some(if meter.outage_stopped() {
+                                "not run: the run stopped because the model provider could not \
+                                 be reached, before any pass checked it"
+                                    .to_string()
+                            } else {
                                 "not run: the spend limit set for this run was reached before \
                                  any pass checked it"
-                                    .to_string(),
-                            ),
+                                    .to_string()
+                            }),
                             0,
                             0,
                         );
@@ -2725,10 +2825,24 @@ pub async fn audit_repos_with_llm_controlled(
                     all_failed_passes.push(crate::ai_audit::FailedPass {
                         repo: spec.to_string(),
                         pass: crate::report_export::coverage_gaps::AI_REVIEW_ALL_PASSES.to_string(),
-                        reason: "NOT RUN: the spend limit set for this run was reached before \
-                                 this repository was reviewed. This inspection is incomplete."
-                            .to_string(),
+                        reason: if meter.outage_stopped() {
+                            "NOT RUN: the run stopped because the model provider could not be \
+                             reached before this repository was reviewed. This inspection is \
+                             incomplete."
+                        } else {
+                            "NOT RUN: the spend limit set for this run was reached before \
+                             this repository was reviewed. This inspection is incomplete."
+                        }
+                        .to_string(),
                         files_not_reviewed: files.len(),
+                        class: if meter.outage_stopped() {
+                            crate::ai_audit::FailureClass::OutageStop
+                        } else {
+                            crate::ai_audit::FailureClass::SpendLimit
+                        },
+                        files: Vec::new(),
+                        attempts: Vec::new(),
+                        scope_note: false,
                     });
                 } else if run_ai_review {
                     // H11: every carried finding names the commit it was last found at, so a
@@ -3004,6 +3118,10 @@ pub async fn audit_repos_with_llm_controlled(
                                         .to_string(),
                                     reason: e.to_string(),
                                     files_not_reviewed: files.len(),
+                                    class: crate::ai_audit::classify_pass_error(&e),
+                                    files: Vec::new(),
+                                    attempts: camerata_llm::failure::attempts_of(&e),
+                                    scope_note: false,
                                 });
                                 ai_all_unreviewed = true;
                                 let msg = format!("{spec}: AI audit skipped ({e})");
@@ -3043,6 +3161,10 @@ pub async fn audit_repos_with_llm_controlled(
                                 .to_string(),
                             reason: why.clone(),
                             files_not_reviewed: files.len(),
+                            class: crate::ai_audit::FailureClass::AuthOrBilling,
+                            files: Vec::new(),
+                            attempts: Vec::new(),
+                            scope_note: false,
                         });
                     }
                 }
@@ -3337,6 +3459,19 @@ pub async fn audit_repos_with_llm_controlled(
             ));
         }
         report.ledger.record_cost_cap(cap);
+    }
+    // The outage stop: what it left undone is disclosed through the same failed-pass list, and
+    // the trigger and every part that was never sent stay on the operator ledger.
+    if let Some(outage) = meter.outage_record() {
+        all_failed_passes.extend(outage.failed_passes());
+        notes.push(format!(
+            "INCOMPLETE: the run stopped because the model provider could not be reached; {} \
+             scan pass(es) and {} stage(s) were never sent (see the list of passes that did not \
+             run). Run it again when the provider is back.",
+            outage.not_run_passes.len(),
+            outage.not_run_stages.len()
+        ));
+        report.ledger.record_outage(outage);
     }
     // Operator telemetry: the per-stage split of the spend, joined to the SAME counted-line
     // total `camerata count` prints (it comes from the same file filter). Lives on the ledger,

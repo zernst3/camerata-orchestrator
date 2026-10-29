@@ -62,6 +62,9 @@ pub struct ProductPackage {
     pub readme: String,
     /// The provenance the README and `manifest.json` both render.
     pub provenance: ManifestProvenance,
+    /// The package is for the operator's own review. Only an internal package may record an
+    /// incomplete run, and only [`release_internal`] releases it.
+    pub internal: bool,
 }
 
 /// THE assembly: `build_report_json`, `render_data_json`, `compile_pdf_from_data`,
@@ -96,6 +99,8 @@ pub async fn build_product_package_with_stem(
     crate::report_export::require_client_name(options)?;
     // And no package for a report that covers fewer repos than the project holds.
     crate::report_export::require_all_repos(report, options)?;
+    // And no client package for a run that did not run to completion.
+    crate::report_export::require_complete_run(report, options)?;
     let report_json =
         crate::report_export::build_report_json(report, dispositions, corpus, options);
     let data_json = crate::report_export::render_data_json(&report_json)?;
@@ -174,6 +179,7 @@ pub(crate) fn assemble_package(
         datasets,
         readme,
         provenance,
+        internal: options.internal,
     })
 }
 
@@ -249,6 +255,12 @@ pub fn gate_failure_of(error: &anyhow::Error) -> Option<&GateFailure> {
 /// cannot run row parity (that needs the in-memory rows), so that check is absent from the
 /// report.
 pub fn audit_zip(zip_bytes: &[u8], pdf_text: Option<&str>) -> GateReport {
+    audit_zip_with(zip_bytes, pdf_text, false)
+}
+
+/// [`audit_zip`], optionally letting a package that records an incomplete run through (the
+/// internal export of such a run; nothing else passes it).
+fn audit_zip_with(zip_bytes: &[u8], pdf_text: Option<&str>, allow_incomplete: bool) -> GateReport {
     let mut report = GateReport::default();
     let entries = match read_zip_entries(zip_bytes) {
         Ok(entries) => entries,
@@ -268,9 +280,66 @@ pub fn audit_zip(zip_bytes: &[u8], pdf_text: Option<&str>) -> GateReport {
     report.record(CheckId::DatasetParity, dataset_parity_problems(&entries));
     report.record(CheckId::Counts, count_reconciliation_problems(&entries));
     report.record(CheckId::Marking, marking_problems(&entries));
-    report.record(CheckId::Manifest, verify_manifest(&entries));
+    let mut manifest_problems = verify_manifest(&entries);
+    if !allow_incomplete {
+        manifest_problems.extend(incomplete_run_problems(&entries));
+    }
+    report.record(CheckId::Manifest, manifest_problems);
     report.record(CheckId::Provenance, provenance_problems(&entries));
     report.sorted()
+}
+
+/// The check that a package does not record an inspection that failed to run to completion: such
+/// a package is for the operator's own review, never for a client. Reads the manifest's
+/// `inspection.run_incomplete` flag, the README's INTERNAL INCOMPLETE line and the marking in
+/// `findings.json`, none of which a complete run carries, so a package edited to drop one of them
+/// is still refused.
+fn incomplete_run_problems(entries: &std::collections::BTreeMap<String, Vec<u8>>) -> Vec<Problem> {
+    let mut problems = Vec::new();
+    let refusal = |file: &str, reasons: &str| {
+        Problem::new(
+            file,
+            "run complete",
+            format!(
+                "this package records an inspection that did not run to completion, so it is not \
+                 for a client ({reasons})"
+            ),
+            None,
+        )
+    };
+    let json_of = |name: &str| {
+        entries
+            .get(name)
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok())
+    };
+    if let Some(manifest) = json_of("manifest.json") {
+        if manifest["inspection"]["run_incomplete"].as_bool() == Some(true) {
+            let reasons = manifest["inspection"]["incomplete_reasons"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str())
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                })
+                .unwrap_or_default();
+            problems.push(refusal("manifest.json", &reasons));
+        }
+    }
+    if let Some(readme) = entries
+        .get("README.txt")
+        .and_then(|b| std::str::from_utf8(b).ok())
+    {
+        if readme.contains(crate::INTERNAL_INCOMPLETE_README_LINE) {
+            problems.push(refusal("README.txt", "the README says INTERNAL INCOMPLETE"));
+        }
+    }
+    if let Some(findings) = json_of("findings.json") {
+        if let Some(marking) = findings["provenance"]["internal_incomplete"].as_str() {
+            problems.push(refusal("findings.json", marking));
+        }
+    }
+    problems
 }
 
 /// The secrets check over every archive member, by kind, and over the member NAMES.
@@ -328,6 +397,22 @@ fn pdf_data_problems(data_json: &str) -> Vec<Problem> {
 /// the real exporters call to obtain zip bytes: `Ok` only when every check passed, and on
 /// failure no bytes are returned.
 pub fn release(package: ProductPackage) -> Result<ReleasedZip, ReleaseError> {
+    release_checked(package, false)
+}
+
+/// [`release`] for an INTERNAL package: one marked for the operator's own review, which may
+/// record a run that did not complete. Everything else is checked exactly as for a client; a
+/// package that is not internal is refused if it records an incomplete run, so this cannot be
+/// used to put one in front of a client.
+pub fn release_internal(package: ProductPackage) -> Result<ReleasedZip, ReleaseError> {
+    release_checked(package, true)
+}
+
+fn release_checked(
+    package: ProductPackage,
+    internal_ok: bool,
+) -> Result<ReleasedZip, ReleaseError> {
+    let allow_incomplete = internal_ok && package.internal;
     let bytes = crate::build_product_zip(
         &package.stem,
         &package.pdf,
@@ -339,7 +424,7 @@ pub fn release(package: ProductPackage) -> Result<ReleasedZip, ReleaseError> {
     )
     .map_err(|e| ReleaseError::Assembly(e.to_string()))?;
 
-    let mut report = audit_zip(&bytes, None);
+    let mut report = audit_zip_with(&bytes, None, allow_incomplete);
     report.record(CheckId::Secrets, pdf_data_problems(&package.data_json));
     // The archive pass above held the workbook and the CSV to the JSON rows, and the sheet
     // footers to each other; this pass also holds the PDF's rows, cover summary and
@@ -394,6 +479,21 @@ mod tests;
 
 #[cfg(test)]
 mod triage_log_tests;
+
+#[cfg(test)]
+mod run_complete_tests;
+
+/// A clean report, for other modules' tests.
+#[cfg(test)]
+pub(crate) fn test_scan_report() -> crate::onboard::ScanReport {
+    tests::scan_report()
+}
+
+/// An internal package made from an incomplete run, for other modules' tests.
+#[cfg(test)]
+pub(crate) fn test_internal_incomplete_package() -> ProductPackage {
+    run_complete_tests::internal_incomplete_package()
+}
 
 #[cfg(test)]
 mod patterns_tests;

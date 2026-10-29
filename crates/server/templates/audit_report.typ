@@ -447,6 +447,12 @@
   #v(0.1cm)
   #text(size: 11pt, fill: ink_faint)[Prepared for #d.cover.client_name]
 ]
+// An internal export of a run that did not complete says so, in red, on the cover. Absent from
+// every complete run's data, so a complete run's cover is unchanged.
+#if d.cover.at("internal_incomplete", default: none) != none [
+  #v(0.3cm)
+  #text(size: 11pt, weight: 700, fill: rgb("#b00020"))[#d.cover.internal_incomplete]
+]
 // The one vivid accent rule on this page.
 #v(0.5cm)
 #line(length: 1.4cm, stroke: 2.5pt + vivid)
@@ -552,7 +558,7 @@
 // nothing extra.
 #if d.executive_summary.failed_passes.len() > 0 [
   #block(above: 8pt, below: 4pt, stroke: 0.75pt + vivid, inset: 10pt, radius: 8pt, width: 100%)[
-    #text(weight: 600, size: 9pt, fill: ink)[Not computed this run]
+    #text(weight: 600, size: 9pt, fill: ink)[Not run this inspection]
     #for note in d.executive_summary.failed_passes [
       - #note
     ]
@@ -928,7 +934,7 @@ Not performed in this engagement:
 // here for the more technical Methodology reader. Gated on non-empty.
 #if d.methodology.failed_passes.len() > 0 [
   #v(0.2cm)
-  Not computed this run (pass failed or timed out):
+  Not run this inspection:
   #for note in d.methodology.failed_passes [
     - #note
   ]

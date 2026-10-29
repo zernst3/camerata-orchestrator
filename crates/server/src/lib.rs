@@ -70,6 +70,9 @@ pub mod jobs;
 // sites (uow, lib) are unchanged.
 pub use camerata_app_core::lifecycle;
 pub mod cost_cap;
+pub mod failure_report;
+/// The failure classes and typed transport failure, re-exported for callers of the server.
+pub use camerata_llm::failure;
 pub mod dev_implement_run;
 pub mod efficiency;
 pub mod live_fleet;
@@ -102,6 +105,7 @@ pub mod report_export;
 pub mod review_agent;
 pub mod routine;
 pub mod run;
+pub mod run_health;
 mod run_target;
 pub mod runtime_audit;
 pub mod scan_cache;
@@ -7359,6 +7363,12 @@ pub(crate) fn reconcile_external_tool_ledger(
                 pass: pass_label.clone(),
                 reason: format!("{rule_id}: {pass_label} did not run: {reason}"),
                 files_not_reviewed: 0,
+                class: crate::ai_audit::FailureClass::Content,
+                files: Vec::new(),
+                attempts: Vec::new(),
+                // A mechanical tool that was not run (by policy, not installed for this stack, or
+                // no rule routed to it) is a disclosed limit of the scope, not a failed part.
+                scope_note: true,
             });
             continue;
         }
@@ -7386,6 +7396,12 @@ pub(crate) fn reconcile_external_tool_ledger(
                 pass: pass_label.clone(),
                 reason: format!("{rule_id}: {pass_label} did not run: {reason}"),
                 files_not_reviewed: 0,
+                class: crate::ai_audit::FailureClass::Content,
+                files: Vec::new(),
+                attempts: Vec::new(),
+                // A mechanical tool that was not run (by policy, not installed for this stack, or
+                // no rule routed to it) is a disclosed limit of the scope, not a failed part.
+                scope_note: true,
             });
             continue;
         }
@@ -17948,8 +17964,14 @@ async fn export_audit_report(
     }
     // And no report for fewer repos than the project holds.
     req.options.expected_repos = project.repos.clone();
+    // A project that is not a client engagement is the operator's own review: its exports may
+    // come from a run that did not complete, marked as such.
+    req.options.internal = !project.client_engagement;
     if let Err(e) = crate::report_export::require_all_repos(&report, &req.options) {
         return repositories_missing_response(&e);
+    }
+    if let Err(e) = crate::report_export::require_complete_run(&report, &req.options) {
+        return run_incomplete_response(&e);
     }
 
     let json = crate::report_export::build_report_json(
@@ -18154,6 +18176,7 @@ async fn export_product(
     req.options.client_name = project.client_name.clone();
     // The repos the project holds: the package assembly refuses a report that covers fewer.
     req.options.expected_repos = project.repos.clone();
+    req.options.internal = !project.client_engagement;
 
     // ONE assembly (`release_gate::build_product_package`) and ONE path to zip bytes
     // (`release_gate::release`), shared by this handler, `camerata inspect --export` and the
@@ -18179,6 +18202,9 @@ async fn export_product(
             if let Some(missing) = e.downcast_ref::<crate::report_export::RepositoriesMissing>() {
                 return repositories_missing_response(missing);
             }
+            if let Some(incomplete) = e.downcast_ref::<crate::report_export::RunIncomplete>() {
+                return run_incomplete_response(incomplete);
+            }
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({ "ok": false, "message": e.to_string() })),
@@ -18186,7 +18212,11 @@ async fn export_product(
                 .into_response();
         }
     };
-    let released = match crate::release_gate::release(package) {
+    let released = match if req.options.internal {
+        crate::release_gate::release_internal(package)
+    } else {
+        crate::release_gate::release(package)
+    } {
         Ok(released) => released,
         Err(crate::release_gate::ReleaseError::Blocked(failure)) => {
             return release_blocked_response(&failure);
@@ -18243,6 +18273,24 @@ fn client_name_required_response(missing: &crate::report_export::ClientNameRequi
             "ok": false,
             "gate": "client_name",
             "message": missing.to_string(),
+        })),
+    )
+        .into_response()
+}
+
+/// The 422 the export routes return when the run did not complete and the export is for a client:
+/// `{ ok: false, gate: "incomplete_run", message, reasons }`. The message carries the same
+/// reasons the CLI prints, so the cockpit shows the operator why nothing was exported.
+fn run_incomplete_response(incomplete: &crate::report_export::RunIncomplete) -> Response {
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+    (
+        StatusCode::UNPROCESSABLE_ENTITY,
+        Json(serde_json::json!({
+            "ok": false,
+            "gate": "incomplete_run",
+            "message": incomplete.to_string(),
+            "reasons": incomplete.reasons,
         })),
     )
         .into_response()
@@ -18504,6 +18552,11 @@ pub struct ManifestProvenance {
     /// 22c: the non-blank lines in those excluded files. `None` for a run that did not record
     /// it (a report from before 22c).
     pub excluded_noise_lines: Option<usize>,
+    /// Why the inspection did not run to completion (see
+    /// [`crate::onboard::ScanReport::incomplete_reasons`]); empty for a complete run. Recorded
+    /// only on an internal package: the release gate refuses a package that records any, and a
+    /// complete run's manifest and README are unchanged.
+    pub incomplete: Vec<String>,
 }
 
 impl ManifestProvenance {
@@ -18562,7 +18615,7 @@ impl ManifestProvenance {
                 })
             })
             .collect();
-        serde_json::json!({
+        let mut inspection = serde_json::json!({
             "repos": repos,
             "engine_version": self.engine_version(),
             "corpus_version": self.corpus_version,
@@ -18584,7 +18637,13 @@ impl ManifestProvenance {
             "excluded_noise_files": self.excluded_noise_files,
             "excluded_noise_lines": self.excluded_noise_lines,
             "release_checks": Self::release_checks(),
-        })
+        });
+        // Present only for an incomplete run, so a complete run's manifest is unchanged.
+        if !self.incomplete.is_empty() {
+            inspection["run_incomplete"] = serde_json::json!(true);
+            inspection["incomplete_reasons"] = serde_json::json!(self.incomplete);
+        }
+        inspection
     }
 
     /// The release gate's check names, in run order. The README line and the manifest's
@@ -18658,6 +18717,12 @@ impl ManifestProvenance {
         if self.cost_cap_reached {
             out.push_str(&format!("{COST_CAP_README_LINE}\n"));
         }
+        if !self.incomplete.is_empty() {
+            out.push_str(&format!("{INTERNAL_INCOMPLETE_README_LINE}\n"));
+            for reason in &self.incomplete {
+                out.push_str(&format!("Not complete: {reason}\n"));
+            }
+        }
         out.push_str(&crate::vuln_intel::readme_lines(
             self.vulnerability_data.as_ref(),
         ));
@@ -18674,6 +18739,10 @@ impl ManifestProvenance {
 /// [`ManifestProvenance::engine_version`] (README and `manifest.json`) and in the report cover
 /// (`report_export::CoverJson::engine_commit`, which the PDF and `findings.json` render).
 pub const ENGINE_COMMIT: Option<&str> = option_env!("CAMERATA_GIT_COMMIT");
+
+/// The README line of an internal package made from a run that did not complete.
+pub const INTERNAL_INCOMPLETE_README_LINE: &str = "INTERNAL INCOMPLETE: this inspection did not \
+     run to completion and is not for a client.";
 
 /// The README line that states the inspection was stopped by the operator's spend limit. Printed
 /// only when [`ManifestProvenance::cost_cap_reached`] is true; the release gate parses it back.

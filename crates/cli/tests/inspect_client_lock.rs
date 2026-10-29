@@ -100,7 +100,9 @@ fn args(repo: &Path, export: &Path, backend: ProjectBackend) -> InspectArgs {
         export: export.to_path_buf(),
         backend,
         batch: false,
-        realtime: false,
+        // The scripted model has no batches endpoint, so the run is real-time: a batch run would
+        // fail its AI review and (rightly) be refused as incomplete.
+        realtime: true,
         model: Some("claude-sonnet-5".to_string()),
         calibration_model: Some("claude-sonnet-5".to_string()),
         fix_model: None,

@@ -498,7 +498,9 @@ async fn run_batch(
     applies_to_routing: bool,
     script: impl Fn(usize, &str) -> Reply + Send + Sync + 'static,
 ) -> (std::sync::Arc<FakeBatch>, Vec<FailedPass>) {
-    let api = std::sync::Arc::new(FakeBatch::new(script));
+    // The provider keeps failing, so the end-of-run second try of an errored item fails as well
+    // and the item stays a failed pass, as these tests expect.
+    let api = std::sync::Arc::new(FakeBatch::new(script).with_realtime_failing());
     let seam = BatchSeam::new(api.clone());
     let m = meter(applies_to_routing);
     let (_f, _p, _r, failed, _s) = audit_repo(

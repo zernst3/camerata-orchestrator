@@ -204,6 +204,12 @@ pub struct RuleLedgerEntry {
     /// [`ScanLedger::note_scope_subset`]; `None` for a rule that saw every file.
     #[serde(default)]
     pub scope_coverage: Option<ScopeCoverage>,
+    /// True for a rule whose scope is the repo as a whole rather than files (set with
+    /// [`ScanLedger::mark_repo_level_rule`]). Only such a rule may be clean having evaluated no
+    /// file: for every other deterministic rule, zero files in scope means it had nothing to
+    /// look at, not that it found nothing ([`Self::cell_state`]).
+    #[serde(default)]
+    pub repo_level: bool,
 }
 
 /// The files a scoped rule was checked against, over every repo of the scan.
@@ -275,6 +281,16 @@ impl RuleLedgerEntry {
         if let Some(why) = &self.partial_reason {
             return CellState::NotReviewed {
                 reason: why.clone(),
+            };
+        }
+        // A deterministic architectural rule that evaluated no file in scope had nothing to look
+        // at on this repo. That is not a clean result, and in the patterns matrix it must not
+        // read as "this service handles the rule differently" against a service that violates
+        // it. (Carried results and the semantic tier legitimately evaluate no FRESH file and
+        // stay clean; a repo-level rule has no files by design.)
+        if self.tier == RuleTier::Architectural && self.files_evaluated == 0 && !self.repo_level {
+            return CellState::NotApplicable {
+                reason: "no files in scope".to_string(),
             };
         }
         CellState::Clean
@@ -517,6 +533,10 @@ pub struct ScanLedger {
     /// "capped" fact. See [`crate::cost_cap`].
     #[serde(default)]
     cost_cap: Option<crate::cost_cap::CostCapRecord>,
+    /// What an outage stop left undone, when the run stopped because the model provider could not
+    /// be reached (see [`crate::run_health`]). Operator-only. `None` when the run never stopped.
+    #[serde(default)]
+    outage: Option<crate::run_health::OutageRecord>,
     /// The engagement the scan ran under: client engagement or not, the backend, provider and
     /// models, and whether the client's own tooling was allowed to run (see
     /// [`crate::client_lock`]). Operator-only. `None` for a ledger written before the record
@@ -882,6 +902,21 @@ impl ScanLedger {
         self.cost_cap = Some(record);
     }
 
+    /// Record that the run stopped on an outage. Overwrites: one scan, one record.
+    pub fn record_outage(&mut self, record: crate::run_health::OutageRecord) {
+        self.outage = Some(record);
+    }
+
+    /// What the outage stop left undone, when the run stopped.
+    pub fn outage(&self) -> Option<&crate::run_health::OutageRecord> {
+        self.outage.as_ref()
+    }
+
+    /// True when the run stopped on an outage, so the inspection is incomplete.
+    pub fn is_outage_stopped(&self) -> bool {
+        self.outage.is_some()
+    }
+
     /// Record the engagement this scan ran under. Overwrites: one scan, one record.
     pub fn record_engagement(&mut self, record: crate::client_lock::EngagementRecord) {
         self.engagement = Some(record);
@@ -1072,6 +1107,7 @@ impl ScanLedger {
                 repos_not_run: Vec::new(),
                 not_run_reason: None,
                 scope_coverage: None,
+                repo_level: false,
             });
         self.invalidate_merged();
         self.rules.get(&key).expect("just inserted")
@@ -1236,6 +1272,7 @@ impl ScanLedger {
                     repos_not_run: Vec::new(),
                     not_run_reason: None,
                     scope_coverage: None,
+                    repo_level: false,
                 },
             );
         }
@@ -1420,6 +1457,7 @@ impl ScanLedger {
                 repos_not_run: Vec::new(),
                 not_run_reason: None,
                 scope_coverage: None,
+                repo_level: false,
             },
         );
         self.invalidate_merged();
@@ -1446,6 +1484,15 @@ impl ScanLedger {
             None => CellState::NotApplicable {
                 reason: "the rule does not apply to this repo".to_string(),
             },
+        }
+    }
+
+    /// Mark the (repo, rule) entry as repo-level: its scope is the repo as a whole, so it may be
+    /// clean having evaluated no file. The scope comes from the rule (a checker with no file
+    /// globs), never from a fixture.
+    pub fn mark_repo_level_rule(&mut self, repo: &str, rule_id: &str) {
+        if let Some(entry) = self.rules.get_mut(&(rule_id.to_string(), repo.to_string())) {
+            entry.repo_level = true;
         }
     }
 
@@ -1588,6 +1635,10 @@ pub fn stage_disclosure(
             stage.deduped,
         ),
         files_not_reviewed: 0,
+        class: crate::ai_audit::FailureClass::Content,
+        files: Vec::new(),
+        attempts: Vec::new(),
+        scope_note: false,
     })
 }
 
@@ -1707,6 +1758,10 @@ pub fn rule_disclosure(
         pass: "mechanical-enforcement coverage".to_string(),
         reason: format!("{} {}", rule.rule_id, reason),
         files_not_reviewed: 0,
+        class: crate::ai_audit::FailureClass::Content,
+        files: Vec::new(),
+        attempts: Vec::new(),
+        scope_note: false,
     })
 }
 
@@ -1954,8 +2009,13 @@ fn merge_rule_entries(entries: &[&RuleLedgerEntry]) -> RuleLedgerEntry {
             .collect(),
         not_run_reason: gaps.first().and_then(|e| e.skip_reason.clone()),
         scope_coverage,
+        // A merged entry is read by rule id, never for a cell.
+        repo_level: entries.iter().all(|e| e.repo_level),
     }
 }
+
+#[cfg(test)]
+mod scope_tests;
 
 #[cfg(test)]
 mod tests {
