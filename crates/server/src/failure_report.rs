@@ -31,6 +31,10 @@ pub struct FailureEntry {
     pub last_at: String,
     /// A short message, secrets redacted and capped; never client code.
     pub message: String,
+    /// When a later attempt (a resume, or a new run) completed this part, so it no longer fails.
+    /// The entry and its attempts stay in the file as history. `None` while it still fails.
+    #[serde(default)]
+    pub resolved_at: Option<String>,
 }
 
 /// The whole report.
@@ -60,6 +64,7 @@ pub fn build(report: &crate::onboard::ScanReport) -> FailureReport {
                 first_at,
                 last_at,
                 message: scrub_message(&redacted, MAX_RECORD_MESSAGE_CHARS),
+                resolved_at: None,
             }
         })
         .collect();
@@ -74,10 +79,15 @@ impl FailureReport {
         self.entries.is_empty()
     }
 
-    /// One structured line per failure, for stderr: `key=value` pairs, stable order.
+    /// The entries that still fail.
+    pub fn unresolved(&self) -> impl Iterator<Item = &FailureEntry> {
+        self.entries.iter().filter(|e| e.resolved_at.is_none())
+    }
+
+    /// One structured line per failure that still fails, for stderr: `key=value` pairs, stable
+    /// order. A resolved entry is history and is not printed.
     pub fn stderr_lines(&self) -> Vec<String> {
-        self.entries
-            .iter()
+        self.unresolved()
             .map(|e| {
                 format!(
                     "camerata failure: class={} repo={} part=\"{}\" files={} attempts={} first={} last={} message=\"{}\"",
@@ -96,18 +106,31 @@ impl FailureReport {
 
     /// The short readable form.
     pub fn render_md(&self) -> String {
+        let open = self.unresolved().count();
         let mut out = format!(
-            "# Failure report\n\nGenerated {}. {} part(s) failed or did not run. Operator only: \
-             this file is never part of an export.\n",
+            "# Failure report\n\nGenerated {}. {} part(s) failed or did not run{}. Operator \
+             only: this file is never part of an export.\n",
             self.generated_at,
-            self.entries.len()
+            open,
+            if open == self.entries.len() {
+                String::new()
+            } else {
+                format!(
+                    "; {} more failed in an earlier attempt and were completed since",
+                    self.entries.len() - open
+                )
+            }
         );
         for (i, e) in self.entries.iter().enumerate() {
             out.push_str(&format!(
-                "\n## {}. {} ({})\n\nClass: {}. Files: {}. Attempts: {}.",
+                "\n## {}. {} ({}){}\n\nClass: {}. Files: {}. Attempts: {}.",
                 i + 1,
                 e.part,
                 e.repo,
+                e.resolved_at
+                    .as_ref()
+                    .map(|t| format!(" - resolved {t}"))
+                    .unwrap_or_default(),
                 e.class.as_str(),
                 e.files.len(),
                 e.attempts.len()
@@ -171,21 +194,68 @@ pub fn paths_next_to(ledger_file: &Path) -> (PathBuf, PathBuf) {
     )
 }
 
+/// How many resolved entries the file keeps as history.
+const KEEP_RESOLVED: usize = 200;
+
+/// The report as it should be on disk after an attempt: `current` (what still fails, now), with
+/// the earlier attempts of each part put in front of its own, and every part that failed before
+/// and does not fail now kept as history with the time it was completed.
+pub fn merge_history(previous: &FailureReport, current: &FailureReport) -> FailureReport {
+    let now = crate::client_source::records::now_rfc3339();
+    let same = |a: &FailureEntry, b: &FailureEntry| a.repo == b.repo && a.part == b.part;
+    let mut entries: Vec<FailureEntry> = current.entries.clone();
+    for entry in &mut entries {
+        if let Some(old) = previous.unresolved().find(|old| same(old, entry)) {
+            let mut attempts = old.attempts.clone();
+            attempts.append(&mut entry.attempts);
+            entry.attempts = attempts;
+            if !old.first_at.is_empty() {
+                entry.first_at = old.first_at.clone();
+            }
+        }
+    }
+    let mut history: Vec<FailureEntry> = Vec::new();
+    for old in &previous.entries {
+        if old.resolved_at.is_some() {
+            history.push(old.clone());
+        } else if !current.entries.iter().any(|now| same(old, now)) {
+            let mut done = old.clone();
+            done.resolved_at = Some(now.clone());
+            history.push(done);
+        }
+    }
+    if history.len() > KEEP_RESOLVED {
+        history.drain(..history.len() - KEEP_RESOLVED);
+    }
+    entries.extend(history);
+    FailureReport {
+        generated_at: current.generated_at.clone(),
+        entries,
+    }
+}
+
 /// Write `failures.json` and `failures.md` next to `ledger_file`. Returns the two paths, or
-/// `None` (and removes any older pair) when nothing failed.
+/// `None` (and removes any older pair) when nothing failed now and nothing failed before. A part
+/// that failed in an earlier attempt and is complete now stays in the file as history, with the
+/// time it was resolved and every attempt it took.
 pub fn write(
     ledger_file: &Path,
     report: &FailureReport,
 ) -> std::io::Result<Option<(PathBuf, PathBuf)>> {
     let (json_path, md_path) = paths_next_to(ledger_file);
-    if report.is_empty() {
+    let previous: FailureReport = std::fs::read(&json_path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default();
+    let merged = merge_history(&previous, report);
+    if merged.is_empty() {
         let _ = std::fs::remove_file(&json_path);
         let _ = std::fs::remove_file(&md_path);
         return Ok(None);
     }
-    let json = serde_json::to_string_pretty(report).map_err(std::io::Error::other)?;
+    let json = serde_json::to_string_pretty(&merged).map_err(std::io::Error::other)?;
     std::fs::write(&json_path, json)?;
-    std::fs::write(&md_path, report.render_md())?;
+    std::fs::write(&md_path, merged.render_md())?;
     Ok(Some((json_path, md_path)))
 }
 
@@ -292,8 +362,43 @@ mod tests {
         let back: FailureReport =
             serde_json::from_str(&std::fs::read_to_string(&json).unwrap()).unwrap();
         assert_eq!(back.entries.len(), 1);
-        assert!(write(&ledger, &FailureReport::default()).unwrap().is_none());
-        assert!(!json.exists() && !md.exists());
+        // Nothing failed now and nothing failed before: no files at all.
+        let other = dir.path().join("y-5678.ledger.json");
+        assert!(write(&other, &FailureReport::default()).unwrap().is_none());
+        assert!(!paths_next_to(&other).0.exists());
+    }
+
+    #[test]
+    fn a_part_completed_by_a_later_attempt_stays_as_history_with_a_resolved_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = dir.path().join("x-1234.ledger.json");
+        // Attempt 1: a part fails. Attempt 2 (a resume): it fails again once more, then a third
+        // attempt completes it.
+        write(&ledger, &build(&report_with(vec![failed()]))).unwrap();
+        let (json, md) = write(&ledger, &build(&report_with(vec![failed()])))
+            .unwrap()
+            .expect("still failing");
+        let twice: FailureReport =
+            serde_json::from_str(&std::fs::read_to_string(&json).unwrap()).unwrap();
+        assert_eq!(twice.entries.len(), 1);
+        assert_eq!(twice.entries[0].attempts.len(), 4, "both attempts are kept");
+        assert!(twice.entries[0].resolved_at.is_none());
+
+        let done = write(&ledger, &build(&report_with(Vec::new())))
+            .unwrap()
+            .expect("the history is kept");
+        let back: FailureReport =
+            serde_json::from_str(&std::fs::read_to_string(&done.0).unwrap()).unwrap();
+        assert_eq!(back.entries.len(), 1);
+        assert!(back.entries[0].resolved_at.is_some(), "{back:?}");
+        assert_eq!(back.entries[0].attempts.len(), 4);
+        assert_eq!(back.unresolved().count(), 0);
+        assert!(
+            back.stderr_lines().is_empty(),
+            "history is not printed as a failure"
+        );
+        let text = std::fs::read_to_string(md).unwrap();
+        assert!(text.contains("resolved"), "{text}");
     }
 
     #[test]

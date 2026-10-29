@@ -487,6 +487,18 @@ async fn a_resume_after_a_failed_sub_pass_equals_the_uninterrupted_run() {
     assert!(remaining.contains(&PartKind::Fix), "{remaining:?}");
     assert!(!remaining.contains(&PartKind::Scan), "{remaining:?}");
     let sent_before = flaky.calls();
+    // An incomplete run leaves no baseline behind: the incremental cache is written only when the
+    // run is complete.
+    let manifest = camerata_server::scan_cache::state_dir::manifest_cache_path(repo.path());
+    assert!(
+        !manifest.exists(),
+        "an incomplete run is not a reusable baseline"
+    );
+    let ledger = camerata_server::scan_cache::state_dir::ledger_path(repo.path());
+    let (failures_json, _md) = camerata_server::failure_report::paths_next_to(&ledger);
+    let before: camerata_server::failure_report::FailureReport =
+        serde_json::from_slice(&std::fs::read(&failures_json).unwrap()).unwrap();
+    assert!(before.unresolved().count() >= 1, "the failure is on record");
 
     // The provider is back; resume.
     flaky.set(Outage::default());
@@ -518,6 +530,21 @@ async fn a_resume_after_a_failed_sub_pass_equals_the_uninterrupted_run() {
         flaky.sent_of(PartKind::Calibration),
         healthy.sent_of(PartKind::Calibration),
         "no calibration call was sent a second time"
+    );
+    assert!(
+        manifest.exists(),
+        "a complete run becomes the reusable baseline"
+    );
+    let after: camerata_server::failure_report::FailureReport =
+        serde_json::from_slice(&std::fs::read(&failures_json).unwrap()).unwrap();
+    assert_eq!(after.unresolved().count(), 0, "nothing fails any more");
+    assert!(
+        after.entries.iter().all(|e| e.resolved_at.is_some()) && !after.entries.is_empty(),
+        "the failures stay as history with the time they were resolved"
+    );
+    assert!(
+        after.entries.iter().any(|e| e.attempts.len() >= 2),
+        "the attempt history is kept"
     );
     let done = camerata_server::run_store::read_record(&run_id).unwrap();
     assert_eq!(done.status, camerata_server::run_store::RunStatus::Complete);
