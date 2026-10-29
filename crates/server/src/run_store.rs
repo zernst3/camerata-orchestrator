@@ -282,6 +282,11 @@ pub struct RunRecord {
     /// Why the last attempt ended incomplete, in plain words.
     #[serde(default)]
     pub incomplete_reasons: Vec<String>,
+    /// Things worth knowing about how the run was worked that are not a failure (for example a
+    /// model call made with no prompt seed in scope, which a resume cannot replay). Kept across
+    /// attempts; each note appears once.
+    #[serde(default)]
+    pub notes: Vec<String>,
 }
 
 /// What a process working on a run looks like from outside.
@@ -758,6 +763,7 @@ impl RunStore {
             estimate_usd: new.estimate_usd,
             plan: plan_for(&new.repos, new.include_alternatives),
             incomplete_reasons: Vec::new(),
+            notes: Vec::new(),
         };
         let lock = RunLock::acquire(&dir)?;
         let store = Arc::new(Self {
@@ -835,6 +841,20 @@ impl RunStore {
             *slot = u8::from_str_radix(hex.get(i * 2..i * 2 + 2).unwrap_or("00"), 16).unwrap_or(0);
         }
         out
+    }
+
+    /// Record a note on the run (once: the same text is not added twice) and write the record.
+    /// Returns whether the note is new.
+    pub fn add_note(&self, note: &str) -> bool {
+        {
+            let mut state = self.lock_state();
+            if state.record.notes.iter().any(|n| n == note) {
+                return false;
+            }
+            state.record.notes.push(note.to_string());
+        }
+        let _ = self.persist();
+        true
     }
 
     pub(crate) fn lock_state(&self) -> std::sync::MutexGuard<'_, StoreState> {

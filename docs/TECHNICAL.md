@@ -6098,7 +6098,11 @@ would need the project's settings (repo folders, backend, rules) that only the a
 in a task local, so two audit jobs in one server each draw tokens from their own seed however
 they interleave, and one ending cannot clear the other's. Work handed to another task
 (`spawn_blocking`) does not inherit it and must be given a token already drawn (the candidate
-locator is).
+locator is). The journal checks for the seed before it journals a call or submits a batch: a call
+with none in scope would carry a random token, its stored reply could never match on a resume and
+it would be paid for again. In the test builds that is an error; in production the call goes ahead
+(the money is spent either way), `[camerata-server] WARNING` is printed once and the run record
+keeps the note (`RunRecord.notes`).
 
 **Exit codes of `camerata inspect`.** 0 complete (or resumed a complete run); 1 failure or refused
 resume; 3 release gate refused; 4 spend limit; 5 outage stop; 6 incomplete for another reason.

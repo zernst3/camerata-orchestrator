@@ -28,6 +28,13 @@ fn current_seed() -> Option<[u8; NONCE_BYTES]> {
     RUN_SEED.try_with(|seed| *seed).ok()
 }
 
+/// Whether a run's prompt seed is in scope on this future: model calls made now draw reproducible
+/// delimiter tokens. The run store's journal needs it (a reply is stored under a digest of the
+/// prompt, and a random token would change the prompt on every resume).
+pub(crate) fn seed_in_scope() -> bool {
+    current_seed().is_some()
+}
+
 /// Run `fut` with delimiter tokens drawn from `seed` (see [`FrameNonce::generate_avoiding`]). The
 /// run store hands each run its seed for the whole of the run so that a resumed run asks the model
 /// the same questions as the run it resumes. The seed belongs to this future alone: another run in
