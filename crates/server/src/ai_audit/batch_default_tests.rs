@@ -629,7 +629,9 @@ async fn a_failed_real_time_pass_is_disclosed_too() {
     #[async_trait::async_trait]
     impl LlmPort for FailSecond {
         async fn complete(&self, _req: LlmRequest) -> anyhow::Result<LlmResponse> {
-            if self.0.fetch_add(1, Ordering::SeqCst) == 1 {
+            // Fails the second pass and, when it is tried once more at the end of the round,
+            // fails it again: the disclosure is for a pass that fails both tries.
+            if matches!(self.0.fetch_add(1, Ordering::SeqCst), 1 | 2) {
                 anyhow::bail!("HTTP 500 after retries");
             }
             Ok(response(r#"{"findings":[]}"#, false, 0.01))

@@ -125,8 +125,9 @@ async fn a_malformed_reply_that_never_recovers_is_a_failed_pass_not_zero_finding
         "{}",
         failures[0].error
     );
-    // The first attempt plus exactly the bounded number of retries.
-    assert_eq!(llm.calls(), 1 + MALFORMED_REPLY_RETRIES);
+    // The first attempt plus exactly the bounded number of retries, and the same again when the
+    // pass is tried once more at the end of the round.
+    assert_eq!(llm.calls(), 2 * (1 + MALFORMED_REPLY_RETRIES));
 }
 
 #[tokio::test]
@@ -156,7 +157,8 @@ async fn the_failure_reason_states_the_attempt_count() {
     let llm = ScriptedLlm::new(&[(MALFORMED, false)]);
     let (_f, _p, _r, _ok, failures) = scan(&llm, 1).await;
     let attempts = 1 + MALFORMED_REPLY_RETRIES;
-    assert_eq!(llm.calls(), attempts);
+    // Both tries (the second at the end of the round) are sent in full.
+    assert_eq!(llm.calls(), 2 * attempts);
     assert_eq!(failures.len(), 1, "{failures:?}");
     assert!(
         failures[0]

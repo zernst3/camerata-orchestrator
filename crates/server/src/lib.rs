@@ -102,6 +102,7 @@ pub mod report_export;
 pub mod review_agent;
 pub mod routine;
 pub mod run;
+pub mod run_health;
 mod run_target;
 pub mod runtime_audit;
 pub mod scan_cache;

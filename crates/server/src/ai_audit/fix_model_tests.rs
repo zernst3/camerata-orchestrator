@@ -322,7 +322,9 @@ async fn a_finding_whose_every_call_failed_is_not_a_give_up() {
             outcome.transport_failed,
             outcome.cap_stopped
         ),
-        (1, 0, 0, 1, 0),
+        // Three failed calls in a row stop the run (the outage stop), so the last retry is not
+        // sent: the finding was still never heard from, so it is not a give-up either way.
+        (1, 0, 0, 0, 1),
         "{outcome:?}"
     );
     assert_eq!(outcome.give_up_rate(), None, "the model answered nothing");

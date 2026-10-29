@@ -231,6 +231,87 @@ pub struct NotRunStage {
     pub class: FailureClass,
 }
 
+/// The failed-pass disclosures for passes and stages that did not run, grouped one entry per
+/// (repo, group, chunk). `cause` completes "NOT RUN: <cause> before ..." and is the only thing
+/// that differs between the spend limit and an outage stop.
+pub(crate) fn not_run_failed_passes(
+    passes_in: &[NotRunPass],
+    stages_in: &[NotRunStage],
+    cause: &str,
+) -> Vec<crate::ai_audit::FailedPass> {
+    let mut out: Vec<crate::ai_audit::FailedPass> = Vec::new();
+    // One entry per (repo, group, chunk), listing its rule-batches, so a 200-chunk scan is
+    // not 1,600 notes while every (chunk, rule-batch) pair is still named.
+    // Passes are recorded in the order they were refused, which depends on scheduling;
+    // the disclosure is in position order so it reads the same on every run.
+    let mut passes = passes_in.to_vec();
+    passes.sort_by(|a, b| {
+        (&a.repo, &a.group, a.chunk, a.rule_batch).cmp(&(&b.repo, &b.group, b.chunk, b.rule_batch))
+    });
+    let mut i = 0;
+    while i < passes.len() {
+        let first = &passes[i];
+        let mut batches = vec![first.rule_batch];
+        let mut rules = first.rule_ids.len();
+        let mut j = i + 1;
+        while j < passes.len()
+            && passes[j].repo == first.repo
+            && passes[j].group == first.group
+            && passes[j].chunk == first.chunk
+        {
+            batches.push(passes[j].rule_batch);
+            rules += passes[j].rule_ids.len();
+            j += 1;
+        }
+        let listed = batches
+            .iter()
+            .map(usize::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        out.push(crate::ai_audit::FailedPass {
+            repo: first.repo.clone(),
+            pass: format!(
+                "scan pass {} chunk {}/{}",
+                first.group, first.chunk, first.n_chunks
+            ),
+            reason: format!(
+                "NOT RUN: {cause} before rule-batch {listed} \
+                 of {} ran, so {rules} rule check(s) were not made against this part of the \
+                 code. This inspection is incomplete.",
+                first.n_rule_batches
+            ),
+            // The files of this chunk were not checked by this pass. Counted so the
+            // incremental cache and the completeness check treat the repo as unreviewed.
+            files_not_reviewed: first.files.len(),
+            class: first.class,
+            files: first.files.clone(),
+            attempts: Vec::new(),
+        });
+        i = j;
+    }
+    for stage in stages_in {
+        out.push(crate::ai_audit::FailedPass {
+            repo: stage.repo.clone(),
+            pass: stage.stage.clone(),
+            reason: if stage.partial {
+                format!(
+                    "NOT RUN (in part): {cause} while this stage was running, so the rest of \
+                     it did not run. This inspection is incomplete."
+                )
+            } else {
+                format!(
+                    "NOT RUN: {cause} before this stage started. This inspection is incomplete."
+                )
+            },
+            files_not_reviewed: 0,
+            class: stage.class,
+            files: Vec::new(),
+            attempts: Vec::new(),
+        });
+    }
+    out
+}
+
 /// How much of a rule's checking the cap left undone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuleCoverage {
@@ -292,81 +373,11 @@ impl CostCapRecord {
     /// The failed-pass disclosures for everything the cap stopped. The text carries NO dollar
     /// figure (it reaches the client report); the amounts are in the ledger and the CLI output.
     pub fn failed_passes(&self) -> Vec<crate::ai_audit::FailedPass> {
-        let mut out: Vec<crate::ai_audit::FailedPass> = Vec::new();
-        // One entry per (repo, group, chunk), listing its rule-batches, so a 200-chunk scan is
-        // not 1,600 notes while every (chunk, rule-batch) pair is still named.
-        // Passes are recorded in the order they were refused, which depends on scheduling;
-        // the disclosure is in position order so it reads the same on every run.
-        let mut passes = self.not_run_passes.clone();
-        passes.sort_by(|a, b| {
-            (&a.repo, &a.group, a.chunk, a.rule_batch).cmp(&(
-                &b.repo,
-                &b.group,
-                b.chunk,
-                b.rule_batch,
-            ))
-        });
-        let mut i = 0;
-        while i < passes.len() {
-            let first = &passes[i];
-            let mut batches = vec![first.rule_batch];
-            let mut rules = first.rule_ids.len();
-            let mut j = i + 1;
-            while j < passes.len()
-                && passes[j].repo == first.repo
-                && passes[j].group == first.group
-                && passes[j].chunk == first.chunk
-            {
-                batches.push(passes[j].rule_batch);
-                rules += passes[j].rule_ids.len();
-                j += 1;
-            }
-            let listed = batches
-                .iter()
-                .map(usize::to_string)
-                .collect::<Vec<_>>()
-                .join(", ");
-            out.push(crate::ai_audit::FailedPass {
-                repo: first.repo.clone(),
-                pass: format!(
-                    "scan pass {} chunk {}/{}",
-                    first.group, first.chunk, first.n_chunks
-                ),
-                reason: format!(
-                    "NOT RUN: the spend limit set for this run was reached before rule-batch {listed} \
-                     of {} ran, so {rules} rule check(s) were not made against this part of the \
-                     code. This inspection is incomplete.",
-                    first.n_rule_batches
-                ),
-                // The files of this chunk were not checked by this pass. Counted so the
-                // incremental cache and the completeness check treat the repo as unreviewed.
-                files_not_reviewed: first.files.len(),
-                class: first.class,
-                files: first.files.clone(),
-                attempts: Vec::new(),
-            });
-            i = j;
-        }
-        for stage in &self.not_run_stages {
-            out.push(crate::ai_audit::FailedPass {
-                repo: stage.repo.clone(),
-                pass: stage.stage.clone(),
-                reason: if stage.partial {
-                    "NOT RUN (in part): the spend limit set for this run was reached while \
-                     this stage was running, so the rest of it did not run. This inspection \
-                     is incomplete."
-                } else {
-                    "NOT RUN: the spend limit set for this run was reached before this \
-                     stage started. This inspection is incomplete."
-                }
-                .to_string(),
-                files_not_reviewed: 0,
-                class: stage.class,
-                files: Vec::new(),
-                attempts: Vec::new(),
-            });
-        }
-        out
+        not_run_failed_passes(
+            &self.not_run_passes,
+            &self.not_run_stages,
+            "the spend limit set for this run was reached",
+        )
     }
 
     /// How much of `rule_id`'s checking on `repo` the cap left undone. A rule is `NotRun` only
@@ -402,6 +413,8 @@ pub(crate) struct BudgetState {
     /// Repos the run reached after the cap had already stopped it (see
     /// [`CostCapRecord::repos_not_finished`]).
     pub repos_not_finished: Vec<String>,
+    /// Repos the run reached after an outage stop (see [`crate::run_health::OutageRecord`]).
+    pub outage_repos: Vec<String>,
     /// A call's cost could not be determined (no reported dollar figure and no way to price its
     /// tokens) while a cap was set. The cap can no longer be enforced, so nothing further is
     /// admitted: refusing a pass that might have fit beats running past the limit unseen.

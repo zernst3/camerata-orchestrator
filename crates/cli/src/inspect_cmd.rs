@@ -296,9 +296,30 @@ pub struct InspectOutcome {
     pub efficiency: camerata_server::efficiency::EfficiencyConfig,
     /// What the spend limit did, when one was set. Operator-only: it carries dollar figures.
     pub cost_cap: Option<camerata_server::cost_cap::CostCapRecord>,
+    /// What an outage stop left undone, when the run stopped because the model provider could not
+    /// be reached. Operator-only.
+    pub outage: Option<camerata_server::run_health::OutageRecord>,
 }
 
 impl InspectOutcome {
+    /// True when the run stopped because the model provider could not be reached, so the
+    /// inspection is incomplete and can be run again later.
+    pub fn outage_stopped(&self) -> bool {
+        self.outage.is_some()
+    }
+
+    /// The process exit code this outcome calls for: [`EXIT_OUTAGE_STOPPED`] when an outage
+    /// stopped the run, [`EXIT_COST_CAPPED`] when the spend limit did, else 0.
+    pub fn exit_code(&self) -> i32 {
+        if self.outage_stopped() {
+            EXIT_OUTAGE_STOPPED
+        } else if self.cost_capped() {
+            EXIT_COST_CAPPED
+        } else {
+            0
+        }
+    }
+
     /// True when the spend limit stopped part of the run, so the export is incomplete.
     pub fn cost_capped(&self) -> bool {
         self.cost_cap
@@ -314,6 +335,14 @@ pub const EXIT_RELEASE_BLOCKED: i32 = 3;
 /// The exit code when the spend limit (`--max-cost-usd`) stopped the run. The export WAS
 /// written, marked incomplete.
 pub const EXIT_COST_CAPPED: i32 = 4;
+
+/// The exit code when the run stopped because the model provider could not be reached (three
+/// transport failures in a row after retries, or one auth or billing failure). Every part that
+/// was never sent is on the ledger as not run with class `outage_stop`, and the run can be
+/// triggered again when the provider is back. A client export is refused for such a run; an
+/// `--internal` export is written, marked INTERNAL INCOMPLETE. Distinct from 3 (release gate
+/// refused) and 4 (spend limit).
+pub const EXIT_OUTAGE_STOPPED: i32 = 5;
 
 /// Why an inspection produced no export.
 #[derive(Debug)]
@@ -1085,6 +1114,7 @@ pub async fn run_inspect_pipeline_with(
         preflight: preflight_text,
         efficiency: controls.efficiency,
         cost_cap: report.ledger.cost_cap().cloned(),
+        outage: report.ledger.outage().cloned(),
     })
 }
 
@@ -1340,7 +1370,12 @@ pub fn format_outcome_report(outcome: &InspectOutcome) -> String {
         .cost_cap
         .as_ref()
         .map(render_cost_cap)
-        .unwrap_or_default();
+        .unwrap_or_default()
+        + &outcome
+            .outage
+            .as_ref()
+            .map(render_outage)
+            .unwrap_or_default();
     format!(
         "camerata inspect: wrote {} ({} bytes) — backend: {backend_label}, findings: {}\n\
          {}\nintegrity ledger: {}\n{}\nefficiency measures: {}\n{cap}\n{}{telemetry}",
@@ -1352,6 +1387,19 @@ pub fn format_outcome_report(outcome: &InspectOutcome) -> String {
         format_usage_report(outcome.actual_usage.as_ref(), outcome.batch),
         outcome.efficiency.render(),
         outcome.ledger_summary,
+    )
+}
+
+/// The outage block of the final report: what stopped the run and how much was never sent.
+fn render_outage(outage: &camerata_server::run_health::OutageRecord) -> String {
+    format!(
+        "RUN STOPPED: {} ({}). This inspection is INCOMPLETE: {} scan pass(es) and {} stage(s) \
+         were never sent (listed under FAILED PASSES as NOT RUN). Run it again when the provider \
+         is reachable.\n",
+        outage.trigger.detail,
+        outage.trigger.class.as_str(),
+        outage.not_run_passes.len(),
+        outage.not_run_stages.len()
     )
 }
 
@@ -1385,6 +1433,9 @@ fn render_cost_cap(cap: &camerata_server::cost_cap::CostCapRecord) -> String {
 
 #[cfg(test)]
 mod redaction_tests;
+
+#[cfg(test)]
+mod exit_code_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1504,6 +1555,7 @@ mod tests {
                 not_run_stages: Vec::new(),
                 notes: Vec::new(),
             }),
+            outage: None,
         };
         let text = format_outcome_report(&outcome);
         assert!(
@@ -2084,6 +2136,7 @@ mod tests {
             preflight: None,
             efficiency: camerata_server::efficiency::EfficiencyConfig::default(),
             cost_cap: None,
+            outage: None,
         };
         let text = format_outcome_report(&outcome);
         assert!(text.contains("/tmp/out.zip"), "{text}");
@@ -2134,6 +2187,7 @@ mod tests {
             preflight: None,
             efficiency: camerata_server::efficiency::EfficiencyConfig::default(),
             cost_cap: None,
+            outage: None,
         };
         let text = format_outcome_report(&outcome);
         assert!(text.contains("STAGE TELEMETRY"), "{text}");

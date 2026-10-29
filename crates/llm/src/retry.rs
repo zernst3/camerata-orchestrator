@@ -34,6 +34,7 @@ use std::time::Duration;
 use crate::failure::{AttemptRecord, FailureClass, LlmCallFailure};
 
 /// The most retries any failure gets on the standard schedule.
+#[cfg(test)]
 pub(crate) const MAX_RETRIES: u32 = 3;
 
 /// Fixed exponential backoff schedule in seconds, indexed by (zero-based) attempt number.

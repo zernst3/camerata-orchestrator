@@ -1115,6 +1115,7 @@ impl ScanReport {
         self.ai_error.is_none()
             && self.failed_passes.iter().all(|f| f.files_not_reviewed == 0)
             && !self.ledger.is_cost_capped()
+            && !self.ledger.is_outage_stopped()
             && self.repos_not_inspected.is_empty()
     }
 
@@ -2707,20 +2708,32 @@ pub async fn audit_repos_with_llm_controlled(
                     // started (no digests built, no calls), its rules are on record as not run
                     // and it is named as unfinished. Its token-free checks above still ran.
                     ai_all_unreviewed = true;
-                    notes.push(format!(
-                        "{spec}: AI review not run (the spend limit set for this run was reached)"
-                    ));
+                    notes.push(if meter.outage_stopped() {
+                        format!(
+                            "{spec}: AI review not run (the run stopped because the model \
+                             provider could not be reached)"
+                        )
+                    } else {
+                        format!(
+                            "{spec}: AI review not run (the spend limit set for this run was \
+                             reached)"
+                        )
+                    });
                     for (rid, _) in &semantic {
                         pipeline_ledger.record_rule(
                             spec,
                             rid.clone(),
                             crate::scan_ledger::RuleTier::Semantic,
                             false,
-                            Some(
+                            Some(if meter.outage_stopped() {
+                                "not run: the run stopped because the model provider could not \
+                                 be reached, before any pass checked it"
+                                    .to_string()
+                            } else {
                                 "not run: the spend limit set for this run was reached before \
                                  any pass checked it"
-                                    .to_string(),
-                            ),
+                                    .to_string()
+                            }),
                             0,
                             0,
                         );
@@ -2728,11 +2741,21 @@ pub async fn audit_repos_with_llm_controlled(
                     all_failed_passes.push(crate::ai_audit::FailedPass {
                         repo: spec.to_string(),
                         pass: crate::report_export::coverage_gaps::AI_REVIEW_ALL_PASSES.to_string(),
-                        reason: "NOT RUN: the spend limit set for this run was reached before \
-                                 this repository was reviewed. This inspection is incomplete."
-                            .to_string(),
+                        reason: if meter.outage_stopped() {
+                            "NOT RUN: the run stopped because the model provider could not be \
+                             reached before this repository was reviewed. This inspection is \
+                             incomplete."
+                        } else {
+                            "NOT RUN: the spend limit set for this run was reached before \
+                             this repository was reviewed. This inspection is incomplete."
+                        }
+                        .to_string(),
                         files_not_reviewed: files.len(),
-                        class: crate::ai_audit::FailureClass::SpendLimit,
+                        class: if meter.outage_stopped() {
+                            crate::ai_audit::FailureClass::OutageStop
+                        } else {
+                            crate::ai_audit::FailureClass::SpendLimit
+                        },
                         files: Vec::new(),
                         attempts: Vec::new(),
                     });
@@ -3349,6 +3372,19 @@ pub async fn audit_repos_with_llm_controlled(
             ));
         }
         report.ledger.record_cost_cap(cap);
+    }
+    // The outage stop: what it left undone is disclosed through the same failed-pass list, and
+    // the trigger and every part that was never sent stay on the operator ledger.
+    if let Some(outage) = meter.outage_record() {
+        all_failed_passes.extend(outage.failed_passes());
+        notes.push(format!(
+            "INCOMPLETE: the run stopped because the model provider could not be reached; {} \
+             scan pass(es) and {} stage(s) were never sent (see the list of passes that did not \
+             run). Run it again when the provider is back.",
+            outage.not_run_passes.len(),
+            outage.not_run_stages.len()
+        ));
+        report.ledger.record_outage(outage);
     }
     // Operator telemetry: the per-stage split of the spend, joined to the SAME counted-line
     // total `camerata count` prints (it comes from the same file filter). Lives on the ledger,

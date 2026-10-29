@@ -517,6 +517,10 @@ pub struct ScanLedger {
     /// "capped" fact. See [`crate::cost_cap`].
     #[serde(default)]
     cost_cap: Option<crate::cost_cap::CostCapRecord>,
+    /// What an outage stop left undone, when the run stopped because the model provider could not
+    /// be reached (see [`crate::run_health`]). Operator-only. `None` when the run never stopped.
+    #[serde(default)]
+    outage: Option<crate::run_health::OutageRecord>,
     /// The engagement the scan ran under: client engagement or not, the backend, provider and
     /// models, and whether the client's own tooling was allowed to run (see
     /// [`crate::client_lock`]). Operator-only. `None` for a ledger written before the record
@@ -880,6 +884,21 @@ impl ScanLedger {
     /// Record what the spend cap did. Overwrites: one scan, one record.
     pub fn record_cost_cap(&mut self, record: crate::cost_cap::CostCapRecord) {
         self.cost_cap = Some(record);
+    }
+
+    /// Record that the run stopped on an outage. Overwrites: one scan, one record.
+    pub fn record_outage(&mut self, record: crate::run_health::OutageRecord) {
+        self.outage = Some(record);
+    }
+
+    /// What the outage stop left undone, when the run stopped.
+    pub fn outage(&self) -> Option<&crate::run_health::OutageRecord> {
+        self.outage.as_ref()
+    }
+
+    /// True when the run stopped on an outage, so the inspection is incomplete.
+    pub fn is_outage_stopped(&self) -> bool {
+        self.outage.is_some()
     }
 
     /// Record the engagement this scan ran under. Overwrites: one scan, one record.

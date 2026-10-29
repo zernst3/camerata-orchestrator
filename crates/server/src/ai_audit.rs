@@ -197,6 +197,29 @@ impl PassFailure {
     fn caused_by(mut self, e: &anyhow::Error) -> Self {
         self.class = classify_pass_error(e);
         self.attempts = camerata_llm::failure::attempts_of(e);
+        if self.attempts.is_empty() {
+            // The call itself answered (a cut-off, malformed or refused reply), so the
+            // transport has no failed attempt to show; the record says what was wrong with the
+            // answer.
+            let mut record = AttemptRecord::new("", "");
+            record.error_type = Some(self.class.as_str().to_string());
+            record.message = camerata_llm::failure::scrub_message(
+                &self.error,
+                camerata_llm::failure::MAX_RECORD_MESSAGE_CHARS,
+            );
+            self.attempts.push(record);
+        }
+        self
+    }
+
+    /// The same failure, naming the model its attempts asked for where the record does not.
+    fn with_model(mut self, model: Option<&str>) -> Self {
+        let model = model
+            .map(str::to_string)
+            .unwrap_or_else(|| resolve_audit_model(None));
+        for a in self.attempts.iter_mut().filter(|a| a.model.is_empty()) {
+            a.model.clone_from(&model);
+        }
         self
     }
 
@@ -450,6 +473,9 @@ pub struct UsageMeter {
     budget: std::sync::Mutex<crate::cost_cap::BudgetState>,
     /// Wakes passes waiting for the first reported cost (see [`Self::admit`]).
     admission: tokio::sync::Notify,
+    /// The outage stop: a run-wide counter of consecutive transport failures. Once it trips,
+    /// admission refuses every new part. See [`crate::run_health`].
+    health: crate::run_health::RunHealth,
 }
 
 /// Why a pass was not admitted.
@@ -502,6 +528,25 @@ impl UsageMeter {
         &self.controls
     }
 
+    /// The run-wide outage counter.
+    pub fn health(&self) -> &crate::run_health::RunHealth {
+        &self.health
+    }
+
+    /// True once the outage stop has tripped: no new part is sent.
+    pub fn outage_stopped(&self) -> bool {
+        self.health.is_stopped()
+    }
+
+    /// The class a part refused right now is recorded with: an outage stop, else the spend limit.
+    fn not_run_class(&self) -> FailureClass {
+        if self.health.is_stopped() {
+            FailureClass::OutageStop
+        } else {
+            FailureClass::SpendLimit
+        }
+    }
+
     /// Actual spend so far, in dollars, as the telemetry and the printed total count it.
     pub fn spent_usd(&self) -> f64 {
         self.cost_micro_usd.load(Ordering::Relaxed) as f64 / 1_000_000.0
@@ -520,6 +565,10 @@ impl UsageMeter {
     /// permit. A retry of a cut-off or malformed reply checks this before it is sent. Always
     /// false with no cap; true once any call's cost was unknowable (the cap cannot be enforced).
     pub fn retry_blocked(&self) -> bool {
+        // After an outage stop no call is sent, a retry of an admitted pass included.
+        if self.health.is_stopped() {
+            return true;
+        }
         let Some(cap) = self.controls.max_cost_usd else {
             return false;
         };
@@ -542,6 +591,10 @@ impl UsageMeter {
     /// in-flight count move together under one lock, so two passes cannot both claim the last
     /// slot.
     fn try_admit(&self) -> Admission<'_> {
+        // The outage stop refuses every new part, cap or no cap.
+        if self.health.is_stopped() {
+            return Admission::CapReached;
+        }
         let mut budget = self.budget();
         if let Some(cap) = self.controls.max_cost_usd {
             // A call's cost was unknowable, so the cap cannot be enforced: admit nothing more.
@@ -587,7 +640,8 @@ impl UsageMeter {
     }
 
     /// Record a scan pass the cap refused.
-    pub fn record_not_run(&self, pass: crate::cost_cap::NotRunPass) {
+    pub fn record_not_run(&self, mut pass: crate::cost_cap::NotRunPass) {
+        pass.class = self.not_run_class();
         self.budget().not_run_passes.push(pass);
     }
 
@@ -617,7 +671,7 @@ impl UsageMeter {
                 repo: repo.to_string(),
                 stage: stage.to_string(),
                 partial,
-                class: camerata_llm::failure::FailureClass::SpendLimit,
+                class: self.not_run_class(),
             });
         }
     }
@@ -629,6 +683,10 @@ impl UsageMeter {
     /// anything (a refused scan pass, or an earlier stage): after the cap has bitten, nothing
     /// later may start, which is what keeps the overshoot bounded.
     pub fn stage_blocked(&self, repo: &str, stage: &str) -> bool {
+        if self.health.is_stopped() {
+            self.record_stage_not_run(repo, stage, false);
+            return true;
+        }
         let Some(_) = self.controls.max_cost_usd else {
             return false;
         };
@@ -650,6 +708,13 @@ impl UsageMeter {
     /// without reading its files into digests first. The repo's own token-free checks are not
     /// affected; the caller still runs them. A run with no cap never blocks a repo.
     pub fn repo_blocked(&self, repo: &str) -> bool {
+        if self.health.is_stopped() {
+            let mut budget = self.budget();
+            if !budget.outage_repos.iter().any(|r| r == repo) {
+                budget.outage_repos.push(repo.to_string());
+            }
+            return true;
+        }
         let Some(_) = self.controls.max_cost_usd else {
             return false;
         };
@@ -720,10 +785,43 @@ impl UsageMeter {
         Some(crate::cost_cap::CostCapRecord {
             cap_usd,
             spent_usd: self.spent_usd(),
-            not_run_passes: budget.not_run_passes.clone(),
-            not_run_stages: budget.not_run_stages.clone(),
+            // Only what the spend limit stopped: an outage stop has its own record.
+            not_run_passes: budget
+                .not_run_passes
+                .iter()
+                .filter(|p| p.class == FailureClass::SpendLimit)
+                .cloned()
+                .collect(),
+            not_run_stages: budget
+                .not_run_stages
+                .iter()
+                .filter(|s| s.class == FailureClass::SpendLimit)
+                .cloned()
+                .collect(),
             notes: budget.notes.clone(),
             repos_not_finished: budget.repos_not_finished.clone(),
+        })
+    }
+
+    /// What the outage stop left undone; `None` when the run never stopped.
+    pub fn outage_record(&self) -> Option<crate::run_health::OutageRecord> {
+        let trigger = self.health.trigger()?;
+        let budget = self.budget();
+        Some(crate::run_health::OutageRecord {
+            trigger,
+            not_run_passes: budget
+                .not_run_passes
+                .iter()
+                .filter(|p| p.class == FailureClass::OutageStop)
+                .cloned()
+                .collect(),
+            not_run_stages: budget
+                .not_run_stages
+                .iter()
+                .filter(|s| s.class == FailureClass::OutageStop)
+                .cloned()
+                .collect(),
+            repos_not_finished: budget.outage_repos.clone(),
         })
     }
 }
@@ -827,6 +925,8 @@ impl UsageMeter {
     pub fn record_stage(&self, stage: Stage, r: &crate::llm::LlmResponse) {
         self.stages.record(stage, r);
         self.record(r);
+        // A reply came back: the provider is reachable, so the outage streak starts over.
+        self.health.note_success();
     }
 
     /// Mark a completion already passed to [`Self::record_stage`] as one whose output was
@@ -961,8 +1061,12 @@ impl UsageMeter {
     /// stops. A failure that carries no usage (a transport error) changes nothing.
     pub fn record_failed(&self, stage: Stage, error: &anyhow::Error) {
         if let Some(billed) = crate::llm::refusal_billed(error) {
-            self.record_stage(stage, billed);
+            self.stages.record(stage, billed);
+            self.record(billed);
         }
+        // The outage stop watches every failed call, after the transport's own retries.
+        self.health
+            .note_failure(classify_pass_error(error), &error.to_string());
     }
 
     pub fn snapshot(&self) -> ActualUsage {
@@ -6146,15 +6250,24 @@ async fn run_passes(
         Option<anyhow::Result<(Vec<Finding>, Vec<ProposedRule>, Vec<String>)>>,
     );
     let eff = efficiency_of(meter);
+    // Set while the end-of-run second try is running, so a retried pass does not count twice in
+    // the job's progress.
+    let second_try = std::sync::atomic::AtomicBool::new(false);
     let run_one = |(ci, bi): (usize, usize)| {
         let digest = &digests[ci];
         let batch = batches[bi];
+        let second_try = &second_try;
         async move {
             // SPEND CAP: asked before anything is built or sent, and held until the pass
             // (its truncation retry included) has finished, so a pass is never cut off
             // mid-response. A refused pass is recorded as NOT RUN, never skipped silently.
             let _permit = match admit_pass(meter).await {
                 Err(CapReached) => {
+                    // The end-of-round second try of a pass that already failed: the failure
+                    // stands as its record, so the refusal is not recorded a second time.
+                    if second_try.load(std::sync::atomic::Ordering::SeqCst) {
+                        return (ci, bi, None);
+                    }
                     if let Some(m) = meter {
                         m.record_not_run(crate::cost_cap::NotRunPass {
                             repo: repo.to_string(),
@@ -6266,16 +6379,71 @@ async fn run_passes(
                         }
                     }
                 }
-                jstore.inc_done(jid, 1);
+                if !second_try.load(std::sync::atomic::Ordering::SeqCst) {
+                    jstore.inc_done(jid, 1);
+                }
             }
             (ci, bi, Some(r))
         }
     };
-    let results: Vec<PassOut> = if eff.warm_schedule {
+    let mut results: Vec<PassOut> = if eff.warm_schedule {
         crate::warm_schedule::run_warm_then_fan_out(jobs, concurrency, &run_one).await
     } else {
         crate::warm_schedule::run_unscheduled(jobs, concurrency, &run_one).await
     };
+
+    // ── END-OF-RUN SECOND TRY ────────────────────────────────────────────────────────────
+    // Every pass that failed on the transport or on its content (after its own retries) is set
+    // aside while the rest of the round runs, then tried ONCE more here, when the provider has
+    // had the whole round to recover. The same admission and spend checks apply (`run_one` asks
+    // first), and a stopped run sends nothing. An auth or billing failure is not tried again:
+    // waiting does not fix it. A pass that fails again keeps both tries on its record.
+    let mut prior_attempts: std::collections::HashMap<(usize, usize), Vec<AttemptRecord>> =
+        std::collections::HashMap::new();
+    let mut second_tried: std::collections::HashSet<(usize, usize)> =
+        std::collections::HashSet::new();
+    let retry_list: Vec<(usize, usize)> = results
+        .iter()
+        .filter_map(|(ci, bi, r)| match r {
+            Some(Err(e)) if classify_pass_error(e).is_retried_at_end() => Some((*ci, *bi)),
+            _ => None,
+        })
+        .collect();
+    if !retry_list.is_empty() && !meter.is_some_and(UsageMeter::outage_stopped) {
+        for (ci, bi, r) in &results {
+            if let (true, Some(Err(e))) = (retry_list.contains(&(*ci, *bi)), r) {
+                let first = PassFailure::named(String::new(), e).caused_by(e);
+                prior_attempts.insert((*ci, *bi), first.attempts);
+            }
+        }
+        second_try.store(true, std::sync::atomic::Ordering::SeqCst);
+        let mut retry_jobs = retry_list.clone();
+        retry_jobs.sort_unstable();
+        let second_jobs: Vec<crate::warm_schedule::ScheduledJob<(usize, usize)>> = retry_jobs
+            .into_iter()
+            .map(|(c, b)| crate::warm_schedule::ScheduledJob {
+                group: c,
+                payload: (c, b),
+            })
+            .collect();
+        let retried =
+            crate::warm_schedule::run_unscheduled(second_jobs, concurrency, &run_one).await;
+        for (ci, bi, r) in retried {
+            // Refused at admission (the spend limit, an outage stop): the first failure stands.
+            let Some(r) = r else { continue };
+            let Some(slot) = results.iter_mut().find(|(c, b, _)| *c == ci && *b == bi) else {
+                continue;
+            };
+            // A first reply that was cut off keeps the complete findings it carried unless the
+            // second try did better or failed the same way.
+            let keep_first = matches!(&slot.2, Some(Err(e)) if e.downcast_ref::<PartialPassReply>().is_some())
+                && matches!(&r, Err(e2) if e2.downcast_ref::<PartialPassReply>().is_none());
+            second_tried.insert((ci, bi));
+            if !keep_first {
+                slot.2 = Some(r);
+            }
+        }
+    }
 
     let mut findings = Vec::new();
     let mut proposed = Vec::new();
@@ -6291,10 +6459,20 @@ async fn run_passes(
                 ok += 1;
             }
             Some(Err(e)) => {
-                let failure = PassFailure::at(label, ci, n_c, bi, n_b, &e)
+                let mut failure = PassFailure::at(label, ci, n_c, bi, n_b, &e)
                     .with_files(chunks[ci].len())
                     .with_file_names(chunks[ci].iter().map(|(path, _)| path))
-                    .caused_by(&e);
+                    .caused_by(&e)
+                    .with_model(audit_model);
+                if second_tried.contains(&(ci, bi)) {
+                    // Both tries on the record, the first one's first and the second one marked.
+                    let mut merged = prior_attempts.remove(&(ci, bi)).unwrap_or_default();
+                    merged.extend(failure.attempts.drain(..).map(|mut a| {
+                        a.second_try = true;
+                        a
+                    }));
+                    failure.attempts = merged;
+                }
                 // A reply cut off at the output limit keeps the complete findings that arrived.
                 match e.downcast::<PartialPassReply>() {
                     Ok(partial) => {
@@ -16492,12 +16670,15 @@ mod tests {
     struct RefusingCompleter {
         calls: std::sync::atomic::AtomicUsize,
         refuse_all: bool,
+        /// Also refuses the third call, which is the end-of-round second try of the pass the
+        /// first call refused.
+        refuse_second_try: bool,
     }
 
     impl RefusingCompleter {
         fn respond(&self) -> anyhow::Result<LlmResponse> {
             let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            if self.refuse_all || n == 0 {
+            if self.refuse_all || n == 0 || (self.refuse_second_try && n == 2) {
                 let refusal = crate::llm::refusal_error(&serde_json::json!({
                     "stop_reason": "refusal", "content": []
                 }))
@@ -16543,6 +16724,7 @@ mod tests {
         let llm = RefusingCompleter {
             calls: Default::default(),
             refuse_all: true,
+            refuse_second_try: false,
         };
         let files = vec![(
             "src/lib.rs".to_string(),
@@ -16581,6 +16763,7 @@ mod tests {
         let llm = RefusingCompleter {
             calls: Default::default(),
             refuse_all: false,
+            refuse_second_try: true,
         };
         let files = vec![(
             "src/lib.rs".to_string(),

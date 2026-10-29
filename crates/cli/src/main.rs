@@ -666,6 +666,14 @@ async fn run_inspect_cmd(args: InspectArgs) -> anyhow::Result<()> {
             println!("{}", inspect_cmd::format_outcome_report(&outcome));
             // A run the spend limit cut short wrote an export (marked incomplete) but is not a
             // success: a script must not read it as one.
+            if outcome.outage_stopped() {
+                eprintln!(
+                    "camerata inspect: STOPPED BY AN OUTAGE; the model provider could not be \
+                     reached. The export is INCOMPLETE (see the passes listed as NOT RUN above). \
+                     Run it again when the provider is back."
+                );
+                std::process::exit(inspect_cmd::EXIT_OUTAGE_STOPPED);
+            }
             if outcome.cost_capped() {
                 eprintln!(
                     "camerata inspect: STOPPED BY THE SPEND LIMIT; the export is INCOMPLETE (see \

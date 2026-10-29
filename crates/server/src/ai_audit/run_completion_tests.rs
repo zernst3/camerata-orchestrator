@@ -161,8 +161,8 @@ async fn a_pass_that_failed_on_the_transport_carries_the_transport_class_and_its
     assert_eq!(rows[0].files, vec!["f0.rs".to_string()]);
     assert_eq!(
         rows[0].attempts.len(),
-        1,
-        "the transport's trail rides along"
+        2,
+        "the first try and the second try, each with the transport's own record"
     );
     assert_eq!(rows[0].attempts[0].http_status, Some(529));
     assert_eq!(rows[0].attempts[0].request_id.as_deref(), Some("req_abc"));
@@ -208,4 +208,157 @@ fn a_model_refusal_and_a_cut_off_reply_are_content() {
     )
     .into();
     assert_eq!(classify_pass_error(&partial), FailureClass::Content);
+}
+
+// ── Item 4: the end-of-run second try ────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn a_transport_failure_is_retried_once_after_the_other_passes_and_recovers() {
+    // Three chunks in order: ok, transport failure, ok; then the second try of chunk 1 answers.
+    let llm = Scripted::new(&[
+        Step::Reply(GOOD),
+        Step::Fail(
+            FailureClass::Transport,
+            "Anthropic API HTTP 529: overloaded",
+        ),
+        Step::Reply(GOOD),
+        Step::Reply(GOOD),
+    ]);
+    let (_f, _p, _r, ok, failures) = scan(&llm, 3, None).await;
+    assert!(
+        failures.is_empty(),
+        "the second try recovered it: {failures:?}"
+    );
+    assert_eq!(ok, 3, "all three passes answered in the end");
+    assert_eq!(llm.calls(), 4, "three first tries and one second try");
+    // The second try was sent AFTER the other passes, not straight after the failure.
+    let seen = llm.seen.lock().unwrap();
+    assert!(seen[3].contains("f1.rs"), "the retried pass is chunk 1");
+}
+
+#[tokio::test]
+async fn a_pass_that_fails_both_tries_records_both_attempts_with_times() {
+    let llm = Scripted::new(&[
+        Step::Reply(GOOD),
+        Step::Fail(
+            FailureClass::Transport,
+            "Anthropic API HTTP 529: overloaded",
+        ),
+        Step::Reply(GOOD),
+        Step::Fail(
+            FailureClass::Transport,
+            "Anthropic API HTTP 529: overloaded",
+        ),
+    ]);
+    let (_f, _p, _r, ok, failures) = scan(&llm, 3, None).await;
+    assert_eq!(ok, 2);
+    assert_eq!(failures.len(), 1);
+    let rows = failed_pass_rows(REPO, ok, &failures);
+    assert_eq!(rows[0].class, FailureClass::Transport);
+    assert_eq!(
+        rows[0].attempts.len(),
+        2,
+        "the first try and the second try"
+    );
+    assert!(!rows[0].attempts[0].second_try);
+    assert!(rows[0].attempts[1].second_try, "the second try is marked");
+    assert!(
+        !rows[0].attempts[0].at.is_empty() && !rows[0].attempts[1].at.is_empty(),
+        "both attempts are timestamped"
+    );
+    assert_eq!(llm.calls(), 4, "exactly one second try, never a third");
+}
+
+#[tokio::test]
+async fn a_content_failure_gets_the_second_try_too() {
+    // Chunk 0's three sends are malformed; its second try (after chunks 1 and 2) is good.
+    let llm = Scripted::new(&[
+        Step::Reply(MALFORMED),
+        Step::Reply(MALFORMED),
+        Step::Reply(MALFORMED),
+        Step::Reply(GOOD),
+    ]);
+    let (_f, _p, _r, ok, failures) = scan(&llm, 3, None).await;
+    assert!(failures.is_empty(), "{failures:?}");
+    assert_eq!(ok, 3);
+}
+
+#[tokio::test]
+async fn an_auth_failure_is_not_retried_at_the_end() {
+    let llm = Scripted::new(&[
+        Step::Fail(FailureClass::AuthOrBilling, "Anthropic API HTTP 401"),
+        Step::Reply(GOOD),
+    ]);
+    let (_f, _p, _r, _ok, failures) = scan(&llm, 1, None).await;
+    assert_eq!(failures.len(), 1);
+    assert_eq!(llm.calls(), 1, "waiting does not fix a key");
+}
+
+// ── Item 5: the outage stop ──────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn three_transport_failures_in_a_row_stop_the_run_and_mark_the_rest_outage_stop() {
+    let llm = Scripted::new(&[Step::Fail(
+        FailureClass::Transport,
+        "Anthropic API HTTP 529: overloaded",
+    )]);
+    let meter = UsageMeter::default();
+    let (_f, _p, _r, ok, failures) = scan(&llm, 6, Some(&meter)).await;
+    assert_eq!(ok, 0);
+    assert_eq!(llm.calls(), 3, "nothing is sent after the third failure");
+    assert_eq!(failures.len(), 3, "the three that were tried");
+    assert!(meter.outage_stopped());
+    let record = meter.outage_record().expect("the stop is on record");
+    assert_eq!(record.trigger.class, FailureClass::Transport);
+    assert_eq!(record.not_run_passes.len(), 3, "the three never dispatched");
+    assert!(record
+        .not_run_passes
+        .iter()
+        .all(|p| p.class == FailureClass::OutageStop));
+    assert!(
+        record.not_run_passes.iter().all(|p| !p.files.is_empty()),
+        "each names the files it did not review"
+    );
+    // This is not a spend-limit stop, and the second try does not run on a stopped run.
+    assert_eq!(meter.cost_cap_record(), None);
+}
+
+#[tokio::test]
+async fn an_auth_failure_stops_the_run_after_the_first_call() {
+    let llm = Scripted::new(&[Step::Fail(
+        FailureClass::AuthOrBilling,
+        "Anthropic API HTTP 401: invalid x-api-key",
+    )]);
+    let meter = UsageMeter::default();
+    let (_f, _p, _r, _ok, failures) = scan(&llm, 4, Some(&meter)).await;
+    assert_eq!(llm.calls(), 1);
+    assert_eq!(failures.len(), 1);
+    assert_eq!(meter.outage_record().unwrap().not_run_passes.len(), 3);
+}
+
+#[tokio::test]
+async fn a_malformed_reply_on_one_part_does_not_stop_the_run() {
+    let llm = Scripted::new(&[
+        Step::Reply(MALFORMED),
+        Step::Reply(MALFORMED),
+        Step::Reply(MALFORMED),
+        Step::Reply(GOOD),
+    ]);
+    let meter = UsageMeter::default();
+    let (_f, _p, _r, ok, _failures) = scan(&llm, 3, Some(&meter)).await;
+    assert!(!meter.outage_stopped());
+    assert_eq!(ok, 3);
+}
+
+#[tokio::test]
+async fn content_failures_never_count_toward_the_stop() {
+    let llm = Scripted::new(&[Step::Reply(MALFORMED)]);
+    let meter = UsageMeter::default();
+    let (_f, _p, _r, ok, failures) = scan(&llm, 5, Some(&meter)).await;
+    assert_eq!(ok, 0);
+    assert_eq!(failures.len(), 5, "every part was tried");
+    assert!(
+        !meter.outage_stopped(),
+        "malformed replies are not an outage"
+    );
 }
