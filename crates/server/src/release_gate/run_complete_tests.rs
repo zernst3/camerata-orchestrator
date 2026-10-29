@@ -294,3 +294,17 @@ fn an_outage_stop_is_flagged_as_an_outage_in_the_refusal() {
         .expect_err("refused");
     assert!(refusal.outage);
 }
+
+/// The PDF template's own headings over the disclosed passes are client-facing text too: on a
+/// client export the list holds only scope notes (a tool not run), so no heading may call them
+/// failures.
+#[test]
+fn the_pdf_template_carries_no_failure_wording_over_the_disclosed_passes() {
+    let template = include_str!("../../templates/audit_report.typ");
+    for banned in ["pass failed", "not computed", "Not computed", "timed out"] {
+        assert!(
+            !template.contains(banned),
+            "the PDF template prints {banned:?} to a client"
+        );
+    }
+}

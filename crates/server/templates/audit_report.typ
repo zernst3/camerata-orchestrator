@@ -558,7 +558,7 @@
 // nothing extra.
 #if d.executive_summary.failed_passes.len() > 0 [
   #block(above: 8pt, below: 4pt, stroke: 0.75pt + vivid, inset: 10pt, radius: 8pt, width: 100%)[
-    #text(weight: 600, size: 9pt, fill: ink)[Not computed this run]
+    #text(weight: 600, size: 9pt, fill: ink)[Not run this inspection]
     #for note in d.executive_summary.failed_passes [
       - #note
     ]
@@ -934,7 +934,7 @@ Not performed in this engagement:
 // here for the more technical Methodology reader. Gated on non-empty.
 #if d.methodology.failed_passes.len() > 0 [
   #v(0.2cm)
-  Not computed this run (pass failed or timed out):
+  Not run this inspection:
   #for note in d.methodology.failed_passes [
     - #note
   ]
