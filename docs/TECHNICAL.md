@@ -6102,7 +6102,12 @@ locator is). The journal checks for the seed before it journals a call or submit
 with none in scope would carry a random token, its stored reply could never match on a resume and
 it would be paid for again. In the test builds that is an error; in production the call goes ahead
 (the money is spent either way), `[camerata-server] WARNING` is printed once and the run record
-keeps the note (`RunRecord.notes`).
+keeps the note (`RunRecord.notes`). The note is not left in `run.json` alone: `run_store::note_report`
+puts the run's notes on the finished report's `message` (the cockpit shows it under the scan
+result), and `camerata inspect` prints each as `run note: ...` in its summary (and on stderr with the
+failure lines when the export is refused as incomplete). The test build's refusal applies to the
+server crate's own unit tests (`cfg!(test)`); the end-to-end tests under `tests/` link the
+production build and see the warning and the note instead.
 
 **Exit codes of `camerata inspect`.** 0 complete (or resumed a complete run); 1 failure or refused
 resume; 3 release gate refused; 4 spend limit; 5 outage stop; 6 incomplete for another reason.

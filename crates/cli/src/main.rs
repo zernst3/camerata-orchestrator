@@ -735,6 +735,9 @@ fn report_inspect_result(
                 for line in &run.failure_lines {
                     eprintln!("{line}");
                 }
+                for note in &run.run_notes {
+                    eprintln!("run note: {note}");
+                }
             }
             std::process::exit(e.exit_code());
         }

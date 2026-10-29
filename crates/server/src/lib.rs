@@ -8354,6 +8354,9 @@ pub(crate) async fn start_audit_job(
             if let Some(store) = &run_store {
                 report.run_id = Some(store.run_id());
                 crate::run_store::finish_run(store, &report, true);
+                // What the run wants the operator to know (a model call made with no prompt
+                // seed in scope, say) goes on the report the cockpit shows, not run.json alone.
+                crate::run_store::note_report(store, &mut report);
             }
 
             // ── Enforcement-ledger scan-capture is done by the synchronous audit handler ──

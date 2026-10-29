@@ -891,6 +891,46 @@ fn in_production_an_unseeded_call_runs_and_the_run_records_a_note() {
     assert!(check_seed(&RunStore::open(&id).unwrap(), false, SeedPolicy::Refuse).is_err());
 }
 
+/// A note on the run is put on the report the operator sees (the cockpit shows the message under
+/// the scan result, the command line prints the notes): after the report's own notes, each once,
+/// and a run with no notes leaves the message as it was.
+#[test]
+#[serial_test::serial(process_env)]
+fn the_runs_notes_are_put_on_the_report_the_operator_sees() {
+    let (_s, _g) = state_dir();
+    let repo = git_repo();
+    let store = new_run(&repo);
+    let mut report = crate::onboard::ScanReport::gated(&["acme/one".to_string()]);
+    report.message = Some("acme/one: AI review deselected".to_string());
+    note_report(&store, &mut report);
+    assert_eq!(
+        report.message.as_deref(),
+        Some("acme/one: AI review deselected"),
+        "no notes, no change"
+    );
+    store.add_note("a model call was made with no prompt seed in scope");
+    store.add_note("a model call was made with no prompt seed in scope");
+    note_report(&store, &mut report);
+    assert_eq!(
+        report.message.as_deref(),
+        Some("acme/one: AI review deselected · a model call was made with no prompt seed in scope")
+    );
+    note_report(&store, &mut report);
+    assert_eq!(
+        report.message.as_deref(),
+        Some("acme/one: AI review deselected · a model call was made with no prompt seed in scope"),
+        "a note already on the report is not added twice"
+    );
+    let mut bare = crate::onboard::ScanReport::gated(&[]);
+    bare.message = None;
+    note_report(&store, &mut bare);
+    assert_eq!(
+        bare.message.as_deref(),
+        Some("a model call was made with no prompt seed in scope"),
+        "a report with no message of its own carries the note alone"
+    );
+}
+
 mod batches {
     use super::*;
     use crate::ai_audit::BatchApi;

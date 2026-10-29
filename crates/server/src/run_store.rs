@@ -1459,6 +1459,28 @@ pub fn preview_resume(run_id: &str) -> Result<ResumePreview, RunStoreError> {
     })
 }
 
+/// Put the run's notes ([`RunRecord::notes`], for example a model call made with no prompt seed
+/// in scope) on the report the operator sees, after the report's own notes in `message`, each
+/// once. A note that stays in `run.json` alone is one no one reads; the cockpit shows the
+/// message under the scan result and the command line prints the notes in its summary.
+pub fn note_report(store: &RunStore, report: &mut crate::onboard::ScanReport) {
+    let notes = store.record().notes;
+    if notes.is_empty() {
+        return;
+    }
+    let mut parts: Vec<String> = report
+        .message
+        .take()
+        .map(|m| m.split(" · ").map(str::to_string).collect())
+        .unwrap_or_default();
+    for note in notes {
+        if !parts.iter().any(|p| p == &note) {
+            parts.push(note);
+        }
+    }
+    report.message = Some(parts.join(" · "));
+}
+
 /// The end of an attempt, from the finished report: tells the store which parts failed and
 /// whether the run is complete. Shared by the command line and the cockpit's scan job.
 pub fn finish_run(store: &RunStore, report: &crate::onboard::ScanReport, export_written: bool) {
