@@ -6127,6 +6127,8 @@ pub async fn load_corpus_for_scan(
         return (None, Vec::new());
     }
     let (set, errors) = camerata_rules::load_corpus_lenient(corpus_dir).await;
+    // The failure report's scrubber keeps a long rule id out of its credential redaction.
+    camerata_llm::failure::register_rule_ids(set.iter().map(|r| r.id.0.clone()));
     let failures = errors
         .into_iter()
         .map(|(path, error)| CorpusLoadFailure {

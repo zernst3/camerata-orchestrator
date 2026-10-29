@@ -181,10 +181,56 @@ fn scrub_word(word: &str) -> String {
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '+' || c == '/')
         && trimmed.chars().any(|c| c.is_ascii_digit())
         && trimmed.chars().any(|c| c.is_ascii_alphabetic());
-    if (prefixed && trimmed.len() >= 12) || long_opaque {
+    if (prefixed && trimmed.len() >= 12) || (long_opaque && !is_rule_id(trimmed)) {
         return word.replace(trimmed, "[REDACTED]");
     }
     word.to_string()
+}
+
+/// Rule ids the loaded corpus knows, so a long one is never mistaken for a credential. Filled by
+/// the server when it loads a corpus; the shape test in [`has_rule_id_shape`] covers ids that
+/// were never registered.
+fn known_rule_ids() -> &'static std::sync::RwLock<std::collections::HashSet<String>> {
+    static IDS: std::sync::OnceLock<std::sync::RwLock<std::collections::HashSet<String>>> =
+        std::sync::OnceLock::new();
+    IDS.get_or_init(Default::default)
+}
+
+/// Tell the scrubber which rule ids exist, so an operator message that names one keeps it.
+pub fn register_rule_ids<I, S>(ids: I)
+where
+    I: IntoIterator<Item = S>,
+    S: Into<String>,
+{
+    if let Ok(mut set) = known_rule_ids().write() {
+        set.extend(ids.into_iter().map(Into::into));
+    }
+}
+
+/// The shape every Camerata rule id has: upper-case words joined by hyphens and ending in a
+/// number (`SUPABASE-FN-SEARCH-PATH-PINNED-1`). A credential has lower-case letters or no such
+/// structure, so this never exempts one.
+fn has_rule_id_shape(token: &str) -> bool {
+    let mut parts = token.split('-');
+    let Some(last) = parts.next_back() else {
+        return false;
+    };
+    let words: Vec<&str> = parts.collect();
+    words.len() >= 2
+        && !last.is_empty()
+        && last.len() <= 4
+        && last.chars().all(|c| c.is_ascii_digit())
+        && words.iter().all(|w| {
+            w.chars().next().is_some_and(|c| c.is_ascii_uppercase())
+                && w.chars()
+                    .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+                && w.len() <= 16
+        })
+}
+
+/// True for a word that is a rule id: one the corpus registered, or one with a rule id's shape.
+fn is_rule_id(word: &str) -> bool {
+    has_rule_id_shape(word) || known_rule_ids().read().is_ok_and(|set| set.contains(word))
 }
 
 /// The typed error the transport returns. `Display` is exactly the message the transport used to
@@ -466,6 +512,34 @@ mod tests {
         assert!(s.contains("[REDACTED]"));
         let long = scrub_message(&"word ".repeat(500), 100);
         assert!(long.chars().count() <= 103, "{}", long.chars().count());
+    }
+
+    #[test]
+    fn a_long_rule_id_survives_the_scrub_and_a_credential_does_not() {
+        // The shape of a rule id keeps it, even at 32 characters or more with a digit.
+        let id = "SUPABASE-FN-SEARCH-PATH-PINNED-1";
+        assert!(id.len() >= 32);
+        let s = scrub_message(&format!("rule {id} did not run"), 400);
+        assert!(s.contains(id), "{s}");
+        // A registered id that does not have the shape is kept too.
+        register_rule_ids(["Odd_registered_rule_identifier_number_7x"]);
+        let s = scrub_message("see Odd_registered_rule_identifier_number_7x now", 400);
+        assert!(
+            s.contains("Odd_registered_rule_identifier_number_7x"),
+            "{s}"
+        );
+        // Credential-like words are still redacted: opaque, mixed case, or shaped like an id
+        // only in part.
+        for secret in [
+            "k9Zx2LmQ8vB7nR4tY6uW1eP3aS5dF0gH",
+            "ABCDEFGH12345678ABCDEFGH12345678",
+            "ABCDEFGH-ABCDEFGH-12345678-ABCDEFGH-ABCDEFGH123",
+            "abcdef0123456789abcdef0123456789-1",
+        ] {
+            let s = scrub_message(&format!("value {secret} rejected"), 400);
+            assert!(!s.contains(secret), "{secret} survived: {s}");
+            assert!(s.contains("[REDACTED]"), "{s}");
+        }
     }
 
     #[test]
