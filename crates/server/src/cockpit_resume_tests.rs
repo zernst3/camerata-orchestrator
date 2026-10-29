@@ -1,6 +1,6 @@
 //! The cockpit's path to a saved run: the scan job saves the run, a job with a failed part leaves
-//! the client export locked, `GET /api/runs/:id/plan` says what remains, and
-//! `POST /api/runs/:id/resume` runs only what remains through the same resume the command line
+//! the client export locked, `GET /api/inspections/:id/plan` says what remains, and
+//! `POST /api/inspections/:id/resume` runs only what remains through the same resume the command line
 //! uses, after which the lock lifts. A fake `claude` on PATH plays the model; no live calls.
 //!
 //! The fake answers the audit prompt with one finding per framed file and the fix prompt with
@@ -8,6 +8,8 @@
 //! first job ends with a failed calibration part; the flag is removed before the resume.
 
 use super::*;
+use axum::body::Body;
+use axum::http::Request;
 use http_body_util::BodyExt;
 
 const FAKE_CLAUDE: &str = r#"#!/usr/bin/env python3
@@ -236,7 +238,7 @@ async fn a_cockpit_scan_with_a_failed_part_resumes_through_the_endpoint_and_the_
     let audit_calls_before = stage_calls(&log).iter().filter(|s| *s == "audit").count();
     assert!(audit_calls_before > 0);
 
-    // ── GET /api/runs/:id/plan: what remains, and no refusal ───────────────────────────────
+    // ── GET /api/inspections/:id/plan: what remains, and no refusal ───────────────────────────────
     let plan = run_resume_plan(Path(run_id.clone())).await.into_response();
     assert_eq!(plan.status(), StatusCode::OK);
     let plan = body_json(plan).await;
@@ -257,7 +259,7 @@ async fn a_cockpit_scan_with_a_failed_part_resumes_through_the_endpoint_and_the_
         "the audit part is done and is not remaining: {remaining:?}"
     );
 
-    // ── POST /api/runs/:id/resume: the provider is back; only the failed part runs ────────
+    // ── POST /api/inspections/:id/resume: the provider is back; only the failed part runs ────────
     std::fs::remove_file(&calibration_down).unwrap();
     let resume = run_resume_start(State(state.clone()), Path(run_id.clone()))
         .await
@@ -340,4 +342,138 @@ async fn the_run_endpoints_answer_404_for_an_unknown_run() {
         .await
         .into_response();
     assert_eq!(resume.status(), StatusCode::NOT_FOUND);
+}
+
+async fn get_json(app: axum::Router, uri: &str) -> (StatusCode, serde_json::Value) {
+    use tower::ServiceExt;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(uri)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = resp.status();
+    (status, body_json(resp).await)
+}
+
+/// A cockpit run of `dir` named `name`, as the scan job would save it, not finished.
+fn saved_cockpit_run(
+    name: &str,
+    dir: &std::path::Path,
+    args: serde_json::Value,
+) -> Arc<crate::run_store::RunStore> {
+    use crate::run_store as rs;
+    rs::RunStore::create(rs::NewRun {
+        project_key: "listing-test".to_string(),
+        repos: vec![(name.to_string(), dir.to_path_buf())],
+        models: rs::ModelsRecord {
+            audit: "m".to_string(),
+            calibration: "m".to_string(),
+            fix: String::new(),
+            backend: "cli".to_string(),
+            mode: "parallel".to_string(),
+        },
+        ai_scan_key: crate::scan_cache::AiScanKey::new("m", Some("m"), &[]),
+        args,
+        estimate_usd: None,
+        include_alternatives: false,
+        origin: rs::RunOrigin::Cockpit,
+    })
+    .unwrap()
+}
+
+/// `GET /api/inspections` lists the open project's saved inspections with where each stands, a
+/// live one is never offered for resuming, another project's runs are not listed, the plan and
+/// resume live under the same namespace, and the two old `/api/runs/:id/...` paths still answer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial(process_env)]
+async fn the_inspections_endpoint_lists_the_open_projects_saved_runs() {
+    let root = tempfile::tempdir().unwrap();
+    let state_dir = root.path().join("state");
+    let repo = root.path().join("repo");
+    let other_repo = root.path().join("other");
+    for d in [&state_dir, &repo, &other_repo] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    stage_fixture(&repo);
+    stage_fixture(&other_repo);
+    let _state_dir = camerata_test_env::EnvGuard::set("CAMERATA_STATE_DIR", &state_dir);
+
+    let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
+    let project = state
+        .projects
+        .create("Listing", vec!["acme/one".to_string()])
+        .unwrap();
+    state
+        .settings
+        .set_repo_path("acme/one", Some(repo.to_string_lossy().into_owned()));
+    let app = router(state.clone());
+
+    // Nothing saved yet.
+    let (status, body) = get_json(app.clone(), "/api/inspections").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["project_id"], project.id.as_str());
+    assert_eq!(body["inspections"].as_array().unwrap().len(), 0, "{body}");
+
+    // One interrupted (its holder is gone), one live (still held), one of another project.
+    let args = serde_json::to_value(audit_request()).unwrap();
+    let interrupted_id = {
+        let store = saved_cockpit_run("acme/one", &repo, args.clone());
+        store.run_id()
+    };
+    let live = saved_cockpit_run("acme/one", &repo, args.clone());
+    let live_id = live.run_id();
+    let stranger = saved_cockpit_run("acme/elsewhere", &other_repo, args.clone());
+    let stranger_id = stranger.run_id();
+
+    let (status, body) = get_json(app.clone(), "/api/inspections").await;
+    assert_eq!(status, StatusCode::OK);
+    let listed = body["inspections"].as_array().unwrap();
+    assert_eq!(listed.len(), 2, "only this project's runs: {body}");
+    assert!(
+        !listed.iter().any(|r| r["id"] == stranger_id.as_str()),
+        "{body}"
+    );
+    let row = |id: &str| {
+        listed
+            .iter()
+            .find(|r| r["id"] == id)
+            .unwrap_or_else(|| panic!("{id} is listed: {body}"))
+    };
+    let interrupted = row(&interrupted_id);
+    assert_eq!(interrupted["status"], "interrupted");
+    assert_eq!(interrupted["resumable_here"], true);
+    assert_eq!(interrupted["repos"][0], "acme/one");
+    assert!(interrupted["remaining_parts"].as_u64().unwrap() > 0);
+    assert!(interrupted["started"].is_string());
+    assert!(interrupted["estimate_usd"].is_number());
+    let live_row = row(&live_id);
+    assert_eq!(live_row["status"], "live");
+    assert_eq!(
+        live_row["resumable_here"], false,
+        "a running inspection is never offered"
+    );
+
+    // The plan and the resume answer under the namespace, and under the old paths.
+    for prefix in ["/api/inspections", "/api/runs"] {
+        let (status, plan) =
+            get_json(app.clone(), &format!("{prefix}/{interrupted_id}/plan")).await;
+        assert_eq!(status, StatusCode::OK, "{prefix}: {plan}");
+        assert_eq!(plan["state"], "interrupted", "{prefix}: {plan}");
+        let (status, _) = get_json(app.clone(), &format!("{prefix}/no-such-run/plan")).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{prefix}");
+    }
+    // A live inspection's plan refuses in plain words.
+    let (_, plan) = get_json(app.clone(), &format!("/api/inspections/{live_id}/plan")).await;
+    assert!(
+        plan["refusal"]
+            .as_str()
+            .is_some_and(|r| r.contains("being worked on right now")),
+        "{plan}"
+    );
+    drop((live, stranger));
 }

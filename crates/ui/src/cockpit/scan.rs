@@ -1955,7 +1955,7 @@ pub(super) struct ResumePlanView {
 
 /// Fetch the resume plan of a saved run.
 pub(super) async fn resume_plan(run_id: &str) -> Result<ResumePlanView, String> {
-    let resp = reqwest::get(format!("{}/api/runs/{run_id}/plan", crate::bff_base()))
+    let resp = reqwest::get(format!("{}/api/inspections/{run_id}/plan", crate::bff_base()))
         .await
         .map_err(|e| format!("could not reach the app's server: {e}"))?;
     if !resp.status().is_success() {
@@ -1973,7 +1973,7 @@ pub(super) async fn resume_plan(run_id: &str) -> Result<ResumePlanView, String> 
 /// Start the resume of a saved run as a background job; returns the job id, or the plain reason.
 pub(super) async fn resume_start(run_id: &str) -> Result<String, String> {
     let resp = reqwest::Client::new()
-        .post(format!("{}/api/runs/{run_id}/resume", crate::bff_base()))
+        .post(format!("{}/api/inspections/{run_id}/resume", crate::bff_base()))
         .send()
         .await
         .map_err(|e| format!("could not reach the app's server: {e}"))?;

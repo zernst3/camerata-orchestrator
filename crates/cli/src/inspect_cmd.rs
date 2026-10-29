@@ -1064,6 +1064,7 @@ pub async fn run_inspect_pipeline_with(
                 args: serde_json::to_value(&args).unwrap_or(serde_json::Value::Null),
                 estimate_usd: controls.estimate_hint_usd,
                 include_alternatives: corpus.is_some(),
+                origin: camerata_server::run_store::RunOrigin::Cli,
             }) {
                 Ok(store) => {
                     if let Some(prior) = &incremental_prior {
