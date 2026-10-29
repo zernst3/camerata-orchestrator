@@ -1461,6 +1461,9 @@ pub struct Llm {
     /// Collector for the Claude Code session every CLI spawn creates (see
     /// [`crate::session_sink`]). `None` = nobody is recording; the spawn is still tagged.
     sessions: Option<SessionSink>,
+    /// Waits between retry attempts. `None` = real sleeping; tests inject a recording sleeper so
+    /// the backoff schedule is asserted without waiting.
+    sleeper: Option<std::sync::Arc<dyn crate::retry::Sleeper>>,
 }
 
 impl std::fmt::Debug for Llm {
@@ -1503,6 +1506,7 @@ impl Llm {
             api_key,
             ledger: None,
             sessions: None,
+            sleeper: None,
         }
     }
 
@@ -1530,6 +1534,20 @@ impl Llm {
     /// Same as [`Llm::from_env`] but with the process-global usage ledger attached.
     pub fn from_env_with_ledger(ledger: std::sync::Arc<crate::usage_ledger::UsageLedger>) -> Self {
         Self::from_env().with_ledger(ledger)
+    }
+
+    /// Replace the sleeper retries wait with. Production sleeps for real; a test injects a
+    /// recorder and never waits.
+    pub fn with_sleeper(mut self, sleeper: std::sync::Arc<dyn crate::retry::Sleeper>) -> Self {
+        self.sleeper = Some(sleeper);
+        self
+    }
+
+    fn sleeper(&self) -> &dyn crate::retry::Sleeper {
+        match &self.sleeper {
+            Some(s) => s.as_ref(),
+            None => &crate::retry::TokioSleeper,
+        }
     }
 
     /// Attach (or replace) the process-global usage ledger on an existing instance.
@@ -1769,10 +1787,11 @@ impl Llm {
                 .header("content-type", "application/json")
                 .json(&body)
         };
-        let (status, text) = crate::retry::execute_with_retry(make_request).await?;
-        if !status.is_success() {
-            anyhow::bail!("Anthropic API HTTP {status}: {text}");
+        let out = crate::retry::execute_traced(make_request, self.sleeper(), model).await?;
+        if !(200..300).contains(&out.status) {
+            return Err(api_http_failure(out));
         }
+        let text = out.body;
         let v: serde_json::Value =
             serde_json::from_str(&text).map_err(|e| anyhow::anyhow!("parse API JSON: {e}"))?;
         self.api_response_or_refusal(&v, model, basis)
@@ -1797,6 +1816,29 @@ impl Llm {
         }
         Ok(messages_response(v, model, "api", basis))
     }
+}
+
+/// The typed error for a terminal non-success HTTP answer from the Messages API: the message is
+/// the one the transport has always returned, the class says what waiting or credentials could
+/// do about it, and the trail holds every attempt (status, provider error, request id, waits).
+fn api_http_failure(out: crate::retry::ApiOutcome) -> anyhow::Error {
+    let status = reqwest::StatusCode::from_u16(out.status)
+        .map(|s| s.to_string())
+        .unwrap_or_else(|_| out.status.to_string());
+    let (etype, emsg) = crate::failure::provider_error_of(&out.body);
+    let (class, retryable) = crate::failure::classify_http(
+        out.status,
+        etype.as_deref(),
+        emsg.as_deref().unwrap_or(&out.body),
+    );
+    let mut failure = crate::failure::LlmCallFailure::new(
+        class,
+        format!("Anthropic API HTTP {status}: {}", out.body),
+    );
+    failure.retryable = retryable;
+    failure.attempts = out.attempts;
+    failure.http = Some((out.status, out.body));
+    anyhow::Error::new(failure)
 }
 
 // ════════════════════════════════════════════════════════════════════════════════════
@@ -3015,6 +3057,7 @@ mod tests {
             api_key: None,
             ledger: None,
             sessions: None,
+            sleeper: None,
         };
         // Empty request model -> default.
         assert_eq!(llm.model_for(&LlmRequest::new("hi")), "claude-sonnet-5");
@@ -3497,6 +3540,7 @@ mod tests {
             api_key: None,
             ledger: None,
             sessions: None,
+            sleeper: None,
         };
         let err = llm.complete(LlmRequest::new("hi")).await.unwrap_err();
         assert!(err.to_string().contains("not wired yet"));
@@ -3963,6 +4007,7 @@ malformed line, not json
             api_key: None,
             ledger: None,
             sessions: None,
+            sleeper: None,
         })
     }
 
@@ -4579,6 +4624,7 @@ exit 1
             api_key: Some("k".to_string()),
             ledger: Some(ledger.clone()),
             sessions: None,
+            sleeper: None,
         };
         let refused = serde_json::json!({
             "model": "claude-opus-5-5", "content": [], "stop_reason": "refusal",
@@ -4932,6 +4978,7 @@ printf '%s\n' '{"type":"result","is_error":false,"stop_reason":"refusal","result
             api_key: None,
             ledger: None,
             sessions: None,
+            sleeper: None,
         }
     }
 
@@ -5072,6 +5119,7 @@ printf '%s\n' '{"type":"result","is_error":false,"result":"OK","total_cost_usd":
             api_key: None,
             ledger: None,
             sessions: None,
+            sleeper: None,
         }
         .with_session_sink(sink.clone());
         // No key: the call fails before any network, and must not have recorded a session.
