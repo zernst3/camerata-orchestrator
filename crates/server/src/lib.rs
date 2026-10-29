@@ -19177,6 +19177,9 @@ impl From<anyhow::Error> for AppError {
 mod lib_multirepo_tests;
 
 #[cfg(test)]
+mod cockpit_resume_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use axum::body::Body;
