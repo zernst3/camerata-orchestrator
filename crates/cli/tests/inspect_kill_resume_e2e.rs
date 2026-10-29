@@ -14,6 +14,10 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+/// The real binary must never open the OS keychain from a test: a fresh build would block on a
+/// macOS permission dialog. The CLI backend needs no API key, so the seam costs the run nothing.
+const NO_KEYCHAIN: &str = camerata_server::credentials::NO_KEYCHAIN_ENV;
+
 const FAKE_CLAUDE: &str = r#"#!/usr/bin/env python3
 import hashlib, json, os, re, sys, time
 args = sys.argv[1:]
@@ -170,6 +174,7 @@ fn inspect(w: &World, export: &Path, extra: &[&str], envs: &[(&str, &str)]) -> C
     );
     cmd.env("PATH", path)
         .env("CAMERATA_STATE_DIR", &w.state)
+        .env(NO_KEYCHAIN, "1")
         .env("CAMERATA_DISABLE_DEP_AUDIT", "1")
         .env("FAKE_LOG", &w.log)
         .stdout(Stdio::null())
@@ -191,6 +196,7 @@ fn resume_cmd(w: &World, export: &Path, envs: &[(&str, &str)]) -> Command {
     );
     cmd.env("PATH", path)
         .env("CAMERATA_STATE_DIR", &w.state)
+        .env(NO_KEYCHAIN, "1")
         .env("CAMERATA_DISABLE_DEP_AUDIT", "1")
         .env("FAKE_LOG", &w.log)
         .stdout(Stdio::piped())
