@@ -6008,6 +6008,70 @@ because no corpus rule authored a ceiling for them to clamp.
 
 ---
 
+## 14. Saved runs and resume (`run_store`)
+
+**Why.** A client deliverable never contains a failed or unfinished part, so a failure must cost
+only that part. Every inspection (the `camerata inspect` pipeline and the cockpit's scan job) is
+saved in `<state dir>/runs/<run-id>/` (mode 0700, because it holds model answers derived from
+client code). Every file is written to a temporary name and renamed, so a process killed at any
+instant leaves the old file or the new one, whole.
+
+**Layout.** `run.json` holds the record: per repo the commit and a digest of the tree state at the
+start and at the end of the last attempt; the models and mode; the rules fingerprint and the
+`AiScanKey`; the engine version (crate version plus the prompt schema version); the seed the
+prompt delimiter tokens are drawn from; the arguments the run started with; and the plan of parts
+with their status (`pending`, `running`, `done`, `failed`). The plan is written, every part pending,
+before any work starts: per repo the tools, scan, calibration, alternatives, detail and fix stages,
+then merge and export. `calls/<digest>.json` holds every model answer for one request, by
+occurrence. `batches/<digest>-<n>.json` holds a submitted Message Batch (its id the moment the
+submit returned, its results once fetched). `lock.json` holds the process id and a heartbeat time.
+`prior_manifest.json` is the incremental baseline the run started from.
+
+**Granularity.** Parts are tracked at the stage level in the plan, and individual model calls are
+recorded as the stage reaches them, because how many calls a stage makes depends on the stage
+before it. A call is stored as good when the model finished (the reply was not cut off) and the
+text holds a JSON object that parses. A malformed or cut off reply is never stored as good. A
+reply that parses but that a later step rejected (the pass is then a failed part of class
+`content`) is set aside at the end of the attempt: all good replies of that repo and stage, or for
+a scan pass only the calls over the files it names. A call that failed is stored as failed.
+
+**Resume.** The pipeline is deterministic given the same model answers. A resume runs it again
+with the model seam (`run_store::journal`) answering from the store: a good reply is returned
+without a model call (and at no cost to this attempt), anything else goes to the model, through
+the same retries, outage stop and spend limit. Merging, ranking, ordering and the report are
+therefore always recomputed from stored plus new results, and a run resumed after a failure
+gives the export an uninterrupted run gives (a test compares them, for a failed scan pass, a
+failed sub pass, a malformed answer and two repos). Prompt delimiter tokens are drawn from the
+run's own random seed and the framed text (`prompt_frame::seed_tokens`), so a prompt is the same
+text on a resume and a stored answer matches it; the seed never leaves the run folder.
+
+**Interrupted runs.** A run whose status is running but whose lock is missing, whose process is
+gone (`kill -0`) or whose heartbeat is older than 45 seconds is Interrupted. A resume takes the
+stale lock over. A live lock refuses a second worker. Batches: an already submitted batch is
+polled and fetched, never submitted again.
+
+**One resume.** `run_store::open_for_resume` checks and opens a run; `camerata inspect --resume`
+and the server's `POST /api/runs/:id/resume` (the cockpit's **Run what remains**, after
+`GET /api/runs/:id/plan` shows the plan and estimate) both use it. The command line and the
+cockpit's scan job are two pipelines that call the same steps; the resume logic, the journal, the
+checks and the estimate are shared, not copied.
+
+**Exit codes of `camerata inspect`.** 0 complete (or resumed a complete run); 1 failure or refused
+resume; 3 release gate refused; 4 spend limit; 5 outage stop; 6 incomplete for another reason.
+
+**Failure report.** `failures.json` and `failures.md` next to the ledger keep each failed part's
+attempts as history: a part that a later attempt completed stays with a `resolved_at` time.
+
+**Incremental baseline.** The incremental manifest is written to the cache only by a complete scan.
+
+**Estimates.** `regeneration_estimate` (ui-core) is an upper bound by the detail stage's own
+limits: the three rounds on every finding (`n/10 + n/5 + n` calls) and the second try (`n` more),
+each call priced at its own `max_tokens` (never less than 4,096). It is a ceiling, not an
+expectation.
+
+**Cleanup.** The newest five runs per project are kept. A run that is not complete is deleted only
+when a newer complete run exists for the same commits; a run a live process works on never is.
+
 ## Appendix: key invariants
 
 1. **The coordinator makes zero model calls.** All model interaction goes through
