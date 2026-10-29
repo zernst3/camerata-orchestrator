@@ -1906,6 +1906,7 @@ mod tests {
             efficiency,
             cost_cap: Some(CostCapRecord {
                 repos_not_finished: Vec::new(),
+                cost_unknown: false,
                 cap_usd: 5.0,
                 spent_usd: 5.4,
                 not_run_passes: vec![NotRunPass {

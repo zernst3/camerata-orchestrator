@@ -1190,7 +1190,12 @@ impl ScanReport {
             let cause = if self.ledger.is_outage_stopped() {
                 "the run stopped because the model provider could not be reached"
             } else if self.ledger.is_cost_capped() {
-                "the spend limit stopped the run"
+                if self.ledger.cost_cap().is_some_and(|c| c.cost_unknown) {
+                    "the spend limit could not be enforced (a call's cost could not be \
+                     determined) and stopped the run"
+                } else {
+                    "the spend limit stopped the run"
+                }
             } else {
                 "the spend limit or an outage stopped the run"
             };
@@ -2185,10 +2190,11 @@ pub async fn audit_repos_with_llm_controlled(
     // Aggregates REAL usage across every repo's audit (passes + calibration) for the
     // actual-vs-estimated readout.
     // The model the fix stage calls (rank 10): resolved once, from the same controls the
-    // spend-limit check above listed it from.
-    let fix_model: Option<String> = controls
-        .fix_model_for(model, calibration_model)
-        .map(str::to_string);
+    // spend-limit check above listed it from, to the same id (never left for the transport's
+    // process default to fill in; see `ai_audit::stage_model`).
+    let fix_model: Option<String> = Some(crate::ai_audit::resolve_audit_model(
+        controls.fix_model_for(model, calibration_model),
+    ));
     let meter = crate::ai_audit::UsageMeter::with_controls(controls.clone());
     // Wave C: the clone-candidate judge's verdict cache. Seeded from the prior manifest even when
     // that manifest is not usable as an AI baseline (verdicts are keyed by the content of the
@@ -2813,8 +2819,8 @@ pub async fn audit_repos_with_llm_controlled(
                         )
                     } else {
                         format!(
-                            "{spec}: AI review not run (the spend limit set for this run was \
-                             reached)"
+                            "{spec}: AI review not run ({})",
+                            crate::cost_cap::cause_for(meter.cost_unknown())
                         )
                     });
                     for (rid, _) in &semantic {
@@ -2828,9 +2834,10 @@ pub async fn audit_repos_with_llm_controlled(
                                  be reached, before any pass checked it"
                                     .to_string()
                             } else {
-                                "not run: the spend limit set for this run was reached before \
-                                 any pass checked it"
-                                    .to_string()
+                                format!(
+                                    "not run: {} before any pass checked it",
+                                    crate::cost_cap::cause_for(meter.cost_unknown())
+                                )
                             }),
                             0,
                             0,
@@ -3009,11 +3016,15 @@ pub async fn audit_repos_with_llm_controlled(
                                             rid.clone(),
                                             crate::scan_ledger::RuleTier::Semantic,
                                             false,
-                                            Some(
-                                                "not run: the spend limit set for this run was \
-                                                 reached before any pass checked it"
-                                                    .to_string(),
-                                            ),
+                                            Some(format!(
+                                                "not run: {} before any pass checked it",
+                                                cap_record
+                                                    .as_ref()
+                                                    .map(crate::cost_cap::CostCapRecord::cause)
+                                                    .unwrap_or(
+                                                        crate::cost_cap::CAUSE_LIMIT_REACHED
+                                                    )
+                                            )),
                                             0,
                                             emitted,
                                         );

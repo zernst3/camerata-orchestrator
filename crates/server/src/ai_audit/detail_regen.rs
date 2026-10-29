@@ -594,12 +594,10 @@ async fn run_detail_round(
             "Repository: {repo}\n\nWrite the full detail for each finding below:\n\n{}",
             blocks.iter().map(|b| b.prompt.as_str()).collect::<String>()
         );
-        let mut req = LlmRequest::new(prompt)
+        let req = LlmRequest::new(prompt)
             .with_system(system.to_string())
-            .with_max_tokens(scaled_max_tokens(batch.len(), DETAIL_TOKENS_PER_FINDING));
-        if let Some(m) = model {
-            req = req.with_model(m.to_string());
-        }
+            .with_max_tokens(scaled_max_tokens(batch.len(), DETAIL_TOKENS_PER_FINDING))
+            .with_model(super::stage_model(model));
         // Streaming transport, as the other aggregate stages: the CLI leg's heartbeat and
         // partial-output salvage apply, and a flat deadline does not.
         let mut on_delta = |_: &str| {};
