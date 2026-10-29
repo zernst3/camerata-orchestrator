@@ -480,6 +480,7 @@ mod tests {
             class: crate::ai_audit::FailureClass::Content,
             files: Vec::new(),
             attempts: Vec::new(),
+            scope_note: false,
         });
         assert!(!ai_covered(&report), "a chunk of files was never reviewed");
 

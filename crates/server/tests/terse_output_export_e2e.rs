@@ -212,6 +212,9 @@ async fn export_text(regeneration_down: bool) -> (String, Vec<camerata_server::o
         client_name: "Acme Corp".to_string(),
         project_title: "Terse output export E2E".to_string(),
         prepared_by: "Camerata (automated e2e test)".to_string(),
+        // The run has a failed part, so this is an internal export: the client form carries no
+        // failure wording.
+        internal: true,
         ..Default::default()
     };
     let json = report_export::build_report_json(

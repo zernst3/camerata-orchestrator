@@ -1610,6 +1610,7 @@ pub fn stage_disclosure(
         class: crate::ai_audit::FailureClass::Content,
         files: Vec::new(),
         attempts: Vec::new(),
+        scope_note: false,
     })
 }
 
@@ -1732,6 +1733,7 @@ pub fn rule_disclosure(
         class: crate::ai_audit::FailureClass::Content,
         files: Vec::new(),
         attempts: Vec::new(),
+        scope_note: false,
     })
 }
 

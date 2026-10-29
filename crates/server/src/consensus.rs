@@ -173,6 +173,7 @@ where
             class: crate::ai_audit::FailureClass::Content,
             files: Vec::new(),
             attempts: Vec::new(),
+            scope_note: false,
         });
     }
     samples.push(vote);

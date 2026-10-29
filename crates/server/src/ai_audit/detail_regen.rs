@@ -794,6 +794,7 @@ pub(crate) async fn regenerate_full_details(
             class: crate::ai_audit::FailureClass::Content,
             files: Vec::new(),
             attempts: Vec::new(),
+            scope_note: false,
         });
     }
     (findings, failed_passes)

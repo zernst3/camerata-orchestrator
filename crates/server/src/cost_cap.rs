@@ -286,6 +286,7 @@ pub(crate) fn not_run_failed_passes(
             class: first.class,
             files: first.files.clone(),
             attempts: Vec::new(),
+            scope_note: false,
         });
         i = j;
     }
@@ -307,6 +308,7 @@ pub(crate) fn not_run_failed_passes(
             class: stage.class,
             files: Vec::new(),
             attempts: Vec::new(),
+            scope_note: false,
         });
     }
     out

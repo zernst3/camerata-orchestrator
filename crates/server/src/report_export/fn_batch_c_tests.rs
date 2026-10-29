@@ -31,6 +31,7 @@ fn two_repo_report(failed_repo: Option<&str>) -> crate::onboard::ScanReport {
             class: crate::ai_audit::FailureClass::Content,
             files: Vec::new(),
             attempts: Vec::new(),
+            scope_note: false,
         });
     }
     report
@@ -99,6 +100,7 @@ fn coverage_has_a_line_for_every_repo_the_ai_tier_did_not_run_on() {
         class: crate::ai_audit::FailureClass::Content,
         files: Vec::new(),
         attempts: Vec::new(),
+        scope_note: false,
     });
     let gaps = coverage_gaps(&report);
     assert!(

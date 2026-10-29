@@ -124,7 +124,7 @@ async fn deterministic_only_inspect_runs_end_to_end_and_writes_a_valid_zip() {
         max_cost_usd: None,
         efficiency: Vec::new(),
         client: "Example Client Ltd".to_string(),
-        client_engagement: true,
+        client_engagement: false,
         run_client_tooling: false,
         consensus: false,
     };
@@ -284,7 +284,7 @@ async fn headless_inspect_discloses_when_the_commodity_taint_pass_does_not_run()
         max_cost_usd: None,
         efficiency: Vec::new(),
         client: "Example Client Ltd".to_string(),
-        client_engagement: true,
+        client_engagement: false,
         run_client_tooling: false,
         consensus: false,
     };

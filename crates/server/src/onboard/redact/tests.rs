@@ -245,6 +245,7 @@ fn report_with_text(p: &Planted) -> ScanReport {
         class: crate::ai_audit::FailureClass::Content,
         files: Vec::new(),
         attempts: Vec::new(),
+        scope_note: false,
     });
     report.ai_error = Some(format!("auth failed {}", p.text));
     report.ai_blocked_reason = Some(p.text.clone());

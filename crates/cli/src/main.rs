@@ -681,6 +681,14 @@ async fn run_inspect_cmd(args: InspectArgs) -> anyhow::Result<()> {
                 );
                 std::process::exit(inspect_cmd::EXIT_COST_CAPPED);
             }
+            if !outcome.incomplete_reasons.is_empty() {
+                eprintln!(
+                    "camerata inspect: THIS RUN DID NOT COMPLETE ({}); the export is INTERNAL \
+                     INCOMPLETE and is not for a client.",
+                    outcome.incomplete_reasons.join("; ")
+                );
+                std::process::exit(inspect_cmd::EXIT_INCOMPLETE_RUN);
+            }
             Ok(())
         }
         Err(e) => {

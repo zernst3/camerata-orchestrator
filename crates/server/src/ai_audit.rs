@@ -104,6 +104,11 @@ pub struct FailedPass {
     /// only; never rendered into an export.
     #[serde(default)]
     pub attempts: Vec<AttemptRecord>,
+    /// True for a disclosed LIMIT of this inspection's scope (a tool that was not run by policy
+    /// or does not apply to the code), not a part that failed. Shown in Coverage like any
+    /// disclosure; it never makes the run incomplete, so it never locks a client export.
+    #[serde(default)]
+    pub scope_note: bool,
 }
 
 impl FailedPass {
@@ -283,6 +288,7 @@ fn failed_pass_rows(repo: &str, answered: usize, failures: &[PassFailure]) -> Ve
             class: f.class,
             files: f.file_names.clone(),
             attempts: f.attempts.clone(),
+            scope_note: false,
         })
         .collect()
 }
@@ -3347,6 +3353,7 @@ pub async fn verify_findings(
             class: crate::ai_audit::FailureClass::Content,
             files: Vec::new(),
             attempts: Vec::new(),
+            scope_note: false,
         });
     }
     // D5: the deterministic severity floor runs regardless of whether the LLM calibration
@@ -5332,6 +5339,7 @@ pub async fn generate_fix_specifics(
             class: crate::ai_audit::FailureClass::Content,
             files: Vec::new(),
             attempts: Vec::new(),
+            scope_note: false,
         });
     }
 
@@ -10511,6 +10519,7 @@ pub async fn audit_repo(
                             class: crate::ai_audit::FailureClass::Content,
                             files: Vec::new(),
                             attempts: Vec::new(),
+                            scope_note: false,
                         });
                     }
                     for rec in &recs {
@@ -10569,6 +10578,7 @@ pub async fn audit_repo(
                         class: classify_pass_error(&e),
                         files: Vec::new(),
                         attempts: camerata_llm::failure::attempts_of(&e),
+                        scope_note: false,
                     });
                 }
             }
@@ -10764,6 +10774,7 @@ pub async fn audit_repo(
                 class: crate::ai_audit::FailureClass::Content,
                 files: Vec::new(),
                 attempts: Vec::new(),
+                scope_note: false,
             });
         }
         if !unchanged.is_empty() {
@@ -10779,6 +10790,7 @@ pub async fn audit_repo(
                 class: crate::ai_audit::FailureClass::Content,
                 files: Vec::new(),
                 attempts: Vec::new(),
+                scope_note: false,
             });
         }
     }

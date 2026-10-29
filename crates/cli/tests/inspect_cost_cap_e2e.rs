@@ -117,7 +117,7 @@ fn args(repo: &Path, export: &Path, cap: Option<f64>) -> InspectArgs {
         max_cost_usd: cap,
         efficiency: vec!["warm_schedule=off".to_string()],
         client: "Example Client Ltd".to_string(),
-        client_engagement: true,
+        client_engagement: false,
         run_client_tooling: false,
         consensus: false,
     }

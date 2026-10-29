@@ -28,6 +28,7 @@ fn report_with_gaps() -> crate::onboard::ScanReport {
             class: crate::ai_audit::FailureClass::Content,
             files: Vec::new(),
             attempts: Vec::new(),
+            scope_note: false,
         },
         // Not a pass over files: disclosed in the methodology, not as a Coverage file gap.
         FailedPass {
@@ -38,6 +39,7 @@ fn report_with_gaps() -> crate::onboard::ScanReport {
             class: crate::ai_audit::FailureClass::Content,
             files: Vec::new(),
             attempts: Vec::new(),
+            scope_note: false,
         },
     ];
     report.ledger.record_input(ScanInputFacts {

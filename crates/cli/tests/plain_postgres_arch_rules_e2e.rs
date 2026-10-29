@@ -154,7 +154,7 @@ async fn plain_postgres_repo_fires_both_rules_through_camerata_inspect_end_to_en
         max_cost_usd: None,
         efficiency: Vec::new(),
         client: "Example Client Ltd".to_string(),
-        client_engagement: true,
+        client_engagement: false,
         run_client_tooling: false,
         consensus: false,
     };

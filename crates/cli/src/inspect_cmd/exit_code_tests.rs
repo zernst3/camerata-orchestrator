@@ -19,6 +19,7 @@ fn outcome() -> InspectOutcome {
         efficiency: camerata_server::efficiency::EfficiencyConfig::default(),
         cost_cap: None,
         outage: None,
+        incomplete_reasons: Vec::new(),
     }
 }
 

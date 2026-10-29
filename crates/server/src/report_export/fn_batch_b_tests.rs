@@ -28,6 +28,7 @@ fn whole_repo_failure(repo: &str) -> crate::ai_audit::FailedPass {
         class: crate::ai_audit::FailureClass::Content,
         files: Vec::new(),
         attempts: Vec::new(),
+        scope_note: false,
     }
 }
 
@@ -194,6 +195,7 @@ fn failure_text_loses_machine_paths_when_the_report_is_sealed() {
         class: crate::ai_audit::FailureClass::Content,
         files: Vec::new(),
         attempts: Vec::new(),
+        scope_note: false,
     });
     let sealed = report.seal();
     let sealed: &crate::onboard::ScanReport = &sealed;

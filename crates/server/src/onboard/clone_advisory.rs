@@ -369,6 +369,7 @@ async fn judge_rule(
             class: crate::ai_audit::FailureClass::Content,
             files: Vec::new(),
             attempts: Vec::new(),
+            scope_note: false,
         });
     }
     judged

@@ -299,6 +299,10 @@ pub struct InspectOutcome {
     /// What an outage stop left undone, when the run stopped because the model provider could not
     /// be reached. Operator-only.
     pub outage: Option<camerata_server::run_health::OutageRecord>,
+    /// Why the run did not complete ([`camerata_server::onboard::ScanReport::incomplete_reasons`]);
+    /// empty for a complete run. Non-empty only on an `--internal` run, because a client run
+    /// that is incomplete writes no export and returns [`InspectError::IncompleteRun`] instead.
+    pub incomplete_reasons: Vec<String>,
 }
 
 impl InspectOutcome {
@@ -315,6 +319,8 @@ impl InspectOutcome {
             EXIT_OUTAGE_STOPPED
         } else if self.cost_capped() {
             EXIT_COST_CAPPED
+        } else if !self.incomplete_reasons.is_empty() {
+            EXIT_INCOMPLETE_RUN
         } else {
             0
         }
@@ -344,6 +350,20 @@ pub const EXIT_COST_CAPPED: i32 = 4;
 /// refused) and 4 (spend limit).
 pub const EXIT_OUTAGE_STOPPED: i32 = 5;
 
+/// The exit code when a CLIENT export was refused, or an internal one was marked, because the
+/// run did not complete for a reason other than the two above (a part failed after its retries
+/// and its second try). Nothing was written for a client. Distinct from 3, 4 and 5.
+pub const EXIT_INCOMPLETE_RUN: i32 = 6;
+
+/// The exit code for an incomplete run: the outage code when an outage stopped it.
+fn incomplete_exit_code(outage: bool) -> i32 {
+    if outage {
+        EXIT_OUTAGE_STOPPED
+    } else {
+        EXIT_INCOMPLETE_RUN
+    }
+}
+
 /// Why an inspection produced no export.
 #[derive(Debug)]
 pub enum InspectError {
@@ -352,6 +372,22 @@ pub enum InspectError {
     /// The release gate refused the export: a secret value (or an inconsistency) was found in
     /// the package it just built. Nothing was written.
     ReleaseBlocked(camerata_server::release_gate::GateFailure),
+    /// A client export was refused because the run did not complete (raised by the package
+    /// assembly; the pipeline wraps it as [`InspectError::IncompleteRun`] with the run's report).
+    Incomplete(camerata_server::report_export::RunIncomplete),
+    /// The same refusal, with what the run did and did not do. No zip was written.
+    IncompleteRun(Box<IncompleteRun>),
+}
+
+/// A client export refused because the run did not complete, with the run's own account.
+#[derive(Debug)]
+pub struct IncompleteRun {
+    /// The refusal and its reasons.
+    pub refusal: camerata_server::report_export::RunIncomplete,
+    /// The ledger summary (including FAILED PASSES), as for a run that exported.
+    pub ledger_summary: String,
+    /// Where the operator ledger was written.
+    pub ledger_path: PathBuf,
 }
 
 impl InspectError {
@@ -360,6 +396,8 @@ impl InspectError {
         match self {
             InspectError::Failed(_) => 1,
             InspectError::ReleaseBlocked(_) => EXIT_RELEASE_BLOCKED,
+            InspectError::Incomplete(refusal) => incomplete_exit_code(refusal.outage),
+            InspectError::IncompleteRun(run) => incomplete_exit_code(run.refusal.outage),
         }
     }
 }
@@ -369,6 +407,14 @@ impl std::fmt::Display for InspectError {
         match self {
             InspectError::Failed(message) => write!(f, "{message}"),
             InspectError::ReleaseBlocked(failure) => write!(f, "{failure}"),
+            InspectError::Incomplete(refusal) => write!(f, "{refusal}"),
+            InspectError::IncompleteRun(run) => write!(
+                f,
+                "{}\n\n{}\nintegrity ledger: {}",
+                run.refusal,
+                run.ledger_summary,
+                run.ledger_path.display()
+            ),
         }
     }
 }
@@ -632,7 +678,7 @@ pub async fn build_product_export_bytes(
     corpus: Option<&camerata_rules::RuleSet>,
     client: &str,
 ) -> Result<(String, Vec<u8>), InspectError> {
-    let released = release_product_export(report, corpus, None, client).await?;
+    let released = release_product_export(report, corpus, None, client, false).await?;
     Ok((released.stem, released.bytes))
 }
 
@@ -643,6 +689,7 @@ async fn release_product_export(
     corpus: Option<&camerata_rules::RuleSet>,
     model: Option<camerata_server::ModelRecord>,
     client: &str,
+    internal: bool,
 ) -> Result<camerata_server::release_gate::ReleasedZip, InspectError> {
     let dispositions: HashMap<String, camerata_server::report_export::DispositionWire> =
         HashMap::new();
@@ -650,6 +697,9 @@ async fn release_product_export(
     options.apply_env_defaults();
     options.model = model;
     options.client_name = client.to_string();
+    // `--internal` is the operator's own review: only then may an export come from a run that
+    // did not complete, and it is marked INTERNAL INCOMPLETE.
+    options.internal = internal;
 
     let package = camerata_server::release_gate::build_product_package(
         report,
@@ -658,17 +708,27 @@ async fn release_product_export(
         &options,
     )
     .await
-    .map_err(
-        |e| match e.downcast::<camerata_server::release_gate::ReleaseError>() {
+    .map_err(|e| {
+        // A client export of a run that did not complete is refused before anything is built.
+        let e = match e.downcast::<camerata_server::report_export::RunIncomplete>() {
+            Ok(incomplete) => return InspectError::Incomplete(incomplete),
+            Err(e) => e,
+        };
+        match e.downcast::<camerata_server::release_gate::ReleaseError>() {
             // The assembly checks the PDF's data before it compiles it.
             Ok(camerata_server::release_gate::ReleaseError::Blocked(failure)) => {
                 InspectError::ReleaseBlocked(failure)
             }
             Ok(other) => InspectError::Failed(other.to_string()),
             Err(e) => InspectError::Failed(e.to_string()),
-        },
-    )?;
-    camerata_server::release_gate::release(package).map_err(|e| match e {
+        }
+    })?;
+    let released = if internal {
+        camerata_server::release_gate::release_internal(package)
+    } else {
+        camerata_server::release_gate::release(package)
+    };
+    released.map_err(|e| match e {
         camerata_server::release_gate::ReleaseError::Blocked(failure) => {
             InspectError::ReleaseBlocked(failure)
         }
@@ -1090,8 +1150,23 @@ pub async fn run_inspect_pipeline_with(
     // ── Phase 5: export — the exact `export_product` HTTP handler's assembly ───────────
     // `release_product_export` is the release gate: it returns bytes only when every check
     // passed, and `std::fs::write` below runs only on `Ok`, so a blocked export is never on disk.
-    let released =
-        release_product_export(&report, corpus.as_ref(), Some(model_record), &args.client).await?;
+    let released = release_product_export(
+        &report,
+        corpus.as_ref(),
+        Some(model_record),
+        &args.client,
+        !args.client_engagement,
+    )
+    .await
+    .map_err(|e| match e {
+        // The refusal still tells the operator what the run did and did not do.
+        InspectError::Incomplete(refusal) => InspectError::IncompleteRun(Box::new(IncompleteRun {
+            refusal,
+            ledger_summary: ledger_summary.clone(),
+            ledger_path: ledger_file.clone(),
+        })),
+        other => other,
+    })?;
     let zip_bytes = released.bytes;
     let release_gate = format!(
         "release gate: passed ({} checks)",
@@ -1115,6 +1190,7 @@ pub async fn run_inspect_pipeline_with(
         efficiency: controls.efficiency,
         cost_cap: report.ledger.cost_cap().cloned(),
         outage: report.ledger.outage().cloned(),
+        incomplete_reasons: report.incomplete_reasons(),
     })
 }
 
@@ -1556,6 +1632,7 @@ mod tests {
                 notes: Vec::new(),
             }),
             outage: None,
+            incomplete_reasons: Vec::new(),
         };
         let text = format_outcome_report(&outcome);
         assert!(
@@ -2137,6 +2214,7 @@ mod tests {
             efficiency: camerata_server::efficiency::EfficiencyConfig::default(),
             cost_cap: None,
             outage: None,
+            incomplete_reasons: Vec::new(),
         };
         let text = format_outcome_report(&outcome);
         assert!(text.contains("/tmp/out.zip"), "{text}");
@@ -2188,6 +2266,7 @@ mod tests {
             efficiency: camerata_server::efficiency::EfficiencyConfig::default(),
             cost_cap: None,
             outage: None,
+            incomplete_reasons: Vec::new(),
         };
         let text = format_outcome_report(&outcome);
         assert!(text.contains("STAGE TELEMETRY"), "{text}");
@@ -2431,6 +2510,7 @@ mod tests {
             class: camerata_server::ai_audit::FailureClass::Content,
             files: Vec::new(),
             attempts: Vec::new(),
+            scope_note: false,
         }];
 
         let text = render_ledger_summary(&ledger, &failed_passes, false);
