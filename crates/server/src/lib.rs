@@ -8003,9 +8003,8 @@ pub(crate) async fn start_audit_job(
                     }
                 },
             };
-            let _token_seed = run_store
-                .as_ref()
-                .map(|s| crate::prompt_frame::seed_tokens(s.nonce_seed()));
+            // The run's own delimiter seed, carried with the audit future below (never global).
+            let token_seed = run_store.as_ref().map(|s| s.nonce_seed());
             let sessions = crate::llm::SessionSink::new();
             let llm_backend = match &backend_resolution {
                 crate::llm::BackendResolution::Api => crate::llm::Backend::Api,
@@ -8024,26 +8023,29 @@ pub(crate) async fn start_audit_job(
                 Some(j) => j.as_ref(),
                 None => &real,
             };
-            let (mut report, mut manifest) = crate::onboard::audit_repos_with_llm_controlled(
-                model_seam,
-                &sources,
-                &selected,
-                notes,
-                model.as_deref(),
-                calibration_model.as_deref(),
-                mode,
-                thorough,
-                Some((&transcripts, SCAN_AUDIT_KEY)),
-                Some((&body_jobs, &body_jid)),
-                prior.as_ref(),
-                deep,
-                soc2_enabled,
-                run_ai_review,
-                run_deterministic,
-                backend_resolution,
-                corpus.as_ref(),
-                &chosen_options,
-                run_controls,
+            let (mut report, mut manifest) = crate::prompt_frame::with_seed(
+                token_seed,
+                crate::onboard::audit_repos_with_llm_controlled(
+                    model_seam,
+                    &sources,
+                    &selected,
+                    notes,
+                    model.as_deref(),
+                    calibration_model.as_deref(),
+                    mode,
+                    thorough,
+                    Some((&transcripts, SCAN_AUDIT_KEY)),
+                    Some((&body_jobs, &body_jid)),
+                    prior.as_ref(),
+                    deep,
+                    soc2_enabled,
+                    run_ai_review,
+                    run_deterministic,
+                    backend_resolution,
+                    corpus.as_ref(),
+                    &chosen_options,
+                    run_controls,
+                ),
             )
             .await;
             report.provenance.model_sessions = sessions.snapshot();

@@ -1087,9 +1087,7 @@ pub async fn run_inspect_pipeline_with(
     };
     // Delimiter tokens drawn from the run's own seed, so a resumed run asks the model the same
     // questions as the run it resumes and a stored reply still matches its prompt.
-    let _token_seed = store
-        .as_ref()
-        .map(|s| camerata_server::prompt_frame::seed_tokens(s.nonce_seed()));
+    let token_seed = store.as_ref().map(|s| s.nonce_seed());
 
     let (mut report, manifest) = {
         // The model this run asks: the scripted one a test hands in, else the real client for the
@@ -1126,26 +1124,29 @@ pub async fn run_inspect_pipeline_with(
             Some(j) => j.as_ref(),
             None => base,
         };
-        let (mut report, manifest) = camerata_server::onboard::audit_repos_with_llm_controlled(
-            model_seam,
-            &sources,
-            &selected,
-            Vec::new(),
-            model,
-            calibration_model,
-            mode,
-            false, // thorough: not exposed on Step 0's flag surface; matches AuditReq's default
-            None,  // feedback: no live transcript sink headlessly
-            None,  // job: no job store headlessly (this call blocks until done)
-            incremental_prior.as_ref(),
-            false, // deep: the opt-in compliance tier; not exposed on Step 0's flag surface
-            true,  // soc2_enabled: irrelevant with `deep` off
-            true,  // run_ai_review
-            true,  // run_deterministic
-            backend_resolution,
-            corpus.as_ref(),
-            &HashMap::new(),
-            controls.clone(),
+        let (mut report, manifest) = camerata_server::prompt_frame::with_seed(
+            token_seed,
+            camerata_server::onboard::audit_repos_with_llm_controlled(
+                model_seam,
+                &sources,
+                &selected,
+                Vec::new(),
+                model,
+                calibration_model,
+                mode,
+                false, // thorough: not exposed on Step 0's flag surface; matches AuditReq's default
+                None,  // feedback: no live transcript sink headlessly
+                None,  // job: no job store headlessly (this call blocks until done)
+                incremental_prior.as_ref(),
+                false, // deep: the opt-in compliance tier; not exposed on Step 0's flag surface
+                true,  // soc2_enabled: irrelevant with `deep` off
+                true,  // run_ai_review
+                true,  // run_deterministic
+                backend_resolution,
+                corpus.as_ref(),
+                &HashMap::new(),
+                controls.clone(),
+            ),
         )
         .await;
         if seams.llm.is_none() {
