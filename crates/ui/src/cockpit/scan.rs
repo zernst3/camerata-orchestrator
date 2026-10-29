@@ -1125,6 +1125,10 @@ pub(super) struct ScanReportView {
     /// Every pass or stage that failed or did not run. Non-empty means the scan is INCOMPLETE.
     #[serde(default)]
     pub failed_passes: Vec<FailedPassView>,
+    /// The saved run this scan is; "Run what remains" resumes it. `None` for a scan that could
+    /// not be saved.
+    #[serde(default)]
+    pub run_id: Option<String>,
     #[serde(default)]
     pub repos: Vec<String>,
     #[serde(default)]
@@ -1938,6 +1942,77 @@ pub(super) fn recommend_scan_mode(report: &ScanReportView) -> String {
 }
 
 /// Poll an async audit job for progress + incremental findings + the final report.
+/// What "Run what remains" would do: shown before it starts (mirror of the server's preview).
+#[derive(Clone, PartialEq, serde::Deserialize, Default, Debug)]
+pub(super) struct ResumePlanView {
+    /// The parts that remain, the stored and unsent calls and the estimate, ready to show.
+    #[serde(default)]
+    pub text: String,
+    /// Why the resume cannot start now, in plain words; `None` when it can.
+    #[serde(default)]
+    pub refusal: Option<String>,
+}
+
+/// Fetch the resume plan of a saved run.
+pub(super) async fn resume_plan(run_id: &str) -> Result<ResumePlanView, String> {
+    let resp = reqwest::get(format!("{}/api/runs/{run_id}/plan", crate::bff_base()))
+        .await
+        .map_err(|e| format!("could not reach the app's server: {e}"))?;
+    if !resp.status().is_success() {
+        let body: serde_json::Value = resp.json().await.unwrap_or_default();
+        return Err(body["error"]
+            .as_str()
+            .unwrap_or("that run is not saved any more")
+            .to_string());
+    }
+    resp.json::<ResumePlanView>()
+        .await
+        .map_err(|e| format!("the plan could not be read: {e}"))
+}
+
+/// Start the resume of a saved run as a background job; returns the job id, or the plain reason.
+pub(super) async fn resume_start(run_id: &str) -> Result<String, String> {
+    let resp = reqwest::Client::new()
+        .post(format!("{}/api/runs/{run_id}/resume", crate::bff_base()))
+        .send()
+        .await
+        .map_err(|e| format!("could not reach the app's server: {e}"))?;
+    let ok = resp.status().is_success();
+    let body: serde_json::Value = resp.json().await.unwrap_or_default();
+    if ok {
+        body["job_id"]
+            .as_str()
+            .map(str::to_string)
+            .ok_or_else(|| "the server did not return a job".to_string())
+    } else {
+        Err(body["error"]
+            .as_str()
+            .unwrap_or("the run could not be resumed")
+            .to_string())
+    }
+}
+
+/// The whole of "Run what remains" for one run, with the Bombe held from the first request to the
+/// end of the polling: the guard is the first thing built, so it covers the start request, the
+/// job's whole run (`poll`) and every early return. `start` and `poll` are the requests, passed in
+/// so the flow is testable without a server.
+pub(super) async fn run_what_remains<S, SF, P, PF>(
+    loading_count: crate::loading::LoadingCount,
+    start: S,
+    poll: P,
+) -> Result<(), String>
+where
+    S: FnOnce() -> SF,
+    SF: std::future::Future<Output = Result<String, String>>,
+    P: FnOnce(String) -> PF,
+    PF: std::future::Future<Output = ()>,
+{
+    let _guard = crate::loading::LoadingGuard::from_count(loading_count);
+    let job_id = start().await?;
+    poll(job_id).await;
+    Ok(())
+}
+
 pub(super) async fn audit_job_poll(job_id: &str) -> Option<JobStatusEnvelope> {
     reqwest::get(format!(
         "{}/api/onboard/audit/job/{}",
@@ -6829,7 +6904,18 @@ pub(super) fn job_progress_label(
 /// `compact` is the one-line form shown beside the export button, where the export will carry
 /// the same disclosure. Its own component so it is SSR-testable without `ScanResults`.
 #[component]
-pub(super) fn IncompletePassesBanner(failed_passes: Vec<FailedPassView>, compact: bool) -> Element {
+pub(super) fn IncompletePassesBanner(
+    failed_passes: Vec<FailedPassView>,
+    compact: bool,
+    // The saved run this scan is. With it, "Run what remains" is live; without, it stays off.
+    #[props(default)] run_id: Option<String>,
+    // What the resume would do, once asked for (`on_plan`): shown before anything is sent.
+    #[props(default)] plan: Option<ResumePlanView>,
+    // True while the resume job runs.
+    #[props(default)] busy: bool,
+    #[props(default)] on_plan: Option<EventHandler<String>>,
+    #[props(default)] on_resume: Option<EventHandler<String>>,
+) -> Element {
     if failed_passes.is_empty() {
         return rsx! {};
     }
@@ -6894,9 +6980,44 @@ pub(super) fn IncompletePassesBanner(failed_passes: Vec<FailedPassView>, compact
                 button {
                     class: "scan-run-what-remains",
                     r#type: "button",
-                    disabled: true,
-                    title: "Resume is coming: it will run only the parts listed here.",
+                    disabled: run_id.is_none() || busy,
+                    title: if run_id.is_some() {
+                        "Show what would run again and what it should cost. Nothing is sent until you confirm."
+                    } else {
+                        "This scan was not saved, so it cannot be resumed. Run it again."
+                    },
+                    onclick: {
+                        let run_id = run_id.clone();
+                        move |_| {
+                            if let (Some(id), Some(handler)) = (run_id.clone(), on_plan) {
+                                handler.call(id);
+                            }
+                        }
+                    },
                     "Run what remains"
+                }
+                if let Some(plan) = plan.clone() {
+                    div { class: "scan-resume-plan",
+                        pre { class: "scan-resume-plan-text", "{plan.text}" }
+                        if let Some(why) = plan.refusal.clone() {
+                            p { class: "onboard-gate-b scan-resume-refusal", "Cannot resume now: {why}" }
+                        } else {
+                            button {
+                                class: "scan-resume-confirm",
+                                r#type: "button",
+                                disabled: busy,
+                                onclick: {
+                                    let run_id = run_id.clone();
+                                    move |_| {
+                                        if let (Some(id), Some(handler)) = (run_id.clone(), on_resume) {
+                                            handler.call(id);
+                                        }
+                                    }
+                                },
+                                "Start: run only these parts"
+                            }
+                        }
+                    }
                 }
                 p { class: "onboard-gate-hint",
                     "A clean result here does NOT mean the missing parts are clean. Raise the limit or re-run to cover them."
@@ -7785,7 +7906,7 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
     let mut job_failed_message = use_signal(|| Option::<String>::None);
     // The in-flight async job id (app-scope, survives navigation). RESUME: if a job was
     // already running when this view (re)mounted, re-attach the poll instead of losing it.
-    let active_audit_job = use_context::<Signal<Option<String>>>();
+    let mut active_audit_job = use_context::<Signal<Option<String>>>();
     // The audited repos whose source was deleted from this machine: audit, apply and open-PR
     // all need the source on disk, so they switch off and say why.
     let scan_blocked = crate::source_ui::use_scan_block()
@@ -7795,6 +7916,51 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
     // guaranteed — never resolved from inside `poll_job`'s own body, which runs detached inside
     // this `use_future`'s async block (see the BOMBE-SILENT-MISS note on `poll_job`).
     let loading_count = use_context::<crate::loading::LoadingCount>();
+    // "Run what remains": the plan is fetched first and shown with its estimate; confirming
+    // starts the resume job and polls it with the Bombe held for the whole run.
+    let mut resume_plan_shown = use_signal(|| Option::<ResumePlanView>::None);
+    let on_plan = EventHandler::new(move |run_id: String| {
+        spawn(async move {
+            match resume_plan(&run_id).await {
+                Ok(plan) => resume_plan_shown.set(Some(plan)),
+                Err(why) => resume_plan_shown.set(Some(ResumePlanView {
+                    text: String::new(),
+                    refusal: Some(why),
+                })),
+            }
+        });
+    });
+    let on_resume = EventHandler::new(move |run_id: String| {
+        resume_plan_shown.set(None);
+        job_failed_message.set(None);
+        auditing.set(true);
+        spawn(async move {
+            let result = run_what_remains(
+                loading_count,
+                || async { resume_start(&run_id).await },
+                |jid| async move {
+                    active_audit_job.set(Some(jid.clone()));
+                    poll_job(
+                        jid,
+                        audit,
+                        auditing,
+                        job_progress,
+                        det_progress,
+                        active_audit_job,
+                        scan_idle_ms,
+                        job_failed_message,
+                        loading_count,
+                    )
+                    .await;
+                },
+            )
+            .await;
+            if let Err(why) = result {
+                auditing.set(false);
+                job_failed_message.set(Some(why));
+            }
+        });
+    });
     use_future(move || async move {
         if let Some(jid) = active_audit_job.peek().clone() {
             auditing.set(true);
@@ -9311,6 +9477,11 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                 IncompletePassesBanner {
                     failed_passes: audited.as_ref().map(|a| a.failed_passes.clone()).unwrap_or_default(),
                     compact: false,
+                    run_id: audited.as_ref().and_then(|a| a.run_id.clone()),
+                    plan: resume_plan_shown(),
+                    busy: auditing(),
+                    on_plan: Some(on_plan),
+                    on_resume: Some(on_resume),
                 }
 
                 // PRIMARY axis: the kind switcher. Flipping it flips the action vocabulary too,
@@ -12590,14 +12761,172 @@ mod render_tests {
         assert_eq!(html.matches("scan-incomplete-banner").count(), 1, "{html}");
     }
 
+    fn failure_with_run_harness() -> Element {
+        rsx! {
+            IncompletePassesBanner {
+                failed_passes: vec![FailedPassView {
+                    repo: "acme/api".to_string(),
+                    pass: "fix-specific generation".to_string(),
+                    reason: "overloaded".to_string(),
+                    class: "transport".to_string(),
+                    ..FailedPassView::default()
+                }],
+                compact: false,
+                run_id: Some("20261029T101500Z-ab12cd".to_string()),
+            }
+        }
+    }
+
+    fn failure_with_plan_harness() -> Element {
+        rsx! {
+            IncompletePassesBanner {
+                failed_passes: vec![FailedPassView {
+                    repo: "acme/api".to_string(),
+                    pass: "fix-specific generation".to_string(),
+                    ..FailedPassView::default()
+                }],
+                compact: false,
+                run_id: Some("r1".to_string()),
+                plan: Some(ResumePlanView {
+                    text: "Resume: what remains\n  - acme/api: fix text (failed)\n".to_string(),
+                    refusal: None,
+                }),
+            }
+            IncompletePassesBanner {
+                failed_passes: vec![FailedPassView {
+                    repo: "acme/api".to_string(),
+                    pass: "p".to_string(),
+                    ..FailedPassView::default()
+                }],
+                compact: false,
+                run_id: Some("r2".to_string()),
+                plan: Some(ResumePlanView {
+                    text: String::new(),
+                    refusal: Some("repository acme/api is at commit 1234567890 now".to_string()),
+                }),
+            }
+        }
+    }
+
     #[test]
-    fn run_what_remains_is_a_disabled_button_that_says_resume_is_coming() {
+    fn run_what_remains_is_off_for_a_scan_that_was_not_saved_and_live_for_one_that_was() {
         let mut vdom = VirtualDom::new(failure_detail_harness);
         vdom.rebuild_in_place();
         let html = dioxus_ssr::render(&vdom);
         assert!(html.contains("Run what remains"), "{html}");
         assert!(html.contains("disabled"), "{html}");
-        assert!(html.contains("Resume is coming"), "{html}");
+        assert!(html.contains("was not saved"), "{html}");
+
+        let mut vdom = VirtualDom::new(failure_with_run_harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        let button = html
+            .split("scan-run-what-remains")
+            .nth(1)
+            .expect("the button");
+        let button = button.split("</button>").next().unwrap();
+        assert!(!button.contains("disabled"), "{button}");
+        assert!(
+            button.contains("Nothing is sent until you confirm"),
+            "{button}"
+        );
+        assert!(!html.contains("Resume is coming"), "{html}");
+    }
+
+    #[test]
+    fn the_plan_is_shown_with_its_estimate_before_anything_starts_and_a_refusal_has_no_start() {
+        let mut vdom = VirtualDom::new(failure_with_plan_harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        assert!(html.contains("Resume: what remains"), "{html}");
+        assert!(html.contains("Start: run only these parts"), "{html}");
+        assert!(
+            html.contains("Cannot resume now: repository acme/api is at commit"),
+            "{html}"
+        );
+        // Only the plan without a refusal offers the start button.
+        assert_eq!(html.matches("scan-resume-confirm").count(), 1, "{html}");
+    }
+
+    thread_local! {
+        static RESUME_COUNT: std::cell::RefCell<Option<crate::loading::LoadingCount>> =
+            const { std::cell::RefCell::new(None) };
+        static RESUME_LOG: std::cell::RefCell<Vec<usize>> = const { std::cell::RefCell::new(Vec::new()) };
+    }
+
+    fn resume_harness() -> Element {
+        crate::loading::provide_loading_context();
+        let count = use_context::<crate::loading::LoadingCount>();
+        RESUME_COUNT.with(|c| *c.borrow_mut() = Some(count));
+        spawn(async move {
+            // The start request and the whole job poll: the Bombe runs through both.
+            let _ = run_what_remains(
+                count,
+                || async move {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    RESUME_LOG.with(|l| l.borrow_mut().push(*count.peek()));
+                    Ok("job-1".to_string())
+                },
+                |_jid| async move {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    RESUME_LOG.with(|l| l.borrow_mut().push(*count.peek()));
+                },
+            )
+            .await;
+        });
+        rsx! { div {} }
+    }
+
+    /// "Run what remains" holds the Bombe from the start request to the end of the polling, the
+    /// way `loading.rs` tests every guard: a real spawned task with real suspensions.
+    #[tokio::test]
+    async fn run_what_remains_holds_the_bombe_from_the_start_request_to_the_end_of_the_poll() {
+        RESUME_LOG.with(|l| l.borrow_mut().clear());
+        let mut vdom = VirtualDom::new(resume_harness);
+        vdom.rebuild_in_place();
+        let count = RESUME_COUNT.with(|c| c.borrow_mut().take()).unwrap();
+        assert_eq!(*count.read(), 0);
+        vdom.process_events();
+        assert_eq!(*count.read(), 1, "running as the resume starts");
+        for _ in 0..4 {
+            tokio::time::sleep(std::time::Duration::from_millis(15)).await;
+            vdom.process_events();
+        }
+        assert_eq!(
+            RESUME_LOG.with(|l| l.borrow().clone()),
+            vec![1, 1],
+            "running at the start request and again during the poll"
+        );
+        assert_eq!(*count.read(), 0, "released when the polling ended");
+    }
+
+    fn refused_resume_harness() -> Element {
+        crate::loading::provide_loading_context();
+        let count = use_context::<crate::loading::LoadingCount>();
+        RESUME_COUNT.with(|c| *c.borrow_mut() = Some(count));
+        spawn(async move {
+            let refused: Result<(), String> = run_what_remains(
+                count,
+                || async { Err("the repo moved on".to_string()) },
+                |_jid| async {},
+            )
+            .await;
+            assert!(refused.is_err());
+        });
+        rsx! { div {} }
+    }
+
+    #[tokio::test]
+    async fn a_refused_resume_releases_the_bombe() {
+        let mut vdom = VirtualDom::new(refused_resume_harness);
+        vdom.rebuild_in_place();
+        let count = RESUME_COUNT.with(|c| c.borrow_mut().take()).unwrap();
+        vdom.process_events();
+        assert_eq!(
+            *count.read(),
+            0,
+            "nothing runs, so nothing is left counting"
+        );
     }
 
     #[test]
