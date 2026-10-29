@@ -1028,6 +1028,7 @@ async fn a_cockpit_run_is_refused_by_the_command_line_with_words_naming_the_cock
             estimate_usd: None,
             include_alternatives: false,
             origin: rs::RunOrigin::Cockpit,
+            project_id: None,
         })
         .unwrap();
         store.run_id()

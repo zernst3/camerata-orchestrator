@@ -6072,8 +6072,13 @@ checks and the estimate are shared, not copied.
 **Saved inspections in the cockpit.** `GET /api/inspections` lists the open project's saved runs
 (`run_store::list_inspections_in`): id, start time, repos, status (`complete`, `incomplete`,
 `interrupted` or `live`), the number of parts that remain, the expected cost of finishing it, the
-origin and whether the cockpit can resume it. A run belongs to the project when every repo it
-inspected is one of the project's repos, by name or by folder. `live` means a process holds the
+origin and whether the cockpit can resume it. A cockpit run records the id of the project it was
+started in (`RunRecord.project_id`) and belongs to that project only, however many repos two
+projects share; `POST /api/inspections/:id/resume` refuses (409, naming both projects) when the
+open project is not that one. A command line run belongs to the project that holds every repo it
+inspected, by name or by folder. A cockpit run saved before the project id was recorded is placed
+by its repos only when exactly one project holds all of them; otherwise it is listed under no
+project, and `RunSummary.note` says why. `live` means a process holds the
 run's lock: it is never offered. The routes live under `/api/inspections` so they are not confused
 with the agent runs under `/api/runs`; the first cockpit build called `/api/runs/:id/plan` and
 `/api/runs/:id/resume`, and those two paths remain as aliases of the same handlers for one

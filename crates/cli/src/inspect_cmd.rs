@@ -1065,6 +1065,7 @@ pub async fn run_inspect_pipeline_with(
                 estimate_usd: controls.estimate_hint_usd,
                 include_alternatives: corpus.is_some(),
                 origin: camerata_server::run_store::RunOrigin::Cli,
+                project_id: None,
             }) {
                 Ok(store) => {
                     if let Some(prior) = &incremental_prior {

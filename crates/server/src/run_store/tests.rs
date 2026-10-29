@@ -133,6 +133,7 @@ fn new_run(repo: &tempfile::TempDir) -> Arc<RunStore> {
         estimate_usd: Some(10.0),
         include_alternatives: true,
         origin: RunOrigin::Cli,
+        project_id: None,
     })
     .unwrap()
 }
@@ -718,6 +719,7 @@ fn make_run(root: &std::path::Path, id: &str, project: &str, commit: &str, statu
         updated_at: id.to_string(),
         status,
         origin: RunOrigin::Cli,
+        project_id: None,
         attempt: 1,
         engine_version: engine_version(),
         project_key: project.to_string(),
@@ -971,6 +973,7 @@ fn cockpit_run(repo: &tempfile::TempDir) -> Arc<RunStore> {
         estimate_usd: Some(10.0),
         include_alternatives: false,
         origin: RunOrigin::Cockpit,
+        project_id: None,
     })
     .unwrap()
 }
@@ -1071,6 +1074,7 @@ fn the_listing_holds_only_the_runs_the_caller_says_belong_to_the_project() {
         estimate_usd: None,
         include_alternatives: false,
         origin: RunOrigin::Cockpit,
+        project_id: None,
     })
     .unwrap();
     drop(stranger);
