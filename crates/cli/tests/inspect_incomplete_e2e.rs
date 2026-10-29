@@ -15,8 +15,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use async_trait::async_trait;
 use camerata::inspect_cmd::{
-    run_inspect_pipeline_with, InspectArgs, InspectError, Seams, EXIT_INCOMPLETE_RUN,
-    EXIT_OUTAGE_STOPPED,
+    run_inspect_pipeline_with, run_inspect_with_key_presence, InspectArgs, InspectError, Seams,
+    EXIT_INCOMPLETE_RUN, EXIT_OUTAGE_STOPPED,
 };
 use camerata_server::cost_cap::FailureClass;
 use camerata_server::llm::{LlmPort, LlmRequest, LlmResponse, ProjectBackend};
@@ -244,4 +244,27 @@ async fn the_internal_export_of_an_unreachable_run_is_written_marked_and_gate_re
     // `camerata release-gate <zip>` refuses it.
     let bytes = std::fs::read(&export).unwrap();
     assert!(!camerata_server::release_gate::audit_zip(&bytes, None).is_clean());
+}
+
+/// The AI review was requested for a CLIENT run and could not run at all (the compliance backend
+/// gate blocked it: the API backend with no key). The run is incomplete, so the export is refused
+/// with exit 6 and no zip is written.
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn a_client_run_whose_ai_review_was_compliance_blocked_exits_6_and_writes_no_zip() {
+    if !typst_available("a_client_run_whose_ai_review_was_compliance_blocked") {
+        return;
+    }
+    let state = tempfile::tempdir().unwrap();
+    let _state = camerata_test_env::EnvGuard::set("CAMERATA_STATE_DIR", state.path());
+    let _env = camerata_test_env::EnvGuard::set("CAMERATA_DISABLE_DEP_AUDIT", "1");
+    let repo = tempfile::tempdir().unwrap();
+    stage_fixture(repo.path());
+    let out = tempfile::tempdir().unwrap();
+    let export = out.path().join("inspect.zip");
+    let result = run_inspect_with_key_presence(args(repo.path(), &export, true), false).await;
+    let err =
+        result.expect_err("a client export of a run whose AI review could not run is refused");
+    assert_eq!(err.exit_code(), EXIT_INCOMPLETE_RUN, "{err}");
+    assert!(!export.exists(), "no zip is written for a client");
 }
