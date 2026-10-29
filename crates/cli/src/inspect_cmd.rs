@@ -1428,9 +1428,18 @@ pub async fn resume_inspect(
             many,
         )),
     };
-    let run_id = rs::resolve_run(run, project_key.as_deref())
+    let run_id = rs::resolve_run(run, project_key.as_deref(), rs::RunOrigin::Cli)
         .map_err(|e| InspectError::Failed(e.to_string()))?;
     let record = rs::read_record(&run_id).map_err(|e| InspectError::Failed(e.to_string()))?;
+    // A run the cockpit started saved the cockpit's scan request, not these flags, and it needs
+    // the project's settings to be read back: the cockpit is the place to resume it.
+    if record.origin == rs::RunOrigin::Cockpit {
+        return Err(InspectError::Failed(format!(
+            "run {run_id} was started from the cockpit, so it is resumed there: open the \
+             project's scan screen and choose Run what remains. `camerata inspect --resume` \
+             resumes runs started from the command line"
+        )));
+    }
     let mut args: InspectArgs = serde_json::from_value(record.args.clone()).map_err(|e| {
         InspectError::Failed(format!(
             "run {run_id} did not save the arguments it was started with ({e}); start a new run"

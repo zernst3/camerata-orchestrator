@@ -1020,6 +1020,8 @@ pub struct RunSummary {
     pub run_id: String,
     pub created_at: String,
     pub state: RunState,
+    /// Where the run was started.
+    pub origin: RunOrigin,
     pub project_key: String,
     pub repos: Vec<String>,
     pub attempt: u32,
@@ -1046,6 +1048,7 @@ pub fn list_runs_in(root: &Path) -> Vec<RunSummary> {
                 run_id: record.run_id.clone(),
                 created_at: record.created_at.clone(),
                 state,
+                origin: record.origin,
                 project_key: record.project_key.clone(),
                 repos: record.repos.iter().map(|r| r.name.clone()).collect(),
                 attempt: record.attempt,
@@ -1165,20 +1168,39 @@ pub fn read_record(run_id: &str) -> Result<RunRecord, RunStoreError> {
 }
 
 /// Resolve `run` (an id, or `latest`) to a run id. `latest` is the newest run that is not
-/// complete; with `project_key` it is the newest of that project.
-pub fn resolve_run(run: &str, project_key: Option<&str>) -> Result<String, RunStoreError> {
+/// complete and was started from `origin` (the place asking can resume only its own); with
+/// `project_key` it is the newest of that project.
+pub fn resolve_run(
+    run: &str,
+    project_key: Option<&str>,
+    origin: RunOrigin,
+) -> Result<String, RunStoreError> {
     if run != "latest" {
         return Ok(run.to_string());
     }
-    list_runs()
+    let unfinished: Vec<RunSummary> = list_runs()
         .into_iter()
-        .find(|r| r.state != RunState::Complete && project_key.is_none_or(|k| r.project_key == k))
-        .map(|r| r.run_id)
-        .ok_or_else(|| {
-            RunStoreError::NotFound(
-                "there is no saved run that still has work left to do".to_string(),
-            )
-        })
+        .filter(|r| r.state != RunState::Complete && project_key.is_none_or(|k| r.project_key == k))
+        .collect();
+    if let Some(found) = unfinished.iter().find(|r| r.origin == origin) {
+        return Ok(found.run_id.clone());
+    }
+    Err(RunStoreError::NotFound(if unfinished.is_empty() {
+        "there is no saved run that still has work left to do".to_string()
+    } else {
+        let elsewhere = match origin {
+            RunOrigin::Cli => RunOrigin::Cockpit,
+            RunOrigin::Cockpit => RunOrigin::Cli,
+        };
+        format!(
+            "there is no saved run started from the {} that still has work left to do; {} \
+             started from the {} still {}, and a run is resumed in the place that started it",
+            origin.label(),
+            unfinished.len(),
+            elsewhere.label(),
+            if unfinished.len() == 1 { "has" } else { "have" },
+        )
+    }))
 }
 
 // ── Resume checks ────────────────────────────────────────────────────────────────────────────

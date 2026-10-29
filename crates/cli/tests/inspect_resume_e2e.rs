@@ -996,3 +996,78 @@ async fn a_run_being_worked_on_refuses_a_second_worker() {
     );
     drop(busy);
 }
+
+/// A run the cockpit started is resumed in the cockpit: `camerata inspect --resume <id>` (and
+/// `latest`) refuses in plain words that name the cockpit, sends nothing to the model and leaves
+/// the run as it was.
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn a_cockpit_run_is_refused_by_the_command_line_with_words_naming_the_cockpit() {
+    use camerata_server::run_store as rs;
+    let _env = env();
+    let repo = tempfile::tempdir().unwrap();
+    stage_fixture(repo.path());
+    let run_id = {
+        let store = rs::RunStore::create(rs::NewRun {
+            project_key: camerata_server::scan_cache::state_dir::repo_state_key(repo.path()),
+            repos: vec![("acme/one".to_string(), repo.path().to_path_buf())],
+            models: rs::ModelsRecord {
+                audit: "m".to_string(),
+                calibration: "m".to_string(),
+                fix: String::new(),
+                backend: "cli".to_string(),
+                mode: "parallel".to_string(),
+            },
+            ai_scan_key: camerata_server::scan_cache::AiScanKey::new("m", Some("m"), &[]),
+            // The cockpit's scan request, not the command line's flags.
+            args: serde_json::json!({
+                "repos": ["acme/one"],
+                "rules": [{"id": "unchecked-input", "directive": "Check inputs."}],
+                "mode": "parallel",
+            }),
+            estimate_usd: None,
+            include_alternatives: false,
+            origin: rs::RunOrigin::Cockpit,
+        })
+        .unwrap();
+        store.run_id()
+        // Dropped here: the process that started it is gone, so the run is Interrupted.
+    };
+    let before = std::fs::read(rs::runs_dir().join(&run_id).join("run.json")).unwrap();
+
+    let llm = Scripted::new(Outage::default());
+    for target in [run_id.as_str(), "latest"] {
+        let sink = Mutex::new(Vec::new());
+        let err = resume_inspect(
+            target,
+            &[repo.path().to_path_buf()],
+            None,
+            None,
+            true,
+            &store(),
+            seams(&llm, &sink),
+        )
+        .await
+        .expect_err("a cockpit run is not resumed by the command line");
+        let InspectError::Failed(why) = &err else {
+            panic!("expected a plain refusal, got {err}");
+        };
+        assert!(why.contains("cockpit"), "{why}");
+        if target == "latest" {
+            // `latest` skips runs it cannot resume, and says where the one it found belongs.
+            assert!(why.contains("started from the command line"), "{why}");
+            assert!(
+                why.contains("is resumed in the place that started it"),
+                "{why}"
+            );
+        } else {
+            assert!(why.contains(&run_id), "{why}");
+            assert!(why.contains("Run what remains"), "{why}");
+        }
+        assert!(!why.contains('\u{2014}'), "{why}");
+        assert_ne!(err.exit_code(), 0);
+    }
+    assert_eq!(llm.calls(), 0, "nothing was sent to the model");
+    let after = std::fs::read(rs::runs_dir().join(&run_id).join("run.json")).unwrap();
+    assert_eq!(before, after, "the refusal leaves the saved run untouched");
+}
