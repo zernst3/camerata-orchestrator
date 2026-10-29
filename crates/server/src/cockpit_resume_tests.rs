@@ -243,11 +243,18 @@ async fn a_cockpit_scan_with_a_failed_part_resumes_through_the_endpoint_and_the_
     );
     let record = crate::run_store::read_record(&run_id).unwrap();
     assert_eq!(record.status, crate::run_store::RunStatus::Incomplete);
+    assert_eq!(
+        record.project_id.as_deref(),
+        Some(project.id.as_str()),
+        "a scan started from the cockpit records the project it was started in"
+    );
     let audit_calls_before = stage_calls(&log).iter().filter(|s| *s == "audit").count();
     assert!(audit_calls_before > 0);
 
     // ── GET /api/inspections/:id/plan: what remains, and no refusal ───────────────────────────────
-    let plan = run_resume_plan(Path(run_id.clone())).await.into_response();
+    let plan = run_resume_plan(State(state.clone()), Path(run_id.clone()))
+        .await
+        .into_response();
     assert_eq!(plan.status(), StatusCode::OK);
     let plan = body_json(plan).await;
     assert!(plan["refusal"].is_null(), "{plan}");
@@ -304,7 +311,12 @@ async fn a_cockpit_scan_with_a_failed_part_resumes_through_the_endpoint_and_the_
     assert_eq!(record.status, crate::run_store::RunStatus::Complete);
 
     // ── A complete run: the plan says so and the resume endpoint starts nothing ───────────
-    let plan = body_json(run_resume_plan(Path(run_id.clone())).await.into_response()).await;
+    let plan = body_json(
+        run_resume_plan(State(state.clone()), Path(run_id.clone()))
+            .await
+            .into_response(),
+    )
+    .await;
     assert_eq!(plan["state"], "complete", "{plan}");
     assert!(
         plan["refusal"]
@@ -338,7 +350,7 @@ async fn the_run_endpoints_answer_404_for_an_unknown_run() {
     let state_dir = tempfile::tempdir().unwrap();
     let _state_dir = camerata_test_env::EnvGuard::set("CAMERATA_STATE_DIR", state_dir.path());
     let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
-    let plan = run_resume_plan(Path("no-such-run".to_string()))
+    let plan = run_resume_plan(State(state.clone()), Path("no-such-run".to_string()))
         .await
         .into_response();
     assert_eq!(plan.status(), StatusCode::NOT_FOUND);
@@ -390,8 +402,198 @@ fn saved_cockpit_run(
         estimate_usd: None,
         include_alternatives: false,
         origin: rs::RunOrigin::Cockpit,
+        project_id: None,
     })
     .unwrap()
+}
+
+/// A cockpit run of the repos `repos` (name and folder), started in `project_id` (`None` = saved
+/// before runs recorded their project), not finished.
+fn saved_cockpit_run_in(
+    project_id: Option<&str>,
+    repos: &[(&str, &std::path::Path)],
+) -> Arc<crate::run_store::RunStore> {
+    use crate::run_store as rs;
+    rs::RunStore::create(rs::NewRun {
+        project_key: "listing-test".to_string(),
+        repos: repos
+            .iter()
+            .map(|(name, dir)| (name.to_string(), dir.to_path_buf()))
+            .collect(),
+        models: rs::ModelsRecord {
+            audit: "m".to_string(),
+            calibration: "m".to_string(),
+            fix: String::new(),
+            backend: "cli".to_string(),
+            mode: "parallel".to_string(),
+        },
+        ai_scan_key: crate::scan_cache::AiScanKey::new("m", Some("m"), &[]),
+        args: serde_json::to_value(audit_request()).unwrap(),
+        estimate_usd: None,
+        include_alternatives: false,
+        origin: rs::RunOrigin::Cockpit,
+        project_id: project_id.map(str::to_string),
+    })
+    .unwrap()
+}
+
+/// The ids `GET /api/inspections?project_id=` lists for `project_id`.
+async fn listed_ids(app: &axum::Router, project_id: &str) -> Vec<String> {
+    let (status, body) = get_json(
+        app.clone(),
+        &format!("/api/inspections?project_id={project_id}"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    body["inspections"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["id"].as_str().unwrap().to_string())
+        .collect()
+}
+
+/// A saved cockpit inspection belongs to the project it was started in. Project X holds
+/// [acme/one] and project Y holds [acme/one, acme/two]: Y's scan of acme/one alone is listed in Y
+/// and not in X (the repos alone would offer it to both), and resuming it from X is refused in
+/// words naming both projects, with no job started. A cockpit run saved before runs recorded a
+/// project is placed by its repos only when exactly one project holds them all, and otherwise
+/// listed nowhere (and refused), with the reason in the run listing the command line shows.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial(process_env)]
+async fn a_saved_cockpit_inspection_is_listed_and_resumed_only_in_the_project_that_started_it() {
+    let root = tempfile::tempdir().unwrap();
+    let state_dir = root.path().join("state");
+    let one = root.path().join("one");
+    let two = root.path().join("two");
+    for d in [&state_dir, &one, &two] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    stage_fixture(&one);
+    stage_fixture(&two);
+    let _state_dir = camerata_test_env::EnvGuard::set("CAMERATA_STATE_DIR", &state_dir);
+
+    let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
+    let x = state
+        .projects
+        .create("Client X", vec!["acme/one".to_string()])
+        .unwrap();
+    let y = state
+        .projects
+        .create(
+            "Client Y",
+            vec!["acme/one".to_string(), "acme/two".to_string()],
+        )
+        .unwrap();
+    state
+        .settings
+        .set_repo_path("acme/one", Some(one.to_string_lossy().into_owned()));
+    state
+        .settings
+        .set_repo_path("acme/two", Some(two.to_string_lossy().into_owned()));
+    let app = router(state.clone());
+
+    // Y scanned acme/one alone; X never did.
+    let y_run = saved_cockpit_run_in(Some(&y.id), &[("acme/one", one.as_path())]).run_id();
+    assert_eq!(listed_ids(&app, &y.id).await, vec![y_run.clone()]);
+    assert!(
+        listed_ids(&app, &x.id).await.is_empty(),
+        "Y's inspection is not offered in X, though acme/one is one of X's repos"
+    );
+
+    // Resuming it from X is refused and starts nothing; the saved run is untouched.
+    assert!(state.projects.set_active(&x.id));
+    let refused = run_resume_start(State(state.clone()), Path(y_run.clone()))
+        .await
+        .into_response();
+    assert_eq!(refused.status(), StatusCode::CONFLICT);
+    let body = body_json(refused).await;
+    assert!(body["job_id"].is_null(), "no job was started: {body}");
+    let why = body["error"].as_str().unwrap().to_string();
+    assert!(
+        why.contains("Client Y") && why.contains("Client X"),
+        "the refusal names both projects: {why}"
+    );
+    assert_eq!(
+        crate::run_store::read_record(&y_run).unwrap().attempt,
+        1,
+        "the refused resume did not touch the run"
+    );
+    // The plan ("what would Run what remains do") is refused from X the same way: a run is
+    // previewed only in the project that started it. From Y it answers.
+    let plan = run_resume_plan(State(state.clone()), Path(y_run.clone()))
+        .await
+        .into_response();
+    assert_eq!(plan.status(), StatusCode::CONFLICT);
+    let why = body_json(plan).await["error"].as_str().unwrap().to_string();
+    assert!(
+        why.contains("Client Y") && why.contains("Client X"),
+        "the plan's refusal names both projects: {why}"
+    );
+    assert!(state.projects.set_active(&y.id));
+    let plan = run_resume_plan(State(state.clone()), Path(y_run.clone()))
+        .await
+        .into_response();
+    assert_eq!(plan.status(), StatusCode::OK);
+    assert!(state.projects.set_active(&x.id));
+
+    // An old cockpit run with no project id: acme/two is held by Y alone, so it is placed in Y.
+    let old_two = saved_cockpit_run_in(None, &[("acme/two", two.as_path())]).run_id();
+    assert!(listed_ids(&app, &y.id).await.contains(&old_two));
+    assert!(!listed_ids(&app, &x.id).await.contains(&old_two));
+    // acme/one is held by both projects: the old run is listed nowhere and says why in the run
+    // listing the command line shows.
+    let old_one = saved_cockpit_run_in(None, &[("acme/one", one.as_path())]).run_id();
+    assert!(!listed_ids(&app, &x.id).await.contains(&old_one));
+    assert!(!listed_ids(&app, &y.id).await.contains(&old_one));
+    let runs = crate::run_store::list_runs();
+    let summary = runs.iter().find(|r| r.run_id == old_one).unwrap();
+    assert!(
+        summary
+            .note
+            .as_deref()
+            .is_some_and(|n| n.contains("saved before runs recorded their project")),
+        "{:?}",
+        summary.note
+    );
+    // Neither project can resume it.
+    for open in [&x.id, &y.id] {
+        assert!(state.projects.set_active(open));
+        let refused = run_resume_start(State(state.clone()), Path(old_one.clone()))
+            .await
+            .into_response();
+        assert_eq!(refused.status(), StatusCode::CONFLICT);
+    }
+    // A run that names its project has no such note.
+    let named = runs.iter().find(|r| r.run_id == y_run).unwrap();
+    assert_eq!(named.project_id.as_deref(), Some(y.id.as_str()));
+    assert!(named.note.is_none());
+}
+
+/// A cockpit run's project id is read back from the record, and a record written before the field
+/// existed reads as no project.
+#[test]
+#[serial_test::serial(process_env)]
+fn a_run_record_without_a_project_id_reads_as_no_project() {
+    let state_dir = tempfile::tempdir().unwrap();
+    let repo = tempfile::tempdir().unwrap();
+    stage_fixture(repo.path());
+    let _state_dir = camerata_test_env::EnvGuard::set("CAMERATA_STATE_DIR", state_dir.path());
+    let named = saved_cockpit_run_in(Some("proj-1"), &[("acme/one", repo.path())]);
+    let id = named.run_id();
+    assert_eq!(
+        crate::run_store::read_record(&id)
+            .unwrap()
+            .project_id
+            .as_deref(),
+        Some("proj-1")
+    );
+    let path = crate::run_store::runs_dir().join(&id).join("run.json");
+    let mut json: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    json.as_object_mut().unwrap().remove("project_id");
+    std::fs::write(&path, json.to_string()).unwrap();
+    assert_eq!(crate::run_store::read_record(&id).unwrap().project_id, None);
 }
 
 /// `GET /api/inspections` lists the open project's saved inspections with where each stands, a

@@ -32,6 +32,57 @@ use crate::llm::{
     LlmResponse,
 };
 
+// ── The prompt seed ──────────────────────────────────────────────────────────────────────────
+
+/// What the journal does when it is asked to journal a call and no prompt seed is in scope.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SeedPolicy {
+    /// The call fails with the reason (tests: a journaled call without a seed is a bug).
+    Refuse,
+    /// The call goes ahead, with a loud warning on stderr and a note on the run.
+    WarnAndRecord,
+}
+
+/// The policy this build uses: tests refuse, production warns and records.
+const SEED_POLICY: SeedPolicy = if cfg!(test) {
+    SeedPolicy::Refuse
+} else {
+    SeedPolicy::WarnAndRecord
+};
+
+/// The note a run carries when a model call was journaled with no prompt seed in scope.
+pub(crate) const UNSEEDED_CALL_NOTE: &str = "a model call was made with no prompt seed in \
+     scope, so its prompt carries a random delimiter token; its stored reply cannot match the \
+     same call on a resume and that call is paid for again";
+
+/// Check that the journal may journal a call: its prompt seed must be in scope (`in_scope`).
+pub(crate) fn check_seed(
+    store: &RunStore,
+    in_scope: bool,
+    policy: SeedPolicy,
+) -> anyhow::Result<()> {
+    if in_scope {
+        return Ok(());
+    }
+    match policy {
+        SeedPolicy::Refuse => anyhow::bail!(
+            "a model call was journaled with no prompt seed in scope (wrap the run in \
+             prompt_frame::with_seed with the run's seed): {UNSEEDED_CALL_NOTE}"
+        ),
+        SeedPolicy::WarnAndRecord => {
+            if store.add_note(UNSEEDED_CALL_NOTE) {
+                eprintln!("[camerata-server] WARNING: {UNSEEDED_CALL_NOTE}");
+            }
+            Ok(())
+        }
+    }
+}
+
+/// [`check_seed`] for a call made now.
+fn require_seed(store: &RunStore) -> anyhow::Result<()> {
+    check_seed(store, crate::prompt_frame::seed_in_scope(), SEED_POLICY)
+}
+
 // ── What is stored ───────────────────────────────────────────────────────────────────────────
 
 /// A model reply as stored. [`LlmResponse`] is serialize-only, so this mirrors it.
@@ -403,6 +454,7 @@ impl<'a> JournalLlm<'a> {
 #[async_trait::async_trait]
 impl LlmPort for JournalLlm<'_> {
     async fn complete(&self, req: LlmRequest) -> anyhow::Result<LlmResponse> {
+        require_seed(&self.store)?;
         match plan_call(&self.store, &req) {
             Planned::Replay(resp) => Ok(*resp),
             Planned::Fresh(call) => {
@@ -418,6 +470,7 @@ impl LlmPort for JournalLlm<'_> {
         req: LlmRequest,
         on_delta: &mut (dyn for<'a> FnMut(&'a str) + Send),
     ) -> anyhow::Result<LlmResponse> {
+        require_seed(&self.store)?;
         match plan_call(&self.store, &req) {
             Planned::Replay(resp) => {
                 on_delta(&resp.text);
@@ -447,6 +500,7 @@ struct JournalRealtime {
 #[async_trait::async_trait]
 impl LlmPort for JournalRealtime {
     async fn complete(&self, req: LlmRequest) -> anyhow::Result<LlmResponse> {
+        require_seed(&self.store)?;
         match plan_call(&self.store, &req) {
             Planned::Replay(resp) => Ok(*resp),
             Planned::Fresh(call) => {
@@ -462,6 +516,7 @@ impl LlmPort for JournalRealtime {
         req: LlmRequest,
         on_delta: &mut (dyn for<'a> FnMut(&'a str) + Send),
     ) -> anyhow::Result<LlmResponse> {
+        require_seed(&self.store)?;
         match plan_call(&self.store, &req) {
             Planned::Replay(resp) => {
                 on_delta(&resp.text);
@@ -578,6 +633,7 @@ impl BatchApi for JournalBatchApi {
     }
 
     async fn submit(&self, items: Vec<BatchItem>) -> anyhow::Result<String> {
+        require_seed(&self.store)?;
         let mut h = Sha256::new();
         h.update(serde_json::to_vec(&items).unwrap_or_default());
         let key = hex(&h.finalize());

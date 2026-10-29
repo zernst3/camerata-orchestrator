@@ -6072,8 +6072,13 @@ checks and the estimate are shared, not copied.
 **Saved inspections in the cockpit.** `GET /api/inspections` lists the open project's saved runs
 (`run_store::list_inspections_in`): id, start time, repos, status (`complete`, `incomplete`,
 `interrupted` or `live`), the number of parts that remain, the expected cost of finishing it, the
-origin and whether the cockpit can resume it. A run belongs to the project when every repo it
-inspected is one of the project's repos, by name or by folder. `live` means a process holds the
+origin and whether the cockpit can resume it. A cockpit run records the id of the project it was
+started in (`RunRecord.project_id`) and belongs to that project only, however many repos two
+projects share; `POST /api/inspections/:id/resume` and `GET /api/inspections/:id/plan` refuse (409,
+naming both projects) when the open project is not that one. A command line run belongs to the project that holds every repo it
+inspected, by name or by folder. A cockpit run saved before the project id was recorded is placed
+by its repos only when exactly one project holds all of them; otherwise it is listed under no
+project, and `RunSummary.note` says why. `live` means a process holds the
 run's lock: it is never offered. The routes live under `/api/inspections` so they are not confused
 with the agent runs under `/api/runs`; the first cockpit build called `/api/runs/:id/plan` and
 `/api/runs/:id/resume`, and those two paths remain as aliases of the same handlers for one
@@ -6093,7 +6098,16 @@ would need the project's settings (repo folders, backend, rules) that only the a
 in a task local, so two audit jobs in one server each draw tokens from their own seed however
 they interleave, and one ending cannot clear the other's. Work handed to another task
 (`spawn_blocking`) does not inherit it and must be given a token already drawn (the candidate
-locator is).
+locator is). The journal checks for the seed before it journals a call or submits a batch: a call
+with none in scope would carry a random token, its stored reply could never match on a resume and
+it would be paid for again. In the test builds that is an error; in production the call goes ahead
+(the money is spent either way), `[camerata-server] WARNING` is printed once and the run record
+keeps the note (`RunRecord.notes`). The note is not left in `run.json` alone: `run_store::note_report`
+puts the run's notes on the finished report's `message` (the cockpit shows it under the scan
+result), and `camerata inspect` prints each as `run note: ...` in its summary (and on stderr with the
+failure lines when the export is refused as incomplete). The test build's refusal applies to the
+server crate's own unit tests (`cfg!(test)`); the end-to-end tests under `tests/` link the
+production build and see the warning and the note instead.
 
 **Exit codes of `camerata inspect`.** 0 complete (or resumed a complete run); 1 failure or refused
 resume; 3 release gate refused; 4 spend limit; 5 outage stop; 6 incomplete for another reason.

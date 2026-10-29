@@ -256,6 +256,11 @@ pub struct RunRecord {
     /// line's.
     #[serde(default)]
     pub origin: RunOrigin,
+    /// The cockpit project the run was started in (its id); `None` for the command line's runs
+    /// and for cockpit runs saved before this field. A cockpit run belongs to this project and to
+    /// no other, whatever repos the two share.
+    #[serde(default)]
+    pub project_id: Option<String>,
     /// How many times a process has worked on the run: 1 for the first, 2 after one resume.
     pub attempt: u32,
     pub engine_version: String,
@@ -277,6 +282,11 @@ pub struct RunRecord {
     /// Why the last attempt ended incomplete, in plain words.
     #[serde(default)]
     pub incomplete_reasons: Vec<String>,
+    /// Things worth knowing about how the run was worked that are not a failure (for example a
+    /// model call made with no prompt seed in scope, which a resume cannot replay). Kept across
+    /// attempts; each note appears once.
+    #[serde(default)]
+    pub notes: Vec<String>,
 }
 
 /// What a process working on a run looks like from outside.
@@ -657,6 +667,8 @@ pub struct NewRun {
     pub include_alternatives: bool,
     /// Where the run is started from.
     pub origin: RunOrigin,
+    /// The cockpit project the run is started in (`None` for the command line).
+    pub project_id: Option<String>,
 }
 
 /// A fresh run id: the time, then six random hex digits.
@@ -738,6 +750,7 @@ impl RunStore {
             updated_at: now(),
             status: RunStatus::Running,
             origin: new.origin,
+            project_id: new.project_id,
             attempt: 1,
             engine_version: engine_version(),
             project_key: new.project_key,
@@ -750,6 +763,7 @@ impl RunStore {
             estimate_usd: new.estimate_usd,
             plan: plan_for(&new.repos, new.include_alternatives),
             incomplete_reasons: Vec::new(),
+            notes: Vec::new(),
         };
         let lock = RunLock::acquire(&dir)?;
         let store = Arc::new(Self {
@@ -827,6 +841,20 @@ impl RunStore {
             *slot = u8::from_str_radix(hex.get(i * 2..i * 2 + 2).unwrap_or("00"), 16).unwrap_or(0);
         }
         out
+    }
+
+    /// Record a note on the run (once: the same text is not added twice) and write the record.
+    /// Returns whether the note is new.
+    pub fn add_note(&self, note: &str) -> bool {
+        {
+            let mut state = self.lock_state();
+            if state.record.notes.iter().any(|n| n == note) {
+                return false;
+            }
+            state.record.notes.push(note.to_string());
+        }
+        let _ = self.persist();
+        true
     }
 
     pub(crate) fn lock_state(&self) -> std::sync::MutexGuard<'_, StoreState> {
@@ -1022,12 +1050,25 @@ pub struct RunSummary {
     pub state: RunState,
     /// Where the run was started.
     pub origin: RunOrigin,
+    /// The cockpit project the run belongs to, when it recorded one.
+    #[serde(default)]
+    pub project_id: Option<String>,
+    /// Why the cockpit may not list the run under a project, in plain words: set for a cockpit run
+    /// saved before runs recorded their project.
+    #[serde(default)]
+    pub note: Option<String>,
     pub project_key: String,
     pub repos: Vec<String>,
     pub attempt: u32,
     pub remaining: Vec<String>,
     pub incomplete_reasons: Vec<String>,
 }
+
+/// The note a cockpit run saved before runs recorded their project carries in the listing.
+pub const UNPLACED_COCKPIT_RUN_NOTE: &str =
+    "this cockpit run was saved before runs recorded their \
+     project, so the cockpit lists it under a project only when exactly one project holds all of \
+     its repos; when several do (or none) it is listed under no project";
 
 /// Every saved run, newest first.
 pub fn list_runs() -> Vec<RunSummary> {
@@ -1049,6 +1090,9 @@ pub fn list_runs_in(root: &Path) -> Vec<RunSummary> {
                 created_at: record.created_at.clone(),
                 state,
                 origin: record.origin,
+                project_id: record.project_id.clone(),
+                note: (record.origin == RunOrigin::Cockpit && record.project_id.is_none())
+                    .then(|| UNPLACED_COCKPIT_RUN_NOTE.to_string()),
                 project_key: record.project_key.clone(),
                 repos: record.repos.iter().map(|r| r.name.clone()).collect(),
                 attempt: record.attempt,
@@ -1413,6 +1457,28 @@ pub fn preview_resume(run_id: &str) -> Result<ResumePreview, RunStoreError> {
         estimate,
         refusal,
     })
+}
+
+/// Put the run's notes ([`RunRecord::notes`], for example a model call made with no prompt seed
+/// in scope) on the report the operator sees, after the report's own notes in `message`, each
+/// once. A note that stays in `run.json` alone is one no one reads; the cockpit shows the
+/// message under the scan result and the command line prints the notes in its summary.
+pub fn note_report(store: &RunStore, report: &mut crate::onboard::ScanReport) {
+    let notes = store.record().notes;
+    if notes.is_empty() {
+        return;
+    }
+    let mut parts: Vec<String> = report
+        .message
+        .take()
+        .map(|m| m.split(" · ").map(str::to_string).collect())
+        .unwrap_or_default();
+    for note in notes {
+        if !parts.iter().any(|p| p == &note) {
+            parts.push(note);
+        }
+    }
+    report.message = Some(parts.join(" · "));
 }
 
 /// The end of an attempt, from the finished report: tells the store which parts failed and

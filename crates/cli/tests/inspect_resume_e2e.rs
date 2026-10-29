@@ -192,6 +192,10 @@ fn stage_fixture(dest: &Path) {
         let out = std::process::Command::new("git")
             .current_dir(dest)
             .args(args)
+            // A fixed commit time: the commit is a function of the content alone, so every
+            // staging of the fixture is the same commit (see the test below).
+            .env("GIT_AUTHOR_DATE", "2026-01-01T00:00:00Z")
+            .env("GIT_COMMITTER_DATE", "2026-01-01T00:00:00Z")
             .output()
             .unwrap();
         assert!(out.status.success(), "git {args:?}");
@@ -201,6 +205,33 @@ fn stage_fixture(dest: &Path) {
     g(&["config", "user.name", "Resume E2E"]);
     g(&["add", "."]);
     g(&["commit", "-q", "-m", "fixture"]);
+}
+
+/// The cause of the flake in the two-repo resume test: the export's spreadsheet stores each
+/// distinct string once, and the provenance sheet lists every repo's commit. The fixture repos
+/// were committed with the wall clock, so two repos staged in the same second got the same commit
+/// (one stored string) and two staged a second apart got different ones (two stored strings);
+/// which of the two the baseline pair and the resumed pair fell into was a matter of timing, and
+/// the sheets then differed by one string. A fixture commit is a function of its content alone.
+#[test]
+fn fixture_repos_have_the_same_commit_whenever_they_are_staged() {
+    let (first, second) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    stage_fixture(first.path());
+    std::thread::sleep(std::time::Duration::from_millis(2100));
+    stage_fixture(second.path());
+    let head = |dir: &Path| {
+        let out = std::process::Command::new("git")
+            .current_dir(dir)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .unwrap();
+        String::from_utf8(out.stdout).unwrap()
+    };
+    assert_eq!(
+        head(first.path()),
+        head(second.path()),
+        "the same fixture is the same commit, whenever it is staged"
+    );
 }
 
 fn args(repos: &[&Path], names: &[&str], export: &Path) -> InspectArgs {
@@ -358,6 +389,47 @@ fn comparable(path: &Path) -> BTreeMap<String, String> {
     out
 }
 
+/// Where two texts differ, in a form that explains itself: the changed middle of each, with a
+/// little of the text around it, and (for a spreadsheet's shared strings) the strings only one of
+/// them holds. A text that is one long line is common here, so lines are not the unit.
+fn describe_difference(resumed: &str, uninterrupted: &str) -> String {
+    let (a, b) = (resumed.as_bytes(), uninterrupted.as_bytes());
+    let prefix = a.iter().zip(b).take_while(|(x, y)| x == y).count();
+    let suffix = a[prefix..]
+        .iter()
+        .rev()
+        .zip(b[prefix..].iter().rev())
+        .take_while(|(x, y)| x == y)
+        .count();
+    let window = |text: &str, bytes: &[u8]| -> String {
+        let mut from = prefix.saturating_sub(60);
+        while !text.is_char_boundary(from) {
+            from -= 1;
+        }
+        let mut to = (bytes.len() - suffix + 60).min(bytes.len());
+        while !text.is_char_boundary(to) {
+            to += 1;
+        }
+        text[from..to].to_string()
+    };
+    let strings = |text: &str| -> std::collections::BTreeSet<String> {
+        text.split("<t>")
+            .skip(1)
+            .filter_map(|s| s.split("</t>").next())
+            .map(str::to_string)
+            .collect()
+    };
+    let (sa, sb) = (strings(resumed), strings(uninterrupted));
+    format!(
+        "first difference at byte {prefix}\n  resumed:       ...{}...\n  uninterrupted: ...{}...\n  \
+         strings only in the resumed run: {:?}\n  strings only in the uninterrupted run: {:?}",
+        window(resumed, a),
+        window(uninterrupted, b),
+        sa.difference(&sb).collect::<Vec<_>>(),
+        sb.difference(&sa).collect::<Vec<_>>(),
+    )
+}
+
 fn assert_same_exports(resumed: &Path, uninterrupted: &Path) {
     let a = comparable(resumed);
     let b = comparable(uninterrupted);
@@ -369,16 +441,12 @@ fn assert_same_exports(resumed: &Path, uninterrupted: &Path) {
     for (name, text) in &a {
         if text != &b[name] {
             let other = &b[name];
-            let first = text
-                .lines()
-                .zip(other.lines())
-                .enumerate()
-                .find(|(_, (x, y))| x != y);
             panic!(
-                "{name} differs between the resumed and the uninterrupted run; first difference: \
-                 {first:?}; lengths {} and {}",
+                "{name} differs between the resumed and the uninterrupted run; lengths {} and \
+                 {}\n{}",
                 text.len(),
-                other.len()
+                other.len(),
+                describe_difference(text, other)
             );
         }
     }
@@ -1028,6 +1096,7 @@ async fn a_cockpit_run_is_refused_by_the_command_line_with_words_naming_the_cock
             estimate_usd: None,
             include_alternatives: false,
             origin: rs::RunOrigin::Cockpit,
+            project_id: None,
         })
         .unwrap();
         store.run_id()

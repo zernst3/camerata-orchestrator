@@ -7575,6 +7575,107 @@ fn synchronous_scan_mode(
 /// job id IMMEDIATELY, so the request never blocks for the (possibly many-minute) run. The
 /// UI polls `GET /api/onboard/audit/job/:id` for progress + incremental findings, then the
 /// final report. The work is decoupled from this request — it survives a dropped poll.
+/// The repos one project holds, by name and by folder, for deciding which project a saved run
+/// belongs to.
+struct ProjectRepoSet {
+    id: String,
+    names: std::collections::HashSet<String>,
+    dirs: Vec<std::path::PathBuf>,
+}
+
+impl ProjectRepoSet {
+    /// Whether every repo the run inspected is one of this project's repos (by name or folder).
+    fn holds_all_repos_of(&self, record: &crate::run_store::RunRecord) -> bool {
+        let canon = |p: &std::path::Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+        !record.repos.is_empty()
+            && record.repos.iter().all(|repo| {
+                self.names.contains(&repo.name)
+                    || self.dirs.contains(&canon(std::path::Path::new(&repo.dir)))
+            })
+    }
+}
+
+/// The repo set of every project.
+fn project_repo_sets(state: &AppState) -> Vec<ProjectRepoSet> {
+    let canon = |p: &std::path::Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+    state
+        .projects
+        .list()
+        .into_iter()
+        .map(|project| ProjectRepoSet {
+            id: project.id.clone(),
+            names: project.repos.iter().cloned().collect(),
+            dirs: resolve_local_sources(state, &project.repos)
+                .sources
+                .iter()
+                .map(|(_, dir)| canon(dir))
+                .collect(),
+        })
+        .collect()
+}
+
+/// Whether the saved run `record` belongs to the project `project_id`.
+///
+/// A cockpit run belongs to the project it was started in and to no other, whatever repos two
+/// projects share: a consultant's second client must never be offered (or resume) the first
+/// client's inspection. A cockpit run saved before runs recorded their project is placed by its
+/// repos, and only when exactly one project holds all of them (with several holders it is listed
+/// nowhere rather than guessed). The command line's runs match by repos.
+fn run_belongs_to_project(
+    sets: &[ProjectRepoSet],
+    project_id: &str,
+    record: &crate::run_store::RunRecord,
+) -> bool {
+    use crate::run_store::RunOrigin;
+    match (record.origin, record.project_id.as_deref()) {
+        (RunOrigin::Cockpit, Some(owner)) => owner == project_id,
+        (RunOrigin::Cockpit, None) => {
+            let holders: Vec<&ProjectRepoSet> = sets
+                .iter()
+                .filter(|set| set.holds_all_repos_of(record))
+                .collect();
+            holders.len() == 1 && holders[0].id == project_id
+        }
+        (RunOrigin::Cli, _) => sets
+            .iter()
+            .any(|set| set.id == project_id && set.holds_all_repos_of(record)),
+    }
+}
+
+/// The refusal for resuming `record` while the open (active) project is not the one it belongs
+/// to, or `None` when it belongs to the open project. A resume runs the run's saved request under
+/// the open project and can land the report in it, so it must be the project that started the run.
+fn resume_project_refusal(
+    state: &AppState,
+    record: &crate::run_store::RunRecord,
+) -> Option<String> {
+    let Some(open) = state.projects.active() else {
+        return Some("open the project this inspection belongs to before resuming it".to_string());
+    };
+    let sets = project_repo_sets(state);
+    if run_belongs_to_project(&sets, &open.id, record) {
+        return None;
+    }
+    Some(match record.project_id.as_deref() {
+        Some(owner) => {
+            let name = state.projects.get(owner).map_or_else(
+                || "another project".to_string(),
+                |p| format!("\"{}\"", p.name),
+            );
+            format!(
+                "this inspection was started in {name}, not in the open project \"{}\"; open \
+                 {name} to run what remains, so its report lands in the right project",
+                open.name
+            )
+        }
+        None => format!(
+            "this inspection was saved before runs recorded their project and cannot be placed \
+             in the open project \"{}\"; run it again from the scan screen",
+            open.name
+        ),
+    })
+}
+
 /// The query of `GET /api/inspections`.
 #[derive(Debug, Default, serde::Deserialize)]
 struct InspectionsQuery {
@@ -7600,21 +7701,12 @@ async fn list_saved_inspections(
     let Some(project) = project else {
         return Json(serde_json::json!({ "project_id": null, "inspections": [] }));
     };
-    let names: std::collections::HashSet<String> = project.repos.iter().cloned().collect();
-    let canon = |p: &std::path::Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
-    let dirs: Vec<std::path::PathBuf> = resolve_local_sources(&state, &project.repos)
-        .sources
-        .iter()
-        .map(|(_, dir)| canon(dir))
-        .collect();
+    let sets = project_repo_sets(&state);
     let project_id = project.id.clone();
+    let listed_for = project_id.clone();
     let listed = tokio::task::spawn_blocking(move || {
         crate::run_store::list_inspections_in(&crate::run_store::runs_dir(), |record| {
-            !record.repos.is_empty()
-                && record.repos.iter().all(|repo| {
-                    names.contains(&repo.name)
-                        || dirs.contains(&canon(std::path::Path::new(&repo.dir)))
-                })
+            run_belongs_to_project(&sets, &listed_for, record)
         })
     })
     .await
@@ -7624,7 +7716,21 @@ async fn list_saved_inspections(
 
 /// What "Run what remains" would do for a saved run: the parts that remain, what they should
 /// cost, and the plain reason the resume cannot start now when it cannot.
-async fn run_resume_plan(Path(id): Path<String>) -> impl IntoResponse {
+/// A run is previewed only in the project that started it, as it is resumed (409 otherwise, in
+/// the same words).
+async fn run_resume_plan(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    if let Ok(record) = crate::run_store::read_record(&id) {
+        if let Some(why) = resume_project_refusal(&state, &record) {
+            return (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({ "error": why })),
+            )
+                .into_response();
+        }
+    }
     match crate::run_store::preview_resume(&id) {
         Ok(preview) => (StatusCode::OK, Json(serde_json::json!(preview))).into_response(),
         Err(e) => (
@@ -7652,6 +7758,13 @@ async fn run_resume_start(
                 .into_response()
         }
     };
+    if let Some(why) = resume_project_refusal(&state, &record) {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({ "error": why })),
+        )
+            .into_response();
+    }
     let req: AuditReq =
         match serde_json::from_value(record.args) {
             Ok(r) => r,
@@ -8040,6 +8153,7 @@ pub(crate) async fn start_audit_job(
                     estimate_usd: None,
                     include_alternatives: corpus.is_some(),
                     origin: rs::RunOrigin::Cockpit,
+                    project_id: project_id.clone(),
                 }) {
                     Ok(store) => {
                         if let Some(p) = &prior {
@@ -8240,6 +8354,9 @@ pub(crate) async fn start_audit_job(
             if let Some(store) = &run_store {
                 report.run_id = Some(store.run_id());
                 crate::run_store::finish_run(store, &report, true);
+                // What the run wants the operator to know (a model call made with no prompt
+                // seed in scope, say) goes on the report the cockpit shows, not run.json alone.
+                crate::run_store::note_report(store, &mut report);
             }
 
             // ── Enforcement-ledger scan-capture is done by the synchronous audit handler ──

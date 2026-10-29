@@ -310,6 +310,10 @@ pub struct InspectOutcome {
     /// The saved run this inspection is (`camerata inspect --resume <id>` runs what remains).
     /// `None` when the run could not be saved.
     pub run_id: Option<String>,
+    /// What the saved run wants the operator to know that is not a failure
+    /// (`RunRecord::notes`: a model call made with no prompt seed in scope, say). Printed in the
+    /// summary; empty when the run could not be saved or has nothing to say.
+    pub run_notes: Vec<String>,
 }
 
 impl InspectOutcome {
@@ -404,6 +408,8 @@ pub struct IncompleteRun {
     pub failure_lines: Vec<String>,
     /// The saved run, so the operator can resume it.
     pub run_id: Option<String>,
+    /// The saved run's notes (see [`InspectOutcome::run_notes`]), for stderr.
+    pub run_notes: Vec<String>,
 }
 
 impl InspectError {
@@ -1065,6 +1071,7 @@ pub async fn run_inspect_pipeline_with(
                 estimate_usd: controls.estimate_hint_usd,
                 include_alternatives: corpus.is_some(),
                 origin: camerata_server::run_store::RunOrigin::Cli,
+                project_id: None,
             }) {
                 Ok(store) => {
                     if let Some(prior) = &incremental_prior {
@@ -1307,7 +1314,7 @@ pub async fn run_inspect_pipeline_with(
     {
         Ok(released) => released,
         Err(e) => {
-            finish_run(store.as_ref(), &report, false);
+            let run_notes = finish_run(store.as_ref(), &report, false);
             return Err(match e {
                 // The refusal still tells the operator what the run did and did not do.
                 InspectError::Incomplete(refusal) => {
@@ -1317,6 +1324,7 @@ pub async fn run_inspect_pipeline_with(
                         ledger_path: ledger_file.clone(),
                         failure_lines: failure_lines.clone(),
                         run_id: run_id.clone(),
+                        run_notes,
                     }))
                 }
                 other => other,
@@ -1329,7 +1337,7 @@ pub async fn run_inspect_pipeline_with(
         released.report.checks.len()
     );
     let written = std::fs::write(&args.export, &zip_bytes);
-    finish_run(store.as_ref(), &report, written.is_ok());
+    let run_notes = finish_run(store.as_ref(), &report, written.is_ok());
     written.map_err(|e| format!("could not write {}: {e}", args.export.display()))?;
 
     Ok(InspectOutcome {
@@ -1350,6 +1358,7 @@ pub async fn run_inspect_pipeline_with(
         incomplete_reasons: report.incomplete_reasons(),
         failure_lines,
         run_id,
+        run_notes,
     })
 }
 
@@ -1376,10 +1385,12 @@ fn finish_run(
     store: Option<&Arc<camerata_server::run_store::RunStore>>,
     report: &camerata_server::onboard::ScanReport,
     export_written: bool,
-) {
-    if let Some(store) = store {
-        camerata_server::run_store::finish_run(store, report, export_written);
-    }
+) -> Vec<String> {
+    let Some(store) = store else {
+        return Vec::new();
+    };
+    camerata_server::run_store::finish_run(store, report, export_written);
+    store.record().notes
 }
 
 /// Production entry point for `camerata inspect --resume`: the key and the credential store are
@@ -1724,9 +1735,16 @@ pub fn format_outcome_report(outcome: &InspectOutcome) -> String {
             .as_ref()
             .map(render_outage)
             .unwrap_or_default();
+    // What the saved run wants the operator to know that is not a failure: in the summary, not in
+    // run.json alone.
+    let notes: String = outcome
+        .run_notes
+        .iter()
+        .map(|note| format!("run note: {note}\n"))
+        .collect();
     format!(
         "camerata inspect: wrote {} ({} bytes) — backend: {backend_label}, findings: {}\n\
-         {}\nintegrity ledger: {}\n{}\nefficiency measures: {}\n{cap}\n{}{telemetry}",
+         {}\nintegrity ledger: {}\n{}\nefficiency measures: {}\n{cap}{notes}\n{}{telemetry}",
         outcome.export_path.display(),
         outcome.export_zip_bytes,
         outcome.findings_count,
@@ -1907,6 +1925,7 @@ mod tests {
             outage: None,
             incomplete_reasons: Vec::new(),
             failure_lines: Vec::new(),
+            run_notes: Vec::new(),
         };
         let text = format_outcome_report(&outcome);
         assert!(
@@ -2491,6 +2510,7 @@ mod tests {
             outage: None,
             incomplete_reasons: Vec::new(),
             failure_lines: Vec::new(),
+            run_notes: Vec::new(),
         };
         let text = format_outcome_report(&outcome);
         assert!(text.contains("/tmp/out.zip"), "{text}");
@@ -2505,6 +2525,45 @@ mod tests {
             !text.contains("STAGE TELEMETRY"),
             "a scan that made no model call has no telemetry table: {text}"
         );
+    }
+
+    /// A note the saved run carries (a model call made with no prompt seed in scope, which a
+    /// resume cannot replay) is in the summary the operator reads, not in run.json alone; a run
+    /// with no notes prints no such block.
+    #[test]
+    fn format_outcome_report_prints_the_runs_notes() {
+        let mut outcome = InspectOutcome {
+            run_id: Some("run-1".to_string()),
+            export_path: PathBuf::from("/tmp/out.zip"),
+            export_zip_bytes: 1,
+            backend: ProjectBackend::Cli,
+            batch: false,
+            actual_usage: None,
+            findings_count: 0,
+            ledger_summary: String::new(),
+            ledger_path: PathBuf::from("/tmp/l.json"),
+            release_gate: "release gate: passed (6 checks)".to_string(),
+            stage_telemetry: None,
+            preflight: None,
+            efficiency: camerata_server::efficiency::EfficiencyConfig::default(),
+            cost_cap: None,
+            outage: None,
+            incomplete_reasons: Vec::new(),
+            failure_lines: Vec::new(),
+            run_notes: Vec::new(),
+        };
+        let text = format_outcome_report(&outcome);
+        assert!(!text.contains("run note"), "{text}");
+        outcome.run_notes = vec![
+            "a model call was made with no prompt seed in scope".to_string(),
+            "second".to_string(),
+        ];
+        let text = format_outcome_report(&outcome);
+        assert!(
+            text.contains("run note: a model call was made with no prompt seed in scope"),
+            "{text}"
+        );
+        assert!(text.contains("run note: second"), "{text}");
     }
 
     /// Rank 1: the per-stage cost table closes the operator's output, so the next sweep can read
@@ -2545,6 +2604,7 @@ mod tests {
             outage: None,
             incomplete_reasons: Vec::new(),
             failure_lines: Vec::new(),
+            run_notes: Vec::new(),
         };
         let text = format_outcome_report(&outcome);
         assert!(text.contains("STAGE TELEMETRY"), "{text}");

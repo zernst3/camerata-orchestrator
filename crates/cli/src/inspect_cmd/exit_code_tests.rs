@@ -22,6 +22,7 @@ fn outcome() -> InspectOutcome {
         outage: None,
         incomplete_reasons: Vec::new(),
         failure_lines: Vec::new(),
+        run_notes: Vec::new(),
     }
 }
 
