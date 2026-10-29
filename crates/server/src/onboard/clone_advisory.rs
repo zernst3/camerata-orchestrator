@@ -366,6 +366,9 @@ async fn judge_rule(
             pass: FAILED_PASS_NAME.to_string(),
             reason: format!("{}: {reason}", rule.id()),
             files_not_reviewed: 0,
+            class: crate::ai_audit::FailureClass::Content,
+            files: Vec::new(),
+            attempts: Vec::new(),
         });
     }
     judged

@@ -806,6 +806,9 @@ fn record_repo_not_inspected(
         pass: REPOSITORY_READ_PASS.to_string(),
         reason: reason.to_string(),
         files_not_reviewed: 0,
+        class: crate::ai_audit::FailureClass::Io,
+        files: Vec::new(),
+        attempts: Vec::new(),
     });
     // Every rule that would have run on this repo is on record as not run, so none of them can
     // read as "checked, found nothing" for it, and the rules that did run on other repos are
@@ -2729,6 +2732,9 @@ pub async fn audit_repos_with_llm_controlled(
                                  this repository was reviewed. This inspection is incomplete."
                             .to_string(),
                         files_not_reviewed: files.len(),
+                        class: crate::ai_audit::FailureClass::SpendLimit,
+                        files: Vec::new(),
+                        attempts: Vec::new(),
                     });
                 } else if run_ai_review {
                     // H11: every carried finding names the commit it was last found at, so a
@@ -3004,6 +3010,9 @@ pub async fn audit_repos_with_llm_controlled(
                                         .to_string(),
                                     reason: e.to_string(),
                                     files_not_reviewed: files.len(),
+                                    class: crate::ai_audit::classify_pass_error(&e),
+                                    files: Vec::new(),
+                                    attempts: camerata_llm::failure::attempts_of(&e),
                                 });
                                 ai_all_unreviewed = true;
                                 let msg = format!("{spec}: AI audit skipped ({e})");
@@ -3043,6 +3052,9 @@ pub async fn audit_repos_with_llm_controlled(
                                 .to_string(),
                             reason: why.clone(),
                             files_not_reviewed: files.len(),
+                            class: crate::ai_audit::FailureClass::AuthOrBilling,
+                            files: Vec::new(),
+                            attempts: Vec::new(),
                         });
                     }
                 }

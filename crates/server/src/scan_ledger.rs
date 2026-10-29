@@ -1588,6 +1588,9 @@ pub fn stage_disclosure(
             stage.deduped,
         ),
         files_not_reviewed: 0,
+        class: crate::ai_audit::FailureClass::Content,
+        files: Vec::new(),
+        attempts: Vec::new(),
     })
 }
 
@@ -1707,6 +1710,9 @@ pub fn rule_disclosure(
         pass: "mechanical-enforcement coverage".to_string(),
         reason: format!("{} {}", rule.rule_id, reason),
         files_not_reviewed: 0,
+        class: crate::ai_audit::FailureClass::Content,
+        files: Vec::new(),
+        attempts: Vec::new(),
     })
 }
 

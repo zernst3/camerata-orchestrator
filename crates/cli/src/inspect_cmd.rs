@@ -1499,6 +1499,7 @@ mod tests {
                     rule_batch: 2,
                     n_rule_batches: 2,
                     rule_ids: vec!["A-1".into()],
+                    class: camerata_server::cost_cap::FailureClass::SpendLimit,
                 }],
                 not_run_stages: Vec::new(),
                 notes: Vec::new(),
@@ -2373,6 +2374,9 @@ mod tests {
             reason: "SEC-NO-RAW-SQL-CONCAT-1: commodity taint pass did not run: semgrep absent"
                 .to_string(),
             files_not_reviewed: 0,
+            class: camerata_server::ai_audit::FailureClass::Content,
+            files: Vec::new(),
+            attempts: Vec::new(),
         }];
 
         let text = render_ledger_summary(&ledger, &failed_passes, false);

@@ -25,6 +25,9 @@ fn report_with_gaps() -> crate::onboard::ScanReport {
             pass: "audit pass[all] 2/3 · rules 1/1".to_string(),
             reason: "the model's reply was not valid JSON after 3 attempts".to_string(),
             files_not_reviewed: 12,
+            class: crate::ai_audit::FailureClass::Content,
+            files: Vec::new(),
+            attempts: Vec::new(),
         },
         // Not a pass over files: disclosed in the methodology, not as a Coverage file gap.
         FailedPass {
@@ -32,6 +35,9 @@ fn report_with_gaps() -> crate::onboard::ScanReport {
             pass: "rule-alternative recommendations".to_string(),
             reason: "timed out".to_string(),
             files_not_reviewed: 0,
+            class: crate::ai_audit::FailureClass::Content,
+            files: Vec::new(),
+            attempts: Vec::new(),
         },
     ];
     report.ledger.record_input(ScanInputFacts {

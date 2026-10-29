@@ -66,6 +66,8 @@ pub struct RuleAlternatives {
     pub kind: Option<camerata_rules::RuleKind>,
 }
 
+pub use camerata_llm::failure::{AttemptRecord, FailureClass};
+
 /// A named audit pass that failed or timed out for a repo — e.g. the alternative-
 /// recommendation pass hitting the CLI's hang timeout. Captured here instead of only
 /// `eprintln!`-ing to stderr, so the report export (`report_export::build_report_json`) can
@@ -90,6 +92,18 @@ pub struct FailedPass {
     /// still loads. Rendered under Coverage by [`Self::coverage_line`].
     #[serde(default)]
     pub files_not_reviewed: usize,
+    /// Why the part failed. Decides what the run did next (second try, outage count) and what the
+    /// operator is told. `serde(default)` (content) so a ledger written before the class loads.
+    #[serde(default)]
+    pub class: FailureClass,
+    /// The repo-relative files the part was shown and so did not review, for the failure report.
+    /// Empty for a part that is not over files. Operator only; never rendered into an export.
+    #[serde(default)]
+    pub files: Vec<String>,
+    /// What each attempt got back, oldest first, the end-of-run second try included. Operator
+    /// only; never rendered into an export.
+    #[serde(default)]
+    pub attempts: Vec<AttemptRecord>,
 }
 
 impl FailedPass {
@@ -137,6 +151,12 @@ struct PassFailure {
     /// recovered from the part that arrived (they are in the round's findings; the rest of the
     /// pass was not reviewed). `None` for a pass that produced nothing.
     recovered: Option<usize>,
+    /// Why the pass failed: what the run does with it next (second try, outage count).
+    class: FailureClass,
+    /// What each attempt at the call got back, from the transport.
+    attempts: Vec<AttemptRecord>,
+    /// The repo-relative files the pass was shown, for the failure report.
+    file_names: Vec<String>,
 }
 
 impl PassFailure {
@@ -154,6 +174,9 @@ impl PassFailure {
             error: error.to_string(),
             files: 0,
             recovered: None,
+            class: FailureClass::Content,
+            attempts: Vec::new(),
+            file_names: Vec::new(),
         }
     }
 
@@ -164,7 +187,23 @@ impl PassFailure {
             error: error.to_string(),
             files: 0,
             recovered: None,
+            class: FailureClass::Content,
+            attempts: Vec::new(),
+            file_names: Vec::new(),
         }
+    }
+
+    /// The same failure, recording the cause: its class and the transport's attempt trail.
+    fn caused_by(mut self, e: &anyhow::Error) -> Self {
+        self.class = classify_pass_error(e);
+        self.attempts = camerata_llm::failure::attempts_of(e);
+        self
+    }
+
+    /// The same failure, naming the files the pass was shown.
+    fn with_file_names<'a>(mut self, names: impl Iterator<Item = &'a String>) -> Self {
+        self.file_names = names.cloned().collect();
+        self
     }
 
     /// The same failure, recording that the pass was shown `files` files.
@@ -218,8 +257,28 @@ fn failed_pass_rows(repo: &str, answered: usize, failures: &[PassFailure]) -> Ve
                 ),
             },
             files_not_reviewed: f.files,
+            class: f.class,
+            files: f.file_names.clone(),
+            attempts: f.attempts.clone(),
         })
         .collect()
+}
+
+/// The class of a pass error. A cut-off reply and a model refusal are content by construction;
+/// everything else is classified by the transport's own typed failure, else from its text.
+pub(crate) fn classify_pass_error(e: &anyhow::Error) -> FailureClass {
+    if e.downcast_ref::<PartialPassReply>().is_some() || crate::llm::is_refusal(e) {
+        return FailureClass::Content;
+    }
+    camerata_llm::failure::classify_error(e)
+}
+
+/// The error a pass returns when the spend limit stopped a retry its reply needed.
+fn spend_limit_before_retry_error() -> anyhow::Error {
+    anyhow::Error::new(camerata_llm::failure::LlmCallFailure::new(
+        FailureClass::SpendLimit,
+        SPEND_LIMIT_BEFORE_RETRY,
+    ))
 }
 
 /// One rule's recommendation: which option the AI judged best-fitting for this codebase (or
@@ -558,6 +617,7 @@ impl UsageMeter {
                 repo: repo.to_string(),
                 stage: stage.to_string(),
                 partial,
+                class: camerata_llm::failure::FailureClass::SpendLimit,
             });
         }
     }
@@ -3180,6 +3240,9 @@ pub async fn verify_findings(
                      any finding this run"
                 .to_string(),
             files_not_reviewed: 0,
+            class: crate::ai_audit::FailureClass::Content,
+            files: Vec::new(),
+            attempts: Vec::new(),
         });
     }
     // D5: the deterministic severity floor runs regardless of whether the LLM calibration
@@ -5162,6 +5225,9 @@ pub async fn generate_fix_specifics(
                  to held for manual review rather than shipped with no fix at all)"
             ),
             files_not_reviewed: 0,
+            class: crate::ai_audit::FailureClass::Content,
+            files: Vec::new(),
+            attempts: Vec::new(),
         });
     }
 
@@ -5512,7 +5578,7 @@ async fn audit_pass(
     // The spend limit stopped a retry the reply needed: the pass has no usable answer, and it
     // says why rather than parsing a cut-off or malformed reply as "no findings".
     if stopped_by_cap {
-        anyhow::bail!("{SPEND_LIMIT_BEFORE_RETRY}");
+        return Err(spend_limit_before_retry_error());
     }
     // A reply that is still not JSON is a FAILED pass, never "no findings": parsing it would
     // return an empty list indistinguishable from a clean chunk. The caller records it as a
@@ -6099,6 +6165,7 @@ async fn run_passes(
                             n_rule_batches: n_b,
                             rule_ids: batch.iter().map(|(id, _)| id.clone()).collect(),
                             files: chunks[ci].iter().map(|(path, _)| path.clone()).collect(),
+                            class: camerata_llm::failure::FailureClass::SpendLimit,
                         });
                     }
                     if let Some((jstore, jid)) = job {
@@ -6224,8 +6291,10 @@ async fn run_passes(
                 ok += 1;
             }
             Some(Err(e)) => {
-                let failure =
-                    PassFailure::at(label, ci, n_c, bi, n_b, &e).with_files(chunks[ci].len());
+                let failure = PassFailure::at(label, ci, n_c, bi, n_b, &e)
+                    .with_files(chunks[ci].len())
+                    .with_file_names(chunks[ci].iter().map(|(path, _)| path))
+                    .caused_by(&e);
                 // A reply cut off at the output limit keeps the complete findings that arrived.
                 match e.downcast::<PartialPassReply>() {
                     Ok(partial) => {
@@ -10261,6 +10330,9 @@ pub async fn audit_repo(
                             pass: "rule-alternative recommendations".to_string(),
                             reason,
                             files_not_reviewed: 0,
+                            class: crate::ai_audit::FailureClass::Content,
+                            files: Vec::new(),
+                            attempts: Vec::new(),
                         });
                     }
                     for rec in &recs {
@@ -10316,6 +10388,9 @@ pub async fn audit_repo(
                         pass: "rule-alternative recommendations".to_string(),
                         reason: e.to_string(),
                         files_not_reviewed: 0,
+                        class: classify_pass_error(&e),
+                        files: Vec::new(),
+                        attempts: camerata_llm::failure::attempts_of(&e),
                     });
                 }
             }
@@ -10508,6 +10583,9 @@ pub async fn audit_repo(
                     name_list(&unknown)
                 ),
                 files_not_reviewed: 0,
+                class: crate::ai_audit::FailureClass::Content,
+                files: Vec::new(),
+                attempts: Vec::new(),
             });
         }
         if !unchanged.is_empty() {
@@ -10520,6 +10598,9 @@ pub async fn audit_repo(
                     name_list(&unchanged)
                 ),
                 files_not_reviewed: 0,
+                class: crate::ai_audit::FailureClass::Content,
+                files: Vec::new(),
+                attempts: Vec::new(),
             });
         }
     }
@@ -11723,6 +11804,9 @@ mod cache_schedule_tests;
 
 #[cfg(test)]
 mod retry_tests;
+
+#[cfg(test)]
+mod run_completion_tests;
 
 #[cfg(test)]
 mod injection_tests;

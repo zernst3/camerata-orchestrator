@@ -315,6 +315,7 @@ pub(crate) async fn submit_round(
                             .iter()
                             .map(|(path, _)| path.clone())
                             .collect(),
+                        class: camerata_llm::failure::FailureClass::SpendLimit,
                     });
                 }
                 continue;

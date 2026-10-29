@@ -152,6 +152,7 @@ fn recording_the_efficiency_set_and_a_cost_cap_changes_nothing_in_the_client_exp
             rule_batch: 2,
             n_rule_batches: 2,
             rule_ids: vec!["ARCH-X-1".to_string()],
+            class: camerata_server::cost_cap::FailureClass::SpendLimit,
         }],
         not_run_stages: Vec::new(),
         notes: vec!["batch NOT submitted".to_string()],

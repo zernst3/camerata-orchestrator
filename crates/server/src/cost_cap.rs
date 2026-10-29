@@ -51,6 +51,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::efficiency::EfficiencyConfig;
+pub use camerata_llm::failure::FailureClass;
 
 /// Everything about HOW a run executes that is not WHAT it scans: which efficiency measures are
 /// on and how much it may spend. Built once per run, carried on the run's
@@ -209,6 +210,10 @@ pub struct NotRunPass {
     /// not reviewed by this pass, so the incremental cache must not record it as audited.
     #[serde(default)]
     pub files: Vec<String>,
+    /// Why this pass did not run: the spend limit, or an outage stop. A ledger written before
+    /// the class existed holds only spend-limit refusals, so that is the default.
+    #[serde(default = "FailureClass::spend_limit")]
+    pub class: FailureClass,
 }
 
 /// A stage that did not run, or did not finish, because of the cap.
@@ -221,6 +226,9 @@ pub struct NotRunStage {
     /// run); false when it never started.
     #[serde(default)]
     pub partial: bool,
+    /// Why this stage did not run; see [`NotRunPass::class`].
+    #[serde(default = "FailureClass::spend_limit")]
+    pub class: FailureClass,
 }
 
 /// How much of a rule's checking the cap left undone.
@@ -333,6 +341,9 @@ impl CostCapRecord {
                 // The files of this chunk were not checked by this pass. Counted so the
                 // incremental cache and the completeness check treat the repo as unreviewed.
                 files_not_reviewed: first.files.len(),
+                class: first.class,
+                files: first.files.clone(),
+                attempts: Vec::new(),
             });
             i = j;
         }
@@ -350,6 +361,9 @@ impl CostCapRecord {
                 }
                 .to_string(),
                 files_not_reviewed: 0,
+                class: stage.class,
+                files: Vec::new(),
+                attempts: Vec::new(),
             });
         }
         out
@@ -408,6 +422,7 @@ mod tests {
             rule_batch: batch,
             n_rule_batches: 4,
             rule_ids: rules.iter().map(|r| r.to_string()).collect(),
+            class: camerata_llm::failure::FailureClass::SpendLimit,
         }
     }
 
@@ -562,6 +577,7 @@ mod tests {
                 repo: "acme/api".into(),
                 stage: "calibration".into(),
                 partial: false,
+                class: camerata_llm::failure::FailureClass::SpendLimit,
             }],
             notes: vec![],
         };
@@ -596,6 +612,7 @@ mod tests {
                 repo: "r".into(),
                 stage: "calibration".into(),
                 partial: true,
+                class: camerata_llm::failure::FailureClass::SpendLimit,
             }],
             ..CostCapRecord::default()
         };

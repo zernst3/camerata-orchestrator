@@ -554,6 +554,7 @@ fn once_a_pass_was_refused_every_later_stage_is_blocked_even_below_the_cap() {
         rule_batch: 1,
         n_rule_batches: 1,
         rule_ids: vec!["R-1".into()],
+        class: camerata_llm::failure::FailureClass::SpendLimit,
     });
     for stage in [STAGE_ALTERNATIVES, STAGE_CALIBRATION, STAGE_FIX, STAGE_DEEP] {
         assert!(meter.stage_blocked("o/r", stage), "{stage} must not start");
