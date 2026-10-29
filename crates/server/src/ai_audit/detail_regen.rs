@@ -573,6 +573,8 @@ async fn run_detail_round(
     batch_size: usize,
     last_error: &mut Option<String>,
     rejections: &mut DetailRejections,
+    trail: &mut super::StageTrail,
+    second_try: bool,
 ) -> Vec<usize> {
     let mut still_pending = Vec::new();
     for batch in pending.chunks(batch_size.max(1)) {
@@ -611,6 +613,7 @@ async fn run_detail_round(
                 // A refusal is billed: it counts toward the spend limit like any answered call
                 // (`record_failed`), and the reason the call failed reaches the failed pass.
                 meter_failed(meter, Stage::DetailRegeneration, &e);
+                trail.note_error(&e, second_try);
                 *last_error = Some(format!("{e:#}"));
                 still_pending.extend(batch.iter().copied());
                 continue;
@@ -720,6 +723,7 @@ pub(crate) async fn regenerate_full_details(
     let mut pending: Vec<usize> = (0..total).collect();
     let mut last_error: Option<String> = None;
     let mut rejections = DetailRejections::default();
+    let mut trail = super::StageTrail::default();
     // The stage boundary check: stopped by the spend limit before it began, every finding keeps
     // its short detail, marked.
     let blocked = meter.is_some_and(|m| m.stage_blocked(repo, STAGE_DETAIL));
@@ -744,8 +748,40 @@ pub(crate) async fn regenerate_full_details(
                 round_batch_size(round),
                 &mut last_error,
                 &mut rejections,
+                &mut trail,
+                false,
             )
             .await;
+        }
+        // END-OF-RUN SECOND TRY: what the rounds could not write gets one more try, one finding
+        // at a time (the smallest prompt), through the same admission and spend checks. A stopped
+        // run sends nothing.
+        if !pending.is_empty() && !meter.is_some_and(UsageMeter::outage_stopped) {
+            trail.note_unusable(
+                "no usable explanation was written after the stage's own rounds",
+                false,
+            );
+            pending = run_detail_round(
+                llm,
+                repo,
+                &system,
+                nonce,
+                model,
+                meter,
+                files,
+                &directives,
+                &mut findings,
+                &pending,
+                1,
+                &mut last_error,
+                &mut rejections,
+                &mut trail,
+                true,
+            )
+            .await;
+            if !pending.is_empty() {
+                trail.note_unusable("no usable explanation was written on the second try", true);
+            }
         }
     }
     if rejections.total() > 0 {
@@ -791,9 +827,9 @@ pub(crate) async fn regenerate_full_details(
                 })
                 .unwrap_or_default(),
             files_not_reviewed: 0,
-            class: crate::ai_audit::FailureClass::Content,
+            class: trail.class(),
             files: Vec::new(),
-            attempts: Vec::new(),
+            attempts: trail.attempts.clone(),
             scope_note: false,
         });
     }

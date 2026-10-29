@@ -302,6 +302,77 @@ pub(crate) fn classify_pass_error(e: &anyhow::Error) -> FailureClass {
     camerata_llm::failure::classify_error(e)
 }
 
+/// What a stage's failed calls looked like, kept for its failed pass: the class of the last
+/// failure and every attempt with its time, the end-of-run second try marked.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct StageTrail {
+    pub attempts: Vec<AttemptRecord>,
+    pub class: Option<FailureClass>,
+}
+
+impl StageTrail {
+    /// A call of the stage failed with `e`: keep the transport's own attempt records (or one
+    /// describing the failure when the error carries none).
+    pub(crate) fn note_error(&mut self, e: &anyhow::Error, second_try: bool) {
+        let class = classify_pass_error(e);
+        let mut records = camerata_llm::failure::attempts_of(e);
+        if records.is_empty() {
+            records.push(Self::describe(class, &e.to_string()));
+        }
+        for r in &mut records {
+            r.second_try = second_try;
+            if r.model.is_empty() {
+                r.model = resolve_audit_model(None);
+            }
+        }
+        self.attempts.extend(records);
+        self.class = Some(class);
+    }
+
+    /// The stage's calls answered but the answer was unusable (no fix, no estimate): keep one
+    /// record saying so, so the failed pass shows when each try ended without a result.
+    pub(crate) fn note_unusable(&mut self, message: &str, second_try: bool) {
+        let mut record = Self::describe(FailureClass::Content, message);
+        record.second_try = second_try;
+        record.model = resolve_audit_model(None);
+        self.attempts.push(record);
+        self.class.get_or_insert(FailureClass::Content);
+    }
+
+    fn describe(class: FailureClass, message: &str) -> AttemptRecord {
+        let mut record = AttemptRecord::new("", "");
+        record.error_type = Some(class.as_str().to_string());
+        record.message = camerata_llm::failure::scrub_message(
+            message,
+            camerata_llm::failure::MAX_RECORD_MESSAGE_CHARS,
+        );
+        record
+    }
+
+    /// The class of the failed pass: that of the last failure, else content.
+    pub(crate) fn class(&self) -> FailureClass {
+        self.class.unwrap_or(FailureClass::Content)
+    }
+}
+
+/// The error a stage returns when both its tries failed: the second failure with the whole
+/// trail (the first try's records first, the second's marked).
+pub(crate) fn error_with_both_tries(first: &anyhow::Error, second: anyhow::Error) -> anyhow::Error {
+    let mut trail = StageTrail::default();
+    trail.note_error(first, false);
+    trail.note_error(&second, true);
+    let class = classify_pass_error(&second);
+    let mut failure = camerata_llm::failure::LlmCallFailure::new(class, second.to_string());
+    failure.attempts = trail.attempts;
+    anyhow::Error::new(failure)
+}
+
+/// True when a failed call of a stage is worth the end-of-run second try: its class is transport
+/// or content, and the run has not stopped.
+pub(crate) fn second_try_allowed(e: &anyhow::Error, meter: Option<&UsageMeter>) -> bool {
+    classify_pass_error(e).is_retried_at_end() && !meter.is_some_and(UsageMeter::outage_stopped)
+}
+
 /// The error a pass returns when the spend limit stopped a retry its reply needed.
 fn spend_limit_before_retry_error() -> anyhow::Error {
     anyhow::Error::new(camerata_llm::failure::LlmCallFailure::new(
@@ -3193,7 +3264,12 @@ pub async fn verify_findings(
         .map(<[Finding]>::to_vec)
         .collect();
     let n_chunks = owned_chunks.len();
-    let mut calibrated: Vec<Finding> = Vec::with_capacity(findings.len());
+    // Each chunk's findings, in chunk order, so a chunk whose calls failed can be tried once more
+    // at the end and its result put back where it belongs.
+    let mut chunk_results: Vec<Vec<Finding>> = Vec::with_capacity(n_chunks);
+    // Chunks whose every call failed in a way worth another try: (chunk index, prompt, size).
+    let mut deferred: Vec<(usize, String, usize)> = Vec::new();
+    let mut trail = StageTrail::default();
 
     for (chunk_idx, chunk) in owned_chunks.into_iter().enumerate() {
         // SPEND CAP, between batches: once the cap is reached the remaining batches do not run.
@@ -3201,7 +3277,7 @@ pub async fn verify_findings(
         // stage is recorded as stopped part way.
         let _permit = match admit_stage(meter, repo, STAGE_CALIBRATION).await {
             Err(CapReached) => {
-                calibrated.extend(chunk);
+                chunk_results.push(chunk);
                 continue;
             }
             Ok(permit) => permit,
@@ -3283,6 +3359,7 @@ pub async fn verify_findings(
         // single pass (unchanged behavior).
         let passes = if thorough { 3 } else { 1 };
         let mut votes: Vec<String> = Vec::new();
+        let mut last_error: Option<anyhow::Error> = None;
         for pass_idx in 0..passes {
             // Routed through the STREAMING transport (not the flat `complete`) even when
             // there is no live transcript to feed — the CLI leg's heartbeat resets on any
@@ -3296,7 +3373,9 @@ pub async fn verify_findings(
             if let Err(e) = &calibration {
                 meter_failed(meter, Stage::Calibration, e);
             }
-            if let Ok(resp) = calibration {
+            if let Err(e) = calibration {
+                last_error = Some(e);
+            } else if let Ok(resp) = calibration {
                 if let Some(m) = meter {
                     m.record_stage(Stage::Calibration, &resp);
                 }
@@ -3335,14 +3414,65 @@ pub async fn verify_findings(
                 store.set_status(key, &session, "done");
             }
         }
-        calibrated.extend(chunk_calibrated);
+        // Every call for this chunk failed: set it aside for one more try once the other chunks
+        // are done, when the provider has had time to recover.
+        if votes.is_empty() {
+            if let Some(e) = &last_error {
+                trail.note_error(e, false);
+                if second_try_allowed(e, meter) {
+                    deferred.push((chunk_idx, prompt.clone(), chunk_len));
+                }
+            }
+        }
+        chunk_results.push(chunk_calibrated);
     }
+    // END-OF-RUN SECOND TRY for the chunks set aside above, through the same admission and spend
+    // checks; a stopped run sends nothing.
+    for (chunk_idx, prompt, _chunk_len) in deferred {
+        if meter.is_some_and(UsageMeter::outage_stopped) {
+            break;
+        }
+        let Ok(_permit) = admit_stage(meter, repo, STAGE_CALIBRATION).await else {
+            continue;
+        };
+        let mut req = LlmRequest::new(prompt)
+            .with_system(system.clone())
+            .with_max_tokens(scaled_max_tokens(
+                chunk_results[chunk_idx].len(),
+                VERIFY_TOKENS_PER_FINDING,
+            ))
+            .with_temperature(AUDIT_TEMPERATURE);
+        if let Some(m) = calibration_model {
+            req = req.with_model(m.to_string());
+        }
+        let mut on_delta = |_: &str| {};
+        match llm.complete_streaming(req, &mut on_delta).await {
+            Ok(resp) => {
+                if let Some(m) = meter {
+                    m.record_stage(Stage::Calibration, &resp);
+                }
+                let chunk = std::mem::take(&mut chunk_results[chunk_idx]);
+                chunk_results[chunk_idx] = apply_verdicts(&resp.text, chunk);
+            }
+            Err(e) => {
+                meter_failed(meter, Stage::Calibration, &e);
+                trail.note_error(&e, true);
+            }
+        }
+    }
+    let calibrated: Vec<Finding> = chunk_results.into_iter().flatten().collect();
     // C3-1b: a run-wide (not per-chunk/per-finding) disclosure — every finding calibration
     // was handed came back with NO usable effort estimate at all. Neither D5 (severity floor)
     // nor D6 (severity ceiling) below ever sets `effort`, so checking it here, before those
     // text-derived passes run, is equivalent to checking the final output and reads clearer.
     let mut estimation_failed_passes = Vec::new();
     if !calibrated.is_empty() && calibrated.iter().all(|f| f.effort.is_none()) {
+        if trail.attempts.is_empty() {
+            trail.note_unusable(
+                "the calibration reply held no usable remediation-effort estimate",
+                false,
+            );
+        }
         estimation_failed_passes.push(FailedPass {
             repo: repo.to_string(),
             pass: "hour estimation".to_string(),
@@ -3350,9 +3480,9 @@ pub async fn verify_findings(
                      any finding this run"
                 .to_string(),
             files_not_reviewed: 0,
-            class: crate::ai_audit::FailureClass::Content,
+            class: trail.class(),
             files: Vec::new(),
-            attempts: Vec::new(),
+            attempts: trail.attempts.clone(),
             scope_note: false,
         });
     }
@@ -4098,7 +4228,17 @@ async fn recommend_alternatives(
         // answer because the reply was cut off at the output limit.
         let mut unanswered_ids: std::collections::BTreeSet<String> =
             std::collections::BTreeSet::new();
-        for (digest_idx, digest) in digests.iter().enumerate() {
+        // The digests to ask, in order. A digest whose ask failed in a way worth another try is
+        // asked once more at the END of this list, after the others, inside this stage, so the
+        // decision exists before the scan reads it.
+        let mut work: Vec<(usize, bool)> = (0..digests.len()).map(|i| (i, false)).collect();
+        let mut first_failures: std::collections::HashMap<usize, anyhow::Error> =
+            std::collections::HashMap::new();
+        let mut next_work = 0usize;
+        while next_work < work.len() {
+            let (digest_idx, is_second) = work[next_work];
+            next_work += 1;
+            let digest = &digests[digest_idx];
             let pending: Vec<RuleAlternatives> = alt_chunk
                 .iter()
                 .zip(&best)
@@ -4147,7 +4287,21 @@ async fn recommend_alternatives(
                 feedback,
                 meter,
             };
-            let resp = ask.send(&pending, &session, &role).await?;
+            let resp = match ask.send(&pending, &session, &role).await {
+                Ok(resp) => resp,
+                Err(e) if is_second => {
+                    return Err(match first_failures.remove(&digest_idx) {
+                        Some(first) => error_with_both_tries(&first, e),
+                        None => e,
+                    });
+                }
+                Err(e) if second_try_allowed(&e, meter) => {
+                    first_failures.insert(digest_idx, e);
+                    work.push((digest_idx, true));
+                    continue;
+                }
+                Err(e) => return Err(e),
+            };
             let (mut answered, unanswered) = if resp.truncated {
                 // A reply cut off at the output limit: the entries that closed before the cut
                 // are answers; the rest were never reached.
@@ -4972,6 +5126,8 @@ async fn run_fix_specifics_round(
     pending: &[usize],
     batch_size: usize,
     ledger: &mut FixLedger,
+    trail: &mut StageTrail,
+    second_try: bool,
 ) -> Vec<usize> {
     let mut still_pending = Vec::new();
     // Bounded chunks (see `FIX_BATCH_SIZE`'s doc comment) — each is an independent streamed
@@ -5026,6 +5182,7 @@ async fn run_fix_specifics_round(
             // failure never re-queues findings OUTSIDE this chunk.
             Err(e) => {
                 meter_failed(meter, Stage::FixGeneration, &e);
+                trail.note_error(&e, second_try);
                 ledger.miss(batch, FixMiss::TransportFailed);
                 still_pending.extend(batch.iter().copied());
                 continue;
@@ -5231,6 +5388,7 @@ pub async fn generate_fix_specifics(
         return (findings, Vec::new());
     }
     let mut ledger = FixLedger::default();
+    let mut trail = StageTrail::default();
 
     // One delimiter token for every round, regeneration rounds included (see `crate::prompt_frame`),
     // drawn so that it occurs in none of the evidence or files it will frame.
@@ -5263,6 +5421,8 @@ pub async fn generate_fix_specifics(
             &pending,
             FIX_BATCH_SIZE,
             &mut ledger,
+            &mut trail,
+            false,
         )
         .await;
     }
@@ -5285,8 +5445,44 @@ pub async fn generate_fix_specifics(
             &pending,
             1,
             &mut ledger,
+            &mut trail,
+            false,
         )
         .await;
+    }
+
+    // END-OF-RUN SECOND TRY. What is still pending after every round gets one more solo try, when
+    // the provider has had the whole stage to recover, through the same admission and spend
+    // checks. A run that has stopped sends nothing. Only a part that fails this too is a
+    // give-up (and so a failed part, which locks a client export).
+    if !pending.is_empty() && !meter.is_some_and(UsageMeter::outage_stopped) {
+        trail.note_unusable(
+            "no usable fix was returned after the stage's own rounds",
+            false,
+        );
+        pending = run_fix_specifics_round(
+            llm,
+            repo,
+            &system,
+            &nonce,
+            fix_model,
+            meter,
+            corpus,
+            files,
+            &mut findings,
+            &mut feedback,
+            &pending,
+            1,
+            &mut ledger,
+            &mut trail,
+            true,
+        )
+        .await;
+        if !pending.is_empty() {
+            trail.note_unusable("no usable fix was returned on the second try", true);
+        }
+    } else if !pending.is_empty() {
+        trail.note_unusable("no usable fix was returned", false);
     }
 
     // C6-B3: a give-up is never silent and never leaves the finding with no fix line when a
@@ -5336,9 +5532,9 @@ pub async fn generate_fix_specifics(
                  to held for manual review rather than shipped with no fix at all)"
             ),
             files_not_reviewed: 0,
-            class: crate::ai_audit::FailureClass::Content,
+            class: trail.class(),
             files: Vec::new(),
-            attempts: Vec::new(),
+            attempts: trail.attempts.clone(),
             scope_note: false,
         });
     }
@@ -6793,10 +6989,48 @@ async fn run_passes_batch(
                     Err(ItemFailure {
                         reason: format!("{first}; resubmitted once and failed again: {again}"),
                         resubmittable: false,
+                        second_tryable: true,
                     }),
                 );
             }
             round.refused.extend(retry.refused);
+        }
+    }
+
+    // END-OF-RUN SECOND TRY. An item that is still without a reply after the follow-up batch is
+    // sent once more, in real time, through the same admission and spend checks (a stopped run
+    // sends nothing). An item whose batch was accepted is NOT sent again: it may be running and
+    // billed. A reply from the second try is used exactly like a batch reply; a failure keeps
+    // both tries on the record.
+    let mut second_try_errors: Vec<(&BatchWork, anyhow::Error)> = Vec::new();
+    if eff.batch_default && !meter.is_some_and(UsageMeter::outage_stopped) {
+        let realtime = llm.realtime();
+        let again: Vec<&BatchWork> = work
+            .iter()
+            .filter(|w| !round.refused.contains(&w.custom_id))
+            .filter(|w| match round.results.get(&w.custom_id) {
+                Some(Ok(_)) => false,
+                Some(Err(failure)) => failure.second_tryable,
+                None => true,
+            })
+            .collect();
+        for w in again {
+            let Ok(_permit) = admit_pass(meter).await else {
+                continue;
+            };
+            let session = format!("audit-{repo}-batch-{}-second-try", w.custom_id);
+            match send_audit_request(realtime, w.req.clone(), None, &session).await {
+                Ok(resp) => {
+                    if let Some(m) = meter {
+                        m.record_stage(Stage::ScanPass, &resp);
+                    }
+                    round.results.insert(w.custom_id.clone(), Ok(resp));
+                }
+                Err(e) => {
+                    meter_failed(meter, Stage::ScanPass, &e);
+                    second_try_errors.push((w, e));
+                }
+            }
         }
     }
 
@@ -6881,7 +7115,7 @@ async fn run_passes_batch(
     // on, every unusable reply was already counted wasted above: by the retry step, or by the
     // branch that sends no retry. Only the legacy path, which has neither, needs it here.
     let wasted_meter = if eff.batch_default { None } else { meter };
-    Ok(reassemble_batch_passes(
+    let mut out = reassemble_batch_passes(
         repo,
         label,
         n_c,
@@ -6894,7 +7128,19 @@ async fn run_passes_batch(
         wasted_meter,
         true,
         job,
-    ))
+    );
+    // A second try that failed too: the pass keeps its class and both tries.
+    for (w, e) in &second_try_errors {
+        let name = format!("{label} {}/{n_c} \u{b7} rules {}/{n_b}", w.ci + 1, w.bi + 1);
+        if let Some(failure) = out.4.iter_mut().find(|f| f.pass == name) {
+            let mut trail = StageTrail::default();
+            trail.note_unusable(&failure.error, false);
+            trail.note_error(e, true);
+            failure.class = trail.class();
+            failure.attempts = trail.attempts;
+        }
+    }
+    Ok(out)
 }
 
 /// Turn a finished batch's per-item outcomes into the shared pass result: each (chunk,
@@ -11997,6 +12243,9 @@ mod retry_tests;
 
 #[cfg(test)]
 mod run_completion_tests;
+
+#[cfg(test)]
+mod second_try_tests;
 
 #[cfg(test)]
 mod injection_tests;
@@ -21314,8 +21563,9 @@ mod tests {
             generate_fix_specifics(&completer, "o/r", vec![f], &[], None, Some(&meter), None).await;
         assert_eq!(out[0].fix_specific, None);
         assert!(!out[0].needs_review);
-        // MAX_FIX_REGENERATIONS + 1 batched rounds, plus 1 more solo retry (C6-B3.4).
-        assert_eq!(meter.snapshot().calls as usize, MAX_FIX_REGENERATIONS + 2);
+        // MAX_FIX_REGENERATIONS + 1 batched rounds, plus 1 more solo retry (C6-B3.4), plus the
+        // end-of-run second try.
+        assert_eq!(meter.snapshot().calls as usize, MAX_FIX_REGENERATIONS + 3);
         assert_eq!(
             failed_passes.len(),
             1,

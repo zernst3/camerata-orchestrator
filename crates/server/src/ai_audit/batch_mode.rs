@@ -231,6 +231,11 @@ pub(crate) struct ItemFailure {
     /// returned. `false` when its batch was accepted and the answer could not be retrieved: that
     /// batch may still be running and paid for, and a second copy would be paid for again.
     pub resubmittable: bool,
+    /// `true` when the end-of-run second try (one real-time call) may send the item again: the
+    /// same condition as [`Self::resubmittable`] for a first failure, and true for an item that
+    /// already failed its resubmission. `false` for an item whose batch was accepted, because a
+    /// second copy of a running batch's item is paid for again.
+    pub second_tryable: bool,
 }
 
 /// What one [`submit_round`] produced.
@@ -382,6 +387,7 @@ pub(crate) async fn submit_round(
                                 Err(ItemFailure {
                                     reason: error,
                                     resubmittable: true,
+                                    second_tryable: true,
                                 }),
                             );
                         }
@@ -403,6 +409,7 @@ pub(crate) async fn submit_round(
                     None => ItemFailure {
                         reason: format!("batch submission failed ({error})"),
                         resubmittable: true,
+                        second_tryable: true,
                     },
                     // The batch was accepted and is running or finished server-side. It is NOT
                     // resubmitted: that would pay for the same items again, outside the cap's
@@ -423,6 +430,7 @@ pub(crate) async fn submit_round(
                                  resubmitted"
                             ),
                             resubmittable: false,
+                            second_tryable: false,
                         }
                     }
                 };
