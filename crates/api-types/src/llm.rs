@@ -73,6 +73,13 @@ impl LlmResponse {
     }
 }
 
+/// Streamed to a listener when the CLI model backend is run again after an attempt that had
+/// already streamed text. The text before it came from the failed attempt and is superseded by
+/// what follows. It is a wire contract between the server's live transcript and the cockpit,
+/// which renders it as a short muted note (the ui-core transcript module) instead of a raw line.
+pub const CLI_ATTEMPT_SUPERSEDED: &str =
+    "\n[the text above came from an attempt that failed; the model was asked again]\n";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -117,10 +124,3 @@ mod tests {
         assert_eq!(resp_with_tokens(Some(0), 0, 0).cache_hit_ratio(), None);
     }
 }
-
-/// Streamed to a listener when the CLI model backend is run again after an attempt that had
-/// already streamed text. The text before it came from the failed attempt and is superseded by
-/// what follows. It is a wire contract between the server's live transcript and the cockpit,
-/// which renders it as a short muted note (the ui-core transcript module) instead of a raw line.
-pub const CLI_ATTEMPT_SUPERSEDED: &str =
-    "\n[the text above came from an attempt that failed; the model was asked again]\n";
