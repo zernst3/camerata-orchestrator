@@ -1113,6 +1113,99 @@ pub fn estimate_resume(run_id: &str) -> Result<ResumeEstimate, RunStoreError> {
     Ok(journal::estimate_remaining(&dir, &record))
 }
 
+/// Open the saved run `run_id` to resume it: refuse in plain words when anything its stored
+/// replies depend on differs now, and say what remains and what it should cost. Returns the opened
+/// store and the text to show before any work starts. THE one implementation of "resume": the
+/// command line (`camerata inspect --resume`) and the cockpit's "Run what remains" both come
+/// through it.
+pub fn open_for_resume(
+    run_id: &str,
+    sources: &[(String, PathBuf)],
+    ai_scan_key: &AiScanKey,
+    models: &ModelsRecord,
+) -> Result<(Arc<RunStore>, String), RunStoreError> {
+    let record = read_record(run_id)?;
+    let trees = sources
+        .iter()
+        .map(|(name, dir)| (name.clone(), tree_state(dir)))
+        .collect();
+    check_resume(&ResumeCheck {
+        record: &record,
+        ai_scan_key,
+        models,
+        trees,
+    })?;
+    let estimate = estimate_resume(run_id)?;
+    let store = RunStore::open(run_id)?;
+    Ok((store, estimate.render()))
+}
+
+/// What the cockpit shows before a resume is confirmed: what remains, what it should cost, and
+/// the reason the resume is not possible when it is not.
+#[derive(Debug, Clone, Serialize)]
+pub struct ResumePreview {
+    pub run_id: String,
+    pub state: RunState,
+    pub estimate: ResumeEstimate,
+    /// The text of [`ResumeEstimate::render`], ready to show.
+    pub text: String,
+    /// Why the resume cannot start now, in plain words; `None` when it can.
+    pub refusal: Option<String>,
+}
+
+/// The preview for `run_id`. The checks that need only the run and the folders (complete, in use,
+/// another version of Camerata, a commit or file that changed) are made here; the models and the
+/// rules are compared when the resume starts, and refuse then.
+pub fn preview_resume(run_id: &str) -> Result<ResumePreview, RunStoreError> {
+    let dir = runs_dir().join(run_id);
+    let record = load_record(&dir)?;
+    let estimate = journal::estimate_remaining(&dir, &record);
+    let trees = record
+        .repos
+        .iter()
+        .map(|r| (r.name.clone(), tree_state(Path::new(&r.dir))))
+        .collect();
+    let refusal = check_resume(&ResumeCheck {
+        record: &record,
+        ai_scan_key: &record.ai_scan_key,
+        models: &record.models,
+        trees,
+    })
+    .err()
+    .map(|e| e.to_string());
+    Ok(ResumePreview {
+        run_id: record.run_id.clone(),
+        state: record.state(liveness_of(&dir)),
+        text: estimate.render(),
+        estimate,
+        refusal,
+    })
+}
+
+/// The end of an attempt, from the finished report: tells the store which parts failed and
+/// whether the run is complete. Shared by the command line and the cockpit's scan job.
+pub fn finish_run(store: &RunStore, report: &crate::onboard::ScanReport, export_written: bool) {
+    let reasons = report.incomplete_reasons();
+    store.finish(&FinishOutcome {
+        failures: report
+            .failed_passes
+            .iter()
+            .map(|f| FinishFailure {
+                repo: f.repo.clone(),
+                pass: f.pass.clone(),
+                class: f.class.as_str().to_string(),
+                files: f.files.clone(),
+                scope_note: f.scope_note,
+            })
+            .collect(),
+        not_run: Vec::new(),
+        scan_reached_end: true,
+        export_written,
+        complete: reasons.is_empty() && export_written,
+        incomplete_reasons: reasons,
+    });
+}
+
 // ── Cleanup ──────────────────────────────────────────────────────────────────────────────────
 
 /// Delete the oldest runs of `project_key` beyond the newest `keep`. A run that is not complete

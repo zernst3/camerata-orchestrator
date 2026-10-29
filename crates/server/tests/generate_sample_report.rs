@@ -299,6 +299,7 @@ async fn regenerate_sample_report() {
     assert_eq!(audited_rule_ids.len(), 22);
 
     let report = ScanReport {
+        run_id: None,
  repos_not_inspected: Vec::new(),
  recommendations_by_repo: Vec::new(),
  patterns_across_services: Default::default(),

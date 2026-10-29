@@ -843,3 +843,44 @@ mod batches {
         assert_eq!(rows[0].response.as_ref().unwrap().cost_usd, Some(0.0));
     }
 }
+
+#[test]
+#[serial_test::serial(process_env)]
+fn the_preview_says_what_remains_and_why_a_resume_cannot_start() {
+    let (_s, _g) = state_dir();
+    let repo = git_repo();
+    let store = new_run(&repo);
+    let id = store.run_id();
+    store.finish(&FinishOutcome {
+        scan_reached_end: true,
+        failures: vec![FinishFailure {
+            repo: "acme/api".to_string(),
+            pass: "fix-specific generation".to_string(),
+            class: "transport".to_string(),
+            files: Vec::new(),
+            scope_note: false,
+        }],
+        incomplete_reasons: vec!["a part failed".to_string()],
+        ..FinishOutcome::default()
+    });
+    drop(store);
+    let preview = preview_resume(&id).unwrap();
+    assert_eq!(preview.state, RunState::Incomplete);
+    assert!(preview.refusal.is_none(), "{:?}", preview.refusal);
+    assert!(preview.text.contains("fix text"), "{}", preview.text);
+    // The repo moves on: the preview says why it cannot be resumed.
+    std::fs::write(repo.path().join("a.txt"), "changed\n").unwrap();
+    let preview = preview_resume(&id).unwrap();
+    assert!(
+        preview
+            .refusal
+            .as_deref()
+            .is_some_and(|r| r.contains("changes that were not there")),
+        "{:?}",
+        preview.refusal
+    );
+    assert!(matches!(
+        preview_resume("no-such-run"),
+        Err(RunStoreError::NotFound(_))
+    ));
+}

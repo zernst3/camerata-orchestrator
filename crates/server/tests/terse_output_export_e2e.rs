@@ -134,6 +134,7 @@ fn report(
     failed_passes: Vec<FailedPass>,
 ) -> ScanReport {
     ScanReport {
+        run_id: None,
         repos_not_inspected: Vec::new(),
         recommendations_by_repo: Vec::new(),
         patterns_across_services: Default::default(),

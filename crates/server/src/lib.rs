@@ -1425,6 +1425,8 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/onboard/audit/job/:id", get(onboard_audit_job))
         .route("/api/onboard/audit/job/:id/cancel", post(cancel_audit_job))
+        .route("/api/runs/:id/plan", get(run_resume_plan))
+        .route("/api/runs/:id/resume", post(run_resume_start))
         .route("/api/onboard/finding-context", get(onboard_finding_context))
         .route(
             "/api/onboard/finding-context/batch",
@@ -5874,7 +5876,7 @@ async fn onboard_scan(
 /// `repos` means PROJECT-LEVEL (scanned against every repo); a non-empty `repos` scopes the
 /// rule to just those repos. The UI sends each repo's selections plus the project-level set,
 /// and the audit scopes each repo to the rules that apply to it.
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, serde::Serialize)]
 struct AuditRuleReq {
     #[serde(default)]
     id: String,
@@ -5886,7 +5888,7 @@ struct AuditRuleReq {
     repos: Vec<String>,
 }
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, serde::Serialize)]
 struct AuditReq {
     /// Go ahead when some repos have no local clone; the report then lists them as not
     /// inspected and the release gate refuses to package it. Without it the audit is refused
@@ -7567,6 +7569,64 @@ fn synchronous_scan_mode(
 /// job id IMMEDIATELY, so the request never blocks for the (possibly many-minute) run. The
 /// UI polls `GET /api/onboard/audit/job/:id` for progress + incremental findings, then the
 /// final report. The work is decoupled from this request — it survives a dropped poll.
+/// What "Run what remains" would do for a saved run: the parts that remain, what they should
+/// cost, and the plain reason the resume cannot start now when it cannot.
+async fn run_resume_plan(Path(id): Path<String>) -> impl IntoResponse {
+    match crate::run_store::preview_resume(&id) {
+        Ok(preview) => (StatusCode::OK, Json(serde_json::json!(preview))).into_response(),
+        Err(e) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+/// Start the saved run `id` again as a background job that runs only the parts that are not
+/// done. The same job the scan button starts, with the saved request and `resume_run` set, so a
+/// refusal (the repo moved on, the rules changed, the run is in use) fails the job with the reason.
+async fn run_resume_start(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let record = match crate::run_store::read_record(&id) {
+        Ok(r) => r,
+        Err(e) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            )
+                .into_response()
+        }
+    };
+    let req: AuditReq =
+        match serde_json::from_value(record.args) {
+            Ok(r) => r,
+            Err(_) => return (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({
+                    "error": "this run was not started from the app, so the app cannot resume it; \
+                              use `camerata inspect --resume` instead"
+                })),
+            )
+                .into_response(),
+        };
+    let job_id = start_audit_job(
+        &state,
+        req,
+        AuditJobOptions {
+            resume_run: Some(id),
+            ..AuditJobOptions::default()
+        },
+    )
+    .await;
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({ "job_id": job_id })),
+    )
+        .into_response()
+}
+
 async fn onboard_audit_start(
     State(state): State<AppState>,
     Json(req): Json<AuditReq>,
@@ -7614,6 +7674,9 @@ pub(crate) struct AuditJobOptions {
     /// Set for a delta retest: the finished report is recorded as a `DeltaRetest` inspection
     /// entry instead of a full one.
     pub delta: Option<DeltaRetest>,
+    /// The saved run to resume instead of starting a new one ("Run what remains"). The job then
+    /// runs only the parts that are not done, through [`crate::run_store::open_for_resume`].
+    pub resume_run: Option<String>,
 }
 
 /// The commits a delta retest ran between.
@@ -7634,6 +7697,9 @@ pub(crate) async fn start_audit_job(
 ) -> String {
     let state = state.clone();
     let run_controls = req.run_controls_for(&state);
+    // What the run was asked, saved with the run so it can be resumed with the same request.
+    let request_json = serde_json::to_value(&req).unwrap_or(serde_json::Value::Null);
+    let resume_run = options.resume_run.clone();
     let repos: Vec<String> = req
         .repos
         .into_iter()
@@ -7872,8 +7938,94 @@ pub(crate) async fn start_audit_job(
                 }
             }
 
-            let (mut report, mut manifest) = crate::onboard::audit_repos_controlled(
+            // The run is saved from the start, so a failed part or an interruption costs only
+            // that part (see `crate::run_store`); a resume ("Run what remains") opens the saved run
+            // through the same function the command line uses.
+            use crate::run_store as rs;
+            let source_dirs: Vec<std::path::PathBuf> =
+                sources.iter().map(|(_, dir)| dir.clone()).collect();
+            let project_key = if source_dirs.len() == 1 {
+                crate::scan_cache::state_dir::repo_state_key(&source_dirs[0])
+            } else {
+                crate::scan_cache::state_dir::project_state_key(&source_dirs)
+            };
+            let audit_model = crate::ai_audit::resolve_audit_model(model.as_deref());
+            let ai_scan_key = crate::scan_cache::AiScanKey::new(
+                &audit_model,
+                calibration_model.as_deref(),
+                &selected,
+            );
+            let models_record = rs::ModelsRecord {
+                audit: audit_model,
+                calibration: calibration_model.clone().unwrap_or_default(),
+                fix: run_controls.fix_model.clone().unwrap_or_default(),
+                backend: match &backend_resolution {
+                    crate::llm::BackendResolution::Api => "api".to_string(),
+                    _ => "cli".to_string(),
+                },
+                mode: format!("{mode:?}").to_ascii_lowercase(),
+            };
+            let mut prior = prior;
+            let run_store = match &resume_run {
+                Some(id) => match rs::open_for_resume(id, &sources, &ai_scan_key, &models_record) {
+                    Ok((store, _estimate)) => {
+                        // The baseline the run started from, not one an attempt since replaced.
+                        prior = store.load_prior_manifest();
+                        Some(store)
+                    }
+                    Err(e) => {
+                        body_jobs.fail(&body_jid, e.to_string());
+                        return;
+                    }
+                },
+                None => match rs::RunStore::create(rs::NewRun {
+                    project_key: project_key.clone(),
+                    repos: sources.clone(),
+                    models: models_record,
+                    ai_scan_key,
+                    args: request_json,
+                    estimate_usd: None,
+                    include_alternatives: corpus.is_some(),
+                }) {
+                    Ok(store) => {
+                        if let Some(p) = &prior {
+                            store.save_prior_manifest(p);
+                        }
+                        let _ = rs::prune_runs(&project_key, rs::DEFAULT_KEEP_RUNS);
+                        Some(store)
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "[camerata-server] this scan cannot be saved ({e}); it runs, but it \
+                             cannot be resumed"
+                        );
+                        None
+                    }
+                },
+            };
+            let _token_seed = run_store
+                .as_ref()
+                .map(|s| crate::prompt_frame::seed_tokens(s.nonce_seed()));
+            let sessions = crate::llm::SessionSink::new();
+            let llm_backend = match &backend_resolution {
+                crate::llm::BackendResolution::Api => crate::llm::Backend::Api,
+                _ => crate::llm::Backend::Cli,
+            };
+            let real = crate::onboard::build_llm(
                 state.credential_store.as_ref(),
+                llm_backend,
+                Some(usage_ledger.clone()),
+            )
+            .with_session_sink(sessions.clone());
+            let journaled = run_store
+                .as_ref()
+                .map(|s| rs::journal::wrap(&real, s.clone()));
+            let model_seam: &dyn crate::llm::LlmPort = match &journaled {
+                Some(j) => j.as_ref(),
+                None => &real,
+            };
+            let (mut report, mut manifest) = crate::onboard::audit_repos_with_llm_controlled(
+                model_seam,
                 &sources,
                 &selected,
                 notes,
@@ -7888,13 +8040,13 @@ pub(crate) async fn start_audit_job(
                 soc2_enabled,
                 run_ai_review,
                 run_deterministic,
-                Some(usage_ledger.clone()),
                 backend_resolution,
                 corpus.as_ref(),
                 &chosen_options,
                 run_controls,
             )
             .await;
+            report.provenance.model_sessions = sessions.snapshot();
             // A repo that could not be read is on the report as not inspected, never just
             // absent, and the manifest is corrected for it before it is stored.
             record_unresolved_repos_before_storing(
@@ -8026,6 +8178,13 @@ pub(crate) async fn start_audit_job(
                 &mut report.findings,
                 corpus.as_ref(),
             );
+
+            // The run is complete when no part failed or was left out; a scan that is not can be
+            // resumed with "Run what remains". The export is the operator's own later step.
+            if let Some(store) = &run_store {
+                report.run_id = Some(store.run_id());
+                crate::run_store::finish_run(store, &report, true);
+            }
 
             // ── Enforcement-ledger scan-capture is done by the synchronous audit handler ──
             // (The job path is async; ledger capture lives in the synchronous `onboard_audit`
@@ -27900,6 +28059,7 @@ mod tests {
     /// Helper: build a minimal ScanReport with one active finding.
     fn make_scan_report(rule_id: &str) -> crate::onboard::ScanReport {
         crate::onboard::ScanReport {
+            run_id: None,
             repos_not_inspected: Vec::new(),
             recommendations_by_repo: Vec::new(),
             patterns_across_services: Default::default(),

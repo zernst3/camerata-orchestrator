@@ -98,6 +98,7 @@ fn minimal_report(ledger: ScanLedger, audited_rule_ids: Vec<String>) -> ScanRepo
         ..onboard::ScanProvenance::default()
     };
     ScanReport {
+        run_id: None,
         repos_not_inspected: Vec::new(),
         recommendations_by_repo: Vec::new(),
         patterns_across_services: Default::default(),

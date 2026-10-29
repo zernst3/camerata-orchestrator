@@ -1283,6 +1283,7 @@ pub async fn run_inspect_pipeline_with(
     // every exporter the rest of this function calls now takes `&SealedReport`, never
     // `&ScanReport` (see `ScanReport::seal`'s doc comment for the compile-time guarantee this
     // establishes).
+    report.run_id.clone_from(&run_id);
     let report = report.seal();
 
     // ── Phase 5: export — the exact `export_product` HTTP handler's assembly ───────────
@@ -1345,35 +1346,22 @@ pub async fn run_inspect_pipeline_with(
     })
 }
 
-/// Open the saved run `run_id` to resume it: refuse in plain words when anything its stored
-/// replies depend on differs now, and say what remains and what it should cost. Returns the
-/// opened store and the text to print before any work starts.
+/// Open the saved run `run_id` to resume it (the one implementation lives in
+/// [`camerata_server::run_store::open_for_resume`]; the cockpit's button uses it too).
 fn open_for_resume(
     run_id: &str,
     sources: &[(String, PathBuf)],
     ai_scan_key: &camerata_server::scan_cache::AiScanKey,
     models: &camerata_server::run_store::ModelsRecord,
 ) -> Result<(Arc<camerata_server::run_store::RunStore>, String), InspectError> {
-    use camerata_server::run_store as rs;
-    let as_error = |e: rs::RunStoreError| match e {
-        rs::RunStoreError::AlreadyComplete(m) => InspectError::AlreadyComplete(m),
-        other => InspectError::Failed(other.to_string()),
-    };
-    let record = rs::read_record(run_id).map_err(as_error)?;
-    let trees = sources
-        .iter()
-        .map(|(name, dir)| (name.clone(), rs::tree_state(dir)))
-        .collect();
-    rs::check_resume(&rs::ResumeCheck {
-        record: &record,
-        ai_scan_key,
-        models,
-        trees,
+    camerata_server::run_store::open_for_resume(run_id, sources, ai_scan_key, models).map_err(|e| {
+        match e {
+            camerata_server::run_store::RunStoreError::AlreadyComplete(m) => {
+                InspectError::AlreadyComplete(m)
+            }
+            other => InspectError::Failed(other.to_string()),
+        }
     })
-    .map_err(as_error)?;
-    let estimate = rs::estimate_resume(run_id).map_err(as_error)?;
-    let store = rs::RunStore::open(run_id).map_err(as_error)?;
-    Ok((store, estimate.render()))
 }
 
 /// The end of an attempt: tell the store which parts failed and whether the run is complete.
@@ -1382,28 +1370,9 @@ fn finish_run(
     report: &camerata_server::onboard::ScanReport,
     export_written: bool,
 ) {
-    let Some(store) = store else {
-        return;
-    };
-    let reasons = report.incomplete_reasons();
-    store.finish(&camerata_server::run_store::FinishOutcome {
-        failures: report
-            .failed_passes
-            .iter()
-            .map(|f| camerata_server::run_store::FinishFailure {
-                repo: f.repo.clone(),
-                pass: f.pass.clone(),
-                class: f.class.as_str().to_string(),
-                files: f.files.clone(),
-                scope_note: f.scope_note,
-            })
-            .collect(),
-        not_run: Vec::new(),
-        scan_reached_end: true,
-        export_written,
-        complete: reasons.is_empty() && export_written,
-        incomplete_reasons: reasons,
-    });
+    if let Some(store) = store {
+        camerata_server::run_store::finish_run(store, report, export_written);
+    }
 }
 
 /// Production entry point for `camerata inspect --resume`: the key and the credential store are

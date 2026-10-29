@@ -1099,6 +1099,11 @@ pub struct ScanReport {
     /// deserializes as empty rather than failing to load.
     #[serde(default)]
     pub failed_passes: Vec<crate::ai_audit::FailedPass>,
+    /// The saved run this scan is (see [`crate::run_store`]); `camerata inspect --resume` and the
+    /// cockpit's "Run what remains" button run what is left of it. `None` when the run could not
+    /// be saved, and for a report written before runs were saved.
+    #[serde(default)]
+    pub run_id: Option<String>,
     /// W1: the pipeline-integrity ledger — per-rule "did it actually run" facts and
     /// per-stage row accounting, accumulated during this scan. `report_export::
     /// build_report_json` derives "What's healthy" / "excluded from this audit" / the
@@ -1247,6 +1252,7 @@ impl ScanReport {
     /// The connect-GitHub gate result: no scan performed.
     pub fn gated(repos: &[String]) -> Self {
         Self {
+            run_id: None,
             repos: repos.to_vec(),
             stacks: Vec::new(),
             files_scanned: 0,
@@ -1289,6 +1295,7 @@ impl ScanReport {
     /// zero-findings scan.
     pub fn crashed(repos: &[String], message: String) -> Self {
         Self {
+            run_id: None,
             repos: repos.to_vec(),
             stacks: Vec::new(),
             files_scanned: 0,

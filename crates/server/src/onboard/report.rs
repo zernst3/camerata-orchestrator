@@ -13,6 +13,7 @@ pub fn build_report(
 ) -> ScanReport {
     let proposed_rules = propose_rules(&findings, &repos);
     ScanReport {
+        run_id: None,
         repos,
         stacks,
         files_scanned,
