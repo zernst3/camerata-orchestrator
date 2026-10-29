@@ -243,11 +243,18 @@ async fn a_cockpit_scan_with_a_failed_part_resumes_through_the_endpoint_and_the_
     );
     let record = crate::run_store::read_record(&run_id).unwrap();
     assert_eq!(record.status, crate::run_store::RunStatus::Incomplete);
+    assert_eq!(
+        record.project_id.as_deref(),
+        Some(project.id.as_str()),
+        "a scan started from the cockpit records the project it was started in"
+    );
     let audit_calls_before = stage_calls(&log).iter().filter(|s| *s == "audit").count();
     assert!(audit_calls_before > 0);
 
     // ── GET /api/inspections/:id/plan: what remains, and no refusal ───────────────────────────────
-    let plan = run_resume_plan(Path(run_id.clone())).await.into_response();
+    let plan = run_resume_plan(State(state.clone()), Path(run_id.clone()))
+        .await
+        .into_response();
     assert_eq!(plan.status(), StatusCode::OK);
     let plan = body_json(plan).await;
     assert!(plan["refusal"].is_null(), "{plan}");
@@ -304,7 +311,12 @@ async fn a_cockpit_scan_with_a_failed_part_resumes_through_the_endpoint_and_the_
     assert_eq!(record.status, crate::run_store::RunStatus::Complete);
 
     // ── A complete run: the plan says so and the resume endpoint starts nothing ───────────
-    let plan = body_json(run_resume_plan(Path(run_id.clone())).await.into_response()).await;
+    let plan = body_json(
+        run_resume_plan(State(state.clone()), Path(run_id.clone()))
+            .await
+            .into_response(),
+    )
+    .await;
     assert_eq!(plan["state"], "complete", "{plan}");
     assert!(
         plan["refusal"]
@@ -338,7 +350,7 @@ async fn the_run_endpoints_answer_404_for_an_unknown_run() {
     let state_dir = tempfile::tempdir().unwrap();
     let _state_dir = camerata_test_env::EnvGuard::set("CAMERATA_STATE_DIR", state_dir.path());
     let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
-    let plan = run_resume_plan(Path("no-such-run".to_string()))
+    let plan = run_resume_plan(State(state.clone()), Path("no-such-run".to_string()))
         .await
         .into_response();
     assert_eq!(plan.status(), StatusCode::NOT_FOUND);
@@ -507,6 +519,23 @@ async fn a_saved_cockpit_inspection_is_listed_and_resumed_only_in_the_project_th
         1,
         "the refused resume did not touch the run"
     );
+    // The plan ("what would Run what remains do") is refused from X the same way: a run is
+    // previewed only in the project that started it. From Y it answers.
+    let plan = run_resume_plan(State(state.clone()), Path(y_run.clone()))
+        .await
+        .into_response();
+    assert_eq!(plan.status(), StatusCode::CONFLICT);
+    let why = body_json(plan).await["error"].as_str().unwrap().to_string();
+    assert!(
+        why.contains("Client Y") && why.contains("Client X"),
+        "the plan's refusal names both projects: {why}"
+    );
+    assert!(state.projects.set_active(&y.id));
+    let plan = run_resume_plan(State(state.clone()), Path(y_run.clone()))
+        .await
+        .into_response();
+    assert_eq!(plan.status(), StatusCode::OK);
+    assert!(state.projects.set_active(&x.id));
 
     // An old cockpit run with no project id: acme/two is held by Y alone, so it is placed in Y.
     let old_two = saved_cockpit_run_in(None, &[("acme/two", two.as_path())]).run_id();

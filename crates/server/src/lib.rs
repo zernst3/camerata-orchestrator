@@ -7716,7 +7716,21 @@ async fn list_saved_inspections(
 
 /// What "Run what remains" would do for a saved run: the parts that remain, what they should
 /// cost, and the plain reason the resume cannot start now when it cannot.
-async fn run_resume_plan(Path(id): Path<String>) -> impl IntoResponse {
+/// A run is previewed only in the project that started it, as it is resumed (409 otherwise, in
+/// the same words).
+async fn run_resume_plan(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    if let Ok(record) = crate::run_store::read_record(&id) {
+        if let Some(why) = resume_project_refusal(&state, &record) {
+            return (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({ "error": why })),
+            )
+                .into_response();
+        }
+    }
     match crate::run_store::preview_resume(&id) {
         Ok(preview) => (StatusCode::OK, Json(serde_json::json!(preview))).into_response(),
         Err(e) => (

@@ -6074,8 +6074,8 @@ checks and the estimate are shared, not copied.
 `interrupted` or `live`), the number of parts that remain, the expected cost of finishing it, the
 origin and whether the cockpit can resume it. A cockpit run records the id of the project it was
 started in (`RunRecord.project_id`) and belongs to that project only, however many repos two
-projects share; `POST /api/inspections/:id/resume` refuses (409, naming both projects) when the
-open project is not that one. A command line run belongs to the project that holds every repo it
+projects share; `POST /api/inspections/:id/resume` and `GET /api/inspections/:id/plan` refuse (409,
+naming both projects) when the open project is not that one. A command line run belongs to the project that holds every repo it
 inspected, by name or by folder. A cockpit run saved before the project id was recorded is placed
 by its repos only when exactly one project holds all of them; otherwise it is listed under no
 project, and `RunSummary.note` says why. `live` means a process holds the
