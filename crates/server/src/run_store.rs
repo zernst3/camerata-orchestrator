@@ -1206,6 +1206,30 @@ pub fn finish_run(store: &RunStore, report: &crate::onboard::ScanReport, export_
     });
 }
 
+/// The saved runs under `runs_root` that cover `checkout` (a run lists the folders it inspected).
+/// A run holds model answers derived from the client's code, so deleting a checkout deletes
+/// these too. A multi-repo run that includes the checkout goes whole, as the project cache does.
+pub fn runs_covering(runs_root: &Path, checkout: &Path) -> Vec<PathBuf> {
+    let canon = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+    let wanted = canon(checkout);
+    let Ok(entries) = std::fs::read_dir(runs_root) else {
+        return Vec::new();
+    };
+    let mut out: Vec<PathBuf> = entries
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|dir| {
+            load_record(dir).is_ok_and(|r| {
+                r.repos
+                    .iter()
+                    .any(|repo| canon(Path::new(&repo.dir)) == wanted)
+            })
+        })
+        .collect();
+    out.sort();
+    out
+}
+
 // ── Cleanup ──────────────────────────────────────────────────────────────────────────────────
 
 /// Delete the oldest runs of `project_key` beyond the newest `keep`. A run that is not complete

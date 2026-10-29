@@ -248,6 +248,23 @@ pub async fn plan(state: &AppState, target: &GuardedTarget) -> PurgePlan {
         }
     }
 
+    // Saved runs (`runs/<id>/`): the model answers of every run that inspected this checkout.
+    if let Some(cli_dir) = &state.storage_roots.cli_state_dir {
+        for path in crate::run_store::runs_covering(&cli_dir.join("runs"), &checkout) {
+            let totals = walk_totals(&path, &[]);
+            steps.push(PurgeStep {
+                item: PurgedItem {
+                    kind: PurgedKind::SavedRun,
+                    path: path.to_string_lossy().into_owned(),
+                    files: totals.0,
+                    bytes: totals.1,
+                    outcome: PurgeOutcome::Planned,
+                },
+                action: Action::File(path),
+            });
+        }
+    }
+
     // Claude Code session files for every session recorded on any of the project's inspections.
     if let Some(claude_dir) = &state.storage_roots.claude_projects_dir {
         let mut ids: Vec<String> = state
