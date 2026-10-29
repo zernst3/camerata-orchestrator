@@ -191,9 +191,30 @@ async fn auth_content_and_malformed_failures_each_get_their_own_class() {
 
 #[test]
 fn the_spend_limit_stopping_a_retry_is_a_spend_limit_failure_not_a_billing_one() {
-    let e = spend_limit_before_retry_error();
+    let e = retry_blocked_error(None);
     assert_eq!(classify_pass_error(&e), FailureClass::SpendLimit);
     assert_eq!(e.to_string(), SPEND_LIMIT_BEFORE_RETRY);
+    let meter = UsageMeter::default();
+    let e = retry_blocked_error(Some(&meter));
+    assert_eq!(classify_pass_error(&e), FailureClass::SpendLimit);
+}
+
+/// A pass already in flight when the outage stop trips has its truncation or malformed-reply
+/// retry refused by the stop, not by the spend limit: it is recorded as an outage stop and the
+/// operator is not told a spend limit was reached (there may be none).
+#[test]
+fn a_retry_refused_by_the_outage_stop_is_an_outage_stop_not_a_spend_limit() {
+    let meter = UsageMeter::default();
+    for _ in 0..crate::run_health::OUTAGE_STREAK {
+        meter.health().note_failure(FailureClass::Transport, "x");
+    }
+    assert!(meter.outage_stopped());
+    assert!(meter.retry_blocked(), "no retry is sent after the stop");
+    let e = retry_blocked_error(Some(&meter));
+    assert_eq!(classify_pass_error(&e), FailureClass::OutageStop);
+    let text = e.to_string();
+    assert!(text.contains("could not be reached"), "{text}");
+    assert!(!text.contains("spend limit"), "{text}");
 }
 
 #[test]

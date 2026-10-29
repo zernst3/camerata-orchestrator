@@ -109,6 +109,8 @@ pub(super) struct FakeBatch {
     cost: f64,
     /// Every poll fails (the batch was accepted, but its status cannot be read).
     poll_fails: bool,
+    /// Every fetch fails (the batch ended, but its results cannot be read).
+    fetch_fails: bool,
     polls: AtomicUsize,
 }
 
@@ -129,6 +131,7 @@ impl FakeBatch {
             },
             cost: 0.01,
             poll_fails: false,
+            fetch_fails: false,
             polls: AtomicUsize::new(0),
         }
     }
@@ -225,6 +228,9 @@ impl BatchApi for FakeBatch {
         })
     }
     async fn fetch(&self, batch_id: &str, _ttl: CacheTtl) -> anyhow::Result<Vec<BatchResultRow>> {
+        if self.fetch_fails {
+            anyhow::bail!("Message Batches API HTTP 503: results unavailable");
+        }
         let round: usize = batch_id.trim_start_matches("msgbatch_").parse().unwrap();
         let ids = self.pending.lock().unwrap()[batch_id].clone();
         Ok(ids
@@ -1070,6 +1076,43 @@ async fn a_batch_item_that_fails_the_second_try_too_records_it_with_the_class() 
         1,
         "exactly one second try"
     );
+}
+
+/// A batch that ended but whose results could not be fetched (the polls succeeded, so this is not
+/// an outage and the run goes on): its items are not sent again, in real time or otherwise, since
+/// the batch may be billed, and each is recorded as a transport failure naming the batch id so a
+/// later resume can fetch it.
+#[tokio::test(start_paused = true)]
+async fn an_unfetched_batch_is_a_transport_failure_naming_the_batch_and_is_not_sent_again() {
+    let mut api = FakeBatch::new(|_round, _id| Reply::Ok);
+    api.fetch_fails = true;
+    let m = meter(eff(true), None);
+    let (_f, ok, failures) = run(&api, &m).await;
+    assert_eq!(ok, 0);
+    assert_eq!(failures.len(), 4);
+    assert!(
+        !m.outage_stopped(),
+        "every poll answered, so the provider is reachable: not an outage"
+    );
+    assert_eq!(
+        api.realtime.calls.load(Ordering::SeqCst),
+        0,
+        "an accepted batch's items are never sent again"
+    );
+    assert_eq!(
+        api.submitted_ids().len(),
+        1,
+        "and never resubmitted as a batch either"
+    );
+    for f in &failures {
+        assert_eq!(f.class, FailureClass::Transport, "{f:?}");
+        assert!(
+            f.error.contains("msgbatch_0"),
+            "names the batch: {}",
+            f.error
+        );
+        assert!(!f.attempts.is_empty(), "one record of what happened: {f:?}");
+    }
 }
 
 /// A batch that was accepted but whose results could not be retrieved is not sent again, in real

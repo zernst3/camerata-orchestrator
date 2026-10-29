@@ -373,12 +373,27 @@ pub(crate) fn second_try_allowed(e: &anyhow::Error, meter: Option<&UsageMeter>) 
     classify_pass_error(e).is_retried_at_end() && !meter.is_some_and(UsageMeter::outage_stopped)
 }
 
-/// The error a pass returns when the spend limit stopped a retry its reply needed.
-fn spend_limit_before_retry_error() -> anyhow::Error {
-    anyhow::Error::new(camerata_llm::failure::LlmCallFailure::new(
-        FailureClass::SpendLimit,
-        SPEND_LIMIT_BEFORE_RETRY,
-    ))
+/// Why a pass failed when the outage stop refused a retry its reply needed (the pass was in
+/// flight when the run stopped).
+pub(crate) const OUTAGE_BEFORE_RETRY: &str = "the run stopped because the model provider could \
+                                              not be reached before the reply could be retried";
+
+/// What refused a retry a reply needed: the outage stop once the run has stopped, else the spend
+/// limit. The class says which, so a pass caught in flight by the stop is recorded as an outage
+/// stop and the operator is never told a spend limit was reached when there may be none.
+fn retry_blocked_cause(meter: Option<&UsageMeter>) -> (FailureClass, &'static str) {
+    if meter.is_some_and(UsageMeter::outage_stopped) {
+        (FailureClass::OutageStop, OUTAGE_BEFORE_RETRY)
+    } else {
+        (FailureClass::SpendLimit, SPEND_LIMIT_BEFORE_RETRY)
+    }
+}
+
+/// The error a pass returns when a retry its reply needed was refused; see
+/// [`retry_blocked_cause`].
+fn retry_blocked_error(meter: Option<&UsageMeter>) -> anyhow::Error {
+    let (class, message) = retry_blocked_cause(meter);
+    anyhow::Error::new(camerata_llm::failure::LlmCallFailure::new(class, message))
 }
 
 /// One rule's recommendation: which option the AI judged best-fitting for this codebase (or
@@ -4342,7 +4357,7 @@ async fn recommend_alternatives(
                     }
                     if meter.is_some_and(UsageMeter::retry_blocked) {
                         gaps.retry_note
-                            .get_or_insert_with(|| SPEND_LIMIT_BEFORE_RETRY.to_string());
+                            .get_or_insert_with(|| retry_blocked_cause(meter).1.to_string());
                         still_unanswered.extend_from_slice(group);
                         continue;
                     }
@@ -5886,7 +5901,7 @@ async fn audit_pass(
     // The spend limit stopped a retry the reply needed: the pass has no usable answer, and it
     // says why rather than parsing a cut-off or malformed reply as "no findings".
     if stopped_by_cap {
-        return Err(spend_limit_before_retry_error());
+        return Err(retry_blocked_error(meter));
     }
     // A reply that is still not JSON is a FAILED pass, never "no findings": parsing it would
     // return an empty list indistinguishable from a clean chunk. The caller records it as a
@@ -7263,9 +7278,13 @@ fn reassemble_batch_passes(
                     "[camerata-server] batch item {custom_id} (chunk {ci}, rule-batch {bi}) \
                      failed: {reason}"
                 );
+                // Classed from the reason (a fetch or submit failure is transport, a refusal is
+                // content) with one record of it, so the failure report says what happened and
+                // an accepted batch's id (in the reason) is there for a later resume to fetch.
                 failures.push(
                     PassFailure::at(label, ci, n_c, bi, n_b, &reason)
-                        .with_files(chunk_files.get(ci).copied().unwrap_or(0)),
+                        .with_files(chunk_files.get(ci).copied().unwrap_or(0))
+                        .caused_by(&anyhow::anyhow!("{reason}")),
                 );
                 // Still count as done so the progress bar can reach 100%.
                 if let Some((jstore, jid)) = job {
