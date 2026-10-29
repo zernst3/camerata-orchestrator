@@ -260,6 +260,7 @@ fn entries(path: &Path) -> BTreeMap<String, Vec<u8>> {
 const RUN_METADATA: &[&str] = &[
     "generated_at",
     "sha256",
+    "short_sha",
     "size_bytes",
     "bytes",
     "commit",
@@ -314,7 +315,12 @@ fn comparable(path: &Path) -> BTreeMap<String, String> {
         if name.ends_with(".json") {
             let mut v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
             strip_run_metadata(&mut v);
-            out.insert(name, serde_json::to_string_pretty(&v).unwrap());
+            let text = serde_json::to_string_pretty(&v).unwrap();
+            let named = regex::Regex::new(r"acme-one-[0-9a-f]{7}([.-])").unwrap();
+            out.insert(
+                name,
+                named.replace_all(&text, "acme-one-<commit>$1").into_owned(),
+            );
         } else if name.ends_with(".xlsx") {
             let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
             for i in 0..archive.len() {
@@ -339,7 +345,9 @@ fn comparable(path: &Path) -> BTreeMap<String, String> {
                 regex::Regex::new(r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(:\d{2})?Z?( UTC)?").unwrap();
             let text = re.replace_all(&text, "<time>").into_owned();
             let commit = regex::Regex::new(r"[0-9a-f]{40}").unwrap();
-            out.insert(name, commit.replace_all(&text, "<commit>").into_owned());
+            let text = commit.replace_all(&text, "<commit>").into_owned();
+            let named = regex::Regex::new(r"-[0-9a-f]{7}([.-])").unwrap();
+            out.insert(name, named.replace_all(&text, "-<commit>$1").into_owned());
         }
     }
     out
@@ -704,4 +712,255 @@ async fn a_malformed_answer_is_a_failed_part_and_the_resume_asks_for_that_part_o
         "the resume sent less than a whole run"
     );
     assert_same_exports(&export, &baseline_export);
+}
+
+mod batch {
+    use std::collections::HashMap;
+    use std::sync::atomic::AtomicBool;
+
+    use camerata_server::ai_audit::{BatchApi, BatchSeam};
+    use camerata_server::llm::{
+        BatchItem, BatchRequestCounts, BatchResultRow, BatchStatus, CacheTtl,
+    };
+
+    use super::*;
+
+    /// A Message Batches API over the scripted model: each item is answered as the model would
+    /// answer the same request. While `poll_down`, the batch is accepted but its status cannot
+    /// be read, like a process that died after the submit.
+    pub struct FakeBatchApi {
+        pub model: Scripted,
+        pub submits: AtomicUsize,
+        pub fetches: AtomicUsize,
+        pub poll_down: AtomicBool,
+        items: Mutex<HashMap<String, Vec<BatchItem>>>,
+    }
+
+    impl FakeBatchApi {
+        pub fn new() -> Self {
+            Self {
+                model: Scripted::new(Outage::default()),
+                submits: AtomicUsize::new(0),
+                fetches: AtomicUsize::new(0),
+                poll_down: AtomicBool::new(false),
+                items: Mutex::new(HashMap::new()),
+            }
+        }
+    }
+
+    pub struct Shared(pub std::sync::Arc<FakeBatchApi>);
+
+    fn request_of(item: &BatchItem) -> LlmRequest {
+        let text = match item.params.messages[0].content.as_str() {
+            Some(t) => t.to_string(),
+            None => item.params.messages[0]
+                .content
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|b| b["text"].as_str())
+                .collect::<String>(),
+        };
+        let mut req = LlmRequest::new(text);
+        req.system.clone_from(&item.params.system);
+        req
+    }
+
+    #[async_trait]
+    impl BatchApi for Shared {
+        fn has_api_key(&self) -> bool {
+            true
+        }
+        fn realtime(&self) -> &dyn LlmPort {
+            &self.0.model
+        }
+        async fn count_input_tokens(&self, _req: &LlmRequest, _model: &str) -> Option<u64> {
+            Some(1_000)
+        }
+        async fn submit(&self, items: Vec<BatchItem>) -> anyhow::Result<String> {
+            let n = self.0.submits.fetch_add(1, Ordering::SeqCst);
+            let id = format!("msgbatch_{n}");
+            self.0.items.lock().unwrap().insert(id.clone(), items);
+            Ok(id)
+        }
+        async fn poll(&self, _id: &str) -> anyhow::Result<BatchStatus> {
+            if self.0.poll_down.load(Ordering::SeqCst) {
+                anyhow::bail!("Message Batches API HTTP 503: try later");
+            }
+            Ok(BatchStatus {
+                processing_status: "ended".to_string(),
+                request_counts: BatchRequestCounts::default(),
+            })
+        }
+        async fn fetch(&self, id: &str, _ttl: CacheTtl) -> anyhow::Result<Vec<BatchResultRow>> {
+            self.0.fetches.fetch_add(1, Ordering::SeqCst);
+            let items = self
+                .0
+                .items
+                .lock()
+                .unwrap()
+                .get(id)
+                .cloned()
+                .unwrap_or_default();
+            items
+                .iter()
+                .map(|item| {
+                    Ok(BatchResultRow {
+                        custom_id: item.custom_id.clone(),
+                        response: Some(self.0.model.answer(&request_of(item))?),
+                        error: None,
+                        billed: None,
+                    })
+                })
+                .collect()
+        }
+    }
+
+    fn batch_args(repo: &Path, export: &Path) -> InspectArgs {
+        let mut a = args(&[repo], &["acme/one"], export);
+        a.realtime = false;
+        a.batch = true;
+        a
+    }
+
+    async fn run_batch(
+        api: &std::sync::Arc<FakeBatchApi>,
+        repo: &Path,
+        export: &Path,
+    ) -> Result<InspectOutcome, InspectError> {
+        let seam = BatchSeam::new(std::sync::Arc::new(Shared(api.clone())));
+        let sink = Mutex::new(Vec::new());
+        run_inspect_pipeline_with(
+            batch_args(repo, export),
+            true,
+            &store(),
+            Seams {
+                resume: None,
+                llm: Some(&seam),
+                preflight_sink: Box::leak(Box::new(|text: &str| {
+                    sink.lock().unwrap().push(text.to_string());
+                })),
+            },
+        )
+        .await
+    }
+
+    /// The process dies after a batch is submitted (modelled by a status that cannot be read,
+    /// with the process ending its attempt): the resume polls and fetches the same batch and
+    /// submits nothing new, and the export is the uninterrupted run's.
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn a_batch_submitted_before_the_interruption_is_fetched_not_submitted_again() {
+        if !typst_available("a_batch_submitted_before_the_interruption") {
+            return;
+        }
+        let _env = env();
+        let _poll = camerata_test_env::EnvGuard::set("CAMERATA_BATCH_POLL_SECS", "1");
+        let out = tempfile::tempdir().unwrap();
+
+        let baseline_repo = tempfile::tempdir().unwrap();
+        stage_fixture(baseline_repo.path());
+        let baseline_export = out.path().join("baseline.zip");
+        let healthy = std::sync::Arc::new(FakeBatchApi::new());
+        run_batch(&healthy, baseline_repo.path(), &baseline_export)
+            .await
+            .expect("the uninterrupted batch run completes");
+
+        let repo = tempfile::tempdir().unwrap();
+        stage_fixture(repo.path());
+        let export = out.path().join("resumed.zip");
+        let api = std::sync::Arc::new(FakeBatchApi::new());
+        api.poll_down.store(true, Ordering::SeqCst);
+        let err = run_batch(&api, repo.path(), &export)
+            .await
+            .expect_err("a batch whose status cannot be read leaves the run incomplete");
+        assert_ne!(err.exit_code(), 0);
+        assert!(!export.exists());
+        let submitted = api.submits.load(Ordering::SeqCst);
+        assert!(submitted >= 1, "the batch was submitted");
+        let run_id = the_run_id(&err);
+        assert!(
+            std::fs::read_dir(
+                camerata_server::run_store::runs_dir()
+                    .join(&run_id)
+                    .join("batches")
+            )
+            .unwrap()
+            .count()
+                >= 1,
+            "the batch id is on disk"
+        );
+
+        api.poll_down.store(false, Ordering::SeqCst);
+        let seam = BatchSeam::new(std::sync::Arc::new(Shared(api.clone())));
+        let sink = Mutex::new(Vec::new());
+        let outcome = resume_inspect(
+            &run_id,
+            &[],
+            Some(export.clone()),
+            None,
+            true,
+            &store(),
+            Seams {
+                resume: None,
+                llm: Some(&seam),
+                preflight_sink: Box::leak(Box::new(|text: &str| {
+                    sink.lock().unwrap().push(text.to_string());
+                })),
+            },
+        )
+        .await
+        .expect("the resume completes");
+        assert!(
+            outcome.incomplete_reasons.is_empty(),
+            "{:?}",
+            outcome.incomplete_reasons
+        );
+        // The first batch was not submitted a second time: across both attempts the batches
+        // submitted are exactly those an uninterrupted run submits (its second round follows the
+        // first round's results, so the interrupted attempt never got to it).
+        assert_eq!(
+            api.submits.load(Ordering::SeqCst),
+            healthy.submits.load(Ordering::SeqCst),
+            "the batch submitted before the interruption was not submitted again"
+        );
+        assert!(
+            api.fetches.load(Ordering::SeqCst) >= 1,
+            "it fetched the batch"
+        );
+        assert_same_exports(&export, &baseline_export);
+    }
+}
+
+/// A run another process is working on refuses a second worker.
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn a_run_being_worked_on_refuses_a_second_worker() {
+    if !typst_available("a_run_being_worked_on_refuses_a_second_worker") {
+        return;
+    }
+    let _env = env();
+    let repo = tempfile::tempdir().unwrap();
+    stage_fixture(repo.path());
+    let out = tempfile::tempdir().unwrap();
+    let export = out.path().join("x.zip");
+    let flaky = Scripted::new(Outage {
+        fix_stage: true,
+        ..Outage::default()
+    });
+    let err = run(&flaky, &[repo.path()], &["acme/one"], &export)
+        .await
+        .expect_err("refused");
+    let run_id = the_run_id(&err);
+    // Another process takes the run and is working on it.
+    let busy = camerata_server::run_store::RunStore::open(&run_id).unwrap();
+    flaky.set(Outage::default());
+    let refused = resume(&flaky, &run_id, Some(export.clone()))
+        .await
+        .expect_err("a run in use is not resumed");
+    assert!(
+        refused.to_string().contains("being worked on right now"),
+        "{refused}"
+    );
+    drop(busy);
 }
