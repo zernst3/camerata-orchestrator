@@ -8696,10 +8696,13 @@ pub fn apply_stack_exceptions(
 /// (C5-4), OUTSIDE the curated do_now/do_next/plan action tiers, via the PRE-EXISTING
 /// `report_export::is_held_for_review` gate — no new bucketing logic needed on that side.
 ///
-/// Runs across the WHOLE scan (every repo the caller passes in), so a rule flagged in more than
-/// one repo still collapses to one row with every repo's site listed.
+/// Runs across the WHOLE scan (every repo the caller passes in), but groups by (repo, rule): a
+/// rule flagged in two repos is two services' observations, so it stays two rows, each naming
+/// its own repo. Collapsing them would put one service's sites under another service's name
+/// (the group takes the repo of its first occurrence) and hide that the same path, say
+/// `src/index.ts:12`, is a different place in each.
 pub fn group_structural_needs_review(findings: Vec<Finding>) -> Vec<Finding> {
-    let mut groups: std::collections::BTreeMap<String, Vec<Finding>> =
+    let mut groups: std::collections::BTreeMap<(String, String), Vec<Finding>> =
         std::collections::BTreeMap::new();
     let mut rest = Vec::with_capacity(findings.len());
     for f in findings {
@@ -8713,12 +8716,15 @@ pub fn group_structural_needs_review(findings: Vec<Finding>) -> Vec<Finding> {
             && f.confidence.as_deref() == Some("needs-review")
             && !matches!(severity.as_str(), "critical" | "high");
         if is_structural_needs_review {
-            groups.entry(f.rule_id.clone()).or_default().push(f);
+            groups
+                .entry((f.repo.clone(), f.rule_id.clone()))
+                .or_default()
+                .push(f);
         } else {
             rest.push(f);
         }
     }
-    for (rule_id, mut occurrences) in groups {
+    for ((_repo, rule_id), mut occurrences) in groups {
         occurrences.sort_by(|a, b| {
             (a.repo.as_str(), a.path.as_str(), a.line).cmp(&(
                 b.repo.as_str(),
@@ -12119,6 +12125,27 @@ mod tests {
             "the two non-primary occurrences must be listed as also_locations: {:?}",
             grouped.also_locations
         );
+    }
+
+    /// The same rule flagged in two repos is two groups, each in its own repo: one service's
+    /// sites never appear under another service's name.
+    #[test]
+    fn the_same_structural_rule_in_two_repos_is_two_groups_each_in_its_own_repo() {
+        let mut a1 = structural_needs_review("src/index.ts", 12);
+        a1.repo = "acme/web".to_string();
+        let mut a2 = structural_needs_review("src/list.ts", 3);
+        a2.repo = "acme/web".to_string();
+        let mut b = structural_needs_review("src/index.ts", 12);
+        b.repo = "acme/api".to_string();
+        let out = group_structural_needs_review(vec![a1, a2, b]);
+        assert_eq!(out.len(), 2, "one group per repo: {out:?}");
+        let web = out.iter().find(|f| f.repo == "acme/web").unwrap();
+        let api = out.iter().find(|f| f.repo == "acme/api").unwrap();
+        assert_eq!(web.also_locations.len(), 1);
+        assert!(web.also_locations.iter().all(|l| l.repo == "acme/web"));
+        assert!(api.also_locations.is_empty());
+        assert!(web.detail.contains("src/index.ts:12") && web.detail.contains("src/list.ts:3"));
+        assert!(!api.detail.contains("src/list.ts"));
     }
 
     /// Different RULES never merge into the same group — grouping is per-rule.

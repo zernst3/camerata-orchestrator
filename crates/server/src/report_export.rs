@@ -713,6 +713,20 @@ pub struct CodeVolumeJson {
     /// template must render the total either way and only additionally list languages when
     /// this is non-empty.
     pub by_language: Vec<crate::onboard::LanguageVolume>,
+    /// Each repo's own line count, when the project has more than one repo. Absent from the JSON
+    /// otherwise, so a one-repo `findings.json` is byte for byte what it always was; the template
+    /// guards for the key. Never merged into the total above without saying which repo holds
+    /// what.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub per_repo: Vec<CodeVolumeRepoJson>,
+}
+
+/// One repo's share of the code volume.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct CodeVolumeRepoJson {
+    pub repo: String,
+    pub files: usize,
+    pub lines: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1199,6 +1213,10 @@ pub struct CuratedSiteJson {
     /// listed in `also_sites`), as finished sentences: "Also flagged here as <headline>
     /// (<severity>)". They are the same place, so they are not counted as another site.
     pub also_flagged_here: Vec<String>,
+    /// For a leaked credential that another repo of the project also flags under the same name:
+    /// one finished sentence naming those repos. Display only: the rows stay separate, because
+    /// each service's owner rotates their own. Empty for every other row.
+    pub same_credential_note: String,
     /// M2/M8: one finished sentence for every bound that moved this row's severity ("Severity
     /// lowered from high to info: no file or line was identified for this finding."). The
     /// severity shown is the adjusted one; this says what it was and why it changed. Empty
@@ -1355,6 +1373,9 @@ pub struct CuratedGroupJson {
     pub title: String,
     pub citation: CitationJson,
     pub sites: Vec<CuratedSiteJson>,
+    /// For a project of several repos: the repos this rule was found in, sorted. Empty for a
+    /// project of one repo (the group then reads as it always has).
+    pub repos: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1362,6 +1383,12 @@ pub struct HealthyRuleJson {
     pub rule_id: String,
     pub title: String,
     pub citation: CitationJson,
+    /// For a project of several repos: the repos where the rule was checked and is clean. A rule
+    /// that did not apply to a repo is not clean there, so it is named in
+    /// [`Self::not_applicable_in`] and never here. Both are empty for a one-repo project.
+    pub clean_in: Vec<String>,
+    /// For a project of several repos: the repos the rule does not apply to.
+    pub not_applicable_in: Vec<String>,
 }
 
 /// W1: one rule the ledger confirms did NOT run this scan, with the real reason — the
@@ -1488,6 +1515,9 @@ pub struct AuditReportJson {
     /// citation/title header across two places in the document for no reader benefit, so the
     /// bar for moving a GROUP here is "zero curated sites," not "any informational/held site."
     pub held_for_review_findings: Vec<CuratedGroupJson>,
+    /// Where the services of a multi-repo project differ on a rule: an observation after the
+    /// findings, with no severity, in no total. `None` (and nothing rendered) for one repo.
+    pub patterns_across_services: Option<PatternsAcrossServicesJson>,
     pub whats_healthy: WhatsHealthyJson,
     /// W1: rules the ledger confirms did NOT run this scan, each with its real reason — the
     /// "excluded from this audit" section. Empty whenever `report.ledger` carries no rule
@@ -1501,6 +1531,103 @@ pub struct AuditReportJson {
     /// in the PDF's Coverage block, the workbook's Coverage sheet and `findings.json`.
     pub coverage_gaps: CoverageGapsJson,
     pub disclaimer: String,
+}
+
+/// One service's cell of a pattern row as the report prints it: the ledger's cell state plus
+/// the finished label ("Violated, 3 sites", "Clean", "Not applicable: ...", "Not reviewed: ...").
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct PatternCellJson {
+    pub repo: String,
+    #[serde(flatten)]
+    pub state: crate::scan_ledger::CellState,
+    pub label: String,
+}
+
+/// One rule the services differ on. Carries no severity and no bucket: it is an observation.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct PatternRowJson {
+    pub rule_id: String,
+    pub title: String,
+    /// The fixed sentence that introduces the row ([`crate::onboard::patterns_matrix::
+    /// pattern_sentence`]).
+    pub statement: String,
+    pub cells: Vec<PatternCellJson>,
+}
+
+/// The "Patterns across services" section: where the services of one project differ on a rule.
+/// Present only for a project of more than one repo. Never part of the findings, the severity
+/// totals or any count (the release gate checks that).
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct PatternsAcrossServicesJson {
+    pub repos: Vec<String>,
+    /// One plain sentence on what the section is and is not.
+    pub note: String,
+    pub rows: Vec<PatternRowJson>,
+    pub themes: Vec<crate::onboard::patterns_matrix::Theme>,
+}
+
+/// What the section says about itself: an observation, not a finding.
+pub const PATTERNS_NOTE: &str = "This section compares the services of this project. It is an \
+     observation, not a finding: it carries no severity and is in no total. A service where a \
+     rule does not apply, or was not reviewed, is shown as such and is never counted as clean.";
+
+/// The finished label of one cell.
+pub fn pattern_cell_label(state: &crate::scan_ledger::CellState) -> String {
+    use crate::scan_ledger::CellState;
+    match state {
+        CellState::Violated { sites } => {
+            format!(
+                "Violated, {sites} {}",
+                if *sites == 1 { "site" } else { "sites" }
+            )
+        }
+        CellState::Clean => "Clean".to_string(),
+        CellState::NotApplicable { reason } => format!("Not applicable: {reason}"),
+        CellState::NotReviewed { reason } => format!("Not reviewed: {reason}"),
+    }
+}
+
+/// The patterns section for a report, or `None` for a project of one repo. A row for a rule
+/// the corpus does not know (an id the model invented) is left out when a corpus is loaded:
+/// the section names rules by title and never prints a raw id.
+pub fn patterns_across_services_json(
+    report: &crate::onboard::ScanReport,
+    corpus: Option<&camerata_rules::RuleSet>,
+) -> Option<PatternsAcrossServicesJson> {
+    let matrix = &report.patterns_across_services;
+    if !matrix.is_present() {
+        return None;
+    }
+    let rows = matrix
+        .rows
+        .iter()
+        .filter_map(|row| {
+            let title = match corpus {
+                Some(c) => c.get_by_id(&row.rule_id)?.title.clone(),
+                None => row.rule_id.clone(),
+            };
+            Some(PatternRowJson {
+                rule_id: row.rule_id.clone(),
+                statement: crate::onboard::patterns_matrix::pattern_sentence(&title),
+                title,
+                cells: row
+                    .cells
+                    .iter()
+                    .map(|c| PatternCellJson {
+                        repo: c.repo.clone(),
+                        label: pattern_cell_label(&c.state),
+                        state: c.state.clone(),
+                    })
+                    .collect(),
+            })
+        })
+        .collect();
+    Some(PatternsAcrossServicesJson {
+        repos: matrix.repos.clone(),
+        note: PATTERNS_NOTE.to_string(),
+        rows,
+        themes: matrix.themes.clone(),
+    })
 }
 
 /// The confidentiality marking a client deliverable carries (2026-10-24 decision, recorded in
@@ -1709,6 +1836,26 @@ pub fn confidentiality_marking(
     }
 }
 
+/// The disclaimer for a project of several repos: the same paragraph, speaking of the
+/// repositories the cover page names rather than one repository state.
+pub const AUDIT_REPORT_DISCLAIMER_MULTI: &str =
+    "This report is an advisory architectural and security assessment based on static \
+     analysis of the repository states identified on the cover page. It is not a \
+     certification, warranty, or guarantee of security. Findings reflect evidence present in \
+     the inspected code at scan time and may not represent the live production systems. All \
+     remediation should be validated by the client's engineering team against the live \
+     environments. The preparing reviewer accepts no liability for actions taken on the basis \
+     of this report.";
+
+/// The disclaimer for a project of `repo_count` repos.
+pub fn audit_report_disclaimer(repo_count: usize) -> &'static str {
+    if repo_count > 1 {
+        AUDIT_REPORT_DISCLAIMER_MULTI
+    } else {
+        AUDIT_REPORT_DISCLAIMER
+    }
+}
+
 /// General-audit variant of `ai_audit::DEEP_ADVISORY_DISCLAIMER` / the deep-report export's
 /// `DEEP_REPORT_ADVISORY` (`lib.rs`) — same honesty posture, worded for the standard
 /// (non-deep-tier) brownfield audit this report covers. M4/S12: the calm, board-appropriate
@@ -1889,6 +2036,7 @@ fn failed_pass_disclosures(failed_passes: &[crate::ai_audit::FailedPass]) -> Vec
 /// export somehow has zero curated AND zero excluded candidates (every candidate is held or a
 /// dependency advisory) — dividing zero by zero is not a 0% or 100% fix rate, it is "not yet
 /// established," identically to the draft case.
+#[cfg(test)]
 pub(crate) fn next_steps_note(
     review_state: ReviewState,
     candidates_reviewed: usize,
@@ -1896,6 +2044,31 @@ pub(crate) fn next_steps_note(
     held_for_review: usize,
     excluded_false_positive: usize,
 ) -> String {
+    next_steps_note_for(
+        false,
+        review_state,
+        candidates_reviewed,
+        curated_total,
+        held_for_review,
+        excluded_false_positive,
+    )
+}
+
+/// [`next_steps_note`] for a project of one repo (`multi_repo` false) or several, where the
+/// retest covers the repositories and the codebases rather than one repository.
+pub(crate) fn next_steps_note_for(
+    multi_repo: bool,
+    review_state: ReviewState,
+    candidates_reviewed: usize,
+    curated_total: usize,
+    held_for_review: usize,
+    excluded_false_positive: usize,
+) -> String {
+    let (rescan_object, introduces) = if multi_repo {
+        ("repositories", "the codebases introduce")
+    } else {
+        ("repository", "the codebase introduces")
+    };
     let not_yet_established = || {
         format!(
             "Fix rate not yet established: {held_for_review} of {} are held for a reviewer's \
@@ -1928,10 +2101,10 @@ pub(crate) fn next_steps_note(
     format!(
         "There are three steps from here. First, the do-now items above get fixed, by your own \
          team, an outside contractor, or the reviewing engineer. {fix_rate_sentence} Second, a \
-         retest: the reviewing engineer re-scans the repository once the fixes are in and signs \
-         a short addendum confirming each item is closed. Third, ongoing coverage: a monthly \
-         delta rescan plus on-call architect availability for anything new the codebase \
-         introduces between engagements."
+         retest: the reviewing engineer re-scans the {rescan_object} once the fixes are in and \
+         signs a short addendum confirming each item is closed. Third, ongoing coverage: a \
+         monthly delta rescan plus on-call architect availability for anything new \
+         {introduces} between engagements."
     )
 }
 
@@ -4184,7 +4357,7 @@ fn apply_sites_vs_rows_check(report: &mut crate::onboard::ScanReport) {
 /// [`apply_evidence_gate`]'s doc comment — this is its body, split out when W7 added the
 /// sites-vs-rows check so each half keeps its own no-op early return.
 fn apply_zero_finding_evidence_check(report: &mut crate::onboard::ScanReport) {
-    if report.recommendations.is_empty() {
+    if report.recommendations.is_empty() && report.recommendations_by_repo.is_empty() {
         return;
     }
     let healthy_ids: std::collections::HashSet<String> = if report.ledger.rules().next().is_some() {
@@ -4192,19 +4365,34 @@ fn apply_zero_finding_evidence_check(report: &mut crate::onboard::ScanReport) {
     } else {
         report.provenance.audited_rule_ids.iter().cloned().collect()
     };
+    // One recommendation per (rule, repo) when the scan kept them; the by-rule map holds only
+    // the last repo's. A row the gate adds is attributed to the repo whose evidence it is, never
+    // to the first repo of the project.
+    let recs: Vec<crate::ai_audit::RuleRecommendation> =
+        if report.recommendations_by_repo.is_empty() {
+            let mut by_rule: Vec<_> = report.recommendations.values().cloned().collect();
+            by_rule.sort_by(|a, b| a.rule_id.cmp(&b.rule_id));
+            by_rule
+        } else {
+            report.recommendations_by_repo.clone()
+        };
     let rule_ids_with_any_finding: std::collections::HashSet<String> = report
         .findings
         .iter()
         .flat_map(|f| std::iter::once(f.rule_id.clone()).chain(f.also_matches.iter().cloned()))
         .collect();
     let mut synthetic = Vec::new();
-    for rid in &healthy_ids {
+    for rec in &recs {
+        // The id as the ledger spells it (the recommendation's is upper-cased).
+        let Some(rid) = healthy_ids
+            .iter()
+            .find(|id| id.eq_ignore_ascii_case(&rec.rule_id))
+        else {
+            continue;
+        };
         if rule_ids_with_any_finding.contains(rid.as_str()) {
             continue;
         }
-        let Some(rec) = report.recommendations.get(&rid.to_ascii_uppercase()) else {
-            continue;
-        };
         let Some(evidence) = rec.evidence.as_deref() else {
             continue;
         };
@@ -4218,7 +4406,11 @@ fn apply_zero_finding_evidence_check(report: &mut crate::onboard::ScanReport) {
         // to call a sentence a location.
         let located = !path.is_empty();
         synthetic.push(Finding {
-            repo: report.repos.first().cloned().unwrap_or_default(),
+            repo: if rec.repo.is_empty() {
+                report.repos.first().cloned().unwrap_or_default()
+            } else {
+                rec.repo.clone()
+            },
             path,
             line,
             rule_id: rid.clone(),
@@ -4251,6 +4443,26 @@ fn apply_zero_finding_evidence_check(report: &mut crate::onboard::ScanReport) {
     report
         .ledger
         .record_stage("evidence-gate-synthesis", rows_in, rows_out, acc);
+}
+
+/// For a rule listed under "What's healthy" in a project of several repos: the repos where it
+/// was checked and is clean, and the repos it does not apply to. The list says where the rule
+/// is healthy; a repo it never applied to is not one of them.
+fn healthy_repos_for(
+    report: &crate::onboard::ScanReport,
+    rule_id: &str,
+) -> (Vec<String>, Vec<String>) {
+    use crate::scan_ledger::CellState;
+    let mut clean = Vec::new();
+    let mut not_applicable = Vec::new();
+    for repo in &report.repos {
+        match crate::onboard::patterns_matrix::cell_for(report, rule_id, repo) {
+            CellState::Clean => clean.push(repo.clone()),
+            CellState::NotApplicable { .. } => not_applicable.push(repo.clone()),
+            CellState::Violated { .. } | CellState::NotReviewed { .. } => {}
+        }
+    }
+    (clean, not_applicable)
 }
 
 /// Build the report's single output type from a completed scan + the client's triage
@@ -4332,6 +4544,16 @@ pub fn build_report_json(
         ReviewState::Reviewed
     } else {
         ReviewState::Raw
+    };
+    // The repos that flag a credential under the same name, for the display-only note on each
+    // such site. Built over the rows the report carries: a row the reviewer dismissed as a false
+    // positive is not in the report, so no note may point at it. Nothing to link in one repo.
+    let credentials = if report.repos.len() > 1 {
+        crate::onboard::credential_cross_ref::CredentialIndex::from_findings(
+            live.iter().map(|(f, _, _, _)| *f),
+        )
+    } else {
+        crate::onboard::credential_cross_ref::CredentialIndex::default()
     };
 
     // Dependency findings get their own §7 lane — carve them out of every other section.
@@ -4565,7 +4787,7 @@ pub fn build_report_json(
         // silently diverge from `sites[0]` if a future change weakened the gate above.
         let citation = citation_for_finding(first_site, corpus);
         let title = title_for_finding(first_site, corpus);
-        let site_jsons = sites
+        let site_jsons: Vec<CuratedSiteJson> = sites
             .iter()
             .map(|(f, disposition, reason, severity)| {
                 // `chosen_option_for_rule` feeds `effective_bucket`'s C5-8 "has a fix" check
@@ -4724,6 +4946,9 @@ pub fn build_report_json(
                     also_locations: f.also_locations.clone(),
                     also_sites: also_sites_for(f, corpus),
                     also_flagged_here: also_flagged_here_for(f, corpus),
+                    same_credential_note: crate::onboard::credential_cross_ref::note(
+                        &credentials.also_flagged_in(f),
+                    ),
                     severity_adjustments: crate::severity_bounds::severity_adjustment_lines(
                         f, corpus,
                     ),
@@ -4732,11 +4957,20 @@ pub fn build_report_json(
                 }
             })
             .collect();
+        let repos = if report.repos.len() > 1 {
+            let mut repos: Vec<String> = site_jsons.iter().map(|s| s.repo.clone()).collect();
+            repos.sort();
+            repos.dedup();
+            repos
+        } else {
+            Vec::new()
+        };
         all_curated_groups.push(CuratedGroupJson {
             rule_id,
             title,
             citation,
             sites: site_jsons,
+            repos,
         });
     }
 
@@ -4971,13 +5205,22 @@ pub fn build_report_json(
     let mut healthy_rules: Vec<HealthyRuleJson> = healthy_candidate_ids
         .iter()
         .filter(|rid| !rule_ids_with_any_finding.contains(rid.as_str()))
-        .map(|rid| HealthyRuleJson {
-            rule_id: rid.clone(),
-            title: corpus
-                .and_then(|c| c.get_by_id(rid))
-                .map(|r| r.title.clone())
-                .unwrap_or_else(|| rid.clone()),
-            citation: resolve_citation(rid, None, corpus),
+        .map(|rid| {
+            let (clean_in, not_applicable_in) = if has_rule_ledger_data && report.repos.len() > 1 {
+                healthy_repos_for(report, rid)
+            } else {
+                (Vec::new(), Vec::new())
+            };
+            HealthyRuleJson {
+                rule_id: rid.clone(),
+                title: corpus
+                    .and_then(|c| c.get_by_id(rid))
+                    .map(|r| r.title.clone())
+                    .unwrap_or_else(|| rid.clone()),
+                citation: resolve_citation(rid, None, corpus),
+                clean_in,
+                not_applicable_in,
+            }
         })
         .collect();
     healthy_rules.sort_by(|a, b| {
@@ -5288,6 +5531,19 @@ pub fn build_report_json(
     let code_volume = (report.code_lines > 0).then(|| CodeVolumeJson {
         lines: report.code_lines,
         by_language: report.code_lines_by_language.clone(),
+        per_repo: if report.repos.len() > 1 {
+            report
+                .volume_by_repo
+                .iter()
+                .map(|v| CodeVolumeRepoJson {
+                    repo: v.repo.clone(),
+                    files: v.files,
+                    lines: v.lines,
+                })
+                .collect()
+        } else {
+            Vec::new()
+        },
     });
     let cover = CoverJson {
         repos: report.repos.clone(),
@@ -5324,11 +5580,15 @@ pub fn build_report_json(
     };
 
     // ── Methodology (M4: ported from the better sample copy, no dashes per S12) ────────
+    // A project of several repos is several independent services, so the prose that speaks of
+    // "the repository" or "the codebase" speaks of the repositories and the services instead.
+    let multi_repo = report.repos.len() > 1;
     let methodology = MethodologyJson {
         candidates_reviewed,
         excluded_false_positive: excluded_fp,
         held_for_review: held_for_review_total,
-        next_steps: next_steps_note(
+        next_steps: next_steps_note_for(
+            multi_repo,
             review_state,
             candidates_reviewed,
             curated_total,
@@ -5349,13 +5609,27 @@ pub fn build_report_json(
         citation_note: RELATED_STANDARD_NOTE.to_string(),
         not_done: vec![
             "No penetration testing or live exploitation was performed.".to_string(),
-            "No runtime or dynamic analysis; findings derive from static repository state."
-                .to_string(),
-            "Row Level Security findings reflect the repository's migration history, not the \
-             live database. Changes made in the Supabase dashboard that never landed in a \
-             migration are invisible to a repository scan and must be confirmed against \
-             production."
-                .to_string(),
+            if multi_repo {
+                "No runtime or dynamic analysis; findings derive from the static state of the \
+                 repositories."
+                    .to_string()
+            } else {
+                "No runtime or dynamic analysis; findings derive from static repository state."
+                    .to_string()
+            },
+            if multi_repo {
+                "Row Level Security findings reflect each repository's migration history, not \
+                 the live databases. Changes made in the Supabase dashboard that never landed \
+                 in a migration are invisible to a repository scan and must be confirmed \
+                 against production."
+                    .to_string()
+            } else {
+                "Row Level Security findings reflect the repository's migration history, not the \
+                 live database. Changes made in the Supabase dashboard that never landed in a \
+                 migration are invisible to a repository scan and must be confirmed against \
+                 production."
+                    .to_string()
+            },
             "No review of organizational controls, identity and access management, or \
              infrastructure configuration."
                 .to_string(),
@@ -5386,6 +5660,7 @@ pub fn build_report_json(
         priority_grid,
         curated_findings,
         held_for_review_findings,
+        patterns_across_services: patterns_across_services_json(report, corpus),
         whats_healthy: WhatsHealthyJson {
             rules: healthy_rules,
             further_clean_count,
@@ -5395,7 +5670,7 @@ pub fn build_report_json(
         dependency_snapshot,
         methodology,
         coverage_gaps: coverage_gaps::coverage_gaps(report),
-        disclaimer: AUDIT_REPORT_DISCLAIMER.to_string(),
+        disclaimer: audit_report_disclaimer(report.repos.len()).to_string(),
     }
 }
 
@@ -5696,6 +5971,8 @@ mod tests {
         ScanReport {
             repos_not_inspected: Vec::new(),
             recommendations_by_repo: Vec::new(),
+            patterns_across_services: Default::default(),
+            volume_by_repo: Default::default(),
             repos: vec!["owner/repo".to_string()],
             stacks: Vec::new(),
             files_scanned: 10,
@@ -14145,6 +14422,8 @@ mod export_invariants_gate {
         ScanReport {
             repos_not_inspected: Vec::new(),
             recommendations_by_repo: Vec::new(),
+            patterns_across_services: Default::default(),
+            volume_by_repo: Default::default(),
             repos: vec!["demo/portal".to_string()],
             stacks: Vec::new(),
             files_scanned: 40,

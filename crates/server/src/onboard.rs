@@ -20,10 +20,12 @@ pub mod architectural;
 pub mod audit;
 pub mod clone_advisory;
 pub mod count;
+pub mod credential_cross_ref;
 pub mod files;
 pub mod finding_context;
 pub mod finding_context_batch;
 pub mod greenfield;
+pub mod patterns_matrix;
 pub mod propose;
 pub(crate) mod redact;
 pub mod report;
@@ -734,6 +736,16 @@ pub struct LanguageVolume {
     pub lines: usize,
 }
 
+/// The size of one repo of a multi-repo scan: the files read and the non-blank source lines in
+/// them. [`ScanReport::code_lines`] is the sum over the repos; this keeps the parts, so a report
+/// about several services can say how large each one is.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct RepoVolume {
+    pub repo: String,
+    pub files: usize,
+    pub lines: usize,
+}
+
 /// Turn a `language -> line count` accumulator (merged across every repo in the scan) into the
 /// sorted `Vec<LanguageVolume>` the report carries: highest line count first, language name as
 /// the tiebreak so output is deterministic.
@@ -1048,6 +1060,17 @@ pub struct ScanReport {
     /// report that speaks per repo reads. `#[serde(default)]` so an older report still loads.
     #[serde(default)]
     pub recommendations_by_repo: Vec<crate::ai_audit::RuleRecommendation>,
+    /// Where services of one project differ on a rule: the rules violated in at least one repo
+    /// and clean in at least one other, as an observation, never a finding (see
+    /// [`patterns_matrix`]). Empty for a project of one repo. Rebuilt from the ledger and the
+    /// findings by [`Self::refresh_patterns_across_services`] whenever a report is stored or
+    /// sealed, so it can never disagree with them.
+    #[serde(default)]
+    pub patterns_across_services: patterns_matrix::PatternsAcrossServices,
+    /// The files and source lines of each repo read, in scan order. [`Self::code_lines`] and
+    /// [`Self::files_scanned`] are the totals over these.
+    #[serde(default)]
+    pub volume_by_repo: Vec<RepoVolume>,
     /// The repos the scan was asked to inspect and could not: `(repo, reason)`. A folder that
     /// is gone, a repo whose files could not be read. Such a repo is also in
     /// [`Self::failed_passes`] (pass `repository read`) and has not-run rows in the ledger, but
@@ -1168,6 +1191,8 @@ impl ScanReport {
             recommendations: std::collections::HashMap::new(),
             repos_not_inspected: Vec::new(),
             recommendations_by_repo: Vec::new(),
+            patterns_across_services: patterns_matrix::PatternsAcrossServices::default(),
+            volume_by_repo: Vec::new(),
             failed_passes: Vec::new(),
             ledger: crate::scan_ledger::ScanLedger::new(),
         }
@@ -1205,9 +1230,38 @@ impl ScanReport {
             recommendations: std::collections::HashMap::new(),
             repos_not_inspected: Vec::new(),
             recommendations_by_repo: Vec::new(),
+            patterns_across_services: patterns_matrix::PatternsAcrossServices::default(),
+            volume_by_repo: Vec::new(),
             failed_passes: Vec::new(),
             ledger: crate::scan_ledger::ScanLedger::new(),
         }
+    }
+
+    /// Fold a targeted rescan's picks into the stored report. A pick replaces the stored one for
+    /// its (rule, repo) in [`Self::recommendations_by_repo`], the list the multi-repo workbook's
+    /// "Rules applied" rows and the evidence gate read, and the by-rule view takes it as the
+    /// rule's latest pick. A pick that names no repo updates the by-rule view only. Every other
+    /// service's pick is left as it was.
+    pub fn fold_rescan_recommendations(&mut self, picks: Vec<crate::ai_audit::RuleRecommendation>) {
+        for pick in picks {
+            if !pick.repo.is_empty() {
+                self.recommendations_by_repo
+                    .retain(|r| !(r.rule_id == pick.rule_id && r.repo == pick.repo));
+                self.recommendations_by_repo.push(pick.clone());
+            }
+            self.recommendations.insert(pick.rule_id.clone(), pick);
+        }
+    }
+
+    /// Rebuild [`Self::patterns_across_services`] from the ledger and the findings. Called by
+    /// [`Self::seal`] and wherever a report is stored for the cockpit, after the last change to
+    /// either. The themes a model grouped the rows into are kept only while the rows they cite
+    /// still exist.
+    pub fn refresh_patterns_across_services(&mut self) {
+        let themes = std::mem::take(&mut self.patterns_across_services.themes);
+        let mut fresh = patterns_matrix::build(self);
+        fresh.themes = patterns_matrix::keep_valid_themes(themes, &fresh);
+        self.patterns_across_services = fresh;
     }
 
     /// THE sealing point (Pass-1 W1 — see
@@ -1234,6 +1288,7 @@ impl ScanReport {
     /// row-set divergence.
     pub fn seal(mut self) -> SealedReport {
         self.sweep_secrets_before_seal();
+        self.refresh_patterns_across_services();
         // W21: audit every row's `path` HERE, because this is the one moment "every row" is
         // a complete and stable statement, and it is upstream of all three exporters — so
         // one audit covers the PDF, the workbook and the JSON rather than needing a check
@@ -1986,6 +2041,7 @@ pub async fn audit_repos_with_llm_controlled(
     let mut code_lines_total = 0usize;
     let mut lang_lines_total: std::collections::BTreeMap<String, usize> =
         std::collections::BTreeMap::new();
+    let mut volume_by_repo: Vec<RepoVolume> = Vec::new();
     let mut repos_ok = Vec::new();
     let mut notes = extra_notes;
     // Per-rule alternative recommendations, accumulated across every repo this scan touches
@@ -2009,6 +2065,11 @@ pub async fn audit_repos_with_llm_controlled(
     // `ledger: Option<Arc<UsageLedger>>` parameter above, which is a completely different
     // thing (cumulative token-usage accounting, not pipeline row/rule integrity).
     let mut pipeline_ledger = crate::scan_ledger::ScanLedger::new();
+    // Which repos each selected rule is bound to, so the patterns matrix can tell a rule that is
+    // not bound to a repo (not applicable there) from one that should have run and did not.
+    for rule in selected {
+        pipeline_ledger.note_rule_scope(&rule.id, &rule.repos);
+    }
     // Provenance (P1): the git identity of every source dir this run touched (sha/branch/
     // dirty), captured unconditionally per source — even a repo whose file-read later fails
     // still gets its ref recorded, since the dir is what was attempted. A dirty tree never
@@ -2191,6 +2252,11 @@ pub async fn audit_repos_with_llm_controlled(
                 code_chars_total += files.iter().map(|(_, c)| c.len()).sum::<usize>();
                 let (repo_lines, repo_lang_lines) = propose::count_source_lines(&files);
                 code_lines_total += repo_lines;
+                volume_by_repo.push(RepoVolume {
+                    repo: spec.to_string(),
+                    files: files.len(),
+                    lines: repo_lines,
+                });
                 for (lang, n) in repo_lang_lines {
                     *lang_lines_total.entry(lang).or_insert(0) += n;
                 }
@@ -3208,6 +3274,7 @@ pub async fn audit_repos_with_llm_controlled(
     report.code_chars = code_chars_total;
     report.code_lines = code_lines_total;
     report.code_lines_by_language = finalize_language_breakdown(lang_lines_total);
+    report.volume_by_repo = volume_by_repo;
     report.actual_usage = Some(meter.snapshot());
     report.deep = deep_report;
     // The by-rule view (the repo scanned last wins, as it always did) and the full list, one
@@ -3499,6 +3566,66 @@ async fn capture_audited_ref(spec: &str, dir: &std::path::Path) -> AuditedRef {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A targeted rescan re-evaluates a few rules on every repo they apply to. Its picks replace
+    /// the stored ones for the same (rule, repo) and leave every other service's pick alone, in
+    /// both the by-rule view and the per-repo list the multi-repo workbook reads.
+    #[test]
+    fn a_rescan_replaces_the_pick_for_its_rule_and_repo_and_keeps_the_other_services() {
+        fn rec(rule: &str, repo: &str, option: &str) -> crate::ai_audit::RuleRecommendation {
+            crate::ai_audit::RuleRecommendation {
+                repo: repo.to_string(),
+                rule_id: rule.to_string(),
+                recommended_option_id: option.to_string(),
+                ..Default::default()
+            }
+        }
+        let mut report = build_report(
+            vec!["acme/a".to_string(), "acme/b".to_string()],
+            Vec::new(),
+            0,
+            Vec::new(),
+        );
+        report.recommendations_by_repo = vec![
+            rec("RULE-X", "acme/a", "old"),
+            rec("RULE-X", "acme/b", "old"),
+            rec("RULE-Y", "acme/a", "keep"),
+        ];
+        report
+            .recommendations
+            .insert("RULE-X".to_string(), rec("RULE-X", "acme/b", "old"));
+        report.fold_rescan_recommendations(vec![rec("RULE-X", "acme/a", "forced")]);
+        let pick = |report: &ScanReport, rule: &str, repo: &str| {
+            report
+                .recommendations_by_repo
+                .iter()
+                .find(|r| r.rule_id == rule && r.repo == repo)
+                .map(|r| r.recommended_option_id.clone())
+        };
+        assert_eq!(pick(&report, "RULE-X", "acme/a").as_deref(), Some("forced"));
+        assert_eq!(
+            pick(&report, "RULE-X", "acme/b").as_deref(),
+            Some("old"),
+            "not rescanned"
+        );
+        assert_eq!(pick(&report, "RULE-Y", "acme/a").as_deref(), Some("keep"));
+        assert_eq!(
+            report.recommendations_by_repo.len(),
+            3,
+            "one entry per (rule, repo)"
+        );
+        assert_eq!(
+            report.recommendations["RULE-X"].recommended_option_id, "forced",
+            "the by-rule view follows the rescan too"
+        );
+        // A pick that names no repo updates the by-rule view only.
+        report.fold_rescan_recommendations(vec![rec("RULE-Y", "", "nowhere")]);
+        assert_eq!(pick(&report, "RULE-Y", "acme/a").as_deref(), Some("keep"));
+        assert_eq!(
+            report.recommendations["RULE-Y"].recommended_option_id,
+            "nowhere"
+        );
+    }
 
     /// A `NotAssessed` honesty row is not a detection: it must not count toward a rule's fired
     /// total (which would record the rule as having run and found something), and the rule must

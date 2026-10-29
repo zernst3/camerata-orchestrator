@@ -1110,6 +1110,11 @@ pub(super) struct ScanReportView {
     /// an empty map (no recommendations to show — matches the pre-feature UI exactly).
     #[serde(default)]
     pub recommendations: std::collections::HashMap<String, RuleRecommendationView>,
+    /// Where the services of a multi-repo project differ on a rule: an observation, read-only,
+    /// shown in its own tab. Mirrors `camerata_server::onboard::ScanReport::
+    /// patterns_across_services`; empty (no tab) for a project of one repo.
+    #[serde(default)]
+    pub patterns_across_services: camerata_ui_core::patterns::PatternsView,
 }
 
 pub(super) async fn scan_repos(repos: &[String]) -> Option<ScanReportView> {
@@ -7514,6 +7519,50 @@ pub(super) fn NotAssessedPanel(
     }
 }
 
+/// The read-only "Patterns across services" tab: the rules the services of a multi-repo project
+/// differ on, one grid per rule. An observation, not a finding: nothing here is triaged, rated
+/// or counted, and a service where a rule does not apply, or was not reviewed, is shown as such
+/// and never as clean. Mirrors the report's section (`camerata_ui_core::patterns`).
+#[component]
+pub(super) fn PatternsPanel(view: camerata_ui_core::patterns::PatternsView) -> Element {
+    if view.rows.is_empty() {
+        return rsx! {
+            p { class: "kind-panel-empty",
+                "No rule was found violated in one service and clean in another."
+            }
+        };
+    }
+    rsx! {
+        div { class: "kind-panel patterns-panel",
+            p { class: "kind-panel-sub",
+                "Where the services of this project differ on a rule. An observation, not a finding: it carries no severity and is in no count. A service where a rule does not apply, or was not reviewed, is shown as such and is never counted as clean."
+            }
+            for row in view.rows.iter() {
+                div { key: "{row.rule_id}", class: "kind-panel-group",
+                    p { class: "kind-panel-group-h", "{row.rule_id}" }
+                    p { class: "kind-panel-sub",
+                        "{camerata_ui_core::patterns::pattern_sentence(&row.rule_id)}"
+                    }
+                    ul { class: "kind-panel-list",
+                        for cell in row.cells.iter() {
+                            li { key: "{cell.repo}", class: "kind-panel-row",
+                                span { class: "kind-panel-repo", "{cell.repo}" }
+                                span { class: "kind-panel-label", "{cell.label()}" }
+                            }
+                        }
+                    }
+                }
+            }
+            for theme in view.themes.iter() {
+                div { key: "{theme.name}", class: "kind-panel-group",
+                    p { class: "kind-panel-group-h", "{theme.name}" }
+                    p { class: "kind-panel-sub", "{theme.note}" }
+                }
+            }
+        }
+    }
+}
+
 /// Renders one brownfield scan's results: the audit summary, the findings table,
 /// and the proposed-rules table. Keyed by the parent so a new scan remounts the
 /// chorale tables with fresh rows.
@@ -7834,6 +7883,9 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
     // resume on the Queue. Adding it to `OnboardingDraft` would change a persisted wire shape
     // for no curator benefit.
     let mut kind_view = use_signal(|| KindSurface::Queue);
+    // The "Patterns across services" tab of a multi-repo project. It is an observation, not a
+    // kind of finding, so it is a lens of its own beside the kind switch and not a fifth kind.
+    let mut patterns_open = use_signal(|| false);
     // THE RULE HUB (design §8): which (repo, rule) the hub is open on, and the Queue jump it
     // can perform. Both session-local lenses like `kind_view`, and deliberately not persisted
     // for the same reason: an open modal is not a decision.
@@ -9134,12 +9186,15 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                 div { class: "kind-switch",
                     for (surface , count) in kind_counts.iter().copied() {
                         {
-                            let active = kind_view() == surface;
+                            let active = !patterns_open() && kind_view() == surface;
                             rsx! {
                                 button {
                                     key: "{surface.label()}",
                                     class: if active { "kind-tab active" } else { "kind-tab" },
-                                    onclick: move |_| kind_view.set(surface),
+                                    onclick: move |_| {
+                                        patterns_open.set(false);
+                                        kind_view.set(surface);
+                                    },
                                     "{surface.label()} "
                                     span { class: "triage-tab-count", "{count}" }
                                     // The alarm chip: rows that reached the UI with no kind at
@@ -9157,9 +9212,27 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                             }
                         }
                     }
+                    // The observation tab, only for a project of several repos.
+                    if audited.as_ref().is_some_and(|a| a.patterns_across_services.is_present()) {
+                        button {
+                            class: if patterns_open() { "kind-tab active" } else { "kind-tab" },
+                            onclick: move |_| patterns_open.set(true),
+                            "Patterns across services "
+                            span { class: "triage-tab-count",
+                                "{audited.as_ref().map_or(0, |a| a.patterns_across_services.count())}"
+                            }
+                        }
+                    }
                 }
 
-                if kind_view() == KindSurface::Queue {
+                if patterns_open() {
+                    PatternsPanel {
+                        view: audited
+                            .as_ref()
+                            .map(|a| a.patterns_across_services.clone())
+                            .unwrap_or_default(),
+                    }
+                } else if kind_view() == KindSurface::Queue {
                     // Single-select over the triage tables, each with a live count. The set
                     // and its order come from `TriageState::all()` and the count from
                     // `TriageCounts::of`, so a disposition can never exist without a tab or
@@ -9315,7 +9388,7 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                 // since Pass 2 step 3, a Confirmed row is not: it is decided, just decided to
                 // be real. The gate's whole rule lives in `TriageCounts` (core, unit-tested);
                 // `ProcessGate` renders it and this closure performs the commit.
-                if kind_view() == KindSurface::Queue && (triage_view() == TriageState::TechDebt || triage_counts.outstanding() == 0) {
+                if !patterns_open() && kind_view() == KindSurface::Queue && (triage_view() == TriageState::TechDebt || triage_counts.outstanding() == 0) {
                     {
                     // QUEUE rows only. Process commits dispositions (baseline waivers,
                     // tickets); an informational row has no disposition to commit, and
@@ -13379,6 +13452,91 @@ mod render_tests {
             at("LEGACY-UNMAPPED-1") < at("API-VERSIONING-1"),
             "high alarm row before the medium deviation; html=\n{html}"
         );
+    }
+
+    /// The "Patterns across services" tab is read-only: each service's cell as the server stated
+    /// it, "not applicable" and "not reviewed" printed as themselves, the fixed sentence for the
+    /// row, no severity and no control.
+    #[test]
+    fn the_patterns_panel_prints_each_cell_as_stated_and_is_read_only() {
+        fn harness() -> Element {
+            let view: camerata_ui_core::patterns::PatternsView =
+                serde_json::from_value(serde_json::json!({
+                    "repos": ["acme/web", "acme/api", "acme/worker", "acme/jobs"],
+                    "rows": [{
+                        "rule_id": "ARCH-PAGINATION-1",
+                        "cells": [
+                            {"repo": "acme/web", "state": "violated", "sites": 2},
+                            {"repo": "acme/api", "state": "clean"},
+                            {"repo": "acme/worker", "state": "not_applicable", "reason": "no files"},
+                            {"repo": "acme/jobs", "state": "not_reviewed", "reason": "spend limit"}
+                        ]
+                    }],
+                    "themes": []
+                }))
+                .unwrap();
+            rsx! { PatternsPanel { view } }
+        }
+        let mut vdom = VirtualDom::new(harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        assert!(
+            html.contains("These services handle ARCH-PAGINATION-1 differently."),
+            "{html}"
+        );
+        for expected in [
+            "Violated, 2 sites",
+            "Clean",
+            "Not applicable: no files",
+            "Not reviewed: spend limit",
+        ] {
+            assert!(html.contains(expected), "{expected} missing from {html}");
+        }
+        assert!(!html.contains("<button"), "read-only: {html}");
+        // The panel says in a sentence that it carries no severity; it renders none.
+        assert!(
+            !html.contains("sev-") && !html.contains("severity-chip"),
+            "{html}"
+        );
+    }
+
+    /// An empty section states its case in a sentence, never a blank area.
+    #[test]
+    fn the_patterns_panel_states_an_empty_case() {
+        fn harness() -> Element {
+            rsx! { PatternsPanel { view: camerata_ui_core::patterns::PatternsView::default() } }
+        }
+        let mut vdom = VirtualDom::new(harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        assert!(html.contains("kind-panel-empty"), "{html}");
+    }
+
+    /// The report the server sends carries the section under `patterns_across_services`; a
+    /// report without it (one repo, or an older server) has none and shows no tab.
+    #[test]
+    fn scan_report_view_reads_the_patterns_section_from_the_wire() {
+        let parse = |json: serde_json::Value| -> ScanReportView {
+            serde_json::from_value(json).expect("valid ScanReportView fixture")
+        };
+        let with = parse(serde_json::json!({
+            "repos": ["a/one", "a/two"], "files_scanned": 1,
+            "findings": [], "proposed_rules": [], "gated": false,
+            "patterns_across_services": {
+                "repos": ["a/one", "a/two"],
+                "rows": [{"rule_id": "R-1", "cells": [
+                    {"repo": "a/one", "state": "violated", "sites": 1},
+                    {"repo": "a/two", "state": "clean"}
+                ]}]
+            }
+        }));
+        assert!(with.patterns_across_services.is_present());
+        assert_eq!(with.patterns_across_services.count(), 1);
+        let without = parse(serde_json::json!({
+            "repos": ["a/one"], "files_scanned": 1,
+            "findings": [], "proposed_rules": [], "gated": false
+        }));
+        assert!(!without.patterns_across_services.is_present());
     }
 
     /// req_pass2_6: each panel's empty state is a sentence, not a blank area — the curator has

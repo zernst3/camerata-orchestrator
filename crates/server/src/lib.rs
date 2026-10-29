@@ -879,6 +879,10 @@ impl AppState {
     /// client's source on disk. A persistence failure is logged, never fatal: the in-memory
     /// copy still serves this session.
     pub(crate) fn set_last_scan(&self, project_id: String, report: crate::onboard::ScanReport) {
+        // The patterns across services are derived from the ledger and the findings; rebuilt
+        // here so the stored report (and the cockpit tab that reads it) never lags them.
+        let mut report = report;
+        report.refresh_patterns_across_services();
         self.record_inspection(
             &project_id,
             &report,
@@ -896,6 +900,8 @@ impl AppState {
         project_id: String,
         report: crate::onboard::ScanReport,
     ) {
+        let mut report = report;
+        report.refresh_patterns_across_services();
         let mut guard = self.last_scan.lock().unwrap_or_else(|e| e.into_inner());
         guard.insert(project_id, report.clone());
         drop(guard); // release per-project lock before acquiring recent_scan lock
@@ -962,6 +968,8 @@ impl AppState {
     /// one (the alternatives rescan re-evaluates a few rules of the same inspection). Updates
     /// the in-memory copy and the latest persisted entry in place.
     pub(crate) fn amend_last_scan(&self, project_id: String, report: crate::onboard::ScanReport) {
+        let mut report = report;
+        report.refresh_patterns_across_services();
         // Same sweep as `record_inspection`: the stored report carries only redacted text.
         let mut sealed = report.clone();
         sealed.sweep_secrets_before_seal();
@@ -5087,6 +5095,10 @@ async fn rescan_alternatives_handler(
     let mut all_findings: Vec<crate::onboard::Finding> = Vec::new();
     let mut all_recs: std::collections::HashMap<String, crate::ai_audit::RuleRecommendation> =
         std::collections::HashMap::new();
+    // The same picks with the repo each was made for, one per (rule, repo): what the stored
+    // report's per-repo list is updated from, so a multi-repo workbook never prints the pick a
+    // rescan replaced.
+    let mut all_recs_by_repo: Vec<crate::ai_audit::RuleRecommendation> = Vec::new();
     // W6: a sub-pass (e.g. a nested alternative-recommendation call) failing here must never
     // be silent either — surfaced in `run_notes` below and merged into the stored report.
     let mut all_failed_passes: Vec<crate::ai_audit::FailedPass> = Vec::new();
@@ -5155,8 +5167,10 @@ async fn rescan_alternatives_handler(
         {
             Ok((findings, _proposed, recs, failed, _stage_samples)) => {
                 all_findings.extend(findings);
-                for r in recs {
-                    all_recs.insert(r.rule_id.clone(), r);
+                for mut r in recs {
+                    r.repo = spec.to_string();
+                    all_recs.insert(r.rule_id.clone(), r.clone());
+                    all_recs_by_repo.push(r);
                 }
                 for f in &failed {
                     run_notes.push(format!("{spec}: {} not computed ({})", f.pass, f.reason));
@@ -5184,9 +5198,7 @@ async fn rescan_alternatives_handler(
             .findings
             .retain(|f| !rescanned_ids.contains(&f.rule_id.to_ascii_uppercase()));
         report.findings.extend(all_findings.clone());
-        for (rid, rec) in &all_recs {
-            report.recommendations.insert(rid.clone(), rec.clone());
-        }
+        report.fold_rescan_recommendations(all_recs_by_repo.clone());
         // W6: fold any freshly-failed pass into the stored report so a LATER export still
         // discloses it — never let a rescan's failure disappear once this handler returns.
         report.failed_passes.extend(all_failed_passes.clone());
@@ -17959,7 +17971,7 @@ async fn export_audit_report(
     };
     // The release gate's secrets check over the PDF's data, BEFORE it is compiled: this route
     // ships a PDF outside any zip, and `data.json` is the only data the template reads.
-    let stem = report_filename_stem(&report);
+    let stem = report_filename_stem_for(&report, &req.options.project_title);
     if let Err(failure) = crate::release_gate::check_pdf_data(&stem, &data_json) {
         return release_blocked_response(&failure);
     }
@@ -18002,6 +18014,27 @@ async fn export_audit_report(
 /// `camerata-cli/src/inspect_cmd.rs`) so its zip's filename stem can never drift from this
 /// HTTP handler's — same function, not a re-derived copy.
 pub fn report_filename_stem(report: &crate::onboard::ScanReport) -> String {
+    report_filename_stem_for(report, "")
+}
+
+/// [`report_filename_stem`] for a project titled `project_title`. A project of several repos is
+/// named for the project and the number of repos (`camerata-inspection-acme-shop-3-repos`), not
+/// for its first repo and that repo's commit, which would label three services' report with one
+/// of them. A blank title falls back to the owner the repos share, then to `multi`. A project of
+/// one repo keeps the repo and commit name it always had.
+pub fn report_filename_stem_for(
+    report: &crate::onboard::ScanReport,
+    project_title: &str,
+) -> String {
+    if report.repos.len() > 1 {
+        let slug = slugify_for_filename(project_title);
+        let slug = if slug.is_empty() {
+            shared_owner_slug(&report.repos).unwrap_or_else(|| "multi".to_string())
+        } else {
+            slug
+        };
+        return format!("camerata-inspection-{slug}-{}-repos", report.repos.len());
+    }
     let repo_slug = report
         .repos
         .first()
@@ -18016,6 +18049,34 @@ pub fn report_filename_stem(report: &crate::onboard::ScanReport) -> String {
         .map(|s| s.chars().take(7).collect::<String>())
         .unwrap_or_else(|| "nosha".to_string());
     format!("camerata-inspection-{repo_slug}-{short_sha}")
+}
+
+/// Lower-case letters and digits of `text`, joined by single hyphens: a filename-safe slug.
+fn slugify_for_filename(text: &str) -> String {
+    let mut out = String::new();
+    let mut pending_hyphen = false;
+    for c in text.chars() {
+        if c.is_ascii_alphanumeric() {
+            if pending_hyphen && !out.is_empty() {
+                out.push('-');
+            }
+            pending_hyphen = false;
+            out.push(c.to_ascii_lowercase());
+        } else {
+            pending_hyphen = true;
+        }
+    }
+    out
+}
+
+/// The owner every `owner/repo` in `repos` shares, slugified, when there is one.
+fn shared_owner_slug(repos: &[String]) -> Option<String> {
+    let mut owners = repos.iter().filter_map(|r| r.split('/').next());
+    let first = owners.next()?;
+    owners
+        .all(|o| o == first)
+        .then(|| slugify_for_filename(first))
+        .filter(|s| !s.is_empty())
 }
 
 /// `POST /api/projects/:id/product-export` — the primary export button's target: a ZIP
@@ -18238,6 +18299,16 @@ fn release_blocked_response(failure: &crate::release_gate::GateFailure) -> Respo
 /// `pub`: reused verbatim by `camerata inspect` (see [`report_filename_stem`]'s doc comment)
 /// so the headless export's README text can never diverge from the HTTP product-export's.
 pub fn product_export_readme(stem: &str, provenance: &ManifestProvenance) -> String {
+    // A project of several repos gets one more paragraph: where the services differ on a rule.
+    let patterns = if provenance.repos.len() > 1 {
+        "Patterns across services\n\
+         \x20 Where the services of this project differ on a rule: a sheet of that name in the\n\
+         \x20 workbook, a section in the PDF and a patterns_across_services key in findings.json.\n\
+         \x20 An observation, not a finding: it has no severity and is in no count.\n\
+         \n"
+    } else {
+        ""
+    };
     format!(
         "Codebase Inspection - Product Export\n\
          =====================================\n\
@@ -18267,10 +18338,12 @@ pub fn product_export_readme(stem: &str, provenance: &ManifestProvenance) -> Str
          \x20 from the same pass over the scan.\n\
          \n\
          {}\
+         {}\
          \n\
          {}\n",
+        patterns,
         provenance.readme_lines(),
-        crate::report_export::AUDIT_REPORT_DISCLAIMER,
+        crate::report_export::audit_report_disclaimer(provenance.repos.len()),
     )
 }
 
@@ -27726,6 +27799,8 @@ mod tests {
         crate::onboard::ScanReport {
             repos_not_inspected: Vec::new(),
             recommendations_by_repo: Vec::new(),
+            patterns_across_services: Default::default(),
+            volume_by_repo: Default::default(),
             repos: vec!["owner/repo".to_string()],
             stacks: Vec::new(),
             files_scanned: 1,
@@ -28866,6 +28941,43 @@ mod tests {
             "RULE-X",
             "recent_scan must mirror the report passed to set_last_scan"
         );
+    }
+
+    /// The patterns across services are rebuilt when a scan is stored, so the cockpit tab never
+    /// reads a stale or empty matrix; a scan of one repo stores none.
+    #[test]
+    fn storing_a_scan_rebuilds_its_patterns_across_services() {
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        let mut report = make_scan_report("RULE-X");
+        report.repos = vec!["acme/a".to_string(), "acme/b".to_string()];
+        report.findings[0].repo = "acme/a".to_string();
+        report.ledger.record_rule(
+            "acme/a",
+            "RULE-X",
+            crate::scan_ledger::RuleTier::Semantic,
+            true,
+            None,
+            3,
+            1,
+        );
+        report.ledger.record_rule(
+            "acme/b",
+            "RULE-X",
+            crate::scan_ledger::RuleTier::Semantic,
+            true,
+            None,
+            3,
+            0,
+        );
+        assert!(report.patterns_across_services.rows.is_empty());
+        state.set_last_scan("proj-multi".to_string(), report);
+        let stored = state.get_last_scan("proj-multi").unwrap();
+        assert_eq!(stored.patterns_across_services.rows.len(), 1);
+        assert_eq!(stored.patterns_across_services.rows[0].rule_id, "RULE-X");
+
+        state.set_last_scan("proj-one".to_string(), make_scan_report("RULE-X"));
+        let one = state.get_last_scan("proj-one").unwrap();
+        assert!(!one.patterns_across_services.is_present());
     }
 
     /// When two projects are scanned in sequence, recent_scan reflects the LATEST one.

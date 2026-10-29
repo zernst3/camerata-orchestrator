@@ -666,6 +666,96 @@ pub fn count_reconciliation_problems(entries: &Entries) -> Vec<Problem> {
     problems
 }
 
+const PATTERNS: &str = "patterns across services";
+
+/// The "Patterns across services" section is an observation, never a finding: it must change no
+/// severity total and no finding count. Held here as structure, because a total that moved would
+/// have to come from the section being counted somewhere:
+///
+/// * `findings.json` carries the section under its own key when the report has one, and no key
+///   when it does not, and the workbook has the matching sheet or none;
+/// * the section carries no severity anywhere;
+/// * no pattern row sits inside the `findings` array, so every count read off that array (and
+///   off `json/all-findings.json`, which the rest of this check holds it to) is findings only.
+pub fn patterns_section_problems(entries: &Entries, report: &AuditReportJson) -> Vec<Problem> {
+    let mut problems = Vec::new();
+    let findings_json: Option<Value> = entries
+        .get("findings.json")
+        .and_then(|bytes| serde_json::from_slice(bytes).ok());
+    if let Some(value) = &findings_json {
+        let section = value.get("patterns_across_services");
+        match (&report.patterns_across_services, section) {
+            (Some(_), None) => problems.push(problem(
+                "findings.json",
+                PATTERNS,
+                "the report has a patterns section and findings.json has no patterns_across_services key",
+            )),
+            (None, Some(_)) => problems.push(problem(
+                "findings.json",
+                PATTERNS,
+                "findings.json has a patterns_across_services key and the report has no such section",
+            )),
+            (Some(want), Some(got)) => {
+                let rows = got.get("rows").and_then(Value::as_array).map_or(0, Vec::len);
+                if rows != want.rows.len() {
+                    problems.push(problem(
+                        "findings.json",
+                        PATTERNS,
+                        format!(
+                            "findings.json lists {rows} pattern rows and the PDF's data has {}",
+                            want.rows.len()
+                        ),
+                    ));
+                }
+                if got.to_string().contains("\"severity\"") {
+                    problems.push(problem(
+                        "findings.json",
+                        PATTERNS,
+                        "the patterns section carries a severity; it is an observation and has none",
+                    ));
+                }
+            }
+            (None, None) => {}
+        }
+        for (i, row) in value
+            .get("findings")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .enumerate()
+        {
+            if row.get("cells").is_some() || row.get("statement").is_some() {
+                problems.push(problem(
+                    "findings.json",
+                    &format!("findings[{i}]"),
+                    "a pattern row is inside the findings array; it would be counted as a finding",
+                ));
+            }
+        }
+    }
+    if let Some(stem) = package_stem(entries) {
+        if let Some(xlsx) = entries.get(&format!("{stem}-findings.xlsx")) {
+            if let Ok(names) = super::archive::xlsx_sheet_names(xlsx) {
+                let has_sheet = names
+                    .iter()
+                    .any(|n| n == crate::xlsx_export::PATTERNS_SHEET);
+                if has_sheet != report.patterns_across_services.is_some() {
+                    problems.push(problem(
+                        &format!("{stem}-findings.xlsx"),
+                        PATTERNS,
+                        if has_sheet {
+                            "the workbook has a Patterns across services sheet and the report has no such section"
+                        } else {
+                            "the report has a patterns section and the workbook has no Patterns across services sheet"
+                        },
+                    ));
+                }
+            }
+        }
+    }
+    problems
+}
+
 /// 22d, the PDF side (the in-memory release, which holds the PDF's data): the rows the PDF
 /// counts (all six matrix buckets) agree with `json/all-findings.json` by severity and kind, the
 /// finding cards it renders (curated plus held for review) agree with those matrix rows by
@@ -711,6 +801,7 @@ pub fn pdf_count_reconciliation_problems(
         &pdf,
         &rendered,
     );
+    problems.extend(patterns_section_problems(entries, report));
     let json = match json_tally(entries) {
         None => return problems,
         Some(Err(p)) => {

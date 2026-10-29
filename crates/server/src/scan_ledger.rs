@@ -222,8 +222,11 @@ pub struct ScopeCoverage {
 }
 
 /// What one (rule, repo) cell says. The one definition every reader of the ledger shares: the
-/// merge below, the integrity gate and the patterns-across-services matrix.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// merge below ([`merge_rule_entries`], whose merged entry the integrity gate then reads) and
+/// the patterns-across-services matrix, which calls [`ScanLedger::cell_state`] directly.
+/// Serializable because the matrix ships it to the report JSON and the cockpit.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
 pub enum CellState {
     /// The rule ran on the repo and found something. `sites` is the number of findings emitted.
     Violated { sites: usize },
@@ -526,6 +529,14 @@ pub struct ScanLedger {
     /// `None` for a full scan.
     #[serde(default)]
     incremental: Option<IncrementalCarry>,
+    /// The repos each selected rule is bound to, by upper-cased rule id. An empty list is a
+    /// project-level rule, which applies to every repo. A rule with no record here is read as
+    /// applying everywhere, so a repo with nothing recorded for it is "not reviewed", never
+    /// "not applicable". Set via [`Self::note_rule_scope`]; used by
+    /// [`Self::rule_applies_to_repo`] to tell a rule that is not bound to a repo from one that
+    /// should have been checked there and was not.
+    #[serde(default)]
+    rule_scopes: BTreeMap<String, Vec<String>>,
 }
 
 /// H11: what an incremental run re-audited and what it carried forward unchanged.
@@ -1435,6 +1446,22 @@ impl ScanLedger {
             None => CellState::NotApplicable {
                 reason: "the rule does not apply to this repo".to_string(),
             },
+        }
+    }
+
+    /// Record which repos a selected rule is bound to (`repos` empty: a project-level rule that
+    /// applies to every repo). Called once per selected rule when a scan starts.
+    pub fn note_rule_scope(&mut self, rule_id: &str, repos: &[String]) {
+        self.rule_scopes
+            .insert(rule_id.to_ascii_uppercase(), repos.to_vec());
+    }
+
+    /// Whether the rule is bound to `repo`. True for a project-level rule and for a rule whose
+    /// scope was never recorded (see [`Self::note_rule_scope`]).
+    pub fn rule_applies_to_repo(&self, rule_id: &str, repo: &str) -> bool {
+        match self.rule_scopes.get(&rule_id.to_ascii_uppercase()) {
+            Some(repos) if !repos.is_empty() => repos.iter().any(|r| r == repo),
+            _ => true,
         }
     }
 
