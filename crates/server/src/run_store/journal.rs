@@ -9,8 +9,11 @@
 //!
 //! A request is named by a digest of everything the model sees (model, system prompt, prompt,
 //! output limit, cache breakpoints, effort, temperature). The same request asked twice in one
-//! attempt (a retry with an unchanged prompt) is stored as the first and the second occurrence,
-//! so a resume replays both in order.
+//! attempt (a retry with an unchanged prompt) is stored as the first and the second occurrence.
+//! On a resume the n-th ask of a request is answered by its n-th GOOD stored reply, in the order
+//! the replies were stored: a first occurrence that failed and a second that succeeded (the
+//! end-of-run second try) leave one good reply, and it answers the resume's one ask, so nothing
+//! that was paid for is paid for again.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
@@ -271,6 +274,7 @@ fn plan_call(store: &RunStore, req: &LlmRequest) -> Planned {
             idx
         };
         let dir = store.dir().to_path_buf();
+        let st = &mut *st;
         let file = st.calls.entry(key.clone()).or_insert_with(|| {
             load_call_file(&dir, &key).unwrap_or_else(|| CallFile {
                 key: key.clone(),
@@ -280,19 +284,32 @@ fn plan_call(store: &RunStore, req: &LlmRequest) -> Planned {
                 entries: BTreeMap::new(),
             })
         });
-        match file.entries.get(&idx) {
-            Some(CallEntry {
-                status: EntryStatus::Done,
-                response: Some(stored),
-                ..
-            }) => Planned::Replay(Box::new(stored.replayed())),
-            _ => Planned::Fresh(FreshCall {
-                key,
-                idx,
-                kind,
-                repo,
-                files,
-            }),
+        // The idx-th ask is answered by the idx-th good reply, in the order they were stored.
+        let good = file
+            .entries
+            .values()
+            .filter(|e| e.status == EntryStatus::Done)
+            .filter_map(|e| e.response.as_ref())
+            .nth(idx);
+        match good {
+            Some(stored) => Planned::Replay(Box::new(stored.replayed())),
+            None => {
+                // A fresh call is stored in the next free slot of the file, never over an
+                // existing entry (a good one at a later slot must stay).
+                let next = st
+                    .next_slot
+                    .entry(key.clone())
+                    .or_insert_with(|| file.entries.keys().next_back().map_or(0, |k| k + 1));
+                let slot = *next;
+                *next += 1;
+                Planned::Fresh(FreshCall {
+                    key,
+                    idx: slot,
+                    kind,
+                    repo,
+                    files,
+                })
+            }
         }
     };
     if let Planned::Fresh(f) = &planned {

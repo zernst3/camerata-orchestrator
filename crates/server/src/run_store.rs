@@ -48,7 +48,8 @@ use crate::scan_cache::AiScanKey;
 /// The layout version of `run.json`. A run written by another version is not resumed.
 pub const STORE_SCHEMA_VERSION: u32 = 1;
 
-/// A lock whose heartbeat is older than this is stale: the process holding it is gone.
+/// The fallback when the operating system's lock cannot be probed: a lock whose heartbeat is
+/// older than this is stale, the process holding it is gone.
 pub const STALE_HEARTBEAT_SECS: i64 = 45;
 
 /// How often a running process refreshes its heartbeat.
@@ -338,6 +339,16 @@ fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Option<T> {
 }
 
 // ── The lock ─────────────────────────────────────────────────────────────────────────────────
+//
+// The lock on a run is the operating system's lock on `lock.json` (`File::try_lock`, an
+// exclusive advisory lock): held by the process for as long as it keeps the file open, released
+// by the kernel the instant the process ends, however it ends (SIGKILL, a crash, a power loss
+// loses the lock with the machine), and kept through a laptop's sleep. That is what makes "is
+// anything working on this run" a question with one answer and no race: two takers cannot both
+// win, because the lock is taken by one system call, and a live process whose heartbeat fell
+// behind (the laptop slept, the runtime was starved) still holds its lock and is not taken over.
+// The file's content (the process id and a heartbeat time) is for the operator and for the
+// fallback when the lock cannot be probed.
 
 /// `lock.json`: who is working on the run and when they last said so.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -367,10 +378,49 @@ fn pid_is_alive(pid: u32) -> bool {
     }
 }
 
+/// Open the lock file for the lock, creating it (private to this user) when it does not exist and
+/// never truncating it: the content is the holder's to write once it holds the lock.
+fn open_lock_file(path: &Path) -> std::io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options.open(path)
+}
+
+/// Whether the file at `path` is locked by a live process: `Some(true)` when it is, `Some(false)`
+/// when nothing holds it, `None` when the lock could not be probed (the file could not be opened
+/// or the system refused the probe). The probe takes a shared lock for an instant, which an
+/// exclusive holder refuses and which no holder is disturbed by.
+fn os_lock_held(path: &Path) -> Option<bool> {
+    let file = std::fs::OpenOptions::new().read(true).open(path).ok()?;
+    match file.try_lock_shared() {
+        Ok(()) => {
+            let _ = file.unlock();
+            Some(false)
+        }
+        Err(std::fs::TryLockError::WouldBlock) => Some(true),
+        Err(std::fs::TryLockError::Error(_)) => None,
+    }
+}
+
 /// Whether anything works on the run in `run_dir`.
 pub fn liveness_of(run_dir: &Path) -> Liveness {
-    let Some(lock) = read_json::<LockFile>(&run_dir.join("lock.json")) else {
+    let path = run_dir.join("lock.json");
+    if !path.exists() {
         return Liveness::None;
+    }
+    match os_lock_held(&path) {
+        Some(true) => return Liveness::Live,
+        Some(false) => return Liveness::Stale,
+        None => {}
+    }
+    // The lock could not be probed: judge by the file's content.
+    let Some(lock) = read_json::<LockFile>(&path) else {
+        return Liveness::Stale;
     };
     let fresh = chrono::DateTime::parse_from_rfc3339(&lock.heartbeat_at)
         .map(|t| (chrono::Utc::now() - t.with_timezone(&chrono::Utc)).num_seconds())
@@ -383,32 +433,45 @@ pub fn liveness_of(run_dir: &Path) -> Liveness {
     }
 }
 
-/// The lock a process holds on a run while it works. A heartbeat task refreshes it; dropping the
-/// lock stops the task and removes the file.
+/// The lock a process holds on a run while it works: the operating system's lock on `lock.json`,
+/// held for as long as this value lives. A heartbeat task refreshes the file's content; dropping
+/// the lock stops the task and removes the file.
 pub struct RunLock {
     path: PathBuf,
+    /// The open, locked file. Dropped last, after the file is removed.
+    file: Arc<std::fs::File>,
     heartbeat: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl RunLock {
-    /// Take the lock on `run_dir`. Refused while a live process holds it; a stale lock (its
-    /// process died, or its heartbeat stopped) is taken over.
+    /// Take the lock on `run_dir`. Refused while another process (or another handle in this one)
+    /// holds it; a lock whose holder is gone is taken over at once, whatever its heartbeat says.
     pub fn acquire(run_dir: &Path) -> Result<Self, RunStoreError> {
-        if liveness_of(run_dir) == Liveness::Live {
-            let pid = read_json::<LockFile>(&run_dir.join("lock.json")).map(|l| l.pid);
-            return Err(RunStoreError::Busy(match pid {
-                Some(pid) => format!(
-                    "this run is being worked on right now by process {pid}; wait for it to \
-                     finish, or stop it first"
-                ),
-                None => "this run is being worked on right now".to_string(),
-            }));
-        }
         let path = run_dir.join("lock.json");
+        let file = open_lock_file(&path).map_err(|e| RunStoreError::Io(e.to_string()))?;
+        match file.try_lock() {
+            Ok(()) => {}
+            Err(std::fs::TryLockError::WouldBlock) => {
+                let pid = read_json::<LockFile>(&path).map(|l| l.pid);
+                return Err(RunStoreError::Busy(match pid {
+                    Some(pid) => format!(
+                        "this run is being worked on right now by process {pid}; wait for it \
+                         to finish, or stop it first"
+                    ),
+                    None => "this run is being worked on right now".to_string(),
+                }));
+            }
+            Err(std::fs::TryLockError::Error(e)) => {
+                return Err(RunStoreError::Io(format!(
+                    "could not lock {}: {e}",
+                    path.display()
+                )))
+            }
+        }
+        let file = Arc::new(file);
         let started_at = now();
         let write = {
-            let path = path.clone();
-            let started_at = started_at.clone();
+            let file = file.clone();
             move || {
                 let lock = LockFile {
                     pid: std::process::id(),
@@ -416,7 +479,9 @@ impl RunLock {
                     heartbeat_at: now(),
                 };
                 if let Ok(bytes) = serde_json::to_vec(&lock) {
-                    let _ = write_atomic(&path, &bytes);
+                    // In place, never by rename: the lock lives on this file, so the path must
+                    // keep pointing at it.
+                    let _ = write_in_place(&file, &bytes);
                 }
             }
         };
@@ -429,8 +494,22 @@ impl RunLock {
                 }
             })
         });
-        Ok(Self { path, heartbeat })
+        Ok(Self {
+            path,
+            file,
+            heartbeat,
+        })
     }
+}
+
+/// Replace the content of the open `file` with `bytes`.
+fn write_in_place(file: &std::fs::File, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::{Seek, Write};
+    let mut handle = file;
+    handle.set_len(0)?;
+    handle.seek(std::io::SeekFrom::Start(0))?;
+    handle.write_all(bytes)?;
+    handle.flush()
 }
 
 impl Drop for RunLock {
@@ -439,6 +518,7 @@ impl Drop for RunLock {
             task.abort();
         }
         let _ = std::fs::remove_file(&self.path);
+        let _ = self.file.unlock();
     }
 }
 
@@ -531,6 +611,8 @@ pub(crate) struct StoreState {
     pub record: RunRecord,
     /// How many times each request key was asked in this attempt (the position of its reply).
     pub asked: std::collections::HashMap<String, usize>,
+    /// The next free slot of each request's call file, for a fresh call to be stored in.
+    pub next_slot: std::collections::HashMap<String, usize>,
     /// Call files read or written in this attempt.
     pub calls: std::collections::HashMap<String, journal::CallFile>,
     /// How many times each batch submission key was made in this attempt.
@@ -645,6 +727,7 @@ impl RunStore {
             state: Mutex::new(StoreState {
                 record,
                 asked: Default::default(),
+                next_slot: Default::default(),
                 calls: Default::default(),
                 submitted: Default::default(),
             }),
@@ -669,6 +752,7 @@ impl RunStore {
             state: Mutex::new(StoreState {
                 record,
                 asked: Default::default(),
+                next_slot: Default::default(),
                 calls: Default::default(),
                 submitted: Default::default(),
             }),

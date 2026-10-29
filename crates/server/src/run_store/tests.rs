@@ -224,6 +224,43 @@ async fn a_good_reply_is_replayed_on_a_resume_and_a_failed_one_is_asked_again() 
     );
 }
 
+/// A call that failed at its first occurrence and succeeded at its second (the end-of-run second
+/// try sends the same prompt) has a good reply stored. A resume asks the prompt once, so it must
+/// be answered from that stored reply, not sent to the model again: the uninterrupted run used
+/// that reply, and paying for it twice is what the store exists to prevent.
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn a_good_reply_stored_at_a_later_occurrence_answers_the_first_ask_of_a_resume() {
+    let (_s, _g) = state_dir();
+    let repo = git_repo();
+    let store = new_run(&repo);
+    let model = Scripted::new();
+    {
+        let j = JournalLlm::new(&model, store.clone());
+        model.fail_boom.store(true, Ordering::SeqCst);
+        assert!(
+            j.complete(ask("BOOM part")).await.is_err(),
+            "first try fails"
+        );
+        model.fail_boom.store(false, Ordering::SeqCst);
+        let second = j.complete(ask("BOOM part")).await.unwrap();
+        assert!(second.text.contains("BOOM part"), "the second try is good");
+    }
+    assert_eq!(model.calls(), 2);
+
+    let store = reopen(store);
+    let before = model.calls();
+    let j = JournalLlm::new(&model, store);
+    let replayed = j.complete(ask("BOOM part")).await.unwrap();
+    assert_eq!(
+        model.calls(),
+        before,
+        "the stored good reply answers the resume's first ask; nothing is sent again"
+    );
+    assert!(replayed.text.contains("BOOM part"));
+    assert_eq!(replayed.cost_usd, Some(0.0));
+}
+
 #[tokio::test]
 #[serial_test::serial(process_env)]
 async fn the_same_request_asked_twice_replays_in_order() {
@@ -353,7 +390,9 @@ fn a_live_lock_refuses_a_second_worker_and_a_dead_one_is_taken_over() {
     assert!(matches!(RunStore::open(&id), Err(RunStoreError::Busy(_))));
     assert_eq!(store.record().state_for_test(&dir), RunState::Running);
 
-    // The process dies without cleaning up: the lock names a pid that is gone.
+    // The process dies without cleaning up: the kernel releases its lock on the file, and the
+    // file it left behind names a pid that is gone. (In one process the only way to release the
+    // lock is to drop its holder; the file is then written back as the dead process left it.)
     let dead = {
         let mut child = std::process::Command::new("sh")
             .args(["-c", "exit 0"])
@@ -363,7 +402,7 @@ fn a_live_lock_refuses_a_second_worker_and_a_dead_one_is_taken_over() {
         child.wait().unwrap();
         pid
     };
-    std::mem::forget(store); // a killed process runs no destructors
+    drop(store);
     let stale = serde_json::json!({
         "pid": dead,
         "started_at": now(),
@@ -388,21 +427,55 @@ fn a_live_lock_refuses_a_second_worker_and_a_dead_one_is_taken_over() {
     assert_eq!(again.record().attempt, 2);
 }
 
+/// The lock is the operating system's, not the heartbeat: a process that still holds it is live
+/// however old its heartbeat (the laptop slept, the runtime was starved), so a second taker is
+/// refused and the cockpit says Running, not Interrupted. Once the holder is gone the same file
+/// is stale and is taken over, and the taker's lock is removed when it is dropped.
 #[test]
 #[serial_test::serial(process_env)]
-fn a_stale_heartbeat_alone_makes_a_lock_stale() {
+fn a_held_lock_with_an_old_heartbeat_is_live_and_a_released_one_is_stale() {
     let (_s, _g) = state_dir();
     let repo = git_repo();
     let store = new_run(&repo);
+    let id = store.run_id();
     let dir = store.dir().to_path_buf();
     let old = chrono::Utc::now() - chrono::Duration::seconds(STALE_HEARTBEAT_SECS + 30);
-    let lock = serde_json::json!({
+    let stale = serde_json::json!({
         "pid": std::process::id(),
         "started_at": now(),
         "heartbeat_at": old.to_rfc3339(),
     });
-    std::fs::write(dir.join("lock.json"), lock.to_string()).unwrap();
+    std::fs::write(dir.join("lock.json"), stale.to_string()).unwrap();
+    assert_eq!(
+        liveness_of(&dir),
+        Liveness::Live,
+        "the holder is alive, whatever its heartbeat says"
+    );
+    assert!(
+        matches!(RunStore::open(&id), Err(RunStoreError::Busy(_))),
+        "a second taker is refused while the lock is held"
+    );
+    assert_eq!(store.record().state_for_test(&dir), RunState::Running);
+
+    // The holder is gone: the same file, no longer held, is stale and is taken over.
+    drop(store);
+    std::fs::write(dir.join("lock.json"), stale.to_string()).unwrap();
     assert_eq!(liveness_of(&dir), Liveness::Stale);
+    let taken = RunLock::acquire(&dir).expect("a released lock is taken over");
+    assert_eq!(liveness_of(&dir), Liveness::Live);
+    let written: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(dir.join("lock.json")).unwrap()).unwrap();
+    assert_eq!(
+        written["pid"],
+        std::process::id(),
+        "the lock is now the taker's"
+    );
+    drop(taken);
+    assert_eq!(
+        liveness_of(&dir),
+        Liveness::None,
+        "dropping the lock removes it"
+    );
 }
 
 impl RunRecord {
