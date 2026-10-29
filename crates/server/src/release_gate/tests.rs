@@ -714,7 +714,7 @@ fn row_parity_check_flags_a_pdf_row_absent_from_findings_json() {
     );
 }
 
-fn rezip(entries: &BTreeMap<String, Vec<u8>>) -> Vec<u8> {
+pub(super) fn rezip(entries: &BTreeMap<String, Vec<u8>>) -> Vec<u8> {
     let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
     let options = zip::write::SimpleFileOptions::default()
         .compression_method(zip::CompressionMethod::Deflated);

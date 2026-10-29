@@ -39,7 +39,12 @@ fn outage_record() -> camerata_server::run_health::OutageRecord {
 
 #[test]
 fn the_incomplete_run_exit_codes_are_all_different_and_nonzero() {
-    let codes = [EXIT_RELEASE_BLOCKED, EXIT_COST_CAPPED, EXIT_OUTAGE_STOPPED];
+    let codes = [
+        EXIT_RELEASE_BLOCKED,
+        EXIT_COST_CAPPED,
+        EXIT_OUTAGE_STOPPED,
+        EXIT_INCOMPLETE_RUN,
+    ];
     for (i, a) in codes.iter().enumerate() {
         assert_ne!(*a, 0);
         assert_ne!(*a, 1, "1 is a plain failure");
@@ -53,6 +58,39 @@ fn the_incomplete_run_exit_codes_are_all_different_and_nonzero() {
 #[test]
 fn a_complete_outcome_exits_zero() {
     assert_eq!(outcome().exit_code(), 0);
+}
+
+fn refusal(outage: bool, cost_capped: bool) -> camerata_server::report_export::RunIncomplete {
+    camerata_server::report_export::RunIncomplete {
+        message: "refused".to_string(),
+        reasons: vec!["a part did not run".to_string()],
+        outage,
+        cost_capped,
+    }
+}
+
+/// A CLIENT run the spend limit stopped is refused (nothing written) and still exits with the
+/// spend-limit code, so a script that raises the limit and runs again keeps working; only a run
+/// that is incomplete for another reason exits 6.
+#[test]
+fn a_refused_client_export_keeps_the_spend_limit_and_outage_codes() {
+    assert_eq!(
+        InspectError::Incomplete(refusal(false, true)).exit_code(),
+        EXIT_COST_CAPPED
+    );
+    assert_eq!(
+        InspectError::Incomplete(refusal(true, false)).exit_code(),
+        EXIT_OUTAGE_STOPPED
+    );
+    assert_eq!(
+        InspectError::Incomplete(refusal(true, true)).exit_code(),
+        EXIT_OUTAGE_STOPPED,
+        "an outage outranks the spend limit"
+    );
+    assert_eq!(
+        InspectError::Incomplete(refusal(false, false)).exit_code(),
+        EXIT_INCOMPLETE_RUN
+    );
 }
 
 #[test]

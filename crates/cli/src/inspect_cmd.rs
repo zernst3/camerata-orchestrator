@@ -342,8 +342,8 @@ impl InspectOutcome {
 /// integrity gate's is 2). The zip is never written.
 pub const EXIT_RELEASE_BLOCKED: i32 = 3;
 
-/// The exit code when the spend limit (`--max-cost-usd`) stopped the run. The export WAS
-/// written, marked incomplete.
+/// The exit code when the spend limit (`--max-cost-usd`) stopped the run. A client export is
+/// refused and nothing is written; an `--internal` export is written, marked incomplete.
 pub const EXIT_COST_CAPPED: i32 = 4;
 
 /// The exit code when the run stopped because the model provider could not be reached (three
@@ -359,10 +359,13 @@ pub const EXIT_OUTAGE_STOPPED: i32 = 5;
 /// and its second try). Nothing was written for a client. Distinct from 3, 4 and 5.
 pub const EXIT_INCOMPLETE_RUN: i32 = 6;
 
-/// The exit code for an incomplete run: the outage code when an outage stopped it.
-fn incomplete_exit_code(outage: bool) -> i32 {
+/// The exit code for an incomplete run: the outage code when an outage stopped it, the spend-limit
+/// code when the limit did, else the plain incomplete code.
+fn incomplete_exit_code(outage: bool, cost_capped: bool) -> i32 {
     if outage {
         EXIT_OUTAGE_STOPPED
+    } else if cost_capped {
+        EXIT_COST_CAPPED
     } else {
         EXIT_INCOMPLETE_RUN
     }
@@ -402,8 +405,12 @@ impl InspectError {
         match self {
             InspectError::Failed(_) => 1,
             InspectError::ReleaseBlocked(_) => EXIT_RELEASE_BLOCKED,
-            InspectError::Incomplete(refusal) => incomplete_exit_code(refusal.outage),
-            InspectError::IncompleteRun(run) => incomplete_exit_code(run.refusal.outage),
+            InspectError::Incomplete(refusal) => {
+                incomplete_exit_code(refusal.outage, refusal.cost_capped)
+            }
+            InspectError::IncompleteRun(run) => {
+                incomplete_exit_code(run.refusal.outage, run.refusal.cost_capped)
+            }
         }
     }
 }

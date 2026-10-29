@@ -291,35 +291,55 @@ fn audit_zip_with(zip_bytes: &[u8], pdf_text: Option<&str>, allow_incomplete: bo
 
 /// The check that a package does not record an inspection that failed to run to completion: such
 /// a package is for the operator's own review, never for a client. Reads the manifest's
-/// `inspection.run_incomplete` flag, which a complete run never carries.
+/// `inspection.run_incomplete` flag, the README's INTERNAL INCOMPLETE line and the marking in
+/// `findings.json`, none of which a complete run carries, so a package edited to drop one of them
+/// is still refused.
 fn incomplete_run_problems(entries: &std::collections::BTreeMap<String, Vec<u8>>) -> Vec<Problem> {
-    let Some(manifest) = entries
-        .get("manifest.json")
-        .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok())
-    else {
-        return Vec::new();
+    let mut problems = Vec::new();
+    let refusal = |file: &str, reasons: &str| {
+        Problem::new(
+            file,
+            "run complete",
+            format!(
+                "this package records an inspection that did not run to completion, so it is not \
+                 for a client ({reasons})"
+            ),
+            None,
+        )
     };
-    if manifest["inspection"]["run_incomplete"].as_bool() != Some(true) {
-        return Vec::new();
+    let json_of = |name: &str| {
+        entries
+            .get(name)
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok())
+    };
+    if let Some(manifest) = json_of("manifest.json") {
+        if manifest["inspection"]["run_incomplete"].as_bool() == Some(true) {
+            let reasons = manifest["inspection"]["incomplete_reasons"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str())
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                })
+                .unwrap_or_default();
+            problems.push(refusal("manifest.json", &reasons));
+        }
     }
-    let reasons = manifest["inspection"]["incomplete_reasons"]
-        .as_array()
-        .map(|a| {
-            a.iter()
-                .filter_map(|v| v.as_str())
-                .collect::<Vec<_>>()
-                .join("; ")
-        })
-        .unwrap_or_default();
-    vec![Problem::new(
-        "manifest.json",
-        "run complete",
-        format!(
-            "this package records an inspection that did not run to completion, so it is not \
-             for a client ({reasons})"
-        ),
-        None,
-    )]
+    if let Some(readme) = entries
+        .get("README.txt")
+        .and_then(|b| std::str::from_utf8(b).ok())
+    {
+        if readme.contains(crate::INTERNAL_INCOMPLETE_README_LINE) {
+            problems.push(refusal("README.txt", "the README says INTERNAL INCOMPLETE"));
+        }
+    }
+    if let Some(findings) = json_of("findings.json") {
+        if let Some(marking) = findings["provenance"]["internal_incomplete"].as_str() {
+            problems.push(refusal("findings.json", marking));
+        }
+    }
+    problems
 }
 
 /// The secrets check over every archive member, by kind, and over the member NAMES.

@@ -223,6 +223,56 @@ fn a_complete_run_exports_exactly_as_before() {
     release(package).expect("a complete run clears the gate");
 }
 
+/// Laundering: an internal zip whose manifest flag is edited away still says INTERNAL
+/// INCOMPLETE in its README and findings.json, and the gate reads those too.
+#[test]
+fn the_release_gate_refuses_an_internal_zip_whose_manifest_flag_was_edited_away() {
+    let released = release_internal(internal_incomplete_package()).expect("internal release");
+    let mut entries = read_zip_entries(&released.bytes).expect("zip reads");
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&entries["manifest.json"]).expect("manifest parses");
+    let inspection = manifest["inspection"].as_object_mut().expect("object");
+    assert!(inspection.remove("run_incomplete").is_some());
+    assert!(inspection.remove("incomplete_reasons").is_some());
+    entries.insert(
+        "manifest.json".to_string(),
+        serde_json::to_vec_pretty(&manifest).unwrap(),
+    );
+    let audit = audit_zip(&super::tests::rezip(&entries), None);
+    assert!(
+        audit
+            .problems()
+            .any(|(_, p)| p.message.contains("did not run to completion")),
+        "the README and findings.json still record the incomplete run: {audit:?}"
+    );
+}
+
+#[test]
+fn a_spend_limit_stop_is_flagged_in_the_refusal() {
+    let mut report = scan_report();
+    report.failed_passes.push(failed(FailureClass::SpendLimit));
+    report
+        .ledger
+        .record_cost_cap(crate::cost_cap::CostCapRecord {
+            cap_usd: 1.0,
+            spent_usd: 1.0,
+            not_run_passes: Vec::new(),
+            not_run_stages: vec![crate::cost_cap::NotRunStage {
+                repo: "acme/portal".to_string(),
+                stage: "calibration".to_string(),
+                partial: false,
+                class: FailureClass::SpendLimit,
+            }],
+            notes: Vec::new(),
+            repos_not_finished: Vec::new(),
+        });
+    let sealed = report.seal();
+    let refusal = crate::report_export::require_complete_run(&sealed, &client_options())
+        .expect_err("refused");
+    assert!(refusal.cost_capped);
+    assert!(!refusal.outage);
+}
+
 #[test]
 fn an_outage_stop_is_flagged_as_an_outage_in_the_refusal() {
     let mut report = scan_report();

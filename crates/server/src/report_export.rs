@@ -1719,6 +1719,9 @@ pub struct RunIncomplete {
     pub reasons: Vec<String>,
     /// True when an outage stop is among the reasons (the CLI exits 5 rather than 6).
     pub outage: bool,
+    /// True when the spend limit stopped the run (the CLI exits 4 rather than 6, so a script that
+    /// raises the limit and runs again keeps working).
+    pub cost_capped: bool,
 }
 
 impl std::fmt::Display for RunIncomplete {
@@ -1752,6 +1755,7 @@ pub fn require_complete_run(
         ),
         reasons,
         outage: report.ledger.is_outage_stopped(),
+        cost_capped: report.ledger.is_cost_capped(),
     })
 }
 
