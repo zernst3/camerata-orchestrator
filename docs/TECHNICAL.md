@@ -174,6 +174,12 @@ maintainer-only `corpus-verifier` tool, so it carries no app-crate edge.)
 
 ### Process and runtime model
 
+Dev builds on macOS are signed with a local self-signed "Camerata Dev" certificate
+(`scripts/sign-dev.sh`), so the Keychain's "Always Allow" survives a rebuild. `cargo run` does it
+through `scripts/cargo-runner.sh` (set in `.cargo/config.toml`); after `cargo build --release`, run
+`scripts/sign-dev.sh target/release/camerata target/release/camerata-ui` yourself. It is a no-op
+off macOS, on CI or without the certificate, and it is not release signing.
+
 When you run `cargo run -p camerata-ui`:
 
 1. The Dioxus desktop process starts. As of the 2026-07-08 adapter-ladder batch,
