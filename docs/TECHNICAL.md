@@ -3005,12 +3005,13 @@ selection and alternatives join). On the API backend the exact input size of one
 representative scan pass is counted through `count_tokens` (free, not billed), built
 by the same `representative_scan_sample` the batch path samples with. With
 `terse_output` on, the estimate adds the detail regeneration step
-(`camerata_ui_core::scan::regeneration_estimate`): the findings are sized from the
-scan's output, and the step is priced as an upper bound by its own limits (10
-findings to a call, 450 output tokens per finding, all three rounds run on every finding),
-in real time with no batch discount. The batch spend-limit gate's fallback estimate
-and the hint `camerata inspect` hands the meter use the same figure, so neither
-under-estimates a run with the switch on. `applies_to` routing is NOT modelled: it
+(`camerata_ui_core::scan::regeneration_expected`): the findings are sized from the
+scan's output, and the step is priced as the usual run (10 findings to a call, 450 output
+tokens per finding, every finding back in the first round), in real time with no batch
+discount. The ceiling (`regeneration_estimate`: every round on every finding at the request
+cap) is carried beside it (`estimate_audit_cost_bounds`) and printed as "at most"; it warns,
+it never refuses. The batch spend-limit gate's fallback estimate and the hint
+`camerata inspect` hands the meter use the expected figure. `applies_to` routing is NOT modelled: it
 only ever sends fewer (chunk, rule) pairs, so leaving it out keeps the estimate an
 over-estimate, the safe side. The output
 states it is an estimate and gives its basis; an unpriced model prints "unavailable"
@@ -6024,7 +6025,7 @@ with their status (`pending`, `running`, `done`, `failed`). The plan is written,
 before any work starts: per repo the tools, scan, calibration, alternatives, detail and fix stages,
 then merge and export. `calls/<digest>.json` holds every model answer for one request, by
 occurrence. `batches/<digest>-<n>.json` holds a submitted Message Batch (its id the moment the
-submit returned, its results once fetched). `lock.json` holds the process id and a heartbeat time.
+submit returned, its results once fetched). `lock.json` is the lock (below) and holds the process id and a heartbeat time.
 `prior_manifest.json` is the incremental baseline the run started from.
 
 **Granularity.** Parts are tracked at the stage level in the plan, and individual model calls are
@@ -6045,10 +6046,16 @@ failed sub pass, a malformed answer and two repos). Prompt delimiter tokens are 
 run's own random seed and the framed text (`prompt_frame::seed_tokens`), so a prompt is the same
 text on a resume and a stored answer matches it; the seed never leaves the run folder.
 
-**Interrupted runs.** A run whose status is running but whose lock is missing, whose process is
-gone (`kill -0`) or whose heartbeat is older than 45 seconds is Interrupted. A resume takes the
-stale lock over. A live lock refuses a second worker. Batches: an already submitted batch is
-polled and fetched, never submitted again.
+**Interrupted runs.** The lock on a run is the operating system's lock on `lock.json`
+(`File::try_lock`), held for as long as the process keeps the file open: the kernel releases it
+the instant the process ends, however it ends (SIGKILL, a crash, a power loss), and keeps it
+through a laptop's sleep. A run whose status is running but whose lock file is missing or no
+longer held is Interrupted, at once, not after a timeout. A resume takes such a lock over; a held
+lock refuses a second worker, in another process or in the same one, and two takers cannot both
+win because the lock is one system call. The file's content (process id, heartbeat every 5
+seconds) is for the operator, and the fallback when the lock cannot be probed: then a process
+that is gone (`kill -0`) or a heartbeat older than 45 seconds means Interrupted. Batches: an
+already submitted batch is polled and fetched, never submitted again.
 
 **One resume.** `run_store::open_for_resume` checks and opens a run; `camerata inspect --resume`
 and the server's `POST /api/runs/:id/resume` (the cockpit's **Run what remains**, after
@@ -6064,10 +6071,14 @@ attempts as history: a part that a later attempt completed stays with a `resolve
 
 **Incremental baseline.** The incremental manifest is written to the cache only by a complete scan.
 
-**Estimates.** `regeneration_estimate` (ui-core) is an upper bound by the detail stage's own
-limits: the three rounds on every finding (`n/10 + n/5 + n` calls) and the second try (`n` more),
-each call priced at its own `max_tokens` (never less than 4,096). It is a ceiling, not an
-expectation.
+**Estimates.** Two figures. `regeneration_expected` (ui-core) is the usual run: every finding
+back in the first round, priced at 450 output tokens a finding; it is the estimate the operator
+reads and the one a spend limit is checked against before anything starts (a batch submit is
+refused only when the expected cost would pass the limit). `regeneration_estimate` is the ceiling
+by the detail stage's own limits: the three rounds on every finding (`n/10 + n/5 + n` calls) and
+the second try (`n` more), each call priced at its own `max_tokens` (never less than 4,096); the
+pre-flight prints it as "at most" and notes when it alone is above the limit. The limit itself is
+enforced per call either way.
 
 **Cleanup.** The newest five runs per project are kept. A run that is not complete is deleted only
 when a newer complete run exists for the same commits; a run a live process works on never is.
