@@ -2394,6 +2394,7 @@ html, body {
   white-space: pre-wrap; word-break: break-word; max-height: 240px; overflow-y: auto;
 }
 .agent-output { background: #1b1a18; color: #ece9e3; border-color: #1b1a18; }
+.agent-superseded-note { margin: 0; font-size: 11px; font-style: italic; color: var(--ink-faint); }
 
 /* ---- AI clarify suggestions ----------------------------------------------- */
 .clarify-suggest-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 6px 0 8px; }
