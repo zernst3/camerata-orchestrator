@@ -463,6 +463,18 @@ mod triage_log_tests;
 #[cfg(test)]
 mod run_complete_tests;
 
+/// A clean report, for other modules' tests.
+#[cfg(test)]
+pub(crate) fn test_scan_report() -> crate::onboard::ScanReport {
+    tests::scan_report()
+}
+
+/// An internal package made from an incomplete run, for other modules' tests.
+#[cfg(test)]
+pub(crate) fn test_internal_incomplete_package() -> ProductPackage {
+    run_complete_tests::internal_incomplete_package()
+}
+
 #[cfg(test)]
 mod patterns_tests;
 

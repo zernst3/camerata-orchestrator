@@ -303,6 +303,10 @@ pub struct InspectOutcome {
     /// empty for a complete run. Non-empty only on an `--internal` run, because a client run
     /// that is incomplete writes no export and returns [`InspectError::IncompleteRun`] instead.
     pub incomplete_reasons: Vec<String>,
+    /// One structured line per failed part, for stderr (see
+    /// [`camerata_server::failure_report`]). The full report is at the path the ledger summary
+    /// names.
+    pub failure_lines: Vec<String>,
 }
 
 impl InspectOutcome {
@@ -388,6 +392,8 @@ pub struct IncompleteRun {
     pub ledger_summary: String,
     /// Where the operator ledger was written.
     pub ledger_path: PathBuf,
+    /// One structured line per failure, for stderr.
+    pub failure_lines: Vec<String>,
 }
 
 impl InspectError {
@@ -1140,6 +1146,22 @@ pub async fn run_inspect_pipeline_with(
             args.client_tooling(),
         ));
     save_ledger(&ledger_file, &report.ledger);
+    // The operator's failure report, next to the ledger (never in the export): every failed part
+    // with every attempt's status, provider error, request id and waits.
+    let failure_report = camerata_server::failure_report::build(&report);
+    let failure_report_path =
+        match camerata_server::failure_report::write(&ledger_file, &failure_report) {
+            Ok(paths) => paths.map(|(json, _md)| json),
+            Err(e) => {
+                eprintln!("camerata inspect: could not write the failure report: {e}");
+                None
+            }
+        };
+    let failure_lines = failure_report.stderr_lines();
+    let ledger_summary = match &failure_report_path {
+        Some(path) => format!("{ledger_summary}\nfailure report: {}", path.display()),
+        None => ledger_summary,
+    };
 
     // Pass-1 W1 seal fix: THE sealing point — every row-adding pass above has already run, and
     // every exporter the rest of this function calls now takes `&SealedReport`, never
@@ -1164,6 +1186,7 @@ pub async fn run_inspect_pipeline_with(
             refusal,
             ledger_summary: ledger_summary.clone(),
             ledger_path: ledger_file.clone(),
+            failure_lines: failure_lines.clone(),
         })),
         other => other,
     })?;
@@ -1191,6 +1214,7 @@ pub async fn run_inspect_pipeline_with(
         cost_cap: report.ledger.cost_cap().cloned(),
         outage: report.ledger.outage().cloned(),
         incomplete_reasons: report.incomplete_reasons(),
+        failure_lines,
     })
 }
 
@@ -1633,6 +1657,7 @@ mod tests {
             }),
             outage: None,
             incomplete_reasons: Vec::new(),
+            failure_lines: Vec::new(),
         };
         let text = format_outcome_report(&outcome);
         assert!(
@@ -2215,6 +2240,7 @@ mod tests {
             cost_cap: None,
             outage: None,
             incomplete_reasons: Vec::new(),
+            failure_lines: Vec::new(),
         };
         let text = format_outcome_report(&outcome);
         assert!(text.contains("/tmp/out.zip"), "{text}");
@@ -2267,6 +2293,7 @@ mod tests {
             cost_cap: None,
             outage: None,
             incomplete_reasons: Vec::new(),
+            failure_lines: Vec::new(),
         };
         let text = format_outcome_report(&outcome);
         assert!(text.contains("STAGE TELEMETRY"), "{text}");

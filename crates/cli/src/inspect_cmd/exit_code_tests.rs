@@ -20,6 +20,7 @@ fn outcome() -> InspectOutcome {
         cost_cap: None,
         outage: None,
         incomplete_reasons: Vec::new(),
+        failure_lines: Vec::new(),
     }
 }
 

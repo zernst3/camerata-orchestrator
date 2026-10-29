@@ -1041,6 +1041,83 @@ pub(super) struct FailedPassView {
     pub pass: String,
     #[serde(default)]
     pub reason: String,
+    /// Why the part failed (transport, auth_or_billing, content, spend_limit, outage_stop, io).
+    /// Empty for a report from before the class existed.
+    #[serde(default)]
+    pub class: String,
+    /// The files the part was shown and did not review.
+    #[serde(default)]
+    pub files: Vec<String>,
+    /// What each attempt got back. Operator only; the cockpit shows it, no export carries it.
+    #[serde(default)]
+    pub attempts: Vec<AttemptView>,
+    /// A disclosed limit of the scope, not a failed part.
+    #[serde(default)]
+    pub scope_note: bool,
+}
+
+/// One attempt at a failed part (mirror of the transport's attempt record).
+#[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize, Default, Debug)]
+pub(super) struct AttemptView {
+    #[serde(default)]
+    pub at: String,
+    #[serde(default)]
+    pub backend: String,
+    #[serde(default)]
+    pub model: String,
+    #[serde(default)]
+    pub http_status: Option<u16>,
+    #[serde(default)]
+    pub error_type: Option<String>,
+    #[serde(default)]
+    pub message: String,
+    #[serde(default)]
+    pub request_id: Option<String>,
+    #[serde(default)]
+    pub retry_after_secs: Option<u64>,
+    #[serde(default)]
+    pub wait_secs: Option<u64>,
+    #[serde(default)]
+    pub exit_code: Option<i32>,
+    #[serde(default)]
+    pub stderr_tail: Option<String>,
+    #[serde(default)]
+    pub second_try: bool,
+}
+
+impl AttemptView {
+    /// The one-line form shown in the failure panel.
+    pub(super) fn line(&self) -> String {
+        let mut out = format!("{} {} {}", self.at, self.backend, self.model);
+        if self.second_try {
+            out.push_str(" (second try)");
+        }
+        if let Some(s) = self.http_status {
+            out.push_str(&format!(", HTTP {s}"));
+        }
+        if let Some(t) = &self.error_type {
+            out.push_str(&format!(", {t}"));
+        }
+        if let Some(r) = &self.request_id {
+            out.push_str(&format!(", request {r}"));
+        }
+        if let Some(r) = self.retry_after_secs {
+            out.push_str(&format!(", retry-after {r}s"));
+        }
+        if let Some(w) = self.wait_secs {
+            out.push_str(&format!(", waited {w}s"));
+        }
+        if let Some(c) = self.exit_code {
+            out.push_str(&format!(", exit {c}"));
+        }
+        if !self.message.is_empty() {
+            out.push_str(&format!(": {}", self.message));
+        }
+        if let Some(t) = &self.stderr_tail {
+            out.push_str(&format!(" [stderr: {t}]"));
+        }
+        out
+    }
 }
 
 #[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize)]
@@ -6782,8 +6859,44 @@ pub(super) fn IncompletePassesBanner(failed_passes: Vec<FailedPassView>, compact
                 }
                 ul { class: "scan-incomplete-list",
                     for (i , f) in failed_passes.iter().enumerate() {
-                        li { key: "{i}", "{f.repo}: {f.pass} \u{2014} {f.reason}" }
+                        li { key: "{i}",
+                            details { class: "scan-failure",
+                                summary { "{f.repo}: {f.pass} \u{2014} {f.reason}" }
+                                p { class: "scan-failure-meta",
+                                    "Class: {f.class}. Repo: {f.repo}. Part: {f.pass}. Files: {f.files.len()}."
+                                }
+                                if !f.files.is_empty() {
+                                    p { class: "scan-failure-files", "{f.files.join(\", \")}" }
+                                }
+                                ol { class: "scan-failure-attempts",
+                                    for (n , a) in f.attempts.iter().enumerate() {
+                                        li { key: "{n}", "{a.line()}" }
+                                    }
+                                }
+                                button {
+                                    class: "scan-failure-copy",
+                                    r#type: "button",
+                                    onclick: {
+                                        let entry = f.clone();
+                                        move |_| {
+                                            let text = serde_json::to_string_pretty(&entry).unwrap_or_default();
+                                            spawn(async move {
+                                                let _ = crate::source_ui::copy_to_clipboard(&text).await;
+                                            });
+                                        }
+                                    },
+                                    "Copy as JSON"
+                                }
+                            }
+                        }
                     }
+                }
+                button {
+                    class: "scan-run-what-remains",
+                    r#type: "button",
+                    disabled: true,
+                    title: "Resume is coming: it will run only the parts listed here.",
+                    "Run what remains"
                 }
                 p { class: "onboard-gate-hint",
                     "A clean result here does NOT mean the missing parts are clean. Raise the limit or re-run to cover them."
@@ -12340,6 +12453,7 @@ mod render_tests {
             repo: "acme/api".to_string(),
             pass: pass.to_string(),
             reason: reason.to_string(),
+            ..FailedPassView::default()
         }
     }
 
@@ -12401,6 +12515,75 @@ mod render_tests {
         assert!(html.contains("The export will say so"), "{html}");
         // A failed pass of ANY cause shows, not only the spend limit.
         assert!(!html.contains("Stopped by the spend limit"), "{html}");
+    }
+
+    fn failure_detail_harness() -> Element {
+        rsx! {
+            IncompletePassesBanner {
+                failed_passes: vec![FailedPassView {
+                    repo: "acme/api".to_string(),
+                    pass: "audit pass[all] 1/2".to_string(),
+                    reason: "Anthropic API HTTP 529: overloaded".to_string(),
+                    class: "transport".to_string(),
+                    files: vec!["src/a.rs".to_string()],
+                    attempts: vec![AttemptView {
+                        at: "2026-10-28T10:00:00Z".to_string(),
+                        backend: "api".to_string(),
+                        model: "claude-x".to_string(),
+                        http_status: Some(529),
+                        error_type: Some("overloaded_error".to_string()),
+                        request_id: Some("req_9".to_string()),
+                        retry_after_secs: Some(30),
+                        wait_secs: Some(5),
+                        message: "Overloaded".to_string(),
+                        ..AttemptView::default()
+                    }],
+                    scope_note: false,
+                }],
+                compact: false,
+            }
+        }
+    }
+
+    #[test]
+    fn the_failure_panel_lists_class_repo_part_files_and_every_attempt_field() {
+        let mut vdom = VirtualDom::new(failure_detail_harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        for needle in [
+            "Class: transport",
+            "acme/api",
+            "audit pass[all] 1/2",
+            "src/a.rs",
+            "HTTP 529",
+            "overloaded_error",
+            "request req_9",
+            "retry-after 30s",
+            "waited 5s",
+            "claude-x",
+            "Copy as JSON",
+        ] {
+            assert!(html.contains(needle), "{needle} missing in {html}");
+        }
+        // One banner, not two.
+        assert_eq!(html.matches("scan-incomplete-banner").count(), 1, "{html}");
+    }
+
+    #[test]
+    fn run_what_remains_is_a_disabled_button_that_says_resume_is_coming() {
+        let mut vdom = VirtualDom::new(failure_detail_harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        assert!(html.contains("Run what remains"), "{html}");
+        assert!(html.contains("disabled"), "{html}");
+        assert!(html.contains("Resume is coming"), "{html}");
+    }
+
+    #[test]
+    fn an_old_report_without_the_new_fields_still_loads() {
+        let v: FailedPassView =
+            serde_json::from_str(r#"{"repo":"a/b","pass":"p","reason":"r"}"#).unwrap();
+        assert!(v.class.is_empty() && v.attempts.is_empty() && v.files.is_empty());
     }
 
     fn incomplete_none_harness() -> Element {

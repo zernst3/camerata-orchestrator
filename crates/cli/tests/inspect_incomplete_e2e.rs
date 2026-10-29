@@ -224,6 +224,18 @@ async fn the_internal_export_of_an_unreachable_run_is_written_marked_and_gate_re
     assert!(outcome.outage_stopped());
     assert_eq!(outcome.exit_code(), EXIT_OUTAGE_STOPPED);
     assert!(export.exists());
+    // The operator's failure report: structured stderr lines, a file next to the ledger, and
+    // nothing of it inside the zip.
+    assert!(!outcome.failure_lines.is_empty());
+    assert!(outcome.ledger_summary.contains("failure report:"));
+    let report_json = outcome
+        .ledger_path
+        .to_string_lossy()
+        .replace(".ledger.json", ".failures.json");
+    assert!(Path::new(&report_json).exists(), "{report_json}");
+    let names =
+        camerata_server::release_gate::read_zip_entries(&std::fs::read(&export).unwrap()).unwrap();
+    assert!(names.keys().all(|k| !k.contains("failures")), "{names:?}");
     let manifest: serde_json::Value =
         serde_json::from_str(&zip_entry(&export, "manifest.json")).unwrap();
     assert_eq!(manifest["inspection"]["run_incomplete"], true);

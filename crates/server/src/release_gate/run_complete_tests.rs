@@ -58,6 +58,10 @@ fn package_from(
     )
 }
 
+pub(super) fn internal_incomplete_package() -> ProductPackage {
+    package_from(incomplete_report(), &internal_options()).expect("internal may export")
+}
+
 fn internal_options() -> ReportOptions {
     ReportOptions {
         internal: true,
