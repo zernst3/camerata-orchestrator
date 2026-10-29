@@ -266,7 +266,7 @@ pub struct RunRecord {
     pub rules_fingerprint: String,
     pub ai_scan_key: AiScanKey,
     /// The secret the run draws its prompt delimiter tokens from (hex). See
-    /// [`crate::prompt_frame::seed_tokens`].
+    /// [`crate::prompt_frame::with_seed`].
     pub nonce_seed: String,
     /// The arguments the run was started with, for the resume (opaque to the store).
     pub args: serde_json::Value,
