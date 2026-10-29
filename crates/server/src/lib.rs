@@ -6196,6 +6196,7 @@ pub fn record_corpus_load_failures(
         );
         report.ledger.record_corpus_load_failure(&failure.rule_id);
         report.coverage_notes.push(crate::onboard::CoverageNote {
+            tool_failed: false,
             repo: None,
             tool: RULE_CORPUS_COVERAGE_TOOL.to_string(),
             // Operator-facing detail. See this function's doc comment, point 3, for why this
@@ -6508,6 +6509,7 @@ async fn onboard_audit(
                     Err(_elapsed) => (
                         Vec::new(),
                         Some(crate::onboard::CoverageNote {
+                            tool_failed: false,
                             repo: None,
                             tool: "osv-scanner".to_string(),
                             message: format!(
@@ -7348,9 +7350,9 @@ pub(crate) fn reconcile_external_tool_ledger(
                 Some(note_repo) => repo.is_empty() || note_repo == repo,
                 None => true,
             })
-            .map(|n| n.message.clone());
+            .map(|n| (n.message.clone(), n.tool_failed));
 
-        if let Some(reason) = failure {
+        if let Some((reason, invoked_and_failed)) = failure {
             report.ledger.correct_rule_after_external_pass(
                 &repo,
                 rule_id.clone(),
@@ -7358,18 +7360,42 @@ pub(crate) fn reconcile_external_tool_ledger(
                 Some(format!("{pass_label} did not run: {reason}")),
                 0,
             );
-            report.failed_passes.push(crate::ai_audit::FailedPass {
-                repo: repo_for_disclosure(report, &repo),
-                pass: pass_label.clone(),
-                reason: format!("{rule_id}: {pass_label} did not run: {reason}"),
-                files_not_reviewed: 0,
-                class: crate::ai_audit::FailureClass::Content,
-                files: Vec::new(),
-                attempts: Vec::new(),
-                // A mechanical tool that was not run (by policy, not installed for this stack, or
-                // no rule routed to it) is a disclosed limit of the scope, not a failed part.
-                scope_note: true,
-            });
+            if invoked_and_failed {
+                // The tool was started and then crashed or wrote nothing usable: a failed part.
+                // It locks a client export and is re-run on resume. One entry per repo and
+                // pass, however many rules the tool was asked to check.
+                let repo_name = repo_for_disclosure(report, &repo);
+                let already = report
+                    .failed_passes
+                    .iter()
+                    .any(|f| !f.scope_note && f.repo == repo_name && f.pass == pass_label);
+                if !already {
+                    report.failed_passes.push(crate::ai_audit::FailedPass {
+                        repo: repo_name,
+                        pass: pass_label.clone(),
+                        reason: format!("{pass_label} failed: {reason}"),
+                        files_not_reviewed: 0,
+                        class: crate::ai_audit::FailureClass::Io,
+                        files: Vec::new(),
+                        attempts: Vec::new(),
+                        scope_note: false,
+                    });
+                }
+            } else {
+                report.failed_passes.push(crate::ai_audit::FailedPass {
+                    repo: repo_for_disclosure(report, &repo),
+                    pass: pass_label.clone(),
+                    reason: format!("{rule_id}: {pass_label} did not run: {reason}"),
+                    files_not_reviewed: 0,
+                    class: crate::ai_audit::FailureClass::Content,
+                    files: Vec::new(),
+                    attempts: Vec::new(),
+                    // A mechanical tool that was not run (by policy, not installed for this
+                    // stack, or no rule routed to it) is a disclosed limit of the scope, not a
+                    // failed part.
+                    scope_note: true,
+                });
+            }
             continue;
         }
 
@@ -7930,6 +7956,7 @@ pub(crate) async fn start_audit_job(
                         Err(_elapsed) => (
                             Vec::new(),
                             Some(crate::onboard::CoverageNote {
+                                tool_failed: false,
                                 repo: None,
                                 tool: "osv-scanner".to_string(),
                                 message: format!(
@@ -27059,6 +27086,7 @@ mod tests {
     #[test]
     fn render_scan_results_includes_coverage_notes() {
         let notes = vec![crate::onboard::CoverageNote {
+            tool_failed: false,
             repo: None,
             tool: "ruff".to_string(),
             message: "ruff not installed; Python rules skipped".to_string(),
@@ -27324,7 +27352,8 @@ mod tests {
             3,
             0,
         );
-        report.coverage_notes = vec![crate::onboard::CoverageNote {
+        report.coverage_notes =
+            vec![crate::onboard::CoverageNote { tool_failed: false,
             repo: None,
             tool: "semgrep".to_string(),
             message:
@@ -27645,6 +27674,7 @@ mod tests {
             0,
         );
         report.coverage_notes = vec![crate::onboard::CoverageNote {
+            tool_failed: false,
             repo: None,
             tool: "unrouted".to_string(),
             message: "could not preview SOME-OTHER-RULE-1 — no scan-runnable tool wired"
@@ -27765,6 +27795,7 @@ mod tests {
             0,
         );
         report.coverage_notes = vec![crate::onboard::CoverageNote {
+            tool_failed: false,
             repo: None,
             tool: "eslint".to_string(),
             message: "could not preview 1 rule(s) with eslint: base interpreter not available: \

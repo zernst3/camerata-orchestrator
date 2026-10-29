@@ -233,6 +233,7 @@ fn report_with_text(p: &Planted) -> ScanReport {
         });
     report.recommendations.insert("ARCH-X-1".to_string(), rec);
     report.coverage_notes.push(crate::onboard::CoverageNote {
+        tool_failed: false,
         repo: None,
         tool: "eslint".to_string(),
         message: format!("tool output: {}", p.text),

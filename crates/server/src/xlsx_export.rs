@@ -5776,6 +5776,7 @@ mod tests {
         let f = finding("SEC-NO-RAW-SQL-CONCAT-1", "src/a.rs", 3, "high");
         let mut report = report_with(vec![f], vec!["SEC-NO-RAW-SQL-CONCAT-1"]);
         report.coverage_notes = vec![crate::onboard::CoverageNote {
+            tool_failed: false,
             repo: None,
             tool: "eslint".to_string(),
             message: "Could not preview 12 rule(s) with eslint: spawn ENOENT.".to_string(),

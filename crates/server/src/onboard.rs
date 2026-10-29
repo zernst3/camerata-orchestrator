@@ -779,6 +779,13 @@ pub struct CoverageNote {
     /// the ledger is reconciled.
     #[serde(default)]
     pub repo: Option<String>,
+    /// True when the tool was INVOKED and then failed (it crashed, exited non-zero without a
+    /// result, or wrote output nobody could read). False for a tool that was not run: withheld
+    /// by policy, not installed or not provisionable, or given no rule to run. The first is a
+    /// failed part (it locks a client export and can be resumed); the second is a disclosed limit
+    /// of the scope. `serde(default)` (false) so a report persisted before this loads unchanged.
+    #[serde(default)]
+    pub tool_failed: bool,
 }
 
 /// The pass name a repo that could not be read is recorded under. Stable: a persisted report
@@ -3383,6 +3390,7 @@ pub async fn audit_repos_with_llm_controlled(
         .any(|s| s.frameworks.iter().any(|f| f == "Firebase"))
     {
         report.coverage_notes.push(CoverageNote {
+            tool_failed: false,
             repo: None,
             tool: crate::FIREBASE_SCOPE_COVERAGE_TOOL.to_string(),
             message: crate::FIREBASE_SCOPE_SENTENCE.to_string(),

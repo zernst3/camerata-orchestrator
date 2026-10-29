@@ -511,6 +511,7 @@ mod tests {
         )
         .unwrap();
         let note = crate::onboard::CoverageNote {
+            tool_failed: false,
             repo: None,
             tool: "osv-scanner".to_string(),
             message,

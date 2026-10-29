@@ -704,6 +704,7 @@ async fn run_dep_audit_core(
             return (
                 Vec::new(),
                 Some(CoverageNote {
+                    tool_failed: false,
                     repo: None,
                     tool: TOOL_NAME.to_string(),
                     message: scrub_local_paths(
@@ -742,6 +743,7 @@ async fn run_dep_audit_core(
             return (
                 Vec::new(),
                 Some(CoverageNote {
+                    tool_failed: false,
                     repo: None,
                     tool: TOOL_NAME.to_string(),
                     message: scrub_local_paths(
@@ -758,6 +760,7 @@ async fn run_dep_audit_core(
             return (
                 Vec::new(),
                 Some(CoverageNote {
+                    tool_failed: false,
                     repo: None,
                     tool: TOOL_NAME.to_string(),
                     message: "dependency audit (osv-scanner) did not run: \
@@ -817,6 +820,7 @@ async fn run_dep_audit_core(
         return (
             Vec::new(),
             Some(CoverageNote {
+                tool_failed: false,
                 repo: None,
                 tool: TOOL_NAME.to_string(),
                 message: note_msg,
@@ -836,6 +840,7 @@ async fn run_dep_audit_core(
                 repo_dir,
             );
             let note = message.map(|message| CoverageNote {
+                tool_failed: false,
                 repo: None,
                 tool: TOOL_NAME.to_string(),
                 message,
@@ -845,6 +850,7 @@ async fn run_dep_audit_core(
         Err(e) => (
             Vec::new(),
             Some(CoverageNote {
+                tool_failed: false,
                 repo: None,
                 tool: TOOL_NAME.to_string(),
                 message: scrub_local_paths(
@@ -898,6 +904,7 @@ pub async fn run_dep_audit(repo: &str, repo_dir: &Path) -> (Vec<Finding>, Option
             return (
                 Vec::new(),
                 Some(CoverageNote {
+                    tool_failed: false,
                     repo: Some(repo.to_string()),
                     tool: TOOL_NAME.to_string(),
                     message: "dependency audit (osv-scanner) did not run: \
@@ -1086,6 +1093,7 @@ mod tests {
         assert!(message.contains("did not run"), "{message}");
         assert!(!message.contains(NO_LOCKFILES), "{message}");
         let note = CoverageNote {
+            tool_failed: false,
             repo: None,
             tool: TOOL_NAME.to_string(),
             message,
@@ -1389,6 +1397,7 @@ mod tests {
         let (dep_findings, dep_note): (Vec<Finding>, Option<CoverageNote>) = (
             Vec::new(),
             Some(CoverageNote {
+                tool_failed: false,
                 repo: None,
                 tool: TOOL_NAME.to_string(),
                 message: "dependency audit (osv-scanner) timed out after 60 s for acme/api"
