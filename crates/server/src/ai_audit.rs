@@ -3135,14 +3135,14 @@ pub fn apply_severity_ceiling_rules(findings: Vec<Finding>) -> Vec<Finding> {
 /// Floor for [`scaled_max_tokens`] — the ORIGINAL flat budget every aggregate pass
 /// hardcoded before this fix, kept as the minimum so a small finding/rule set (the common
 /// case) sees zero behavior change.
-const AGGREGATE_MAX_TOKENS_FLOOR: u32 = 4096;
+const AGGREGATE_MAX_TOKENS_FLOOR: u32 = camerata_ui_core::scan::AGGREGATE_MAX_TOKENS_FLOOR;
 
 /// Ceiling for [`scaled_max_tokens`] — bounds a single call's requested budget regardless
 /// of how many items land in one chunk. The per-pass `*_BATCH_SIZE` constants below keep
 /// any one call's item count well under what would reach this in practice; the ceiling is
 /// a second, independent guard against requesting an unreasonably large budget from the
 /// API (e.g. if a caller ever skips chunking).
-const AGGREGATE_MAX_TOKENS_CEILING: u32 = 32_000;
+const AGGREGATE_MAX_TOKENS_CEILING: u32 = camerata_ui_core::scan::AGGREGATE_MAX_TOKENS_CEILING;
 
 /// `max_tokens` for a call describing `n_items` things, given a per-item token estimate —
 /// clamped to `[AGGREGATE_MAX_TOKENS_FLOOR, AGGREGATE_MAX_TOKENS_CEILING]` so small batches

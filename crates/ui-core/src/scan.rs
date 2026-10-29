@@ -80,6 +80,32 @@ pub const REGEN_TOKENS_PER_FINDING: u32 = 450;
 /// failed, and a last round of one finding to a call for any straggler.
 pub const REGEN_ROUNDS: usize = 3;
 
+/// The batch size of regeneration round `round` (0-based): the full batch, half of it, then one
+/// at a time. The server's stage takes its round sizes from here, and so does the estimate.
+pub fn regen_round_batch_size(round: usize) -> usize {
+    match round {
+        0 => REGEN_BATCH_SIZE,
+        1 => REGEN_BATCH_SIZE.div_ceil(2),
+        _ => 1,
+    }
+}
+
+/// The floor of `max_tokens` for a call that describes several items (the flat budget every
+/// aggregate stage had before its budget scaled): a call of one finding is still allowed this
+/// many output tokens. The server's `scaled_max_tokens` clamps to it.
+pub const AGGREGATE_MAX_TOKENS_FLOOR: u32 = 4096;
+
+/// The ceiling of `max_tokens` for one aggregate call.
+pub const AGGREGATE_MAX_TOKENS_CEILING: u32 = 32_000;
+
+/// The `max_tokens` a regeneration call of `findings` findings asks for: the per-finding budget,
+/// clamped to the aggregate floor and ceiling, exactly as the server sizes the request.
+pub fn regen_call_max_tokens(findings: usize) -> u32 {
+    (findings as u32)
+        .saturating_mul(REGEN_TOKENS_PER_FINDING)
+        .clamp(AGGREGATE_MAX_TOKENS_FLOOR, AGGREGATE_MAX_TOKENS_CEILING)
+}
+
 /// Estimator assumption: input tokens per finding of a regeneration call (the finding's rule
 /// directive, short statement, snippet, six lines of code either side and at most 20 excerpt
 /// lines from the files it names). An estimate, not a measurement.
@@ -131,24 +157,46 @@ pub struct RegenerationEstimate {
 }
 
 /// The cost of regenerating the full `detail` of the findings a scan of `scan_out_tokens` output
-/// tokens implies. An UPPER bound by the stage's own limits: every one of the `REGEN_ROUNDS`
-/// rounds is assumed to run on every finding (the real repeat round covers only what the first
-/// left out), each finding is assumed to use its whole `REGEN_TOKENS_PER_FINDING` output budget,
-/// and calls hold `REGEN_BATCH_SIZE` findings. It is added to a pre-flight estimate so that the
-/// spend-limit gate and the batch refusal never UNDER-estimate a run with `terse_output` on.
+/// tokens implies. A true UPPER bound by the stage's own limits, which is what makes it safe to
+/// gate a spend limit on: the stage makes `REGEN_ROUNDS` rounds ([`regen_round_batch_size`] sizes
+/// each: the full batch, half of it, then one finding to a call) and then one end-of-run second
+/// try of one finding to a call. Every round is assumed to run on EVERY finding (the real repeat
+/// rounds cover only what the earlier ones left out) and every call is priced at the
+/// `max_tokens` it is sent with ([`regen_call_max_tokens`]: the per-finding budget, never below
+/// the 4,096 aggregate floor, so a one-finding call is priced at 4,096 and not at 450). Input is
+/// each finding's 900 estimated tokens plus the system prompt once per call, over every round.
+///
+/// It is deliberately a ceiling and not an expectation: a real run pays for the first round and
+/// for the stragglers of the later ones only.
 pub fn regeneration_estimate(scan_out_tokens: f64) -> RegenerationEstimate {
     let findings = (scan_out_tokens / REGEN_SCAN_TOKENS_PER_FINDING)
         .ceil()
         .max(0.0);
-    let rounds = REGEN_ROUNDS as f64;
-    let calls_per_round = (findings as usize).div_ceil(REGEN_BATCH_SIZE);
+    let n = findings as usize;
+    let mut calls = 0usize;
+    let mut input_tokens = 0.0;
+    let mut output_tokens = 0.0;
+    // The rounds, then the second try (one finding to a call).
+    let batch_sizes = (0..REGEN_ROUNDS)
+        .map(regen_round_batch_size)
+        .chain(std::iter::once(1));
+    for batch in batch_sizes {
+        let full = n / batch;
+        let rest = n % batch;
+        let round_calls = full + usize::from(rest > 0);
+        calls += round_calls;
+        output_tokens += full as f64 * f64::from(regen_call_max_tokens(batch));
+        if rest > 0 {
+            output_tokens += f64::from(regen_call_max_tokens(rest));
+        }
+        input_tokens += findings * REGEN_INPUT_TOKENS_PER_FINDING
+            + round_calls as f64 * REGEN_SYSTEM_PROMPT_TOKENS;
+    }
     RegenerationEstimate {
         findings,
-        calls: calls_per_round * REGEN_ROUNDS,
-        input_tokens: (findings * REGEN_INPUT_TOKENS_PER_FINDING
-            + calls_per_round as f64 * REGEN_SYSTEM_PROMPT_TOKENS)
-            * rounds,
-        output_tokens: findings * f64::from(REGEN_TOKENS_PER_FINDING) * rounds,
+        calls,
+        input_tokens,
+        output_tokens,
     }
 }
 
@@ -2214,28 +2262,35 @@ mod tests {
         }
     }
 
-    /// The term is bounded by the regeneration stage's own limits: at most `REGEN_ROUNDS` rounds,
-    /// each finding written at most once per round within `REGEN_TOKENS_PER_FINDING` output
-    /// tokens, `REGEN_BATCH_SIZE` findings to a call.
+    /// The term is a true upper bound by the regeneration stage's own limits: every round on every
+    /// finding, the second try as well, and each call priced at the `max_tokens` it is sent with.
     #[test]
-    fn the_regeneration_term_stays_within_the_stages_own_limits() {
+    fn the_regeneration_term_is_an_upper_bound_by_the_stages_own_limits() {
+        // The worst case in calls is n/10 + n/5 + n for the three rounds, and n more for the
+        // end-of-run second try.
         for scan_out in [0.0, 300.0, 2_600.0, 50_000.0, 5_000_000.0] {
             let r = regeneration_estimate(scan_out);
+            let n = r.findings as usize;
+            let expected_calls =
+                n.div_ceil(REGEN_BATCH_SIZE) + n.div_ceil(REGEN_BATCH_SIZE.div_ceil(2)) + n + n;
+            assert_eq!(r.calls, expected_calls, "{n} findings");
+            // No call can produce more than its own request cap, so the output is bounded by it.
             assert!(
                 r.output_tokens
-                    <= r.findings * f64::from(REGEN_TOKENS_PER_FINDING) * REGEN_ROUNDS as f64
-            );
-            assert_eq!(
-                r.calls,
-                (r.findings as usize).div_ceil(REGEN_BATCH_SIZE) * REGEN_ROUNDS
+                    >= r.findings * f64::from(REGEN_TOKENS_PER_FINDING) * REGEN_ROUNDS as f64,
+                "never below the old per-finding figure"
             );
         }
-        // The numbers follow the constants: 86 findings (the size of a real run) are 9 calls of
-        // up to 10 a round, and every finding is priced at 450 output tokens a round.
+        // 86 findings (the size of a real run), exactly: round 1 is 8 full calls of 10 findings
+        // (4,500 tokens each) and one of 6 (the 4,096 floor); round 2 is 17 calls of 5 and one of
+        // 1 (the floor each); rounds 3 and 4 are 86 single-finding calls at the floor.
         let r = regeneration_estimate(86.0 * REGEN_SCAN_TOKENS_PER_FINDING);
         assert_eq!(r.findings, 86.0);
-        assert_eq!(r.calls, 9 * 3);
-        assert_eq!(r.output_tokens, 86.0 * 450.0 * 3.0);
+        assert_eq!(r.calls, 9 + 18 + 86 + 86);
+        assert_eq!(
+            r.output_tokens,
+            f64::from(8 * 4_500 + 4_096 + 18 * 4_096 + 2 * 86 * 4_096)
+        );
         let none = regeneration_estimate(0.0);
         assert_eq!(
             (none.calls, none.input_tokens, none.output_tokens),
@@ -2246,6 +2301,21 @@ mod tests {
             regeneration_estimate(50_000.0).output_tokens
                 >= regeneration_estimate(2_600.0).output_tokens
         );
+    }
+
+    /// The request size the estimate prices is the one the stage sends: a one-finding call is
+    /// asked for the 4,096 floor, not for 450.
+    #[test]
+    fn a_regeneration_call_is_priced_at_the_max_tokens_it_is_sent_with() {
+        assert_eq!(regen_call_max_tokens(1), AGGREGATE_MAX_TOKENS_FLOOR);
+        assert_eq!(regen_call_max_tokens(5), AGGREGATE_MAX_TOKENS_FLOOR);
+        assert_eq!(
+            regen_call_max_tokens(REGEN_BATCH_SIZE),
+            (REGEN_BATCH_SIZE as u32 * REGEN_TOKENS_PER_FINDING).max(AGGREGATE_MAX_TOKENS_FLOOR)
+        );
+        assert_eq!(regen_round_batch_size(0), REGEN_BATCH_SIZE);
+        assert_eq!(regen_round_batch_size(1), REGEN_BATCH_SIZE.div_ceil(2));
+        assert_eq!(regen_round_batch_size(2), 1);
     }
 
     /// The scan stage's output budget per rule is measured, not guessed, and the estimator prices
