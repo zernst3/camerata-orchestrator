@@ -1425,6 +1425,12 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/onboard/audit/job/:id", get(onboard_audit_job))
         .route("/api/onboard/audit/job/:id/cancel", post(cancel_audit_job))
+        // Saved inspections: one namespace, distinct from the agent runs under /api/runs. The two
+        // `/api/runs/:id/plan|resume` paths the first cockpit build called stay as aliases of the
+        // same handlers for one release; the cockpit itself now calls /api/inspections.
+        .route("/api/inspections", get(list_saved_inspections))
+        .route("/api/inspections/:id/plan", get(run_resume_plan))
+        .route("/api/inspections/:id/resume", post(run_resume_start))
         .route("/api/runs/:id/plan", get(run_resume_plan))
         .route("/api/runs/:id/resume", post(run_resume_start))
         .route("/api/onboard/finding-context", get(onboard_finding_context))
@@ -7569,6 +7575,53 @@ fn synchronous_scan_mode(
 /// job id IMMEDIATELY, so the request never blocks for the (possibly many-minute) run. The
 /// UI polls `GET /api/onboard/audit/job/:id` for progress + incremental findings, then the
 /// final report. The work is decoupled from this request — it survives a dropped poll.
+/// The query of `GET /api/inspections`.
+#[derive(Debug, Default, serde::Deserialize)]
+struct InspectionsQuery {
+    /// The project to list for; the open (active) project when absent.
+    #[serde(default)]
+    project_id: Option<String>,
+}
+
+/// `GET /api/inspections`: the saved inspections of the open project, newest first, each with its
+/// id, when it started, its repos, where it stands (complete, incomplete, interrupted or live),
+/// how many parts remain and what finishing it should cost. The cockpit offers the newest
+/// unfinished one on the scan screen ("This inspection was interrupted"). A run belongs to the
+/// project when every repo it inspected is one of the project's repos (by name or by folder).
+async fn list_saved_inspections(
+    State(state): State<AppState>,
+    axum::extract::Query(query): axum::extract::Query<InspectionsQuery>,
+) -> impl IntoResponse {
+    let project = query
+        .project_id
+        .as_deref()
+        .and_then(|id| state.projects.get(id))
+        .or_else(|| state.projects.active());
+    let Some(project) = project else {
+        return Json(serde_json::json!({ "project_id": null, "inspections": [] }));
+    };
+    let names: std::collections::HashSet<String> = project.repos.iter().cloned().collect();
+    let canon = |p: &std::path::Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+    let dirs: Vec<std::path::PathBuf> = resolve_local_sources(&state, &project.repos)
+        .sources
+        .iter()
+        .map(|(_, dir)| canon(dir))
+        .collect();
+    let project_id = project.id.clone();
+    let listed = tokio::task::spawn_blocking(move || {
+        crate::run_store::list_inspections_in(&crate::run_store::runs_dir(), |record| {
+            !record.repos.is_empty()
+                && record.repos.iter().all(|repo| {
+                    names.contains(&repo.name)
+                        || dirs.contains(&canon(std::path::Path::new(&repo.dir)))
+                })
+        })
+    })
+    .await
+    .unwrap_or_default();
+    Json(serde_json::json!({ "project_id": project_id, "inspections": listed }))
+}
+
 /// What "Run what remains" would do for a saved run: the parts that remain, what they should
 /// cost, and the plain reason the resume cannot start now when it cannot.
 async fn run_resume_plan(Path(id): Path<String>) -> impl IntoResponse {
@@ -7986,6 +8039,7 @@ pub(crate) async fn start_audit_job(
                     args: request_json,
                     estimate_usd: None,
                     include_alternatives: corpus.is_some(),
+                    origin: rs::RunOrigin::Cockpit,
                 }) {
                     Ok(store) => {
                         if let Some(p) = &prior {
@@ -8003,9 +8057,8 @@ pub(crate) async fn start_audit_job(
                     }
                 },
             };
-            let _token_seed = run_store
-                .as_ref()
-                .map(|s| crate::prompt_frame::seed_tokens(s.nonce_seed()));
+            // The run's own delimiter seed, carried with the audit future below (never global).
+            let token_seed = run_store.as_ref().map(|s| s.nonce_seed());
             let sessions = crate::llm::SessionSink::new();
             let llm_backend = match &backend_resolution {
                 crate::llm::BackendResolution::Api => crate::llm::Backend::Api,
@@ -8024,26 +8077,29 @@ pub(crate) async fn start_audit_job(
                 Some(j) => j.as_ref(),
                 None => &real,
             };
-            let (mut report, mut manifest) = crate::onboard::audit_repos_with_llm_controlled(
-                model_seam,
-                &sources,
-                &selected,
-                notes,
-                model.as_deref(),
-                calibration_model.as_deref(),
-                mode,
-                thorough,
-                Some((&transcripts, SCAN_AUDIT_KEY)),
-                Some((&body_jobs, &body_jid)),
-                prior.as_ref(),
-                deep,
-                soc2_enabled,
-                run_ai_review,
-                run_deterministic,
-                backend_resolution,
-                corpus.as_ref(),
-                &chosen_options,
-                run_controls,
+            let (mut report, mut manifest) = crate::prompt_frame::with_seed(
+                token_seed,
+                crate::onboard::audit_repos_with_llm_controlled(
+                    model_seam,
+                    &sources,
+                    &selected,
+                    notes,
+                    model.as_deref(),
+                    calibration_model.as_deref(),
+                    mode,
+                    thorough,
+                    Some((&transcripts, SCAN_AUDIT_KEY)),
+                    Some((&body_jobs, &body_jid)),
+                    prior.as_ref(),
+                    deep,
+                    soc2_enabled,
+                    run_ai_review,
+                    run_deterministic,
+                    backend_resolution,
+                    corpus.as_ref(),
+                    &chosen_options,
+                    run_controls,
+                ),
             )
             .await;
             report.provenance.model_sessions = sessions.snapshot();

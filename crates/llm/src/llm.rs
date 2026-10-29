@@ -413,9 +413,9 @@ fn stderr_tail(stderr: &str) -> Option<String> {
 
 /// Streamed to the listener when the CLI is run again after an attempt that had already streamed
 /// text. The text before it came from the failed attempt and is superseded by what follows, so a
-/// transcript that records it shows one divider instead of two answers run together.
-pub const CLI_ATTEMPT_SUPERSEDED: &str =
-    "\n[the text above came from an attempt that failed; the model was asked again]\n";
+/// transcript that records it shows one divider instead of two answers run together. Relocated to
+/// `camerata_api_types::llm`: the cockpit reads the same marker to render it as a muted note.
+pub use camerata_api_types::llm::CLI_ATTEMPT_SUPERSEDED;
 
 /// A typed CLI failure: `message` is the text the CLI path has always returned, and the one
 /// attempt record carries the exit code and the stderr tail. `retryable` says whether another

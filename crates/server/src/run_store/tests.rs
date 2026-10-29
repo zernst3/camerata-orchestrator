@@ -132,6 +132,7 @@ fn new_run(repo: &tempfile::TempDir) -> Arc<RunStore> {
         args: serde_json::json!({"client": "x"}),
         estimate_usd: Some(10.0),
         include_alternatives: true,
+        origin: RunOrigin::Cli,
     })
     .unwrap()
 }
@@ -716,6 +717,7 @@ fn make_run(root: &std::path::Path, id: &str, project: &str, commit: &str, statu
         created_at: id.to_string(),
         updated_at: id.to_string(),
         status,
+        origin: RunOrigin::Cli,
         attempt: 1,
         engine_version: engine_version(),
         project_key: project.to_string(),
@@ -956,4 +958,125 @@ fn the_preview_says_what_remains_and_why_a_resume_cannot_start() {
         preview_resume("no-such-run"),
         Err(RunStoreError::NotFound(_))
     ));
+}
+
+/// A cockpit run made for the listing tests: `origin` Cockpit, the repo `repo` as "acme/api".
+fn cockpit_run(repo: &tempfile::TempDir) -> Arc<RunStore> {
+    RunStore::create(NewRun {
+        project_key: "proj-1".to_string(),
+        repos: vec![("acme/api".to_string(), repo.path().to_path_buf())],
+        models: models(),
+        ai_scan_key: key(),
+        args: serde_json::json!({"repos": ["acme/api"]}),
+        estimate_usd: Some(10.0),
+        include_alternatives: false,
+        origin: RunOrigin::Cockpit,
+    })
+    .unwrap()
+}
+
+/// The listing says Live for a run a process holds, Interrupted for one whose process is gone
+/// before it finished, Incomplete for one that finished with a part left, and Complete for one that
+/// finished: and only an unfinished run of the cockpit is offered for resuming here. A run that is
+/// live is never offered.
+#[test]
+#[serial_test::serial(process_env)]
+fn the_listing_tells_live_interrupted_incomplete_and_complete_apart() {
+    let (_s, _g) = state_dir();
+    let repo = git_repo();
+    let all = |_: &RunRecord| true;
+
+    // Live: the store is held.
+    let live = cockpit_run(&repo);
+    let live_id = live.run_id();
+    let listed = list_inspections_in(&runs_dir(), all);
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].status, InspectionStatus::Live);
+    assert!(!listed[0].resumable_here, "a live run is never offered");
+
+    // Interrupted: dropped while still marked running.
+    drop(live);
+    let listed = list_inspections_in(&runs_dir(), all);
+    assert_eq!(listed[0].id, live_id);
+    assert_eq!(listed[0].status, InspectionStatus::Interrupted);
+    assert!(listed[0].resumable_here);
+    assert_eq!(listed[0].origin, RunOrigin::Cockpit);
+    assert_eq!(listed[0].repos, vec!["acme/api".to_string()]);
+    assert!(listed[0].remaining_parts > 0, "{:?}", listed[0]);
+
+    // Incomplete: finished with a failed part.
+    let store = RunStore::open(&live_id).unwrap();
+    store.finish(&FinishOutcome {
+        scan_reached_end: true,
+        export_written: false,
+        complete: false,
+        incomplete_reasons: vec!["one part failed".to_string()],
+        failures: vec![FinishFailure {
+            repo: "acme/api".to_string(),
+            pass: "hour estimation".to_string(),
+            class: "transport".to_string(),
+            files: Vec::new(),
+            scope_note: false,
+        }],
+        ..FinishOutcome::default()
+    });
+    drop(store);
+    let listed = list_inspections_in(&runs_dir(), all);
+    assert_eq!(listed[0].status, InspectionStatus::Incomplete);
+    assert!(listed[0].resumable_here);
+    assert_eq!(listed[0].reasons, vec!["one part failed".to_string()]);
+
+    // Complete: nothing remains, and nothing is offered.
+    let store = RunStore::open(&live_id).unwrap();
+    store.finish(&FinishOutcome {
+        scan_reached_end: true,
+        export_written: true,
+        complete: true,
+        ..FinishOutcome::default()
+    });
+    drop(store);
+    let listed = list_inspections_in(&runs_dir(), all);
+    assert_eq!(listed[0].status, InspectionStatus::Complete);
+    assert_eq!(listed[0].remaining_parts, 0);
+    assert!(!listed[0].resumable_here);
+
+    // A command-line run is listed but not resumable from the cockpit.
+    let cli = new_run(&repo);
+    drop(cli);
+    let listed = list_inspections_in(&runs_dir(), all);
+    let cli_row = listed
+        .iter()
+        .find(|r| r.origin == RunOrigin::Cli)
+        .expect("the command line run is listed");
+    assert_eq!(cli_row.status, InspectionStatus::Interrupted);
+    assert!(!cli_row.resumable_here);
+    // Newest first.
+    assert!(listed.windows(2).all(|w| w[0].id >= w[1].id));
+}
+
+/// Only the open project's runs are listed.
+#[test]
+#[serial_test::serial(process_env)]
+fn the_listing_holds_only_the_runs_the_caller_says_belong_to_the_project() {
+    let (_s, _g) = state_dir();
+    let repo = git_repo();
+    let other = git_repo();
+    drop(cockpit_run(&repo));
+    let stranger = RunStore::create(NewRun {
+        project_key: "proj-2".to_string(),
+        repos: vec![("acme/other".to_string(), other.path().to_path_buf())],
+        models: models(),
+        ai_scan_key: key(),
+        args: serde_json::Value::Null,
+        estimate_usd: None,
+        include_alternatives: false,
+        origin: RunOrigin::Cockpit,
+    })
+    .unwrap();
+    drop(stranger);
+    let mine = list_inspections_in(&runs_dir(), |r| {
+        r.repos.iter().all(|x| x.name == "acme/api")
+    });
+    assert_eq!(mine.len(), 1);
+    assert_eq!(mine[0].repos, vec!["acme/api".to_string()]);
 }

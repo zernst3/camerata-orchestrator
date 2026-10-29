@@ -6049,7 +6049,7 @@ the same retries, outage stop and spend limit. Merging, ranking, ordering and th
 therefore always recomputed from stored plus new results, and a run resumed after a failure
 gives the export an uninterrupted run gives (a test compares them, for a failed scan pass, a
 failed sub pass, a malformed answer and two repos). Prompt delimiter tokens are drawn from the
-run's own random seed and the framed text (`prompt_frame::seed_tokens`), so a prompt is the same
+run's own random seed and the framed text (`prompt_frame::with_seed`), so a prompt is the same
 text on a resume and a stored answer matches it; the seed never leaves the run folder.
 
 **Interrupted runs.** The lock on a run is the operating system's lock on `lock.json`
@@ -6064,10 +6064,36 @@ that is gone (`kill -0`) or a heartbeat older than 45 seconds means Interrupted.
 already submitted batch is polled and fetched, never submitted again.
 
 **One resume.** `run_store::open_for_resume` checks and opens a run; `camerata inspect --resume`
-and the server's `POST /api/runs/:id/resume` (the cockpit's **Run what remains**, after
-`GET /api/runs/:id/plan` shows the plan and estimate) both use it. The command line and the
+and the server's `POST /api/inspections/:id/resume` (the cockpit's **Run what remains**, after
+`GET /api/inspections/:id/plan` shows the plan and estimate) both use it. The command line and the
 cockpit's scan job are two pipelines that call the same steps; the resume logic, the journal, the
 checks and the estimate are shared, not copied.
+
+**Saved inspections in the cockpit.** `GET /api/inspections` lists the open project's saved runs
+(`run_store::list_inspections_in`): id, start time, repos, status (`complete`, `incomplete`,
+`interrupted` or `live`), the number of parts that remain, the expected cost of finishing it, the
+origin and whether the cockpit can resume it. A run belongs to the project when every repo it
+inspected is one of the project's repos, by name or by folder. `live` means a process holds the
+run's lock: it is never offered. The routes live under `/api/inspections` so they are not confused
+with the agent runs under `/api/runs`; the first cockpit build called `/api/runs/:id/plan` and
+`/api/runs/:id/resume`, and those two paths remain as aliases of the same handlers for one
+release (the cockpit itself now calls the new ones). The scan screen offers the newest unfinished
+one on app start and when a project is opened (`cockpit/saved_inspections.rs`), through the same
+plan preview, resume request and `LoadingGuard` (`run_what_remains`) as the incomplete-scan banner.
+
+**Where a run is resumed.** A run records its origin (`RunOrigin`): the arguments saved with a cockpit
+run are the scan request (`AuditReq`), those of a command line run are the flags (`InspectArgs`),
+and each is read back only where it was written. The cockpit restores the request from `run.json`
+and starts the same job with `resume_run` set. `camerata inspect --resume <id>` of a cockpit run
+refuses in plain words that name the cockpit (and `--resume latest` picks the newest unfinished run
+started from the command line). The other choice, resuming a cockpit run from the command line,
+would need the project's settings (repo folders, backend, rules) that only the app holds.
+
+**The prompt-token seed is per run.** `prompt_frame::with_seed` runs a future with the run's seed
+in a task local, so two audit jobs in one server each draw tokens from their own seed however
+they interleave, and one ending cannot clear the other's. Work handed to another task
+(`spawn_blocking`) does not inherit it and must be given a token already drawn (the candidate
+locator is).
 
 **Exit codes of `camerata inspect`.** 0 complete (or resumed a complete run); 1 failure or refused
 resume; 3 release gate refused; 4 spend limit; 5 outage stop; 6 incomplete for another reason.

@@ -221,6 +221,29 @@ pub struct ModelsRecord {
     pub mode: String,
 }
 
+/// Where a run was started, which decides where it can be resumed: the arguments saved with a run
+/// are the shape of the place that started it (`camerata inspect`'s flags, or the cockpit's scan
+/// request), and only that place can read them back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RunOrigin {
+    /// `camerata inspect`; resumed with `camerata inspect --resume`.
+    #[default]
+    Cli,
+    /// The cockpit's scan job; resumed from the cockpit with "Run what remains".
+    Cockpit,
+}
+
+impl RunOrigin {
+    /// A short plain label.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Cli => "command line",
+            Self::Cockpit => "cockpit",
+        }
+    }
+}
+
 /// Everything saved about one run except the model replies.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunRecord {
@@ -229,6 +252,10 @@ pub struct RunRecord {
     pub created_at: String,
     pub updated_at: String,
     pub status: RunStatus,
+    /// Where the run was started (see [`RunOrigin`]); runs saved before this field are the command
+    /// line's.
+    #[serde(default)]
+    pub origin: RunOrigin,
     /// How many times a process has worked on the run: 1 for the first, 2 after one resume.
     pub attempt: u32,
     pub engine_version: String,
@@ -239,7 +266,7 @@ pub struct RunRecord {
     pub rules_fingerprint: String,
     pub ai_scan_key: AiScanKey,
     /// The secret the run draws its prompt delimiter tokens from (hex). See
-    /// [`crate::prompt_frame::seed_tokens`].
+    /// [`crate::prompt_frame::with_seed`].
     pub nonce_seed: String,
     /// The arguments the run was started with, for the resume (opaque to the store).
     pub args: serde_json::Value,
@@ -628,6 +655,8 @@ pub struct NewRun {
     pub args: serde_json::Value,
     pub estimate_usd: Option<f64>,
     pub include_alternatives: bool,
+    /// Where the run is started from.
+    pub origin: RunOrigin,
 }
 
 /// A fresh run id: the time, then six random hex digits.
@@ -708,6 +737,7 @@ impl RunStore {
             created_at: now(),
             updated_at: now(),
             status: RunStatus::Running,
+            origin: new.origin,
             attempt: 1,
             engine_version: engine_version(),
             project_key: new.project_key,
@@ -990,6 +1020,8 @@ pub struct RunSummary {
     pub run_id: String,
     pub created_at: String,
     pub state: RunState,
+    /// Where the run was started.
+    pub origin: RunOrigin,
     pub project_key: String,
     pub repos: Vec<String>,
     pub attempt: u32,
@@ -1016,6 +1048,7 @@ pub fn list_runs_in(root: &Path) -> Vec<RunSummary> {
                 run_id: record.run_id.clone(),
                 created_at: record.created_at.clone(),
                 state,
+                origin: record.origin,
                 project_key: record.project_key.clone(),
                 repos: record.repos.iter().map(|r| r.name.clone()).collect(),
                 attempt: record.attempt,
@@ -1032,26 +1065,142 @@ pub fn list_runs_in(root: &Path) -> Vec<RunSummary> {
     out
 }
 
+// ── The listing the cockpit shows ────────────────────────────────────────────────────────────
+
+/// Where a saved inspection stands, as the cockpit lists it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InspectionStatus {
+    /// Every part is done and the export was written.
+    Complete,
+    /// The process finished but a part failed, did not run, or the export was refused.
+    Incomplete,
+    /// Its process is gone (killed, crashed, the machine slept or died) before it finished.
+    Interrupted,
+    /// A process is working on it right now. Never offered for resuming.
+    Live,
+}
+
+impl From<RunState> for InspectionStatus {
+    fn from(state: RunState) -> Self {
+        match state {
+            RunState::Running => Self::Live,
+            RunState::Interrupted => Self::Interrupted,
+            RunState::Complete => Self::Complete,
+            RunState::Incomplete => Self::Incomplete,
+        }
+    }
+}
+
+/// One saved inspection of the open project, as `GET /api/inspections` lists it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct InspectionSummary {
+    pub id: String,
+    /// When the inspection was started (RFC 3339).
+    pub started: String,
+    pub repos: Vec<String>,
+    pub status: InspectionStatus,
+    /// Where it was started; the cockpit resumes only its own.
+    pub origin: RunOrigin,
+    /// How many parts of the plan are not done (pending, running, failed).
+    pub remaining_parts: usize,
+    /// The expected cost of resuming it, in US dollars; 0 when nothing remains.
+    pub estimate_usd: f64,
+    /// Whether "Run what remains" can be offered here: it is interrupted or incomplete (never live
+    /// or complete) and this place started it.
+    pub resumable_here: bool,
+    /// Why an incomplete inspection is incomplete, in plain words.
+    pub reasons: Vec<String>,
+}
+
+/// Every saved inspection under `root` that `belongs` to the project being asked about, newest
+/// first. Runs that cannot be read (another layout version) are left out.
+pub fn list_inspections_in(
+    root: &Path,
+    belongs: impl Fn(&RunRecord) -> bool,
+) -> Vec<InspectionSummary> {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return Vec::new();
+    };
+    let mut out: Vec<InspectionSummary> = entries
+        .filter_map(Result::ok)
+        .filter_map(|e| {
+            let dir = e.path();
+            let record = load_record(&dir).ok()?;
+            if !belongs(&record) {
+                return None;
+            }
+            let status = InspectionStatus::from(record.state(liveness_of(&dir)));
+            let unfinished = matches!(
+                status,
+                InspectionStatus::Interrupted | InspectionStatus::Incomplete
+            );
+            let remaining_parts = if status == InspectionStatus::Complete {
+                0
+            } else {
+                record.remaining_parts().len()
+            };
+            let estimate_usd = if unfinished {
+                journal::estimate_remaining(&dir, &record).usd
+            } else {
+                0.0
+            };
+            Some(InspectionSummary {
+                id: record.run_id.clone(),
+                started: record.created_at.clone(),
+                repos: record.repos.iter().map(|r| r.name.clone()).collect(),
+                status,
+                origin: record.origin,
+                remaining_parts,
+                estimate_usd,
+                resumable_here: unfinished && record.origin == RunOrigin::Cockpit,
+                reasons: record.incomplete_reasons.clone(),
+            })
+        })
+        .collect();
+    out.sort_by(|a, b| b.id.cmp(&a.id));
+    out
+}
+
 /// Load a saved run's record without taking its lock.
 pub fn read_record(run_id: &str) -> Result<RunRecord, RunStoreError> {
     load_record(&runs_dir().join(run_id))
 }
 
 /// Resolve `run` (an id, or `latest`) to a run id. `latest` is the newest run that is not
-/// complete; with `project_key` it is the newest of that project.
-pub fn resolve_run(run: &str, project_key: Option<&str>) -> Result<String, RunStoreError> {
+/// complete and was started from `origin` (the place asking can resume only its own); with
+/// `project_key` it is the newest of that project.
+pub fn resolve_run(
+    run: &str,
+    project_key: Option<&str>,
+    origin: RunOrigin,
+) -> Result<String, RunStoreError> {
     if run != "latest" {
         return Ok(run.to_string());
     }
-    list_runs()
+    let unfinished: Vec<RunSummary> = list_runs()
         .into_iter()
-        .find(|r| r.state != RunState::Complete && project_key.is_none_or(|k| r.project_key == k))
-        .map(|r| r.run_id)
-        .ok_or_else(|| {
-            RunStoreError::NotFound(
-                "there is no saved run that still has work left to do".to_string(),
-            )
-        })
+        .filter(|r| r.state != RunState::Complete && project_key.is_none_or(|k| r.project_key == k))
+        .collect();
+    if let Some(found) = unfinished.iter().find(|r| r.origin == origin) {
+        return Ok(found.run_id.clone());
+    }
+    Err(RunStoreError::NotFound(if unfinished.is_empty() {
+        "there is no saved run that still has work left to do".to_string()
+    } else {
+        let elsewhere = match origin {
+            RunOrigin::Cli => RunOrigin::Cockpit,
+            RunOrigin::Cockpit => RunOrigin::Cli,
+        };
+        format!(
+            "there is no saved run started from the {} that still has work left to do; {} \
+             started from the {} still {}, and a run is resumed in the place that started it",
+            origin.label(),
+            unfinished.len(),
+            elsewhere.label(),
+            if unfinished.len() == 1 { "has" } else { "have" },
+        )
+    }))
 }
 
 // ── Resume checks ────────────────────────────────────────────────────────────────────────────

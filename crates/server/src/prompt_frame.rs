@@ -17,35 +17,39 @@
 //! on every call would make every pass re-bill the repo map and the digest it shares with its
 //! siblings.
 
-/// The seed tokens are derived from while a resumable run is in progress. `None` outside one.
-static NONCE_SEED: std::sync::Mutex<Option<[u8; NONCE_BYTES]>> = std::sync::Mutex::new(None);
+tokio::task_local! {
+    /// The seed delimiter tokens are derived from, for the run whose future is being polled. It is
+    /// the run's own context (a task local follows the future, not the process), so two audit jobs
+    /// in one server each draw from their own seed however they interleave and however they end.
+    static RUN_SEED: [u8; NONCE_BYTES];
+}
 
 fn current_seed() -> Option<[u8; NONCE_BYTES]> {
-    NONCE_SEED.lock().ok().and_then(|seed| *seed)
+    RUN_SEED.try_with(|seed| *seed).ok()
 }
 
-/// Draw delimiter tokens from `seed` (see [`FrameNonce::generate_avoiding`]) until the guard is
-/// dropped, which restores the previous setting. The run store installs the run's seed for the
-/// whole of a run so that a resumed run asks the model the same questions as the run it resumes.
-pub fn seed_tokens(seed: [u8; NONCE_BYTES]) -> NonceSeedGuard {
-    let previous = NONCE_SEED
-        .lock()
-        .ok()
-        .and_then(|mut slot| slot.replace(seed));
-    NonceSeedGuard { previous }
-}
-
-/// Restores the previous token seed when dropped. See [`seed_tokens`].
-pub struct NonceSeedGuard {
-    previous: Option<[u8; NONCE_BYTES]>,
-}
-
-impl Drop for NonceSeedGuard {
-    fn drop(&mut self) {
-        if let Ok(mut slot) = NONCE_SEED.lock() {
-            *slot = self.previous;
-        }
+/// Run `fut` with delimiter tokens drawn from `seed` (see [`FrameNonce::generate_avoiding`]). The
+/// run store hands each run its seed for the whole of the run so that a resumed run asks the model
+/// the same questions as the run it resumes. The seed belongs to this future alone: another run in
+/// the same process never sees it, and this run's end cannot clear anyone else's.
+///
+/// Work the future hands to another task (`tokio::spawn`, `spawn_blocking`) does not carry the
+/// seed, so such work must be given an already drawn [`FrameNonce`] (the run's only spawned work,
+/// the candidate locator, is).
+pub async fn with_seed<F: std::future::Future>(
+    seed: Option<[u8; NONCE_BYTES]>,
+    fut: F,
+) -> F::Output {
+    match seed {
+        Some(seed) => RUN_SEED.scope(seed, fut).await,
+        None => fut.await,
     }
+}
+
+/// [`with_seed`] for synchronous code (tests).
+#[cfg(test)]
+fn with_seed_sync<R>(seed: [u8; NONCE_BYTES], f: impl FnOnce() -> R) -> R {
+    RUN_SEED.sync_scope(seed, f)
 }
 
 /// The per-run delimiter token: 16 bytes from the operating system's random source, as 32
@@ -203,20 +207,21 @@ pub fn with_untrusted_clause(system: String, nonce: &FrameNonce) -> String {
 #[cfg(test)]
 mod tests {
     #[test]
-    #[serial_test::serial(process_env)]
     fn a_seeded_token_is_the_same_for_the_same_text_and_differs_by_text_and_seed() {
-        let guard = seed_tokens([7u8; NONCE_BYTES]);
-        let a = FrameNonce::generate_avoiding(&["alpha", "beta"]);
-        let b = FrameNonce::generate_avoiding(&["alpha", "beta"]);
-        let other_text = FrameNonce::generate_avoiding(&["alpha", "gamma"]);
+        let (a, b, other_text) = with_seed_sync([7u8; NONCE_BYTES], || {
+            (
+                FrameNonce::generate_avoiding(&["alpha", "beta"]),
+                FrameNonce::generate_avoiding(&["alpha", "beta"]),
+                FrameNonce::generate_avoiding(&["alpha", "gamma"]),
+            )
+        });
         assert_eq!(a, b, "the same text gets the same token");
         assert_ne!(a, other_text);
         assert_eq!(a.as_str().len(), NONCE_BYTES * 2);
-        drop(guard);
-        let guard = seed_tokens([8u8; NONCE_BYTES]);
-        let c = FrameNonce::generate_avoiding(&["alpha", "beta"]);
+        let c = with_seed_sync([8u8; NONCE_BYTES], || {
+            FrameNonce::generate_avoiding(&["alpha", "beta"])
+        });
         assert_ne!(a, c, "another seed gives another token");
-        drop(guard);
         // Outside a seeded run the token is random again.
         assert_ne!(
             FrameNonce::generate_avoiding(&["alpha"]),
@@ -225,6 +230,54 @@ mod tests {
     }
 
     use super::*;
+
+    /// Two audit jobs in one server each keep their own seed: tokens drawn inside one run follow that
+    /// run's seed however the two interleave, and the run that ends first leaves the other's seed
+    /// alone (the old process-wide seed was cleared by whichever guard dropped first).
+    #[tokio::test]
+    async fn two_concurrent_runs_keep_their_own_tokens() {
+        let seed_a = [1u8; NONCE_BYTES];
+        let seed_b = [2u8; NONCE_BYTES];
+        let expected_a = FrameNonce::derived(&seed_a, &["same text"], 1);
+        let expected_b = FrameNonce::derived(&seed_b, &["same text"], 1);
+        assert_ne!(expected_a, expected_b);
+        let (a_started, a_started_rx) = tokio::sync::oneshot::channel::<()>();
+        let (b_started, b_started_rx) = tokio::sync::oneshot::channel::<()>();
+        let (a_ended, a_ended_rx) = tokio::sync::oneshot::channel::<()>();
+        let run_a = async {
+            let drawn = with_seed(Some(seed_a), async {
+                let first = FrameNonce::generate_avoiding(&["same text"]);
+                let _ = a_started.send(());
+                let _ = b_started_rx.await;
+                // B has begun; A is between two of its calls.
+                let second = FrameNonce::generate_avoiding(&["same text"]);
+                (first, second)
+            })
+            .await;
+            let _ = a_ended.send(());
+            drawn
+        };
+        let run_b = async {
+            let _ = a_started_rx.await;
+            with_seed(Some(seed_b), async {
+                let first = FrameNonce::generate_avoiding(&["same text"]);
+                let _ = b_started.send(());
+                // A ends first; B carries on.
+                let _ = a_ended_rx.await;
+                let second = FrameNonce::generate_avoiding(&["same text"]);
+                (first, second)
+            })
+            .await
+        };
+        let ((a1, a2), (b1, b2)) = tokio::join!(run_a, run_b);
+        assert_eq!((a1, a2), (expected_a.clone(), expected_a));
+        assert_eq!((b1, b2), (expected_b.clone(), expected_b));
+        // Outside any run the token is random again.
+        assert_ne!(
+            FrameNonce::generate_avoiding(&["same text"]),
+            FrameNonce::generate_avoiding(&["same text"])
+        );
+    }
 
     #[test]
     fn a_token_that_occurs_in_a_framed_input_is_drawn_again() {

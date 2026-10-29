@@ -1064,6 +1064,7 @@ pub async fn run_inspect_pipeline_with(
                 args: serde_json::to_value(&args).unwrap_or(serde_json::Value::Null),
                 estimate_usd: controls.estimate_hint_usd,
                 include_alternatives: corpus.is_some(),
+                origin: camerata_server::run_store::RunOrigin::Cli,
             }) {
                 Ok(store) => {
                     if let Some(prior) = &incremental_prior {
@@ -1087,9 +1088,7 @@ pub async fn run_inspect_pipeline_with(
     };
     // Delimiter tokens drawn from the run's own seed, so a resumed run asks the model the same
     // questions as the run it resumes and a stored reply still matches its prompt.
-    let _token_seed = store
-        .as_ref()
-        .map(|s| camerata_server::prompt_frame::seed_tokens(s.nonce_seed()));
+    let token_seed = store.as_ref().map(|s| s.nonce_seed());
 
     let (mut report, manifest) = {
         // The model this run asks: the scripted one a test hands in, else the real client for the
@@ -1126,26 +1125,29 @@ pub async fn run_inspect_pipeline_with(
             Some(j) => j.as_ref(),
             None => base,
         };
-        let (mut report, manifest) = camerata_server::onboard::audit_repos_with_llm_controlled(
-            model_seam,
-            &sources,
-            &selected,
-            Vec::new(),
-            model,
-            calibration_model,
-            mode,
-            false, // thorough: not exposed on Step 0's flag surface; matches AuditReq's default
-            None,  // feedback: no live transcript sink headlessly
-            None,  // job: no job store headlessly (this call blocks until done)
-            incremental_prior.as_ref(),
-            false, // deep: the opt-in compliance tier; not exposed on Step 0's flag surface
-            true,  // soc2_enabled: irrelevant with `deep` off
-            true,  // run_ai_review
-            true,  // run_deterministic
-            backend_resolution,
-            corpus.as_ref(),
-            &HashMap::new(),
-            controls.clone(),
+        let (mut report, manifest) = camerata_server::prompt_frame::with_seed(
+            token_seed,
+            camerata_server::onboard::audit_repos_with_llm_controlled(
+                model_seam,
+                &sources,
+                &selected,
+                Vec::new(),
+                model,
+                calibration_model,
+                mode,
+                false, // thorough: not exposed on Step 0's flag surface; matches AuditReq's default
+                None,  // feedback: no live transcript sink headlessly
+                None,  // job: no job store headlessly (this call blocks until done)
+                incremental_prior.as_ref(),
+                false, // deep: the opt-in compliance tier; not exposed on Step 0's flag surface
+                true,  // soc2_enabled: irrelevant with `deep` off
+                true,  // run_ai_review
+                true,  // run_deterministic
+                backend_resolution,
+                corpus.as_ref(),
+                &HashMap::new(),
+                controls.clone(),
+            ),
         )
         .await;
         if seams.llm.is_none() {
@@ -1426,9 +1428,18 @@ pub async fn resume_inspect(
             many,
         )),
     };
-    let run_id = rs::resolve_run(run, project_key.as_deref())
+    let run_id = rs::resolve_run(run, project_key.as_deref(), rs::RunOrigin::Cli)
         .map_err(|e| InspectError::Failed(e.to_string()))?;
     let record = rs::read_record(&run_id).map_err(|e| InspectError::Failed(e.to_string()))?;
+    // A run the cockpit started saved the cockpit's scan request, not these flags, and it needs
+    // the project's settings to be read back: the cockpit is the place to resume it.
+    if record.origin == rs::RunOrigin::Cockpit {
+        return Err(InspectError::Failed(format!(
+            "run {run_id} was started from the cockpit, so it is resumed there: open the \
+             project's scan screen and choose Run what remains. `camerata inspect --resume` \
+             resumes runs started from the command line"
+        )));
+    }
     let mut args: InspectArgs = serde_json::from_value(record.args.clone()).map_err(|e| {
         InspectError::Failed(format!(
             "run {run_id} did not save the arguments it was started with ({e}); start a new run"

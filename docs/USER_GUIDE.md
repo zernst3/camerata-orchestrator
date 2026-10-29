@@ -1984,6 +1984,20 @@ In the app, the scan screen shows a failure panel when parts failed. **Run what 
 the same plan and estimate first; **Start: run only these parts** resumes the run, and the
 background animation runs until it ends.
 
+**If the app closes in the middle of a scan.** A scan you start in the app is saved as it runs, the
+same way. If the app crashes, you close it, or the laptop dies before the scan finishes, nothing is
+lost: the next time you open the app (or open the project) the scan screen says **This inspection
+was interrupted** (or **This inspection did not finish**, when it ended with a part left) and offers
+**Run what remains**. It shows the same plan and estimate first. Only the work that was not stored
+is sent again, so the cost is minutes and the findings are the ones an uninterrupted scan gives.
+When several saved inspections are unfinished, the newest is offered and the others are listed
+below it. An inspection that is running right now is listed as running and is never offered.
+
+A run is resumed in the place that started it. A run started from the app is resumed in the app;
+`camerata inspect --resume` refuses it and says so, and `--resume latest` skips it. A run started
+with `camerata inspect` is resumed with `camerata inspect --resume`; the app lists it with that
+command and has no button for it.
+
 | Exit code | What it means |
 |---|---|
 | 0 | The run is complete, or you resumed a run that was already complete. |

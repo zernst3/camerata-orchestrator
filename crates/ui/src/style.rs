@@ -2394,6 +2394,11 @@ html, body {
   white-space: pre-wrap; word-break: break-word; max-height: 240px; overflow-y: auto;
 }
 .agent-output { background: #1b1a18; color: #ece9e3; border-color: #1b1a18; }
+.saved-inspections { display: flex; flex-direction: column; gap: 10px; margin: 0 0 14px; }
+.saved-inspection-reasons { margin: 4px 0 8px 18px; padding: 0; font-size: 12px; }
+.saved-inspection-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; font-size: 12.5px; }
+.saved-inspection-other-button { margin-left: 8px; }
+.agent-superseded-note { margin: 0; font-size: 11px; font-style: italic; color: var(--ink-faint); }
 
 /* ---- AI clarify suggestions ----------------------------------------------- */
 .clarify-suggest-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 6px 0 8px; }
