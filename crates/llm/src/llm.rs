@@ -1958,7 +1958,7 @@ impl Llm {
         };
         let out = crate::retry::execute_traced(make_request, self.sleeper(), model).await?;
         if !(200..300).contains(&out.status) {
-            return Err(api_http_failure(out));
+            return Err(http_failure("Anthropic API", out));
         }
         let text = out.body;
         let v: serde_json::Value =
@@ -2006,7 +2006,7 @@ fn with_full_trail(
 /// The typed error for a terminal non-success HTTP answer from the Messages API: the message is
 /// the one the transport has always returned, the class says what waiting or credentials could
 /// do about it, and the trail holds every attempt (status, provider error, request id, waits).
-fn api_http_failure(out: crate::retry::ApiOutcome) -> anyhow::Error {
+fn http_failure(what: &str, out: crate::retry::ApiOutcome) -> anyhow::Error {
     let status = reqwest::StatusCode::from_u16(out.status)
         .map(|s| s.to_string())
         .unwrap_or_else(|_| out.status.to_string());
@@ -2016,10 +2016,8 @@ fn api_http_failure(out: crate::retry::ApiOutcome) -> anyhow::Error {
         etype.as_deref(),
         emsg.as_deref().unwrap_or(&out.body),
     );
-    let mut failure = crate::failure::LlmCallFailure::new(
-        class,
-        format!("Anthropic API HTTP {status}: {}", out.body),
-    );
+    let mut failure =
+        crate::failure::LlmCallFailure::new(class, format!("{what} HTTP {status}: {}", out.body));
     failure.retryable = retryable;
     failure.attempts = out.attempts;
     failure.http = Some((out.status, out.body));
@@ -2311,10 +2309,16 @@ impl Llm {
                 .header("content-type", "application/json")
                 .json(&body)
         };
-        let (status, text) = crate::retry::execute_with_retry(make_request).await?;
-        if !status.is_success() {
-            anyhow::bail!("Message Batches API HTTP {status}: {text}");
+        // The batch's model, for the attempt records of a failed submit.
+        let model = items
+            .first()
+            .map(|i| i.params.model.clone())
+            .unwrap_or_default();
+        let out = crate::retry::execute_traced(make_request, self.sleeper(), &model).await?;
+        if !(200..300).contains(&out.status) {
+            return Err(http_failure("Message Batches API", out));
         }
+        let text = out.body;
         let v: serde_json::Value = serde_json::from_str(&text)
             .map_err(|e| anyhow::anyhow!("parse batch response: {e}"))?;
         let batch_id = v["id"]
@@ -2352,10 +2356,11 @@ impl Llm {
                 .header("x-api-key", key)
                 .header("anthropic-version", "2023-06-01")
         };
-        let (status, text) = crate::retry::execute_with_retry(make_request).await?;
-        if !status.is_success() {
-            anyhow::bail!("batch poll HTTP {status}: {text}");
+        let out = crate::retry::execute_traced(make_request, self.sleeper(), "").await?;
+        if !(200..300).contains(&out.status) {
+            return Err(http_failure("batch poll", out));
         }
+        let text = out.body;
         let v: serde_json::Value =
             serde_json::from_str(&text).map_err(|e| anyhow::anyhow!("parse batch poll: {e}"))?;
         let processing_status = v["processing_status"]
@@ -2398,11 +2403,11 @@ impl Llm {
                 .header("x-api-key", key)
                 .header("anthropic-version", "2023-06-01")
         };
-        let (status, text) = crate::retry::execute_with_retry(make_request).await?;
-        if !status.is_success() {
-            anyhow::bail!("batch results HTTP {status}: {text}");
+        let out = crate::retry::execute_traced(make_request, self.sleeper(), "").await?;
+        if !(200..300).contains(&out.status) {
+            return Err(http_failure("batch results", out));
         }
-        parse_batch_results_jsonl(&text, cache_ttl)
+        parse_batch_results_jsonl(&out.body, cache_ttl)
     }
 
     /// Convenience accessor for the API key (needed by the batch polling loop to confirm
@@ -5713,6 +5718,33 @@ exit 1"#,
             assert!(refusal_error(&m).is_none(), "{ok} is not a refusal");
         }
         assert!(refusal_error(&serde_json::json!({})).is_none());
+    }
+
+    /// A batch submit, poll or fetch that ends on an HTTP error is a typed failure that keeps
+    /// every attempt (status, provider message, request id, wait), exactly like a real-time call,
+    /// and the message keeps the wording callers have always seen.
+    #[test]
+    fn a_failed_batch_call_keeps_its_class_message_and_every_attempt() {
+        let mut first = crate::failure::AttemptRecord::new("api", "m");
+        first.http_status = Some(529);
+        first.request_id = Some("req_1".to_string());
+        first.wait_secs = Some(5);
+        let mut last = crate::failure::AttemptRecord::new("api", "m");
+        last.http_status = Some(529);
+        let out = crate::retry::ApiOutcome {
+            status: 529,
+            body: r#"{"error":{"type":"overloaded_error","message":"Overloaded"}}"#.to_string(),
+            attempts: vec![first, last],
+        };
+        let err = http_failure("Message Batches API", out);
+        assert!(
+            err.to_string().starts_with("Message Batches API HTTP 529"),
+            "{err}"
+        );
+        let failure = crate::failure::call_failure_of(&err).expect("a typed failure");
+        assert_eq!(failure.class, crate::failure::FailureClass::Transport);
+        assert_eq!(failure.attempts.len(), 2);
+        assert_eq!(failure.attempts[0].request_id.as_deref(), Some("req_1"));
     }
 
     #[test]
