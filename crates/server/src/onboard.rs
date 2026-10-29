@@ -779,6 +779,13 @@ pub struct CoverageNote {
     /// the ledger is reconciled.
     #[serde(default)]
     pub repo: Option<String>,
+    /// True when the tool was INVOKED and then failed (it crashed, exited non-zero without a
+    /// result, or wrote output nobody could read). False for a tool that was not run: withheld
+    /// by policy, not installed or not provisionable, or given no rule to run. The first is a
+    /// failed part (it locks a client export and can be resumed); the second is a disclosed limit
+    /// of the scope. `serde(default)` (false) so a report persisted before this loads unchanged.
+    #[serde(default)]
+    pub tool_failed: bool,
 }
 
 /// The pass name a repo that could not be read is recorded under. Stable: a persisted report
@@ -1092,6 +1099,11 @@ pub struct ScanReport {
     /// deserializes as empty rather than failing to load.
     #[serde(default)]
     pub failed_passes: Vec<crate::ai_audit::FailedPass>,
+    /// The saved run this scan is (see [`crate::run_store`]); `camerata inspect --resume` and the
+    /// cockpit's "Run what remains" button run what is left of it. `None` when the run could not
+    /// be saved, and for a report written before runs were saved.
+    #[serde(default)]
+    pub run_id: Option<String>,
     /// W1: the pipeline-integrity ledger — per-rule "did it actually run" facts and
     /// per-stage row accounting, accumulated during this scan. `report_export::
     /// build_report_json` derives "What's healthy" / "excluded from this audit" / the
@@ -1240,6 +1252,7 @@ impl ScanReport {
     /// The connect-GitHub gate result: no scan performed.
     pub fn gated(repos: &[String]) -> Self {
         Self {
+            run_id: None,
             repos: repos.to_vec(),
             stacks: Vec::new(),
             files_scanned: 0,
@@ -1282,6 +1295,7 @@ impl ScanReport {
     /// zero-findings scan.
     pub fn crashed(repos: &[String], message: String) -> Self {
         Self {
+            run_id: None,
             repos: repos.to_vec(),
             stacks: Vec::new(),
             files_scanned: 0,
@@ -3383,6 +3397,7 @@ pub async fn audit_repos_with_llm_controlled(
         .any(|s| s.frameworks.iter().any(|f| f == "Firebase"))
     {
         report.coverage_notes.push(CoverageNote {
+            tool_failed: false,
             repo: None,
             tool: crate::FIREBASE_SCOPE_COVERAGE_TOOL.to_string(),
             message: crate::FIREBASE_SCOPE_SENTENCE.to_string(),

@@ -3135,14 +3135,14 @@ pub fn apply_severity_ceiling_rules(findings: Vec<Finding>) -> Vec<Finding> {
 /// Floor for [`scaled_max_tokens`] — the ORIGINAL flat budget every aggregate pass
 /// hardcoded before this fix, kept as the minimum so a small finding/rule set (the common
 /// case) sees zero behavior change.
-const AGGREGATE_MAX_TOKENS_FLOOR: u32 = 4096;
+const AGGREGATE_MAX_TOKENS_FLOOR: u32 = camerata_ui_core::scan::AGGREGATE_MAX_TOKENS_FLOOR;
 
 /// Ceiling for [`scaled_max_tokens`] — bounds a single call's requested budget regardless
 /// of how many items land in one chunk. The per-pass `*_BATCH_SIZE` constants below keep
 /// any one call's item count well under what would reach this in practice; the ceiling is
 /// a second, independent guard against requesting an unreasonably large budget from the
 /// API (e.g. if a caller ever skips chunking).
-const AGGREGATE_MAX_TOKENS_CEILING: u32 = 32_000;
+const AGGREGATE_MAX_TOKENS_CEILING: u32 = camerata_ui_core::scan::AGGREGATE_MAX_TOKENS_CEILING;
 
 /// `max_tokens` for a call describing `n_items` things, given a per-item token estimate —
 /// clamped to `[AGGREGATE_MAX_TOKENS_FLOOR, AGGREGATE_MAX_TOKENS_CEILING]` so small batches
@@ -3285,6 +3285,10 @@ pub async fn verify_findings(
     // Chunks whose every call failed in a way worth another try: (chunk index, prompt, size).
     let mut deferred: Vec<(usize, String, usize)> = Vec::new();
     let mut trail = StageTrail::default();
+    // Per chunk: its own failed calls, and whether it is still without a verdict. A chunk left
+    // without one after the second try is a failed part naming its findings (see below).
+    let mut chunk_trails: Vec<StageTrail> = vec![StageTrail::default(); n_chunks];
+    let mut uncalibrated: std::collections::BTreeSet<usize> = std::collections::BTreeSet::new();
 
     for (chunk_idx, chunk) in owned_chunks.into_iter().enumerate() {
         // SPEND CAP, between batches: once the cap is reached the remaining batches do not run.
@@ -3434,6 +3438,8 @@ pub async fn verify_findings(
         if votes.is_empty() {
             if let Some(e) = &last_error {
                 trail.note_error(e, false);
+                chunk_trails[chunk_idx].note_error(e, false);
+                uncalibrated.insert(chunk_idx);
                 if second_try_allowed(e, meter) {
                     deferred.push((chunk_idx, prompt.clone(), chunk_len));
                 }
@@ -3448,6 +3454,9 @@ pub async fn verify_findings(
             break;
         }
         let Ok(_permit) = admit_stage(meter, repo, STAGE_CALIBRATION).await else {
+            // The spend limit stopped the run; it records that, so the chunk is not also a
+            // failed part.
+            uncalibrated.remove(&chunk_idx);
             continue;
         };
         let mut req = LlmRequest::new(prompt)
@@ -3468,13 +3477,21 @@ pub async fn verify_findings(
                 }
                 let chunk = std::mem::take(&mut chunk_results[chunk_idx]);
                 chunk_results[chunk_idx] = apply_verdicts(&resp.text, chunk);
+                uncalibrated.remove(&chunk_idx);
             }
             Err(e) => {
                 meter_failed(meter, Stage::Calibration, &e);
                 trail.note_error(&e, true);
+                chunk_trails[chunk_idx].note_error(&e, true);
             }
         }
     }
+    // A chunk that still has no verdict after both tries (or because the run stopped before the
+    // second) leaves its findings uncalibrated. Recorded below as a failed part naming them.
+    let failed_chunks: Vec<(usize, Vec<Finding>)> = uncalibrated
+        .iter()
+        .map(|&i| (i, chunk_results[i].clone()))
+        .collect();
     let calibrated: Vec<Finding> = chunk_results.into_iter().flatten().collect();
     // C3-1b: a run-wide (not per-chunk/per-finding) disclosure — every finding calibration
     // was handed came back with NO usable effort estimate at all. Neither D5 (severity floor)
@@ -3500,6 +3517,18 @@ pub async fn verify_findings(
             attempts: trail.attempts.clone(),
             scope_note: false,
         });
+    } else {
+        // Some findings were estimated, so the run-wide miss above does not apply, but a chunk
+        // that never got its verdict is still a part that failed.
+        for (idx, chunk) in failed_chunks {
+            estimation_failed_passes.push(failed_calibration_chunk(
+                repo,
+                idx,
+                n_chunks,
+                &chunk,
+                &chunk_trails[idx],
+            ));
+        }
     }
     // D5: the deterministic severity floor runs regardless of whether the LLM calibration
     // pass succeeded — it re-derives its verdict from the finding's own text, not the model's,
@@ -3508,6 +3537,53 @@ pub async fn verify_findings(
     // reason — both are text-derived and safe regardless of whether calibration ran.
     let calibrated = apply_severity_ceiling_rules(apply_severity_calibration_rules(calibrated));
     (calibrated, estimation_failed_passes)
+}
+
+/// The failed part for one calibration chunk whose calls all failed: names the findings it left
+/// uncalibrated (as `path:line`, at most five spelled out) and the files they sit in, so the
+/// operator can see what was not checked and the resume can run the chunk again.
+fn failed_calibration_chunk(
+    repo: &str,
+    chunk_idx: usize,
+    n_chunks: usize,
+    chunk: &[Finding],
+    trail: &StageTrail,
+) -> FailedPass {
+    let mut files: Vec<String> = chunk.iter().map(|f| f.path.clone()).collect();
+    files.sort();
+    files.dedup();
+    let named: Vec<String> = chunk
+        .iter()
+        .take(5)
+        .map(|f| format!("{}:{}", f.path, f.line))
+        .collect();
+    let more = chunk.len().saturating_sub(named.len());
+    let pass = if n_chunks > 1 {
+        format!("calibration batch {} of {n_chunks}", chunk_idx + 1)
+    } else {
+        "calibration".to_string()
+    };
+    FailedPass {
+        repo: repo.to_string(),
+        pass,
+        reason: format!(
+            "the calibration step failed for {} finding{} left without a severity check or an \
+             effort estimate: {}{}",
+            chunk.len(),
+            if chunk.len() == 1 { "" } else { "s" },
+            named.join(", "),
+            if more > 0 {
+                format!(" and {more} more")
+            } else {
+                String::new()
+            }
+        ),
+        files_not_reviewed: 0,
+        class: trail.class(),
+        files,
+        attempts: trail.attempts.clone(),
+        scope_note: false,
+    }
 }
 
 /// Merge several calibration passes into one CONSERVATIVE consensus verdict set (#51 thorough
@@ -4706,7 +4782,7 @@ pub fn fix_effort(fix_model: Option<&str>) -> Option<&'static str> {
 /// NOT re-judge severity/confidence/effort (calibration already did that) and does NOT
 /// explain the violation (the finding's own `detail` already does) — its ONLY job is a
 /// concrete "change X in file Y" sentence grounded in the evidence it's given.
-fn fix_specific_system_prompt() -> String {
+pub(crate) fn fix_specific_system_prompt() -> String {
     r#"You write ONE concrete, codebase-specific fix per finding for a paying client's audit
 report. You are NOT re-explaining what is wrong — the finding's own detail already does that.
 Your only job is telling the developer EXACTLY what to change, in THIS codebase.

@@ -343,6 +343,7 @@ pub async fn rescan_changes(
                 from_sha: from_sha.clone(),
                 to_sha: to_sha.clone(),
             }),
+            resume_run: None,
         },
     )
     .await;

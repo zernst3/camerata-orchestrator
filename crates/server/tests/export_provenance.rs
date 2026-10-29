@@ -27,6 +27,7 @@ const RULE_B: &str = "RUST-DOMAIN-2";
 
 fn report_with_refs(refs: Vec<AuditedRef>, audited: &[&str]) -> ScanReport {
     ScanReport {
+        run_id: None,
         repos_not_inspected: Vec::new(),
         recommendations_by_repo: Vec::new(),
         patterns_across_services: Default::default(),

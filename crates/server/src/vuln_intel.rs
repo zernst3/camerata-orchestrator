@@ -498,6 +498,7 @@ fn apply(findings: &mut [Finding], kev: &FeedState<KevFeed>, epss: &FeedState<Ep
 fn unavailable_note(label: &str, state_reason: Option<&str>, effect: &str) -> Option<CoverageNote> {
     let reason = state_reason?;
     Some(CoverageNote {
+        tool_failed: false,
         repo: None,
         tool: COVERAGE_TOOL.to_string(),
         message: format!("{label} not checked ({reason}); {effect}"),

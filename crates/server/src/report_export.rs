@@ -6017,11 +6017,13 @@ mod tests {
     fn client_tooling_notes_reach_the_report_in_their_own_words() {
         let notes = vec![
             crate::onboard::CoverageNote {
+                tool_failed: false,
                 repo: None,
                 tool: "clippy".to_string(),
                 message: crate::scan_tools::client_tooling_skipped_message("cargo clippy", 2),
             },
             crate::onboard::CoverageNote {
+                tool_failed: false,
                 repo: None,
                 tool: crate::scan_tools::CLIENT_TOOLING_NOTE_TOOL.to_string(),
                 message: "cargo clippy ran with the operator's opt-in to run this repository's \
@@ -6060,6 +6062,7 @@ mod tests {
 
     pub(super) fn report_with(findings: Vec<Finding>, audited_rule_ids: Vec<&str>) -> ScanReport {
         ScanReport {
+            run_id: None,
             repos_not_inspected: Vec::new(),
             recommendations_by_repo: Vec::new(),
             patterns_across_services: Default::default(),
@@ -10881,11 +10884,13 @@ mod tests {
         let mut report = report_with(vec![], vec![]);
         report.coverage_notes = vec![
             CoverageNote {
+                tool_failed: false,
                 repo: None,
                 tool: "osv-scanner".to_string(),
                 message: "dependency audit did not run: network unavailable".to_string(),
             },
             CoverageNote {
+                tool_failed: false,
                 repo: None,
                 tool: "ruff".to_string(),
                 message: "ruff not installed".to_string(),
@@ -10906,6 +10911,7 @@ mod tests {
         let mut report = report_with(vec![], vec![]);
         report.coverage_notes = vec![
             CoverageNote {
+                tool_failed: false,
                 repo: None,
                 tool: "eslint".to_string(),
                 message: "Could not preview 12 rule(s) with eslint: spawn ENOENT at \
@@ -10914,11 +10920,13 @@ mod tests {
                     .to_string(),
             },
             CoverageNote {
+                tool_failed: false,
                 repo: None,
                 tool: "eslint".to_string(),
                 message: "Could not preview 3 rule(s) with eslint: exit code 2.".to_string(),
             },
             CoverageNote {
+                tool_failed: false,
                 repo: None,
                 tool: "osv-scanner".to_string(),
                 message: "dependency audit did not run: network unavailable".to_string(),
@@ -10977,6 +10985,7 @@ mod tests {
         let mut report = report_with(vec![], vec![]);
         report.coverage_notes = vec![
             CoverageNote {
+                tool_failed: false,
                 repo: None,
                 tool: crate::RULE_CORPUS_COVERAGE_TOOL.to_string(),
                 message: "/Users/auditor/corpus/supabase/rls/a.toml did not parse, so rule \
@@ -10985,6 +10994,7 @@ mod tests {
                     .to_string(),
             },
             CoverageNote {
+                tool_failed: false,
                 repo: None,
                 tool: crate::RULE_CORPUS_COVERAGE_TOOL.to_string(),
                 message: "/Users/auditor/corpus/universal/b.toml did not parse, so rule \
@@ -11045,6 +11055,7 @@ mod tests {
     fn the_firebase_scope_sentence_reaches_the_summary_and_methodology_verbatim() {
         let mut report = report_with(vec![], vec![]);
         report.coverage_notes = vec![CoverageNote {
+            tool_failed: false,
             repo: None,
             tool: crate::FIREBASE_SCOPE_COVERAGE_TOOL.to_string(),
             message: "operator note".to_string(),
@@ -11078,6 +11089,7 @@ mod tests {
     fn req_w13_the_client_facing_corpus_load_line_pluralizes_correctly() {
         let mut report = report_with(vec![], vec![]);
         report.coverage_notes = vec![CoverageNote {
+            tool_failed: false,
             repo: None,
             tool: crate::RULE_CORPUS_COVERAGE_TOOL.to_string(),
             message: "x.toml did not parse".to_string(),
@@ -14541,6 +14553,7 @@ mod export_invariants_gate {
 
     fn report_with(findings: Vec<Finding>, audited_rule_ids: Vec<&str>) -> ScanReport {
         ScanReport {
+            run_id: None,
             repos_not_inspected: Vec::new(),
             recommendations_by_repo: Vec::new(),
             patterns_across_services: Default::default(),

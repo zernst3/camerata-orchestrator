@@ -1953,6 +1953,51 @@ The gate deliberately does not complain that a Python rule did not run against a
 that does not run because it is irrelevant to the stack is correct behaviour. What it will not
 tolerate is a skip it cannot classify, which it treats as a defect rather than a pass.
 
+### When a run does not finish: saved runs and resume
+
+Every inspection is saved while it runs, part by part. If the AI service goes down, a part fails, or
+the run is interrupted (a crash, a closed laptop), you do not start over. You run only what remains.
+
+`camerata inspect` prints a line such as `run: 20261029T101500Z-ab12cd (camerata inspect --resume
+20261029T101500Z-ab12cd runs only what remains)`. To finish that run later:
+
+```
+camerata inspect --resume 20261029T101500Z-ab12cd
+camerata inspect --resume latest          # the newest run that still has work left
+```
+
+A resume first prints what remains and what it should cost (only the remaining work, as an upper
+estimate), then sends only the model calls that were not stored as good, and builds the report and
+the export from everything. You may give `--export` and `--max-cost-usd` again; the spend limit
+then applies to the resume alone. Everything else is the saved run's.
+
+A resume refuses, in plain words, when its stored answers would no longer fit: the repository is at
+another commit; a file was edited or added; the models or the rules differ; or this is another
+version of Camerata. It also refuses while another process works on the same run. A run that is
+already complete says so and does nothing.
+
+A client export is written only when every part is complete. While a part has failed or has not
+run, the export is refused (nothing is written) and the run stays resumable. `--internal` still
+writes an export, marked INTERNAL INCOMPLETE.
+
+In the app, the scan screen shows a failure panel when parts failed. **Run what remains** shows
+the same plan and estimate first; **Start: run only these parts** resumes the run, and the
+background animation runs until it ends.
+
+| Exit code | What it means |
+|---|---|
+| 0 | The run is complete, or you resumed a run that was already complete. |
+| 1 | The run could not start or a resume was refused; the message says why. |
+| 3 | The release gate refused the export. Nothing was written. |
+| 4 | The spend limit stopped the run. Raise the limit and resume. |
+| 5 | The AI service could not be reached (three failed calls in a row, or a login or billing failure). Resume when it is back. |
+| 6 | The run is incomplete for another reason (a part failed after its retries). A client export was refused. |
+
+Saved runs live in the Camerata state folder under `runs/`, one folder per run, readable only by
+you: they hold model answers derived from the code. Camerata keeps the newest five runs of each
+project. A run that is not complete is deleted only when a newer complete run exists for the same
+commits.
+
 ---
 
 ## 12. Feature flags (opt-out)

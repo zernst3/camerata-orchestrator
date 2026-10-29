@@ -114,9 +114,41 @@ pub fn is_client_tooling_skip(note: &CoverageNote) -> bool {
     note.message.contains(CLIENT_TOOLING_SKIPPED)
 }
 
+/// Why a tool did not produce a result when it was never actually run: withheld by policy, not
+/// installed or not provisionable, or handed no rule to evaluate. A run error that is NOT this
+/// type (a crash, a non-zero exit with no result document, output nobody can read) means the
+/// tool was invoked and failed. See [`tool_invoked_and_failed`].
+#[derive(Debug)]
+struct ToolNotRun(String);
+
+impl std::fmt::Display for ToolNotRun {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for ToolNotRun {}
+
+fn tool_not_run(message: impl Into<String>) -> anyhow::Error {
+    anyhow::Error::new(ToolNotRun(message.into()))
+}
+
+/// True when `error` came from a tool that was INVOKED and then failed, as opposed to one that
+/// was not run (see [`ToolNotRun`]). A program that cannot be started because it is not on the
+/// machine (`NotFound`) was never run, so it is the absence case.
+pub(crate) fn tool_invoked_and_failed(error: &anyhow::Error) -> bool {
+    if error.downcast_ref::<ToolNotRun>().is_some() {
+        return false;
+    }
+    error
+        .downcast_ref::<std::io::Error>()
+        .is_none_or(|io| io.kind() != std::io::ErrorKind::NotFound)
+}
+
 /// The coverage note for `tool` skipped in a client engagement with no opt-in.
 fn client_tooling_skipped_note(tool: ScanTool, rules: usize) -> CoverageNote {
     CoverageNote {
+        tool_failed: false,
         repo: None,
         tool: tool.name().to_string(),
         message: client_tooling_skipped_message(tool_command(tool), rules),
@@ -126,6 +158,7 @@ fn client_tooling_skipped_note(tool: ScanTool, rules: usize) -> CoverageNote {
 /// The coverage note for `tool` run in a client engagement because the operator opted in.
 fn client_tooling_ran_note(tool: ScanTool) -> CoverageNote {
     CoverageNote {
+        tool_failed: false,
         repo: None,
         tool: CLIENT_TOOLING_NOTE_TOOL.to_string(),
         message: format!(
@@ -1497,6 +1530,7 @@ pub async fn run_scan_tools<'r>(
     }
     for sr in &ungrouped {
         coverage_notes.push(CoverageNote {
+            tool_failed: false,
             repo: None,
             tool: "unrouted".to_string(),
             message: format!(
@@ -1551,7 +1585,8 @@ pub async fn run_scan_tools<'r>(
             }
             Err(e) => {
                 coverage_notes.push(CoverageNote {
- repo: None,
+                    tool_failed: tool_invoked_and_failed(&e),
+                    repo: None,
                     tool: tool.name().to_string(),
                     message: format!(
                         "Could not preview {} rule(s) with {}: {e}. It enforces once wired into CI.",
@@ -1644,18 +1679,20 @@ async fn run_one_tool<'r>(
                 .map(|v| !v.is_empty())
                 .unwrap_or(false)
             {
-                anyhow::bail!("semgrep disabled via {DISABLE_SEMGREP_ENV_VAR} (test isolation)");
+                return Err(tool_not_run(format!(
+                    "semgrep disabled via {DISABLE_SEMGREP_ENV_VAR} (test isolation)"
+                )));
             }
             // Semgrep selects by config PACK, not individual ids.  Camerata
             // auto-provisions semgrep into a stable venv so the user never
             // needs to install it manually.  The preview runs against the
             // bundled offline ruleset (no network call to the semgrep registry).
             let tooling_dir = tool_provisioning::tooling_dir().ok_or_else(|| {
-                anyhow::anyhow!("could not resolve Camerata data dir for tool provisioning")
+                tool_not_run("could not resolve Camerata data dir for tool provisioning")
             })?;
             let semgrep_bin = tool_provisioning::ensure_semgrep(&tooling_dir)
                 .await
-                .map_err(|e| anyhow::anyhow!("semgrep provisioning: {e}"))?;
+                .map_err(|e| tool_not_run(format!("semgrep provisioning: {e}")))?;
             let rules_dir = tool_provisioning::bundled_semgrep_rules_dir();
             let rules_str = rules_dir.to_string_lossy().into_owned();
             let bin_str = semgrep_bin.to_string_lossy().into_owned();
@@ -1675,7 +1712,9 @@ async fn run_one_tool<'r>(
         }
         ScanTool::Ruff => {
             if selectors.is_empty() {
-                anyhow::bail!("no ruff rule codes derived from the selection");
+                return Err(tool_not_run(
+                    "no ruff rule codes derived from the selection",
+                ));
             }
             let select = selectors.join(",");
             let args = ruff_args(&select);
@@ -1727,7 +1766,9 @@ async fn run_one_tool<'r>(
         }
         ScanTool::Eslint => {
             if selectors.is_empty() {
-                anyhow::bail!("no eslint rule ids derived from the selection");
+                return Err(tool_not_run(
+                    "no eslint rule ids derived from the selection",
+                ));
             }
             // Camerata auto-provisions eslint into a stable node_modules
             // workspace so the user never needs to install it manually. We use
@@ -1742,16 +1783,16 @@ async fn run_one_tool<'r>(
             // resolve and aborted every run with an empty stdout. See
             // [`parse_eslint_json`]'s doc comment for the full C11 post-mortem.
             let tooling_dir = tool_provisioning::tooling_dir().ok_or_else(|| {
-                anyhow::anyhow!("could not resolve Camerata data dir for tool provisioning")
+                tool_not_run("could not resolve Camerata data dir for tool provisioning")
             })?;
             tool_provisioning::ensure_eslint(&tooling_dir)
                 .await
-                .map_err(|e| anyhow::anyhow!("eslint provisioning: {e}"))?;
+                .map_err(|e| tool_not_run(format!("eslint provisioning: {e}")))?;
             // Resolve the `eslint` symlink ONCE to the concrete generation directory and run
             // from those paths, so a re-provision swapping the link mid-run cannot affect us.
             let run_paths = tool_provisioning::eslint_run_paths(&tooling_dir)
                 .await
-                .map_err(|e| anyhow::anyhow!("eslint workspace: {e}"))?;
+                .map_err(|e| tool_not_run(format!("eslint workspace: {e}")))?;
             let workspace = run_paths.workspace;
             let bin_str = run_paths.bin.to_string_lossy().into_owned();
             let config_str = run_paths.config.to_string_lossy().into_owned();
@@ -1763,6 +1804,7 @@ async fn run_one_tool<'r>(
             let mut gaps: Vec<CoverageNote> = unresolvable
                 .iter()
                 .map(|(sel, pkg)| CoverageNote {
+                    tool_failed: false,
                     repo: None,
                     tool: ScanTool::Eslint.name().to_string(),
                     message: format!(
@@ -1774,11 +1816,11 @@ async fn run_one_tool<'r>(
                 })
                 .collect();
             if runnable.is_empty() {
-                anyhow::bail!(
+                return Err(tool_not_run(format!(
                     "none of the {} selected eslint rule(s) could be resolved: every one needs \
                      a plugin package that is not installed in Camerata's eslint workspace",
                     selectors.len(),
-                );
+                )));
             }
 
             let args = eslint_args(&config_str, &runnable);
@@ -1792,6 +1834,7 @@ async fn run_one_tool<'r>(
                     // valid JSON, no findings. Never leave it undisclosed.
                     if shape.read_nothing() {
                         gaps.push(CoverageNote {
+                            tool_failed: false,
                             repo: None,
                             tool: ScanTool::Eslint.name().to_string(),
                             message: format!(
@@ -3016,6 +3059,50 @@ mod tests {
             !ungrouped.iter().any(|s| s.id == "ARCH-1"),
             "architectural must not be ungrouped (no note)"
         );
+    }
+
+    #[test]
+    fn a_tool_that_could_not_start_was_not_run_but_a_crash_was_a_failure() {
+        // Not run: withheld, not provisionable, no rule, or not on the machine.
+        assert!(!tool_invoked_and_failed(&tool_not_run("semgrep disabled")));
+        assert!(!tool_invoked_and_failed(&anyhow::Error::new(
+            std::io::Error::from(std::io::ErrorKind::NotFound)
+        )));
+        // Invoked and failed: unreadable output, no output, or any other process error.
+        assert!(tool_invoked_and_failed(&tool_output_error(
+            ScanTool::Semgrep,
+            "",
+            "boom",
+            None
+        )));
+        assert!(tool_invoked_and_failed(&anyhow::Error::new(
+            std::io::Error::from(std::io::ErrorKind::PermissionDenied)
+        )));
+    }
+
+    #[tokio::test]
+    async fn a_tool_that_is_not_on_the_machine_leaves_a_note_that_is_not_a_failure() {
+        let rules = vec![rule_with(
+            "PY-A",
+            EnforcementKind::Mechanical,
+            false,
+            &["Ruff: S608"],
+        )];
+        let lookup = lookup_over(&rules);
+        let dir = std::path::Path::new("/nonexistent-camerata-scan-preview-dir");
+        let (_, notes, _) = run_scan_tools(
+            "me/api",
+            dir,
+            &[selected("PY-A")],
+            &lookup,
+            None,
+            None,
+            crate::client_lock::ClientTooling::INTERNAL,
+            false,
+        )
+        .await;
+        assert!(!notes.is_empty());
+        assert!(notes.iter().all(|n| !n.tool_failed), "{notes:?}");
     }
 
     #[tokio::test]

@@ -955,6 +955,9 @@ pub fn RescanChangesButton(project_id: String, repo: String) -> Element {
                 let (pid, rp) = (project_id.clone(), repo.clone());
                 busy.set(true);
                 spawn(async move {
+                    // The rescan starts an audit job (model work): hold the Bombe while it starts.
+                    // The job itself is polled by the scan screen, which holds its own guard.
+                    let _guard = crate::loading::LoadingGuard::new();
                     match rescan_changes(&pid, &rp).await {
                         Ok(RescanStarted::NothingChanged) => push_toast(
                             toasts,

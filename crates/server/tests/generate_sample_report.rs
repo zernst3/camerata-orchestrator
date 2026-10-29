@@ -299,6 +299,7 @@ async fn regenerate_sample_report() {
     assert_eq!(audited_rule_ids.len(), 22);
 
     let report = ScanReport {
+        run_id: None,
  repos_not_inspected: Vec::new(),
  recommendations_by_repo: Vec::new(),
  patterns_across_services: Default::default(),
@@ -336,12 +337,12 @@ async fn regenerate_sample_report() {
         actual_usage: None,
         deep: None,
         coverage_notes: vec![
-            CoverageNote {
+            CoverageNote { tool_failed: false,
  repo: None,
                 tool: "osv-scanner".to_string(),
                 message: "Dependency scan covers the npm ecosystem via package-lock.json. No manifest was found for other ecosystems.".to_string(),
             },
-            CoverageNote {
+            CoverageNote { tool_failed: false,
  repo: None,
                 tool: "osv-scanner".to_string(),
                 message: "Advisory data reflects the scan timestamp; re-run before remediation sign-off.".to_string(),

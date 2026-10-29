@@ -110,6 +110,7 @@ pub fn build(inputs: &PreflightInputs<'_>) -> Preflight {
                 tokens: r.tokens * runs as u64,
                 dollars: r.dollars * runs as f64,
                 passes: r.passes * runs,
+                ceiling_usd: r.ceiling_usd * runs as f64,
                 ..r
             })
             .collect();
@@ -118,6 +119,7 @@ pub fn build(inputs: &PreflightInputs<'_>) -> Preflight {
             e.dollars * runs as f64,
             e.passes * runs,
             rows,
+            e.ceiling_usd * runs as f64,
         )
     });
 
@@ -128,13 +130,21 @@ pub fn build(inputs: &PreflightInputs<'_>) -> Preflight {
     )
     .ok();
     match estimate {
-        Some((tokens, dollars, passes, _)) => {
+        Some((tokens, dollars, passes, _, ceiling)) => {
             writeln!(
                 out,
                 "  estimated cost: about ${dollars:.2} ({} tokens over about {passes} model calls)",
                 human_tokens(tokens)
             )
             .ok();
+            if ceiling_is_above(dollars, ceiling) {
+                writeln!(
+                    out,
+                    "  at most ${ceiling:.2} if the detail step needs every repeat round on every \
+                     finding (the usual run pays for its first round only)"
+                )
+                .ok();
+            }
         }
         None => {
             writeln!(
@@ -165,7 +175,7 @@ pub fn build(inputs: &PreflightInputs<'_>) -> Preflight {
                     )
                     .ok();
                 }
-                (None, Some((_, _, _, rows))) => {
+                (None, Some((_, _, _, rows, _))) => {
                     if let Some(row) = rows.iter().find(|r| r.repo == repo.repo) {
                         writeln!(
                             out,
@@ -252,12 +262,20 @@ pub fn build(inputs: &PreflightInputs<'_>) -> Preflight {
                  pass over the limit."
             )
             .ok();
-            if let Some((_, dollars, _, _)) = estimate {
+            if let Some((_, dollars, _, _, ceiling)) = estimate {
                 if dollars > cap {
                     writeln!(
                         out,
                         "  WARNING: the estimate is above the spend limit, so this run is expected to stop \
                          before it finishes and its export will be marked incomplete."
+                    )
+                    .ok();
+                } else if ceiling > cap {
+                    writeln!(
+                        out,
+                        "  note: the worst case (${ceiling:.2}) is above the spend limit. The run is \
+                         expected to stay under it; if the detail step needs its repeat rounds, the \
+                         run stops at the limit and says what was not run."
                     )
                     .ok();
                 }
@@ -277,8 +295,13 @@ pub fn build(inputs: &PreflightInputs<'_>) -> Preflight {
     }
     Preflight {
         text: out,
-        estimate_usd: estimate.map(|(_, d, _, _)| d),
+        estimate_usd: estimate.map(|(_, d, _, _, _)| d),
     }
+}
+
+/// Whether the ceiling is worth a line of its own: more than a cent above the expected figure.
+fn ceiling_is_above(expected: f64, ceiling: f64) -> bool {
+    ceiling - expected > 0.005
 }
 
 #[cfg(test)]
@@ -318,6 +341,40 @@ mod tests {
             terse_output: false,
             consensus: false,
         }
+    }
+
+    /// The operator reads the expected cost; the ceiling (every regeneration round on every
+    /// finding) is shown beside it as "at most". The spend-limit WARNING is about the expected
+    /// cost; a limit between the two gets a note about the worst case instead, and the number the
+    /// batch gate is given is the expected one.
+    #[test]
+    fn the_preflight_shows_the_expected_cost_with_the_ceiling_beside_it() {
+        let repos = [repo(400_000, 30)];
+        let mut on = inputs(&repos, None);
+        on.terse_output = true;
+        let p = build(&on);
+        assert!(p.text.contains("at most $"), "{}", p.text);
+        let expected = p.estimate_usd.unwrap();
+
+        let mut between = inputs(&repos, Some(expected + 1.0));
+        between.terse_output = true;
+        let p = build(&between);
+        assert!(
+            !p.text
+                .contains("WARNING: the estimate is above the spend limit"),
+            "{}",
+            p.text
+        );
+        assert!(p.text.contains("worst case"), "{}", p.text);
+        assert_eq!(
+            p.estimate_usd.unwrap(),
+            expected,
+            "the gate's figure is the expected cost"
+        );
+
+        // With the stage off the two figures are one and nothing says "at most".
+        let p = build(&inputs(&repos, None));
+        assert!(!p.text.contains("at most $"), "{}", p.text);
     }
 
     #[test]

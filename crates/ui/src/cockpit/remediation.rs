@@ -477,6 +477,9 @@ pub(super) fn FindingsSourceSection(
                             let (repo, story_id) = (repo.clone(), story_id.clone());
                             busy.set(true);
                             spawn(async move {
+                                // The rescan is an audit job and this task polls it to its verdict
+                                // (up to five minutes): hold the Bombe for all of it.
+                                let _guard = crate::loading::LoadingGuard::new();
                                 match crate::source_ui::rescan_changes(&project_id, &repo).await {
                                     Ok(crate::source_ui::RescanStarted::NothingChanged) => {
                                         crate::toast::push_toast(

@@ -43,9 +43,9 @@ use crate::stage_telemetry::DetailRejections;
 /// findings would raise their prose overlap and could fuse them.
 pub(crate) const DETAIL_INCOMPLETE_MARKER: &str = "[detail incomplete]";
 
-/// How many findings one regeneration call covers. Batched, not one call per finding: see
-/// "Cost arithmetic" in `docs/TECHNICAL.md` and `batching_beats_one_call_per_finding`.
-const DETAIL_BATCH_SIZE: usize = camerata_ui_core::scan::REGEN_BATCH_SIZE;
+// How many findings one regeneration call covers is `camerata_ui_core::scan::REGEN_BATCH_SIZE`
+// (batched, not one call per finding: see "Cost arithmetic" in `docs/TECHNICAL.md` and
+// `batching_beats_one_call_per_finding`); the rounds' sizes come from `regen_round_batch_size`.
 
 /// Output budget per finding. Measured on a real run: a full detail with its JSON wrapping is
 /// about 280 output tokens, so 160 cut off 4 of 10 calls. 450 leaves headroom for a long one.
@@ -72,11 +72,7 @@ const DETAIL_ROUNDS: usize = camerata_ui_core::scan::REGEN_ROUNDS;
 
 /// The batch size of round `round` (0-based): the full batch, half of it, then one at a time.
 fn round_batch_size(round: usize) -> usize {
-    match round {
-        0 => DETAIL_BATCH_SIZE,
-        1 => DETAIL_BATCH_SIZE.div_ceil(2),
-        _ => 1,
-    }
+    camerata_ui_core::scan::regen_round_batch_size(round)
 }
 
 /// The system prompt of the regeneration call.

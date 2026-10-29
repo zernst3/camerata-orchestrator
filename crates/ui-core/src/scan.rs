@@ -80,6 +80,32 @@ pub const REGEN_TOKENS_PER_FINDING: u32 = 450;
 /// failed, and a last round of one finding to a call for any straggler.
 pub const REGEN_ROUNDS: usize = 3;
 
+/// The batch size of regeneration round `round` (0-based): the full batch, half of it, then one
+/// at a time. The server's stage takes its round sizes from here, and so does the estimate.
+pub fn regen_round_batch_size(round: usize) -> usize {
+    match round {
+        0 => REGEN_BATCH_SIZE,
+        1 => REGEN_BATCH_SIZE.div_ceil(2),
+        _ => 1,
+    }
+}
+
+/// The floor of `max_tokens` for a call that describes several items (the flat budget every
+/// aggregate stage had before its budget scaled): a call of one finding is still allowed this
+/// many output tokens. The server's `scaled_max_tokens` clamps to it.
+pub const AGGREGATE_MAX_TOKENS_FLOOR: u32 = 4096;
+
+/// The ceiling of `max_tokens` for one aggregate call.
+pub const AGGREGATE_MAX_TOKENS_CEILING: u32 = 32_000;
+
+/// The `max_tokens` a regeneration call of `findings` findings asks for: the per-finding budget,
+/// clamped to the aggregate floor and ceiling, exactly as the server sizes the request.
+pub fn regen_call_max_tokens(findings: usize) -> u32 {
+    (findings as u32)
+        .saturating_mul(REGEN_TOKENS_PER_FINDING)
+        .clamp(AGGREGATE_MAX_TOKENS_FLOOR, AGGREGATE_MAX_TOKENS_CEILING)
+}
+
 /// Estimator assumption: input tokens per finding of a regeneration call (the finding's rule
 /// directive, short statement, snippet, six lines of code either side and at most 20 excerpt
 /// lines from the files it names). An estimate, not a measurement.
@@ -130,25 +156,67 @@ pub struct RegenerationEstimate {
     pub output_tokens: f64,
 }
 
+/// The EXPECTED cost of regenerating the full `detail` of the findings a scan of
+/// `scan_out_tokens` output tokens implies: the usual run, where every finding comes back in the
+/// first round ([`REGEN_BATCH_SIZE`] findings to a call) and each finding writes about its
+/// [`REGEN_TOKENS_PER_FINDING`] output tokens. This is the figure the operator reads as the
+/// estimate and the one a spend limit is checked against before the run starts;
+/// [`regeneration_estimate`] is the ceiling shown beside it.
+pub fn regeneration_expected(scan_out_tokens: f64) -> RegenerationEstimate {
+    let findings = (scan_out_tokens / REGEN_SCAN_TOKENS_PER_FINDING)
+        .ceil()
+        .max(0.0);
+    let calls = (findings as usize).div_ceil(REGEN_BATCH_SIZE);
+    RegenerationEstimate {
+        findings,
+        calls,
+        input_tokens: findings * REGEN_INPUT_TOKENS_PER_FINDING
+            + calls as f64 * REGEN_SYSTEM_PROMPT_TOKENS,
+        output_tokens: findings * f64::from(REGEN_TOKENS_PER_FINDING),
+    }
+}
+
 /// The cost of regenerating the full `detail` of the findings a scan of `scan_out_tokens` output
-/// tokens implies. An UPPER bound by the stage's own limits: every one of the `REGEN_ROUNDS`
-/// rounds is assumed to run on every finding (the real repeat round covers only what the first
-/// left out), each finding is assumed to use its whole `REGEN_TOKENS_PER_FINDING` output budget,
-/// and calls hold `REGEN_BATCH_SIZE` findings. It is added to a pre-flight estimate so that the
-/// spend-limit gate and the batch refusal never UNDER-estimate a run with `terse_output` on.
+/// tokens implies. A true UPPER bound by the stage's own limits, which is what makes it safe to
+/// gate a spend limit on: the stage makes `REGEN_ROUNDS` rounds ([`regen_round_batch_size`] sizes
+/// each: the full batch, half of it, then one finding to a call) and then one end-of-run second
+/// try of one finding to a call. Every round is assumed to run on EVERY finding (the real repeat
+/// rounds cover only what the earlier ones left out) and every call is priced at the
+/// `max_tokens` it is sent with ([`regen_call_max_tokens`]: the per-finding budget, never below
+/// the 4,096 aggregate floor, so a one-finding call is priced at 4,096 and not at 450). Input is
+/// each finding's 900 estimated tokens plus the system prompt once per call, over every round.
+///
+/// It is deliberately a ceiling and not an expectation: a real run pays for the first round and
+/// for the stragglers of the later ones only.
 pub fn regeneration_estimate(scan_out_tokens: f64) -> RegenerationEstimate {
     let findings = (scan_out_tokens / REGEN_SCAN_TOKENS_PER_FINDING)
         .ceil()
         .max(0.0);
-    let rounds = REGEN_ROUNDS as f64;
-    let calls_per_round = (findings as usize).div_ceil(REGEN_BATCH_SIZE);
+    let n = findings as usize;
+    let mut calls = 0usize;
+    let mut input_tokens = 0.0;
+    let mut output_tokens = 0.0;
+    // The rounds, then the second try (one finding to a call).
+    let batch_sizes = (0..REGEN_ROUNDS)
+        .map(regen_round_batch_size)
+        .chain(std::iter::once(1));
+    for batch in batch_sizes {
+        let full = n / batch;
+        let rest = n % batch;
+        let round_calls = full + usize::from(rest > 0);
+        calls += round_calls;
+        output_tokens += full as f64 * f64::from(regen_call_max_tokens(batch));
+        if rest > 0 {
+            output_tokens += f64::from(regen_call_max_tokens(rest));
+        }
+        input_tokens += findings * REGEN_INPUT_TOKENS_PER_FINDING
+            + round_calls as f64 * REGEN_SYSTEM_PROMPT_TOKENS;
+    }
     RegenerationEstimate {
         findings,
-        calls: calls_per_round * REGEN_ROUNDS,
-        input_tokens: (findings * REGEN_INPUT_TOKENS_PER_FINDING
-            + calls_per_round as f64 * REGEN_SYSTEM_PROMPT_TOKENS)
-            * rounds,
-        output_tokens: findings * f64::from(REGEN_TOKENS_PER_FINDING) * rounds,
+        calls,
+        input_tokens,
+        output_tokens,
     }
 }
 
@@ -201,6 +269,98 @@ pub fn estimate_audit_cost(
     backend: ProjectBackend,
     multi_option_selected: usize,
     terse_output: bool,
+) -> (u64, f64, usize) {
+    estimate_audit_cost_bounds(
+        code_chars,
+        selected,
+        mode,
+        audit_in,
+        audit_out,
+        calib_in,
+        calib_out,
+        thorough,
+        incremental,
+        deep,
+        backend,
+        multi_option_selected,
+        terse_output,
+    )
+    .expected
+}
+
+/// [`estimate_audit_cost`]'s expected figure and, beside it, the ceiling.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AuditCostBounds {
+    /// `(tokens, dollars, model calls)`: the usual run (see [`regeneration_expected`]). What the
+    /// operator reads as the estimate and what a spend limit is checked against before the run.
+    pub expected: (u64, f64, usize),
+    /// The dollars if every regeneration round runs on every finding at the request cap
+    /// ([`regeneration_estimate`]). Equal to the expected dollars when `terse_output` is off. A
+    /// limit between the two gets a warning, never a refusal: the limit is enforced per call.
+    pub ceiling_usd: f64,
+}
+
+/// [`estimate_audit_cost`] with both figures. Every argument means what it does there.
+#[allow(clippy::too_many_arguments)]
+pub fn estimate_audit_cost_bounds(
+    code_chars: usize,
+    selected: usize,
+    mode: &str,
+    audit_in: f64,
+    audit_out: f64,
+    calib_in: f64,
+    calib_out: f64,
+    thorough: bool,
+    incremental: bool,
+    deep: bool,
+    backend: ProjectBackend,
+    multi_option_selected: usize,
+    terse_output: bool,
+) -> AuditCostBounds {
+    let with = |regen_of: fn(f64) -> RegenerationEstimate| {
+        estimate_with_regeneration(
+            code_chars,
+            selected,
+            mode,
+            audit_in,
+            audit_out,
+            calib_in,
+            calib_out,
+            thorough,
+            incremental,
+            deep,
+            backend,
+            multi_option_selected,
+            terse_output,
+            regen_of,
+        )
+    };
+    let expected = with(regeneration_expected);
+    let (_, ceiling_usd, _) = with(regeneration_estimate);
+    AuditCostBounds {
+        expected,
+        ceiling_usd,
+    }
+}
+
+/// The arithmetic of [`estimate_audit_cost`], with the regeneration stage priced by `regen_of`
+/// (the expected figure or the ceiling) when `terse_output` is on.
+#[allow(clippy::too_many_arguments)]
+fn estimate_with_regeneration(
+    code_chars: usize,
+    selected: usize,
+    mode: &str,
+    audit_in: f64,
+    audit_out: f64,
+    calib_in: f64,
+    calib_out: f64,
+    thorough: bool,
+    incremental: bool,
+    deep: bool,
+    backend: ProjectBackend,
+    multi_option_selected: usize,
+    terse_output: bool,
+    regen_of: fn(f64) -> RegenerationEstimate,
 ) -> (u64, f64, usize) {
     const CHUNK_DIGEST_CHARS: usize = 350_000;
     const RULE_BATCH_SIZE: usize = 15;
@@ -350,7 +510,7 @@ pub fn estimate_audit_cost(
     // ── Detail regeneration (rank 4, `terse_output`): real time at the audit model, no batch
     // discount, sized from the scan's output (the findings it implies). Zero with the switch off.
     let regen = if terse_output {
-        regeneration_estimate(findings_out)
+        regen_of(findings_out)
     } else {
         RegenerationEstimate {
             findings: 0.0,
@@ -410,6 +570,8 @@ pub struct RepoEstimate {
     pub tokens: u64,
     pub dollars: f64,
     pub passes: usize,
+    /// The ceiling beside `dollars` (see [`AuditCostBounds::ceiling_usd`]).
+    pub ceiling_usd: f64,
 }
 
 /// A multi-repo estimate: one row per repo and their sum.
@@ -419,6 +581,8 @@ pub struct AuditEstimate {
     pub tokens: u64,
     pub dollars: f64,
     pub passes: usize,
+    /// The ceiling beside `dollars`, summed over the rows.
+    pub ceiling_usd: f64,
 }
 
 /// [`estimate_audit_cost`] for a project of several repos: one estimate PER REPO, summed.
@@ -444,7 +608,7 @@ pub fn estimate_audit_cost_by_repo(
     let rows: Vec<RepoEstimate> = repos
         .iter()
         .map(|r| {
-            let (tokens, dollars, passes) = estimate_audit_cost(
+            let bounds = estimate_audit_cost_bounds(
                 r.code_chars,
                 r.selected,
                 mode,
@@ -459,11 +623,13 @@ pub fn estimate_audit_cost_by_repo(
                 r.multi_option_selected,
                 terse_output,
             );
+            let (tokens, dollars, passes) = bounds.expected;
             RepoEstimate {
                 repo: r.repo.clone(),
                 tokens,
                 dollars,
                 passes,
+                ceiling_usd: bounds.ceiling_usd,
             }
         })
         .collect();
@@ -471,6 +637,7 @@ pub fn estimate_audit_cost_by_repo(
         tokens: rows.iter().map(|r| r.tokens).sum(),
         dollars: rows.iter().map(|r| r.dollars).sum(),
         passes: rows.iter().map(|r| r.passes).sum(),
+        ceiling_usd: rows.iter().map(|r| r.ceiling_usd).sum(),
         rows,
     }
 }
@@ -519,6 +686,7 @@ mod tests {
             tokens: 1000,
             dollars: 1.234,
             passes: 4,
+            ceiling_usd: 1.234,
         };
         assert_eq!(
             repo_estimate_line("acme/api", 41, 360_000, &row),
@@ -2189,15 +2357,16 @@ mod tests {
     }
 
     /// With the switch on the estimate includes a regeneration term, and it is exactly the term
-    /// [`regeneration_estimate`] computes for the findings the scan's output implies, priced at
-    /// the audit model with NO batch discount (the stage is real time).
+    /// [`regeneration_expected`] computes for the findings the scan's output implies (the usual
+    /// run; the ceiling is carried beside it), priced at the audit model with NO batch discount
+    /// (the stage is real time).
     #[test]
     fn terse_output_on_adds_the_regeneration_term_and_off_leaves_it_out() {
         for mode in ["parallel", "batch"] {
             let (tokens_off, dollars_off, passes_off) = terse_estimate(mode, false);
             let (tokens_on, dollars_on, passes_on) = terse_estimate(mode, true);
             // One pass, no code: the scan writes OUT_TOKENS_PER_PASS (2_600) tokens of findings.
-            let regen = regeneration_estimate(2_600.0);
+            let regen = regeneration_expected(2_600.0);
             assert!(regen.findings >= 1.0 && regen.calls >= 1, "{regen:?}");
             assert_eq!(passes_on, passes_off + regen.calls, "{mode}");
             let added = tokens_on as i64 - tokens_off as i64;
@@ -2214,28 +2383,35 @@ mod tests {
         }
     }
 
-    /// The term is bounded by the regeneration stage's own limits: at most `REGEN_ROUNDS` rounds,
-    /// each finding written at most once per round within `REGEN_TOKENS_PER_FINDING` output
-    /// tokens, `REGEN_BATCH_SIZE` findings to a call.
+    /// The term is a true upper bound by the regeneration stage's own limits: every round on every
+    /// finding, the second try as well, and each call priced at the `max_tokens` it is sent with.
     #[test]
-    fn the_regeneration_term_stays_within_the_stages_own_limits() {
+    fn the_regeneration_term_is_an_upper_bound_by_the_stages_own_limits() {
+        // The worst case in calls is n/10 + n/5 + n for the three rounds, and n more for the
+        // end-of-run second try.
         for scan_out in [0.0, 300.0, 2_600.0, 50_000.0, 5_000_000.0] {
             let r = regeneration_estimate(scan_out);
+            let n = r.findings as usize;
+            let expected_calls =
+                n.div_ceil(REGEN_BATCH_SIZE) + n.div_ceil(REGEN_BATCH_SIZE.div_ceil(2)) + n + n;
+            assert_eq!(r.calls, expected_calls, "{n} findings");
+            // No call can produce more than its own request cap, so the output is bounded by it.
             assert!(
                 r.output_tokens
-                    <= r.findings * f64::from(REGEN_TOKENS_PER_FINDING) * REGEN_ROUNDS as f64
-            );
-            assert_eq!(
-                r.calls,
-                (r.findings as usize).div_ceil(REGEN_BATCH_SIZE) * REGEN_ROUNDS
+                    >= r.findings * f64::from(REGEN_TOKENS_PER_FINDING) * REGEN_ROUNDS as f64,
+                "never below the old per-finding figure"
             );
         }
-        // The numbers follow the constants: 86 findings (the size of a real run) are 9 calls of
-        // up to 10 a round, and every finding is priced at 450 output tokens a round.
+        // 86 findings (the size of a real run), exactly: round 1 is 8 full calls of 10 findings
+        // (4,500 tokens each) and one of 6 (the 4,096 floor); round 2 is 17 calls of 5 and one of
+        // 1 (the floor each); rounds 3 and 4 are 86 single-finding calls at the floor.
         let r = regeneration_estimate(86.0 * REGEN_SCAN_TOKENS_PER_FINDING);
         assert_eq!(r.findings, 86.0);
-        assert_eq!(r.calls, 9 * 3);
-        assert_eq!(r.output_tokens, 86.0 * 450.0 * 3.0);
+        assert_eq!(r.calls, 9 + 18 + 86 + 86);
+        assert_eq!(
+            r.output_tokens,
+            f64::from(8 * 4_500 + 4_096 + 18 * 4_096 + 2 * 86 * 4_096)
+        );
         let none = regeneration_estimate(0.0);
         assert_eq!(
             (none.calls, none.input_tokens, none.output_tokens),
@@ -2246,6 +2422,110 @@ mod tests {
             regeneration_estimate(50_000.0).output_tokens
                 >= regeneration_estimate(2_600.0).output_tokens
         );
+    }
+
+    /// The request size the estimate prices is the one the stage sends: a one-finding call is
+    /// asked for the 4,096 floor, not for 450.
+    #[test]
+    fn a_regeneration_call_is_priced_at_the_max_tokens_it_is_sent_with() {
+        assert_eq!(regen_call_max_tokens(1), AGGREGATE_MAX_TOKENS_FLOOR);
+        assert_eq!(regen_call_max_tokens(5), AGGREGATE_MAX_TOKENS_FLOOR);
+        assert_eq!(
+            regen_call_max_tokens(REGEN_BATCH_SIZE),
+            (REGEN_BATCH_SIZE as u32 * REGEN_TOKENS_PER_FINDING).max(AGGREGATE_MAX_TOKENS_FLOOR)
+        );
+        assert_eq!(regen_round_batch_size(0), REGEN_BATCH_SIZE);
+        assert_eq!(regen_round_batch_size(1), REGEN_BATCH_SIZE.div_ceil(2));
+        assert_eq!(regen_round_batch_size(2), 1);
+    }
+
+    /// Two figures, not one: the expected cost (the usual run, where every finding comes back in
+    /// the first round, priced at the per-finding budget) is what the operator reads and what the
+    /// spend-limit gate refuses on; the ceiling (every round on every finding at the request cap)
+    /// is a warning. With `terse_output` off there is no regeneration and the two are equal.
+    #[test]
+    fn the_estimate_is_the_expected_cost_and_the_ceiling_is_carried_beside_it() {
+        let scan_out = 86.0 * REGEN_SCAN_TOKENS_PER_FINDING;
+        let expected = regeneration_expected(scan_out);
+        assert_eq!(expected.findings, 86.0);
+        assert_eq!(expected.calls, 86usize.div_ceil(REGEN_BATCH_SIZE));
+        assert_eq!(
+            expected.output_tokens,
+            86.0 * f64::from(REGEN_TOKENS_PER_FINDING)
+        );
+        assert_eq!(
+            expected.input_tokens,
+            86.0 * REGEN_INPUT_TOKENS_PER_FINDING
+                + expected.calls as f64 * REGEN_SYSTEM_PROMPT_TOKENS
+        );
+        let ceiling = regeneration_estimate(scan_out);
+        assert!(ceiling.output_tokens > 5.0 * expected.output_tokens);
+        assert!(ceiling.calls > expected.calls);
+
+        let bounds = |terse: bool| {
+            estimate_audit_cost_bounds(
+                400_000,
+                30,
+                "parallel",
+                3.0,
+                15.0,
+                3.0,
+                15.0,
+                false,
+                false,
+                false,
+                ProjectBackend::Api,
+                0,
+                terse,
+            )
+        };
+        let on = bounds(true);
+        assert!(on.ceiling_usd > on.expected.1, "{on:?}");
+        let off = bounds(false);
+        assert_eq!(off.ceiling_usd, off.expected.1, "{off:?}");
+        // The one-figure estimator is the expected cost, never the ceiling.
+        let (tokens, dollars, passes) = estimate_audit_cost(
+            400_000,
+            30,
+            "parallel",
+            3.0,
+            15.0,
+            3.0,
+            15.0,
+            false,
+            false,
+            false,
+            ProjectBackend::Api,
+            0,
+            true,
+        );
+        assert_eq!((tokens, dollars, passes), on.expected);
+        assert!(
+            dollars > off.expected.1,
+            "terse_output still adds its stage"
+        );
+        // The multi-repo estimate carries the ceiling too.
+        let by_repo = estimate_audit_cost_by_repo(
+            &[RepoEstimateInput {
+                repo: "acme/api".into(),
+                code_chars: 400_000,
+                selected: 30,
+                multi_option_selected: 0,
+            }],
+            "parallel",
+            3.0,
+            15.0,
+            3.0,
+            15.0,
+            false,
+            false,
+            false,
+            ProjectBackend::Api,
+            true,
+        );
+        assert_eq!(by_repo.dollars, on.expected.1);
+        assert_eq!(by_repo.ceiling_usd, on.ceiling_usd);
+        assert_eq!(by_repo.rows[0].ceiling_usd, on.ceiling_usd);
     }
 
     /// The scan stage's output budget per rule is measured, not guessed, and the estimator prices

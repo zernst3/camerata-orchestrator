@@ -89,6 +89,7 @@ fn deviation() -> FindingKind {
 fn report_with(findings: Vec<Finding>) -> ScanReport {
     let audited_rule_ids = findings.iter().map(|f| f.rule_id.clone()).collect();
     ScanReport {
+        run_id: None,
         repos_not_inspected: Vec::new(),
         recommendations_by_repo: Vec::new(),
         patterns_across_services: Default::default(),

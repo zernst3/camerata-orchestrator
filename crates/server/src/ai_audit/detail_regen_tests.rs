@@ -932,8 +932,11 @@ fn batching_beats_one_call_per_finding() {
     let per_finding = price(n * system_tokens);
     let batch = camerata_ui_core::scan::REGEN_BATCH_SIZE as u64;
     let batched = price(n.div_ceil(batch) * system_tokens);
+    // Batching saves at least 80% of the ideal factor (one call in `batch` instead of one per
+    // finding), whatever the batch size is.
+    let required_saving = batch as f64 * 0.8;
     assert!(
-        batched * 8.0 < per_finding,
+        batched * required_saving < per_finding,
         "batching repeats the system prompt {} times instead of {n}: {batched} vs {per_finding}",
         n.div_ceil(batch)
     );

@@ -182,6 +182,7 @@ async fn audit_repo_frames_every_file_and_the_repo_map_under_one_token_its_syste
 }
 
 #[tokio::test]
+#[serial_test::serial(process_env)]
 async fn two_runs_draw_two_tokens() {
     let first = Recorder::new("{}");
     let second = Recorder::new("{}");

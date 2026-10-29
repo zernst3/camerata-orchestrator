@@ -3094,6 +3094,7 @@ mod tests {
 
     pub(super) fn report_with(findings: Vec<Finding>, audited_rule_ids: Vec<&str>) -> ScanReport {
         ScanReport {
+            run_id: None,
             repos_not_inspected: Vec::new(),
             recommendations_by_repo: Vec::new(),
             patterns_across_services: Default::default(),
@@ -5776,6 +5777,7 @@ mod tests {
         let f = finding("SEC-NO-RAW-SQL-CONCAT-1", "src/a.rs", 3, "high");
         let mut report = report_with(vec![f], vec!["SEC-NO-RAW-SQL-CONCAT-1"]);
         report.coverage_notes = vec![crate::onboard::CoverageNote {
+            tool_failed: false,
             repo: None,
             tool: "eslint".to_string(),
             message: "Could not preview 12 rule(s) with eslint: spawn ENOENT.".to_string(),

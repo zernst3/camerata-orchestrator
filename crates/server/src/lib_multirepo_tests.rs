@@ -45,6 +45,7 @@ fn a_tool_that_failed_on_one_repo_is_not_reported_as_having_run_on_it() {
     let mut report = two_repo_report();
     record_for_both(&mut report);
     report.coverage_notes = vec![crate::onboard::CoverageNote {
+        tool_failed: false,
         repo: Some("acme/two".to_string()),
         tool: "semgrep".to_string(),
         message: "Could not preview 1 rule(s) with semgrep: exited 2".to_string(),
@@ -263,5 +264,71 @@ fn a_manifest_stamped_complete_is_corrected_when_a_repo_was_never_read() {
     assert!(
         !manifest.ai_covered,
         "a baseline from a run that never read a repo is not a complete one"
+    );
+}
+
+fn semgrep_note(repo: &str, tool_failed: bool) -> crate::onboard::CoverageNote {
+    crate::onboard::CoverageNote {
+        tool_failed,
+        repo: Some(repo.to_string()),
+        tool: "semgrep".to_string(),
+        message: "Could not preview 2 rule(s) with semgrep: exited 2".to_string(),
+    }
+}
+
+#[test]
+fn a_tool_that_was_invoked_and_failed_is_a_failed_part_that_locks_the_export() {
+    let mut report = two_repo_report();
+    record_for_both(&mut report);
+    // A second rule on the same tool and repo must not make a second failed part.
+    report.ledger.record_rule(
+        "acme/two",
+        "SEC-NO-COMMAND-INJECTION-1",
+        RuleTier::ExternalTool,
+        true,
+        None,
+        3,
+        0,
+    );
+    report.coverage_notes = vec![semgrep_note("acme/two", true)];
+    reconcile_external_tool_ledger(&mut report, &attempted_on(&["acme/one", "acme/two"]), None);
+
+    let parts: Vec<_> = report
+        .failed_passes
+        .iter()
+        .filter(|f| f.pass == "commodity taint pass")
+        .collect();
+    assert_eq!(
+        parts.len(),
+        1,
+        "one failed part per repo and pass: {parts:?}"
+    );
+    assert!(!parts[0].scope_note, "{:?}", parts[0]);
+    assert_eq!(parts[0].class, crate::ai_audit::FailureClass::Io);
+    assert_eq!(parts[0].repo, "acme/two");
+    assert!(
+        !report.incomplete_reasons().is_empty(),
+        "a crashed tool makes the run incomplete"
+    );
+}
+
+#[test]
+fn a_tool_that_was_not_run_stays_a_disclosed_scope_note() {
+    let mut report = two_repo_report();
+    record_for_both(&mut report);
+    report.coverage_notes = vec![semgrep_note("acme/two", false)];
+    reconcile_external_tool_ledger(&mut report, &attempted_on(&["acme/one", "acme/two"]), None);
+
+    let parts: Vec<_> = report
+        .failed_passes
+        .iter()
+        .filter(|f| f.pass == "commodity taint pass")
+        .collect();
+    assert_eq!(parts.len(), 1, "{parts:?}");
+    assert!(parts[0].scope_note, "{:?}", parts[0]);
+    assert!(
+        report.incomplete_reasons().is_empty(),
+        "a tool not run by policy or absence never locks: {:?}",
+        report.incomplete_reasons()
     );
 }

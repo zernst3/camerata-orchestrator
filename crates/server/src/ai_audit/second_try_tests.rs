@@ -247,6 +247,75 @@ async fn estimation_that_fails_both_tries_is_a_failed_pass_with_both_on_record()
     assert_eq!(llm.calls(), 2, "exactly one second try");
 }
 
+/// Answers every calibration call whose prompt names `src/chunk2.rs` with a transport failure and
+/// every other with a good verdict, so one chunk of a two-chunk calibration fails alone.
+struct FailsOneChunk;
+
+#[async_trait::async_trait]
+impl LlmPort for FailsOneChunk {
+    async fn complete(&self, req: LlmRequest) -> anyhow::Result<LlmResponse> {
+        if req.prompt.contains("src/chunk2.rs") {
+            return Err(anyhow::Error::new(LlmCallFailure::new(
+                FailureClass::Transport,
+                "Anthropic API HTTP 529: overloaded",
+            )));
+        }
+        Ok(response(VERDICT_WITH_EFFORT))
+    }
+    async fn complete_streaming(
+        &self,
+        req: LlmRequest,
+        _on_delta: &mut (dyn for<'a> FnMut(&'a str) + Send),
+    ) -> anyhow::Result<LlmResponse> {
+        self.complete(req).await
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+#[tokio::test]
+async fn a_calibration_chunk_that_fails_both_tries_is_a_failed_part_naming_its_findings() {
+    // 41 findings make two chunks; the second holds only the last, which lives in chunk2.rs.
+    let mut findings: Vec<Finding> = (0..CALIBRATION_BATCH_SIZE)
+        .map(|_| calibration_finding())
+        .collect();
+    let mut last = calibration_finding();
+    last.path = "src/chunk2.rs".to_string();
+    last.line = 9;
+    findings.push(last);
+    let (out, failed) = verify_findings(
+        &FailsOneChunk,
+        "me/api",
+        findings,
+        None,
+        None,
+        None,
+        false,
+        "This repository has 2 code files.",
+    )
+    .await;
+    assert_eq!(
+        out.len(),
+        CALIBRATION_BATCH_SIZE + 1,
+        "no finding is dropped"
+    );
+    assert_eq!(
+        out[0].effort.as_deref(),
+        Some("low"),
+        "chunk one calibrated"
+    );
+    assert_eq!(failed.len(), 1, "{failed:?}");
+    let part = &failed[0];
+    assert!(part.pass.starts_with("calibration"), "{}", part.pass);
+    assert!(!part.scope_note);
+    assert_eq!(part.class, FailureClass::Transport);
+    assert_eq!(part.files, vec!["src/chunk2.rs".to_string()]);
+    assert!(part.reason.contains("src/chunk2.rs:9"), "{}", part.reason);
+    assert_eq!(part.attempts.len(), 2, "both tries on record");
+    assert!(report_with(failed).incomplete_reasons().len() == 1);
+}
+
 // ── Alternatives ───────────────────────────────────────────────────────────────────────────
 
 const GOOD_ALT: &str = r#"{"recommendations":[{"rule_id":"MULTI-RULE-1","recommended_option_id":"opt-a","applicable":true,"evidence":"a.rs:1"}]}"#;

@@ -149,6 +149,39 @@ pub fn typst_on_path_for(test: &str) -> bool {
     typst_gate(typst_installed(), std::env::var_os("CI").is_some(), test)
 }
 
+/// The same gate for `python3`, which the fake `claude` of the end-to-end tests is written in:
+/// present, the test runs; missing under CI, PANIC (a quiet skip would hide a broken resume
+/// path); missing elsewhere, a visible banner and `false`.
+pub fn python3_gate(present: bool, ci: bool, test: &str) -> bool {
+    if present {
+        return true;
+    }
+    assert!(
+        !ci,
+        "{test}: python3 is not on PATH, and this test cannot run without it (its fake claude \
+         is a python script). Install python3 in the CI image; a silent skip would hide a \
+         broken resume."
+    );
+    eprintln!("\n*** SKIPPED {test}: python3 is not on PATH, so the fake claude cannot run ***\n");
+    false
+}
+
+/// True when `python3 --version` runs.
+pub fn python3_installed() -> bool {
+    std::process::Command::new("python3")
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// [`python3_gate`] over the real machine and the `CI` variable, for the test named `test`.
+pub fn python3_on_path_for(test: &str) -> bool {
+    python3_gate(python3_installed(), std::env::var_os("CI").is_some(), test)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -164,6 +197,25 @@ mod tests {
     #[test]
     fn typst_missing_locally_skips_and_says_so() {
         assert!(!typst_gate(false, false, "t"));
+    }
+
+    // ---- the python3 gate: the same rule, so the fake-claude tests never skip quietly in CI ----
+
+    #[test]
+    fn python3_present_runs_the_test_under_ci_and_locally() {
+        assert!(python3_gate(true, true, "t"));
+        assert!(python3_gate(true, false, "t"));
+    }
+
+    #[test]
+    fn python3_missing_locally_skips_and_says_so() {
+        assert!(!python3_gate(false, false, "t"));
+    }
+
+    #[test]
+    #[should_panic(expected = "python3 is not on PATH")]
+    fn python3_missing_under_ci_fails_the_test() {
+        python3_gate(false, true, "t");
     }
 
     #[test]
