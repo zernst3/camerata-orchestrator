@@ -64,19 +64,10 @@ fi
 exec "$REAL_TYPST" "$@"
 "#;
 
+/// Both gates fail the test under CI when the program is missing, so a broken CI image can never
+/// turn these tests into quiet skips.
 fn python_and_typst_available(test: &str) -> bool {
-    let python = Command::new("python3")
-        .arg("--version")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
-    if !python {
-        eprintln!("skipping {test}: python3 is not on PATH");
-        return false;
-    }
-    camerata_test_env::typst_on_path_for(test)
+    camerata_test_env::python3_on_path_for(test) && camerata_test_env::typst_on_path_for(test)
 }
 
 fn write_script(dir: &Path, name: &str, body: &str) {
