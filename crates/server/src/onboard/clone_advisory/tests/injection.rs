@@ -106,6 +106,7 @@ async fn code_that_prints_a_delimiter_cannot_close_a_candidates_frame() {
 }
 
 #[tokio::test]
+#[serial_test::serial(process_env)]
 async fn one_token_per_judge_run_and_a_new_one_for_the_next_run() {
     let all = discount_repo("0.2", "0.15");
     let first = StubJudge::answering("different", "");

@@ -106,6 +106,7 @@ pub mod review_agent;
 pub mod routine;
 pub mod run;
 pub mod run_health;
+pub mod run_store;
 mod run_target;
 pub mod runtime_audit;
 pub mod scan_cache;

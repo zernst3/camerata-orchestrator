@@ -4782,7 +4782,7 @@ pub fn fix_effort(fix_model: Option<&str>) -> Option<&'static str> {
 /// NOT re-judge severity/confidence/effort (calibration already did that) and does NOT
 /// explain the violation (the finding's own `detail` already does) — its ONLY job is a
 /// concrete "change X in file Y" sentence grounded in the evidence it's given.
-fn fix_specific_system_prompt() -> String {
+pub(crate) fn fix_specific_system_prompt() -> String {
     r#"You write ONE concrete, codebase-specific fix per finding for a paying client's audit
 report. You are NOT re-explaining what is wrong — the finding's own detail already does that.
 Your only job is telling the developer EXACTLY what to change, in THIS codebase.

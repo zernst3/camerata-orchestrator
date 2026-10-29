@@ -131,6 +131,11 @@ impl BatchSeam {
     pub(crate) fn api(&self) -> &dyn BatchApi {
         self.api.as_ref()
     }
+
+    /// The batch API itself, shared, for a wrapper that stores what it does.
+    pub(crate) fn api_arc(&self) -> std::sync::Arc<dyn BatchApi> {
+        self.api.clone()
+    }
 }
 
 #[async_trait::async_trait]

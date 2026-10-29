@@ -17,6 +17,37 @@
 //! on every call would make every pass re-bill the repo map and the digest it shares with its
 //! siblings.
 
+/// The seed tokens are derived from while a resumable run is in progress. `None` outside one.
+static NONCE_SEED: std::sync::Mutex<Option<[u8; NONCE_BYTES]>> = std::sync::Mutex::new(None);
+
+fn current_seed() -> Option<[u8; NONCE_BYTES]> {
+    NONCE_SEED.lock().ok().and_then(|seed| *seed)
+}
+
+/// Draw delimiter tokens from `seed` (see [`FrameNonce::generate_avoiding`]) until the guard is
+/// dropped, which restores the previous setting. The run store installs the run's seed for the
+/// whole of a run so that a resumed run asks the model the same questions as the run it resumes.
+pub fn seed_tokens(seed: [u8; NONCE_BYTES]) -> NonceSeedGuard {
+    let previous = NONCE_SEED
+        .lock()
+        .ok()
+        .and_then(|mut slot| slot.replace(seed));
+    NonceSeedGuard { previous }
+}
+
+/// Restores the previous token seed when dropped. See [`seed_tokens`].
+pub struct NonceSeedGuard {
+    previous: Option<[u8; NONCE_BYTES]>,
+}
+
+impl Drop for NonceSeedGuard {
+    fn drop(&mut self) {
+        if let Ok(mut slot) = NONCE_SEED.lock() {
+            *slot = self.previous;
+        }
+    }
+}
+
 /// The per-run delimiter token: 16 bytes from the operating system's random source, as 32
 /// lowercase hex characters.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -54,7 +85,37 @@ impl FrameNonce {
     /// can cause: a failing random source is the only explanation, and carrying on would frame
     /// client code with a delimiter the client's own text can print.
     pub fn generate_avoiding(inputs: &[&str]) -> Self {
+        if let Some(seed) = current_seed() {
+            // A run that can be resumed draws its tokens from the run's own secret seed and the
+            // text to be framed, so the same text gets the same token when the run is resumed and
+            // a stored model reply still matches the prompt that asked for it. The seed is random
+            // and never leaves the run folder, so the token stays unpredictable to the client.
+            let mut counter = 0u32;
+            return Self::draw_avoiding(inputs, || {
+                counter += 1;
+                Self::derived(&seed, inputs, counter)
+            });
+        }
         Self::draw_avoiding(inputs, Self::generate)
+    }
+
+    /// The token derived from `seed`, the framed texts and the redraw `counter`.
+    fn derived(seed: &[u8; NONCE_BYTES], inputs: &[&str], counter: u32) -> Self {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(seed);
+        hasher.update(counter.to_le_bytes());
+        for text in inputs {
+            hasher.update((text.len() as u64).to_le_bytes());
+            hasher.update(text.as_bytes());
+        }
+        let digest = hasher.finalize();
+        Self(
+            digest[..NONCE_BYTES]
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect(),
+        )
     }
 
     /// [`Self::generate_avoiding`] over the paths and bodies of file sets (the files a run frames,
@@ -141,6 +202,28 @@ pub fn with_untrusted_clause(system: String, nonce: &FrameNonce) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    #[serial_test::serial(process_env)]
+    fn a_seeded_token_is_the_same_for_the_same_text_and_differs_by_text_and_seed() {
+        let guard = seed_tokens([7u8; NONCE_BYTES]);
+        let a = FrameNonce::generate_avoiding(&["alpha", "beta"]);
+        let b = FrameNonce::generate_avoiding(&["alpha", "beta"]);
+        let other_text = FrameNonce::generate_avoiding(&["alpha", "gamma"]);
+        assert_eq!(a, b, "the same text gets the same token");
+        assert_ne!(a, other_text);
+        assert_eq!(a.as_str().len(), NONCE_BYTES * 2);
+        drop(guard);
+        let guard = seed_tokens([8u8; NONCE_BYTES]);
+        let c = FrameNonce::generate_avoiding(&["alpha", "beta"]);
+        assert_ne!(a, c, "another seed gives another token");
+        drop(guard);
+        // Outside a seeded run the token is random again.
+        assert_ne!(
+            FrameNonce::generate_avoiding(&["alpha"]),
+            FrameNonce::generate_avoiding(&["alpha"])
+        );
+    }
+
     use super::*;
 
     #[test]
