@@ -411,6 +411,12 @@ fn stderr_tail(stderr: &str) -> Option<String> {
     ))
 }
 
+/// Streamed to the listener when the CLI is run again after an attempt that had already streamed
+/// text. The text before it came from the failed attempt and is superseded by what follows, so a
+/// transcript that records it shows one divider instead of two answers run together.
+pub const CLI_ATTEMPT_SUPERSEDED: &str =
+    "\n[the text above came from an attempt that failed; the model was asked again]\n";
+
 /// A typed CLI failure: `message` is the text the CLI path has always returned, and the one
 /// attempt record carries the exit code and the stderr tail. `retryable` says whether another
 /// run could help; the retry loop in [`Llm::complete_cli_streaming`] reads it.
@@ -1798,11 +1804,24 @@ impl Llm {
         // The streaming callback is shared by every attempt, so it sits behind an async mutex the
         // attempt closure locks; one attempt runs at a time.
         let on_delta = tokio::sync::Mutex::new(on_delta);
-        let outcome = crate::retry::drive(self.sleeper(), |_attempt| {
+        // Whether the attempt that just ran streamed any text. A retry then tells the listener
+        // that text is superseded, so a live transcript never shows two answers run together.
+        let streamed = std::sync::atomic::AtomicBool::new(false);
+        let outcome = crate::retry::drive(self.sleeper(), |attempt| {
             let on_delta = &on_delta;
+            let streamed = &streamed;
             async move {
                 let mut guard = on_delta.lock().await;
-                self.cli_attempt(req, model, &mut **guard).await
+                if attempt > 0 && streamed.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                    (**guard)(CLI_ATTEMPT_SUPERSEDED);
+                }
+                let mut counted = |text: &str| {
+                    if !text.is_empty() {
+                        streamed.store(true, std::sync::atomic::Ordering::SeqCst);
+                    }
+                    (**guard)(text);
+                };
+                self.cli_attempt(req, model, &mut counted).await
             }
         })
         .await;
@@ -5515,6 +5534,51 @@ exit 1"#,
         assert_eq!(resp.text, "RECOVERED");
         assert_eq!(runs_of(&fake), 2);
         assert_eq!(sleeper.waits().len(), 1);
+    }
+
+    /// An attempt that streamed text and then failed is superseded: the retry's text follows a
+    /// marker, so a live transcript never shows the two answers run together.
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn a_cli_retry_marks_the_earlier_streamed_text_as_superseded() {
+        let fake = flaky_claude(
+            "cli-superseded",
+            1,
+            r#"printf '%s\n' '{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"PARTIAL"}}}'
+printf '%s\n' '{"type":"result","is_error":true,"result":"API Error: 529 overloaded_error"}'
+exit 1"#,
+        );
+        let _env = fake_cli_env(&fake.dir, 5);
+        let sleeper = std::sync::Arc::new(RecordingSleeper::default());
+
+        let mut seen = String::new();
+        let resp = llm_with(&sleeper)
+            .complete_streaming(LlmRequest::new("p"), &mut |d| seen.push_str(d))
+            .await
+            .expect("the second run answers");
+
+        assert_eq!(resp.text, "RECOVERED");
+        assert_eq!(runs_of(&fake), 2);
+        let partial = seen.find("PARTIAL").expect("the failed attempt streamed");
+        let marker = seen
+            .find(CLI_ATTEMPT_SUPERSEDED)
+            .expect("the retry marks the earlier text superseded");
+        assert!(partial < marker, "{seen:?}");
+    }
+
+    /// A retry after an attempt that streamed nothing adds no marker.
+    #[tokio::test]
+    #[serial_test::serial(process_env)]
+    async fn a_cli_retry_after_a_silent_failure_adds_no_marker() {
+        let fake = flaky_claude("cli-no-marker", 1, "echo 'connection reset' >&2\nexit 1");
+        let _env = fake_cli_env(&fake.dir, 5);
+        let sleeper = std::sync::Arc::new(RecordingSleeper::default());
+        let mut seen = String::new();
+        llm_with(&sleeper)
+            .complete_streaming(LlmRequest::new("p"), &mut |d| seen.push_str(d))
+            .await
+            .expect("the second run answers");
+        assert!(!seen.contains(CLI_ATTEMPT_SUPERSEDED), "{seen:?}");
     }
 
     /// A login or billing failure is not retried: waiting does not log anyone in.
