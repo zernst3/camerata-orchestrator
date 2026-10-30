@@ -2293,8 +2293,8 @@ content-keyed verdict cache (`VerdictCache`, keyed on the rule, the judge model,
 version, the candidate's content id, the exact-mode differences and the rule-specific facts (for a
 single-source candidate, every copy's decision tokens), so a moved
 file hits and a judge model change misses), the stable prompt prefix as the single cache breakpoint, and
-the project's fast tier (`resolve_clone_judge_model`: explicit pick, then `CAMERATA_CLONE_JUDGE_MODEL`,
-then `fleet::tier::default_fast_model()`; stamped in `ScanProvenance.clone_judge_model` when the judge
+the project's fast tier (`resolve_clone_judge_model`: explicit pick, then
+`fleet::tier::default_fast_model()`, Haiku 5.5; stamped in `ScanProvenance.clone_judge_model` when the judge
 made a call). The cache rides in the scan manifest (`ScanManifest.clone_verdicts`, `serde(default)`,
 `MANIFEST_VERSION` unchanged) in the app data directory, never in the client's repository. Usage is
 folded into the same `UsageMeter` as every other pass; the full ranked candidate list and every verdict
@@ -4987,8 +4987,9 @@ model from the `TierMap` via `tier::model_for_task`, then:
    (`orchestrator::lead_stage_index`).
 2. Prepares an **orchestrator session** for the lead stage only
    (`orchestrator::prepare_orchestrator_session`): the lead's MCP config carries
-   `CAMERATA_DELEGATE_ENABLED=1` and the tier→model JSON so the gateway boots in orchestrator mode
-   and the `delegate` tool is live.
+   `CAMERATA_DELEGATE_ENABLED=1` and, as the `--delegate-models` argument, the tier→model JSON taken
+   from the project's tier map, so the gateway boots in orchestrator mode and the `delegate` tool is
+   live. The models travel as an argument, never as an environment variable.
 3. All other stages (including delegate children) receive a standard non-orchestrator MCP config.
    Their `--allowedTools` excludes `delegate`.
 
@@ -5314,6 +5315,29 @@ at project creation: `DEFAULT_MODEL` (`claude-sonnet-5-5`) for every slot.
 
 `StepKind` enum variants: `Audit`, `Calibration`, `ResearchChat`, `StoryAuthoring`,
 `Decomposition`, `Escalation`, `Clarification`.
+
+#### Where a model comes from
+
+A model is never read from the environment or a `.env` file. The sources, in order:
+
+1. The open project's model configuration in the cockpit (`StepModels`, the tier map, the L3
+   review model). A project file written before a setting existed loads with the built-in
+   defaults (`#[serde(default)]`).
+2. On the command line, only the explicit flags: `--model`, `--calibration-model`, `--fix-model`.
+3. The built-in default: `DEFAULT_MODEL` (`claude-sonnet-5-5`, Sonnet 5.5), with Haiku 5.5
+   (`claude-haiku-5-5`) for the fix stage and the clone judge. Older ids stay selectable and
+   priced.
+
+`ai_audit::resolve_audit_model`, `resolve_calibration_model`, `stage_model` and
+`clone_advisory::resolve_clone_judge_model` apply that order and are shared by the cockpit and the
+command line. The transport (`Llm::complete` and `complete_streaming`) has no default of its own: a
+request that names no model is refused with an error that names the caller as the bug, so the model
+the pre-flight prices, the ledger records and the spend limit checks is the model that runs.
+The delegate tool's tier
+models reach the gateway as the `--delegate-models` argument written into the lead's MCP config
+from the project's tier map. Tests set each variable that used to pick a model and prove it is
+ignored (`crates/server/tests/model_source_e2e.rs`, `crates/cli/tests/inspect_model_source.rs`,
+and unit tests beside each resolver).
 
 **No runtime env fallback once a project exists.** The project's per-step value is
 authoritative; call sites resolve it via `step_model(state, step)` or
