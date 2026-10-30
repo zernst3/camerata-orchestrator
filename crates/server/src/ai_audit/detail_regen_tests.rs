@@ -319,6 +319,7 @@ fn meter_with(config: EfficiencyConfig) -> UsageMeter {
         max_cost_usd: None,
         estimate_hint_usd: None,
         fix_model: None,
+        clone_judge_model: None,
         consensus: false,
     })
 }
@@ -755,6 +756,7 @@ async fn the_spend_limit_stopping_the_step_leaves_every_finding_marked() {
         efficiency: EfficiencyConfig::default(),
         max_cost_usd: Some(0.005),
         fix_model: None,
+        clone_judge_model: None,
         consensus: false,
         estimate_hint_usd: None,
     });
@@ -824,6 +826,7 @@ async fn a_billed_refusal_in_regeneration_counts_toward_the_cap_and_is_named_in_
         efficiency: EfficiencyConfig::default(),
         max_cost_usd: Some(0.50),
         fix_model: None,
+        clone_judge_model: None,
         consensus: false,
         estimate_hint_usd: None,
     });
@@ -1499,6 +1502,7 @@ async fn the_third_round_is_still_bounded_by_the_spend_limit() {
         efficiency: EfficiencyConfig::default(),
         max_cost_usd: Some(0.03),
         fix_model: None,
+        clone_judge_model: None,
         consensus: false,
         estimate_hint_usd: None,
     });

@@ -112,6 +112,7 @@ fn args(repo: &Path, export: &Path, cap: Option<f64>) -> InspectArgs {
         // No fix model: a capped run takes the fix stage's default (Haiku 5.5), which the model
         // registry prices, so the limit is enforceable and the run is admitted.
         fix_model: None,
+        clone_judge_model: None,
         full: true,
         verbose: false,
         max_cost_usd: cap,

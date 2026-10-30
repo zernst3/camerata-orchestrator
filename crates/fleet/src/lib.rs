@@ -1421,7 +1421,7 @@ mod tests {
                     plan,
                     root,
                     bin,
-                    Some("claude-sonnet-5"),
+                    Some("claude-sonnet-5-5"),
                     &|_| {},
                 ));
         }
@@ -1494,10 +1494,10 @@ mod tests {
         };
 
         let expected = [
-            (CapabilityBand::Balanced, "claude-sonnet-5"),
-            (CapabilityBand::Strongest, "claude-opus-5"),
-            (CapabilityBand::Balanced, "claude-sonnet-5"),
-            (CapabilityBand::Fast, "claude-haiku-4-5-20251001"),
+            (CapabilityBand::Balanced, "claude-sonnet-5-5"),
+            (CapabilityBand::Strongest, "claude-opus-5-5"),
+            (CapabilityBand::Balanced, "claude-sonnet-5-5"),
+            (CapabilityBand::Fast, "claude-haiku-5-5"),
         ];
 
         for (task, (expected_band, expected_model)) in plan.tasks.iter().zip(expected.iter()) {

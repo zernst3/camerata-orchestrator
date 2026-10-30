@@ -149,6 +149,7 @@ async fn plain_postgres_repo_fires_both_rules_through_camerata_inspect_end_to_en
         model: None,
         calibration_model: None,
         fix_model: None,
+        clone_judge_model: None,
         full: true,
         verbose: false,
         max_cost_usd: None,

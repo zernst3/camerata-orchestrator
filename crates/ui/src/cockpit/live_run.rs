@@ -239,7 +239,7 @@ pub(super) fn UowReviewPanel(
         .read()
         .clone()
         .flatten()
-        .unwrap_or_else(|| "claude-sonnet-5".to_string());
+        .unwrap_or_else(|| "claude-sonnet-5-5".to_string());
 
     rsx! {
         div { class: "uow-review-card",

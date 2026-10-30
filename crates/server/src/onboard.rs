@@ -893,8 +893,8 @@ pub struct ScanProvenance {
     /// The model resolved for the calibration pass. `None` when calibration never ran.
     pub calibration_model: Option<String>,
     /// The model the clone-candidate judge (`clone_advisory`, Wave C) ran on, resolved by
-    /// `resolve_clone_judge_model`: the explicit pick, else `CAMERATA_CLONE_JUDGE_MODEL`, else
-    /// the project's fast tier. `None` when the judge never made a model call this scan (no
+    /// `resolve_clone_judge_model`: the explicit pick, else
+    /// the fast tier's built-in primary (Haiku 5.5). `None` when the judge never made a model call this scan (no
     /// clone rule armed, no candidates, or no model available), so a before/after comparison
     /// can attribute a change in the clone rules' findings to the judge.
     #[serde(default)]
@@ -2650,7 +2650,7 @@ pub async fn audit_repos_with_llm_controlled(
                         .collect();
                     if !clone_armed.is_empty() {
                         let set = camerata_checks::clone_rules::candidates(&files, &clone_armed);
-                        let judge_model = clone_advisory::resolve_clone_judge_model(None);
+                        let judge_model = controls.clone_judge_model_for();
                         // SPEND CAP: the judge is a stage like any other; past the cap it does not
                         // start and is recorded as NOT RUN.
                         let clone_blocked = run_ai_review

@@ -95,6 +95,7 @@ async fn run_with(
         max_cost_usd: None,
         estimate_hint_usd: None,
         fix_model: None,
+        clone_judge_model: None,
         consensus: false,
     });
     let plan = plan_routes(rules, files, true);
@@ -698,6 +699,7 @@ async fn run_batch(
         max_cost_usd: None,
         estimate_hint_usd: None,
         fix_model: None,
+        clone_judge_model: None,
         consensus: false,
     });
     let plan = plan_routes(rules, files, true);

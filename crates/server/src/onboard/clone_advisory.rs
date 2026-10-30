@@ -64,20 +64,15 @@ const TOKENS_PER_CANDIDATE: u32 = 80;
 /// The pass name a failed batch is disclosed under (`FailedPass::pass`).
 pub const FAILED_PASS_NAME: &str = "clone-candidate judgment";
 
-/// Resolve the model the clone judge runs on: the caller's explicit pick, else
-/// `CAMERATA_CLONE_JUDGE_MODEL`, else the project's fast tier primary
-/// (`camerata_fleet::tier::default_fast_model`). Never the audit model by default: this is
+/// Resolve the model the clone judge runs on: the caller's explicit pick, else the fast tier's
+/// built-in primary (`camerata_fleet::tier::default_fast_model`, Haiku 5.5). Never the
+/// environment. Never the audit model by default: this is
 /// classification over bounded structured input, the fast band of the tier map
 /// (`docs/decisions/2026-06-20_deterministic_model_tiering.md`).
 pub fn resolve_clone_judge_model(caller_pick: Option<&str>) -> String {
     caller_pick
         .map(str::to_string)
         .filter(|s| !s.trim().is_empty())
-        .or_else(|| {
-            std::env::var("CAMERATA_CLONE_JUDGE_MODEL")
-                .ok()
-                .filter(|s| !s.trim().is_empty())
-        })
         .unwrap_or_else(camerata_fleet::tier::default_fast_model)
 }
 
@@ -314,13 +309,12 @@ async fn judge_rule(
     for batch in pending.chunks(BATCH_SIZE) {
         let inputs: Vec<_> = batch.iter().map(|c| judge_input(c, req.files)).collect();
         let (prompt, prefix_len) = batch_prompt(req.repo, rule, &text, &inputs, nonce);
-        let mut request = LlmRequest::new(prompt)
+        // The judge always names its model (the transport refuses a request that names none).
+        let request = LlmRequest::new(prompt)
             .with_system(system.clone())
             .with_max_tokens(scaled_max_tokens(batch.len(), TOKENS_PER_CANDIDATE))
-            .with_cache_prefix_len(prefix_len);
-        if !req.judge_model.is_empty() {
-            request = request.with_model(req.judge_model.to_string());
-        }
+            .with_cache_prefix_len(prefix_len)
+            .with_model(req.judge_model.to_string());
         // Streamed, so a transcript shows real output and the CLI leg keeps its heartbeat.
         let mut on_delta = |_: &str| {};
         outcome.model_calls += 1;

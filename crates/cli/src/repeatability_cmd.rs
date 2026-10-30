@@ -301,6 +301,7 @@ pub async fn run_repeatability_with(
         args.calibration_model.as_deref(),
         false,
         None,
+        None,
     );
     if let Some(why) =
         camerata_server::client_lock::refusal(args.client_engagement, args.backend, &models)
@@ -412,6 +413,7 @@ pub async fn run_repeatability_with(
         // No explicit fix model: the fix stage follows the `fix_on_haiku` measure, as in a default run.
         fix_model: None,
         // Repeatability measures the drift of the default configuration.
+        clone_judge_model: None,
         consensus: false,
     };
     let ids: Vec<&str> = selected.iter().map(|r| r.id.as_str()).collect();

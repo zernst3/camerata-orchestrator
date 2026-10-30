@@ -138,6 +138,7 @@ fn controls(cap: Option<f64>, efficiency: EfficiencyConfig) -> RunControls {
         // No fix model: a capped run takes the fix stage's default (Haiku 5.5), which the model
         // registry prices.
         fix_model: None,
+        clone_judge_model: None,
         consensus: false,
     }
 }

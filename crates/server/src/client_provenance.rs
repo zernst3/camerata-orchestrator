@@ -79,6 +79,8 @@ pub fn export_provenance_with(
 ) -> ManifestProvenance {
     let mut provenance = ManifestProvenance::from_cover(cover);
     provenance.cost_cap_reached = report.ledger.is_cost_capped();
+    provenance.cost_cap_unenforced =
+        provenance.cost_cap_reached && report.ledger.cost_cap().is_some_and(|cap| cap.cost_unknown);
     provenance.incomplete = report.incomplete_reasons();
     provenance.vulnerability_data = report.provenance.vulnerability_data.clone();
     provenance.corpus_version = corpus.map(corpus_version);

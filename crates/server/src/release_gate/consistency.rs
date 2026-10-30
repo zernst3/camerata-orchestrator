@@ -1020,6 +1020,8 @@ pub struct ReadmeProvenance {
     pub release_checks: Option<Vec<String>>,
     /// The spend-limit line is present (the inspection was stopped by the operator's limit).
     pub cost_cap_reached: bool,
+    /// The spend-limit line is the "could not be enforced" variant, not the "reached" one.
+    pub cost_cap_unenforced: bool,
     /// Every `Vulnerability data (<feed>) ...` stamp line, verbatim and in README order.
     pub vulnerability_data: Vec<String>,
     /// 22c: `Prepared for: <client>`.
@@ -1091,6 +1093,9 @@ pub fn parse_readme_provenance(readme: &str) -> ReadmeProvenance {
             };
         } else if line == crate::COST_CAP_README_LINE {
             p.cost_cap_reached = true;
+        } else if line == crate::COST_CAP_UNENFORCED_README_LINE {
+            p.cost_cap_reached = true;
+            p.cost_cap_unenforced = true;
         } else if let Some(v) = line.strip_prefix("Release checks: ") {
             p.release_checks = v
                 .strip_suffix(" (all passed)")
@@ -1212,6 +1217,15 @@ pub fn verify_readme_provenance(readme: &str, manifest: &Value) -> Vec<Problem> 
             .unwrap_or(false)
     {
         mismatch("Spend limit");
+    }
+    // Which line it is: "reached" or "could not be enforced". A package built before the
+    // variant existed has no key, which reads as "reached" (the only line it could print).
+    if parsed.cost_cap_unenforced
+        != manifest["inspection"]["cost_cap_unenforced"]
+            .as_bool()
+            .unwrap_or(false)
+    {
+        mismatch("Spend limit (cause)");
     }
 
     // The vulnerability-data stamp: the README's stamp lines are exactly the manifest's

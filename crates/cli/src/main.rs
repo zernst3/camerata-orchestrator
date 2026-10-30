@@ -169,6 +169,10 @@ enum Command {
         calibration_model: Option<String>,
         #[arg(long = "fix-model", help = fix_model_help())]
         fix_model: Option<String>,
+        /// Model for the duplicate-code checker (the clone judge). Unset: the built-in fast
+        /// default, Haiku 5.5.
+        #[arg(long = "clone-judge-model")]
+        clone_judge_model: Option<String>,
         /// Ignore the on-disk incremental-scan cache and force a full re-scan of every file.
         #[arg(long)]
         full: bool,
@@ -483,6 +487,7 @@ async fn main() -> anyhow::Result<()> {
             model,
             calibration_model,
             fix_model,
+            clone_judge_model,
             full,
             verbose,
             max_cost_usd,
@@ -510,6 +515,7 @@ async fn main() -> anyhow::Result<()> {
                 model,
                 calibration_model,
                 fix_model,
+                clone_judge_model,
                 full,
                 verbose,
                 max_cost_usd,
@@ -1151,6 +1157,7 @@ mod cli_parse_tests {
                 model,
                 calibration_model,
                 fix_model,
+                clone_judge_model,
                 full,
                 verbose,
                 max_cost_usd,
@@ -1177,6 +1184,10 @@ mod cli_parse_tests {
                 assert!(model.is_none());
                 assert!(calibration_model.is_none());
                 assert!(fix_model.is_none(), "no fix model unless asked for");
+                assert!(
+                    clone_judge_model.is_none(),
+                    "no clone judge model unless asked for"
+                );
                 assert!(!full);
                 assert!(!verbose);
                 assert!(max_cost_usd.is_none(), "no cap unless asked for");
@@ -1381,6 +1392,8 @@ mod cli_parse_tests {
             "claude-opus-5",
             "--fix-model",
             "claude-sonnet-5",
+            "--clone-judge-model",
+            "claude-haiku-4-5-20251001",
             "--full",
             "--verbose",
         ])
@@ -1392,6 +1405,7 @@ mod cli_parse_tests {
                 model,
                 calibration_model,
                 fix_model,
+                clone_judge_model,
                 full,
                 verbose,
                 ..
@@ -1401,6 +1415,10 @@ mod cli_parse_tests {
                 assert_eq!(model.as_deref(), Some("claude-sonnet-5"));
                 assert_eq!(calibration_model.as_deref(), Some("claude-opus-5"));
                 assert_eq!(fix_model.as_deref(), Some("claude-sonnet-5"));
+                assert_eq!(
+                    clone_judge_model.as_deref(),
+                    Some("claude-haiku-4-5-20251001")
+                );
                 assert!(full);
                 assert!(verbose);
             }

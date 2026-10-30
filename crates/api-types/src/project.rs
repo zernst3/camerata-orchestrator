@@ -12,9 +12,9 @@
 
 use serde::{Deserialize, Serialize};
 
-/// The default model when none is configured / requested. Capable by default; override
-/// per call or via `CAMERATA_LLM_MODEL`.
-pub const DEFAULT_MODEL: &str = "claude-sonnet-5";
+/// The default model when none is configured / requested. Capable by default; a project or a
+/// call names another one explicitly (never the environment).
+pub const DEFAULT_MODEL: &str = "claude-sonnet-5-5";
 
 /// The model the fix stage runs on when no fix model is set and the `fix_on_haiku` efficiency
 /// measure is on (the default). The fix call is short, narrow, evidence-bound prose and every
@@ -251,6 +251,16 @@ impl Default for StepModels {
 #[cfg(test)]
 mod fix_stage_model_name_tests {
     use super::*;
+
+    /// The built-in default is Sonnet 5.5 and the cheap stages default to Haiku 5.5; older ids
+    /// stay selectable but are never a default.
+    #[test]
+    fn the_built_in_defaults_are_sonnet_5_5_and_haiku_5_5() {
+        assert_eq!(DEFAULT_MODEL, "claude-sonnet-5-5");
+        assert_eq!(FIX_STAGE_HAIKU_MODEL, "claude-haiku-5-5");
+        assert_eq!(default_model(), "claude-sonnet-5-5");
+        assert_eq!(StepModels::default().audit, "claude-sonnet-5-5");
+    }
 
     #[test]
     fn a_model_id_is_displayed_as_family_and_dotted_version() {

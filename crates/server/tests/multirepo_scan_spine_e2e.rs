@@ -115,6 +115,7 @@ fn controls(cap: Option<f64>) -> RunControls {
         max_cost_usd: cap,
         estimate_hint_usd: None,
         fix_model: None,
+        clone_judge_model: None,
         consensus: false,
     }
 }

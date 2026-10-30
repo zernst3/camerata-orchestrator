@@ -246,6 +246,7 @@ async fn a_cut_off_reply_is_not_retried_when_the_switch_is_off() {
         max_cost_usd: None,
         estimate_hint_usd: None,
         fix_model: None,
+        clone_judge_model: None,
         consensus: false,
     });
     let files = files();

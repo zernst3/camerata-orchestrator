@@ -2293,8 +2293,11 @@ content-keyed verdict cache (`VerdictCache`, keyed on the rule, the judge model,
 version, the candidate's content id, the exact-mode differences and the rule-specific facts (for a
 single-source candidate, every copy's decision tokens), so a moved
 file hits and a judge model change misses), the stable prompt prefix as the single cache breakpoint, and
-the project's fast tier (`resolve_clone_judge_model`: explicit pick, then `CAMERATA_CLONE_JUDGE_MODEL`,
-then `fleet::tier::default_fast_model()`; stamped in `ScanProvenance.clone_judge_model` when the judge
+the project's fast tier (`resolve_clone_judge_model`: the run's pick, which is the open project's
+fast band primary in the cockpit (`clone_judge_step_model`) or `--clone-judge-model` on the command
+line (`RunControls::clone_judge_model`), then `fleet::tier::default_fast_model()`, Haiku 5.5; the
+older Haiku stays selectable and priced; the model is in the pre-flight's priced list and the
+client lock's check; stamped in `ScanProvenance.clone_judge_model` when the judge
 made a call). The cache rides in the scan manifest (`ScanManifest.clone_verdicts`, `serde(default)`,
 `MANIFEST_VERSION` unchanged) in the app data directory, never in the client's repository. Usage is
 folded into the same `UsageMeter` as every other pass; the full ranked candidate list and every verdict
@@ -3313,9 +3316,10 @@ when the model's catalog request shape accepts sampling parameters
 (`camerata_llm::model_registry::accepts_sampling_params`, which presumes an
 unknown model strict), and `conform_messages_body` still runs last. Every
 current Claude model in the catalog is strict except one: Haiku 4.5
-(`claude-haiku-4-5-20251001`, `RequestShapeSpec::LEGACY`), which is the default
-fast-tier model and the clone-judge model, accepts sampling parameters and so
-now gets temperature 0. Nothing is sent to the strict models, so the "a call
+(`claude-haiku-4-5-20251001`, `RequestShapeSpec::LEGACY`), which is still
+selectable but is no longer a default (the fast tier and the clone judge now
+default to Haiku 5.5), accepts sampling parameters and so gets temperature 0
+when a project picks it. Nothing is sent to the strict models, so the "a call
 site sent something this model rejects" warning never fires; Haiku 4.5 and any
 future permissive model get the least random answer they offer. The passes that
 decide which findings exist ask for `ai_audit::AUDIT_TEMPERATURE` (0): the scan
@@ -4986,8 +4990,9 @@ model from the `TierMap` via `tier::model_for_task`, then:
    (`orchestrator::lead_stage_index`).
 2. Prepares an **orchestrator session** for the lead stage only
    (`orchestrator::prepare_orchestrator_session`): the lead's MCP config carries
-   `CAMERATA_DELEGATE_ENABLED=1` and the tier→model JSON so the gateway boots in orchestrator mode
-   and the `delegate` tool is live.
+   `CAMERATA_DELEGATE_ENABLED=1` and, as the `--delegate-models` argument, the tier→model JSON taken
+   from the project's tier map, so the gateway boots in orchestrator mode and the `delegate` tool is
+   live. The models travel as an argument, never as an environment variable.
 3. All other stages (including delegate children) receive a standard non-orchestrator MCP config.
    Their `--allowedTools` excludes `delegate`.
 
@@ -5309,10 +5314,35 @@ non-orchestrator (it can never re-delegate).
 Every non-fleet AI step (audit, calibration, research chat, story authoring,
 decomposition, escalation, clarification) has a dedicated model slot in
 `StepModels`, stored on the `Project` (`#[serde(default)]`, back-compat). Default
-at project creation: `DEFAULT_MODEL` (`claude-sonnet-5`) for every slot.
+at project creation: `DEFAULT_MODEL` (`claude-sonnet-5-5`) for every slot.
 
 `StepKind` enum variants: `Audit`, `Calibration`, `ResearchChat`, `StoryAuthoring`,
 `Decomposition`, `Escalation`, `Clarification`.
+
+#### Where a model comes from
+
+A model is never read from the environment or a `.env` file. The sources, in order:
+
+1. The open project's model configuration in the cockpit (`StepModels`, the tier map, the L3
+   review model). A project file written before a setting existed loads with the built-in
+   defaults (`#[serde(default)]`).
+2. On the command line, only the explicit flags: `--model`, `--calibration-model`, `--fix-model`,
+   `--clone-judge-model`.
+3. The built-in default: `DEFAULT_MODEL` (`claude-sonnet-5-5`, Sonnet 5.5), with Haiku 5.5
+   (`claude-haiku-5-5`) for the fix stage and the clone judge and Opus 5.5 (`claude-opus-5-5`) for
+   the tier map's strongest band (`fleet::tier::default_strongest_model`). Older ids stay
+   selectable and priced.
+
+`ai_audit::resolve_audit_model`, `resolve_calibration_model`, `stage_model` and
+`clone_advisory::resolve_clone_judge_model` apply that order and are shared by the cockpit and the
+command line. The transport (`Llm::complete` and `complete_streaming`) has no default of its own: a
+request that names no model is refused with an error that names the caller as the bug, so the model
+the pre-flight prices, the ledger records and the spend limit checks is the model that runs.
+The delegate tool's tier
+models reach the gateway as the `--delegate-models` argument written into the lead's MCP config
+from the project's tier map. Tests set each variable that used to pick a model and prove it is
+ignored (`crates/server/tests/model_source_e2e.rs`, `crates/cli/tests/inspect_model_source.rs`,
+and unit tests beside each resolver).
 
 **No runtime env fallback once a project exists.** The project's per-step value is
 authoritative; call sites resolve it via `step_model(state, step)` or

@@ -4744,6 +4744,17 @@ pub fn fix_step_model(state: &AppState) -> Option<String> {
         .filter(|m| !m.is_empty())
 }
 
+/// The clone judge's model for the active project: its fast (Haiku) band primary, or `None` when
+/// there is no active project (the built-in default then applies). The judge is classification
+/// over bounded input, the fast band's job; the project's tier map is where that band is set.
+pub fn clone_judge_step_model(state: &AppState) -> Option<String> {
+    state
+        .projects
+        .active()
+        .map(|p| p.tier_map.fast_primary().trim().to_string())
+        .filter(|m| !m.is_empty())
+}
+
 /// Body for `POST /api/projects/:id/step-models`: which NON-FLEET AI step and the model id
 /// to bind to it. Patch semantics — one step per call, the others left untouched.
 #[derive(serde::Deserialize)]
@@ -7807,8 +7818,13 @@ impl AuditReq {
     /// not a positive number cannot be honored as written, so it becomes the smallest possible
     /// limit (one pass runs, the rest are reported as not run), never "no limit": a typo must
     /// not remove the guard.
-    fn run_controls(&self, fix_model: Option<String>) -> crate::cost_cap::RunControls {
+    fn run_controls(
+        &self,
+        fix_model: Option<String>,
+        clone_judge_model: Option<String>,
+    ) -> crate::cost_cap::RunControls {
         crate::cost_cap::RunControls {
+            clone_judge_model,
             max_cost_usd: self.max_cost_usd.map(|cap| {
                 crate::cost_cap::RunControls::validate_cap(cap).unwrap_or(f64::MIN_POSITIVE)
             }),
@@ -7821,7 +7837,7 @@ impl AuditReq {
     /// operator picked one) is what the run's fix stage is told. The one place the project's
     /// fix setting becomes run controls; both audit entry points come through it.
     fn run_controls_for(&self, state: &AppState) -> crate::cost_cap::RunControls {
-        self.run_controls(fix_step_model(state))
+        self.run_controls(fix_step_model(state), clone_judge_step_model(state))
     }
 }
 
@@ -8121,16 +8137,17 @@ pub(crate) async fn start_audit_job(
                 calibration_model.as_deref(),
                 &selected,
             );
-            let models_record = rs::ModelsRecord {
-                audit: audit_model,
-                calibration: calibration_model.clone().unwrap_or_default(),
-                fix: run_controls.fix_model.clone().unwrap_or_default(),
-                backend: match &backend_resolution {
-                    crate::llm::BackendResolution::Api => "api".to_string(),
-                    _ => "cli".to_string(),
+            // The resolved ids (what each stage calls), so a resume notices a changed default.
+            let models_record = rs::ModelsRecord::from_picks(
+                model.as_deref(),
+                calibration_model.as_deref(),
+                &run_controls,
+                match &backend_resolution {
+                    crate::llm::BackendResolution::Api => "api",
+                    _ => "cli",
                 },
-                mode: format!("{mode:?}").to_ascii_lowercase(),
-            };
+                &format!("{mode:?}").to_ascii_lowercase(),
+            );
             let mut prior = prior;
             let run_store = match &resume_run {
                 Some(id) => match rs::open_for_resume(id, &sources, &ai_scan_key, &models_record) {
@@ -11284,14 +11301,20 @@ async fn draft_routine_prompt(
     let Ok(llm) = state.step_llm() else {
         return scaffold();
     };
+    // The model the form picked, else the open project's setting (never the environment).
+    let model = step_model_or(
+        &state,
+        crate::project::StepKind::ResearchChat,
+        Some(&req.model),
+    );
     // A client engagement never sends client context to a non-Anthropic model: the form gets
     // the scaffold and no model is called.
-    if state.client_lock_step_model_refusal(&req.model).is_some() {
+    if state.client_lock_step_model_refusal(&model).is_some() {
         return scaffold();
     }
     let llm = std::sync::Arc::new(llm);
     let completer = crate::llm::build_completer(
-        &req.model,
+        &model,
         &state.model_registry,
         state.credential_store.as_ref(),
         llm.clone(),
@@ -11302,7 +11325,7 @@ async fn draft_routine_prompt(
     match completer
         .complete(
             crate::llm::LlmRequest::new(user)
-                .with_model(req.model)
+                .with_model(model)
                 .with_system(system),
         )
         .await
@@ -11464,11 +11487,17 @@ async fn chat_escalation(
     // (the chat setting when there is none), not on the keyless CLI floor; `Api` with no key
     // refuses rather than downgrading.
     let chat_llm = state.step_llm().map_err(backend_refused)?;
-    if let Some(why) = state.client_lock_step_model_refusal(&req.model) {
+    // The model the chat picked, else the open project's escalation model (never the environment).
+    let model = step_model_or(
+        &state,
+        crate::project::StepKind::Escalation,
+        Some(&req.model),
+    );
+    if let Some(why) = state.client_lock_step_model_refusal(&model) {
         return Err(backend_refused(why));
     }
     let completer = crate::llm::build_completer(
-        &req.model,
+        &model,
         &state.model_registry,
         state.credential_store.as_ref(),
         std::sync::Arc::new(chat_llm.clone()),
@@ -11479,7 +11508,7 @@ async fn chat_escalation(
     let reply = match completer
         .complete(
             crate::llm::LlmRequest::new(user)
-                .with_model(req.model)
+                .with_model(model)
                 .with_system(system),
         )
         .await
@@ -12115,8 +12144,14 @@ fn client_lock_refusal_for_scan(
                 .to_string(),
         );
     };
-    let models =
-        crate::client_lock::models_a_scan_may_use(model, calibration_model, deep, fix_model);
+    // The clone judge runs on the project's fast band.
+    let models = crate::client_lock::models_a_scan_may_use(
+        model,
+        calibration_model,
+        deep,
+        fix_model,
+        Some(project.tier_map.fast_primary()),
+    );
     crate::client_lock::refusal(project.client_engagement, project.backend, &models)
         .map(|why| format!("{why} {APP_CLIENT_LOCK_FIX}"))
 }
@@ -18893,6 +18928,11 @@ pub struct ManifestProvenance {
     /// INCOMPLETE. States only that fact: no dollar figure is exported (cost numbers are
     /// operator-only). What was not run is listed in the report's failed-pass section.
     pub cost_cap_reached: bool,
+    /// True when the spend limit stopped work because a call's cost could not be determined (the
+    /// limit could not be enforced), not because it was reached. Meaningful only with
+    /// [`Self::cost_cap_reached`]; it selects the README line ([`COST_CAP_UNENFORCED_README_LINE`]
+    /// instead of [`COST_CAP_README_LINE`]).
+    pub cost_cap_unenforced: bool,
     /// "Vulnerability data as of": per feed (CISA KEV, FIRST EPSS, OSV), the date the data
     /// behind the dependency findings was current as of, or plainly that the feed was not
     /// checked. `None` renders as every feed not checked (never an omitted line). Filled from
@@ -18992,6 +19032,7 @@ impl ManifestProvenance {
             }),
             "client_engagement": self.model.as_ref().map(|m| m.client_engagement),
             "cost_cap_reached": self.cost_cap_reached,
+            "cost_cap_unenforced": self.cost_cap_reached && self.cost_cap_unenforced,
             "vulnerability_data": crate::vuln_intel::manifest_json(self.vulnerability_data.as_ref()),
             "client_name": self.client_name,
             "corpus_rules_applied": self.corpus_rules_applied,
@@ -19077,7 +19118,12 @@ impl ManifestProvenance {
             ));
         }
         if self.cost_cap_reached {
-            out.push_str(&format!("{COST_CAP_README_LINE}\n"));
+            let line = if self.cost_cap_unenforced {
+                COST_CAP_UNENFORCED_README_LINE
+            } else {
+                COST_CAP_README_LINE
+            };
+            out.push_str(&format!("{line}\n"));
         }
         if !self.incomplete.is_empty() {
             out.push_str(&format!("{INTERNAL_INCOMPLETE_README_LINE}\n"));
@@ -19110,6 +19156,12 @@ pub const INTERNAL_INCOMPLETE_README_LINE: &str = "INTERNAL INCOMPLETE: this ins
 /// only when [`ManifestProvenance::cost_cap_reached`] is true; the release gate parses it back.
 pub const COST_CAP_README_LINE: &str = "Spend limit: reached. This inspection is INCOMPLETE; the \
      report lists the passes that were not run.";
+
+/// The README line when the spend limit stopped work because a call's cost could not be
+/// determined, so the limit could not be enforced (it was not reached). Printed instead of
+/// [`COST_CAP_README_LINE`]; the release gate parses both.
+pub const COST_CAP_UNENFORCED_README_LINE: &str = "Spend limit: could not be enforced. This \
+     inspection is INCOMPLETE; the report lists the passes that were not run.";
 
 /// The one-sentence purpose + per-contract `schema_version` for a file in the product ZIP, keyed
 /// by its archive path. `None` schema for formats with no data contract (PDF, xlsx, README).
@@ -28959,25 +29011,27 @@ mod tests {
     fn an_audit_request_carries_its_spend_limit_into_the_run_controls() {
         let req = |body: serde_json::Value| -> AuditReq { serde_json::from_value(body).unwrap() };
         assert_eq!(
-            req(serde_json::json!({})).run_controls(None).max_cost_usd,
+            req(serde_json::json!({}))
+                .run_controls(None, None)
+                .max_cost_usd,
             None,
             "no field, no cap"
         );
         assert_eq!(
             req(serde_json::json!({ "max_cost_usd": null }))
-                .run_controls(None)
+                .run_controls(None, None)
                 .max_cost_usd,
             None
         );
         assert_eq!(
             req(serde_json::json!({ "max_cost_usd": 25.0 }))
-                .run_controls(None)
+                .run_controls(None, None)
                 .max_cost_usd,
             Some(25.0)
         );
         for bad in [0.0, -4.0] {
             let cap = req(serde_json::json!({ "max_cost_usd": bad }))
-                .run_controls(None)
+                .run_controls(None, None)
                 .max_cost_usd;
             assert_eq!(
                 cap,
@@ -28987,13 +29041,51 @@ mod tests {
         }
         // The project's fix model rides along; none set leaves the fix stage to the switch.
         let empty = req(serde_json::json!({}));
-        assert_eq!(empty.run_controls(None).fix_model, None);
+        assert_eq!(empty.run_controls(None, None).fix_model, None);
         assert_eq!(
             empty
-                .run_controls(Some("claude-opus-5".to_string()))
+                .run_controls(Some("claude-opus-5".to_string()), None)
                 .fix_model
                 .as_deref(),
             Some("claude-opus-5")
+        );
+    }
+
+    /// The clone judge follows the open project's fast (Haiku) band: the run's controls carry the
+    /// band's primary model (default Haiku 5.5), a project that moves the band moves the judge,
+    /// and with no project the built-in default applies. The environment has no say.
+    #[test]
+    #[serial_test::serial(process_env)]
+    fn the_clone_judge_follows_the_projects_fast_band() {
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_CLONE_JUDGE_MODEL", "env-judge");
+        let state = AppState::seeded();
+        let req: AuditReq = serde_json::from_value(serde_json::json!({})).unwrap();
+        // No project: the built-in default.
+        assert_eq!(clone_judge_step_model(&state), None);
+        assert_eq!(
+            req.run_controls_for(&state).clone_judge_model_for(),
+            "claude-haiku-5-5"
+        );
+
+        let project = state
+            .projects()
+            .create("Judge wiring", vec!["me/repo".to_string()])
+            .expect("create active project");
+        assert_eq!(
+            clone_judge_step_model(&state).as_deref(),
+            Some("claude-haiku-5-5"),
+            "a new project's fast band is Haiku 5.5"
+        );
+        state
+            .projects()
+            .update(&project.id, |p| {
+                p.tier_map.fast = vec!["claude-haiku-4-5-20251001".to_string()];
+            })
+            .unwrap();
+        assert_eq!(
+            req.run_controls_for(&state).clone_judge_model_for(),
+            "claude-haiku-4-5-20251001",
+            "the project's fast band chooses the judge; the older id stays selectable"
         );
     }
 
