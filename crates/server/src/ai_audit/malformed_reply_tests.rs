@@ -19,6 +19,8 @@ const ONE_FINDING: &str = r#"{"findings":[{"path":"a.rs","line":1,"severity":"hi
 struct ScriptedLlm {
     replies: Mutex<Vec<(&'static str, bool)>>,
     calls: AtomicUsize,
+    /// The user prompt of every request, in order.
+    prompts: Mutex<Vec<String>>,
 }
 
 impl ScriptedLlm {
@@ -26,10 +28,14 @@ impl ScriptedLlm {
         Self {
             replies: Mutex::new(replies.to_vec()),
             calls: AtomicUsize::new(0),
+            prompts: Mutex::new(Vec::new()),
         }
     }
     fn calls(&self) -> usize {
         self.calls.load(Ordering::SeqCst)
+    }
+    fn prompts(&self) -> Vec<String> {
+        self.prompts.lock().unwrap().clone()
     }
 }
 
@@ -50,8 +56,9 @@ fn response(text: &str, truncated: bool) -> LlmResponse {
 
 #[async_trait::async_trait]
 impl LlmPort for ScriptedLlm {
-    async fn complete(&self, _req: LlmRequest) -> anyhow::Result<LlmResponse> {
+    async fn complete(&self, req: LlmRequest) -> anyhow::Result<LlmResponse> {
         self.calls.fetch_add(1, Ordering::SeqCst);
+        self.prompts.lock().unwrap().push(req.prompt);
         let mut replies = self.replies.lock().unwrap();
         let (text, truncated) = if replies.len() > 1 {
             replies.remove(0)
@@ -138,6 +145,38 @@ async fn a_malformed_reply_is_retried_and_a_good_retry_is_used() {
     assert_eq!(ok, 1);
     assert_eq!(findings.len(), 1);
     assert_eq!(llm.calls(), 2);
+}
+
+/// A retry after a content failure must change the request: the same prompt sent again pays
+/// twice for the same answer. The malformed-reply retry carries a note saying the previous
+/// reply held no JSON object, so the model is told what to do differently and the request (and
+/// its run-store key) is not the one that already failed.
+#[tokio::test]
+async fn a_malformed_reply_retry_is_not_an_identical_re_send() {
+    let llm = ScriptedLlm::new(&[(MALFORMED, false), (MALFORMED, false), (ONE_FINDING, false)]);
+    let (findings, _p, _r, ok, failures) = scan(&llm, 1).await;
+    assert!(failures.is_empty(), "{failures:?}");
+    assert_eq!(ok, 1);
+    assert_eq!(findings.len(), 1);
+    let prompts = llm.prompts();
+    assert_eq!(prompts.len(), 3);
+    assert!(
+        !prompts[0].contains(MALFORMED_REPLY_NOTE),
+        "the first send carries no note"
+    );
+    for (n, retry) in prompts.iter().enumerate().skip(1) {
+        assert_ne!(
+            retry, &prompts[0],
+            "retry {n} re-sent the request that already came back malformed"
+        );
+        assert!(
+            retry.starts_with(&prompts[0]),
+            "the retry keeps the whole original prompt (its cached prefix) and adds to it"
+        );
+        assert!(retry.contains(MALFORMED_REPLY_NOTE), "retry {n}: {retry}");
+    }
+    // The note is one line, present once, whatever the retry count.
+    assert_eq!(prompts[2].matches(MALFORMED_REPLY_NOTE).count(), 1);
 }
 
 #[tokio::test]

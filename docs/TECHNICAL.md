@@ -6173,9 +6173,10 @@ content-failed stages only, with the failed part named as the reason.
 failure was transport trouble (a dropped connection, a timeout, a 429, a 5xx), the one case where the
 same request can succeed. A reply the model gave and that was unusable (cut off, malformed, refused, or
 turned down by a check) is a content failure: a retry of it must change the request, which the stages'
-own rounds do (a doubled output cap, a smaller batch, a feedback line naming the problem), and the
-same request is never sent a further time. `FailureClass::is_retried_at_end` is the one rule; the
-detail and fix stages re-send only the findings whose last attempt failed in transport.
+own rounds do (a doubled output cap, a smaller batch, a feedback line naming the problem, a note on
+the scan's malformed-reply retry saying the previous reply held no JSON), and the same request is
+never sent a further time. `FailureClass::is_retried_at_end` is the one rule; the detail and fix
+stages re-send only the findings whose last attempt failed in transport.
 
 **Incremental baseline.** The incremental manifest is written to the cache only by a complete scan.
 

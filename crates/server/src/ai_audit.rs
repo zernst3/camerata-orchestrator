@@ -138,6 +138,12 @@ impl FailedPass {
 /// prompt tends to fail the same way and every retry is billed.
 pub(crate) const MALFORMED_REPLY_RETRIES: usize = 2;
 
+/// The line a malformed-reply retry adds to the user prompt. A retry after a content failure
+/// must change the request (the same prompt sent again pays twice for the same answer), and this
+/// tells the model what was wrong with its reply. Camerata's own words, outside the framed client
+/// content, appended after the whole original prompt so the cached prefix is unchanged.
+pub(crate) const MALFORMED_REPLY_NOTE: &str = "Your previous reply to this exact request held no JSON object that parses. Reply with ONLY the JSON object described above, no prose before or after it.";
+
 /// One scan pass (a file chunk x rule batch) that produced NO answer, and why. Collected by
 /// every pass runner ([`run_passes`], [`run_passes_batch`], [`run_routed_passes`],
 /// [`run_security_passes`]) instead of keeping only the last error, so a round where 1 of 40
@@ -6506,9 +6512,11 @@ struct ScanReply {
 ///    chunk's findings are lost. At most one retry, and a retry that itself fails leaves the
 ///    first response in place.
 /// 2. MALFORMED-REPLY RETRY (H4). A complete reply (not cut off) that holds no JSON object the
-///    parser can read is sent again, at most `malformed_retries_allowed` times (a batch item
-///    passes zero: its reply is reported as a failed pass instead). A transport error on a retry
-///    ends the retries and leaves the malformed reply in place.
+///    parser can read is asked again with [`MALFORMED_REPLY_NOTE`] added to the prompt (never
+///    the identical request: a retry after a content failure changes the request), at most
+///    `malformed_retries_allowed` times (a batch item passes zero: its reply is reported as a
+///    failed pass instead). A transport error on a retry ends the retries and leaves the
+///    malformed reply in place.
 ///
 /// Every retry is one more billed call, so each checks the spend limit before sending: with the
 /// limit reached the retry is not sent and `stopped_by_cap` is set.
@@ -6572,7 +6580,12 @@ async fn retry_unusable_scan_reply(
         if let Some(m) = meter {
             m.record_wasted(Stage::ScanPass, &resp);
         }
-        match send_audit_request(llm, req.clone(), feedback, session).await {
+        // Never the same request again: the retry says what was wrong with the reply. Built
+        // from the ORIGINAL request each time, so the note appears once whatever the count.
+        let mut retry_req = req.clone();
+        retry_req.prompt.push_str("\n\n");
+        retry_req.prompt.push_str(MALFORMED_REPLY_NOTE);
+        match send_audit_request(llm, retry_req, feedback, session).await {
             Ok(retry) => {
                 if let Some(m) = meter {
                     m.record_stage(Stage::ScanPass, &retry);
