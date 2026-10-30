@@ -864,6 +864,7 @@ async fn run_detail_round(
             LlmRequest::new(prompt)
                 .with_system(system.to_string())
                 .with_max_tokens(camerata_ui_core::scan::regen_call_max_tokens(batch.len()))
+                .with_response_schema(super::reply_schemas::detail_reply_schema(&ids))
                 .with_model(super::stage_model(model)),
             Stage::DetailRegeneration,
         );

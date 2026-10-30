@@ -179,6 +179,13 @@ pub struct CallEntry {
     /// accepted and some turned down.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    /// Which path produced this reply: `"schema"` when the request's JSON Schema went to the
+    /// API as `output_config.format` and the reply was produced under it, `"tolerant"` when the
+    /// request carried one but the backend or model could not take it (the CLI backend, a model
+    /// without structured output) so the reply is free text read by the tolerant parser. Absent
+    /// for a request with no schema, and for a call that failed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_path: Option<String>,
 }
 
 /// Everything stored for one request digest.
@@ -224,6 +231,12 @@ pub fn request_key(req: &LlmRequest) -> String {
     );
     if let Some(dir) = &req.repo_read_dir {
         part("read", dir.to_string_lossy().as_bytes());
+    }
+    // The schema a reply must satisfy is part of the question (a different schema is a
+    // different request, and a stored reply to the other would not be this one's). A request
+    // with none hashes exactly as before.
+    if let Some(schema) = &req.response_schema {
+        part("schema", schema.to_string().as_bytes());
     }
     hex(&h.finalize())
 }
@@ -311,6 +324,9 @@ enum Planned {
 }
 
 struct FreshCall {
+    /// Whether the request carried a response schema (whether it was sent is decided when the
+    /// reply names its backend and model).
+    asked_schema: bool,
     key: String,
     idx: usize,
     kind: PartKind,
@@ -376,6 +392,7 @@ fn plan_call(store: &RunStore, req: &LlmRequest) -> Planned {
                 *next += 1;
                 st.last_served.insert(key.clone(), slot);
                 Planned::Fresh(FreshCall {
+                    asked_schema: req.response_schema.is_some(),
                     key,
                     idx: slot,
                     kind,
@@ -441,6 +458,14 @@ fn after_call(store: &RunStore, call: FreshCall, result: &anyhow::Result<LlmResp
             class: None,
             cost_usd: resp.cost_usd.unwrap_or(0.0),
             reason: unusable_reason(resp),
+            output_path: call.asked_schema.then(|| {
+                if crate::llm::structured_output_used(true, &resp.backend, &resp.model) {
+                    "schema"
+                } else {
+                    "tolerant"
+                }
+                .to_string()
+            }),
         },
         Err(e) => {
             let class = crate::failure::classify_error(e);
@@ -456,6 +481,7 @@ fn after_call(store: &RunStore, call: FreshCall, result: &anyhow::Result<LlmResp
                 class: Some(class.as_str().to_string()),
                 cost_usd: 0.0,
                 reason: None,
+                output_path: None,
             }
         }
     };

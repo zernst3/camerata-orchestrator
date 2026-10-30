@@ -3027,6 +3027,25 @@ The command line's pre-flight, the cockpit's cost readout
 file list to route, and without the clone judge) and the batch gate's fallback projection
 (`ai_audit::batch_estimate_usd`) all price from it.
 
+**Structured replies** (retry fixes F3, `crates/server/src/ai_audit/reply_schemas.rs`).
+Every JSON stage (scan, alternatives, calibration, detail, fix) sends a JSON Schema as
+`output_config.format` on the API backend, to a model the registry says accepts one
+(`model_registry::accepts_structured_output`: every Claude model of the catalog), so a
+reply's shape and field types cannot be wrong. The Anthropic structured-outputs page says
+the grammar constrains the final answer only, so it works with the streamed leg, the
+adaptive thinking the 5.x models are asked for, the effort setting and the Message Batches
+API; the schemas keep to its limits (closed objects, no length or range constraints, at most
+24 optional properties), checked by a test. The CLI backend, OpenRouter and a model without
+structured output never see the schema and reply as they always did, so every stage keeps its
+tolerant parser (first `{` to last `}`, salvage of a cut-off reply) as the fallback. The
+schema is part of the request's identity (the run store's request key), and each stored
+call carries `output_path`: `schema` when the reply was produced under the schema,
+`tolerant` when the request carried one the backend or model could not take. The API caches
+a prompt per schema, so the stages that send a cached digest (scan, alternatives) use one
+schema for every request of a run; calibration, detail and fix, which send no cached prefix,
+name the ids of their batch in the schema. A schema cannot make a reply cover every id (the
+API allows `minItems` of 0 or 1 only), so a finding the reply leaves out is handled as before.
+
 **Fix telemetry** (operator only). Every stage's `StageUsage::models` counts calls per
 model id, so the table prints `fix model: claude-haiku-5-5 x12` under the stage rows.
 The API backend reports the model that served each call; the CLI backend does not (its

@@ -302,6 +302,16 @@ pub fn accepts_effort(model_id: &str) -> bool {
         .is_some_and(|e| e.shape.strict_params || e.shape.effort != EffortPolicy::Omit)
 }
 
+/// Whether `model_id` accepts structured output (`output_config.format` with a JSON Schema):
+/// every Claude model of the catalog does (the 5.x line and Haiku 4.5; the API's structured
+/// outputs page lists them all and says the grammar applies to the final answer only, so it
+/// works with streaming, adaptive thinking, effort and the Batches API). An id the catalog
+/// does not know is presumed not to: a field the API answers with HTTP 400 costs a whole call,
+/// and the tolerant parser is the fallback.
+pub fn accepts_structured_output(model_id: &str) -> bool {
+    registry_entry_for(model_id).is_some()
+}
+
 /// The most output tokens one reply of `model_id` may carry (the registry's `max_output`), or
 /// `None` for a model the catalog does not know or lists without a figure. A request's
 /// `max_tokens` is clamped to this so a runaway guard never asks for more than the model can

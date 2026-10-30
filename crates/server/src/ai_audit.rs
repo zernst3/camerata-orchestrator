@@ -3544,6 +3544,7 @@ async fn reask_unanswered_verdicts(
                 .with_system(system.to_string())
                 .with_max_tokens(cap)
                 .with_temperature(AUDIT_TEMPERATURE)
+                .with_response_schema(reply_schemas::calibration_reply_schema(items.len()))
                 .with_model(stage_model(calibration_model)),
             Stage::Calibration,
         );
@@ -3708,6 +3709,7 @@ pub async fn verify_findings(
                     .with_system(system.clone())
                     .with_max_tokens(calibration_max_tokens(chunk_len))
                     .with_temperature(AUDIT_TEMPERATURE)
+                    .with_response_schema(reply_schemas::calibration_reply_schema(chunk_len))
                     .with_model(stage_model(calibration_model)),
                 Stage::Calibration,
             )
@@ -3854,6 +3856,9 @@ pub async fn verify_findings(
                 .with_system(system.clone())
                 .with_max_tokens(calibration_max_tokens(chunk_results[chunk_idx].len()))
                 .with_temperature(AUDIT_TEMPERATURE)
+                .with_response_schema(reply_schemas::calibration_reply_schema(
+                    chunk_results[chunk_idx].len(),
+                ))
                 .with_model(stage_model(calibration_model)),
             Stage::Calibration,
         );
@@ -5040,6 +5045,7 @@ impl AlternativesAsk<'_> {
                 ))
                 .with_max_tokens(alternatives_max_tokens(rules.len()))
                 .with_temperature(AUDIT_TEMPERATURE)
+                .with_response_schema(reply_schemas::alternatives_reply_schema())
                 .with_model(stage_model(audit_model)),
             Stage::Alternatives,
         );
@@ -5890,6 +5896,7 @@ async fn run_fix_specifics_round(
             LlmRequest::new(prompt)
                 .with_system(system.to_string())
                 .with_max_tokens(fix_max_tokens(batch.len()))
+                .with_response_schema(reply_schemas::fix_reply_schema(batch.len()))
                 .with_model(stage_model(fix_model)),
             Stage::FixGeneration,
         );
@@ -6625,6 +6632,7 @@ async fn audit_pass(
             ))
             .with_max_tokens(scan_max_tokens(n_rules))
             .with_temperature(AUDIT_TEMPERATURE)
+            .with_response_schema(reply_schemas::scan_reply_schema())
             .with_model(stage_model(audit_model)),
         Stage::ScanPass,
     );
@@ -7644,6 +7652,7 @@ async fn run_passes_batch(
                     .with_max_tokens(scan_max_tokens(batch.len()))
                     .with_model(model.clone())
                     .with_cache_breakpoints(cache_bps)
+                    .with_response_schema(reply_schemas::scan_reply_schema())
                     .with_temperature(AUDIT_TEMPERATURE),
                 Stage::ScanPass,
             );
@@ -13000,6 +13009,7 @@ pub async fn run_deep_tier(
 }
 
 pub(crate) mod detail_regen;
+pub(crate) mod reply_schemas;
 use detail_regen::regenerate_full_details;
 
 #[cfg(test)]
@@ -13065,6 +13075,9 @@ mod drift_tests;
 
 #[cfg(test)]
 mod output_caps_tests;
+
+#[cfg(test)]
+mod structured_output_tests;
 
 #[cfg(test)]
 mod tests {
