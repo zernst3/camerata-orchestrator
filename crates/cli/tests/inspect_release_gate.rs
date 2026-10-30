@@ -79,6 +79,7 @@ async fn cli_inspect_export_exits_3_and_writes_nothing_when_blocked() {
         model: None,
         calibration_model: None,
         fix_model: None,
+        clone_judge_model: None,
         full: true,
         verbose: false,
         max_cost_usd: None,

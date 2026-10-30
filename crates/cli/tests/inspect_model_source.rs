@@ -100,6 +100,7 @@ fn args(
         model: model.map(str::to_string),
         calibration_model: calibration_model.map(str::to_string),
         fix_model: fix_model.map(str::to_string),
+        clone_judge_model: None,
         full: true,
         verbose: false,
         max_cost_usd: None,

@@ -194,6 +194,7 @@ async fn run(backend: ProjectBackend, efficiency: Vec<String>) -> RunResult {
         model: None,
         calibration_model: None,
         fix_model: None,
+        clone_judge_model: None,
         full: true,
         verbose: false,
         max_cost_usd: None,

@@ -2650,7 +2650,7 @@ pub async fn audit_repos_with_llm_controlled(
                         .collect();
                     if !clone_armed.is_empty() {
                         let set = camerata_checks::clone_rules::candidates(&files, &clone_armed);
-                        let judge_model = clone_advisory::resolve_clone_judge_model(None);
+                        let judge_model = controls.clone_judge_model_for();
                         // SPEND CAP: the judge is a stage like any other; past the cap it does not
                         // start and is recorded as NOT RUN.
                         let clone_blocked = run_ai_review

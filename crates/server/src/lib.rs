@@ -4744,6 +4744,17 @@ pub fn fix_step_model(state: &AppState) -> Option<String> {
         .filter(|m| !m.is_empty())
 }
 
+/// The clone judge's model for the active project: its fast (Haiku) band primary, or `None` when
+/// there is no active project (the built-in default then applies). The judge is classification
+/// over bounded input, the fast band's job; the project's tier map is where that band is set.
+pub fn clone_judge_step_model(state: &AppState) -> Option<String> {
+    state
+        .projects
+        .active()
+        .map(|p| p.tier_map.fast_primary().trim().to_string())
+        .filter(|m| !m.is_empty())
+}
+
 /// Body for `POST /api/projects/:id/step-models`: which NON-FLEET AI step and the model id
 /// to bind to it. Patch semantics — one step per call, the others left untouched.
 #[derive(serde::Deserialize)]
@@ -7807,8 +7818,13 @@ impl AuditReq {
     /// not a positive number cannot be honored as written, so it becomes the smallest possible
     /// limit (one pass runs, the rest are reported as not run), never "no limit": a typo must
     /// not remove the guard.
-    fn run_controls(&self, fix_model: Option<String>) -> crate::cost_cap::RunControls {
+    fn run_controls(
+        &self,
+        fix_model: Option<String>,
+        clone_judge_model: Option<String>,
+    ) -> crate::cost_cap::RunControls {
         crate::cost_cap::RunControls {
+            clone_judge_model,
             max_cost_usd: self.max_cost_usd.map(|cap| {
                 crate::cost_cap::RunControls::validate_cap(cap).unwrap_or(f64::MIN_POSITIVE)
             }),
@@ -7821,7 +7837,7 @@ impl AuditReq {
     /// operator picked one) is what the run's fix stage is told. The one place the project's
     /// fix setting becomes run controls; both audit entry points come through it.
     fn run_controls_for(&self, state: &AppState) -> crate::cost_cap::RunControls {
-        self.run_controls(fix_step_model(state))
+        self.run_controls(fix_step_model(state), clone_judge_step_model(state))
     }
 }
 
@@ -12128,8 +12144,14 @@ fn client_lock_refusal_for_scan(
                 .to_string(),
         );
     };
-    let models =
-        crate::client_lock::models_a_scan_may_use(model, calibration_model, deep, fix_model);
+    // The clone judge runs on the project's fast band.
+    let models = crate::client_lock::models_a_scan_may_use(
+        model,
+        calibration_model,
+        deep,
+        fix_model,
+        Some(project.tier_map.fast_primary()),
+    );
     crate::client_lock::refusal(project.client_engagement, project.backend, &models)
         .map(|why| format!("{why} {APP_CLIENT_LOCK_FIX}"))
 }
@@ -28972,25 +28994,27 @@ mod tests {
     fn an_audit_request_carries_its_spend_limit_into_the_run_controls() {
         let req = |body: serde_json::Value| -> AuditReq { serde_json::from_value(body).unwrap() };
         assert_eq!(
-            req(serde_json::json!({})).run_controls(None).max_cost_usd,
+            req(serde_json::json!({}))
+                .run_controls(None, None)
+                .max_cost_usd,
             None,
             "no field, no cap"
         );
         assert_eq!(
             req(serde_json::json!({ "max_cost_usd": null }))
-                .run_controls(None)
+                .run_controls(None, None)
                 .max_cost_usd,
             None
         );
         assert_eq!(
             req(serde_json::json!({ "max_cost_usd": 25.0 }))
-                .run_controls(None)
+                .run_controls(None, None)
                 .max_cost_usd,
             Some(25.0)
         );
         for bad in [0.0, -4.0] {
             let cap = req(serde_json::json!({ "max_cost_usd": bad }))
-                .run_controls(None)
+                .run_controls(None, None)
                 .max_cost_usd;
             assert_eq!(
                 cap,
@@ -29000,13 +29024,51 @@ mod tests {
         }
         // The project's fix model rides along; none set leaves the fix stage to the switch.
         let empty = req(serde_json::json!({}));
-        assert_eq!(empty.run_controls(None).fix_model, None);
+        assert_eq!(empty.run_controls(None, None).fix_model, None);
         assert_eq!(
             empty
-                .run_controls(Some("claude-opus-5".to_string()))
+                .run_controls(Some("claude-opus-5".to_string()), None)
                 .fix_model
                 .as_deref(),
             Some("claude-opus-5")
+        );
+    }
+
+    /// The clone judge follows the open project's fast (Haiku) band: the run's controls carry the
+    /// band's primary model (default Haiku 5.5), a project that moves the band moves the judge,
+    /// and with no project the built-in default applies. The environment has no say.
+    #[test]
+    #[serial_test::serial(process_env)]
+    fn the_clone_judge_follows_the_projects_fast_band() {
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_CLONE_JUDGE_MODEL", "env-judge");
+        let state = AppState::seeded();
+        let req: AuditReq = serde_json::from_value(serde_json::json!({})).unwrap();
+        // No project: the built-in default.
+        assert_eq!(clone_judge_step_model(&state), None);
+        assert_eq!(
+            req.run_controls_for(&state).clone_judge_model_for(),
+            "claude-haiku-5-5"
+        );
+
+        let project = state
+            .projects()
+            .create("Judge wiring", vec!["me/repo".to_string()])
+            .expect("create active project");
+        assert_eq!(
+            clone_judge_step_model(&state).as_deref(),
+            Some("claude-haiku-5-5"),
+            "a new project's fast band is Haiku 5.5"
+        );
+        state
+            .projects()
+            .update(&project.id, |p| {
+                p.tier_map.fast = vec!["claude-haiku-4-5-20251001".to_string()];
+            })
+            .unwrap();
+        assert_eq!(
+            req.run_controls_for(&state).clone_judge_model_for(),
+            "claude-haiku-4-5-20251001",
+            "the project's fast band chooses the judge; the older id stays selectable"
         );
     }
 

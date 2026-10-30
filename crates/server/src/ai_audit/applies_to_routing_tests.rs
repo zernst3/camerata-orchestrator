@@ -102,6 +102,7 @@ fn meter(applies_to_routing: bool) -> UsageMeter {
         max_cost_usd: None,
         estimate_hint_usd: None,
         fix_model: None,
+        clone_judge_model: None,
         consensus: false,
     })
 }
@@ -675,6 +676,7 @@ async fn run_routed_batch_default_off(
         max_cost_usd: None,
         estimate_hint_usd: None,
         fix_model: None,
+        clone_judge_model: None,
         consensus: false,
     });
     let rules = three_group_rules();

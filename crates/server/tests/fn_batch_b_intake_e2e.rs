@@ -162,6 +162,7 @@ fn controls() -> RunControls {
         max_cost_usd: None,
         estimate_hint_usd: None,
         fix_model: None,
+        clone_judge_model: None,
         consensus: false,
     }
 }

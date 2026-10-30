@@ -106,6 +106,7 @@ fn args(repo: &Path, export: &Path, backend: ProjectBackend) -> InspectArgs {
         model: Some("claude-sonnet-5".to_string()),
         calibration_model: Some("claude-sonnet-5".to_string()),
         fix_model: None,
+        clone_judge_model: None,
         full: true,
         verbose: false,
         max_cost_usd: None,

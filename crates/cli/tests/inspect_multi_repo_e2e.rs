@@ -84,6 +84,7 @@ fn args(a: &Path, b: &Path, export: &Path) -> InspectArgs {
         model: None,
         calibration_model: None,
         fix_model: None,
+        clone_judge_model: None,
         full: false,
         verbose: false,
         max_cost_usd: None,

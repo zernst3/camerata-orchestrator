@@ -2293,8 +2293,11 @@ content-keyed verdict cache (`VerdictCache`, keyed on the rule, the judge model,
 version, the candidate's content id, the exact-mode differences and the rule-specific facts (for a
 single-source candidate, every copy's decision tokens), so a moved
 file hits and a judge model change misses), the stable prompt prefix as the single cache breakpoint, and
-the project's fast tier (`resolve_clone_judge_model`: explicit pick, then
-`fleet::tier::default_fast_model()`, Haiku 5.5; stamped in `ScanProvenance.clone_judge_model` when the judge
+the project's fast tier (`resolve_clone_judge_model`: the run's pick, which is the open project's
+fast band primary in the cockpit (`clone_judge_step_model`) or `--clone-judge-model` on the command
+line (`RunControls::clone_judge_model`), then `fleet::tier::default_fast_model()`, Haiku 5.5; the
+older Haiku stays selectable and priced; the model is in the pre-flight's priced list and the
+client lock's check; stamped in `ScanProvenance.clone_judge_model` when the judge
 made a call). The cache rides in the scan manifest (`ScanManifest.clone_verdicts`, `serde(default)`,
 `MANIFEST_VERSION` unchanged) in the app data directory, never in the client's repository. Usage is
 folded into the same `UsageMeter` as every other pass; the full ranked candidate list and every verdict

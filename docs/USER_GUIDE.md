@@ -1806,7 +1806,7 @@ Anthropic API, is the default and uses the Anthropic key you saved in the app (S
 anywhere the run fails and tells you to add one, it never falls back to the Claude Code subscription; `--backend cli` is an explicit choice for
 internal benchmark runs, and the export's `manifest.json` and `README.txt` record the backend and provider,
 for example `api` / `anthropic`), `--batch` (the Anthropic Message Batches path, roughly half the token cost, results
-arrive asynchronously, needs `--backend api`), `--model` / `--calibration-model` / `--fix-model` (the only
+arrive asynchronously, needs `--backend api`), `--model` / `--calibration-model` / `--fix-model` / `--clone-judge-model` (the only
 way to choose a model on the command line; with none given, the built-in default, Sonnet 5.5, runs), `--full` to ignore
 the incremental-scan cache and rescan every file, `--verbose` to print the per-rule coverage
 ledger rather than the concise summary, `--max-cost-usd` to cap the spend, and `--efficiency` to
@@ -2489,7 +2489,8 @@ the command line only by flags (`--model`, `--calibration-model`, `--fix-model`)
 chosen, the built-in default is Sonnet 5.5 (`claude-sonnet-5-5`), and the cheap fix and clone-judge
 stages default to Haiku 5.5. Camerata never reads a model from the environment or from a `.env`
 file, so a stray line in a local file cannot change which model a run uses or what it costs. A
-project saved before a model setting existed opens with these built-in defaults.
+project saved before a model setting existed opens with these built-in defaults. In the app the
+duplicate-code checker (the clone judge) runs on the project's fast model band.
 
 #### L3 AI code review
 

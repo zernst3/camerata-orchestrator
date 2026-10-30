@@ -81,6 +81,10 @@ pub struct RunControls {
     /// `camerata inspect --fix-model`). `None` or blank = not set: the fix stage then follows the
     /// `fix_on_haiku` measure. See [`crate::ai_audit::resolve_fix_model`].
     pub fix_model: Option<String>,
+    /// The clone judge's model: the open project's fast (Haiku) band in the cockpit, or
+    /// `camerata inspect --clone-judge-model`. `None` or blank = the built-in default
+    /// ([`crate::onboard::clone_advisory::resolve_clone_judge_model`]).
+    pub clone_judge_model: Option<String>,
     /// H5: the three-pass consensus option (`crate::consensus`). Off by default: about three
     /// times the AI spend, and a finding only one pass in three reports is dropped.
     pub consensus: bool,
@@ -106,6 +110,11 @@ impl RunControls {
                 "--max-cost-usd must be a positive dollar amount (got {cap})"
             ))
         }
+    }
+
+    /// The model this run's clone judge calls: the explicit pick, else the built-in fast default.
+    pub fn clone_judge_model_for(&self) -> String {
+        crate::onboard::clone_advisory::resolve_clone_judge_model(self.clone_judge_model.as_deref())
     }
 
     /// The model this run's fix stage calls, given the run's scan and calibration picks:
@@ -156,10 +165,7 @@ pub fn models_the_run_will_use(
         .iter()
         .any(|id| camerata_checks::clone_rules::RULE_IDS.contains(id))
     {
-        roles.push((
-            "the clone judge",
-            crate::onboard::clone_advisory::resolve_clone_judge_model(None),
-        ));
+        roles.push(("the clone judge", controls.clone_judge_model_for()));
     }
     let mut out: Vec<(String, String)> = Vec::new();
     for (role, model) in roles {
@@ -561,6 +567,38 @@ mod tests {
             text.contains("the deep tier") && text.contains("the clone judge"),
             "{text}"
         );
+    }
+
+    /// The clone judge is listed (and so priced and lock-checked) on the model the run will call:
+    /// the project's fast band or `--clone-judge-model`, else the built-in Haiku 5.5. The older
+    /// Haiku stays selectable and priced.
+    #[test]
+    fn the_clone_judge_role_is_listed_on_the_model_the_judge_will_call() {
+        let judge_of = |controls: &RunControls| {
+            models_the_run_will_use(
+                Some("claude-sonnet-5-5"),
+                None,
+                false,
+                &[camerata_checks::clone_rules::RULE_SINGLE_SOURCE],
+                controls,
+            )
+            .into_iter()
+            .find(|(roles, _)| roles.contains("the clone judge"))
+            .map(|(_, model)| model)
+            .unwrap()
+        };
+        assert_eq!(judge_of(&RunControls::default()), "claude-haiku-5-5");
+        let picked = RunControls {
+            clone_judge_model: Some("claude-haiku-4-5-20251001".to_string()),
+            ..RunControls::default()
+        };
+        assert_eq!(judge_of(&picked), "claude-haiku-4-5-20251001");
+        assert!(crate::llm::is_priced("claude-haiku-4-5-20251001"));
+        let blank = RunControls {
+            clone_judge_model: Some("  ".to_string()),
+            ..RunControls::default()
+        };
+        assert_eq!(judge_of(&blank), "claude-haiku-5-5");
     }
 
     /// Rank 10: the spend-limit check lists the model the fix stage will actually call, in the

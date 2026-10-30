@@ -98,6 +98,9 @@ pub struct InspectArgs {
     /// `--fix-model`: the fix stage's explicit model. `None`/blank = not set, and the fix stage
     /// follows the `fix_on_haiku` measure (see `camerata_server::ai_audit::resolve_fix_model`).
     pub fix_model: Option<String>,
+    /// `--clone-judge-model`: the duplicate-code checker's model. `None`/blank = the built-in
+    /// fast default (Haiku 5.5, `camerata_server::onboard::clone_advisory::resolve_clone_judge_model`).
+    pub clone_judge_model: Option<String>,
     /// Ignore the on-disk incremental-scan cache (see [`manifest_cache_path`]) and force a
     /// full re-scan of every file.
     pub full: bool,
@@ -249,6 +252,7 @@ impl InspectArgs {
             max_cost_usd,
             estimate_hint_usd: None,
             fix_model: self.fix_model.clone(),
+            clone_judge_model: self.clone_judge_model.clone(),
             consensus: self.consensus,
         })
     }
@@ -515,6 +519,7 @@ pub fn require_client_lock(args: &InspectArgs) -> Result<(), String> {
         args.calibration_model.as_deref(),
         false,
         args.fix_model.as_deref(),
+        args.clone_judge_model.as_deref(),
     );
     match camerata_server::client_lock::refusal(args.client_engagement, args.backend, &models) {
         None => Ok(()),
@@ -1830,6 +1835,7 @@ mod tests {
             model: None,
             calibration_model: None,
             fix_model: None,
+            clone_judge_model: None,
             full: false,
             verbose: false,
             max_cost_usd: None,
@@ -1892,6 +1898,35 @@ mod tests {
             controls.fix_model_for(Some("claude-sonnet-5"), None),
             Some("claude-opus-5"),
             "an explicit fix model wins over the switch"
+        );
+    }
+
+    /// `--clone-judge-model` is the only way to move the duplicate-code checker on the command
+    /// line; unset, it runs on the built-in fast default (Haiku 5.5). The environment has no
+    /// say, and the client lock checks the judge's model like any other.
+    #[test]
+    #[serial_test::serial(process_env)]
+    fn the_clone_judge_model_flag_reaches_the_run_controls_and_the_client_lock() {
+        let _env = camerata_test_env::EnvGuard::set("CAMERATA_CLONE_JUDGE_MODEL", "env-judge");
+        let dir = tempfile::tempdir().unwrap();
+        let mut args = base_args(dir.path().to_path_buf(), dir.path().join("o.zip"));
+        let controls = args.run_controls().unwrap();
+        assert_eq!(controls.clone_judge_model, None);
+        assert_eq!(controls.clone_judge_model_for(), "claude-haiku-5-5");
+        args.clone_judge_model = Some("claude-haiku-4-5-20251001".to_string());
+        let controls = args.run_controls().unwrap();
+        assert_eq!(
+            controls.clone_judge_model_for(),
+            "claude-haiku-4-5-20251001",
+            "the older id stays selectable"
+        );
+        args.clone_judge_model = Some("other-vendor/judge".to_string());
+        args.client_engagement = true;
+        args.backend = ProjectBackend::Api;
+        let refusal = require_client_lock(&args).unwrap_err();
+        assert!(
+            refusal.contains("the clone judge") && refusal.contains("other-vendor/judge"),
+            "{refusal}"
         );
     }
 

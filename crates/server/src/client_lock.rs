@@ -86,16 +86,18 @@ pub fn refusal(
 /// calibration and fix generation passes, the deep tier when it is on, and the clone judge
 /// (always included, because which rules are selected is only known once files have been read,
 /// and the lock must decide before that). Each is resolved exactly as the run resolves it,
-/// environment overrides included; `fix_model` is the explicit fix-stage model (the project's fix
+/// `fix_model` is the explicit fix-stage model (the project's fix
 /// step model or `--fix-model`), a model the run calls and so checked like the rest.
 pub fn models_a_scan_may_use(
     model: Option<&str>,
     calibration_model: Option<&str>,
     deep: bool,
     fix_model: Option<&str>,
+    clone_judge_model: Option<&str>,
 ) -> Vec<(String, String)> {
     let controls = crate::cost_cap::RunControls {
         fix_model: fix_model.map(str::to_string),
+        clone_judge_model: clone_judge_model.map(str::to_string),
         ..crate::cost_cap::RunControls::from_env()
     };
     crate::cost_cap::models_the_run_will_use(
