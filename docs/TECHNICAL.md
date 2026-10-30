@@ -16,9 +16,10 @@
 
 ## 1. System overview and crate map
 
-Camerata is a single Rust workspace. The shipped app is 26 crates under
-`crates/` (plus one maintainer-only tool, `tools/corpus-verifier`, that is NOT a
-dependency of any app crate), so 27 workspace members in total. All load-bearing
+Camerata is a single Rust workspace: 29 crates under `crates/` plus one
+maintainer-only tool, `tools/corpus-verifier`, that is NOT a dependency of any app
+crate, so 30 workspace members in total (`crates/rules/tests/docs_crate_graph.rs`
+holds these counts to `Cargo.toml`). All load-bearing
 code is Rust; the only optional non-Rust piece is a future TypeScript AST sidecar
 described in `docs/ARCHITECTURE.md` that does not exist yet.
 
@@ -51,6 +52,9 @@ described in `docs/ARCHITECTURE.md` that does not exist yet.
 | `camerata-maintenance` | lib | Tier-2 standing post-publish ops agent (dependency upgrades, security patches, secret rotation). |
 | `camerata-deploy` | lib | Tier-2 BYO-infra publish: `DeployTarget` seam + local + Azure adapter. |
 | `camerata-linter-registry` | lib | Citation validator: canonical linter rule-id lists per tool, plus a corpus-scan report used to ground `mechanical` rules to real linter ids (`Verification::Grounded`). |
+| `camerata-secrets` | lib | Leaf crate: the one secret-shape detector and redactor shared by the gateway, the scan floor, the chat scrubber and the export release gate. No `camerata-*` dependencies. |
+| `camerata-source-check` | lib | Corpus source freshness: fetches every rule's `[[sources]]` url, records ok / redirected / dead / unreachable, hashes cited sections against a sidecar and renders the report. Never edits a rule. Depends on `camerata-rules`. |
+| `camerata-test-env` | lib | TEST SUPPORT ONLY: the `EnvGuard` env-var override and the `process_env` serial-key discipline test. A dev-dependency of the suites that change environment variables; no app crate depends on it. |
 | `camerata-liveness` | lib | Run-liveness / stall detection primitive (progress-based, not wall-clock) shared by the agent runtime, the layer-2 runner, and the server for the watched/routine stall thresholds and cancellation. |
 
 > The maintainer-only `tools/corpus-verifier` (a separate workspace member,
@@ -60,117 +64,31 @@ described in `docs/ARCHITECTURE.md` that does not exist yet.
 
 ### The crate dependency graph (the real DAG)
 
-This is the actual `[dependencies]` graph between the library crates (test-only
-`[dev-dependencies]` are excluded — those can point "back up" for integration tests
-without forming a real cycle).
-
-```mermaid
-graph TD
-    %% Binaries (thin entry points / adapters)
-    ui["camerata-ui<br/>Dioxus desktop · bin<br/>(spawns server as subprocess)"]
-    cli["camerata-cli<br/>HTTP adapter + demos · bin"]
-    mcp["camerata-mcp<br/>MCP adapter (rmcp stdio) · bin"]
-    client["camerata-client<br/>typed HTTP client over /api/*"]
-
-    %% Composition root
-    server["camerata-server<br/>Axum BFF + orchestrator · lib+bin"]
-
-    %% Headless cores
-    appcore["camerata-app-core<br/>headless backend orchestration · no axum"]
-    uicore["camerata-ui-core<br/>headless UI logic/state (incl. GovDevState) · no dioxus"]
-    llm["camerata-llm<br/>LlmPort seam + provider stack"]
-
-    %% Capabilities
-    fleet["camerata-fleet<br/>tiered governed run"]
-    gateway["camerata-gateway<br/>Layer-1 gate / MCP · lib+bin"]
-    agent["camerata-agent<br/>claude -p driver"]
-    checks["camerata-checks<br/>Layer-2 runner"]
-    intake["camerata-intake<br/>lead-engineer / clarify"]
-    maintenance["camerata-maintenance<br/>standing ops · staged"]
-
-    %% Infrastructure / adapters
-    persistence["camerata-persistence<br/>versioned store + governance_events"]
-    worktracker["camerata-worktracker<br/>board adapter · port"]
-    deploy["camerata-deploy<br/>cloud deploy seam · staged"]
-
-    %% Domain + utilities (the floor)
-    core["camerata-core<br/>domain types + ports · ZERO model calls"]
-    rules["camerata-rules<br/>rule corpus"]
-    liveness["camerata-liveness<br/>stall detection"]
-    linter["camerata-linter-registry<br/>linter-id map"]
-
-    %% Pure contract leaf (bottom of everything)
-    apitypes["camerata-api-types<br/>pure serde wire-contract leaf · ZERO camerata deps"]
-
-    ui -.->|spawns as subprocess, no crate dep| server
-    ui --> worktracker
-    ui --> uicore
-
-    cli --> client
-    cli -.->|only for the eval subcommand| server
-    cli -.-> maintenance
-    cli -.-> deploy
-
-    mcp --> client
-    client --> apitypes
-
-    server --> gateway
-    server --> fleet
-    server --> intake
-    server --> agent
-    server --> checks
-    server --> persistence
-    server --> worktracker
-    server --> rules
-    server --> liveness
-    server --> core
-    server --> appcore
-    server --> llm
-
-    appcore --> apitypes
-    uicore --> apitypes
-    llm --> apitypes
-
-    fleet --> agent
-    fleet --> checks
-    fleet --> gateway
-    fleet --> intake
-    fleet --> rules
-    fleet --> core
-
-    gateway --> agent
-    gateway --> rules
-    gateway --> core
-
-    agent --> worktracker
-    agent --> liveness
-    agent --> core
-
-    checks --> rules
-    checks --> liveness
-    checks --> core
-
-    intake --> core
-    persistence --> core
-    rules --> core
-```
+The real `[dependencies]` graph between the workspace members (test-only
+`[dev-dependencies]` are excluded: those can point "back up" for integration tests
+without forming a real cycle) is drawn once, in
+[`PLATFORM.md`](../PLATFORM.md#the-crate-dependency-graph). That diagram is generated
+from `cargo metadata`, and `crates/rules/tests/docs_crate_graph.rs` fails when it
+disagrees with the manifests, so it is not repeated here. The README carries a compact
+version of the same graph.
 
 Read it bottom-up. `camerata-api-types` is the true floor: a pure-serde leaf with zero
-`camerata-*` dependencies, so `camerata-app-core`, `camerata-ui-core`, `camerata-llm`, and
+`camerata-*` dependencies, so `camerata-app-core`, `camerata-ui-core`, `camerata-llm` and
 `camerata-client` can all depend on it directly with no cycle between each other.
-`camerata-core` and the leaf utilities (`liveness`, `linter-registry`) also depend on
-nothing. Adapters (`persistence`, `worktracker`, `deploy`) and capabilities (`agent`,
-`gateway`, `checks`, `intake`, `fleet`) build on the floor. `camerata-server` is the
-**composition root** that wires them behind the Axum BFF, re-exporting the DTOs/provider
-stack it handed off to `api-types`/`llm` via shims so old call sites keep compiling.
-`camerata-client` is the shared typed-HTTP plumbing under both new adapters:
-`camerata-mcp` (an MCP server exposing the same verbs as tools) and `camerata-cli` (now an
-HTTP adapter, `-.->` since it only touches `camerata-server` for its `eval` subcommand).
-`camerata-ui` no longer depends on the `camerata-server` crate at all: it spawns the
-`camerata-server` binary as a subprocess (dashed edge) rather than linking it. Every solid
-arrow points down the stack: the graph is a DAG, and the compiler enforces it (a cycle
-between library crates does not compile). (`camerata-linter-registry` is consumed by the
-maintainer-only `corpus-verifier` tool, so it carries no app-crate edge.)
+`camerata-core`, `camerata-secrets` and the leaf utilities (`liveness`, `linter-registry`,
+`preview`, `deploy`, `maintenance`) also depend on nothing in the workspace. Adapters
+(`persistence`, `worktracker`) and capabilities (`agent`, `gateway`, `checks`, `intake`,
+`fleet`) build on the floor. `camerata-server` is the **composition root** that wires them
+behind the Axum BFF, re-exporting the DTOs/provider stack it handed off to
+`api-types`/`llm` via shims so old call sites keep compiling. `camerata-client` is the
+shared typed-HTTP plumbing under both adapters, `camerata-mcp` (an MCP server exposing the
+same verbs as tools) and the CLI's HTTP subcommands; the CLI also links `camerata-server`
+directly for the in-process `eval` and `inspect` commands. `camerata-ui` does not depend
+on the `camerata-server` crate at all: it spawns the `camerata-server` binary as a
+subprocess. Every arrow points down the stack: the graph is a DAG, and the compiler
+enforces it (a cycle between library crates does not compile). `camerata-linter-registry`
+has no workspace dependencies and no app crate depends on it; the maintainer-only
+`corpus-verifier` tool depends on `camerata-core` and `camerata-rules`.
 
 ### Process and runtime model
 

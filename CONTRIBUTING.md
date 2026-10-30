@@ -57,3 +57,12 @@ cargo test -p camerata-server --test benchmark_supabase_fixture
   same number wherever they state a whole-corpus count of 100 or more; say "every rule" where a
   figure adds nothing. Write the count as plain digits in the shape "N rules across M domains".
 - The authoring workflow is in [`docs/RULE_AUTHORING.md`](docs/RULE_AUTHORING.md).
+
+## Changing the crates
+
+The README carries a compact crate diagram and `PLATFORM.md` the full one. Both are generated
+from `cargo metadata`, and `crates/rules/tests/docs_crate_graph.rs` fails when a drawn arrow is
+not a real dependency, a real dependency is missing from the full graph or the crate count in
+either doc is stale. The same test holds the README's "over 500,000 lines" and "10,000+ tests"
+to the code, so they can only be floors the code meets. Regenerate the diagram when you add a
+crate or a dependency between workspace crates.

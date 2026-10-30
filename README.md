@@ -2,80 +2,79 @@
 
 [![CI](https://github.com/zernst3/camerata-orchestrator/actions/workflows/ci.yml/badge.svg)](https://github.com/zernst3/camerata-orchestrator/actions/workflows/ci.yml)
 
-## What Camerata does for an inspection
+Camerata is a governed engineering platform for working on code with AI. It is built on one library of written, versioned rules, and two products use it: the **Codebase Inspection**, which reads a codebase against the rules and reports what it finds, and the **governed development console**, where AI agents change code only through a deterministic gate that enforces the same rules.
 
-Camerata inspects a codebase. It reads the code against a library of written, versioned rules and produces a report of findings. Every finding names the rule it was raised under, and rules point to the standard they rest on (a published style guide, a security reference or a vendor's own documentation), and the few without an outside standard say why. Any rule that can raise a high or critical finding must carry a citation and a fix, and a corpus test enforces that. In the desktop app a person reviews findings in a triage queue (confirm, ignore, false positive or tech debt) before export. The headless `camerata inspect` export carries every finding untriaged and says so: the report is stamped as an unreviewed draft.
+The rules are plain TOML files in [`crates/rules/principles/`](crates/rules/principles/), so you can read exactly what Camerata checks. The library holds 443 rules across 22 domains, each one versioned and locked by content hash so no rule can change silently. Every finding names the rule it was raised under, and rules point to the standard they rest on (a published style guide, a security reference or a vendor's own documentation). [`docs/RULES_REFERENCE.md`](docs/RULES_REFERENCE.md) documents the format and [`docs/RULE_AUTHORING.md`](docs/RULE_AUTHORING.md) the authoring workflow.
 
-Two kinds of check run. A deterministic scan answers the questions that have a provable answer: hardcoded secrets, SQL built by string concatenation, file paths that escape their directory, plus the project's own linters. An AI pass handles the judgment calls, such as a write path with no authorization check or a service that bypasses the repository layer. No AI-raised candidate becomes a finding until it has passed severity calibration and de-duplication, and anything the engine is unsure of is held for a person to decide.
+## The Codebase Inspection
 
-The rules are plain TOML files in [`crates/rules/principles/`](crates/rules/principles/), so you can read exactly what an inspection checks. The library holds 443 rules across 22 domains, each one versioned and locked by content hash so no rule can change silently. [`docs/RULES_REFERENCE.md`](docs/RULES_REFERENCE.md) documents the format and [`docs/RULE_AUTHORING.md`](docs/RULE_AUTHORING.md) the authoring workflow.
+Two kinds of check run. A deterministic scan answers the questions that have a provable answer: hardcoded secrets, SQL built by string concatenation, file paths that escape their directory, plus the project's own linters. An AI pass handles the judgment calls, such as a write path with no authorization check or a service that bypasses the repository layer. No AI-raised candidate becomes a finding until it has passed severity calibration and de-duplication, and anything the engine is unsure of is held for a person to decide. What a client gets:
 
-- **Generate a sample report:** the real report pipeline builds the PDF, the workbook and `findings.json` from a hand-built fixture (not a scan of a real codebase). `cargo test -p camerata-server --test generate_sample_report -- --ignored` writes them to `sample-report/` and needs Typst 0.15 on `PATH`.
-- **Data handling:** [`DATA_HANDLING.md`](DATA_HANDLING.md) covers what leaves your machine during an inspection and how to delete what stays.
+- **Findings in five kinds, not a yes/no:** a defect, a deviation from the convention the codebase itself follows, a convention it follows well, a place where no convention exists and a rule that could not be assessed. Each names its rule and the standard behind it, and carries a rough range of hours to fix.
+- **A PDF summary, an Excel workbook and `findings.json`** in one ZIP marked "Confidential, prepared for" the client. A release gate scans every file first and refuses the export if one secret survives.
+- **Several repositories as one project.** Every finding names its repo, each service's conventions are read separately and a **Patterns across services** section shows where services differ. It is an observation, never a finding.
+- **Run to completion.** A call that fails on network or server trouble is retried, an outage stops the run cleanly and a client export is never written with a part that failed or did not run. Every inspection is saved part by part, so after any interruption **Run what remains** (or `camerata inspect --resume`) sends only the work that is left.
+- **Accuracy checks on the client-facing text.** The explanation and the fix written for each finding are checked against the code, and a name the code does not contain is turned down.
+- **Runtime end-of-life and vulnerability checks** on the runtime a repository declares, beyond the lockfile audit.
+- **Cost you control.** An estimate is printed first, the spend limit is off unless you set one, models come from project settings or command-line flags only (defaults: Sonnet 5.5, Haiku 5.5 and Opus 5.5) and every token-saving measure can be switched off for a run.
 
-**The honest boundary.** What this repository can show you is the engine's behavior on fixture repositories and the test suite that pins it. It does not claim, and the repo holds no published measurement of, how precise or complete the AI pass is on a large real-world codebase, so treat results at that scale as unproven until you have run it on your own code and reviewed the findings yourself.
+**The honest boundary.** What this repository can show you is the engine's behavior on fixture repositories and the test suite that pins it. It does not claim, and the repo holds no published measurement of, how precise or complete the AI pass is on a large real-world codebase, so treat results at that scale as unproven until you have run it on your own code and reviewed the findings yourself. [`DATA_HANDLING.md`](DATA_HANDLING.md) covers what leaves your machine and how to delete what stays.
 
-Camerata also has a governed agent-development platform built on the same rules. That material, including what in it is still staged, is in [`PLATFORM.md`](PLATFORM.md).
+## The governed development console
 
-## How an inspection runs
+- **Agents work behind a deterministic gate.** Every agent tool call goes through a Rust MCP gateway that allows or denies it before anything executes. A forbidden write is blocked before a byte reaches disk. The gate is fail-closed, provider-neutral and binary pass or fail, not an AI grading an AI.
+- **Four enforcement layers consume the same rules:** the gate before a write, mechanical checks after a task, an optional AI code review and the CI files Camerata generates for the team to own ([`docs/ENFORCEMENT_MODEL.md`](docs/ENFORCEMENT_MODEL.md)).
+- **From work item to pull request.** Issues become Units of Work that move through investigation, decisions, development, update-branch, PR and sign-off. Each phase is saved as data, and a run that meets a rule's escalation condition pauses for a person to approve, amend or reject.
+- **Every agent is grounded.** It can read all of a project's repositories and its rules. Writes are jailed to one worktree.
+- **Onboarding turns an inspection into governance.** Triaged findings become baseline waivers, GitHub issues and governance files. Camerata reports everything but enforces only on new or changed code.
 
-Point Camerata at one or more existing repositories (in the desktop app, or one checkout at a time with `camerata inspect`):
+## How it is built
 
-- **Per-repo stack detection** (languages and frameworks) and a **per-repo proposed ruleset** drawn from a corpus of **443 rules across 22 domains** covering many language and framework stacks (Rust/Axum/SeaORM/Dioxus/sqlx/Tokio, Python/Django/Flask/FastAPI, Go/GORM/gRPC, JS/TS/React/Vue/Angular/Next/Nest, Java/Spring, C#/ASP.NET/EF Core, Ruby/Rails, SQL, Supabase, fullstack, plus the always-on security floor, the process rules and the agentic governance rules). Each repo is scanned against its own selected rules plus an always-on deterministic security floor. The domain-to-stack mapping is declarative data with a computable union, and a build gate (`req_h1_every_corpus_domain_is_emittable_by_some_stack`) fails the build if a corpus folder exists that no stack could ever select from, so a rule cannot sit in the corpus permanently unreachable.
-- **A two-tier audit:** a deterministic mechanical scan (hardcoded secrets, raw-SQL concatenation, path escapes, plus clippy/ruff/eslint/semgrep/osv preview) and an AI architectural audit (missing auth on a write path, a service bypassing the repository layer, N+1, cross-boundary imports and the like), with severity/authority calibration, cross-rule dedup and snippet-to-line resolution.
-- **Alternative recommendation, built into that same audit:** for every rule that carries more than one adopted alternative, the audit also picks the option it judges best fitting for this codebase (with reasoning you can inspect) and assesses the codebase against that option, not against every option at once. There is one hard exception, and it is load-bearing: if the option the repo actually follows is the one the rule itself names as its own degenerate or absent form (`violates = true` on that option), the rule's directive is **not** rewritten to match, and a finding is emitted instead. Without that guard, a codebase that is consistently incorrect reads as compliant, which is the single worst failure this engine has had. A rule with no default no longer blocks you from proceeding, it is just a hint that the audit will pick for you. Disagree with any recommendation and you can override it and rescan just the rules you changed, then accept the final selections into the ruleset.
+Everything load-bearing is Rust. `camerata-server` is one Tokio process that is the server, the brain and the gate. The Dioxus desktop cockpit spawns it as a subprocess, and the command-line tool, an MCP server and a typed client drive the same HTTP surface. Agents run behind the gateway through two interchangeable drivers: the Claude CLI and an in-process driver for any Anthropic API or OpenRouter model. The main crates, with an arrow where one depends on the other:
 
-In the desktop app the findings then go to triage, and onboarding can turn the triaged result into governance files for the repository; that half is described in [`PLATFORM.md`](PLATFORM.md#onboarding-from-inspection-to-governance). Walked screen by screen in [`docs/USER_GUIDE.md`](docs/USER_GUIDE.md); mechanics in [`docs/TECHNICAL.md`](docs/TECHNICAL.md).
+```mermaid
+%% Generated from `cargo metadata --no-deps`: the crates shown, with an arrow where one depends on the other
+%% directly. An arrow is dropped when the same dependency is already implied by a longer path drawn here.
+graph TD
+    agent["camerata-agent<br/>agent drivers"]
+    api_types["camerata-api-types<br/>wire contract, no camerata deps"]
+    app_core["camerata-app-core<br/>headless app orchestration"]
+    checks["camerata-checks<br/>layer 2 checks and inspection checkers"]
+    cli["camerata<br/>cli: the camerata binary"]
+    client["camerata-client<br/>typed HTTP client"]
+    core["camerata-core<br/>domain types and ports"]
+    fleet["camerata-fleet<br/>tiered governed run"]
+    gateway["camerata-gateway<br/>layer 1 gate, MCP"]
+    llm["camerata-llm<br/>model providers, registry, usage"]
+    mcp["camerata-mcp<br/>MCP server over stdio"]
+    persistence["camerata-persistence<br/>versioned store, governance events"]
+    rules["camerata-rules<br/>rule corpus and loader"]
+    server["camerata-server<br/>Axum server, composition root"]
+    ui["camerata-ui<br/>Dioxus desktop cockpit"]
 
-### What a finding IS: five kinds, not a yes/no
-
-A finding is not a yes/no. Every exported row carries an explicit `kind`, and the five kinds
-are different statements about the codebase, not five severities:
-
-| Kind | What it says | Ships at |
-|---|---|---|
-| `defect` | An objective fault at a site. | Its calibrated severity, bounded by the rule's authored floor and ceiling. |
-| `deviation` | A consistency violation against the convention this codebase itself predominantly follows: "2 of your 47 assessed endpoints do not use URI versioning." Numerator, denominator and the observed convention are structured fields, never prose to parse. | Capped at `medium` by default, because the cost of inconsistency is forward drift on future features rather than present risk. A rule may author `deviation_ceiling = "high"` where the domain genuinely compounds. |
-| `convention_observed` | The codebase consistently follows a convention and there are zero violations. This ships in the product: the inspection derives the decision set, governance later enforces it. | `info`, one row per rule. |
-| `no_convention` | No convention has been adopted; the codebase is inconsistent with no clear majority. | `info`, exactly one row per rule, never N. |
-| `not_assessed` | The rule was armed but could not be evaluated (tool failed, no files matched, the model declined). An honesty row, structurally distinguishable from "assessed and clean". | `info`. |
-
-A row whose producer never assigned a kind exports as the explicit tag `unspecified`. It is
-deliberately **never** rendered as `defect`: an unmapped emission path has to be visible as a gap
-rather than silently counted as an accusation. The taxonomy is defined once, in
-`crates/api-types/src/audit.rs`, and the same discriminator reaches the PDF, the workbook and
-`findings.json`. Mechanics in [`docs/TECHNICAL.md`](docs/TECHNICAL.md) §6a.
-
-## Run an inspection headless
-
-`camerata inspect` runs the whole inspection pipeline in-process with no server and no UI, and
-writes the same product-export ZIP the cockpit's export button produces, with no triage decisions applied. This costs real model
-tokens, so the two commands below are a pair: run the gate before you pay for anything.
-
+    agent --> api_types
+    agent --> core
+    app_core --> fleet
+    checks --> rules
+    cli --> client
+    cli --> server
+    client --> api_types
+    fleet --> checks
+    fleet --> gateway
+    gateway --> agent
+    gateway --> rules
+    llm --> api_types
+    mcp --> client
+    persistence --> api_types
+    persistence --> core
+    rules --> core
+    server --> app_core
+    server --> llm
+    server --> persistence
+    ui --> api_types
 ```
-cargo run -p camerata -- inspect --repo <PATH> --export <OUT.zip>
-                                            # the ZIP holds: the PDF summary, findings.xlsx,
-                                            # findings.json, README.txt. Also writes
-                                            # <repo>/.camerata-scan-ledger.json.
-cargo run -p camerata -- integrity-gate --ledger <PATH>/.camerata-scan-ledger.json
-                                            # exit 0 = every required engine ran, every skip was
-                                            # justified, every pipeline stage reconciles
-                                            # exit 1 = the scan is degraded; do not grade it
-                                            # exit 2 = the GATE could not run (ledger missing or
-                                            #          unreadable) - deliberately NOT a pass
-./scripts/self-measurement.sh               # the in-repo self-measurement gate: seconds,
-                                            # deterministic, no network, no model calls
-```
 
-The workbook is partitioned by finding kind rather than being one flat sheet: **Index**,
-**All Findings** (defects, deviations and any unclassified row), **Deviations** (one row per rule,
-at the grain the deviation numbers are actually computed), **Conventions** (what this codebase
-already does well and consistently), the per-area sheets, **Dependencies**, **False Positives**
-and **Coverage** (what was checked, what could not be and which rules did not run). The PDF is the
-summary and deliberately does not carry every row; `findings.json` carries the whole non-false-positive
-row set, every kind included. Exit code 2 on the gate is the point of the design: a wrapper that read
-"the gate could not run" as "the gate passed" would be the same class of bug as a scan that reads
-"the tool did not run" as "the rule is clean".
+The full graph of all 30 workspace members is in [`PLATFORM.md`](PLATFORM.md#the-crate-dependency-graph).
 
 ## By the numbers
 
@@ -83,32 +82,52 @@ I architected Camerata and orchestrated its build: supervised AI agents wrote th
 
 | | |
 |---|---|
-| Rust | about 475,000 lines across 29 crates and one maintainer tool, including tests |
-| Tests | 8,500+ automated tests; test code is roughly 45% of all code |
-| Test quality | mutation testing on the checks crate: the suite catches 97.9% of deliberately injected faults |
-| Rule library | 443 rules across 22 domains, each one versioned and locked by content hash so no rule can change silently |
-| Commits | 1,900+, and every push to the main branches runs formatting, zero-warning lints and the full test suite in CI |
+| Rust | over 500,000 lines of Rust across 29 crates and one maintainer tool, including tests |
+| Tests | 10,000+ automated tests; roughly half the lines are test code |
+| Test quality | mutation testing on the checks crate caught 97.9% of deliberately injected faults in an earlier run ([`docs/MUTATION_TESTING.md`](docs/MUTATION_TESTING.md)) |
+| Rule library | 443 rules across 22 domains |
+| Commits | 2,400+, and every push to the main branches runs formatting, zero-warning lints and the full test suite in CI |
 
-What I am proudest of is the discipline behind those numbers, not the numbers themselves:
+The discipline matters more than the numbers. A finding a client cannot verify is worse than a missed one, so every deterministic detector ships with a positive test and a "safe twin" that proves it stays quiet on the look-alike case. Wherever a question has a provable answer, code answers it and the AI covers only the judgment calls. Client secrets are redacted before any code reaches a model, and the release gate checks every export.
 
-- **False negative, never false positive.** A finding a client cannot verify is worse than a missed one. Every deterministic detector ships with a positive test and a "safe twin" test that proves it stays quiet on the look-alike case.
-- **Deterministic first, AI second.** Wherever a question has a provable answer, code answers it. AI review covers the judgment calls, and no AI-raised candidate becomes a finding without passing through calibration, deduplication and per-rule severity bounds; anything the engine is unsure of is held for human review rather than shipped.
-- **Nothing sensitive leaves the building.** Client secrets are redacted the moment a finding is created and before any code reaches a model, and a release gate scans every string of every file in a deliverable before it exists. If one secret survives, the export fails.
+## Try it
 
-## Read in this order
+```
+cargo run -p camerata-ui                    # the cockpit (a Dioxus desktop app): Onboard repos, then Governed Development
+cargo run -p camerata -- acceptance         # the gate denies planted violations, no network and no model
+cargo run -p camerata -- count <PATH>       # size a repository the way an inspection counts it, no model
+```
 
-1. [`docs/OVERVIEW.md`](docs/OVERVIEW.md): the high-level map of the whole system (crates, the inspection pipeline, the core concepts) in one sitting.
-2. [`docs/USER_GUIDE.md`](docs/USER_GUIDE.md): the flows and features, how to use them.
-3. [`docs/TECHNICAL.md`](docs/TECHNICAL.md): how it works under the hood (the gate, the scan pipeline, agent grounding, persistence).
-4. [`PLATFORM.md`](PLATFORM.md): governed development, the governance gate, the architecture and what is still staged.
-5. [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md): the all-Rust stack, top to bottom.
-6. [`docs/decisions/`](docs/decisions/): the design-decision records.
-7. [`docs/VISION.md`](docs/VISION.md): the north star and where the architecture leads.
+A real inspection costs model tokens and needs an Anthropic key (saved in the app, or in `ANTHROPIC_API_KEY`). Use `--max-cost-usd` to cap the spend:
+
+```
+cargo run -p camerata -- inspect --repo <PATH> --client "<CLIENT NAME>" --export <OUT.zip>
+```
+
+To see a report without spending anything, `cargo test -p camerata-server --test generate_sample_report -- --ignored` builds one from a hand-built fixture (not a scan of real code) into `sample-report/` and needs Typst 0.15 on your `PATH`. More commands are in [`PLATFORM.md`](PLATFORM.md#try-it-runnable-demos).
+
+## Status
+
+The Codebase Inspection and brownfield onboarding are built and run end to end on fixture repositories, and the gate is proven standalone against a real agent. **The V1 accuracy and efficiency tests are still pending:** how precise and complete the AI pass is on large real-world codebases, and what each token-saving measure does to cost and to findings, have not been measured. The governed development console is wired end to end and unit-tested, but a live model doing multi-step work through the gate has not been run yet. The consumer app-builder, the architect surface for Jira, Azure DevOps and GitHub boards and the standing maintenance agent are earlier still. [`PLATFORM.md`](PLATFORM.md#status) separates what is proven from what is staged.
+
+## Where to read next
+
+| Read | For |
+|---|---|
+| [`PLATFORM.md`](PLATFORM.md) | The platform in depth: the inspection, onboarding, the governance gate, the enforcement model and the full crate graph |
+| [`docs/USER_GUIDE.md`](docs/USER_GUIDE.md) | How to use it, screen by screen |
+| [`docs/TECHNICAL.md`](docs/TECHNICAL.md) | How it works inside: the gate, the scan pipeline, agent grounding, persistence |
+| [`docs/OVERVIEW.md`](docs/OVERVIEW.md) | The high-level map of the whole system in one sitting |
+| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | The all-Rust stack, top to bottom |
+| [`DATA_HANDLING.md`](DATA_HANDLING.md) | What leaves your machine during an inspection and how to delete what stays |
+| [`CONTRIBUTING.md`](CONTRIBUTING.md) | How to contribute |
+| [`docs/decisions/`](docs/decisions/) | The design-decision records |
+| [`docs/VISION.md`](docs/VISION.md) | The north star and where the architecture leads |
 
 ## Family
 
-- camerata-ai: the conventions engine the corpus format originates from. The corpus is vendored into this repo at `crates/rules/principles/` (443 TOML rules as of 2026-10-28), so the workspace is self-contained; override with `CAMERATA_CORPUS_PATH`. Field-by-field reference for the rule schema: [`docs/RULES_REFERENCE.md`](docs/RULES_REFERENCE.md); the authoring workflow is [`docs/RULE_AUTHORING.md`](docs/RULE_AUTHORING.md).
-- rust-chorale: the headless, virtualized Dioxus / Leptos table library used for tabular surfaces.
+- camerata-ai: the conventions engine the corpus format originates from. The corpus is vendored into this repo at `crates/rules/principles/`, so the workspace is self-contained; override with `CAMERATA_CORPUS_PATH`.
+- chorale: the headless, virtualized Dioxus and Leptos table library used for tabular surfaces.
 - this repo: the conductor that leads the ensemble.
 
 ## License
