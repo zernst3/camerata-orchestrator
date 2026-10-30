@@ -5507,6 +5507,19 @@ const GENERIC_FIX_TERMS: &[&str] = &["true", "false", "null", "none", "undefined
 /// short on purpose; a name that is merely common in the repo does not belong here. Matched
 /// exactly (case-sensitive) against a backticked span or a path-like token.
 const UNIVERSAL_FIX_NAMES: &[&str] = &[
+    // A framework or runtime written with its dot reads as a file to the path regex; an
+    // abbreviation reads as one too; `void` is a keyword like `try`. None is a name a
+    // repository could hold, so none is asked for.
+    "Next.js",
+    "Node.js",
+    "React.js",
+    "Vue.js",
+    "Nuxt.js",
+    "Express.js",
+    "Deno.js",
+    "e.g",
+    "i.e",
+    "void",
     "Authorization",
     "console.error",
     "console.log",
@@ -22324,6 +22337,27 @@ mod tests {
         ] {
             assert_eq!(find_ungrounded_identifier(fix, evidence), None, "{fix}");
         }
+    }
+
+    /// A framework name written with its dot (`Next.js`), an abbreviation (`e.g.`) and the `void`
+    /// keyword look like a file or a chosen name to the regexes but are no name the repository
+    /// could hold: the stored efficiency runs lost eight fixes to them.
+    #[test]
+    fn find_ungrounded_identifier_skips_framework_names_abbreviations_and_void() {
+        let evidence = "app/api/keys/route.ts line 4";
+        for fix in [
+            "Move the charge into a Next.js route handler in app/api/keys/route.ts.",
+            "Add a client query library (e.g. a cached fetch) only with an explicit decision, i.e. in the PR.",
+            "Return `void` from the handler and log instead.",
+            "Keep the handler in app/api/keys/route.ts and declare it `async function run(): Promise<void>`.",
+        ] {
+            assert_eq!(find_ungrounded_identifier(fix, evidence), None, "{fix}");
+        }
+        // The list is not a blanket pass for dotted names: an unknown file is still rejected.
+        assert_eq!(
+            find_ungrounded_identifier("Move it into lib/charge.ts.", evidence),
+            Some("lib/charge.ts".to_string())
+        );
     }
 
     #[test]
