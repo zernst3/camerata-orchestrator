@@ -6163,9 +6163,13 @@ cockpit's failure panel shows the same lines under the attempt.
 optional `reason`, set at the point of rejection and only on the reply that was rejected: a reply
 cut off at the output limit or holding no JSON (status `unusable`), a fix reply with a fix that
 named something not in the evidence or that contradicted the detail, a detail reply with an entry
-that dropped a name or added a condition (status `rejected`). A reply every entry of which was
-accepted stays `done` with no reason, so a resume replays it. The stages reach the store through
-`LlmPort::note_rejected_reply(request_key, reason)`, a no-op on every completer but the journal.
+that dropped a name or added a condition. A reply EVERY entry of which was turned down is set aside
+(status `rejected`), so a resume asks again. A reply only part of which was turned down stays
+`done` and carries the reason: the entries it got right are replayed on a resume instead of being
+paid for again, and the ones turned down were re-asked by the stage's own rounds with a changed
+request, stored under their own keys. A reply every entry of which was accepted stays `done` with
+no reason. The stages reach the store through `LlmPort::note_rejected_reply(request_key, reason,
+whole)`, a no-op on every completer but the journal.
 The stage-wide set-aside at the end of an attempt (`quarantine_rejected`) now applies to the other
 content-failed stages only, with the failed part named as the reason.
 

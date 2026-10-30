@@ -5626,8 +5626,9 @@ async fn run_fix_specifics_round(
             }
             findings[orig_idx].fix_specific = Some(text.clone());
         }
-        // The reply is set aside with the reasons, and only this reply: one in which every fix
-        // was accepted stays good.
+        // The reply records the reasons, and only this reply. It is set aside only when EVERY
+        // fix in it was turned down: a reply with an accepted fix stays good, so a resume
+        // replays that fix instead of paying for the whole batch again.
         if !turned_down.is_empty() {
             let why = format!(
                 "{} of {} fix(es) turned down: {}",
@@ -5635,7 +5636,7 @@ async fn run_fix_specifics_round(
                 batch.len(),
                 turned_down.join("; ")
             );
-            llm.note_rejected_reply(&request_key, &why);
+            llm.note_rejected_reply(&request_key, &why, turned_down.len() == batch.len());
         }
         // The fixes this call produced that were thrown away (missing, ungrounded,
         // contradicting, leaking) are tokens spent for nothing: say so in the telemetry, pro rata

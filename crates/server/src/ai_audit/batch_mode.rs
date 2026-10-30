@@ -150,8 +150,10 @@ impl LlmPort for BatchSeam {
     ) -> anyhow::Result<LlmResponse> {
         self.api.realtime().complete_streaming(req, on_delta).await
     }
-    fn note_rejected_reply(&self, request_key: &str, reason: &str) {
-        self.api.realtime().note_rejected_reply(request_key, reason);
+    fn note_rejected_reply(&self, request_key: &str, reason: &str, whole: bool) {
+        self.api
+            .realtime()
+            .note_rejected_reply(request_key, reason, whole);
     }
     fn as_any(&self) -> &dyn std::any::Any {
         self

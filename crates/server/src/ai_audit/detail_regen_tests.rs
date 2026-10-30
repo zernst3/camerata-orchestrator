@@ -2161,7 +2161,9 @@ fn a_rejection_names_what_was_wrong() {
 }
 
 /// Round one answers only the first of two findings; round two (one finding) answers it. The
-/// round-one reply is set aside with the finding it left out; the round-two reply stays good.
+/// round-one reply names the finding it left out but stays good (the explanation it did write
+/// is kept, so a resume replays it instead of paying for both again); the round-two reply stays
+/// good with no reason.
 #[tokio::test]
 #[serial_test::serial(process_env)]
 async fn a_detail_reply_that_left_a_finding_out_says_so_and_the_clean_reply_stays_done() {
@@ -2220,24 +2222,22 @@ async fn a_detail_reply_that_left_a_finding_out_says_so_and_the_clean_reply_stay
             .filter_map(|e| serde_json::from_slice(&std::fs::read(e.path()).unwrap()).ok())
             .collect();
         assert_eq!(files.len(), 2);
-        let with = |status: EntryStatus| {
-            let hits: Vec<_> = files
-                .iter()
-                .map(|f| &f.entries[&0])
-                .filter(|e| e.status == status)
-                .collect();
-            assert_eq!(hits.len(), 1, "exactly one entry is {status:?}");
-            hits[0].clone()
-        };
-        let first = with(EntryStatus::Rejected);
-        let reason = first.reason.as_deref().expect("the reply says why");
+        let entries: Vec<_> = files.iter().map(|f| f.entries[&0].clone()).collect();
+        assert!(
+            entries.iter().all(|e| e.status == EntryStatus::Done),
+            "a reply with a written explanation in it stays good: {entries:?}"
+        );
+        let first = entries
+            .iter()
+            .find(|e| e.reason.is_some())
+            .expect("the partly rejected reply says why");
+        let reason = first.reason.as_deref().unwrap();
         assert!(
             reason.starts_with("1 of 2 detail(s) turned down"),
             "{reason}"
         );
         assert!(reason.contains("left this finding out"), "{reason}");
-        let second = with(EntryStatus::Done);
-        assert_eq!(second.reason, None);
+        assert_eq!(entries.iter().filter(|e| e.reason.is_none()).count(), 1);
     })
     .await;
 }

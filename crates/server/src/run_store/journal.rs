@@ -149,8 +149,9 @@ pub enum EntryStatus {
     Failed,
     /// A reply came back but was cut off or held no JSON: asked again on a resume.
     Unusable,
-    /// A good reply that a later step rejected: asked again on a resume. The reason is on the
-    /// entry ([`CallEntry::reason`]).
+    /// A good reply every entry of which a later step rejected: asked again on a resume. The
+    /// reason is on the entry ([`CallEntry::reason`]). A reply only PART of which was rejected
+    /// stays [`EntryStatus::Done`] with the reason: what it got right is replayed.
     Rejected,
 }
 
@@ -171,9 +172,11 @@ pub struct CallEntry {
     /// What the call cost when it was made.
     #[serde(default)]
     pub cost_usd: f64,
-    /// Why this reply was turned down or unusable, set at the point of rejection: a reply cut
-    /// off at the output limit, one holding no JSON, a fix that named something not in the
-    /// evidence, a detail that dropped a name. Only the reply that was rejected carries one.
+    /// Why this reply, or part of it, was turned down or unusable, set at the point of
+    /// rejection: a reply cut off at the output limit, one holding no JSON, a fix that named
+    /// something not in the evidence, a detail that dropped a name. Only the reply that was
+    /// turned down carries one; a reply that stays `Done` with a reason had some entries
+    /// accepted and some turned down.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
 }
@@ -480,11 +483,14 @@ fn unusable_reason(resp: &LlmResponse) -> Option<String> {
 const MAX_REASON_CHARS: usize = 1_500;
 
 /// Record on the stored reply to `request_key` that the caller turned it down for `reason`: the
-/// reply handed back last for that key (a replay's stored reply or the fresh call just made). A
-/// good reply becomes [`EntryStatus::Rejected`] so a resume asks again; a reply that was already
-/// unusable keeps its status and gains the reason after the one it has. No reply is touched
-/// except that one.
-pub(crate) fn reject_reply(store: &RunStore, request_key: &str, reason: &str) {
+/// reply handed back last for that key (a replay's stored reply or the fresh call just made).
+/// When `whole` (every entry of the reply was turned down) a good reply becomes
+/// [`EntryStatus::Rejected`] so a resume asks again; a reply only part of which was turned down
+/// keeps its status and only gains the reason, so a resume replays the entries that were
+/// accepted (the ones turned down were re-asked with a changed request, stored under its own
+/// key) instead of paying for the whole reply again. A reply that was already unusable keeps
+/// its status and gains the reason after the one it has. No reply is touched except that one.
+pub(crate) fn reject_reply(store: &RunStore, request_key: &str, reason: &str, whole: bool) {
     let reason = crate::failure::scrub_message(reason, MAX_REASON_CHARS);
     let dir = store.dir().to_path_buf();
     let mut st = store.lock_state();
@@ -497,7 +503,7 @@ pub(crate) fn reject_reply(store: &RunStore, request_key: &str, reason: &str) {
     let Some(entry) = file.entries.get_mut(&slot) else {
         return;
     };
-    if entry.status == EntryStatus::Done {
+    if whole && entry.status == EntryStatus::Done {
         entry.status = EntryStatus::Rejected;
     }
     entry.reason = Some(match entry.reason.take() {
@@ -556,8 +562,8 @@ impl LlmPort for JournalLlm<'_> {
         }
     }
 
-    fn note_rejected_reply(&self, request_key: &str, reason: &str) {
-        reject_reply(&self.store, request_key, reason);
+    fn note_rejected_reply(&self, request_key: &str, reason: &str, whole: bool) {
+        reject_reply(&self.store, request_key, reason, whole);
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -610,8 +616,8 @@ impl LlmPort for JournalRealtime {
         }
     }
 
-    fn note_rejected_reply(&self, request_key: &str, reason: &str) {
-        reject_reply(&self.store, request_key, reason);
+    fn note_rejected_reply(&self, request_key: &str, reason: &str, whole: bool) {
+        reject_reply(&self.store, request_key, reason, whole);
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -834,7 +840,7 @@ fn all_call_files(store: &RunStore) -> Vec<CallFile> {
 /// calls over those files are set aside; every other stage is set aside as a whole for the repo,
 /// with the failed part named as the reason. The fix and detail stages are NOT set aside here:
 /// each of their replies was marked at the point of rejection ([`reject_reply`]), with its
-/// reason, and a reply that was accepted stays good.
+/// reason, and a reply with an accepted entry in it stays good.
 pub(crate) fn quarantine_rejected(store: &RunStore, failures: &[FinishFailure]) {
     let rejected: Vec<&FinishFailure> = failures
         .iter()

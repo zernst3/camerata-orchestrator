@@ -976,9 +976,11 @@ async fn run_detail_round(
                 }
             }
         }
-        // The reply is set aside with the reasons, and only this reply: one in which every entry
-        // was written stays good.
+        // The reply records the reasons, and only this reply. It is set aside only when NOTHING
+        // in it was written: a reply with a written explanation stays good, so a resume replays
+        // that explanation instead of paying for the whole batch again.
         if !turned_down.is_empty() {
+            let whole = written.iter().all(|w| !*w);
             let lines: Vec<String> = turned_down
                 .iter()
                 .map(|(idx, reason)| {
@@ -993,6 +995,7 @@ async fn run_detail_round(
                     batch.len(),
                     lines.join("; ")
                 ),
+                whole,
             );
             for (idx, reason) in turned_down {
                 why.insert(idx, reason);

@@ -156,8 +156,10 @@ fn two_fix_findings() -> (Vec<Finding>, Vec<(String, String)>) {
     (vec![a, b], files)
 }
 
-/// One reply with one ungrounded fix is set aside with a reason naming the token; the reply that
-/// answered the retry in full is left good, with no reason.
+/// One reply with one ungrounded fix out of two carries a reason naming the token but STAYS
+/// good: the fix it got right is kept, so a resume replays it instead of paying for both fixes
+/// again (the fix it got wrong was re-asked with a changed request, whose reply is stored under
+/// its own key). The reply that answered the retry in full is left good, with no reason.
 #[tokio::test]
 #[serial_test::serial(process_env)]
 async fn a_fix_reply_with_one_ungrounded_fix_carries_the_token_and_the_clean_reply_stays_done() {
@@ -182,11 +184,16 @@ async fn a_fix_reply_with_one_ungrounded_fix_carries_the_token_and_the_clean_rep
 
         let files = call_files(&store);
         assert_eq!(files.len(), 2, "two distinct requests");
-        let first = the_entry_with(&files, EntryStatus::Rejected);
-        let reason = first
-            .reason
-            .as_deref()
-            .expect("the rejected reply says why");
+        let entries: Vec<CallEntry> = files.iter().map(|f| f.entries[&0].clone()).collect();
+        assert!(
+            entries.iter().all(|e| e.status == EntryStatus::Done),
+            "a reply with an accepted fix in it stays good: {entries:?}"
+        );
+        let first = entries
+            .iter()
+            .find(|e| e.reason.is_some())
+            .expect("the partly rejected reply says why");
+        let reason = first.reason.as_deref().unwrap();
         assert!(reason.contains("neverInEvidence"), "{reason}");
         assert!(
             reason.contains("src/work.ts:2"),
@@ -196,8 +203,46 @@ async fn a_fix_reply_with_one_ungrounded_fix_carries_the_token_and_the_clean_rep
             reason.starts_with("1 of 2 fix(es) turned down"),
             "only the reply's own rejections: {reason}"
         );
+        assert_eq!(
+            entries.iter().filter(|e| e.reason.is_none()).count(),
+            1,
+            "the clean reply stays good, no reason"
+        );
+    })
+    .await;
+}
+
+/// A reply whose every fix was turned down is set aside: nothing in it is worth replaying.
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn a_fix_reply_with_every_fix_turned_down_is_set_aside() {
+    seeded(async {
+        let (_s, _g) = state_dir();
+        let repo = tempfile::tempdir().unwrap();
+        let store = new_run(repo.path());
+        let stub = FixStub {
+            calls: AtomicUsize::new(0),
+        };
+        let journal = JournalLlm::new(&stub, store.clone());
+        // Only the second finding: the stub's round-one fix for index 0 names `query`, which is
+        // not in this finding's evidence, so the one fix of the reply is turned down.
+        let (findings, files) = two_fix_findings();
+        let findings = vec![findings[1].clone()];
+        let (out, failed) =
+            generate_fix_specifics(&journal, "o/r", findings, &files, None, None, None).await;
+        assert!(failed.is_empty(), "{failed:?}");
+        assert!(out[0].fix_specific.is_some());
+        let files = call_files(&store);
+        assert_eq!(files.len(), 2, "two distinct requests");
+        let first = the_entry_with(&files, EntryStatus::Rejected);
+        let reason = first
+            .reason
+            .as_deref()
+            .expect("the rejected reply says why");
+        assert!(reason.starts_with("1 of 1 fix(es) turned down"), "{reason}");
+        assert!(reason.contains("`query`"), "{reason}");
         let second = the_entry_with(&files, EntryStatus::Done);
-        assert_eq!(second.reason, None, "the clean reply stays good, no reason");
+        assert_eq!(second.reason, None);
     })
     .await;
 }
@@ -229,8 +274,21 @@ async fn a_failed_fix_stage_does_not_set_aside_the_replies_that_were_accepted() 
         );
         let files = call_files(&store);
         assert_eq!(files.len(), 2);
-        the_entry_with(&files, EntryStatus::Rejected);
-        the_entry_with(&files, EntryStatus::Done);
+        // Both replies had an accepted fix in them (the first one of two, the retry its one), so
+        // both stay good; the quarantine does not touch the fix stage.
+        assert!(
+            files
+                .iter()
+                .all(|f| f.entries[&0].status == EntryStatus::Done),
+            "{files:?}"
+        );
+        assert_eq!(
+            files
+                .iter()
+                .filter(|f| f.entries[&0].reason.is_some())
+                .count(),
+            1
+        );
     })
     .await;
 }
@@ -377,6 +435,7 @@ async fn a_stored_reason_is_scrubbed_of_secrets() {
         journal.note_rejected_reply(
             &key,
             "named sk-ant-api03-AAAAAAAAAAAAAAAAAAAAAAAA1234 in the fix",
+            true,
         );
         let files = call_files(&store);
         let reason = files[0].entries[&0].reason.clone().unwrap();
