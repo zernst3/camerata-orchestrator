@@ -391,4 +391,21 @@ async fn a_run_with_no_limit_is_never_refused_by_the_reserve() {
     }
     assert!(!meter.retry_blocked());
     assert!(!meter.cap_reached());
+    // However much has been spent, no stage, repo or batch submission is refused on cost.
+    meter.record_stage(Stage::ScanPass, &paid_reply("claude-opus-5-5", 1_000_000.0));
+    assert!(!meter.stage_blocked("acme/widgets", STAGE_CALIBRATION));
+    assert!(!meter.repo_blocked("acme/widgets"));
+    assert_eq!(meter.batch_refusal_reason(Some(1_000_000.0)), None);
+    assert_eq!(meter.batch_refusal_reason(None), None);
+    assert!(meter.admit().await.is_ok());
+    // And the controls a run builds by default carry no limit and refuse no model.
+    let controls = crate::cost_cap::RunControls::default();
+    assert_eq!(controls.max_cost_usd, None);
+    assert_eq!(
+        controls.refuse_if_cap_unenforceable(&[(
+            "scan".to_string(),
+            "claude-from-the-future".to_string()
+        )]),
+        None
+    );
 }

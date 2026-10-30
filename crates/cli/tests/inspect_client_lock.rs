@@ -218,6 +218,56 @@ async fn a_client_engagement_with_an_openrouter_model_fails_closed() {
     assert!(err.contains("`anthropic/claude-sonnet-4`"), "{err}");
 }
 
+/// Zach's decision (2026-10-29): "whatever it costs to get TRUE OUTPUT is just what it costs".
+/// A client inspection with no `--max-cost-usd` is not refused by any cost check: the pre-flight
+/// prints the expected cost and says there is no limit, and the model is called. (Needs no typst:
+/// the assertion is about what happens BEFORE and DURING the scan, not about the export.)
+#[tokio::test]
+#[serial_test::serial(process_env)]
+async fn a_client_run_with_no_spend_limit_is_not_refused_by_any_cost_check() {
+    let state = tempfile::tempdir().unwrap();
+    let _state = camerata_test_env::EnvGuard::set("CAMERATA_STATE_DIR", state.path());
+    let _dep = camerata_test_env::EnvGuard::set("CAMERATA_DISABLE_DEP_AUDIT", "1");
+    let repo = tempfile::tempdir().unwrap();
+    stage_repo(repo.path());
+    let out = tempfile::tempdir().unwrap();
+    let export = out.path().join("inspect.zip");
+    let mut a = args(repo.path(), &export, ProjectBackend::Api);
+    assert!(a.client_engagement, "this is a client engagement");
+    assert_eq!(a.max_cost_usd, None, "and no limit was asked for");
+    // The controls the run builds from the flags carry no limit either.
+    assert_eq!(a.run_controls().unwrap().max_cost_usd, None);
+    a.efficiency = Vec::new();
+
+    let text = std::sync::Mutex::new(String::new());
+    let llm = Scripted::default();
+    let result = run_inspect_pipeline_with(
+        a,
+        true,
+        &camerata_server::credentials::MemoryCredentialStore::new(),
+        Seams {
+            resume: None,
+            llm: Some(&llm),
+            preflight_sink: &|t| *text.lock().unwrap() = t.to_string(),
+        },
+    )
+    .await;
+    let text = text.lock().unwrap().clone();
+    assert!(text.contains("estimated cost: about $"), "{text}");
+    assert!(text.contains("spend limit: none"), "{text}");
+    assert!(
+        llm.calls.load(Ordering::SeqCst) > 0,
+        "the scan ran: {result:?}"
+    );
+    if let Err(e) = &result {
+        let message = e.to_string().to_ascii_lowercase();
+        assert!(
+            !message.contains("spend limit") && !message.contains("cost"),
+            "no cost check refused the run: {message}"
+        );
+    }
+}
+
 #[tokio::test]
 #[serial_test::serial(process_env)]
 async fn a_client_engagement_on_the_api_runs_and_records_backend_models_and_engagement() {

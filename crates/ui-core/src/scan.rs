@@ -28,6 +28,12 @@ pub fn default_finding_status() -> String {
     "active".to_string()
 }
 
+/// What the cockpit's "Spend limit (USD)" field holds when it opens: blank, which is NO limit.
+/// A real inspection runs to completion whatever it costs; a limit is something the operator
+/// chooses to add (the pre-flight still prints the expected cost and the ceiling). The command
+/// line is the same: no `--max-cost-usd`, no limit.
+pub const DEFAULT_SPEND_LIMIT_TEXT: &str = "";
+
 /// Parse the scan settings' "spend limit" field (US dollars). Blank means no limit. A value
 /// that is not a positive number is an ERROR the caller must show, never silently "no limit":
 /// a typo must not remove the guard. A leading `$` and thousands commas are accepted.
@@ -904,6 +910,15 @@ mod tests {
             let err = parse_spend_limit(bad).expect_err(bad);
             assert!(err.contains("positive dollar amount"), "{err}");
         }
+    }
+
+    /// Zach's decision (2026-10-29): "whatever it costs to get TRUE OUTPUT is just what it
+    /// costs". A real inspection runs with NO run-wide cost limit unless the operator sets one,
+    /// so the field the cockpit opens with parses to no limit.
+    #[test]
+    fn the_cockpits_spend_limit_field_opens_blank_which_is_no_limit() {
+        assert_eq!(DEFAULT_SPEND_LIMIT_TEXT, "");
+        assert_eq!(parse_spend_limit(DEFAULT_SPEND_LIMIT_TEXT), Ok(None));
     }
 
     #[test]

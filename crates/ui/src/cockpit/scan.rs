@@ -7972,7 +7972,8 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
     let mut audit_full_scan = use_signal(|| false);
     // Spend limit (USD): blank = none. The run stops between passes once actual spend reaches
     // it and lists what it did not run (the server twin of `camerata inspect --max-cost-usd`).
-    let mut audit_spend_limit = use_signal(String::new);
+    let mut audit_spend_limit =
+        use_signal(|| camerata_ui_core::scan::DEFAULT_SPEND_LIMIT_TEXT.to_string());
     // Deep compliance & security tier (#55): opt-in, the most expensive tier.
     // Runs three extra whole-repo passes (SOC-2 gap analysis, deep security audit,
     // threat model) after the standard audit and attaches the results as `report.deep`.
