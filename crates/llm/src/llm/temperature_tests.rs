@@ -16,6 +16,21 @@ fn the_catalog_says_which_models_accept_a_temperature() {
         !crate::model_registry::accepts_sampling_params("claude-from-the-future"),
         "an unknown model is presumed strict"
     );
+    // The built-in defaults (Sonnet 5.5 and Haiku 5.5) reject sampling parameters: a request
+    // that asks for temperature 0 reaches them with the field stripped, never rejected. Only a
+    // project that picks Haiku 4.5 gets the temperature on the wire.
+    for strict_default in ["claude-sonnet-5-5", "claude-haiku-5-5", "claude-opus-5-5"] {
+        assert!(
+            !crate::model_registry::accepts_sampling_params(strict_default),
+            "{strict_default} is strict"
+        );
+        let body = messages_request_body(
+            &LlmRequest::new("audit this").with_temperature(0.0),
+            strict_default,
+            CacheTtl::FiveMinutes,
+        );
+        assert!(body.get("temperature").is_none(), "{body}");
+    }
 }
 
 #[test]
