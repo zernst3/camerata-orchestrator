@@ -86,7 +86,7 @@ Rules, every finding:
 - Ground the rest in the evidence given for that finding (its rule, snippet, the surrounding code and the excerpts from the files it names). NEVER state a fact about code you were not shown.
 - Do not add conditions the statement does not make. Do not write that exploiting it requires, depends on, is contingent on, assumes, or needs an attacker to do something unless the statement or the code shown says so. The fix direction may say what the fix needs (a `to authenticated` clause, a confirmed default); that is not a condition on the problem.
 - If the statement says the case is borderline, start your explanation with "Borderline:", keep saying so, and say what would settle it.
-- A name the statement joins with a slash or a dot (a/b, table.column) may be written as its separate parts, each spelled exactly as given.
+- A name the statement joins with a slash or a dot (created_by/modified_by, audit_log.action) may be written as its separate parts, each spelled exactly as given, when a part is itself a name (snake_case or camelCase); a plain member access such as supabase.from stays as written.
 - Do not repeat the statement word for word and do not restate the rule's text.
 - Say WHAT is wrong and the DIRECTION of the fix. Do not mention Camerata, a scanner, the audit or any detection mechanism.
 - NEVER repeat a credential value, not even partly. Name the variable and the line instead.
@@ -244,8 +244,10 @@ fn looks_like_symbol_word(part: &str) -> bool {
 ///   with such a part, or a token that resolves in `files` (a file, or a directory holding one).
 ///   A slash-joined pair of plain words (`collisions/overwrites`) is prose, not a path.
 /// * A compound token (`audit_log.action`, `created_by/modified_by`, `Supabase/PostgREST`) that
-///   is not a path is kept as its parts: the text must contain each part of three or more
-///   characters, not the spelling that joined them.
+///   is not a path and has a symbol-shaped part is kept as its parts: the text must contain each
+///   part of three or more characters, not the spelling that joined them.
+/// * A dotted token of plain words (`supabase.from`, `req.json`) is a member access, one symbol
+///   the text must contain whole: split, its parts ("from", "json") are words every text has.
 /// * Otherwise a token containing `::`, `_` or CamelCase is a symbol the text must contain whole.
 pub(super) fn named_tokens(text: &str, files: &[(String, String)]) -> Vec<NamedToken> {
     let mut out: Vec<NamedToken> = Vec::new();
@@ -272,12 +274,20 @@ pub(super) fn named_tokens(text: &str, files: &[(String, String)]) -> Vec<NamedT
                 .split(['/', '.'])
                 .filter(|p| p.chars().count() >= 3)
                 .collect();
-            let compound = file_shaped || pieces.iter().any(|p| looks_like_symbol_word(p));
-            if compound {
+            if pieces.iter().any(|p| looks_like_symbol_word(p)) {
+                // `audit_log.action`, `created_by/modified_by`, `Supabase/PostgREST`: a name
+                // that joins names; each part is asked for.
                 parts = pieces.iter().map(|p| (*p).to_string()).collect();
+                true
+            } else if token.contains('/') {
+                // `collisions/overwrites`, `event/log`: plain words joined by a slash, prose.
+                false
+            } else {
+                // `supabase.from`, `req.json`, `error.message`: a member access of plain words
+                // is ONE symbol, asked for whole; split, its parts are words every text has.
+                // `e.g`/`i.e` are not file-shaped and so not symbols.
+                file_shaped
             }
-            // A compound with nothing to ask for, or a pair of plain words, is prose.
-            !parts.is_empty()
         } else {
             token.contains('_') || looks_like_camel_case(token)
         };

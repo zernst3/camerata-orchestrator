@@ -3147,9 +3147,11 @@ accepted on its own and only when all of these hold (`detail_regen::accept_entry
   token with a known file extension or one that resolves in the file set (a file, or a
   directory holding one), a `::`, `_` or CamelCase symbol. A slash-joined pair of plain words
   (`collisions/overwrites`) is prose and is not asked for. A compound name that is not a file
-  (`audit_log.action`, `created_by/modified_by`, `getAuthenticatorAssuranceLevel/aal2`) is
-  asked for as its parts: each part of three or more characters must appear, not the spelling
-  that joined them. A dropped real file name is still rejected.
+  and has a symbol-shaped part (`audit_log.action`, `created_by/modified_by`,
+  `getAuthenticatorAssuranceLevel/aal2`) is asked for as its parts: each part of three or more
+  characters must appear, not the spelling that joined them. A dotted name of plain words
+  (`supabase.from`, `req.json`) is a member access, one symbol asked for whole: split, its parts
+  are words every text has. A dropped real file name is still rejected.
 - It makes no exploit precondition (`mentions_exploit_precondition`, the phrase list
   calibration's raise-block and the D5 cap already use; one list, unchanged) that neither the
   short statement nor the code shown makes. An invented "requires a valid session" would stop

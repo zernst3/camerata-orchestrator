@@ -2060,6 +2060,29 @@ fn a_compound_token_is_accepted_when_each_part_is_present() {
     .is_ok());
 }
 
+/// A dotted name made only of plain words (`supabase.from`, `req.json`, `error.message`) is a
+/// member access, one symbol: its parts are words any text contains ("from", "json", "error"),
+/// so splitting it would let the dropped name through. It is required whole, as before P2.
+#[test]
+fn a_dotted_member_access_of_plain_words_is_still_required_whole() {
+    let f = statement("The handler calls supabase.from(...) directly with no repository layer.");
+    let text = "The handler queries the database directly from the component through the \
+                supabase client, with no repository layer in between.";
+    assert_eq!(
+        accept_entry(&f, &entry(&f, text), "", &[]),
+        Err(Reject::DropsNamedToken("supabase.from".to_string()))
+    );
+    let text = "The handler calls supabase.from(\"documents\") itself, with no repository layer.";
+    assert!(accept_entry(&f, &entry(&f, text), "", &[]).is_ok());
+    // The token is one symbol with no parts to split.
+    let tokens = named_tokens("calls supabase.from(...) directly", &[]);
+    assert_eq!(tokens.len(), 1);
+    assert_eq!(tokens[0].text, "supabase.from");
+    assert!(tokens[0].parts.is_empty());
+    // Prose abbreviations are still not tokens.
+    assert!(named_tokens("e.g. the handler, i.e. this one", &[]).is_empty());
+}
+
 // ── P3: the exploit-precondition check reads the explanation of a confident statement ───────
 
 #[test]
